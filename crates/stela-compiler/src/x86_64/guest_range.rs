@@ -1,17 +1,21 @@
 //! Which accesses of a system-mode block check their address against the
-//! guest's two ranges ([`super::GUEST_RANGE_CHECK`]).
+//! guest's native ranges ([`super::RangeCheck`]).
 //!
 //! An immediate-offset access moves at most 2^16 bytes from its base, so
 //! once one through a base register has been made, the base is within
 //! 2^16 of a range. While the base keeps that value or moves from it by
 //! immediates (writeback, or ADD and SUB immediate, also into another
 //! register), every later immediate-offset access through it is within
-//! 2^35 of a range, as a block holds at most 1,024 instructions: in a
-//! range, or in PML5 entry 1 or 510, which no shadow root maps, where an
-//! x86 #PF takes the fault the guest's translation gives. Stela's window,
-//! 63 entries from either range, stays out of reach, so those accesses
-//! need no check of their own. Any other write of the register, and any
-//! instruction this analysis does not know, forgets it.
+//! 2^35 of a range, as a block holds at most 1,024 instructions. With
+//! five-level paging that is in a range, or in PML5 entry 1 or 510, which
+//! no shadow root maps, where an x86 #PF takes the fault the guest's
+//! translation gives; Stela's window, 63 entries from either range, stays
+//! out of reach. With four-level paging it is in a range, above 2^47
+//! (non-canonical, #GP), in the unmapped guard of at least 2^35 bytes below
+//! the upper range (#PF), or across 0 or 2^64, wrapping into a range as
+//! Arm's address arithmetic does; never in Stela's window below the guard.
+//! Those accesses need no check of their own. Any other write of the
+//! register, and any instruction this analysis does not know, forgets it.
 use crate::aarch64::{
     Instruction, MemoryTransfer, Operation, Register, Width, atomic, literal, non_temporal,
     ordered, simd,

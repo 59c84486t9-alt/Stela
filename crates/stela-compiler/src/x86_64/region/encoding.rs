@@ -341,10 +341,7 @@ const FRAME_DISP32_FROM_R8: u8 = 0x87;
 const R8D_FROM_RAX_DISP8: u8 = 0x40;
 
 fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<Vec<usize>> {
-    use super::super::{
-        GUEST_RANGE_CHECK, GUEST_RANGE_CHECK_ENDS, STACK_ALIGNMENT_CHECK,
-        STACK_ALIGNMENT_CHECK_ENDS,
-    };
+    use super::super::{RangeCheck, STACK_ALIGNMENT_CHECK, STACK_ALIGNMENT_CHECK_ENDS};
     const RAX_FROM_FRAME_DISP32: u8 = 0x87;
     const BASE_LOAD_BYTES: usize = 7;
     const SP: usize = 31;
@@ -374,8 +371,8 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
         ends.push(cursor);
     }
     // A system-mode access checks the address against the guest's ranges.
-    if code[cursor..].starts_with(&GUEST_RANGE_CHECK) {
-        ends.extend(GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));
+    if let Some((_, check_ends)) = RangeCheck::at(&code[cursor..]) {
+        ends.extend(check_ends.map(|end| cursor + end));
     }
     Some(ends)
 }

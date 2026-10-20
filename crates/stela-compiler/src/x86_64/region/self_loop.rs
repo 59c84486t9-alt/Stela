@@ -241,7 +241,7 @@ impl LegacyPlan {
             allocating_output: false,
             range_checks: None,
             // No loads.
-            stack_alignment: true,
+            checks: super::super::MemoryChecks::DEFAULT,
             fault_table: false,
         };
         for (guest, index) in (0..GPR_SLOTS)

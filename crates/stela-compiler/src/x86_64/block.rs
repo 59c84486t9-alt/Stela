@@ -169,7 +169,7 @@ fn emit_selected(
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
-    let ranges = if checks.guest_range && checks.every_access_masked {
+    let ranges = if checks.guest_range && checks.checks_every_access() {
         vec![true; instructions.len()]
     } else if checks.guest_range {
         super::guest_range::checks(instructions)
@@ -226,7 +226,7 @@ fn emit_selected(
         if optimize_regions
             && let Ok(region) = super::region::emit_clean_load_prefix_with(
                 &instructions[cursor..],
-                checks.stack_alignment,
+                checks,
                 fault_table,
                 ranges.map(|ranges| &ranges[cursor..]),
             )
@@ -307,6 +307,7 @@ fn emit_selected(
         fallthrough,
         target,
         native,
+        checks.range,
         after.rax,
     );
     (block, fault_recovery)
@@ -571,6 +572,7 @@ pub(crate) fn successor_exits(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_terminal(
     code: &mut Vec<u8>,
     source_map: &mut Vec<(GuestAddress, usize)>,
@@ -578,6 +580,7 @@ fn emit_terminal(
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     native: super::NativeSystem,
+    range: super::RangeCheck,
     rax: super::Rax,
 ) {
     // The terminal's own load of a register RAX already holds.
@@ -617,10 +620,10 @@ fn emit_terminal(
                 let clean = super::cache_clean::operand(request)
                     .filter(|(operation, _)| native.cache_clean.contains(*operation));
                 if let Some((bytes, rt)) = zero {
-                    super::zero_block::emit(code, rt, bytes);
+                    super::zero_block::emit(code, rt, bytes, range);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else if let Some((_, rt)) = clean {
-                    super::cache_clean::emit(code, rt);
+                    super::cache_clean::emit(code, rt, range);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else {
                     direct_exit(code, request.instruction_pc, ExitKind::System);
@@ -1220,7 +1223,7 @@ mod tests {
                 let clean_region = || {
                     super::super::region::emit_clean_load_prefix_with(
                         rest,
-                        true,
+                        super::super::MemoryChecks::DEFAULT,
                         system,
                         system.then(|| &ranges[cursor..]),
                     )

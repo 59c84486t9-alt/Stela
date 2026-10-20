@@ -97,9 +97,10 @@ struct Emitter<'a> {
     /// For each instruction, whether its clean load checks the guest range
     /// (`x86_64::guest_range`); none in process profiles.
     range_checks: Option<&'a [bool]>,
-    /// The block's SCTLR_ELx.SA: whether a clean load through SP checks its
-    /// alignment ([`super::MemoryChecks::stack_alignment`]).
-    stack_alignment: bool,
+    /// The block's checks: SCTLR_ELx.SA, whether a clean load through SP
+    /// checks its alignment ([`super::MemoryChecks::stack_alignment`]), and
+    /// the guest range check's placement and variant.
+    checks: super::MemoryChecks,
     /// The engine recovers dirty values from host registers at a fault
     /// ([`crate::block::FaultRecovery`]), so accesses need not settle.
     fault_table: bool,
@@ -310,7 +311,7 @@ impl Emitter<'_> {
         // As `memory` selects `memory_store::emit`'s fast path.
         let crossing = data.len() == 1
             && bytes != BYTE_LOAD_BYTES
-            && !(self.stack_alignment
+            && !(self.checks.stack_alignment
                 && super::memory_store::aligned_immediate(base, displacement, mode, bytes));
         let mut raw = vec![];
         let selected = if let &[first, second] = data {
@@ -470,7 +471,7 @@ impl Emitter<'_> {
         const BASE_LOAD: usize = 0;
         const TEST: usize = 1;
         const TRAP: usize = 3;
-        let checked = base == Register::Sp && self.stack_alignment;
+        let checked = base == Register::Sp && self.checks.stack_alignment;
         let index = if checked { TRAP } else { BASE_LOAD } + usize::from(displacement != 0);
         debug_assert_eq!(
             checked,
@@ -520,10 +521,13 @@ impl Emitter<'_> {
     /// clean loads are never ordered.
     fn memory_checks(&self) -> super::MemoryChecks {
         super::MemoryChecks {
-            stack_alignment: self.stack_alignment,
+            stack_alignment: self.checks.stack_alignment,
             guest_range: self
                 .range_checks
                 .is_some_and(|ranges| ranges.get(self.current).copied().unwrap_or(true)),
+            range: self.checks.range,
+            translated: self.checks.translated,
+            translation_helper: self.checks.translation_helper,
             ..super::MemoryChecks::DEFAULT
         }
     }
@@ -1079,7 +1083,13 @@ impl Emitter<'_> {
 /// `consumed_instructions`, with the full frame written back and `exit_pc` set.
 #[cfg(test)]
 pub fn emit_prefix(instructions: &[Instruction]) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, false, true, false, None)
+    emit_prefix_selected(
+        instructions,
+        false,
+        super::MemoryChecks::DEFAULT,
+        false,
+        None,
+    )
 }
 
 /// Transactional nonfaulting GPR/NZCV span candidate.
@@ -1093,38 +1103,37 @@ pub fn emit_allocated_prefix(
 /// Loads through SP check its alignment if `stack_alignment` (the block's
 /// [`super::MemoryChecks::stack_alignment`]). With `range_checks`, the loads
 /// the system-mode analysis selects check their address
-/// ([`super::GUEST_RANGE_CHECK`]).
+/// ([`super::RangeCheck`]).
 #[cfg(test)]
 pub fn emit_clean_load_prefix<'a>(
     instructions: &'a [Instruction],
     stack_alignment: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(instructions, true, stack_alignment, false, range_checks)
+    let checks = super::MemoryChecks {
+        stack_alignment,
+        ..super::MemoryChecks::DEFAULT
+    };
+    emit_prefix_selected(instructions, true, checks, false, range_checks)
 }
 
-/// [`emit_clean_load_prefix`], and with `fault_table` its accesses keep
-/// dirty values in registers and [`OptimizedRegion::fault_recovery`] says
-/// where, for an engine that applies it at a fault.
+/// [`emit_clean_load_prefix`] for a block's `checks`, and with
+/// `fault_table` its accesses keep dirty values in registers and
+/// [`OptimizedRegion::fault_recovery`] says where, for an engine that
+/// applies it at a fault.
 pub fn emit_clean_load_prefix_with<'a>(
     instructions: &'a [Instruction],
-    stack_alignment: bool,
+    checks: super::MemoryChecks,
     fault_table: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
-    emit_prefix_selected(
-        instructions,
-        true,
-        stack_alignment,
-        fault_table,
-        range_checks,
-    )
+    emit_prefix_selected(instructions, true, checks, fault_table, range_checks)
 }
 
 fn emit_prefix_selected<'a>(
     instructions: &'a [Instruction],
     clean_loads: bool,
-    stack_alignment: bool,
+    checks: super::MemoryChecks,
     fault_table: bool,
     range_checks: Option<&'a [bool]>,
 ) -> Result<OptimizedRegion, RegionError> {
@@ -1138,7 +1147,7 @@ fn emit_prefix_selected<'a>(
         return Err(RegionError::Misaligned);
     }
     let effects = if clean_loads {
-        analysis::prefix_clean_access_effects(instructions, stack_alignment)
+        analysis::prefix_clean_access_effects(instructions, checks.stack_alignment)
     } else {
         prefix_effects(instructions)
     };
@@ -1205,7 +1214,7 @@ fn emit_prefix_selected<'a>(
         coalesced: None,
         allocating_output: false,
         range_checks,
-        stack_alignment,
+        checks,
         fault_table,
     };
     for instruction in instructions.iter().take(consumed) {
@@ -1646,7 +1655,7 @@ mod tests {
     /// shape and check each address once, after the frame is settled.
     #[test]
     fn clean_loads_check_the_guest_range_when_asked() {
-        use super::super::GUEST_RANGE_CHECK;
+        let check = super::super::RangeCheck::FIVE_LEVEL.code();
         let load = |pc, data, base| {
             instruction(
                 pc,
@@ -1685,8 +1694,8 @@ mod tests {
             instruction(4, add(Register::X(9), Register::X(9))),
         ];
         let checks = |code: &[u8]| {
-            code.windows(GUEST_RANGE_CHECK.len())
-                .filter(|bytes| *bytes == GUEST_RANGE_CHECK)
+            code.windows(check.len())
+                .filter(|bytes| *bytes == check)
                 .count()
         };
         let unchecked = emit_clean_load_prefix(&instructions, true, None).unwrap();
@@ -1709,10 +1718,7 @@ mod tests {
             checked.stats.address_cache_hits,
             unchecked.stats.address_cache_hits
         );
-        assert_eq!(
-            checked.code.len(),
-            unchecked.code.len() + 3 * GUEST_RANGE_CHECK.len()
-        );
+        assert_eq!(checked.code.len(), unchecked.code.len() + 3 * check.len());
         // The cost gate counts each check's six instructions on both sides.
         let mut baseline = vec![];
         for instruction in &instructions {
@@ -1730,7 +1736,8 @@ mod tests {
         let count = analysis::selected_output_instruction_count(&baseline).unwrap();
         assert_eq!(
             checked.stats.native_instructions,
-            unchecked.stats.native_instructions + 3 * super::super::GUEST_RANGE_CHECK_ENDS.len()
+            unchecked.stats.native_instructions
+                + 3 * super::super::RangeCheck::at(&check).unwrap().1.len()
         );
         assert!(checked.stats.native_instructions <= count);
         assert!(admits_ordinary(&checked, &baseline));
@@ -2312,10 +2319,22 @@ mod tests {
             instruction(4, load(Register::X(10), Register::X(10))),
             instruction(5, store(BYTE_LOAD_BYTES, Register::X(9), Register::X(2), 8)),
         ];
-        let settled = emit_clean_load_prefix_with(&instructions, true, false, None).unwrap();
+        let settled = emit_clean_load_prefix_with(
+            &instructions,
+            super::super::MemoryChecks::DEFAULT,
+            false,
+            None,
+        )
+        .unwrap();
         assert!(settled.fault_recovery.is_empty());
         assert!(settled.stats.load_boundary_stores >= 2);
-        let region = emit_clean_load_prefix_with(&instructions, true, true, None).unwrap();
+        let region = emit_clean_load_prefix_with(
+            &instructions,
+            super::super::MemoryChecks::DEFAULT,
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(region.consumed_instructions, instructions.len());
         assert_eq!(region.stats.load_boundary_stores, 0);
         assert!(region.code.len() < settled.code.len());
@@ -2375,8 +2394,13 @@ mod tests {
             super::super::memory_store::crossing_store(DOUBLEWORD_LOAD_BYTES).unwrap();
         let contains = |code: &[u8], bytes: &[u8]| code.windows(bytes.len()).any(|w| w == bytes);
         for fault_table in [false, true] {
-            let region =
-                emit_clean_load_prefix_with(&instructions, true, fault_table, None).unwrap();
+            let region = emit_clean_load_prefix_with(
+                &instructions,
+                super::super::MemoryChecks::DEFAULT,
+                fault_table,
+                None,
+            )
+            .unwrap();
             assert_eq!(region.consumed_instructions, instructions.len());
             assert!(contains(&region.code, &recipe));
             for entry in &region.fault_recovery {
@@ -2416,7 +2440,13 @@ mod tests {
                 store(BYTE_LOAD_BYTES, Register::X(guest), Register::X(2), 8),
             ));
         }
-        let region = emit_clean_load_prefix_with(&instructions, true, true, None).unwrap();
+        let region = emit_clean_load_prefix_with(
+            &instructions,
+            super::super::MemoryChecks::DEFAULT,
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(region.consumed_instructions, instructions.len());
         let code = &region.code;
         // A frame access `op reg, [rdi+offset]` (disp8 or disp32) whose

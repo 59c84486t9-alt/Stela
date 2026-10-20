@@ -368,9 +368,9 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     let mut ends = vec![];
     while cursor < code.len() {
         // The exact system-mode guest range check of an access address.
-        if code[cursor..].starts_with(&super::super::GUEST_RANGE_CHECK) {
-            ends.extend(super::super::GUEST_RANGE_CHECK_ENDS.map(|end| cursor + end));
-            cursor += super::super::GUEST_RANGE_CHECK.len();
+        if let Some((bytes, check_ends)) = super::super::RangeCheck::at(&code[cursor..]) {
+            ends.extend(check_ends.map(|end| cursor + end));
+            cursor += bytes;
             continue;
         }
         // The exact SCTLR_ELx.SA check of an SP base.

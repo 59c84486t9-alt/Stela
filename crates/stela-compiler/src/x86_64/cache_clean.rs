@@ -78,7 +78,7 @@ pub fn operand(instruction: &SystemInstruction) -> Option<(Operations, u8)> {
 }
 
 /// Read the byte at Xt, so the access faults where its translation would.
-pub(crate) fn emit(code: &mut Vec<u8>, rt: u8) {
+pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, range: super::RangeCheck) {
     super::load(
         code,
         if rt == 31 {
@@ -87,7 +87,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, rt: u8) {
             Register::X(rt)
         },
     );
-    code.extend(super::GUEST_RANGE_CHECK);
+    range.emit(code);
     code.extend([0x0f, 0xb6, 0x08]); // movzx ecx,byte [rax]
 }
 
@@ -156,7 +156,7 @@ mod tests {
         let mut state = GuestState::default();
         state.x[7] = memory.as_ptr() as u64 + 1;
         let mut code = Vec::new();
-        emit(&mut code, 7);
+        emit(&mut code, 7, super::super::RangeCheck::FIVE_LEVEL);
         code.extend([0x89, 0xc8, 0xc3]); // mov eax,ecx; ret
         // SAFETY: private anonymous memory, RX after the copy, unmapped
         // after the call; the code reads one byte of `memory`.

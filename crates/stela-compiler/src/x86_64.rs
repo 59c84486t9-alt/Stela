@@ -231,9 +231,9 @@ pub struct MemoryChecks {
     /// SCTLR_ELx.nAA is clear: a load-acquire or store-release that crosses a
     /// 16-byte granule faults. Atomics always fault there (FEAT_LSE2).
     pub ordered_granule: bool,
-    /// Every access checks its address against the guest's two ranges
-    /// ([`GUEST_RANGE_CHECK`]). `SystemModeV1` sets it for every block,
-    /// whatever the engine asks, and no other profile does.
+    /// Every access checks its address against the guest's native ranges
+    /// ([`RangeCheck`]). `SystemModeV1` sets it for every block, whatever
+    /// the engine asks, and no other profile does.
     pub(crate) guest_range: bool,
     /// No other agent accesses guest memory while the block runs: the
     /// system engine runs one PE at a time, and no device or host agent
@@ -245,12 +245,24 @@ pub struct MemoryChecks {
     /// FEAT_CSV3: every access checks the guest range, those
     /// [`guest_range`] would leave to an earlier check through the same base
     /// included. A mispredicted check then never runs an access whose
-    /// address its own check did not mask ([`GUEST_RANGE_CHECK`]).
+    /// address its own check did not mask ([`RangeCheck`]).
     pub every_access_masked: bool,
     /// An earlier access of the block checked SP's alignment, which holds
     /// since ([`stack_alignment::checks`]): an access through SP relies on
     /// [`Self::stack_alignment`] without its own check.
     pub(crate) stack_checked: bool,
+    /// The guest's native ranges on this host's placement
+    /// (docs/design/system.md, "Host placement").
+    pub range: RangeCheck,
+    /// The translated variant (docs/design/system.md, "Host placement"):
+    /// every access checks its address, as with
+    /// [`Self::every_access_masked`], and a failed check calls the engine's
+    /// translation helper through [`Self::translation_helper`] in place of
+    /// the UD2.
+    pub translated: bool,
+    /// The address of the slot holding the translation helper's address,
+    /// for the translated variant.
+    pub translation_helper: u64,
 }
 
 impl MemoryChecks {
@@ -264,6 +276,9 @@ impl MemoryChecks {
         single_agent: false,
         every_access_masked: false,
         stack_checked: false,
+        range: RangeCheck::FIVE_LEVEL,
+        translated: false,
+        translation_helper: 0,
     };
     /// SCTLR_ELx's checks, as the system-mode engine selects them, and
     /// whether every access masks its address
@@ -282,7 +297,32 @@ impl MemoryChecks {
             single_agent: false,
             every_access_masked,
             stack_checked: false,
+            range: RangeCheck::FIVE_LEVEL,
+            translated: false,
+            translation_helper: 0,
         }
+    }
+
+    /// These checks on a host whose placement gives the guest `range`.
+    pub const fn with_range(self, range: RangeCheck) -> Self {
+        assert!(range.valid(), "a range check's fields fit its encoding");
+        Self { range, ..self }
+    }
+
+    /// These checks in the translated variant, calling the helper whose
+    /// address the slot at `helper` holds ([`Self::translated`]).
+    pub const fn with_translation(self, helper: u64) -> Self {
+        Self {
+            translated: true,
+            translation_helper: helper,
+            ..self
+        }
+    }
+
+    /// Whether every access checks the guest range, none left to an earlier
+    /// check through the same base.
+    pub(crate) const fn checks_every_access(self) -> bool {
+        self.every_access_masked || self.translated
     }
 }
 
@@ -296,42 +336,170 @@ fn plain_ordering(target: crate::TargetCpu, checks: MemoryChecks) -> bool {
 }
 
 /// The system-mode check of the access address in RAX against the guest's
-/// two ranges, the only parts of the host address space its shadow tables
-/// map: bits 63:48 all clear (TTBR0, PML5 entry 0) or all set (TTBR1, entry
-/// 511). Any other address raises #UD before the access, which the engine
-/// turns into the fault the guest's translation gives it. Every other PML5
-/// entry, Stela's window (entry 64) among them, is then out of a guest
-/// access's reach. RCX and host flags are scratch.
+/// native ranges, the only parts of the host address space its shadow
+/// tables map (docs/design/system.md, "Host placement"):
+///
+/// ```text
+/// mov rcx,rax; sar rcx,shift; add ecx,bias (inc ecx for 1); cmp ecx,bound
+/// jbe ok; ud2; ok: mov rcx,masked; cmova rax,rcx
+/// ```
+///
+/// Five-level paging (LA57) gives the guest PML5 entries 0 and 511, so bits
+/// 63:48 must be all clear or all set: shift 48, bias 1, bound 1. A
+/// four-level host gives it the lower half and `[U, 2^64)`, with
+/// `U = 0xffff_8000_0000_0000 + m * 2^41` and Stela's window and guard in
+/// the `m` slices of 2 TiB below `U`: shift 41, bias `64 - m`, bound
+/// `127 - m`. Any other address raises #UD before the access, which the
+/// engine turns into the fault the guest's translation gives it, or into
+/// the translated variant. Stela's memory is then out of a guest access's
+/// reach. RCX and host flags are scratch.
 ///
 /// The check's branch can be mispredicted, so past it a CMOVA, which uses
 /// the comparison's flags and no prediction, replaces an out-of-range RAX
-/// with [`MASKED_ADDRESS`]: an access that speculation runs past a failed
-/// check reaches an unmapped entry, never Stela's memory (Intel's and AMD's
+/// with `masked`, an unmapped address 2^40 or more from any mapped one, so
+/// that no access's extent leaves it: an access that speculation runs past
+/// a failed check never reaches Stela's memory (Intel's and AMD's
 /// bounds-check bypass guidance). A passed check leaves RAX unchanged, and
 /// the UD2 runs before the CMOVA with the guest's address.
-pub(crate) const GUEST_RANGE_CHECK: [u8; 30] = [
-    0x48, 0x89, 0xc1, // mov rcx,rax
-    0x48, 0xc1, 0xf9, 48, // sar rcx,48: 0 or -1 in range
-    0xff, 0xc1, // inc ecx: 1 or 0 in range
-    0x83, 0xf9, 0x01, // cmp ecx,1
-    0x76, 0x02, // jbe +2
-    0x0f, 0x0b, // ud2
-    0x48, 0xb9, 0, 0, 0, 0, 0, 0, 0x01, 0, // mov rcx,MASKED_ADDRESS
-    0x48, 0x0f, 0x47, 0xc1, // cmova rax,rcx
-];
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct RangeCheck {
+    pub shift: u8,
+    pub bias: u8,
+    pub bound: u8,
+    pub masked: u64,
+}
 
-/// Where a mispredicted [`GUEST_RANGE_CHECK`] sends an access: the start of
-/// PML5 entry 1, which no shadow root maps and which is 2^48 bytes from
-/// any other entry, so no access's extent leaves it.
-pub(crate) const MASKED_ADDRESS: u64 = 1 << 48;
-const _: () = assert!(u64::from_le_bytes([0, 0, 0, 0, 0, 0, 0x01, 0]) == MASKED_ADDRESS);
+/// The upper half's first address on a four-level host.
+const UPPER_HALF: u64 = 0xffff_8000_0000_0000;
+/// A four-level check's slices of 2 TiB.
+const SLICE_SHIFT: u8 = 41;
+/// The slices of each half.
+const HALF_SLICES: u8 = 64;
+/// The masked address's distance below `U`, inside the guard.
+const MASK_BELOW_UPPER: u64 = 1 << 40;
+/// The largest positive sign-extended imm8.
+const IMM8_MAX: u8 = 127;
+const OPCODE_INC: u8 = 1;
 
-/// The end of each of the eight host instructions of [`GUEST_RANGE_CHECK`],
-/// which the region cost gates count one by one; the UD2 ends at the sixth.
-pub(crate) const GUEST_RANGE_CHECK_ENDS: [usize; 8] = [3, 7, 9, 12, 14, 16, 26, 30];
-/// The offset of [`GUEST_RANGE_CHECK`]'s UD2.
-#[cfg(test)]
-const GUEST_RANGE_TRAP: usize = 14;
+impl RangeCheck {
+    /// Five-level paging (LA57): bits 63:48 all clear or all set; a failed
+    /// check's masked address is PML5 entry 1, which no shadow root maps.
+    pub const FIVE_LEVEL: Self = Self {
+        shift: 48,
+        bias: 1,
+        bound: 1,
+        masked: 1 << 48,
+    };
+
+    /// Four-level paging with Stela's window and guard in the `slices`
+    /// slices of 2 TiB below `U` (2 to 63): the window's, then the guard,
+    /// the whole slice below `U`, which takes the masked address.
+    pub const fn four_level(slices: u8) -> Self {
+        assert!(
+            slices >= 2 && slices < HALF_SLICES,
+            "a four-level placement takes 2 to 63 slices: at least one for \
+             the window and the guard, the whole slice below U"
+        );
+        let upper = UPPER_HALF + ((slices as u64) << SLICE_SHIFT);
+        Self {
+            shift: SLICE_SHIFT,
+            bias: HALF_SLICES - slices,
+            bound: IMM8_MAX - slices,
+            masked: upper - MASK_BELOW_UPPER,
+        }
+    }
+
+    /// Whether the fields fit the check's encoding: a shift of an address
+    /// and a bias and bound that are positive imm8s.
+    pub const fn valid(self) -> bool {
+        self.shift < u64::BITS as u8 && self.bias <= IMM8_MAX && self.bound <= IMM8_MAX
+    }
+
+    /// The bytes before the failure: the shift, the bias, the comparison
+    /// and the branch over the failure, of `failure` bytes.
+    fn test(self, code: &mut Vec<u8>, failure: u8) {
+        code.extend([0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, self.shift]); // mov rcx,rax; sar rcx,shift
+        if self.bias == OPCODE_INC {
+            code.extend([0xff, 0xc1]); // inc ecx
+        } else {
+            code.extend([0x83, 0xc1, self.bias]); // add ecx,bias
+        }
+        code.extend([0x83, 0xf9, self.bound, 0x76, failure]); // cmp ecx,bound; jbe past the failure
+    }
+
+    /// The mask after the check.
+    fn mask(self, code: &mut Vec<u8>) {
+        code.extend([0x48, 0xb9]); // mov rcx,masked
+        code.extend(self.masked.to_le_bytes());
+        code.extend([0x48, 0x0f, 0x47, 0xc1]); // cmova rax,rcx
+    }
+
+    /// The check with a UD2 failure.
+    pub(crate) fn emit(self, code: &mut Vec<u8>) {
+        self.test(code, UD2.len() as u8);
+        code.extend(UD2);
+        self.mask(code);
+    }
+
+    /// [`Self::emit`]'s bytes.
+    #[cfg(test)]
+    pub(crate) fn code(self) -> Vec<u8> {
+        let mut code = Vec::new();
+        self.emit(&mut code);
+        code
+    }
+
+    /// If `code` starts with a check of any placement, its length and the
+    /// end of each of its eight host instructions, which the region cost
+    /// gates count one by one.
+    pub(crate) fn at(code: &[u8]) -> Option<(usize, [usize; 8])> {
+        let [0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, shift, rest @ ..] = code else {
+            return None;
+        };
+        let (add, rest) = match rest {
+            [0xff, 0xc1, rest @ ..] => (2, rest),
+            [0x83, 0xc1, _, rest @ ..] => (3, rest),
+            _ => return None,
+        };
+        let [
+            0x83,
+            0xf9,
+            bound,
+            0x76,
+            0x02,
+            0x0f,
+            0x0b,
+            0x48,
+            0xb9,
+            rest @ ..,
+        ] = rest
+        else {
+            return None;
+        };
+        let [_, _, _, _, _, _, _, _, 0x48, 0x0f, 0x47, 0xc1, ..] = rest else {
+            return None;
+        };
+        if *shift >= u64::BITS as u8 || *bound > IMM8_MAX {
+            return None;
+        }
+        let compared = 7 + add + 3;
+        let ends = [
+            3,
+            7,
+            7 + add,
+            compared,
+            compared + 2,
+            compared + 4,
+            compared + 14,
+            compared + 18,
+        ];
+        Some((ends[7], ends))
+    }
+}
+
+const UD2: [u8; 2] = [0x0f, 0x0b];
 
 /// SCTLR_ELx.SA's check of an SP base in RAX, before the address addition
 /// as Arm checks it ([`MemoryChecks::stack_alignment`]).
@@ -347,7 +515,7 @@ pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
 
 fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks) {
     if checks.guest_range {
-        code.extend(GUEST_RANGE_CHECK);
+        checks.range.emit(code);
     }
 }
 
@@ -1315,11 +1483,14 @@ mod tests {
         }
     }
 
-    /// The check runs on the host and passes exactly the addresses whose
-    /// bits 63:48 are all clear or all set.
+    /// The check of each placement runs on the host and passes exactly the
+    /// guest's native ranges: with five-level paging the addresses whose
+    /// bits 63:48 are all clear or all set, with four-level paging the lower
+    /// half and `[U, 2^64)`. Past a mispredicted branch the mask alone
+    /// replaces every other address.
     #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
     #[test]
-    fn the_guest_range_check_passes_exactly_the_two_48_bit_ranges() {
+    fn the_guest_range_check_passes_exactly_the_native_ranges() {
         use core::ffi::c_void;
         unsafe extern "C" {
             fn mmap(
@@ -1338,87 +1509,132 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        let (check, rest) = GUEST_RANGE_CHECK.split_at(GUEST_RANGE_TRAP);
-        let (trap, mask) = rest.split_at(2);
-        assert_eq!(trap, [0x0f, 0x0b]);
-        assert_eq!(GUEST_RANGE_CHECK_ENDS[4], check.len());
-        assert_eq!(GUEST_RANGE_CHECK_ENDS[5], GUEST_RANGE_TRAP + 2);
-        assert_eq!(GUEST_RANGE_CHECK_ENDS[7], GUEST_RANGE_CHECK.len());
-        // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
-        // bytes, whose flags the mask then leaves alone) where its UD2 is;
-        // the mask; ret. Then the same with the branch replaced by a
-        // two-byte NOP, as a mispredicted check runs it: the mask alone
-        // must replace every out-of-range address.
-        let mut code = vec![0x48, 0x89, 0xf8];
-        code.extend(check);
-        code.extend([0x31, 0xc0]);
-        code.extend(mask);
-        code.push(0xc3);
-        let speculated = code.len();
-        code.extend([0x48, 0x89, 0xf8]);
-        code.extend(&check[..check.len() - 2]);
-        code.extend([0x66, 0x90]);
-        code.extend(mask);
-        code.push(0xc3);
-        // SAFETY: private anonymous memory, RX after the copy and unmapped
-        // after the calls; the code touches no memory.
-        unsafe {
-            let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
-            assert_ne!(page as usize, usize::MAX);
-            core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
-            assert_eq!(mprotect(page, PAGE, 5), 0);
-            let passes = |address: u64| {
-                let entry: unsafe extern "sysv64" fn(u64) -> u64 = core::mem::transmute(page);
-                let result = entry(address);
-                assert!(result == address || result == 0);
-                let masked: unsafe extern "sysv64" fn(u64) -> u64 =
-                    core::mem::transmute(page.cast::<u8>().add(speculated));
-                let expected = if result == address {
-                    address
-                } else {
-                    MASKED_ADDRESS
-                };
-                assert_eq!(masked(address), expected, "{address:#x}");
-                result == address
+        const LOWER_TOP: u64 = 1 << 47;
+        let five = |address: u64| matches!(address >> 48, 0 | 0xffff);
+        for slices in [None, Some(2), Some(3), Some(63)] {
+            let range = slices.map_or(RangeCheck::FIVE_LEVEL, RangeCheck::four_level);
+            let upper = slices.map_or(0, |slices| UPPER_HALF + (u64::from(slices) << SLICE_SHIFT));
+            let native = |address: u64| match slices {
+                None => five(address),
+                Some(_) => address < LOWER_TOP || address >= upper,
             };
-            for (address, expected) in [
-                (1, true),
-                (0x0000_ffff_ffff_ffff, true),
-                (0xffff_0000_0000_0000, true),
-                (u64::MAX, true),
-                (0x0001_0000_0000_0000, false),
-                // Stela's window, PML5 entry 64.
-                (0x0040_0000_0000_0000, false),
-                (0x00ff_ffff_ffff_ffff, false),
-                (0xff00_0000_0000_0000, false),
-                (0xfffe_ffff_ffff_ffff, false),
-                (0x7fff_ffff_ffff_ffff, false),
-                (0x8000_0000_0000_0000, false),
-                // A tagged pointer.
-                (0x0f00_0000_0000_1234, false),
-            ] {
-                assert_eq!(passes(address), expected, "{address:#x}");
-            }
-            let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-            for _ in 0..4096 {
-                seed = seed
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407);
-                // Bias half the samples to the ranges' edges.
-                let top = match seed >> 62 {
-                    0 => 0,
-                    1 => 0xffff,
-                    _ => (seed >> 16) & 0xffff,
+            let full = range.code();
+            let (bytes, ends) = RangeCheck::at(&full).expect("a check");
+            assert_eq!(bytes, full.len());
+            let (check, rest) = full.split_at(ends[4]);
+            let (trap, mask) = rest.split_at(ends[5] - ends[4]);
+            assert_eq!(trap, UD2);
+            assert_eq!(full.len(), if range.bias == 1 { 30 } else { 31 });
+            // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
+            // bytes, whose flags the mask then leaves alone) where its UD2
+            // is; the mask; ret. Then the same with the branch replaced by a
+            // two-byte NOP, as a mispredicted check runs it.
+            let mut code = vec![0x48, 0x89, 0xf8];
+            code.extend(check);
+            code.extend([0x31, 0xc0]);
+            code.extend(mask);
+            code.push(0xc3);
+            let speculated = code.len();
+            code.extend([0x48, 0x89, 0xf8]);
+            code.extend(&check[..check.len() - 2]);
+            code.extend([0x66, 0x90]);
+            code.extend(mask);
+            code.push(0xc3);
+            // SAFETY: private anonymous memory, RX after the copy and
+            // unmapped after the calls; the code touches no memory.
+            unsafe {
+                let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, PAGE, 5), 0);
+                let passes = |address: u64| {
+                    let entry: unsafe extern "sysv64" fn(u64) -> u64 = core::mem::transmute(page);
+                    let result = entry(address);
+                    assert!(result == address || result == 0);
+                    let masked: unsafe extern "sysv64" fn(u64) -> u64 =
+                        core::mem::transmute(page.cast::<u8>().add(speculated));
+                    let expected = if result == address {
+                        address
+                    } else {
+                        range.masked
+                    };
+                    assert_eq!(masked(address), expected, "{address:#x}");
+                    result == address
                 };
-                let address = top << 48 | (seed.rotate_left(17) & 0xffff_ffff_ffff) | 1;
-                assert_eq!(
-                    passes(address),
-                    matches!(address >> 48, 0 | 0xffff),
-                    "{address:#x}"
-                );
+                let mut edges = vec![
+                    1,
+                    LOWER_TOP - 1,
+                    LOWER_TOP,
+                    0x0000_ffff_ffff_ffff,
+                    0x0001_0000_0000_0000,
+                    // The five-level window, PML5 entry 64.
+                    0x0040_0000_0000_0000,
+                    0x00ff_ffff_ffff_ffff,
+                    0x7fff_ffff_ffff_ffff,
+                    0x8000_0000_0000_0000,
+                    0xff00_0000_0000_0000,
+                    0xfffe_ffff_ffff_ffff,
+                    0xffff_0000_0000_0000,
+                    UPPER_HALF - 1,
+                    // The four-level window's start.
+                    UPPER_HALF,
+                    u64::MAX,
+                    // A tagged pointer.
+                    0x0f00_0000_0000_1234,
+                ];
+                if slices.is_some() {
+                    edges.extend([upper - 1, upper, range.masked, upper - (1 << 35)]);
+                }
+                for address in edges {
+                    assert_eq!(passes(address), native(address), "{range:?} {address:#x}");
+                }
+                assert!(!native(range.masked) && !five(range.masked) || slices.is_some());
+                let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+                for _ in 0..4096 {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    // Bias most samples to the ranges' edges.
+                    let near = [0, LOWER_TOP, UPPER_HALF, upper, 1 << 48, 0xffff_u64 << 48];
+                    let offset = (seed.rotate_left(17) & 0xffff_ffff) as i64 - (1 << 31);
+                    let address = match seed >> 61 {
+                        0 => seed,
+                        top => near[(top as usize) % near.len()].wrapping_add_signed(offset << 9),
+                    };
+                    assert_eq!(passes(address), native(address), "{range:?} {address:#x}");
+                }
+                assert_eq!(munmap(page, PAGE), 0);
             }
-            assert_eq!(munmap(page, PAGE), 0);
         }
+    }
+
+    /// A four-level placement's masked address lies in its guard, which no
+    /// access extent leaves, and its fields fit the encoding.
+    #[test]
+    fn four_level_checks_mask_into_the_guard_below_the_upper_range() {
+        for slices in 2..HALF_SLICES {
+            let range = RangeCheck::four_level(slices);
+            let upper = UPPER_HALF + (u64::from(slices) << SLICE_SHIFT);
+            assert!(range.valid());
+            assert!(range.masked >= upper - (1 << SLICE_SHIFT) && range.masked < upper);
+            assert!(upper - range.masked >= 1 << 35);
+            let mut code = Vec::new();
+            range.emit(&mut code);
+            // A bias of 1 (63 slices) is INC, as five-level paging's.
+            let ends = if slices == HALF_SLICES - 1 {
+                [3, 7, 9, 12, 14, 16, 26, 30]
+            } else {
+                [3, 7, 10, 13, 15, 17, 27, 31]
+            };
+            assert_eq!(RangeCheck::at(&code), Some((ends[7], ends)));
+        }
+        assert_eq!(
+            RangeCheck::at(&RangeCheck::FIVE_LEVEL.code()).unwrap().1,
+            [3, 7, 9, 12, 14, 16, 26, 30]
+        );
+        let refused = MemoryChecks::DEFAULT.with_range(RangeCheck::four_level(2));
+        assert_eq!(refused.range.bias, 62);
+        assert_eq!(refused.range.bound, 125);
     }
 
     #[test]

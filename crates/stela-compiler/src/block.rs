@@ -584,6 +584,11 @@ impl CompilationPlan {
                 self.profile
             )));
         }
+        if checks.translated {
+            return Err(CompileError(
+                "the translated variant's helper call is not lowered yet".into(),
+            ));
+        }
         if !checks.stack_alignment {
             let single_agent = crate::x86_64::MemoryChecks {
                 single_agent: true,
@@ -940,10 +945,10 @@ mod tests {
     /// process blocks make no such check.
     #[test]
     fn system_mode_blocks_check_every_access_against_the_guest_ranges() {
-        use crate::x86_64::GUEST_RANGE_CHECK;
+        let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
         let count = |code: &[u8]| {
-            code.windows(GUEST_RANGE_CHECK.len())
-                .filter(|bytes| *bytes == GUEST_RANGE_CHECK)
+            code.windows(check.len())
+                .filter(|bytes| *bytes == check)
                 .count()
         };
         let compile = |words: &[u32], profile, plan: fn(CompilationPlan) -> CompilationPlan| {
@@ -1002,6 +1007,23 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(count(&masked), words.len() - 2);
+        // A four-level host's blocks, clean-load regions included, check
+        // against its placement's ranges.
+        const FOUR_LEVEL: crate::x86_64::MemoryChecks =
+            crate::x86_64::MemoryChecks::system(true, false, true, false)
+                .with_range(crate::x86_64::RangeCheck::four_level(2));
+        let four_level = compile(&words, BlockProfile::SystemModeV1, |plan| {
+            plan.with_memory_checks(FOUR_LEVEL).unwrap()
+        });
+        let four_level_check = crate::x86_64::RangeCheck::four_level(2).code();
+        assert_eq!(count(&four_level), 0);
+        assert_eq!(
+            four_level
+                .windows(four_level_check.len())
+                .filter(|bytes| *bytes == four_level_check)
+                .count(),
+            count(&system)
+        );
         assert_eq!(
             count(&compile(&words, BlockProfile::Ordinary, |plan| plan)),
             0
@@ -1165,7 +1187,7 @@ mod tests {
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
         let mut zeroing = Vec::new();
-        crate::x86_64::zero_block::emit(&mut zeroing, 3, 64);
+        crate::x86_64::zero_block::emit(&mut zeroing, 3, 64, crate::x86_64::RangeCheck::FIVE_LEVEL);
         assert_eq!(code[at..at + zeroing.len()], zeroing);
         let next = GuestAddress(BASE + 8);
         assert_eq!(
@@ -1243,7 +1265,7 @@ mod tests {
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
         let mut check = Vec::new();
-        crate::x86_64::cache_clean::emit(&mut check, 0);
+        crate::x86_64::cache_clean::emit(&mut check, 0, crate::x86_64::RangeCheck::FIVE_LEVEL);
         assert_eq!(code[at..at + check.len()], check);
         let next = GuestAddress(BASE + 8);
         assert_eq!(
@@ -1354,7 +1376,7 @@ mod tests {
         );
         let compiled =
             compile_for_target(&ordinary, BASE, profile, crate::TargetCpu::Baseline).unwrap();
-        let check = crate::x86_64::GUEST_RANGE_CHECK;
+        let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
         let mut unchecked = compiled.native.x86_64_code.clone();
         let at = unchecked
             .windows(check.len())
@@ -1481,7 +1503,7 @@ mod tests {
         ] {
             assert_eq!(code(profile), ordinary, "{profile:?}");
         }
-        let check = crate::x86_64::GUEST_RANGE_CHECK;
+        let check = crate::x86_64::RangeCheck::FIVE_LEVEL.code();
         let has_check = |code: &[u8]| code.windows(check.len()).any(|bytes| bytes == check);
         assert!(!has_check(&ordinary));
         let system = code(BlockProfile::SystemModeV1);
