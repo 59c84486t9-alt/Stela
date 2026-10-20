@@ -353,6 +353,8 @@ pub(super) struct Access<'a, H: Host, D: Devices> {
     result: Option<u64>,
     translation: Translation,
     regime: bool,
+    /// RMR_EL2.RR requested a Warm reset (`Machine::warm_reset`).
+    reset: bool,
     code: Code,
     refusal: Cell<Option<&'static str>>,
 }
@@ -644,6 +646,22 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         if let Some(written) = self.write_activity_monitor(register, index, value) {
             return written;
         }
+        // RMR_EL2.RR requests a Warm reset, which the PE takes once the write
+        // completes (`Machine::warm_reset`), at the reset vector the board
+        // holds for it.
+        if register == Register::RMR_EL2 && value & RMR_RR != 0 {
+            if self
+                .machine
+                .devices
+                .reset_vector(self.machine.current)
+                .is_none()
+            {
+                return Err(Effect::Refused(
+                    "RMR_EL2.RR Warm reset request without a reset vector for the PE",
+                ));
+            }
+            self.reset = true;
+        }
         let cpu = &mut self.machine.cpu;
         if implementation_defined_bits(register).is_some_and(|bits| value & !bits != 0) {
             return Err(Effect::Refused(
@@ -660,11 +678,6 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             return Ok(());
         }
         match register {
-            // RMR_EL2.RR requests a Warm reset into the reset vector, which
-            // has no profile value (see RVBAR_EL2).
-            Register::RMR_EL2 if value & RMR_RR != 0 => {
-                return Err(Effect::Refused("RMR_EL2.RR Warm reset request"));
-            }
             // OSLAR_EL1.OSLK locks and unlocks the OS lock (OSLSR_EL1.OSLK).
             Register::OSLAR_EL1 => {
                 let oslsr = cpu.read(Register::OSLSR_EL1) & !0b10 | (value & 1) << 1;
@@ -1151,6 +1164,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             result: None,
             translation: Translation::Unchanged,
             regime: false,
+            reset: false,
             code: Code::Unchanged,
             refusal: Cell::new(None),
         };
@@ -1161,6 +1175,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             result,
             translation,
             regime,
+            reset,
             code,
             refusal,
             ..
@@ -1198,6 +1213,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     && access.rt() != 31
                 {
                     self.cpu.state.x[usize::from(access.rt())] = value;
+                }
+                if reset {
+                    return Some(self.warm_reset());
                 }
                 self.next()
             }
@@ -2130,7 +2148,7 @@ mod tests {
     }
 
     #[test]
-    fn rmr_el2_resets_into_aarch64_and_refuses_a_warm_reset_request() {
+    fn rmr_el2_resets_into_aarch64_and_a_warm_reset_needs_a_reset_vector() {
         const RMR_EL2: Encoding = Encoding::new(3, 4, 12, 0, 2);
         let mut machine = machine(&[]);
         machine.cpu.pstate = Pstate::reset(2);
@@ -2644,6 +2662,7 @@ mod tests {
                     result: None,
                     translation: Translation::Unchanged,
                     regime: false,
+                    reset: false,
                     code: Code::Unchanged,
                     refusal: Cell::new(None),
                 };

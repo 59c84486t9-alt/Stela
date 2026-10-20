@@ -448,6 +448,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(())
     }
 
+    /// The running PE's write of RMR_EL2.RR requested a Warm reset (Arm
+    /// RMR_EL2), which it takes as the write completes: Arm leaves when to
+    /// the reset logic, and software waits for it in WFI. The PE leaves reset
+    /// at its reset vector (RVBAR_EL2) in EL2h, the highest implemented EL.
+    /// The System register fields with a Warm reset take their reset
+    /// values; the others keep theirs: the debug state, the OS lock, the
+    /// breakpoints and watchpoints, the debug communications channel and
+    /// claim tags, and RMR_EL2.AA64, which only a Cold reset sets. The
+    /// activity monitors keep counting, as only their own reset resets them.
+    /// The general-purpose and SIMD registers, UNKNOWN after the reset, read
+    /// 0, the Exclusives monitor clears, and the PE's Apple
+    /// IMPLEMENTATION DEFINED state (its registers, performance monitor and
+    /// AMX unit) restarts as on its other resets (inference: no 26A434
+    /// component requests a Warm reset). The cluster's shared registers stay.
+    pub(super) fn warm_reset(&mut self) -> Step {
+        let pe = self.current;
+        let Some(address) = self.devices.reset_vector(pe) else {
+            return Err(self.unsupported(RequirementKind::Native(
+                "RMR_EL2.RR requested a Warm reset, but the board holds no reset vector for the PE",
+            )));
+        };
+        let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
+        system::identify(&self.profile, pe, &mut cpu, &mut Vec::new());
+        let old = core::mem::replace(&mut self.cpu, cpu);
+        let cpu = &mut self.cpu;
+        cpu.registers.keep_over_warm_reset(&old.registers);
+        cpu.dcc = old.dcc;
+        cpu.claim = old.claim;
+        cpu.amu = old.amu;
+        cpu.retired = old.retired;
+        cpu.ctrr = old.ctrr;
+        cpu.apple.impdef.join(&old.apple.impdef);
+        cpu.memory_lock = old.memory_lock;
+        self.waiting = None;
+        self.event_sample = None;
+        self.device_lines = None;
+        self.translations_changed();
+        Ok(())
+    }
+
     /// PE `pe` leaves reset at `address`.
     fn restart(&mut self, pe: usize, address: u64) {
         let mut cpu = Cpu::of(self.profile.chip, address, Pstate::reset(2));
@@ -669,6 +709,59 @@ mod tests {
             });
             assert!(matches!(machine.schedule(), Err(Stop::Unsupported(_))));
         }
+    }
+
+    #[test]
+    fn an_rmr_el2_reset_request_warm_resets_the_pe_at_its_reset_vector() {
+        const MSR_RMR_EL2_X1: u32 = 0xd51c_c041;
+        const MRS_X1_RMR_EL2: u32 = 0xd53c_c041;
+        let devices = Board {
+            reset: Some(START),
+            ..Board::default()
+        };
+        let mut machine = board(&[], devices, alloc::vec![identity(0)]);
+        let cpu = &mut machine.cpu;
+        cpu.set_pstate(Pstate::reset(2));
+        cpu.registers.set_raw(Register::OSLSR_EL1, 0, 0);
+        cpu.registers.set(Register::DBGBVR_EL1, 1, 0x1000);
+        cpu.registers.set(Register::ELR_EL2, 0, 0x8000);
+        cpu.claim = 0b101;
+        cpu.state.x[5] = 7;
+        cpu.monitor = Some(Reservation {
+            granule: BASE,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        });
+        // RR clear requests nothing.
+        machine.cpu.state.x[1] = 0b01;
+        machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        machine.cpu.state.x[1] = 0b10;
+        machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
+        let cpu = &machine.cpu;
+        assert_eq!((cpu.pc, cpu.pstate.el, cpu.pstate.sp), (START, 2, true));
+        assert_eq!(cpu.pstate.daif, DAIF_ALL);
+        assert_eq!((cpu.state.x[5], cpu.monitor), (0, None));
+        assert_eq!(cpu.read(Register::MPIDR_EL1), 0x8000_0000);
+        // Only a Cold reset sets the OS lock, the breakpoints and the claim
+        // tags; ELR_EL2 is UNKNOWN (0 here) and RR clears.
+        assert_eq!(cpu.read(Register::OSLSR_EL1), 0);
+        assert_eq!(cpu.registers.get(Register::DBGBVR_EL1, 1), 0x1000);
+        assert_eq!(cpu.claim, 0b101);
+        assert_eq!(cpu.read(Register::ELR_EL2), 0);
+        machine.system_instruction(MRS_X1_RMR_EL2).unwrap();
+        assert_eq!(machine.cpu.state.x[1], 1);
+        // EL1 cannot reach RMR_EL2, and a board without a reset vector
+        // cannot reset the PE.
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.system_instruction(MSR_RMR_EL2_X1).unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+        machine.devices.reset = None;
+        machine.cpu.set_pstate(Pstate::reset(2));
+        machine.cpu.state.x[1] = 0b10;
+        assert!(matches!(
+            machine.system_instruction(MSR_RMR_EL2_X1),
+            Err(Stop::Unsupported(_))
+        ));
     }
 
     #[test]

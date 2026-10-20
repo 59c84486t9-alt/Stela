@@ -69,6 +69,20 @@ impl File {
             self.values[slot] = value;
         }
     }
+
+    /// Complete a Warm reset of `old`, this file holding the reset values:
+    /// the bits a Warm reset sets (`Register::warm`) keep this file's
+    /// values, and the others, such as the debug and performance monitor
+    /// state only a Cold reset sets, take `old`'s.
+    pub fn keep_over_warm_reset(&mut self, old: &File) {
+        for register in Register::ALL {
+            let warm = register.warm(self.chip);
+            for index in 0..register.instances() {
+                let slot = register.offset() + index as usize;
+                self.values[slot] = self.values[slot] & warm | old.values[slot] & !warm;
+            }
+        }
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -102,5 +116,29 @@ mod tests {
             file.get(Register::SCTLR_EL2, 0),
             file.res1(Register::SCTLR_EL2)
         );
+    }
+
+    #[test]
+    fn a_warm_reset_keeps_what_only_a_cold_reset_sets() {
+        let chip = crate::machine::test_chip();
+        let mut old = File::new(chip);
+        // The OS lock released, a breakpoint value, a return address and a
+        // Warm reset request.
+        old.set_raw(Register::OSLSR_EL1, 0, 0);
+        old.set(Register::DBGBVR_EL1, 3, 0x1234);
+        old.set(Register::ELR_EL2, 0, 0x8000);
+        old.set(Register::VBAR_EL2, 0, 0x4_0000);
+        old.set(Register::RMR_EL2, 0, 0b11);
+        let mut file = File::new(chip);
+        file.keep_over_warm_reset(&old);
+        // Arm's System register XML: OSLSR_EL1.OSLK and the breakpoints
+        // reset only on a Cold reset, RMR_EL2.RR on a Warm one while AA64
+        // keeps its Cold reset value, and ELR_EL2 and VBAR_EL2 become
+        // UNKNOWN (0 here).
+        assert_eq!(file.get(Register::OSLSR_EL1, 0), 0);
+        assert_eq!(file.get(Register::DBGBVR_EL1, 3), 0x1234);
+        assert_eq!(file.get(Register::ELR_EL2, 0), 0);
+        assert_eq!(file.get(Register::VBAR_EL2, 0), 0);
+        assert_eq!(file.get(Register::RMR_EL2, 0), 1);
     }
 }

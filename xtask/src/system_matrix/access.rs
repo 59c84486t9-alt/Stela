@@ -23,6 +23,9 @@ struct Layout {
     res1: Vec<u64>,
     /// The Cold reset value under each chip's profile (`super::resets`).
     reset: Vec<u64>,
+    /// The bits a Warm reset sets under each chip's profile
+    /// (`super::resets::warm`).
+    warm: Vec<u64>,
 }
 
 /// One value per chip, as Rust: a constant when every chip agrees.
@@ -311,18 +314,17 @@ pub fn generate(
                 })
                 .filter(|count: &u64| *count > 0)
                 .unwrap_or(1);
-            let (mut res0, mut res1, mut reset) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut res0, mut res1, mut reset, mut warm) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             for ((_, chip), chip_facts) in profiles.chips.iter().zip(chip_facts) {
                 let mut positions = BTreeMap::new();
                 let fixed = chip_facts.fixed.get(&rust).map_or(&[][..], Vec::as_slice);
                 let (zeros, ones) = layout(register, chip, fixed, &mut positions);
+                let fields = chip_facts.resets.get(&rust).map_or(&[][..], Vec::as_slice);
                 reset.push(super::resets::value(
-                    &rust,
-                    chip_facts.resets.get(&rust).map_or(&[][..], Vec::as_slice),
-                    &positions,
-                    zeros,
-                    ones,
+                    &rust, fields, &positions, zeros, ones,
                 )?);
+                warm.push(super::resets::warm(fields, &positions, zeros, ones));
                 res0.push(zeros | super::codegen::raz_by_choice(&rust));
                 res1.push(ones);
             }
@@ -332,6 +334,7 @@ pub fn generate(
                 res0,
                 res1,
                 reset,
+                warm,
             });
         }
         accessor_list.extend(accessors(register, profile)?);
@@ -438,9 +441,15 @@ pub fn generate(
         ("res0", "u64", 2),
         ("res1", "u64", 3),
         ("reset", "u64", 4),
+        ("warm", "u64", 5),
     ] {
         let parameter = if value >= 2 { ", chip: Chip" } else { "" };
-        if value >= 2 {
+        if value == 5 {
+            writeln!(
+                out,
+                "    /// The bits a Warm reset sets, under `chip`'s profile."
+            )?;
+        } else if value >= 2 {
             writeln!(out, "    /// Under `chip`'s profile.")?;
         }
         writeln!(
@@ -454,7 +463,8 @@ pub fn generate(
                 1 => layout.instances.to_string(),
                 2 => per_chip(&layout.res0),
                 3 => per_chip(&layout.res1),
-                _ => per_chip(&layout.reset),
+                4 => per_chip(&layout.reset),
+                _ => per_chip(&layout.warm),
             };
             writeln!(out, "            Register::{} => {text},", layout.name)?;
         }

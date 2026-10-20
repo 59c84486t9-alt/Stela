@@ -5,7 +5,9 @@
 //! the profile) leave this module; the archive and Arm's prose stay in `.stela`.
 //!
 //! A field's `field_reset` of type Warm or Cold applies at the engine's reset,
-//! which is a Cold reset and so also a Warm one. Conditional resets name the
+//! which is a Cold reset and so also a Warm one; a Warm reset alone, which
+//! RMR_EL2.RR requests, sets only the fields with a Warm reset ([`warm`]).
+//! The activity monitors' own reset (type AMU) is neither. Conditional resets name the
 //! highest implemented EL, EL3 or a feature, all decided by the profile; a
 //! reset whose conditions all fail does not apply. Architecturally UNKNOWN
 //! values read 0 (Stela's choice), and IMPLEMENTATION DEFINED ones take the
@@ -85,6 +87,9 @@ pub struct Field {
     pub lsb: u32,
     pub width: u32,
     pub reset: Reset,
+    /// A Warm reset, which a Cold reset also is; otherwise a Cold reset
+    /// only.
+    pub warm: bool,
 }
 
 /// A field whose XML gives one unconditional access type that fixes its
@@ -245,15 +250,18 @@ fn field_resets(field: &Element, profile: &Profile) -> Result<Vec<Field>> {
         .into_iter()
         .flat_map(|resets| resets.children_named("field_reset"))
     {
-        if !matches!(reset.attribute("reset_type"), Some("Warm" | "Cold")) {
-            continue;
-        }
+        let warm = match reset.attribute("reset_type") {
+            Some("Warm") => true,
+            Some("Cold") => false,
+            _ => continue,
+        };
         if let Some(value) = resolve(reset, width, profile)? {
             out.push(Field {
                 name: name.clone(),
                 lsb,
                 width,
                 reset: value,
+                warm,
             });
         }
     }
@@ -339,6 +347,32 @@ fn holds(condition: &str, profile: &Profile) -> Result<bool> {
     Ok(present == implemented)
 }
 
+/// The bits a Warm reset sets in a register whose profile layout has
+/// `positions` and reserved masks `res0`/`res1`: those of every field with a
+/// Warm reset under the profile. A Warm reset leaves the other bits, such as
+/// the debug and performance monitor state only a Cold reset sets, as they
+/// were.
+pub fn warm(
+    fields: &[Field],
+    positions: &BTreeMap<String, (u32, u32)>,
+    res0: u64,
+    res1: u64,
+) -> u64 {
+    fields
+        .iter()
+        .filter(|field| field.warm && positions.get(&field.name) == Some(&(field.lsb, field.width)))
+        .fold(0, |bits, field| bits | mask(field.width) << field.lsb)
+        & !(res0 | res1)
+}
+
+fn mask(width: u32) -> u64 {
+    if width == 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
+
 /// Apply `fields` to a register whose profile layout has `positions` (name →
 /// (lsb, width)) and reserved masks `res0`/`res1`. Fields absent from the
 /// layout, or at another position, are not part of the profile's register.
@@ -368,11 +402,7 @@ pub fn value(
                     )
                 })?,
         };
-        let mask = if field.width == 64 {
-            u64::MAX
-        } else {
-            (1u64 << field.width) - 1
-        };
+        let mask = mask(field.width);
         value = (value & !(mask << field.lsb)) | (bits & mask) << field.lsb;
     }
     Ok((value & !res0) | res1)
@@ -466,6 +496,19 @@ mod tests {
             value("DBGBCR_EL1", &fields, &positions, 1 << 1, 1 << 63).unwrap(),
             1 << 63 | 0b100
         );
+        // A Warm reset sets E and PMC, less the reserved bit, and leaves a
+        // field whose only reset is a Cold one.
+        assert_eq!(warm(&fields, &positions, 1 << 1, 1 << 63), 0b101);
+        let cold = Field {
+            name: "OSLK".into(),
+            lsb: 1,
+            width: 1,
+            reset: Reset::Value(1),
+            warm: false,
+        };
+        let positions: BTreeMap<String, (u32, u32)> =
+            [("OSLK".into(), (1, 1))].into_iter().collect();
+        assert_eq!(warm(&[cold], &positions, 0, 0), 0);
         let positions: BTreeMap<String, (u32, u32)> =
             [("EE".into(), (25, 1))].into_iter().collect();
         assert!(
