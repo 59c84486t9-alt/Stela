@@ -58,6 +58,13 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
         Some("VM_FLAGS_TPRO and VM_FLAGS_MTE allocations are refused"),
     ),
     ("_kernelrpc_mach_vm_deallocate_external", None),
+    (
+        "_kernelrpc_mach_vm_reallocate",
+        Some(
+            "a source over a guest page the host maps in parts of differing protections is \
+             refused; JIT and TPRO source entries are not told apart from others",
+        ),
+    ),
     ("_kernelrpc_mach_vm_protect", None),
     ("mach_vm_inherit", None),
     (
@@ -159,6 +166,7 @@ fn route(
         "_kernelrpc_mach_vm_remap_new_external" => remap(task, request, true)?,
         "_kernelrpc_mach_vm_allocate_external" => allocate(task, request)?,
         "_kernelrpc_mach_vm_deallocate_external" => deallocate(task, request),
+        "_kernelrpc_mach_vm_reallocate" => reallocate(task, request)?,
         "_kernelrpc_mach_vm_protect" => protect(task, request),
         "mach_vm_inherit" => inherit(request),
         "mach_vm_write" => write(task, request)?,
@@ -258,6 +266,10 @@ const VM_FLAGS_MTE: i32 = 0x2000;
 const VM_FLAGS_OVERWRITE: i32 = 0x4000;
 const VM_FLAGS_SUPERPAGE_MASK: i32 = 0x7_0000;
 const VM_FLAGS_RETURN_DATA_ADDR: i32 = 0x10_0000;
+const VM_FLAGS_ALIAS_MASK: i32 = 0xff00_0000_u32 as i32;
+/// `VM_REALLOCATE_ZERO_FILL_SOURCE`, the one option besides the default
+/// `VM_REALLOCATE_DEALLOCATE_SOURCE` (0).
+const VM_REALLOCATE_ZERO_FILL_SOURCE: i32 = 0x1;
 /// `VM_FLAGS_USER_REMAP`: FIXED, ANYWHERE, RANDOM_ADDR, OVERWRITE,
 /// RETURN_DATA_ADDR, RESILIENT_CODESIGN and RESILIENT_MEDIA.
 const VM_FLAGS_USER_REMAP: i32 = 0x1 | 0x8 | 0x4000 | 0x10_0000 | 0x20 | 0x40;
@@ -706,6 +718,101 @@ fn allocate(task: &mut dyn Task, request: &Request) -> Result<Reply> {
         task.unslid_change(placed, bytes, &mut |_| None);
     }
     task.invalidate(placed, bytes);
+    Ok(Reply::Success(placed.to_le_bytes().to_vec()))
+}
+
+/// The host's `mach_vm_reallocate`, which hosts before macOS 26 lack.
+type HostReallocate = unsafe extern "C" fn(u32, u64, u64, *mut u64, u64, u64, i32, i32) -> i32;
+
+fn host_reallocate() -> Option<HostReallocate> {
+    static FOUND: std::sync::OnceLock<Option<HostReallocate>> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        // SAFETY: a lookup of a libSystem function by its NUL-terminated
+        // name; the symbol, when present, has this signature
+        // (`mach/mach_vm.h`).
+        let symbol = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"mach_vm_reallocate".as_ptr()) };
+        (!symbol.is_null())
+            .then(|| unsafe { core::mem::transmute::<*mut libc::c_void, HostReallocate>(symbol) })
+    })
+}
+
+/// `mach_vm_reallocate` (`osfmk/vm/vm_map.c`, `vm_map_reallocate`): the
+/// source pages moved, atomically, to a destination of equal or greater
+/// size, expanded in place where the source already satisfies the
+/// alignment and the following pages are free. The arm64 kernel's checks
+/// run here on guest pages; the host's own reallocation then moves the
+/// whole guest pages with an alignment widened to them, so the source's
+/// entries keep their objects, protections and inheritance.
+fn reallocate(task: &mut dyn Task, request: &Request) -> Result<Reply> {
+    let Some((source, source_size, destination, destination_size, align_mask, options, flags)) =
+        fields(|| {
+            Some((
+                request.double(SIMPLE)?,
+                request.double(SIMPLE + 8)?,
+                request.double(SIMPLE + 16)?,
+                request.double(SIMPLE + 24)?,
+                request.double(SIMPLE + 32)?,
+                request.word(SIMPLE + 40)? as i32,
+                request.word(SIMPLE + 44)? as i32,
+            ))
+        })
+    else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    // `vm_map_reallocate_sanitize`, on guest pages.
+    let anywhere = flags & VM_FLAGS_ANYWHERE != 0;
+    if flags & !(VM_FLAGS_ANYWHERE | VM_FLAGS_OVERWRITE | VM_FLAGS_ALIAS_MASK) != 0
+        || options & !VM_REALLOCATE_ZERO_FILL_SOURCE != 0
+        || destination_size == 0
+        || destination_size & PAGE_MASK != 0
+        || (!anywhere && destination & PAGE_MASK != 0)
+    {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    if !anywhere && destination & align_mask != 0 {
+        return Ok(Reply::Failure(KERN_INVALID_ADDRESS));
+    }
+    if source_size == 0 || (source | source_size) & PAGE_MASK != 0 {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    if source.checked_add(source_size).is_none() {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    // The shared region is a submap, which `vm_map_relocate_preflight`
+    // refuses.
+    if in_shared_region(source, source_size) {
+        return Ok(Reply::Failure(KERN_INVALID_ADDRESS));
+    }
+    whole_pages("mach_vm_reallocate", source, source_size)?;
+    let Some(host_reallocate) = host_reallocate() else {
+        bail!(
+            "mach_vm_reallocate: the host kernel has no mach_vm_reallocate (macOS 26 or later), \
+             and relocating map entries otherwise is not implemented"
+        );
+    };
+    let mut placed = destination;
+    // SAFETY: this task's own pages moved where the guest asked, or where
+    // the host finds room in guest pages; the out-parameter is a local.
+    let code = unsafe {
+        host_reallocate(
+            host(),
+            source,
+            source_size,
+            &mut placed,
+            destination_size,
+            align_mask | PAGE_MASK,
+            options,
+            flags,
+        )
+    };
+    if code != KERN_SUCCESS {
+        return Ok(Reply::Failure(code as u32));
+    }
+    if flags & VM_FLAGS_OVERWRITE != 0 {
+        task.unslid_change(placed, destination_size, &mut |_| None);
+    }
+    task.invalidate(source, source_size);
+    task.invalidate(placed, destination_size);
     Ok(Reply::Success(placed.to_le_bytes().to_vec()))
 }
 
@@ -1618,6 +1725,176 @@ mod tests {
                 &VM_INHERIT_DEFAULT.to_le_bytes(),
             ],
         )
+    }
+
+    fn reallocate_body(
+        source: u64,
+        source_size: u64,
+        destination: u64,
+        destination_size: u64,
+        options: i32,
+        flags: i32,
+    ) -> Vec<u8> {
+        simple(&[
+            &source.to_le_bytes(),
+            &source_size.to_le_bytes(),
+            &destination.to_le_bytes(),
+            &destination_size.to_le_bytes(),
+            &0u64.to_le_bytes(),
+            &options.to_le_bytes(),
+            &flags.to_le_bytes(),
+        ])
+    }
+
+    fn reallocate(task: &mut Bare, body: &[u8]) -> Reply {
+        call(task, "_kernelrpc_mach_vm_reallocate", false, body).unwrap()
+    }
+
+    /// Whether a byte of `address` is mapped readable.
+    fn mapped(address: u64) -> bool {
+        memory::read(address, 1).is_some()
+    }
+
+    /// Take the guest page after `source`, unless something holds it
+    /// already: either way growing the source cannot stay in place. The
+    /// page, when this took it.
+    fn block_after(source: u64) -> Option<u64> {
+        let mut blocker = source + PAGE_BYTES;
+        // SAFETY: a fixed allocation of a free page of this task.
+        (unsafe { mach_vm_allocate(host(), &mut blocker, PAGE_BYTES, 0) } == KERN_SUCCESS)
+            .then_some(blocker)
+    }
+
+    fn release(address: u64, bytes: u64) {
+        // SAFETY: pages this test allocated.
+        unsafe { mach_vm_deallocate(host(), address, bytes) };
+    }
+
+    #[test]
+    fn reallocate_moves_whole_guest_pages_and_unmaps_the_source() {
+        let mut task = bare();
+        let source = allocate_pages(&mut task, 1);
+        assert!(memory::write(source + 0x10, b"moved"));
+        let blocker = block_after(source);
+        let body = reallocate_body(source, PAGE_BYTES, 0, 3 * PAGE_BYTES, 0, VM_FLAGS_ANYWHERE);
+        let moved = u64_at(&success(reallocate(&mut task, &body)), 0);
+        assert_ne!(moved, source);
+        assert_eq!(moved & PAGE_MASK, 0);
+        assert_eq!(memory::read(moved + 0x10, 5).unwrap(), b"moved");
+        // The grown pages are zero-filled with the source's protections.
+        assert_eq!(memory::read(moved + 2 * PAGE_BYTES, 4).unwrap(), [0; 4]);
+        assert!(memory::write(moved + 3 * PAGE_BYTES - 1, b"!"));
+        // The default option unmaps the source.
+        assert!(!mapped(source));
+        release(moved, 3 * PAGE_BYTES);
+        if let Some(blocker) = blocker {
+            release(blocker, PAGE_BYTES);
+        }
+    }
+
+    #[test]
+    fn reallocate_can_leave_zero_filled_pages_at_the_source() {
+        let mut task = bare();
+        let source = allocate_pages(&mut task, 1);
+        assert!(memory::write(source, b"data"));
+        let blocker = block_after(source);
+        let body = reallocate_body(
+            source,
+            PAGE_BYTES,
+            0,
+            2 * PAGE_BYTES,
+            VM_REALLOCATE_ZERO_FILL_SOURCE,
+            VM_FLAGS_ANYWHERE,
+        );
+        let moved = u64_at(&success(reallocate(&mut task, &body)), 0);
+        assert_eq!(memory::read(moved, 4).unwrap(), b"data");
+        assert_eq!(memory::read(source, 4).unwrap(), [0; 4]);
+        release(moved, 2 * PAGE_BYTES);
+        release(source, PAGE_BYTES);
+        if let Some(blocker) = blocker {
+            release(blocker, PAGE_BYTES);
+        }
+    }
+
+    #[test]
+    fn reallocate_checks_its_arguments_on_guest_pages() {
+        let mut task = bare();
+        let source = allocate_pages(&mut task, 2);
+        let refused = |task: &mut Bare, body: Vec<u8>| failure(reallocate(task, &body));
+        // A source or destination size in host pages but not guest pages.
+        let host_page = HOST_PAGE_BYTES;
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source, host_page, 0, PAGE_BYTES, 0, 1)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source, PAGE_BYTES, 0, PAGE_BYTES + host_page, 0, 1)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        // A source start inside a guest page.
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source + host_page, PAGE_BYTES, 0, PAGE_BYTES, 0, 1)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        // Shrinking is the allocator's.
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source, 2 * PAGE_BYTES, 0, PAGE_BYTES, 0, 1)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        // Unknown flags and options.
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source, PAGE_BYTES, 0, PAGE_BYTES, 2, 1)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(source, PAGE_BYTES, 0, PAGE_BYTES, 0, 0x8)
+            ),
+            KERN_INVALID_ARGUMENT
+        );
+        // A fixed overwrite onto the source itself.
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(
+                    source,
+                    PAGE_BYTES,
+                    source,
+                    2 * PAGE_BYTES,
+                    0,
+                    VM_FLAGS_OVERWRITE
+                )
+            ),
+            KERN_INVALID_ADDRESS
+        );
+        // The shared region is a submap.
+        assert_eq!(
+            refused(
+                &mut task,
+                reallocate_body(REGION_START, PAGE_BYTES, 0, PAGE_BYTES, 0, 1)
+            ),
+            KERN_INVALID_ADDRESS
+        );
+        // An equal size already aligned is the source itself.
+        let body = reallocate_body(source, PAGE_BYTES, 0, PAGE_BYTES, 0, VM_FLAGS_ANYWHERE);
+        assert_eq!(u64_at(&success(reallocate(&mut task, &body)), 0), source);
+        release(source, 2 * PAGE_BYTES);
     }
 
     #[test]
