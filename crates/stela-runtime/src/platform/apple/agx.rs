@@ -34,6 +34,9 @@
 //! - [`raster`]: clipping, coverage, coefficient planes and depth/stencil
 //!   tests.
 //! - [`exec`]: the execution engine that runs those streams' work.
+//! - [`work`]: the bridge that runs a GPU-work channel command on the engine
+//!   in the submitting UAT context and completes it with its stamps and
+//!   events.
 //!
 //! The requirement matrix and its statuses are docs/research/agx.md §5.
 
@@ -51,3 +54,4 @@ pub mod sgx;
 pub mod signal;
 pub mod stream;
 pub mod uat;
+pub mod work;

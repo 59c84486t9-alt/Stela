@@ -27,6 +27,7 @@
 //! The firmware side here reads descriptors and indices and retires entries;
 //! what an entry means belongs to its consumer ([`super::firmware`]).
 
+use super::uat;
 use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 
@@ -59,6 +60,12 @@ pub trait Shared {
         self.read(va, &mut word)?;
         Ok(u64::from_le_bytes(word))
     }
+
+    /// A GPU-unit read in UAT `context`: the work the firmware runs reaches
+    /// its address space with the GPU's permissions ([`uat::gpu_stream`]).
+    fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError>;
+    /// A GPU-unit write in UAT `context`.
+    fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError>;
 }
 
 fn reason(error: DmaError) -> &'static str {
@@ -75,6 +82,22 @@ impl Shared for Port<'_, '_> {
     }
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
         Port::write(self, va, data).map_err(reason)
+    }
+    fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError> {
+        gpu_port(self, context).read(va, buffer)
+    }
+    fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError> {
+        gpu_port(self, context).write(va, data)
+    }
+}
+
+/// The same bus master's port for GPU-unit accesses in `context`.
+fn gpu_port<'c, 'b>(port: &'c mut Port<'_, 'b>, context: usize) -> Port<'c, 'b> {
+    Port {
+        iommu: &mut *port.iommu,
+        stream: uat::gpu_stream(context),
+        memory: &mut *port.memory,
+        access: &mut *port.access,
     }
 }
 
@@ -245,6 +268,18 @@ pub(crate) mod tests {
             let range = self.range(va, data.len())?;
             self.bytes[range].copy_from_slice(data);
             Ok(())
+        }
+        /// Every context sees the same flat memory; outside it is a fault.
+        fn gpu_read(
+            &mut self,
+            _context: usize,
+            va: u64,
+            buffer: &mut [u8],
+        ) -> Result<(), DmaError> {
+            Shared::read(self, va, buffer).map_err(|_| DmaError::Fault(0))
+        }
+        fn gpu_write(&mut self, _context: usize, va: u64, data: &[u8]) -> Result<(), DmaError> {
+            Shared::write(self, va, data).map_err(|_| DmaError::Fault(0))
         }
     }
 

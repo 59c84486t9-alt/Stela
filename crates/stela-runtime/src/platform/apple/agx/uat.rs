@@ -217,6 +217,17 @@ const CONTEXT_SHIFT: u32 = 48;
 const CONTEXT_MASK: u64 = 0xff;
 /// The context the GFX firmware runs in.
 pub const FIRMWARE_CONTEXT: usize = 0;
+/// The stream bit of a GPU-unit access on the GFX coprocessor's port. The
+/// firmware and the GPU it drives are one bus master behind one UAT
+/// (Decision): the machine hands the coprocessor a firmware view, and work
+/// the firmware runs reaches its context's memory with the GPU's
+/// permissions through `gpu_stream(context)`.
+pub const GPU_STREAM: usize = 1 << 8;
+
+/// The port stream of a GPU-unit access in `context`.
+pub const fn gpu_stream(context: usize) -> usize {
+    GPU_STREAM | context
+}
 /// The level-0 index of the TTBR1 window every context shares through the
 /// shared L2 (`0xffff_ffa0_0000_0000`).
 pub const SHARED_INDEX: usize = 2;
@@ -542,7 +553,14 @@ impl Iommu for AgentView<'_> {
         _access: &mut BusAccess<'_>,
     ) -> Result<u64, DmaError> {
         debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
-        self.uat.walk(memory, self.agent, stream, iova, write)
+        // A GPU stream is the GPU's units in that context, whichever view
+        // carries it.
+        let (agent, context) = if stream & GPU_STREAM != 0 {
+            (Agent::Gpu, stream & !GPU_STREAM)
+        } else {
+            (self.agent, stream)
+        };
+        self.uat.walk(memory, agent, context, iova, write)
     }
 }
 
@@ -824,6 +842,67 @@ mod tests {
         );
         assert!(uat.share_kernel_window(0).is_err());
         assert!(uat.share_kernel_window(1 << 40).is_err());
+    }
+
+    #[test]
+    fn the_coprocessor_port_reaches_a_context_with_gpu_permissions() {
+        // Context 0's TTBR0 maps a GPU-RW page (AP 2, UXN 1, PXN 0): the
+        // firmware's own accesses have no stated meaning there, the GPU
+        // stream of the same context reads it.
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 0x4000 * 6);
+        let (ttbat, pce, pde, pte, page) = (
+            base,
+            base + 0x4000,
+            base + 0x8000,
+            base + 0xc000,
+            base + 0x1_0000,
+        );
+        let [ttbr0, ttbr1] = encode_gptbat(5, pce, pce);
+        ram.put_u64(ttbat + 5 * 16, ttbr0);
+        ram.put_u64(ttbat + 5 * 16 + 8, ttbr1);
+        let va = 0x11_0000_4000;
+        let (_, idx) = indices(va);
+        ram.put_u64(pce + idx[0] as u64 * 8, encode_table(pde));
+        ram.put_u64(pde + idx[1] as u64 * 8, encode_table(pte));
+        let flags = shared(Access::Gpu, true, false);
+        ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
+        ram.put_u64(page + 8, 0xa6e5);
+        let mut uat = Uat::default();
+        uat.configure(ttbat).unwrap();
+        assert!(matches!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 5, va + 8),
+            Err(DmaError::Unsupported(_))
+        ));
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(5), va + 8),
+            Ok(0xa6e5)
+        );
+        // An unmapped GPU address faults and is recorded as the GPU's.
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(5), 0x4000),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        let fault = uat.last_fault().unwrap();
+        assert_eq!(
+            (fault.agent, fault.context, fault.address),
+            (Agent::Gpu, 5, 0x4000)
+        );
+        // The context tag must still match, and the context fit the TTBAT.
+        assert!(matches!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(4), va),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        ));
+        assert!(matches!(
+            port_read(
+                &mut uat,
+                Agent::Firmware,
+                &mut ram,
+                gpu_stream(CONTEXTS),
+                va
+            ),
+            Err(DmaError::Unsupported(_))
+        ));
     }
 
     #[test]
