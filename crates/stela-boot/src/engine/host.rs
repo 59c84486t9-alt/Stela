@@ -29,10 +29,14 @@ use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
     mmu::{
         self, Access, Outcome,
+        placement::Placement,
         shadow::{self, Extents},
         tlbi::Reach,
+        translated::Tlb,
     },
 };
+
+mod translated;
 
 /// Guest DRAM backed by one contiguous host range.
 #[derive(Debug, Clone, Copy)]
@@ -172,6 +176,18 @@ pub struct State {
     pub stray: u64,
     /// TSC ticks spent in compiled guest code, its exits and faults.
     pub native_ticks: u64,
+    /// Where the guest's address space lies beside the window.
+    placement: Placement,
+    /// The translated variant's software TLB, tagged by root, and the
+    /// helper's bounce slot; without the slot the host has no helper.
+    tlb: Tlb,
+    bounce: Option<translated::Bounce>,
+    /// Translation helper calls, the TLB fills they made and the accesses
+    /// they ran through the bounce slot; shadow faults in the guard.
+    pub helper_calls: u64,
+    pub helper_fills: u64,
+    pub bounces: u64,
+    pub guard_faults: u64,
 }
 
 struct Global(UnsafeCell<Option<State>>);
@@ -207,6 +223,10 @@ pub struct Config {
     pub code_bytes: u64,
     pub tsc_hz: u64,
     pub apic_base: u64,
+    pub placement: Placement,
+    /// The translation helper's bounce slot: its first page's address and
+    /// the physical addresses of its two leaf entries.
+    pub bounce: Option<(u64, [u64; 2])>,
 }
 
 /// Install the host state, leave the identity map and start the APIC.
@@ -277,6 +297,15 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             scoped: 0,
             prefills: 0,
             stray: 0,
+            placement: config.placement,
+            tlb: Tlb::default(),
+            bounce: config
+                .bounce
+                .map(|(address, entries)| translated::Bounce::new(address, entries)),
+            helper_calls: 0,
+            helper_fills: 0,
+            bounces: 0,
+            guard_faults: 0,
         });
     }
     let state = state();
@@ -300,6 +329,12 @@ pub struct Statistics {
     pub stray: u64,
     /// The APIC timer frequency.
     pub apic_hz: u64,
+    /// Translation helper calls, their TLB fills and bounced accesses, and
+    /// shadow faults in the four-level guard.
+    pub helper_calls: u64,
+    pub helper_fills: u64,
+    pub bounces: u64,
+    pub guard_faults: u64,
 }
 
 pub fn statistics() -> Statistics {
@@ -312,6 +347,10 @@ pub fn statistics() -> Statistics {
         scoped: state.scoped,
         stray: state.stray,
         apic_hz: state.apic_hz,
+        helper_calls: state.helper_calls,
+        helper_fills: state.helper_fills,
+        bounces: state.bounces,
+        guard_faults: state.guard_faults,
     }
 }
 
@@ -351,6 +390,7 @@ impl State {
     fn reset_shadow(&mut self) {
         self.clear(LOWER);
         self.clear(UPPER);
+        self.tlb.clear();
         self.resets += 1;
         self.reload();
     }
@@ -358,6 +398,7 @@ impl State {
     /// Drop the lower half's translations only.
     fn reset_lower(&mut self) {
         self.clear(LOWER);
+        self.tlb.clear();
         self.lower_resets += 1;
         self.reload();
     }
@@ -470,6 +511,47 @@ fn abandon(state: &mut State, frame: &mut Frame, address: u64, write: bool, caus
     frame.rip = stela_native_recover as *const () as u64;
 }
 
+/// The guest's translation of the access at `address`, through the same
+/// software walk for shadow faults and the translation helper: the
+/// translation and the host physical address of its RAM page, or why the
+/// engine must take the access (Arm checks watchpoints after translation,
+/// `AArch64_TranslateAddress`, then Tag Checks).
+fn resolve(
+    state: &mut State,
+    address: u64,
+    write: bool,
+    unprivileged: bool,
+) -> Result<(mmu::Translation, u64), FaultCause> {
+    let regime = state.regime.ok_or(FaultCause::NonCanonical)?;
+    let access = if write { Access::Write } else { Access::Read };
+    let requester = mmu::Requester {
+        unprivileged: regime.requester.unprivileged || unprivileged,
+        ..regime.requester
+    };
+    let translation = match mmu::translate(
+        &regime.controls,
+        address,
+        access,
+        requester,
+        &mut GuestTables(state),
+    ) {
+        Outcome::Mapped(translation) => translation,
+        Outcome::Fault(fault) => return Err(FaultCause::Guest(fault)),
+        Outcome::Unsupported(unsupported) => return Err(FaultCause::Translation(unsupported)),
+    };
+    if regime.watch.blocks(address & !(PAGE - 1)) {
+        return Err(FaultCause::Watched);
+    }
+    if regime.tag_blocks(address, translation.attributes) {
+        return Err(FaultCause::TagChecked);
+    }
+    let page = translation.physical & !(PAGE - 1);
+    let host = state.host_physical(page).ok_or(FaultCause::Device {
+        physical: translation.physical,
+    })?;
+    Ok((translation, host))
+}
+
 /// #PF: fill the shadow from the guest's tables or end the block precisely.
 pub fn page_fault(frame: &mut Frame, address: u64) {
     let state = state();
@@ -480,57 +562,21 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     let Some(regime) = state.regime else {
         super::interrupts::fatal(frame);
     };
-    let access = if write { Access::Write } else { Access::Read };
-    let outcome = mmu::translate(
-        &regime.controls,
-        address,
-        access,
-        regime.requester,
-        &mut GuestTables(state),
-    );
-    let translation = match outcome {
-        Outcome::Mapped(translation) => translation,
-        Outcome::Fault(fault) => {
-            return abandon(state, frame, address, write, FaultCause::Guest(fault));
-        }
-        Outcome::Unsupported(unsupported) => {
-            return abandon(
-                state,
-                frame,
-                address,
-                write,
-                FaultCause::Translation(unsupported),
-            );
-        }
-    };
-    // Watchpoints are checked after translation (Arm
-    // `AArch64_TranslateAddress`), then Tag Checks; the engine checks this
-    // access.
-    if regime.watch.blocks(address & !(PAGE - 1)) {
-        return abandon(state, frame, address, write, FaultCause::Watched);
+    // Only the native ranges are shadow; the rest is the engine's. An
+    // access past a check an earlier one stood for may reach the guard
+    // (`mmu::placement`): its own check finds where it goes.
+    if !state.placement.native(address) {
+        state.guard_faults += u64::from(state.placement.in_guard(address));
+        return abandon(state, frame, address, write, FaultCause::NonCanonical);
     }
-    if regime.tag_blocks(address, translation.attributes) {
-        return abandon(state, frame, address, write, FaultCause::TagChecked);
-    }
-    let page = translation.physical & !(PAGE - 1);
-    let Some(host) = state.host_physical(page) else {
-        let physical = translation.physical;
-        return abandon(
-            state,
-            frame,
-            address,
-            write,
-            FaultCause::Device { physical },
-        );
+    let (translation, host) = match resolve(state, address, write, false) {
+        Ok(resolved) => resolved,
+        Err(cause) => return abandon(state, frame, address, write, cause),
     };
     let rights = PRESENT | NX | if translation.writable { WRITABLE } else { 0 };
     let root = state.roots[state.current];
     let virtual_page = address & !(PAGE - 1);
     let half = if address >> 63 == 0 { LOWER } else { UPPER };
-    // Only the two halves' root entries are shadow; the rest is the engine's.
-    if tables::index(address, 4) != [GUEST_LOW, GUEST_HIGH][half] {
-        return abandon(state, frame, address, write, FaultCause::NonCanonical);
-    }
     state.pool.half = half;
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
@@ -762,6 +808,7 @@ impl Host for BareHost {
         if reach == Reach::All {
             return state.reset_shadow();
         }
+        state.tlb.clear();
         let mut unmapped = Vec::new();
         let mut whole = false;
         for half in [LOWER, UPPER] {
@@ -829,6 +876,14 @@ impl Host for BareHost {
 
     fn report(&mut self, event: &stela_runtime::machine::Event) {
         super::report(event);
+    }
+
+    fn placement(&self) -> Placement {
+        state().placement
+    }
+
+    fn translation_helper(&self) -> Option<u64> {
+        state().bounce.as_ref().map(|_| translated::slot())
     }
 
     fn translations(&mut self) -> Option<&mut dyn stela_runtime::machine::Translations> {

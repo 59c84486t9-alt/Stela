@@ -1494,6 +1494,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         code_bytes: handoff.code.bytes,
         tsc_hz: handoff.tsc_hz,
         apic_base: handoff.apic_base,
+        placement: stela_runtime::machine::mmu::placement::Placement::FiveLevel,
+        bounce: None,
     };
     // SAFETY: once, with interrupts off.
     if let Err(error) = unsafe { host::install(config) } {
@@ -1826,6 +1828,7 @@ fn run(
     let mut user = 0;
     let mut beats = 0u64;
     let mut exits = ExitsSeen::default();
+    let mut translated = TranslatedSeen::default();
     let mut occupancy = None;
     let mut host_erase = erase::HostErase::default();
     loop {
@@ -1978,6 +1981,7 @@ fn run(
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);
             exits.report(machine);
+            translated.report(machine);
             peers_report(machine);
             let stale = machine.stale_code();
             if stale.stale > 0 {
@@ -2117,6 +2121,38 @@ fn timer_report(machine: &mut Machine<BareHost, AppleDevices>) {
         ));
     }
     output::arguments(format_args!("\n"));
+}
+
+/// Whether the guest has yet been seen to reach addresses outside the
+/// host's native ranges (`docs/design/system.md#host-placement`).
+#[derive(Default)]
+struct TranslatedSeen {
+    reported: bool,
+}
+
+impl TranslatedSeen {
+    /// Once per boot, the first guest PC and address that needed the
+    /// translated variant, or that fell in the four-level guard, with the
+    /// counts so far: such a guest runs correctly, through the translation
+    /// helper, but slower, and may call for a different placement.
+    fn report(&mut self, machine: &Machine<BareHost, AppleDevices>) {
+        let host = host::statistics();
+        let first = machine.first_translated();
+        if self.reported || (first.is_none() && host.guard_faults == 0) {
+            return;
+        }
+        self.reported = true;
+        let (pc, address) = first.unwrap_or_default();
+        output::arguments(format_args!(
+            "TRANSLATED pc={pc:#x} address={address:#x} pages={} helper_calls={} \
+             helper_fills={} bounces={} guard_faults={}\n",
+            machine.statistics.translated_pages,
+            host.helper_calls,
+            host.helper_fills,
+            host.bounces,
+            host.guard_faults,
+        ));
+    }
 }
 
 /// The engine's entries into compiled code, its exits by kind and the
@@ -2489,7 +2525,7 @@ fn finish(
     dump_report(machine, dumps);
     let host = host::statistics();
     output::arguments(format_args!(
-        "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} lower_resets={} scoped_invalidations={} stray_interrupts={} events={} seconds={seconds:.3}\n",
+        "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} lower_resets={} scoped_invalidations={} stray_interrupts={} helper_calls={} helper_fills={} bounces={} guard_faults={} events={} seconds={seconds:.3}\n",
         machine.statistics,
         host.fills,
         host.prefills,
@@ -2497,6 +2533,10 @@ fn finish(
         host.lower_resets,
         host.scoped,
         host.stray,
+        host.helper_calls,
+        host.helper_fills,
+        host.bounces,
+        host.guard_faults,
         EVENTS.load(Ordering::Relaxed),
     ));
     exit_report(machine);
