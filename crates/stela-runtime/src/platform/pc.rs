@@ -10,7 +10,8 @@
 //! [`storage::open`] selects the one disk and GPT partition that `stela.cfg`
 //! names and returns a [`gpt::PartitionDevice`] that cannot reach any other
 //! block. [`boot_log`] keeps the mount's output on the machine-state
-//! partition, and `stela` reads it back.
+//! partition, and `stela` reads it back; [`machine_state`] keeps that
+//! partition's layout in the tail of the Apple region instead.
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -21,6 +22,7 @@ pub mod boot_log;
 pub mod dma;
 pub mod gpt;
 pub mod input;
+pub mod machine_state;
 mod mmio;
 pub mod nvme;
 pub mod pci;
