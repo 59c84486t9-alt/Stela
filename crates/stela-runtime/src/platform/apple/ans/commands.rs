@@ -27,6 +27,87 @@ const TUNNEL_PAGE: u32 = 0x4000;
 pub(super) const fn tunnel_buffer(bytes: u32) -> u32 {
     bytes.div_ceil(TUNNEL_PAGE) * TUNNEL_PAGE
 }
+
+/// Request type of `AppleEmbeddedNVMeController::SendTimeToDevice`
+/// (0x3df6d7c, type stored at 0x3df6e64). It runs only after
+/// `InitializeWallTime` (0x3db8020) has waited for IOBSD, stored
+/// `kern.monotonicclock` at controller +0x408 and set +0x3f0 bit 2
+/// (0x3dfa084), so the first one comes from the hourly housekeeping
+/// (`HousekeepingTimerEvent` 0x3de9144, `DoHousekeeping` 0x3db7fa0) or a
+/// later controller initialization (0x3db22b4) or format (0x3db5790).
+const DEVICE_TIME: u32 = 6;
+
+/// The host clocks one device-time tunnel carries (0x3df6e50..0x3df6e78),
+/// in a 4 KiB request with no output buffer. The status at +0x4c must be 0
+/// (0x3df6e8c); anything else is logged and returned as an error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct DeviceTime {
+    /// +0x1c, low word of `clock_get_calendar_nanotime`'s seconds
+    /// (`UpdateTime` 0x3de9244..0x3de92ac): Unix time.
+    pub calendar_seconds: u32,
+    /// +0x20, low word of the PRTC counter at controller +0x400: the
+    /// boot-time `kern.monotonicclock` plus the calendar seconds since
+    /// `kern.boottime` (0x3de92f4..0x3de9304).
+    pub prtc_seconds: u32,
+    /// +0x24, `mach_absolute_time`.
+    pub absolute: u64,
+    /// +0x2c, `mach_continuous_time`.
+    pub continuous: u64,
+}
+
+/// The named refusal for a tunnel request type the 26A434 IONVMeFamily can
+/// build but the die does not serve. docs/research/ans2.md owns the census
+/// (`Tunnel request census`). Each type below either has a builder that
+/// J473AP's boot, restore and recovery paths leave idle, or reaches the
+/// controller only through a user client's production tunnel.
+fn unserved_tunnel(kind: u32) -> &'static str {
+    match kind {
+        3 => {
+            "ANS QoS-parameter tunnel (type 3) is not modeled: only \
+             AppleEmbeddedNVMeController::SetQoSParameters (0x3df71d0) builds it, and the ANS2 \
+             controller's override (0x3dbeddc) sends nothing"
+        }
+        7 => {
+            "ANS NAND-qualification tunnel (type 7) is not modeled: SetNANDQual (0x3df6fc8) sends \
+             it only for the nand-qual boot-arg, and the die runs no NAND qualification"
+        }
+        0x22 => {
+            "ANS NAND I/O-log tunnel (type 0x22) is not modeled: SetNANDIOLog (0x3e0ade4) sends it \
+             only for the enable-IO-log boot-arg, and the die keeps no NAND I/O log"
+        }
+        0x37 => {
+            "ANS legacy NAND geometry tunnel (type 0x37) is not modeled: the ANS2 driver sends it \
+             (0x3df75ac) only after the V2 geometry request (type 0xba) fails"
+        }
+        0x52 => {
+            "ANS calendar-time mode tunnel (type 0x52) is not modeled: SetATVMode (0x3df62f8) \
+             sends it only with /defaults flash-use-calender-time, and its effect is not recovered"
+        }
+        0x97 => {
+            "ANS BDR-factor tunnel (type 0x97) is not modeled: SetBDRFactor (0x3db7bd4) sends it \
+             only with a bdr-factor property on the ANS node, and its effect is not recovered"
+        }
+        0xb1 => {
+            "ANS TT-parameter tunnel (type 0xb1) is not modeled: SetTTParams (0x3dfb1d4) sends it \
+             only for the raid or fastbm boot-args, and their effect is not recovered"
+        }
+        0x309 | 0x30a => {
+            "ANS sleep-notice tunnel (types 0x309/0x30a) is not modeled: systemPowerChange \
+             (0x3dc1dcc) sends it only after register 0x1314 subscribes, and the die reports no \
+             notices"
+        }
+        0x311 => {
+            "ANS virtual-card size tunnel (type 0x311) is not modeled: GetVirtualCardSize \
+             (0x3dc2638) asks only from a setProperties call, and the die has no virtual card"
+        }
+        0x0a..=0x11 | 0x16 | 0x91 | 0xdd => {
+            "ANS production tunnel type is not modeled: AppleNVMeUpdateUC permits it without an \
+             entitlement (0x3dcb6d4..0x3dcb700), but no driver builds it and its contract is not \
+             recovered"
+        }
+        _ => "ANS tunnel request type or output is not modeled",
+    }
+}
 /// Apple hardware personality (Linux `include/linux/pci_ids.h`). The model
 /// identifies its own software as Stela and offers one read-only firmware
 /// slot; these are emulated-die choices, not copied Apple firmware data.
@@ -552,7 +633,8 @@ impl Ans {
     /// `SendOSBuildStrToDevice` (0x3de51e8) builds request type 0x120 at +12,
     /// a 16-byte OS build at +24 and checks the status at +0x4c afterwards.
     /// The request, output and status buffers are tunnel buffers, reached
-    /// through the SART's allow-list.
+    /// through the SART's allow-list. Every request type a 26A434 driver
+    /// builds is either served here or refused by name ([`unserved_tunnel`]).
     fn tunnel(
         &mut self,
         cmd: &Command,
@@ -701,7 +783,39 @@ impl Ans {
             self.tunables.record(kind, &data);
             return Ok(Outcome::status(SUCCESS));
         }
-        if kind != 0x120 || cmd.long(52) != 0 || cmd.word(60) != 0 {
+        if kind == DEVICE_TIME {
+            if cmd.long(52) != 0
+                || cmd.word(60) != 0
+                || request[..12]
+                    .iter()
+                    .chain(&request[16..0x1c])
+                    .chain(&request[0x34..0x4c])
+                    .any(|&b| b != 0)
+            {
+                return Err("ANS device-time tunnel fields are not modeled");
+            }
+            let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
+            let long = |at: usize| u64::from_le_bytes(request[at..at + 8].try_into().unwrap());
+            let time = DeviceTime {
+                calendar_seconds: word(0x1c),
+                prtc_seconds: word(0x20),
+                absolute: long(0x24),
+                continuous: long(0x2c),
+            };
+            port.write(
+                address
+                    .checked_add(0x4c)
+                    .ok_or("ANS tunnel status address wraps")?,
+                &0u32.to_le_bytes(),
+            )
+            .map_err(dma_error)?;
+            self.device_time = Some(time);
+            return Ok(Outcome::status(SUCCESS));
+        }
+        if kind != 0x120 {
+            return Err(unserved_tunnel(kind));
+        }
+        if cmd.long(52) != 0 || cmd.word(60) != 0 {
             return Err("ANS tunnel request type or output is not modeled");
         }
         if request[..12]
@@ -843,6 +957,116 @@ mod tests {
         });
         assert!(ans.execute(0, &command, &mut port, &mut sart).is_err());
         assert_eq!(ans.last_submission.as_ref().unwrap().tunnel, Some(request));
+    }
+
+    #[test]
+    fn device_time_tunnel_records_the_recovery_request_and_unserved_types_refuse_by_name() {
+        use crate::platform::apple::bus::{MmioDevice, Width};
+        let mut ans = Ans::new(
+            Box::new(RamDisk::new("", 4, 4096)),
+            &[Description {
+                id: 1,
+                kind: 1,
+                blocks: 0,
+            }],
+            None,
+        )
+        .unwrap();
+        // The recoveryOS boot's request buffer: one 16 KiB tunnel buffer.
+        const REQUEST: u64 = 0x8_08f8_c000;
+        let mut memory = Ram::new(REQUEST, 0x8000);
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (offset, value) in [(0x40, REQUEST >> 12), (0x80, 4), (0, 0xff)] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        let mut port = Port {
+            iommu: &mut Physical,
+            stream: 0,
+            memory: &mut memory,
+            access: &mut access,
+        };
+        // Admin SQ tag 8 of the recoveryOS boot, after IONVMeFamily logged
+        // the nvram sync system event.
+        let mut request = [0u8; 80];
+        request[12] = 6;
+        request[0x1c..0x24].copy_from_slice(&[0xea, 0xb5, 0xd6, 0x6a, 0x7f, 0, 0, 0]);
+        request[0x24..0x2c].copy_from_slice(&[0x71, 0xe0, 0xbc, 0x8f, 0, 0, 0, 0]);
+        request[0x2c..0x34].copy_from_slice(&[0x71, 0xe0, 0xbc, 0x8f, 0, 0, 0, 0]);
+        request[0x4c..].fill(0xff);
+        port.write(REQUEST, &request).unwrap();
+        let mut command = Command([0; 64]);
+        command.0[..4].copy_from_slice(&[APPLE_TUNNEL, 0, 8, 0]);
+        command.0[40] = 1;
+        command.0[44..52].copy_from_slice(&REQUEST.to_le_bytes());
+        let outcome = ans.execute(0, &command, &mut port, &mut sart).unwrap();
+        assert_eq!(outcome.status, SUCCESS);
+        let mut status = [1; 4];
+        port.read(REQUEST + 0x4c, &mut status).unwrap();
+        assert_eq!(status, [0; 4]);
+        let recorded = DeviceTime {
+            calendar_seconds: 0x6ad6_b5ea,
+            prtc_seconds: 0x7f,
+            absolute: 0x8fbc_e071,
+            continuous: 0x8fbc_e071,
+        };
+        assert_eq!(ans.device_time, Some(recorded));
+        // The request is only read.
+        let mut after = [0u8; 0x4c];
+        port.read(REQUEST, &mut after).unwrap();
+        assert_eq!(after, request[..0x4c]);
+
+        // An output buffer or a nonzero extension field refuses without a
+        // status or a new record.
+        let refused = |ans: &mut Ans,
+                       port: &mut Port<'_, '_>,
+                       sart: &mut Sart,
+                       request: [u8; 80],
+                       command: Command| {
+            port.write(REQUEST, &request).unwrap();
+            let error = ans.execute(0, &command, port, sart).err().unwrap();
+            let mut status = [0; 4];
+            port.read(REQUEST + 0x4c, &mut status).unwrap();
+            assert_eq!(status, [0xff; 4]);
+            assert_eq!(ans.device_time, Some(recorded));
+            error
+        };
+        let mut changed = request;
+        changed[0x1c] ^= 1;
+        let mut output = Command(command.0);
+        output.0[52..60].copy_from_slice(&(REQUEST + 0x4000).to_le_bytes());
+        output.0[60..64].copy_from_slice(&tunnel_buffer(1).to_le_bytes());
+        let error = refused(&mut ans, &mut port, &mut sart, changed, output);
+        assert_eq!(error, "ANS device-time tunnel fields are not modeled");
+        for extension in [0, 0x18, 0x34, 0x4b] {
+            let mut extended = changed;
+            extended[extension] = 1;
+            let error = refused(&mut ans, &mut port, &mut sart, extended, Command(command.0));
+            assert_eq!(error, "ANS device-time tunnel fields are not modeled");
+        }
+
+        // Every census type the die does not serve refuses by its own name
+        // before any status write.
+        for kind in [
+            3u32, 7, 0x0a, 0x0b, 0x0c, 0x0e, 0x11, 0x16, 0x22, 0x37, 0x52, 0x91, 0x97, 0xb1, 0xdd,
+            0x309, 0x30a, 0x311,
+        ] {
+            let mut other = [0u8; 80];
+            other[12..16].copy_from_slice(&kind.to_le_bytes());
+            other[0x4c..].fill(0xff);
+            let error = refused(&mut ans, &mut port, &mut sart, other, Command(command.0));
+            assert_eq!(error, unserved_tunnel(kind));
+            assert_ne!(
+                error,
+                unserved_tunnel(0x77),
+                "type {kind:#x} has a named refusal"
+            );
+        }
+        assert_eq!(
+            unserved_tunnel(0x77),
+            "ANS tunnel request type or output is not modeled"
+        );
     }
 
     #[test]

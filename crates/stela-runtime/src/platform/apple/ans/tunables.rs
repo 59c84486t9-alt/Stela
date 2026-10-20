@@ -78,7 +78,7 @@ mod tests {
         assert!(matches!(classify(332), Some(Err(_))));
         assert!(matches!(classify(346), Some(Err(_))));
         // The private requests the die already serves are not tables.
-        for other in [0x0d, 0x38, 0xba, 0x120] {
+        for other in [6, 0x0d, 0x38, 0xba, 0x120] {
             assert_eq!(classify(other), None);
         }
         let mut tables = Tables::default();

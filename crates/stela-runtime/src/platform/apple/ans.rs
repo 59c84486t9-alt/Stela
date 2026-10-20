@@ -219,6 +219,8 @@ pub struct Ans {
     features: [u32; 12],
     timestamp: u64,
     os_build: [u8; 16],
+    /// The host clocks of the last device-time tunnel (request type 6).
+    device_time: Option<commands::DeviceTime>,
     /// The uncommitted boot-from-host download and the last image it
     /// committed, which survives controller resets.
     download: bfh::Download,
@@ -256,6 +258,7 @@ impl Ans {
             features: [0; 12],
             timestamp: 0,
             os_build: [0; 16],
+            device_time: None,
             download: bfh::Download::default(),
             boot_image: None,
             tunables: tunables::Tables::default(),
