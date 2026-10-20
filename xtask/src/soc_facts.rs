@@ -142,34 +142,6 @@ fn census(data: &[u8]) -> Result<Value> {
 }
 
 /// The SoC drivers a kernelcache links, by fileset entry.
-/// The prefix of XNU's `version[]`, which `kern.version` reports.
-const KERNEL_VERSION_PREFIX: &[u8] = b"Darwin Kernel Version ";
-
-/// The kernelcache's XNU `version[]` string. The kernel keeps copies of it;
-/// they must agree.
-fn kernel_version(data: &[u8]) -> Result<String> {
-    let mut found = BTreeSet::new();
-    let mut rest = data;
-    while let Some(start) = rest
-        .windows(KERNEL_VERSION_PREFIX.len())
-        .position(|window| window == KERNEL_VERSION_PREFIX)
-    {
-        let tail = &rest[start..];
-        let end = tail
-            .iter()
-            .position(|&byte| byte == 0)
-            .context("unterminated kernel version")?;
-        found.insert(String::from_utf8(tail[..end].to_vec()).context("kernel version")?);
-        rest = &tail[end..];
-    }
-    ensure!(
-        found.len() == 1,
-        "the kernelcache has {} kernel versions",
-        found.len()
-    );
-    Ok(found.pop_first().expect("one version"))
-}
-
 fn drivers(data: &[u8]) -> Result<Vec<String>> {
     let image = macho::parse(data, 0)?;
     Ok(image
@@ -398,7 +370,8 @@ impl SocFacts {
                 "source": decoded.source(),
                 "chip_ids": chip_ids(&group),
                 "boards": device_classes(&group),
-                "version": kernel_version(&decoded.bytes)?,
+                "version": stela_loader::kernel_version::read(&decoded.bytes)
+                    .map_err(|reason| anyhow::anyhow!("{member}: {reason}"))?,
                 "drivers": drivers(&decoded.bytes)?,
                 "impdef": census(&decoded.bytes)?,
             }));
@@ -478,24 +451,6 @@ impl SocFacts {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_kernel_version_is_its_one_version_string() {
-        let version = b"Darwin Kernel Version 27.0.0: Tue Aug 11; root:xnu~1/RELEASE_ARM64_T8112";
-        let mut data = vec![0u8; 8];
-        for _ in 0..2 {
-            data.extend_from_slice(version);
-            data.extend_from_slice(&[0, 1, 2]);
-        }
-        assert_eq!(
-            kernel_version(&data).unwrap().as_bytes(),
-            version.as_slice()
-        );
-        data.extend_from_slice(b"Darwin Kernel Version 26\0");
-        data.push(0);
-        assert!(kernel_version(&data).is_err());
-        assert!(kernel_version(b"none").is_err());
-    }
 
     #[test]
     fn a_universal_kext_gives_its_arm64e_slice_and_a_thin_one_itself() {

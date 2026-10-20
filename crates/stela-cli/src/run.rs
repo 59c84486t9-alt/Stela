@@ -321,6 +321,7 @@ impl Run {
                 image: image(&dylinker_file, dylinker_offset, &dylinker_plan.image),
                 entry: dylinker_plan.thread.pc,
             },
+            kernel_versions: guest_system::kernel_versions(&roots)?,
             roots: roots.clone(),
             reexec: self.reexec(&roots)?,
             argv,

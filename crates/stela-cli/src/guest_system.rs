@@ -9,6 +9,7 @@ use crate::setup::host::{Host, System};
 use crate::setup::{PINNED_BUILD, download_dir};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -139,6 +140,35 @@ fn environment_roots(list: &OsString) -> Result<Vec<PathBuf>> {
         );
     }
     Ok(roots)
+}
+
+/// Each board's kernel version (product type → XNU `version[]`) recorded by
+/// the install receipt beside the first guest root that has one. Roots
+/// without a receipt, and imported roots, which carry no kernelcache, give
+/// none.
+pub(crate) fn kernel_versions(roots: &[PathBuf]) -> Result<BTreeMap<String, String>> {
+    for root in roots {
+        let Some(path) = root.parent().map(|directory| directory.join(RECEIPT)) else {
+            continue;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()));
+            }
+        };
+        let receipt: install::Receipt = serde_json::from_slice(&bytes)
+            .with_context(|| format!("{} is not an install receipt", path.display()))?;
+        if receipt.kind == install::KIND && !receipt.kernels.is_empty() {
+            return Ok(receipt
+                .kernels
+                .into_iter()
+                .map(|kernel| (kernel.product_type, kernel.version))
+                .collect());
+        }
+    }
+    Ok(BTreeMap::new())
 }
 
 /// The error a run without guest system files stops with: what is missing
@@ -308,6 +338,36 @@ mod tests {
         assert!(damaged.contains("damaged"), "{damaged}");
         std::fs::write(layout.root().join(DYLD), b"dyld")?;
         assert_eq!(layout.installed()?, Some(layout.root()));
+        Ok(())
+    }
+
+    /// A run's kernel versions are the ones the receipt beside its root
+    /// records; a root without one gives none, and a damaged one fails.
+    #[test]
+    fn kernel_versions_come_from_the_receipt_beside_the_root() -> Result<()> {
+        let base = tempfile::tempdir()?;
+        let layout = Layout::new(base.path().to_owned(), "26A434");
+        let roots = [layout.root()];
+        assert!(kernel_versions(&roots)?.is_empty());
+        let version = "Darwin Kernel Version 1.2.3: synthetic; root:test~1/RELEASE_TEST";
+        let receipt = serde_json::json!({
+            "kind": install::KIND,
+            "schema_version": 1,
+            "product_version": "1.2.3",
+            "product_build": "26A434",
+            "source": { "kind": "ipsw", "file_name": "test.ipsw", "bytes": 1 },
+            "members": [],
+            "files": [],
+            "kernels": [{ "product_type": "Mac0,1", "member": "kernelcache.test", "version": version }],
+        });
+        std::fs::create_dir_all(layout.directory())?;
+        std::fs::write(layout.receipt(), serde_json::to_vec(&receipt)?)?;
+        assert_eq!(
+            kernel_versions(&roots)?,
+            BTreeMap::from([("Mac0,1".to_owned(), version.to_owned())])
+        );
+        std::fs::write(layout.receipt(), "{}")?;
+        assert!(kernel_versions(&roots).is_err());
         Ok(())
     }
 

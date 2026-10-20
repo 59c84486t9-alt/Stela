@@ -1323,11 +1323,15 @@ fn out_of_line(words: &[u32]) -> Option<Descriptor> {
 /// `kernel_version_t`'s bound.
 const KERNEL_VERSION_MAX: usize = 512;
 
-/// `host_kernel_version`: the 26A434 kernel's version string, as
+/// `host_kernel_version`: the board's kernel version string, as
 /// `kern.version` gives it, as a MIG string (offset, count with the NUL,
-/// the bytes padded to a word).
+/// the bytes padded to a word). It fails when the guest system's install
+/// did not record the version, as `kern.version` is then absent.
 fn kernel_version(kernel: &Kernel) -> Reply {
-    let mut string = kernel.process.hardware.kernel_version.as_bytes().to_vec();
+    let Some(version) = &kernel.process.hardware.kernel_version else {
+        return Reply::Failure(KERN_FAILURE);
+    };
+    let mut string = version.as_bytes().to_vec();
     string.truncate(KERNEL_VERSION_MAX - 1);
     string.push(0);
     let mut body = 0u32.to_le_bytes().to_vec();

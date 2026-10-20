@@ -134,28 +134,12 @@ const fn layout(cluster_type: u8, cores: u8, l2_mib: u32) -> Layout {
     }
 }
 
-/// Each 26A434 kernelcache's XNU `version[]` (`kern.version`), as `cargo xtask
-/// soc-facts` records it in `isa/apple-soc-facts.json` `kernels[].version`.
-const KERNEL_MAC13G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:27 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8103";
-const KERNEL_MAC13J: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000";
-const KERNEL_MAC14G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:16 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8112";
-const KERNEL_MAC14J: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:20:40 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6020";
-const KERNEL_MAC15G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:41 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8122";
-const KERNEL_MAC15J: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:42 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6031";
-const KERNEL_MAC15S: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:24 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6030";
-const KERNEL_MAC16G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:57 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8132";
-const KERNEL_MAC16J: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:48 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6041";
-const KERNEL_MAC17G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:59 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8142";
-const KERNEL_MAC18G: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:06:15 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8152";
-
 /// One SoC's hosted board: its ApChipID, `hw.model` (the IPSW product type),
 /// `hw.target` (`/product` `unique-model`) and clusters in `/cpus` order.
 struct Board {
     chip_id: u32,
     model: &'static str,
     target: &'static str,
-    /// The `version[]` of the kernelcache the board boots.
-    kernel_version: &'static str,
     clusters: &'static [Layout],
 }
 
@@ -168,14 +152,12 @@ const BOARDS: &[Board] = &[
         chip_id: 0x8103,
         model: "Macmini9,1",
         target: "J274AP",
-        kernel_version: KERNEL_MAC13G,
         clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 8)],
     },
     Board {
         chip_id: 0x6000,
         model: "MacBookPro18,3",
         target: "J314sAP",
-        kernel_version: KERNEL_MAC13J,
         clusters: &[
             layout(EFFICIENCY, 2, 4),
             layout(PERFORMANCE, 4, 8),
@@ -186,7 +168,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6001,
         model: "Mac13,1",
         target: "J375cAP",
-        kernel_version: KERNEL_MAC13J,
         clusters: &[
             layout(EFFICIENCY, 2, 4),
             layout(PERFORMANCE, 4, 8),
@@ -197,7 +178,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6002,
         model: "Mac13,2",
         target: "J375dAP",
-        kernel_version: KERNEL_MAC13J,
         clusters: &[
             layout(EFFICIENCY, 2, 4),
             layout(PERFORMANCE, 4, 8),
@@ -211,14 +191,12 @@ const BOARDS: &[Board] = &[
         chip_id: 0x8112,
         model: "Mac14,3",
         target: "J473AP",
-        kernel_version: KERNEL_MAC14G,
         clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 16)],
     },
     Board {
         chip_id: 0x6020,
         model: "Mac14,12",
         target: "J474sAP",
-        kernel_version: KERNEL_MAC14J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 4, 8),
@@ -229,7 +207,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6021,
         model: "Mac14,13",
         target: "J475cAP",
-        kernel_version: KERNEL_MAC14J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 4, 8),
@@ -240,7 +217,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6022,
         model: "Mac14,14",
         target: "J475dAP",
-        kernel_version: KERNEL_MAC14J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 4, 8),
@@ -254,21 +230,18 @@ const BOARDS: &[Board] = &[
         chip_id: 0x8122,
         model: "Mac15,3",
         target: "J504AP",
-        kernel_version: KERNEL_MAC15G,
         clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 16)],
     },
     Board {
         chip_id: 0x6030,
         model: "Mac15,6",
         target: "J514sAP",
-        kernel_version: KERNEL_MAC15S,
         clusters: &[layout(EFFICIENCY, 6, 4), layout(PERFORMANCE, 6, 16)],
     },
     Board {
         chip_id: 0x6031,
         model: "Mac15,8",
         target: "J514cAP",
-        kernel_version: KERNEL_MAC15J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
@@ -279,7 +252,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6034,
         model: "Mac15,10",
         target: "J514mAP",
-        kernel_version: KERNEL_MAC15J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
@@ -290,7 +262,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6032,
         model: "Mac15,14",
         target: "J575dAP",
-        kernel_version: KERNEL_MAC15J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
@@ -304,14 +275,12 @@ const BOARDS: &[Board] = &[
         chip_id: 0x8132,
         model: "Mac16,10",
         target: "J773gAP",
-        kernel_version: KERNEL_MAC16G,
         clusters: &[layout(EFFICIENCY, 6, 4), layout(PERFORMANCE, 4, 16)],
     },
     Board {
         chip_id: 0x6040,
         model: "Mac16,11",
         target: "J773sAP",
-        kernel_version: KERNEL_MAC16J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
@@ -322,7 +291,6 @@ const BOARDS: &[Board] = &[
         chip_id: 0x6041,
         model: "Mac16,9",
         target: "J575cAP",
-        kernel_version: KERNEL_MAC16J,
         clusters: &[
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
@@ -333,14 +301,12 @@ const BOARDS: &[Board] = &[
         chip_id: 0x8142,
         model: "Mac17,2",
         target: "J704AP",
-        kernel_version: KERNEL_MAC17G,
         clusters: &[layout(EFFICIENCY, 6, 6), layout(PERFORMANCE, 4, 16)],
     },
     Board {
         chip_id: 0x8152,
         model: "Mac18,5",
         target: "J873gAP",
-        kernel_version: KERNEL_MAC18G,
         clusters: &[layout(EFFICIENCY, 6, 8), layout(PERFORMANCE, 6, 20)],
     },
 ];
@@ -377,9 +343,10 @@ pub struct Hardware {
     pub clusters: Vec<Cluster>,
     /// `hw.memsize`: the host's physical memory.
     pub memory_bytes: u64,
-    /// `kern.version`: the `version[]` of the 26A434 kernelcache the board
-    /// boots.
-    pub kernel_version: &'static str,
+    /// `kern.version`: the `version[]` of the kernelcache the board boots,
+    /// which the installed guest system's receipt records; `None` when the
+    /// guest system did not record it.
+    pub kernel_version: Option<String>,
     /// `hw.optional.breakpoint` and `hw.optional.watchpoint`: the
     /// ID_AA64DFR0_EL1 BRPs and WRPs counts the system engine's
     /// identification of the same chip presents.
@@ -455,7 +422,7 @@ impl Hardware {
             cache_line: CACHE_LINE,
             clusters,
             memory_bytes,
-            kernel_version: board.kernel_version,
+            kernel_version: None,
             breakpoints,
             watchpoints,
             memory_tagging: identification::memory_tagging(chip),
@@ -604,44 +571,13 @@ mod tests {
         }
     }
 
-    /// Every board's kernel version is the one `cargo xtask soc-facts` read
-    /// from the kernelcache its BuildManifest identity names.
+    /// The debug counts are the identification's; the kernel version is the
+    /// installed guest system's, never a built-in value.
     #[test]
-    fn every_board_reports_its_kernelcaches_version() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../isa/apple-soc-facts.json"
-        );
-        let facts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        let kernel_of = |model: &str| {
-            let board = facts["boards"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|board| board["product_type"] == model)
-                .unwrap();
-            facts["kernels"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|kernel| kernel["source"]["member"] == board["kernelcache"])
-                .unwrap()["version"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        };
-        for board in BOARDS {
-            assert_eq!(
-                board.kernel_version,
-                kernel_of(board.model),
-                "{}",
-                board.model
-            );
-        }
+    fn the_debug_counts_are_the_chips_and_the_kernel_version_the_installs() {
         let m2 = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
-        assert!(m2.kernel_version.ends_with("RELEASE_ARM64_T8112"));
         assert_eq!((m2.breakpoints, m2.watchpoints), (6, 4));
+        assert_eq!(m2.kernel_version, None);
     }
 
     /// Every board's SoC has a row whose parts XNU's families cover, and

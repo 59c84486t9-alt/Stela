@@ -35,6 +35,7 @@ pub mod installed;
 #[cfg(feature = "std")]
 pub mod inventory;
 pub mod kernel_collection;
+pub mod kernel_version;
 #[cfg(feature = "std")]
 pub mod linked_images;
 #[cfg(feature = "std")]

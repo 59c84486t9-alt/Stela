@@ -59,6 +59,10 @@ const OS_BUILD: &str = "26A434";
 /// The namespaces whose variables describe the machine.
 const OWNED: &[&str] = &["hw.", "machdep."];
 
+/// Variables the installed guest system answers, absent when it did not
+/// record them (an imported or development root), never the host's.
+const INSTALLED: &[&str] = &["kern.version"];
+
 /// Machine variables that are the host's own: its memory and byte order.
 const HOST_MACHINE: &[&str] = &[
     "hw.memsize",
@@ -349,12 +353,11 @@ impl Model {
             Value::Int(crate::hosted::tables::ADDRESS_BITS as i32),
         );
         add("machdep.ptrauth_enabled", Value::Int(1));
-        // The 26A434 kernelcache the board boots names its release, build
-        // date and xnu tag.
-        add(
-            "kern.version",
-            Value::String(hardware.kernel_version.into()),
-        );
+        // The kernelcache the board boots names its release, build date and
+        // xnu tag, as the guest system's install recorded it.
+        if let Some(version) = &hardware.kernel_version {
+            add("kern.version", Value::String(version.clone()));
+        }
         add("kern.osrelease", Value::String(KERNEL_RELEASE.into()));
         add("kern.osversion", Value::String(OS_BUILD.into()));
         Self { entries }
@@ -431,7 +434,9 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
     if let Some(index) = model.index(name) {
         return Ok(Lookup::Modeled(index));
     }
-    if !OWNED.iter().any(|prefix| name.starts_with(prefix)) || HOST_MACHINE.contains(&name) {
+    if !OWNED.iter().any(|prefix| name.starts_with(prefix)) && !INSTALLED.contains(&name)
+        || HOST_MACHINE.contains(&name)
+    {
         return Ok(Lookup::Host);
     }
     if UNMODELED.contains(&name) {
@@ -664,8 +669,12 @@ mod tests {
     use super::*;
     use crate::machine::Chip;
 
+    /// A synthetic kernel version, as an install records it.
+    const VERSION: &str = "Darwin Kernel Version 1.2.3: synthetic; root:test~1/RELEASE_TEST";
+
     fn model() -> Model {
-        let hardware = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
+        let mut hardware = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
+        hardware.kernel_version = Some(VERSION.into());
         Model::new(&hardware, &[("FEAT_LSE", true), ("AdvSIMD", true)])
     }
 
@@ -708,12 +717,7 @@ mod tests {
             .iter()
             .find(|cluster| cluster.performance)
             .unwrap();
-        // The board's own kernelcache and debug pairs.
-        assert!(
-            matches!(value(&m1_pro, "kern.version"), Value::String(version)
-            if version.ends_with("RELEASE_ARM64_T6000"))
-        );
-        let hardware = Hardware::of_soc(0x6000, 1 << 34).unwrap();
+        // The board's own debug pairs.
         assert_eq!(
             value(&m1_pro, "hw.optional.breakpoint"),
             Value::Int(hardware.breakpoints as i32)
@@ -759,9 +763,14 @@ mod tests {
         ));
         assert!(matches!(lookup(&model, "kern.ostype"), Ok(Lookup::Host)));
         assert_eq!(value("kern.osrelease"), &Value::String("27.0.0".into()));
-        assert!(matches!(value("kern.version"), Value::String(version)
-            if version.starts_with("Darwin Kernel Version 27.0.0:")
-                && version.ends_with("RELEASE_ARM64_T8112")));
+        assert_eq!(value("kern.version"), &Value::String(VERSION.into()));
+        // Without the install's record the variable is absent, not the
+        // host's.
+        let unrecorded = Model::new(&Hardware::of(Chip::AppleM2, 1 << 34).unwrap(), &[]);
+        assert!(matches!(
+            lookup(&unrecorded, "kern.version"),
+            Ok(Lookup::Absent)
+        ));
         assert!(matches!(lookup(&model, "hw.memsize"), Ok(Lookup::Host)));
         assert!(lookup(&model, "machdep.wake_abstime").is_err());
         let index = model.index("hw.optional.arm.FEAT_LSE").unwrap();

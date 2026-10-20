@@ -13,13 +13,21 @@ use std::path::{Path, PathBuf};
 use stela_runtime::payload::Purpose;
 
 /// The receipt's `kind`.
-const KIND: &str = "stela_guest_system";
+pub(super) const KIND: &str = "stela_guest_system";
 const SCHEMA: u32 = 1;
 /// The receipt `stela extract-guest-files` writes.
 const EXTRACTION_KIND: &str = "guest_file_extraction";
 /// A decrypted member needs at most this many halves of its encrypted
 /// size while its files are copied (26A434's system volume: 1.26 times).
 const DECRYPTED_HALVES: u64 = 3;
+/// The BuildManifest component of a board's kernelcache.
+const KERNEL_CACHE: &str = "KernelCache";
+/// The erase identities, whose kernelcache a board's installed system boots.
+const ERASE: &str = "Erase";
+/// A kernelcache member's size limit, and its decoded payload's (the 26A434
+/// kernelcaches decode to about 125 MB).
+const KERNEL_MEMBER_LIMIT: u64 = 64 << 20;
+const KERNEL_DECODED_LIMIT: u64 = 512 << 20;
 /// The prefix of the arm64e shared cache's files.
 const SHARED_CACHE: &str = "System/Library/dyld/dyld_shared_cache_arm64e";
 
@@ -62,16 +70,30 @@ struct Member {
     volume: Option<String>,
 }
 
+/// One board's kernel: the kernelcache member its erase identity boots and
+/// that kernelcache's XNU `version[]`, which a hosted process reports as
+/// `kern.version` for that board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct Kernel {
+    pub(super) product_type: String,
+    member: String,
+    pub(super) version: String,
+}
+
 /// `receipt.json`.
 #[derive(Debug, Serialize, Deserialize)]
-struct Receipt {
-    kind: String,
+pub(super) struct Receipt {
+    pub(super) kind: String,
     schema_version: u32,
     product_version: String,
     product_build: String,
     source: Source,
     members: Vec<Member>,
     files: Vec<disk::Copied>,
+    /// Each board's kernel, read from the IPSW; empty for imported roots,
+    /// which carry no kernelcache.
+    #[serde(default)]
+    pub(super) kernels: Vec<Kernel>,
 }
 
 /// A planned member: its component, archive path and size.
@@ -135,6 +157,8 @@ pub(super) fn from_ipsw(
     }
     let partial = stage(layout)?;
     let result = (|| {
+        println!("Reading each board's kernel version");
+        let kernels = kernels(&manifest, &mut archive)?;
         let mut members = vec![];
         let mut files = vec![];
         for plan in &planned {
@@ -157,10 +181,65 @@ pub(super) fn from_ipsw(
             },
             members,
             files,
+            kernels,
         };
         publish(layout, &partial, &receipt)
     })();
     finish(&partial, result)
+}
+
+/// Each erase identity's board and the `version[]` of the kernelcache it
+/// boots, decoding each kernelcache member once.
+fn kernels(
+    manifest: &restore::manifest::RestoreManifest,
+    archive: &mut zip::ZipArchive<File>,
+) -> Result<Vec<Kernel>> {
+    let mut versions = std::collections::BTreeMap::new();
+    let mut kernels: Vec<Kernel> = vec![];
+    for identity in &manifest.identities {
+        let (Some(product_type), Some(component)) = (
+            identity.product_type.as_ref(),
+            identity.components.get(KERNEL_CACHE),
+        ) else {
+            continue;
+        };
+        if identity.restore_behavior.as_deref() != Some(ERASE)
+            || kernels
+                .iter()
+                .any(|kernel| &kernel.product_type == product_type)
+        {
+            continue;
+        }
+        if !versions.contains_key(&component.path) {
+            let mut container = vec![];
+            archive
+                .by_name(&component.path)
+                .with_context(|| format!("the IPSW has no member {}", component.path))?
+                .take(KERNEL_MEMBER_LIMIT + 1)
+                .read_to_end(&mut container)?;
+            ensure!(
+                container.len() as u64 <= KERNEL_MEMBER_LIMIT,
+                "{} is larger than a kernelcache",
+                component.path
+            );
+            versions.insert(component.path.clone(), kernel_version(&container)?);
+        }
+        kernels.push(Kernel {
+            product_type: product_type.clone(),
+            member: component.path.clone(),
+            version: versions[&component.path].clone(),
+        });
+    }
+    ensure!(!kernels.is_empty(), "the IPSW names no board kernelcache");
+    kernels.sort_by(|a, b| a.product_type.cmp(&b.product_type));
+    Ok(kernels)
+}
+
+/// The `version[]` of a kernelcache IM4P container.
+fn kernel_version(container: &[u8]) -> Result<String> {
+    let (decoded, _) = stela_loader::im4p::decode(container, KERNEL_DECODED_LIMIT)
+        .context("cannot decode the kernelcache")?;
+    stela_loader::kernel_version::read(&decoded).map_err(|reason| anyhow::anyhow!(reason))
 }
 
 /// Decrypt one member beside the install, copy its files into the staged
@@ -319,6 +398,7 @@ pub(super) fn from_roots(layout: &Layout, roots: &[PathBuf], dry_run: bool) -> R
             },
             members: vec![],
             files: installed,
+            kernels: vec![],
         };
         publish(layout, &partial, &receipt)
     })();
@@ -530,6 +610,33 @@ mod tests {
         progress.read_to_end(&mut out)?;
         assert_eq!(progress.read, 10);
         assert_eq!(out, b"0123456789");
+        Ok(())
+    }
+
+    /// A synthetic kernelcache IM4P (DER short form: SEQUENCE of IA5 "IM4P",
+    /// type and description and an OCTET STRING payload) yields its version.
+    #[test]
+    fn a_kernelcache_container_yields_its_version() -> Result<()> {
+        fn field(tag: u8, data: &[u8]) -> Vec<u8> {
+            [vec![tag, data.len() as u8], data.to_vec()].concat()
+        }
+        const IA5: u8 = 0x16;
+        const OCTETS: u8 = 0x04;
+        const SEQUENCE: u8 = 0x30;
+        let version = b"Darwin Kernel Version 1.0.0: synthetic; root:test~1/RELEASE_TEST";
+        let payload = [&[0xa5; 8][..], version, &[0]].concat();
+        let container = field(
+            SEQUENCE,
+            &[
+                field(IA5, b"IM4P"),
+                field(IA5, b"krnl"),
+                field(IA5, b"synthetic"),
+                field(OCTETS, &payload),
+            ]
+            .concat(),
+        );
+        assert_eq!(kernel_version(&container)?.as_bytes(), version.as_slice());
+        assert!(kernel_version(&field(SEQUENCE, &field(IA5, b"IM4P"))).is_err());
         Ok(())
     }
 }

@@ -112,6 +112,10 @@ pub struct Launch {
     /// Guest system roots, in order, that absolute paths the guest looks up
     /// read-only resolve under before the host's own file system.
     pub roots: Vec<std::path::PathBuf>,
+    /// Each board's kernel version (`hw.model` → XNU `version[]`) that the
+    /// guest system's install read from its kernelcaches; empty when the
+    /// roots carry no such record.
+    pub kernel_versions: BTreeMap<String, String>,
     /// The host command that activates a new guest image in this process
     /// for `execve`: it is run with `--argv0=ARGV0 -- PATH ARGS...`
     /// appended and the new environment.
@@ -194,7 +198,8 @@ pub fn run(launch: Launch) -> Result<Report> {
     let profile = pe::profile(launch.chip, target);
     let identification = features::Identification(&profile.fixed);
     let memory_bytes = host_memory()?;
-    let hardware = hardware::Hardware::of(launch.chip, memory_bytes)?;
+    let mut hardware = hardware::Hardware::of(launch.chip, memory_bytes)?;
+    hardware.kernel_version = launch.kernel_versions.get(hardware.model).cloned();
     let features = identification.optional_features();
     commpage::map(&commpage::data_page(
         &hardware,
