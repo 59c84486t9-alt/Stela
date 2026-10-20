@@ -33,6 +33,7 @@ pub mod requirements;
 pub mod shared_region;
 pub mod tables;
 mod threads;
+pub mod translations;
 pub mod unsupported;
 
 pub use kernel::{Executable, Signature};
@@ -52,6 +53,7 @@ impl Termination {
     /// End the host process as the guest process ended, so that its
     /// parent's `wait` sees the same status.
     pub fn end_host_process(self) -> ! {
+        translations::finish();
         match self {
             Self::Exited(status) => std::process::exit(status & 0xff),
             Self::Signaled(signal) => {
@@ -133,6 +135,8 @@ pub struct Launch {
 #[derive(Debug, Clone)]
 pub struct Report {
     pub termination: Termination,
+    /// The engine statistics of the threads that ended before the report.
+    pub engine: crate::machine::Statistics,
     pub calls: BTreeMap<&'static str, u64>,
     pub slid_pages: u64,
 }
@@ -188,6 +192,7 @@ fn commpage_time() -> Result<commpage::Time> {
 /// Run the process to its exit.
 pub fn run(launch: Launch) -> Result<Report> {
     check_host_timebase()?;
+    translations::configure(translations::Config::from_environment());
     // SIGPIPE as exec left it, which the host runtime's own start-up
     // changed to ignored.
     core::hint::black_box(&RECORD_SIGPIPE_AT_EXEC);
@@ -343,6 +348,7 @@ pub fn run(launch: Launch) -> Result<Report> {
     };
     Ok(Report {
         termination,
+        engine: *threads::lock(&process.runtime.statistics),
         calls: threads::lock(&process.counts).clone(),
         slid_pages: process.slid_pages(),
     })

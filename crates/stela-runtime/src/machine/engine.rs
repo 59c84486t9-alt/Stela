@@ -7,6 +7,7 @@ mod hosted;
 mod pointer;
 mod processors;
 mod scalable;
+mod stored;
 mod system;
 mod tags;
 mod unprivileged;
@@ -68,6 +69,7 @@ use stela_compiler::{
         pointer as x86_64_pointer, register_read, zero_block,
     },
 };
+pub use stored::{Offer, Translations};
 
 const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
 const INSTRUCTION: u64 = 4;
@@ -350,6 +352,11 @@ pub trait Host {
     fn wait_for_interrupt(&mut self);
     /// Progress events for the diagnostic log.
     fn report(&mut self, _event: &Event) {}
+    /// The persistent translation store blocks are taken from and offered
+    /// to, if the host keeps one ([`Translations`]).
+    fn translations(&mut self) -> Option<&mut dyn Translations> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -730,6 +737,12 @@ pub struct Statistics {
     /// ThreadRegister, FloatingPoint, ScalableNumerical, System, AMX).
     pub exit_kinds: [u64; 13],
     pub compiled: u64,
+    /// Counter ticks spent analyzing and compiling `compiled`.
+    pub compile_ticks: u64,
+    /// Blocks taken from the persistent translation store instead of
+    /// compiled, and compiled blocks offered to it.
+    pub stored: u64,
+    pub offered: u64,
     pub exceptions: u64,
     pub interrupts: u64,
     pub system_exits: u64,
@@ -751,6 +764,65 @@ pub struct Statistics {
     /// Guest context changes at which the host isolated its branch
     /// predictions ([`PredictionContext`]).
     pub prediction_isolations: u64,
+}
+
+impl core::ops::AddAssign for Statistics {
+    fn add_assign(&mut self, other: Self) {
+        let Self {
+            blocks,
+            chained,
+            links,
+            lookups,
+            lookup_hits,
+            exit_kinds,
+            compiled,
+            compile_ticks,
+            stored,
+            offered,
+            exceptions,
+            interrupts,
+            system_exits,
+            device_accesses,
+            code_discards,
+            code_invalidations,
+            waits,
+            switches,
+            translation_changes,
+            tlb_maintenance,
+            scoped_maintenance,
+            table_base_changes,
+            prediction_isolations,
+        } = other;
+        for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
+            *total += count;
+        }
+        for (total, count) in [
+            (&mut self.blocks, blocks),
+            (&mut self.chained, chained),
+            (&mut self.links, links),
+            (&mut self.lookups, lookups),
+            (&mut self.lookup_hits, lookup_hits),
+            (&mut self.compiled, compiled),
+            (&mut self.compile_ticks, compile_ticks),
+            (&mut self.stored, stored),
+            (&mut self.offered, offered),
+            (&mut self.exceptions, exceptions),
+            (&mut self.interrupts, interrupts),
+            (&mut self.system_exits, system_exits),
+            (&mut self.device_accesses, device_accesses),
+            (&mut self.code_discards, code_discards),
+            (&mut self.code_invalidations, code_invalidations),
+            (&mut self.waits, waits),
+            (&mut self.switches, switches),
+            (&mut self.translation_changes, translation_changes),
+            (&mut self.tlb_maintenance, tlb_maintenance),
+            (&mut self.scoped_maintenance, scoped_maintenance),
+            (&mut self.table_base_changes, table_base_changes),
+            (&mut self.prediction_isolations, prediction_isolations),
+        ] {
+            *total += count;
+        }
+    }
 }
 
 struct Block {
@@ -936,6 +1008,11 @@ pub struct Machine<H: Host, D: Devices> {
     index: BTreeMap<(u64, u64, Variant), usize>,
     /// The `index` keys of the blocks compiled from each physical page.
     code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
+    /// The fetch pages read for the translation store, by physical page,
+    /// until their code is invalidated ([`stored`]).
+    pages: BTreeMap<u64, stored::StoredPage>,
+    /// Entry contexts by variant and address class.
+    stored_contexts: BTreeMap<(Variant, u64), crate::translations::Digest>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
@@ -1053,6 +1130,24 @@ pub struct Machine<H: Host, D: Devices> {
     tags_checked_at: Option<u64>,
 }
 
+/// Compile the admitted words `input` at `pc` as the engine compiles a
+/// block: the system-mode profile for `target`, with `checks` and the
+/// System instructions `system` completes natively. A pure function of its
+/// arguments, which the translation store's probes rely on.
+pub fn compile_input(
+    input: &[u8],
+    pc: u64,
+    target: TargetCpu,
+    checks: MemoryChecks,
+    system: NativeSystem,
+) -> Result<stela_compiler::block::CompiledBlock, stela_compiler::CompileError> {
+    CompilationPlan::new(input, GuestAddress(pc), PROFILE, target)
+        .and_then(|plan| plan.with_memory_checks(checks))
+        .and_then(|plan| plan.with_zero_block(system.zero_block))
+        .and_then(|plan| plan.with_cache_clean(system.cache_clean))
+        .and_then(CompilationPlan::compile)
+}
+
 /// Breakpoints that can match and an enabled software step make every
 /// block a single instruction checked before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1091,6 +1186,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             fault_recovery: BTreeMap::new(),
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
+            pages: BTreeMap::new(),
+            stored_contexts: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
@@ -1480,6 +1577,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// IC IVAU made stale: a later fetch compiles the page again. Their code
     /// stays installed until the next full discard.
     fn invalidate_code_page(&mut self, physical: u64) {
+        self.pages.remove(&(physical & !(FETCH_PAGE - 1)));
         let Some(keys) = self.code_pages.remove(&(physical & !(FETCH_PAGE - 1))) else {
             return;
         };
@@ -1498,6 +1596,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.fault_recovery.clear();
         self.index.clear();
         self.code_pages.clear();
+        self.pages.clear();
         self.scalable_leaves.clear();
         self.code_generation += 1;
         self.statistics.code_discards += 1;
@@ -2546,14 +2645,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
         } else {
             (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES)
         };
+        let page = pc & !(FETCH_PAGE - 1);
+        let offset = (pc - page) as usize;
         let mut source = vec![0u8; available as usize];
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
+        let stored = match single {
+            true => None,
+            false => self
+                .stored_page(pc, physical, &source)
+                .map(|stored| (stored.key, stored.record.clone())),
+        };
         // A form the chip lacks compiles as the UDF or NOP it executes as.
         for bytes in source.as_chunks_mut::<4>().0 {
             *bytes = self.admit(u32::from_le_bytes(*bytes)).to_le_bytes();
         }
+        let context = stored
+            .is_some()
+            .then(|| self.stored_context(variant, target, page));
+        if let (Some((_, Some(record))), Some(context)) = (&stored, &context)
+            && let Some(compiled) = record
+                .find(offset as u16, context)
+                .and_then(|entry| entry.rebase(page))
+        {
+            self.statistics.stored += 1;
+            return self.install(pc, physical, variant, &source, compiled);
+        }
+        let started = self.host.counter();
         let chip = self.profile.chip;
         let mut length = source.len();
         // No block runs into a host breakpoint or trace point: one ends
@@ -2622,7 +2741,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
                 Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
             };
-        let compiled = self.compile_prefix(&source[..consumed], pc, target, checks, system)?;
+        let (compiled, input) =
+            self.compile_prefix(&source[..consumed], pc, target, checks, system)?;
+        self.statistics.compiled += 1;
+        self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
+        if let (Some((key, _)), Some(context)) = (stored, context)
+            && let Some(translations) = self.host.translations()
+        {
+            translations.offer(Offer {
+                key,
+                page,
+                pc,
+                context,
+                input: source[..input].to_vec(),
+                target,
+                checks,
+                system,
+                block: compiled.clone(),
+            });
+            self.statistics.offered += 1;
+        }
+        self.install(pc, physical, variant, &source, compiled)
+    }
+
+    /// Install `compiled`, the block at `pc` of `variant` compiled from the
+    /// admitted `source`, and its thunks, and index it.
+    fn install(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+        source: &[u8],
+        compiled: stela_compiler::block::CompiledBlock,
+    ) -> Result<Fetched, Stop> {
+        let Variant { checks, single, .. } = variant;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         let code = match self.host.install(&compiled.native.x86_64_code) {
@@ -2636,7 +2788,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     })?
             }
         };
-        self.statistics.compiled += 1;
         let terminal_pc = pc + compiled.source_bytes as u64 - INSTRUCTION;
         let mut successors: Vec<Successor> = compiled
             .direct_exits
@@ -2781,7 +2932,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.target.data_independent_timing_target()
     }
 
-    /// Compile the longest prefix `target` can emit.
+    /// Compile the longest prefix `target` can emit, and the bytes of
+    /// `source` the compiler was given for it.
     fn compile_prefix(
         &self,
         source: &[u8],
@@ -2789,16 +2941,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         target: TargetCpu,
         checks: MemoryChecks,
         system: NativeSystem,
-    ) -> Result<stela_compiler::block::CompiledBlock, Stop> {
-        let attempt = |bytes: &[u8]| {
-            CompilationPlan::new(bytes, GuestAddress(pc), PROFILE, target)
-                .and_then(|plan| plan.with_memory_checks(checks))
-                .and_then(|plan| plan.with_zero_block(system.zero_block))
-                .and_then(|plan| plan.with_cache_clean(system.cache_clean))
-                .and_then(CompilationPlan::compile)
-        };
+    ) -> Result<(stela_compiler::block::CompiledBlock, usize), Stop> {
+        let attempt = |bytes: &[u8]| compile_input(bytes, pc, target, checks, system);
         match attempt(source) {
-            Ok(compiled) => Ok(compiled),
+            Ok(compiled) => Ok((compiled, source.len())),
             Err(error) => {
                 // A host-capability refusal names no PC; find the longest
                 // prefix that compiles and report the first refused word.
@@ -2816,6 +2962,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     return Err(self.unsupported_word(source, pc, pc, error.0));
                 }
                 attempt(&source[..good * 4])
+                    .map(|compiled| (compiled, good * 4))
                     .map_err(|error| self.unsupported_word(source, pc, pc, error.0))
             }
         }
@@ -4879,7 +5026,7 @@ mod tests {
         /// Calls of [`Host::isolate_predictions`].
         pub(super) isolations: usize,
         reaches: Vec<mmu::tlbi::Reach>,
-        installed: Vec<Vec<u8>>,
+        pub(super) installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
         executables: Vec<crate::execution::platform::Mapping>,
         patches: Vec<(usize, Vec<u8>)>,
@@ -4888,6 +5035,8 @@ mod tests {
         /// What the next native blocks return, in order: unit tests do not
         /// run native code.
         pub(super) exits: Vec<NativeExit>,
+        /// A translation store, for the tests that give the host one.
+        pub(super) store: Option<stored::tests::MemoryStore>,
     }
 
     impl Host for FakeHost {
@@ -4966,6 +5115,11 @@ mod tests {
         fn arm_timer(&mut self, _: Option<u64>) {}
         fn wait_for_interrupt(&mut self) {
             self.now += 1000;
+        }
+        fn translations(&mut self) -> Option<&mut dyn Translations> {
+            self.store
+                .as_mut()
+                .map(|store| store as &mut dyn Translations)
         }
     }
 
@@ -5053,6 +5207,7 @@ mod tests {
             patches: Vec::new(),
             chained: None,
             exits: Vec::new(),
+            store: None,
         };
         let profile = CpuProfile {
             name: "test",

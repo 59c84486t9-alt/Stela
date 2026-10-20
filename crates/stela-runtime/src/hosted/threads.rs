@@ -330,6 +330,7 @@ impl Lifetime {
             match outcome {
                 Ok(termination) => termination.end_host_process(),
                 Err(error) => {
+                    super::translations::finish();
                     eprintln!("error: {error:#}");
                     std::process::exit(1)
                 }
@@ -359,6 +360,8 @@ pub(super) struct Runtime {
     pub(super) execution: ExecutionLock,
     pub(super) registry: Registry,
     pub(super) lifetime: Lifetime,
+    /// The engine statistics of every thread that ended.
+    pub(super) statistics: Mutex<crate::machine::Statistics>,
 }
 
 /// Take `mutex` if no other thread holds it.
@@ -561,7 +564,9 @@ fn enter<F>(
         }
     };
     drop(sender);
-    let outcome = run(&mut kernel, pe, &member);
+    let mut pe = pe;
+    let outcome = run(&mut kernel, &mut pe, &member);
+    *lock(&process.runtime.statistics) += pe.statistics;
     process.exception_ports.thread_ended(port);
     // A thread ending the process records the end while it is still a
     // member, so that no thread the end wakes counts itself the last.
@@ -631,38 +636,38 @@ impl Drop for EndsControl<'_> {
 /// At each return to guest code the thread's control parks it while it is
 /// suspended or held (`thread_suspend`, `thread_get_state`); a thread the
 /// process's end wakes there ends.
-fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<Termination>> {
+fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<Termination>> {
     let process = kernel.process.clone();
     let thread = kernel.thread;
     let execution = &process.runtime.execution;
     let control = member.control.clone();
     let _ends = EndsControl(&control);
-    if let Some(end) = kernel.begin(&mut pe)? {
+    if let Some(end) = kernel.begin(pe)? {
         return Ok(ended(end));
     }
     control.set_thread_pointer(pe.cpu.read(Register::TPIDRRO_EL0));
     // `PTHREAD_START_SUSPENDED` parks before the first instruction.
-    if !control.leave(&mut pe) {
+    if !control.leave(pe) {
         return Ok(None);
     }
-    resume(&process, thread, member, &mut pe);
+    resume(&process, thread, member, pe);
     loop {
         match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
                 execution.release(thread);
-                control.enter_kernel(&pe);
+                control.enter_kernel(pe);
                 kernel.blocked(true);
-                kernel.synchronous(&mut pe)?;
+                kernel.synchronous(pe)?;
                 kernel.blocked(false);
                 match kernel.end.take() {
                     Some(End::Process(termination)) => return Ok(Some(termination)),
                     Some(End::Thread) => return Ok(None),
                     None => {}
                 }
-                if !control.leave(&mut pe) {
+                if !control.leave(pe) {
                     return Ok(None);
                 }
-                resume(&process, thread, member, &mut pe);
+                resume(&process, thread, member, pe);
                 pe.return_from_exception();
             }
             // XNU defers an AST taken inside the commpage's
@@ -677,35 +682,35 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                 // (`thread_quantum_expire`).
                 crate::hosted::commpage::note_time();
                 if kernel.signals.deliverable().is_some() {
-                    restart_ranges(&process, &mut pe);
+                    restart_ranges(&process, pe);
                     execution.release(thread);
-                    if let Some(end) = deliver(kernel, &mut pe)? {
+                    if let Some(end) = deliver(kernel, pe)? {
                         return Ok(ended(end));
                     }
-                    resume(&process, thread, member, &mut pe);
+                    resume(&process, thread, member, pe);
                 } else if control.pending() {
-                    restart_ranges(&process, &mut pe);
+                    restart_ranges(&process, pe);
                     execution.release(thread);
-                    if !control.leave(&mut pe) {
+                    if !control.leave(pe) {
                         return Ok(None);
                     }
-                    resume(&process, thread, member, &mut pe);
+                    resume(&process, thread, member, pe);
                 } else if execution.contended() {
-                    restart_ranges(&process, &mut pe);
+                    restart_ranges(&process, pe);
                     execution.release(thread);
-                    resume(&process, thread, member, &mut pe);
+                    resume(&process, thread, member, pe);
                 }
             }
             Stop::Waiting => {
                 execution.release(thread);
-                if !control.leave(&mut pe) {
+                if !control.leave(pe) {
                     return Ok(None);
                 }
                 std::thread::yield_now();
-                if let Some(end) = deliver(kernel, &mut pe)? {
+                if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(&process, thread, member, &mut pe);
+                resume(&process, thread, member, pe);
             }
             // An instruction the runtime does not implement: as an Apple
             // CPU's UNDEFINED encoding, EXC_BAD_INSTRUCTION at its pc.
@@ -726,11 +731,11 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                     Failure::BadInstruction,
                 )?;
                 pe.cpu.pc = requirement.pc;
-                kernel.bad_instruction(&mut pe, || format!("unsupported {requirement}"))?;
-                if let Some(end) = deliver(kernel, &mut pe)? {
+                kernel.bad_instruction(pe, || format!("unsupported {requirement}"))?;
+                if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(&process, thread, member, &mut pe);
+                resume(&process, thread, member, pe);
             }
             Stop::Breakpoint(pc) => {
                 execution.release(thread);

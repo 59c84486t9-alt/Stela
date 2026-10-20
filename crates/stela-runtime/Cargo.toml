@@ -32,6 +32,9 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
 
+[build-dependencies]
+sha2.workspace = true
+
 [dev-dependencies]
 # The reference LZFSE encoder the no_std decoder is checked against.
 lzfse_rust = "0.2"

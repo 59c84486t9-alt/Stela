@@ -363,6 +363,8 @@ fn execve(kernel: &mut Kernel, call: &Call, label: u64) -> Result<Outcome> {
             host.display()
         );
     }
+    // The image ends here: its proven translations are written first.
+    crate::hosted::translations::finish();
     // The new image keeps the descriptor table with no descriptor
     // mid-flag change.
     let _gate = kernel.process.files.gate();

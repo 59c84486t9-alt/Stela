@@ -418,6 +418,8 @@ pub struct ProcessHost {
     tables: std::sync::Arc<Tables>,
     deadline: Option<u64>,
     runner: NativeRunner,
+    /// The process's translation store, if it has one.
+    translations: Option<super::translations::Store>,
 }
 
 impl ProcessHost {
@@ -446,6 +448,7 @@ impl ProcessHost {
             deadline: None,
             // Installed blocks, chained ones and thunks lie in the arena.
             runner: NativeRunner::new(vec![(start, start + ARENA_BYTES as u64)]),
+            translations: super::translations::Store::open(),
         })
     }
 
@@ -541,6 +544,12 @@ impl Host for ProcessHost {
     fn set_regime(&mut self, _regime: &Regime) {}
 
     fn invalidate_translations(&mut self) {}
+
+    fn translations(&mut self) -> Option<&mut dyn crate::machine::Translations> {
+        self.translations
+            .as_mut()
+            .map(|store| store as &mut dyn crate::machine::Translations)
+    }
 
     fn counter(&mut self) -> u64 {
         counter_at(host_nanoseconds())

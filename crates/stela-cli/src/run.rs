@@ -374,6 +374,10 @@ impl Run {
                 eprintln!("stela: {count:>8} {name}");
             }
             eprintln!("stela: {:>8} shared-region pages slid", report.slid_pages);
+            hosted::translations::finish();
+            for line in hosted::translations::summary(&report.engine) {
+                eprintln!("stela: {line}");
+            }
         }
         report.termination.end_host_process()
     }

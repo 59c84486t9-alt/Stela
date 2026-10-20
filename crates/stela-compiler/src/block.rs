@@ -343,7 +343,7 @@ pub struct BlockExit {
     pub kind: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompiledBlock {
     pub native: NativeBlock,
     /// Exact consumed prefix, including the terminator when present.

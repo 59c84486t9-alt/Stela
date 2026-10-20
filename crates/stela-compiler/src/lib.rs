@@ -67,7 +67,7 @@ pub trait Lifter {
 }
 
 /// Each native range keeps its guest address for faults and debugging.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeBlock {
     pub x86_64_code: Vec<u8>,
     pub source_map: Vec<(GuestAddress, usize)>,

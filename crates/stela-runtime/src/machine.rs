@@ -33,7 +33,7 @@ pub(crate) use chip::test_chip;
 pub use cpu::{Cpu, Exception};
 pub use engine::{
     DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
-    NativeFault, NoDevices, PeerState, Regime, Requirement, RequirementKind, Reset, StaleCode,
-    Statistics, Stop, Transition,
+    NativeFault, NoDevices, Offer, PeerState, Regime, Requirement, RequirementKind, Reset,
+    StaleCode, Statistics, Stop, Transition, Translations, compile_input,
 };
 pub use registers::{CpuProfile, Identity, Lines};
