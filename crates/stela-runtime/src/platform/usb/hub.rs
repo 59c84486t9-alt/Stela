@@ -9,17 +9,35 @@
 //! bitmap). On J473 macOS `AppleUSB20Hub` (KC `0x451599c`) matches
 //! bDeviceClass 9, bDeviceSubClass 0.
 //!
-//! The hub reports individual port power switching and individual
-//! over-current protection, no port indicators and a TT think time of 8
-//! full-speed bit times; its ports are removable. Port reset completes at
-//! once: the port is Enabled with C_PORT_RESET set and its function reset,
-//! as at the end of the 10 ms reset signaling (11.5.1.5). Resume likewise
-//! completes at once with C_PORT_SUSPEND. The xHCI controller above routes
-//! a slot to a downstream function by its route string, so the hub carries
-//! no split transactions itself: its TT holds no buffered state, which
-//! makes CLEAR_TT_BUFFER and RESET_TT complete with nothing to clear.
-//! Refused (STALL): PORT_TEST, PORT_INDICATOR, GET_TT_STATE and STOP_TT
-//! (vendor-defined state formats), and setting hub features.
+//! The hub reports individual port power switching, individual
+//! over-current protection, software-controllable port indicators and a TT
+//! think time of 8 full-speed bit times; its ports are removable. Port
+//! reset completes at once: the port is Enabled with C_PORT_RESET set and
+//! its function reset, as at the end of the 10 ms reset signaling
+//! (11.5.1.5). Resume likewise completes at once with C_PORT_SUSPEND.
+//!
+//! The xHCI controller above routes a slot to a downstream function by its
+//! route string, so the hub carries no split transactions itself: its TT
+//! holds no buffered state, which makes CLEAR_TT_BUFFER and RESET_TT
+//! complete with nothing to clear. STOP_TT (11.24.2.11) halts the TT until
+//! RESET_TT, and while it is stopped the low- and full-speed functions it
+//! serves take no transactions. GET_TT_STATE (11.24.2.6) returns, for a
+//! stopped TT with TT_Flags 0, the hub's own state format: [`TT_STATE`].
+//!
+//! SET_FEATURE(PORT_TEST) (11.24.2.13, the test selectors of table 11-24)
+//! puts a disabled, disconnected or suspended port in the Testing state
+//! (11.5): PORT_TEST is set and the port forwards nothing, and only a reset
+//! of the hub itself, or a configuration change, which powers its ports
+//! off, ends it. SET_FEATURE(PORT_INDICATOR) takes the selectors of table
+//! 11-25; a nonzero selector sets PORT_INDICATOR (software control), and
+//! selector 0 or CLEAR_FEATURE(PORT_INDICATOR) returns the indicator to
+//! automatic. The indicator is a light with no other effect.
+//!
+//! Refused (STALL), as request errors: SET_HUB_DEPTH, which USB 3.2
+//! 10.16.2.9 defines for Enhanced SuperSpeed hubs only (a USB 2.0 hub
+//! has no request 12, and `AppleUSB20Hub` never sends it), and setting
+//! the hub's or a port's change features, which 11.24.2.12-13 make
+//! optional.
 use super::{
     BusPeer, Function, Reply, Speed, Token,
     control::{
@@ -35,8 +53,9 @@ use alloc::{string::String, vec, vec::Vec};
 pub const MAX_PORTS: usize = 7;
 const STATUS_ENDPOINT: u8 = 0x81;
 const HUB_DESCRIPTOR: u8 = 0x29;
-/// Individual port power switching, individual over-current protection.
-const CHARACTERISTICS: u16 = 0x0009;
+/// Individual port power switching, individual over-current protection,
+/// port indicators (11.23.2.1: wHubCharacteristics D1..0, D4..3, D7).
+const CHARACTERISTICS: u16 = 0x0089;
 /// Power-on to power-good, in 2 ms units.
 const POWER_ON_TO_GOOD: u8 = 5;
 const CONTROLLER_CURRENT_MA: u8 = 50;
@@ -46,6 +65,18 @@ const FULL_SPEED_INTERVAL: u8 = 255;
 
 const CLEAR_TT_BUFFER: u8 = 8;
 const RESET_TT: u8 = 9;
+const GET_TT_STATE: u8 = 10;
+const STOP_TT: u8 = 11;
+/// The hub's GET_TT_STATE reply (a vendor-specific format, 11.24.2.6):
+/// byte 0 is 1 while the TT is stopped, byte 1 the transactions it holds
+/// buffered (always 0: the controller above carries the splits), bytes
+/// 2..3 reserved.
+pub const TT_STATE: [u8; 4] = [1, 0, 0, 0];
+/// Table 11-24: Test_J, Test_K, Test_SE0_NAK, Test_Packet,
+/// Test_Force_Enable.
+const TEST_SELECTORS: core::ops::RangeInclusive<u8> = 1..=5;
+/// Table 11-25: automatic, amber, green, off.
+const INDICATOR_SELECTORS: core::ops::RangeInclusive<u8> = 0..=3;
 
 // Port features (11.24.2, table 11-17) and status bits (11.24.2.7.1).
 const PORT_CONNECTION: u16 = 0;
@@ -55,6 +86,11 @@ const PORT_RESET: u16 = 4;
 const PORT_POWER: u16 = 8;
 const PORT_LOW_SPEED: u16 = 9;
 const PORT_HIGH_SPEED: u16 = 10;
+const PORT_TEST: u16 = 11;
+const PORT_INDICATOR: u16 = 12;
+/// The feature selectors of PORT_TEST and PORT_INDICATOR (table 11-17).
+const TEST_FEATURE: u16 = 21;
+const INDICATOR_FEATURE: u16 = 22;
 const C_PORT_CONNECTION: u16 = 16;
 const C_PORT_ENABLE: u16 = 17;
 const C_PORT_SUSPEND: u16 = 18;
@@ -83,11 +119,21 @@ pub trait Ports {
 struct Port {
     status: u16,
     change: u16,
+    /// The indicator selector software last set (table 11-25).
+    indicator: u8,
+}
+
+impl Port {
+    fn testing(&self) -> bool {
+        self.status & bit(PORT_TEST) != 0
+    }
 }
 
 struct State {
     ports: Vec<Port>,
     halted: bool,
+    /// STOP_TT halted the TT; RESET_TT restarts it.
+    tt_stopped: bool,
 }
 
 /// The hub's class and interface requests over its ports.
@@ -169,6 +215,7 @@ impl<P: Ports> Hub<P> {
             state: State {
                 ports: vec![Port::default(); ports.count()],
                 halted: false,
+                tt_stopped: false,
             },
             ports,
         })
@@ -189,7 +236,7 @@ impl<P: Ports> Hub<P> {
     /// disconnection disables the port.
     fn detect(&mut self) {
         for (n, port) in self.state.ports.iter_mut().enumerate() {
-            if port.status & bit(PORT_POWER) == 0 {
+            if port.status & bit(PORT_POWER) == 0 || port.testing() {
                 continue;
             }
             let attached = self.ports.attached(n);
@@ -217,11 +264,18 @@ impl<P: Ports> Hub<P> {
             .fold(0, |bitmap, (n, _)| bitmap | 1 << (n + 1))
     }
 
+    /// A port whose function takes transactions: enabled, neither
+    /// suspended nor testing, and for a low- or full-speed function a
+    /// running TT.
     fn usable(&self, port: u8) -> Option<usize> {
         let n = usize::from(port).checked_sub(1)?;
         let status = self.state.ports.get(n)?.status;
         let enabled = bit(PORT_CONNECTION) | bit(PORT_ENABLE) | bit(PORT_POWER);
-        (status & enabled == enabled && status & bit(PORT_SUSPEND) == 0).then_some(n)
+        let split = self.ports.speed(n) != Speed::High;
+        (status & enabled == enabled
+            && status & (bit(PORT_SUSPEND) | bit(PORT_TEST)) == 0
+            && !(split && self.state.tt_stopped))
+            .then_some(n)
     }
 }
 
@@ -240,7 +294,17 @@ impl<P: Ports> Context<'_, P> {
     }
 
     fn set_port_feature(&mut self, setup: Setup) -> Result<Outcome, ()> {
-        let (n, port) = port(&mut self.state.ports, setup.index)?;
+        // PORT_TEST and PORT_INDICATOR carry a selector in wIndex 15:8.
+        let selector = (setup.index >> 8) as u8;
+        let index = match setup.value {
+            TEST_FEATURE | INDICATOR_FEATURE => setup.index & 0xff,
+            _ => setup.index,
+        };
+        let (n, port) = port(&mut self.state.ports, index)?;
+        if port.testing() {
+            // A port in test mode leaves it only through a hub reset.
+            return Err(());
+        }
         let powered = port.status & bit(PORT_POWER) != 0;
         match setup.value {
             PORT_POWER => port.status |= bit(PORT_POWER),
@@ -257,6 +321,24 @@ impl<P: Ports> Context<'_, P> {
             PORT_RESET => {}
             PORT_SUSPEND if port.status & bit(PORT_ENABLE) != 0 => port.status |= bit(PORT_SUSPEND),
             PORT_SUSPEND => {}
+            // Only a Disabled, Disconnected or Suspended port enters test
+            // mode (11.24.2.13).
+            TEST_FEATURE if TEST_SELECTORS.contains(&selector) => {
+                let enabled = port.status & bit(PORT_ENABLE) != 0;
+                let suspended = port.status & bit(PORT_SUSPEND) != 0;
+                if enabled && !suspended {
+                    return Err(());
+                }
+                port.status |= bit(PORT_TEST);
+            }
+            INDICATOR_FEATURE if INDICATOR_SELECTORS.contains(&selector) => {
+                port.indicator = selector;
+                if selector == 0 {
+                    port.status &= !bit(PORT_INDICATOR);
+                } else {
+                    port.status |= bit(PORT_INDICATOR);
+                }
+            }
             _ => return Err(()),
         }
         Ok(Outcome::Done)
@@ -264,6 +346,9 @@ impl<P: Ports> Context<'_, P> {
 
     fn clear_port_feature(&mut self, setup: Setup) -> Result<Outcome, ()> {
         let (_, port) = self.port(setup.index)?;
+        if port.testing() {
+            return Err(());
+        }
         match setup.value {
             PORT_ENABLE => port.status &= !(bit(PORT_ENABLE) | bit(PORT_SUSPEND)),
             PORT_SUSPEND if port.status & bit(PORT_SUSPEND) != 0 => {
@@ -273,11 +358,20 @@ impl<P: Ports> Context<'_, P> {
             PORT_SUSPEND => {}
             // Power off disconnects; a reconnection follows power on.
             PORT_POWER => port.status = 0,
+            INDICATOR_FEATURE => {
+                port.indicator = 0;
+                port.status &= !bit(PORT_INDICATOR);
+            }
             C_PORT_CONNECTION | C_PORT_ENABLE | C_PORT_SUSPEND | C_PORT_OVER_CURRENT
             | C_PORT_RESET => port.change &= !bit(setup.value - C_PORT_CONNECTION),
             _ => return Err(()),
         }
         Ok(Outcome::Done)
+    }
+
+    /// The single TT's port argument is 1 (11.24.2.6, 11.24.2.11).
+    fn single_tt(setup: Setup) -> Result<(), ()> {
+        (setup.index == 1).then_some(()).ok_or(())
     }
 }
 
@@ -287,6 +381,7 @@ impl<P: Ports> Requests for Context<'_, P> {
         if value == 0 {
             // Back to Address: ports lose power (11.11).
             self.state.ports.fill(Port::default());
+            self.state.tt_stopped = false;
         }
         Ok(())
     }
@@ -332,9 +427,26 @@ impl<P: Ports> Requests for Context<'_, P> {
                 // Single TT: wIndex is the port for RESET_TT, 1 for
                 // CLEAR_TT_BUFFER (11.24.2.3, 11.24.2.9).
                 match setup.request {
-                    RESET_TT => self.port(setup.index).map(|_| Outcome::Done),
+                    RESET_TT => {
+                        self.port(setup.index)?;
+                        self.state.tt_stopped = false;
+                        Ok(Outcome::Done)
+                    }
                     _ => Ok(Outcome::Done),
                 }
+            }
+            (CLASS, RECIPIENT_OTHER, STOP_TT, false) if setup.value == 0 => {
+                Self::single_tt(setup)?;
+                self.state.tt_stopped = true;
+                Ok(Outcome::Done)
+            }
+            // No TT_Flags are defined, and only a stopped TT reports its
+            // state.
+            (CLASS, RECIPIENT_OTHER, GET_TT_STATE, true)
+                if setup.value == 0 && self.state.tt_stopped =>
+            {
+                Self::single_tt(setup)?;
+                Ok(Outcome::Data(TT_STATE.to_vec()))
             }
             (STANDARD, RECIPIENT_INTERFACE, GET_STATUS, true) if setup.index == 0 => {
                 Ok(Outcome::Data(vec![0, 0]))
@@ -372,6 +484,7 @@ impl<P: Ports> BusPeer for Hub<P> {
         control.reset(&mut context)?;
         self.state.ports.fill(Port::default());
         self.state.halted = false;
+        self.state.tt_stopped = false;
         Ok(())
     }
 
@@ -534,7 +647,7 @@ mod tests {
         let mut hub = configured();
         let hub_descriptor =
             transfer(&mut hub, setup(0xa0, GET_DESCRIPTOR, 0x2900, 0, 71), &[]).unwrap();
-        assert_eq!(hub_descriptor, [9, 0x29, 2, 0x09, 0, 5, 50, 0, 0xff]);
+        assert_eq!(hub_descriptor, [9, 0x29, 2, 0x89, 0, 5, 50, 0, 0xff]);
         let qualifier = transfer(&mut hub, setup(0x80, GET_DESCRIPTOR, 0x600, 0, 10), &[]).unwrap();
         assert_eq!(qualifier[6], 0, "no TT at full speed");
         let config = transfer(&mut hub, setup(0x80, GET_DESCRIPTOR, 0x200, 0, 255), &[]).unwrap();
@@ -604,10 +717,18 @@ mod tests {
         assert!(hub.downstream(1).is_none());
         transfer(&mut hub, setup(0x23, CLEAR_FEATURE, PORT_POWER, 1, 0), &[]).unwrap();
         assert_eq!(port_status(&mut hub, 1).0, 0);
-        for feature in [21, 22] {
-            assert!(transfer(&mut hub, setup(0x23, SET_FEATURE, feature, 1, 0), &[]).is_err());
+        // Test selector 0 or 6, indicator selector 4, GET_TT_STATE of a
+        // running TT and SET_HUB_DEPTH are request errors.
+        for (feature, index) in [
+            (TEST_FEATURE, 0x0001),
+            (TEST_FEATURE, 0x0601),
+            (INDICATOR_FEATURE, 0x0401),
+        ] {
+            let request = setup(0x23, SET_FEATURE, feature, index, 0);
+            assert!(transfer(&mut hub, request, &[]).is_err());
         }
-        assert!(transfer(&mut hub, setup(0xa3, 10, 0, 1, 4), &[]).is_err());
+        assert!(transfer(&mut hub, setup(0xa3, GET_TT_STATE, 0, 1, 4), &[]).is_err());
+        assert!(transfer(&mut hub, setup(0x20, 12, 1, 0, 0), &[]).is_err());
         assert!(transfer(&mut hub, setup(0x23, SET_FEATURE, PORT_POWER, 3, 0), &[]).is_err());
         transfer(&mut hub, setup(0x23, CLEAR_TT_BUFFER, 0x0081, 1, 0), &[]).unwrap();
         transfer(&mut hub, setup(0x23, RESET_TT, 0, 1, 0), &[]).unwrap();
@@ -618,5 +739,85 @@ mod tests {
         assert_eq!(status_change(&mut hub), Reply::Ack(0b10));
         hub.reset().unwrap();
         assert_eq!(hub.state.ports, [Port::default(); 2]);
+    }
+
+    /// Both ports powered, connected and reset; port 1 full speed, port 2
+    /// high speed.
+    fn enabled() -> Hub<Two> {
+        let mut hub = configured();
+        for port in 1..=2 {
+            transfer(&mut hub, setup(0x23, SET_FEATURE, PORT_POWER, port, 0), &[]).unwrap();
+            transfer(&mut hub, setup(0x23, SET_FEATURE, PORT_RESET, port, 0), &[]).unwrap();
+        }
+        hub
+    }
+
+    #[test]
+    fn test_mode_holds_a_port_until_the_hub_resets() {
+        let mut hub = enabled();
+        // An enabled port refuses test mode; a suspended one enters it.
+        let test_packet = setup(0x23, SET_FEATURE, TEST_FEATURE, 0x0401, 0);
+        assert!(transfer(&mut hub, test_packet, &[]).is_err());
+        transfer(&mut hub, setup(0x23, SET_FEATURE, PORT_SUSPEND, 1, 0), &[]).unwrap();
+        transfer(&mut hub, test_packet, &[]).unwrap();
+        assert_ne!(port_status(&mut hub, 1).0 & bit(PORT_TEST), 0);
+        assert!(hub.downstream(1).is_none());
+        // Port requests other than GET_STATUS fail until the hub resets.
+        for request in [
+            setup(0x23, CLEAR_FEATURE, PORT_SUSPEND, 1, 0),
+            setup(0x23, SET_FEATURE, PORT_RESET, 1, 0),
+        ] {
+            assert!(transfer(&mut hub, request, &[]).is_err());
+        }
+        // A disconnected port enters test mode too; the hub reset ends both.
+        hub.ports.attached[1] = false;
+        hub.set_time(1);
+        transfer(
+            &mut hub,
+            setup(0x23, SET_FEATURE, TEST_FEATURE, 0x0102, 0),
+            &[],
+        )
+        .unwrap();
+        hub.reset().unwrap();
+        assert!(hub.state.ports.iter().all(|port| !port.testing()));
+    }
+
+    #[test]
+    fn port_indicators_follow_software_selectors() {
+        let mut hub = enabled();
+        let green = setup(0x23, SET_FEATURE, INDICATOR_FEATURE, 0x0202, 0);
+        transfer(&mut hub, green, &[]).unwrap();
+        assert_eq!(hub.state.ports[1].indicator, 2);
+        assert_eq!(port_status(&mut hub, 2).0, 0x1503);
+        // Selector 0 and CLEAR_FEATURE both return to automatic.
+        let automatic = setup(0x23, SET_FEATURE, INDICATOR_FEATURE, 0x0002, 0);
+        transfer(&mut hub, automatic, &[]).unwrap();
+        assert_eq!(port_status(&mut hub, 2).0, 0x0503);
+        transfer(&mut hub, green, &[]).unwrap();
+        let clear = setup(0x23, CLEAR_FEATURE, INDICATOR_FEATURE, 2, 0);
+        transfer(&mut hub, clear, &[]).unwrap();
+        assert_eq!(
+            (port_status(&mut hub, 2).0, hub.state.ports[1].indicator),
+            (0x0503, 0)
+        );
+        // The function still takes transactions.
+        assert!(hub.downstream(2).is_some());
+    }
+
+    #[test]
+    fn a_stopped_tt_reports_its_state_and_cuts_off_split_functions() {
+        let mut hub = enabled();
+        assert!(transfer(&mut hub, setup(0x23, STOP_TT, 0, 2, 0), &[]).is_err());
+        transfer(&mut hub, setup(0x23, STOP_TT, 0, 1, 0), &[]).unwrap();
+        // The full-speed function behind the TT is cut off; the high-speed
+        // one is not.
+        assert!(hub.downstream(1).is_none());
+        assert!(hub.downstream(2).is_some());
+        let state = transfer(&mut hub, setup(0xa3, GET_TT_STATE, 0, 1, 4), &[]).unwrap();
+        assert_eq!(state, TT_STATE);
+        assert!(transfer(&mut hub, setup(0xa3, GET_TT_STATE, 1, 1, 4), &[]).is_err());
+        transfer(&mut hub, setup(0x23, RESET_TT, 0, 1, 0), &[]).unwrap();
+        assert!(hub.downstream(1).is_some());
+        assert!(transfer(&mut hub, setup(0xa3, GET_TT_STATE, 0, 1, 4), &[]).is_err());
     }
 }
