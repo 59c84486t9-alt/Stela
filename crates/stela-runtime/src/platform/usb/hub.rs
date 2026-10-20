@@ -71,7 +71,7 @@ const STOP_TT: u8 = 11;
 /// byte 0 is 1 while the TT is stopped, byte 1 the transactions it holds
 /// buffered (always 0: the controller above carries the splits), bytes
 /// 2..3 reserved.
-pub const TT_STATE: [u8; 4] = [1, 0, 0, 0];
+const TT_STATE: [u8; 4] = [1, 0, 0, 0];
 /// Table 11-24: Test_J, Test_K, Test_SE0_NAK, Test_Packet,
 /// Test_Force_Enable.
 const TEST_SELECTORS: core::ops::RangeInclusive<u8> = 1..=5;
@@ -119,8 +119,6 @@ pub trait Ports {
 struct Port {
     status: u16,
     change: u16,
-    /// The indicator selector software last set (table 11-25).
-    indicator: u8,
 }
 
 impl Port {
@@ -331,8 +329,8 @@ impl<P: Ports> Context<'_, P> {
                 }
                 port.status |= bit(PORT_TEST);
             }
+            // The selected color is a light with no other effect.
             INDICATOR_FEATURE if INDICATOR_SELECTORS.contains(&selector) => {
-                port.indicator = selector;
                 if selector == 0 {
                     port.status &= !bit(PORT_INDICATOR);
                 } else {
@@ -358,10 +356,7 @@ impl<P: Ports> Context<'_, P> {
             PORT_SUSPEND => {}
             // Power off disconnects; a reconnection follows power on.
             PORT_POWER => port.status = 0,
-            INDICATOR_FEATURE => {
-                port.indicator = 0;
-                port.status &= !bit(PORT_INDICATOR);
-            }
+            INDICATOR_FEATURE => port.status &= !bit(PORT_INDICATOR),
             C_PORT_CONNECTION | C_PORT_ENABLE | C_PORT_SUSPEND | C_PORT_OVER_CURRENT
             | C_PORT_RESET => port.change &= !bit(setup.value - C_PORT_CONNECTION),
             _ => return Err(()),
@@ -787,7 +782,6 @@ mod tests {
         let mut hub = enabled();
         let green = setup(0x23, SET_FEATURE, INDICATOR_FEATURE, 0x0202, 0);
         transfer(&mut hub, green, &[]).unwrap();
-        assert_eq!(hub.state.ports[1].indicator, 2);
         assert_eq!(port_status(&mut hub, 2).0, 0x1503);
         // Selector 0 and CLEAR_FEATURE both return to automatic.
         let automatic = setup(0x23, SET_FEATURE, INDICATOR_FEATURE, 0x0002, 0);
@@ -796,10 +790,7 @@ mod tests {
         transfer(&mut hub, green, &[]).unwrap();
         let clear = setup(0x23, CLEAR_FEATURE, INDICATOR_FEATURE, 2, 0);
         transfer(&mut hub, clear, &[]).unwrap();
-        assert_eq!(
-            (port_status(&mut hub, 2).0, hub.state.ports[1].indicator),
-            (0x0503, 0)
-        );
+        assert_eq!(port_status(&mut hub, 2).0, 0x0503);
         // The function still takes transactions.
         assert!(hub.downstream(2).is_some());
     }
