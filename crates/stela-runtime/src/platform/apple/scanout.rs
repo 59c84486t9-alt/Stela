@@ -154,6 +154,43 @@ fn scale(value: u32, weight: u32) -> u32 {
     (value * weight + 127) / 255
 }
 
+impl PixelFormat {
+    /// The byte offsets of red and blue in a pixel.
+    const fn red_blue(self) -> (usize, usize) {
+        match self {
+            PixelFormat::Bgra8888 => (2, 0),
+            PixelFormat::Rgba8888 => (0, 2),
+        }
+    }
+}
+
+/// The screen part of `rect` on a `width` by `height` screen, as half-open
+/// pixel ranges, or `None` when nothing is on screen.
+fn on_screen(rect: Rect, width: u32, height: u32) -> Option<([usize; 2], [usize; 2])> {
+    let end = |start: u32, length: u32, limit: u32| {
+        (u64::from(start) + u64::from(length)).min(limit.into()) as usize
+    };
+    let x = [rect.x as usize, end(rect.x, rect.width, width)];
+    let y = [rect.y as usize, end(rect.y, rect.height, height)];
+    (x[0] < x[1] && y[0] < y[1]).then_some((x, y))
+}
+
+/// Copy `source` pixels of `from` into `out` in `to`, alpha made opaque.
+fn copy_opaque(source: &[u8], out: &mut [u8], from: PixelFormat, to: PixelFormat) {
+    let source = source.as_chunks::<4>().0;
+    let out = out.as_chunks_mut::<4>().0;
+    for (out, &pixel) in out.iter_mut().zip(source) {
+        let value = u32::from_le_bytes(pixel) | 0xff00_0000;
+        let value = if from == to {
+            value
+        } else {
+            // The formats differ only in red/blue order.
+            value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
+        };
+        *out = value.to_le_bytes();
+    }
+}
+
 /// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
 /// return the frame for one [`Scanout::present`]: the mode's rows in its
 /// pixel order, alpha opaque. `read` fills a byte range of a surface from
@@ -164,24 +201,34 @@ fn scale(value: u32, weight: u32) -> u32 {
 /// source-over, its colour taken as premultiplied or multiplied by its
 /// alpha first. Over the opaque black background a premultiplied layer
 /// shows its colour whatever its alpha.
+///
+/// The frame is built in the scanout's byte order. An unscaled row is
+/// copied whole when blending cannot change it: every pixel opaque, or a
+/// premultiplied layer over screen no lower layer has drawn on (still
+/// black).
 pub fn compose(
     layers: &[Layer],
     mode: Mode,
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
 ) -> Result<Vec<u8>, &'static str> {
-    let (width, height) = (mode.width as usize, mode.height as usize);
-    // Red, green and blue per pixel; the background is opaque black.
-    let mut canvas = alloc::vec![[0u32; 3]; width * height];
+    let width = mode.width as usize;
+    let mut frame = [0, 0, 0, 0xff].repeat(width * mode.height as usize);
+    let (red, blue) = mode.format.red_blue();
     let mut row = Vec::new();
+    let mut drawn: Vec<([usize; 2], [usize; 2])> = Vec::new();
     for layer in layers {
         let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
-        let x_end =
-            (u64::from(destination.x) + u64::from(destination.width)).min(mode.width.into());
-        let y_end =
-            (u64::from(destination.y) + u64::from(destination.height)).min(mode.height.into());
+        let Some((xs, ys)) = on_screen(destination, mode.width, mode.height) else {
+            continue;
+        };
+        let unscaled = (source.width, source.height) == (destination.width, destination.height);
+        let over_black = !drawn
+            .iter()
+            .any(|(x, y)| x[0] < xs[1] && xs[0] < x[1] && y[0] < ys[1] && ys[0] < y[1]);
+        let (from_red, from_blue) = surface.format.red_blue();
         row.resize(source.width as usize * 4, 0);
-        for y in u64::from(destination.y)..y_end {
-            let from_y = (2 * (y - u64::from(destination.y)) + 1) * u64::from(source.height)
+        for y in ys[0]..ys[1] {
+            let from_y = (2 * (y as u64 - u64::from(destination.y)) + 1) * u64::from(source.height)
                 / (2 * u64::from(destination.height));
             let iova = (u64::from(source.y) + from_y)
                 .checked_mul(surface.stride.into())
@@ -191,38 +238,37 @@ pub fn compose(
             if !read(iova, &mut row) {
                 return Err("surface row is not reachable through its DART");
             }
-            for x in u64::from(destination.x)..x_end {
-                let from_x = (2 * (x - u64::from(destination.x)) + 1) * u64::from(source.width)
+            let out = &mut frame[(y * width + xs[0]) * 4..(y * width + xs[1]) * 4];
+            if unscaled {
+                let start = (xs[0] - destination.x as usize) * 4;
+                let pixels = &row[start..start + out.len()];
+                if (layer.premultiplied && over_black)
+                    || pixels.iter().skip(3).step_by(4).all(|&alpha| alpha == 0xff)
+                {
+                    copy_opaque(pixels, out, surface.format, mode.format);
+                    continue;
+                }
+            }
+            for (x, out) in (xs[0]..xs[1]).zip(out.as_chunks_mut::<4>().0) {
+                let from_x = (2 * (x as u64 - u64::from(destination.x)) + 1)
+                    * u64::from(source.width)
                     / (2 * u64::from(destination.width));
                 let pixel = &row[from_x as usize * 4..][..4];
-                let (red, blue) = match surface.format {
-                    PixelFormat::Bgra8888 => (pixel[2], pixel[0]),
-                    PixelFormat::Rgba8888 => (pixel[0], pixel[2]),
-                };
                 let alpha = u32::from(pixel[3]);
-                let out = &mut canvas[y as usize * width + x as usize];
-                for (channel, value) in out.iter_mut().zip([red, pixel[1], blue]) {
-                    let value = u32::from(value);
+                for (to, from) in [(red, from_red), (1, 1), (blue, from_blue)] {
+                    let value = u32::from(pixel[from]);
                     let value = if layer.premultiplied {
                         value
                     } else {
                         scale(value, alpha)
                     };
-                    *channel = (value + scale(*channel, 255 - alpha)).min(255);
+                    out[to] = (value + scale(u32::from(out[to]), 255 - alpha)).min(255) as u8;
                 }
             }
         }
+        drawn.push((xs, ys));
     }
-    Ok(canvas
-        .into_iter()
-        .flat_map(|[red, green, blue]| {
-            let (low, high) = match mode.format {
-                PixelFormat::Bgra8888 => (blue, red),
-                PixelFormat::Rgba8888 => (red, blue),
-            };
-            [low as u8, green as u8, high as u8, 0xff]
-        })
-        .collect())
+    Ok(frame)
 }
 
 #[cfg(test)]
@@ -325,6 +371,132 @@ mod tests {
         let down = Layer::new(a, Rect::whole(2, 1), Rect::whole(1, 1), true).unwrap();
         let frame = compose(&[down], MODE, reader(&memory)).unwrap();
         assert_eq!(&frame[0..4], &green);
+    }
+
+    /// The general path alone: every pixel blended through a red, green and
+    /// blue canvas, as `compose` did before its fast paths.
+    fn reference(layers: &[Layer], mode: Mode, memory: &[u8]) -> Vec<u8> {
+        let (width, height) = (mode.width as usize, mode.height as usize);
+        let mut canvas = alloc::vec![[0u32; 3]; width * height];
+        for layer in layers {
+            let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
+            let x_end =
+                (u64::from(destination.x) + u64::from(destination.width)).min(mode.width.into());
+            let y_end =
+                (u64::from(destination.y) + u64::from(destination.height)).min(mode.height.into());
+            for y in u64::from(destination.y)..y_end {
+                let from_y = (2 * (y - u64::from(destination.y)) + 1) * u64::from(source.height)
+                    / (2 * u64::from(destination.height));
+                for x in u64::from(destination.x)..x_end {
+                    let from_x = (2 * (x - u64::from(destination.x)) + 1) * u64::from(source.width)
+                        / (2 * u64::from(destination.width));
+                    let at = surface.iova
+                        + (u64::from(source.y) + from_y) * u64::from(surface.stride)
+                        + (u64::from(source.x) + from_x) * 4;
+                    let pixel = &memory[at as usize..][..4];
+                    let (red, blue) = surface.format.red_blue();
+                    let alpha = u32::from(pixel[3]);
+                    let out = &mut canvas[y as usize * width + x as usize];
+                    for (channel, value) in out.iter_mut().zip([pixel[red], pixel[1], pixel[blue]])
+                    {
+                        let value = u32::from(value);
+                        let value = if layer.premultiplied {
+                            value
+                        } else {
+                            scale(value, alpha)
+                        };
+                        *channel = (value + scale(*channel, 255 - alpha)).min(255);
+                    }
+                }
+            }
+        }
+        let (red, blue) = mode.format.red_blue();
+        canvas
+            .into_iter()
+            .flat_map(|rgb| {
+                let mut pixel = [0, 0, 0, 0xff];
+                pixel[red] = rgb[0] as u8;
+                pixel[1] = rgb[1] as u8;
+                pixel[blue] = rgb[2] as u8;
+                pixel
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_fast_paths_compose_the_frames_the_general_path_does() {
+        // A seeded xorshift draws surfaces (some opaque, some with random
+        // alpha) and layer stacks that mix unscaled and scaled, clipped and
+        // overlapping, premultiplied and straight layers in both formats.
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |bound: u32| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % u64::from(bound)) as u32
+        };
+        let mut memory = alloc::vec![0u8; 0x8000];
+        for byte in memory.iter_mut() {
+            *byte = next(256) as u8;
+        }
+        // Surfaces at 0x1000 steps; the even ones opaque.
+        let formats = [PixelFormat::Bgra8888, PixelFormat::Rgba8888];
+        let mut surfaces = Vec::new();
+        for index in 0..6u32 {
+            let (width, height) = (next(9) + 1, next(7) + 1);
+            let iova = u64::from(0x1000 * (index + 1));
+            let stride = width * 4 + next(3) * 4;
+            if index % 2 == 0 {
+                let base = iova as usize;
+                for at in (base..base + (stride * height) as usize).skip(3).step_by(4) {
+                    memory[at] = 0xff;
+                }
+            }
+            surfaces.push(Surface {
+                width,
+                height,
+                stride,
+                format: formats[next(2) as usize],
+                iova,
+            });
+        }
+        for case in 0..200 {
+            let mode = Mode {
+                width: 12,
+                height: 8,
+                format: formats[case % 2],
+            };
+            let mut layers = Vec::new();
+            for _ in 0..next(5) {
+                let surface = surfaces[next(6) as usize];
+                let (width, height) = (next(surface.width) + 1, next(surface.height) + 1);
+                let source = Rect {
+                    x: next(surface.width - width + 1),
+                    y: next(surface.height - height + 1),
+                    width,
+                    height,
+                };
+                let size = if next(2) == 0 {
+                    (width, height)
+                } else {
+                    (next(14) + 1, next(10) + 1)
+                };
+                let destination = Rect {
+                    x: next(14),
+                    y: next(10),
+                    width: size.0,
+                    height: size.1,
+                };
+                let premultiplied = next(2) == 0;
+                layers.push(Layer::new(surface, source, destination, premultiplied).unwrap());
+            }
+            let fast = compose(&layers, mode, reader(&memory)).unwrap();
+            assert_eq!(
+                fast,
+                reference(&layers, mode, &memory),
+                "case {case}: {layers:?}"
+            );
+        }
     }
 
     #[test]
