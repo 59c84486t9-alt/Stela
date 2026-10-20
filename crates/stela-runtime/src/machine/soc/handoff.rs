@@ -162,7 +162,7 @@ const N3_UNTRACED: &str = "iBoot's choice between the T8122 temp-sensor and temp
     tables is not traced";
 
 /// The rows, one per `machine::soc` SoC row.
-const HANDOFFS: [Handoff; 14] = [
+const HANDOFFS: [Handoff; 18] = [
     row(
         0x8103,
         LPDDR4,
@@ -180,6 +180,12 @@ const HANDOFFS: [Handoff; 14] = [
         LPDDR5,
         Ok(None),
         ("j314c", 0x1d17c8, 0xe2a0c, 0x531a4),
+    ),
+    row(
+        0x6002,
+        LPDDR5,
+        Ok(None),
+        ("j375d", 0x1fa578, 0xf7b80, 0x533cc),
     ),
     row(
         0x8112,
@@ -200,6 +206,12 @@ const HANDOFFS: [Handoff; 14] = [
         ("j414c", 0x1b8348, 0xdbf10, 0x56014),
     ),
     row(
+        0x6022,
+        LPDDR5,
+        Ok(None),
+        ("j180d", 0x1de898, 0xe6080, 0x57bb8),
+    ),
+    row(
         0x8122,
         LPDDR5,
         Err(N3_UNTRACED),
@@ -216,6 +228,18 @@ const HANDOFFS: [Handoff; 14] = [
         LPDDR5,
         Ok(None),
         ("j514c", 0x2189f8, 0x112010, 0x66fa4),
+    ),
+    row(
+        0x6034,
+        LPDDR5,
+        Ok(None),
+        ("j514m", 0x218178, 0x1113b0, 0x66db8),
+    ),
+    row(
+        0x6032,
+        LPDDR5,
+        Ok(None),
+        ("j575d", 0x262e88, 0x1351a0, 0x693e8),
     ),
     row(
         0x8132,
@@ -277,6 +301,6 @@ mod tests {
         assert_eq!(handoff(0x8112).unwrap().pmp_variant, Ok(Some("-a0")));
         assert_eq!(handoff(0x8103).unwrap().dram_type, LPDDR4);
         assert!(handoff(0x8122).unwrap().pmp_variant.is_err());
-        assert!(handoff(0x6002).is_none());
+        assert!(handoff(0x6050).is_none());
     }
 }

@@ -6,10 +6,11 @@
 //! `cluster-type`. Each SoC row pairs an ApChipID with the
 //! `product-soc-name` its boards' DeviceTrees give in UniversalMac 26A434 and
 //! the MIDR_EL1 part number of each cluster type (m1n1 `src/midr.h`
-//! `MIDR_PART_<soc>_<core>`). A SoC, cluster type or affinity without that
-//! evidence refuses: the M1, M2 and M3 Ultra, the second M3 Max (ApChipID
-//! 0x6034), the A18 Pro and the M5 Pro and Max (no `product-soc-name`), and
-//! the M6's M cores.
+//! `MIDR_PART_<soc>_<core>`; for the Ultras, the parts of the Max dies they
+//! join, and for the second M3 Max and the M3 Ultra an inference stated at
+//! their rows). A SoC, cluster type or affinity without that evidence
+//! refuses: the A18 Pro, which no `machine::Chip` profile describes, the
+//! T6050 (no `product-soc-name`) and its M cores.
 use super::{
     Chip,
     adt::Node,
@@ -125,12 +126,20 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
     }
 }
 
-/// The level 1 caches of every core pair with public capacities: the M1,
-/// M1 Pro and Max (Icestorm and Firestorm: Linux `t8103.dtsi`,
-/// `t600x-common.dtsi`), the M2 and M2 Pro and Max (Blizzard and Avalanche:
-/// `t8112.dtsi`, `t602x-common.dtsi`) and the M3 (Sawtooth and Everest:
-/// `t8122.dtsi`) give E cores 128 KiB instruction and 64 KiB data caches
-/// and P cores 192 KiB and 128 KiB.
+/// The level 1 caches of every SoC row's E and P cores: 128 KiB instruction
+/// and 64 KiB data caches on E cores, 192 KiB and 128 KiB on P cores.
+///
+/// - Known (Linux `arch/arm64/boot/dts/apple`): the M1, M1 Pro and Max
+///   (Icestorm and Firestorm: `t8103.dtsi`, `t600x-common.dtsi`), the M2 and
+///   M2 Pro and Max (Blizzard and Avalanche: `t8112.dtsi`,
+///   `t602x-common.dtsi`) and the M3 (Sawtooth and Everest: `t8122.dtsi`).
+/// - Known (published `sysctl hw.perflevel*` of real machines, gist
+///   chockenberry/1d08129bdf41bfb70e98c3a75ce74578): the M4 Max and the M5
+///   report these `l1icachesize` and `l1dcachesize` values per core type,
+///   with the `l2cachesize` values their boards' 26A434 DeviceTrees state.
+/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro and the M6, whose
+///   26A434 DeviceTrees give their cores the same `apple,sawtooth` and
+///   `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
 const L1_CACHES: [CoreCaches; 2] = [
     CoreCaches {
         instruction: cache(128 << 10, 8),
@@ -235,7 +244,70 @@ const M2_PRO_POINTS: [&[u32]; 2] = [
     ],
 ];
 
-const SOCS: [Soc; 14] = [
+const M1_MAX: Soc = Soc {
+    chip_id: 0x6001,
+    name: "Apple M1 Max",
+    pmgr: "pmgr1,t6001",
+    chip: Chip::AppleM1,
+    parts: [(b'E', 0x028), (b'P', 0x029)],
+    aic: Some(("aic,2", 0xc000)),
+    dram_base: Some(0x100_0000_0000),
+    lockdown: Some(LOCKDOWN),
+    operating_points: Some(M1_PRO_POINTS),
+    memory_cache: None,
+    clusters: None,
+    aon_fuses: None,
+    cpu_start: Some(CPU_START_T8103),
+    caches: Some(L1_CACHES),
+    wake_masks: None,
+    power_banks: &[],
+    dpe_reg: None,
+    bridge_fields: None,
+};
+
+const M2_MAX: Soc = Soc {
+    chip_id: 0x6021,
+    name: "Apple M2 Max",
+    pmgr: "pmgr1,t6021",
+    chip: Chip::AppleM2,
+    parts: [(b'E', 0x038), (b'P', 0x039)],
+    aic: Some(("aic,2", 0xc000)),
+    dram_base: Some(0x100_0000_0000),
+    lockdown: Some(LOCKDOWN),
+    operating_points: Some(M2_PRO_POINTS),
+    memory_cache: None,
+    clusters: None,
+    aon_fuses: None,
+    cpu_start: Some(CPU_START_T6020),
+    caches: Some(L1_CACHES),
+    wake_masks: None,
+    power_banks: &[],
+    dpe_reg: None,
+    bridge_fields: None,
+};
+
+const M3_MAX: Soc = Soc {
+    chip_id: 0x6031,
+    name: "Apple M3 Max",
+    pmgr: "pmgr1,t6031",
+    chip: Chip::AppleM3,
+    parts: [(b'E', 0x048), (b'P', 0x049)],
+    aic: None,
+    dram_base: None,
+    lockdown: Some(LOCKDOWN),
+    operating_points: None,
+    memory_cache: None,
+    clusters: None,
+    aon_fuses: None,
+    cpu_start: Some(CPU_START_T6031),
+    caches: Some(L1_CACHES),
+    wake_masks: None,
+    power_banks: &[],
+    dpe_reg: None,
+    bridge_fields: None,
+};
+
+const SOCS: [Soc; 18] = [
     Soc {
         chip_id: 0x8103,
         name: "Apple M1",
@@ -276,25 +348,12 @@ const SOCS: [Soc; 14] = [
         dpe_reg: None,
         bridge_fields: None,
     },
+    M1_MAX,
+    // Two M1 Max dies (Linux `t6002.dtsi`: the same core compatibles).
     Soc {
-        chip_id: 0x6001,
-        name: "Apple M1 Max",
-        pmgr: "pmgr1,t6001",
-        chip: Chip::AppleM1,
-        parts: [(b'E', 0x028), (b'P', 0x029)],
-        aic: Some(("aic,2", 0xc000)),
-        dram_base: Some(0x100_0000_0000),
-        lockdown: Some(LOCKDOWN),
-        operating_points: Some(M1_PRO_POINTS),
-        memory_cache: None,
-        clusters: None,
-        aon_fuses: None,
-        cpu_start: Some(CPU_START_T8103),
-        caches: Some(L1_CACHES),
-        wake_masks: None,
-        power_banks: &[],
-        dpe_reg: None,
-        bridge_fields: None,
+        chip_id: 0x6002,
+        name: "Apple M1 Ultra",
+        ..M1_MAX
     },
     Soc {
         chip_id: 0x8112,
@@ -365,25 +424,12 @@ const SOCS: [Soc; 14] = [
         dpe_reg: None,
         bridge_fields: None,
     },
+    M2_MAX,
+    // Two M2 Max dies (Linux `t6022.dtsi`: the same core compatibles).
     Soc {
-        chip_id: 0x6021,
-        name: "Apple M2 Max",
-        pmgr: "pmgr1,t6021",
-        chip: Chip::AppleM2,
-        parts: [(b'E', 0x038), (b'P', 0x039)],
-        aic: Some(("aic,2", 0xc000)),
-        dram_base: Some(0x100_0000_0000),
-        lockdown: Some(LOCKDOWN),
-        operating_points: Some(M2_PRO_POINTS),
-        memory_cache: None,
-        clusters: None,
-        aon_fuses: None,
-        cpu_start: Some(CPU_START_T6020),
-        caches: Some(L1_CACHES),
-        wake_masks: None,
-        power_banks: &[],
-        dpe_reg: None,
-        bridge_fields: None,
+        chip_id: 0x6022,
+        name: "Apple M2 Ultra",
+        ..M2_MAX
     },
     Soc {
         chip_id: 0x8122,
@@ -419,31 +465,27 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
         bridge_fields: None,
     },
+    M3_MAX,
+    // The binned M3 Max (Mac15,10 and Mac15,11) and the M3 Ultra's two dies.
+    // Their parts are inferred: their boards' T6031 SPTM handles only the H15
+    // parts 0x42-0x45, 0x48, 0x49, 0x50 and 0x51 (sptm.t6031
+    // 0xfffffff0270af46c), and of those only XNU's Palma pair is a Max die
+    // (CPUSUBFAMILY_ARM_HC_HD), the layout their DeviceTrees give.
     Soc {
-        chip_id: 0x6031,
+        chip_id: 0x6034,
         name: "Apple M3 Max",
-        pmgr: "pmgr1,t6031",
-        chip: Chip::AppleM3,
-        parts: [(b'E', 0x048), (b'P', 0x049)],
-        aic: None,
-        dram_base: None,
-        lockdown: Some(LOCKDOWN),
-        operating_points: None,
-        memory_cache: None,
-        clusters: None,
-        aon_fuses: None,
-        cpu_start: Some(CPU_START_T6031),
-        caches: None,
-        wake_masks: None,
-        power_banks: &[],
-        dpe_reg: None,
-        bridge_fields: None,
+        ..M3_MAX
+    },
+    Soc {
+        chip_id: 0x6032,
+        name: "Apple M3 Ultra",
+        ..M3_MAX
     },
     Soc {
         chip_id: 0x8132,
@@ -459,7 +501,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -479,7 +521,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T6031),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -499,7 +541,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T6031),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -519,7 +561,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -539,7 +581,7 @@ const SOCS: [Soc; 14] = [
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: None,
+        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -660,9 +702,15 @@ pub struct Processor {
 /// have Aff2 1 (the `cpu@` `reg` of Linux `t8103.dtsi`, `t8112.dtsi`,
 /// `t600x-common.dtsi` and `t602x-common.dtsi` and `t8122.dtsi`, which XNU
 /// masks off in `ml_get_cpu_number`; inferred for the later SoCs), and U and
-/// MT are 0 for a multiprocessor without multithreading (inferred). A `reg`
-/// beyond Aff1's first eight clusters, as the multi-die boards use, has no
-/// public MPIDR mapping and refuses.
+/// MT are 0 for a multiprocessor without multithreading (inferred). On the
+/// two-die boards the second die's clusters are Aff1 8 and up (its `reg`
+/// 0x800 to 0xaff), with the same Aff2 for its P cores (Linux `t6002.dtsi` and
+/// `t6022.dtsi`: `cpu@800`, `cpu@10900`). A `reg` beyond Aff1's sixteen
+/// clusters has no public MPIDR mapping and refuses.
+/// The `reg` bits a `/cpus` node may set: Aff1's sixteen clusters, two dies
+/// of eight, and Aff0's cores.
+const MPIDR_CLUSTER_CORE: u32 = 0xfff;
+
 pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cpus, String> {
     let soc = SOCS
         .iter()
@@ -693,7 +741,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                         char::from(processor.cluster_type)
                     )
                 })?;
-            if processor.reg & !0x7ff != 0 {
+            if processor.reg & !MPIDR_CLUSTER_CORE != 0 {
                 return Err(format!(
                     "{} cpu reg {:#x} has no public MPIDR mapping",
                     soc.name, processor.reg
@@ -5389,7 +5437,14 @@ mod tests {
                 midr: 0x611f_0530,
                 mpidr: 0x8001_0103,
                 clock: None,
-                caches: None,
+                caches: Some(
+                    Caches::split_unified(
+                        cache(192 << 10, 6),
+                        cache(128 << 10, 8),
+                        cache(16 << 20, 16)
+                    )
+                    .unwrap()
+                ),
             }
         );
         // An M2 Pro's AIC2 has its event register at +0xc000.
@@ -5420,10 +5475,20 @@ mod tests {
     #[test]
     fn a_board_without_evidence_refuses() {
         let one = layout_of(&[(b'E', 0)]);
-        // M2 Ultra: two dies, no public part numbers.
+        // M2 Ultra: two M2 Max dies, the second die's P cores at Aff1 9.
+        let ultra = cpus(
+            0x6022,
+            "Apple M2 Ultra",
+            &layout_of(&[(b'E', 0x800), (b'P', 0x903)]),
+        )
+        .unwrap();
+        assert_eq!(ultra.processors[0].mpidr, 0x8000_0800);
+        assert_eq!(ultra.processors[1].mpidr, 0x8001_0903);
+        assert_eq!(ultra.processors[1].midr, 0x611f_0390);
+        // A SoC without a row.
         assert_eq!(
-            cpus(0x6022, "Apple M2 Ultra", &one),
-            Err("ApChipID 0x6022 (Apple M2 Ultra) has no public MIDR part".into())
+            cpus(0x6050, "Apple M5 Max", &one),
+            Err("ApChipID 0x6050 (Apple M5 Max) has no public MIDR part".into())
         );
         assert!(cpus(0x8112, "Apple M2 Pro", &one).is_err());
         assert!(cpus(0x8112, "Apple M2", &[]).is_err());
@@ -5432,7 +5497,7 @@ mod tests {
             cpus(0x8152, "Apple M6", &layout_of(&[(b'M', 0)])),
             Err("Apple M6 cluster type M has no public MIDR part".into())
         );
-        assert!(cpus(0x6031, "Apple M3 Max", &layout_of(&[(b'P', 0x800)])).is_err());
+        assert!(cpus(0x6031, "Apple M3 Max", &layout_of(&[(b'P', 0x1000)])).is_err());
     }
 
     /// A J473AP-shaped DeviceTree: two PEs, `/arm-io` child 0 at PA

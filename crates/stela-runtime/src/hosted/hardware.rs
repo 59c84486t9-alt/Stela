@@ -175,6 +175,19 @@ const BOARDS: &[Board] = &[
         ],
     },
     Board {
+        chip_id: 0x6002,
+        model: "Mac13,2",
+        target: "J375dAP",
+        clusters: &[
+            layout(EFFICIENCY, 2, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+            layout(EFFICIENCY, 2, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
         chip_id: 0x8112,
         model: "Mac14,3",
         target: "J473AP",
@@ -201,6 +214,19 @@ const BOARDS: &[Board] = &[
         ],
     },
     Board {
+        chip_id: 0x6022,
+        model: "Mac14,14",
+        target: "J475dAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
         chip_id: 0x8122,
         model: "Mac15,3",
         target: "J504AP",
@@ -217,6 +243,29 @@ const BOARDS: &[Board] = &[
         model: "Mac15,8",
         target: "J514cAP",
         clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
+        ],
+    },
+    Board {
+        chip_id: 0x6034,
+        model: "Mac15,10",
+        target: "J514mAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
+        ],
+    },
+    Board {
+        chip_id: 0x6032,
+        model: "Mac15,14",
+        target: "J575dAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
             layout(EFFICIENCY, 4, 4),
             layout(PERFORMANCE, 6, 16),
             layout(PERFORMANCE, 6, 16),
@@ -410,9 +459,8 @@ mod tests {
         assert!(!m2.memory_tagging);
     }
 
-    /// Every SoC variant with public level 1 caches has a hosted machine:
-    /// its family and subfamily are XNU's for its parts, and the Pro and
-    /// Max have a second P cluster.
+    /// Each SoC variant's family and subfamily are XNU's for its parts, and
+    /// the Pro and Max have a second P cluster.
     #[test]
     fn each_soc_variant_takes_its_own_family_and_clusters() {
         let cases = [
@@ -453,6 +501,13 @@ mod tests {
                 12,
             ),
             (0x8122, CPUFAMILY_ARM_IBIZA, CPUSUBFAMILY_ARM_HG, 8),
+            (0x6030, CPUFAMILY_ARM_LOBOS, CPUSUBFAMILY_ARM_HS, 12),
+            (0x6031, CPUFAMILY_ARM_PALMA, CPUSUBFAMILY_ARM_HC_HD, 16),
+            (0x8132, CPUFAMILY_ARM_DONAN, CPUSUBFAMILY_ARM_HG, 10),
+            (0x6040, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HS, 16),
+            (0x6041, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HC_HD, 16),
+            (0x8142, CPUFAMILY_ARM_HIDRA, CPUSUBFAMILY_ARM_HG, 10),
+            (0x8152, CPUFAMILY_ARM_KOMODO, CPUSUBFAMILY_ARM_HG, 12),
         ];
         for (chip_id, family, subfamily, cpus) in cases {
             let hardware = Hardware::of_soc(chip_id, 1 << 34).unwrap();
@@ -472,15 +527,35 @@ mod tests {
         );
     }
 
-    /// A SoC without public level 1 caches, or without a hosted board,
-    /// refuses by name rather than borrowing another chip's values.
+    /// A SoC without a `machine::soc` row has no hosted board and refuses
+    /// by name rather than borrowing another chip's values.
     #[test]
-    fn socs_without_evidence_refuse() {
-        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
-            let error = Hardware::of(chip, 1 << 34).unwrap_err().to_string();
-            assert!(error.contains("level 1 cache"), "{error}");
+    fn socs_without_a_row_refuse() {
+        let error = Hardware::of_soc(0x6050, 1 << 34).unwrap_err().to_string();
+        assert!(error.contains("no hosted board"), "{error}");
+    }
+
+    /// Every board has a hosted machine, an Ultra two dies of its Max.
+    #[test]
+    fn every_board_has_a_hosted_machine() {
+        for board in BOARDS {
+            let hardware = Hardware::of_soc(board.chip_id, 1 << 34).unwrap();
+            assert_eq!(hardware.cache_line, CACHE_LINE);
+            assert!(
+                hardware
+                    .clusters
+                    .iter()
+                    .all(|cluster| cluster.l1i_bytes != 0)
+            );
         }
-        assert!(Hardware::of_soc(0x6002, 1 << 34).is_err());
+        for (ultra, max) in [(0x6002, 0x6001), (0x6022, 0x6021), (0x6032, 0x6031)] {
+            let ultra = Hardware::of_soc(ultra, 1 << 34).unwrap();
+            let max = Hardware::of_soc(max, 1 << 34).unwrap();
+            assert_eq!(ultra.cpus(), 2 * max.cpus());
+            assert_eq!(ultra.cpu_family, max.cpu_family);
+            assert_eq!(&ultra.clusters[..3], &max.clusters[..]);
+            assert_eq!(&ultra.clusters[3..], &max.clusters[..]);
+        }
     }
 
     /// Every board's SoC has a row whose parts XNU's families cover, and
