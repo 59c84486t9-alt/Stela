@@ -80,16 +80,24 @@ impl fmt::Display for Failure {
 }
 
 fn errno_name(errno: u64) -> Option<&'static str> {
+    use crate::hosted::darwin::{
+        E2BIG, EACCES, EBADARCH, EBADEXEC, EBADF, EFAULT, EINVAL, ENOENT, ENOMEM, ENOSYS, ENOTSUP,
+        EPERM, ERANGE,
+    };
     Some(match errno {
-        1 => "EPERM",
-        2 => "ENOENT",
-        9 => "EBADF",
-        12 => "ENOMEM",
-        13 => "EACCES",
-        14 => "EFAULT",
-        22 => "EINVAL",
-        45 => "ENOTSUP",
-        78 => "ENOSYS",
+        EPERM => "EPERM",
+        ENOENT => "ENOENT",
+        E2BIG => "E2BIG",
+        EBADF => "EBADF",
+        ENOMEM => "ENOMEM",
+        EACCES => "EACCES",
+        EFAULT => "EFAULT",
+        EINVAL => "EINVAL",
+        ERANGE => "ERANGE",
+        ENOTSUP => "ENOTSUP",
+        ENOSYS => "ENOSYS",
+        EBADEXEC => "EBADEXEC",
+        EBADARCH => "EBADARCH",
         _ => return None,
     })
 }
@@ -405,7 +413,10 @@ mod tests {
 
     #[test]
     fn failures_name_what_the_guest_sees() {
-        assert_eq!(Failure::Errno(45).to_string(), "it fails with ENOTSUP");
+        assert_eq!(
+            Failure::Errno(crate::hosted::darwin::ENOTSUP).to_string(),
+            "it fails with ENOTSUP"
+        );
         assert_eq!(Failure::Errno(999).to_string(), "it fails with errno 999");
     }
 }

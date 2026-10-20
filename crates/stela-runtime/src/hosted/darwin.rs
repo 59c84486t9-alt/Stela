@@ -27,6 +27,7 @@ pub(crate) const EALREADY: u64 = 37;
 pub(crate) const ENOTSUP: u64 = 45;
 pub(crate) const ENOSYS: u64 = 78;
 pub(crate) const EBADEXEC: u64 = 85;
+pub(crate) const EBADARCH: u64 = 86;
 
 /// `MAXPATHLEN`.
 pub(crate) const MAX_PATH: usize = 1024;
