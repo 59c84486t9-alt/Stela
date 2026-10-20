@@ -150,6 +150,13 @@ pub struct Run {
     /// (`blocks.bin` beside it).
     #[arg(long, requires = "bundle")]
     restore_manifest: Option<PathBuf>,
+    /// Have the restore host check the payload's recorded hashes only as
+    /// the restore reads each block, instead of reading every member whole
+    /// before StartRestore: adds the mount's `--verify-on-read`. A USB
+    /// image carries it in its install entry (`stela setup
+    /// --verify-on-read`).
+    #[arg(long, requires = "bundle")]
+    verify_on_read: bool,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
@@ -424,6 +431,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     if arguments.guest_network {
         options.push_str(" --guest-network");
+    }
+    if arguments.verify_on_read {
+        options.push_str(" --verify-on-read");
     }
     if let Some(url) = &arguments.network_check {
         ensure!(
@@ -843,6 +853,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "preboot_disk": arguments.preboot_disk,
         "directory_volume": arguments.directory_volume,
         "restore_manifest": arguments.restore_manifest,
+        "verify_on_read": arguments.verify_on_read,
         "storage_disks": attached
             .iter()
             .map(|(path, serial)| json!({ "path": path, "serial": serial }))

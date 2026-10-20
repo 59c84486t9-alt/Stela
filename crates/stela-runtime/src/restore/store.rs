@@ -4,12 +4,16 @@
 //! BuildManifest's component digest is a different (Image4) digest and remains
 //! attached to the selected identity; it is never replaced with the ZIP hash.
 //!
-//! A manifest that carries precomputed hashes (`payload::BlockHashes`, which
+//! A manifest that carries recorded hashes (`payload::BlockHashes`, which
 //! the host that wrote it computed while hashing every member) needs no
-//! scan: [`Store::adopt_block_hashes`] takes the block hashes and SHA-384s
-//! from the file the manifest names by SHA-256, each read checks its blocks
-//! against them, and a member read from its first byte to its last is also
-//! checked against its SHA-384.
+//! scan to build them: [`Store::adopt_block_hashes`] takes the block hashes
+//! and SHA-384s from the file the manifest names by SHA-256. Every read
+//! checks its blocks against them, and a member read from its first byte to
+//! its last is also checked against its SHA-384. [`Verify`] says when the
+//! whole of each member is checked against those records: by default every
+//! member, before StartRestore ([`Store::prepare`]); with
+//! [`Verify::OnRead`] only the blocks the restore reads, as it reads them.
+//! Both use the one block check, and a mismatch refuses the member by name.
 use super::{
     Error, Result,
     plist::{self, Limits, Value},
@@ -61,12 +65,22 @@ impl Identity {
         }
     }
 }
+/// When recorded hashes are checked against the whole of each member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Verify {
+    /// Every member, read whole by [`Store::prepare`] before StartRestore.
+    #[default]
+    Full,
+    /// Only the blocks each request reads, as it reads them.
+    OnRead,
+}
 struct Verified {
     entry: Entry,
     blocks: Vec<[u8; 32]>,
     sha384: [u8; 48],
-    /// For precomputed hashes: the SHA-384 of the member's bytes read in
-    /// order from its start, and how far they reach.
+    /// For recorded hashes not yet checked against the whole member: the
+    /// SHA-384 of its bytes read in order from its start, and how far they
+    /// reach.
     whole: Option<(u64, Sha384)>,
 }
 pub struct Store<R> {
@@ -79,6 +93,7 @@ pub struct Store<R> {
     current: usize,
     verified: BTreeMap<String, Verified>,
     block_count: usize,
+    verify: Verify,
 }
 fn payload(e: impl core::fmt::Display) -> Error {
     Error::Payload(e.to_string())
@@ -170,6 +185,7 @@ impl<R: ReadAt> Store<R> {
             current,
             verified: BTreeMap::new(),
             block_count: 0,
+            verify: Verify::Full,
         })
     }
     pub fn manifest(&self) -> &PayloadManifest {
@@ -192,8 +208,10 @@ impl<R: ReadAt> Store<R> {
                 "member absent from immutable payload inventory",
             ))
     }
-    /// Admission/preflight work, before connecting restored: scan all staged
-    /// inventory members once, then requests only read and verify touched blocks.
+    /// Admission/preflight work, before StartRestore: every inventory member
+    /// is read whole and checked, against its recorded hashes or, without
+    /// them, its SHA-256 (building its block hashes). With
+    /// [`Verify::OnRead`] recorded members are left to the reads.
     pub fn prepare(&mut self) -> Result<()> {
         let paths: Vec<_> = self
             .manifest
@@ -202,13 +220,24 @@ impl<R: ReadAt> Store<R> {
             .map(|m| m.name.clone())
             .collect();
         for path in paths {
-            self.verify(&path)?;
+            match self.verified.get(&path) {
+                Some(recorded) if recorded.whole.is_some() && self.verify == Verify::Full => {
+                    self.check_whole(&path)?
+                }
+                Some(_) => {}
+                None => self.verify(&path)?,
+            }
         }
         Ok(())
     }
-    /// Take the manifest's precomputed block hashes and SHA-384s from
-    /// `file`, the contents of the file it names, instead of scanning every
-    /// member in [`prepare`](Self::prepare).
+    /// When [`prepare`](Self::prepare) checks members with recorded hashes;
+    /// [`Verify::Full`] unless set.
+    pub fn set_verify(&mut self, verify: Verify) {
+        self.verify = verify;
+    }
+    /// Take the manifest's recorded block hashes and SHA-384s from `file`,
+    /// the contents of the file it names, in place of scanning to build
+    /// them; members are checked against them as [`Verify`] says.
     pub fn adopt_block_hashes(&mut self, file: &[u8]) -> Result<()> {
         let blocks = self
             .manifest
@@ -241,10 +270,7 @@ impl<R: ReadAt> Store<R> {
             hex::decode_to_slice(member.sha384.as_deref().unwrap_or(""), &mut sha384)
                 .map_err(|_| Error::Invalid("member SHA-384"))?;
             let n = member.bytes.div_ceil(BLOCK_BYTES as u64) as usize;
-            let blocks = file[at * 32..(at + n) * 32]
-                .chunks_exact(32)
-                .map(|hash| hash.try_into().expect("32-byte chunks"))
-                .collect();
+            let blocks = file[at * 32..(at + n) * 32].as_chunks::<32>().0.to_vec();
             at += n;
             adopted.insert(
                 member.name.clone(),
@@ -260,11 +286,49 @@ impl<R: ReadAt> Store<R> {
         self.verified = adopted;
         Ok(())
     }
+    /// Whether every member is checked as [`Verify`] requires before
+    /// StartRestore.
     pub fn prepared(&self) -> bool {
-        self.manifest
-            .members
-            .iter()
-            .all(|m| self.verified.contains_key(&m.name))
+        self.manifest.members.iter().all(|m| {
+            self.verified
+                .get(&m.name)
+                .is_some_and(|v| v.whole.is_none() || self.verify == Verify::OnRead)
+        })
+    }
+    /// One block of a member with recorded or scanned hashes, checked
+    /// against its hash.
+    fn block(&mut self, path: &str, block: u64) -> Result<Vec<u8>> {
+        let size = self.member_len(path)?;
+        let verified = &self.verified[path];
+        let start = block * BLOCK_BYTES as u64;
+        let mut bytes = vec![0; (size - start).min(BLOCK_BYTES as u64) as usize];
+        self.archive
+            .read_member_at(&mut self.reader, &verified.entry, start, &mut bytes)
+            .map_err(payload)?;
+        let actual: [u8; 32] = Sha256::digest(&bytes).into();
+        if actual != verified.blocks[block as usize] {
+            return Err(Error::Payload(format!(
+                "{path}: source changed at block {block}"
+            )));
+        }
+        Ok(bytes)
+    }
+    /// Read a member with recorded hashes whole, checking each block and
+    /// then its SHA-384.
+    fn check_whole(&mut self, path: &str) -> Result<()> {
+        let blocks = self.verified[path].blocks.len() as u64;
+        let mut hash = Sha384::new();
+        for block in 0..blocks {
+            hash.update(self.block(path, block)?);
+        }
+        let verified = self.verified.get_mut(path).expect("recorded");
+        if <[u8; 48]>::from(hash.finalize()) != verified.sha384 {
+            return Err(Error::Payload(format!(
+                "{path}: SHA-384 differs from the payload manifest"
+            )));
+        }
+        verified.whole = None;
+        Ok(())
     }
     pub fn digest384(&self, path: &str) -> Result<&[u8; 48]> {
         self.verified
@@ -348,29 +412,16 @@ impl<R: ReadAt> Store<R> {
             return Err(Error::Invalid("payload read range"));
         }
         self.verify(path)?;
-        let verified = &self.verified[path];
         let mut result = Vec::with_capacity(len);
         let mut at = offset;
         while result.len() < len {
             let block = at / BLOCK_BYTES as u64;
-            let start = block * BLOCK_BYTES as u64;
-            let size = (size - start).min(BLOCK_BYTES as u64) as usize;
-            let mut bytes = vec![0; size];
-            self.archive
-                .read_member_at(&mut self.reader, &verified.entry, start, &mut bytes)
-                .map_err(payload)?;
-            let actual: [u8; 32] = Sha256::digest(&bytes).into();
-            if actual != verified.blocks[block as usize] {
-                return Err(Error::Payload(format!(
-                    "{path}: source changed at block {block}"
-                )));
-            }
-            let skip = (at - start) as usize;
-            let n = (size - skip).min(len - result.len());
+            let bytes = self.block(path, block)?;
+            let skip = (at - block * BLOCK_BYTES as u64) as usize;
+            let n = (bytes.len() - skip).min(len - result.len());
             result.extend_from_slice(&bytes[skip..skip + n]);
             at += n as u64;
         }
-        let member_bytes = self.member_len(path)?;
         let verified = self.verified.get_mut(path).expect("verified above");
         if let Some((reached, hash)) = &mut verified.whole
             && *reached == offset
@@ -378,7 +429,7 @@ impl<R: ReadAt> Store<R> {
         {
             hash.update(&result);
             *reached += result.len() as u64;
-            if *reached == member_bytes {
+            if *reached == size {
                 let actual: [u8; 48] = hash.clone().finalize().into();
                 if actual != verified.sha384 {
                     return Err(Error::Payload(format!(
@@ -528,16 +579,49 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn precomputed_hashes_replace_the_scan_and_still_refuse_changed_bytes() {
+    fn recorded_hashes_check_every_member_before_the_restore_by_default() {
+        let data: Vec<u8> = (0..BLOCK_BYTES * 2 + 5).map(|i| (i * 7) as u8).collect();
+        let mut s = fixture(&data, true);
+        let file = precomputed(&mut s, &data);
+        s.adopt_block_hashes(&file).unwrap();
+        assert!(!s.prepared(), "the whole member is still to be checked");
+        s.prepare().unwrap();
+        assert!(s.prepared());
+        assert_eq!(s.read_at("os.dmg", 5, 10).unwrap(), data[5..15]);
+
+        // The same records refuse a changed block or SHA-384 by name.
+        let mut s = fixture(&data, true);
+        let mut file = precomputed(&mut s, &data);
+        file[64] ^= 1;
+        s.manifest.block_hashes.as_mut().unwrap().sha256 = crate::sha256(&file);
+        s.adopt_block_hashes(&file).unwrap();
+        let error = s.prepare().unwrap_err().to_string();
+        assert!(
+            error.contains("os.dmg: source changed at block 2"),
+            "{error}"
+        );
+        let mut s = fixture(&data, false);
+        let file = precomputed(&mut s, &data);
+        s.manifest.members[0].sha384 = Some("0".repeat(96));
+        s.adopt_block_hashes(&file).unwrap();
+        let error = s.prepare().unwrap_err().to_string();
+        assert!(error.contains("os.dmg: SHA-384 differs"), "{error}");
+        assert!(!s.prepared());
+    }
+
+    #[test]
+    fn verify_on_read_checks_recorded_hashes_as_reads_reach_them() {
         let data: Vec<u8> = (0..BLOCK_BYTES * 2 + 5).map(|i| (i * 3) as u8).collect();
         let mut s = fixture(&data, false);
         let file = precomputed(&mut s, &data);
         assert!(!s.prepared());
         let error = s.adopt_block_hashes(&file[1..]).unwrap_err().to_string();
         assert!(error.contains("blocks.bin"), "{error}");
+        s.set_verify(Verify::OnRead);
         s.adopt_block_hashes(&file).unwrap();
-        // Nothing is left to scan.
+        // Nothing is left to read before the restore.
         assert!(s.prepared());
+        s.prepare().unwrap();
         assert_eq!(s.digest384("os.dmg").unwrap(), &Sha384::digest(&data)[..]);
         assert_eq!(
             s.read_at("os.dmg", 10, 20).unwrap(),
@@ -546,7 +630,10 @@ pub(crate) mod tests {
         );
         // Read in order from the start, the whole member meets its SHA-384.
         let mut whole = s.read_at("os.dmg", 0, BLOCK_BYTES).unwrap();
-        whole.extend(s.read_at("os.dmg", BLOCK_BYTES as u64, data.len() - BLOCK_BYTES).unwrap());
+        whole.extend(
+            s.read_at("os.dmg", BLOCK_BYTES as u64, data.len() - BLOCK_BYTES)
+                .unwrap(),
+        );
         assert_eq!(whole, data);
 
         // A block hash that differs refuses that block by number.
@@ -554,18 +641,24 @@ pub(crate) mod tests {
         let mut file = precomputed(&mut s, &data);
         file[32] ^= 1;
         s.manifest.block_hashes.as_mut().unwrap().sha256 = crate::sha256(&file);
+        s.set_verify(Verify::OnRead);
         s.adopt_block_hashes(&file).unwrap();
+        s.prepare().unwrap();
         s.read_at("os.dmg", 0, 10).unwrap();
         let error = s
             .read_at("os.dmg", BLOCK_BYTES as u64, 1)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("os.dmg: source changed at block 1"), "{error}");
+        assert!(
+            error.contains("os.dmg: source changed at block 1"),
+            "{error}"
+        );
 
         // A SHA-384 that differs refuses the member once it is read whole.
         let mut s = fixture(&data, false);
         let file = precomputed(&mut s, &data);
         s.manifest.members[0].sha384 = Some("0".repeat(96));
+        s.set_verify(Verify::OnRead);
         s.adopt_block_hashes(&file).unwrap();
         s.read_at("os.dmg", 0, BLOCK_BYTES).unwrap();
         let error = s

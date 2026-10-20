@@ -21,7 +21,13 @@ use stela_runtime::{
     machine::apple::{AppleDevices, MuxStream, UsbId},
     payload::{PayloadManifest, ReadAt},
     pc::block::BlockDevice,
-    restore::{answers::Answers, driver::Driver, route::Route, source::Extent, store::Store},
+    restore::{
+        answers::Answers,
+        driver::Driver,
+        route::Route,
+        source::Extent,
+        store::{Store, Verify},
+    },
 };
 
 /// Which restore the host runs, and how it reports.
@@ -107,13 +113,16 @@ pub struct Experiment {
 }
 impl Experiment {
     /// The study runs `identity`; the install the inventory's one Erase
-    /// identity.
+    /// identity. `verify` says when the payload's recorded hashes are
+    /// checked: every member before StartRestore, or each block as it is
+    /// read, which needs the hashes recorded.
     pub fn new(
         source: Source,
         usb: UsbId,
         handoff: &Handoff,
         mode: Mode,
         identity: Option<usize>,
+        verify: Verify,
         signer: Option<stela_runtime::restore::tss::Signer>,
     ) -> Result<Self, String> {
         let manifest = inventory(handoff)?;
@@ -121,9 +130,14 @@ impl Experiment {
             Some(identity) => identity,
             None => manifest.erase_identity().map_err(|e| format!("{e}"))? as usize,
         };
-        let precomputed = manifest.block_hashes.is_some();
+        let recorded = manifest.block_hashes.is_some();
+        if verify == Verify::OnRead && !recorded {
+            return Err(String::from(
+                "--verify-on-read needs the payload's recorded block hashes, and this restore inventory names none",
+            ));
+        }
         output::arguments(format_args!(
-            "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={}\n",
+            "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={} verify={}\n",
             match mode {
                 Mode::Install => "INSTALL",
                 Mode::Study => "RESTORE STUDY UNQUALIFIED",
@@ -133,11 +147,16 @@ impl Experiment {
             manifest.source.build_manifest_sha256,
             identity,
             manifest.source.bytes,
-            if precomputed { "precomputed" } else { "scan" }
+            if recorded { "recorded" } else { "scan" },
+            match verify {
+                Verify::Full => "full",
+                Verify::OnRead => "on-read",
+            }
         ));
         let mut store = Store::open(source, manifest, identity).map_err(|e| format!("{e}"))?;
-        if precomputed {
-            // The manifest names its block hashes; nothing is scanned first.
+        store.set_verify(verify);
+        if recorded {
+            // Both modes check reads against the manifest's recorded hashes.
             let blocks = inventory_file(handoff, RESTORE_BLOCKS_FILE)
                 .ok_or("the restore inventory's block hashes were not loaded")?;
             store

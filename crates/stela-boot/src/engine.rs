@@ -49,11 +49,16 @@ use stela_runtime::machine::{
     system::Register,
 };
 use stela_runtime::pc::{gpt::Guid, storage::Target};
+use stela_runtime::restore::store::Verify;
 
 /// The user-facing restore: `--install MANIFEST` names the install medium's
 /// `payload.json`, `--install-source GUID` the FAT32 partition holding it.
 pub const INSTALL_OPTION: &str = "--install";
 const INSTALL_SOURCE_OPTION: &str = "--install-source";
+/// The restore host checks the payload's recorded hashes only as the
+/// restore reads each block, instead of reading every member whole before
+/// StartRestore (`restore::store::Verify::OnRead`).
+pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -108,6 +113,9 @@ struct Options {
     install: Option<String>,
     /// The install medium's partition, by its unique GUID alone.
     install_source: Option<Guid>,
+    /// Check the payload's recorded hashes as blocks are read
+    /// (`--verify-on-read`), not every member before StartRestore.
+    verify_on_read: bool,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -226,6 +234,7 @@ impl Options {
             restore_identity: None,
             install: None,
             install_source: None,
+            verify_on_read: false,
             survey: false,
             idle_skip: false,
             input: false,
@@ -303,6 +312,10 @@ impl Options {
             }
             if name == "--survey" {
                 options.survey = true;
+                continue;
+            }
+            if name == VERIFY_ON_READ_OPTION {
+                options.verify_on_read = true;
                 continue;
             }
             if name == "--idle-skip" {
@@ -457,6 +470,9 @@ impl Options {
             return Err(
                 "--install requires --bundle, --storage and --nor; refuses --restore-study, --preboot and --survey",
             );
+        }
+        if options.verify_on_read && options.install.is_none() && !options.restore {
+            return Err("--verify-on-read applies to --install and --restore-study");
         }
         if options.install.is_some() && !options.tss {
             return Err(
@@ -1296,10 +1312,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 &options.usb_storage,
             )
         }
-            .unwrap_or_else(|error| {
-                output::arguments(format_args!("host storage refusal: {error}\n"));
-                output::fatal("host storage could not be opened")
-            });
+        .unwrap_or_else(|error| {
+            output::arguments(format_args!("host storage refusal: {error}\n"));
+            output::fatal("host storage could not be opened")
+        });
         // The guest's adapter is its own: the mount's client keeps the
         // first one.
         let guest_network = options.guest_network.then(|| {
@@ -1352,7 +1368,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         ),
         (None, Some(partition)) => Some(restore::inventory(handoff).and_then(|manifest| {
             let path = options.install.as_deref().unwrap_or_default();
-            let directory = path.rsplit_once('\\').map_or("", |(directory, _)| directory);
+            let directory = path
+                .rsplit_once('\\')
+                .map_or("", |(directory, _)| directory);
             let hashes = restore::inventory_file(handoff, crate::system::INSTALL_PIECES_FILE)
                 .ok_or("the install medium's piece hashes were not loaded")?;
             install::open(partition, &manifest, directory, hashes).map(restore::Source::new)
@@ -1621,6 +1639,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             handoff,
             mode,
             options.restore_identity,
+            match options.verify_on_read {
+                true => Verify::OnRead,
+                false => Verify::Full,
+            },
             signer,
         )
         .unwrap_or_else(|error| {
