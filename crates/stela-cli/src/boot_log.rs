@@ -1,8 +1,10 @@
 //! `stela boot-log`: the persistent boot log `stela.efi` keeps on a
 //! machine-state partition (`stela_runtime::pc::boot_log`), read from a
 //! whole-disk image by the partition's GUID or from a raw partition at a
-//! byte offset. `stela setup --boot-log` reads the same region of a setup's
-//! install.
+//! byte offset. `--in-target` reads it from the tail of an Apple region
+//! that also holds the machine state (`pc::machine_state`), as a setup with
+//! `--target` alone lays it out. `stela setup --boot-log` reads the same
+//! region of a setup's install.
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use std::{
@@ -15,6 +17,7 @@ use stela_runtime::pc::{
     block::{BlockDevice, BlockError, Identity, Transport},
     boot_log::{self, Log},
     gpt::{self, Guid},
+    machine_state,
 };
 
 #[derive(Args)]
@@ -28,6 +31,11 @@ pub(crate) struct BootLog {
     /// partition).
     #[arg(long, value_parser = crate::args::parse_address)]
     offset: Option<u64>,
+    /// The partition is an Apple region whose last bytes hold the machine
+    /// state (`--nor` naming the `--storage` partition); with `--offset`,
+    /// FILE ends where the partition does.
+    #[arg(long)]
+    in_target: bool,
 }
 
 impl BootLog {
@@ -45,7 +53,7 @@ impl BootLog {
     fn load(&self) -> Result<Log> {
         let mut file = File::open(&self.file)
             .with_context(|| format!("cannot open {}", self.file.display()))?;
-        let offset = match (&self.partition, self.offset) {
+        let (offset, end) = match (&self.partition, self.offset) {
             (Some(guid), _) => {
                 let guid: Guid = guid.parse().map_err(anyhow::Error::msg)?;
                 let (table, block) = table(&self.file)?;
@@ -62,14 +70,15 @@ impl BootLog {
                     })?;
                 let bytes = partition.blocks() * block;
                 ensure!(
-                    bytes >= boot_log::PARTITION_BYTES,
+                    self.in_target || bytes >= boot_log::PARTITION_BYTES,
                     "partition {guid} holds {bytes:#x} bytes; the boot log needs {:#x}, so \
                      stela.efi boots it without one",
                     boot_log::PARTITION_BYTES
                 );
-                partition.first_lba * block
+                let start = partition.first_lba * block;
+                (start, start + bytes)
             }
-            (None, Some(offset)) => offset,
+            (None, Some(offset)) => (offset, file.seek(SeekFrom::End(0))?),
             (None, None) => {
                 let found = table(&self.file)
                     .map(|(table, block)| format!("; its GPT has:\n{}", listing(&table, block)))
@@ -79,6 +88,18 @@ impl BootLog {
                      --offset BYTES for a raw partition (0 when FILE is one){found}"
                 )
             }
+        };
+        // The machine state starts at the partition's start, or in its tail.
+        let offset = if self.in_target {
+            let layout = machine_state::split(end.saturating_sub(offset)).map_err(|error| {
+                anyhow::anyhow!(
+                    "{} at {offset:#x} holds no machine state in its last bytes: {error}",
+                    self.file.display()
+                )
+            })?;
+            offset + layout.state_offset()
+        } else {
+            offset
         };
         let start = offset + boot_log::OFFSET;
         let mut region = vec![0; boot_log::LOG_BYTES as usize];
@@ -280,6 +301,7 @@ pub(crate) mod tests {
             file: file.into(),
             partition: partition.map(Into::into),
             offset,
+            in_target: false,
         }
     }
 
@@ -314,6 +336,50 @@ pub(crate) mod tests {
         // A region that holds no log is refused by name.
         let error = format!("{:#}", command(&path, None, Some(0)).load().unwrap_err());
         assert!(error.contains("the log region is blank"), "{error}");
+    }
+
+    #[test]
+    fn the_log_is_read_from_an_apple_region_s_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("region.img");
+        // A 12 MiB partition keeps its machine state from 4 MiB.
+        let partition_bytes = 12 * 1024 * 1024;
+        image(&path, partition_bytes);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let tail = machine_state::split(partition_bytes)
+            .unwrap()
+            .state_offset();
+        assert_eq!(tail, 4 * 1024 * 1024);
+        let at = (2048 * 512 + tail + boot_log::OFFSET) as usize;
+        bytes[at..at + boot_log::LOG_BYTES as usize].copy_from_slice(&region(&["in the tail\n"]));
+        std::fs::write(&path, &bytes).unwrap();
+        let mut tail_log = command(&path, Some(GUID), None);
+        tail_log.in_target = true;
+        let log = tail_log.load().unwrap();
+        assert_eq!(
+            String::from_utf8(log.stream).unwrap(),
+            "=== STELA BOOT 1 ===\nin the tail\n"
+        );
+        // A raw partition ends with the file.
+        let raw = dir.path().join("raw.img");
+        std::fs::write(
+            &raw,
+            &bytes[2048 * 512..2048 * 512 + partition_bytes as usize],
+        )
+        .unwrap();
+        let mut raw_log = command(&raw, None, Some(0));
+        raw_log.in_target = true;
+        assert_eq!(raw_log.load().unwrap().boots, 1);
+        // A partition too small for a tail is named.
+        let small = dir.path().join("small.img");
+        image(&small, 2 * 1024 * 1024);
+        let mut small_log = command(&small, Some(GUID), None);
+        small_log.in_target = true;
+        let error = format!("{:#}", small_log.load().unwrap_err());
+        assert!(
+            error.contains("no machine state in its last bytes"),
+            "{error}"
+        );
     }
 
     #[test]
