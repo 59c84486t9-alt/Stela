@@ -361,7 +361,7 @@ mod tests {
     const CORE_MASK_1: u64 = 0xd0_1514;
 
     fn t8112() -> &'static Gpu {
-        generation::by_compatible("gpu,t8112").unwrap()
+        generation::by_chip(0x8112).unwrap()
     }
 
     fn read(sgx: &mut Sgx, offset: u64) -> Result<u64, MmioError> {

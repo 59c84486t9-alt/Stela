@@ -7,7 +7,8 @@
 //! Known (`AGXG14G`, kernel file offsets):
 //! - The root is one page (`AGXArmFirmware::allocFirmwareData` 0x1b5bdc0).
 //!   `AGXArmFirmware::initFirmwareData` (0x1b5b35c..0x1b5b4f0) writes
-//!   [`MAGIC`] at +0x00, the firmware VA of the page at
+//!   the family's magic at +0x00 ([`super::generation::Family::
+//!   initdata_magic`]), the firmware VA of the page at
 //!   `AGXArmFirmware+0x1660` at +0x08, the 64-bit firmware VAs cached at
 //!   `AGXFirmware+0x830`, +0x358, +0x848, +0x928, +0x930 and +0x368 at +0x18,
 //!   +0x20, +0xa8, +0xb0, +0xb8 and +0xc0, the words 0 and 1 at +0x28 and
@@ -36,8 +37,6 @@
 use super::firmware::Pipe;
 use super::ring::{self, Descriptor, Shared};
 
-/// The root's first word.
-pub const MAGIC: u64 = 0x0c8a_6342_8392_04c8;
 /// Bytes of the root the kext writes (through +0xc0's pointer).
 pub const ROOT_BYTES: usize = 0xc8;
 /// The words at +0x28 and +0x2c.
@@ -81,11 +80,12 @@ pub struct Root {
 }
 
 impl Root {
-    /// Parse the root's bytes, refusing a root that is not the kext's.
-    pub fn parse(bytes: &[u8; ROOT_BYTES]) -> Result<Self, &'static str> {
+    /// Parse the root's bytes, refusing a root that is not the kext's: its
+    /// first word must be the family's `magic`.
+    pub fn parse(bytes: &[u8; ROOT_BYTES], magic: u64) -> Result<Self, &'static str> {
         let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
         let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        if u64_at(0) != MAGIC {
+        if u64_at(0) != magic {
             return Err("GFX initdata root lacks its magic");
         }
         if (u32_at(0x28), u32_at(0x2c)) != ROOT_CONSTANTS {
@@ -116,11 +116,11 @@ impl Root {
         Ok(root)
     }
 
-    /// Read the root at `va`.
-    pub fn read(memory: &mut dyn Shared, va: u64) -> Result<Self, &'static str> {
+    /// Read the root at `va`, whose first word must be `magic`.
+    pub fn read(memory: &mut dyn Shared, va: u64, magic: u64) -> Result<Self, &'static str> {
         let mut bytes = [0; ROOT_BYTES];
         memory.read(va, &mut bytes)?;
-        Self::parse(&bytes)
+        Self::parse(&bytes, magic)
     }
 
     /// The device-control ring.
@@ -159,6 +159,7 @@ impl Root {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    pub(crate) use crate::platform::apple::agx::generation::MAGIC_G13_G14G as MAGIC;
     use crate::platform::apple::agx::ring::tests::Flat;
 
     pub(crate) const BASE: u64 = 0xffff_ffa0_0000_0000;
@@ -183,7 +184,7 @@ pub(crate) mod tests {
     fn the_root_names_its_objects_by_the_kext_fields() {
         let mut memory = Flat::new(BASE, 0x10000);
         kext_root(&mut memory);
-        let root = Root::read(&mut memory, ROOT).unwrap();
+        let root = Root::read(&mut memory, ROOT, MAGIC).unwrap();
         assert_eq!(root.rings, RINGS);
         assert_eq!(root.page_1660, BASE + 0x2000);
         assert_eq!(root.object_358, BASE + 0x3000);
@@ -196,14 +197,14 @@ pub(crate) mod tests {
         let mut memory = Flat::new(BASE, 0x10000);
         kext_root(&mut memory);
         memory.put_u64(ROOT + 0x28, 0);
-        assert!(Root::read(&mut memory, ROOT).is_err());
+        assert!(Root::read(&mut memory, ROOT, MAGIC).is_err());
         kext_root(&mut memory);
         memory.put_u64(ROOT + 0xb0, 0);
-        assert!(Root::read(&mut memory, ROOT).is_err());
+        assert!(Root::read(&mut memory, ROOT, MAGIC).is_err());
         kext_root(&mut memory);
         memory.put_u64(ROOT, 0);
         assert_eq!(
-            Root::read(&mut memory, ROOT),
+            Root::read(&mut memory, ROOT, MAGIC),
             Err("GFX initdata root lacks its magic")
         );
     }
@@ -212,7 +213,7 @@ pub(crate) mod tests {
     fn the_ring_directory_places_work_device_control_and_events() {
         let mut memory = Flat::new(BASE, 0x10000);
         kext_root(&mut memory);
-        let root = Root::read(&mut memory, ROOT).unwrap();
+        let root = Root::read(&mut memory, ROOT, MAGIC).unwrap();
         // 3D, submission index 2.
         memory.put_descriptor(RINGS + 0x20 + 2 * 0x60 + 0x20, BASE + 0x8000, BASE + 0x9000);
         memory.put_descriptor(RINGS + 0x1a0, BASE + 0x8100, BASE + 0xa000);

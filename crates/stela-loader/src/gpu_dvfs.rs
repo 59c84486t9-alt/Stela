@@ -33,6 +33,14 @@
 //! (the same DeviceTree notes they "must be filled in by the bootloader"), so
 //! both tables state voltage 0, as `dvfs` does for the CPU clusters, rather
 //! than an invented one. A SoC without public operating points refuses.
+//!
+//! T8103 and T600x take the same tables: the 26A434 `AGXG13X`
+//! `AGXAccelerator::start` aligns instruction for instruction with G14G's
+//! over the property reads above (only object offsets and string addresses
+//! differ). One table serves every cluster: Inferred, as the Asahi tables
+//! repeat each state's voltage per cluster, and the kext accepts 1..=16
+//! tables; iBoot for a multi-cluster board (j314/j316) would confirm the
+//! count it writes.
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
 use anyhow::{Result, bail};
@@ -52,9 +60,36 @@ const T8112_HZ: [u32; 9] = [
     1_398_000_000,
 ];
 
+/// T8103's GPU operating points in Hz (Asahi `t8103.dtsi` `gpu_opp`, the
+/// same pinned commit).
+const T8103_HZ: [u32; 7] = [
+    0,
+    396_000_000,
+    528_000_000,
+    720_000_000,
+    924_000_000,
+    1_128_000_000,
+    1_278_000_000,
+];
+
+/// The M1 Pro, Max and Ultra GPU operating points in Hz (Asahi
+/// `t600x-common.dtsi` `gpu_opp`, the same pinned commit), shared by every
+/// cluster.
+const T600X_HZ: [u32; 7] = [
+    0,
+    388_800_000,
+    486_000_000,
+    648_000_000,
+    777_600_000,
+    972_000_000,
+    1_296_000_000,
+];
+
 /// The GPU's operating points, lowest first, on the SoC with `chip_id`.
 fn operating_points(chip_id: u32) -> Option<&'static [u32]> {
     match chip_id {
+        0x8103 => Some(&T8103_HZ),
+        0x6000..=0x6002 => Some(&T600X_HZ),
         0x8112 => Some(&T8112_HZ),
         _ => None,
     }
@@ -162,6 +197,28 @@ mod tests {
         }
         // A tree that already has the hand-off is left alone.
         assert_eq!(publish(&mut tree, 0x8112).unwrap(), None);
+    }
+
+    #[test]
+    fn the_m1_gpus_take_their_seven_operating_points() {
+        for (chip_id, top) in [
+            (0x8103, 1_278_000_000),
+            (0x6000, 1_296_000_000),
+            (0x6001, 1_296_000_000),
+            (0x6002, 1_296_000_000),
+        ] {
+            let mut tree = shipped();
+            let tables = publish(&mut tree, chip_id).unwrap().unwrap();
+            assert_eq!(
+                tables,
+                Tables {
+                    states: 7,
+                    tables: 1
+                }
+            );
+            let table = tree.property(SGX, "perf-states").unwrap().value.clone();
+            assert_eq!((u32_at(&table, 12), u32_at(&table, 13)), (top, 0));
+        }
     }
 
     #[test]

@@ -1000,7 +1000,8 @@ impl AppleDevices {
         placement: &super::soc::GfxController,
         observe: bool,
     ) -> Result<(), String> {
-        let coprocessor = GfxCoprocessor::with_observe(observe).map_err(String::from)?;
+        let coprocessor =
+            GfxCoprocessor::with_observe(placement.gpu.family, observe).map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -2710,7 +2711,7 @@ mod tests {
         const SGX: u64 = 0x2_0400_0000;
         const RAM: u64 = 0x8_0000_0000;
         let placement = GfxController {
-            gpu: generation::by_compatible("gpu,t8112").unwrap(),
+            gpu: generation::by_chip(0x8112).unwrap(),
             wrapper: (WRAPPER, 0x6c000),
             interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
             sgx: vec![(SGX, 0x400_0000, 0)],
@@ -2755,7 +2756,7 @@ mod tests {
             table::encode_pte(RAM + 0x1_0000, &flags),
         );
         // The kext's root: magic, the +0x28 words and its object pointers.
-        ram.put_u64(RAM + 0x1_0000, firmware::INITDATA_MAGIC);
+        ram.put_u64(RAM + 0x1_0000, generation::MAGIC_G13_G14G);
         ram.put_u64(RAM + 0x1_0028, 1 << 32);
         for field in [0x08, 0x18, 0x20, 0xa8, 0xb0, 0xb8, 0xc0] {
             ram.put_u64(RAM + 0x1_0000 + field, va + 0x1000);

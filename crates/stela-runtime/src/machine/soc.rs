@@ -2243,10 +2243,10 @@ fn pmp_controller(
 pub const GFX_MAPPER: &str = "iommu-mapper,gfx";
 
 /// Whether `compatible` names an `sgx` GPU whose whole interface is modeled
-/// (`agx::generation`, every SoC 26A434 supports; only admitted ones stay
-/// visible).
+/// on every SoC that carries it (`agx::generation`, every SoC 26A434
+/// supports; only admitted ones stay visible).
 pub fn admitted_gpu(compatible: &str) -> bool {
-    agx::generation::by_compatible(compatible).is_some_and(|gpu| gpu.admitted().is_ok())
+    agx::generation::compatible_admitted(compatible)
 }
 
 /// The AGX GPU's DT placement: the `gfx-asc` wrapper (`reg[0]`) and its four
@@ -2295,21 +2295,25 @@ fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>
 fn gfx_controller(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
+    chip_id: u32,
 ) -> Result<Option<GfxController>, String> {
     let asc = io
         .child("gfx-asc")
         .filter(|n| n.compatible(ASC) && n.property("role") == Some(b"GFX\0".as_slice()));
-    let sgx = io.child("sgx").and_then(|n| {
+    // Several SoCs share one `sgx` compatible; the chip names the GPU.
+    let sgx = io.child("sgx").filter(|n| {
         agx::generation::GPUS
             .iter()
-            .find(|gpu| n.compatible(gpu.compatible))
-            .map(|gpu| (n, gpu))
+            .any(|gpu| n.compatible(gpu.compatible))
     });
-    let (asc, (sgx, gpu)) = match (asc, sgx) {
+    let (asc, sgx) = match (asc, sgx) {
         (None, None) => return Ok(None),
         (Some(asc), Some(sgx)) => (asc, sgx),
         _ => return Err("the GFX coprocessor and the sgx GPU must be visible together".into()),
     };
+    let gpu = agx::generation::by_chip(chip_id)
+        .filter(|gpu| sgx.compatible(gpu.compatible))
+        .ok_or_else(|| format!("sgx is not the GPU of ApChipID {chip_id:#x}"))?;
     gpu.admitted()
         .map_err(|reason| format!("{} is not modeled: {reason}", gpu.compatible))?;
     let nub = asc
@@ -4479,7 +4483,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let ans = ans_controller(&io, &translate, iboot_security)?;
     let smc = smc_controller(&root, &io, &translate)?;
     let pmp = pmp_controller(&io, &translate)?;
-    let gfx = gfx_controller(&io, &translate)?;
+    let gfx = gfx_controller(&io, &translate, chip_id)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
     let power_states = power_states(&io, &translate, chip_id)?;
@@ -5092,10 +5096,12 @@ mod tests {
             model_children(ASC, gfx_role).len(),
             usize::from(GPU_ADMITTED)
         );
-        assert_eq!(models("gpu,t8112", |_| None), GPU_ADMITTED);
+        for gpu in ["gpu,t8112", "gpu,t8103", "gpu,t6000"] {
+            assert_eq!(models(gpu, |_| None), GPU_ADMITTED);
+        }
         // A GPU whose family the firmware model does not implement stays
         // hidden.
-        assert!(!models("gpu,t8103", |_| None));
+        assert!(!models("gpu,t6020", |_| None));
         assert!(!models("gpu,t6041", |_| None));
         assert_eq!(models(GFX_MAPPER, |_| None), GPU_ADMITTED);
         assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
@@ -5160,16 +5166,17 @@ mod tests {
             encode(&[("name", &z("device-tree"))], &[io])
         };
         let translate = |offset| Some(0x2_0000_0000 + offset);
-        let placed = |asc: bool, sgx: bool| {
+        let placed_on = |asc: bool, sgx: bool, chip_id: u32| {
             let bytes = tree(asc, sgx);
             let root = Node::root(&bytes).unwrap();
             let io = root.child("arm-io").unwrap();
-            gfx_controller(&io, &translate)
+            gfx_controller(&io, &translate, chip_id)
         };
+        let placed = |asc: bool, sgx: bool| placed_on(asc, sgx, 0x8112);
         assert_eq!(
             placed(true, true).unwrap(),
             Some(GfxController {
-                gpu: agx::generation::by_compatible("gpu,t8112").unwrap(),
+                gpu: agx::generation::by_chip(0x8112).unwrap(),
                 wrapper: (0x2_0640_0000, 0x6c000),
                 interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
                 sgx: vec![(0x2_0400_0000, 0x400_0000, 0)],
@@ -5180,6 +5187,8 @@ mod tests {
         assert_eq!(placed(false, false).unwrap(), None);
         assert!(placed(true, false).is_err());
         assert!(placed(false, true).is_err());
+        // The `sgx` must be the board chip's own GPU.
+        assert!(placed_on(true, true, 0x8103).is_err());
     }
 
     /// The census `sgx` layouts: T8112's `reg[1]` inside `reg[0]`, the

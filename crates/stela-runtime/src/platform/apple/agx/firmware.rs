@@ -48,6 +48,7 @@ use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
 use super::channel;
 use super::event;
+use super::generation::Family;
 use super::initdata::{self, Root};
 use super::observe::{self, Journal};
 use super::ring::{self, Kind, Shared};
@@ -87,8 +88,6 @@ const DOORBELL_FWCTL: u64 = 4;
 /// The firmware-control doorbell's low byte that names the device-control
 /// ring (index 4, kind 1).
 const FWCTL_DEVICE_CONTROL: u64 = 0x11;
-/// The initdata root's first word.
-pub const INITDATA_MAGIC: u64 = initdata::MAGIC;
 /// The device-control power-transition notice (`AGXAccelerator::
 /// powerStateDidChangeTo`/`WillChangeTo` 0x1af8508/0x1af861c).
 const DEVICE_CONTROL_POWER: u32 = 0x28;
@@ -204,8 +203,10 @@ enum Job {
 }
 
 /// The GFX firmware protocol state shared by its two endpoints.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct State {
+    /// The AGX family whose kext and firmware fix the interface.
+    family: &'static Family,
     /// The firmware VA of the initdata root, once the kext sends it, as the
     /// 44-bit field of the message.
     pub initdata_va: Option<u64>,
@@ -232,11 +233,22 @@ pub struct State {
 }
 
 impl State {
-    /// A fresh protocol state, observing work commands when `observe`.
-    fn new(observe: bool) -> Self {
+    /// A fresh protocol state for `family`'s interface, observing work
+    /// commands when `observe`.
+    fn new(family: &'static Family, observe: bool) -> Self {
         State {
+            family,
+            initdata_va: None,
+            initdata_checked: false,
+            root: None,
+            work: Vec::new(),
+            fwctl: 0,
+            power: Vec::new(),
+            device_control: BTreeMap::new(),
+            commands: 0,
+            events: 0,
+            jobs: VecDeque::new(),
             observe: observe.then(Journal::default),
-            ..Self::default()
         }
     }
 
@@ -302,7 +314,11 @@ impl State {
     /// Read the root, then run the queued doorbells in order.
     fn dma(&mut self, memory: &mut dyn Shared, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
         if let Some(va) = self.initdata_va.filter(|_| !self.initdata_checked) {
-            let root = Root::read(memory, uat::canonical_firmware_va(va))?;
+            let magic = self
+                .family
+                .initdata_magic
+                .ok_or("the GPU family's initdata root magic is not recovered")?;
+            let root = Root::read(memory, uat::canonical_firmware_va(va), magic)?;
             self.root = Some(root);
             self.initdata_checked = true;
         }
@@ -430,6 +446,12 @@ impl State {
                             pipe as u8
                         )),
                     }
+                }
+                if command.kind == channel::Kind::DashboardSignal && !self.family.dashboard_signals
+                {
+                    return Err(
+                        "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler",
+                    );
                 }
                 for event in signal::execute(memory, &command)? {
                     event::post(memory, root, event)?;
@@ -690,13 +712,10 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
 pub struct Protocol(Rc<RefCell<State>>);
 
 impl Protocol {
-    pub fn new() -> Self {
-        Protocol::with_observe(false)
-    }
-
-    /// A protocol whose firmware records work commands (`--agx-observe`).
-    pub fn with_observe(observe: bool) -> Self {
-        Protocol(Rc::new(RefCell::new(State::new(observe))))
+    /// The protocol of `family`'s firmware, recording work commands when
+    /// `observe` (`--agx-observe`).
+    pub fn with_observe(family: &'static Family, observe: bool) -> Self {
+        Protocol(Rc::new(RefCell::new(State::new(family, observe))))
     }
 
     pub fn with<R>(&self, f: impl FnOnce(&State) -> R) -> R {
@@ -709,12 +728,6 @@ impl Protocol {
     }
 }
 
-impl Default for Protocol {
-    fn default() -> Self {
-        Protocol::new()
-    }
-}
-
 /// The GFX coprocessor: RTKit with the GFX endpoints and the firmware's DMA.
 pub struct Coprocessor {
     rtkit: RtKit,
@@ -722,16 +735,11 @@ pub struct Coprocessor {
 }
 
 impl Coprocessor {
-    /// A GFX coprocessor whose RTKit manages its power ordinarily
-    /// (`power-managed`).
-    pub fn new() -> Result<Self, &'static str> {
-        Self::with_observe(false)
-    }
-
-    /// A GFX coprocessor that records each work command (`--agx-observe`)
+    /// `family`'s GFX coprocessor, whose RTKit manages its power ordinarily
+    /// (`power-managed`), recording each work command (`--agx-observe`)
     /// when `observe`, still refusing it by name.
-    pub fn with_observe(observe: bool) -> Result<Self, &'static str> {
-        let (endpoints, protocol) = endpoints(observe);
+    pub fn with_observe(family: &'static Family, observe: bool) -> Result<Self, &'static str> {
+        let (endpoints, protocol) = endpoints(family, observe);
         let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
         Ok(Self { rtkit, protocol })
     }
@@ -786,8 +794,8 @@ impl Endpoint for Doorbell {
 
 /// The GFX coprocessor's application endpoints and a handle to their shared
 /// state. Pass the endpoints to [`super::super::rtkit::RtKit::new`].
-pub fn endpoints(observe: bool) -> (Vec<NumberedEndpoint>, Protocol) {
-    let protocol = Protocol::with_observe(observe);
+pub fn endpoints(family: &'static Family, observe: bool) -> (Vec<NumberedEndpoint>, Protocol) {
+    let protocol = Protocol::with_observe(family, observe);
     let endpoints: Vec<NumberedEndpoint> = alloc::vec![
         (
             MESSAGE_ENDPOINT,
@@ -801,6 +809,7 @@ pub fn endpoints(observe: bool) -> (Vec<NumberedEndpoint>, Protocol) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::apple::agx::generation::{G13G, G14G, MAGIC_G13_G14G};
     use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
     use crate::platform::apple::agx::ring::tests::Flat;
     use crate::platform::apple::agx::ring::{READ, WRITE};
@@ -819,6 +828,15 @@ mod tests {
 
     /// A checked root whose device-control ring holds `entries`.
     fn with_device_control(entries: &[[u8; 0x40]]) -> (State, Flat) {
+        with_device_control_on(&G14G, entries).unwrap()
+    }
+
+    /// `family`'s firmware, having read the root, with `entries` on its
+    /// device-control ring.
+    fn with_device_control_on(
+        family: &'static Family,
+        entries: &[[u8; 0x40]],
+    ) -> Result<(State, Flat), &'static str> {
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
         memory.put_descriptor(RINGS + 0x1a0, CONTROL_STATE, CONTROL_ENTRIES);
@@ -826,12 +844,12 @@ mod tests {
             memory.put(CONTROL_ENTRIES + n as u64 * 0x40, entry);
         }
         memory.put_u32(CONTROL_STATE + WRITE, entries.len() as u32);
-        let mut state = State::default();
+        let mut state = State::new(family, false);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
-        state.dma(&mut memory, &mut Vec::new()).unwrap();
-        (state, memory)
+        state.dma(&mut memory, &mut Vec::new())?;
+        Ok((state, memory))
     }
 
     fn power(word: u32) -> [u8; 0x40] {
@@ -843,16 +861,16 @@ mod tests {
 
     #[test]
     fn the_message_endpoint_captures_the_initdata_pointer_once() {
-        let mut state = State::default();
+        let mut state = State::new(&G14G, false);
         let va = 0x4_1234_5000;
         assert!(state.init((MSG_INIT << TYPE_SHIFT) | va).is_ok());
         assert_eq!(state.initdata_va, Some(va));
         // A second initdata, or any other message type, is refused.
         assert!(state.init((MSG_INIT << TYPE_SHIFT) | va).is_err());
-        let mut fresh = State::default();
+        let mut fresh = State::new(&G14G, false);
         assert!(fresh.init(0x42 << TYPE_SHIFT).is_err());
         // A VA above 44 bits is truncated to the field the kext sends.
-        let mut wide = State::default();
+        let mut wide = State::new(&G14G, false);
         wide.init((MSG_INIT << TYPE_SHIFT) | INIT_VA_BITS | (1 << 44))
             .unwrap();
         assert_eq!(wide.initdata_va, Some(INIT_VA_BITS));
@@ -860,7 +878,7 @@ mod tests {
 
     #[test]
     fn doorbells_take_the_kexts_forms_and_queue_firmware_work() {
-        let (endpoints, protocol) = endpoints(false);
+        let (endpoints, protocol) = endpoints(&G14G, false);
         let mut by_number = endpoints
             .into_iter()
             .collect::<alloc::collections::BTreeMap<_, _>>();
@@ -881,7 +899,7 @@ mod tests {
 
     #[test]
     fn malformed_or_unmodeled_doorbells_refuse_explicitly() {
-        let mut state = State::default();
+        let mut state = State::new(&G14G, false);
         // Missing the 0x80 flag.
         assert!(state.doorbell(DOORBELL_WORK << TYPE_SHIFT).is_err());
         // An unmodeled type.
@@ -1268,6 +1286,34 @@ mod tests {
     }
 
     #[test]
+    fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
+        use crate::platform::apple::agx::generation::{G14X, G16X};
+        // The kext root carries the G13G/G13X/G14G magic.
+        assert_eq!(
+            with_device_control_on(&G14X, &[]).err(),
+            Some("GFX initdata root lacks its magic")
+        );
+        assert_eq!(
+            with_device_control_on(&G16X, &[]).err(),
+            Some("the GPU family's initdata root magic is not recovered")
+        );
+        let (mut state, mut memory) = with_device_control_on(&G13G, &[]).unwrap();
+        assert!(state.root.is_some());
+        let (channel_state, command) = (BASE + 0xd000, BASE + 0x10000);
+        let (ring_state, _) = one_3d_entry(&mut memory, channel_state, command);
+        memory.put_u32(command, 0xc);
+        state.doorbell(work(1, 0)).unwrap();
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err(
+                "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler"
+            )
+        );
+        assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
+        assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(0));
+    }
+
+    #[test]
     fn a_shared_event_signal_completes_and_posts_its_events() {
         use crate::platform::apple::agx::event::Event;
         use crate::platform::apple::agx::event::tests::{EVENT_STATE, entry, event_ring};
@@ -1324,7 +1370,7 @@ mod tests {
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
         memory.put_descriptor(RINGS + 0x1a0, CONTROL_STATE, CONTROL_ENTRIES);
-        let mut state = State::new(true);
+        let mut state = State::new(&G14G, true);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
@@ -1360,14 +1406,14 @@ mod tests {
         // Draining twice yields nothing the second time.
         assert!(state.observations().is_empty());
         // Off by default: no records without observe.
-        let mut quiet = State::default();
+        let mut quiet = State::new(&G14G, false);
         assert!(quiet.observations().is_empty());
     }
 
     #[test]
     fn the_root_must_be_the_kexts_before_any_doorbell_runs() {
         let mut memory = Flat::new(BASE, 0x20000);
-        let mut state = State::default();
+        let mut state = State::new(&G14G, false);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
             .unwrap();
@@ -1376,7 +1422,7 @@ mod tests {
             Err("GFX initdata root lacks its magic")
         );
         assert!(state.dma_pending());
-        let mut early = State::default();
+        let mut early = State::new(&G14G, false);
         early
             .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
             .unwrap();
@@ -1420,7 +1466,7 @@ mod tests {
         let mut table = Uat::default();
         table.configure(base).unwrap();
         let mut latch = InterruptLatch::new();
-        let mut state = State::default();
+        let mut state = State::new(&G14G, false);
         state
             .init((MSG_INIT << TYPE_SHIFT) | (va & INIT_VA_BITS))
             .unwrap();
@@ -1450,7 +1496,7 @@ mod tests {
 
     /// Write a kext-shaped root at physical `at` whose objects follow `va`.
     pub(crate) fn put_root(ram: &mut crate::platform::dma::tests::Ram, at: u64, va: u64) {
-        ram.put_u64(at, INITDATA_MAGIC);
+        ram.put_u64(at, MAGIC_G13_G14G);
         ram.put_u64(at + 0x28, 1 << 32);
         for (n, field) in [0x08, 0x18, 0x20, 0xa8, 0xb0, 0xb8, 0xc0]
             .into_iter()

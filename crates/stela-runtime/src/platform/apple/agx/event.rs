@@ -106,7 +106,7 @@ pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<(), &'
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
+    use crate::platform::apple::agx::initdata::tests::{BASE, MAGIC, RINGS, ROOT, kext_root};
     use crate::platform::apple::agx::ring::tests::Flat;
 
     pub(crate) const EVENT_STATE: u64 = BASE + 0x14000;
@@ -154,7 +154,7 @@ pub(crate) mod tests {
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
         event_ring(&mut memory);
-        let root = Root::read(&mut memory, ROOT).unwrap();
+        let root = Root::read(&mut memory, ROOT, MAGIC).unwrap();
         memory.put_u32(EVENT_STATE + READ, 0);
         memory.put_u32(EVENT_STATE + WRITE, 0xfe);
         post(&mut memory, &root, Event::Flag(1)).unwrap();
