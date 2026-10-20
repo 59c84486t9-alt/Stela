@@ -65,8 +65,11 @@ pub struct SepOs {
     pending: Vec<Frame>,
     /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
     /// traffic. Those services are then advertised and their requests logged
-    /// and refused by name, never answered.
+    /// and never answered.
     observe: Option<Journal>,
+    /// Strict mode ([`Self::set_strict`]): an observed request stops the
+    /// boot once recorded. Otherwise it stays unanswered and the boot goes on.
+    strict: bool,
 }
 
 /// The SEP page that scales discovery capacities: 16 KiB, since
@@ -87,14 +90,24 @@ impl SepOs {
             xart: None,
             pending: Vec::new(),
             observe: None,
+            strict: true,
         }
+    }
+
+    /// Strict mode (the default) refuses each observed request by name once
+    /// it is recorded. Graceful mode leaves it unanswered, so the kernel
+    /// client takes its own timeout path and the run records the requests
+    /// that follow: a diagnostic exception to the error-reply rule
+    /// (docs/design/runtime.md "Unsupported operations"), never a reply.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
     }
 
     /// The SEP's native services: the xART pair, advertised once OS active
     /// is reported, over the anti-replay store `store`. With `observe`, the
     /// `sks`/`pnon`/`scrd` services are also advertised so their kernel
-    /// clients bind; their requests are recorded and refused by name, never
-    /// answered (a diagnostic mode: it qualifies nothing beyond its log).
+    /// clients bind; their requests are recorded and never answered (a
+    /// diagnostic mode: it qualifies nothing beyond its log).
     pub fn with_services(
         mut self,
         store: Nonces<Box<dyn Backend>>,
@@ -129,7 +142,8 @@ impl SepOs {
     }
 
     /// Answer the queued application-service requests through `port`. A
-    /// refusal or DMA fault stops before that request's reply.
+    /// refusal or DMA fault stops before that request's reply; an observed
+    /// request is recorded and gets none.
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
@@ -139,9 +153,12 @@ impl SepOs {
         for frame in core::mem::take(&mut self.pending) {
             if let Some(name) = observe::name(frame.service) {
                 // Record the request (frame plus a bounded prefix of its OOL
-                // input) and refuse by name; observation never answers.
+                // input); observation never answers.
                 self.record(name, frame, &mut *port);
-                return Err(observe::refusal(frame.service));
+                if self.strict {
+                    return Err(observe::refusal(frame.service));
+                }
+                continue;
             }
             let xart = self
                 .xart
@@ -751,6 +768,36 @@ mod tests {
         );
         // Draining empties the journal.
         assert!(os.observations().is_empty());
+    }
+
+    #[test]
+    fn graceful_observation_records_each_request_and_answers_none() {
+        use super::observe;
+        let mut os = SepOs::new(None).with_services(store(), true).unwrap();
+        os.set_strict(false);
+        reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        let request = |service, tag| Frame {
+            service,
+            tag,
+            opcode: 0,
+            parameter: 0,
+            data: 8,
+        };
+        for frame in [
+            request(observe::KEYSTORE_ID, 1),
+            request(observe::CREDENTIALS_ID, 2),
+        ] {
+            assert!(reply(&mut os, frame).unwrap().is_empty());
+        }
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
+        // Both are recorded in one DMA step, and neither gets a reply.
+        assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+        assert!(!os.dma_pending());
+        let lines = os.observations();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("sks tag=1 op=0"), "{}", lines[0]);
+        assert!(lines[0].ends_with("input=unregistered"), "{}", lines[0]);
+        assert!(lines[1].starts_with("scrd tag=2 op=0"), "{}", lines[1]);
     }
 
     #[test]

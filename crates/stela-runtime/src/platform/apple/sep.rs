@@ -104,9 +104,14 @@ impl Sep {
         self.mailbox.dma_pending()
     }
 
-    /// Strict mode for the SEP's unimplemented requests ([`Asc::set_strict`]).
+    /// Strict mode for the SEP's unimplemented requests ([`Asc::set_strict`])
+    /// and its observed ones ([`firmware::SepFirmware::set_strict`]).
     pub fn set_strict(&mut self, strict: bool) {
         self.mailbox.set_strict(strict);
+        self.mailbox
+            .firmware_mut::<firmware::SepFirmware>()
+            .expect("SEP owns its firmware engine")
+            .set_strict(strict);
     }
 
     /// The requests answered with an error reply for the first time since

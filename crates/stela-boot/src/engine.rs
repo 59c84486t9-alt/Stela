@@ -1837,6 +1837,7 @@ fn run(
         };
         let stop = machine.run(limit);
         unmodeled_report(machine);
+        sep_observation_report(machine);
         for hit in machine.take_trace_hits() {
             output::arguments(format_args!(
                 "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
@@ -2281,6 +2282,14 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
     }
 }
 
+/// The SEP's `--sep-observe` journal, printed as it fills: a graceful run
+/// keeps going past each observed request and may end at the host timeout.
+fn sep_observation_report(machine: &mut Machine<BareHost, AppleDevices>) {
+    for line in machine.devices.sep_observations() {
+        output::arguments(format_args!("SEP OBSERVE {line}\n"));
+    }
+}
+
 /// Each unsupported operation answered outside strict mode for the first
 /// time since the last report: machine effects and device accesses, then
 /// coprocessor requests answered with their firmware's error reply.
@@ -2521,9 +2530,7 @@ fn finish(
         ));
     }
     general_registers(cpu);
-    for line in machine.devices.sep_observations() {
-        output::arguments(format_args!("SEP OBSERVE {line}\n"));
-    }
+    sep_observation_report(machine);
     for line in machine.devices.agx_observations() {
         output::arguments(format_args!("{line}\n"));
     }

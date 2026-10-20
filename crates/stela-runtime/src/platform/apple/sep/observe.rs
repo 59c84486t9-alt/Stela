@@ -6,10 +6,13 @@
 //! to Stela's own SEP model, not by recovering sepOS. With observation on,
 //! the SEP also advertises these services, so their kernel clients bind and
 //! register OOL buffers. Each request is then recorded in the SEP's
-//! [`Journal`] (the frame and a bounded prefix of its OOL input) and refused
-//! by name, with no reply: the boot stops at that request with the evidence
-//! in the log. Observation never answers a request; it is a diagnostic mode,
-//! off by default, and a run with it on qualifies nothing beyond what it logs.
+//! [`Journal`] (the frame and a bounded prefix of its OOL input) and gets no
+//! reply. In strict mode it is also refused by name, so the boot stops at it;
+//! in graceful mode the kernel client times out on its own and the run goes
+//! on to record the requests that follow (docs/design/runtime.md
+//! "Unsupported operations" names this diagnostic exception). Observation
+//! never answers a request; it is off by default, and a run with it on
+//! qualifies nothing beyond what it logs.
 //!
 //! The capacities are Stela's broad diagnostic choice, one to 32 SEP pages
 //! each way, not recovered limits: a client whose registration falls
@@ -23,8 +26,8 @@ pub const BOOT_POLICY_ID: u8 = 0x13;
 pub const CREDENTIALS_ID: u8 = 0x14;
 const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
 /// The OOL input prefix each recorded request logs: one 4 KiB page, enough
-/// for a whole LocalPolicy-sized request, since every observed request
-/// stops the boot and so costs a full restore run.
+/// for a whole LocalPolicy-sized request, since each observation costs a
+/// full boot run.
 pub const INPUT_PREFIX: usize = 4096;
 /// Lines the journal keeps before the host drains it; older ones are counted.
 const JOURNAL_LINES: usize = 512;

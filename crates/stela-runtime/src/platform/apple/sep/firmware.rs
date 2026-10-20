@@ -68,6 +68,9 @@ pub struct SepFirmware {
     ecid: u64,
     /// Observe (`--sep-observe`): advertise and log `sks`/`pnon`/`scrd`.
     observe: bool,
+    /// Strict mode, which sepOS applies to observed requests
+    /// ([`SepOs::set_strict`]).
+    strict: bool,
     /// Where sepOS finds its state, until it activates.
     state: Option<state::Location>,
 }
@@ -87,7 +90,17 @@ impl SepFirmware {
             security,
             ecid,
             observe,
+            strict: true,
             state: Some(state),
+        }
+    }
+
+    /// Strict mode for sepOS's observed requests ([`SepOs::set_strict`]),
+    /// now and once it activates.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+        if let Phase::Active(os) = &mut self.phase {
+            os.set_strict(strict);
         }
     }
 
@@ -234,9 +247,9 @@ impl Firmware for SepFirmware {
         );
         let location = self.state.take().ok_or("sepOS activated twice")?;
         let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
-        self.phase = Phase::Active(Box::new(
-            SepOs::new(self.security).with_services(store, self.observe)?,
-        ));
+        let mut os = SepOs::new(self.security).with_services(store, self.observe)?;
+        os.set_strict(self.strict);
+        self.phase = Phase::Active(Box::new(os));
         Ok(())
     }
 }
@@ -316,13 +329,19 @@ mod tests {
         )?;
         assert!(outbox.is_empty(), "opcode 6 does not ack until DMA accepts");
         assert!(fw.dma_pending());
+        dma(fw, &mut ram, fault)
+    }
+
+    /// Run the firmware's queued DMA over `ram` through an identity DART
+    /// (faulting when `fault`), returning the messages it produced.
+    fn dma(fw: &mut SepFirmware, ram: &mut Ram, fault: bool) -> Result<Vec<Message>, &'static str> {
         let mut iommu = Identity { fault };
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let mut port = Port {
             iommu: &mut iommu,
             stream: 0,
-            memory: &mut ram,
+            memory: ram,
             access: &mut access,
         };
         let mut produced = Vec::new();
@@ -368,6 +387,56 @@ mod tests {
         .unwrap();
         assert!(fw.booted());
         assert_eq!(Frame::from_mailbox(outbox[0]).unwrap().opcode, 21);
+    }
+
+    #[test]
+    fn strict_mode_reaches_sepos_before_and_after_it_activates() {
+        // An observed sks request, queued then run through the DMA step.
+        let observed = |fw: &mut SepFirmware| {
+            let mut outbox = Vec::new();
+            let request = Frame {
+                service: observe::KEYSTORE_ID,
+                tag: 1,
+                opcode: 0,
+                parameter: 0,
+                data: 0,
+            };
+            fw.receive(request.mailbox(), &mut outbox).unwrap();
+            assert!(outbox.is_empty());
+            dma(fw, &mut Ram::new(0x4000, 0x4000), false)
+        };
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            true,
+            state::Location::Volatile,
+        );
+        booted(&mut fw);
+        fw.set_strict(false);
+        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        deliver(&mut fw, &image, false).unwrap();
+        let mut outbox = Vec::new();
+        fw.receive(
+            Frame {
+                service: message::BOOT,
+                tag: 0,
+                opcode: 0x20,
+                parameter: 0,
+                data: 0x5_0000,
+            }
+            .mailbox(),
+            &mut outbox,
+        )
+        .unwrap();
+        // Graceful from before activation: recorded, unanswered, no stop.
+        assert_eq!(observed(&mut fw), Ok(Vec::new()));
+        fw.set_strict(true);
+        assert_eq!(
+            observed(&mut fw),
+            Err(observe::refusal(observe::KEYSTORE_ID))
+        );
+        assert_eq!(fw.drain_observations().len(), 2);
     }
 
     #[test]
