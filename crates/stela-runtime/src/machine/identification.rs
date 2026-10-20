@@ -1248,6 +1248,20 @@ pub const TABLE: &[Row] = &[
         None,
         engine(false, "PSRV is not modeled"),
     ),
+    // Unnamed by m1n1: the 26A434 kernel enables the static branch that
+    // adds ACTLR EnAFP and EnPRSV to a translated thread's EL0 return from
+    // it (0xfffffe000c551258).
+    row(
+        AIDR_EL1,
+        23,
+        1,
+        0,
+        None,
+        engine(
+            false,
+            "the alternate floating-point mode it selects is not modeled",
+        ),
+    ),
 ];
 
 /// The chip has `feature`: in its Apple clang feature set, or implied by it.

@@ -97,20 +97,25 @@ const ACTLR_EN_TSO: u64 = 1 << 1;
 /// thread's flag while the `icdsb` boot argument is nonzero.
 const ACTLR_ICDSB: u64 = 1 << 9;
 
-/// The ACTLR_ELx bits that refuse by name, from XNU `proc_reg.h`, with what
-/// the public descriptions and the 26A434 Rosetta runtime establish of each
+/// The ACTLR_ELx bits that refuse by name, from XNU `proc_reg.h`: controls
+/// of Apple features this machine's AIDR_EL1 does not advertise
 /// (docs/design/system.md, "IMPLEMENTATION DEFINED architectural
-/// registers").
+/// registers"). The 26A434 kernel sets them only in translated x86-64
+/// threads, and it executes an x86-64 image only when AIDR_EL1 advertises
+/// TSO and APFLG, so no component sets them here.
 const ACTLR_REFUSED: [(u64, &str); 3] = [
     (
         1 << 4,
-        "ACTLR EnAPFLG: Rosetta flag extension semantics not recovered",
+        "ACTLR EnAPFLG: the Rosetta flag extension, which AIDR_EL1 here does not advertise (APFLG, bit 19)",
     ),
     (
         1 << 5,
-        "ACTLR EnAFP: Apple alternate floating-point mode semantics not recovered",
+        "ACTLR EnAFP: Apple's alternate floating-point mode, which AIDR_EL1 here does not advertise (bit 23)",
     ),
-    (1 << 6, "ACTLR EnPRSV: semantics not recovered"),
+    (
+        1 << 6,
+        "ACTLR EnPRSV: a mode AIDR_EL1 here does not advertise (PSRV, bit 20)",
+    ),
 ];
 
 /// Why a write that sets these bits of a register whose whole contents Arm
@@ -134,10 +139,13 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 ///   consumer, the 26A434 Rosetta runtime, invalidates the code it writes
 ///   with the full DSB ISH, IC IVAU, DSB ISH, ISB sequence (`runtime`
 ///   `__text+0x318`), so no consumer needs a further effect (inference).
-///   XNU sets EnTSO with bit 4 (EnAPFLG), or with bits 5 and 6 (EnAFP,
-///   EnPRSV) as its patched alternatives choose, before returning to EL0 in
-///   a Rosetta thread; each refuses by name ([`ACTLR_REFUSED`]), and no
-///   component sets any other bit, so they stop.
+///   XNU sets EnTSO with bit 4 (EnAPFLG), and with bits 5 and 6 (EnAFP,
+///   EnPRSV) when AIDR_EL1 bit 23 enables that static branch, before
+///   returning to EL0 in a translated x86-64 thread. It creates such a
+///   thread only after exec's Rosetta check passes, which needs AIDR_EL1's
+///   TSO and APFLG bits, and this machine advertises neither: each refuses
+///   by name ([`ACTLR_REFUSED`]), and no component sets any other bit, so
+///   they stop.
 /// - AMAIR_ELx refine MAIR_ELx's attributes, and Arm lets that refinement
 ///   have no effect. Stela's memory model gives memory attributes none
 ///   beyond what MAIR_ELx selects (one PE at a time on coherent host RAM),
@@ -3499,20 +3507,12 @@ mod tests {
         assert_eq!(machine.cpu.read(Register::AMAIR_EL1), u64::MAX);
         assert_eq!(read(&mut machine, AMAIR_EL1), 0x0123_4567_89ab_cdef);
         assert_eq!(read(&mut machine, AMAIR_EL12), u64::MAX);
-        // EnAPFLG, EnAFP and EnPRSV refuse by name, as does HACR_EL2's guest
-        // timer mask.
+        // EnAPFLG, EnAFP and EnPRSV, controls of features AIDR_EL1 does not
+        // advertise, refuse by name, as does HACR_EL2's guest timer mask.
         for (encoding, value, reason) in [
-            (
-                ACTLR_EL1,
-                EN_TSO | EN_APFLG,
-                "ACTLR EnAPFLG: Rosetta flag extension semantics not recovered",
-            ),
-            (
-                ACTLR_EL12,
-                EN_TSO | EN_AFP | EN_PRSV,
-                "ACTLR EnAFP: Apple alternate floating-point mode semantics not recovered",
-            ),
-            (ACTLR_EL1, EN_PRSV, "ACTLR EnPRSV: semantics not recovered"),
+            (ACTLR_EL1, EN_TSO | EN_APFLG, "ACTLR EnAPFLG"),
+            (ACTLR_EL12, EN_TSO | EN_AFP | EN_PRSV, "ACTLR EnAFP"),
+            (ACTLR_EL1, EN_PRSV, "ACTLR EnPRSV"),
             (
                 HACR_EL2,
                 1 << 20,
