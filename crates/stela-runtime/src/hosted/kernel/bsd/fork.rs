@@ -129,6 +129,8 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             kernel.worker = None;
             // The child's working directory is the thread's (`fdt_fork`).
             kernel.thread_directory = false;
+            // A new thread carries no scheduler marks.
+            kernel.shared_resource_heavy = false;
         } else {
             drop((
                 runtime,

@@ -82,6 +82,9 @@ const CTL_WORKQ_ALLOW_SIGMASK: u64 = 0x4000;
 const PARALLELISM_COUNT_LOGICAL: u64 = 0x1;
 const PARALLELISM_REALTIME: u64 = 0x2;
 const PARALLELISM_CLUSTER_SHARED_RESOURCE: u64 = 0x4;
+/// `_PTHREAD_DISPATCH_APPLY_ATTR_CLUSTER_SHARED_RSRC_SET` and `_CLEAR`.
+const APPLY_ATTR_SHARED_RESOURCE_SET: u64 = 0x1;
+const APPLY_ATTR_SHARED_RESOURCE_CLEAR: u64 = 0x2;
 /// `workq_set_self_flags`.
 pub(super) const SET_SELF_QOS_FLAG: u64 = 0x01;
 pub(super) const SET_SELF_VOUCHER_FLAG: u64 = 0x02;
@@ -543,10 +546,9 @@ fn control(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             kernel.process.workqueue.allow_signals(mask);
             Outcome::value(0)
         }
-        CTL_DISPATCH_APPLY_ATTR => bail!(
-            "bsdthread_ctl BSDTHREAD_CTL_DISPATCH_APPLY_ATTR({first:#x}, {second:#x}): cluster \
-             shared-resource policies are not modeled"
-        ),
+        CTL_DISPATCH_APPLY_ATTR => {
+            dispatch_apply_attribute(&mut kernel.shared_resource_heavy, first)
+        }
         CTL_SET_QOS
         | CTL_QOS_DISPATCH_ASYNCHRONOUS_OVERRIDE_ADD
         | CTL_QOS_DISPATCH_ASYNCHRONOUS_OVERRIDE_RESET => Outcome::Error(ENOTSUP),
@@ -572,10 +574,9 @@ fn max_parallelism(kernel: &Kernel, qos: u64, flags: u64) -> Result<Outcome> {
         if qos != 0 {
             return Ok(Outcome::Error(EINVAL));
         }
-        bail!(
-            "bsdthread_ctl QOS_MAX_PARALLELISM for realtime threads: the M2's realtime spill \
-             order is not modeled"
-        );
+        return Ok(Outcome::value(u64::from(realtime_parallelism(
+            &kernel.process.hardware,
+        ))));
     }
     let qos = qos as u8;
     if qos == priority::THREAD_QOS_UNSPECIFIED || qos >= priority::THREAD_QOS_LAST {
@@ -585,6 +586,47 @@ fn max_parallelism(kernel: &Kernel, qos: u64, flags: u64) -> Result<Outcome> {
         &kernel.process.hardware,
         qos,
     ))))
+}
+
+/// The CPUs realtime threads may run on at once
+/// (`pset_realtime_max_parallelism` of a performance cluster): its own
+/// CPUs and those of every cluster its realtime spill order reaches. The
+/// default order `rt_init_completed` sets spills among clusters of one
+/// core type only, so it is every performance core; without performance
+/// clusters the scheduler's one node is every core.
+pub(super) fn realtime_parallelism(hardware: &crate::hosted::hardware::Hardware) -> u32 {
+    let performance: u32 = hardware
+        .clusters
+        .iter()
+        .filter(|cluster| cluster.performance)
+        .map(|cluster| u32::from(cluster.cores))
+        .sum();
+    if performance == 0 {
+        u32::from(hardware.cpus())
+    } else {
+        performance
+    }
+}
+
+/// `bsdthread_dispatch_apply_attr(flags, worker index)` under the edge
+/// scheduler: the calling thread's user mark as a heavy user of its
+/// cluster's shared round-robin resource (`th_shared_rsrc_heavy_user`),
+/// which only steers the scheduler's cluster load balancing. Setting a set
+/// mark or clearing a clear one is `KERN_FAILURE`, EINVAL; a change blocks
+/// the thread once (`thread_block`) so the scheduler sees it. The worker
+/// index is unused on the edge scheduler.
+fn dispatch_apply_attribute(heavy: &mut bool, flags: u64) -> Outcome {
+    let set = match flags {
+        APPLY_ATTR_SHARED_RESOURCE_SET => true,
+        APPLY_ATTR_SHARED_RESOURCE_CLEAR => false,
+        _ => return Outcome::Error(EINVAL),
+    };
+    if *heavy == set {
+        return Outcome::Error(EINVAL);
+    }
+    *heavy = set;
+    std::thread::yield_now();
+    Outcome::value(0)
 }
 
 /// The CPUs threads of `qos` may run on at once
@@ -639,6 +681,38 @@ mod tests {
         );
         assert_eq!(parallelism(&hardware, THREAD_QOS_BACKGROUND), 4);
         assert_eq!(parallelism(&hardware, THREAD_QOS_MAINTENANCE), 4);
+        // Realtime threads spill only among clusters of one core type.
+        assert_eq!(realtime_parallelism(&hardware), 4);
+    }
+
+    #[test]
+    fn dispatch_marks_a_shared_resource_user_once() {
+        let mut heavy = false;
+        let set = APPLY_ATTR_SHARED_RESOURCE_SET;
+        let clear = APPLY_ATTR_SHARED_RESOURCE_CLEAR;
+        assert_eq!(
+            dispatch_apply_attribute(&mut heavy, clear),
+            Outcome::Error(EINVAL)
+        );
+        assert_eq!(dispatch_apply_attribute(&mut heavy, set), Outcome::value(0));
+        assert!(heavy);
+        assert_eq!(
+            dispatch_apply_attribute(&mut heavy, set),
+            Outcome::Error(EINVAL)
+        );
+        assert_eq!(
+            dispatch_apply_attribute(&mut heavy, clear),
+            Outcome::value(0)
+        );
+        assert!(!heavy);
+        assert_eq!(
+            dispatch_apply_attribute(&mut heavy, 3),
+            Outcome::Error(EINVAL)
+        );
+        assert_eq!(
+            dispatch_apply_attribute(&mut heavy, 0),
+            Outcome::Error(EINVAL)
+        );
     }
 
     #[test]

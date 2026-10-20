@@ -323,10 +323,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "a workloop's fixed priority, policy and CPU limit are not applied to its servicer, \
          which is scheduled by QoS; a work interval or a bound thread stops the run",
     ),
-    (
-        "bsdthread_ctl",
-        "REALTIME and DISPATCH_APPLY_ATTR are refused",
-    ),
 ];
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.

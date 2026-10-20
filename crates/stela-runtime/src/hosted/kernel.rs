@@ -163,6 +163,9 @@ pub(super) struct Kernel {
     /// Whether its host thread has its own working directory
     /// (`__pthread_chdir`), which [`bsd::files`] restores.
     pub(super) thread_directory: bool,
+    /// Whether dispatch marked it a heavy user of its cluster's shared
+    /// resource (`th_shared_rsrc_heavy_user`).
+    pub(super) shared_resource_heavy: bool,
     pub(super) end: Option<End>,
     /// Its suspension and published state, which `thread_abort` and
     /// `thread_terminate` reach.
@@ -308,6 +311,7 @@ impl Kernel {
             mig_relay: None,
             worker: None,
             thread_directory: false,
+            shared_resource_heavy: false,
             end: None,
         }
     }
