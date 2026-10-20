@@ -1396,6 +1396,29 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             options.nor.as_ref().map(|_| services.next().unwrap()),
         ),
     };
+    // recoveryOS boots on a Mac's internal disk layout: refuse a namespace
+    // without the iBootSystemContainer it aborts without, before it runs.
+    let recovery = options.bundle
+        && bundle::enters_recovery_os(&handoff.files[..handoff.file_count], built.as_deref())
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("bundle refusal: {error}\n"));
+                output::fatal("the boot bundle's OS environment could not be read")
+            });
+    let backing = match backing {
+        Some(namespace) if recovery => {
+            let mut bytes = bundle::Bytes::new(namespace);
+            if let Err(error) = stela_runtime::apfs::require_system_container(&mut bytes) {
+                output::arguments(format_args!("recoveryOS refusal: {error}\n"));
+                output::fatal(
+                    "recoveryOS needs the internal disk's iBootSystemContainer with its xART \
+                     volume, which the restore creates",
+                );
+            }
+            Some(bytes.into_inner())
+        }
+        None if recovery => output::fatal("recoveryOS needs the internal disk (--storage)"),
+        backing => backing,
+    };
     let nor = nor.map(nor::HostNor::open);
     let (mut host_nor, nor_image, nvram, sep_state) = match nor {
         Some((host_nor, image, nvram, sep_state)) => {

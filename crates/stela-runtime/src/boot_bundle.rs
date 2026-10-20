@@ -68,6 +68,10 @@ pub struct Options {
     pub dram_base: u64,
     pub dram_size: u64,
     pub phys_base: u64,
+    /// The OS environment iBoot enters (`/chosen osenvironment`), such as
+    /// `recoveryos`; `None` is macOS.
+    #[serde(default)]
+    pub osenvironment: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

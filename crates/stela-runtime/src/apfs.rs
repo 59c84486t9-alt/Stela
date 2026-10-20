@@ -28,6 +28,9 @@ pub use volume::{Entry, FileKind, Inode, Volume};
 
 /// The APFS partition type in a GUID partition table.
 pub const PARTITION_TYPE: &str = "7C3457EF-0000-11AA-AA11-00306543ECAC";
+/// The iBootSystemContainer (`Apple_APFS_ISC`) partition type: iSCPreboot,
+/// xART and Hardware.
+pub const ISC_PARTITION_TYPE: &str = "69646961-6700-11AA-AA11-00306543ECAC";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApfsError {
@@ -149,6 +152,21 @@ pub fn container_partitions<R: ReadAt>(source: &mut R) -> Result<Vec<(u64, Optio
         return Ok(vec![(0, None)]);
     }
     let apfs = gpt::Guid::parse(PARTITION_TYPE).expect("constant GUID");
+    Ok(typed_partitions(source, apfs)?
+        .ok_or_else(|| ApfsError::NotFound("an APFS container".into()))?
+        .into_iter()
+        .map(|(offset, unique)| (offset, Some(unique)))
+        .collect())
+}
+
+/// The byte offsets and unique GUIDs of the partitions of type `type_guid`
+/// in `source`'s GUID partition table, found at a 512- or 4096-byte block
+/// size; `None` when `source` has no valid table.
+pub fn typed_partitions<R: ReadAt>(
+    source: &mut R,
+    type_guid: gpt::Guid,
+) -> Result<Option<Vec<(u64, gpt::Guid)>>> {
+    let io = |error: R::Error| ApfsError::Io(format!("{error:?}"));
     for sector in SECTOR_SIZES {
         let disk = gpt::Disk {
             block_bytes: sector,
@@ -168,14 +186,38 @@ pub fn container_partitions<R: ReadAt>(source: &mut R) -> Result<Vec<(u64, Optio
             .map_err(io)?;
         let table = gpt::parse_entries(&info, &entries)
             .map_err(|_| ApfsError::Malformed("GUID partition table entries"))?;
-        return Ok(table
-            .partitions
-            .iter()
-            .filter(|partition| partition.type_guid == apfs)
-            .map(|partition| (partition.first_lba * sector, Some(partition.unique_guid)))
-            .collect());
+        return Ok(Some(
+            table
+                .partitions
+                .iter()
+                .filter(|partition| partition.type_guid == type_guid)
+                .map(|partition| (partition.first_lba * sector, partition.unique_guid))
+                .collect(),
+        ));
     }
-    Err(ApfsError::NotFound("an APFS container".into()))
+    Ok(None)
+}
+
+/// Check that a Mac's internal disk `namespace` holds the iBootSystemContainer
+/// (`Apple_APFS_ISC`) with its xART volume. A Mac's internal disk carries it
+/// from the factory or the restore that creates it (`restored_external`), and
+/// recoveryOS needs it: `apfs_boot_util`'s `mount_phase_one` ignores a missing
+/// Update volume but aborts the boot without xART (`xART volume mount failed`,
+/// recoveryOS boot rec-r7).
+pub fn require_system_container<R: ReadAt>(namespace: &mut R) -> Result<()> {
+    let isc = gpt::Guid::parse(ISC_PARTITION_TYPE).expect("constant GUID");
+    let missing =
+        || ApfsError::NotFound("an iBootSystemContainer (Apple_APFS_ISC) partition".into());
+    let partitions = typed_partitions(namespace, isc)?.ok_or_else(missing)?;
+    let [(offset, _)] = partitions[..] else {
+        return Err(if partitions.is_empty() {
+            missing()
+        } else {
+            ApfsError::Malformed("more than one iBootSystemContainer partition")
+        });
+    };
+    Container::open(namespace, offset)?.volume_with_role(volume::APFS_VOL_ROLE_XART)?;
+    Ok(())
 }
 
 /// The container's blocks: a [`ReadAt`] source, the byte offset of the
@@ -296,6 +338,11 @@ pub(crate) mod tests {
     /// `container` as the only partition of a synthetic 512-byte-block GPT
     /// disk, starting at block 2048, with unique GUID `unique`.
     pub(crate) fn on_gpt(container: &[u8], unique: gpt::Guid) -> Memory {
+        on_typed_gpt(container, unique, PARTITION_TYPE)
+    }
+
+    /// [`on_gpt`] with the partition type `type_guid`.
+    fn on_typed_gpt(container: &[u8], unique: gpt::Guid, type_guid: &str) -> Memory {
         const BLOCK: u64 = 512;
         const FIRST: u64 = 2048;
         let blocks = FIRST + (container.len() as u64).div_ceil(BLOCK) + FIRST;
@@ -306,7 +353,7 @@ pub(crate) mod tests {
         let table = gpt::Table {
             disk_guid: gpt::Guid::from_entropy([7; 16]),
             partitions: alloc::vec![gpt::Partition {
-                type_guid: gpt::Guid::parse(PARTITION_TYPE).unwrap(),
+                type_guid: gpt::Guid::parse(type_guid).unwrap(),
                 unique_guid: unique,
                 first_lba: FIRST,
                 last_lba: FIRST + (container.len() as u64).div_ceil(BLOCK) - 1,
@@ -335,6 +382,30 @@ pub(crate) mod tests {
         // A borrowed disk opens as the container at that offset.
         let mut container = Container::open(&mut disk, found[0].0).unwrap();
         assert!(!container.volumes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recovery_needs_the_system_container_and_its_xart_volume() {
+        let unique = gpt::Guid::parse("A1B2C3D4-0000-1111-2222-333344445555").unwrap();
+        // A blank namespace and one with only a macOS container lack it.
+        let mut blank = Memory(alloc::vec![0; 1 << 20]);
+        assert!(matches!(
+            require_system_container(&mut blank),
+            Err(ApfsError::NotFound(_))
+        ));
+        let mut macos = on_gpt(&fixture().0, unique);
+        assert!(matches!(
+            require_system_container(&mut macos),
+            Err(ApfsError::NotFound(_))
+        ));
+        // An ISC container without an xART-role volume is refused too.
+        let mut isc = on_typed_gpt(&fixture().0, unique, ISC_PARTITION_TYPE);
+        let found = typed_partitions(&mut isc, gpt::Guid::parse(ISC_PARTITION_TYPE).unwrap());
+        assert_eq!(found.unwrap(), Some(alloc::vec![(2048 * 512, unique)]));
+        let Err(ApfsError::NotFound(what)) = require_system_container(&mut isc) else {
+            panic!("an ISC container without xART was accepted");
+        };
+        assert!(what.contains("0x100"), "{what}");
     }
 
     #[test]

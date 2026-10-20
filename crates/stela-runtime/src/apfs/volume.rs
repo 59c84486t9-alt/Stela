@@ -29,6 +29,8 @@ pub const APFS_VOL_ROLE_INSTALLER: u16 = 0x0020;
 pub const APFS_VOL_ROLE_DATA: u16 = 0x0040;
 /// `3 << APFS_VOLUME_ENUM_SHIFT`.
 pub const APFS_VOL_ROLE_UPDATE: u16 = 0x00c0;
+/// `4 << APFS_VOLUME_ENUM_SHIFT`: the xART volume of the iBootSystemContainer.
+pub const APFS_VOL_ROLE_XART: u16 = 0x0100;
 
 const APFS_MAGIC: &[u8; 4] = b"APSB";
 const APFS_FS_UNENCRYPTED: u64 = 0x0000_0001;

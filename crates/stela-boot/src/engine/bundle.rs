@@ -271,6 +271,10 @@ impl<D: BlockDevice> Bytes<D> {
         let block = vec![0; device.identity().block_size as usize];
         Self { device, block }
     }
+
+    pub(super) fn into_inner(self) -> D {
+        self.device
+    }
 }
 
 impl<D: BlockDevice> ReadAt for Bytes<D> {
@@ -417,9 +421,9 @@ pub(super) fn entropy(buffer: &mut [u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The guest DRAM base the bundle was prepared for (`bundle.json`), from
-/// the files the loader read or a bundle built in the heap.
-pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64, String> {
+/// The bundle's `bundle.json`, from the files the loader read or a bundle
+/// built in the heap.
+fn manifest(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<Manifest, String> {
     let json = match built {
         Some(built) => built
             .iter()
@@ -431,8 +435,20 @@ pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<
             .map(contents),
     }
     .ok_or("bundle.json was not read")?;
-    let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
-    Ok(manifest.options.dram_base)
+    Manifest::parse(json).map_err(|e| format!("{e}"))
+}
+
+/// The guest DRAM base the bundle was prepared for (`bundle.json`).
+pub fn dram_base(files: &[File], built: Option<&[(String, Vec<u8>)]>) -> Result<u64, String> {
+    Ok(manifest(files, built)?.options.dram_base)
+}
+
+/// Whether the bundle enters recoveryOS (`osenvironment` `recoveryos`).
+pub fn enters_recovery_os(
+    files: &[File],
+    built: Option<&[(String, Vec<u8>)]>,
+) -> Result<bool, String> {
+    Ok(manifest(files, built)?.options.osenvironment.as_deref() == Some("recoveryos"))
 }
 
 /// Load the bundle the loader read into guest DRAM `[dram_base, dram_base +
