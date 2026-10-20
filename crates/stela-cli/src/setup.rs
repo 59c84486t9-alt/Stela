@@ -3319,6 +3319,78 @@ mod tests {
     }
 
     #[test]
+    fn no_maintenance_operation_writes_the_installed_disk_or_another_partition() {
+        let mut f = fixture(64 * GIB, false);
+        // An installed macOS: the Apple region holds the guest's own GPT,
+        // and its containers' bytes after it stand for the user's data.
+        let mut region = vec![0u8; 64 * 1024];
+        region[512..520].copy_from_slice(b"EFI PART");
+        for (n, byte) in region[1024..].iter_mut().enumerate() {
+            *byte = (n % 251) as u8;
+        }
+        add_installed_disk(&mut f, &region, &[]);
+        // A partition of another system on the same disk.
+        let foreign = f._dir.path().join("disk1s4.img");
+        fs::write(&foreign, vec![0xa5; IMAGE_BYTES]).unwrap();
+        f.host.partitions.insert(
+            "disk1s4".into(),
+            (
+                PartitionInfo {
+                    identifier: "disk1s4".into(),
+                    disk: "disk1".into(),
+                    guid: "5e1a0000-0000-4000-8000-0000000000ff".into(),
+                    bytes: 50 * GIB,
+                    content: "Apple_HFS".into(),
+                    mount: None,
+                    container: None,
+                },
+                foreign.clone(),
+            ),
+        );
+        let disks = || {
+            (
+                partition_bytes(&f, REGION),
+                partition_bytes(&f, NOR),
+                fs::read(&foreign).unwrap(),
+                snapshot(&f.data),
+            )
+        };
+        let before = disks();
+        let report = setup(&environment(&f.host), installed_command(&f)).unwrap();
+        assert!(report.contains("guest disk"), "{report}");
+        assert_eq!(disks(), before, "setup");
+        let new = f._dir.path().join("new.efi");
+        fs::write(&new, efi_image(b"stela-2")).unwrap();
+        let newer = f._dir.path().join("Newer.ipsw");
+        restore::payload::synthetic_ipsw_of(&newer, "STELA2").unwrap();
+        type Step<'a> = (&'a str, &'a dyn Fn(&mut Setup));
+        let steps: [Step<'_>; 7] = [
+            ("status", &|c| c.status = true),
+            ("update-stela", &|c| {
+                c.update_stela = true;
+                c.efi = Some(new.clone());
+            }),
+            ("rollback", &|c| c.rollback = true),
+            ("update-os", &|c| {
+                c.update_os = true;
+                c.ipsw = Some(newer.clone());
+            }),
+            ("rollback", &|c| c.rollback = true),
+            ("repair", &|c| {
+                c.repair = true;
+                c.ipsw = Some(f.ipsw.clone());
+            }),
+            ("status", &|c| c.status = true),
+        ];
+        for (name, step) in steps {
+            rerun(&f, step).unwrap_or_else(|error| panic!("{name}: {error:#}"));
+            assert_eq!(disks(), before, "{name}");
+        }
+        uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert_eq!(disks(), before, "uninstall");
+    }
+
+    #[test]
     fn a_bundle_copy_stopped_between_its_renames_is_found_and_put_back() {
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], &[]);

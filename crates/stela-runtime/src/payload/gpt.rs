@@ -1050,6 +1050,19 @@ mod tests {
         header.bytes[60] ^= 1;
         damaged.apply(&header, None);
         assert!(damaged.read().is_err());
+        // A backup that names another system's partition is read, and the
+        // plan refuses to write beside it.
+        let mut other = planned.clone();
+        other.partitions[0].type_guid = Guid([1; 16]);
+        let mut foreign = Sparse::new(DISK);
+        for write in &encode(DISK, &other).unwrap()[..2] {
+            foreign.apply(write, None);
+        }
+        let Found::Table { table, repair } = foreign.read().unwrap() else {
+            panic!("the backup is not read");
+        };
+        assert_eq!(repair, Some("the primary GPT is missing"));
+        assert!(plan(DISK, Some(&table), request(), counter()).is_err());
     }
 
     #[test]
