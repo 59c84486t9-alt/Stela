@@ -128,7 +128,10 @@ impl Preparation {
         } = *description;
         Self::new(
             chip,
-            Arc::new(chip.admit_table(withheld)),
+            Arc::new(
+                chip.admit_table(withheld)
+                    .expect("a description records the withheld set of an admit table"),
+            ),
             target,
             fp,
             checks,
@@ -290,7 +293,7 @@ pub(crate) fn test_preparation() -> Preparation {
     let chip = crate::machine::test_chip();
     Preparation::new(
         chip,
-        Arc::new(chip.admit_table(0)),
+        Arc::new(chip.admit_table(0).expect("the test chip's admit table")),
         TargetCpu::Baseline,
         true,
         MemoryChecks::DEFAULT,

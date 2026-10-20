@@ -72,8 +72,8 @@ struct AbsentForm {
     /// form over [`Feature`] bits: met when a PE presents every feature of
     /// one term. A chip that has the form has what it requires. A condition
     /// on an encoding field counts as met (the checklist does not place the
-    /// field), so words needing a feature only for some field values stay
-    /// admitted while it is withheld.
+    /// field); [`Chip::admit_table`] refuses a PE for which that admits
+    /// words needing a withheld feature (`forms::FIELD_CONDITIONED`).
     requires: &'static [u64],
     /// (mask, value, chips, requires): forms those chips have that keep
     /// their words where the PE presents what they require.
@@ -192,11 +192,23 @@ impl Chip {
     }
 
     /// The [`AdmitTable`] of a PE of the chip whose identification withholds
-    /// the `withheld` [`Feature`] bits (`identification::withheld`).
-    pub fn admit_table(self, withheld: u64) -> AdmitTable {
+    /// the `withheld` [`Feature`] bits (`identification::withheld`), or why
+    /// there is none: the PE presents what some forms' words need for one
+    /// value of an encoding field the table does not place, but withholds
+    /// what they need for the others (an SME2 PE without FEAT_SME_I16I64).
+    pub fn admit_table(self, withheld: u64) -> Result<AdmitTable, &'static str> {
         const PREFIX: u32 = AdmitTable::PREFIXES as u32 - 1;
         let bit = 1u8 << self as u8;
         let presented = self.features() & !withheld;
+        if forms::FIELD_CONDITIONED
+            .iter()
+            .any(|(requires, strict)| met(requires, presented) && !met(strict, presented))
+        {
+            return Err(
+                "the identification withholds a feature only some encodings of a \
+                        form it presents need, which the admit table cannot tell apart",
+            );
+        }
         let mut by_prefix = vec![Vec::new(); AdmitTable::PREFIXES];
         for (index, group) in forms::ABSENT.iter().enumerate() {
             let index = u16::try_from(index).expect("fewer than 65536 absent-form groups");
@@ -226,13 +238,13 @@ impl Chip {
             groups.extend(prefix);
         }
         starts.push(groups.len() as u32);
-        AdmitTable {
+        Ok(AdmitTable {
             chip: self,
             withheld,
             presented,
             starts,
             groups,
-        }
+        })
     }
 
     /// The word the chip executes for `word`: the word itself, `UDF #0` for a
@@ -439,7 +451,7 @@ mod tests {
     #[test]
     fn the_admit_table_answers_as_the_full_search() {
         for chip in Chip::ALL {
-            let table = chip.admit_table(0);
+            let table = chip.admit_table(0).unwrap();
             for group in forms::ABSENT {
                 for form in group.forms {
                     for word in [form.value, form.value | !group.mask] {
@@ -490,30 +502,47 @@ mod tests {
         // (Registers::write_pstate_field); the SME forms are absent.
         let fmopa = 0x8081_2000; // fmopa za0.s, p0/m, p1/m, z0.s, z0.s
         let rdsvl = 0x04bf_5820; // rdsvl x0, #1
-        let full = Chip::AppleM4.admit_table(0);
-        let without_sme = Chip::AppleM4.admit_table(withholding(Chip::AppleM4, "FEAT_SME"));
+        let full = Chip::AppleM4.admit_table(0).unwrap();
+        let without_sme = Chip::AppleM4
+            .admit_table(withholding(Chip::AppleM4, "FEAT_SME"))
+            .unwrap();
         for word in [fmopa, rdsvl] {
             assert_eq!(full.admit(word), word);
             assert_eq!(without_sme.admit(word), UDF, "{word:#x}");
             assert_eq!(Chip::AppleM3.admit(word), UDF);
         }
         let irg = 0x9adf_1020; // irg x0, x1
-        let without_tags = Chip::AppleM5.admit_table(withholding(Chip::AppleM5, "FEAT_MTE"));
+        let without_tags = Chip::AppleM5
+            .admit_table(withholding(Chip::AppleM5, "FEAT_MTE"))
+            .unwrap();
         assert_eq!(
             without_tags.withheld(),
             withholding(Chip::AppleM5, "FEAT_MTE")
         );
-        assert_eq!(Chip::AppleM5.admit_table(0).admit(irg), irg);
+        assert_eq!(Chip::AppleM5.admit_table(0).unwrap().admit(irg), irg);
         assert_eq!(without_tags.admit(irg), UDF);
         // A hint whose feature is withheld is a NOP, as Arm decodes it.
         let pacm = 0xd503_24ff;
-        let without_pacm = Chip::AppleM6.admit_table(withholding(Chip::AppleM6, "FEAT_PAuth_LR"));
+        let without_pacm = Chip::AppleM6
+            .admit_table(withholding(Chip::AppleM6, "FEAT_PAuth_LR"))
+            .unwrap();
         assert_eq!(Chip::AppleM6.admit(pacm), pacm);
         assert_eq!(without_pacm.admit(pacm), NOP);
         // What the PE presents keeps its words.
         let add = 0x8b02_0020;
         assert_eq!(without_sme.admit(add), add);
         assert_eq!(without_tags.admit(add), add);
+        // SME2's sz 1 words need FEAT_SME_I16I64 or FEAT_SME_F64F64, which
+        // the table cannot place, so withholding either alone is refused.
+        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            for alone in ["FEAT_SME_I16I64", "FEAT_SME_F64F64"] {
+                assert!(
+                    chip.admit_table(withholding(chip, alone)).is_err(),
+                    "{chip:?} {alone}"
+                );
+            }
+            assert!(chip.admit_table(0).is_ok());
+        }
     }
 
     #[test]

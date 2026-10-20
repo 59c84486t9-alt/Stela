@@ -88,17 +88,27 @@ impl Features {
     }
 
     /// What a checklist feature expression requires of the varying
-    /// features, and whether it names one. A feature every chip has is met
-    /// and one no chip has is not. A condition on an encoding field
-    /// (`sz == '0'`) counts as met: the checklist does not place the field,
-    /// so a form's words that need a feature only for some field values
-    /// stay admitted while it is withheld.
-    fn requires(&self, expression: &str) -> Result<(Requires, bool)> {
+    /// features. A feature every chip has is met and one no chip has is
+    /// not.
+    fn requires(&self, expression: &str) -> Result<Requirement> {
+        let (admitting, varying) = self.parse(expression, true)?;
+        let (strict, _) = self.parse(expression, false)?;
+        Ok(Requirement {
+            admitting,
+            strict,
+            varying,
+        })
+    }
+
+    /// The expression's terms with each encoding-field condition taken as
+    /// `field`, and whether it names a varying feature.
+    fn parse(&self, expression: &str, field: bool) -> Result<(Requires, bool)> {
         let tokens = tokenize(expression)?;
         let mut parser = Parser {
             features: self,
             tokens: &tokens,
             at: 0,
+            field,
             varying: false,
         };
         let requires = parser.disjunction()?;
@@ -109,6 +119,18 @@ impl Features {
         );
         Ok((requires, parser.varying))
     }
+}
+
+/// A feature expression's requirement. The checklist does not place the
+/// encoding fields its conditions test (`sz == '0'`), so a form's words are
+/// admitted where `admitting` (such a condition met) is, and the words of
+/// every field value need `strict` (such a condition not met).
+#[derive(Debug, PartialEq, Eq)]
+struct Requirement {
+    admitting: Requires,
+    strict: Requires,
+    /// Whether the expression names a varying feature.
+    varying: bool,
 }
 
 fn tokenize(expression: &str) -> Result<Vec<&str>> {
@@ -141,6 +163,8 @@ struct Parser<'a> {
     features: &'a Features,
     tokens: &'a [&'a str],
     at: usize,
+    /// What an encoding-field condition is taken as.
+    field: bool,
     /// Whether the expression names a varying feature.
     varying: bool,
 }
@@ -190,7 +214,11 @@ impl<'a> Parser<'a> {
             self.next();
             let literal = self.next().context("comparison without a value")?;
             ensure!(literal.starts_with('\''), "comparison with {literal}");
-            return Ok(ALWAYS.to_vec());
+            return Ok(if self.field {
+                ALWAYS.to_vec()
+            } else {
+                Vec::new()
+            });
         }
         if let Some(bit) = self.features.varying.iter().position(|name| name == token) {
             self.varying = true;
@@ -289,11 +317,12 @@ pub fn render(
     }
     let masks: Vec<u64> = (0..CHIPS.len()).map(|index| features.mask(index)).collect();
     let mut forms = BTreeMap::new();
+    let mut field_conditioned = BTreeSet::new();
     for (id, form) in checklist {
         let present = cpus.get(id.as_str()).copied().unwrap_or(0);
         let expressions = form["features"].as_array().map_or(&[][..], Vec::as_slice);
         ensure!(expressions.len() <= 1, "{id} has more than one feature");
-        let (requires, varying) = match expressions.first() {
+        let requirement = match expressions.first() {
             Some(feature) => {
                 let expression = feature["feature"]
                     .as_str()
@@ -302,11 +331,28 @@ pub fn render(
                     .requires(expression)
                     .with_context(|| format!("{id}: {expression}"))?
             }
-            None => (ALWAYS.to_vec(), false),
+            None => Requirement {
+                admitting: ALWAYS.to_vec(),
+                strict: ALWAYS.to_vec(),
+                varying: false,
+            },
         };
         // A form naming no varying feature is where its Apple profile
         // puts it, whatever constant its expression folds to.
-        let requires = if varying { requires } else { ALWAYS.to_vec() };
+        if !requirement.varying {
+            ensure!(
+                requirement.admitting == requirement.strict,
+                "{id} tests an encoding field but names no varying feature"
+            );
+        }
+        let requires = if requirement.varying {
+            requirement.admitting
+        } else {
+            ALWAYS.to_vec()
+        };
+        if requirement.varying && requirement.strict != requires {
+            field_conditioned.insert((requires.clone(), requirement.strict));
+        }
         let mut withholdable = 0;
         for (index, chip) in CHIPS.iter().enumerate() {
             if present & 1 << index == 0 {
@@ -413,6 +459,23 @@ pub fn render(
          /// the PE presents every feature of one of its terms.",
         names.join(", ")
     )?;
+    writeln!(
+        out,
+        "/// (requires, strict) of the forms whose words need more for some values of\n\
+         /// an encoding field than `requires`, which takes the field's condition as\n\
+         /// met: a PE that meets `requires` must meet `strict`, or the table would\n\
+         /// admit words that need a withheld feature.\n\
+         pub(super) static FIELD_CONDITIONED: &[(&[u64], &[u64])] = &["
+    )?;
+    for (requires, strict) in &field_conditioned {
+        writeln!(
+            out,
+            "    ({}, {}),",
+            requires_text(requires),
+            requires_text(strict)
+        )?;
+    }
+    writeln!(out, "];\n")?;
     writeln!(out, "pub(super) static ABSENT: &[AbsentGroup] = &[")?;
     for (mask, values) in &groups {
         writeln!(out, "    AbsentGroup {{ mask: {mask:#010x}, forms: &[")?;
@@ -475,7 +538,7 @@ mod tests {
     #[test]
     fn feature_expressions_become_terms_over_the_varying_features() {
         let features = features();
-        let requires = |text| features.requires(text).unwrap();
+        let requires = |text| features.parse(text, true).unwrap();
         assert_eq!(requires("FEAT_SME"), (vec![0b010], true));
         // A feature on every chip is met, one on none is not.
         assert_eq!(requires("FEAT_PAuth"), (vec![0], false));
@@ -485,14 +548,22 @@ mod tests {
             requires("(FEAT_SME || FEAT_PAuth_LR) && FEAT_SME_I16I64"),
             (vec![0b101, 0b110], true)
         );
-        // A term another implies is dropped; a field condition is met.
+        // A term another implies is dropped.
         assert_eq!(
             requires("FEAT_SME || (FEAT_SME && FEAT_PAuth_LR)"),
             (vec![0b010], true)
         );
+        // A field condition admits the form's words; all of them need the
+        // feature the other field values do.
         assert_eq!(
-            requires("FEAT_SME && (sz == '0' || FEAT_SME_I16I64)"),
-            (vec![0b010], true)
+            features
+                .requires("FEAT_SME && (sz == '0' || FEAT_SME_I16I64)")
+                .unwrap(),
+            Requirement {
+                admitting: vec![0b010],
+                strict: vec![0b110],
+                varying: true
+            }
         );
         assert!(features.requires("!FEAT_SME").is_err());
         assert!(features.requires("FEAT_SME &&").is_err());
@@ -517,6 +588,14 @@ mod tests {
             ),
             ("HINT_HM_hints", form("0xfffff01f", "0xd503201f")),
             ("SMSTART", featured("0xfffff1ff", "0xd503417f", "FEAT_SME")),
+            (
+                "ADD_ZA",
+                featured(
+                    "0xffbf9c38",
+                    "0xc1a01c10",
+                    "FEAT_SME && (sz == '0' || FEAT_SME_I16I64)",
+                ),
+            ),
             // Every checklist form named by NOP_WHEN_ABSENT must exist.
             ("CHKFEAT_HF_hints", form("0xffffffff", "0xd503251f")),
             ("CLRBHB_HI_hints", form("0xffffffff", "0xd50322df")),
@@ -541,8 +620,13 @@ mod tests {
             {"id": "RETAASPPCR_64M_branch_reg", "cpus": ["apple-m6"]},
             {"id": "PACM_HI_hints", "cpus": ["apple-m6"]},
             {"id": "SMSTART", "cpus": ["apple-m4", "apple-m5", "apple-m6"]},
+            {"id": "ADD_ZA", "cpus": ["apple-m4", "apple-m5", "apple-m6"]},
         ]});
         let text = render(&checklist, &apple, &features()).unwrap();
+        // A PE presenting SME must present I16I64 for ADD's sz 1 words.
+        assert!(text.contains(
+            "pub(super) static FIELD_CONDITIONED: &[(&[u64], &[u64])] = &[\n    (&[0x2], &[0x6]),\n];"
+        ));
         assert!(text.contains(
             "pub(super) const FEATURES: [&str; 3] = \
              [\"FEAT_PAuth_LR\", \"FEAT_SME\", \"FEAT_SME_I16I64\"];"

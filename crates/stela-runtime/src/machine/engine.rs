@@ -1178,11 +1178,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
-        let admit_table = Arc::new(
-            profile
-                .chip
-                .admit_table(identification::withheld(profile.chip, &profile.fixed)),
-        );
+        let admit_table = profile
+            .chip
+            .admit_table(identification::withheld(profile.chip, &profile.fixed))
+            .unwrap_or_else(|reason| panic!("the profile has no admit table: {reason}"));
+        let admit_table = Arc::new(admit_table);
         let mut machine = Self {
             cpu,
             host,

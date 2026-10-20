@@ -12,6 +12,15 @@ pub(super) const FEATURES: [&str; 45] = ["FEAT_AFP", "FEAT_AMUv1", "FEAT_AMUv1p1
 /// Grouped by encoding mask, each group sorted by value. `chips` bit `n` is
 /// set when the form is absent on chip `n` (apple-m1, apple-m2, apple-m3, apple-m4, apple-m5, apple-m6). `requires` is met when
 /// the PE presents every feature of one of its terms.
+/// (requires, strict) of the forms whose words need more for some values of
+/// an encoding field than `requires`, which takes the field's condition as
+/// met: a PE that meets `requires` must meet `strict`, or the table would
+/// admit words that need a withheld feature.
+pub(super) static FIELD_CONDITIONED: &[(&[u64], &[u64])] = &[
+    (&[0x10000000], &[0x110000000]),
+    (&[0x10000000], &[0x810000000]),
+];
+
 pub(super) static ABSENT: &[AbsentGroup] = &[
     AbsentGroup { mask: 0x3fe0fc00, forms: &[
         AbsentForm { value: 0x19000400, chips: 0x3f, nop: false, requires: &[0x0], unless: &[] },
