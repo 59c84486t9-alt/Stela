@@ -181,6 +181,10 @@ pub struct Changes {
     pub interrupts: bool,
     /// FP/SIMD access.
     pub floating_point: bool,
+    /// The write took a value whose effect this machine does not model
+    /// (`impdef::Entry::unmodeled_effect`): what is missing, which the
+    /// engine reports once, or stops at in strict mode.
+    pub unmodeled: Option<&'static str>,
 }
 
 /// Why an access cannot complete on this machine (not a guest exception).
@@ -611,7 +615,10 @@ impl Cpu {
                 }
             } else {
                 match self.apple.impdef.write(entry, value) {
-                    Ok(()) => Outcome::Written(Changes::default()),
+                    Ok(()) => Outcome::Written(Changes {
+                        unmodeled: entry.unmodeled_effect(value),
+                        ..Changes::default()
+                    }),
                     Err(reason) => Outcome::Refused(Refusal::UnsupportedSetting(reason)),
                 }
             };

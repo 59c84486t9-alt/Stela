@@ -296,6 +296,10 @@ pub struct Entry {
     pub el2: bool,
     /// The bits a `Control` entry takes.
     pub permitted: u64,
+    /// Bits the entry holds whose effect this machine does not model, and
+    /// what is missing: a write that sets one completes and is reported
+    /// once ([`Entry::unmodeled_effect`]), and stops in strict mode.
+    pub unmodeled: Option<(u64, &'static str)>,
 }
 
 const fn entry(
@@ -312,6 +316,7 @@ const fn entry(
         scope: Scope::Pe,
         el2: false,
         permitted: 0,
+        unmodeled: None,
     }
 }
 
@@ -330,6 +335,20 @@ impl Entry {
     const fn permitting(self, permitted: u64) -> Self {
         Self { permitted, ..self }
     }
+
+    const fn unmodeled(self, bits: u64, missing: &'static str) -> Self {
+        Self {
+            unmodeled: Some((bits, missing)),
+            ..self
+        }
+    }
+
+    /// What a write of `value` would need that this machine does not model.
+    pub fn unmodeled_effect(&self, value: u64) -> Option<&'static str> {
+        self.unmodeled
+            .filter(|(bits, _)| value & bits != 0)
+            .map(|(_, missing)| missing)
+    }
 }
 
 /// JIT box mode bit 0: the box is enforced. The kernel writes 2 for a task
@@ -343,8 +362,14 @@ const JIT_BOX_MODE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbo
     0xfffffe000c1a7e44), and its EL0 faults (EC 0x3f, ISS 0x18-0x1f) raise \
     EXC_BAD_INSTRUCTION (0xfffffe000bd77d14). SPTM 26A434 writes 2 at boot (__text+0x40e4) and \
     saves it, clears bit 0 and restores it around its own execution with SCTLR_EL1 and TCR_EL1 \
-    (__text+0x2124, __text+0x28ec): bit 0 enables the box (inference). What an enabled box \
-    enforces is not documented, so a value with bit 0 set stops; every other value is held";
+    (__text+0x2124, __text+0x28ec): bit 0 enables the box (inference). Every value is held. \
+    What an enabled box enforces is not documented (docs/research/j473-kernel.md#jit-box), \
+    so a value with bit 0 set is reported once as unmodeled and stops in strict mode";
+
+/// What an enabled JIT box would need: its enforcement.
+const JIT_BOX_UNMODELED: &str = "JIT box enabled; enforcement not modeled: JITs that keep to \
+    the box run as on hardware, but the guest loses the box's hardening against a compromised \
+    JIT";
 
 const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key-derived \
     value after the architectural PAC keys and reads it nowhere; TXM and the kernel never touch it";
@@ -582,7 +607,7 @@ const JIT_RANGE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbox.c
     (0xfffffe000bda5670), after its mode (S3_4_C15_C15_4), and never reads it. The context \
     switch does so when the incoming task's box or S3_4_C15_C15_6 differs from the CPU's \
     (0xfffffe000bd839f0), and so does an update of the running task's (0xfffffe000bda5964). \
-    The range acts only under an enabled mode, which stops here, so it is held (inference)";
+    The range acts only under an enabled mode, whose enforcement is not modeled, so it is held";
 
 const GUARDED_HPFAR_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to HPFAR_EL2, \
     as it copies the GL bank's ESR and FAR to EL1's, when it reflects a guarded-level \
@@ -768,7 +793,8 @@ pub const TABLE: &[Entry] = &[
         Class::Control,
         JIT_BOX_MODE_EVIDENCE,
     )
-    .permitting(!JIT_BOX_ENABLE),
+    .permitting(u64::MAX)
+    .unmodeled(JIT_BOX_ENABLE, JIT_BOX_UNMODELED),
     entry(
         JIT_RANGE,
         "S3_4_C15_C15_1 (unnamed)",
@@ -1427,11 +1453,11 @@ mod tests {
         assert_eq!(other.read(counter), Ok(0));
     }
 
-    /// A task without a JIT box (mode 2) and SPTM's own context (bit 0
-    /// cleared) keep the box disabled, and its range is held; enabling the
-    /// box stops.
+    /// The JIT box's mode and range are held. A task without a box (mode 2)
+    /// and SPTM's own context (bit 0 cleared) need nothing more; an enabled
+    /// box's enforcement is reported as unmodeled.
     #[test]
-    fn the_jit_box_stays_disabled_and_holds_its_range() {
+    fn the_jit_box_holds_its_mode_and_range_and_reports_enforcement() {
         let mut registers = Registers::default();
         let mode = lookup(JIT_BOX_MODE).unwrap();
         let range = lookup(JIT_RANGE).unwrap();
@@ -1439,10 +1465,13 @@ mod tests {
         assert_eq!(registers.read(mode), Ok(2));
         registers.write(range, 0x0000_0001_0200_0006).unwrap();
         assert_eq!(registers.read(range), Ok(0x0000_0001_0200_0006));
+        assert_eq!(mode.unmodeled_effect(2), None);
         for enabled in [0x061e_0c5b, 0x0e1e_0c5b, JIT_BOX_ENABLE] {
-            assert!(registers.write(mode, enabled).is_err(), "{enabled:#x}");
+            registers.write(mode, enabled).unwrap();
+            assert_eq!(registers.read(mode), Ok(enabled));
+            assert_eq!(mode.unmodeled_effect(enabled), Some(JIT_BOX_UNMODELED));
         }
-        assert_eq!(registers.read(mode), Ok(2));
+        assert_eq!(range.unmodeled_effect(u64::MAX), None);
         // The M1 kernels have no JIT box.
         assert!(super::lookup(JIT_RANGE, Chip::AppleM1).is_none());
         for chip in &Chip::ALL[1..] {

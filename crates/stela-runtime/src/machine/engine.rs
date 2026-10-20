@@ -996,6 +996,13 @@ pub struct Machine<H: Host, D: Devices> {
     /// byte (`set_watches`), and the hits not yet taken (`take_watch_hits`).
     watches: Vec<(u64, u64)>,
     watch_hits: Vec<WatchHit>,
+    /// Stop at an unmodeled effect instead of reporting it
+    /// (`set_strict`).
+    strict: bool,
+    /// Every unmodeled effect met so far, each the first time, and those
+    /// not yet taken (`take_unmodeled`).
+    unmodeled_met: Vec<RequirementKind>,
+    unmodeled: Vec<Requirement>,
     /// The block count at which the running PE's time slice ends.
     slice_end: u64,
     /// The system counter value at which it ends, whichever comes first.
@@ -1102,6 +1109,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             trace_hits: Vec::new(),
             watches: Vec::new(),
             watch_hits: Vec::new(),
+            strict: false,
+            unmodeled_met: Vec::new(),
+            unmodeled: Vec::new(),
             slice_end: processors::QUANTUM,
             slice_deadline: u64::MAX,
             clock: clock::Clock::default(),
@@ -1320,6 +1330,34 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// [`WATCH_HITS`] of them; later hits are counted in the last one.
     pub fn take_watch_hits(&mut self) -> Vec<WatchHit> {
         core::mem::take(&mut self.watch_hits)
+    }
+
+    /// Stop at an effect the machine does not model (`Stop::Unsupported`)
+    /// instead of completing the operation and reporting it once: strict
+    /// mode, for tests and boot studies (docs/design/runtime.md
+    /// #unsupported-operations).
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
+    /// The operations since the last call that completed without an effect
+    /// the machine does not model, each kind reported the first time only,
+    /// for the boot log.
+    pub fn take_unmodeled(&mut self) -> Vec<Requirement> {
+        core::mem::take(&mut self.unmodeled)
+    }
+
+    /// An operation completed without an effect this machine does not
+    /// model: stop in strict mode, else report it the first time.
+    fn unmodeled_effect(&mut self, requirement: Requirement) -> Step {
+        if self.strict {
+            return Err(Stop::Unsupported(requirement));
+        }
+        if !self.unmodeled_met.contains(&requirement.kind) {
+            self.unmodeled_met.push(requirement.kind.clone());
+            self.unmodeled.push(requirement);
+        }
+        Ok(())
     }
 
     fn watch(&mut self, physical: u64, bytes: u8, value: Option<u64>, write: bool) {
@@ -4480,6 +4518,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 }
             }
             RegisterOutcome::Written(changes) => {
+                if let Some(missing) = changes.unmodeled {
+                    let refusal = Refusal::UnsupportedSetting(missing);
+                    self.unmodeled_effect(self.register_requirement(word, access, refusal))?;
+                }
                 // PSTATE.D and Apple registers can change what is derived.
                 self.derived_changed();
                 if changes.translation {
@@ -4507,16 +4549,28 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 return Ok(());
             }
             RegisterOutcome::Refused(refusal) => {
-                let mut requirement =
-                    self.requirement(RequirementKind::SystemRegister { word, refusal });
-                requirement.syndrome = Some(super::exception::syndrome(
-                    Class::SystemRegister,
-                    access.map_or(0, registers::trap_iss),
+                return Err(Stop::Unsupported(
+                    self.register_requirement(word, access, refusal),
                 ));
-                return Err(Stop::Unsupported(requirement));
             }
         }
         self.next()
+    }
+
+    /// The requirement of a System register access this machine cannot
+    /// carry out in full, with the syndrome its trap would report.
+    fn register_requirement(
+        &self,
+        word: u32,
+        access: Option<RegisterAccess>,
+        refusal: Refusal,
+    ) -> Requirement {
+        let mut requirement = self.requirement(RequirementKind::SystemRegister { word, refusal });
+        requirement.syndrome = Some(super::exception::syndrome(
+            Class::SystemRegister,
+            access.map_or(0, registers::trap_iss),
+        ));
+        requirement
     }
 
     /// WFI and WFE (Arm `Hint_WFI`, `Hint_WFE` and `AArch64_CheckForWFxTrap`).
@@ -5373,9 +5427,10 @@ mod tests {
         machine.system_instruction(0xd53d_ffe0).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0200);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
-        // The M2 kernel's JIT box: its range (S3_4_C15_C15_1) is held, and
-        // a mode (S3_4_C15_C15_4) that enables the box, whose enforcement
-        // is undocumented, refuses by name.
+        // The M2 kernel's JIT box: its range (S3_4_C15_C15_1) and mode
+        // (S3_4_C15_C15_4) are held. A mode that enables the box, whose
+        // enforcement is undocumented, is reported once, or stops in strict
+        // mode.
         let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
         machine.cpu.set_pstate(Pstate::reset(1));
         machine.cpu.pc = BASE;
@@ -5383,10 +5438,19 @@ mod tests {
         machine.system_instruction(0xd51c_ff20).unwrap();
         assert_eq!(machine.cpu.pc, BASE + 4);
         machine.cpu.state.x[0] = 0x061e_0c5b;
+        for _ in 0..2 {
+            machine.system_instruction(0xd51c_ff80).unwrap();
+        }
+        assert_eq!(machine.cpu.pc, BASE + 12);
+        let reports = machine.take_unmodeled();
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].syndrome, Some(0x6239_3c1e));
+        assert!(machine.take_unmodeled().is_empty());
+        machine.set_strict(true);
         let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd51c_ff80) else {
-            panic!("refusal")
+            panic!("strict mode stops")
         };
-        assert_eq!(requirement.syndrome, Some(0x6239_3c1e));
+        assert_eq!(requirement.kind, reports[0].kind);
     }
 
     #[test]

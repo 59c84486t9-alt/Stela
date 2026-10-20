@@ -1779,6 +1779,9 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
+        for requirement in machine.take_unmodeled() {
+            output::arguments(format_args!("UNMODELED {requirement}\n"));
+        }
         for hit in machine.take_trace_hits() {
             output::arguments(format_args!(
                 "TRACE pc={:#x} pe={} el={} x0-x3={:#x} {:#x} {:#x} {:#x} lr={:#x} dropped={}\n",
