@@ -43,9 +43,18 @@ fn guest_roots() -> Option<Vec<PathBuf>> {
         .then_some(roots)
 }
 
+/// A program that runs another by the path it is given, as `execv` does.
+const EXEC: &str = r#"#include <unistd.h>
+int main(int argc, char **argv) { execv(argv[1], argv + 1); return 127; }
+"#;
+
 fn compile(directory: &Path, name: &str, flags: &[&str]) -> Option<PathBuf> {
-    let source = directory.join("hello.c");
-    std::fs::write(&source, HELLO).ok()?;
+    compile_source(directory, name, HELLO, flags)
+}
+
+fn compile_source(directory: &Path, name: &str, text: &str, flags: &[&str]) -> Option<PathBuf> {
+    let source = directory.join(format!("{name}.c"));
+    std::fs::write(&source, text).ok()?;
     let output = directory.join(name);
     Command::new("xcrun")
         .arg("clang")
@@ -187,6 +196,17 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
         text(&output)
     );
     let _ = (intel, unsigned);
+
+    // The guest's own execve of a relative name stays relative: no PATH
+    // lookup.
+    compile_source(&programs, "exec", EXEC, &["-arch", "arm64e"]).unwrap();
+    let output = stela(&home, &programs, &["./exec", "hello", "y"]);
+    assert_eq!(
+        text(&output).0,
+        "hello from arm64: y\n",
+        "{:?}",
+        text(&output)
+    );
 
     // A launcher for the arm64-only app, then nothing left after uninstall.
     let scan = [

@@ -96,6 +96,17 @@ pub(crate) struct Target {
     pub(crate) environment: Vec<(OsString, OsString)>,
 }
 
+impl Target {
+    /// `program` exactly as named, as `execve` takes its path.
+    pub(crate) fn path(program: &Path) -> Self {
+        Self {
+            program: program.to_owned(),
+            argv0: program.as_os_str().to_owned(),
+            environment: vec![],
+        }
+    }
+}
+
 /// `path` under the first root holding it, else the host's own.
 pub(crate) fn guest_path(roots: &[PathBuf], path: &Path) -> PathBuf {
     match path.strip_prefix("/") {
@@ -128,11 +139,7 @@ pub(crate) fn resolve(roots: &[PathBuf], program: &Path, search: Option<&OsStr>)
     if !file.exists() {
         bail!("{}: no such file", program.display());
     }
-    Ok(Target {
-        program: program.to_owned(),
-        argv0: program.as_os_str().to_owned(),
-        environment: vec![],
-    })
+    Ok(Target::path(program))
 }
 
 /// `execvp`'s lookup of a name without a slash: each `PATH` entry, under the

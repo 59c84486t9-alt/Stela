@@ -270,7 +270,13 @@ impl Run {
                 return Err(missing);
             }
         };
-        let target = program::resolve(&roots, &self.program, std::env::var_os("PATH").as_deref())?;
+        // The guest's own `execve` (`--argv0`) names a path, as the kernel
+        // takes it: relative to the working directory, never a PATH lookup
+        // or a bundle.
+        let target = match &self.argv0 {
+            Some(_) => program::Target::path(&self.program),
+            None => program::resolve(&roots, &self.program, std::env::var_os("PATH").as_deref())?,
+        };
         let argv0 = self.argv0.clone().unwrap_or(target.argv0);
         let mut argv = vec![argv0.as_bytes().to_vec()];
         argv.extend(
