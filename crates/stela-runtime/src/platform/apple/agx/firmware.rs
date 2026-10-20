@@ -33,10 +33,11 @@
 //! these endpoints, plus the firmware's bus-master accesses through the UAT in
 //! the firmware context. On the initdata message it reads the root
 //! ([`super::initdata::Root`]) and refuses one that is not the kext's. On the
-//! device-control doorbell it consumes the device-control ring: the
-//! power-transition notice (type 0x28) is recorded and the device-state query
-//! (type 7) answered, each retired; every other type refuses by name and stays
-//! unconsumed. On a work doorbell it runs the named data-master ring: each
+//! device-control doorbell it consumes the device-control ring: every type
+//! the 26A434 kext sends is decoded against the firmware's dispatcher, its
+//! shared effects reproduced and its entry retired and counted; the types
+//! whose effects need a unit or firmware thread the model lacks refuse by
+//! name and stay unconsumed. On a work doorbell it runs the named data-master ring: each
 //! entry's channel runs its pending commands in order. The signal commands
 //! complete ([`super::signal`]), with their events posted on the firmware
 //! event ring ([`super::event`]) and each announced by the 0x42 message on
@@ -54,7 +55,7 @@ use super::signal;
 use super::uat;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
@@ -91,29 +92,37 @@ pub const INITDATA_MAGIC: u64 = initdata::MAGIC;
 /// The device-control power-transition notice (`AGXAccelerator::
 /// powerStateDidChangeTo`/`WillChangeTo` 0x1af8508/0x1af861c).
 const DEVICE_CONTROL_POWER: u32 = 0x28;
-/// The device-state query (`AGXAccelerator::getPropertyCoreConfigImpl`
-/// 0x1b07768, reporting `device_state`).
-const DEVICE_CONTROL_DEVICE_STATE: u32 = 0x7;
-/// The device-state report's offset in the root's +0xb0 object
-/// (`AGXFirmware+0x918` + 0xe000, register x27 of the query).
-const DEVICE_STATE: u64 = 0xe000;
-/// The report's section mask, a byte: bit 0 the PI controller and OMU metric
-/// configuration at +0x31c, the others the counter list and RIF shadow at
-/// +0x824. The kext reads only the sections whose bit is set and clears the
-/// byte afterwards.
-const DEVICE_STATE_SECTIONS: u64 = 0x82c;
-/// The configuration snapshot (`AGXArmFirmware::
-/// submitCmdFirmwareForceConfigSnapshot` 0x1b569c0, sent without waiting).
-/// The 26A434 firmware's handler (0xffffff80000042b4) copies configuration
-/// words of the initdata objects into its own data (0xffffff80000f814c) and
-/// writes nothing the AP shares.
-const DEVICE_CONTROL_CONFIG_SNAPSHOT: u32 = 0x15;
 /// The device-control types the firmware counts once handled, one bit per
 /// type (its byte table at 0xffffff80000593a0, read at 0xffffff8000003a2c).
 const COUNTED_DEVICE_CONTROL: u64 = 0x1fff_3bfb_f3c7_bffe;
 /// The handled-entry count's offset in the root's +0xb0 object, a word the
 /// firmware increments after each counted entry (0xffffff8000004b8c).
 const DEVICE_CONTROL_COUNT: u64 = 0xe838;
+/// The ring directory's firmware VA of the HWDSID table, 0x10 bytes per
+/// DSID: +0 the requested priority, +4 the firmware's matching word
+/// (handlers 0xffffff80000043a0 and 0xffffff8000003ba4).
+const DSID_TABLE: u64 = 0x2c8;
+/// The ring directory's context-switch histogram enables, one bit per data
+/// master, and the histograms themselves, 12 words per data master from
+/// +0x3e5 (handler 0xffffff8000003e88; `getDMContextSwitchTimeHistogram`
+/// 0x1b4eb38 reads them).
+const HISTOGRAM_ENABLES: u64 = 0x3e4;
+/// The data masters the kext keeps a histogram for: TA, 3D and CL, whose
+/// 0x30-byte histograms fill +0x3e5..+0x475.
+const HISTOGRAM_MASTERS: u32 = 3;
+/// The power-counter sample buffer and its sample count in the root's +0xb0
+/// object (handler 0xffffff8000003b20; `getAndGatherPowerCounterData`
+/// 0x1b54b60 reads them).
+const POWER_COUNTERS: u64 = 0xca48;
+const POWER_COUNTER_BYTES: usize = 0x1800;
+const POWER_COUNTER_SAMPLES: u64 = 0xca30;
+/// The RIART U-level disable mask and T-disable word in the root's +0x20
+/// object (handlers 0xffffff8000004678 and 0xffffff8000003d24).
+const RIART_U_LEVELS_DISABLED: u64 = 0xe30;
+const RIART_T_DISABLED: u64 = 0xe34;
+/// The timed-out word of an `AGXLateEvalWait`'s firmware object
+/// (handler 0xffffff8000003d34).
+const LATE_EVAL_TIMED_OUT: u64 = 0x38;
 /// The event type the firmware would send on 0x20 (`0x42`).
 pub const EVENT_TYPE: u64 = 0x42;
 
@@ -139,12 +148,43 @@ impl Pipe {
     }
 }
 
-/// A device-control command the model carries out.
+/// A device-control command the model carries out, by its shared effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Command {
     Power(PowerNotice),
-    DeviceState,
-    ConfigSnapshot,
+    /// The firmware has no handler for the type, or keeps every effect in
+    /// its own data or registers: nothing the AP shares changes.
+    Private,
+    /// 0xe: set a DSID's requested priority, release the DSID once the
+    /// firmware's word matches it, then write `value` at `pointer`.
+    DsidPriority {
+        dsid: u8,
+        priority: u32,
+        pointer: u64,
+        value: u32,
+    },
+    /// 0x14: clear a DSID's table slot, then write `value` at `pointer`.
+    DsidDeprioritize {
+        dsid: u8,
+        pointer: u64,
+        value: u32,
+    },
+    /// 0x1a operation 3 or 4: enable or disable a data master's histogram.
+    Histogram {
+        master: u32,
+        enable: bool,
+    },
+    /// 0x27: mark a late-evaluation wait's firmware object timed out.
+    LateEvalTimeout {
+        wait: u64,
+    },
+    /// 0x32: empty the power-counter sample buffer.
+    PowerCounters,
+    /// 0x34/0x35: a RIART word in the root's +0x20 object.
+    Riart {
+        offset: u64,
+        value: u32,
+    },
 }
 
 /// A power-transition notice the AP sent on the device-control ring.
@@ -179,10 +219,8 @@ pub struct State {
     pub fwctl: u64,
     /// Power-transition notices consumed, in order.
     pub power: Vec<PowerNotice>,
-    /// Device-state queries answered.
-    pub device_state_queries: u64,
-    /// Configuration snapshots taken.
-    pub config_snapshots: u64,
+    /// Device-control entries consumed, by type.
+    pub device_control: BTreeMap<u32, u64>,
     /// Channel commands completed.
     pub commands: u64,
     /// Firmware events posted.
@@ -294,15 +332,55 @@ impl State {
                 .is_some_and(|bits| bits & 1 != 0);
             match device_control_entry(&entry)? {
                 Command::Power(notice) => self.power.push(notice),
-                Command::DeviceState => {
-                    // The model runs no PI controller, OMU metrics, counter
-                    // list or RIF shadow, so the report states no section.
-                    memory.write(root.object_928 + DEVICE_STATE + DEVICE_STATE_SECTIONS, &[0])?;
-                    self.device_state_queries += 1;
+                Command::Private => {}
+                Command::DsidPriority {
+                    dsid,
+                    priority,
+                    pointer,
+                    value,
+                } => {
+                    let slot = dsid_slot(memory, root, dsid)?;
+                    memory.write(slot, &priority.to_le_bytes())?;
+                    let matched = memory.read_u32(slot + 4)?;
+                    if matched == priority && priority != 0 {
+                        memory.write(slot, &[0; 8])?;
+                    }
+                    memory.write(pointer, &value.to_le_bytes())?;
                 }
-                // The model keeps no configuration of its own to copy.
-                Command::ConfigSnapshot => self.config_snapshots += 1,
+                Command::DsidDeprioritize {
+                    dsid,
+                    pointer,
+                    value,
+                } => {
+                    let slot = dsid_slot(memory, root, dsid)?;
+                    memory.write(slot, &[0; 8])?;
+                    memory.write(pointer, &value.to_le_bytes())?;
+                }
+                Command::Histogram { master, enable } => {
+                    let at = root.rings + HISTOGRAM_ENABLES;
+                    let mut enables = [0];
+                    memory.read(at, &mut enables)?;
+                    let bit = 1 << master;
+                    enables[0] = if enable {
+                        enables[0] | bit
+                    } else {
+                        enables[0] & !bit
+                    };
+                    memory.write(at, &enables)?;
+                }
+                Command::LateEvalTimeout { wait } => {
+                    memory.write(wait + LATE_EVAL_TIMED_OUT, &1u32.to_le_bytes())?;
+                }
+                Command::PowerCounters => {
+                    let samples = root.object_928 + POWER_COUNTERS;
+                    memory.write(samples, &[0; POWER_COUNTER_BYTES])?;
+                    memory.write(root.object_928 + POWER_COUNTER_SAMPLES, &[0; 4])?;
+                }
+                Command::Riart { offset, value } => {
+                    memory.write(root.object_358 + offset, &value.to_le_bytes())?;
+                }
             }
+            *self.device_control.entry(kind).or_default() += 1;
             if counted {
                 let count = root.object_928 + DEVICE_CONTROL_COUNT;
                 let handled = memory.read_u32(count)?.wrapping_add(1);
@@ -371,12 +449,49 @@ impl State {
     }
 }
 
+/// The HWDSID table slot of `dsid`, through the ring directory's table VA.
+fn dsid_slot(memory: &mut dyn Shared, root: &Root, dsid: u8) -> Result<u64, &'static str> {
+    let table = memory.read_u64(root.rings + DSID_TABLE)?;
+    if table == 0 {
+        return Err("GFX ring directory names no HWDSID table");
+    }
+    Ok(table + u64::from(dsid) * 0x10)
+}
+
+/// Every byte of `entry` after the type and outside `fields`, each a
+/// half-open (start, end) byte range, is zero.
+fn only(entry: &[u8], fields: &[(usize, usize)]) -> bool {
+    entry.iter().enumerate().skip(4).all(|(at, &b)| {
+        b == 0
+            || fields
+                .iter()
+                .any(|&(start, end)| (start..end).contains(&at))
+    })
+}
+
 /// Decode one device-control entry (`AGFIAcceleratorDeviceControlEntry`,
-/// 0x40 bytes, the type at +0). The power notice is the type and one word,
-/// the device-state query and the configuration snapshot the type alone; the
-/// rest is zero, as the kext builds them.
+/// 0x40 bytes, the type at +0) into its shared effects. Each type's fields
+/// are those its 26A434 kext builder writes; every other byte is zero, as
+/// the builders zero the entry first. The firmware handlers are the 26A434
+/// dispatcher's (0xffffff8000003a1c, a jump table over types 4..0x3b at
+/// 0xffffff8000004c48); docs/research/agx.md §2 tabulates both sides.
 fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
     let word = |at: usize| u32::from_le_bytes(entry[at..at + 4].try_into().unwrap());
+    let u64_at = |at: usize| u64::from_le_bytes(entry[at..at + 8].try_into().unwrap());
+    let form = |fields: &[(usize, usize)], beyond: &'static str| {
+        if only(entry, fields) {
+            Ok(Command::Private)
+        } else {
+            Err(beyond)
+        }
+    };
+    let boolean = |beyond: &'static str| {
+        if word(4) > 1 {
+            Err("GFX device-control flag word is not 0 or 1")
+        } else {
+            form(&[(4, 8)], beyond)
+        }
+    };
     match word(0) {
         DEVICE_CONTROL_POWER => {
             if entry[8..].iter().any(|&b| b != 0) {
@@ -388,22 +503,183 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
                 _ => Err("GFX device-control power notice names no transition"),
             }
         }
-        DEVICE_CONTROL_DEVICE_STATE => {
-            if entry[4..].iter().any(|&b| b != 0) {
-                return Err("GFX device-state query has fields beyond its type");
-            }
-            Ok(Command::DeviceState)
+        // The dispatcher has no handler for these: they go straight to its
+        // common tail. 7 is the device-state query; no 26A434 firmware code
+        // writes its report at +0xe82c of the root's +0xb0 object, so the
+        // section mask stays as the AP left it. 0x23 (FW utilisation
+        // monitor), 0x2d (LUD hints), 0x12 (VKSCDM reset), 0x11 (VKSCDM
+        // distribution), 0x1c (GVDM mode) and 0x31 (AVMR) are likewise
+        // unhandled by this firmware.
+        0x7 | 0x12 | 0x23 | 0x2d => form(&[], "GFX device control has fields beyond its type"),
+        0x11 => form(
+            &[(4, 0x14)],
+            "GFX VKSCDM distribution has fields beyond its state",
+        ),
+        0x1c => form(&[(4, 8)], "GFX GVDM mode has fields beyond its word"),
+        0x31 => form(
+            &[(4, 0xd)],
+            "GFX AVMR control has fields beyond its overrides",
+        ),
+        // Handlers whose effects stay in the firmware's own data, its
+        // power-management threads or its registers. 0xb/0xc/0xd wake the
+        // power thread for new hot-spot offsets and DPE/PPT parameters; 0x15
+        // and 0x30 copy initdata configuration (the UMA recall words the kext
+        // wrote at +0xe1c of the root's +0x20 object) into firmware data; 0x22
+        // copies the display power words at +0x988 of the same object; 0x1b
+        // only cleans the firmware's cached SFE tier-3 and THM counts at
+        // directory +0x47d/+0x475, which no unit of the model ever raises;
+        // 0x33 issues the register-window instruction-cache invalidate, which
+        // the model's GPU, holding no instruction cache, has nothing to act on.
+        // The rest set firmware power, QoS and scheduling state: 0xa idle
+        // power-off, 0xf/0x10 CDM distribution, 0x13 resource release, 0x16/
+        // 0x17 default QoS, 0x18 FRG power nap, 0x19 GIFAF hint, 0x25 QoS
+        // knob, 0x38 power-counter selection (the list the kext wrote at
+        // +0xca34 of the root's +0xb0 object) and 0x3b remote IOP power,
+        // whose handler reads its words and does nothing.
+        0xb | 0xc | 0xd | 0x10 | 0x15 | 0x1b | 0x22 | 0x30 | 0x38 => {
+            form(&[], "GFX device control has fields beyond its type")
         }
-        DEVICE_CONTROL_CONFIG_SNAPSHOT => {
-            if entry[4..].iter().any(|&b| b != 0) {
-                return Err("GFX configuration snapshot has fields beyond its type");
+        0xa => boolean("GFX idle power-off has fields beyond its flag"),
+        0xf => form(
+            &[(4, 0x1c)],
+            "GFX CDM distribution has fields beyond its state",
+        ),
+        0x13 => form(
+            &[(8, 0x14)],
+            "GFX resource release has fields beyond its slots",
+        ),
+        0x16 | 0x17 => form(&[(4, 0xc)], "GFX default QoS has fields beyond its value"),
+        0x18 => {
+            if word(4) > 1 {
+                return Err("GFX FRG power nap flag is not 0 or 1");
             }
-            Ok(Command::ConfigSnapshot)
+            form(
+                &[(4, 0x10)],
+                "GFX FRG power nap has fields beyond its words",
+            )
         }
+        0x19 => boolean("GFX GIFAF streaming hint has fields beyond its flag"),
+        0x25 => {
+            // The firmware aborts on a data master other than 0..2
+            // (0xffffff8000004c28).
+            if entry[4] > 2 {
+                return Err("GFX QoS knob names no data master the firmware accepts");
+            }
+            form(&[(4, 0xa)], "GFX QoS knob has fields beyond its knobs")
+        }
+        0x33 => form(
+            &[(4, 0xc)],
+            "GFX ICache invalidate has fields beyond its words",
+        ),
+        0x3b => form(
+            &[(4, 0x10)],
+            "GFX remote IOP power notice has fields beyond its words",
+        ),
+        // Handlers with shared effects.
+        0xe => {
+            if !only(entry, &[(4, 0x15)]) {
+                return Err("GFX DSID priority has fields beyond its slot");
+            }
+            if u64_at(4) == 0 {
+                return Err("GFX DSID priority names no completion word");
+            }
+            Ok(Command::DsidPriority {
+                dsid: entry[0x14],
+                priority: word(0x10),
+                pointer: u64_at(4),
+                value: word(0xc),
+            })
+        }
+        0x14 => {
+            if !only(entry, &[(4, 0x10), (0x14, 0x15)]) {
+                return Err("GFX DSID deprioritize has fields beyond its slot");
+            }
+            if u64_at(4) == 0 {
+                return Err("GFX DSID deprioritize names no completion word");
+            }
+            Ok(Command::DsidDeprioritize {
+                dsid: entry[0x14],
+                pointer: u64_at(4),
+                value: word(0xc),
+            })
+        }
+        0x1a => {
+            if !only(entry, &[(4, 9)]) {
+                return Err("GFX context-switch histogram has fields beyond its operation");
+            }
+            let master = word(4);
+            if master >= HISTOGRAM_MASTERS {
+                return Err("GFX context-switch histogram names no data master");
+            }
+            match entry[8] {
+                // 1 (get), 2 (reset) and 5 only clean the firmware's cached
+                // histogram for the AP to read; the model never switches a
+                // data master's context, so its bins stay as they are.
+                1 | 2 | 5 => Ok(Command::Private),
+                3 => Ok(Command::Histogram {
+                    master,
+                    enable: true,
+                }),
+                4 => Ok(Command::Histogram {
+                    master,
+                    enable: false,
+                }),
+                _ => Err("GFX context-switch histogram names no operation"),
+            }
+        }
+        0x27 => {
+            if !only(entry, &[(4, 0x20)]) {
+                return Err("GFX late-eval timeout has fields beyond its wait");
+            }
+            match u64_at(4) {
+                0 => Err("GFX late-eval timeout names no wait"),
+                wait => Ok(Command::LateEvalTimeout { wait }),
+            }
+        }
+        0x32 => {
+            form(&[], "GFX power-counter gather has fields beyond its type")?;
+            Ok(Command::PowerCounters)
+        }
+        0x34 => {
+            form(
+                &[(4, 8)],
+                "GFX RIART U-level mask has fields beyond its word",
+            )?;
+            Ok(Command::Riart {
+                offset: RIART_U_LEVELS_DISABLED,
+                value: word(4),
+            })
+        }
+        0x35 => {
+            boolean("GFX RIART T-disable has fields beyond its flag")?;
+            Ok(Command::Riart {
+                offset: RIART_T_DISABLED,
+                value: word(4),
+            })
+        }
+        // Refused by name.
+        0x4 | 0x5 => Err(
+            "GFX device control 0x4/0x5 starts or stops performance-counter sampling, which programs counter hardware the model lacks",
+        ),
         // AGXAccelerator::allocateMemoryEvent answers a host-allocation
         // request the firmware raised; the model raises none.
         0x8 | 0x26 => Err(
             "GFX device control 0x8/0x26 answers a firmware host-allocation request the model never makes",
+        ),
+        0x9 => Err(
+            "GFX device control 0x9 answers a firmware event the model never posts and wakes a firmware scheduler thread it does not run",
+        ),
+        0x1f => Err(
+            "GFX device control 0x1f updates an app role in the firmware scheduler's context registry, which the model does not keep",
+        ),
+        0x24 => Err(
+            "GFX device control 0x24 is an AFR perf-state override the 26A434 firmware lacks; it answers with a firmware log warning the model does not post",
+        ),
+        0x29 => Err(
+            "GFX device control 0x29 hands an exiting context to a firmware teardown thread the model does not run",
+        ),
+        0x2c => Err(
+            "GFX device control 0x2c (external CS or kill request) is a fatal unsupported command in the 26A434 firmware",
         ),
         _ => Err("GFX device-control type is not one the 26A434 kext sends"),
     }
@@ -528,6 +804,7 @@ mod tests {
     use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
     use crate::platform::apple::agx::ring::tests::Flat;
     use crate::platform::apple::agx::ring::{READ, WRITE};
+    use core::ops::Range;
 
     fn doorbell_payload(kind: u64, low: u64) -> u64 {
         ((DOORBELL_FLAG | kind) << TYPE_SHIFT) | low
@@ -636,44 +913,290 @@ mod tests {
         assert!(!state.dma_pending());
     }
 
+    const OBJECT_928: u64 = BASE + 0x5000;
+    const OBJECT_358: u64 = BASE + 0x3000;
+    const COUNT: u64 = OBJECT_928 + DEVICE_CONTROL_COUNT;
+
+    /// A device-control entry of `kind` whose bytes in `fields` are `fill`.
+    fn filled(kind: u32, fields: Range<usize>, fill: u8) -> [u8; 0x40] {
+        let mut entry = [0; 0x40];
+        entry[..4].copy_from_slice(&kind.to_le_bytes());
+        entry[fields].fill(fill);
+        entry
+    }
+
+    fn of_type(kind: u32) -> [u8; 0x40] {
+        filled(kind, 4..4, 0)
+    }
+
+    /// Ring the device-control doorbell and run the firmware's DMA.
+    fn ring(state: &mut State, memory: &mut Flat) -> Result<(), &'static str> {
+        state.doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))?;
+        state.dma(memory, &mut Vec::new())
+    }
+
     #[test]
-    fn the_device_state_query_reports_no_section() {
-        let mut query = [0; 0x40];
-        query[0] = 7;
-        let (mut state, mut memory) = with_device_control(&[query]);
-        // A stale mask from an earlier report.
-        let sections = BASE + 0x5000 + DEVICE_STATE + DEVICE_STATE_SECTIONS;
+    fn the_device_state_query_leaves_the_report_as_the_ap_left_it() {
+        let (mut state, mut memory) = with_device_control(&[of_type(7)]);
+        // A mask the AP left; the 26A434 firmware has no type-7 handler.
+        let sections = OBJECT_928 + 0xe82c;
         memory.put(sections, &[1]);
-        state
-            .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
-            .unwrap();
-        state.dma(&mut memory, &mut Vec::new()).unwrap();
+        ring(&mut state, &mut memory).unwrap();
         let mut mask = [0xff];
         memory.read(sections, &mut mask).unwrap();
-        assert_eq!(mask, [0]);
-        assert_eq!(state.device_state_queries, 1);
+        assert_eq!(mask, [1]);
+        assert_eq!(state.device_control.get(&7), Some(&1));
+        assert_eq!(memory.read_u32(COUNT), Ok(1));
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(1));
-        query[8] = 1;
-        assert!(device_control_entry(&query).is_err());
+        assert!(device_control_entry(&filled(7, 8..9, 1)).is_err());
     }
 
     #[test]
     fn the_configuration_snapshot_is_taken_and_left_uncounted() {
-        let mut snapshot = [0; 0x40];
-        snapshot[0] = 0x15;
+        let snapshot = of_type(0x15);
         let (mut state, mut memory) = with_device_control(&[power(0), snapshot, power(1)]);
-        let count = BASE + 0x5000 + DEVICE_CONTROL_COUNT;
-        memory.put_u32(count, 7);
-        state
-            .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
-            .unwrap();
-        state.dma(&mut memory, &mut Vec::new()).unwrap();
-        assert_eq!(state.config_snapshots, 1);
+        memory.put_u32(COUNT, 7);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(state.device_control.get(&0x15), Some(&1));
         // The two power notices are counted; the snapshot is not.
-        assert_eq!(memory.read_u32(count), Ok(9));
+        assert_eq!(memory.read_u32(COUNT), Ok(9));
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(3));
-        snapshot[4] = 1;
-        assert!(device_control_entry(&snapshot).is_err());
+        assert!(device_control_entry(&filled(0x15, 4..5, 1)).is_err());
+    }
+
+    /// Every kext form whose firmware handler changes nothing the AP shares.
+    fn private_forms() -> Vec<[u8; 0x40]> {
+        let mut forms: Vec<_> = [
+            0x7, 0x12, 0x23, 0x2d, 0xb, 0xc, 0xd, 0x10, 0x15, 0x1b, 0x22, 0x30, 0x38,
+        ]
+        .into_iter()
+        .map(of_type)
+        .collect();
+        forms.extend([
+            filled(0x11, 4..0x14, 0x5a),
+            filled(0x1c, 4..8, 0x5a),
+            filled(0x31, 4..0xd, 0x5a),
+            filled(0xa, 4..5, 1),
+            filled(0xf, 4..0x1c, 0x5a),
+            filled(0x13, 8..0x14, 0x5a),
+            filled(0x16, 4..0xc, 0x5a),
+            filled(0x17, 4..0xc, 0x5a),
+            filled(0x18, 8..0x10, 0x5a),
+            filled(0x19, 4..5, 1),
+            filled(0x25, 4..0xa, 2),
+            filled(0x33, 4..0xc, 0x5a),
+            filled(0x3b, 4..0x10, 0x5a),
+        ]);
+        forms
+    }
+
+    #[test]
+    fn private_device_control_is_consumed_and_counted_by_the_firmware_table() {
+        let forms = private_forms();
+        let (mut state, mut memory) = with_device_control(&forms);
+        let before = memory.bytes.clone();
+        ring(&mut state, &mut memory).unwrap();
+        let entries = forms.len() as u32;
+        assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(entries));
+        // 0x13, 0x15, 0x1b and 0x22 are the uncounted ones among them.
+        assert_eq!(memory.read_u32(COUNT), Ok(entries - 4));
+        assert_eq!(
+            state.device_control.values().sum::<u64>(),
+            u64::from(entries)
+        );
+        // Nothing else the AP shares changed.
+        let mut after = memory.bytes.clone();
+        for at in [CONTROL_STATE + READ, COUNT] {
+            let at = (at - BASE) as usize;
+            after[at..at + 4].copy_from_slice(&before[at..at + 4]);
+        }
+        assert!(after == before);
+    }
+
+    #[test]
+    fn private_device_control_refuses_bytes_outside_its_form() {
+        for form in private_forms() {
+            let mut extra = form;
+            extra[0x3f] = 1;
+            assert!(device_control_entry(&extra).is_err());
+        }
+        // Flags are 0 or 1, and the QoS knob's data master is 0..2.
+        assert!(device_control_entry(&filled(0xa, 4..5, 2)).is_err());
+        assert!(device_control_entry(&filled(0x18, 4..5, 2)).is_err());
+        assert!(device_control_entry(&filled(0x25, 4..5, 3)).is_err());
+    }
+
+    /// A HWDSID table named by the ring directory, and an entry of `kind`
+    /// for DSID 3 whose completion word is at `word` with value 0x700.
+    fn dsid_entry(memory: &mut Flat, kind: u32, word: u64) -> ([u8; 0x40], u64) {
+        let table = BASE + 0x1e000;
+        memory.put_u64(RINGS + DSID_TABLE, table);
+        let mut entry = of_type(kind);
+        entry[4..0xc].copy_from_slice(&word.to_le_bytes());
+        entry[0xc..0x10].copy_from_slice(&0x700u32.to_le_bytes());
+        entry[0x14] = 3;
+        (entry, table + 3 * 0x10)
+    }
+
+    #[test]
+    fn dsid_priority_sets_the_table_and_releases_a_matched_slot() {
+        let (mut state, mut memory) = with_device_control(&[]);
+        let word = BASE + 0x1f000;
+        let (mut entry, slot) = dsid_entry(&mut memory, 0xe, word);
+        entry[0x10..0x14].copy_from_slice(&5u32.to_le_bytes());
+        // The firmware's word does not match yet: the request stays.
+        memory.put(CONTROL_ENTRIES, &entry);
+        memory.put_u32(slot + 4, 4);
+        memory.put_u32(CONTROL_STATE + WRITE, 1);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u32(slot), Ok(5));
+        assert_eq!(memory.read_u32(slot + 4), Ok(4));
+        assert_eq!(memory.read_u32(word), Ok(0x700));
+        // A matching word releases the slot.
+        memory.put(CONTROL_ENTRIES + 0x40, &entry);
+        memory.put_u32(slot + 4, 5);
+        memory.put_u32(word, 0);
+        memory.put_u32(CONTROL_STATE + WRITE, 2);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u64(slot), Ok(0));
+        assert_eq!(memory.read_u32(word), Ok(0x700));
+        // 0xe is uncounted.
+        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        assert_eq!(state.device_control.get(&0xe), Some(&2));
+        entry[0x15] = 1;
+        assert!(device_control_entry(&entry).is_err());
+        entry[0x15] = 0;
+        entry[4..0xc].fill(0);
+        assert!(device_control_entry(&entry).is_err());
+    }
+
+    #[test]
+    fn dsid_deprioritize_clears_the_slot_and_writes_the_completion_word() {
+        let (mut state, mut memory) = with_device_control(&[]);
+        let word = BASE + 0x1f000;
+        let (mut entry, slot) = dsid_entry(&mut memory, 0x14, word);
+        memory.put(CONTROL_ENTRIES, &entry);
+        memory.put_u64(slot, 0x0000_0006_0000_0006);
+        memory.put_u32(CONTROL_STATE + WRITE, 1);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u64(slot), Ok(0));
+        assert_eq!(memory.read_u32(word), Ok(0x700));
+        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        // The kext leaves +0x10..+0x14 zero.
+        entry[0x10] = 1;
+        assert!(device_control_entry(&entry).is_err());
+        // Without a table the entry refuses and stays.
+        let (mut bare, mut memory) = with_device_control(&[]);
+        entry[0x10] = 0;
+        memory.put(CONTROL_ENTRIES, &entry);
+        memory.put_u32(CONTROL_STATE + WRITE, 1);
+        assert_eq!(
+            ring(&mut bare, &mut memory),
+            Err("GFX ring directory names no HWDSID table")
+        );
+        assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(0));
+    }
+
+    #[test]
+    fn the_context_switch_histogram_family_follows_the_firmware() {
+        // The boot run's entry: get (1) for data master 0.
+        let get = filled(0x1a, 8..9, 1);
+        let mut enable = filled(0x1a, 8..9, 3);
+        enable[4] = 2;
+        let mut disable = filled(0x1a, 8..9, 4);
+        disable[4] = 1;
+        let reset = filled(0x1a, 8..9, 2);
+        let (mut state, mut memory) = with_device_control(&[get, enable, disable, reset]);
+        let enables = RINGS + HISTOGRAM_ENABLES;
+        memory.put(enables, &[0b011]);
+        // A bin the AP reads back after the get.
+        memory.put_u32(enables + 1, 9);
+        ring(&mut state, &mut memory).unwrap();
+        let mut bits = [0];
+        memory.read(enables, &mut bits).unwrap();
+        assert_eq!(bits, [0b101]);
+        assert_eq!(memory.read_u32(enables + 1), Ok(9));
+        assert_eq!(state.device_control.get(&0x1a), Some(&4));
+        // 0x1a is uncounted.
+        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        // No fourth data master, no operation 0, nothing beyond +8.
+        let mut master = get;
+        master[4] = 3;
+        assert!(device_control_entry(&master).is_err());
+        assert!(device_control_entry(&filled(0x1a, 8..9, 0)).is_err());
+        assert!(device_control_entry(&filled(0x1a, 8..0xa, 1)).is_err());
+    }
+
+    #[test]
+    fn a_late_eval_timeout_marks_its_wait() {
+        let wait = BASE + 0x1f000;
+        let mut entry = filled(0x27, 0xc..0x20, 0x5a);
+        entry[4..0xc].copy_from_slice(&wait.to_le_bytes());
+        let (mut state, mut memory) = with_device_control(&[entry]);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u32(wait + LATE_EVAL_TIMED_OUT), Ok(1));
+        assert_eq!(memory.read_u32(COUNT), Ok(1));
+        entry[0x20] = 1;
+        assert!(device_control_entry(&entry).is_err());
+        assert!(device_control_entry(&filled(0x27, 0xc..0x20, 1)).is_err());
+    }
+
+    #[test]
+    fn the_power_counter_gather_empties_its_buffer() {
+        let (mut state, mut memory) = with_device_control(&[of_type(0x32)]);
+        let samples = OBJECT_928 + POWER_COUNTERS;
+        memory.put(samples, &[0x5a; POWER_COUNTER_BYTES]);
+        memory.put_u32(OBJECT_928 + POWER_COUNTER_SAMPLES, 3);
+        // The selection list beside it is the kext's and stays.
+        memory.put_u32(OBJECT_928 + 0xca34, 0x11);
+        ring(&mut state, &mut memory).unwrap();
+        let mut buffer = [0xff; POWER_COUNTER_BYTES];
+        memory.read(samples, &mut buffer).unwrap();
+        assert!(buffer.iter().all(|&b| b == 0));
+        assert_eq!(memory.read_u32(OBJECT_928 + POWER_COUNTER_SAMPLES), Ok(0));
+        assert_eq!(memory.read_u32(OBJECT_928 + 0xca34), Ok(0x11));
+        assert_eq!(memory.read_u32(COUNT), Ok(1));
+        assert!(device_control_entry(&filled(0x32, 4..5, 1)).is_err());
+    }
+
+    #[test]
+    fn riart_settings_land_in_the_root_object() {
+        let mut mask = of_type(0x34);
+        mask[4..8].copy_from_slice(&0x6u32.to_le_bytes());
+        let disabled = filled(0x35, 4..5, 1);
+        let (mut state, mut memory) = with_device_control(&[mask, disabled]);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u32(OBJECT_358 + RIART_U_LEVELS_DISABLED), Ok(6));
+        assert_eq!(memory.read_u32(OBJECT_358 + RIART_T_DISABLED), Ok(1));
+        assert_eq!(memory.read_u32(COUNT), Ok(2));
+        assert!(device_control_entry(&filled(0x35, 4..5, 2)).is_err());
+        assert!(device_control_entry(&filled(0x34, 8..9, 1)).is_err());
+    }
+
+    #[test]
+    fn device_control_needing_a_missing_unit_refuses_by_name() {
+        for (kind, reason) in [
+            (0x4, "performance-counter"),
+            (0x5, "performance-counter"),
+            (0x9, "scheduler thread"),
+            (0x1f, "context registry"),
+            (0x24, "AFR"),
+            (0x29, "teardown thread"),
+            (0x2c, "fatal"),
+            (0x26, "host-allocation"),
+        ] {
+            let (mut state, mut memory) = with_device_control(&[of_type(kind)]);
+            assert!(ring(&mut state, &mut memory).unwrap_err().contains(reason));
+            assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(0));
+            assert_eq!(memory.read_u32(COUNT), Ok(0));
+        }
+        // Types the kext never sends.
+        for kind in [0, 1, 2, 3, 6, 0x1d, 0x20, 0x3c, 0x40] {
+            assert_eq!(
+                device_control_entry(&of_type(kind)),
+                Err("GFX device-control type is not one the 26A434 kext sends")
+            );
+        }
     }
 
     #[test]
