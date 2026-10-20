@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod agx_isa;
+mod agx_observe;
 mod amx;
 mod bench;
 mod boot;
@@ -54,6 +55,9 @@ enum Task {
     SocFacts(soc_facts::SocFacts),
     /// Generate the AGX2 shader ISA tables from Mesa's AGX2.xml.
     AgxIsa(agx_isa::AgxIsa),
+    /// Consolidate a boot run's `--agx-observe` log into a per-command-type
+    /// field-confirmation report.
+    AgxObserve(agx_observe::AgxObserve),
     /// Audit the native code of Arm's data-independent-time instructions
     /// against Intel's data operand independent timing list.
     DitAudit(dit::DitAudit),
@@ -78,6 +82,7 @@ fn main() -> ExitCode {
         Task::DarwinCatalogs(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::SocFacts(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AgxIsa(task) => task.run().map(|()| ExitCode::SUCCESS),
+        Task::AgxObserve(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::DitAudit(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Progress { check } => progress::run(check)
             .and_then(|()| system_matrix::assess::run(check))
