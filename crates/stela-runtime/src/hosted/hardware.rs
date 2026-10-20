@@ -1,13 +1,23 @@
-//! The Apple-silicon machine a hosted process observes: the chip's CPU
-//! family, topology and cache line, which the commpage and the `hw.*`
-//! sysctls report instead of the x86 host's. Memory size is the host's, as
-//! the guest's allocations are.
+//! The Apple-silicon machine a hosted process observes: the SoC's CPU
+//! family, topology and caches, which the commpage and the `hw.*` sysctls
+//! report instead of the x86 host's. Memory size is the host's, as the
+//! guest's allocations are.
 //!
-//! Values from XNU `osfmk/mach/machine.h` (CPU types, subtypes, families)
-//! and the M2's published topology: four Avalanche performance cores and
-//! four Blizzard efficiency cores in two clusters, 128-byte cache lines.
-use crate::machine::Chip;
-use anyhow::{Result, bail};
+//! Each SoC is one [`BOARDS`] row: a board of the universal macOS 27.0.1
+//! `26A434` IPSW and its DeviceTree's cluster layout (`/cpus` `cluster-type`,
+//! `reg` and `l2-cache-size`, recorded per board in `isa/apple-soc-facts.json`
+//! by `cargo xtask soc-facts`). Everything the system engine also presents
+//! comes from the same `machine` tables, so the two cannot disagree: the
+//! SoC's name, CPU and per-core-type MIDR_EL1 part from `machine::soc`'s
+//! rows, the level 1 caches from the same rows, and memory tagging from
+//! `machine::identification`. The CPU family and subfamily are XNU's for
+//! those MIDR parts ([`FAMILIES`]).
+//!
+//! The DeviceTree lists every core its die has. A binned SoC (fewer cores
+//! enabled than the die has) is not a separate row: no 26A434 input gives
+//! its fused core count, which iBoot applies.
+use crate::machine::{Chip, identification, soc};
+use anyhow::{Context, Result, bail, ensure};
 
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 pub const CPU_SUBTYPE_ARM64E: u32 = 2;
@@ -15,7 +25,242 @@ pub const CPU_SUBTYPE_ARM64E: u32 = 2;
 pub const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
 /// `CPU_SUBTYPE_PTRAUTH_ABI`: an arm64e process using the stable PAC ABI.
 pub const CPU_SUBTYPE_PTRAUTH_ABI: u32 = 0x8000_0000;
+
+/// XNU `osfmk/mach/machine.h` CPU families of the Apple-silicon Macs
+/// (xnu-12377.121.6), and the T8152's, which only 26A434 gives (below).
+pub const CPUFAMILY_ARM_FIRESTORM_ICESTORM: u32 = 0x1b58_8bb3;
 pub const CPUFAMILY_ARM_BLIZZARD_AVALANCHE: u32 = 0xda33_d83d;
+pub const CPUFAMILY_ARM_IBIZA: u32 = 0xfa33_415e;
+pub const CPUFAMILY_ARM_LOBOS: u32 = 0x5f4d_ea93;
+pub const CPUFAMILY_ARM_PALMA: u32 = 0x7201_5832;
+pub const CPUFAMILY_ARM_DONAN: u32 = 0x6f51_29ac;
+pub const CPUFAMILY_ARM_BRAVA: u32 = 0x17d5_b93a;
+pub const CPUFAMILY_ARM_TAHITI: u32 = 0x75d4_acb9;
+pub const CPUFAMILY_ARM_HIDRA: u32 = 0x1d5a_87e8;
+pub const CPUFAMILY_ARM_SOTRA: u32 = 0xf76c_5b1a;
+/// The family of MIDR parts 0x72 and 0x73 (m1n1 `src/midr.h`
+/// `MIDR_PART_T8152_KOMODO_*`), which xnu-12377.121.6 does not list: the
+/// 26A434 kernels' MIDR-part-indexed family table (`cpuid_get_cpufamily`;
+/// kernelcache.release.mac14g file 0xf5bc, entries 0x72 and 0x73) gives it.
+pub const CPUFAMILY_ARM_KOMODO: u32 = 0x6d0c_cb0c;
+
+/// XNU `machine.h` CPU subfamilies.
+pub const CPUSUBFAMILY_ARM_HP: u32 = 1;
+pub const CPUSUBFAMILY_ARM_HG: u32 = 2;
+pub const CPUSUBFAMILY_ARM_HS: u32 = 4;
+pub const CPUSUBFAMILY_ARM_HC_HD: u32 = 5;
+
+/// The CPU family and subfamily of each MIDR_EL1 part an Apple-silicon Mac
+/// SoC row has, as `(part, family, subfamily)`: XNU `osfmk/arm/cpuid.c`
+/// `cpuid_get_cpufamily` and `cpuid_get_cpusubfamily` (xnu-12377.121.6),
+/// which the 26A434 kernels' part-indexed tables match (kernelcache.release.
+/// mac14g file 0xf5bc for families, 0xf7d0 for subfamilies), and those
+/// tables for the T8152's parts.
+const FAMILIES: &[(u16, u32, u32)] = &[
+    (0x22, CPUFAMILY_ARM_FIRESTORM_ICESTORM, CPUSUBFAMILY_ARM_HG),
+    (0x23, CPUFAMILY_ARM_FIRESTORM_ICESTORM, CPUSUBFAMILY_ARM_HG),
+    (0x24, CPUFAMILY_ARM_FIRESTORM_ICESTORM, CPUSUBFAMILY_ARM_HS),
+    (0x25, CPUFAMILY_ARM_FIRESTORM_ICESTORM, CPUSUBFAMILY_ARM_HS),
+    (
+        0x28,
+        CPUFAMILY_ARM_FIRESTORM_ICESTORM,
+        CPUSUBFAMILY_ARM_HC_HD,
+    ),
+    (
+        0x29,
+        CPUFAMILY_ARM_FIRESTORM_ICESTORM,
+        CPUSUBFAMILY_ARM_HC_HD,
+    ),
+    (0x32, CPUFAMILY_ARM_BLIZZARD_AVALANCHE, CPUSUBFAMILY_ARM_HG),
+    (0x33, CPUFAMILY_ARM_BLIZZARD_AVALANCHE, CPUSUBFAMILY_ARM_HG),
+    (0x34, CPUFAMILY_ARM_BLIZZARD_AVALANCHE, CPUSUBFAMILY_ARM_HS),
+    (0x35, CPUFAMILY_ARM_BLIZZARD_AVALANCHE, CPUSUBFAMILY_ARM_HS),
+    (
+        0x38,
+        CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
+        CPUSUBFAMILY_ARM_HC_HD,
+    ),
+    (
+        0x39,
+        CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
+        CPUSUBFAMILY_ARM_HC_HD,
+    ),
+    (0x42, CPUFAMILY_ARM_IBIZA, CPUSUBFAMILY_ARM_HG),
+    (0x43, CPUFAMILY_ARM_IBIZA, CPUSUBFAMILY_ARM_HG),
+    (0x44, CPUFAMILY_ARM_LOBOS, CPUSUBFAMILY_ARM_HS),
+    (0x45, CPUFAMILY_ARM_LOBOS, CPUSUBFAMILY_ARM_HS),
+    (0x48, CPUFAMILY_ARM_PALMA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x49, CPUFAMILY_ARM_PALMA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x52, CPUFAMILY_ARM_DONAN, CPUSUBFAMILY_ARM_HG),
+    (0x53, CPUFAMILY_ARM_DONAN, CPUSUBFAMILY_ARM_HG),
+    (0x54, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HS),
+    (0x55, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HS),
+    (0x58, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x59, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x60, CPUFAMILY_ARM_TAHITI, CPUSUBFAMILY_ARM_HP),
+    (0x61, CPUFAMILY_ARM_TAHITI, CPUSUBFAMILY_ARM_HP),
+    (0x62, CPUFAMILY_ARM_HIDRA, CPUSUBFAMILY_ARM_HG),
+    (0x63, CPUFAMILY_ARM_HIDRA, CPUSUBFAMILY_ARM_HG),
+    (0x64, CPUFAMILY_ARM_SOTRA, CPUSUBFAMILY_ARM_HS),
+    (0x65, CPUFAMILY_ARM_SOTRA, CPUSUBFAMILY_ARM_HS),
+    (0x68, CPUFAMILY_ARM_SOTRA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x69, CPUFAMILY_ARM_SOTRA, CPUSUBFAMILY_ARM_HC_HD),
+    (0x72, CPUFAMILY_ARM_KOMODO, CPUSUBFAMILY_ARM_HG),
+    (0x73, CPUFAMILY_ARM_KOMODO, CPUSUBFAMILY_ARM_HG),
+];
+
+/// Apple's 128-byte cache lines: `hw.cachelinesize`, which XNU takes from
+/// the level 1 data cache's CCSIDR_EL1 (`machine::caches`).
+const CACHE_LINE: u32 = 128;
+
+/// The DeviceTree `cluster-type` letters.
+const EFFICIENCY: u8 = b'E';
+const PERFORMANCE: u8 = b'P';
+
+/// One cluster of a board's DeviceTree: its `cluster-type`, core count and
+/// `l2-cache-size`.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    cluster_type: u8,
+    cores: u8,
+    l2_bytes: u32,
+}
+
+const fn layout(cluster_type: u8, cores: u8, l2_mib: u32) -> Layout {
+    Layout {
+        cluster_type,
+        cores,
+        l2_bytes: l2_mib << 20,
+    }
+}
+
+/// One SoC's hosted board: its ApChipID, `hw.model` (the IPSW product type),
+/// `hw.target` (`/product` `unique-model`) and clusters in `/cpus` order.
+struct Board {
+    chip_id: u32,
+    model: &'static str,
+    target: &'static str,
+    clusters: &'static [Layout],
+}
+
+/// The hosted board of each SoC `machine::soc` has a row for: the Mac mini
+/// or Mac Studio where one exists, else a MacBook Pro (and the Mac15,3 the
+/// M3 boot bundle uses), with its 26A434 DeviceTree's clusters. The first row
+/// of each chip is its base SoC, the one [`Hardware::of`] selects.
+const BOARDS: &[Board] = &[
+    Board {
+        chip_id: 0x8103,
+        model: "Macmini9,1",
+        target: "J274AP",
+        clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 8)],
+    },
+    Board {
+        chip_id: 0x6000,
+        model: "MacBookPro18,3",
+        target: "J314sAP",
+        clusters: &[
+            layout(EFFICIENCY, 2, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
+        chip_id: 0x6001,
+        model: "Mac13,1",
+        target: "J375cAP",
+        clusters: &[
+            layout(EFFICIENCY, 2, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
+        chip_id: 0x8112,
+        model: "Mac14,3",
+        target: "J473AP",
+        clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 16)],
+    },
+    Board {
+        chip_id: 0x6020,
+        model: "Mac14,12",
+        target: "J474sAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
+        chip_id: 0x6021,
+        model: "Mac14,13",
+        target: "J475cAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 4, 8),
+            layout(PERFORMANCE, 4, 8),
+        ],
+    },
+    Board {
+        chip_id: 0x8122,
+        model: "Mac15,3",
+        target: "J504AP",
+        clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 4, 16)],
+    },
+    Board {
+        chip_id: 0x6030,
+        model: "Mac15,6",
+        target: "J514sAP",
+        clusters: &[layout(EFFICIENCY, 6, 4), layout(PERFORMANCE, 6, 16)],
+    },
+    Board {
+        chip_id: 0x6031,
+        model: "Mac15,8",
+        target: "J514cAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
+        ],
+    },
+    Board {
+        chip_id: 0x8132,
+        model: "Mac16,10",
+        target: "J773gAP",
+        clusters: &[layout(EFFICIENCY, 6, 4), layout(PERFORMANCE, 4, 16)],
+    },
+    Board {
+        chip_id: 0x6040,
+        model: "Mac16,11",
+        target: "J773sAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
+        ],
+    },
+    Board {
+        chip_id: 0x6041,
+        model: "Mac16,9",
+        target: "J575cAP",
+        clusters: &[
+            layout(EFFICIENCY, 4, 4),
+            layout(PERFORMANCE, 6, 16),
+            layout(PERFORMANCE, 6, 16),
+        ],
+    },
+    Board {
+        chip_id: 0x8142,
+        model: "Mac17,2",
+        target: "J704AP",
+        clusters: &[layout(EFFICIENCY, 6, 6), layout(PERFORMANCE, 4, 16)],
+    },
+    Board {
+        chip_id: 0x8152,
+        model: "Mac18,5",
+        target: "J873gAP",
+        clusters: &[layout(EFFICIENCY, 6, 8), layout(PERFORMANCE, 6, 20)],
+    },
+];
 
 /// One cluster of identical cores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,15 +276,21 @@ pub struct Cluster {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hardware {
     pub chip: Chip,
+    /// The SoC's ApChipID.
+    pub chip_id: u32,
     /// `hw.model` and `hw.product`.
     pub model: &'static str,
     /// `hw.target`: the board.
     pub target: &'static str,
     /// The device tree's `product-soc-name`: `machdep.cpu.brand_string`.
     pub brand: &'static str,
+    /// `hw.cpufamily`.
     pub cpu_family: u32,
+    /// `hw.cpusubfamily`.
+    pub cpu_subfamily: u32,
     pub cache_line: u32,
-    /// In logical CPU order: XNU numbers the efficiency cluster first.
+    /// In logical CPU order: the DeviceTree's `/cpus` order, which numbers
+    /// the efficiency cluster first.
     pub clusters: Vec<Cluster>,
     /// `hw.memsize`: the host's physical memory.
     pub memory_bytes: u64,
@@ -50,48 +301,69 @@ pub struct Hardware {
 }
 
 impl Hardware {
+    /// The base SoC of `chip`: the M1, M2, M3, M4, M5 or M6.
     pub fn of(chip: Chip, memory_bytes: u64) -> Result<Self> {
-        let (cpu_family, model, target, brand, clusters) = match chip {
-            // The Mac mini (M2, 2023): Blizzard cores with 128 KiB L1I,
-            // 64 KiB L1D and a 4 MiB L2; Avalanche cores with 192 KiB L1I,
-            // 128 KiB L1D and a 16 MiB L2.
-            Chip::AppleM2 => (
-                CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
-                "Mac14,3",
-                "J473AP",
-                "Apple M2",
-                vec![
-                    Cluster {
-                        cores: 4,
-                        performance: false,
-                        l1i_bytes: 128 << 10,
-                        l1d_bytes: 64 << 10,
-                        l2_bytes: 4 << 20,
-                    },
-                    Cluster {
-                        cores: 4,
-                        performance: true,
-                        l1i_bytes: 192 << 10,
-                        l1d_bytes: 128 << 10,
-                        l2_bytes: 16 << 20,
-                    },
-                ],
-            ),
-            other => bail!(
-                "the hosted machine profile of {} (CPU family and topology) is not declared",
-                other.name()
-            ),
-        };
+        let board = BOARDS
+            .iter()
+            .find(|board| soc::chip(board.chip_id) == Some(chip))
+            .with_context(|| format!("{} has no hosted board", chip.name()))?;
+        Self::of_soc(board.chip_id, memory_bytes)
+    }
+
+    /// The SoC with ApChipID `chip_id`, such as an M2 Pro's 0x6020.
+    pub fn of_soc(chip_id: u32, memory_bytes: u64) -> Result<Self> {
+        let board = BOARDS
+            .iter()
+            .find(|board| board.chip_id == chip_id)
+            .with_context(|| format!("ApChipID {chip_id:#x} has no hosted board"))?;
+        let chip = soc::chip(chip_id).context("hosted board without a SoC row")?;
+        let brand = soc::name(chip_id).context("hosted board without a SoC row")?;
+        let mut family = None;
+        let mut clusters = Vec::with_capacity(board.clusters.len());
+        for layout in board.clusters {
+            let kind = char::from(layout.cluster_type);
+            let part = soc::midr_part(chip_id, layout.cluster_type)
+                .with_context(|| format!("{brand} cluster type {kind} has no MIDR part"))?;
+            let (_, cpu_family, cpu_subfamily) = FAMILIES
+                .iter()
+                .find(|(known, ..)| *known == part)
+                .with_context(|| format!("{brand} MIDR part {part:#x} has no CPU family"))?;
+            ensure!(
+                *family.get_or_insert((*cpu_family, *cpu_subfamily))
+                    == (*cpu_family, *cpu_subfamily),
+                "{brand}'s core types are of different CPU families"
+            );
+            let Some((instruction, data)) = soc::level1_caches(chip_id, layout.cluster_type) else {
+                bail!(
+                    "the hosted machine profile of {brand} has no public level 1 cache sizes \
+                     for its {kind} cores"
+                );
+            };
+            ensure!(
+                instruction.line == CACHE_LINE && data.line == CACHE_LINE,
+                "{brand}'s level 1 caches do not have Apple's 128-byte lines"
+            );
+            clusters.push(Cluster {
+                cores: layout.cores,
+                performance: layout.cluster_type == PERFORMANCE,
+                l1i_bytes: instruction.bytes,
+                l1d_bytes: data.bytes,
+                l2_bytes: layout.l2_bytes,
+            });
+        }
+        let (cpu_family, cpu_subfamily) = family.context("hosted board without clusters")?;
         Ok(Self {
             chip,
-            model,
-            target,
+            chip_id,
+            model: board.model,
+            target: board.target,
             brand,
             cpu_family,
-            cache_line: 128,
+            cpu_subfamily,
+            cache_line: CACHE_LINE,
             clusters,
             memory_bytes,
-            memory_tagging: crate::machine::identification::memory_tagging(chip),
+            memory_tagging: identification::memory_tagging(chip),
         })
     }
 
@@ -114,11 +386,122 @@ mod tests {
     use super::*;
 
     #[test]
-    fn m2_topology_is_declared_and_others_refuse() {
+    fn m2_topology_is_declared() {
         let m2 = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
+        assert_eq!(m2.chip_id, 0x8112);
         assert_eq!(m2.cpus(), 8);
         assert_eq!(m2.cpu_clusters(), [0, 0, 0, 0, 1, 1, 1, 1]);
+        assert_eq!(m2.cpu_family, CPUFAMILY_ARM_BLIZZARD_AVALANCHE);
+        assert_eq!(m2.cpu_subfamily, CPUSUBFAMILY_ARM_HG);
+        assert_eq!(
+            (m2.brand, m2.model, m2.target),
+            ("Apple M2", "Mac14,3", "J473AP")
+        );
+        assert_eq!(
+            m2.clusters[1],
+            Cluster {
+                cores: 4,
+                performance: true,
+                l1i_bytes: 192 << 10,
+                l1d_bytes: 128 << 10,
+                l2_bytes: 16 << 20,
+            }
+        );
         assert!(!m2.memory_tagging);
-        assert!(Hardware::of(Chip::AppleM1, 1 << 34).is_err());
+    }
+
+    /// Every SoC variant with public level 1 caches has a hosted machine:
+    /// its family and subfamily are XNU's for its parts, and the Pro and
+    /// Max have a second P cluster.
+    #[test]
+    fn each_soc_variant_takes_its_own_family_and_clusters() {
+        let cases = [
+            (
+                0x8103,
+                CPUFAMILY_ARM_FIRESTORM_ICESTORM,
+                CPUSUBFAMILY_ARM_HG,
+                8,
+            ),
+            (
+                0x6000,
+                CPUFAMILY_ARM_FIRESTORM_ICESTORM,
+                CPUSUBFAMILY_ARM_HS,
+                10,
+            ),
+            (
+                0x6001,
+                CPUFAMILY_ARM_FIRESTORM_ICESTORM,
+                CPUSUBFAMILY_ARM_HC_HD,
+                10,
+            ),
+            (
+                0x8112,
+                CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
+                CPUSUBFAMILY_ARM_HG,
+                8,
+            ),
+            (
+                0x6020,
+                CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
+                CPUSUBFAMILY_ARM_HS,
+                12,
+            ),
+            (
+                0x6021,
+                CPUFAMILY_ARM_BLIZZARD_AVALANCHE,
+                CPUSUBFAMILY_ARM_HC_HD,
+                12,
+            ),
+            (0x8122, CPUFAMILY_ARM_IBIZA, CPUSUBFAMILY_ARM_HG, 8),
+        ];
+        for (chip_id, family, subfamily, cpus) in cases {
+            let hardware = Hardware::of_soc(chip_id, 1 << 34).unwrap();
+            assert_eq!(hardware.cpu_family, family, "{chip_id:#x}");
+            assert_eq!(hardware.cpu_subfamily, subfamily, "{chip_id:#x}");
+            assert_eq!(hardware.cpus(), cpus, "{chip_id:#x}");
+            assert!(!hardware.clusters[0].performance);
+            assert_eq!(hardware.cpu_clusters().len(), usize::from(cpus));
+        }
+        assert_eq!(
+            Hardware::of(Chip::AppleM1, 1 << 34).unwrap().chip_id,
+            0x8103
+        );
+        assert_eq!(
+            Hardware::of(Chip::AppleM3, 1 << 34).unwrap().chip_id,
+            0x8122
+        );
+    }
+
+    /// A SoC without public level 1 caches, or without a hosted board,
+    /// refuses by name rather than borrowing another chip's values.
+    #[test]
+    fn socs_without_evidence_refuse() {
+        for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            let error = Hardware::of(chip, 1 << 34).unwrap_err().to_string();
+            assert!(error.contains("level 1 cache"), "{error}");
+        }
+        assert!(Hardware::of_soc(0x6002, 1 << 34).is_err());
+    }
+
+    /// Every board's SoC has a row whose parts XNU's families cover, and
+    /// every chip's base SoC comes first.
+    #[test]
+    fn every_board_names_a_soc_row_with_known_families() {
+        for board in BOARDS {
+            for layout in board.clusters {
+                let part = soc::midr_part(board.chip_id, layout.cluster_type).unwrap();
+                assert!(
+                    FAMILIES.iter().any(|(known, ..)| *known == part),
+                    "{part:#x}"
+                );
+            }
+        }
+        for chip in Chip::ALL {
+            let first = BOARDS
+                .iter()
+                .find(|board| soc::chip(board.chip_id) == Some(chip))
+                .unwrap();
+            assert_eq!(first.chip_id & 0xf000, 0x8000, "{}", chip.name());
+        }
     }
 }

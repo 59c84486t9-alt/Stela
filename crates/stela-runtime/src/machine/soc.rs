@@ -580,6 +580,34 @@ pub fn chip(chip_id: u32) -> Option<Chip> {
     Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.chip)
 }
 
+/// The `product-soc-name` of the SoC with `chip_id`, for the SoCs with a row.
+pub fn name(chip_id: u32) -> Option<&'static str> {
+    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.name)
+}
+
+/// The MIDR_EL1 part number of `cluster_type`'s cores on the SoC with
+/// `chip_id`, the one [`cpus`] gives them.
+pub fn midr_part(chip_id: u32, cluster_type: u8) -> Option<u16> {
+    SOCS.iter()
+        .find(|soc| soc.chip_id == chip_id)?
+        .parts
+        .iter()
+        .find(|(kind, _)| *kind == cluster_type)
+        .map(|&(_, part)| part)
+}
+
+/// The level 1 instruction and data caches of `cluster_type`'s cores on the
+/// SoC with `chip_id`, the ones [`cpus`] gives them, where known.
+pub fn level1_caches(chip_id: u32, cluster_type: u8) -> Option<(Cache, Cache)> {
+    let soc = SOCS.iter().find(|soc| soc.chip_id == chip_id)?;
+    let index = soc
+        .parts
+        .iter()
+        .position(|(kind, _)| *kind == cluster_type)?;
+    let caches = soc.caches?[index];
+    Some((caches.instruction, caches.data))
+}
+
 /// The guest DRAM base of the SoC with `chip_id`.
 pub fn dram_base(chip_id: u32) -> Result<u64, String> {
     SOCS.iter()
