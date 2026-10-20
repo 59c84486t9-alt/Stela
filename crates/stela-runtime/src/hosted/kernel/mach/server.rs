@@ -213,7 +213,10 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (
         Object::Task,
         "_mach_make_memory_entry",
-        Some("ranges in whole guest pages"),
+        Some(
+            "a range in partial guest pages derived from a parent entry, empty, or a data \
+             address 4 KiB or more into its guest page stops the run",
+        ),
     ),
     (Object::Host, "host_statistics_from_user", None),
     (Object::Host, "host_statistics64_from_user", None),
@@ -544,16 +547,19 @@ pub(super) fn serve(
         // same memory under the host's 4 KiB rounding as under the arm64
         // kernel's 16 KiB rounding.
         (Object::Task, "_mach_make_memory_entry", true) => {
-            let (Some(size), Some(offset)) = (request.double(24), request.double(32)) else {
+            let (Some(parent), Some(size), Some(offset), Some(permission)) = (
+                request.word(4),
+                request.double(24),
+                request.double(32),
+                request.word(40),
+            ) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
-            if (size | offset) & memory::PAGE_MASK != 0 {
-                bail!(
-                    "mach_make_memory_entry of {size:#x} bytes at {offset:#x}: a range in \
-                     partial guest pages is not implemented"
-                );
+            if (size | offset) & memory::PAGE_MASK == 0 || permission & MAP_MEM_ONLY != 0 {
+                Reply::Forward
+            } else {
+                partial_memory_entry(port, parent, size, offset, permission)?
             }
-            Reply::Forward
         }
         // `node`, `which`. The host port is the host's, already this
         // process's host kernel object.
@@ -1076,6 +1082,87 @@ const HOST_FORWARDED: &[&str] = &[
     "host_get_UNDServer",
     "kext_request",
 ];
+
+/// `mach_make_memory_entry_64` flags (`mach/memory_object_types.h`).
+const MAP_MEM_ONLY: u32 = 0x01_0000;
+const MAP_MEM_NAMED_CREATE: u32 = 0x02_0000;
+const MAP_MEM_NAMED_REUSE: u32 = 0x08_0000;
+const MAP_MEM_USE_DATA_ADDR: u32 = 0x10_0000;
+const MAP_MEM_VM_COPY: u32 = 0x20_0000;
+const MAP_MEM_VM_SHARE: u32 = 0x40_0000;
+const MAP_MEM_4K_DATA_ADDR: u32 = 0x80_0000;
+
+/// `mach_make_memory_entry_64(task, size, offset, permission, parent)` of
+/// a range in partial guest pages. The entries made from this task's map
+/// (a share, copy or new object) span the range rounded out to the map's
+/// 16 KiB pages (`vm_sanitize_addr_size`), KERN_INVALID_ARGUMENT when that
+/// overflows, and answer that span's size less the data's offset in it:
+/// the host makes them from the rounded range, which its 4 KiB rounding
+/// keeps. A data-address entry (`MAP_MEM_USE_DATA_ADDR`,
+/// `MAP_MEM_4K_DATA_ADDR`) keeps its start, whose offset in its guest page
+/// the host's offset in its own page then is only below 4 KiB.
+fn partial_memory_entry(
+    task: u32,
+    parent: u32,
+    size: u64,
+    offset: u64,
+    permission: u32,
+) -> Result<Reply> {
+    unsafe extern "C" {
+        fn mach_make_memory_entry_64(
+            task: u32,
+            size: *mut u64,
+            offset: u64,
+            permission: i32,
+            entry: *mut u32,
+            parent: u32,
+        ) -> i32;
+    }
+    let from_map = parent == 0
+        || permission
+            & (MAP_MEM_NAMED_CREATE | MAP_MEM_VM_COPY | MAP_MEM_VM_SHARE | MAP_MEM_NAMED_REUSE)
+            != 0;
+    let data = permission & (MAP_MEM_USE_DATA_ADDR | MAP_MEM_4K_DATA_ADDR) != 0;
+    if !from_map || size == 0 || (data && offset & memory::PAGE_MASK & !memory::HOST_PAGE_MASK != 0)
+    {
+        bail!(
+            "mach_make_memory_entry of {size:#x} bytes at {offset:#x} (permission \
+             {permission:#x}): this range in partial guest pages is not implemented"
+        );
+    }
+    let Some(end) = offset.checked_add(size).and_then(memory::round_page) else {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    };
+    let start = if data {
+        offset
+    } else {
+        offset & !memory::PAGE_MASK
+    };
+    let mut span = end - start;
+    let mut entry = 0;
+    // SAFETY: this task's port, the guest's parent entry name and out
+    // arguments of this frame.
+    let code = unsafe {
+        mach_make_memory_entry_64(
+            task,
+            &raw mut span,
+            start,
+            permission as i32,
+            &raw mut entry,
+            parent,
+        )
+    } as u32;
+    if code != darwin::KERN_SUCCESS {
+        return Ok(Reply::Failure(code));
+    }
+    Ok(Reply::Complex {
+        descriptors: vec![Descriptor::Port {
+            name: entry,
+            disposition: MOVE_SEND,
+        }],
+        body: span.to_le_bytes().to_vec(),
+    })
+}
 
 /// `mach_memory_object_memory_entry_64(host, TRUE, size, permission,
 /// MEMORY_OBJECT_NULL)` of a size in partial guest pages: the entry's
@@ -1950,6 +2037,60 @@ mod tests {
         // SAFETY: the allocation the reply's send would release.
         unsafe { mach_vm_deallocate(crate::hosted::host::task(), address, u64::from(size)) };
         words
+    }
+
+    #[test]
+    fn an_entry_of_a_partial_range_spans_its_guest_pages() {
+        const VM_PROT_READ_WRITE: u32 = 3;
+        let task = crate::hosted::host::task();
+        let page = memory::allocate(
+            0,
+            2 * memory::PAGE_BYTES,
+            true,
+            memory::Protection::READ_WRITE,
+        )
+        .unwrap();
+        let span = |offset: u64, permission: u32| match partial_memory_entry(
+            task,
+            0,
+            0x100,
+            offset,
+            VM_PROT_READ_WRITE | permission,
+        )
+        .unwrap()
+        {
+            Reply::Complex { descriptors, body } => {
+                let [Descriptor::Port { name, .. }] = descriptors[..] else {
+                    panic!("{descriptors:?}");
+                };
+                release_send(name);
+                u64::from_le_bytes(body[..8].try_into().unwrap())
+            }
+            _ => panic!("no entry"),
+        };
+        // The guest page holding the range, less a data address's offset.
+        assert_eq!(span(page + 0x10, 0), memory::PAGE_BYTES);
+        assert_eq!(span(page + 0x10, MAP_MEM_VM_SHARE), memory::PAGE_BYTES);
+        assert_eq!(
+            span(page + 0x10, MAP_MEM_USE_DATA_ADDR),
+            memory::PAGE_BYTES - 0x10
+        );
+        // Across a guest page boundary: both pages.
+        assert_eq!(
+            span(page + memory::PAGE_BYTES - 0x10, 0),
+            2 * memory::PAGE_BYTES
+        );
+        // A data address 4 KiB into its guest page, or an entry of a
+        // parent's range, is not implemented.
+        assert!(
+            partial_memory_entry(task, 0, 0x100, page + 0x1010, 3 | MAP_MEM_USE_DATA_ADDR).is_err()
+        );
+        assert!(partial_memory_entry(task, 1, 0x100, 0x10, 3).is_err());
+        assert!(matches!(
+            partial_memory_entry(task, 0, 0x100, u64::MAX - 0x10, 3).unwrap(),
+            Reply::Failure(KERN_INVALID_ARGUMENT)
+        ));
+        memory::deallocate(page, 2 * memory::PAGE_BYTES).unwrap();
     }
 
     #[test]
