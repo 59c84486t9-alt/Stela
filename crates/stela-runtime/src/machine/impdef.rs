@@ -74,7 +74,8 @@ mod census;
 pub const VERIFICATION: &str =
     "hardware-unverified until an M2 enumeration observes the encoding and its reset value";
 
-/// The CRn of Apple's registers (op0 3); no 26A434 component uses CRn 11.
+/// The CRn of the M2's Apple registers (op0 3); no M1, M2 or M3 component
+/// uses CRn 11.
 const IMPDEF_CRN: u8 = 15;
 
 macro_rules! encodings {
@@ -168,7 +169,7 @@ encodings! {
     GUEST_C14_3 = 4, 14, 3;
     JIT_RANGE = 4, 15, 1;
     GUEST_C15_2 = 4, 15, 2;
-    SPTM_CONTEXT = 4, 15, 4;
+    JIT_BOX_MODE = 4, 15, 4;
     GUEST_C15_5 = 4, 15, 5;
     THREAD_PERMISSIONS = 4, 15, 6;
     DPC_ERR_STS = 5, 0, 5;
@@ -233,6 +234,8 @@ encodings! {
     UPMC12 = 7, 4, 5;
     AON_ENABLE = 7, 5, 0;
     AON_SELECT_2 = 7, 5, 3;
+    AON_COUNTER_3 = 7, 6, 3;
+    AON_SELECT_3 = 7, 7, 3;
     UPMPCM_EL1 = 7, 5, 4;
     UPMC13 = 7, 5, 5;
     CLUSTER_COUNTER_C6 = 7, 6, 2;
@@ -329,8 +332,19 @@ impl Entry {
     }
 }
 
-const SPTM_CONTEXT_EVIDENCE: &str = "SPTM 26A434 saves and restores it with SCTLR_EL1 and TCR_EL1 \
-    (__text+0x2120, __text+0x28e8)";
+/// JIT box mode bit 0: the box is enforced. The kernel writes 2 for a task
+/// without a JIT box, and SPTM clears this bit alone while it runs.
+const JIT_BOX_ENABLE: u64 = 1;
+
+const JIT_BOX_MODE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbox.c) writes a \
+    task's mode to it before its range (S3_4_C15_C15_1): 2 for a task without a box, else \
+    0x061e0c5b or 0x0e1e0c5b, then ISB (0xfffffe000bda55ec). A task gets a box only from \
+    mmap with the com.apple.private.verified-jit entitlement (0xfffffe000c1a7c48, \
+    0xfffffe000c1a7e44), and its EL0 faults (EC 0x3f, ISS 0x18-0x1f) raise \
+    EXC_BAD_INSTRUCTION (0xfffffe000bd77d14). SPTM 26A434 writes 2 at boot (__text+0x40e4) and \
+    saves it, clears bit 0 and restores it around its own execution with SCTLR_EL1 and TCR_EL1 \
+    (__text+0x2124, __text+0x28ec): bit 0 enables the box (inference). What an enabled box \
+    enforces is not documented, so a value with bit 0 set stops; every other value is held";
 
 const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key-derived \
     value after the architectural PAC keys and reads it nowhere; TXM and the kernel never touch it";
@@ -470,6 +484,15 @@ const AON_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's CorePerfSam
     (0xfffffe0009f39778, 0xfffffe0009f382ac). It counts only under S3_7_C15_C5_0, which \
     accepts only 0 here, so it holds what software wrote, 0 from reset (inference)";
 
+const AON_FOURTH_EVIDENCE: &str = "no public name; the CorePerfSampler of AppleT6000CLPCv3, \
+    AppleT6020CLPC and the M3-and-later CLPCs selects a fourth core counter: enableCore writes \
+    0x8000, 0x8100, 0x8300 and 0x8700 to S3_7_C15_C1_3, C3_3, C5_3 and C7_3 before setting \
+    S3_7_C15_C5_0 (kernelcache.release.mac14j 0xfffffe0009efa014, mac13j 0xfffffe0009e74e38), \
+    and sample reads S3_7_C15_C6_3 after C0_3, C2_3 and C4_3 as a wrapping 32-bit count \
+    (mac14j 0xfffffe0009ef29ac, mac13j 0xfffffe0009e6d85c). The selector acts and the \
+    counter counts only under S3_7_C15_C5_0, which accepts only 0 here, so the selector is \
+    stored and the counter holds what software wrote, 0 from reset (inference)";
+
 const MEM_STALL_SELECT_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CoreMemStallSampler::enableCore writes two 32-bit selectors into each of S3_1_C15_C0_3 \
     and C1_3 (0x801 and 0x805, 0x807 and 0x3) with read-modify-write to start four \
@@ -554,13 +577,12 @@ const NESTED_PAGE_EVIDENCE: &str = "no public name; SPTM 26A434 reads and writes
     and clears it before entering EL1 (__text+0x49edc). The M2 has no FEAT_NV2, so only 0 \
     is accepted (inference: a companion of VNCR_EL2)";
 
-const JIT_RANGE_EVIDENCE: &str = "refused: no public name; 26A434 XNU's JIT box (its panic \
-    names jitbox.c) writes a task's JIT range to it, a 32 MiB-aligned user address ORed with a \
-    size code, then ISB (0xfffffe000bda5670), after writing the task's mode to S3_4_C15_C15_4 \
-    (2 for none), and never reads it. The context switch does so when the incoming task's JIT \
-    box settings or S3_4_C15_C15_6 differ from the CPU's (0xfffffe000bd839f0), and so does an \
-    update of the running task's (0xfffffe000bda5964); a task without a JIT box never changes \
-    them. What the range enforces is not documented";
+const JIT_RANGE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbox.c) writes a \
+    task's JIT range to it, a 32 MiB-aligned user address ORed with a size code, then ISB \
+    (0xfffffe000bda5670), after its mode (S3_4_C15_C15_4), and never reads it. The context \
+    switch does so when the incoming task's box or S3_4_C15_C15_6 differs from the CPU's \
+    (0xfffffe000bd839f0), and so does an update of the running task's (0xfffffe000bda5964). \
+    The range acts only under an enabled mode, which stops here, so it is held (inference)";
 
 const GUARDED_HPFAR_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to HPFAR_EL2, \
     as it copies the GL bank's ESR and FAR to EL1's, when it reflects a guarded-level \
@@ -741,15 +763,16 @@ pub const TABLE: &[Entry] = &[
     entry(HID14, "HID14", Class::Tuning, M1N1_TUNING),
     entry(HID16, "HID16", Class::Tuning, M1N1_TUNING),
     entry(
-        SPTM_CONTEXT,
+        JIT_BOX_MODE,
         "S3_4_C15_C15_4 (unnamed)",
-        Class::Storage,
-        SPTM_CONTEXT_EVIDENCE,
-    ),
+        Class::Control,
+        JIT_BOX_MODE_EVIDENCE,
+    )
+    .permitting(!JIT_BOX_ENABLE),
     entry(
         JIT_RANGE,
         "S3_4_C15_C15_1 (unnamed)",
-        Class::Unsupported,
+        Class::Storage,
         JIT_RANGE_EVIDENCE,
     ),
     entry(
@@ -876,6 +899,20 @@ pub const TABLE: &[Entry] = &[
         "S3_7_C15_C4_3 (unnamed)",
         Class::Counter,
         AON_COUNTER_EVIDENCE,
+    ),
+    // The fourth core counter of the M1 and M2 Pro, Max and Ultra and the
+    // M3-and-later CLPCs.
+    entry(
+        AON_SELECT_3,
+        "S3_7_C15_C7_3 (unnamed)",
+        Class::Storage,
+        AON_FOURTH_EVIDENCE,
+    ),
+    entry(
+        AON_COUNTER_3,
+        "S3_7_C15_C6_3 (unnamed)",
+        Class::Counter,
+        AON_FOURTH_EVIDENCE,
     ),
     entry(
         MEM_STALL_SELECT_0,
@@ -1313,7 +1350,7 @@ mod tests {
     #[test]
     fn storage_refuses_reads_before_writes_and_tuning_starts_at_zero() {
         let mut registers = Registers::default();
-        let storage = lookup(SPTM_CONTEXT).unwrap();
+        let storage = lookup(SPTM_KEY_0).unwrap();
         assert!(registers.read(storage).is_err());
         registers.write(storage, 2).unwrap();
         assert_eq!(registers.read(storage), Ok(2));
@@ -1390,6 +1427,29 @@ mod tests {
         assert_eq!(other.read(counter), Ok(0));
     }
 
+    /// A task without a JIT box (mode 2) and SPTM's own context (bit 0
+    /// cleared) keep the box disabled, and its range is held; enabling the
+    /// box stops.
+    #[test]
+    fn the_jit_box_stays_disabled_and_holds_its_range() {
+        let mut registers = Registers::default();
+        let mode = lookup(JIT_BOX_MODE).unwrap();
+        let range = lookup(JIT_RANGE).unwrap();
+        registers.write(mode, 2).unwrap();
+        assert_eq!(registers.read(mode), Ok(2));
+        registers.write(range, 0x0000_0001_0200_0006).unwrap();
+        assert_eq!(registers.read(range), Ok(0x0000_0001_0200_0006));
+        for enabled in [0x061e_0c5b, 0x0e1e_0c5b, JIT_BOX_ENABLE] {
+            assert!(registers.write(mode, enabled).is_err(), "{enabled:#x}");
+        }
+        assert_eq!(registers.read(mode), Ok(2));
+        // The M1 kernels have no JIT box.
+        assert!(super::lookup(JIT_RANGE, Chip::AppleM1).is_none());
+        for chip in &Chip::ALL[1..] {
+            assert!(super::lookup(JIT_RANGE, *chip).is_some(), "{}", chip.name());
+        }
+    }
+
     /// CLPC's samplers can only be disabled; their counters, the cluster
     /// counters among them, hold what software writes.
     #[test]
@@ -1401,6 +1461,13 @@ mod tests {
         registers
             .write(lookup(AON_SELECT_0).unwrap(), 0x8000)
             .unwrap();
+        // The fourth core counter of the M1 and M2 Pro and Max CLPCs.
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let select = super::lookup(AON_SELECT_3, chip).unwrap();
+            registers.write(select, 0x8700).unwrap();
+            let counter = super::lookup(AON_COUNTER_3, chip).unwrap();
+            assert_eq!(registers.read(counter), Ok(0));
+        }
         let select = lookup(MEM_STALL_SELECT_0).unwrap();
         assert!(registers.write(select, 0x801).is_err());
         let counter = lookup(MEM_STALL_COUNTER_2).unwrap();

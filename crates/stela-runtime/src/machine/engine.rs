@@ -5373,14 +5373,20 @@ mod tests {
         machine.system_instruction(0xd53d_ffe0).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0200);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);
-        // One the M2's kernelcache accesses without a documented effect, the
-        // JIT box's S3_4_C15_C15_1, refuses by name.
+        // The M2 kernel's JIT box: its range (S3_4_C15_C15_1) is held, and
+        // a mode (S3_4_C15_C15_4) that enables the box, whose enforcement
+        // is undocumented, refuses by name.
         let mut machine = machine_on(crate::machine::Chip::AppleM2, &[]);
         machine.cpu.set_pstate(Pstate::reset(1));
-        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd53c_ff20) else {
+        machine.cpu.pc = BASE;
+        machine.cpu.state.x[0] = 0x0000_0001_0200_0006;
+        machine.system_instruction(0xd51c_ff20).unwrap();
+        assert_eq!(machine.cpu.pc, BASE + 4);
+        machine.cpu.state.x[0] = 0x061e_0c5b;
+        let Err(Stop::Unsupported(requirement)) = machine.system_instruction(0xd51c_ff80) else {
             panic!("refusal")
         };
-        assert_eq!(requirement.syndrome, Some(0x6233_3c1f));
+        assert_eq!(requirement.syndrome, Some(0x6239_3c1e));
     }
 
     #[test]

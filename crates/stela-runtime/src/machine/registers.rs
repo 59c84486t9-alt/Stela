@@ -1206,4 +1206,49 @@ mod tests {
             Outcome::Refused(_)
         ));
     }
+
+    /// Every IMPLEMENTATION DEFINED encoding the M1's and M2's censused
+    /// components access has an owner: a modeled register here, CTRR,
+    /// AMX, the core PMU, the board's fast IPIs or a `machine::impdef`
+    /// entry with a class other than `Unsupported`.
+    #[test]
+    fn every_encoding_the_m1_and_m2_components_access_has_a_model() {
+        use crate::platform::apple::ipi;
+        for chip in [super::super::Chip::AppleM1, super::super::Chip::AppleM2] {
+            let mut owned = 0;
+            for crn in [11, 15] {
+                for selector in 0u16..1 << 10 {
+                    let field = |shift: u16, mask: u16| ((selector >> shift) & mask) as u8;
+                    let (op1, crm, op2) = (field(7, 7), field(3, 0xf), field(0, 7));
+                    let encoding = Encoding::new(3, op1, crn, crm, op2);
+                    if !impdef::consumed(encoding, chip)
+                        || Pmu::owns(encoding)
+                        || ipi::Register::decode(encoding).is_some()
+                    {
+                        continue;
+                    }
+                    owned += 1;
+                    let entry = impdef::lookup(encoding, chip);
+                    assert!(
+                        entry.is_none_or(|entry| entry.class != impdef::Class::Unsupported),
+                        "{} {encoding:?}",
+                        chip.name()
+                    );
+                    // A modeled register may be UNDEFINED in this state
+                    // (SPRR's permissions while SPRR is disabled), but none
+                    // lacks a model.
+                    assert_eq!(crn, 15, "{} {encoding:?}", chip.name());
+                    let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+                    let outcome = cpu.apple_access(mrs(0, encoding), 0);
+                    assert_ne!(
+                        outcome,
+                        Outcome::Refused(Refusal::Unimplemented),
+                        "{} {encoding:?}",
+                        chip.name()
+                    );
+                }
+            }
+            assert!(owned > 150, "{}: {owned}", chip.name());
+        }
+    }
 }
