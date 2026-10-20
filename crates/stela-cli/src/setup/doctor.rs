@@ -246,18 +246,34 @@ fn bundle_status(record: &Record, report: &mut Report) {
             ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}"))
         ));
     }
-    for ecid in record.missing_restore_bundles() {
+    for (kind, ecid) in record.missing_restore_bundles() {
         report.problem(format!(
-            "the active build {} has no restore bundle for {}, so its Install macOS (Stela) \
-             choice is missing: `stela setup --repair --ipsw`",
+            "the active build {} has no {} bundle for {}, so its {} choice is missing: `stela \
+             setup --repair --ipsw`",
             record.build,
-            ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}"))
+            kind.label(),
+            ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")),
+            match kind {
+                bundle::Kind::Update => "Update macOS (Stela)",
+                _ => "Install macOS (Stela)",
+            }
         ));
     }
-    if let Some(medium) = &record.medium {
+    if record.installs_media() && record.active_medium().is_none() {
+        report.problem(format!(
+            "the active build {} has no install medium, so its Install and Update macOS (Stela) \
+             choices are missing: `stela setup --repair --ipsw` with its restore image",
+            record.build
+        ));
+    }
+    for medium in &record.media {
         let problems = medium.problems();
         report.line(
-            "install medium",
+            if medium.build == record.build {
+                "install medium"
+            } else {
+                "kept medium"
+            },
             format!(
                 "{} (macOS {}, partition {}): {}",
                 medium.directory().display(),
@@ -278,8 +294,8 @@ fn bundle_status(record: &Record, report: &mut Report) {
         }
         if medium.build == record.build && !record.tss {
             report.problem(
-                "the Install macOS (Stela) choices are off because the restore needs Apple's \
-                 signing server: `stela setup --tss`"
+                "the Install and Update macOS (Stela) choices are off because the restores need \
+                 Apple's signing server: `stela setup --tss`"
                     .into(),
             );
         }
@@ -604,21 +620,25 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         )?;
     }
     // The install's restore bundles and medium: all again with an image.
-    let damaged_medium = record
-        .active_medium()
-        .is_some_and(|medium| !medium.problems().is_empty());
-    let mut restore: Vec<Option<Ecid>> = Vec::new();
-    if record.active_medium().is_some() {
-        for install in &record.installs {
-            let intact = record.restore_bundle(install.ecid).is_some_and(|b| {
+    // A setup that has written media needs the active build's: it is put
+    // back when damaged or missing.
+    let has_media = record.installs_media();
+    let damaged_medium = has_media
+        && record
+            .active_medium()
+            .is_none_or(|medium| !medium.problems().is_empty());
+    let mut restore: Vec<(bundle::Kind, Option<Ecid>)> = Vec::new();
+    if has_media {
+        for (kind, ecid) in super::restore_bundles(&record.install_machines()) {
+            let intact = record.restore_bundle(kind, ecid).is_some_and(|b| {
                 bundle::verify(
                     &bundle::in_place(&b.directory(&record.volume)),
                     &b.manifest_sha256,
                 )
                 .is_empty()
             });
-            if (ipsw.is_some() || !intact) && !restore.contains(&install.ecid) {
-                restore.push(install.ecid);
+            if ipsw.is_some() || !intact {
+                restore.push((kind, ecid));
             }
         }
     }
@@ -628,7 +648,11 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
             let plan = plan_install(
                 environment,
                 &record,
-                record.active_medium().map(|medium| medium.volume.as_path()),
+                &record.build,
+                record
+                    .active_medium()
+                    .or(record.media.last())
+                    .map(|medium| medium.volume.as_path()),
                 ipsw,
                 &restore,
                 prepared.iter().map(|p| p.bytes).sum(),

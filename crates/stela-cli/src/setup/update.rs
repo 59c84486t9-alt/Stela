@@ -18,14 +18,20 @@
 //!   new system on the container's Update volume and sets `boot-command
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
 //!   (`stela_loader::upgrade`), and every later boot builds from the
-//!   Preboot volume's new objects. Setup refreshes the System Recovery
-//!   bundles to the new build, so recoveryOS's Reinstall macOS installs it
-//!   over the installed system, keeping its data, as on a Mac.
+//!   Preboot volume's new objects. `--update-os` brings the setup to a new
+//!   build offline: its System Recovery bundles and, for a setup with
+//!   installs, the build's install medium and each machine's erase and
+//!   update restore bundles. The Update macOS (Stela) choice then restores
+//!   the build's Update identity over the installed system, keeping its
+//!   data, as Apple Configurator's update restore does. The previous
+//!   build's medium is kept for rollback ([`MEDIA_KEPT`] media in all), so
+//!   the USB needs room for both.
 //!
 //! Neither touches the installed disks' partitions.
 use super::{
-    Environment, Record, TOOL_PATH, bundle, check_space, copy_bundles, first_schema,
-    prepare_bundles, publish, read_efi, write_record,
+    Environment, MEDIA_KEPT, Record, TOOL_PATH, apply_install, bundle, check_space, copy_bundles,
+    describe_install, first_schema, plan_install, prepare_bundles, publish, read_efi,
+    restore_bundles, write_record,
 };
 use crate::efi;
 use anyhow::{Context, Result, bail, ensure};
@@ -144,6 +150,34 @@ fn prune(record: &mut Record) -> Result<()> {
     };
     let history: Vec<Change> = record.history.iter().filter(|c| kept(c)).cloned().collect();
     record.history = history;
+    // The media of the newest kept builds, the active one's first.
+    let newest: Vec<String> = record
+        .recovery_builds
+        .iter()
+        .rev()
+        .filter(|build| **build != record.build)
+        .take(MEDIA_KEPT - 1)
+        .cloned()
+        .chain([record.build.clone()])
+        .collect();
+    let (kept, stale): (Vec<_>, Vec<_>) = record
+        .media
+        .drain(..)
+        .partition(|m| newest.contains(&m.build));
+    record.media = kept;
+    for medium in stale {
+        remove_medium(&medium)?;
+    }
+    Ok(())
+}
+
+/// Delete a medium the record no longer names.
+fn remove_medium(medium: &super::medium::Medium) -> Result<()> {
+    let directory = medium.directory();
+    if directory.is_dir() {
+        fs::remove_dir_all(&directory)
+            .with_context(|| format!("cannot remove {}", directory.display()))?;
+    }
     Ok(())
 }
 
@@ -306,7 +340,27 @@ pub(super) fn update_os(
     let machines = record.machines();
     let (_, _, prepared) =
         prepare_bundles(environment, ipsw, &record.model, Some(&build), &machines)?;
-    check_space(environment.host, &record.volume, &prepared)?;
+    let recovery_bytes: u64 = prepared.iter().map(|p| p.bytes).sum();
+    // With installs, the build's install medium and restore bundles, so
+    // Install and Update macOS (Stela) restore the new build offline.
+    let install = match record.installs.is_empty() {
+        true => {
+            check_space(environment.host, &record.volume, &prepared)?;
+            None
+        }
+        false => Some(plan_install(
+            environment,
+            &record,
+            &build,
+            record
+                .active_medium()
+                .or(record.media.last())
+                .map(|medium| medium.volume.as_path()),
+            ipsw,
+            &restore_bundles(&record.install_machines()),
+            recovery_bytes,
+        )?),
+    };
     let mut text = String::new();
     writeln!(text, "macOS update to {product_version} ({build}):")?;
     for bundle in &prepared {
@@ -317,16 +371,33 @@ pub(super) fn update_os(
             bundle.bytes as f64 / 1e9
         )?;
     }
+    if let Some(plan) = &install {
+        describe_install(&record, plan, &mut text)?;
+        if let Some(medium) = record.active_medium() {
+            writeln!(
+                text,
+                "  keeps          {} for rollback",
+                medium.directory().display()
+            )?;
+        }
+    }
     writeln!(
         text,
         "  stela.cfg      boots recoveryOS {build} for System Recovery"
     )?;
-    writeln!(
-        text,
-        "  next           boot System Recovery (`stela setup --next-boot recovery`, or its \
-         startup choice) and choose Reinstall macOS: it installs {product_version} over the \
-         installed system and keeps its data"
-    )?;
+    match &install {
+        Some(_) => writeln!(
+            text,
+            "  next           choose Update macOS (Stela) in the startup choices: it restores \
+             {product_version} over the installed system offline and keeps its data (Install \
+             macOS (Stela) erases the disk instead)"
+        )?,
+        None => writeln!(
+            text,
+            "  next           boot System Recovery and choose Reinstall macOS, which downloads \
+             {product_version} from Apple; an install added with --target restores it offline"
+        )?,
+    }
     writeln!(
         text,
         "  note           macOS's own Software Update stages the update on the Update volume; \
@@ -346,6 +417,9 @@ pub(super) fn update_os(
     }
     copy_bundles(&mut record, &prepared)?;
     write_record(&record.esp.clone(), &record)?;
+    if let Some(plan) = install {
+        apply_install(environment, &mut record, ipsw, plan)?;
+    }
     activate_build(&mut record, &build)?;
     if !record.recovery_builds.contains(&from) {
         record.recovery_builds.insert(0, from.clone());
@@ -431,6 +505,19 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
                 fs::remove_dir_all(directory)?;
             }
             record.bundles.retain(|b| b.build != *to);
+            let (stale, kept): (Vec<_>, Vec<_>) =
+                record.media.drain(..).partition(|m| m.build == *to);
+            record.media = kept;
+            for medium in &stale {
+                remove_medium(medium)?;
+            }
+            if record.installs_media() && record.active_medium().is_none() {
+                writeln!(
+                    text,
+                    "  note           the macOS {from} install medium is no longer kept; \
+                     `stela setup --repair --ipsw` with its restore image writes it again"
+                )?;
+            }
         }
     }
     if pending {

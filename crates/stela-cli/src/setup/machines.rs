@@ -29,7 +29,9 @@ use stela_loader::{boot_bundle::Options as BundleOptions, mount_interface::MAX_C
 pub(super) const FIRST_NAME: &str = "macOS";
 /// Each install takes three startup choices: itself, its System Recovery
 /// and its Install macOS (Stela).
-const MAX_INSTALLS: usize = MAX_CHOICES / 3;
+/// Each install has four startup choices: itself, its System Recovery,
+/// Install macOS and Update macOS.
+const MAX_INSTALLS: usize = MAX_CHOICES / 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Install {
@@ -222,15 +224,15 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         check_space(host, &record.volume, &prepared)?;
         prepared
     };
-    let restore: Vec<Option<Ecid>> = next
-        .installs
-        .iter()
-        .map(|install| install.ecid)
-        .filter(|ecid| next.restore_bundle(*ecid).is_none())
-        .collect();
+    let restore: Vec<(bundle::Kind, Option<Ecid>)> =
+        super::restore_bundles(&next.install_machines())
+            .into_iter()
+            .filter(|&(kind, ecid)| next.restore_bundle(kind, ecid).is_none())
+            .collect();
     let install_plan = plan_install(
         environment,
         &next,
+        &next.build,
         command.install_volume.as_deref(),
         &ipsw,
         &restore,
@@ -263,8 +265,8 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     describe_install(&next, &install_plan, &mut text)?;
     writeln!(
         text,
-        "  choices.cfg    lists \"{name}\", its System Recovery and its Install macOS (Stela); \
-         the startup choices open at every boot"
+        "  choices.cfg    lists \"{name}\", its System Recovery, its Install macOS (Stela) and \
+         its Update macOS (Stela); the startup choices open at every boot"
     )?;
     if checked.nor_image.is_some() {
         writeln!(
@@ -352,8 +354,8 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
             if record.active_medium().is_some() {
                 writeln!(
                     text,
-                    "  choices.cfg    drops the Install macOS (Stela) choices: the restore needs \
-                     --tss"
+                    "  choices.cfg    drops the Install and Update macOS (Stela) choices: the \
+                     restores need --tss"
                 )?;
             }
         }

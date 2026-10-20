@@ -9,6 +9,9 @@
 //! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1;
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
 //!   --restore`), which the Install macOS (Stela) choice boots;
+//! - `update-<ECID>`: a machine's update restore bundle (`stela boot
+//!   prepare --restore --update`), which the Update macOS (Stela) choice
+//!   boots;
 //! - any of these with `-s<schema>` for another schema, so a Stela update
 //!   that reads a new schema adds its bundles beside the old ones and its
 //!   rollback finds them.
@@ -43,7 +46,12 @@ pub(super) enum Kind {
     Recovery,
     /// The restore ramdisk (`boot prepare --restore`).
     Restore,
+    /// The update restore ramdisk (`boot prepare --restore --update`).
+    Update,
 }
+
+/// The kinds the install medium's restores boot: erase, then update.
+pub(super) const RESTORE_KINDS: [Kind; 2] = [Kind::Restore, Kind::Update];
 
 impl Kind {
     fn is_recovery(&self) -> bool {
@@ -54,6 +62,7 @@ impl Kind {
         match self {
             Self::Recovery => LEGACY_LEAF,
             Self::Restore => "restore",
+            Self::Update => "update",
         }
     }
 
@@ -62,6 +71,7 @@ impl Kind {
         match self {
             Self::Recovery => "recoveryOS",
             Self::Restore => "restore",
+            Self::Update => "update restore",
         }
     }
 }
@@ -406,6 +416,10 @@ pub(super) mod tests {
         assert_eq!(
             firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), 1),
             "\\EFI\\stela\\boot\\26A434\\restore-0000000000000001"
+        );
+        assert_eq!(
+            firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), 1),
+            "\\EFI\\stela\\boot\\26A434\\update-0000000000000001"
         );
         assert_eq!(
             firmware_path("26A434", Some(Ecid(1)), 1),
