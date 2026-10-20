@@ -50,6 +50,10 @@ pub struct Description {
     pub checks: MemoryChecks,
     pub scalable: Option<bool>,
     pub system: NativeSystem,
+    /// The features the PE withholds (`AdmitTable::withheld`); none in a
+    /// description from before it was recorded.
+    #[serde(default)]
+    pub withheld: u64,
 }
 
 /// What a source window prepares to.
@@ -108,6 +112,7 @@ impl Preparation {
             checks: self.checks,
             scalable: self.scalable,
             system: self.system,
+            withheld: self.admit.withheld(),
         }
     }
 
@@ -119,10 +124,11 @@ impl Preparation {
             checks,
             scalable,
             system,
+            withheld,
         } = *description;
         Self::new(
             chip,
-            Arc::new(chip.admit_table()),
+            Arc::new(chip.admit_table(withheld)),
             target,
             fp,
             checks,
@@ -284,7 +290,7 @@ pub(crate) fn test_preparation() -> Preparation {
     let chip = crate::machine::test_chip();
     Preparation::new(
         chip,
-        Arc::new(chip.admit_table()),
+        Arc::new(chip.admit_table(0)),
         TargetCpu::Baseline,
         true,
         MemoryChecks::DEFAULT,

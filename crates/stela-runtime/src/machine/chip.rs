@@ -3,7 +3,9 @@
 //! under the AARCHMRS implications by `cargo xtask system-matrix`; the
 //! generated accessors decide a feature only some chips have through
 //! [`Chip::implemented`], and [`Chip::admit`] makes an instruction form the
-//! chip lacks UNDEFINED (or a NOP, where Arm decodes it so).
+//! chip lacks UNDEFINED (or a NOP, where Arm decodes it so), as
+//! [`Chip::admit_table`] does for a PE whose identification withholds
+//! features its chip has.
 use super::system::generated::{CAPS, CHIPS, Feature};
 use alloc::{vec, vec::Vec};
 
@@ -66,8 +68,21 @@ struct AbsentForm {
     chips: u8,
     /// Arm decodes the form as NOP, not UNDEFINED, without its feature.
     nop: bool,
-    /// (mask, value, chips): forms those chips have that keep their words.
-    unless: &'static [(u32, u32, u8)],
+    /// The chip-varying features the form requires, in disjunctive normal
+    /// form over [`Feature`] bits: met when a PE presents every feature of
+    /// one term. A chip that has the form has what it requires. A condition
+    /// on an encoding field counts as met (the checklist does not place the
+    /// field), so words needing a feature only for some field values stay
+    /// admitted while it is withheld.
+    requires: &'static [u64],
+    /// (mask, value, chips, requires): forms those chips have that keep
+    /// their words where the PE presents what they require.
+    unless: &'static [(u32, u32, u8, &'static [u64])],
+}
+
+/// Whether `presented` features meet a form's `requires`.
+fn met(requires: &[u64], presented: u64) -> bool {
+    requires.iter().any(|term| term & !presented == 0)
 }
 
 /// The absent forms of one encoding mask, sorted by value.
@@ -88,12 +103,17 @@ fn unallocated_group(word: u32) -> bool {
     matches!((word >> 25) & 0xf, 0b0001 | 0b0011)
 }
 
-/// A chip's absent-form groups indexed by bits 31:21 of the word, in
-/// [`forms::ABSENT`] order, so that [`AdmitTable::admit`] searches only the
-/// groups whose forms share a word's prefix; most prefixes have none.
+/// The absent-form groups of a chip whose PE withholds some of its features,
+/// indexed by bits 31:21 of the word, in [`forms::ABSENT`] order, so that
+/// [`AdmitTable::admit`] searches only the groups whose forms share a word's
+/// prefix; most prefixes have none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdmitTable {
     chip: Chip,
+    /// The [`Feature`] bits the PE's identification withholds.
+    withheld: u64,
+    /// The chip's features without them.
+    presented: u64,
     /// The range of `groups` for each prefix, and its end.
     starts: Vec<u32>,
     groups: Vec<u16>,
@@ -103,7 +123,8 @@ impl AdmitTable {
     const SHIFT: u32 = 21;
     const PREFIXES: usize = 1 << (32 - Self::SHIFT);
 
-    /// [`Chip::admit`] of the table's chip.
+    /// [`Chip::admit`] of the table's chip, where the forms of the features
+    /// its PE withholds are absent too.
     pub fn admit(&self, word: u32) -> u32 {
         if unallocated_group(word) {
             return UDF;
@@ -112,10 +133,16 @@ impl AdmitTable {
         let groups = &self.groups[self.starts[prefix] as usize..self.starts[prefix + 1] as usize];
         self.chip.admit_in(
             word,
+            self.presented,
             groups
                 .iter()
                 .map(|&group| &forms::ABSENT[usize::from(group)]),
         )
+    }
+
+    /// The [`Feature`] bits the table's PE withholds.
+    pub fn withheld(&self) -> u64 {
+        self.withheld
     }
 }
 
@@ -156,16 +183,28 @@ impl Chip {
         CAPS[self as usize]
     }
 
-    /// The chip's [`AdmitTable`].
-    pub fn admit_table(self) -> AdmitTable {
+    /// The chip's [`Feature`] bits.
+    pub fn features(self) -> u64 {
+        Feature::ALL
+            .into_iter()
+            .filter(|feature| feature.on(self))
+            .fold(0, |bits, feature| bits | 1 << feature as u64)
+    }
+
+    /// The [`AdmitTable`] of a PE of the chip whose identification withholds
+    /// the `withheld` [`Feature`] bits (`identification::withheld`).
+    pub fn admit_table(self, withheld: u64) -> AdmitTable {
         const PREFIX: u32 = AdmitTable::PREFIXES as u32 - 1;
         let bit = 1u8 << self as u8;
+        let presented = self.features() & !withheld;
         let mut by_prefix = vec![Vec::new(); AdmitTable::PREFIXES];
         for (index, group) in forms::ABSENT.iter().enumerate() {
             let index = u16::try_from(index).expect("fewer than 65536 absent-form groups");
             // Every prefix that agrees with a form on the group's mask.
             let free = !(group.mask >> AdmitTable::SHIFT) & PREFIX;
-            for form in group.forms.iter().filter(|form| form.chips & bit != 0) {
+            let absent =
+                |form: &&AbsentForm| form.chips & bit != 0 || !met(form.requires, presented);
+            for form in group.forms.iter().filter(absent) {
                 let fixed = form.value >> AdmitTable::SHIFT & !free;
                 let mut varying = free;
                 loop {
@@ -189,6 +228,8 @@ impl Chip {
         starts.push(groups.len() as u32);
         AdmitTable {
             chip: self,
+            withheld,
+            presented,
             starts,
             groups,
         }
@@ -201,11 +242,17 @@ impl Chip {
         if unallocated_group(word) {
             return UDF;
         }
-        self.admit_in(word, forms::ABSENT.iter())
+        self.admit_in(word, self.features(), forms::ABSENT.iter())
     }
 
-    /// The first of `groups` holding a form this chip lacks that `word` is.
-    fn admit_in<'a>(self, word: u32, groups: impl Iterator<Item = &'a AbsentGroup>) -> u32 {
+    /// The first of `groups` holding a form that `word` is and that this
+    /// chip lacks, or that a PE presenting the `presented` features does.
+    fn admit_in<'a>(
+        self,
+        word: u32,
+        presented: u64,
+        groups: impl Iterator<Item = &'a AbsentGroup>,
+    ) -> u32 {
         let bit = 1u8 << self as u8;
         for group in groups {
             let Ok(index) = group
@@ -215,11 +262,11 @@ impl Chip {
                 continue;
             };
             let form = &group.forms[index];
-            let kept = form
-                .unless
-                .iter()
-                .any(|(mask, value, chips)| chips & bit != 0 && word & mask == *value);
-            if form.chips & bit != 0 && !kept {
+            let kept = form.unless.iter().any(|(mask, value, chips, requires)| {
+                chips & bit != 0 && word & mask == *value && met(requires, presented)
+            });
+            let absent = form.chips & bit != 0 || !met(form.requires, presented);
+            if absent && !kept {
                 return if form.nop { NOP } else { UDF };
             }
         }
@@ -392,7 +439,7 @@ mod tests {
     #[test]
     fn the_admit_table_answers_as_the_full_search() {
         for chip in Chip::ALL {
-            let table = chip.admit_table();
+            let table = chip.admit_table(0);
             for group in forms::ABSENT {
                 for form in group.forms {
                     for word in [form.value, form.value | !group.mask] {
@@ -411,6 +458,62 @@ mod tests {
             assert_eq!(table.admit(0xe7ff_deff), UDF);
             assert_eq!(table.admit(0xf940_0020), 0xf940_0020); // ldr x0, [x1]
         }
+    }
+
+    /// A PE that withholds a feature its chip has lacks the feature's forms,
+    /// as a chip without it does.
+    #[test]
+    fn withheld_features_make_their_forms_absent() {
+        // `requires` counts in Feature bits, and every chip that has a form
+        // has what it requires.
+        let names: Vec<&str> = Feature::ALL.iter().map(|feature| feature.name()).collect();
+        assert_eq!(names, forms::FEATURES);
+        for chip in Chip::ALL {
+            let bit = 1u8 << chip as u8;
+            for form in forms::ABSENT.iter().flat_map(|group| group.forms) {
+                if form.chips & bit == 0 {
+                    assert!(
+                        met(form.requires, chip.features()),
+                        "{chip:?} {:#x}",
+                        form.value
+                    );
+                }
+            }
+        }
+        let withholding = |chip: Chip, prefix: &str| {
+            Feature::ALL
+                .into_iter()
+                .filter(|feature| feature.on(chip) && feature.name().starts_with(prefix))
+                .fold(0, |bits, feature| bits | 1 << feature as u64)
+        };
+        // SMSTART is an MSR to PSTATE, UNDEFINED without the PE's SME state
+        // (Registers::write_pstate_field); the SME forms are absent.
+        let fmopa = 0x8081_2000; // fmopa za0.s, p0/m, p1/m, z0.s, z0.s
+        let rdsvl = 0x04bf_5820; // rdsvl x0, #1
+        let full = Chip::AppleM4.admit_table(0);
+        let without_sme = Chip::AppleM4.admit_table(withholding(Chip::AppleM4, "FEAT_SME"));
+        for word in [fmopa, rdsvl] {
+            assert_eq!(full.admit(word), word);
+            assert_eq!(without_sme.admit(word), UDF, "{word:#x}");
+            assert_eq!(Chip::AppleM3.admit(word), UDF);
+        }
+        let irg = 0x9adf_1020; // irg x0, x1
+        let without_tags = Chip::AppleM5.admit_table(withholding(Chip::AppleM5, "FEAT_MTE"));
+        assert_eq!(
+            without_tags.withheld(),
+            withholding(Chip::AppleM5, "FEAT_MTE")
+        );
+        assert_eq!(Chip::AppleM5.admit_table(0).admit(irg), irg);
+        assert_eq!(without_tags.admit(irg), UDF);
+        // A hint whose feature is withheld is a NOP, as Arm decodes it.
+        let pacm = 0xd503_24ff;
+        let without_pacm = Chip::AppleM6.admit_table(withholding(Chip::AppleM6, "FEAT_PAuth_LR"));
+        assert_eq!(Chip::AppleM6.admit(pacm), pacm);
+        assert_eq!(without_pacm.admit(pacm), NOP);
+        // What the PE presents keeps its words.
+        let add = 0x8b02_0020;
+        assert_eq!(without_sme.admit(add), add);
+        assert_eq!(without_tags.admit(add), add);
     }
 
     #[test]

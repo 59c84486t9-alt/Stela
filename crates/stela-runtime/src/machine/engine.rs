@@ -25,7 +25,7 @@ use super::{
         Class, DAIF_A, DAIF_F, DAIF_I, IllegalReturn, SYNCHRONOUS_EXTERNAL_ABORT, Vector,
         data_abort_iss,
     },
-    hacr,
+    hacr, identification,
     mmu::{self, Access, Controls, Outcome as Translated},
     pmu,
     registers::{self, CpuProfile, HCR_TIDCP, Lines, Outcome as RegisterOutcome, Refusal},
@@ -1178,7 +1178,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
-        let admit_table = Arc::new(profile.chip.admit_table());
+        let admit_table = Arc::new(
+            profile
+                .chip
+                .admit_table(identification::withheld(profile.chip, &profile.fixed)),
+        );
         let mut machine = Self {
             cpu,
             host,

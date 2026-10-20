@@ -64,7 +64,8 @@ pub fn run(check: bool) -> Result<()> {
     let readme = render_readme(&readme_text, &forms)?;
     let absent_path = root().join(forms::GENERATED);
     let absent_text = fs::read_to_string(&absent_path).unwrap_or_default();
-    let absent = forms::render(&forms, &read_json(APPLE_PROFILES)?)?;
+    let features = forms::Features::from_matrix(&read_json(crate::system_matrix::MATRIX)?)?;
+    let absent = forms::render(&forms, &read_json(APPLE_PROFILES)?, &features)?;
 
     for (path, old, new) in [
         (&checklist_path, &checklist_text, &checklist),
