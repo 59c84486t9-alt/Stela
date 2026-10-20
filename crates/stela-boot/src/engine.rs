@@ -1822,6 +1822,7 @@ fn run(
     let mut user = 0;
     let mut beats = 0u64;
     let mut exits = ExitsSeen::default();
+    let mut occupancy = None;
     let mut host_erase = erase::HostErase::default();
     loop {
         let slice = machine.statistics.blocks + SLICE;
@@ -1983,6 +1984,7 @@ fn run(
                 output::arguments(format_args!("ASC {state}\n"));
             }
             survey_report(machine);
+            occupancy_report(machine, &mut occupancy);
             user = 0;
             beats += 1;
             if beats.is_multiple_of(SUSPENSION_BEATS) {
@@ -2304,6 +2306,33 @@ fn survey_report(machine: &mut Machine<BareHost, AppleDevices>) {
             record.detail
         ));
     }
+}
+
+/// The running regime's TTBR1 occupancy (`Machine::upper_occupancy`)
+/// whenever it differs from the last one shown: the level-1 ranges its
+/// tables map and the outermost mapped 32 MiB, which decide whether a
+/// four-level host's upper window can lie below the guest's mappings.
+fn occupancy_report(
+    machine: &mut Machine<BareHost, AppleDevices>,
+    last: &mut Option<stela_runtime::machine::engine::Occupancy>,
+) {
+    let Some(now) = machine.upper_occupancy() else {
+        return;
+    };
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    output::arguments(format_args!(
+        "OCCUPANCY ttbr1={:#x} lowest={:#x} highest={:#x} ranges=",
+        now.root,
+        now.lowest.unwrap_or(0),
+        now.highest.unwrap_or(0)
+    ));
+    for (first, last) in &now.ranges {
+        output::arguments(format_args!(" {first:#x}-{last:#x}"));
+    }
+    output::arguments(format_args!("\n"));
+    *last = Some(now);
 }
 
 fn general_registers(cpu: &Cpu) {

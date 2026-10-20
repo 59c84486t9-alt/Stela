@@ -712,6 +712,19 @@ impl fmt::Display for Reset {
     }
 }
 
+/// Where the running regime's TTBR1 tables map ([`Machine::upper_occupancy`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Occupancy {
+    /// The level-1 table's physical address.
+    pub root: u64,
+    /// First and last VA of each run of valid level-1 entries.
+    pub ranges: Vec<(u64, u64)>,
+    /// The first and last byte of the outermost mapped 32 MiB, where the
+    /// outermost entries are tables; their whole entry otherwise.
+    pub lowest: Option<u64>,
+    pub highest: Option<u64>,
+}
+
 /// Where a guest thread stopped running: the PE's PC, frame pointer and
 /// link register, and the physical count, when software replaced the thread
 /// pointer naming it (TPIDR_EL1). While the thread stays suspended its stack
@@ -1908,6 +1921,85 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Translated::Mapped(translation) => self.host.read_ram(translation.physical, bytes),
             _ => false,
         }
+    }
+
+    /// For diagnostics: which parts of the running regime's TTBR1 range
+    /// its tables map, read from RAM without changing anything. `None`
+    /// unless the regime has two ranges, its MMU is on, TTBR1 walks are
+    /// enabled and its walks start at level 1 of a 16 KiB granule (T1SZ
+    /// 17 to 27, as 26A434 XNU's T1SZ_BOOT 17), or the root is not RAM.
+    pub fn upper_occupancy(&mut self) -> Option<Occupancy> {
+        const TG1_16K: u64 = 0b01;
+        const LEVEL1_SHIFT: u32 = 36;
+        const LEVEL2_SHIFT: u32 = 25;
+        const VALID: u64 = 1;
+        const TABLE: u64 = 0b11;
+        const ADDRESS: u64 = 0x0000_ffff_ffff_c000;
+        let controls = self.cpu.controls(self.cpu.regime());
+        let tcr = controls.tcr;
+        let t1sz = (tcr >> 16 & 0x3f) as u32;
+        let epd1 = tcr >> 23 & 1 != 0;
+        if controls.regime == mmu::Regime::El2
+            || controls.sctlr & 1 == 0
+            || epd1
+            || tcr >> 30 & 0b11 != TG1_16K
+            || !(17..=27).contains(&t1sz)
+        {
+            return None;
+        }
+        let entries = 1usize << (64 - t1sz - LEVEL1_SHIFT);
+        let root = controls.ttbr1 & ADDRESS & !((entries as u64 * 8).max(64) - 1);
+        let mut table = alloc::vec![0u8; entries * 8];
+        if !self.host.read_ram(root, &mut table) {
+            return None;
+        }
+        let descriptor = |bytes: &[u8], index: usize| {
+            u64::from_le_bytes(bytes[index * 8..][..8].try_into().unwrap())
+        };
+        let base = u64::MAX << (64 - t1sz);
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut valid = Vec::new();
+        for index in 0..entries {
+            if descriptor(&table, index) & VALID == 0 {
+                continue;
+            }
+            valid.push(index);
+            let first = base + ((index as u64) << LEVEL1_SHIFT);
+            let last = first + ((1u64 << LEVEL1_SHIFT) - 1);
+            match ranges.last_mut() {
+                Some(range) if range.1.wrapping_add(1) == first => range.1 = last,
+                _ => ranges.push((first, last)),
+            }
+        }
+        // The lowest and highest mapped 32 MiB, one level below the
+        // outermost level-1 entries.
+        let mut edge = |index: usize, highest: bool| -> u64 {
+            let start = base + ((index as u64) << LEVEL1_SHIFT);
+            let entry = descriptor(&table, index);
+            let mut next = alloc::vec![0u8; 2048 * 8];
+            let table_read =
+                entry & TABLE == TABLE && self.host.read_ram(entry & ADDRESS, &mut next);
+            let mut slots =
+                (0..2048).filter(|&slot| table_read && descriptor(&next, slot) & VALID != 0);
+            let slot = if highest {
+                slots.next_back()
+            } else {
+                slots.next()
+            };
+            let (first, bytes) = match slot {
+                Some(slot) => (start + ((slot as u64) << LEVEL2_SHIFT), 1 << LEVEL2_SHIFT),
+                None => (start, 1u64 << LEVEL1_SHIFT),
+            };
+            if highest { first + (bytes - 1) } else { first }
+        };
+        let lowest = valid.first().map(|&index| edge(index, false));
+        let highest = valid.last().map(|&index| edge(index, true));
+        Some(Occupancy {
+            root,
+            ranges,
+            lowest,
+            highest,
+        })
     }
 
     /// `pointer` without its PAC, laid out as an instruction address in the
@@ -9530,5 +9622,45 @@ mod tests {
         for word in [0x9100_0400_u32, 0xf940_0020, 0xa900_0be1, 0xd503_201f] {
             assert!(!is_floating_point(word), "{word:#x}");
         }
+    }
+
+    /// 26A434 XNU's TTBR1 layout: a 16 KiB granule with T1SZ 17, so 2048
+    /// level-1 entries of 64 GiB from 0xffff_8000_0000_0000.
+    #[test]
+    fn upper_occupancy_lists_the_mapped_level_one_ranges_and_outermost_blocks() {
+        const ROOT: u64 = BASE + 0x8000;
+        const NEXT: u64 = BASE + 0xc000;
+        let mut machine = machine(&[]);
+        let mut put = |address: u64, value: u64| {
+            let offset = (address - BASE) as usize;
+            machine.host.ram[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        };
+        put(ROOT + 2016 * 8, NEXT | 0b11);
+        put(ROOT + 2017 * 8, 0b01);
+        put(ROOT + 2047 * 8, 0b01);
+        put(NEXT + 3 * 8, 0b11);
+        let registers = &mut machine.cpu.registers;
+        registers.set(SystemRegister::TCR_EL1, 0, 17 << 16 | 0b01 << 30);
+        registers.set(SystemRegister::TTBR1_EL1, 0, ROOT);
+        assert_eq!(machine.upper_occupancy(), None, "the MMU is off");
+        machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 1);
+        assert_eq!(
+            machine.upper_occupancy(),
+            Some(Occupancy {
+                root: ROOT,
+                ranges: vec![
+                    (0xffff_fe00_0000_0000, 0xffff_fe1f_ffff_ffff),
+                    (0xffff_fff0_0000_0000, u64::MAX),
+                ],
+                lowest: Some(0xffff_fe00_0600_0000),
+                highest: Some(u64::MAX),
+            })
+        );
+        // Another granule is not reported.
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TCR_EL1, 0, 17 << 16 | 0b10 << 30);
+        assert_eq!(machine.upper_occupancy(), None);
     }
 }
