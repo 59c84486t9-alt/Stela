@@ -85,6 +85,9 @@ const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 /// most blocks end within them, and the rest compile from the whole window.
 const FIRST_WINDOW_BYTES: usize = 32 * INSTRUCTION as usize;
 const FETCH_CACHE: usize = 1024;
+/// The level a fetch the host refuses (`Host::fetch_permitted`) reports its
+/// permission fault at: the host refuses whole pages, a level 3 leaf's.
+const HOST_REFUSED_FETCH_LEVEL: i8 = 3;
 /// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
 const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
@@ -326,6 +329,15 @@ pub trait Host {
     /// memory service then reads and writes.
     fn context_entry(&mut self, _code: NativeCode) -> Option<usize> {
         None
+    }
+    /// Whether the PE may execute the page holding `virtual`, which its
+    /// translation lets it execute: false where the host's view of memory
+    /// refuses the fetch (an Apple SPRR view in which JIT pages are rw-),
+    /// which takes a permission Instruction Abort. Asked when a fetch's
+    /// translation is not cached; [`Machine::fetch_permissions_changed`]
+    /// makes later fetches ask again.
+    fn fetch_permitted(&mut self, _virtual: u64) -> bool {
+        true
     }
     /// Make the shadow translation follow `regime`: drop what a change of
     /// its controls translates differently (a TTBR0 write arrives only
@@ -1575,6 +1587,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.sync_regime();
     }
 
+    /// The host's answers to [`Host::fetch_permitted`] changed: every later
+    /// fetch translates and asks again, and no cached, looked-up or chained
+    /// transfer enters a block of another page before it has.
+    pub fn fetch_permissions_changed(&mut self) {
+        self.translation_generation += 1;
+    }
+
     /// A TLBI: the fetch translations of every regime go, and the host
     /// drops what `reach` names of its shadow. No control changed, so the
     /// regime and what derives from System registers stay.
@@ -2411,6 +2430,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let controls = self.cpu.controls(self.cpu.regime());
         let mut tables = RamTables(&mut self.host);
         match mmu::translate(&controls, pc, Access::Execute, requester, &mut tables) {
+            Translated::Mapped(_) if !self.host.fetch_permitted(pc) => {
+                let fault =
+                    mmu::Fault::stage1(mmu::FaultKind::Permission, HOST_REFUSED_FETCH_LEVEL);
+                Err(Ok(self.abort(
+                    fault,
+                    [Class::InstructionAbortLower, Class::InstructionAbortSame],
+                    fault.instruction_syndrome(),
+                    pc,
+                    pc,
+                )))
+            }
             Translated::Mapped(translation) => {
                 let physical = translation.physical & !(FETCH_PAGE - 1);
                 self.fetch[slot] = Some(FetchEntry {
@@ -5056,6 +5086,9 @@ mod tests {
         pub(super) exits: Vec<NativeExit>,
         /// A translation store, for the tests that give the host one.
         pub(super) store: Option<stored::tests::MemoryStore>,
+        /// Pages whose fetch the host refuses, and its answers.
+        refused: Vec<u64>,
+        fetch_checks: usize,
     }
 
     impl Host for FakeHost {
@@ -5121,6 +5154,12 @@ mod tests {
         }
         fn code_invalidated(&mut self, page: Option<u64>) {
             self.code_invalidations.push(page);
+        }
+        fn fetch_permitted(&mut self, virtual_address: u64) -> bool {
+            self.fetch_checks += 1;
+            !self
+                .refused
+                .contains(&(virtual_address & !(FETCH_PAGE - 1)))
         }
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
@@ -5231,6 +5270,8 @@ mod tests {
             chained: None,
             exits: Vec::new(),
             store: None,
+            refused: Vec::new(),
+            fetch_checks: 0,
         };
         let profile = CpuProfile {
             name: "test",
@@ -5668,6 +5709,46 @@ mod tests {
         fn system_instruction_for_test(&mut self, word: u32) {
             self.pointer_authentication(word).unwrap();
         }
+    }
+
+    #[test]
+    fn a_fetch_the_host_refuses_takes_a_permission_instruction_abort() {
+        // add x0, x0, #1; svc #0
+        let mut machine = machine(&[0x9100_0400, 0xd400_0001]);
+        assert!(matches!(
+            machine.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+        assert_eq!(machine.host.fetch_checks, 1);
+        // The view changes: until the engine hears so, the cached
+        // translation stands and the host is not asked.
+        machine.host.refused.push(BASE);
+        assert!(matches!(
+            machine.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
+        assert_eq!(machine.host.fetch_checks, 1);
+        machine.fetch_permissions_changed();
+        let Ok(Fetched::Exception(exception)) = machine.fetch_block(BASE, false) else {
+            panic!("an instruction abort")
+        };
+        let permission = mmu::Fault::stage1(mmu::FaultKind::Permission, HOST_REFUSED_FETCH_LEVEL);
+        assert_eq!(
+            exception.syndrome,
+            super::super::exception::syndrome(
+                Class::InstructionAbortSame,
+                permission.instruction_syndrome()
+            )
+        );
+        assert_eq!(exception.fault_address, Some(BASE));
+        assert_eq!(machine.host.fetch_checks, 2);
+        // Permitted again: the block runs once more.
+        machine.host.refused.clear();
+        machine.fetch_permissions_changed();
+        assert!(matches!(
+            machine.fetch_block(BASE, false),
+            Ok(Fetched::Block(_))
+        ));
     }
 
     #[test]
