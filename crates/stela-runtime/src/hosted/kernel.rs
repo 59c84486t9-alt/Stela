@@ -163,6 +163,25 @@ pub(super) struct Process {
     pub(super) aio: Arc<bsd::aio::Aio>,
     /// Its MAP_JIT ranges and the view their host protection follows.
     pub(super) jit: Mutex<Jit>,
+    /// The hosted devices' user clients, which serve
+    /// `iokit_user_client_trap` on their connections.
+    pub(super) user_client_traps: Option<Arc<dyn UserClientTraps>>,
+    /// Set in a fork child, which has none of the parent's IOKit
+    /// connections (Mach port rights are not inherited).
+    pub(super) user_clients_closed: AtomicBool,
+}
+
+/// A hosted device's user clients: `iokit_user_client_trap`
+/// (`IOConnectTrap6`) on a connection the device made. The trap runs while
+/// the calling thread has given up the execution lock, so it may block;
+/// it reads guest memory through [`crate::hosted::memory`].
+pub(crate) trait UserClientTraps: Send + Sync {
+    /// Whether `connect` names a user client of the device.
+    fn owns(&self, connect: u32) -> bool;
+    /// Trap `index` with its six arguments, from the trap at `pc`: the
+    /// IOReturn for X0. An [`super::unsupported`] error is reported as a device
+    /// call and its kern_return given; any other error stops the run.
+    fn trap(&self, connect: u32, index: u32, arguments: [u64; 6], pc: u64) -> Result<u32>;
 }
 
 /// One `task_restartable_range_t`: location, length, recovery offset and
@@ -248,6 +267,7 @@ pub(super) struct Config {
     pub(super) reexec: Vec<std::ffi::OsString>,
     pub(super) trace: bool,
     pub(super) engine: Engine,
+    pub(super) user_client_traps: Option<Arc<dyn UserClientTraps>>,
 }
 
 impl Process {
@@ -275,6 +295,8 @@ impl Process {
         );
         Arc::new(Self {
             jit: Mutex::new(jit),
+            user_client_traps: config.user_client_traps.clone(),
+            user_clients_closed: AtomicBool::new(false),
             pac_exception_fatal,
             sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features, &config.release),
             signer: config.signer,

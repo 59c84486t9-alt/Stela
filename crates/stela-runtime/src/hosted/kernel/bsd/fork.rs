@@ -106,6 +106,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             workqueue.child();
             kqworkq.child();
             workloops.child();
+            process.user_clients_closed.store(true, Ordering::SeqCst);
             // The child has no asynchronous I/O (`forkproc`).
             process.aio.fork_child(&mut aio);
             drop(aio);

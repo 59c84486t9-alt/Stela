@@ -330,6 +330,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         reexec: launch.reexec.clone(),
         trace: launch.trace,
         engine,
+        user_client_traps: None,
     });
     // The main thread runs on this host thread, the process's first, with
     // the signal mask exec left it; its port, which the apple strings

@@ -28,6 +28,7 @@ use crate::hosted::{
 use crate::mach::catalog::{self, Reserved};
 use crate::machine::system::Register;
 use anyhow::Result;
+use std::sync::atomic::Ordering;
 
 mod accounting;
 pub(super) mod exception;
@@ -238,6 +239,35 @@ pub(crate) fn forwarded(name: &str) -> Option<bool> {
     }
 }
 
+/// `iokit_user_client_trap` on a connection a hosted device made: the
+/// device's IOReturn, or `None` for the host's own user clients, which the
+/// trap is forwarded to. An unsupported trap is reported as a device call
+/// and fails with its kern_return, else `kIOReturnUnsupported`.
+fn user_client_trap(kernel: &Kernel, arguments: &[u64], pc: u64) -> Result<Option<u64>> {
+    const IO_RETURN_UNSUPPORTED: u32 = 0xe000_02c7;
+    let [connect, index, a, b, c, d, e, f] = arguments[..8] else {
+        unreachable!("the catalog row has eight arguments")
+    };
+    let (connect, index) = (connect as u32, index as u32);
+    let Some(traps) = &kernel.process.user_client_traps else {
+        return Ok(None);
+    };
+    if kernel.process.user_clients_closed.load(Ordering::SeqCst) || !traps.owns(connect) {
+        return Ok(None);
+    }
+    let result = match traps.trap(connect, index, [a, b, c, d, e, f], pc) {
+        Ok(result) => result,
+        Err(error) => {
+            let subject = format!("iokit_user_client_trap.{index}");
+            match unsupported::recover(error, Kind::DeviceCall, pc, Some(&subject))? {
+                Failure::Kern(code) => code,
+                _ => IO_RETURN_UNSUPPORTED,
+            }
+        }
+    };
+    Ok(Some(u64::from(result)))
+}
+
 fn forward_trap(kernel: &mut Kernel, index: u32, arguments: &[u64]) -> Result<u64> {
     kernel.page_in_arguments(arguments)?;
     // A terminated thread never sees the result.
@@ -326,6 +356,11 @@ fn dispatch(
     arguments: &[u64],
     pc: u64,
 ) -> Result<u64> {
+    if name == "iokit_user_client_trap"
+        && let Some(result) = user_client_trap(kernel, arguments, pc)?
+    {
+        return Ok(result);
+    }
     if FORWARDED.contains(&name) {
         return forward_trap(kernel, index, arguments);
     }

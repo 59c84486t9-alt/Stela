@@ -32,6 +32,8 @@ pub enum Kind {
     Exception,
     /// The installed guest system lacks something a run needs.
     GuestSystem,
+    /// A hosted device's user-client call (`iokit_user_client_trap`).
+    DeviceCall,
 }
 
 impl Kind {
@@ -44,6 +46,7 @@ impl Kind {
             Self::PlatformCall => "platform call",
             Self::Exception => "exception",
             Self::GuestSystem => "guest system",
+            Self::DeviceCall => "device call",
         }
     }
 }
