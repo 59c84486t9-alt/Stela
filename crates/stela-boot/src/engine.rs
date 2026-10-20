@@ -1790,6 +1790,13 @@ fn run(
             machine.statistics.waits,
         ),
     );
+    // Counter ticks spent compiling, the guest instructions compiled and
+    // the blocks taken from the translation store, at the last beat.
+    let mut translation = (
+        machine.statistics.compile_ticks,
+        machine.statistics.compiled_instructions,
+        machine.statistics.stored,
+    );
     // The PE's call chain at each slice end since the last heartbeat, and
     // how many of those were at EL0.
     let mut samples: Vec<[u64; CHAIN]> = Vec::new();
@@ -1914,6 +1921,7 @@ fn run(
             let elapsed = now - beat.0;
             let cpu = &machine.cpu;
             let compiled = machine.statistics.compiled;
+            let beat_compiled = beat.3;
             // Ticks per block, the share spent in compiled code, the blocks
             // compiled since the last beat, code discards so far, the share
             // of blocks entered through a chain, and the exceptions,
@@ -1942,6 +1950,7 @@ fn run(
                 events.2 - beat.5.2,
             ));
             beat = (now, native, blocks, compiled, chained, events);
+            translation = translation_report(machine, translation, compiled - beat_compiled);
             peers_report(machine);
             let stale = machine.stale_code();
             if stale.stale > 0 {
@@ -2227,6 +2236,37 @@ fn general_registers(cpu: &Cpu) {
         }
         output::arguments(format_args!("\n"));
     }
+}
+
+/// The translation cost since the last beat, `last` its compile ticks,
+/// compiled instructions and stored blocks then, for the `compiled` blocks
+/// compiled since: nanoseconds per block and per guest
+/// instruction, and the blocks the translation store gave. The new `last`.
+fn translation_report(
+    machine: &Machine<BareHost, AppleDevices>,
+    last: (u64, u64, u64),
+    compiled: u64,
+) -> (u64, u64, u64) {
+    const NANOSECONDS: u128 = 1_000_000_000;
+    let statistics = &machine.statistics;
+    let now = (
+        statistics.compile_ticks,
+        statistics.compiled_instructions,
+        statistics.stored,
+    );
+    let nanoseconds =
+        u128::from(now.0.wrapping_sub(last.0)) * NANOSECONDS / u128::from(host::COUNTER_HZ);
+    let instructions = now.1 - last.1;
+    if compiled != 0 {
+        output::arguments(format_args!(
+            "TRANSLATION blocks={compiled} instructions={instructions} ns/block={} \
+             ns/instruction={} stored={}\n",
+            nanoseconds / u128::from(compiled),
+            nanoseconds / u128::from(instructions.max(1)),
+            now.2 - last.2,
+        ));
+    }
+    now
 }
 
 /// Where every PE is: `R` running, `-` held in reset, `d` powered down,
