@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 use std::sync::Arc;
 use stela_compiler::{GuestAddress, GuestState, TargetCpu, block::BlockProfile};
 use stela_runtime::blocks::{BlockRuntime, StopReason, ThreadState};
-use stela_runtime::hosted::{host::ProcessHost, pe, tables::Tables};
+use stela_runtime::hosted::{hardware::Hardware, host::ProcessHost, pe, tables::Tables};
 use stela_runtime::machine::{Chip, Machine, NoDevices, Stop};
 
 /// One prepared function in one engine.
@@ -124,7 +124,8 @@ impl Hosted {
         arena: &mut Arena,
         round: usize,
     ) -> Result<Self> {
-        let chip = Chip::AppleM2;
+        let hardware = Hardware::of(Chip::AppleM2, 1 << 34)?;
+        let chip = hardware.chip;
         let target = TargetCpu::detect();
         let tables = Arc::new(Tables::new()?);
         let keys = pe::Keys::random()?;
@@ -133,7 +134,7 @@ impl Hosted {
             cpu,
             ProcessHost::new(tables)?,
             NoDevices,
-            pe::profile(chip, target),
+            pe::profile(&hardware, target)?,
             target,
         ));
         let mut breakpoints = pe::vectors().to_vec();

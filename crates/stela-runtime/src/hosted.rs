@@ -224,7 +224,7 @@ pub fn run(launch: Launch) -> Result<Report> {
     let mut hardware = hardware::Hardware::of_model(&launch.model, memory_bytes)?;
     let chip = hardware.chip;
     let target = TargetCpu::detect();
-    let profile = pe::profile(chip, target);
+    let profile = pe::profile(&hardware, target)?;
     let identification = features::Identification(&profile.fixed);
     hardware.kernel_version = launch.kernel_versions.get(hardware.model).cloned();
     unsupported::set_strict(launch.strict);

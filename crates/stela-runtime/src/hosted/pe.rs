@@ -1,4 +1,4 @@
-//! The hosted PE: one Apple M2 core running the guest thread at EL0t under
+//! The hosted PE: one core of the modeled SoC running the guest thread at EL0t under
 //! the EL1&0 regime with the controls XNU arm64 gives user threads, and
 //! every exception from EL0 taken to an EL1 vector the host intercepts.
 //!
@@ -8,12 +8,13 @@
 //! stream). The translation granule is the identity map's
 //! ([`super::tables`]). HCR_EL2 leaves PAC untrapped (API, APK) with TGE
 //! clear, so EL0 exceptions reach EL1.
-use super::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK};
+use super::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, Hardware};
 use super::tables::{T0SZ, Tables};
 use crate::machine::{
     Chip, Cpu, CpuProfile,
     exception::Pstate,
     registers::encodings::{DCZID_EL0, ID_AA64PFR1_EL1},
+    soc,
     system::Register,
 };
 use stela_compiler::TargetCpu;
@@ -233,32 +234,47 @@ pub const MEMORY_TAGGING_LIMIT: &str = "the chip's memory tagging (FEAT_MTE2) is
      chip without it";
 
 /// The chip profile of the hosted PE: identification the engine implements
-/// on this host, capped at the chip, with the M2's 24 MHz counter and
-/// without memory tagging unless the hosted machine presents it
-/// ([`memory_tagging`]). The process is one guest context, so its
-/// speculation guarantees are the host OS's process isolation
-/// (`Speculation::HOSTED`).
-pub fn profile(chip: Chip, target: TargetCpu) -> CpuProfile {
+/// on this host, capped at the SoC's chip, with the M2's 24 MHz counter
+/// and without memory tagging unless the hosted machine presents it
+/// ([`memory_tagging`]). Its one PE is the core the
+/// thread reports running on (CPU 0, [`TPIDR_EL0_CPU`]), identified from
+/// the SoC's row as the system engine identifies it (`soc::cpus`): the
+/// MIDR_EL1 part of its cluster type, which gives the commpage's and
+/// sysctls' CPU family ([`Hardware`]), and its caches. It has no core
+/// clock: the hosted PE keeps no Apple performance monitor. The process is
+/// one guest context, so its speculation guarantees are the host OS's
+/// process isolation (`Speculation::HOSTED`).
+pub fn profile(hardware: &Hardware, target: TargetCpu) -> anyhow::Result<CpuProfile> {
+    let chip = hardware.chip;
     let mut fixed = crate::machine::identification::derive(
         chip,
         target,
         true,
         crate::machine::identification::Speculation::HOSTED,
     );
-    let tagging = memory_tagging(crate::machine::identification::memory_tagging(chip));
+    let tagging = memory_tagging(hardware.memory_tagging);
     for (register, value) in &mut fixed {
         if *register == ID_AA64PFR1_EL1 && !tagging {
             *value &= !PFR1_MTE_FIELDS;
         }
     }
     fixed.push((DCZID_EL0, DCZID_BLOCK_64));
-    CpuProfile {
-        name: chip.name(),
+    let mut cpus = soc::cpus(
+        hardware.chip_id,
+        hardware.brand,
+        &[hardware.boot_processor()],
+    )
+    .map_err(anyhow::Error::msg)?;
+    for processor in &mut cpus.processors {
+        processor.clock = None;
+    }
+    Ok(CpuProfile {
+        name: hardware.brand,
         chip,
         counter_frequency: super::host::COUNTER_HZ,
         fixed,
-        processors: Vec::new(),
-    }
+        processors: cpus.processors,
+    })
 }
 
 /// A new user thread's PSTATE, XNU's `PSR64_USER64_DEFAULT`: EL0t in
@@ -325,6 +341,7 @@ pub const fn vectors() -> [u64; 5] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_compiler::aarch64::system::registers::Encoding;
 
     #[test]
     fn user_controls_match_xnu_user_threads() {
@@ -344,22 +361,50 @@ mod tests {
         assert_eq!(VECTOR_BASE & 0x7ff, 0);
     }
 
+    fn hosted_profile(chip_id: u32) -> CpuProfile {
+        let hardware = Hardware::of_soc(chip_id, 1 << 34).unwrap();
+        profile(&hardware, TargetCpu::detect()).unwrap()
+    }
+
+    fn fixed(profile: &CpuProfile, encoding: Encoding) -> u64 {
+        profile
+            .fixed
+            .iter()
+            .find(|(register, _)| *register == encoding)
+            .map_or(0, |(_, value)| *value)
+    }
+
     #[test]
     fn a_tagging_chip_presents_no_memory_tagging_to_hosted_processes() {
-        let field = |chip| {
-            profile(chip, TargetCpu::detect())
-                .fixed
-                .iter()
-                .find(|(register, _)| *register == ID_AA64PFR1_EL1)
-                .map_or(0, |(_, value)| *value)
-        };
         assert!(crate::machine::identification::memory_tagging(
             Chip::AppleM5
         ));
         assert!(!memory_tagging(true));
-        assert_eq!(field(Chip::AppleM5) & PFR1_MTE_FIELDS, 0);
+        let m5 = hosted_profile(0x8142);
+        assert_eq!(fixed(&m5, ID_AA64PFR1_EL1) & PFR1_MTE_FIELDS, 0);
         // The register's other features stay.
-        assert_ne!(field(Chip::AppleM5), 0);
+        assert_ne!(fixed(&m5, ID_AA64PFR1_EL1), 0);
+    }
+
+    /// Each SoC's hosted PE is its CPU 0 as the SoC row identifies it: a Pro,
+    /// Max or Ultra presents its own MIDR_EL1 part, the one its CPU family
+    /// comes from, not its base chip's.
+    #[test]
+    fn the_hosted_pe_is_the_socs_cpu_0() {
+        for model in super::super::hardware::models() {
+            let hardware = Hardware::of_model(model, 1 << 34).unwrap();
+            let profile = profile(&hardware, TargetCpu::detect()).unwrap();
+            let [identity] = profile.processors[..] else {
+                panic!("{model} has {} hosted PEs", profile.processors.len());
+            };
+            let part = soc::midr_part(hardware.chip_id, hardware.boot_processor().cluster_type);
+            assert_eq!(Some((identity.midr >> 4 & 0xfff) as u16), part, "{model}");
+            assert_eq!(identity.clock, None, "{model}");
+            assert_eq!(profile.chip, hardware.chip, "{model}");
+        }
+        let m2 = hosted_profile(0x8112).processors[0].midr;
+        let m2_max = hosted_profile(0x6021).processors[0].midr;
+        assert_ne!(m2, m2_max);
     }
 
     #[test]

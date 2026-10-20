@@ -453,6 +453,21 @@ impl Hardware {
         })
     }
 
+    /// Logical CPU 0's `/cpus` node: the first cluster's first core, whose
+    /// `reg` is 0 on every board (`isa/apple-soc-facts.json`).
+    pub fn boot_processor(&self) -> soc::Processor {
+        let cluster = &self.clusters[0];
+        soc::Processor {
+            cluster_type: if cluster.performance {
+                PERFORMANCE
+            } else {
+                EFFICIENCY
+            },
+            reg: 0,
+            l2_bytes: Some(cluster.l2_bytes),
+        }
+    }
+
     pub fn cpus(&self) -> u8 {
         self.clusters.iter().map(|cluster| cluster.cores).sum()
     }
