@@ -24,7 +24,7 @@
 use super::{
     Termination,
     host::ProcessHost,
-    kernel::{End, Kernel, Pe, Process, signals},
+    kernel::{End, Kernel, Pe, Process, control::Control, signals},
     pe,
     tables::Tables,
 };
@@ -89,6 +89,9 @@ impl Engine {
         ));
         machine.set_breakpoints(&pe::vectors());
         machine.set_wait_limit(Some(WAIT_LIMIT_TICKS));
+        // One process's threads read one clock: no thread's slow slices
+        // hold its counter behind the others'.
+        machine.follow_host_counter();
         Ok(machine)
     }
 }
@@ -166,6 +169,8 @@ pub(super) struct Member {
     /// executes guest code.
     stale: Mutex<Vec<(u64, u64)>>,
     has_stale: AtomicBool,
+    /// Its suspension and published user state.
+    control: Arc<Control>,
 }
 
 /// The registry identifier of the main thread, the first one spawned.
@@ -185,6 +190,7 @@ impl Registry {
             port: AtomicU32::new(port),
             stale: Mutex::new(Vec::new()),
             has_stale: AtomicBool::new(false),
+            control: Arc::default(),
         });
         lock(&self.members).insert(id, member.clone());
         (id, member)
@@ -200,6 +206,28 @@ impl Registry {
             .values()
             .map(|member| member.port.load(Ordering::SeqCst))
             .collect()
+    }
+
+    /// The control of the thread `id`.
+    pub(super) fn control(&self, id: u64) -> Option<Arc<Control>> {
+        lock(&self.members)
+            .get(&id)
+            .map(|member| member.control.clone())
+    }
+
+    /// The control of the thread whose port is `port`.
+    pub(super) fn control_by_port(&self, port: u32) -> Option<Arc<Control>> {
+        lock(&self.members)
+            .values()
+            .find(|member| member.port.load(Ordering::SeqCst) == port)
+            .map(|member| member.control.clone())
+    }
+
+    /// The process ended: wake every parked thread for good.
+    fn close(&self) {
+        for member in lock(&self.members).values() {
+            member.control.close();
+        }
     }
 
     /// Whether `port` names one of the process's threads.
@@ -342,9 +370,11 @@ impl Runtime {
         result
     }
 
-    /// End the process with `outcome`: no guest code runs after it.
+    /// End the process with `outcome`: no guest code runs after it, and
+    /// no thread stays parked.
     fn end(&self, thread: u64, outcome: Result<Termination>) {
         self.execution.close(thread);
+        self.registry.close();
         self.lifetime.end(outcome);
     }
 
@@ -507,19 +537,38 @@ fn restart_ranges(process: &Process, pe: &mut Pe) {
     }
 }
 
+/// Marks the thread's control ended however [`run`] returns.
+struct EndsControl<'a>(&'a Control);
+
+impl Drop for EndsControl<'_> {
+    fn drop(&mut self) {
+        self.0.ended();
+    }
+}
+
 /// Execute the thread until it ends: `Some` when it ended the process.
+/// At each return to guest code the thread's control parks it while it is
+/// suspended or held (`thread_suspend`, `thread_get_state`); a thread the
+/// process's end wakes there ends.
 fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<Termination>> {
     let process = kernel.process.clone();
     let thread = kernel.thread;
     let execution = &process.runtime.execution;
+    let control = member.control.clone();
+    let _ends = EndsControl(&control);
     if let Some(end) = kernel.begin(&mut pe)? {
         return Ok(ended(end));
+    }
+    // `PTHREAD_START_SUSPENDED` parks before the first instruction.
+    if !control.leave(&mut pe) {
+        return Ok(None);
     }
     resume(&process, thread, member, &mut pe);
     loop {
         match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
                 execution.release(thread);
+                control.enter_kernel(&pe);
                 kernel.blocked(true);
                 kernel.synchronous(&mut pe)?;
                 kernel.blocked(false);
@@ -528,15 +577,28 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                     Some(End::Thread) => return Ok(None),
                     None => {}
                 }
+                if !control.leave(&mut pe) {
+                    return Ok(None);
+                }
                 resume(&process, thread, member, &mut pe);
                 pe.return_from_exception();
             }
+            // XNU defers an AST taken inside the commpage's
+            // preemption-free zone until the zone's exit.
+            Stop::Budget if crate::hosted::commpage::preemption_free(pe.cpu.pc) => {}
             Stop::Budget => {
                 if kernel.signals.deliverable().is_some() {
                     restart_ranges(&process, &mut pe);
                     execution.release(thread);
                     if let Some(end) = deliver(kernel, &mut pe)? {
                         return Ok(ended(end));
+                    }
+                    resume(&process, thread, member, &mut pe);
+                } else if control.pending() {
+                    restart_ranges(&process, &mut pe);
+                    execution.release(thread);
+                    if !control.leave(&mut pe) {
+                        return Ok(None);
                     }
                     resume(&process, thread, member, &mut pe);
                 } else if execution.contended() {
@@ -547,6 +609,9 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
             }
             Stop::Waiting => {
                 execution.release(thread);
+                if !control.leave(&mut pe) {
+                    return Ok(None);
+                }
                 std::thread::yield_now();
                 if let Some(end) = deliver(kernel, &mut pe)? {
                     return Ok(ended(end));
@@ -692,6 +757,30 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec![2, 3]);
         assert!(lock.acquire(1), "threads 2 and 3 ran since");
         lock.release(1);
+    }
+
+    #[test]
+    fn the_process_end_wakes_every_thread_waiting_on_a_control() {
+        let runtime = Arc::new(Runtime::default());
+        let (id, _) = runtime.registry.insert(0x103);
+        let (_, other) = runtime.registry.insert(0x203);
+        // A caller waits for a thread that never stops (it has not started
+        // and never will), as a parked thread waits for its resume.
+        let control = runtime.registry.control_by_port(0x203).unwrap();
+        assert!(Arc::ptr_eq(&control, &other.control));
+        let waiter = std::thread::spawn(move || control.with_state(false, |_| ((), None)));
+        while !other.control.pending() {
+            std::thread::yield_now();
+        }
+        runtime.end(id, Ok(Termination::Exited(0)));
+        assert_eq!(
+            waiter.join().unwrap(),
+            Err(crate::hosted::kernel::control::KERN_ABORTED)
+        );
+        assert!(Arc::ptr_eq(
+            &runtime.registry.control(id).unwrap(),
+            &runtime.registry.control(id).unwrap()
+        ));
     }
 
     #[test]

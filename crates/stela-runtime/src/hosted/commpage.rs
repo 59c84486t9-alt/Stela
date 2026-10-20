@@ -107,6 +107,16 @@ pub fn data_page(hardware: &Hardware, identification: &Identification, time: Tim
     page
 }
 
+/// The text page's preemption-free zone (`pfz_start`..`pfz_end`), where
+/// XNU defers a thread's AST: empty while the page holds no routines.
+const PREEMPTION_FREE_ZONE: core::ops::Range<u64> = TEXT_ADDRESS..TEXT_ADDRESS;
+
+/// Whether a thread at `pc` is inside the preemption-free zone, so its
+/// time slice, suspension and signals wait for the zone's exit.
+pub fn preemption_free(pc: u64) -> bool {
+    PREEMPTION_FREE_ZONE.contains(&pc)
+}
+
 pub fn text_page() -> Vec<u8> {
     BRK_666
         .to_le_bytes()
