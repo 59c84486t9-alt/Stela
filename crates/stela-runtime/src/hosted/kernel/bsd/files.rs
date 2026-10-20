@@ -21,6 +21,7 @@
 //!   host lacks can start a relative lookup at a directory descriptor by
 //!   moving the thread's directory there and back ([`at_directory`]).
 use super::{Call, Kernel, Outcome};
+use crate::hosted::darwin::{F_SETFD, O_CLOEXEC};
 use crate::hosted::forward;
 use crate::hosted::threads::{lock, try_lock};
 use anyhow::Result;
@@ -38,7 +39,6 @@ const ALL_PERMISSIONS: u64 = 0o7777;
 /// The `fcntl` commands the gate orders: `F_SETFD`, `F_DUPFD` and
 /// `F_DUPFD_CLOEXEC`.
 const F_DUPFD: u32 = 0;
-const F_SETFD: u32 = 2;
 const F_DUPFD_CLOEXEC: u32 = 67;
 
 /// The process's file-creation mask and descriptor-flag gate.
@@ -147,10 +147,12 @@ pub(super) fn at_directory<T>(
     lookup: impl FnOnce() -> T,
 ) -> std::result::Result<T, Option<u64>> {
     const O_SEARCH: u64 = 0x4000_0000 | 0x0010_0000;
-    const O_CLOEXEC: u64 = 0x0100_0000;
     let own = if thread_directory {
         let here = c".";
-        match host("open", &[here.as_ptr() as u64, O_SEARCH | O_CLOEXEC]) {
+        match host(
+            "open",
+            &[here.as_ptr() as u64, O_SEARCH | u64::from(O_CLOEXEC)],
+        ) {
             Ok(own) => Some(own),
             Err(_) => return Err(None),
         }

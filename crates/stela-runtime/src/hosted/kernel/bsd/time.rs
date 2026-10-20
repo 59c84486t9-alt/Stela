@@ -5,7 +5,8 @@
 //! with the forwarded families. `kevent` and `kevent64` timers in absolute
 //! units are [`super::timer`]'s. `gettimeofday` and `settimeofday` also
 //! refresh the commpage's timestamp ([`commpage::refresh_time`]).
-use super::{Call, EFAULT, Kernel, Outcome, forward};
+use super::{Call, Kernel, Outcome, forward};
+use crate::hosted::darwin::EFAULT;
 use crate::hosted::{commpage, host, memory};
 use anyhow::{Result, bail};
 

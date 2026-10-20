@@ -23,7 +23,7 @@
 //! The thread bound to one leaves the kernel with its events and stays
 //! bound while its returns find more.
 use super::{
-    Call, EFAULT, EINVAL, Kernel, Outcome, Pe,
+    Call, Kernel, Outcome, Pe,
     kqworkloop::{self, WorkloopRequest},
     kqworkq::{self, DATA_BYTES, DataBuffer, KEVENT_BYTES, LIST_LEN, MANAGER_BUCKET},
     priority::{
@@ -35,6 +35,7 @@ use super::{
         SET_SELF_WQ_KEVENT_UNBIND,
     },
 };
+use crate::hosted::darwin::{EALREADY, EFAULT, EINVAL, ENOMEM, ENOTSUP};
 use crate::hosted::{
     kernel::{End, Process},
     memory::{self, PAGE_BYTES, Protection, round_page},
@@ -97,8 +98,6 @@ const PTHREAD_T_OFFSET: u64 = 12 << 10;
 const STACK_ALIGNMENT: u64 = 16;
 /// `ulock_owner_value_to_port_name`: the low bits of a lock word are flags.
 const ULOCK_OWNER_FLAG_BITS: u32 = 0x3;
-const ENOTSUP: u64 = 45;
-const EALREADY: u64 = 37;
 const EBADMSG: u64 = 94;
 
 /// The pool a request or thread belongs to.
@@ -673,7 +672,7 @@ fn spawn(process: &Arc<Process>) -> Result<()> {
                 memory::allocate(registration.stack_hint, size, true, Protection::READ_WRITE)
             else {
                 workqueue.state().creating.pop_front();
-                return Ok(Err(super::ENOMEM));
+                return Ok(Err(ENOMEM));
             };
             memory::protect(stack, GUARD_BYTES, Protection::NONE)?;
             kernel.signals.set_mask(!super::signal::WORKQ_THREADMASK);

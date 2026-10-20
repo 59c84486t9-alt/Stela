@@ -30,6 +30,10 @@ use super::{
     hardware::Hardware,
     memory::{self, PAGE_BYTES, Protection},
 };
+use crate::hosted::darwin::{
+    MACH_PORT_RIGHT_RECEIVE, MACH_RCV_MSG, host_request_notification, mach_host_self, mach_msg,
+    mach_port_allocate,
+};
 use anyhow::{Result, ensure};
 use core::sync::atomic::{AtomicU64, Ordering, fence};
 use std::sync::OnceLock;
@@ -420,25 +424,8 @@ pub fn note_time() {
 /// `HOST_NOTIFY_CALENDAR_CHANGE` (`mach/host_notify.h`).
 const HOST_NOTIFY_CALENDAR_CHANGE: i32 = 1;
 
-unsafe extern "C" {
-    fn host_request_notification(host: u32, kind: i32, port: u32) -> i32;
-    fn mach_host_self() -> u32;
-    fn mach_port_allocate(task: u32, right: u32, name: *mut u32) -> i32;
-    fn mach_msg(
-        message: *mut u8,
-        option: i32,
-        send_size: u32,
-        receive_size: u32,
-        port: u32,
-        timeout: u32,
-        notify: u32,
-    ) -> i32;
-}
-
-/// `MACH_PORT_RIGHT_RECEIVE`, `MACH_RCV_MSG` and `MACH_RCV_TOO_LARGE`
-/// (without `MACH_RCV_LARGE` a message too large is dropped).
-const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
-const MACH_RCV_MSG: i32 = 0x2;
+/// `MACH_RCV_TOO_LARGE` (without `MACH_RCV_LARGE` a message too large is
+/// dropped).
 const MACH_RCV_TOO_LARGE: i32 = 0x1000_4004;
 
 /// A new receive right of this task.

@@ -12,6 +12,10 @@
 //! are serviced here by routine, and a routine not serviced stops the
 //! process naming it.
 use super::{Kernel, Pe, Trap};
+use crate::hosted::darwin::{
+    ENOTSUP, KERN_FAILURE, KERN_INVALID_ADDRESS, KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED,
+    KERN_SUCCESS, MACH_SEND_INVALID_DEST, VM_PROT_DEFAULT,
+};
 use crate::hosted::threads::lock;
 use crate::hosted::{
     forward, host,
@@ -31,15 +35,6 @@ mod vm;
 /// The fast traps `handle_svc` answers before the table.
 const MACH_ABSOLUTE_TIME_FAST: u32 = 3;
 const MACH_CONTINUOUS_TIME_FAST: u32 = 4;
-const KERN_SUCCESS: u64 = 0;
-const KERN_INVALID_ARGUMENT: u64 = 4;
-/// `MACH_SEND_INVALID_DEST`-class failure for a bad user address.
-const KERN_INVALID_ADDRESS: u64 = 1;
-const MACH_SEND_INVALID_DEST: u64 = 0x1000_0003;
-const KERN_FAILURE: u64 = 5;
-const KERN_NOT_SUPPORTED: u64 = 46;
-/// `ENOTSUP`, which the swap traps return as their result.
-const ENOTSUP: u64 = 45;
 /// The entitlements exec records as the task's x86-64 compatibility
 /// permission in 26A434.
 const CROSS_ARCHITECTURE_ENTITLEMENTS: [&str; 2] = [
@@ -47,8 +42,6 @@ const CROSS_ARCHITECTURE_ENTITLEMENTS: [&str; 2] = [
     "com.apple.developer.cross-architecture-support-unmanaged",
 ];
 const VM_FLAGS_ANYWHERE: u64 = 1;
-/// `VM_PROT_DEFAULT`.
-const VM_PROT_DEFAULT: u64 = 3;
 /// The ARM timebase over the 24 MHz counter: 125/3 ns per tick.
 const TIMEBASE_NUMERATOR: u32 = 125;
 const TIMEBASE_DENOMINATOR: u32 = 3;
@@ -309,7 +302,7 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                 unreachable!("the catalog row has four arguments")
             };
             let Some(address) = crate::hosted::memory::read_u64(pointer) else {
-                return Ok(KERN_INVALID_ADDRESS);
+                return Ok(u64::from(KERN_INVALID_ADDRESS));
             };
             // `mach_vm_allocate` is `mach_vm_map` of anonymous memory with
             // the default protection: placed in guest pages.
@@ -321,12 +314,12 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                     .checked_add(size)
                     .and_then(crate::hosted::memory::round_page)
                 else {
-                    return Ok(KERN_INVALID_ARGUMENT);
+                    return Ok(u64::from(KERN_INVALID_ARGUMENT));
                 };
                 (start, end - start, 0)
             };
             let Some(size) = crate::hosted::memory::round_page(size) else {
-                return Ok(KERN_INVALID_ARGUMENT);
+                return Ok(u64::from(KERN_INVALID_ARGUMENT));
             };
             let mut placed = address;
             let status = forward_trap(
@@ -338,18 +331,20 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                     size,
                     mask,
                     flags,
-                    VM_PROT_DEFAULT,
+                    u64::from(VM_PROT_DEFAULT),
                 ],
             )?;
-            if status == KERN_SUCCESS && !crate::hosted::memory::write_u64(pointer, placed) {
-                return Ok(KERN_INVALID_ADDRESS);
+            if status == u64::from(KERN_SUCCESS)
+                && !crate::hosted::memory::write_u64(pointer, placed)
+            {
+                return Ok(u64::from(KERN_INVALID_ADDRESS));
             }
             status
         }
         "_kernelrpc_mach_vm_map_trap" => {
             let mut rounded = arguments.to_vec();
             let Some(size) = crate::hosted::memory::round_page(arguments[2]) else {
-                return Ok(KERN_INVALID_ARGUMENT);
+                return Ok(u64::from(KERN_INVALID_ARGUMENT));
             };
             rounded[2] = size;
             rounded[3] |= PAGE_MASK;
@@ -362,7 +357,7 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                 .checked_add(size)
                 .and_then(crate::hosted::memory::round_page)
             else {
-                return Ok(KERN_INVALID_ARGUMENT);
+                return Ok(u64::from(KERN_INVALID_ARGUMENT));
             };
             let deallocate = name == "_kernelrpc_mach_vm_deallocate_trap";
             // `mach_vm_protect_trap(target, address, size, set_maximum,
@@ -385,13 +380,13 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             } else {
                 runs
             };
-            let mut status = KERN_SUCCESS;
+            let mut status = u64::from(KERN_SUCCESS);
             for (run, size) in runs {
                 let mut rounded = arguments.to_vec();
                 rounded[1] = run;
                 rounded[2] = size;
                 status = forward_trap(kernel, index, &rounded)?;
-                if status != KERN_SUCCESS {
+                if status != u64::from(KERN_SUCCESS) {
                     break;
                 }
             }
@@ -401,17 +396,17 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             // `(target_task, bytes_reclaimed_out, next_deadline_out)`.
             let (bytes_out, deadline_out) = (arguments[1], arguments[2]);
             if arguments[0] != u64::from(kernel.process.task_port()) {
-                return Ok(MACH_SEND_INVALID_DEST);
+                return Ok(u64::from(MACH_SEND_INVALID_DEST));
             }
             if bytes_out == 0 || deadline_out == 0 {
-                return Ok(KERN_INVALID_ARGUMENT);
+                return Ok(u64::from(KERN_INVALID_ARGUMENT));
             }
             match reclaim::update_accounting(&mut lock(&kernel.process.reclaim)) {
                 Ok((bytes, deadline)) => {
                     // The kernel ignores copy-out faults here.
                     crate::hosted::memory::write_u64(bytes_out, bytes);
                     crate::hosted::memory::write_u64(deadline_out, deadline);
-                    KERN_SUCCESS
+                    u64::from(KERN_SUCCESS)
                 }
                 Err(status) => u64::from(status),
             }
@@ -419,14 +414,14 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         // The commpage's preemption-free-zone routines enter the kernel
         // here to take a preemption deferred in the zone; leaving the
         // kernel takes it (`syscall_subr.c`).
-        "pfz_exit" => KERN_SUCCESS,
+        "pfz_exit" => u64::from(KERN_SUCCESS),
         "mach_timebase_info_trap" => {
             let mut info = TIMEBASE_NUMERATOR.to_le_bytes().to_vec();
             info.extend(TIMEBASE_DENOMINATOR.to_le_bytes());
             if crate::hosted::memory::write(arguments[0], &info) {
-                KERN_SUCCESS
+                u64::from(KERN_SUCCESS)
             } else {
-                KERN_INVALID_ARGUMENT
+                u64::from(KERN_INVALID_ARGUMENT)
             }
         }
         "mach_wait_until_trap" => {
@@ -457,10 +452,10 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
             };
             let status = forward_trap(kernel, index, &[arguments[0], target])?;
             if pointer != 0
-                && status == KERN_SUCCESS
+                && status == u64::from(KERN_SUCCESS)
                 && !crate::hosted::memory::write_u64(pointer, host::counter_at(armed))
             {
-                return Ok(KERN_INVALID_ADDRESS);
+                return Ok(u64::from(KERN_INVALID_ADDRESS));
             }
             status
         }
@@ -471,10 +466,10 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         | "macx_backing_store_suspend"
         | "macx_backing_store_recovery" => ENOTSUP,
         // The M2's 26A434 kernel is built without exclaves.
-        "_exclaves_ctl_trap" => KERN_NOT_SUPPORTED,
+        "_exclaves_ctl_trap" => u64::from(KERN_NOT_SUPPORTED),
         "mach_msg_trap" | "mach_msg_overwrite_trap" | "mach_msg2_trap" => {
             let status = message::send(kernel, name, index, arguments)?;
-            if status == KERN_SUCCESS {
+            if status == u64::from(KERN_SUCCESS) {
                 message::received(name, arguments)?;
             }
             status
@@ -511,11 +506,11 @@ fn thread_set_x86_64_compat(kernel: &Kernel, compat: u32) -> u64 {
                 .any(|name| signature.entitled(name))
         });
     if !entitled {
-        return KERN_FAILURE;
+        return u64::from(KERN_FAILURE);
     }
     match compat {
-        0 | 1 => KERN_SUCCESS,
-        _ => KERN_INVALID_ARGUMENT,
+        0 | 1 => u64::from(KERN_SUCCESS),
+        _ => u64::from(KERN_INVALID_ARGUMENT),
     }
 }
 

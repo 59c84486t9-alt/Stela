@@ -34,8 +34,9 @@
 //!   the `com.apple.private.uexc` entitlement.
 //! - `aio_readv(aiocb)` and `aio_writev(aiocb)` queue one vectored request
 //!   of the process's asynchronous I/O ([`super::aio`]).
-use super::{EFAULT, EINVAL, EPERM, Kernel, Outcome, Pe, files};
+use super::{Kernel, Outcome, Pe, files};
 use crate::darwin::BsdReturnType;
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOTSUP, EPERM, F_GETFL, F_SETFD, O_CLOEXEC};
 use crate::hosted::forward;
 use anyhow::{Result, bail};
 
@@ -176,11 +177,8 @@ pub(super) fn call(
 }
 
 const O_NONBLOCK: u32 = 0x4;
-const O_CLOEXEC: u32 = 0x0100_0000;
 /// `O_CLOFORK`, a kernel-private open flag the 26A434 calls accept.
 const O_CLOFORK: u32 = 0x0800_0000;
-const F_SETFD: u64 = 2;
-const F_GETFL: u64 = 3;
 const F_SETFL: u64 = 4;
 const FD_CLOEXEC: u64 = 1;
 /// `FD_CLOFORK`, the host's close-on-fork descriptor flag, which only
@@ -188,7 +186,6 @@ const FD_CLOEXEC: u64 = 1;
 const FD_CLOFORK: u32 = 2;
 /// The guard [`apply_flags`] adds and at once removes.
 const TRANSIENT_GUARD: u64 = 0x5354_454c_4143_4c46;
-const ENOTSUP: u64 = 45;
 const AT_FDCWD: i32 = -2;
 const AT_SYMLINK_NOFOLLOW: u32 = 0x20;
 const AT_SYMLINK_NOFOLLOW_ANY: u32 = 0x800;
@@ -255,10 +252,10 @@ fn apply_flags(fd: u64, flags: u32) -> std::result::Result<(), u64> {
             &[fd, guard, GUARD_REQUIRED, 0, 0, kept],
         )?;
     } else if flags & O_CLOEXEC != 0 {
-        host("sys_fcntl", &[fd, F_SETFD, FD_CLOEXEC])?;
+        host("sys_fcntl", &[fd, u64::from(F_SETFD), FD_CLOEXEC])?;
     }
     if flags & O_NONBLOCK != 0 {
-        let (status, _) = host("sys_fcntl", &[fd, F_GETFL])?;
+        let (status, _) = host("sys_fcntl", &[fd, u64::from(F_GETFL)])?;
         host("sys_fcntl", &[fd, F_SETFL, status | u64::from(O_NONBLOCK)])?;
     }
     Ok(())
@@ -491,16 +488,14 @@ fn register_uexc_handler() -> Serviced {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosted::darwin::{EAGAIN, EBADF, ENOENT, O_CREAT, O_RDWR};
     use std::ffi::CString;
     use std::os::fd::AsRawFd;
     use std::os::macos::fs::MetadataExt;
     use std::os::unix::ffi::OsStrExt;
 
-    const EBADF: u64 = 9;
     const F_GETFD: u64 = 1;
     const UF_HIDDEN: u32 = 0x8000;
-    const O_RDWR: u64 = 0x2;
-    const O_CREAT: u64 = 0x200;
     const GUARD_CLOSE: u64 = 1 << 0;
 
     fn descriptor_flags(fd: u64) -> u64 {
@@ -522,7 +517,7 @@ mod tests {
     }
 
     fn status_flags(fd: u64) -> u64 {
-        host("sys_fcntl", &[fd, F_GETFL]).unwrap().0
+        host("sys_fcntl", &[fd, u64::from(F_GETFL)]).unwrap().0
     }
 
     fn close(fd: u64) {
@@ -569,7 +564,7 @@ mod tests {
         // Nonblocking: an empty pipe does not wait.
         assert_eq!(
             host("read", &[read, back.as_mut_ptr() as u64, 1]),
-            Err(super::super::EAGAIN)
+            Err(EAGAIN)
         );
         close(read);
         close(write);
@@ -706,7 +701,6 @@ mod tests {
     fn fsctlat_is_fsctl_from_the_working_directory_or_a_directory() {
         // FSIOC_SYNC_VOLUME (`_IOW('A', 1, uint32_t)`) without waiting.
         const SYNC_VOLUME: u64 = 0x8004_4101;
-        const ENOENT: u64 = 2;
         const ENOTDIR: u64 = 20;
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("file"), b"x").unwrap();
@@ -786,7 +780,7 @@ mod tests {
                 path.as_ptr() as u64,
                 guard_bytes.as_ptr() as u64,
                 attributes,
-                O_RDWR | O_CREAT | u64::from(O_CLOEXEC),
+                u64::from(O_RDWR | O_CREAT | O_CLOEXEC),
                 0o600,
             ],
         )

@@ -11,10 +11,11 @@
 //! `bsdthread_terminate` ends one. The workqueue's calls are
 //! [`super::workqueue`]'s.
 use super::{
-    Call, EFAULT, EINVAL, Kernel, Outcome, Pe, forward,
+    Call, Kernel, Outcome, Pe, forward,
     priority::{self, THREAD_QOS_BACKGROUND, THREAD_QOS_LEGACY, THREAD_QOS_MAINTENANCE},
     signal::WORKQ_THREADMASK,
 };
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOTSUP, EPERM, ESRCH};
 use crate::hosted::{
     kernel::{End, status},
     memory::{self, Protection, round_page, trunc_page},
@@ -90,8 +91,6 @@ pub(super) const SET_SELF_QOS_FLAG: u64 = 0x01;
 pub(super) const SET_SELF_VOUCHER_FLAG: u64 = 0x02;
 pub(super) const SET_SELF_WQ_KEVENT_UNBIND: u64 = 0x10;
 pub(super) const SET_SELF_QOS_OVERRIDE_FLAG: u64 = 0x40;
-const ENOTSUP: u64 = 45;
-const ESRCH: u64 = 3;
 /// `semaphore_signal_trap`, `_kernelrpc_mach_port_deallocate_trap`.
 const SEMAPHORE_SIGNAL_TRAP: &str = "semaphore_signal_trap";
 const PORT_DEALLOCATE_TRAP: &str = "_kernelrpc_mach_port_deallocate_trap";
@@ -512,7 +511,7 @@ fn control(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             }
             match kernel.process.workqueue.add_override(port, qos, third) {
                 true => Outcome::value(0),
-                false => Outcome::Error(super::EPERM),
+                false => Outcome::Error(EPERM),
             }
         }
         CTL_QOS_OVERRIDE_RESET => match &kernel.worker {
@@ -520,7 +519,7 @@ fn control(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
                 kernel.process.workqueue.reset_override(worker);
                 Outcome::value(0)
             }
-            None => Outcome::Error(super::EPERM),
+            None => Outcome::Error(EPERM),
         },
         CTL_SET_SELF => super::workqueue::set_self(kernel, first, second, third)?,
         CTL_QOS_MAX_PARALLELISM => {

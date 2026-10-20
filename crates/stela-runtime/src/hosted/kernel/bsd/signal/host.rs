@@ -17,6 +17,7 @@
 //! runs no guest thread blocks all signals but the synchronous ones the
 //! runtime's fault recovery owns, so the host kernel picks a guest thread
 //! for a process-directed signal.
+use crate::hosted::darwin::{SA_NOCLDSTOP, SA_NOCLDWAIT, SA_RESTART, SIG_DFL, SIG_IGN};
 use crate::hosted::{forward, host::UserContext};
 use anyhow::{Result, bail};
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
@@ -28,11 +29,6 @@ pub(super) const SIGNALS: usize = 32;
 /// the host (`host::NativeRunner`): never blocked on a host thread and
 /// never given a guest disposition.
 pub(super) const OWNED: [i32; 3] = [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL];
-const SA_RESTART: u32 = 0x0002;
-const SA_NOCLDSTOP: u32 = 0x0008;
-const SA_NOCLDWAIT: u32 = 0x0020;
-const SIG_DFL: u64 = 0;
-const SIG_IGN: u64 = 1;
 /// RFLAGS.CF, which a host BSD call's error sets.
 const RFLAGS_CARRY: u64 = 1;
 

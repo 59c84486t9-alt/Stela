@@ -10,6 +10,7 @@
 //! itself are the host root directory's, the volume root that walks up a
 //! path end at; opening `/` opens the first root's top directory.
 use super::{Call, Kernel, Outcome, forward};
+use crate::hosted::darwin::{EFAULT, MAX_PATH, O_ACCMODE, O_CREAT, O_RDONLY};
 use crate::hosted::memory;
 use anyhow::Result;
 use std::ffi::CString;
@@ -17,11 +18,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 /// `MAXPATHLEN`.
-const MAX_PATH: usize = 1024;
-const O_ACCMODE: u64 = 0x3;
-const O_RDONLY: u64 = 0;
-const O_CREAT: u64 = 0x200;
-const O_TRUNC: u64 = 0x400;
+const O_TRUNC: u32 = 0x400;
 const F_GETPATH: u64 = 50;
 const F_GETPATH_NOFIRMLINK: u64 = 102;
 
@@ -77,7 +74,7 @@ fn reported_path(kernel: &mut Kernel, call: &Call, buffer: u64) -> Result<Option
     };
     guest.push(0);
     if !memory::write(buffer, &guest) {
-        return Ok(Some(Outcome::Error(super::EFAULT)));
+        return Ok(Some(Outcome::Error(EFAULT)));
     }
     Ok(Some(if call.entry.name.starts_with("fsgetpath") {
         Outcome::value(guest.len() as u64)
@@ -129,7 +126,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
         return Ok(None);
     };
     if let Some(index) = flags_index {
-        let flags = call.argument(index);
+        let flags = call.argument(index) as u32;
         if flags & O_ACCMODE != O_RDONLY || flags & (O_CREAT | O_TRUNC) != 0 {
             return Ok(None);
         }

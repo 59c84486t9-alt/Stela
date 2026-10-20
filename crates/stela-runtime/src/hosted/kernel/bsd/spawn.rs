@@ -15,7 +15,8 @@
 //! the arm64 kernel's would: the descriptor and its blocks have one layout
 //! in both LP64 ABIs, and the host kernel applies them to the host process
 //! that is the guest's child. The child's process ID is the host's.
-use super::{Call, EFAULT, Kernel, Outcome, process};
+use super::{Call, Kernel, Outcome, process};
+use crate::hosted::darwin::{EBADEXEC, EFAULT, EINVAL};
 use crate::hosted::hardware::CPU_SUBTYPE_ARM64E;
 use crate::hosted::{activation, forward, memory};
 use anyhow::{Result, bail};
@@ -48,9 +49,7 @@ const CPU_TYPE_ANY: u32 = u32::MAX;
 const CPU_SUBTYPE_ANY: u32 = u32::MAX;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
-const EINVAL: u64 = 22;
 /// `EBADEXEC`: no fat architecture honors the preferences.
-const EBADEXEC: u64 = 85;
 const EBADARCH: u64 = activation::EBADARCH as u64;
 const POSIX_SPAWN: u16 = 244;
 

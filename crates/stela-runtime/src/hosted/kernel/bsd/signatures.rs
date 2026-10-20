@@ -18,8 +18,9 @@
 //! `com.apple.security.cs.disable-library-validation`) also loads code of
 //! its own Team ID.
 use super::codesign::{CS_PLATFORM_BINARY, CS_REQUIRE_LV, CS_RUNTIME};
-use super::{Call, EFAULT, EINVAL, ENOENT, EPERM, Kernel, Outcome};
+use super::{Call, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
+use crate::hosted::darwin::{E2BIG, EBADEXEC, EBADF, EFAULT, EINVAL, ENOENT, ENOTSUP, EPERM};
 use crate::hosted::{memory, threads::lock};
 use anyhow::{Result, bail};
 
@@ -34,10 +35,6 @@ const F_ADDFILESIGS_INFO: u64 = 103;
 const F_ADDFILESUPPL: u64 = 104;
 const F_GETSIGSINFO: u64 = 105;
 const GETSIGSINFO_PLATFORM_BINARY: u32 = 1;
-const EBADF: u64 = 9;
-const E2BIG: u64 = 7;
-const ENOTSUP: u64 = 45;
-const EBADEXEC: u64 = 85;
 /// `CS_MAX_BLOB_SIZE`.
 const MAX_BLOB_BYTES: u64 = 40 << 20;
 /// `struct user_fsignatures`: `fs_file_start`, `fs_blob_start`,

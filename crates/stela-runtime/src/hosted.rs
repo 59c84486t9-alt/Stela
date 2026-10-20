@@ -21,6 +21,7 @@ use stela_compiler::TargetCpu;
 
 pub mod activation;
 pub mod commpage;
+pub(crate) mod darwin;
 pub mod exec;
 pub mod features;
 pub mod forward;

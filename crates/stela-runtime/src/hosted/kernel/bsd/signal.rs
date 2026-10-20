@@ -18,7 +18,11 @@
 //! signal whose action changed to the default before delivery takes the
 //! default action, as the host kernel would have; a synchronous exception's
 //! signal nobody catches ends the process by that signal.
-use super::{Call, EFAULT, EINVAL, ENOMEM, EPERM, Kernel, Outcome, forward};
+use super::{Call, Kernel, Outcome, forward};
+use crate::hosted::darwin::{
+    EFAULT, EINTR, EINVAL, ENOMEM, ENOTSUP, EPERM, SA_NOCLDSTOP, SA_NOCLDWAIT, SA_RESTART, SIG_DFL,
+    SIG_IGN, SIGKILL, SIGSTOP,
+};
 use crate::hosted::kernel::{End, Pe, status};
 use crate::hosted::{Termination, forward as host_call, memory, threads::lock};
 use crate::machine::system::Register;
@@ -32,19 +36,12 @@ pub(crate) mod host;
 
 pub(crate) const SIGILL: u32 = 4;
 pub(crate) const SIGTRAP: u32 = 5;
-const SIGKILL: u64 = 9;
 pub(crate) const SIGBUS: u32 = 10;
 pub(crate) const SIGSEGV: u32 = 11;
-const SIGSTOP: u64 = 17;
 const SIGCHLD: u32 = 20;
-const SIG_DFL: u64 = 0;
-const SIG_IGN: u64 = 1;
 const SA_ONSTACK: u32 = 0x0001;
-const SA_RESTART: u32 = 0x0002;
 const SA_RESETHAND: u32 = 0x0004;
-const SA_NOCLDSTOP: u32 = 0x0008;
 const SA_NODEFER: u32 = 0x0010;
-const SA_NOCLDWAIT: u32 = 0x0020;
 const SA_SIGINFO: u32 = 0x0040;
 const SA_VALIDATE_SIGRETURN_FROM_SIGTRAMP: u32 = 0x0400;
 const SA_USERSPACE_MASK: u32 =
@@ -69,10 +66,8 @@ const ILL_ILLTRP: i32 = 2;
 const BUS_ADRALN: i32 = 1;
 const SEGV_MAPERR: i32 = 1;
 pub(crate) const SEGV_ACCERR: i32 = 2;
-pub(super) const EINTR: u64 = 4;
-const ENOTSUP: u64 = 45;
 
-const fn bit(signal: u64) -> u32 {
+const fn bit(signal: u32) -> u32 {
     1 << (signal - 1)
 }
 
@@ -372,7 +367,11 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
 /// `sigaction(signum, struct __sigaction *nsa, struct sigaction *osa)`.
 fn sigaction(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let [signal, new, old, ..] = call.arguments;
-    if signal == 0 || signal as usize >= SIGNALS || signal == SIGKILL || signal == SIGSTOP {
+    if signal == 0
+        || signal as usize >= SIGNALS
+        || signal == u64::from(SIGKILL)
+        || signal == u64::from(SIGSTOP)
+    {
         return Ok(Outcome::Error(EINVAL));
     }
     let signal = signal as u32;
@@ -831,7 +830,7 @@ impl Kernel {
         describe: impl FnOnce() -> String,
     ) {
         let action = lock(&self.process.actions).get(signal);
-        let unmasked = self.signals.mask() & bit(u64::from(signal)) == 0;
+        let unmasked = self.signals.mask() & bit(signal) == 0;
         // A stack overflow is delivered only on the alternate stack.
         let ready = !stack_overflow || action.flags & SA_ONSTACK != 0;
         if action.caught() && unmasked && ready {
@@ -871,7 +870,7 @@ impl Kernel {
         let sender = self.signals.take(signal).unwrap_or_default();
         let mut actions = lock(&self.process.actions);
         let action = actions.get(signal);
-        let signal_bit = bit(u64::from(signal));
+        let signal_bit = bit(signal);
         if !action.caught() {
             drop(actions);
             // The action changed since the host recorded the signal: the

@@ -38,14 +38,18 @@
 //! and a permanently bound servicer
 //! (`KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD`) stop the run.
 use super::{
-    EFAULT, EINVAL, Kernel,
+    Kernel,
     kqworkq::{
-        self, DataBuffer, EV_ADD, EV_CLEAR, EV_DELETE, EV_DISABLE, EV_ENABLE, EV_ERROR, EV_RECEIPT,
-        HostBuckets, KEVENT_BYTES, KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST,
-        KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST, KEVENT_FLAG_ERROR_EVENTS, KEVENT_FLAG_STACK_DATA,
-        KEVENT_FLAG_USER, KEVENT_FLAG_WORKLOOP, KEVENT_FLAG_WORKQ, Kevent, Knote,
+        self, DataBuffer, EV_DISABLE, EV_RECEIPT, HostBuckets, KEVENT_BYTES,
+        KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST, KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST,
+        KEVENT_FLAG_ERROR_EVENTS, KEVENT_FLAG_STACK_DATA, KEVENT_FLAG_USER, KEVENT_FLAG_WORKLOOP,
+        KEVENT_FLAG_WORKQ, Kevent, Knote,
     },
     priority, workqueue,
+};
+use crate::hosted::darwin::{
+    EALREADY, EFAULT, EINVAL, ENOENT, ENOTSUP, ERANGE, EV_ADD, EV_CLEAR, EV_DELETE, EV_ENABLE,
+    EV_ERROR,
 };
 use crate::hosted::{kernel::Process, memory, threads::lock};
 use anyhow::{Result, bail};
@@ -77,12 +81,8 @@ const EXT_VALUE: usize = 3;
 const PORT_NAME_ROLL_BITS: u32 = 0x3;
 /// The `kqueue_id_t` a servicer finds below its event list.
 const ID_BYTES: u64 = 8;
-const ENOENT: u64 = kqworkq::ENOENT as u64;
 const EEXIST: u64 = 17;
 const EXDEV: u64 = 18;
-const ERANGE: u64 = 34;
-const EALREADY: u64 = 37;
-const ENOTSUP: u64 = 45;
 const ESTALE: u64 = 70;
 const EOWNERDEAD: u64 = 105;
 /// `kqueue_workloop_ctl` commands and `kqwlp_flags`

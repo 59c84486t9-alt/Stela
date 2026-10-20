@@ -16,6 +16,7 @@ use super::{
     shared_region::SharedRegion,
     threads::{Engine, Runtime, lock},
 };
+use crate::hosted::darwin::{HOST_SELF_TRAP, SIGKILL, TASK_SELF_TRAP};
 use crate::{
     machine::{Cpu, Machine, NoDevices, system::Register},
     pauth,
@@ -38,7 +39,6 @@ mod status;
 
 pub use bsd::Signature;
 pub(super) use bsd::signal::host as signals;
-pub(super) use bsd::{EAGAIN, ENOMEM};
 
 pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 
@@ -50,7 +50,6 @@ const EC_BRK64: u64 = 0x3c;
 /// A pointer-authentication failure under FEAT_FPAC (`ESR_EC_PAC_FAIL`).
 const EC_PAC_FAIL: u64 = 0x1c;
 /// SIGKILL, which ends a PAC-hardened task's failure.
-const SIGKILL: i32 = 9;
 const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
 /// A data abort's ISS WnR: the access was a write.
@@ -75,10 +74,6 @@ pub struct Executable {
     /// The executable's Mach header, slid.
     pub header: u64,
 }
-
-/// `task_self_trap`, `host_self_trap`.
-const TASK_SELF_TRAP: u32 = 28;
-const HOST_SELF_TRAP: u32 = 29;
 
 /// The process's kernel state, shared by its threads: what exec fixed, and
 /// each mutable family behind its own lock. No lock here is held while a
@@ -482,7 +477,7 @@ impl Kernel {
                         "stela: {}: the process is PAC-hardened and is killed",
                         describe()
                     );
-                    self.end = Some(End::Process(Termination::Signaled(SIGKILL)));
+                    self.end = Some(End::Process(Termination::Signaled(SIGKILL as i32)));
                 } else {
                     // EXC_ARM_PAC_FAIL is neither an invalid address nor an
                     // alignment fault: the protection failure's si_code.

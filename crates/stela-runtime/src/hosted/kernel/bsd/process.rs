@@ -22,8 +22,9 @@
 //! `posix_spawn`
 //! ([`super::spawn`]) creates a process with the same activation command;
 //! `fork` and `vfork` ([`super::fork`]) fork the host process.
-use super::{Call, EFAULT, Kernel, Outcome, Pe, paths};
+use super::{Call, Kernel, Outcome, Pe, paths};
 use crate::hosted::activation::{self, Activator};
+use crate::hosted::darwin::{E2BIG, EACCES, EFAULT, EINVAL, MAX_PATH};
 use crate::hosted::kernel::End;
 use crate::hosted::{Termination, memory};
 use anyhow::{Result, bail};
@@ -31,15 +32,10 @@ use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// `MAXPATHLEN`.
-const MAX_PATH: usize = 1024;
 /// The kernel's bound on the argument and environment bytes (`ARG_MAX`
 /// on arm64 macOS, `kern.argmax`).
 const ARG_MAX: usize = 1 << 20;
 const ENAMETOOLONG: u64 = 63;
-const E2BIG: u64 = 7;
-const EACCES: u64 = 13;
-const EINVAL: u64 = 22;
 /// `MAC_MAX_LABEL_BUF_LEN` (`security/mac.h`).
 const MAC_MAX_LABEL_BUF_LEN: u64 = 8192;
 

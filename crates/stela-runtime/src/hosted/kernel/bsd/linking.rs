@@ -10,12 +10,11 @@
 //! pager fails it), chains that stay inside their page, and the call is
 //! refused once dyld ends page-in linking for the process.
 use super::{Call, Kernel, Outcome, Pe};
+use crate::hosted::darwin::{EINVAL, ENOMEM, VM_PROT_DEFAULT};
 use crate::hosted::memory::{self, PAGE_BYTES, Protection};
 use crate::pauth;
 use anyhow::Result;
 
-const EINVAL: u64 = 22;
-const ENOMEM: u64 = 12;
 /// `struct mwl_region` and `struct mwl_info_hdr`.
 const REGION_BYTES: usize = 32;
 const HEADER_BYTES: usize = 40;
@@ -24,7 +23,6 @@ const MWL_MAX_REGION_COUNT: u64 = 5;
 const MWL_MAX_LINK_INFO_SIZE: u64 = 64 << 20;
 const VM_PROT_EXECUTE: u32 = 0x4;
 const VM_PROT_WRITE: u32 = 0x2;
-const VM_PROT_DEFAULT: u32 = 0x3;
 const VM_PROT_ZF: u32 = 0x10;
 const VM_PROT_TPRO: u32 = 0x200;
 /// `DYLD_CHAINED_PTR_*`.

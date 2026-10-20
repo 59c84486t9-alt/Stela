@@ -13,8 +13,9 @@
 //! `ext`), `struct kevent64_s` (`kevent64`) and `struct kevent_qos_s`
 //! (`kevent_qos`, `kevent_id`).
 use super::aio::{Aio, Rewrite};
-use super::kqworkq::{EV_ERROR, Kevent};
-use super::{Call, EFAULT, Kernel, Outcome};
+use super::kqworkq::Kevent;
+use super::{Call, Kernel, Outcome};
+use crate::hosted::darwin::{EFAULT, EV_ERROR};
 use crate::hosted::{host, memory};
 use anyhow::Result;
 use std::sync::Arc;

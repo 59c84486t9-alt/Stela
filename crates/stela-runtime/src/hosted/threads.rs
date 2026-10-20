@@ -28,6 +28,7 @@ use super::{
     pe,
     tables::Tables,
 };
+use crate::hosted::darwin::THREAD_SELF_TRAP;
 use crate::machine::{Chip, CpuProfile, Machine, NoDevices, Stop, system::Register};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::{
@@ -51,7 +52,6 @@ const WAIT_LIMIT_TICKS: u64 = 1;
 const HOST_STACK_BYTES: usize = 16 << 20;
 /// `thread_self_trap`: the calling host thread's port, with a new user
 /// reference.
-const THREAD_SELF_TRAP: u32 = 27;
 const MACH_PORT_DEALLOCATE_TRAP: u32 = 18;
 
 /// Lock a process mutex. A thread that panicked while holding one leaves
@@ -477,9 +477,9 @@ where
     });
     if let Err(error) = spawned {
         return Ok(Err(if error.kind() == std::io::ErrorKind::OutOfMemory {
-            super::kernel::ENOMEM
+            crate::hosted::darwin::ENOMEM
         } else {
-            super::kernel::EAGAIN
+            crate::hosted::darwin::EAGAIN
         }));
     }
     receiver

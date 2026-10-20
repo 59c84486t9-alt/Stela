@@ -56,9 +56,15 @@
 //! message, and [`Aio::events_to_guest`] presents the delivered event as
 //! the arm64 kernel's, so a kqueue's waiters, its readability and
 //! `EV_ONESHOT` behave as the kernel's knote's.
-use super::{
-    Call, EAGAIN, EFAULT, EINVAL, EPERM, Kernel, Outcome, forward, number_of, timer::Layout,
+use super::{Call, Kernel, Outcome, forward, number_of, timer::Layout};
+use crate::hosted::darwin::{
+    EAGAIN, EBADF, EFAULT, EINTR, EINVAL, ENOMEM, ENOTSUP, EPERM, EV_ADD, EV_CLEAR, EV_DELETE,
+    EV_ENABLE, EV_ERROR, EV_ONESHOT, F_GETFL, MACH_MSG_TYPE_COPY_SEND, MACH_MSG_TYPE_MAKE_SEND,
+    MACH_PORT_RIGHT_RECEIVE, MACH_SEND_MSG, MACH_SEND_TIMEOUT, MessageHeader, O_ACCMODE, O_RDONLY,
+    O_RDWR, SIGKILL, SIGSTOP, mach_msg, mach_port_allocate, mach_port_destruct,
+    mach_port_insert_right, semaphore_create, semaphore_destroy, semaphore_signal,
 };
+use crate::hosted::host::task;
 use crate::hosted::memory::{self, PAGE_BYTES};
 use crate::hosted::threads::{lock, try_lock};
 use anyhow::{Result, bail};
@@ -94,12 +100,8 @@ pub(super) const CLOSING: &[&str] = &[
 pub(crate) const OVERLAY: &str = "a descriptor's queued asynchronous I/O is cancelled and its \
      running I/O waited for before it closes";
 
-const EBADF: u64 = 9;
-const EINTR: u64 = 4;
-const ENOMEM: u64 = 12;
 const ESPIPE: u64 = 29;
 const EINPROGRESS: u64 = 36;
-const ENOTSUP: u64 = 45;
 const ETIMEDOUT: u64 = 60;
 const ECANCELED: u64 = 89;
 /// `aio_cancel` results.
@@ -121,8 +123,6 @@ const SIGEV_NONE: i32 = 0;
 const SIGEV_SIGNAL: i32 = 1;
 const SIGEV_KEVENT: i32 = 4;
 const NSIG: i32 = 32;
-const SIGKILL: i32 = 9;
-const SIGSTOP: i32 = 17;
 /// `aio_fsync` operations; 0 is `O_SYNC` for Panther binaries.
 const O_SYNC: u64 = 0x80;
 const O_DSYNC: u64 = 0x40_0000;
@@ -149,24 +149,14 @@ const SIGEV_NOTIFY: usize = 0;
 const SIGEV_SIGNO: usize = 4;
 const SIGEV_VALUE: usize = 8;
 /// `fcntl` access flags.
-const F_GETFL: u64 = 3;
-const O_ACCMODE: u64 = 3;
-const O_RDONLY: u64 = 0;
-const O_WRONLY: u64 = 1;
-const O_RDWR: u64 = 2;
-const O_APPEND: u64 = 0x8;
-const O_EXEC: u64 = 0x4000_0000;
+const O_WRONLY: u32 = 1;
+const O_APPEND: u32 = 0x8;
+const O_EXEC: u32 = 0x4000_0000;
 /// The kevent filters and flags the kernel registers, and the carrier's.
 const EVFILT_AIO: i16 = -3;
 const EVFILT_MACHPORT: i16 = -8;
 /// The 26A434 list filter (`EVFILT_SYSCOUNT` grew past xnu-12377's 18).
 const EVFILT_LIST: i16 = -19;
-const EV_ADD: u16 = 0x1;
-const EV_DELETE: u16 = 0x2;
-const EV_ENABLE: u16 = 0x4;
-const EV_ONESHOT: u16 = 0x10;
-const EV_CLEAR: u16 = 0x20;
-const EV_ERROR: u16 = 0x4000;
 /// The flags `aio_register_kevent` registers with, less `EV_KERNEL`,
 /// which the filter's attach clears.
 const KNOTE_FLAGS: u16 = EV_ADD | EV_ENABLE | EV_CLEAR | EV_ONESHOT;
@@ -186,49 +176,8 @@ const PROC_FI_GUARD_CLOSE: u32 = 1 << 0;
 const PROC_FI_GUARD_DUP: u32 = 1 << 1;
 const S_IFMT: u16 = 0o170_000;
 const S_IFCHR: u16 = 0o020_000;
-/// Mach constants for the carrier ports and the waiters' semaphores.
-const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
-const MACH_MSG_TYPE_MAKE_SEND: u32 = 20;
-const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
-const MACH_SEND_MSG: i32 = 1;
-const MACH_SEND_TIMEOUT: i32 = 0x10;
+/// `SYNC_POLICY_FIFO`: the waiters' semaphores.
 const SYNC_POLICY_FIFO: i32 = 0;
-
-#[allow(non_upper_case_globals)]
-unsafe extern "C" {
-    static mach_task_self_: u32;
-    fn mach_port_allocate(task: u32, right: u32, name: *mut u32) -> i32;
-    fn mach_port_insert_right(task: u32, name: u32, right: u32, kind: u32) -> i32;
-    fn mach_port_destruct(task: u32, name: u32, send_delta: i32, guard: u64) -> i32;
-    fn mach_msg(
-        message: *mut u8,
-        option: i32,
-        send_size: u32,
-        receive_size: u32,
-        receive_name: u32,
-        timeout: u32,
-        notify: u32,
-    ) -> i32;
-    fn semaphore_create(task: u32, semaphore: *mut u32, policy: i32, value: i32) -> i32;
-    fn semaphore_destroy(task: u32, semaphore: u32) -> i32;
-    fn semaphore_signal(semaphore: u32) -> i32;
-}
-
-/// `mach_msg_header_t`.
-#[repr(C)]
-struct MessageHeader {
-    bits: u32,
-    size: u32,
-    remote: u32,
-    local: u32,
-    voucher: u32,
-    id: i32,
-}
-
-fn task() -> u32 {
-    // SAFETY: the host's task port name, set before `main`.
-    unsafe { mach_task_self_ }
-}
 
 /// The host call `name` of the pinned catalog: X0, or the errno.
 fn host(name: &str, arguments: &[u64]) -> std::result::Result<u64, u64> {
@@ -336,8 +285,7 @@ impl Notification {
             SIGEV_NONE => Ok(()),
             SIGEV_SIGNAL
                 if (1..NSIG).contains(&self.signal)
-                    && self.signal != SIGKILL
-                    && self.signal != SIGSTOP =>
+                    && ![SIGKILL, SIGSTOP].contains(&(self.signal as u32)) =>
             {
                 Ok(())
             }
@@ -554,16 +502,18 @@ fn vnode(fd: i32) -> Option<Vnode> {
 }
 
 /// The descriptor's status flags, or EBADF.
-fn status_flags(fd: i32) -> std::result::Result<u64, u64> {
-    host("sys_fcntl", &[i64::from(fd) as u64, F_GETFL]).map_err(|_| EBADF)
+fn status_flags(fd: i32) -> std::result::Result<u32, u64> {
+    host("sys_fcntl", &[i64::from(fd) as u64, u64::from(F_GETFL)])
+        .map(|flags| flags as u32)
+        .map_err(|_| EBADF)
 }
 
 /// Whether the status flags give `FREAD` or `FWRITE`.
-fn readable(flags: u64) -> bool {
+fn readable(flags: u32) -> bool {
     flags & O_EXEC == 0 && matches!(flags & O_ACCMODE, O_RDONLY | O_RDWR)
 }
 
-fn writable(flags: u64) -> bool {
+fn writable(flags: u32) -> bool {
     flags & O_EXEC == 0 && matches!(flags & O_ACCMODE, O_WRONLY | O_RDWR)
 }
 
@@ -1834,7 +1784,7 @@ mod tests {
         let mut signalled = aiocb(fd, 0, at, 16, LIO_READ);
         for (notify, signal, valid) in [
             (SIGEV_SIGNAL, 30, true),
-            (SIGEV_SIGNAL, SIGKILL, false),
+            (SIGEV_SIGNAL, SIGKILL as i32, false),
             (SIGEV_SIGNAL, NSIG, false),
             (SIGEV_KEVENT, 0, false),
             (SIGEV_KEVENT, 3, true),

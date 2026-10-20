@@ -20,7 +20,8 @@
 //! range needs the text crypter the M2's FairPlay kernel extension
 //! registers (`text_crypter_create`), which the host does not provide for
 //! arm64 images: the run stops.
-use super::{Call, EFAULT, EINVAL, ENOMEM, Kernel, Outcome, Pe, forward, forward_uninterruptible};
+use super::{Call, Kernel, Outcome, Pe, forward, forward_uninterruptible};
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOMEM, KERN_FAILURE};
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
 use crate::hosted::{shared_region, threads::lock};
 use anyhow::{Result, bail};
@@ -127,7 +128,7 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         // The kernel's own choice, 16 KiB aligned, at or above the hint.
         match memory::allocate(address & !PAGE_MASK, size, true, Protection::NONE) {
             Ok(start) => start,
-            Err(_) => return Ok(Outcome::Error(super::ENOMEM)),
+            Err(_) => return Ok(Outcome::Error(ENOMEM)),
         }
     };
     let mut placed = Call {
@@ -304,7 +305,6 @@ const MAPPING_BYTES: usize = 48;
 /// `_SR_FILE_MAPPINGS_MAX_FILES` and `SFM_MAX`.
 const MAX_FILES: u64 = 256;
 const MAX_MAPPINGS: u64 = MAX_FILES * 8;
-const KERN_FAILURE: u64 = 5;
 
 /// `shared_region_map_and_slide_2_np(files_count, files, mappings_count,
 /// mappings)`: the kernel picks the slide below the first file's
@@ -316,7 +316,7 @@ fn map_and_slide(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcom
         return Ok(Outcome::value(0));
     }
     if files_count > MAX_FILES || mappings_count > MAX_MAPPINGS {
-        return Ok(Outcome::Error(KERN_FAILURE));
+        return Ok(Outcome::Error(u64::from(KERN_FAILURE)));
     }
     let (Some(file_bytes), Some(mapping_bytes)) = (
         memory::read(files, files_count as usize * FILE_BYTES),
@@ -345,7 +345,7 @@ fn map_and_slide(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcom
         let count = word(file, 4) as usize;
         let mappings: Vec<_> = records.by_ref().take(count).collect();
         if mappings.len() != count {
-            return Ok(Outcome::Error(KERN_FAILURE));
+            return Ok(Outcome::Error(u64::from(KERN_FAILURE)));
         }
         grouped.push(shared_region::FileMappings {
             descriptor: word(file, 0) as i32,
@@ -369,7 +369,7 @@ fn map_and_slide(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcom
             .map(|region| region.map(&grouped, slide))
     });
     let Some(mapped) = mapped else {
-        return Ok(Outcome::Error(KERN_FAILURE));
+        return Ok(Outcome::Error(u64::from(KERN_FAILURE)));
     };
     Ok(match mapped? {
         Ok(()) => {

@@ -19,7 +19,10 @@
 //! it; the watch is then armed again. Workloops
 //! ([`kqworkloop`](super::kqworkloop)) keep their ordinary knotes the same
 //! way under the same monitor.
-use super::{EFAULT, EINVAL, ENOMEM, priority};
+use super::priority;
+use crate::hosted::darwin::{
+    EFAULT, EINVAL, ENOENT, ENOMEM, EV_ADD, EV_DELETE, EV_ENABLE, EV_ERROR, EV_ONESHOT,
+};
 use crate::hosted::{forward, kernel::Process, memory, threads::lock};
 use anyhow::{Result, anyhow};
 use std::{
@@ -59,19 +62,11 @@ const KEVENT_ID_FLAG_USER: u64 = KEVENT_FLAG_WORKLOOP
     | KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST;
 
 /// `EV_*` (`sys/event.h`).
-pub(crate) const EV_ADD: u16 = 0x0001;
-pub(crate) const EV_DELETE: u16 = 0x0002;
-pub(crate) const EV_ENABLE: u16 = 0x0004;
 pub(crate) const EV_DISABLE: u16 = 0x0008;
-pub(crate) const EV_ONESHOT: u16 = 0x0010;
-pub(crate) const EV_CLEAR: u16 = 0x0020;
 pub(crate) const EV_RECEIPT: u16 = 0x0040;
 const EV_DISPATCH: u16 = 0x0080;
 const EV_UDATA_SPECIFIC: u16 = 0x0100;
-pub(crate) const EV_ERROR: u16 = 0x4000;
 const EVFILT_READ: i16 = -1;
-pub(crate) const ENOENT: i64 = 2;
-const EINTR: i32 = 4;
 /// `_pthread_priority_normalize`: the bits a knote's QoS keeps.
 const FALLBACK_FLAG: u64 = 0x0400_0000;
 const QOS_CLASS_MASK: u64 = 0x0000_3f00;
@@ -414,7 +409,9 @@ impl HostBuckets {
                 let mut touch = *change;
                 touch.flags &= !EV_ADD;
                 match Self::register_on(descriptor, &touch) {
-                    Some(result) if result.flags & EV_ERROR != 0 && result.data == ENOENT => {
+                    Some(result)
+                        if result.flags & EV_ERROR != 0 && result.data == ENOENT as i64 =>
+                    {
                         (attach_on(self)?, true)
                     }
                     result => (
@@ -433,7 +430,7 @@ impl HostBuckets {
             None => (
                 match self.descriptor(attach.bucket) {
                     Some(descriptor) => Self::register_on(descriptor, change),
-                    None => Some(change.failed_with(ENOENT as u64)),
+                    None => Some(change.failed_with(ENOENT)),
                 },
                 false,
             ),
@@ -713,7 +710,7 @@ fn start_monitor(process: Arc<Process>, kqueue: Arc<Kqworkq>) {
                 };
                 if count < 0 {
                     let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() == Some(EINTR) {
+                    if error.raw_os_error() == Some(libc::EINTR) {
                         continue;
                     }
                     process
@@ -742,6 +739,7 @@ fn start_monitor(process: Arc<Process>, kqueue: Arc<Kqworkq>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosted::darwin::EV_CLEAR;
 
     const EVFILT_USER: i16 = -10;
     const NOTE_TRIGGER: u32 = 0x0100_0000;
@@ -846,7 +844,10 @@ mod tests {
             .register(&missing, attach, &watch)
             .unwrap()
             .expect("an error event");
-        assert_eq!((result.flags & EV_ERROR, result.data), (EV_ERROR, ENOENT));
+        assert_eq!(
+            (result.flags & EV_ERROR, result.data),
+            (EV_ERROR, ENOENT as i64)
+        );
         buckets.close();
         // SAFETY: the test's own descriptor.
         unsafe { libc::close(watch.0) };

@@ -9,8 +9,11 @@
 //! meaning depends on the CPU, the page size, the clock or the execution
 //! state are serviced by their family. Everything else stops the process
 //! naming the call.
+use crate::hosted::darwin::{EINTR, ENOSYS};
+// Kept for the MIG routines that still name it through this module.
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
+pub(super) use crate::hosted::darwin::EINVAL;
 use crate::hosted::forward;
 use crate::machine::system::Register;
 use anyhow::{Result, anyhow, bail};
@@ -41,14 +44,7 @@ pub(super) mod workqueue;
 pub use codesign::Signature;
 
 /// `ENOSYS`, for numbers past the table and its reserved rows.
-pub(super) const ENOSYS: u64 = 78;
 const ENOSYS_ROUTINE: &str = "enosys";
-pub(super) const EINVAL: u64 = 22;
-pub(super) const EFAULT: u64 = 14;
-pub(crate) const ENOMEM: u64 = 12;
-pub(super) const ENOENT: u64 = 2;
-pub(super) const EPERM: u64 = 1;
-pub(crate) const EAGAIN: u64 = 35;
 
 /// How a call completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +100,7 @@ pub(super) fn forward(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     // A terminated thread never sees the outcome.
     Ok(kernel
         .forwarding(|| forward::bsd_interruptible(call.entry.number, call.arguments(), interrupt))
-        .map_or(Outcome::Error(signal::EINTR), outcome))
+        .map_or(Outcome::Error(EINTR), outcome))
 }
 
 /// Forward `call` to the host kernel uninterruptibly, for a model whose
@@ -113,7 +109,7 @@ pub(super) fn forward_uninterruptible(kernel: &mut Kernel, call: &Call) -> Resul
     kernel.page_in_arguments(call.arguments())?;
     Ok(kernel
         .forwarding(|| forward::bsd(call.entry.number, call.arguments()))
-        .map_or(Outcome::Error(signal::EINTR), outcome))
+        .map_or(Outcome::Error(EINTR), outcome))
 }
 
 fn outcome(returned: forward::Returned) -> Outcome {

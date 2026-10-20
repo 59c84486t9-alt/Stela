@@ -15,15 +15,11 @@
 //! `NOTE_EXEC` or `NOTE_EXIT`. The child of `vfork` has its own copy of
 //! memory rather than the parent's, which POSIX permits.
 use super::{Call, Kernel, Outcome, signal};
+use crate::hosted::darwin::{HOST_SELF_TRAP, TASK_SELF_TRAP, THREAD_SELF_TRAP};
 use crate::hosted::forward;
 use crate::hosted::threads::try_lock;
 use anyhow::Result;
 use core::sync::atomic::Ordering;
-
-/// `thread_self_trap`, `task_self_trap`, `host_self_trap`.
-const THREAD_SELF_TRAP: u32 = 27;
-const TASK_SELF_TRAP: u32 = 28;
-const HOST_SELF_TRAP: u32 = 29;
 
 /// Anything held across the fork.
 trait Held {}

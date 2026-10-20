@@ -168,11 +168,10 @@ pub fn mach(index: u32, arguments: &[u64]) -> Returned {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosted::darwin::{EBADF, TASK_SELF_TRAP};
 
     const GETPID: u16 = 20;
     const CLOSE: u16 = 6;
-    const EBADF: u64 = 9;
-    const TASK_SELF_TRAP: u32 = 28;
 
     #[test]
     fn host_calls_return_results_and_errors() {

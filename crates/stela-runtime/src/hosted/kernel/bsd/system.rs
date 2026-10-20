@@ -35,11 +35,8 @@
 //!   the x86 trap flag of the target's host thread rather than step its
 //!   guest code, so it stops the run.
 use super::{Call, Kernel, Outcome, forward};
+use crate::hosted::darwin::{EACCES, ENOTSUP, EPERM};
 use anyhow::{Result, bail};
-
-const EPERM: u64 = 1;
-const EACCES: u64 = 13;
-const ENOTSUP: u64 = 45;
 
 /// `PT_STEP`.
 const PT_STEP: i32 = 9;

@@ -17,8 +17,9 @@
 //! numbers are the same source on both kernels, and an `OID_AUTO` number
 //! the host assigned names the same variable. A modeled name the host does
 //! not know receives a synthetic number from `name2oid`.
-use super::{Call, EFAULT, EINVAL, ENOENT, EPERM, Kernel, Outcome, forward};
+use super::{Call, Kernel, Outcome, forward};
 use crate::darwin::catalog;
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ENOMEM, EPERM, ERANGE};
 use crate::hosted::{
     forward as host,
     hardware::{self, Hardware},
@@ -26,9 +27,6 @@ use crate::hosted::{
 };
 use anyhow::{Context, Result, bail};
 
-/// `ENOMEM`: the caller's buffer is smaller than the value.
-const ENOMEM: u64 = super::ENOMEM;
-const ERANGE: u64 = 34;
 /// `CTL_MAXNAME`.
 const MAX_NAME: u64 = 12;
 const INT_BYTES: u64 = 4;

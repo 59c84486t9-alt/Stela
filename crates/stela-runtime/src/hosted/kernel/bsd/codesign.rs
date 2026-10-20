@@ -11,13 +11,12 @@
 //! `CS_ENFORCEMENT`: arm64 kernels enforce code signing for every process
 //! (`cs_process_enforcement`). Page hashes are not validated; the
 //! signature's trust is the host file system's.
-use super::{Call, EFAULT, EINVAL, ENOENT, Kernel, Outcome, forward};
+use super::{Call, Kernel, Outcome, forward};
 use crate::code_signature;
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ERANGE, ESRCH};
 use crate::hosted::{memory, threads::lock};
 use anyhow::{Result, bail};
 
-const ESRCH: u64 = 3;
-const ERANGE: u64 = 34;
 const CS_OPS_STATUS: u64 = 0;
 const CS_OPS_MARKINVALID: u64 = 1;
 const CS_OPS_MARKHARD: u64 = 2;
