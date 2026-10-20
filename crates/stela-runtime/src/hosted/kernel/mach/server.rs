@@ -166,16 +166,8 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Host, "host_info", None),
     (Object::Host, "host_kernel_version", None),
     (Object::Host, "_host_page_size", None),
-    (
-        Object::Host,
-        "mach_memory_object_memory_entry",
-        Some("an internal entry of a size in partial guest pages stops the run"),
-    ),
-    (
-        Object::Host,
-        "mach_memory_object_memory_entry_64",
-        Some("an internal entry of a size in partial guest pages stops the run"),
-    ),
+    (Object::Host, "mach_memory_object_memory_entry", None),
+    (Object::Host, "mach_memory_object_memory_entry_64", None),
     (Object::Host, "host_request_notification", None),
     (Object::Host, "_kernelrpc_host_create_mach_voucher", None),
     (Object::Host, "kmod_get_info", None),
@@ -579,27 +571,25 @@ pub(super) fn serve(
         (Object::Host, "_host_page_size", false) => {
             Reply::Success(memory::PAGE_BYTES.to_le_bytes().to_vec())
         }
-        // The pager port, then `internal`, `size` and `permission`. An
-        // internal entry's object is the size rounded to the kernel's page
-        // (`vm_sanitize_object_size`): the host's 4 KiB rounding names the
-        // same memory only for whole guest pages.
+        // The pager port, then `internal`, `size` and `permission`.
         (
             Object::Host,
             "mach_memory_object_memory_entry" | "mach_memory_object_memory_entry_64",
             true,
         ) => {
-            let (Some(pager), Some(internal), Some(size)) =
-                (request.word(4), request.word(24), request.double(28))
-            else {
+            let (Some(pager), Some(internal), Some(size), Some(permission)) = (
+                request.word(4),
+                request.word(24),
+                request.double(28),
+                request.word(36),
+            ) else {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
             if pager == 0 && internal != 0 && size & memory::PAGE_MASK != 0 {
-                bail!(
-                    "{routine} of {size:#x} bytes: an internal entry in partial guest pages is \
-                     not implemented"
-                );
+                internal_entry(port, size, permission)
+            } else {
+                Reply::Forward
             }
-            Reply::Forward
         }
         (Object::Host, routine, _) if HOST_FORWARDED.contains(&routine) => Reply::Forward,
         // The default processor set is the host's boot set, whose name
@@ -1086,6 +1076,40 @@ const HOST_FORWARDED: &[&str] = &[
     "host_get_UNDServer",
     "kext_request",
 ];
+
+/// `mach_memory_object_memory_entry_64(host, TRUE, size, permission,
+/// MEMORY_OBJECT_NULL)` of a size in partial guest pages: the entry's
+/// object is the size rounded to the kernel's 16 KiB page
+/// (`vm_sanitize_object_size`, KERN_INVALID_ARGUMENT when that overflows),
+/// which the host makes with that size since its own 4 KiB rounding keeps
+/// it.
+fn internal_entry(host: u32, size: u64, permission: u32) -> Reply {
+    unsafe extern "C" {
+        fn mach_memory_object_memory_entry_64(
+            host: u32,
+            internal: i32,
+            size: u64,
+            permission: i32,
+            pager: u32,
+            entry: *mut u32,
+        ) -> i32;
+    }
+    let Some(size) = memory::round_page(size) else {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    };
+    let mut entry = 0;
+    // SAFETY: the host port this request was sent to and an out name.
+    let code = unsafe {
+        mach_memory_object_memory_entry_64(host, 1, size, permission as i32, 0, &raw mut entry)
+    } as u32;
+    if code != darwin::KERN_SUCCESS {
+        return Reply::Failure(code);
+    }
+    Reply::Descriptors(vec![Descriptor::Port {
+        name: entry,
+        disposition: MOVE_SEND,
+    }])
+}
 
 /// `processor_set_info_t`'s bound.
 const PROCESSOR_SET_INFO_MAX: u32 = 1024;
@@ -1926,6 +1950,68 @@ mod tests {
         // SAFETY: the allocation the reply's send would release.
         unsafe { mach_vm_deallocate(crate::hosted::host::task(), address, u64::from(size)) };
         words
+    }
+
+    #[test]
+    fn an_internal_entry_holds_its_size_in_whole_guest_pages() {
+        unsafe extern "C" {
+            fn mach_vm_map(
+                task: u32,
+                address: *mut u64,
+                size: u64,
+                mask: u64,
+                flags: i32,
+                object: u32,
+                offset: u64,
+                copy: i32,
+                current: i32,
+                maximum: i32,
+                inheritance: u32,
+            ) -> i32;
+            fn mach_vm_deallocate(task: u32, address: u64, size: u64) -> i32;
+        }
+        const VM_PROT_READ_WRITE: u32 = 3;
+        // SAFETY: this task's host port.
+        let host = unsafe { mach_host_self() };
+        assert!(matches!(
+            internal_entry(host, u64::MAX - 0x1000, VM_PROT_READ_WRITE),
+            Reply::Failure(KERN_INVALID_ARGUMENT)
+        ));
+        let Reply::Descriptors(descriptors) = internal_entry(host, 0x1001, VM_PROT_READ_WRITE)
+        else {
+            panic!("the entry was not made");
+        };
+        let [Descriptor::Port { name, .. }] = descriptors[..] else {
+            panic!("{descriptors:?}");
+        };
+        let map = |size: u64| {
+            let mut address = 0;
+            // SAFETY: a new mapping of the entry anywhere in this task.
+            let code = unsafe {
+                mach_vm_map(
+                    crate::hosted::host::task(),
+                    &raw mut address,
+                    size,
+                    0,
+                    1,
+                    name,
+                    0,
+                    0,
+                    3,
+                    3,
+                    1,
+                )
+            };
+            if code == 0 {
+                // SAFETY: the mapping just made.
+                unsafe { mach_vm_deallocate(crate::hosted::host::task(), address, size) };
+            }
+            code
+        };
+        // The whole guest page, and nothing past it.
+        assert_eq!(map(memory::PAGE_BYTES), 0);
+        assert_ne!(map(memory::PAGE_BYTES + 0x1000), 0);
+        release_send(name);
     }
 
     #[test]
