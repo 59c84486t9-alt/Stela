@@ -142,6 +142,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
             initialize_nor: command.initialize_nor,
             dram_bytes: BundleOptions::default().dram_size,
             usb_disk: usb_disk.as_deref(),
+            external_disks: false,
         },
     )?;
     for install in &record.installs {

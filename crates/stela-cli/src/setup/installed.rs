@@ -52,6 +52,11 @@ pub(super) struct InstalledDisk {
     /// the Apple region. None for a machine-state partition of its own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) machine_state_offset: Option<u64>,
+    /// The Apple region is a partition of the setup USB, and every PC disk
+    /// is the Mac's external drive (`--external-disks`), which recoveryOS
+    /// partitions, formats and installs macOS onto.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub(super) external_disks: bool,
 }
 
 impl InstalledDisk {
@@ -88,8 +93,9 @@ impl InstalledDisk {
             .unwrap_or_default();
         format!(
             "--system --storage {region} --nor {} --preboot {region} --recovery-bundle \
-             {recovery} --ram-bytes {dram_bytes:#x}{ecid}",
-            self.nor_target()
+             {recovery} --ram-bytes {dram_bytes:#x}{ecid}{}",
+            self.nor_target(),
+            self.external()
         )
     }
 
@@ -106,10 +112,20 @@ impl InstalledDisk {
             .map(|ecid| format!(" --ecid {ecid}"))
             .unwrap_or_default();
         format!(
-            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes {dram_bytes:#x}{ecid}",
+            "--system --storage {} --nor {} --bundle {recovery} --ram-bytes \
+             {dram_bytes:#x}{ecid}{}",
             self.region_target(),
-            self.nor_target()
+            self.nor_target(),
+            self.external()
         )
+    }
+
+    fn external(&self) -> &'static str {
+        if self.external_disks {
+            " --external-disks"
+        } else {
+            ""
+        }
     }
 
     fn region_target(&self) -> String {
@@ -271,8 +287,12 @@ pub(super) struct Request<'a> {
     pub(super) erase_target: bool,
     pub(super) initialize_nor: bool,
     pub(super) dram_bytes: u64,
-    /// The setup USB's whole disk, which holds neither partition.
+    /// The setup USB's whole disk, which holds neither partition, unless
+    /// the Apple region is the USB's own (`external_disks`).
     pub(super) usb_disk: Option<&'a str>,
+    /// The Apple region is a partition of the setup USB, and the PC's disks
+    /// are the Mac's external drives.
+    pub(super) external_disks: bool,
 }
 
 /// The checked disk, what setup will write to its machine-state partition
@@ -393,7 +413,12 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
          keep the machine state in the Apple region's last {} MiB",
         machine_state::MACHINE_STATE_BYTES >> 20
     );
-    let region = usable(host, request.apple_region, "Apple region", request.usb_disk)?;
+    let region = usable(
+        host,
+        request.apple_region,
+        "Apple region",
+        request.usb_disk.filter(|_| !request.external_disks),
+    )?;
     // Without `--nor`, the guest's SSD is the region less its tail.
     let split = match request.nor {
         Some(_) => None,
@@ -587,6 +612,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         nor_guid: nor.guid.to_ascii_uppercase(),
         nor: nor.identifier,
         machine_state_offset: split.map(|split| split.state_offset()),
+        external_disks: request.external_disks,
     };
     Ok(Checked {
         disk,

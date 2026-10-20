@@ -1158,6 +1158,34 @@ impl Setup {
 
 /// The ESP to change: the EFI partition of `usb`'s disk, which must be
 /// mounted, sit on a removable disk and boot no loader but Stela's.
+/// The setup USB's one unmounted partition besides its EFI partition: a
+/// raw partition, which becomes the Mac's internal SSD. `None` when the USB
+/// has none; several are refused, since setup cannot tell them apart.
+fn stick_ssd(host: &dyn Host, usb_disk: Option<&str>) -> Result<Option<String>> {
+    let Some(usb_disk) = usb_disk else {
+        return Ok(None);
+    };
+    let disks = host.disks()?;
+    let Some(disk) = disks.iter().find(|disk| disk.identifier == usb_disk) else {
+        return Ok(None);
+    };
+    let raw: Vec<&str> = disk
+        .partitions
+        .iter()
+        .filter(|p| p.content != "EFI" && p.mount.is_none())
+        .map(|p| p.identifier.as_str())
+        .collect();
+    match raw[..] {
+        [] => Ok(None),
+        [partition] => Ok(Some(partition.into())),
+        _ => bail!(
+            "{usb_disk} has several unmounted partitions ({}); name the Mac's internal SSD with \
+             --target",
+            raw.join(", ")
+        ),
+    }
+}
+
 fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     ensure!(usb.is_dir(), "{} is not a mounted volume", usb.display());
     let volume = host.volume(usb)?;
@@ -1614,7 +1642,8 @@ fn apply_install(
 }
 
 /// Why `--target` needs `--tss`.
-const TSS_REQUIRED: &str = "installing macOS onto --target needs --tss: the restore \
+const TSS_REQUIRED: &str = "installing macOS onto the Mac's internal SSD (--target, or the \
+    USB's raw partition) needs --tss: the restore \
     personalizes its root tickets and the recoveryOS LocalPolicy with Apple's signing server \
     (gs.apple.com), which receives this machine's ECID, the restore's nonces and its boot \
     components' hashes. Add --tss to opt in.";
@@ -1654,23 +1683,29 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         );
     }
     let dram_bytes = BundleOptions::default().dram_size;
-    ensure!(command.target.is_none() || command.tss, TSS_REQUIRED);
-    let installed = match &command.target {
-        Some(target) => {
-            let usb_disk = host.volume(&esp)?.disk;
-            Some(installed::check(
-                host,
-                &installed::Request {
-                    apple_region: target,
-                    nor: command.nor.as_deref(),
-                    serial: command.disk_serial.as_deref(),
-                    erase_target: command.erase_target,
-                    initialize_nor: command.initialize_nor,
-                    dram_bytes,
-                    usb_disk: usb_disk.as_deref(),
-                },
-            )?)
-        }
+    let usb_disk = host.volume(&esp)?.disk;
+    // Without --target, a raw partition of the USB is the Mac's internal
+    // SSD, and the PC's disks its external drives.
+    let stick = match &command.target {
+        Some(_) => None,
+        None => stick_ssd(host, usb_disk.as_deref())?,
+    };
+    let target = command.target.clone().or(stick.clone());
+    ensure!(target.is_none() || command.tss, TSS_REQUIRED);
+    let installed = match &target {
+        Some(target) => Some(installed::check(
+            host,
+            &installed::Request {
+                apple_region: target,
+                nor: command.nor.as_deref(),
+                serial: command.disk_serial.as_deref(),
+                erase_target: command.erase_target,
+                initialize_nor: command.initialize_nor,
+                dram_bytes,
+                usb_disk: usb_disk.as_deref(),
+                external_disks: stick.is_some(),
+            },
+        )?),
         None => None,
     };
     let mut notes = Vec::new();
@@ -1698,7 +1733,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         prepare_bundles(environment, &ipsw, command.model(), None, &[Some(ecid)])?;
     // With an installed disk, its two restore bundles (each smaller than
     // the recoveryOS one) go on the same volume.
-    let bundles = prepared[0].bytes * if command.target.is_some() { 3 } else { 1 };
+    let bundles = prepared[0].bytes * if installed.is_some() { 3 } else { 1 };
     let volume = choose_volume(host, &esp, &command.usb, command.volume.as_deref(), bundles)?;
     let installs = installed
         .iter()
@@ -1936,15 +1971,24 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
         report.push_str("Dry run: nothing was changed.\n");
         return Ok(report);
     }
+    let disk = plan.installed.as_ref().map(|checked| checked.disk.clone());
     apply(environment, plan)?;
-    let start = match &command.target {
-        Some(target) => format!(
+    let start = match disk {
+        Some(disk) if disk.external_disks => format!(
+            "boot the PC from the USB: its internal SSD ({}) is blank, so Stela offers \
+             \"{INSTALL_CHOICE}\", which restores it. Then recoveryOS's Disk Utility \
+             partitions and formats the PC's disks, which macOS sees as external drives, and \
+             Reinstall macOS installs onto one, as on a Mac",
+            disk.apple_region
+        ),
+        Some(disk) => format!(
             "choose \"{INSTALL_CHOICE}\" in Stela's startup choices to install macOS onto \
              {target}, then boot from the USB again, which boots the installed macOS (or \
-             recoveryOS while {target} holds none, or when NVRAM asks)"
+             recoveryOS while {target} holds none, or when NVRAM asks)",
+            target = disk.apple_region
         ),
-        _ => "stela.efi starts recoveryOS, where Disk Utility prepares a disk and Reinstall \
-              macOS installs onto it, as on a Mac"
+        None => "stela.efi starts recoveryOS, where Disk Utility prepares a disk and Reinstall \
+                 macOS installs onto it, as on a Mac"
             .into(),
     };
     writeln!(
@@ -2588,6 +2632,7 @@ mod tests {
             nor_serial: SERIAL.into(),
             nor_guid: NOR_GUID.into(),
             machine_state_offset: None,
+            external_disks: false,
         };
         let record = serde_json::json!({
             "schema_version": 3,
@@ -2743,6 +2788,69 @@ mod tests {
 
     fn nvram(f: &Fixture) -> Variables {
         nvram_of(f, NOR)
+    }
+
+    /// Give the USB an unmounted raw partition, as the Mac's internal SSD.
+    fn add_stick_ssd(f: &mut Fixture, identifier: &str, guid: &str) {
+        add_stela(f);
+        let usb = f
+            .host
+            .disks
+            .iter_mut()
+            .find(|d| d.identifier == "disk5")
+            .unwrap();
+        usb.partitions.push(Partition {
+            identifier: identifier.into(),
+            content: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF".into(),
+            mount: None,
+        });
+        // Sparse, as large as the partition: the machine state is its tail.
+        let path = f._dir.path().join(format!("{identifier}.img"));
+        fs::File::create(&path).unwrap().set_len(100 * GIB).unwrap();
+        let info = PartitionInfo {
+            identifier: identifier.into(),
+            disk: "disk5".into(),
+            guid: guid.to_ascii_lowercase(),
+            bytes: 100 * GIB,
+            content: "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF".into(),
+            mount: None,
+            container: None,
+        };
+        f.host.partitions.insert(identifier.into(), (info, path));
+        f.host.serials.insert("disk5".into(), "STICK01".into());
+    }
+
+    #[test]
+    fn a_raw_partition_of_the_usb_is_the_macs_ssd_and_the_pc_disks_external() {
+        let mut f = fixture(64 * GIB, false);
+        add_stick_ssd(&mut f, "disk5s4", REGION_GUID);
+        let error = setup(&environment(&f.host), command(&f, &f.esp))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs --tss"), "{error}");
+        let mut opted = command(&f, &f.esp);
+        opted.tss = true;
+        let report = setup(&environment(&f.host), opted).unwrap();
+        assert!(report.contains("external drives"), "{report}");
+        let record = record(&f);
+        let disk = &record.installs[0].disk;
+        assert_eq!(disk.apple_region, "disk5s4");
+        assert!(disk.external_disks);
+        let options = fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
+        assert!(
+            options.contains(&format!("--storage STICK01:{REGION_GUID}")),
+            "{options}"
+        );
+        assert!(options.contains("--external-disks"), "{options}");
+
+        // Two raw partitions name no one internal SSD.
+        let mut f = fixture(64 * GIB, false);
+        add_stick_ssd(&mut f, "disk5s4", REGION_GUID);
+        add_stick_ssd(&mut f, "disk5s5", REGION2_GUID);
+        let mut opted = command(&f, &f.esp);
+        opted.tss = true;
+        let error = setup(&environment(&f.host), opted).unwrap_err().to_string();
+        assert!(error.contains("several unmounted partitions"), "{error}");
     }
 
     fn rerun(f: &Fixture, configure: impl Fn(&mut Setup)) -> Result<String> {
