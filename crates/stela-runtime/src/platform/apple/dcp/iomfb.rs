@@ -6,31 +6,42 @@
 //! from its row and a method the model does not serve all refuse by name, so
 //! an unmodeled operation is a recorded gap, never a fake success.
 //!
-//! The method semantics follow Asahi Linux's AP side of the same protocol
-//! (`drivers/gpu/drm/apple/iomfb_template.c`: the boot sequence `boot_1` ..
-//! `boot_done`, `iomfb_poweron`, `iomfb_modeset`, `iomfb_flush` and the swap
-//! callbacks) and m1n1's method signatures (`proxyclient/m1n1/fw/dcp/ipc.py`),
-//! with this interface's tags and sizes. docs/research/display-gpu.md
-//! section 8 is the requirement matrix, row by row with its source.
+//! The boot sequence follows Asahi Linux's AP side of the same protocol
+//! (`drivers/gpu/drm/apple/iomfb_template.c`: `boot_1` .. `boot_done`,
+//! `iomfb_poweron`, the swap callbacks) and m1n1's method signatures
+//! (`proxyclient/m1n1/fw/dcp/ipc.py`), with this interface's tags and sizes.
+//! The mode, hotplug and swap layouts are the 26A434 AP's own (kernel
+//! fileset offsets, cited per method). docs/research/display-gpu.md section
+//! 8 is the requirement matrix, row by row with its source.
 //!
 //! `A401 start_signal` nests `D120 start_hardware_boot` into the AP before it
-//! answers, as the firmware does (Asahi `dcpep_cb_boot_1` is the AP's D120
-//! handler; it calls `set_create_DFB`, `do_create_default_frame_buffer`,
-//! `setup_video_limits`, `flush_supportsPower`, `late_init_signal` and
-//! `setDisplayRefreshProperties` back, which re-enter [`Methods::call`]).
-//! The model inherits the boot framebuffer rather than allocating a new
-//! default one: `A454 do_create_default_frame_buffer` answers 0.
+//! answers, as the firmware does (the AP's D120 handler calls
+//! `set_create_DFB`, `do_create_default_frame_buffer`, `setup_video_limits`,
+//! `flush_supportsPower`, `late_init_signal` and `setDisplayRefreshProperties`
+//! back, which re-enter [`Methods::call`]). The model inherits the boot
+//! framebuffer rather than allocating a new default one: `A454
+//! do_create_default_frame_buffer` answers 0.
+//!
+//! Once started, the coprocessor publishes its one mode on the IOMFB service
+//! (`D126`..`D128 setDCPAVPropStart/Chunk/End` with the keys `TimingElements`
+//! and `ColorElements`, [`super::modes`]) and then reports the monitor
+//! connected (`D575 hotPlug_notify_gated`, state 1). Its callbacks leave one
+//! at a time, each after the AP answered the previous one. The mode set is
+//! `A364 getVideoDataForIDs` then `A413 set_digital_out_mode` with the
+//! published IDs.
 //!
 //! A swap is `A406 swap_start_dcp` (the coprocessor assigns the swap id)
-//! then `A407 swap_submit_dcp`. A submitted swap's surface is queued as a
+//! then `A407 swap_submit_dcp` ([`super::swap`]). The submitted layers
+//! update the four layer slots; the one visible layer is queued as a
 //! [`Frame`]; the coprocessor reads its pixels through the display pipe's
-//! DART, presents them and only then completes the swap with
-//! `D594 swap_complete_ap_gated` ([`super::Coprocessor::present`]).
+//! DART, presents them and only then completes the swap with `D594
+//! swap_complete_ap_gated` ([`super::Coprocessor::present`]).
 use super::super::scanout::{self, Mode, Scanout, Surface};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};
+use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
-use super::swap;
+use super::swap::{self, Layer, Rect, Submission};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -50,6 +61,27 @@ const ADAPTIVE_SYNC: u32 = 14;
 /// `swap_complete_ap_gated(swap_id, ...)`); the rest of this interface's
 /// record is zero (no timing statistics are reported).
 const SWAP_COMPLETE: [u8; 4] = *b"D594";
+/// The property-publishing callbacks (`UnifiedPipeline_RemoteCalls::
+/// D126_callback__` 0x2a71628, `D127` 0x2a71730, `D128` 0x2a718b4).
+const PROP_START: [u8; 4] = *b"D126";
+const PROP_CHUNK: [u8; 4] = *b"D127";
+const PROP_END: [u8; 4] = *b"D128";
+/// `D127`'s chunk: `data[0x1000]` then `u32 offset`, `u32 length`.
+const CHUNK_BYTES: usize = 0x1000;
+/// `D128`'s key: `char[0x40]`, NUL-terminated by the AP.
+const KEY_BYTES: usize = 0x40;
+/// `IOMobileFramebuffer_RemoteCalls::D575_callback__` (0x3d88bb8):
+/// `hotPlug_notify_gated(u64 state, IOMFB_TiledDisplayInfo* (0x4b bytes,
+/// in-out), bool)`.
+const HOTPLUG: [u8; 4] = *b"D575";
+const TILED_DISPLAY_INFO: usize = 0x4b;
+/// `hotPlug_notify_gated`'s plugged state (`IOMobileFramebufferShim::
+/// hotPlug_notify_gated` 0x2a613c0 takes 0 as unplugged).
+const PLUGGED: u64 = 1;
+/// `get_digital_out_state`'s state for a connected display:
+/// `restored_external` uses an external display only when it reads 1
+/// ("Will use display %s").
+const DIGITAL_OUT_CONNECTED: u32 = 1;
 
 /// A submitted swap waiting for its pixels: its id and its surface, or none
 /// for a swap that only clears to the background.
@@ -59,50 +91,64 @@ pub struct Frame {
     pub surface: Option<Surface>,
 }
 
+/// A callback the coprocessor makes on its own initiative.
+struct Outgoing {
+    tag: [u8; 4],
+    input: Vec<u8>,
+    output: u32,
+}
+
 /// The IOMFB methods of the one connected display, presenting to a host
 /// scanout.
 pub struct Methods {
     scanout: Box<dyn Scanout>,
+    /// The one mode, or why the scanout's mode cannot be advertised.
+    advertised: Result<Advertised, &'static str>,
     /// Why the last call refused, with the tag and its interface row.
     last_refusal: Option<String>,
     log: VecDeque<Log>,
     dropped: u64,
-    /// The `IOMFBSwapRec` size submitted swaps are parsed with.
-    record: Option<usize>,
     dumped: u32,
     /// The last `setPowerState`.
     powered: Option<bool>,
     /// Open IOMFB clients (`first_client_open` minus `last_client_close`).
     clients: u32,
+    /// The mode set by `set_digital_out_mode`, `(color, timing)`.
+    digital_out: Option<(u32, u32)>,
     next_swap: u32,
     /// The swap `swap_start_dcp` opened, not yet submitted.
     open_swap: Option<u32>,
+    /// The four layer slots after the last submitted swap.
+    planes: [Option<Layer>; swap::LAYERS],
     frames: VecDeque<Frame>,
+    /// Callbacks to make, in order.
+    outgoing: VecDeque<Outgoing>,
     /// Swaps presented, whose completion callback is due.
     completed: VecDeque<u32>,
+    /// A callback is out and not answered yet.
+    in_flight: bool,
 }
 
 impl Methods {
     pub fn new(scanout: Box<dyn Scanout>) -> Self {
-        Self::with_record(scanout, swap::SWAP_RECORD_BYTES)
-    }
-
-    /// Methods that parse submitted swaps with an `IOMFBSwapRec` of `record`
-    /// bytes, or refuse them when it is `None`.
-    pub fn with_record(scanout: Box<dyn Scanout>, record: Option<usize>) -> Self {
+        let advertised = Advertised::new(scanout.mode());
         Self {
             scanout,
+            advertised,
             last_refusal: None,
             log: VecDeque::new(),
             dropped: 0,
-            record,
             dumped: 0,
             powered: None,
             clients: 0,
+            digital_out: None,
             next_swap: 1,
             open_swap: None,
+            planes: [None; swap::LAYERS],
             frames: VecDeque::new(),
+            outgoing: VecDeque::new(),
             completed: VecDeque::new(),
+            in_flight: false,
         }
     }
 
@@ -114,6 +160,11 @@ impl Methods {
     /// The last `setPowerState` the AP asked for.
     pub fn powered(&self) -> Option<bool> {
         self.powered
+    }
+
+    /// The `(color, timing)` IDs of the last `set_digital_out_mode`.
+    pub fn digital_out(&self) -> Option<(u32, u32)> {
+        self.digital_out
     }
 
     /// The last refusal's full text.
@@ -159,7 +210,7 @@ impl Methods {
                 scanout::PresentError::Format => "DCP swap surface format is not converted",
                 scanout::PresentError::Scanout(reason) => reason,
             })?,
-            // A background-only swap clears to opaque black.
+            // A swap without a visible layer clears to opaque black.
             None => alloc::vec![0u8; mode.width as usize * mode.height as usize * 4],
         };
         self.scanout.present(&rows)?;
@@ -171,7 +222,12 @@ impl Methods {
         Ok(())
     }
 
-    /// Record and return a named refusal for `tag`.
+    fn refusal(&mut self, text: String) {
+        self.record_log(Log::Refused(text.clone()));
+        self.last_refusal = Some(text);
+    }
+
+    /// Record and return a named refusal for method `tag`.
     fn refuse(&mut self, tag: [u8; 4], reason: &'static str) -> Result<Step<Self>, &'static str> {
         let row = abi::method(&tag)
             .map(|row| {
@@ -181,9 +237,17 @@ impl Methods {
                 )
             })
             .unwrap_or_default();
-        let text = format!("DCP IOMFB {}{row}: {reason}", abi::tag_str(&tag));
-        self.record_log(Log::Refused(text.clone()));
-        self.last_refusal = Some(text);
+        self.refusal(format!("DCP IOMFB {}{row}: {reason}", abi::tag_str(&tag)));
+        Err(reason)
+    }
+
+    /// Record and return a named refusal of the AP's answer to callback `tag`.
+    fn refuse_answer(&mut self, tag: [u8; 4], reason: &'static str) -> Result<(), &'static str> {
+        let name = abi::callback(&tag).map_or("", |row| row.name);
+        self.refusal(format!(
+            "DCP IOMFB callback {} {name}: {reason}",
+            abi::tag_str(&tag)
+        ));
         Err(reason)
     }
 
@@ -201,6 +265,66 @@ impl Methods {
             Err(reason) => self.refuse(tag, reason),
         }
     }
+
+    /// Queue a callback, sized by its interface row.
+    fn queue(&mut self, tag: [u8; 4], input: Packed) -> Result<(), &'static str> {
+        let row = abi::callback(&tag).ok_or("DCP callback is not on the interface")?;
+        let (Some(length), Some(output)) = (row.input, row.output) else {
+            return Err("DCP callback sizes are not recorded");
+        };
+        let input = input.finish(length)?;
+        self.outgoing.push_back(Outgoing { tag, input, output });
+        Ok(())
+    }
+
+    /// Publish the one mode's `TimingElements` and `ColorElements` on the
+    /// IOMFB service, then report the monitor plugged.
+    fn publish(&mut self) -> Result<(), &'static str> {
+        let advertised = match &self.advertised {
+            Ok(advertised) => advertised,
+            Err(reason) => {
+                let reason = *reason;
+                return self.refuse_answer(PROP_START, reason);
+            }
+        };
+        let properties = [
+            ("TimingElements", advertised.timing_elements()),
+            ("ColorElements", advertised.color_elements()),
+        ];
+        for (key, xml) in properties {
+            // setDCPAVPropEnd NUL-terminates the buffer's last byte and
+            // hands the whole buffer to OSUnserializeXML.
+            let mut bytes = xml.into_bytes();
+            bytes.push(0);
+            let length = u32::try_from(bytes.len()).map_err(|_| "DCP property is too long")?;
+            self.queue(PROP_START, Packed::new().u32(length))?;
+            for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
+                let mut data = [0u8; CHUNK_BYTES];
+                data[..chunk.len()].copy_from_slice(chunk);
+                self.queue(
+                    PROP_CHUNK,
+                    Packed::new()
+                        .bytes(&data)
+                        .u32((index * CHUNK_BYTES) as u32)
+                        .u32(chunk.len() as u32),
+                )?;
+            }
+            let mut name = [0u8; KEY_BYTES];
+            name[..key.len()].copy_from_slice(key.as_bytes());
+            self.queue(PROP_END, Packed::new().bytes(&name))?;
+        }
+        // A single, untiled display: a zero IOMFB_TiledDisplayInfo, present
+        // (its null flag clear); the trailing bool is not read by
+        // IOMobileFramebufferShim::hotPlug_notify_gated.
+        self.queue(
+            HOTPLUG,
+            Packed::new()
+                .u64(PLUGGED)
+                .bytes(&[0; TILED_DISPLAY_INFO])
+                .bool(false)
+                .bool(false),
+        )
+    }
 }
 
 impl Service for Methods {
@@ -210,25 +334,21 @@ impl Service for Methods {
         input: &[u8],
         output: u32,
     ) -> Result<Step<Self>, &'static str> {
-        let Some(row) = abi::method(&tag) else {
-            self.record_log(Log::Call {
-                tag,
-                input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
-                output,
-            });
-            return self.refuse(tag, "tag is not a method of this DCP interface");
-        };
         self.record_log(Log::Call {
             tag,
             input: input[..input.len().min(LOGGED_INPUT)].to_vec(),
             output,
         });
+        let Some(row) = abi::method(&tag) else {
+            return self.refuse(tag, "tag is not a method of this DCP interface");
+        };
         if row.input as usize != input.len() || row.output != output {
             return self.refuse(tag, "call sizes differ from the interface's record");
         }
         let mut fields = Fields::new(input);
         match &tag {
-            // start_signal: nest D120 start_hardware_boot, then report its bool.
+            // start_signal: nest D120 start_hardware_boot, report its bool,
+            // then publish the mode and the hotplug.
             b"A401" => {
                 self.callback_log(*b"D120", 0, 4);
                 Ok(Step::Call {
@@ -241,6 +361,9 @@ impl Service for Methods {
                             output: answer.to_vec(),
                         });
                         let ok = answer.first().is_some_and(|byte| byte & 1 != 0);
+                        if ok {
+                            methods.publish()?;
+                        }
                         Ok(Step::Return(bool_reply(ok)))
                     }),
                 })
@@ -285,13 +408,71 @@ impl Service for Methods {
                 let packed = Packed::new().u32(0).u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
             }
-            // set_digital_out_mode(color id, timing id): the model has not
-            // advertised any TimingElements/ColorElements, so no id names
-            // one of its modes.
-            b"A413" => self.refuse(
-                tag,
-                "set_digital_out_mode names a mode the DCP never advertised",
-            ),
+            // manage_properties(bool) (UnifiedPipeline2 0x2a52a8c; the
+            // shim's HPD path passes "plugged"): the properties are the
+            // ones already published; withdrawing them is not modeled.
+            b"A363" => {
+                if !fields.bool()? {
+                    return self.refuse(
+                        tag,
+                        "manage_properties withdraws the published modes, which the fixed monitor never does",
+                    );
+                }
+                Ok(Step::Return(Vec::new()))
+            }
+            // getVideoDataForIDs(IOAVVideoTimingData*, IOAVVideoColorData*,
+            // u32 timing, u32 color, bool* dual pipe) -> bool (UnifiedPipeline2
+            // 0x2a52ae4; the shim passes the timing ID before the color ID).
+            b"A364" => {
+                let timing_in = fields.bytes(modes::TIMING_BYTES)?;
+                let color_in = fields.bytes(modes::COLOR_BYTES)?;
+                let timing_id = fields.u32()?;
+                let color_id = fields.u32()?;
+                let found = self
+                    .advertised
+                    .as_ref()
+                    .ok()
+                    .and_then(|advertised| advertised.video_data(timing_id, color_id));
+                let packed = match found {
+                    Some((timing, color)) => Packed::new()
+                        .bytes(timing)
+                        .bytes(color)
+                        .bool(false)
+                        .bool(true),
+                    // Unknown IDs: the records are left as passed, false.
+                    None => Packed::new()
+                        .bytes(timing_in)
+                        .bytes(color_in)
+                        .bool(false)
+                        .bool(false),
+                };
+                let packed = packed.finish(output);
+                self.reply(tag, packed)
+            }
+            // set_digital_out_mode(color id, timing id) -> link status
+            // (IOMobileFramebufferAP 0x3d77a64).
+            b"A413" => {
+                let color = fields.u32()?;
+                let timing = fields.u32()?;
+                if (color, timing) != (modes::COLOR_ID, modes::TIMING_ID) {
+                    return self.refuse(
+                        tag,
+                        "set_digital_out_mode names a mode the DCP never advertised",
+                    );
+                }
+                self.digital_out = Some((color, timing));
+                let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
+                self.reply(tag, packed)
+            }
+            // get_digital_out_state(u32* state) -> link status
+            // (IOMobileFramebufferAP 0x3d77ad4): the monitor is connected.
+            b"A414" => {
+                let packed = Packed::new()
+                    .u32(DIGITAL_OUT_CONNECTED)
+                    .u32(IO_RETURN_SUCCESS)
+                    .finish(output);
+                self.reply(tag, packed)
+            }
             // first_client_open() / last_client_close_dcp(out u32).
             b"A466" => {
                 self.clients += 1;
@@ -332,10 +513,38 @@ impl Service for Methods {
     }
 
     fn callback_pending(&self) -> bool {
-        !self.completed.is_empty()
+        !self.in_flight && !(self.outgoing.is_empty() && self.completed.is_empty())
     }
 
     fn take_callback(&mut self) -> Option<Callback<Self>> {
+        if self.in_flight {
+            return None;
+        }
+        if let Some(Outgoing { tag, input, output }) = self.outgoing.pop_front() {
+            self.in_flight = true;
+            self.callback_log(tag, input.len(), output);
+            return Some(Callback {
+                tag,
+                input,
+                output,
+                then: Box::new(move |methods, answer| {
+                    methods.in_flight = false;
+                    methods.record_log(Log::Answer {
+                        tag,
+                        output: answer.to_vec(),
+                    });
+                    // The setDCPAVProp handlers answer a bool: false is
+                    // "setDCPAVPropStart not called or failed", "invalid
+                    // chunk requested", "OSUnserializeXML failed" or
+                    // "setProperty failed".
+                    if tag != HOTPLUG && !answer.first().is_some_and(|byte| byte & 1 != 0) {
+                        methods.outgoing.clear();
+                        return methods.refuse_answer(tag, "the AP refused the published mode");
+                    }
+                    Ok(())
+                }),
+            });
+        }
         let swap_id = self.completed.pop_front()?;
         let length = abi::callback(&SWAP_COMPLETE)
             .and_then(|row| row.input)
@@ -343,20 +552,23 @@ impl Service for Methods {
             as usize;
         let mut input = alloc::vec![0u8; length];
         input[0..4].copy_from_slice(&swap_id.to_le_bytes());
+        self.in_flight = true;
         self.callback_log(SWAP_COMPLETE, length, 0);
         Some(Callback {
             tag: SWAP_COMPLETE,
             input,
             output: 0,
-            then: Box::new(|_, _| Ok(())),
+            then: Box::new(|methods, _| {
+                methods.in_flight = false;
+                Ok(())
+            }),
         })
     }
 }
 
 impl Methods {
-    /// `swap_submit_dcp`: queue the swap's one enabled layer (or none, a
-    /// background clear) and answer `{bool, u32, u32 result}` (Linux
-    /// `dcp_swap_submit_resp`).
+    /// `swap_submit_dcp`: update the layer slots, queue the visible layer
+    /// (or none, a background clear) and answer `{bool, u32, link status}`.
     fn submit(
         &mut self,
         tag: [u8; 4],
@@ -373,33 +585,16 @@ impl Methods {
                 bytes: input.to_vec(),
             });
         }
-        let Some(record) = self.record else {
-            return self.refuse(
-                tag,
-                "the IOMFBSwapRec size of this interface is not pinned; the submitted input is in the display log",
-            );
-        };
-        let layers = match swap::layers(input, record) {
-            Ok(layers) => layers,
+        let submission = match Submission::parse(input) {
+            Ok(submission) => submission,
             Err(reason) => return self.refuse(tag, reason),
         };
-        let mut enabled = layers.iter().flatten();
-        let surface = match (enabled.next(), enabled.next()) {
-            (None, _) => None,
-            (Some((layer, dva)), None) => match layer.surface(*dva) {
-                Ok(surface) => Some(surface),
-                Err(reason) => return self.refuse(tag, reason),
-            },
-            (Some(_), Some(_)) => {
-                return self.refuse(tag, "swap composes several layers; the model scans out one");
-            }
+        let planes = submission.apply(&self.planes);
+        let surface = match visible(&planes, submission.background, self.mode()) {
+            Ok(surface) => surface,
+            Err(reason) => return self.refuse(tag, reason),
         };
-        let mode = self.mode();
-        if surface
-            .is_some_and(|surface| surface.width != mode.width || surface.height != mode.height)
-        {
-            return self.refuse(tag, "swap surface differs from the fixed mode");
-        }
+        self.planes = planes;
         self.frames.push_back(Frame { swap_id, surface });
         let packed = Packed::new()
             .bool(false)
@@ -407,6 +602,34 @@ impl Methods {
             .u32(IO_RETURN_SUCCESS)
             .finish(output);
         self.reply(tag, packed)
+    }
+}
+
+/// The surface the layer slots show on the fixed `mode`: none when no layer
+/// is visible and the background is black; the one layer when it covers the
+/// screen unscaled. Anything else refuses by name.
+fn visible(
+    planes: &[Option<Layer>; swap::LAYERS],
+    background: u32,
+    mode: Mode,
+) -> Result<Option<Surface>, &'static str> {
+    let mut layers = planes.iter().flatten();
+    match (layers.next(), layers.next()) {
+        (None, _) if background == 0 => Ok(None),
+        (None, _) => Err("swap clears to a background color; the model presents black only"),
+        (Some(layer), None) => {
+            let surface = layer.record.surface(layer.dva)?;
+            if layer.source != Rect::whole(surface.width, surface.height)
+                || layer.destination != Rect::whole(mode.width, mode.height)
+                || (surface.width, surface.height) != (mode.width, mode.height)
+            {
+                return Err(
+                    "swap crops, scales or places its layer off the full screen; the model presents an unscaled full-screen layer",
+                );
+            }
+            Ok(Some(surface))
+        }
+        (Some(_), Some(_)) => Err("swap composes several layers; the model scans out one"),
     }
 }
 
@@ -471,82 +694,10 @@ pub fn answer(
     }
 }
 
-/// A truthful EDID 1.4 base block for the fixed `mode` at 60 Hz: enough for
-/// the driver to accept one connected SDR digital display of that size. The
-/// pixel clock and blanking are nominal CVT-style values; the model advertises
-/// exactly this one detailed timing.
-pub fn edid(mode: Mode) -> [u8; 128] {
-    let mut e = [0u8; 128];
-    e[0..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
-    // Manufacturer "STE" (Stela), product 1, serial 1, week 1, year 2026.
-    let man = ((b'S' as u16 - 64) << 10) | ((b'T' as u16 - 64) << 5) | (b'E' as u16 - 64);
-    e[8..10].copy_from_slice(&man.to_be_bytes());
-    e[10..12].copy_from_slice(&1u16.to_le_bytes());
-    e[12..16].copy_from_slice(&1u32.to_le_bytes());
-    e[16] = 1;
-    e[17] = 2026u16.wrapping_sub(1990) as u8;
-    e[18] = 1; // EDID 1.4
-    e[19] = 4;
-    // Digital input, 8 bpc, DisplayPort; digital display.
-    e[20] = 0xa5;
-    e[21] = (mode.width / 100).min(255) as u8;
-    e[22] = (mode.height / 100).min(255) as u8;
-    e[23] = 0x78; // gamma 2.2
-    e[24] = 0x06; // RGB, preferred-timing-is-native
-    // Nominal chromaticity (sRGB-like); exact values are not load-bearing.
-    e[25..35].copy_from_slice(&[0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54]);
-    // Established/standard timings unused; the detailed timing is the mode.
-    let dtd = detailed_timing(mode);
-    e[54..72].copy_from_slice(&dtd);
-    // Three display descriptors: name, range limits, blank.
-    e[72] = 0x00;
-    e[75] = 0xfc; // display name
-    e[77..77 + 6].copy_from_slice(b"Stela\n");
-    e[90] = 0x00;
-    e[93] = 0xfd; // range limits
-    e[95..95 + 6].copy_from_slice(&[0x32, 0x4b, 0x1e, 0x50, 0x11, 0x00]);
-    e[101] = 0x0a;
-    e[108] = 0x00;
-    e[111] = 0x10; // dummy
-    e[126] = 0; // one extension would go here; none
-    let sum = e[0..127].iter().fold(0u8, |a, b| a.wrapping_add(*b));
-    e[127] = 0u8.wrapping_sub(sum);
-    e
-}
-
-/// An 18-byte detailed timing descriptor for `mode` at ~60 Hz with CVT-style
-/// blanking (160 front/back horizontal, 45 vertical lines).
-fn detailed_timing(mode: Mode) -> [u8; 18] {
-    let w = mode.width;
-    let h = mode.height;
-    let hblank = 160u32 + 160;
-    let vblank = 45u32;
-    let clock = ((w + hblank) * (h + vblank) * 60 / 10_000).max(1);
-    let mut d = [0u8; 18];
-    d[0..2].copy_from_slice(&(clock as u16).to_le_bytes());
-    d[2] = (w & 0xff) as u8;
-    d[3] = (hblank & 0xff) as u8;
-    d[4] = (((w >> 8) << 4) | (hblank >> 8)) as u8;
-    d[5] = (h & 0xff) as u8;
-    d[6] = (vblank & 0xff) as u8;
-    d[7] = (((h >> 8) << 4) | (vblank >> 8)) as u8;
-    d[8] = 48; // h front porch
-    d[9] = 32; // h sync width
-    d[10] = ((3 << 4) | 10) as u8; // v front porch / sync width low
-    d[11] = 0;
-    // Image size in mm (nominal), borders 0, digital separate sync +/+.
-    d[12] = ((w / 4) & 0xff) as u8;
-    d[13] = ((h / 4) & 0xff) as u8;
-    d[14] = 0;
-    d[15] = 0;
-    d[16] = 0;
-    d[17] = 0x1e;
-    d
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::super::scanout::{Mode, PixelFormat};
+    use super::super::swap::tests::submission;
     use super::*;
     use alloc::rc::Rc;
     use core::cell::RefCell;
@@ -584,6 +735,30 @@ mod tests {
             Ok(Step::Call { .. }) => panic!("expected a return, got a callback"),
             Err(reason) => panic!("refused: {reason}"),
         }
+    }
+
+    /// Start the display: A401, nesting D120, which the AP answers true.
+    fn started(methods: &mut Methods) {
+        let step = methods.call(*b"A401", &[], 4).unwrap();
+        let Step::Call { then, .. } = step else {
+            panic!("A401 must nest D120");
+        };
+        returned(then(methods, &1u32.to_le_bytes()));
+    }
+
+    /// Make every queued callback, answering each with `answer`; returns
+    /// their tags and inputs.
+    fn drain(methods: &mut Methods, answer: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut made = Vec::new();
+        while let Some(callback) = methods.take_callback() {
+            assert!(methods.take_callback().is_none(), "one callback at a time");
+            made.push((callback.tag, callback.input.clone()));
+            let mut output = alloc::vec![0u8; callback.output as usize];
+            let n = output.len().min(answer.len());
+            output[..n].copy_from_slice(&answer[..n]);
+            (callback.then)(methods, &output).unwrap();
+        }
+        made
     }
 
     #[test]
@@ -691,6 +866,136 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_hardware_boot_publishes_nothing() {
+        let mut methods = methods();
+        let Ok(Step::Call { then, .. }) = methods.call(*b"A401", &[], 4) else {
+            panic!("A401 must nest D120");
+        };
+        assert_eq!(returned(then(&mut methods, &[0; 4])), [0; 4]);
+        assert!(!methods.callback_pending());
+    }
+
+    #[test]
+    fn start_publishes_the_mode_then_reports_the_monitor_plugged() {
+        let mut methods = methods();
+        started(&mut methods);
+        assert!(methods.callback_pending());
+        let made = drain(&mut methods, &[1, 0, 0, 0]);
+        let tags: Vec<&[u8; 4]> = made.iter().map(|(tag, _)| tag).collect();
+        // Start, the chunks, End per key; then the hotplug.
+        assert_eq!(tags.first(), Some(&&PROP_START));
+        assert_eq!(tags.last(), Some(&&HOTPLUG));
+        assert_eq!(tags.iter().filter(|tag| ***tag == PROP_END).count(), 2);
+        let mut keys = Vec::new();
+        let mut buffer = Vec::new();
+        let mut expected = 0usize;
+        for (tag, input) in &made {
+            match tag {
+                &PROP_START => {
+                    assert_eq!(input.len(), 4);
+                    expected = u32::from_le_bytes(input[0..4].try_into().unwrap()) as usize;
+                    buffer = alloc::vec![0u8; expected];
+                }
+                &PROP_CHUNK => {
+                    assert_eq!(input.len(), 0x1008);
+                    let offset = u32::from_le_bytes(input[0x1000..0x1004].try_into().unwrap());
+                    let length = u32::from_le_bytes(input[0x1004..0x1008].try_into().unwrap());
+                    let (offset, length) = (offset as usize, length as usize);
+                    assert!(length <= CHUNK_BYTES && offset + length <= expected);
+                    buffer[offset..offset + length].copy_from_slice(&input[..length]);
+                }
+                &PROP_END => {
+                    assert_eq!(input.len(), 0x40);
+                    let key = input.split(|&byte| byte == 0).next().unwrap();
+                    keys.push(String::from_utf8(key.to_vec()).unwrap());
+                    // The buffer ends in the NUL setDCPAVPropEnd writes.
+                    assert_eq!(buffer.last(), Some(&0));
+                    let text = core::str::from_utf8(&buffer[..buffer.len() - 1]).unwrap();
+                    assert!(text.starts_with("<array><dict>"));
+                }
+                &HOTPLUG => {
+                    assert_eq!(input.len(), 0x58);
+                    assert_eq!(&input[0..8], &1u64.to_le_bytes());
+                    // The tiled-display info is present (null flag clear).
+                    assert_eq!(input[0x54], 0);
+                }
+                other => panic!("unexpected callback {other:?}"),
+            }
+        }
+        assert_eq!(keys, ["TimingElements", "ColorElements"]);
+        assert!(!methods.callback_pending());
+    }
+
+    #[test]
+    fn a_refused_property_stops_publishing_by_name() {
+        let mut methods = methods();
+        started(&mut methods);
+        let callback = methods.take_callback().unwrap();
+        assert_eq!(callback.tag, PROP_START);
+        assert!((callback.then)(&mut methods, &[0; 4]).is_err());
+        assert!(
+            methods
+                .last_refusal()
+                .unwrap()
+                .contains("setDCPAVPropStart")
+        );
+        assert!(!methods.callback_pending());
+    }
+
+    #[test]
+    fn the_mode_set_uses_the_published_ids() {
+        let mut methods = methods();
+        started(&mut methods);
+        drain(&mut methods, &[1, 0, 0, 0]);
+        // get_digital_out_state: connected, success.
+        let state = Packed::new().u32(0).bool(false).finish(8).unwrap();
+        assert_eq!(
+            returned(methods.call(*b"A414", &state, 8)),
+            [1, 0, 0, 0, 0, 0, 0, 0]
+        );
+        // getVideoDataForIDs(timing, color): both records, no dual pipe, true.
+        let query = |timing: u32, color: u32| {
+            Packed::new()
+                .bytes(&[0; modes::TIMING_BYTES])
+                .bytes(&[0; modes::COLOR_BYTES])
+                .u32(timing)
+                .u32(color)
+                .bool(false)
+                .finish(0x7c)
+                .unwrap()
+        };
+        let data =
+            returned(methods.call(*b"A364", &query(modes::TIMING_ID, modes::COLOR_ID), 0x74));
+        let advertised = Advertised::new(FULL_HD).unwrap();
+        assert_eq!(&data[..0x50], &advertised.timing[..]);
+        assert_eq!(&data[0x50..0x70], &advertised.color[..]);
+        assert_eq!((data[0x70], data[0x71]), (0, 1));
+        // Unknown IDs answer false.
+        let data = returned(methods.call(*b"A364", &query(7, 7), 0x74));
+        assert_eq!(data[0x71], 0);
+        // set_digital_out_mode(color, timing).
+        let set = Packed::new()
+            .u32(modes::COLOR_ID)
+            .u32(modes::TIMING_ID)
+            .finish(8)
+            .unwrap();
+        assert_eq!(returned(methods.call(*b"A413", &set, 4)), [0; 4]);
+        assert_eq!(
+            methods.digital_out(),
+            Some((modes::COLOR_ID, modes::TIMING_ID))
+        );
+        let swapped = Packed::new()
+            .u32(modes::TIMING_ID)
+            .u32(modes::COLOR_ID)
+            .finish(8)
+            .unwrap();
+        assert!(methods.call(*b"A413", &swapped, 4).is_err());
+        // manage_properties(true) keeps them; (false) refuses.
+        assert!(returned(methods.call(*b"A363", &[1, 0, 0, 0], 0)).is_empty());
+        assert!(methods.call(*b"A363", &[0; 4], 0).is_err());
+    }
+
+    #[test]
     fn power_and_parameters_follow_asahis_power_on() {
         let mut methods = methods();
         // set_parameter_dcp(ADAPTIVE_SYNC, 0, count 3) as Asahi sends it.
@@ -712,42 +1017,12 @@ mod tests {
         assert_eq!(methods.powered(), Some(false));
         let other = Packed::new().u64(2).finish(0x10).unwrap();
         assert!(methods.call(*b"A484", &other, 8).is_err());
-        // No mode was advertised, so a mode set refuses.
-        assert!(
-            methods
-                .call(*b"A413", &[1, 0, 0, 0, 1, 0, 0, 0], 4)
-                .is_err()
-        );
         // first_client_open / last_client_close_dcp.
         assert!(returned(methods.call(*b"A466", &[], 0)).is_empty());
         assert_eq!(returned(methods.call(*b"A467", &[0; 4], 4)), [0; 4]);
     }
 
-    /// A swap_submit_dcp input with a 0x10-byte record and `layer` enabled.
-    fn submission(surface: Option<(u32, u32)>) -> Vec<u8> {
-        let mut input = alloc::vec![0u8; 0x1d30];
-        if let Some((width, height)) = surface {
-            let record = 0x10;
-            let at = record;
-            input[at + 3..at + 7].copy_from_slice(&1u32.to_le_bytes());
-            input[at + 0xb..at + 0xf]
-                .copy_from_slice(&PixelFormat::Bgra8888.fourcc().to_le_bytes());
-            input[at + 0x15..at + 0x19].copy_from_slice(&(width * 4).to_le_bytes());
-            input[at + 0x21..at + 0x25].copy_from_slice(&width.to_le_bytes());
-            input[at + 0x25..at + 0x29].copy_from_slice(&height.to_le_bytes());
-            input[at + 0x29..at + 0x2d].copy_from_slice(&(width * height * 4).to_le_bytes());
-            let dvas = record + swap::LAYERS * swap::SURFACE_BYTES;
-            input[dvas..dvas + 8].copy_from_slice(&0x1000u64.to_le_bytes());
-        }
-        input
-    }
-
-    #[test]
-    fn a_swap_is_started_submitted_presented_then_completed() {
-        let screen = TestScreen(Rc::default(), Some(MODE));
-        let frames = screen.0.clone();
-        let mut methods = Methods::with_record(Box::new(screen), Some(0x10));
-        assert!(returned(methods.call(*b"A403", &[], 0)).is_empty());
+    fn start_swap(methods: &mut Methods) -> u32 {
         let start = Packed::new()
             .u32(0)
             .u64(0xfeed)
@@ -755,10 +1030,25 @@ mod tests {
             .finish(0x10)
             .unwrap();
         let started = returned(methods.call(*b"A406", &start, 8));
-        assert_eq!(started, [1, 0, 0, 0, 0, 0, 0, 0]);
+        u32::from_le_bytes(started[0..4].try_into().unwrap())
+    }
+
+    #[test]
+    fn a_swap_is_started_submitted_presented_then_completed() {
+        let screen = TestScreen(Rc::default(), Some(MODE));
+        let frames = screen.0.clone();
+        let mut methods = Methods::new(Box::new(screen));
+        assert!(returned(methods.call(*b"A403", &[], 0)).is_empty());
+        assert_eq!(start_swap(&mut methods), 1);
         // A second start before the submit refuses.
+        let start = Packed::new()
+            .u32(0)
+            .u64(0)
+            .bool(false)
+            .finish(0x10)
+            .unwrap();
         assert!(methods.call(*b"A406", &start, 8).is_err());
-        let submitted = returned(methods.call(*b"A407", &submission(Some((4, 2))), 0xc));
+        let submitted = returned(methods.call(*b"A407", &submission(1, &[(0, 4, 2, 0x1000)]), 0xc));
         assert_eq!(submitted, [0; 12]);
         // Not complete until presented.
         assert!(!methods.callback_pending() && methods.frame_pending());
@@ -774,6 +1064,7 @@ mod tests {
         assert_eq!(&callback.tag, b"D594");
         assert_eq!(callback.input.len(), 0x730);
         assert_eq!(&callback.input[0..4], &1u32.to_le_bytes());
+        (callback.then)(&mut methods, &[]).unwrap();
         // The record is logged whole the first times.
         let logged = core::iter::from_fn(|| methods.take_log())
             .any(|entry| matches!(entry, Log::Payload { bytes, .. } if bytes.len() == 0x1d30));
@@ -781,57 +1072,65 @@ mod tests {
     }
 
     #[test]
+    fn a_layer_left_out_of_the_mask_keeps_showing() {
+        let screen = TestScreen(Rc::default(), Some(MODE));
+        let frames = screen.0.clone();
+        let mut methods = Methods::new(Box::new(screen));
+        start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(1, &[(2, 4, 2, 0x1000)]), 0xc));
+        methods
+            .present(|_, bytes| {
+                bytes.fill(1);
+                true
+            })
+            .unwrap();
+        // A swap that enables no layer keeps layer 2.
+        start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(2, &[]), 0xc));
+        methods
+            .present(|dva, bytes| {
+                assert!((0x1000..0x1020).contains(&dva));
+                bytes.fill(2);
+                true
+            })
+            .unwrap();
+        assert_eq!(frames.borrow()[1], [2; 32]);
+    }
+
+    #[test]
     fn a_background_swap_clears_and_bad_swaps_refuse() {
         let screen = TestScreen(Rc::default(), Some(MODE));
         let frames = screen.0.clone();
-        let mut methods = Methods::with_record(Box::new(screen), Some(0x10));
-        let start = Packed::new()
-            .u32(0)
-            .u64(0)
-            .bool(false)
-            .finish(0x10)
-            .unwrap();
+        let mut methods = Methods::new(Box::new(screen));
         // A submit without a start refuses.
-        assert!(methods.call(*b"A407", &submission(None), 0xc).is_err());
-        returned(methods.call(*b"A406", &start, 8));
-        returned(methods.call(*b"A407", &submission(None), 0xc));
+        assert!(methods.call(*b"A407", &submission(0, &[]), 0xc).is_err());
+        start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
         methods
             .present(|_, _| panic!("a clear reads no surface"))
             .unwrap();
         assert_eq!(frames.borrow()[0], [0; 32]);
         // A surface of another size than the mode refuses.
-        returned(methods.call(*b"A406", &start, 8));
+        start_swap(&mut methods);
         assert!(
             methods
-                .call(*b"A407", &submission(Some((2, 2))), 0xc)
+                .call(*b"A407", &submission(2, &[(0, 2, 2, 0x1000)]), 0xc)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn an_unpinned_record_refuses_the_submit_and_logs_it() {
-        let mut methods = methods();
-        let start = Packed::new()
-            .u32(0)
-            .u64(0)
-            .bool(false)
-            .finish(0x10)
-            .unwrap();
-        returned(methods.call(*b"A406", &start, 8));
-        assert!(methods.call(*b"A407", &submission(None), 0xc).is_err());
-        assert!(methods.last_refusal().unwrap().contains("not pinned"));
-        let logged = core::iter::from_fn(|| methods.take_log())
-            .any(|entry| matches!(entry, Log::Payload { .. }));
-        assert!(logged);
-    }
-
-    #[test]
-    fn the_edid_is_well_formed_for_the_mode() {
-        let e = edid(FULL_HD);
-        assert_eq!(&e[0..8], &[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0]);
-        assert_eq!(e.iter().fold(0u8, |a, b| a.wrapping_add(*b)), 0, "checksum");
-        let dtd = &e[54..72];
-        let hactive = u32::from(dtd[2]) | (u32::from(dtd[4] >> 4) << 8);
-        assert_eq!(hactive, 1920);
+        // Two visible layers refuse.
+        start_swap(&mut methods);
+        let two = submission(3, &[(0, 4, 2, 0x1000), (1, 4, 2, 0x2000)]);
+        assert!(methods.call(*b"A407", &two, 0xc).is_err());
+        assert!(methods.last_refusal().unwrap().contains("several layers"));
+        // An offset destination refuses.
+        start_swap(&mut methods);
+        let mut offset = submission(4, &[(0, 4, 2, 0x1000)]);
+        offset[swap::DESTINATION_RECTS] = 1;
+        assert!(methods.call(*b"A407", &offset, 0xc).is_err());
+        // A non-black background refuses.
+        start_swap(&mut methods);
+        let mut red = submission(5, &[]);
+        red[swap::BACKGROUND] = 0xff;
+        assert!(methods.call(*b"A407", &red, 0xc).is_err());
     }
 }

@@ -18,8 +18,11 @@
 //!   end of its calls and callbacks through the AP's shared region, which the
 //!   coprocessor masters through `dart-dcpext`.
 //! - [`abi`]: the interface's tags, sizes and argument packing.
-//! - [`iomfb`]: the methods, the swap queue and the completion callbacks.
-//! - [`swap`]: `swap_submit_dcp`'s surfaces.
+//! - [`iomfb`]: the methods, the published mode and hotplug, the swap queue
+//!   and the completion callbacks.
+//! - [`modes`]: the one advertised mode (EDID, IOAV timing and color records
+//!   and their `TimingElements`/`ColorElements` properties).
+//! - [`swap`]: `swap_submit_dcp`'s record and surfaces.
 //! - [`afk`]: the AFK ring transport of the EPIC endpoints, up with no
 //!   service announced.
 //!
@@ -30,6 +33,7 @@ pub mod abi;
 pub mod afk;
 pub mod iomfb;
 pub mod link;
+pub mod modes;
 pub mod rpc;
 pub mod swap;
 
@@ -506,7 +510,7 @@ mod tests {
     #[test]
     fn a_presented_swap_completes_on_a_coprocessor_stream() {
         let (scanout, presented) = screen(4, 2);
-        let methods = iomfb::Methods::with_record(scanout, Some(0x10));
+        let methods = iomfb::Methods::new(scanout);
         let mut coprocessor = Coprocessor::with_methods(methods, Some(RAM)).unwrap();
         let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize + 0x4000);
         let mut endpoint = up(&mut coprocessor, &mut ram);
@@ -518,18 +522,9 @@ mod tests {
             .unwrap();
         call(&mut endpoint, &mut ram, 0, b"A406", &start, 8, true);
         dma(&mut coprocessor, &mut ram).unwrap();
-        // One 4x2 BGRA layer at DVA RAM + 0xc4000, after the 0x10 record.
-        let mut submit = alloc::vec![0u8; 0x1d30];
-        let at = 0x10;
-        submit[at + 3] = 1;
-        submit[at + 0xb..at + 0xf].copy_from_slice(&PixelFormat::Bgra8888.fourcc().to_le_bytes());
-        submit[at + 0x15] = 16;
-        submit[at + 0x21] = 4;
-        submit[at + 0x25] = 2;
-        submit[at + 0x29] = 32;
-        let dvas = 0x10 + swap::LAYERS * swap::SURFACE_BYTES;
+        // One 4x2 BGRA layer after the link's region.
         let surface = RAM + 0x4000 + link::REGION_BYTES;
-        submit[dvas..dvas + 8].copy_from_slice(&surface.to_le_bytes());
+        let submit = swap::tests::submission(1, &[(0, 4, 2, surface)]);
         call(&mut endpoint, &mut ram, 0, b"A407", &submit, 0xc, true);
         dma(&mut coprocessor, &mut ram).unwrap();
         assert!(coprocessor.frame_pending() && !coprocessor.dma_pending());

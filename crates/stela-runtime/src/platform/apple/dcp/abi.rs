@@ -188,9 +188,12 @@ impl Packed {
     }
 }
 
-/// `kIOReturnSuccess`, the value a `uint32_t` result reports success with.
-/// Asahi's `iomfb_template.c` (`dcp_swapped`, `dcp_swap_cleared`) treats any
-/// other swap result as a failed swap.
+/// The link status a successful `uint32_t` result carries. The AP converts
+/// it with `iomfb_status_from_link` (0x3d9cf30): 0 is `kIOReturnSuccess`,
+/// 1..=18 index its error table (0xaf72f0: 1 0xe00002bc, 2 0xe00002c7, ...,
+/// 18 0xe0000001) and larger values also read as success. Asahi's
+/// `iomfb_template.c` (`dcp_swapped`) treats any nonzero swap result as a
+/// failed swap.
 pub const IO_RETURN_SUCCESS: u32 = 0;
 
 /// The interface's methods.
@@ -472,7 +475,7 @@ pub const CALLBACKS: &[Callback] = &[
     c(b"D124", "UnifiedPipeline", "read_edt_data", Some(0x64), Some(0x24)),
     c(b"D125", "UnifiedPipeline", "read_edt_string", Some(0x48), Some(0x48)),
     c(b"D126", "UnifiedPipeline", "setDCPAVPropStart", Some(0x4), Some(0x4)),
-    c(b"D127", "UnifiedPipeline", "setDCPAVPropChunk", None, None),
+    c(b"D127", "UnifiedPipeline", "setDCPAVPropChunk", Some(0x1008), Some(0x4)),
     c(b"D128", "UnifiedPipeline", "setDCPAVPropEnd", Some(0x40), Some(0x4)),
     c(b"D129", "UnifiedPipeline", "allocate_bandwidth", Some(0x1c), Some(0x14)),
     c(b"D130", "UnifiedPipeline", "update_ext_pipe_count", Some(0x8), None),
@@ -547,7 +550,7 @@ pub const CALLBACKS: &[Callback] = &[
     c(b"D572", "IOMobileFramebuffer", "powerUpDART", Some(0x4), Some(0x4)),
     c(b"D573", "IOMobileFramebuffer", "", Some(0x4), Some(0x8)),
     c(b"D574", "IOMobileFramebuffer", "", Some(0x4), Some(0x8)),
-    c(b"D575", "IOMobileFramebuffer", "", Some(0x58), Some(0x4c)),
+    c(b"D575", "IOMobileFramebuffer", "hotPlug_notify_gated", Some(0x58), Some(0x4c)),
     c(b"D576", "IOMobileFramebuffer", "", Some(0x4), None),
     c(b"D577", "IOMobileFramebuffer", "", Some(0x8), None),
     c(b"D578", "IOMobileFramebuffer", "", None, None),
@@ -621,6 +624,29 @@ mod tests {
         assert_eq!(callback(b"D120").unwrap().name, "start_hardware_boot");
         assert_eq!(callback(b"D594").unwrap().input, Some(0x730));
         assert!(method(b"A999").is_none());
+        // The 26A434 dispatch stubs: D127 takes data[0x1000], offset and
+        // length and answers a bool; D575 packs u64 state, the 0x4b-byte
+        // IOMFB_TiledDisplayInfo, a bool and the info's null flag, and
+        // answers the info back.
+        assert_eq!(
+            (
+                callback(b"D127").unwrap().input,
+                callback(b"D127").unwrap().output
+            ),
+            (Some(0x1000 + 8), Some(4))
+        );
+        let hotplug = callback(b"D575").unwrap();
+        assert_eq!(
+            (hotplug.input, hotplug.output),
+            (Some((8u32 + 0x4b + 1 + 1).next_multiple_of(4)), Some(0x4c))
+        );
+        // getVideoDataForIDs: timing 0x50, color 0x20, two u32, a bool and
+        // three null flags in; the two records, the bool and the result out.
+        assert_eq!(method(b"A364").unwrap().input, 0x50 + 0x20 + 8 + 1 + 3);
+        assert_eq!(
+            method(b"A364").unwrap().output,
+            (0x50u32 + 0x20 + 2).next_multiple_of(4)
+        );
     }
 
     #[test]
