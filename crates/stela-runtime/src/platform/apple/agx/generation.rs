@@ -17,15 +17,119 @@
 //!
 //! A family is admitted ([`Gpu::admitted`]) only when every layout the GFX
 //! firmware model and the `sgx` model use has been checked against that
-//! family's own kext and firmware. Today that is G14G and the two G13
-//! families, whose kexts write the same initdata, rings and channels
-//! (aligned function by function) and whose firmware runs the same device-
-//! control and signal handlers except the dashboard signal it lacks
-//! ([`Family::dashboard_signals`]). Every other family is named here with
-//! the facts recovered so far and stays hidden by the loader, its refusal
-//! naming what is missing.
+//! family's own kext and firmware ([`Interface::Modeled`] carries them as a
+//! [`Model`]). Today that is G14G, the two G13 families, whose kexts write
+//! the same initdata, rings and channels (aligned function by function) and
+//! whose firmware runs the same device-control and signal handlers except
+//! the dashboard signal it lacks ([`Family::dashboard_signals`]), and G14X,
+//! whose kext and firmware keep the same protocol with its own initdata
+//! magic, shared-object offsets ([`Layout`]), identification words and GPC
+//! block (docs/research/agx.md §6). Every other family is named here with the
+//! facts recovered so far and stays hidden by the loader, its refusal naming
+//! what is missing.
 
 use super::sgx::Identity;
+
+/// How `readChipInfo` reads the GPU's size from the identification words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Identification {
+    /// 0xd04010 holds the cores (bits 7:0) and fragment units (15:8) per
+    /// cluster, and 0xd0401c bits 19:12 the clusters (`AGXAcceleratorG13/
+    /// G14::readChipInfo`).
+    Clusters,
+    /// 0xd04010 holds the cores per cluster (bits 7:0), the clusters per die
+    /// (15:8) and the dies (19:16); the kext reads the fragment units as the
+    /// cores and 0xd0401c names no count (`AGXAcceleratorG14X::readChipInfo`;
+    /// Public, Asahi `regs.rs` `get_gpu_id`).
+    Dies,
+}
+
+/// Where a firmware interface keeps the shared words the device-control
+/// model writes (`AGXArmFirmware::initFirmwareData` and the firmware's
+/// device-control handlers, docs/research/agx.md §2.1 and §6).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Layout {
+    /// The handled-entry count in the root's +0xb0 object, which the
+    /// firmware increments after each counted entry.
+    pub device_control_count: u64,
+    /// Bytes of one slot of the HWDSID table the ring directory's +0x2c8
+    /// names (+0 the requested priority, +4 the firmware's matching word).
+    pub dsid_slot_bytes: u64,
+    /// The ring directory's context-switch histogram enables byte, one bit
+    /// per data master, followed by the histograms
+    /// (`getDMContextSwitchTimeHistogram` reads them).
+    pub histogram_enables: u64,
+    /// The power-counter sample count and the samples in the root's +0xb0
+    /// object (`getAndGatherPowerCounterData` reads them).
+    pub power_counter_samples: u64,
+    pub power_counters: u64,
+    /// The RIART U-level disable mask and T-disable word in the root's
+    /// +0x20 object.
+    pub riart_u_levels_disabled: u64,
+    pub riart_t_disabled: u64,
+}
+
+/// The G13G, G13X and G14G interface (`armfw_g14g` handlers 0xffffff8000004b8c,
+/// 0xffffff80000043a0, 0xffffff8000003e88, 0xffffff8000003b20,
+/// 0xffffff8000004678 and 0xffffff8000003d24).
+const G13_G14G_LAYOUT: Layout = Layout {
+    device_control_count: 0xe838,
+    dsid_slot_bytes: 0x10,
+    histogram_enables: 0x3e4,
+    power_counter_samples: 0xca30,
+    power_counters: 0xca48,
+    riart_u_levels_disabled: 0xe30,
+    riart_t_disabled: 0xe34,
+};
+
+/// The G14X interface (`armfw_g14s`, `armfw_g14c` and `armfw_g14d`, whose
+/// handlers differ only in their own globals: the tail at
+/// 0xffffff800000497c, 0xe at 0xffffff8000004554, 0x14 at
+/// 0xffffff8000003b78, the histogram byte at 0xffffff8000004a30, 0x32 at
+/// 0xffffff8000003ad4, 0x34 at 0xffffff80000047d4 and 0x35 at
+/// 0xffffff8000003c6c of `armfw_g14s`), matching the `AGXG14X` kext's
+/// `initFirmwareData` stores.
+const G14X_LAYOUT: Layout = Layout {
+    device_control_count: 0xedc8,
+    dsid_slot_bytes: 8,
+    histogram_enables: 0x3d4,
+    power_counter_samples: 0xcfc0,
+    power_counters: 0xcfd8,
+    riart_u_levels_disabled: 0x123c,
+    riart_t_disabled: 0x1240,
+};
+
+/// What the models need of a family they implement.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Model {
+    pub identification: Identification,
+    /// The GPC block `AGXFenderCommon` reads: the performance state at +0,
+    /// the host-interrupt enables at +0x10 and their status at +0x14.
+    pub gpc: u64,
+    /// Bits of a UAT output address (Public: Asahi `hw/*.rs` `uat_oas`,
+    /// pinned `94fb23346d522edf53722357c426a3e58030beea`: 40 on T8103 and
+    /// T8112, 42 on T600x and T602x, whose DRAM lies at 1 TiB).
+    pub uat_output_bits: u32,
+    pub layout: Layout,
+}
+
+const G13G_MODEL: Model = Model {
+    identification: Identification::Clusters,
+    gpc: 0xd0_1000,
+    uat_output_bits: 40,
+    layout: G13_G14G_LAYOUT,
+};
+const G13X_MODEL: Model = Model {
+    uat_output_bits: 42,
+    ..G13G_MODEL
+};
+const G14G_MODEL: Model = G13G_MODEL;
+const G14X_MODEL: Model = Model {
+    identification: Identification::Dies,
+    gpc: 0xe0_1000,
+    uat_output_bits: 42,
+    layout: G14X_LAYOUT,
+};
 
 /// The MMU block's layout (`setupMMUConfig`, `invalidateGPUTTBACache`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +206,7 @@ pub const MAGIC_G13_G14G: u64 = 0x0c8a_6342_8392_04c8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Interface {
     /// Every layout the models use is checked against this family.
-    Modeled,
+    Modeled(&'static Model),
     /// Not admitted, for the stated reason.
     Unrecovered(&'static str),
 }
@@ -125,10 +229,11 @@ pub struct Family {
     /// writes (`AGXArmFirmware::initFirmwareData`); `None` when the kext
     /// builds it otherwise and the census has not recovered it.
     pub initdata_magic: Option<u64>,
-    /// Whether the family's GFX firmware runs dashboard-signal records
-    /// (stream record 0xf, the kext's `submitDashboardSignalCommand`). The
-    /// G13 kexts have no such sender and the G13G/G13X firmware no handler
-    /// (no trace 0x126, no record jump table entry); G14G has both.
+    /// Whether the family's kext sends dashboard-signal commands
+    /// (`submitDashboardSignalCommand`, stream record 0xf). Only the G14G and
+    /// G17G kexts have the sender. The G13G/G13X firmware has no handler (no
+    /// trace 0x126, no record jump table entry) and the G14X firmware's
+    /// record table ends at 0xe; G14G's firmware runs the record.
     pub dashboard_signals: bool,
     pub interface: Interface,
 }
@@ -159,7 +264,7 @@ pub const G13G: Family = Family {
     mmu: g13_mmu(26),
     initdata_magic: Some(MAGIC_G13_G14G),
     dashboard_signals: false,
-    interface: Interface::Modeled,
+    interface: Interface::Modeled(&G13G_MODEL),
 };
 pub const G13X: Family = Family {
     name: "G13X",
@@ -170,7 +275,7 @@ pub const G13X: Family = Family {
     mmu: g13_mmu(28),
     initdata_magic: Some(MAGIC_G13_G14G),
     dashboard_signals: false,
-    interface: Interface::Modeled,
+    interface: Interface::Modeled(&G13X_MODEL),
 };
 pub const G14G: Family = Family {
     name: "G14G",
@@ -181,7 +286,7 @@ pub const G14G: Family = Family {
     mmu: g14_mmu(26),
     initdata_magic: Some(MAGIC_G13_G14G),
     dashboard_signals: true,
-    interface: Interface::Modeled,
+    interface: Interface::Modeled(&G14G_MODEL),
 };
 pub const G14X: Family = Family {
     name: "G14X",
@@ -191,8 +296,8 @@ pub const G14X: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0494_04b8),
-    dashboard_signals: true,
-    interface: Interface::Unrecovered(NOT_CHECKED),
+    dashboard_signals: false,
+    interface: Interface::Modeled(&G14X_MODEL),
 };
 pub const G15G: Family = Family {
     name: "G15G",
@@ -202,7 +307,7 @@ pub const G15G: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0394_04b8),
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G15S: Family = Family {
@@ -213,7 +318,7 @@ pub const G15S: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0394_04b8),
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G15C: Family = Family {
@@ -224,7 +329,7 @@ pub const G15C: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0496_04b8),
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G16G: Family = Family {
@@ -235,7 +340,7 @@ pub const G16G: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: Some(0x0c8a_636f_0392_04b8),
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G16X: Family = Family {
@@ -246,7 +351,7 @@ pub const G16X: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: None,
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G17G: Family = Family {
@@ -268,7 +373,7 @@ pub const G17X: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: None,
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G17P: Family = Family {
@@ -279,7 +384,7 @@ pub const G17P: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: None,
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 pub const G18G: Family = Family {
@@ -290,7 +395,7 @@ pub const G18G: Family = Family {
     core_masks: &G14X_CORE_MASKS,
     mmu: g14_mmu(28),
     initdata_magic: None,
-    dashboard_signals: true,
+    dashboard_signals: false,
     interface: Interface::Unrecovered(NOT_CHECKED),
 };
 
@@ -301,6 +406,7 @@ pub const T8112: Identity = Identity {
     generation: 5,
     variant: 2,
     revision: 0x10,
+    dies: 1,
     clusters: 1,
     cores: 10,
     frags: 10,
@@ -318,11 +424,13 @@ pub const T8112: Identity = Identity {
 /// Revision: Inferred. No public source states it; the kext accepts A0, B0,
 /// B1 and C0 (bits 15:12 and 11:8), and each SoC's newest GFX firmware image
 /// is the one a shipping part runs (`armfw_g13g` b100, `armfw_g13x` c000).
-const fn g13(variant: u8, revision: u8, clusters: u8, core_mask: [u32; 3]) -> Identity {
+/// T6002 spans two dies, which these identification words do not count.
+const fn g13(variant: u8, revision: u8, dies: u8, clusters: u8, core_mask: [u32; 3]) -> Identity {
     Identity {
         generation: 4,
         variant,
         revision,
+        dies,
         clusters,
         cores: 8,
         frags: 8,
@@ -330,10 +438,35 @@ const fn g13(variant: u8, revision: u8, clusters: u8, core_mask: [u32; 3]) -> Id
         core_mask,
     }
 }
-pub const T8103: Identity = g13(2, 0x11, 1, [0xff, 0, 0]);
-pub const T6000: Identity = g13(3, 0x20, 2, [0xffff, 0, 0]);
-pub const T6001: Identity = g13(4, 0x20, 4, [u32::MAX, 0, 0]);
-pub const T6002: Identity = g13(4, 0x20, 8, [u32::MAX, u32::MAX, 0]);
+pub const T8103: Identity = g13(2, 0x11, 1, 1, [0xff, 0, 0]);
+pub const T6000: Identity = g13(3, 0x20, 1, 2, [0xffff, 0, 0]);
+pub const T6001: Identity = g13(4, 0x20, 1, 4, [u32::MAX, 0, 0]);
+pub const T6002: Identity = g13(4, 0x20, 2, 8, [u32::MAX, u32::MAX, 0]);
+
+/// The M2 Pro, Max and Ultra GPUs (G14X, generation 6). Public: Asahi
+/// `hw/t602x.rs` (10 cores, 10 fragment units and 4 GPs per cluster; 2, 4
+/// and 8 clusters over 1, 1 and 2 dies) and `regs.rs` (variant S = 3, C and
+/// D = 4). `AGXAcceleratorG14X::readChipInfo` takes variant 3 as a 20-core
+/// part, variant 4 on one die as 40 cores and on more as 80, multiplies the
+/// per-cluster counts by the clusters, and reads three core-mask words,
+/// packed 10 bits per cluster. Revision: Inferred, B0: the kext accepts A0,
+/// B0 and B1, and each SoC's newest GFX firmware image is b000.
+const fn g14x(variant: u8, dies: u8, clusters: u8, core_mask: [u32; 3]) -> Identity {
+    Identity {
+        generation: 6,
+        variant,
+        revision: 0x10,
+        dies,
+        clusters,
+        cores: 10,
+        frags: 10,
+        gps: 4,
+        core_mask,
+    }
+}
+pub const T6020: Identity = g14x(3, 1, 2, [0xf_ffff, 0, 0]);
+pub const T6021: Identity = g14x(4, 1, 4, [u32::MAX, 0xff, 0]);
+pub const T6022: Identity = g14x(4, 2, 8, [u32::MAX, u32::MAX, 0xffff]);
 
 const fn gpu(
     compatible: &'static str,
@@ -372,9 +505,9 @@ pub const GPUS: [Gpu; 20] = [
     known("gpu,t6000", 0x6001, &G13X, "armfw_g13x", T6001),
     known("gpu,t6000", 0x6002, &G13X, "armfw_g13x", T6002),
     known("gpu,t8112", 0x8112, &G14G, "armfw_g14g", T8112),
-    gpu("gpu,t6020", 0x6020, &G14X, "armfw_g14s"),
-    gpu("gpu,t6021", 0x6021, &G14X, "armfw_g14c"),
-    gpu("gpu,t6022", 0x6022, &G14X, "armfw_g14d"),
+    known("gpu,t6020", 0x6020, &G14X, "armfw_g14s", T6020),
+    known("gpu,t6021", 0x6021, &G14X, "armfw_g14c", T6021),
+    known("gpu,t6022", 0x6022, &G14X, "armfw_g14d", T6022),
     gpu("gpu,t8122", 0x8122, &G15G, "armfw_g15g"),
     gpu("gpu,t6030", 0x6030, &G15S, "armfw_g15s"),
     gpu("gpu,t6031", 0x6031, &G15C, "armfw_g15c"),
@@ -402,13 +535,22 @@ pub fn compatible_admitted(compatible: &str) -> bool {
     gpus.clone().next().is_some() && gpus.all(|gpu| gpu.admitted().is_ok())
 }
 
+impl Family {
+    /// What the models need of this family, when its interface is modeled;
+    /// otherwise why it is not.
+    pub fn model(&self) -> Result<&'static Model, &'static str> {
+        match self.interface {
+            Interface::Modeled(model) => Ok(model),
+            Interface::Unrecovered(reason) => Err(reason),
+        }
+    }
+}
+
 impl Gpu {
     /// The identification the model reports, when the GPU's whole interface
     /// is modeled; otherwise why it is not.
     pub fn admitted(&self) -> Result<Identity, &'static str> {
-        if let Interface::Unrecovered(reason) = self.family.interface {
-            return Err(reason);
-        }
+        self.family.model()?;
         let identity = self
             .identity
             .ok_or("no source states the GPU's identification registers")?;
@@ -441,15 +583,55 @@ mod tests {
             .filter(|gpu| gpu.admitted().is_ok())
             .map(|gpu| gpu.chip_id)
             .collect();
-        assert_eq!(admitted, [0x8103, 0x6000, 0x6001, 0x6002, 0x8112]);
+        assert_eq!(
+            admitted,
+            [
+                0x8103, 0x6000, 0x6001, 0x6002, 0x8112, 0x6020, 0x6021, 0x6022
+            ]
+        );
         assert_eq!(by_chip(0x8112).unwrap().admitted(), Ok(T8112));
-        assert_eq!(by_chip(0x6020).unwrap().admitted(), Err(NOT_CHECKED));
+        assert_eq!(by_chip(0x6022).unwrap().admitted(), Ok(T6022));
+        assert_eq!(by_chip(0x8122).unwrap().admitted(), Err(NOT_CHECKED));
+        assert_eq!(G15G.model(), Err(NOT_CHECKED));
         assert!(by_chip(0x9999).is_none());
         // M1 Pro, Max and Ultra share one compatible, admitted as a whole.
         assert!(compatible_admitted("gpu,t6000"));
         assert!(compatible_admitted("gpu,t8112"));
-        assert!(!compatible_admitted("gpu,t6020"));
+        assert!(compatible_admitted("gpu,t6020"));
+        assert!(!compatible_admitted("gpu,t8122"));
         assert!(!compatible_admitted("gpu,t9999"));
+        // Only the G14G and G17G kexts send dashboard signals.
+        let dashboards: alloc::vec::Vec<_> = GPUS
+            .iter()
+            .filter(|gpu| gpu.family.dashboard_signals)
+            .map(|gpu| gpu.family.name)
+            .collect();
+        assert_eq!(dashboards, ["G14G", "G17G"]);
+    }
+
+    #[test]
+    fn g14x_identities_are_ones_its_kext_accepts() {
+        for gpu in GPUS.iter().filter(|gpu| gpu.family.name == "G14X") {
+            let id = gpu.admitted().unwrap();
+            let model = gpu.family.model().unwrap();
+            assert_eq!(model.identification, Identification::Dies);
+            assert_ne!(model.layout, G14G_MODEL.layout);
+            // `readChipInfo`: variants 3 and 4; revisions A0, B0 and B1;
+            // the variant's core capacity holds every core.
+            assert!([0x00, 0x10, 0x11].contains(&id.revision));
+            let capacity = match (id.variant, id.dies) {
+                (3, _) => 20,
+                (4, 1) => 40,
+                (4, _) => 80,
+                _ => panic!("variant the kext does not size"),
+            };
+            let cores = u32::from(id.cores) * u32::from(id.clusters);
+            assert!(cores <= capacity);
+            assert_eq!(id.clusters % id.dies, 0);
+            let enabled: u32 = id.core_mask.iter().map(|word| word.count_ones()).sum();
+            assert_eq!(enabled, cores);
+            assert!(!gpu.family.dashboard_signals);
+        }
     }
 
     #[test]

@@ -40,7 +40,9 @@
 //! differ). One table serves every cluster: Inferred, as the Asahi tables
 //! repeat each state's voltage per cluster, and the kext accepts 1..=16
 //! tables; iBoot for a multi-cluster board (j314/j316) would confirm the
-//! count it writes.
+//! count it writes. T602x likewise: the 26A434 `AGXG14X` `AGXAccelerator::
+//! start` aligns with G14G's over the same reads (object offsets, string
+//! addresses and register allocation differ).
 use crate::apple_device_tree::DeviceTree;
 use alloc::vec::Vec;
 use anyhow::{Result, bail};
@@ -85,12 +87,17 @@ const T600X_HZ: [u32; 7] = [
     1_296_000_000,
 ];
 
+/// The M2 Pro, Max and Ultra GPU operating points in Hz (Asahi
+/// `t602x-common.dtsi` `gpu_opp`, the same pinned commit), T8112's nine.
+const T602X_HZ: [u32; 9] = T8112_HZ;
+
 /// The GPU's operating points, lowest first, on the SoC with `chip_id`.
 fn operating_points(chip_id: u32) -> Option<&'static [u32]> {
     match chip_id {
         0x8103 => Some(&T8103_HZ),
         0x6000..=0x6002 => Some(&T600X_HZ),
         0x8112 => Some(&T8112_HZ),
+        0x6020..=0x6022 => Some(&T602X_HZ),
         _ => None,
     }
 }
@@ -218,6 +225,17 @@ mod tests {
             );
             let table = tree.property(SGX, "perf-states").unwrap().value.clone();
             assert_eq!((u32_at(&table, 12), u32_at(&table, 13)), (top, 0));
+        }
+    }
+
+    #[test]
+    fn the_m2_pro_max_and_ultra_gpus_take_nine_operating_points() {
+        for chip_id in 0x6020..=0x6022 {
+            let mut tree = shipped();
+            let tables = publish(&mut tree, chip_id).unwrap().unwrap();
+            assert_eq!(tables.states, 9);
+            let table = tree.property(SGX, "perf-states").unwrap().value.clone();
+            assert_eq!(u32_at(&table, 16), 1_398_000_000);
         }
     }
 

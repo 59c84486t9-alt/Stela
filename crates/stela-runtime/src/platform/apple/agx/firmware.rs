@@ -48,7 +48,7 @@ use super::super::asc::{Firmware, Message as Mail};
 use super::super::rtkit::{Endpoint, RtKit};
 use super::channel;
 use super::event;
-use super::generation::Family;
+use super::generation::{Family, Layout};
 use super::initdata::{self, Root};
 use super::observe::{self, Journal};
 use super::ring::{self, Kind, Shared};
@@ -94,31 +94,14 @@ const DEVICE_CONTROL_POWER: u32 = 0x28;
 /// The device-control types the firmware counts once handled, one bit per
 /// type (its byte table at 0xffffff80000593a0, read at 0xffffff8000003a2c).
 const COUNTED_DEVICE_CONTROL: u64 = 0x1fff_3bfb_f3c7_bffe;
-/// The handled-entry count's offset in the root's +0xb0 object, a word the
-/// firmware increments after each counted entry (0xffffff8000004b8c).
-const DEVICE_CONTROL_COUNT: u64 = 0xe838;
-/// The ring directory's firmware VA of the HWDSID table, 0x10 bytes per
-/// DSID: +0 the requested priority, +4 the firmware's matching word
-/// (handlers 0xffffff80000043a0 and 0xffffff8000003ba4).
+/// The ring directory's firmware VA of the HWDSID table (handlers
+/// 0xffffff80000043a0 and 0xffffff8000003ba4).
 const DSID_TABLE: u64 = 0x2c8;
-/// The ring directory's context-switch histogram enables, one bit per data
-/// master, and the histograms themselves, 12 words per data master from
-/// +0x3e5 (handler 0xffffff8000003e88; `getDMContextSwitchTimeHistogram`
-/// 0x1b4eb38 reads them).
-const HISTOGRAM_ENABLES: u64 = 0x3e4;
 /// The data masters the kext keeps a histogram for: TA, 3D and CL, whose
-/// 0x30-byte histograms fill +0x3e5..+0x475.
+/// 0x30-byte histograms follow the enables byte.
 const HISTOGRAM_MASTERS: u32 = 3;
-/// The power-counter sample buffer and its sample count in the root's +0xb0
-/// object (handler 0xffffff8000003b20; `getAndGatherPowerCounterData`
-/// 0x1b54b60 reads them).
-const POWER_COUNTERS: u64 = 0xca48;
+/// Bytes of the power-counter sample buffer.
 const POWER_COUNTER_BYTES: usize = 0x1800;
-const POWER_COUNTER_SAMPLES: u64 = 0xca30;
-/// The RIART U-level disable mask and T-disable word in the root's +0x20
-/// object (handlers 0xffffff8000004678 and 0xffffff8000003d24).
-const RIART_U_LEVELS_DISABLED: u64 = 0xe30;
-const RIART_T_DISABLED: u64 = 0xe34;
 /// The timed-out word of an `AGXLateEvalWait`'s firmware object
 /// (handler 0xffffff8000003d34).
 const LATE_EVAL_TIMED_OUT: u64 = 0x38;
@@ -181,9 +164,16 @@ enum Command {
     PowerCounters,
     /// 0x34/0x35: a RIART word in the root's +0x20 object.
     Riart {
-        offset: u64,
+        word: Riart,
         value: u32,
     },
+}
+
+/// The RIART words device control sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Riart {
+    ULevelsDisabled,
+    TDisabled,
 }
 
 /// A power-transition notice the AP sent on the device-control ring.
@@ -338,6 +328,7 @@ impl State {
 
     /// Consume the device-control ring up to its write index.
     fn device_control(&mut self, memory: &mut dyn Shared, root: &Root) -> Result<(), &'static str> {
+        let layout: &Layout = &self.family.model()?.layout;
         let control = root.device_control(memory)?;
         let (mut read, write) = control.indices(memory)?;
         while read != write {
@@ -355,7 +346,7 @@ impl State {
                     pointer,
                     value,
                 } => {
-                    let slot = dsid_slot(memory, root, dsid)?;
+                    let slot = dsid_slot(memory, root, layout, dsid)?;
                     memory.write(slot, &priority.to_le_bytes())?;
                     let matched = memory.read_u32(slot + 4)?;
                     if matched == priority && priority != 0 {
@@ -368,12 +359,12 @@ impl State {
                     pointer,
                     value,
                 } => {
-                    let slot = dsid_slot(memory, root, dsid)?;
+                    let slot = dsid_slot(memory, root, layout, dsid)?;
                     memory.write(slot, &[0; 8])?;
                     memory.write(pointer, &value.to_le_bytes())?;
                 }
                 Command::Histogram { master, enable } => {
-                    let at = root.rings + HISTOGRAM_ENABLES;
+                    let at = root.rings + layout.histogram_enables;
                     let mut enables = [0];
                     memory.read(at, &mut enables)?;
                     let bit = 1 << master;
@@ -388,17 +379,22 @@ impl State {
                     memory.write(wait + LATE_EVAL_TIMED_OUT, &1u32.to_le_bytes())?;
                 }
                 Command::PowerCounters => {
-                    let samples = root.object_928 + POWER_COUNTERS;
+                    let samples = root.object_928 + layout.power_counters;
                     memory.write(samples, &[0; POWER_COUNTER_BYTES])?;
-                    memory.write(root.object_928 + POWER_COUNTER_SAMPLES, &[0; 4])?;
+                    let count = root.object_928 + layout.power_counter_samples;
+                    memory.write(count, &[0; 4])?;
                 }
-                Command::Riart { offset, value } => {
+                Command::Riart { word, value } => {
+                    let offset = match word {
+                        Riart::ULevelsDisabled => layout.riart_u_levels_disabled,
+                        Riart::TDisabled => layout.riart_t_disabled,
+                    };
                     memory.write(root.object_358 + offset, &value.to_le_bytes())?;
                 }
             }
             *self.device_control.entry(kind).or_default() += 1;
             if counted {
-                let count = root.object_928 + DEVICE_CONTROL_COUNT;
+                let count = root.object_928 + layout.device_control_count;
                 let handled = memory.read_u32(count)?.wrapping_add(1);
                 memory.write(count, &handled.to_le_bytes())?;
             }
@@ -472,12 +468,17 @@ impl State {
 }
 
 /// The HWDSID table slot of `dsid`, through the ring directory's table VA.
-fn dsid_slot(memory: &mut dyn Shared, root: &Root, dsid: u8) -> Result<u64, &'static str> {
+fn dsid_slot(
+    memory: &mut dyn Shared,
+    root: &Root,
+    layout: &Layout,
+    dsid: u8,
+) -> Result<u64, &'static str> {
     let table = memory.read_u64(root.rings + DSID_TABLE)?;
     if table == 0 {
         return Err("GFX ring directory names no HWDSID table");
     }
-    Ok(table + u64::from(dsid) * 0x10)
+    Ok(table + u64::from(dsid) * layout.dsid_slot_bytes)
 }
 
 /// Every byte of `entry` after the type and outside `fields`, each a
@@ -668,14 +669,14 @@ fn device_control_entry(entry: &[u8]) -> Result<Command, &'static str> {
                 "GFX RIART U-level mask has fields beyond its word",
             )?;
             Ok(Command::Riart {
-                offset: RIART_U_LEVELS_DISABLED,
+                word: Riart::ULevelsDisabled,
                 value: word(4),
             })
         }
         0x35 => {
             boolean("GFX RIART T-disable has fields beyond its flag")?;
             Ok(Command::Riart {
-                offset: RIART_T_DISABLED,
+                word: Riart::TDisabled,
                 value: word(4),
             })
         }
@@ -840,6 +841,9 @@ mod tests {
     ) -> Result<(State, Flat), &'static str> {
         let mut memory = Flat::new(BASE, 0x20000);
         kext_root(&mut memory);
+        if let Some(magic) = family.initdata_magic {
+            memory.put_u64(ROOT, magic);
+        }
         memory.put_descriptor(RINGS + 0x1a0, CONTROL_STATE, CONTROL_ENTRIES);
         for (n, entry) in entries.iter().enumerate() {
             memory.put(CONTROL_ENTRIES + n as u64 * 0x40, entry);
@@ -934,7 +938,16 @@ mod tests {
 
     const OBJECT_928: u64 = BASE + 0x5000;
     const OBJECT_358: u64 = BASE + 0x3000;
-    const COUNT: u64 = OBJECT_928 + DEVICE_CONTROL_COUNT;
+
+    /// The G14G interface, which the tests' root carries.
+    fn layout() -> &'static Layout {
+        &G14G.model().unwrap().layout
+    }
+
+    /// The handled-entry count.
+    fn count() -> u64 {
+        OBJECT_928 + layout().device_control_count
+    }
 
     /// A device-control entry of `kind` whose bytes in `fields` are `fill`.
     fn filled(kind: u32, fields: Range<usize>, fill: u8) -> [u8; 0x40] {
@@ -965,7 +978,7 @@ mod tests {
         memory.read(sections, &mut mask).unwrap();
         assert_eq!(mask, [1]);
         assert_eq!(state.device_control.get(&7), Some(&1));
-        assert_eq!(memory.read_u32(COUNT), Ok(1));
+        assert_eq!(memory.read_u32(count()), Ok(1));
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(1));
         assert!(device_control_entry(&filled(7, 8..9, 1)).is_err());
     }
@@ -974,11 +987,11 @@ mod tests {
     fn the_configuration_snapshot_is_taken_and_left_uncounted() {
         let snapshot = of_type(0x15);
         let (mut state, mut memory) = with_device_control(&[power(0), snapshot, power(1)]);
-        memory.put_u32(COUNT, 7);
+        memory.put_u32(count(), 7);
         ring(&mut state, &mut memory).unwrap();
         assert_eq!(state.device_control.get(&0x15), Some(&1));
         // The two power notices are counted; the snapshot is not.
-        assert_eq!(memory.read_u32(COUNT), Ok(9));
+        assert_eq!(memory.read_u32(count()), Ok(9));
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(3));
         assert!(device_control_entry(&filled(0x15, 4..5, 1)).is_err());
     }
@@ -1019,14 +1032,14 @@ mod tests {
         let entries = forms.len() as u32;
         assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(entries));
         // 0x13, 0x15, 0x1b and 0x22 are the uncounted ones among them.
-        assert_eq!(memory.read_u32(COUNT), Ok(entries - 4));
+        assert_eq!(memory.read_u32(count()), Ok(entries - 4));
         assert_eq!(
             state.device_control.values().sum::<u64>(),
             u64::from(entries)
         );
         // Nothing else the AP shares changed.
         let mut after = memory.bytes.clone();
-        for at in [CONTROL_STATE + READ, COUNT] {
+        for at in [CONTROL_STATE + READ, count()] {
             let at = (at - BASE) as usize;
             after[at..at + 4].copy_from_slice(&before[at..at + 4]);
         }
@@ -1055,7 +1068,7 @@ mod tests {
         entry[4..0xc].copy_from_slice(&word.to_le_bytes());
         entry[0xc..0x10].copy_from_slice(&0x700u32.to_le_bytes());
         entry[0x14] = 3;
-        (entry, table + 3 * 0x10)
+        (entry, table + 3 * layout().dsid_slot_bytes)
     }
 
     #[test]
@@ -1081,7 +1094,7 @@ mod tests {
         assert_eq!(memory.read_u64(slot), Ok(0));
         assert_eq!(memory.read_u32(word), Ok(0x700));
         // 0xe is uncounted.
-        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        assert_eq!(memory.read_u32(count()), Ok(0));
         assert_eq!(state.device_control.get(&0xe), Some(&2));
         entry[0x15] = 1;
         assert!(device_control_entry(&entry).is_err());
@@ -1101,7 +1114,7 @@ mod tests {
         ring(&mut state, &mut memory).unwrap();
         assert_eq!(memory.read_u64(slot), Ok(0));
         assert_eq!(memory.read_u32(word), Ok(0x700));
-        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        assert_eq!(memory.read_u32(count()), Ok(0));
         // The kext leaves +0x10..+0x14 zero.
         entry[0x10] = 1;
         assert!(device_control_entry(&entry).is_err());
@@ -1127,7 +1140,7 @@ mod tests {
         disable[4] = 1;
         let reset = filled(0x1a, 8..9, 2);
         let (mut state, mut memory) = with_device_control(&[get, enable, disable, reset]);
-        let enables = RINGS + HISTOGRAM_ENABLES;
+        let enables = RINGS + layout().histogram_enables;
         memory.put(enables, &[0b011]);
         // A bin the AP reads back after the get.
         memory.put_u32(enables + 1, 9);
@@ -1138,7 +1151,7 @@ mod tests {
         assert_eq!(memory.read_u32(enables + 1), Ok(9));
         assert_eq!(state.device_control.get(&0x1a), Some(&4));
         // 0x1a is uncounted.
-        assert_eq!(memory.read_u32(COUNT), Ok(0));
+        assert_eq!(memory.read_u32(count()), Ok(0));
         // No fourth data master, no operation 0, nothing beyond +8.
         let mut master = get;
         master[4] = 3;
@@ -1155,7 +1168,7 @@ mod tests {
         let (mut state, mut memory) = with_device_control(&[entry]);
         ring(&mut state, &mut memory).unwrap();
         assert_eq!(memory.read_u32(wait + LATE_EVAL_TIMED_OUT), Ok(1));
-        assert_eq!(memory.read_u32(COUNT), Ok(1));
+        assert_eq!(memory.read_u32(count()), Ok(1));
         entry[0x20] = 1;
         assert!(device_control_entry(&entry).is_err());
         assert!(device_control_entry(&filled(0x27, 0xc..0x20, 1)).is_err());
@@ -1164,18 +1177,19 @@ mod tests {
     #[test]
     fn the_power_counter_gather_empties_its_buffer() {
         let (mut state, mut memory) = with_device_control(&[of_type(0x32)]);
-        let samples = OBJECT_928 + POWER_COUNTERS;
+        let samples = OBJECT_928 + layout().power_counters;
+        let sampled = OBJECT_928 + layout().power_counter_samples;
         memory.put(samples, &[0x5a; POWER_COUNTER_BYTES]);
-        memory.put_u32(OBJECT_928 + POWER_COUNTER_SAMPLES, 3);
+        memory.put_u32(sampled, 3);
         // The selection list beside it is the kext's and stays.
         memory.put_u32(OBJECT_928 + 0xca34, 0x11);
         ring(&mut state, &mut memory).unwrap();
         let mut buffer = [0xff; POWER_COUNTER_BYTES];
         memory.read(samples, &mut buffer).unwrap();
         assert!(buffer.iter().all(|&b| b == 0));
-        assert_eq!(memory.read_u32(OBJECT_928 + POWER_COUNTER_SAMPLES), Ok(0));
+        assert_eq!(memory.read_u32(sampled), Ok(0));
         assert_eq!(memory.read_u32(OBJECT_928 + 0xca34), Ok(0x11));
-        assert_eq!(memory.read_u32(COUNT), Ok(1));
+        assert_eq!(memory.read_u32(count()), Ok(1));
         assert!(device_control_entry(&filled(0x32, 4..5, 1)).is_err());
     }
 
@@ -1186,9 +1200,10 @@ mod tests {
         let disabled = filled(0x35, 4..5, 1);
         let (mut state, mut memory) = with_device_control(&[mask, disabled]);
         ring(&mut state, &mut memory).unwrap();
-        assert_eq!(memory.read_u32(OBJECT_358 + RIART_U_LEVELS_DISABLED), Ok(6));
-        assert_eq!(memory.read_u32(OBJECT_358 + RIART_T_DISABLED), Ok(1));
-        assert_eq!(memory.read_u32(COUNT), Ok(2));
+        let mut riart = |offset| memory.read_u32(OBJECT_358 + offset);
+        assert_eq!(riart(layout().riart_u_levels_disabled), Ok(6));
+        assert_eq!(riart(layout().riart_t_disabled), Ok(1));
+        assert_eq!(memory.read_u32(count()), Ok(2));
         assert!(device_control_entry(&filled(0x35, 4..5, 2)).is_err());
         assert!(device_control_entry(&filled(0x34, 8..9, 1)).is_err());
     }
@@ -1207,7 +1222,7 @@ mod tests {
             let (mut state, mut memory) = with_device_control(&[of_type(kind)]);
             assert!(ring(&mut state, &mut memory).unwrap_err().contains(reason));
             assert_eq!(memory.read_u32(CONTROL_STATE + READ), Ok(0));
-            assert_eq!(memory.read_u32(COUNT), Ok(0));
+            assert_eq!(memory.read_u32(count()), Ok(0));
         }
         // Types the kext never sends.
         for kind in [0, 1, 2, 3, 6, 0x1d, 0x20, 0x3c, 0x40] {
@@ -1289,10 +1304,15 @@ mod tests {
     #[test]
     fn each_family_reads_its_own_root_and_g13_refuses_dashboard_signals() {
         use crate::platform::apple::agx::generation::{G14X, G16X};
-        // The kext root carries the G13G/G13X/G14G magic.
+        // A G14X firmware refuses the G13G/G13X/G14G root.
+        let mut memory = Flat::new(BASE, 0x20000);
+        kext_root(&mut memory);
+        let mut g14x = State::new(&G14X, false);
+        g14x.init((MSG_INIT << TYPE_SHIFT) | (ROOT & INIT_VA_BITS))
+            .unwrap();
         assert_eq!(
-            with_device_control_on(&G14X, &[]).err(),
-            Some("GFX initdata root lacks its magic")
+            g14x.dma(&mut memory, &mut Vec::new()),
+            Err("GFX initdata root lacks its magic")
         );
         assert_eq!(
             with_device_control_on(&G16X, &[]).err(),
@@ -1312,6 +1332,35 @@ mod tests {
         );
         assert_eq!(memory.read_u32(ring_state + READ), Ok(0));
         assert_eq!(memory.read_u32(channel_state + 0x1000), Ok(0));
+    }
+
+    #[test]
+    fn g14x_device_control_writes_its_own_offsets() {
+        use crate::platform::apple::agx::generation::G14X;
+        let mut mask = of_type(0x34);
+        mask[4..8].copy_from_slice(&0x6u32.to_le_bytes());
+        let (mut state, mut memory) = with_device_control_on(&G14X, &[]).unwrap();
+        let word = BASE + 0x1f000;
+        let (deprioritize, _) = dsid_entry(&mut memory, 0x14, word);
+        let slot = BASE + 0x1e000 + 3 * 8;
+        memory.put_u64(slot, 0x0000_0006_0000_0006);
+        memory.put_u64(slot + 8, 0x0000_0007_0000_0007);
+        for (n, entry) in [of_type(0x32), mask, deprioritize].iter().enumerate() {
+            memory.put(CONTROL_ENTRIES + n as u64 * 0x40, entry);
+        }
+        memory.put_u32(CONTROL_STATE + WRITE, 3);
+        let g14x = &G14X.model().unwrap().layout;
+        memory.put_u32(OBJECT_928 + g14x.power_counter_samples, 3);
+        ring(&mut state, &mut memory).unwrap();
+        assert_eq!(memory.read_u32(OBJECT_928 + 0xcfc0), Ok(0));
+        assert_eq!(memory.read_u32(OBJECT_358 + 0x123c), Ok(6));
+        // DSID slots are 8 bytes: DSID 3's neighbour stays.
+        assert_eq!(memory.read_u64(slot), Ok(0));
+        assert_eq!(memory.read_u64(slot + 8), Ok(0x0000_0007_0000_0007));
+        assert_eq!(memory.read_u32(word), Ok(0x700));
+        // 0x32 and 0x34 are counted at the G14X offset; G14G's stays empty.
+        assert_eq!(memory.read_u32(OBJECT_928 + 0xedc8), Ok(2));
+        assert_eq!(memory.read_u32(count()), Ok(0));
     }
 
     #[test]
@@ -1464,7 +1513,7 @@ mod tests {
             base + 0xc000 + idx[2] as u64 * 8,
             uat::encode_pte(base + 0x1_0000, &flags),
         );
-        let mut table = Uat::default();
+        let mut table = Uat::new(40);
         table.configure(base).unwrap();
         let mut latch = InterruptLatch::new();
         let mut state = State::new(&G14G, false);

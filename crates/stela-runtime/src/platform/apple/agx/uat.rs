@@ -14,14 +14,18 @@
 //!   the memory-attribute index share no bits with the AP/XN/GPU flags.
 //! - `isPTEValid`/`isPDEValid`/`isPCEValid` (0x1b9f938..): bit 0.
 //! - `isPhysicalAddressValid` (0x1b9f928): bits 63:40 and 13:0 are clear, so a
-//!   valid output address is 14..39 bits.
+//!   valid output address is 14..39 bits. The `AGXG14X` encoders are the
+//!   same instructions, though its SoC's DRAM lies at 1 TiB: the GPU tables
+//!   are SPTM's (docs/research/agx.md §3), not these encoders'.
 //! - A GPTBAT holds 16 bytes per context (`mapTaskIdIntoGPTBAT` 0x1b9f768):
 //!   entry `2*ctx` is `TTBR0 & ~0x3fff | ctx << 48 | 1`, entry `2*ctx + 1` is
 //!   `TTBR1 & ~0x3fff | ctx << 48 | 1` with the low TTBR0 bits cleared;
 //!   `invalidateGPTBATEntry` (0x1b9f6bc) clears bit 0 of both.
 //!
-//! Public (Asahi `drivers/gpu/drm/asahi/pgtable.rs`, pinned
-//! `94fb23346d522edf53722357c426a3e58030beea`): input address size 39 bits,
+//! Public (Asahi `drivers/gpu/drm/asahi/pgtable.rs` and `hw/*.rs`, pinned
+//! `94fb23346d522edf53722357c426a3e58030beea`): an output address fills bits
+//! `oas - 1..14` of an entry, `oas` (`uat_oas`) being 40 on T8103 and T8112
+//! and 42 on T600x and T602x ([`Uat::new`]); input address size 39 bits,
 //! VA bit 39 selects the shared TTBR1 half; AP 0 firmware+GPU, 1 firmware, 2
 //! GPU; bit 55 grants GPU access; memory-attribute index 0 cached, 1 device,
 //! 2 uncached. The walk indexes bits 36, 25 and 14 with 8, 2048 and 2048
@@ -68,11 +72,9 @@ const LEVELS: u32 = 3;
 pub const IAS: u32 = 39;
 const TTBR_SELECT_BIT: u64 = 1 << IAS;
 
-/// The address field of a valid entry (bits 39:14).
-const ADDRESS_MASK: u64 = 0xff_ffff_c000;
-/// A physical address is valid when nothing outside bits 39:14 is set
-/// (`isPhysicalAddressValid`: `tst x1, #0xffffff0000003fff`).
-const PHYSICAL_INVALID: u64 = 0xffff_ff00_0000_0000 | PAGE_MASK;
+/// The widest address field the entry layout leaves below its flags (bits
+/// 51:14; the GPU-access, UXN and PXN flags start at bit 53).
+const ENTRY_ADDRESS: u64 = 0x000f_ffff_ffff_c000;
 
 const VALID: u64 = 1;
 /// A table descriptor (PDE/PCE): `table | 3`.
@@ -177,9 +179,16 @@ impl Flags {
     }
 }
 
-/// Encode a leaf (page) entry for a 16 KiB-aligned physical address.
+/// Encode a leaf (page) entry for a 16 KiB-aligned physical address within
+/// the translator's output size.
 pub fn encode_pte(physical: u64, flags: &Flags) -> u64 {
-    (physical & ADDRESS_MASK) | flags.encode()
+    (physical & ENTRY_ADDRESS) | flags.encode()
+}
+
+/// The address field of an entry whose output addresses are `bits` wide:
+/// bits `bits - 1..14`.
+const fn output_mask(bits: u32) -> u64 {
+    ((1 << bits) - 1) & !PAGE_MASK
 }
 
 /// Encode a table descriptor (PDE or PCE) for a 16 KiB-aligned table base.
@@ -283,12 +292,25 @@ pub struct Mapping {
 }
 
 /// Walk the table rooted at `ttbr` for `input`, reading entries from guest
-/// RAM. `ttbr` is the 16 KiB-aligned base of the top-level (PCE) table.
-/// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
-pub fn translate(memory: &mut dyn Memory, ttbr: u64, input: u64) -> Result<Mapping, Fault> {
+/// RAM, whose entries hold `output_bits`-bit addresses. `ttbr` is the
+/// 16 KiB-aligned base of the top-level (PCE) table. `input`'s bits above
+/// [`IAS`] must all equal its TTBR-select bit.
+pub fn translate(
+    memory: &mut dyn Memory,
+    ttbr: u64,
+    input: u64,
+    output_bits: u32,
+) -> Result<Mapping, Fault> {
     in_range(input)?;
     let (_, idx) = indices(input);
-    walk_from(memory, ttbr & !PAGE_MASK, 0, &idx, input)
+    walk_from(
+        memory,
+        ttbr & !PAGE_MASK,
+        0,
+        &idx,
+        input,
+        output_mask(output_bits),
+    )
 }
 
 /// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
@@ -305,34 +327,29 @@ fn in_range(input: u64) -> Result<(), Fault> {
     Ok(())
 }
 
-/// Walk from `table` at `first` level for an input whose `idx` are known.
+/// Walk from `table` at `first` level for an input whose `idx` are known,
+/// taking each entry's address through `mask`.
 fn walk_from(
     memory: &mut dyn Memory,
     mut table: u64,
     first: u32,
     idx: &[usize; LEVELS as usize],
     input: u64,
+    mask: u64,
 ) -> Result<Mapping, Fault> {
     for level in first..LEVELS - 1 {
         let entry = read_entry(memory, table, idx[level as usize], level)?;
         if entry & VALID == 0 {
             return Err(Fault::NotPresent { level });
         }
-        let next = entry & ADDRESS_MASK;
-        if next & PHYSICAL_INVALID != 0 {
-            return Err(Fault::BadAddress { level });
-        }
-        table = next;
+        table = entry & mask;
     }
     let leaf = LEVELS - 1;
     let entry = read_entry(memory, table, idx[leaf as usize], leaf)?;
     if entry & VALID == 0 {
         return Err(Fault::NotPresent { level: leaf });
     }
-    let base = entry & ADDRESS_MASK;
-    if base & PHYSICAL_INVALID != 0 {
-        return Err(Fault::BadAddress { level: leaf });
-    }
+    let base = entry & mask;
     let flags = Flags::decode(entry).ok_or(Fault::BadAddress { level: leaf })?;
     Ok(Mapping {
         physical: base | (input & PAGE_MASK),
@@ -415,8 +432,10 @@ const FAULT_PERMISSION: u32 = 2;
 
 /// The GPU address translator: per-context TTBR pairs in the TTBAT at a
 /// physical base the AP programs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Uat {
+    /// The address field of an entry ([`output_mask`]).
+    output: u64,
     ttbat: Option<u64>,
     /// The page-directory page of the shared TTBR1 window.
     shared_l2: Option<u64>,
@@ -424,6 +443,22 @@ pub struct Uat {
 }
 
 impl Uat {
+    /// A translator whose output addresses are `output_bits` wide
+    /// ([`super::generation::Model::uat_output_bits`]).
+    pub fn new(output_bits: u32) -> Self {
+        Self {
+            output: output_mask(output_bits),
+            ttbat: None,
+            shared_l2: None,
+            last_fault: None,
+        }
+    }
+
+    /// Whether `address` is a 16 KiB-aligned output address.
+    fn outputs(&self, address: u64) -> bool {
+        address & !self.output == 0
+    }
+
     /// The TTBAT's physical base, once configured.
     pub fn ttbat(&self) -> Option<u64> {
         self.ttbat
@@ -431,8 +466,8 @@ impl Uat {
 
     /// Root the translator at a 16 KiB-aligned TTBAT.
     pub fn configure(&mut self, ttbat: u64) -> Result<(), &'static str> {
-        if ttbat & PHYSICAL_INVALID != 0 {
-            return Err("UAT TTBAT base outside bits 39:14");
+        if !self.outputs(ttbat) {
+            return Err("UAT TTBAT base is not an aligned output address");
         }
         self.ttbat = Some(ttbat);
         Ok(())
@@ -441,8 +476,8 @@ impl Uat {
     /// Resolve the shared TTBR1 window ([`SHARED_INDEX`]) of every context
     /// from the 16 KiB-aligned page-directory page `l2`.
     pub fn share_kernel_window(&mut self, l2: u64) -> Result<(), &'static str> {
-        if l2 & PHYSICAL_INVALID != 0 || l2 == 0 {
-            return Err("UAT shared L2 outside bits 39:14");
+        if !self.outputs(l2) || l2 == 0 {
+            return Err("UAT shared L2 is not an aligned output address");
         }
         self.shared_l2 = Some(l2);
         Ok(())
@@ -512,8 +547,8 @@ impl Uat {
             .then_some(self.shared_l2)
             .flatten();
         let walked = in_range(iova).and_then(|()| match shared {
-            Some(l2) => walk_from(memory, l2, 1, &idx, iova),
-            None => walk_from(memory, ttbr & ADDRESS_MASK, 0, &idx, iova),
+            Some(l2) => walk_from(memory, l2, 1, &idx, iova, self.output),
+            None => walk_from(memory, ttbr & self.output, 0, &idx, iova, self.output),
         });
         let mapping = match walked {
             Ok(mapping) => mapping,
@@ -599,8 +634,8 @@ mod tests {
     #[test]
     fn descriptor_and_gptbat_encodings_match_the_kext() {
         assert_eq!(
-            encode_pte(0x1_2345_c000, &demo_flags()) & ADDRESS_MASK,
-            0x12345c000 & ADDRESS_MASK
+            encode_pte(0x1_2345_c000, &demo_flags()) & output_mask(40),
+            0x12345c000
         );
         assert_eq!(encode_table(0x8_0100_7fff), 0x8_0100_4000 | 3);
         assert_eq!(
@@ -644,24 +679,27 @@ mod tests {
         ram.put_u64(pde, encode_table(pte));
         let flags = demo_flags();
         ram.put_u64(pte, encode_pte(page, &flags));
-        let got = translate(&mut ram, pce, 0x20).unwrap();
+        let got = translate(&mut ram, pce, 0x20, 40).unwrap();
         assert_eq!(got.physical, page | 0x20);
         assert_eq!(got.flags, flags);
         // An unmapped sibling leaf faults as not-present at the leaf level.
         assert_eq!(
-            translate(&mut ram, pce, PAGE_BYTES),
+            translate(&mut ram, pce, PAGE_BYTES, 40),
             Err(Fault::NotPresent { level: 2 })
         );
         // Bits above the 39-bit space must repeat the TTBR-select bit.
-        assert_eq!(translate(&mut ram, pce, 1 << 40), Err(Fault::OutOfRange));
         assert_eq!(
-            translate(&mut ram, pce, TTBR_SELECT_BIT),
+            translate(&mut ram, pce, 1 << 40, 40),
+            Err(Fault::OutOfRange)
+        );
+        assert_eq!(
+            translate(&mut ram, pce, TTBR_SELECT_BIT, 40),
             Err(Fault::OutOfRange)
         );
         // A missing top-level table reads as zero and faults present at 0.
         ram.put_u64(pce, 0);
         assert_eq!(
-            translate(&mut ram, pce, 0),
+            translate(&mut ram, pce, 0, 40),
             Err(Fault::NotPresent { level: 0 })
         );
     }
@@ -672,7 +710,7 @@ mod tests {
         // PCE points at a table far outside the RAM region.
         ram.put_u64(0x8_0000_0000, encode_table(0x9_0000_0000));
         assert_eq!(
-            translate(&mut ram, 0x8_0000_0000, 0),
+            translate(&mut ram, 0x8_0000_0000, 0, 40),
             Err(Fault::Memory { level: 1 })
         );
     }
@@ -697,7 +735,7 @@ mod tests {
         ram.put_u64(pce + idx[0] as u64 * 8, encode_table(pde));
         ram.put_u64(pde + idx[1] as u64 * 8, encode_table(pte));
         ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
-        let mut uat = Uat::default();
+        let mut uat = Uat::new(40);
         uat.configure(ttbat).unwrap();
         (ram, uat, va, page)
     }
@@ -802,7 +840,7 @@ mod tests {
         ram.put_u64(l2 + idx[1] as u64 * 8, encode_table(pte));
         ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
         ram.put_u64(page, 0x5157_e1a0);
-        let mut uat = Uat::default();
+        let mut uat = Uat::new(40);
         uat.configure(ttbat).unwrap();
         // Before the boot stage names the shared L2, the window faults.
         assert_eq!(
@@ -868,7 +906,7 @@ mod tests {
         let flags = shared(Access::Gpu, true, false);
         ram.put_u64(pte + idx[2] as u64 * 8, encode_pte(page, &flags));
         ram.put_u64(page + 8, 0xa6e5);
-        let mut uat = Uat::default();
+        let mut uat = Uat::new(40);
         uat.configure(ttbat).unwrap();
         assert!(matches!(
             port_read(&mut uat, Agent::Firmware, &mut ram, 5, va + 8),
@@ -937,7 +975,7 @@ mod tests {
 
     #[test]
     fn an_unconfigured_or_misaligned_ttbat_refuses() {
-        let mut uat = Uat::default();
+        let mut uat = Uat::new(40);
         let mut ram = Ram::new(0x8_0000_0000, 0x4000);
         assert!(matches!(
             port_read(&mut uat, Agent::Firmware, &mut ram, 0, 0),
@@ -945,5 +983,23 @@ mod tests {
         ));
         assert!(uat.configure(0x8_0000_0100).is_err());
         assert!(uat.configure(1 << 40).is_err());
+        assert!(Uat::new(42).configure(1 << 40).is_ok());
+    }
+
+    /// T600x and T602x DRAM lies at 1 TiB: their 42-bit entries reach it,
+    /// where a 40-bit translator would drop the address's top bits.
+    #[test]
+    fn a_42_bit_translator_reaches_dram_above_one_tebibyte() {
+        let base = 0x100_0000_0000;
+        let mut ram = Ram::new(base, 0x4000 * 4);
+        let (pce, pde, pte, page) = (base, base + 0x4000, base + 0x8000, base + 0xc000);
+        ram.put_u64(pce, encode_table(pde));
+        ram.put_u64(pde, encode_table(pte));
+        ram.put_u64(pte, encode_pte(page, &demo_flags()));
+        assert_eq!(
+            translate(&mut ram, pce, 0x10, 42).unwrap().physical,
+            page | 0x10
+        );
+        assert!(translate(&mut ram, pce, 0x10, 40).is_err());
     }
 }

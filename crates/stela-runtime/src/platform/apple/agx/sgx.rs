@@ -28,15 +28,25 @@
 //!   bits 3:0 (`getGPCPerformanceState` 0x1b64b0c), sets host-interrupt
 //!   enables 0xd01010 bits 0..2 by type (`enableGPCHostInterrupts`
 //!   0x1b649f0), and acknowledges 0xd01014 by writing back the nonzero
-//!   status it read (`handleGPCHostInterrupts` 0x1b648dc).
+//!   status it read (`handleGPCHostInterrupts` 0x1b648dc). The G14X kext's
+//!   Fender does the same at 0xe01000, 0xe01010 and 0xe01014
+//!   ([`super::generation::Model::gpc`]).
+//! - The G14X kext's identification words carry the dies, the clusters per
+//!   die and the cores per cluster in 0xd04010
+//!   ([`super::generation::Identification::Dies`]); its only other register
+//!   read, the MCW status 0xd40e10 of `AGXAcceleratorG14X::handleMCWInterrupt`
+//!   (an override the G14G kext stubs to return 0), is reached from the
+//!   GPU's interrupt service, which the model never raises, so it refuses.
 //!   `AGXArmFenderChinook::disable/enableDynamicFenderGating` (0x1b643cc,
 //!   0x1b644c0) set 0xd06030 bit 2, or clear bits 2:1.
 //!
 //! Model decisions:
 //! - The GPU must be admitted ([`generation::Gpu::admitted`]): its identity
 //!   comes from the census, its MMU and core-mask registers from its family.
-//! - Identification subfields no source names (0xd04010 bits 31:16, 0xd04014
-//!   bits 15:0 and 31:24, 0xd04018, 0xd0401c outside bits 19:12) read as zero.
+//! - Identification subfields no source names read as zero: 0xd04010 bits
+//!   31:16 (31:20 under [`Identification::Dies`]), 0xd04014 bits 15:0 and
+//!   31:24, 0xd04018, and 0xd0401c outside bits 19:12 (all of it under
+//!   `Dies`).
 //!   The kext multiplies some of them into its core configuration
 //!   (`AGXGPUCoreConfig` +0x34, +0x38, +0x40, +0x48..+0x5c); a boot run shows
 //!   whether zero is tolerated. **Unknown**, recorded in the research doc.
@@ -55,16 +65,17 @@
 //!   so no GPC host interrupts; none of the `sgx` interrupt lines is raised.
 //!   Enables and dynamic gating are held as written.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use super::generation::{Family, Gpu, MMU_ENABLE, Mmu};
+use super::generation::{Family, Gpu, Identification, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
 use alloc::vec;
 use alloc::vec::Vec;
 
 const NAME: &str = "agx-sgx";
 
-const GPC_PERFORMANCE_STATE: u64 = 0xd0_1000;
-const GPC_HOST_INTERRUPT_ENABLE: u64 = 0xd0_1010;
-const GPC_HOST_INTERRUPT_STATUS: u64 = 0xd0_1014;
+/// The GPC registers' offsets in the family's GPC block.
+const GPC_PERFORMANCE_STATE: u64 = 0;
+const GPC_HOST_INTERRUPT_ENABLE: u64 = 0x10;
+const GPC_HOST_INTERRUPT_STATUS: u64 = 0x14;
 /// Host-interrupt types 0..2 (`GPCHostInterruptType`).
 const GPC_HOST_INTERRUPTS: u32 = 0b111;
 
@@ -79,12 +90,13 @@ const GATING_CONTROL: u64 = 0xd0_6030;
 const GATING_BITS: u32 = 0b110;
 
 /// Check that `banks` (`(physical base, bytes, register offset)`) cover
-/// every register the model serves for `family`.
+/// every register the model serves for `family`, which must be modeled.
 pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static str> {
+    let gpc = family.model()?.gpc;
     let fixed = [
-        GPC_PERFORMANCE_STATE,
-        GPC_HOST_INTERRUPT_ENABLE,
-        GPC_HOST_INTERRUPT_STATUS,
+        gpc + GPC_PERFORMANCE_STATE,
+        gpc + GPC_HOST_INTERRUPT_ENABLE,
+        gpc + GPC_HOST_INTERRUPT_STATUS,
         ID_VERSION,
         ID_COUNTS_1,
         ID_COUNTS_2,
@@ -118,6 +130,9 @@ pub struct Identity {
     pub generation: u8,
     pub variant: u8,
     pub revision: u8,
+    /// Dies the clusters span; only [`Identification::Dies`] reports them.
+    pub dies: u8,
+    /// Clusters over every die.
     pub clusters: u8,
     pub cores: u8,
     pub frags: u8,
@@ -133,14 +148,23 @@ impl Identity {
             | u32::from(self.variant) << 16
             | u32::from(self.revision) << 8
     }
-    fn counts_1(&self) -> u32 {
-        u32::from(self.frags) << 8 | u32::from(self.cores)
+    fn counts_1(&self, identification: Identification) -> u32 {
+        let middle = match identification {
+            Identification::Clusters => u32::from(self.frags) << 8,
+            Identification::Dies => {
+                u32::from(self.dies) << 16 | u32::from(self.clusters / self.dies) << 8
+            }
+        };
+        middle | u32::from(self.cores)
     }
     fn counts_2(&self) -> u32 {
         u32::from(self.gps) << 16
     }
-    fn clusters(&self) -> u32 {
-        u32::from(self.clusters) << 12
+    fn clusters(&self, identification: Identification) -> u32 {
+        match identification {
+            Identification::Clusters => u32::from(self.clusters) << 12,
+            Identification::Dies => 0,
+        }
     }
 }
 
@@ -148,6 +172,7 @@ impl Identity {
 pub struct Sgx {
     identity: Identity,
     family: &'static Family,
+    model: &'static Model,
     interrupt_enable: u32,
     gating: u32,
     mmu_enabled: bool,
@@ -161,16 +186,18 @@ impl Sgx {
     /// The registers of `gpu`, which must be admitted.
     pub fn new(gpu: &'static Gpu) -> Result<Self, &'static str> {
         let identity = gpu.admitted()?;
+        let model = gpu.family.model()?;
         Ok(Self {
             identity,
             family: gpu.family,
+            model,
             interrupt_enable: 0,
             gating: 0,
             mmu_enabled: false,
             ttbat_page: 0,
             configuration: vec![0; gpu.family.mmu.configuration.len()],
             last_invalidate: 0,
-            uat: Uat::default(),
+            uat: Uat::new(model.uat_output_bits),
         })
     }
 
@@ -225,6 +252,14 @@ impl Sgx {
     fn read32(&self, offset: u64) -> Result<u32, &'static str> {
         let id = &self.identity;
         let mmu = self.mmu();
+        let identification = self.model.identification;
+        if let Some(word) = offset.checked_sub(self.model.gpc) {
+            match word {
+                GPC_PERFORMANCE_STATE | GPC_HOST_INTERRUPT_STATUS => return Ok(0),
+                GPC_HOST_INTERRUPT_ENABLE => return Ok(self.interrupt_enable),
+                _ => {}
+            }
+        }
         if let Some(slot) = self.core_mask_slot(offset) {
             return Ok(id.core_mask[slot]);
         }
@@ -232,14 +267,11 @@ impl Sgx {
             return Ok(self.configuration[slot]);
         }
         Ok(match offset {
-            GPC_PERFORMANCE_STATE => 0,
-            GPC_HOST_INTERRUPT_ENABLE => self.interrupt_enable,
-            GPC_HOST_INTERRUPT_STATUS => 0,
             ID_VERSION => id.version(),
-            ID_COUNTS_1 => id.counts_1(),
+            ID_COUNTS_1 => id.counts_1(identification),
             ID_COUNTS_2 => id.counts_2(),
             ID_UNK18 => 0,
-            ID_CLUSTERS => id.clusters(),
+            ID_CLUSTERS => id.clusters(identification),
             GATING_CONTROL => self.gating,
             MMU_ENABLE => u32::from(self.mmu_enabled),
             _ if offset == mmu.ttbat => self.ttbat_page,
@@ -253,14 +285,15 @@ impl Sgx {
         let mmu_register = offset == MMU_ENABLE
             || offset == mmu.ttbat
             || self.configuration_slot(offset).is_some();
+        let gpc = self.model.gpc;
         match offset {
-            GPC_HOST_INTERRUPT_ENABLE => {
+            _ if offset == gpc + GPC_HOST_INTERRUPT_ENABLE => {
                 if value & !GPC_HOST_INTERRUPTS != 0 {
                     return Err("GPC host-interrupt enable bit is not modeled");
                 }
                 self.interrupt_enable = value;
             }
-            GPC_HOST_INTERRUPT_STATUS => {
+            _ if offset == gpc + GPC_HOST_INTERRUPT_STATUS => {
                 // Nothing is ever pending, so an acknowledgement clears nothing.
                 if value & !GPC_HOST_INTERRUPTS != 0 {
                     return Err("GPC host-interrupt status bit is not modeled");
@@ -474,13 +507,39 @@ mod tests {
     }
 
     #[test]
+    fn g14x_identification_counts_dies_and_its_fender_moves() {
+        let gpu = generation::by_chip(0x6022).unwrap();
+        let mut sgx = Sgx::new(gpu).unwrap();
+        let version = read(&mut sgx, ID_VERSION).unwrap();
+        assert_eq!((version >> 24, (version >> 16) & 0xff), (6, 4));
+        // Two dies of four 10-core clusters; 0xd0401c names no count.
+        assert_eq!(read(&mut sgx, ID_COUNTS_1).unwrap(), 2 << 16 | 4 << 8 | 10);
+        assert_eq!(read(&mut sgx, ID_CLUSTERS).unwrap(), 0);
+        let masks: alloc::vec::Vec<_> = [0xe0_1500, 0xe0_1504, 0xe0_1508]
+            .into_iter()
+            .map(|offset| read(&mut sgx, offset).unwrap())
+            .collect();
+        assert_eq!(masks, [0xffff_ffff, 0xffff_ffff, 0xffff]);
+        write(&mut sgx, 0xe0_1010, 0b11).unwrap();
+        assert_eq!(read(&mut sgx, 0xe0_1010).unwrap(), 0b11);
+        assert_eq!(read(&mut sgx, 0xe0_1000).unwrap(), 0);
+        assert!(read(&mut sgx, 0xd0_1000).is_err());
+        assert!(read(&mut sgx, 0xd4_0e10).is_err());
+    }
+
+    #[test]
     fn fender_controls_hold_their_bits_and_raise_nothing() {
+        const GPC: u64 = 0xd0_1000;
         let mut sgx = Sgx::new(t8112()).unwrap();
-        assert_eq!(read(&mut sgx, GPC_PERFORMANCE_STATE).unwrap(), 0);
-        write(&mut sgx, GPC_HOST_INTERRUPT_ENABLE, 0b101).unwrap();
-        assert_eq!(read(&mut sgx, GPC_HOST_INTERRUPT_ENABLE).unwrap(), 0b101);
-        assert!(write(&mut sgx, GPC_HOST_INTERRUPT_ENABLE, 0b1000).is_err());
-        assert_eq!(read(&mut sgx, GPC_HOST_INTERRUPT_STATUS).unwrap(), 0);
+        assert_eq!(read(&mut sgx, GPC + GPC_PERFORMANCE_STATE).unwrap(), 0);
+        write(&mut sgx, GPC + GPC_HOST_INTERRUPT_ENABLE, 0b101).unwrap();
+        assert_eq!(
+            read(&mut sgx, GPC + GPC_HOST_INTERRUPT_ENABLE).unwrap(),
+            0b101
+        );
+        assert!(write(&mut sgx, GPC + GPC_HOST_INTERRUPT_ENABLE, 0b1000).is_err());
+        assert_eq!(read(&mut sgx, GPC + GPC_HOST_INTERRUPT_STATUS).unwrap(), 0);
+        assert!(read(&mut sgx, 0xe0_1000).is_err());
         // Disable then enable dynamic gating, as the Fender does.
         let gating = read(&mut sgx, GATING_CONTROL).unwrap() as u32;
         write(&mut sgx, GATING_CONTROL, gating | 0b100).unwrap();

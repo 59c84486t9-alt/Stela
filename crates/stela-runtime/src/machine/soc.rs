@@ -5132,12 +5132,19 @@ mod tests {
             model_children(ASC, gfx_role).len(),
             usize::from(GPU_ADMITTED)
         );
-        for gpu in ["gpu,t8112", "gpu,t8103", "gpu,t6000"] {
+        for gpu in [
+            "gpu,t8112",
+            "gpu,t8103",
+            "gpu,t6000",
+            "gpu,t6020",
+            "gpu,t6021",
+            "gpu,t6022",
+        ] {
             assert_eq!(models(gpu, |_| None), GPU_ADMITTED);
         }
         // A GPU whose family the firmware model does not implement stays
         // hidden.
-        assert!(!models("gpu,t6020", |_| None));
+        assert!(!models("gpu,t8122", |_| None));
         assert!(!models("gpu,t6041", |_| None));
         assert_eq!(models(GFX_MAPPER, |_| None), GPU_ADMITTED);
         assert!(!models(ASC, |key| (key == "role").then_some(b"GFX2\0".as_slice())));
