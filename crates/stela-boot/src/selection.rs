@@ -37,7 +37,7 @@ use stela_runtime::{
         nvram::{Variables, empty_bank},
     },
     payload::{
-        ReadAt,
+        PayloadError, ReadAt,
         gpt::{self, Disk, Role},
     },
     pc::{machine_state, storage::Target},
@@ -187,15 +187,18 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
         first_lba: 0,
         bytes: disk.blocks * disk.block_bytes,
     };
-    let mut header = vec![0u8; disk.block_bytes as usize];
-    whole.read_blocks(1, &mut header)?;
-    let info = gpt::parse_header(disk, 1, &header)
-        .ok()
-        .flatten()
-        .ok_or("the disk has no valid GPT")?;
-    let mut entries = vec![0u8; info.entry_array_bytes() as usize];
-    whole.read_blocks(info.entries_lba, &mut entries)?;
-    let table = gpt::parse_entries(&info, &entries).map_err(|_| "invalid GPT entries")?;
+    // The backup table stands in for a primary an interrupted write left
+    // damaged (`gpt::read`); selecting a boot only reads, so the repair is
+    // left to the next staging run.
+    let found = gpt::read(disk, |lba, blocks| {
+        let mut bytes = vec![0u8; (blocks * disk.block_bytes) as usize];
+        whole.read_blocks(lba, &mut bytes).map_err(PayloadError::Disk)?;
+        Ok(bytes)
+    })
+    .map_err(|_| "the disk's GPT is invalid")?;
+    let gpt::Found::Table { table, .. } = found else {
+        return Err("the disk has no valid GPT");
+    };
     let matching: Vec<_> = table
         .partitions
         .iter()
