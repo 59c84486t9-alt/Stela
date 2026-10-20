@@ -79,7 +79,7 @@ pub struct RestoreDryRun {
     ipsw: PathBuf,
     /// The payload inventory (`stela image-manifest --payload-manifest`);
     /// the block hashes it names are read from beside it.
-    #[arg(long, default_value = ".stela/restore-study/payload.json")]
+    #[arg(long, default_value = ".stela/restore-dryrun/payload.json")]
     payload: PathBuf,
     /// BuildManifest index of the erase identity; default: the inventory's
     /// only erase identity.
