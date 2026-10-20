@@ -106,6 +106,24 @@ impl Staged {
             .ok_or(Error::Invalid("exact prefetched HTTP response unavailable"))
     }
 }
+/// SHA-256 of the staged `URLAsset` reply for a recipient key PEM, for the
+/// inventory to record so the restore host serves the identical answer.
+pub fn staged_system_image_key_digest(pem: &str) -> Result<String> {
+    Ok(crate::sha256(&plist::encode_binary(
+        &url_asset_reply(pem),
+        Limits::default(),
+    )?))
+}
+/// The `URLAsset` reply that serves a recipient key PEM as the public FCS
+/// key server returns it: a complete, successful HTTP response.
+fn url_asset_reply(pem: &str) -> Value {
+    Value::dict([
+        ("ResponseBody", Value::Data(pem.as_bytes().to_vec())),
+        ("ResponseBodyDone", Value::Boolean(true)),
+        ("ResponseHeaders", Value::dict([])),
+        ("ResponseStatus", Value::Integer(200)),
+    ])
+}
 fn fingerprint(v: &Value) -> Result<String> {
     Ok(crate::sha256(&plist::encode_binary(v, Limits::default())?))
 }
@@ -214,6 +232,37 @@ impl<R: ReadAt> Answers<R> {
             signer: None,
             clock: None,
         }
+    }
+    /// Stage the offline `URLAsset` answer for each AEA member's
+    /// `fcs-key-url` GET from the inventory's recorded recipient key, so the
+    /// guest fetches the system-image content key without the network. The
+    /// reply is the PEM as the public key server returns it; restored unwraps
+    /// the archive key from the image's own `fcs-response` (see
+    /// `docs/research/restore-client.md`). A recorded digest that disagrees
+    /// with the rebuilt reply, as a swapped key would, refuses by member.
+    pub fn stage_system_image_keys(&mut self) -> Result<()> {
+        // Several images can share one recipient key and `fcs-key-url`; stage
+        // each URL once, and refuse a URL claimed by two different keys.
+        let mut staged: BTreeMap<String, String> = BTreeMap::new();
+        for key in self.store.manifest().aea_keys.clone() {
+            let args = Value::dict([
+                ("RequestMethod", Value::from("GET")),
+                ("RequestURL", Value::from(key.url.as_str())),
+            ]);
+            let bytes = plist::encode_binary(&url_asset_reply(&key.key_pem), Limits::default())?;
+            let digest = crate::sha256(&bytes);
+            if key.url_asset_sha256.as_deref().is_some_and(|s| s != digest) {
+                return Err(Error::Invalid("staged key does not match its member"));
+            }
+            match staged.get(&key.url) {
+                Some(seen) if *seen == digest => continue,
+                Some(_) => return Err(Error::Invalid("two keys for one fcs-key-url")),
+                None => {}
+            }
+            self.staged.insert("URLAsset", &args, &bytes, &digest)?;
+            staged.insert(key.url, digest);
+        }
+        Ok(())
     }
     pub fn supported(&self) -> Value {
         Value::Dict(
@@ -1127,6 +1176,63 @@ mod tests {
             got.extend(bytes);
         }
         assert_eq!(got, framed);
+    }
+    /// The staged system-image key answer serves the recorded PEM for its
+    /// member's exact `fcs-key-url` GET; a recorded digest for a different key
+    /// refuses by member.
+    #[test]
+    fn the_system_image_key_answers_the_fcs_key_url_get_offline() {
+        use crate::payload::AeaKey;
+        let pem = "-----BEGIN PRIVATE KEY-----\nMIGHA==\n-----END PRIVATE KEY-----\n";
+        let url = "https://wkms-public.apple.com/fcs-keys/mIR-wHh7FG0=";
+        let key = AeaKey {
+            member: "043-70867-640.dmg.aea".into(),
+            header_sha256: "a".repeat(64),
+            url: url.into(),
+            key_pem: pem.into(),
+            key_sha256: crate::sha256(pem.as_bytes()),
+            url_asset_sha256: Some(crate::sha256(
+                &plist::encode_binary(&url_asset_reply(pem), Limits::default()).unwrap(),
+            )),
+        };
+        let mut store = super::super::store::tests::fixture(b"x", false);
+        super::super::store::tests::set_aea_keys(&mut store, alloc::vec![key]);
+        let mut answers = Answers::new(store);
+        answers.stage_system_image_keys().unwrap();
+        let args = Value::dict([
+            ("RequestMethod", Value::from("GET")),
+            ("RequestURL", Value::from(url)),
+        ]);
+        let Plan::Reply(reply) = answers
+            .plan(&Value::dict([
+                ("DataType", Value::from("URLAsset")),
+                ("Arguments", args),
+            ]))
+            .unwrap()
+        else {
+            panic!("URLAsset must reply")
+        };
+        assert_eq!(
+            reply.required("ResponseBody").unwrap().data().unwrap(),
+            pem.as_bytes()
+        );
+
+        // A recorded digest for another key refuses by member.
+        let mut store = super::super::store::tests::fixture(b"x", false);
+        let other = "-----BEGIN PRIVATE KEY-----\nOTHER==\n-----END PRIVATE KEY-----\n";
+        super::super::store::tests::set_aea_keys(
+            &mut store,
+            alloc::vec![AeaKey {
+                member: "043-70867-640.dmg.aea".into(),
+                header_sha256: "a".repeat(64),
+                url: url.into(),
+                key_pem: other.into(),
+                key_sha256: crate::sha256(other.as_bytes()),
+                url_asset_sha256: Some("0".repeat(64)),
+            }],
+        );
+        let error = Answers::new(store).stage_system_image_keys().unwrap_err();
+        assert!(format!("{error}").contains("does not match its member"));
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {

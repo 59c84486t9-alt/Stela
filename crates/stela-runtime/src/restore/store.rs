@@ -463,6 +463,10 @@ pub(crate) mod tests {
     pub(crate) fn fixture(data: &[u8], deflate: bool) -> Store<Memory> {
         with_components(data, deflate, &[])
     }
+    /// Give a store's manifest AEA keys, for the staged-answer tests.
+    pub(crate) fn set_aea_keys(store: &mut Store<Memory>, keys: Vec<crate::payload::AeaKey>) {
+        store.manifest.aea_keys = keys;
+    }
     /// The fixture with more BuildManifest components, each `(name, path,
     /// bytes)` with its SHA-384 as the Digest.
     pub(crate) fn with_components(

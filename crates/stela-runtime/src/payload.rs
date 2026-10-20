@@ -270,6 +270,11 @@ pub struct AeaKey {
     pub url: String,
     pub key_pem: String,
     pub key_sha256: String,
+    /// SHA-256 of the binary-plist `URLAsset` reply the restore host stages
+    /// for this member's `fcs-key-url` GET, so the host serves the recipient
+    /// key offline. Absent in inventories written before the staged answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_asset_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -461,6 +466,10 @@ impl PayloadManifest {
         for key in &self.aea_keys {
             if crate::sha256(key.key_pem.as_bytes()) != key.key_sha256
                 || !sha256_hex(&key.header_sha256)
+                || key
+                    .url_asset_sha256
+                    .as_deref()
+                    .is_some_and(|s| !sha256_hex(s))
             {
                 return fail("AEA key digest mismatch");
             }
@@ -640,6 +649,7 @@ pub(crate) mod tests {
                 url: "https://wkms-public.apple.com/fcs-keys/x".into(),
                 key_pem: pem.into(),
                 key_sha256: crate::sha256(pem.as_bytes()),
+                url_asset_sha256: None,
             }],
             block_hashes: None,
         };
