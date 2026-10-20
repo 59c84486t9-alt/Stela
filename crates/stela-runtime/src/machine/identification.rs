@@ -139,6 +139,9 @@ const fn fixed(register: Encoding, shift: u8, level: u64, reason: &'static str) 
     row(register, shift, level, 0, None, Basis::Engine(true, reason))
 }
 
+/// ID_AA64PFR1_EL1.MTE, the memory tagging level.
+const PFR1_MTE: u8 = 8;
+
 const fn engine(holds: bool, reason: &'static str) -> Basis {
     Basis::Engine(holds, reason)
 }
@@ -421,8 +424,14 @@ pub const TABLE: &[Row] = &[
     ),
     // ID_AA64PFR1_EL1.MTE and MTE_frac: synchronous Tag Check faults only
     // (MTE_frac 0b1111, no FEAT_MTE_ASYNC).
-    feature(ID_AA64PFR1_EL1, 8, 1, "FEAT_MTE", engine(true, MTE)),
-    feature(ID_AA64PFR1_EL1, 8, 2, "FEAT_MTE2", engine(true, MTE2)),
+    feature(ID_AA64PFR1_EL1, PFR1_MTE, 1, "FEAT_MTE", engine(true, MTE)),
+    feature(
+        ID_AA64PFR1_EL1,
+        PFR1_MTE,
+        2,
+        "FEAT_MTE2",
+        engine(true, MTE2),
+    ),
     feature(ID_AA64PFR1_EL1, 40, 0b1111, "FEAT_MTE2", engine(true, MTE2)),
     feature(ID_AA64PFR1_EL1, 24, 1, "FEAT_SME", engine(true, SME_RUNS)),
     feature(ID_AA64PFR1_EL1, 24, 2, "FEAT_SME2", engine(true, SME_RUNS)),
@@ -1298,6 +1307,20 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
     }
 }
 
+/// Whether `chip`'s profile implements memory tagging: the ID_AA64PFR1_EL1.MTE
+/// field [`derive`] presents is nonzero. Its rows are engine properties, so
+/// the value is the same on every host target and kernel level; the hosted
+/// machine description (`hosted::hardware`) reports it from here.
+pub fn memory_tagging(chip: Chip) -> bool {
+    TABLE.iter().any(|row| {
+        row.register == ID_AA64PFR1_EL1
+            && row.shift == PFR1_MTE
+            && row.level != 0
+            && row.feature.is_none_or(|feature| has(chip, feature))
+            && matches!(row.basis, Basis::Engine(true, _))
+    })
+}
+
 /// Every register of [`REGISTERS`] with its value for `chip` on this host
 /// target, with or without EL2, with the host's `speculation` guarantees.
 pub fn derive(
@@ -1708,6 +1731,7 @@ mod tests {
             // CTR_EL0.TminLine and GMID_EL1.BS.
             let mte = matches!(chip, Chip::AppleM5 | Chip::AppleM6);
             assert_eq!(field(chip, ID_AA64PFR1_EL1, 8), 2 * u64::from(mte));
+            assert_eq!(memory_tagging(chip), mte, "{chip:?}");
             assert_eq!(field(chip, ID_AA64PFR1_EL1, 40), 0xf * u64::from(mte));
             assert_eq!(field(chip, CTR_EL0, 32), 4 * u64::from(mte));
             assert_eq!(field(chip, GMID_EL1, 0), 4 * u64::from(mte));

@@ -43,6 +43,10 @@ pub struct Hardware {
     pub clusters: Vec<Cluster>,
     /// `hw.memsize`: the host's physical memory.
     pub memory_bytes: u64,
+    /// The chip implements memory tagging (FEAT_MTE and later): the
+    /// ID_AA64PFR1_EL1.MTE field the system engine's identification of the
+    /// same chip presents (`machine::identification::memory_tagging`).
+    pub memory_tagging: bool,
 }
 
 impl Hardware {
@@ -87,6 +91,7 @@ impl Hardware {
             cache_line: 128,
             clusters,
             memory_bytes,
+            memory_tagging: crate::machine::identification::memory_tagging(chip),
         })
     }
 
@@ -113,6 +118,7 @@ mod tests {
         let m2 = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
         assert_eq!(m2.cpus(), 8);
         assert_eq!(m2.cpu_clusters(), [0, 0, 0, 0, 1, 1, 1, 1]);
+        assert!(!m2.memory_tagging);
         assert!(Hardware::of(Chip::AppleM1, 1 << 34).is_err());
     }
 }
