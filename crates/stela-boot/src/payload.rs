@@ -622,10 +622,50 @@ fn trimmed(bytes: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.into())
 }
 
-/// A whole disk's serial number, from its NVMe controller or its ATA
-/// IDENTIFY data. Other buses, such as virtio and USB, report none.
+/// A whole disk's serial number, from its NVMe controller, its ATA
+/// IDENTIFY data or its USB device's serial number string. Other buses,
+/// such as virtio, report none.
 pub(crate) fn disk_serial(handle: Handle, path: &str) -> Option<String> {
-    nvme_serial(path).or_else(|| ata_serial(handle))
+    nvme_serial(path)
+        .or_else(|| ata_serial(handle))
+        .or_else(|| usb_serial(path))
+}
+
+/// The iSerialNumber string of the USB device the disk belongs to, in US
+/// English and trimmed as Stela's own USB driver reads it (`pc::xhci`), so
+/// both name the disk alike. Hubs' paths prefix their devices', so the
+/// device is the one with the longest path the disk's starts with.
+fn usb_serial(path: &str) -> Option<String> {
+    use uefi::proto::usb::io::UsbIo;
+    const LANGUAGE_EN_US: u16 = 0x0409;
+    let (device, _) = boot::find_handles::<UsbIo>()
+        .ok()?
+        .into_iter()
+        .filter_map(|device| Some((device, device_path(device)?)))
+        .filter(|(_, prefix)| path == prefix || path.starts_with(format!("{prefix}/").as_str()))
+        .max_by_key(|(_, prefix)| prefix.len())?;
+    // SAFETY: descriptors are only read.
+    let mut io = unsafe {
+        boot::open_protocol::<UsbIo>(
+            OpenProtocolParams {
+                handle: device,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+    let index = io.device_descriptor().ok()?.str_serial_number;
+    if index == 0 {
+        return None;
+    }
+    let text = io
+        .string_descriptor(LANGUAGE_EN_US, index)
+        .ok()?
+        .to_string();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.into())
 }
 
 fn nvme_serial(path: &str) -> Option<String> {

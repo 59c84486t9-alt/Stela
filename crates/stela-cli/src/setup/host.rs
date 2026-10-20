@@ -165,7 +165,14 @@ impl Host for System {
             .output()
             .context("cannot run system_profiler")?;
         let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
-        Ok(serial_of(&report, disk))
+        if let Some(serial) = serial_of(&report, disk) {
+            return Ok(Some(serial));
+        }
+        // A USB disk: its device's serial number string, which the
+        // IORegistry links to the disk as the device's descendant.
+        let devices =
+            plist(Command::new("ioreg").args(["-a", "-r", "-c", "IOUSBHostDevice", "-l"]))?;
+        Ok(usb_serial_of(&devices, disk))
     }
 
     fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
@@ -259,6 +266,36 @@ pub(crate) fn serial_of(report: &serde_json::Value, disk: &str) -> Option<String
         }
     }
     None
+}
+
+/// The `USB Serial Number` of the USB device in an `ioreg -a -r -c
+/// IOUSBHostDevice -l` listing whose descendants include whole disk `disk`.
+pub(crate) fn usb_serial_of(devices: &Value, disk: &str) -> Option<String> {
+    fn holds(entry: &Value, disk: &str) -> bool {
+        let Some(entry) = entry.as_dictionary() else {
+            return false;
+        };
+        let whole = entry.get("Whole").and_then(Value::as_boolean) == Some(true);
+        if whole && entry.get("BSD Name").and_then(Value::as_string) == Some(disk) {
+            return true;
+        }
+        entry
+            .get("IORegistryEntryChildren")
+            .and_then(Value::as_array)
+            .is_some_and(|children| children.iter().any(|child| holds(child, disk)))
+    }
+    let devices = match devices.as_array() {
+        Some(devices) => devices.as_slice(),
+        None => core::slice::from_ref(devices),
+    };
+    devices
+        .iter()
+        .find(|device| holds(device, disk))?
+        .as_dictionary()?
+        .get("USB Serial Number")?
+        .as_string()
+        .map(|serial| serial.trim().to_owned())
+        .filter(|serial| !serial.is_empty())
 }
 
 #[cfg(target_os = "macos")]
@@ -432,6 +469,46 @@ mod tests {
         assert_eq!(serial_of(&report, "disk1"), None);
         assert_eq!(serial_of(&report, "disk2").as_deref(), Some("WD-1"));
         assert_eq!(serial_of(&report, "disk9"), None);
+        let media = |name: &str, whole: bool| {
+            Value::Dictionary(
+                [
+                    ("BSD Name".to_owned(), Value::from(name)),
+                    ("Whole".to_owned(), Value::from(whole)),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let device = |serial: &str, children: Vec<Value>| {
+            Value::Dictionary(
+                [
+                    ("USB Serial Number".to_owned(), Value::from(serial)),
+                    (
+                        "IORegistryEntryChildren".to_owned(),
+                        Value::Array(vec![Value::Dictionary(
+                            [("IORegistryEntryChildren".to_owned(), Value::Array(children))]
+                                .into_iter()
+                                .collect(),
+                        )]),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            )
+        };
+        let devices = Value::Array(vec![
+            device("KEYBOARD", Vec::new()),
+            device(
+                " D036F68A3B1E6921 ",
+                vec![media("disk5", true), media("disk5s1", false)],
+            ),
+        ]);
+        assert_eq!(
+            usb_serial_of(&devices, "disk5").as_deref(),
+            Some("D036F68A3B1E6921")
+        );
+        assert_eq!(usb_serial_of(&devices, "disk5s1"), None);
+        assert_eq!(usb_serial_of(&devices, "disk6"), None);
         assert!(raw_device("disk1s2").is_ok());
         assert!(raw_device("disk1").is_err());
         assert!(raw_device("../disk1s2").is_err());
