@@ -58,6 +58,8 @@ const JOURNAL_LINES: usize = 512;
 /// docs/research/agx.md §2). A word confirming one of these matches the
 /// render target the stream describes.
 const TILE_SIZE_BITS: [u32; 4] = [0x1000, 0x2000, 0x4000, 0x8000];
+/// Where the 3D command carries its tile-size word.
+const TILE_SIZE_OFFSET: usize = 0x80;
 
 /// What following a command field confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,22 +220,18 @@ pub fn derive(memory: &mut dyn Shared, command: &Command) -> Vec<Confirmed> {
         }
         offset += 4;
     }
-    // Tile-size words: a 32-bit word carrying one of the render-target tile
-    // bits, matching the fragment pipe's render target.
-    if command.kind == Kind::ThreeD {
-        let mut at = 0;
-        while at + 4 <= readable {
-            let word = u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
-            for bits in TILE_SIZE_BITS {
-                if word == bits {
-                    confirmed.push(Confirmed {
-                        offset: at as u64,
-                        value: u64::from(word),
-                        evidence: Evidence::TileSize { bits },
-                    });
-                }
-            }
-            at += 4;
+    // The 3D command's tile-size word sits at the recovered +0x80; a value
+    // there that is one of the tile bits corroborates that field. A matching
+    // value anywhere else is a coincidence, not evidence.
+    if command.kind == Kind::ThreeD && TILE_SIZE_OFFSET + 4 <= readable {
+        let at = TILE_SIZE_OFFSET;
+        let word = u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
+        if TILE_SIZE_BITS.contains(&word) {
+            confirmed.push(Confirmed {
+                offset: at as u64,
+                value: u64::from(word),
+                evidence: Evidence::TileSize { bits: word },
+            });
         }
     }
     confirmed.sort_by_key(|c| c.offset);
@@ -363,12 +361,17 @@ impl Journal {
     /// Record one observation's lines.
     pub fn record(&mut self, observation: &Observation) {
         for line in observation.lines() {
-            if self.lines.len() == JOURNAL_LINES {
-                self.lines.pop_front();
-                self.dropped += 1;
-            }
-            self.lines.push_back(line);
+            self.note(line);
         }
+    }
+
+    /// Record one line.
+    pub fn note(&mut self, line: String) {
+        if self.lines.len() == JOURNAL_LINES {
+            self.lines.pop_front();
+            self.dropped += 1;
+        }
+        self.lines.push_back(line);
     }
 
     /// The recorded lines, oldest first, preceded by a count of any dropped.
@@ -501,8 +504,10 @@ mod tests {
     fn a_tile_size_word_is_confirmed_only_for_a_3d_command() {
         let mut memory = Flat::new(BASE, 0x8000);
         memory.put_u32(COMMAND, 1);
-        // +0x80 carries 0x4000 (a 32-high tile).
+        // +0x80 carries 0x4000 (a 32-high tile); the same value elsewhere is
+        // no tile-size field.
         memory.put_u32(COMMAND + 0x80, 0x4000);
+        memory.put_u32(COMMAND + 0x84, 0x2000);
         let three_d = Command {
             va: COMMAND,
             kind: Kind::ThreeD,
@@ -514,6 +519,7 @@ mod tests {
                 .any(|c| c.offset == 0x80
                     && matches!(c.evidence, Evidence::TileSize { bits: 0x4000 }))
         );
+        assert!(!confirmed.iter().any(|c| c.offset == 0x84));
         // A CL command's identical word is not a tile-size field.
         memory.put_u32(COMMAND, 3);
         let cl = Command {

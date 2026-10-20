@@ -55,6 +55,7 @@ use super::uat;
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
+use alloc::format;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -315,10 +316,16 @@ impl State {
                 // Observe (`--agx-observe`): record the command and the
                 // fields observation confirms, then run it as usual — a work
                 // command still refuses by name below, with its record logged.
+                // Observation never changes the outcome: a record that cannot
+                // be read is logged as such.
                 if let Some(journal) = self.observe.as_mut() {
-                    let observation =
-                        observe::Observation::record(memory, pipe as u8, index, state, va)?;
-                    journal.record(&observation);
+                    match observe::Observation::record(memory, pipe as u8, index, state, va) {
+                        Ok(observation) => journal.record(&observation),
+                        Err(reason) => journal.note(format!(
+                            "AGX OBSERVE pipe={} index={index} command={va:#x} unrecorded: {reason}",
+                            pipe as u8
+                        )),
+                    }
                 }
                 for event in signal::execute(memory, &command)? {
                     event::post(memory, root, event)?;
