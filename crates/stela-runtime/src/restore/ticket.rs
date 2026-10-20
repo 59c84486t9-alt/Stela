@@ -242,6 +242,40 @@ impl Ticket {
         prefix.extend_from_slice(&label);
         Ok((prefix, suffix))
     }
+    /// The tags whose `DGST` is `digest`.
+    pub fn tags_with(&self, digest: &[u8]) -> Vec<[u8; 4]> {
+        self.entries
+            .iter()
+            .filter(|(_, p)| p.get(b"DGST").and_then(|v| v.data().ok()) == Some(digest))
+            .map(|(tag, _)| *tag)
+            .collect()
+    }
+    /// Type a bare IM4P as the tag under which this ticket covers `digest`.
+    /// Image4 finds an object in the ticket by its IM4P type, and one file
+    /// can serve two components: the 26A434 J473 `RestoreDeviceTree` is the
+    /// `dtre` DeviceTree file, and its manifest digest and ticket entry
+    /// cover that IM4P typed `rdtr`. An image whose SHA-384 is already
+    /// `digest` is left as it is; one no covered type makes hash to
+    /// `digest` refuses.
+    pub fn retype_covered(&self, im4p: &mut [u8], digest: &[u8]) -> Result<()> {
+        if Sha384::digest(&*im4p).as_slice() == digest {
+            return Ok(());
+        }
+        let original =
+            crate::img4::payload_type(im4p).map_err(|_| Error::Invalid("IM4P payload type"))?;
+        for tag in self.tags_with(digest) {
+            crate::img4::set_payload_type(im4p, tag)
+                .map_err(|_| Error::Invalid("IM4P payload type"))?;
+            if Sha384::digest(&*im4p).as_slice() == digest {
+                return Ok(());
+            }
+        }
+        crate::img4::set_payload_type(im4p, original)
+            .map_err(|_| Error::Invalid("IM4P payload type"))?;
+        Err(Error::Invalid(
+            "global manifest does not cover exact component digest",
+        ))
+    }
     pub fn wrap(&self, source: &[u8], manifest_digest: &[u8]) -> Result<Vec<u8>> {
         let parts = crate::img4::parse(source)
             .map_err(|_| Error::Invalid("personalized object needs original IM4P"))?;
@@ -381,5 +415,42 @@ pub(crate) mod tests {
         *changed.last_mut().unwrap() ^= 1;
         assert!(g.wrap(&changed, &hash).is_err());
         assert!(Ticket::global(vec![0; 6], store.identity()).is_err());
+    }
+    /// As 26A434 J473's `RestoreDeviceTree`: the `dtre` file, covered by the
+    /// ticket's `rdtr` entry for the retyped IM4P.
+    #[test]
+    fn an_image_is_retyped_to_the_tag_that_covers_its_digest() {
+        let store = super::super::store::tests::fixture(b"x", false);
+        let file = tlv(
+            0x30,
+            &[
+                tlv(0x16, b"IM4P"),
+                tlv(0x16, b"dtre"),
+                tlv(0x16, b""),
+                tlv(4, b"tree"),
+            ]
+            .concat(),
+        );
+        let mut rdtr = file.clone();
+        crate::img4::set_payload_type(&mut rdtr, *b"rdtr").unwrap();
+        let digest = Sha384::digest(&rdtr);
+        let g = Ticket::global(ticket_for(b"rdtr", &rdtr, None), store.identity()).unwrap();
+        assert_eq!(g.tags_with(&digest), [*b"rdtr"]);
+        let mut image = file.clone();
+        g.retype_covered(&mut image, &digest).unwrap();
+        assert_eq!(image, rdtr);
+        let parts = crate::img4::parse(&g.wrap(&image, &digest).unwrap())
+            .unwrap()
+            .payload
+            .to_vec();
+        assert_eq!(parts, rdtr);
+        // A digest the ticket covers under no tag leaves the image alone.
+        let mut other = file.clone();
+        assert!(g.retype_covered(&mut other, &[0; 48]).is_err());
+        assert_eq!(other, file);
+        // An image that already hashes to the digest is not retyped.
+        let mut same = rdtr.clone();
+        g.retype_covered(&mut same, &digest).unwrap();
+        assert_eq!(same, rdtr);
     }
 }

@@ -297,30 +297,69 @@ impl<R: ReadAt> Answers<R> {
     ) -> Result<Vec<Segment>> {
         let path = identity.path(name)?.to_string();
         let size = self.store.member_len(&path)?;
-        let prefix = self.store.read_at(&path, 0, size.min(64) as usize)?;
-        let tag = bare_type(&prefix, size)?;
+        let head = self.store.read_at(&path, 0, size.min(64) as usize)?;
+        let (stored, at) = bare_type(&head, size)?;
         let digest = identity.component(name)?.required("Digest")?.data()?;
-        if self.store.digest384(&path)?.as_slice() != digest {
-            return Err(Error::Invalid("IM4P differs from BuildManifest digest"));
-        }
         let global = self.global(identity, args, name.starts_with("Cryptex1,"))?;
+        // Image4 finds the object by its IM4P type: send the type under which
+        // the ticket covers the manifest digest (`Ticket::retype_covered`).
+        let tag = if self.store.digest384(&path)?.as_slice() == digest {
+            stored
+        } else {
+            let mut found = None;
+            for tag in global.tags_with(digest) {
+                if self.retyped_digest(&path, &head, at, tag)?.as_slice() == digest {
+                    found = Some(tag);
+                    break;
+                }
+            }
+            found.ok_or(Error::Invalid("IM4P differs from BuildManifest digest"))?
+        };
         let (prefix, suffix) = global.envelope(tag, digest, size)?;
+        let mut head = head;
+        head[at..at + 4].copy_from_slice(&tag);
+        let sent = head.len() as u64;
         Ok(vec![
             Segment::Bytes(prefix),
+            Segment::Bytes(head),
             Segment::Member {
                 path,
-                offset: 0,
-                bytes: size,
+                offset: sent,
+                bytes: size - sent,
             },
             Segment::Bytes(suffix),
         ])
     }
+    /// SHA-384 of a member with its IM4P type, at `at` in `head`, replaced.
+    fn retyped_digest(
+        &mut self,
+        path: &str,
+        head: &[u8],
+        at: usize,
+        tag: [u8; 4],
+    ) -> Result<[u8; 48]> {
+        let size = self.store.member_len(path)?;
+        let mut hash = Sha384::new();
+        let mut first = head.to_vec();
+        first[at..at + 4].copy_from_slice(&tag);
+        hash.update(&first);
+        let mut offset = head.len() as u64;
+        while offset < size {
+            let n = (size - offset).min(super::store::MAX_READ_BYTES as u64) as usize;
+            hash.update(self.store.read_at(path, offset, n)?);
+            offset += n as u64;
+        }
+        Ok(hash.finalize().into())
+    }
+    /// The component's IM4P stitched with the global ticket, typed as the
+    /// ticket covers it (`Ticket::retype_covered`).
     fn personalized(&mut self, identity: &Identity, name: &str, args: &Value) -> Result<Vec<u8>> {
         let path = identity.path(name)?;
-        let bytes = self.member_bytes(path)?;
+        let mut bytes = self.member_bytes(path)?;
         let digest = identity.component(name)?.required("Digest")?.data()?;
-        self.global(identity, args, name.starts_with("Cryptex1,"))?
-            .wrap(&bytes, digest)
+        let global = self.global(identity, args, name.starts_with("Cryptex1,"))?;
+        global.retype_covered(&mut bytes, digest)?;
+        global.wrap(&bytes, digest)
     }
     pub fn plan(&mut self, request: &Value) -> Result<Plan> {
         self.plan_inner(request)
@@ -713,8 +752,9 @@ impl<R: ReadAt> Answers<R> {
         Ok(Plan::Raw(segments))
     }
 }
-/// Check the outer IM4P header and its exact extent without loading the body.
-fn bare_type(prefix: &[u8], bytes: u64) -> Result<[u8; 4]> {
+/// Check the outer IM4P header and its exact extent without loading the body;
+/// returns the type and its offset.
+fn bare_type(prefix: &[u8], bytes: u64) -> Result<([u8; 4], usize)> {
     if prefix.first() != Some(&0x30) {
         return Err(Error::Invalid("IM4P sequence"));
     }
@@ -734,7 +774,14 @@ fn bare_type(prefix: &[u8], bytes: u64) -> Result<[u8; 4]> {
     if length + header as u64 != bytes || prefix.get(header..header + 6) != Some(b"\x16\x04IM4P") {
         return Err(Error::Invalid("source must be exactly one bare IM4P"));
     }
-    crate::img4::peek_payload_type(prefix).map_err(|_| Error::Invalid("IM4P streaming type"))
+    let tag = crate::img4::peek_payload_type(prefix)
+        .map_err(|_| Error::Invalid("IM4P streaming type"))?;
+    // `IA5String "IM4P"` is followed by the four-character type's IA5String.
+    let at = header + 8;
+    if prefix.get(header + 6..at) != Some(b"\x16\x04") || prefix.get(at..at + 4) != Some(&tag[..]) {
+        return Err(Error::Invalid("IM4P streaming type"));
+    }
+    Ok((tag, at))
 }
 /// odc cpio, as public restore.c emits it. UID/GID zero, one link; deterministic
 /// archive metadata is a host archive choice, not a guest firmware identity.
@@ -832,6 +879,24 @@ mod tests {
             panic!("a digest of the stored file must not cover the retyped image")
         };
         assert!(format!("{error}").contains("differs from its BuildManifest digest"));
+    }
+    /// A streamed IM4P is retyped in place: its type sits right after the
+    /// `IM4P` label, whatever the outer length's width.
+    #[test]
+    fn a_streamed_im4p_names_its_type_and_where_it_is() {
+        let short = [
+            0x30, 0x11, 0x16, 0x04, b'I', b'M', b'4', b'P', 0x16, 0x04, b'd', b't', b'r', b'e',
+            0x16, 0x00, 0x04, 0x01, 0x07,
+        ];
+        assert_eq!(bare_type(&short, 19).unwrap(), (*b"dtre", 10));
+        let mut long = vec![0x30, 0x82, 0x01, 0x0e];
+        long.extend_from_slice(b"\x16\x04IM4P\x16\x04dcpf\x16\x00\x04\x82\x01\x00");
+        long.resize(4 + 0x10e, 0);
+        assert_eq!(
+            bare_type(&long[..64], long.len() as u64).unwrap(),
+            (*b"dcpf", 12)
+        );
+        assert!(bare_type(&long[..64], long.len() as u64 + 1).is_err());
     }
     #[test]
     fn exact_http_arguments_digest_and_post_body_are_bound() {
