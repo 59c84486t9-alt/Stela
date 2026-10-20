@@ -461,7 +461,7 @@ impl Kernel {
                 } else {
                     KERN_INVALID_ADDRESS
                 };
-                if self.deliver_exception(pe, EXC_BAD_ACCESS, &[result, address], false)? {
+                if self.deliver_exception(pe, EXC_BAD_ACCESS, &[result, address])? {
                     return Ok(());
                 }
                 let fault = bsd::signal::FaultSignal::of(
@@ -489,27 +489,35 @@ impl Kernel {
             // BRK itself.
             EC_BRK64 => {
                 let comment = iss & 0xffff;
-                let unrecoverable = UNRECOVERABLE_BRK_LABELS
-                    .iter()
-                    .any(|labels| labels.contains(&comment));
-                if self.deliver_exception(
-                    pe,
-                    EXC_BREAKPOINT,
-                    &[EXC_ARM_BREAKPOINT, elr],
-                    unrecoverable,
-                )? {
-                    return Ok(());
-                }
                 let shared_cache_slide = self.shared_cache_slide();
-                self.exception_signal(bsd::signal::SIGTRAP, 0, false, || {
+                let describe = |pe: &Pe| {
                     format!(
-                        "guest BRK #{:#x} at pc {elr:#x} (lr {:#x}, frames {:x?}, shared cache \
-                         slide {shared_cache_slide:#x})",
-                        iss & 0xffff,
+                        "guest BRK #{comment:#x} at pc {elr:#x} (lr {:#x}, frames {:x?}, shared \
+                         cache slide {shared_cache_slide:#x})",
                         pe.cpu.state.x[30],
                         frames(pe.cpu.state.x[29]),
                     )
-                });
+                };
+                // A reserved label (`EXC_MAY_BE_UNRECOVERABLE_BIT`):
+                // `maybe_unrecoverable_exception_triage` ends a process
+                // whose address space is not debugged before any delivery
+                // (`exit_with_mach_exception`, SIGKILL).
+                if UNRECOVERABLE_BRK_LABELS
+                    .iter()
+                    .any(|labels| labels.contains(&comment))
+                    && !mach::raise::address_space_debugged(self)
+                {
+                    eprintln!(
+                        "stela: {}: the reserved label ends the process",
+                        describe(pe)
+                    );
+                    self.end = Some(End::Process(Termination::Signaled(SIGKILL as i32)));
+                    return Ok(());
+                }
+                if self.deliver_exception(pe, EXC_BREAKPOINT, &[EXC_ARM_BREAKPOINT, elr])? {
+                    return Ok(());
+                }
+                self.exception_signal(bsd::signal::SIGTRAP, 0, false, || describe(pe));
                 Ok(())
             }
             // `handle_pac_fail`: EXC_BAD_ACCESS with EXC_ARM_PAC_FAIL and the
@@ -524,7 +532,6 @@ impl Kernel {
                         pe,
                         EXC_BAD_ACCESS,
                         &[EXC_ARM_PAC_FAIL, u64::from(instruction)],
-                        false,
                     )?
                 {
                     return Ok(());
@@ -593,7 +600,6 @@ impl Kernel {
             pe,
             super::darwin::EXC_BAD_INSTRUCTION,
             &[EXC_ARM_UNDEFINED, u64::from(instruction)],
-            false,
         )? {
             return Ok(());
         }
@@ -613,15 +619,8 @@ impl Kernel {
     /// Deliver a guest exception of `kind` with `codes` to the exception
     /// ports set for it (`exception_triage`): whether a handler handled
     /// it, when the thread returns to user space at its state with no
-    /// signal. An `unrecoverable` one (a reserved BRK label) is delivered
-    /// only to a debugged address space.
-    fn deliver_exception(
-        &self,
-        pe: &mut Pe,
-        kind: usize,
-        codes: &[u64],
-        unrecoverable: bool,
-    ) -> Result<bool> {
+    /// signal.
+    fn deliver_exception(&self, pe: &mut Pe, kind: usize, codes: &[u64]) -> Result<bool> {
         let mut words = [0; 2];
         words[..codes.len()].copy_from_slice(codes);
         mach::raise::deliver(
@@ -631,7 +630,6 @@ impl Kernel {
                 kind,
                 codes: words,
                 count: codes.len(),
-                unrecoverable,
             },
         )
     }

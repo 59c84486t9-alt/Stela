@@ -24,6 +24,7 @@ use super::super::{Kernel, Pe};
 use super::server::NDR_RECORD;
 use crate::hosted::darwin::{self, mach_msg, mach_port_allocate};
 use crate::hosted::host;
+use crate::mach::mig;
 use anyhow::{Result, bail};
 
 /// The exception routines' message IDs: `exc` (32-bit codes) and
@@ -72,24 +73,23 @@ pub(super) struct Action {
 }
 
 /// A guest exception: its type and the codes the kernel raises it with
-/// (`sleh.c` gives two, `mach_syscall` one), and whether it may be
-/// unrecoverable (`EXC_MAY_BE_UNRECOVERABLE_BIT`).
+/// (`sleh.c` gives two, `mach_syscall` one).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Exception {
     pub(crate) kind: usize,
     pub(crate) codes: [u64; 2],
     pub(crate) count: usize,
-    pub(crate) unrecoverable: bool,
+}
+
+/// Whether this process's address space is debugged
+/// (`is_address_space_debugged`).
+pub(crate) fn address_space_debugged(kernel: &Kernel) -> bool {
+    super::vm::address_space_debugged(kernel)
 }
 
 /// Deliver `exception` of this thread, whose trap frame `pe` holds, to the
 /// thread's and then the task's action for it: whether one handled it.
 pub(crate) fn deliver(kernel: &Kernel, pe: &mut Pe, exception: Exception) -> Result<bool> {
-    // `maybe_unrecoverable_exception_triage` ends a process whose address
-    // space is not debugged before any delivery.
-    if exception.unrecoverable && !super::vm::address_space_debugged(kernel) {
-        return Ok(false);
-    }
     let actions = kernel
         .process
         .exception_ports
@@ -202,7 +202,7 @@ pub(super) fn parse_reply(id: i32, reply: &[u8], state: bool) -> (u32, NewState)
     if reply_id == MACH_NOTIFY_SEND_ONCE {
         return (MIG_SERVER_DIED, None);
     }
-    if reply_id != id + 100 {
+    if reply_id != id + mig::REPLY_OFFSET as i32 {
         return (MIG_REPLY_MISMATCH, None);
     }
     let size = size as usize;
@@ -403,7 +403,6 @@ mod tests {
             kind: 1,
             codes: [2, 0x1234_5678_9abc],
             count: 2,
-            unrecoverable: false,
         };
         // mach_exception_raise: two port descriptors, then 64-bit codes.
         let body = request_body(

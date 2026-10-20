@@ -310,12 +310,7 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
 /// becomes SIGSYS at the trap (`ux_exception`) unless a handler takes it;
 /// X0 is left as it was.
 fn syscall_exception(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
-    if kernel.deliver_exception(
-        pe,
-        crate::hosted::darwin::EXC_SYSCALL,
-        &[u64::from(index)],
-        false,
-    )? {
+    if kernel.deliver_exception(pe, crate::hosted::darwin::EXC_SYSCALL, &[u64::from(index)])? {
         return Ok(());
     }
     let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
