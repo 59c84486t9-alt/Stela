@@ -23,7 +23,19 @@ const DC_CVAU: Encoding = Encoding::new(1, 3, 7, 11, 1);
 const DC_CIVAC: Encoding = Encoding::new(1, 3, 7, 14, 1);
 
 /// A set of the DC clean operations a context completes natively.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct Operations(u8);
 
 impl Operations {

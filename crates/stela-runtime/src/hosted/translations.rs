@@ -15,6 +15,8 @@
 //! unwritten entries stay the parent's.
 pub mod ahead;
 mod image;
+pub mod service;
+mod spool;
 
 use crate::machine::{Offer, Translations};
 use crate::translations::{self, Digest, Record};
@@ -40,6 +42,11 @@ const DEFAULT_BOUND: u64 = 4 << 30;
 const LAYOUT: &str = "v1";
 const RECORD_EXTENSION: &str = "stlt";
 const USAGE_FILE: &str = "usage";
+/// Below the layout directory: present while a service (`stelad`) owns
+/// the store, and its spool of the offers processes leave it.
+const SERVICE_FILE: &str = "service";
+const SPOOL_DIRECTORY: &str = "spool";
+const SPOOL_EXTENSION: &str = "stlq";
 const TRANSLATOR_FILE: &str = "translator.txt";
 /// Threads proving offered blocks.
 const WORKERS: usize = 2;
@@ -56,6 +63,9 @@ const EVICT_TO_PERCENT: u64 = 90;
 const MAX_RECORD_BYTES: u64 = 64 << 20;
 /// The most native code a process keeps prepared for its threads.
 const MAX_PREPARED_BYTES: usize = 512 << 20;
+/// Offers a served process gathers before it leaves them in the spool, so
+/// a long-running process hands them over as it goes.
+const SPOOL_BATCH: usize = 4096;
 
 /// What the store did, for `--statistics`.
 #[derive(Debug, Default)]
@@ -69,6 +79,7 @@ pub struct Counters {
     pub records_written: AtomicU64,
     pub bytes_written: AtomicU64,
     pub evicted: AtomicU64,
+    pub spooled: AtomicU64,
 }
 
 pub static COUNTERS: Counters = Counters {
@@ -81,6 +92,7 @@ pub static COUNTERS: Counters = Counters {
     records_written: AtomicU64::new(0),
     bytes_written: AtomicU64::new(0),
     evicted: AtomicU64::new(0),
+    spooled: AtomicU64::new(0),
 };
 
 /// Where the store lives and how large it may grow.
@@ -142,10 +154,33 @@ struct Disk {
     namespace: PathBuf,
 }
 
+impl Disk {
+    /// `HOME/v1`.
+    fn root(&self) -> PathBuf {
+        self.config.home.join(LAYOUT)
+    }
+}
+
+/// Who proves the offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// A process proving its own offers with [`WORKERS`] threads and
+    /// waiting [`FINISH_WAIT`] for them at its end.
+    Process,
+    /// A process whose store has a service: it proves nothing and leaves
+    /// its offers in the service's spool at its end.
+    Served,
+    /// The service, proving with `workers` threads to the last offer.
+    Service { workers: usize },
+}
+
+static SERVICE_WORKERS: OnceLock<usize> = OnceLock::new();
+
 /// One process's store: the blocks its threads and its ahead-of-time
 /// translation prepared, and its disk, if it has one.
 struct Shared {
     disk: Option<Disk>,
+    role: Role,
     translator: Digest,
     pid: u32,
     state: Mutex<State>,
@@ -182,30 +217,48 @@ fn shared() -> Option<&'static Shared> {
     {
         return Some(shared);
     }
-    let translator = translations::translator_id();
-    let shared = Box::leak(Box::new(Shared {
-        disk: config.as_ref().map(|config| Disk {
+    let served = config
+        .as_ref()
+        .is_some_and(|config| config.home.join(LAYOUT).join(SERVICE_FILE).is_file());
+    let role = match SERVICE_WORKERS.get() {
+        Some(&workers) => Role::Service { workers },
+        None if served => Role::Served,
+        None => Role::Process,
+    };
+    let shared = Shared::leaked(config.as_ref(), role);
+    CURRENT.store(std::ptr::from_ref(shared).cast_mut(), Ordering::Release);
+    Some(shared)
+}
+
+impl Shared {
+    /// A store of the home `config` names, if any, in `role`, for the rest
+    /// of the process.
+    fn leaked(config: Option<&Config>, role: Role) -> &'static Self {
+        let translator = translations::translator_id();
+        let disk = config.map(|config| Disk {
             namespace: config.home.join(LAYOUT).join(translator.hex()),
             config: config.clone(),
-        }),
-        translator,
-        pid,
-        state: Mutex::new(State {
-            loaded: BTreeMap::new(),
-            prepared: HashMap::new(),
-            prepared_bytes: 0,
-            queue: VecDeque::new(),
-            busy: 0,
-            unwritten: BTreeMap::new(),
-            workers: 0,
-            closed: false,
-        }),
-        changed: Condvar::new(),
-        written_bytes: AtomicU64::new(0),
-        ahead: ahead::Ahead::default(),
-    }));
-    CURRENT.store(shared, Ordering::Release);
-    Some(shared)
+        });
+        Box::leak(Box::new(Shared {
+            disk,
+            role,
+            translator,
+            pid: std::process::id(),
+            state: Mutex::new(State {
+                loaded: BTreeMap::new(),
+                prepared: HashMap::new(),
+                prepared_bytes: 0,
+                queue: VecDeque::new(),
+                busy: 0,
+                unwritten: BTreeMap::new(),
+                workers: 0,
+                closed: false,
+            }),
+            changed: Condvar::new(),
+            written_bytes: AtomicU64::new(0),
+            ahead: ahead::Ahead::default(),
+        }))
+    }
 }
 
 /// The engine's view of this process's store.
@@ -265,7 +318,8 @@ impl Shared {
     fn prepare(&'static self, offer: Offer) {
         let mut state = lock(&self.state);
         let bytes = offer.block.native.x86_64_code.len();
-        if state.prepared_bytes + bytes <= MAX_PREPARED_BYTES {
+        let shares = !matches!(self.role, Role::Service { .. });
+        if shares && state.prepared_bytes + bytes <= MAX_PREPARED_BYTES {
             state.prepared_bytes += bytes;
             state
                 .prepared
@@ -276,7 +330,21 @@ impl Shared {
         }
         let shared = self;
         state.queue.push_back(offer);
-        if state.workers < WORKERS {
+        if self.role == Role::Served {
+            if state.queue.len() >= SPOOL_BATCH
+                && let Some(disk) = &self.disk
+            {
+                let offers = Self::spooled(&mut state);
+                drop(state);
+                self.spool(disk, &offers);
+            }
+            return;
+        }
+        let workers = match self.role {
+            Role::Service { workers } => workers,
+            Role::Process | Role::Served => WORKERS,
+        };
+        if state.workers < workers {
             state.workers += 1;
             drop(state);
             let spawned = std::thread::Builder::new()
@@ -403,6 +471,12 @@ impl Shared {
         let mut state = lock(&self.state);
         state.closed = true;
         self.changed.notify_all();
+        if self.role == Role::Served {
+            let offers = Self::spooled(&mut state);
+            drop(state);
+            self.spool(disk, &offers);
+            return;
+        }
         while (state.busy != 0 || !state.queue.is_empty()) && state.workers != 0 {
             let now = Instant::now();
             if now >= deadline {
@@ -437,6 +511,34 @@ impl Shared {
         }
         self.write(unwritten);
         self.account(disk);
+    }
+
+    /// The queued offers, taken for the spool.
+    fn spooled(state: &mut State) -> Vec<spool::Spooled> {
+        state
+            .queue
+            .drain(..)
+            .map(|offer| spool::Spooled::of(&offer))
+            .collect()
+    }
+
+    /// Leave `offers` in the service's spool.
+    fn spool(&self, disk: &Disk, offers: &[spool::Spooled]) {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        if offers.is_empty() {
+            return;
+        }
+        let path = disk.root().join(SPOOL_DIRECTORY).join(format!(
+            "{}-{}-{}.{SPOOL_EXTENSION}",
+            self.translator.hex(),
+            self.pid,
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        if write_replacing(&path, &spool::encode(&self.translator, offers)).is_ok() {
+            COUNTERS
+                .spooled
+                .fetch_add(offers.len() as u64, Ordering::Relaxed);
+        }
     }
 
     /// Add this process's growth to the home's usage and evict past the
@@ -535,13 +637,14 @@ pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
     if CONFIG.get().is_some_and(Option::is_some) {
         lines.push(format!(
             "store: {} records loaded, {} absent, {} invalid; {} blocks proven, {} unprovable, \
-             {} dropped; {} records written ({} bytes), {} evicted",
+             {} dropped, {} spooled; {} records written ({} bytes), {} evicted",
             counter(&COUNTERS.records_loaded),
             counter(&COUNTERS.records_absent),
             counter(&COUNTERS.records_invalid),
             counter(&COUNTERS.proven),
             counter(&COUNTERS.unprovable),
             counter(&COUNTERS.dropped),
+            counter(&COUNTERS.spooled),
             counter(&COUNTERS.records_written),
             counter(&COUNTERS.bytes_written),
             counter(&COUNTERS.evicted),

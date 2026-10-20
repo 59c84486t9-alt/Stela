@@ -306,34 +306,9 @@ impl Ahead {
                 None => return,
             }
         };
-        let mut bytes = vec![0u8; PAGE_BYTES];
-        if !Process.read(page, &mut bytes) {
-            return;
-        }
-        let key = Digest::of(&bytes);
-        let context = preparation.context(page);
-        let offset = (pc - page) as usize;
-        let already = shared.has_prepared(&key, pc, &context)
-            || shared
-                .record(&key)
-                .is_some_and(|record| record.find(offset as u16, &context).is_some());
-        if already {
-            COUNTERS.already.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        let mut source = bytes[offset..offset + window(pc)].to_vec();
-        preparation.admit(&mut source);
-        let length = source.len();
-        let Ok(Prepared::Block {
-            compiled,
-            input,
-            successors,
-        }) = preparation.prepare(&source, pc, length)
-        else {
-            COUNTERS.refused.fetch_add(1, Ordering::Relaxed);
+        let Some(successors) = prepare_at(shared, &Process, &preparation, pc) else {
             return;
         };
-        COUNTERS.prepared.fetch_add(1, Ordering::Relaxed);
         let mut state = lock(&self.state);
         state.blocks += 1;
         if depth != 0 {
@@ -343,17 +318,58 @@ impl Ahead {
         }
         drop(state);
         self.changed.notify_all();
-        shared.prepare(Offer {
-            key,
-            page,
-            pc,
-            context,
-            input: source[..input].to_vec(),
-            preparation,
-            block: compiled,
-            successors,
-        });
     }
+}
+
+/// Prepare the block at `pc` of `memory` through `preparation` and hand it
+/// to the store, unless the process or the store has it: the successors of
+/// a block prepared now.
+pub(super) fn prepare_at(
+    shared: &'static Shared,
+    memory: &dyn Memory,
+    preparation: &Arc<Preparation>,
+    pc: u64,
+) -> Option<Vec<u64>> {
+    let page = pc & !(PAGE_BYTES as u64 - 1);
+    let mut bytes = vec![0u8; PAGE_BYTES];
+    if !memory.read(page, &mut bytes) {
+        return None;
+    }
+    let key = Digest::of(&bytes);
+    let context = preparation.context(page);
+    let offset = (pc - page) as usize;
+    let already = shared.has_prepared(&key, pc, &context)
+        || shared
+            .record(&key)
+            .is_some_and(|record| record.find(offset as u16, &context).is_some());
+    if already {
+        COUNTERS.already.fetch_add(1, Ordering::Relaxed);
+        return None;
+    }
+    let mut source = bytes[offset..offset + window(pc)].to_vec();
+    preparation.admit(&mut source);
+    let length = source.len();
+    let Ok(Prepared::Block {
+        compiled,
+        input,
+        successors,
+    }) = preparation.prepare(&source, pc, length)
+    else {
+        COUNTERS.refused.fetch_add(1, Ordering::Relaxed);
+        return None;
+    };
+    COUNTERS.prepared.fetch_add(1, Ordering::Relaxed);
+    shared.prepare(Offer {
+        key,
+        page,
+        pc,
+        context,
+        input: source[..input].to_vec(),
+        preparation: preparation.clone(),
+        block: compiled,
+        successors: successors.clone(),
+    });
+    Some(successors)
 }
 
 /// Run below the guest's threads: the host's utility QoS class.

@@ -189,6 +189,23 @@ fn commpage_time() -> Result<commpage::Time> {
     })
 }
 
+/// How a hosted process modeling the Mac `model` (a product type, as
+/// [`Launch::model`]) compiles its blocks on this host, for translating its
+/// images ahead of time outside it (`stelad`).
+pub fn preparation(model: &str) -> Result<std::sync::Arc<crate::machine::Preparation>> {
+    let chip = hardware::Hardware::of_model(model, host_memory()?)?.chip;
+    let target = TargetCpu::detect();
+    let profile = pe::profile(chip, target);
+    let (engine, _) = threads::engine(
+        chip,
+        profile,
+        target,
+        pe::Keys::random()?,
+        pe::UserJop::Disabled,
+    )?;
+    Ok(engine.machine(0)?.current_preparation())
+}
+
 /// Run the process to its exit.
 pub fn run(launch: Launch) -> Result<Report> {
     check_host_timebase()?;

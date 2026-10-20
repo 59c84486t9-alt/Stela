@@ -263,6 +263,128 @@ pub(super) fn read(memory: &impl Memory, header: u64) -> Option<Image> {
     })
 }
 
+/// An arm64 slice of a Mach-O file with its segments at their unslid
+/// addresses, as an image's memory before any slide (`stelad` translates
+/// installed images from their files). Bytes past a segment's file bytes
+/// read as zero, as they map.
+pub(super) struct FileImage {
+    bytes: std::sync::Arc<[u8]>,
+    /// (address, bytes, file offset from the file's start, file bytes).
+    segments: Vec<(u64, u64, u64, u64)>,
+    /// The unslid address of its header (`__TEXT`).
+    pub(super) header: u64,
+}
+
+impl Memory for FileImage {
+    fn read(&self, address: u64, buffer: &mut [u8]) -> bool {
+        let Some(end) = address.checked_add(buffer.len() as u64) else {
+            return false;
+        };
+        let Some(&(start, _, offset, file_bytes)) = self
+            .segments
+            .iter()
+            .find(|&&(start, bytes, ..)| address >= start && end <= start + bytes)
+        else {
+            return false;
+        };
+        let inside = address - start;
+        for (index, byte) in buffer.iter_mut().enumerate() {
+            let at = inside + index as u64;
+            *byte = if at < file_bytes {
+                match self.bytes.get((offset + at) as usize) {
+                    Some(&value) => value,
+                    None => return false,
+                }
+            } else {
+                0
+            };
+        }
+        true
+    }
+}
+
+const FAT_MAGIC: u32 = 0xcafe_babe;
+const FAT_MAGIC_64: u32 = 0xcafe_babf;
+const FAT_HEADER_BYTES: usize = 8;
+const FAT_ARCH_BYTES: usize = 20;
+const FAT_ARCH_64_BYTES: usize = 32;
+
+/// The arm64 slices of the Mach-O file `bytes`, thin or fat.
+pub(super) fn file_images(bytes: std::sync::Arc<[u8]>) -> Vec<FileImage> {
+    let big = |at: usize| field(&bytes, at).map(u32::from_be_bytes);
+    let mut slices = Vec::new();
+    match big(0) {
+        Some(magic @ (FAT_MAGIC | FAT_MAGIC_64)) => {
+            let wide = magic == FAT_MAGIC_64;
+            let entry = if wide {
+                FAT_ARCH_64_BYTES
+            } else {
+                FAT_ARCH_BYTES
+            };
+            for index in 0..big(4).unwrap_or(0) as usize {
+                let at = FAT_HEADER_BYTES + index * entry;
+                let offset = if wide {
+                    field(&bytes, at + 8).map(u64::from_be_bytes)
+                } else {
+                    big(at + 8).map(u64::from)
+                };
+                if big(at) == Some(CPU_TYPE_ARM64)
+                    && let Some(offset) = offset
+                {
+                    slices.push(offset);
+                }
+            }
+        }
+        _ => slices.push(0),
+    }
+    slices
+        .into_iter()
+        .filter_map(|offset| file_image(bytes.clone(), offset))
+        .collect()
+}
+
+/// The slice of `bytes` at `offset`, if it is an arm64 Mach-O.
+fn file_image(bytes: std::sync::Arc<[u8]>, offset: u64) -> Option<FileImage> {
+    let start = usize::try_from(offset).ok()?;
+    let fixed = bytes.get(start..start.checked_add(HEADER_BYTES)?)?;
+    if u32_at(fixed, 0)? != MH_MAGIC_64 || u32_at(fixed, 4)? != CPU_TYPE_ARM64 {
+        return None;
+    }
+    let count = u32_at(fixed, 16)? as usize;
+    let size = (u32_at(fixed, 20)? as usize).min(MAX_COMMAND_BYTES);
+    let commands = bytes.get(start + HEADER_BYTES..start + HEADER_BYTES + size)?;
+    let mut segments = Vec::new();
+    let mut header = None;
+    let mut at = 0;
+    for _ in 0..count {
+        let command = u32_at(commands, at)?;
+        let length = u32_at(commands, at + 4)? as usize;
+        if length < LOAD_COMMAND_BYTES || at + length > commands.len() {
+            return None;
+        }
+        if command == LC_SEGMENT_64 {
+            let body = &commands[at..at + length];
+            let address = u64_at(body, 24)?;
+            let file_offset = u64_at(body, 40)?;
+            if name(body, 8) == TEXT_SEGMENT {
+                header = Some(address);
+            }
+            segments.push((
+                address,
+                u64_at(body, 32)?,
+                offset.checked_add(file_offset)?,
+                u64_at(body, 48)?,
+            ));
+        }
+        at += length;
+    }
+    Some(FileImage {
+        bytes,
+        segments,
+        header: header?,
+    })
+}
+
 /// `LC_FUNCTION_STARTS`: ULEB128 deltas, the first from `text`, ending at
 /// a zero delta.
 fn function_starts_of(bytes: &[u8], text: u64) -> Vec<u64> {
@@ -531,6 +653,46 @@ pub(super) mod tests {
                 0x1000, 0x1040, 0x10c0, 0x1100, 0x1400, 0x1410, 0x1420, 0x1800
             ]
         );
+    }
+
+    #[test]
+    fn an_image_file_reads_as_its_unslid_memory_from_a_fat_files_arm64_slice() {
+        const TEXT: u64 = 0x1_0000_0000;
+        let mut memory = Pages::default();
+        image(&mut memory, TEXT);
+        // The image's file: its pages from __TEXT's start, at file offsets
+        // equal to their distance from it.
+        let mut thin = vec![0u8; 0x9000];
+        assert!(memory.read(TEXT, &mut thin[..0x4000]));
+        assert!(memory.read(TEXT + 0x8000, &mut thin[0x8000..]));
+        // A fat file: an x86_64 slice, then the arm64 one at 0x4000.
+        let mut fat = Vec::new();
+        for value in [FAT_MAGIC, 2] {
+            fat.extend(value.to_be_bytes());
+        }
+        for (cpu, offset, size) in [
+            (0x0100_0007u32, 0x1000u32, 0x10u32),
+            (CPU_TYPE_ARM64, 0x4000, 0x9000),
+        ] {
+            for value in [cpu, 0, offset, size, 12] {
+                fat.extend(value.to_be_bytes());
+            }
+        }
+        fat.resize(0x4000, 0);
+        fat.extend(&thin);
+        for bytes in [thin, fat] {
+            let images = file_images(bytes.into());
+            assert_eq!(images.len(), 1);
+            let file = &images[0];
+            assert_eq!(file.header, TEXT);
+            let from_file = read(file, file.header).unwrap();
+            assert_eq!(from_file, read(&memory, TEXT).unwrap());
+            // Past a segment's file bytes reads zero, past the segments
+            // fails.
+            let mut word = [1u8; 4];
+            assert!(file.read(TEXT + 0x8ffc, &mut word) && word == [0; 4]);
+            assert!(!file.read(TEXT + 0x9000, &mut word));
+        }
     }
 
     #[test]

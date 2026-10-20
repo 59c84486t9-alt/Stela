@@ -108,7 +108,19 @@ pub mod zero_block;
 /// The System instructions a system-mode block ending in one completes
 /// natively instead of exiting: DC ZVA zeroing a block of `zero_block`
 /// bytes, and the DC clean operations of `cache_clean`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct NativeSystem {
     pub zero_block: Option<u16>,
     pub cache_clean: cache_clean::Operations,
@@ -205,7 +217,9 @@ fn memory(
 /// Guest checks fixed into a block's native memory accesses. Each failed
 /// check raises a native #UD before the access, which the system-mode engine
 /// turns into the guest's SP alignment or Alignment fault.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct MemoryChecks {
     /// SCTLR_ELx.SA (SA0 at EL0) is set: an access through an SP that is not
     /// 16-byte aligned faults.

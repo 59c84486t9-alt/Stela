@@ -14,7 +14,7 @@ const CPUID_CX8: u32 = 1 << 8;
 
 /// Explicit host requirements bind generated code and persistent cache identity.
 /// SSE tiers are nested; every other capability is independent.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TargetCpu {
     tier: SseTier,
     pclmulqdq: bool,
@@ -52,7 +52,18 @@ pub struct TargetCpu {
     data_independent_timing: bool,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 enum SseTier {
     #[default]
     Baseline,

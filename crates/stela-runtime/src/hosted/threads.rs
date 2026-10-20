@@ -81,7 +81,7 @@ pub(super) struct Engine {
 impl Engine {
     /// A PE at EL0t entering at `pc`, with the hosted vectors as host
     /// breakpoints and waits returned to the thread's loop.
-    fn machine(&self, pc: u64) -> Result<Box<Pe>> {
+    pub(super) fn machine(&self, pc: u64) -> Result<Box<Pe>> {
         let cpu = pe::user_thread(self.chip, pc, &self.tables, &self.keys, self.jop);
         let host = ProcessHost::new(self.tables.clone())?;
         let mut machine = Box::new(Machine::new(

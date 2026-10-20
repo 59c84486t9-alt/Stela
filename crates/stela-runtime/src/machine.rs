@@ -31,9 +31,12 @@ pub use chip::Chip;
 #[cfg(test)]
 pub(crate) use chip::test_chip;
 pub use cpu::{Cpu, Exception};
+#[cfg(test)]
+pub(crate) use engine::test_preparation;
 pub use engine::{
-    DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit,
-    NativeFault, NoDevices, Offer, PeerState, Preparation, Prepared, Refused, Regime, Requirement,
-    RequirementKind, Reset, StaleCode, Statistics, Stop, Transition, Translations, window,
+    Description, DeviceError, Devices, Event, FaultCause, Host, InstallError, Machine, NativeCode,
+    NativeExit, NativeFault, NoDevices, Offer, PeerState, Preparation, Prepared, Refused, Regime,
+    Requirement, RequirementKind, Reset, StaleCode, Statistics, Stop, Transition, Translations,
+    window,
 };
 pub use registers::{CpuProfile, Identity, Lines};

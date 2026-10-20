@@ -41,6 +41,17 @@ pub struct Preparation {
     system: NativeSystem,
 }
 
+/// The inputs of a [`Preparation`], serializable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Description {
+    pub chip: Chip,
+    pub target: TargetCpu,
+    pub fp: bool,
+    pub checks: MemoryChecks,
+    pub scalable: Option<bool>,
+    pub system: NativeSystem,
+}
+
 /// What a source window prepares to.
 #[derive(Debug)]
 pub enum Prepared {
@@ -87,6 +98,38 @@ impl Preparation {
         }
     }
 
+    /// What decides this preparation, for another process to make it again
+    /// ([`Self::from_description`]).
+    pub fn description(&self) -> Description {
+        Description {
+            chip: self.chip,
+            target: self.target,
+            fp: self.fp,
+            checks: self.checks,
+            scalable: self.scalable,
+            system: self.system,
+        }
+    }
+
+    pub fn from_description(description: &Description) -> Self {
+        let Description {
+            chip,
+            target,
+            fp,
+            checks,
+            scalable,
+            system,
+        } = *description;
+        Self::new(
+            chip,
+            Arc::new(chip.admit_table()),
+            target,
+            fp,
+            checks,
+            scalable,
+            system,
+        )
+    }
     /// Replace each word of `source` with the one the chip executes: a
     /// form the chip lacks compiles as the UDF or NOP it executes as.
     pub fn admit(&self, source: &mut [u8]) {
@@ -232,4 +275,20 @@ impl Preparation {
             }
         }
     }
+}
+
+/// A preparation of the test chip for the baseline target, as a process
+/// profile compiles.
+#[cfg(test)]
+pub(crate) fn test_preparation() -> Preparation {
+    let chip = crate::machine::test_chip();
+    Preparation::new(
+        chip,
+        Arc::new(chip.admit_table()),
+        TargetCpu::Baseline,
+        true,
+        MemoryChecks::DEFAULT,
+        None,
+        NativeSystem::NONE,
+    )
 }

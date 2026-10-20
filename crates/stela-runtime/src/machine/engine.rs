@@ -46,7 +46,9 @@ use alloc::{
 };
 use core::fmt;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
-pub use prepare::{Preparation, Prepared, Refused, window};
+#[cfg(test)]
+pub(crate) use prepare::test_preparation;
+pub use prepare::{Description, Preparation, Prepared, Refused, window};
 pub use processors::PeerState;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -2550,19 +2552,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(Ok(exception)) => return Ok(Fetched::Exception(exception)),
             Err(Err(stop)) => return Err(stop),
         };
-        let variant = Variant {
-            fp: self.floating_point_enabled(),
-            checks: self.memory_checks(),
-            single,
-            scalable: self
-                .cpu
-                .scalable
-                .is_some()
-                .then(|| self.cpu.svcr() & 1 != 0),
-            system: self.native_system(),
-            guarded_page: self.fetch_guarded(pc),
-            timing: self.cpu.pstate.dit && self.timing_target().is_some(),
-        };
+        let guarded = self.fetch_guarded(pc);
+        let variant = self.current_variant(single, guarded);
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         self.chain.context = self.context(
             el,
@@ -2711,6 +2702,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.statistics.offered += 1;
         }
         self.install(pc, physical, variant, &source, compiled)
+    }
+
+    /// How the next fetch compiles its block, in the PE's current state:
+    /// for preparing blocks elsewhere as this machine would compile them.
+    pub fn current_preparation(&mut self) -> Arc<Preparation> {
+        let variant = self.current_variant(false, false);
+        self.preparation(variant)
+    }
+
+    /// The variant a fetch compiles for in the PE's current state.
+    fn current_variant(&mut self, single: bool, guarded_page: bool) -> Variant {
+        Variant {
+            fp: self.floating_point_enabled(),
+            checks: self.memory_checks(),
+            single,
+            scalable: self
+                .cpu
+                .scalable
+                .is_some()
+                .then(|| self.cpu.svcr() & 1 != 0),
+            system: self.native_system(),
+            guarded_page,
+            timing: self.cpu.pstate.dit && self.timing_target().is_some(),
+        }
     }
 
     /// How blocks of `variant` are compiled, made once per variant.

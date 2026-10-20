@@ -120,7 +120,9 @@ impl AdmitTable {
 }
 
 /// An Apple CPU, in the order of the generated per-chip tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum Chip {
     AppleM1,
     AppleM2,
