@@ -42,9 +42,12 @@ const RESTORE_MODE_ARGS: &[&str] = &[
     "-progress",
     "-restore",
 ];
-/// recoveryOS first roots from the ramdisk, the volume that holds BaseSystem
-/// (`recovery_volume`), then from BaseSystem as a disk image.
-const RECOVERY_MODE_ARGS: &[&str] = &["rd=md0", recovery_volume::IMAGE_BOOT_ARG];
+/// recoveryOS first roots from the volume that holds BaseSystem
+/// (`recovery_volume`), which `/chosen` names as iBoot names a Recovery
+/// volume, then from BaseSystem as a disk image. No `rd=`: a memory-device
+/// root makes APFS take that device for the image root as well
+/// (`boot_policy::refuse_ramdisk_image_root`).
+const RECOVERY_MODE_ARGS: &[&str] = &[recovery_volume::IMAGE_BOOT_ARG];
 /// The environment J473 iBoot enters for recoveryOS (its table 0x170838).
 /// The kernel's APFS reads it (`apfs_is_booted_for_recovery`, which accepts
 /// only `recoveryos` and `diagnostics`). The DeviceTree's `recovery` child is
@@ -78,7 +81,7 @@ enum Ramdisk {
     /// An IM4P component and its type.
     Image4(&'static str, &'static str),
     /// The AEA-encrypted BaseSystem UDIF image, decrypted, on the volume
-    /// recoveryOS first roots from.
+    /// recoveryOS first roots from, a RAM disk image DiskImages attaches.
     BaseSystem,
 }
 
@@ -108,7 +111,7 @@ const RESTORE: Roles = Roles {
 
 /// recoveryOS: the installed system's kernel, monitors and DeviceTree, the
 /// BaseSystem trust cache, and the volume holding the BaseSystem image as the
-/// ramdisk root.
+/// RAM disk image the kernel first roots from.
 const RECOVERY: Roles = Roles {
     kernel: "KernelCache",
     device_tree: "DeviceTree",
@@ -204,9 +207,9 @@ pub(crate) struct Prepare {
     /// of the installed system.
     #[arg(long, conflicts_with = "recovery")]
     restore: bool,
-    /// Boot recoveryOS with the installed system's kernel: the ramdisk is a
-    /// volume holding the BaseSystem image, which the kernel then roots
-    /// from. Needs `/usr/bin/aea` to decrypt BaseSystem and
+    /// Boot recoveryOS with the installed system's kernel: the kernel roots
+    /// from a volume in memory holding the BaseSystem image, then from that
+    /// image. Needs `/usr/bin/aea` to decrypt BaseSystem and
     /// `/usr/bin/hdiutil` to make the volume.
     #[arg(long)]
     recovery: bool,
@@ -437,16 +440,17 @@ fn check_digests(
     Ok(outside)
 }
 
-/// The volume recoveryOS first roots from, and the seal of BaseSystem's file
-/// system. The AEA member is copied out and decrypted with the public key.
-/// Its UDIF image's `Apple_APFS` partition gives the seal, and the image itself
-/// goes unchanged onto the volume (`recovery_volume`).
+/// The volume recoveryOS first roots from with its volume's UUID, and the
+/// seal of BaseSystem's file system. The AEA member is copied out and
+/// decrypted with the public key. Its UDIF image's `Apple_APFS` partition
+/// gives the seal, and the image itself goes unchanged onto the volume
+/// (`recovery_volume`).
 fn base_system(
     ipsw: &std::path::Path,
     member: &str,
     key: Option<&std::path::Path>,
     declared_digest: Option<String>,
-) -> Result<(Decoded, Seal)> {
+) -> Result<(Decoded, String, Seal)> {
     let work = tempfile::tempdir()?;
     let encrypted = work.path().join("BaseSystem.dmg.aea");
     let receipt = restore::archive::extract(ipsw, member, &encrypted, RAMDISK_LIMIT)?;
@@ -472,14 +476,15 @@ fn base_system(
         RAMDISK_LIMIT,
     )?)?;
     let (_, image_sha256) = restore::payload::file_sha256(&image)?;
-    let bytes = recovery_volume::build(&image, work.path(), RECOVERY_VOLUME_LIMIT)?;
+    let (bytes, volume_uuid) = recovery_volume::build(&image, work.path(), RECOVERY_VOLUME_LIMIT)?;
     let source = Source {
         component: BASE_SYSTEM.into(),
         member: member.into(),
         container_sha256,
         payload_type: "apfs".into(),
         description: format!(
-            "unsealed APFS volume holding the decrypted UDIF image (SHA-256 {image_sha256}) at /{}",
+            "unsealed APFS volume {volume_uuid} holding the decrypted UDIF image (SHA-256 \
+             {image_sha256}) at /{}",
             recovery_volume::IMAGE_PATH
         ),
         decoded_bytes: bytes.len(),
@@ -490,7 +495,7 @@ fn base_system(
         bytes,
         declared_digest,
     };
-    Ok((volume, seal))
+    Ok((volume, volume_uuid, seal))
 }
 
 fn parse_id(value: Option<&str>) -> Result<Option<u32>> {
@@ -588,10 +593,11 @@ impl Prepare {
         let device_tree = component(roles.device_tree, Some("dtre"), COMPONENT_LIMIT)?;
         let (trust_cache_name, trust_cache_type) = roles.trust_cache;
         let trust_cache = component(trust_cache_name, Some(trust_cache_type), COMPONENT_LIMIT)?;
-        let (ramdisk, base_system_seal) = match roles.ramdisk {
-            None => (None, None),
+        let (ramdisk, recovery_uuid, base_system_seal) = match roles.ramdisk {
+            None => (None, None, None),
             Some(Ramdisk::Image4(name, payload_type)) => (
                 Some(component(name, Some(payload_type), RAMDISK_LIMIT)?),
+                None,
                 None,
             ),
             Some(Ramdisk::BaseSystem) => {
@@ -599,13 +605,13 @@ impl Prepare {
                     .components
                     .get(BASE_SYSTEM)
                     .with_context(|| format!("{} lists no {BASE_SYSTEM}", identity.variant))?;
-                let (volume, seal) = base_system(
+                let (volume, uuid, seal) = base_system(
                     &ipsw,
                     &entry.path,
                     self.aea_key.as_deref(),
                     entry.declared_digest_hex.clone(),
                 )?;
-                (Some(volume), Some(seal))
+                (Some(volume), Some(uuid), Some(seal))
             }
         };
         // The root hash stays an IM4P: iBoot forwards it with its manifest.
@@ -762,7 +768,7 @@ impl Prepare {
                 .map(|(name, decoded)| (name.clone(), input(decoded)))
                 .collect(),
         };
-        let options = self.options(inputs.dram_base()?)?;
+        let options = self.options(inputs.dram_base()?, recovery_uuid.as_deref())?;
         let mut bundle = boot_bundle::prepare(&inputs, &options)?;
         let mut unresolved = vec![];
         if self.board_firmware.is_empty() {
@@ -816,9 +822,14 @@ impl Prepare {
         Ok(())
     }
 
-    /// The bundle options from the command line, with the boot-args and OS
-    /// environment of the selected boot mode.
-    fn options(&self, board_dram_base: Option<u64>) -> Result<Options> {
+    /// The bundle options from the command line, with the boot-args, OS
+    /// environment and root of the selected boot mode; `recovery_uuid` is
+    /// the UUID of the volume a recoveryOS boot first roots from.
+    fn options(
+        &self,
+        board_dram_base: Option<u64>,
+        recovery_uuid: Option<&str>,
+    ) -> Result<Options> {
         let dram_base = self
             .dram_base
             .or(board_dram_base)
@@ -841,9 +852,17 @@ impl Prepare {
                 (false, true) => Some(RECOVERY_ENVIRONMENT),
                 (false, false) => None,
             }),
-            // A ramdisk roots from itself; an installed system's root is
+            // A restore ramdisk roots from itself as `md0`; recoveryOS from
+            // its RAM disk image's volume; an installed system's root is
             // named from its disk (`stela_loader::installed`).
-            root: (self.restore || self.recovery).then_some(Root::Ramdisk),
+            root: match (self.restore, self.recovery, recovery_uuid) {
+                (true, _, _) => Some(Root::Ramdisk),
+                (false, true, Some(volume)) => Some(Root::RamImage {
+                    volume: volume.to_owned(),
+                }),
+                (false, true, None) => bail!("a recoveryOS boot needs its volume's UUID"),
+                (false, false, _) => None,
+            },
             ecid: self.ecid,
             boot_cpu: self.boot_cpu.clone(),
             timebase_frequency: self.timebase_frequency,
@@ -967,10 +986,18 @@ mod tests {
             boot_args(DEFAULT_BOOT_ARGS, RESTORE_MODE_ARGS),
             "-v rd=md0 nand-enable-reformat=0x1 -progress -restore"
         );
+        let recovery = boot_args("-v debug=0x8", RECOVERY_MODE_ARGS);
         assert_eq!(
-            boot_args("-v debug=0x8", RECOVERY_MODE_ARGS),
-            format!("-v debug=0x8 rd=md0 {}", recovery_volume::IMAGE_BOOT_ARG)
+            recovery,
+            format!("-v debug=0x8 {}", recovery_volume::IMAGE_BOOT_ARG)
         );
+        // recoveryOS names no memory-device root, which the loader refuses
+        // beside an image root.
+        assert_eq!(
+            stela_loader::boot_policy::ramdisk_root_device(&recovery),
+            None
+        );
+        assert!(stela_loader::boot_policy::require_image_boot(&recovery).is_ok());
     }
 
     #[test]
@@ -981,7 +1008,42 @@ mod tests {
         );
         assert_eq!(
             boot_args("", RECOVERY_MODE_ARGS),
-            format!("rd=md0 {}", recovery_volume::IMAGE_BOOT_ARG)
+            recovery_volume::IMAGE_BOOT_ARG
+        );
+        // An explicit `rd=md0` stays, and the loader refuses it.
+        let explicit = boot_args("rd=md0", RECOVERY_MODE_ARGS);
+        assert!(stela_loader::boot_policy::require_image_boot(&explicit).is_err());
+    }
+
+    #[test]
+    fn recovery_roots_from_its_volume_and_restore_from_md0() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Line {
+            #[command(flatten)]
+            prepare: Prepare,
+        }
+        let parse = |mode: &str| {
+            Line::try_parse_from([
+                "prepare", "--ipsw", "a.ipsw", "--model", "Mac14,3", "--output", "out", mode,
+            ])
+            .map(|line| line.prepare)
+        };
+        let volume = "11111111-2222-3333-4444-555555555555";
+        let recovery = parse("--recovery").unwrap();
+        let options = recovery.options(None, Some(volume)).unwrap();
+        assert_eq!(
+            options.root,
+            Some(Root::RamImage {
+                volume: volume.into()
+            })
+        );
+        assert!(!options.boot_args.contains("rd="));
+        assert!(recovery.options(None, None).is_err());
+        let restore = parse("--restore").unwrap();
+        assert_eq!(
+            restore.options(None, None).unwrap().root,
+            Some(Root::Ramdisk)
         );
     }
 }

@@ -15,7 +15,7 @@ impl Prepare {
             "output exists; choose a new --output directory"
         );
         let mut image = open_image(path)?;
-        let options = self.options(None)?;
+        let options = self.options(None, None)?;
         let volume = self
             .boot_volume
             .as_deref()

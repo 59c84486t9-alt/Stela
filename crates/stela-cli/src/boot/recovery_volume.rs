@@ -11,11 +11,16 @@
 //! attached container is virtual and an APFS root is already mounted
 //! (`stela_loader::boot_policy::require_image_boot`).
 //!
-//! On a blank disk Stela has no Recovery volume, so the bundle's ramdisk takes
-//! its place. It is an unsealed APFS volume that holds only the decrypted
-//! BaseSystem image, unchanged, at the same path. The kernel roots from it as
-//! `md0`, the same way it roots a restore ramdisk. The volume is made with the
-//! host's `hdiutil` and checked with Stela's own APFS reader before use.
+//! On a blank disk Stela has no Recovery volume, so the bundle carries one in
+//! memory. It is an unsealed APFS volume that holds only the decrypted
+//! BaseSystem image, unchanged, at the same path. DiskImages attaches it from
+//! `/chosen boot-ramdmg-size` and `boot-ramdmg-extents`, and `/chosen
+//! boot-uuid` names its volume as iBoot names a Recovery volume
+//! (`stela_loader::root_selection::Root::RamImage`), with no `rd=`: with
+//! `rd=md0` APFS would take `md0` again for the image root
+//! (`stela_loader::boot_policy::refuse_ramdisk_image_root`). The volume is
+//! made with the host's `hdiutil` and checked with Stela's own APFS reader
+//! before use.
 use crate::apfs::open_image;
 use anyhow::{Context, Result, bail, ensure};
 use std::{ffi::OsString, path::Path, process::Command};
@@ -36,8 +41,11 @@ const STAGE_DIRECTORY: &str = "recovery-volume";
 const VOLUME_FILE: &str = "recovery-volume.dmg";
 
 /// `hdiutil create` for an unsealed APFS container of `stage`'s files, with
-/// no partition map, as a raw image: block zero is the container superblock,
-/// as a memory device needs.
+/// no partition map, as a raw image: block zero is the container superblock.
+/// DiskImages reads it as a raw read-write image (`KDIReadWriteDiskImage`)
+/// whose whole disk an APFS container scheme claims, a case its
+/// `findAppropriateIOMediaObject` names ("whole=TRUE, leaf=FALSE
+/// AppleAPFSContainerScheme child").
 fn create_arguments(stage: &Path, output: &Path) -> Vec<OsString> {
     let mut arguments: Vec<OsString> = [
         "create", "-quiet", "-fs", "APFS", "-layout", "NONE", "-format", "UDRW", "-volname",
@@ -54,8 +62,9 @@ fn create_arguments(stage: &Path, output: &Path) -> Vec<OsString> {
 
 /// The volume for `image`, the decrypted BaseSystem UDIF image, built in
 /// `work` (on the same file system as `image`, which is linked, not copied,
-/// into the staging tree). At most `limit` bytes.
-pub fn build(image: &Path, work: &Path, limit: u64) -> Result<Vec<u8>> {
+/// into the staging tree). At most `limit` bytes. Returns the volume image
+/// and its volume's UUID, which `/chosen boot-uuid` names.
+pub fn build(image: &Path, work: &Path, limit: u64) -> Result<(Vec<u8>, String)> {
     let image_bytes = std::fs::metadata(image)
         .with_context(|| format!("cannot read {}", image.display()))?
         .len();
@@ -75,13 +84,15 @@ pub fn build(image: &Path, work: &Path, limit: u64) -> Result<Vec<u8>> {
         bytes <= limit,
         "the recoveryOS volume is {bytes} bytes, more than {limit}"
     );
-    check(&output, image_bytes)?;
-    Ok(std::fs::read(&output)?)
+    let uuid = check(&output, image_bytes)?;
+    Ok((std::fs::read(&output)?, uuid))
 }
 
 /// The volume must be one unsealed APFS container at offset zero whose one
-/// volume holds the image at [`IMAGE_PATH`] with its full length.
-fn check(volume_image: &Path, image_bytes: u64) -> Result<()> {
+/// volume holds the image at [`IMAGE_PATH`] with its full length. Returns
+/// the volume's UUID in the upper-case form of its `IOMedia` `UUID`, which
+/// AppleFileSystemDriver compares with `boot-uuid`.
+fn check(volume_image: &Path, image_bytes: u64) -> Result<String> {
     let mut source = open_image(volume_image)?;
     let offsets = apfs::containers(&mut source)?;
     ensure!(
@@ -96,10 +107,11 @@ fn check(volume_image: &Path, image_bytes: u64) -> Result<()> {
             volumes.len()
         );
     };
+    // An unsealed first root mounts its live file system. A sealed one would
+    // need a root snapshot, or BaseSystem's path, which needs an earlier root.
     ensure!(
         volume.seal(&mut container.device)?.is_none(),
-        "the recoveryOS volume is sealed; APFS roots a sealed volume from a memory device only \
-         by snapshot"
+        "the recoveryOS volume is sealed; recoveryOS first roots from an unsealed volume"
     );
     let inode = volume
         .lookup(&mut container.device, IMAGE_PATH, false)
@@ -109,7 +121,7 @@ fn check(volume_image: &Path, image_bytes: u64) -> Result<()> {
         "{IMAGE_PATH} holds {} bytes, not the image's {image_bytes}",
         inode.logical_size()
     );
-    Ok(())
+    Ok(apfs::uuid_text(&volume.uuid))
 }
 
 /// An image's bytes as a reader source.
@@ -221,7 +233,10 @@ mod tests {
     fn the_volume_must_hold_the_whole_image_unsealed_at_its_path() {
         let work = tempfile::tempdir().unwrap();
         let volume = fixture_volume(work.path());
-        check(&volume, 4096).unwrap();
+        let uuid = check(&volume, 4096).unwrap();
+        // The form `/chosen boot-uuid` takes: 36 characters, upper case.
+        assert!(stela_loader::boot_selection::parse_uuid(uuid.as_bytes()).is_some());
+        assert_eq!((uuid.len(), uuid.to_ascii_uppercase()), (36, uuid.clone()));
         assert!(check(&volume, 4095).is_err());
         let blank = work.path().join("blank.img");
         std::fs::write(&blank, vec![0u8; 8192]).unwrap();

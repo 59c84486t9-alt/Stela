@@ -30,6 +30,19 @@
 //! 0x24530), so a ramdisk boot keeps the template's 38 zero bytes. Stela
 //! removes them instead, which TXM's darwin expert reads as the null volume
 //! UUID rather than an invalid length (docs/research/iboot-handoff.md).
+//!
+//! Known, from xnu-12377.121.6 and 26A434: a root can also be a volume of a
+//! disk image the booter leaves in memory. `IOFindBSDRoot` first calls
+//! `di_root_ramfile` (`iokit/bsddev/DINetBootHook.cpp`; KC strings 0xdcea3,
+//! 0xdceb4), which reads `/chosen boot-ramdmg-size` (8 bytes, the image's
+//! length) and `boot-ramdmg-extents` (`IOAddressRange`s: 8-byte physical
+//! address and 8-byte length) and sets the controller's
+//! `di-root-ram-file` to that physical memory. DiskImages attaches it
+//! through its RAM backing store (`KDIRAMBackingStore`, URL
+//! `ramfile://%u`), so the image is an `IOMedia` disk, and a
+//! `boot-uuid` then names its volume. Unlike a memory device (`md0`, which
+//! is BSD-only), its container is virtual: DiskImages publishes the
+//! `Virtual Interface` interconnect APFS tests (`nx_is_virtual`).
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Result, ensure};
@@ -40,6 +53,12 @@ pub const APFS_PREBOOT_UUID: &str = "apfs-preboot-uuid";
 pub const ASSOCIATED_VOLUME_GROUP: &str = "associated-volume-group";
 pub const BOOT_UUID: &str = "boot-uuid";
 pub const BOOT_OBJECTS_PATH: &str = "boot-objects-path";
+/// The RAM image's length; `di_root_ramfile` takes exactly 8 bytes.
+pub const BOOT_RAMDMG_SIZE: &str = "boot-ramdmg-size";
+/// The RAM image's physical ranges, each an `IOAddressRange` (16 bytes on
+/// arm64, `IOVirtualRange`); `IOMemoryDescriptor::withAddressRanges` with
+/// no task reads them as physical.
+pub const BOOT_RAMDMG_EXTENTS: &str = "boot-ramdmg-extents";
 /// The kernel's bound on a UUID property: 36 characters and a NUL.
 const UUID_PROPERTY_BYTES: usize = 37;
 /// The kernel's bound on `boot-objects-path`.
@@ -63,6 +82,11 @@ pub enum Root {
     },
     /// A ramdisk; no installed volume.
     Ramdisk,
+    /// The volume `volume` of the disk image placed as the `RAMDisk`
+    /// region, which DiskImages attaches from `/chosen boot-ramdmg-*`
+    /// ([`ram_image`]); `boot-uuid` names the volume. No `rd=` boot-arg:
+    /// iBoot writes `boot-uuid` only without one.
+    RamImage { volume: String },
 }
 
 fn uuid_property(text: &str) -> Result<Vec<u8>> {
@@ -146,6 +170,12 @@ pub fn apply(tree: &mut DeviceTree, root: &Root) -> Result<Vec<Decision>> {
             )
         }
         Root::Ramdisk => (&[], "a ramdisk root".into()),
+        Root::RamImage { volume } => {
+            let source = format!("volume {volume} of the RAM disk image");
+            set(tree, BOOT_UUID, uuid_property(volume)?, source.clone())?;
+            // The image's ranges follow placement (`ram_image`).
+            (&[BOOT_UUID, BOOT_RAMDMG_SIZE, BOOT_RAMDMG_EXTENTS], source)
+        }
     };
     let chosen = tree.node_mut(CHOSEN).expect("checked");
     for property in [
@@ -153,6 +183,8 @@ pub fn apply(tree: &mut DeviceTree, root: &Root) -> Result<Vec<Decision>> {
         ASSOCIATED_VOLUME_GROUP,
         BOOT_UUID,
         BOOT_OBJECTS_PATH,
+        BOOT_RAMDMG_SIZE,
+        BOOT_RAMDMG_EXTENTS,
     ] {
         if !keep.contains(&property) && chosen.property(property).is_some() {
             chosen.remove_property(property);
@@ -163,6 +195,33 @@ pub fn apply(tree: &mut DeviceTree, root: &Root) -> Result<Vec<Decision>> {
                 source: format!("removed: {source}"),
             });
         }
+    }
+    Ok(decisions)
+}
+
+/// Hand DiskImages the `bytes`-byte disk image at physical `address` as
+/// `di_root_ramfile` reads it: `/chosen boot-ramdmg-size` and one extent in
+/// `boot-ramdmg-extents`. Both values have a fixed length, so a caller can
+/// write them before placement and again once the address is known.
+pub fn ram_image(tree: &mut DeviceTree, address: u64, bytes: u64) -> Result<Vec<Decision>> {
+    ensure!(tree.node(CHOSEN).is_some(), "DeviceTree has no {CHOSEN}");
+    // `di_root_ramfile` ignores a zero size.
+    ensure!(bytes != 0, "a RAM disk image has bytes");
+    let mut extent = address.to_le_bytes().to_vec();
+    extent.extend(bytes.to_le_bytes());
+    let source = String::from("the RAM disk image DiskImages attaches (di_root_ramfile)");
+    let mut decisions = Vec::new();
+    for (property, value) in [
+        (BOOT_RAMDMG_SIZE, bytes.to_le_bytes().to_vec()),
+        (BOOT_RAMDMG_EXTENTS, extent),
+    ] {
+        decisions.push(Decision {
+            path: CHOSEN.into(),
+            property: property.into(),
+            value_hex: hex::encode(&value),
+            source: source.clone(),
+        });
+        tree.set_property(CHOSEN, property, value)?;
     }
     Ok(decisions)
 }
@@ -228,6 +287,43 @@ mod tests {
             value(&tree, BOOT_UUID),
             Some(format!("{RECOVERY}\0").as_bytes())
         );
+    }
+
+    #[test]
+    fn a_ram_image_root_names_its_volume_and_physical_extent() {
+        let mut tree = tree();
+        let root = Root::RamImage {
+            volume: RECOVERY.into(),
+        };
+        apply(&mut tree, &root).unwrap();
+        assert_eq!(value(&tree, APFS_PREBOOT_UUID), None);
+        assert_eq!(value(&tree, ASSOCIATED_VOLUME_GROUP), None);
+        assert_eq!(value(&tree, BOOT_OBJECTS_PATH), None);
+        assert_eq!(
+            value(&tree, BOOT_UUID),
+            Some(format!("{RECOVERY}\0").as_bytes())
+        );
+        let decisions = ram_image(&mut tree, 0x8_1234_5000, 0x8d4c_3000).unwrap();
+        assert_eq!(decisions.len(), 2);
+        // `di_root_ramfile`: an 8-byte size and 16-byte IOAddressRanges.
+        assert_eq!(
+            value(&tree, BOOT_RAMDMG_SIZE),
+            Some(0x8d4c_3000u64.to_le_bytes().as_slice())
+        );
+        let extents = value(&tree, BOOT_RAMDMG_EXTENTS).unwrap();
+        assert_eq!(extents.len(), 16);
+        assert_eq!(&extents[..8], 0x8_1234_5000u64.to_le_bytes());
+        assert_eq!(&extents[8..], 0x8d4c_3000u64.to_le_bytes());
+        assert!(ram_image(&mut tree, 0x8_0000_0000, 0).is_err());
+        // Another root drops the image's values.
+        apply(&mut tree, &Root::Ramdisk).unwrap();
+        assert_eq!(value(&tree, BOOT_RAMDMG_SIZE), None);
+        assert_eq!(value(&tree, BOOT_RAMDMG_EXTENTS), None);
+        assert_eq!(value(&tree, BOOT_UUID), None);
+        let bad = Root::RamImage {
+            volume: "md0".into(),
+        };
+        assert!(apply(&mut tree, &bad).is_err());
     }
 
     #[test]

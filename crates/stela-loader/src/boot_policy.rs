@@ -389,16 +389,58 @@ pub const IMAGE_BOOT_ARGS: [&str; 5] = ["rp0", "arp0", "rp", "root-dmg", "auth-r
 /// volume is not allowed", `apfs_vfsops.c:2952`). Without an image-boot
 /// argument, refuse rather than boot into that panic.
 pub fn require_image_boot(boot_args: &str) -> Result<()> {
-    let named = boot_args
-        .split_whitespace()
-        .filter_map(|argument| argument.split_once('='))
-        .any(|(name, value)| IMAGE_BOOT_ARGS.contains(&name) && value.starts_with("file://"));
     ensure!(
-        named,
+        image_boot_named(boot_args),
         "a BaseSystem root needs an image-boot argument ({}=file://...): APFS cannot root a \
          sealed volume without a snapshot from a memory device",
         IMAGE_BOOT_ARGS[0]
     );
+    refuse_ramdisk_image_root(boot_args)
+}
+
+fn image_boot_named(boot_args: &str) -> bool {
+    boot_args
+        .split_whitespace()
+        .filter_map(|argument| argument.split_once('='))
+        .any(|(name, value)| IMAGE_BOOT_ARGS.contains(&name) && value.starts_with("file://"))
+}
+
+/// The first value of the boot-arg `name`, as `PE_parse_boot_argn` takes
+/// the first match.
+fn boot_arg<'a>(boot_args: &'a str, name: &str) -> Option<&'a str> {
+    boot_args
+        .split_whitespace()
+        .filter_map(|argument| argument.split_once('='))
+        .find(|(found, _)| *found == name)
+        .map(|(_, value)| value)
+}
+
+/// The memory device APFS roots every root mount from, as the helper
+/// `container_rootmount` calls first reads it (26A434 APFS
+/// 0xfffffe000b8c63e8): `rd=`, or else `rootdev=`, whose value is `md` and
+/// one character (it checks `m`, `d` and a NUL at the fourth byte).
+pub fn ramdisk_root_device(boot_args: &str) -> Option<&str> {
+    boot_arg(boot_args, "rd")
+        .or_else(|| boot_arg(boot_args, "rootdev"))
+        .filter(|device| device.len() == 3 && device.starts_with("md"))
+}
+
+/// An image root cannot follow a memory-device root. With `rd=mdN`,
+/// `container_rootmount` (0xfffffe000b84fe6c) opens `/dev/mdN` for every
+/// APFS root mount, imageboot's second `vfs_mountroot` included ("boot from
+/// ramdisk"); the first root already holds that device, so the image's
+/// mount fails with EBUSY and imageboot panics (`vfs_mountroot() failed`,
+/// `imageboot.c:468`). A Mac never passes `rd=` for recoveryOS; a root that
+/// pivots to an image is named by `/chosen` instead
+/// ([`crate::root_selection::Root::RamImage`]).
+pub fn refuse_ramdisk_image_root(boot_args: &str) -> Result<()> {
+    if let Some(device) = ramdisk_root_device(boot_args).filter(|_| image_boot_named(boot_args)) {
+        anyhow::bail!(
+            "boot-args root from memory device {device} and pivot to a disk image: APFS's \
+             container_rootmount would take {device} again for the image root (EBUSY, \
+             imageboot.c:468); name the first root in /chosen instead of rd=/rootdev="
+        );
+    }
     Ok(())
 }
 
@@ -802,12 +844,32 @@ mod tests {
     #[test]
     fn a_base_system_root_needs_a_file_image_boot_argument() {
         let image = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
-        assert!(require_image_boot(&format!("-v rd=md0 {image}")).is_ok());
+        assert!(require_image_boot(&format!("-v {image}")).is_ok());
         assert!(require_image_boot("root-dmg=file:///a.dmg").is_ok());
         // A ramdisk root alone, another scheme or another argument is refused.
         assert!(require_image_boot("-v rd=md0").is_err());
         assert!(require_image_boot("rp0=http://host/a.dmg").is_err());
         assert!(require_image_boot("xrp0=file:///a.dmg").is_err());
+    }
+
+    #[test]
+    fn a_memory_device_root_cannot_pivot_to_an_image() {
+        let image = "rp0=file:///usr/standalone/firmware/arm64eBaseSystem.dmg";
+        // The rec-r5 boot-args: APFS took md0 again for the image root.
+        let error = require_image_boot(&format!("-v rd=md0 {image}"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("memory device md0"), "{error}");
+        assert!(refuse_ramdisk_image_root(&format!("rootdev=mdf {image}")).is_err());
+        assert!(refuse_ramdisk_image_root(&format!("{image} rd=md1")).is_err());
+        // APFS reads `rd=` before `rootdev=`, and only `md` and one character.
+        assert_eq!(ramdisk_root_device("rd=disk1s1 rootdev=md0"), None);
+        assert_eq!(ramdisk_root_device("rd=md10"), None);
+        assert_eq!(ramdisk_root_device("rootdev=md0"), Some("md0"));
+        assert_eq!(ramdisk_root_device("rd=md0 rd=disk0"), Some("md0"));
+        // A memory-device root without an image (a restore) stays allowed.
+        assert!(refuse_ramdisk_image_root("-v rd=md0 -restore").is_ok());
+        assert!(refuse_ramdisk_image_root(image).is_ok());
     }
 
     #[test]
