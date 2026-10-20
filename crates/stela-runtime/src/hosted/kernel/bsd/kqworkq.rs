@@ -454,12 +454,12 @@ impl HostBuckets {
         list: u64,
         capacity: u64,
         data: &mut DataBuffer,
-    ) -> Result<u64, u64> {
+    ) -> anyhow::Result<Result<u64, u64>> {
         let Some(descriptor) = self.descriptor(bucket) else {
-            return Ok(0);
+            return Ok(Ok(0));
         };
         if capacity == 0 {
-            return Ok(0);
+            return Ok(Ok(0));
         }
         let mut available = data.remaining;
         let flags = KEVENT_FLAG_IMMEDIATE
@@ -487,7 +487,7 @@ impl HostBuckets {
             ],
         );
         if returned.carry {
-            return Err(returned.rax);
+            return Ok(Err(returned.rax));
         }
         if out != 0 {
             data.remaining = available;
@@ -495,8 +495,13 @@ impl HostBuckets {
         let count = returned.rax;
         for index in 0..count {
             let Some(mut event) = Kevent::read(list, index) else {
-                return Err(EFAULT);
+                return Ok(Err(EFAULT));
             };
+            super::super::mach::received_event(
+                event.filter,
+                event.fflags,
+                [event.ext[0], event.ext[1]],
+            )?;
             super::timer::qos_event_to_guest(&mut event, None);
             let key = event.key();
             if let Some(knote) = self.knotes.get(&key) {
@@ -506,10 +511,10 @@ impl HostBuckets {
                 self.knotes.remove(&key);
             }
             if !event.write(list, index) {
-                return Err(EFAULT);
+                return Ok(Err(EFAULT));
             }
         }
-        Ok(count)
+        Ok(Ok(count))
     }
 
     /// Close every bucket's host kqueue, which ends its watch.
@@ -633,7 +638,12 @@ impl Kqworkq {
 
     /// `kqueue_scan` of one bucket into a kevent thread's stack
     /// (`KEVENT_FLAG_STACK_DATA | KEVENT_FLAG_IMMEDIATE`).
-    pub(crate) fn scan(&self, bucket: u8, list: u64, data: &mut DataBuffer) -> Result<u64, u64> {
+    pub(crate) fn scan(
+        &self,
+        bucket: u8,
+        list: u64,
+        data: &mut DataBuffer,
+    ) -> anyhow::Result<Result<u64, u64>> {
         lock(&self.buckets).scan(bucket, list, LIST_LEN, data)
     }
 }
@@ -821,14 +831,18 @@ mod tests {
         let address = list.as_mut_ptr() as u64;
         let mut data = DataBuffer::new(0, 0, true);
         assert_eq!(
-            buckets.scan(MANAGER_BUCKET, address, LIST_LEN, &mut data),
+            buckets
+                .scan(MANAGER_BUCKET, address, LIST_LEN, &mut data)
+                .unwrap(),
             Ok(1)
         );
         let event = Kevent::decode(&list[..KEVENT_BYTES as usize]);
         assert_eq!((event.ident, event.udata), (1, 0x55));
         assert_eq!(event.qos, priority::EVENT_MANAGER_FLAG as i32);
         assert_eq!(
-            buckets.scan(MANAGER_BUCKET, address, LIST_LEN, &mut data),
+            buckets
+                .scan(MANAGER_BUCKET, address, LIST_LEN, &mut data)
+                .unwrap(),
             Ok(0)
         );
         assert!(buckets.descriptor(MANAGER_BUCKET).is_some());

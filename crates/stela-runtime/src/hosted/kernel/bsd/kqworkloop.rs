@@ -734,7 +734,7 @@ fn process_events(
         let scanned =
             workloop
                 .host
-                .scan(bucket, list + count * KEVENT_BYTES, capacity - count, data);
+                .scan(bucket, list + count * KEVENT_BYTES, capacity - count, data)?;
         match scanned {
             Ok(scanned) => count += scanned,
             Err(errno) => return Ok(Err(errno)),

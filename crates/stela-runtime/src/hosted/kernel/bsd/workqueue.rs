@@ -766,7 +766,7 @@ fn collect(
                     None => Ok(0),
                 };
                 match registered {
-                    Ok(0) => kqueue.scan(bucket, list, &mut data),
+                    Ok(0) => kqueue.scan(bucket, list, &mut data)?,
                     other => other,
                 }
             }

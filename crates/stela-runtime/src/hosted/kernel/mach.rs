@@ -32,6 +32,7 @@ use anyhow::Result;
 mod accounting;
 pub(super) mod exception;
 mod message;
+pub(crate) use message::received_event;
 pub(super) mod raise;
 pub(super) mod reclaim;
 mod server;

@@ -16,8 +16,12 @@
 //! limit: the host builds the received trailer, so its sender and audit
 //! tokens are this process's rather than the kernel's.
 //!
-//! A received message's out-of-line memory moves to guest pages of its own
-//! ([`received`]), as the arm64 kernel places it.
+//! Out-of-line memory stays in whole guest pages, so that a guest's 16 KiB
+//! deallocation never reaches the host's own 4 KiB allocations: a received
+//! message's regions, whether by `mach_msg` ([`received`]) or by a port
+//! knote ([`received_event`]), move to guest pages of their own, as the
+//! arm64 kernel places them, and a region a send deallocates goes with
+//! the rest of its guest pages ([`forward_send`]).
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
 use crate::hosted::darwin::{
@@ -80,25 +84,25 @@ pub(super) fn send(
         }
         let routine = match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {
-                return forward_trap(kernel, index, arguments);
+                return forward_send(kernel, name, index, arguments);
             }
             // A routine of another object's subsystem: the kernel converts
             // the destination to that object, which fails for this one in
             // either kernel, and the routine answers the failure.
             (Some(subsystem), Some(_)) if super::object_of(subsystem.name) != Some(object) => {
-                return forward_trap(kernel, index, arguments);
+                return forward_send(kernel, name, index, arguments);
             }
             (Some(_), Some(routine))
                 if FORWARDED_ROUTINES.contains(&(routine.subsystem, routine.name)) =>
             {
-                return forward_trap(kernel, index, arguments);
+                return forward_send(kernel, name, index, arguments);
             }
             (_, routine) => routine,
         };
         let Some(request) = request(name, arguments)
             .with_context(|| format!("message {id} to kernel object {port:#x}"))?
         else {
-            return forward_trap(kernel, index, arguments);
+            return forward_send(kernel, name, index, arguments);
         };
         let body = Request {
             body: &request.body,
@@ -129,7 +133,7 @@ pub(super) fn send(
                 };
                 match served {
                     // The host kernel consumes a moved destination itself.
-                    Some(Reply::Forward) => return forward_trap(kernel, index, arguments),
+                    Some(Reply::Forward) => return forward_send(kernel, name, index, arguments),
                     Some(Reply::NotSent(status)) => return Ok(u64::from(status)),
                     Some(reply) => {
                         if kernel.trace {
@@ -165,8 +169,181 @@ pub(super) fn send(
         }
         return answer(kernel, name, index, arguments, &request, id, reply);
     }
-    forward_trap(kernel, index, arguments)
+    forward_send(kernel, name, index, arguments)
 }
+
+/// Send a message on the host, as the arm64 kernel would for the guest's
+/// pages: an out-of-line region the send deallocates goes with its whole
+/// guest pages, and the regions a failed send returns
+/// (`mach_msg_receive_pseudo`) are placed in guest pages of their own.
+fn forward_send(kernel: &mut Kernel, name: &str, index: u32, arguments: &[u64]) -> Result<u64> {
+    let outgoing = Outgoing::read(name, arguments);
+    let status = forward_trap(kernel, index, arguments)?;
+    if let Some(outgoing) = outgoing {
+        outgoing.sent(name, status, |start, size| {
+            kernel.unslid_change(start, size, |_| None);
+        })?;
+    }
+    Ok(status)
+}
+
+/// An outgoing complex message as the guest handed it to the send: where
+/// its descriptors are, their bytes, and the out-of-line regions the
+/// send deallocates whose guest pages the host's would not cover whole.
+struct Outgoing {
+    message: u64,
+    descriptors: Vec<u8>,
+    partial: Vec<Deallocated>,
+}
+
+/// An out-of-line region a send deallocates (`vm_map_copyin` with
+/// `src_destroy`): the guest pages the arm64 kernel takes and the host
+/// pages the host kernel takes of them, which were all mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Deallocated {
+    guest: (u64, u64),
+    host: (u64, u64),
+}
+
+impl Deallocated {
+    /// The region of `bytes` at `address`, if it is not empty.
+    fn new(address: u64, bytes: u64) -> Option<Self> {
+        let end = address.checked_add(bytes)?;
+        if bytes == 0 {
+            return None;
+        }
+        Some(Self {
+            guest: (memory::trunc_page(address), memory::round_page(end)?),
+            host: (
+                address & !memory::HOST_PAGE_MASK,
+                memory::round_host_page(end)?,
+            ),
+        })
+    }
+
+    /// The parts of the guest pages the host pages leave.
+    fn rest(&self) -> [(u64, u64); 2] {
+        [(self.guest.0, self.host.0), (self.host.1, self.guest.1)]
+    }
+}
+
+/// `mach_msg_return_t` send failures, `MACH_SEND_*`.
+const SEND_FAILURE: u32 = 0x1000_0000;
+
+impl Outgoing {
+    fn read(name: &str, arguments: &[u64]) -> Option<Self> {
+        if arguments[1] & SEND == 0 {
+            return None;
+        }
+        let (message, bits) = if name == "mach_msg2_trap" {
+            let message = if arguments[1] & MESSAGE_VECTOR != 0 {
+                memory::read_u64(arguments[0])?
+            } else {
+                arguments[0]
+            };
+            (message, (arguments[2] & LOW_HALF) as u32)
+        } else {
+            (arguments[0], memory::read_u32(arguments[0])?)
+        };
+        if bits & MACH_MSGH_BITS_COMPLEX == 0 {
+            return None;
+        }
+        let count = memory::read_u32(message + DESCRIPTOR_COUNT)?;
+        let first = message + DESCRIPTOR_COUNT + 4;
+        let descriptors = descriptor_bytes(first, count)?;
+        let mut partial = Vec::new();
+        let mut at = 0usize;
+        for _ in 0..count {
+            let Some(header) = descriptors.get(at..at + 12) else {
+                break;
+            };
+            let kind = header[11];
+            if kind == PORT_DESCRIPTOR {
+                at += PORT_DESCRIPTOR_BYTES as usize;
+                continue;
+            }
+            let Some(rest) = descriptors.get(at + 12..at + 16) else {
+                break;
+            };
+            let address = u64::from_le_bytes(header[..8].try_into().unwrap());
+            let length = u64::from(u32::from_le_bytes(rest.try_into().unwrap()));
+            let bytes = match kind {
+                OOL_DESCRIPTOR | OOL_VOLATILE_DESCRIPTOR => length,
+                OOL_PORTS_DESCRIPTOR => length * 4,
+                _ => 0,
+            };
+            if header[8] != 0
+                && address != 0
+                && let Some(region) = Deallocated::new(address, bytes)
+                && region.guest != region.host
+                && memory::mapped_runs(region.guest.0, region.guest.1)
+                    .iter()
+                    .map(|(start, end)| end - start)
+                    .sum::<u64>()
+                    == region.guest.1 - region.guest.0
+            {
+                partial.push(region);
+            }
+            at += DESCRIPTOR_BYTES as usize;
+        }
+        Some(Self {
+            message,
+            descriptors,
+            partial,
+        })
+    }
+
+    /// After the host's send returned `status`: a failed send whose copy in
+    /// succeeded returns the message in place with copies of its regions
+    /// (`mach_msg_receive_pseudo`), which move to guest pages of their
+    /// own; once the copy in succeeded, each region it took has the rest
+    /// of its guest pages released. `releasing` learns of each range
+    /// released before it goes.
+    fn sent(&self, name: &str, status: u64, mut releasing: impl FnMut(u64, u64)) -> Result<()> {
+        let failed = status as u32 & !0xff == SEND_FAILURE;
+        let returned = failed
+            && memory::read(self.message + DESCRIPTOR_COUNT + 4, self.descriptors.len())
+                .is_some_and(|now| now != self.descriptors);
+        if returned {
+            place_received(name, self.message)?;
+        }
+        if failed && !returned {
+            // The copy in failed: the regions stay the sender's.
+            return Ok(());
+        }
+        for region in &self.partial {
+            for (start, end) in region.rest() {
+                for (run, run_end) in memory::mapped_runs(start, end) {
+                    releasing(run, run_end - run);
+                    memory::deallocate(run, run_end - run)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The bytes of the `count` descriptors at `first`, or `None` when they
+/// are unreadable (the send then fails on its own).
+fn descriptor_bytes(first: u64, count: u32) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut at = first;
+    for _ in 0..count.min(MAX_DESCRIPTORS) {
+        let kind = (memory::read_u32(at + 8)? >> 24) as u8;
+        let size = if kind == PORT_DESCRIPTOR {
+            PORT_DESCRIPTOR_BYTES
+        } else {
+            DESCRIPTOR_BYTES
+        };
+        bytes.extend(memory::read(at, size as usize)?);
+        at += size;
+    }
+    Some(bytes)
+}
+
+/// A bound on the descriptors read of a message, far above what a
+/// message's body space holds.
+const MAX_DESCRIPTORS: u32 = 1 << 16;
 
 /// `mach_msg_descriptor_type_t`: the out-of-line forms, whose received
 /// memory the host kernel places in its own 4 KiB pages.
@@ -210,6 +387,39 @@ pub(super) fn received(name: &str, arguments: &[u64]) -> Result<()> {
     let Some(message) = receive_buffer(name, arguments) else {
         return Ok(());
     };
+    place_received(name, message)
+}
+
+/// `EVFILT_MACHPORT`.
+const EVFILT_MACHPORT: i16 = -8;
+
+/// The event the host delivered for a knote: one of a port knote that
+/// received a message into the guest's memory (`filt_machportprocess`:
+/// `fflags` the receive's MACH_MSG_SUCCESS, `ext[0]` the message and
+/// `ext[1]` its size and trailer's) has its out-of-line regions moved
+/// into guest pages, as a `mach_msg` receive's are.
+pub(crate) fn received_event(filter: i16, fflags: u32, ext: [u64; 2]) -> Result<()> {
+    let [message, received] = ext;
+    if filter != EVFILT_MACHPORT || fflags != 0 || message == 0 {
+        return Ok(());
+    }
+    // A knote that only reports its port leaves the registered `ext`,
+    // which names no message of that size.
+    let Some(size) = memory::read_u32(message + 4) else {
+        return Ok(());
+    };
+    let Some(trailer) = memory::read_u32(message + u64::from(size) + 4) else {
+        return Ok(());
+    };
+    if u64::from(size) + u64::from(trailer) != received {
+        return Ok(());
+    }
+    place_received("kevent", message)
+}
+
+/// Move the out-of-line regions of the message received at `message`
+/// into guest pages, rewriting their descriptors.
+fn place_received(name: &str, message: u64) -> Result<()> {
     let Some(bits) = memory::read_u32(message) else {
         return Ok(());
     };
@@ -634,5 +844,277 @@ mod tests {
         memory::deallocate(moved, PAGE_BYTES).unwrap();
         memory::deallocate(block, 0x2000).unwrap();
         memory::deallocate(block + 0x3000, 2 * PAGE_BYTES - 0x3000).unwrap();
+    }
+
+    /// A receive right of this process with a send right under the same
+    /// name, destroyed when dropped.
+    struct Port(u32);
+
+    impl Port {
+        fn new() -> Self {
+            let task = crate::hosted::host::task();
+            let mut name = 0;
+            // SAFETY: new rights of this task under a name it returns.
+            unsafe {
+                assert_eq!(
+                    darwin::mach_port_allocate(task, MACH_PORT_RIGHT_RECEIVE, &mut name),
+                    0
+                );
+                assert_eq!(
+                    darwin::mach_port_insert_right(task, name, name, MACH_MSG_TYPE_MAKE_SEND),
+                    0
+                );
+            }
+            Self(name)
+        }
+    }
+
+    impl Drop for Port {
+        fn drop(&mut self) {
+            // SAFETY: the rights this value made.
+            unsafe { darwin::mach_port_destruct(crate::hosted::host::task(), self.0, -1, 0) };
+        }
+    }
+
+    const MACH_MSG_TYPE_COPY_SEND: u32 = 19;
+    const VIRTUAL_COPY: u8 = 1;
+    const MESSAGE_BYTES: usize = 24 + 4 + 16;
+
+    /// A complex message to `port` carrying one out-of-line region.
+    fn ool_message(port: u32, region: u64, bytes: u32, deallocate: bool) -> Vec<u8> {
+        let mut message = Vec::new();
+        for word in [
+            MACH_MSGH_BITS_COMPLEX | MACH_MSG_TYPE_COPY_SEND,
+            MESSAGE_BYTES as u32,
+            port,
+            0,
+            0,
+            0x1234,
+            1,
+        ] {
+            message.extend(word.to_le_bytes());
+        }
+        message.extend(region.to_le_bytes());
+        message.extend([u8::from(deallocate), VIRTUAL_COPY, 0, OOL_DESCRIPTOR]);
+        message.extend(bytes.to_le_bytes());
+        // Room for the received trailer.
+        message.resize(MESSAGE_BYTES + 64, 0);
+        message
+    }
+
+    fn host_send(message: &mut [u8], options: i32) -> u64 {
+        // SAFETY: a message buffer of this test.
+        u64::from(unsafe {
+            darwin::mach_msg(
+                message.as_mut_ptr(),
+                options,
+                MESSAGE_BYTES as u32,
+                0,
+                0,
+                0,
+                0,
+            )
+        } as u32)
+    }
+
+    fn host_receive(port: u32, buffer: &mut [u8]) {
+        // SAFETY: a receive into this test's buffer.
+        let status = unsafe {
+            darwin::mach_msg(
+                buffer.as_mut_ptr(),
+                darwin::MACH_RCV_MSG,
+                0,
+                buffer.len() as u32,
+                port,
+                0,
+                0,
+            )
+        };
+        assert_eq!(status, 0);
+    }
+
+    fn mapped_bytes(start: u64, end: u64) -> u64 {
+        memory::mapped_runs(start, end)
+            .iter()
+            .map(|(start, end)| end - start)
+            .sum()
+    }
+
+    #[test]
+    fn a_sent_region_goes_with_its_whole_guest_pages() {
+        let port = Port::new();
+        let block = memory::allocate(0, 3 * PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        let page = block + PAGE_BYTES;
+        let region = page + 0x1010;
+        assert!(memory::write(region, b"sent"));
+        let mut message = ool_message(port.0, region, 0x100, true);
+        let buffer = message.as_mut_ptr() as u64;
+        let mut arguments = [buffer, SEND, 0, 0, 0, 0, 0, 0];
+        let outgoing = Outgoing::read("mach_msg_trap", &arguments).unwrap();
+        assert_eq!(
+            outgoing.partial,
+            [Deallocated {
+                guest: (page, page + PAGE_BYTES),
+                host: (page + 0x1000, page + 0x2000),
+            }]
+        );
+        let status = host_send(&mut message, darwin::MACH_SEND_MSG);
+        assert_eq!(status, 0);
+        // The host took one host page; the rest of the guest page goes too,
+        // and nothing else. (Freed pages are not checked: another test may
+        // map them at once.)
+        let mut released = Vec::new();
+        outgoing
+            .sent("mach_msg_trap", status, |start, size| {
+                released.push((start, size))
+            })
+            .unwrap();
+        assert_eq!(released, [(page, 0x1000), (page + 0x2000, 0x2000)]);
+        assert!(memory::mapped(block) && memory::mapped(block + 2 * PAGE_BYTES));
+        // The receiver finds the region in guest pages of its own.
+        let mut received_message = vec![0u8; MESSAGE_BYTES + 64];
+        host_receive(port.0, &mut received_message);
+        let address = received_message.as_mut_ptr() as u64;
+        arguments = [address, RECEIVE, 0, 0, 0, 0, 0, 0];
+        received("mach_msg_trap", &arguments).unwrap();
+        // (The freed page may hold it again.)
+        let moved = memory::read_u64(address + 28).unwrap();
+        assert_eq!(memory::read(moved, 4).unwrap(), b"sent");
+        assert_eq!(
+            mapped_bytes(moved & !PAGE_MASK, (moved & !PAGE_MASK) + PAGE_BYTES),
+            PAGE_BYTES
+        );
+        memory::deallocate(moved & !PAGE_MASK, PAGE_BYTES).unwrap();
+        memory::deallocate(block, PAGE_BYTES).unwrap();
+        memory::deallocate(block + 2 * PAGE_BYTES, PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn a_region_kept_by_the_sender_or_in_whole_pages_is_the_hosts() {
+        let port = Port::new();
+        let block = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        // Not deallocated: the sender keeps it.
+        let message = ool_message(port.0, block + 0x10, 8, false);
+        let arguments = [message.as_ptr() as u64, SEND, 0, 0, 0, 0, 0, 0];
+        assert!(
+            Outgoing::read("mach_msg_trap", &arguments)
+                .unwrap()
+                .partial
+                .is_empty()
+        );
+        // Whole guest pages: the host's copy in takes them all.
+        let message = ool_message(port.0, block, PAGE_BYTES as u32, true);
+        let arguments = [message.as_ptr() as u64, SEND, 0, 0, 0, 0, 0, 0];
+        assert!(
+            Outgoing::read("mach_msg_trap", &arguments)
+                .unwrap()
+                .partial
+                .is_empty()
+        );
+        // A simple message, or no send, has nothing to release.
+        let mut simple = ool_message(port.0, block, 8, true);
+        simple[3] = 0;
+        let arguments = [simple.as_ptr() as u64, SEND, 0, 0, 0, 0, 0, 0];
+        assert!(Outgoing::read("mach_msg_trap", &arguments).is_none());
+        let arguments = [message.as_ptr() as u64, RECEIVE, 0, 0, 0, 0, 0, 0];
+        assert!(Outgoing::read("mach_msg_trap", &arguments).is_none());
+        memory::deallocate(block, PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn a_failed_send_returns_its_regions_in_guest_pages() {
+        const MACH_SEND_TIMEOUT: i32 = 0x10;
+        const MACH_SEND_TIMED_OUT: u64 = 0x1000_0004;
+        let port = Port::new();
+        // Fill the port's queue (MACH_PORT_QLIMIT_DEFAULT).
+        for _ in 0..5 {
+            let mut message = ool_message(port.0, 0, 0, false);
+            message[3] = 0;
+            message[4..8].copy_from_slice(&24u32.to_le_bytes());
+            // SAFETY: a message buffer of this test.
+            let status = unsafe {
+                darwin::mach_msg(message.as_mut_ptr(), darwin::MACH_SEND_MSG, 24, 0, 0, 0, 0)
+            };
+            assert_eq!(status, 0);
+        }
+        let block = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        let region = block + 0x2010;
+        assert!(memory::write(region, b"back"));
+        let mut message = ool_message(port.0, region, 0x20, true);
+        let buffer = message.as_mut_ptr() as u64;
+        let arguments = [buffer, SEND, 0, 0, 0, 0, 0, 0];
+        let outgoing = Outgoing::read("mach_msg_trap", &arguments).unwrap();
+        let status = host_send(&mut message, darwin::MACH_SEND_MSG | MACH_SEND_TIMEOUT);
+        assert_eq!(status, MACH_SEND_TIMED_OUT);
+        let mut released = Vec::new();
+        outgoing
+            .sent("mach_msg_trap", status, |start, size| {
+                released.push((start, size))
+            })
+            .unwrap();
+        // The copy in took the sender's guest page; the pseudo-receive's copy
+        // is in a guest page of its own.
+        assert_eq!(released, [(block, 0x2000), (block + 0x3000, 0x1000)]);
+        let returned = memory::read_u64(buffer + 28).unwrap();
+        assert_eq!(memory::read(returned, 4).unwrap(), b"back");
+        assert_eq!(
+            mapped_bytes(returned & !PAGE_MASK, (returned & !PAGE_MASK) + PAGE_BYTES),
+            PAGE_BYTES
+        );
+        memory::deallocate(returned & !PAGE_MASK, PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn a_port_knotes_received_message_has_its_regions_in_guest_pages() {
+        const EVFILT_MACHPORT: i16 = -8;
+        let port = Port::new();
+        let block = memory::allocate(0, PAGE_BYTES, true, Protection::READ_WRITE).unwrap();
+        assert!(memory::write(block + 0x10, b"kevent"));
+        let mut message = ool_message(port.0, block + 0x10, 6, false);
+        assert_eq!(host_send(&mut message, darwin::MACH_SEND_MSG), 0);
+        let mut buffer = vec![0u8; MESSAGE_BYTES + 64];
+        let event = |ext: [u64; 2], fflags: u32| libc::kevent64_s {
+            ident: u64::from(port.0),
+            filter: EVFILT_MACHPORT,
+            flags: libc::EV_ADD | libc::EV_ENABLE,
+            fflags,
+            data: 0,
+            udata: 0,
+            ext,
+        };
+        // A knote that only reports its port names no message.
+        assert_eq!(received_event(EVFILT_MACHPORT, 0, [0, 0]).ok(), Some(()));
+        // SAFETY: a private kqueue and this test's buffers.
+        let (queue, out) = unsafe {
+            let queue = libc::kqueue();
+            assert!(queue >= 0);
+            let change = event(
+                [buffer.as_mut_ptr() as u64, buffer.len() as u64],
+                darwin::MACH_RCV_MSG as u32,
+            );
+            let mut out = event([0, 0], 0);
+            let timeout = libc::timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            };
+            assert_eq!(
+                libc::kevent64(queue, &change, 1, &mut out, 1, 0, &timeout),
+                1
+            );
+            (queue, out)
+        };
+        assert_eq!(out.fflags, 0, "MACH_MSG_SUCCESS");
+        received_event(out.filter, out.fflags, out.ext).unwrap();
+        let moved = u64::from_le_bytes(buffer[28..36].try_into().unwrap());
+        assert_ne!(moved & !PAGE_MASK, block);
+        assert_eq!(memory::read(moved, 6).unwrap(), b"kevent");
+        assert_eq!(
+            mapped_bytes(moved & !PAGE_MASK, (moved & !PAGE_MASK) + PAGE_BYTES),
+            PAGE_BYTES
+        );
+        // SAFETY: the kqueue this test opened.
+        unsafe { libc::close(queue) };
+        memory::deallocate(moved & !PAGE_MASK, PAGE_BYTES).unwrap();
+        memory::deallocate(block, PAGE_BYTES).unwrap();
     }
 }

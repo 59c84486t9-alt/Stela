@@ -119,6 +119,38 @@ pub fn mapped(address: u64) -> bool {
     status == KERN_SUCCESS && start <= address
 }
 
+/// The mapped host runs of `[start, end)`, in order, each the part of one
+/// host region inside it (adjacent regions are separate runs).
+pub fn mapped_runs(start: u64, end: u64) -> Vec<(u64, u64)> {
+    let mut runs = Vec::new();
+    let mut cursor = start;
+    while cursor < end {
+        let (mut at, mut size) = (cursor, 0u64);
+        let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
+        let mut count = VM_REGION_BASIC_INFO_COUNT_64;
+        let mut object = 0u32;
+        // SAFETY: out-parameters sized for VM_REGION_BASIC_INFO_64.
+        let status = unsafe {
+            mach_vm_region(
+                task(),
+                &mut at,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr(),
+                &mut count,
+                &mut object,
+            )
+        };
+        if status != KERN_SUCCESS || at >= end || size == 0 {
+            break;
+        }
+        let run_end = at.saturating_add(size).min(end);
+        runs.push((at.max(cursor), run_end));
+        cursor = run_end;
+    }
+    runs
+}
+
 /// The current and maximum protections of the mapping holding `address`.
 fn protections(address: u64) -> Option<(Protection, Protection)> {
     let mut start = address;

@@ -12,6 +12,7 @@
 //! The three layouts that carry timers: `struct kevent` (`kevent`, no
 //! `ext`), `struct kevent64_s` (`kevent64`) and `struct kevent_qos_s`
 //! (`kevent_qos`, `kevent_id`).
+use super::super::mach;
 use super::aio::{Aio, Rewrite};
 use super::kqworkq::Kevent;
 use super::{Call, Kernel, Outcome};
@@ -216,25 +217,28 @@ fn host_changes(
     converted.then_some(list)
 }
 
-/// Convert the leeway of the `count` events the host wrote at `events`;
-/// false when the list cannot be rewritten.
-fn events_to_guest(layout: Layout, events: u64, count: u64) -> bool {
-    let Some(at) = layout.leeway else {
-        return true;
+/// Convert the leeway of the `count` events the host wrote at `events`,
+/// and place the messages port knotes received
+/// ([`mach::received_event`]); false when the list cannot be rewritten.
+fn events_to_guest(layout: Layout, events: u64, count: u64) -> Result<bool> {
+    let (Some(at), Some((ext, _))) = (layout.leeway, layout.ext) else {
+        return Ok(true);
     };
     for index in 0..count {
         let entry = events + index * layout.size as u64;
         let Some(bytes) = memory::read(entry, layout.size) else {
-            return false;
+            return Ok(false);
         };
         let (filter, flags) = filter_and_flags(&bytes);
+        let fflags = u32::from_le_bytes(bytes[layout.fflags..layout.fflags + 4].try_into()?);
+        mach::received_event(filter, fflags, [field(&bytes, ext), field(&bytes, ext + 8)])?;
         if let Some(leeway) = event_leeway(filter, flags, field(&bytes, at))
             && !memory::write_u64(entry + at as u64, leeway)
         {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 /// `kevent(fd, changelist, nchanges, eventlist, nevents, timeout)`,
@@ -264,7 +268,7 @@ pub(super) fn kevent(kernel: &mut Kernel, call: &Call, layout: Layout) -> Result
     }
     let outcome = super::forward(kernel, &host_call)?;
     if let Outcome::Return(count, _) = outcome
-        && !(events_to_guest(layout, call.argument(3), count)
+        && !(events_to_guest(layout, call.argument(3), count)?
             && aio.events_to_guest(layout, call.argument(3), count, &rewrites))
     {
         return Ok(Outcome::Error(EFAULT));
@@ -380,7 +384,7 @@ mod tests {
         );
         assert!(!returned.carry);
         assert_eq!(returned.rax, 1);
-        assert!(events_to_guest(KEVENT64, event.as_ptr() as u64, 1));
+        assert!(events_to_guest(KEVENT64, event.as_ptr() as u64, 1).unwrap());
         assert_eq!(field(&event, 0), 7);
         assert_eq!(field(&event, 40), 24);
         // SAFETY: the kqueue this test opened.
