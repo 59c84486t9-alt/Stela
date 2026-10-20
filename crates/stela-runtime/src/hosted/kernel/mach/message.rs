@@ -177,6 +177,11 @@ pub(super) fn send(
 /// guest pages, and the regions a failed send returns
 /// (`mach_msg_receive_pseudo`) are placed in guest pages of their own.
 fn forward_send(kernel: &mut Kernel, name: &str, index: u32, arguments: &[u64]) -> Result<u64> {
+    if kernel.trace
+        && let Some(description) = describe_send(name, arguments)
+    {
+        eprintln!("stela: {name} sends {description}");
+    }
     let outgoing = Outgoing::read(name, arguments);
     let status = forward_trap(kernel, index, arguments)?;
     if let Some(outgoing) = outgoing {
@@ -368,6 +373,102 @@ fn descriptor_bytes(first: u64, count: u32) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// A forwarded send as `--trace` shows it: the header's bits, size,
+/// ports and ID, and each descriptor's kind, size or right, and flags.
+fn describe_send(name: &str, arguments: &[u64]) -> Option<String> {
+    if arguments[1] & SEND == 0 {
+        return None;
+    }
+    let (message, words) = if name == "mach_msg2_trap" {
+        let message = if arguments[1] & MESSAGE_VECTOR != 0 {
+            memory::read_u64(arguments[0])?
+        } else {
+            arguments[0]
+        };
+        let [_, _, bits_size, ports, voucher_id, ..] = *arguments else {
+            return None;
+        };
+        let low = |word: u64| (word & LOW_HALF) as u32;
+        let high = |word: u64| (word >> 32) as u32;
+        (
+            message,
+            [
+                low(bits_size),
+                high(bits_size),
+                low(ports),
+                high(ports),
+                low(voucher_id),
+                high(voucher_id),
+            ],
+        )
+    } else {
+        let header = memory::read(arguments[0], HEADER_BYTES as usize)?;
+        let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+        (
+            arguments[0],
+            [word(0), word(4), word(8), word(12), word(16), word(20)],
+        )
+    };
+    let [bits, size, remote, local, voucher, id] = words;
+    let mut text = format!(
+        "message {id} ({size} bytes, bits {bits:#x}) to {remote:#x}, reply {local:#x}, voucher \
+         {voucher:#x}"
+    );
+    if bits & MACH_MSGH_BITS_COMPLEX != 0 {
+        let count = memory::read_u32(message + DESCRIPTOR_COUNT)?;
+        let descriptors = descriptor_bytes(message + DESCRIPTOR_COUNT + 4, count)?;
+        text.push_str(": ");
+        text.push_str(&describe_descriptors(&descriptors));
+    }
+    Some(text)
+}
+
+/// Each descriptor's kind and what it carries.
+fn describe_descriptors(bytes: &[u8]) -> String {
+    let mut parts = Vec::new();
+    let mut at = 0;
+    while let Some(descriptor) = bytes.get(at..) {
+        let Some(&kind) = descriptor.get(11) else {
+            break;
+        };
+        let word = |at: usize| u32::from_le_bytes(descriptor[at..at + 4].try_into().unwrap());
+        let disposition = descriptor[10];
+        if kind == PORT_DESCRIPTOR {
+            parts.push(format!("port {:#x} ({disposition})", word(0)));
+            at += PORT_DESCRIPTOR_BYTES as usize;
+            continue;
+        }
+        let Some(descriptor) = descriptor.get(..DESCRIPTOR_BYTES as usize) else {
+            break;
+        };
+        let address = u64::from_le_bytes(descriptor[..8].try_into().unwrap());
+        let (deallocate, copy) = (descriptor[8], descriptor[9]);
+        parts.push(match kind {
+            OOL_DESCRIPTOR | OOL_VOLATILE_DESCRIPTOR => format!(
+                "{} {:#x} bytes at {address:#x} (copy {copy}, deallocate {deallocate})",
+                if kind == OOL_DESCRIPTOR {
+                    "out-of-line"
+                } else {
+                    "volatile"
+                },
+                word(12)
+            ),
+            OOL_PORTS_DESCRIPTOR => format!(
+                "{} ports at {address:#x} ({disposition}, copy {copy}, deallocate {deallocate})",
+                word(12)
+            ),
+            GUARDED_PORT_DESCRIPTOR => format!(
+                "guarded port {:#x} ({disposition}, flags {:#x}, context {address:#x})",
+                word(12),
+                u16::from_le_bytes([descriptor[8], descriptor[9]])
+            ),
+            kind => format!("descriptor of type {kind}"),
+        });
+        at += DESCRIPTOR_BYTES as usize;
+    }
+    parts.join(", ")
+}
+
 /// A bound on the descriptors read of a message, far above what a
 /// message's body space holds.
 const MAX_DESCRIPTORS: u32 = 1 << 16;
@@ -377,6 +478,7 @@ const MAX_DESCRIPTORS: u32 = 1 << 16;
 const OOL_DESCRIPTOR: u8 = 1;
 const OOL_PORTS_DESCRIPTOR: u8 = 2;
 const OOL_VOLATILE_DESCRIPTOR: u8 = 3;
+const GUARDED_PORT_DESCRIPTOR: u8 = 4;
 const PORT_DESCRIPTOR: u8 = 0;
 /// Received descriptor sizes on LP64: a port descriptor, and the others.
 const PORT_DESCRIPTOR_BYTES: u64 = 12;
@@ -1051,6 +1153,33 @@ mod tests {
         assert_eq!(memory::read(host, 4).unwrap(), b"host");
         memory::deallocate(page + 0x1000, 0x1000).unwrap();
         memory::deallocate(host, 0x2000).unwrap();
+    }
+
+    #[test]
+    fn traced_sends_name_their_descriptors() {
+        let mut message = ool_message(0x1303, 0x4000_0010, 0x20, true);
+        let arguments = [message.as_mut_ptr() as u64, SEND, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            describe_send("mach_msg_trap", &arguments).unwrap(),
+            "message 4660 (44 bytes, bits 0x80000013) to 0x1303, reply 0x0, voucher 0x0: \
+             out-of-line 0x20 bytes at 0x40000010 (copy 1, deallocate 1)"
+        );
+        let mut descriptors = vec![0u8; 12];
+        descriptors[..4].copy_from_slice(&0x707u32.to_le_bytes());
+        descriptors[10] = 17;
+        let mut guarded = vec![0u8; 16];
+        guarded[8..10].copy_from_slice(&2u16.to_le_bytes());
+        guarded[10] = 16;
+        guarded[11] = GUARDED_PORT_DESCRIPTOR;
+        guarded[12..].copy_from_slice(&0x903u32.to_le_bytes());
+        descriptors.extend(guarded);
+        assert_eq!(
+            describe_descriptors(&descriptors),
+            "port 0x707 (17), guarded port 0x903 (16, flags 0x2, context 0x0)"
+        );
+        // A receive alone sends nothing.
+        let arguments = [message.as_mut_ptr() as u64, RECEIVE, 0, 0, 0, 0, 0, 0];
+        assert!(describe_send("mach_msg_trap", &arguments).is_none());
     }
 
     #[test]
