@@ -587,7 +587,7 @@ pub(super) fn serve(
         // registry, whose serialized properties have one layout in both
         // ABIs but describe the x86 machine.
         (Object::Host, "host_get_io_main", false) => Reply::Forward,
-        (Object::Host, "host_kernel_version", false) => kernel_version(),
+        (Object::Host, "host_kernel_version", false) => kernel_version(kernel),
         // `flavor`.
         (Object::Host, "host_processor_info", false) => match request.word(8) {
             Some(flavor) => processor_info(&kernel.process.hardware, flavor)?,
@@ -933,16 +933,16 @@ fn task_set_state(kernel: &Kernel, request: &Request) -> Result<Reply> {
     let mut debug = lock(&kernel.process.task_debug);
     Ok(match flavor {
         ARM_DEBUG_STATE64 if count == DEBUG_STATE64_COUNT => {
-            use super::super::bsd::sysctl::{BREAKPOINT_PAIRS, WATCHPOINT_PAIRS};
             // `debug_state_is_valid64`: a used pair's address is a user
             // address.
-            let invalid = |control: usize, value: usize, pairs: i32| {
+            let invalid = |control: usize, value: usize, pairs: u64| {
                 (0..pairs as usize).any(|index| {
                     debug_double(&words, control + index) != 0
                         && debug_double(&words, value + index) >= MACH_VM_MAX_ADDRESS
                 })
             };
-            if invalid(16, 0, BREAKPOINT_PAIRS) || invalid(48, 32, WATCHPOINT_PAIRS) {
+            let hardware = &kernel.process.hardware;
+            if invalid(16, 0, hardware.breakpoints) || invalid(48, 32, hardware.watchpoints) {
                 return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
             }
             const ENABLE: u64 = 1;
@@ -1224,10 +1224,8 @@ const KERNEL_VERSION_MAX: usize = 512;
 /// `host_kernel_version`: the 26A434 kernel's version string, as
 /// `kern.version` gives it, as a MIG string (offset, count with the NUL,
 /// the bytes padded to a word).
-fn kernel_version() -> Reply {
-    let mut string = super::super::bsd::sysctl::KERNEL_VERSION
-        .as_bytes()
-        .to_vec();
+fn kernel_version(kernel: &Kernel) -> Reply {
+    let mut string = kernel.process.hardware.kernel_version.as_bytes().to_vec();
     string.truncate(KERNEL_VERSION_MAX - 1);
     string.push(0);
     let mut body = 0u32.to_le_bytes().to_vec();

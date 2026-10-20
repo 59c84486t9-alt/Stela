@@ -50,15 +50,8 @@ const CTLFLAG_RD: u32 = 0x8000_0000;
 const CTLFLAG_KERN: u32 = 0x0100_0000;
 const CTLFLAG_LOCKED: u32 = 0x0080_0000;
 const LITTLE_ENDIAN: i32 = 1234;
-/// `num_watchpoint_pairs` and `num_breakpoint_pairs` of Apple cores.
-pub(crate) const WATCHPOINT_PAIRS: i32 = 4;
-pub(crate) const BREAKPOINT_PAIRS: i32 = 6;
 const CACHE_ENTRIES: usize = 10;
 
-/// The kernel the guest runs on: the M2's 26A434 release kernel, whose
-/// `version[]` names its Darwin release, build date and xnu tag.
-pub(crate) const KERNEL_VERSION: &str = "Darwin Kernel Version 27.0.0: Tue Aug 11 21:02:16 PDT \
-     2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T8112";
 const KERNEL_RELEASE: &str = "27.0.0";
 /// The OS build the kernel belongs to (`kern.osversion`).
 const OS_BUILD: &str = "26A434";
@@ -305,8 +298,14 @@ impl Model {
         }
         add("hw.optional.floatingpoint", Value::Int(1));
         add("hw.optional.arm64", Value::Int(1));
-        add("hw.optional.watchpoint", Value::Int(WATCHPOINT_PAIRS));
-        add("hw.optional.breakpoint", Value::Int(BREAKPOINT_PAIRS));
+        add(
+            "hw.optional.watchpoint",
+            Value::Int(hardware.watchpoints as i32),
+        );
+        add(
+            "hw.optional.breakpoint",
+            Value::Int(hardware.breakpoints as i32),
+        );
         add("hw.optional.ucnormal_mem", Value::Int(1));
         let feature = |name: &str| {
             features
@@ -350,7 +349,12 @@ impl Model {
             Value::Int(crate::hosted::tables::ADDRESS_BITS as i32),
         );
         add("machdep.ptrauth_enabled", Value::Int(1));
-        add("kern.version", Value::String(KERNEL_VERSION.into()));
+        // The 26A434 kernelcache the board boots names its release, build
+        // date and xnu tag.
+        add(
+            "kern.version",
+            Value::String(hardware.kernel_version.into()),
+        );
         add("kern.osrelease", Value::String(KERNEL_RELEASE.into()));
         add("kern.osversion", Value::String(OS_BUILD.into()));
         Self { entries }
@@ -704,6 +708,16 @@ mod tests {
             .iter()
             .find(|cluster| cluster.performance)
             .unwrap();
+        // The board's own kernelcache and debug pairs.
+        assert!(
+            matches!(value(&m1_pro, "kern.version"), Value::String(version)
+            if version.ends_with("RELEASE_ARM64_T6000"))
+        );
+        let hardware = Hardware::of_soc(0x6000, 1 << 34).unwrap();
+        assert_eq!(
+            value(&m1_pro, "hw.optional.breakpoint"),
+            Value::Int(hardware.breakpoints as i32)
+        );
         assert_eq!(
             value(&m1_pro, "hw.perflevel0.l2cachesize"),
             Value::Int(performance.l2_bytes as i32)
