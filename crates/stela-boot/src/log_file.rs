@@ -8,9 +8,9 @@ use crate::{
     output::{self, Log},
 };
 use alloc::{boxed::Box, format, string::String};
+use stela_drivers::block::{BlockDevice, BlockError, Identity, Shared, Transport};
 use stela_loader::mount_interface::BOOT_LOG_FILE;
 use stela_runtime::pc::{
-    block::{BlockDevice, BlockError, Identity, Shared, Transport},
     boot_log::{self, LOG_BYTES, Writer},
     fat32::Fat32,
     gpt::Guid,

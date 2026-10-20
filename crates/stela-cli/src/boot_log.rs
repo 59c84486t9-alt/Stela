@@ -13,8 +13,8 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+use stela_drivers::block::{BlockDevice, BlockError, Identity, Transport};
 use stela_runtime::pc::{
-    block::{BlockDevice, BlockError, Identity, Transport},
     boot_log::{self, Log},
     gpt::{self, Guid},
     machine_state,
@@ -210,11 +210,7 @@ fn listing(table: &gpt::Table, block: u64) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use stela_runtime::pc::{
-        block::{BlockDevice, BlockError, Identity, Transport},
-        boot_log::Writer,
-        gpt::Partition,
-    };
+    use stela_runtime::pc::{boot_log::Writer, gpt::Partition};
 
     /// A partition of a byte vector.
     struct Bytes<'a> {

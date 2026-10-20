@@ -31,10 +31,13 @@ hex = { version = "0.4", default-features = false, features = ["alloc"] }
 # same inflater flate2 and the zip crate already use on the host.
 miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
 stela-compiler = { path = "../stela-compiler", default-features = false }
+stela-drivers = { path = "../stela-drivers" }
 
 [build-dependencies]
 sha2.workspace = true
 
 [dev-dependencies]
+# The drivers' RAM disk, which the device model tests run on.
+stela-drivers = { path = "../stela-drivers", features = ["ram-disk"] }
 # The reference LZFSE encoder the no_std decoder is checked against.
 lzfse_rust = "0.2"

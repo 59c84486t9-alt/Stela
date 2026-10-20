@@ -119,7 +119,7 @@ struct Options {
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
     /// Instead, this many bytes of engine memory back them, and nothing
-    /// persists (`--storage-ram`, `pc::block::Volatile`).
+    /// persists (`--storage-ram`, `stela_drivers::block::Volatile`).
     storage_ram: Option<u64>,
     /// The host partition holding the NOR flash image (`--nor`); the
     /// `--storage` partition itself keeps it in its tail.
@@ -791,7 +791,7 @@ struct Clock {
 /// (`--storage`) and the SEP's state on the machine-state partition
 /// (`--nor`).
 struct Disks {
-    backing: Option<alloc::boxed::Box<dyn stela_runtime::pc::block::BlockDevice>>,
+    backing: Option<alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>>,
     sep_state: Option<stela_runtime::machine::apple::sep_state::Location>,
     /// Advertise and log the SEP `sks`/`pnon`/`scrd` services (`--sep-observe`).
     sep_observe: bool,
@@ -1476,7 +1476,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let backing = options.storage.as_ref().map(|_| services.next().unwrap());
     let backing = backing.or_else(|| {
         let bytes = options.storage_ram?;
-        let disk = stela_runtime::pc::block::Volatile::new("STELARAM", bytes, RAM_STORAGE_LIMIT)
+        let disk = stela_drivers::block::Volatile::new("STELARAM", bytes, RAM_STORAGE_LIMIT)
             .unwrap_or_else(|error| {
                 output::arguments(format_args!("RAM storage refusal: {error}\n"));
                 output::fatal("the RAM-backed storage could not be made")
@@ -1486,9 +1486,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
              at most {RAM_STORAGE_LIMIT:#x} written; nothing persists\n"
         ));
         Some(alloc::boxed::Box::new(disk)
-            as alloc::boxed::Box<
-                dyn stela_runtime::pc::block::BlockDevice,
-            >)
+            as alloc::boxed::Box<dyn stela_drivers::block::BlockDevice>)
     });
     let source = options
         .restore_source

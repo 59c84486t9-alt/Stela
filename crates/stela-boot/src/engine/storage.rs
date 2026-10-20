@@ -8,10 +8,15 @@
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::arch::asm;
-use stela_runtime::pc::{
-    self,
+use stela_drivers::{
+    Handoff,
     block::{BlockDevice, BlockError, Identity, Window},
-    dma::RegionAllocator,
+    bus::dma::RegionAllocator,
+    input::virtio::VirtioInput,
+    probe::probe,
+    usb::hid::UsbInput,
+};
+use stela_runtime::pc::{
     gpt::{Guid, PartitionDevice},
     storage::{self, Named, Target},
 };
@@ -85,7 +90,7 @@ impl BlockDevice for Service {
 /// The handoff describes this running machine, only this service uses its
 /// reserved DMA pages, and the loader root/window remain live for the boot.
 pub unsafe fn open(
-    handoff: &pc::Handoff,
+    handoff: &Handoff,
     targets: &[&Target],
     medium: Option<Guid>,
     store: Option<Guid>,
@@ -109,7 +114,7 @@ pub unsafe fn open(
     // SAFETY: the caller owns the handoff's DMA pages and controllers.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: the loader mapped these ranges uncached and identity-mapped.
-    let mut disks = unsafe { storage::probe(handoff, &mut dma) };
+    let mut disks = unsafe { probe(handoff, &mut dma) };
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
@@ -272,7 +277,7 @@ pub struct Opened {
 /// The host's input devices and the loader root their registers and DMA
 /// pages are reached through.
 pub struct Inputs {
-    pub devices: alloc::vec::Vec<pc::input::VirtioInput>,
-    pub usb: alloc::vec::Vec<pc::xhci::hid::UsbInput>,
+    pub devices: alloc::vec::Vec<VirtioInput>,
+    pub usb: alloc::vec::Vec<UsbInput>,
     pub root: u64,
 }

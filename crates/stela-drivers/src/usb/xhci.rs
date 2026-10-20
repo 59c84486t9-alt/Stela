@@ -27,16 +27,15 @@
 //! and SuperSpeed port control, and no class driver here needs one),
 //! isochronous endpoints, streams, hubs more than five tiers deep, and
 //! controllers without 4 KiB pages. Hot plug after attach is not seen.
-pub mod cdc;
-pub mod hid;
-pub mod storage;
-
-use super::{
+use super::{cdc, hid, storage};
+use crate::{
     Clock, Handoff,
     block::BlockError,
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+    },
     registers,
 };
 use alloc::{boxed::Box, format, rc::Rc, string::String, vec, vec::Vec};
@@ -164,7 +163,7 @@ const C_PORT_RESET: u16 = 20;
 const LANGUAGE_EN_US: u16 = 0x0409;
 
 /// Register access, so the controller logic runs against a model in tests.
-pub(crate) trait Registers {
+pub trait Registers {
     fn read32(&mut self, offset: usize) -> u32;
     fn write32(&mut self, offset: usize, value: u32);
     /// A 64-bit register, as two 32-bit writes, low half first (5.1).
@@ -429,7 +428,7 @@ struct Attachment {
 
 pub struct Controller {
     registers: Box<dyn Registers>,
-    clock: Clock,
+    pub(crate) clock: Clock,
     operational: usize,
     runtime: usize,
     doorbells: usize,
@@ -908,7 +907,7 @@ impl Controller {
         )
     }
 
-    fn string(&mut self, slot: u8, index: u8) -> Option<String> {
+    pub(crate) fn string(&mut self, slot: u8, index: u8) -> Option<String> {
         if index == 0 {
             return None;
         }
@@ -1439,7 +1438,9 @@ pub fn attach(
     start(Box::new(registers), handoff.clock, dma, location)
 }
 
-pub(crate) fn start(
+/// Starts the controller behind `registers`, enumerates its devices and
+/// binds the class drivers.
+pub fn start(
     registers: Box<dyn Registers>,
     clock: Clock,
     dma: &mut dyn DmaAllocator,
@@ -1553,160 +1554,10 @@ impl Plan {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    //! The driver against Stela's own xHCI model (`apple::dwc3::xhci`),
-    //! with Stela's native USB functions as the devices: DMA buffers are
-    //! host memory, which the model reaches through a `Memory` over the
-    //! same addresses.
+mod tests {
     use super::*;
-    use crate::platform::{
-        apple::{
-            bus::{Access, MmioDevice, Width},
-            dart::Dart,
-            dwc3::xhci::Xhci,
-            interrupt::InterruptLatch,
-            typec::Usb2Speed,
-        },
-        dma::{Memory, Port},
-        pc::dma::RegionAllocator,
-        usb::Function as UsbFunction,
-    };
+    use crate::bus::dma::RegionAllocator;
     use alloc::vec::Vec;
-    use core::cell::RefCell;
-
-    /// Host memory the test owns, by address.
-    struct Arena {
-        start: u64,
-        end: u64,
-    }
-
-    impl Memory for Arena {
-        fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
-            if physical < self.start || physical + buffer.len() as u64 > self.end {
-                return false;
-            }
-            // SAFETY: inside the arena, which outlives the bench.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    physical as *const u8,
-                    buffer.as_mut_ptr(),
-                    buffer.len(),
-                )
-            };
-            true
-        }
-        fn write(&mut self, physical: u64, data: &[u8]) -> bool {
-            if physical < self.start || physical + data.len() as u64 > self.end {
-                return false;
-            }
-            // SAFETY: as in `read`.
-            unsafe {
-                core::ptr::copy_nonoverlapping(data.as_ptr(), physical as *mut u8, data.len())
-            };
-            true
-        }
-    }
-
-    pub(crate) struct Model<F> {
-        pub xhci: Xhci,
-        pub function: F,
-        arena: Arena,
-        now: u64,
-    }
-
-    impl<F: UsbFunction> Model<F> {
-        fn service(&mut self) {
-            let mut dart = Dart::new(16, None);
-            let mut latch = InterruptLatch::new();
-            let mut access = Access::new(0, self.now, &mut latch);
-            dart.write(0xc00, Width::Word, 1, &mut access).unwrap();
-            dart.write(0x1000, Width::Word, 6, &mut access).unwrap();
-            let mut port = Port {
-                iommu: &mut dart,
-                stream: 0,
-                memory: &mut self.arena,
-                access: &mut access,
-            };
-            // The cable stays plugged in across a controller reset, as the
-            // machine keeps it (`attach_host_function` each service).
-            self.xhci.attach(Some(Usb2Speed::High)).unwrap();
-            self.function.set_time(self.now);
-            self.xhci
-                .service(&mut port, Some(&mut self.function))
-                .unwrap();
-        }
-    }
-
-    pub(crate) struct Shared<F>(pub Rc<RefCell<Model<F>>>);
-
-    impl<F: UsbFunction> Registers for Shared<F> {
-        fn read32(&mut self, offset: usize) -> u32 {
-            let mut model = self.0.borrow_mut();
-            // One microframe per access, so periodic endpoints come due.
-            model.now += 3000;
-            model.service();
-            let now = model.now;
-            model.xhci.read(offset as u64, 4, now).unwrap() as u32
-        }
-        fn write32(&mut self, offset: usize, value: u32) {
-            let mut model = self.0.borrow_mut();
-            let now = model.now;
-            model
-                .xhci
-                .write(offset as u64, 4, u64::from(value), now)
-                .unwrap();
-            model.service();
-        }
-        fn write64(&mut self, offset: usize, value: u64) {
-            let mut model = self.0.borrow_mut();
-            let now = model.now;
-            model.xhci.write(offset as u64, 8, value, now).unwrap();
-            model.service();
-        }
-    }
-
-    pub(crate) struct Bench<F> {
-        pub model: Rc<RefCell<Model<F>>>,
-        pub dma: RegionAllocator,
-        _backing: Vec<u64>,
-    }
-
-    /// The model with `function` cabled to its USB2 port at high speed.
-    pub(crate) fn bench<F>(function: F) -> Bench<F> {
-        let mut backing: Vec<u64> = vec![0; 4 << 20 >> 3];
-        let start = backing.as_mut_ptr() as u64;
-        let end = start + (backing.len() * 8) as u64;
-        let xhci = Xhci::new();
-        let model = Rc::new(RefCell::new(Model {
-            xhci,
-            function,
-            arena: Arena { start, end },
-            now: 0,
-        }));
-        Bench {
-            model,
-            // SAFETY: the vector lives as long as the bench.
-            dma: unsafe { RegionAllocator::new(start..end) },
-            _backing: backing,
-        }
-    }
-
-    pub(crate) fn clock() -> Clock {
-        Clock {
-            ticks_per_microsecond: 1000,
-        }
-    }
-
-    pub(crate) fn run<F: UsbFunction + 'static>(bench: &mut Bench<F>) -> Found {
-        let registers = Box::new(Shared(bench.model.clone()));
-        start(
-            registers,
-            clock(),
-            &mut bench.dma,
-            String::from("xhci test"),
-        )
-        .unwrap()
-    }
 
     #[test]
     fn configuration_descriptors_split_into_interfaces_with_their_endpoints() {

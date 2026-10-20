@@ -15,8 +15,9 @@ use super::bundle::Bytes;
 use crate::{firmware, handoff::Region, output, paging::PAGE};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use core::cell::UnsafeCell;
+use stela_drivers::block::BlockDevice;
 use stela_runtime::{
-    pc::{block::BlockDevice, fat32::Fat32, gpt::Guid},
+    pc::{fat32::Fat32, gpt::Guid},
     translations::{
         self, Digest,
         pack::{self, Pack, Store},

@@ -2,10 +2,11 @@
 //! outbound requests (the restore client's signing-server POST): DHCPv4,
 //! DNS A lookups, TCP client connections and an HTTP/1.1 POST.
 //!
-//! It runs on any [`Link`], so it is independent of the adapter: the
-//! mount's virtio-net driver after ExitBootServices, a USB CDC-ECM adapter
-//! on the host xHCI, or a test peer. Everything blocks with explicit
-//! deadlines from a [`Clock`]; nothing is retried without bound.
+//! It runs on any [`Link`](stela_drivers::net::Link), so it is independent
+//! of the adapter: one of the mount's own drivers after ExitBootServices
+//! (`stela_drivers::net`, or a USB CDC Ethernet adapter on the host xHCI),
+//! or a test peer. Everything blocks with explicit deadlines from a
+//! [`Clock`]; nothing is retried without bound.
 //!
 //! Evidence: RFC 826 (ARP), RFC 791 (IPv4), RFC 768 (UDP), RFC 9293 (TCP),
 //! RFC 2131 and 2132 (DHCP and its options), RFC 1035 (DNS) and RFC 9112
@@ -13,8 +14,9 @@
 //! explicitly: IPv6, IP fragments (sent with DF; received fragments are
 //! dropped), TCP options other than MSS, out-of-order TCP reassembly (the
 //! peer retransmits), TLS, and HTTP redirects.
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 use core::fmt;
+use stela_drivers::net::LinkError;
 
 pub mod dhcp;
 pub mod dns;
@@ -24,25 +26,6 @@ pub mod tcp;
 pub mod wire;
 
 pub use stack::Stack;
-
-/// An Ethernet MAC address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Mac(pub [u8; 6]);
-
-impl Mac {
-    pub const BROADCAST: Self = Self([0xff; 6]);
-
-    pub fn is_multicast(&self) -> bool {
-        self.0[0] & 1 != 0
-    }
-}
-
-impl fmt::Display for Mac {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [a, b, c, d, e, g] = self.0;
-        write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")
-    }
-}
 
 /// An IPv4 address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, PartialOrd, Ord)]
@@ -127,18 +110,13 @@ impl fmt::Display for NetError {
     }
 }
 
-/// A raw Ethernet II link: whole frames without the FCS.
-pub trait Link {
-    /// The adapter's station address, which the stack sends from.
-    fn mac(&self) -> Mac;
-    /// Whether the adapter reports carrier; `true` when it cannot tell.
-    fn carrier(&mut self) -> bool {
-        true
+impl From<LinkError> for NetError {
+    fn from(error: LinkError) -> Self {
+        match error {
+            LinkError::Adapter(why) => Self::Link(why),
+            LinkError::Invalid(why) => Self::Invalid(why),
+        }
     }
-    /// Queues one frame (14-byte header and payload, at most 1514 bytes).
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError>;
-    /// One frame the adapter received, if any, without blocking.
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError>;
 }
 
 /// Microseconds from an arbitrary origin, monotonic.
@@ -146,8 +124,7 @@ pub trait Clock {
     fn now_us(&self) -> u64;
 }
 
-#[cfg(target_arch = "x86_64")]
-impl Clock for crate::platform::pc::Clock {
+impl Clock for stela_drivers::Clock {
     fn now_us(&self) -> u64 {
         self.now_us()
     }
@@ -177,6 +154,7 @@ pub fn checksum(parts: &[&[u8]]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stela_drivers::net::Mac;
 
     #[test]
     fn addresses_parse_and_print() {

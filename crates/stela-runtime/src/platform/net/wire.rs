@@ -1,13 +1,11 @@
 //! Frame and header encodings: Ethernet II, ARP for IPv4 over Ethernet,
 //! IPv4, UDP and TCP. Parsers check lengths and checksums and return
 //! `None` for anything malformed; builders produce complete frames.
-use super::{Ipv4, Mac, checksum};
+use super::{Ipv4, checksum};
 use alloc::vec::Vec;
+use stela_drivers::net::{MAX_FRAME, MIN_FRAME, Mac};
 
 pub const ETHERNET_HEADER: usize = 14;
-/// The shortest frame without FCS; shorter frames are padded (IEEE 802.3).
-pub const MIN_FRAME: usize = 60;
-pub const MAX_FRAME: usize = 1514;
 pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_ARP: u16 = 0x0806;
 pub const IPV4_HEADER: usize = 20;

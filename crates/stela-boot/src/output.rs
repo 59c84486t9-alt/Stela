@@ -16,10 +16,8 @@ use core::{
     fmt::{self, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_runtime::pc::{
-    block::BlockDevice,
-    boot_log::{PENDING_BYTES, Pending, Writer},
-};
+use stela_drivers::block::BlockDevice;
+use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Writer};
 
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
 const EXIT_PORT: u16 = 0xf4;

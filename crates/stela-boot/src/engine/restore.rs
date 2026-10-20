@@ -17,10 +17,10 @@ use crate::{
 };
 use alloc::{boxed::Box, format, string::String};
 use core::task::Poll;
+use stela_drivers::block::BlockDevice;
 use stela_runtime::{
     machine::apple::{AppleDevices, MuxStream, UsbId},
     payload::{PayloadManifest, Purpose, ReadAt},
-    pc::block::BlockDevice,
     restore::{
         answers::Answers,
         driver::Driver,

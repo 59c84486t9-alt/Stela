@@ -257,7 +257,7 @@ pub enum WriteError {
     /// An extent does not start on a device block.
     Misaligned,
     #[cfg(target_arch = "x86_64")]
-    Device(crate::pc::block::BlockError),
+    Device(stela_drivers::block::BlockError),
 }
 
 /// The bytes written to the device at a time.
@@ -271,7 +271,7 @@ const TRANSFER_BYTES: usize = 1 << 20;
 /// larger than it is refused before anything is written.
 #[cfg(target_arch = "x86_64")]
 pub fn write_in_place(
-    device: &mut dyn crate::pc::block::BlockDevice,
+    device: &mut dyn stela_drivers::block::BlockDevice,
     extents: &[crate::payload::pieces::Extent],
     layout: &Layout,
 ) -> Result<(), WriteError> {
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn a_pack_is_written_over_its_files_extents_and_never_past_them() {
         use crate::payload::pieces::Extent;
-        use crate::pc::block::tests::RamDisk;
+        use stela_drivers::block::RamDisk;
         const BLOCK: u32 = 512;
         let translator = Digest::of(b"translator");
         let records: Vec<(Digest, Piece)> = (0u8..40)

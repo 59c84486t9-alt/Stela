@@ -22,14 +22,12 @@
 //! control interface) is left unused.
 mod report;
 
-use super::{
-    super::{
-        block::BlockError,
-        dma::{DmaAllocator, DmaBuffer},
-    },
-    Controller, Device, Endpoint, Interface, Plan, STALL, Shared, setup,
+use super::xhci::{Controller, Device, Endpoint, Interface, Plan, STALL, Shared, setup};
+use crate::{
+    block::BlockError,
+    bus::dma::{DmaAllocator, DmaBuffer},
+    input::{Input, POINTER_MAX},
 };
-use crate::platform::usb::hid::{Input, POINTER_MAX};
 use alloc::{format, string::String, vec::Vec};
 use report::{Field, Keys, Pointer, Reports};
 
@@ -390,121 +388,7 @@ impl UsbInput {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{bench, run};
     use super::*;
-    use crate::platform::usb::{
-        Function, Speed,
-        hid::Peripheral,
-        hub::{Hub, Ports},
-    };
-
-    struct One(Peripheral);
-    impl Ports for One {
-        fn count(&self) -> usize {
-            1
-        }
-        fn speed(&self, _: usize) -> Speed {
-            Speed::Full
-        }
-        fn function(&mut self, _: usize) -> &mut dyn Function {
-            &mut self.0
-        }
-        fn function_ref(&self, _: usize) -> &dyn Function {
-            &self.0
-        }
-    }
-
-    #[test]
-    fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
-        let hub = Hub::new(One(Peripheral::new()), "HUB").unwrap();
-        let mut bench = bench(hub);
-        let mut found = run(&mut bench);
-        assert!(found.failures.is_empty(), "{:?}", found.failures);
-        assert_eq!(found.inputs.len(), 3);
-        let mut keyboard = found.inputs.remove(0);
-        let mut pointer = found.inputs.remove(0);
-        let mut mouse = found.inputs.remove(0);
-        assert!(keyboard.poll().is_empty());
-        assert!(pointer.poll().is_empty());
-        assert!(mouse.poll().is_empty());
-        let feed = |input: Input| {
-            bench
-                .model
-                .borrow_mut()
-                .function
-                .ports
-                .0
-                .input(input)
-                .unwrap();
-        };
-        feed(Input::Key {
-            usage: 0x04,
-            pressed: true,
-        });
-        feed(Input::Key {
-            usage: 0xe1,
-            pressed: true,
-        });
-        feed(Input::Move { x: 100, y: 0x7000 });
-        feed(Input::Buttons(1));
-        let mut keys = Vec::new();
-        let mut motion = Vec::new();
-        for _ in 0..50 {
-            keys.extend(keyboard.poll());
-            motion.extend(pointer.poll());
-        }
-        assert_eq!(
-            keys,
-            [
-                Input::Key {
-                    usage: 0x04,
-                    pressed: true
-                },
-                Input::Key {
-                    usage: 0xe1,
-                    pressed: true
-                },
-            ]
-        );
-        assert!(
-            motion.contains(&Input::Move { x: 100, y: 0x7000 }),
-            "{motion:?}"
-        );
-        assert_eq!(motion.last(), Some(&Input::Buttons(1)));
-        feed(Input::Key {
-            usage: 0x04,
-            pressed: false,
-        });
-        let mut released = Vec::new();
-        for _ in 0..50 {
-            released.extend(keyboard.poll());
-        }
-        assert_eq!(
-            released,
-            [Input::Key {
-                usage: 0x04,
-                pressed: false
-            }]
-        );
-        // The native mouse runs the report protocol: its counts and wheel
-        // arrive as they were sent.
-        feed(Input::Motion { dx: -20, dy: 7 });
-        feed(Input::MouseButtons(4));
-        feed(Input::MouseWheel(-1));
-        let mut moved = Vec::new();
-        for _ in 0..50 {
-            moved.extend(mouse.poll());
-        }
-        assert_eq!(
-            moved,
-            [
-                Input::Motion { dx: -20, dy: 7 },
-                Input::MouseButtons(4),
-                Input::MouseWheel(-1),
-            ]
-        );
-        assert!(!keyboard.failed() && !pointer.failed() && !mouse.failed());
-    }
 
     /// A boot keyboard whose descriptor numbers its 8-byte report 1.
     const NUMBERED_KEYBOARD: [u8; 43] = [

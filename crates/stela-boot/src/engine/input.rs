@@ -9,7 +9,8 @@
 use super::storage::{Inputs, RestoreRoot};
 use crate::output;
 use alloc::vec::Vec;
-use stela_runtime::machine::apple::{AppleDevices, HidInput as Input};
+use stela_drivers::input::Input;
+use stela_runtime::machine::apple::AppleDevices;
 
 pub struct HostInput {
     inputs: Inputs,

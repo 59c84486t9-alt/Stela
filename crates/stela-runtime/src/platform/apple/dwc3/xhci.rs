@@ -1037,7 +1037,7 @@ impl Xhci {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::platform::apple::{
         bus::{Access, MmioDevice, Width},
@@ -1557,7 +1557,7 @@ mod tests {
         // The keyboard's default 500 ms idle rate repeats its report.
         assert_eq!(b.x.deadline(Some(&b.hid)), Some(125 * 96_000));
         b.hid
-            .input(crate::platform::usb::hid::Input::Key {
+            .input(stela_drivers::input::Input::Key {
                 usage: 0x04,
                 pressed: true,
             })
@@ -1800,5 +1800,165 @@ mod tests {
         // Disabling the hub's port hides the keyboard too.
         transfer(&mut hub, setup(0x23, 1, 1, 1, 0), &[]).unwrap();
         assert_eq!(address(&mut b, &mut hub, 3, 1), TRANSACTION_ERROR);
+    }
+
+    /// Stela's own host xHCI driver (`stela_drivers::usb::xhci`) against
+    /// this model, with Stela's native USB functions as the devices: DMA
+    /// buffers are host memory, which the model reaches through a `Memory`
+    /// over the same addresses.
+    pub(crate) mod host {
+        use crate::platform::{
+            apple::{
+                bus::{Access, MmioDevice, Width},
+                dart::Dart,
+                dwc3::xhci::Xhci,
+                interrupt::InterruptLatch,
+                typec::Usb2Speed,
+            },
+            dma::{Memory, Port},
+            usb::Function,
+        };
+        use alloc::{boxed::Box, rc::Rc, string::String, vec::Vec};
+        use core::cell::RefCell;
+        use stela_drivers::{
+            Clock,
+            bus::dma::RegionAllocator,
+            usb::xhci::{Found, Registers, start},
+        };
+
+        /// Host memory the test owns, by address.
+        struct Arena {
+            start: u64,
+            end: u64,
+        }
+
+        impl Memory for Arena {
+            fn read(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+                if physical < self.start || physical + buffer.len() as u64 > self.end {
+                    return false;
+                }
+                // SAFETY: inside the arena, which outlives the bench.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        physical as *const u8,
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                    )
+                };
+                true
+            }
+            fn write(&mut self, physical: u64, data: &[u8]) -> bool {
+                if physical < self.start || physical + data.len() as u64 > self.end {
+                    return false;
+                }
+                // SAFETY: as in `read`.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(data.as_ptr(), physical as *mut u8, data.len())
+                };
+                true
+            }
+        }
+
+        pub(crate) struct Model<F> {
+            pub xhci: Xhci,
+            pub function: F,
+            arena: Arena,
+            now: u64,
+        }
+
+        impl<F: Function> Model<F> {
+            fn service(&mut self) {
+                let mut dart = Dart::new(16, None);
+                let mut latch = InterruptLatch::new();
+                let mut access = Access::new(0, self.now, &mut latch);
+                dart.write(0xc00, Width::Word, 1, &mut access).unwrap();
+                dart.write(0x1000, Width::Word, 6, &mut access).unwrap();
+                let mut port = Port {
+                    iommu: &mut dart,
+                    stream: 0,
+                    memory: &mut self.arena,
+                    access: &mut access,
+                };
+                // The cable stays plugged in across a controller reset, as the
+                // machine keeps it (`attach_host_function` each service).
+                self.xhci.attach(Some(Usb2Speed::High)).unwrap();
+                self.function.set_time(self.now);
+                self.xhci
+                    .service(&mut port, Some(&mut self.function))
+                    .unwrap();
+            }
+        }
+
+        struct Shared<F>(Rc<RefCell<Model<F>>>);
+
+        impl<F: Function> Registers for Shared<F> {
+            fn read32(&mut self, offset: usize) -> u32 {
+                let mut model = self.0.borrow_mut();
+                // One microframe per access, so periodic endpoints come due.
+                model.now += 3000;
+                model.service();
+                let now = model.now;
+                model.xhci.read(offset as u64, 4, now).unwrap() as u32
+            }
+            fn write32(&mut self, offset: usize, value: u32) {
+                let mut model = self.0.borrow_mut();
+                let now = model.now;
+                model
+                    .xhci
+                    .write(offset as u64, 4, u64::from(value), now)
+                    .unwrap();
+                model.service();
+            }
+            fn write64(&mut self, offset: usize, value: u64) {
+                let mut model = self.0.borrow_mut();
+                let now = model.now;
+                model.xhci.write(offset as u64, 8, value, now).unwrap();
+                model.service();
+            }
+        }
+
+        pub(crate) struct Bench<F> {
+            pub model: Rc<RefCell<Model<F>>>,
+            dma: RegionAllocator,
+            _backing: Vec<u64>,
+        }
+
+        /// The model with `function` cabled to its USB2 port at high speed.
+        pub(crate) fn bench<F>(function: F) -> Bench<F> {
+            let mut backing: Vec<u64> = vec![0; 4 << 20 >> 3];
+            let start = backing.as_mut_ptr() as u64;
+            let end = start + (backing.len() * 8) as u64;
+            let xhci = Xhci::new();
+            let model = Rc::new(RefCell::new(Model {
+                xhci,
+                function,
+                arena: Arena { start, end },
+                now: 0,
+            }));
+            Bench {
+                model,
+                // SAFETY: the vector lives as long as the bench.
+                dma: unsafe { RegionAllocator::new(start..end) },
+                _backing: backing,
+            }
+        }
+
+        fn clock() -> Clock {
+            Clock {
+                ticks_per_microsecond: 1000,
+            }
+        }
+
+        /// The host driver started on the bench's model.
+        pub(crate) fn run<F: Function + 'static>(bench: &mut Bench<F>) -> Found {
+            let registers = Box::new(Shared(bench.model.clone()));
+            start(
+                registers,
+                clock(),
+                &mut bench.dma,
+                String::from("xhci test"),
+            )
+            .unwrap()
+        }
     }
 }

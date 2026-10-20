@@ -1561,6 +1561,7 @@ dependencies = [
  "sha1",
  "sha2",
  "stela-compiler",
+ "stela-drivers",
  "stela-loader",
  "stela-runtime",
  "tempfile",
@@ -1576,6 +1577,10 @@ dependencies = [
  "serde",
  "sha2",
 ]
+
+[[package]]
+name = "stela-drivers"
+version = "0.1.0"
 
 [[package]]
 name = "stela-loader"
@@ -1611,6 +1616,7 @@ dependencies = [
  "sha1",
  "sha2",
  "stela-compiler",
+ "stela-drivers",
  "tempfile",
  "zeroize",
 ]
@@ -2133,6 +2139,7 @@ dependencies = [
  "sha2",
  "stela-cli",
  "stela-compiler",
+ "stela-drivers",
  "stela-loader",
  "stela-runtime",
  "tempfile",

@@ -24,14 +24,12 @@
 //! taken to be up. Frames above the 1514-byte Ethernet maximum are refused.
 mod ntb;
 
-use super::{
-    super::{
-        block::BlockError,
-        dma::{DmaAllocator, DmaBuffer},
-    },
-    Device, Endpoint, Interface, Plan, Shared, setup,
+use super::xhci::{Device, Endpoint, Interface, Plan, SET_INTERFACE, Shared, setup};
+use crate::{
+    block::BlockError,
+    bus::dma::{DmaAllocator, DmaBuffer},
+    net::{Link, LinkError, MAX_FRAME, Mac},
 };
-use crate::platform::net::{Link, Mac, NetError};
 use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 
 pub const COMMUNICATIONS: u8 = 2;
@@ -56,7 +54,6 @@ const SET_NTB_INPUT_SIZE: u8 = 0x86;
 /// Directed, broadcast and all-multicast frames.
 const FILTER: u16 = 0x04 | 0x08 | 0x02;
 const NETWORK_CONNECTION: u8 = 0x00;
-const MAX_FRAME: usize = 1514;
 /// An ECM frame's transfer, and the OUT block buffer.
 const FRAME_BYTES: usize = 2048;
 /// The largest NCM IN block this driver takes: room for ten full frames.
@@ -225,7 +222,7 @@ impl UsbNet {
             if binding.alternate != 0 {
                 let request = setup(
                     1,
-                    super::SET_INTERFACE,
+                    SET_INTERFACE,
                     u16::from(binding.alternate),
                     u16::from(binding.data),
                     0,
@@ -297,8 +294,8 @@ impl UsbNet {
     }
 }
 
-fn link_error(error: BlockError) -> NetError {
-    NetError::Link(format!("USB Ethernet: {error}"))
+fn link_error(error: BlockError) -> LinkError {
+    LinkError::Adapter(format!("USB Ethernet: {error}"))
 }
 
 impl Link for UsbNet {
@@ -311,9 +308,9 @@ impl Link for UsbNet {
         self.connected.unwrap_or(true)
     }
 
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         if frame.len() > MAX_FRAME {
-            return Err(NetError::Link(String::from(
+            return Err(LinkError::Adapter(String::from(
                 "frame above the Ethernet maximum",
             )));
         }
@@ -329,7 +326,7 @@ impl Link for UsbNet {
                     .encode(*sequence, frame)
                     .filter(|block| block.len() <= FRAME_BYTES)
                     .ok_or_else(|| {
-                        NetError::Link(String::from("frame above the NCM OUT block size"))
+                        LinkError::Adapter(String::from("frame above the NCM OUT block size"))
                     })?;
                 *sequence = sequence.wrapping_add(1);
                 self.send.bytes_mut()[..block.len()].copy_from_slice(&block);
@@ -349,7 +346,7 @@ impl Link for UsbNet {
         Ok(())
     }
 
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         if let Some(frame) = self.pending.pop_front() {
             return Ok(Some(frame));
         }
@@ -395,29 +392,7 @@ impl Link for UsbNet {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{bench, run};
     use super::*;
-    use crate::platform::usb::{
-        Function, Speed,
-        ecm::Ecm,
-        hub::{Hub, Ports},
-    };
-
-    struct One(Ecm);
-    impl Ports for One {
-        fn count(&self) -> usize {
-            1
-        }
-        fn speed(&self, _: usize) -> Speed {
-            Speed::High
-        }
-        fn function(&mut self, _: usize) -> &mut dyn Function {
-            &mut self.0
-        }
-        fn function_ref(&self, _: usize) -> &dyn Function {
-            &self.0
-        }
-    }
 
     #[test]
     fn mac_strings_parse_as_twelve_hex_digits() {
@@ -427,41 +402,5 @@ mod tests {
         );
         assert_eq!(parse_mac("0253540"), None);
         assert_eq!(parse_mac("02535400AB0G"), None);
-    }
-
-    #[test]
-    fn the_native_ecm_adapter_moves_frames_for_the_host() {
-        let mac = Mac([0x02, 0x53, 0x54, 0, 0, 7]);
-        let hub = Hub::new(One(Ecm::new(mac).unwrap()), "HUB").unwrap();
-        let mut bench = bench(hub);
-        let mut found = run(&mut bench);
-        assert!(found.failures.is_empty(), "{:?}", found.failures);
-        assert_eq!(found.links.len(), 1);
-        let mut link = found.links.remove(0);
-        assert_eq!(link.mac(), mac);
-        assert!(link.carrier());
-        assert!(bench.model.borrow().function.ports.0.up());
-        // Host to network: a 1024-byte frame (two full packets and a ZLP).
-        let mut frame = vec![0u8; 1024];
-        frame[..6].copy_from_slice(&Mac::BROADCAST.0);
-        frame[6..12].copy_from_slice(&mac.0);
-        link.transmit(&frame).unwrap();
-        assert_eq!(
-            bench.model.borrow_mut().function.ports.0.take(),
-            Some(frame.clone())
-        );
-        // Network to host.
-        let mut inbound = vec![7u8; 600];
-        inbound[..6].copy_from_slice(&mac.0);
-        bench.model.borrow_mut().function.ports.0.deliver(&inbound);
-        let mut received = None;
-        for _ in 0..50 {
-            if let Some(frame) = link.receive().unwrap() {
-                received = Some(frame);
-                break;
-            }
-        }
-        assert_eq!(received, Some(inbound));
-        assert!(link.transmit(&[0u8; 1515]).is_err());
     }
 }

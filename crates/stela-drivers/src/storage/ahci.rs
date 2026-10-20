@@ -1,10 +1,12 @@
 //! AHCI host bus adapters with SATA disks, one polled command slot per port.
-use super::{
+use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+    },
     registers,
 };
 use alloc::{format, vec::Vec};

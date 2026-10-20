@@ -19,8 +19,8 @@
 //! [`Medium::zero_erased`] writes zeros to the host for the rest, unmarking
 //! a run only after the host flushed it. docs/research/ans2.md owns the
 //! design (`Formatting the medium`).
-use crate::platform::pc::block::{BlockDevice, BlockError};
 use alloc::{collections::BTreeMap, vec, vec::Vec};
+use stela_drivers::block::{BlockDevice, BlockError};
 
 pub const BLOCK_BYTES: u32 = 4096;
 const RECORD_BYTES: usize = 12;
@@ -327,8 +327,8 @@ impl Medium {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::pc::block::tests::RamDisk;
     use alloc::boxed::Box;
+    use stela_drivers::block::RamDisk;
 
     #[test]
     fn records_and_persistent_partition_extents() {
@@ -394,7 +394,7 @@ mod tests {
 
     /// Two namespaces on a shared RAM disk, and a window onto all of it to
     /// look at the host's bytes behind the medium.
-    fn erasable(block_size: u32) -> (Medium, crate::platform::pc::block::Window) {
+    fn erasable(block_size: u32) -> (Medium, stela_drivers::block::Window) {
         let records = [
             Description {
                 id: 1,
@@ -408,9 +408,8 @@ mod tests {
             },
         ];
         let blocks = 600 * 4096 / u64::from(block_size);
-        let disk = crate::platform::pc::block::Shared::new(Box::new(RamDisk::new(
-            "medium", blocks, block_size,
-        )));
+        let disk =
+            stela_drivers::block::Shared::new(Box::new(RamDisk::new("medium", blocks, block_size)));
         let host = disk.window(0, blocks).unwrap();
         let medium = Medium::new(Box::new(disk.window(0, blocks).unwrap()), &records).unwrap();
         (medium, host)

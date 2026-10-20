@@ -21,7 +21,11 @@ use stela_runtime::sha256;
 
 pub const LEDGER: &str = "isa/system-chip-test-runs.json";
 /// The sources whose behavior the runs observe.
-const TREES: [&str; 2] = ["crates/stela-runtime/src", "crates/stela-compiler/src"];
+const TREES: [&str; 3] = [
+    "crates/stela-runtime/src",
+    "crates/stela-drivers/src",
+    "crates/stela-compiler/src",
+];
 /// Only the runtime's tests consult the test chip.
 const RUNTIME_SOURCE: &str = "crates/stela-runtime/src/";
 /// Cited tests whose code cannot name a chip, so that their pass holds on
@@ -179,7 +183,7 @@ pub(super) fn parse(text: &str, digest: &str) -> Result<Runs> {
     let ledger: Value = serde_json::from_str(text).with_context(|| format!("invalid {LEDGER}"))?;
     ensure!(
         ledger["sources"]["sha256"] == digest,
-        "{LEDGER} is stale: the runtime or compiler sources changed; run `cargo xtask progress`"
+        "{LEDGER} is stale: the runtime, driver or compiler sources changed; run `cargo xtask progress`"
     );
     let mut chips = BTreeMap::new();
     for (chip, run) in ledger["chips"]

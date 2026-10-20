@@ -319,64 +319,67 @@ impl BlockDevice for Volatile {
     }
 }
 
+/// A RAM disk for the partition and selection tests.
+#[cfg(any(test, feature = "ram-disk"))]
+pub struct RamDisk {
+    pub identity: Identity,
+    pub bytes: alloc::vec::Vec<u8>,
+    pub flushes: usize,
+}
+
+#[cfg(any(test, feature = "ram-disk"))]
+impl RamDisk {
+    pub fn new(serial: &str, blocks: u64, block_size: u32) -> Self {
+        Self {
+            identity: Identity {
+                transport: Transport::VirtioBlk,
+                location: String::from("test"),
+                model: String::from("RAM"),
+                serial: String::from(serial),
+                blocks,
+                block_size,
+                read_only: false,
+            },
+            bytes: vec![0; (blocks * u64::from(block_size)) as usize],
+            flushes: 0,
+        }
+    }
+
+    fn span(&self, lba: u64, bytes: usize) -> core::ops::Range<usize> {
+        let start = (lba * u64::from(self.identity.block_size)) as usize;
+        start..start + bytes
+    }
+}
+
+#[cfg(any(test, feature = "ram-disk"))]
+impl BlockDevice for RamDisk {
+    fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.identity.check(lba, buffer.len())?;
+        buffer.copy_from_slice(&self.bytes[self.span(lba, buffer.len())]);
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.identity.check_write(lba, data.len())?;
+        let span = self.span(lba, data.len());
+        self.bytes[span].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.flushes += 1;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use alloc::vec::Vec;
-
-    /// A RAM disk for the partition and selection tests.
-    pub(crate) struct RamDisk {
-        pub(crate) identity: Identity,
-        pub(crate) bytes: Vec<u8>,
-        pub(crate) flushes: usize,
-    }
-
-    impl RamDisk {
-        pub(crate) fn new(serial: &str, blocks: u64, block_size: u32) -> Self {
-            Self {
-                identity: Identity {
-                    transport: Transport::VirtioBlk,
-                    location: String::from("test"),
-                    model: String::from("RAM"),
-                    serial: String::from(serial),
-                    blocks,
-                    block_size,
-                    read_only: false,
-                },
-                bytes: vec![0; (blocks * u64::from(block_size)) as usize],
-                flushes: 0,
-            }
-        }
-
-        fn span(&self, lba: u64, bytes: usize) -> core::ops::Range<usize> {
-            let start = (lba * u64::from(self.identity.block_size)) as usize;
-            start..start + bytes
-        }
-    }
-
-    impl BlockDevice for RamDisk {
-        fn identity(&self) -> &Identity {
-            &self.identity
-        }
-
-        fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
-            self.identity.check(lba, buffer.len())?;
-            buffer.copy_from_slice(&self.bytes[self.span(lba, buffer.len())]);
-            Ok(())
-        }
-
-        fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
-            self.identity.check_write(lba, data.len())?;
-            let span = self.span(lba, data.len());
-            self.bytes[span].copy_from_slice(data);
-            Ok(())
-        }
-
-        fn flush(&mut self) -> Result<(), BlockError> {
-            self.flushes += 1;
-            Ok(())
-        }
-    }
 
     #[test]
     fn transfers_must_be_whole_blocks_inside_the_device() {

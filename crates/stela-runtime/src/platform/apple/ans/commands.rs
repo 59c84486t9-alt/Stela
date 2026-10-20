@@ -14,8 +14,9 @@ use super::{
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
 };
-use crate::platform::{apple::sart::Sart, dma::Port, pc::block::BlockError};
+use crate::platform::{apple::sart::Sart, dma::Port};
 use alloc::vec;
+use stela_drivers::block::BlockError;
 
 const IDENTIFY_BYTES: usize = 4096;
 /// `AppleANS2NVMeController::AllocateTunnelBuffer` (0x3dbe83c) rounds every
@@ -915,9 +916,9 @@ mod tests {
             sart::{Bounds, Sart},
         },
         dma::{Physical, tests::Ram},
-        pc::block::tests::RamDisk,
     };
     use alloc::boxed::Box;
+    use stela_drivers::block::RamDisk;
 
     #[test]
     fn os_build_tunnel_stores_only_the_recovered_message_and_checks_extensions() {

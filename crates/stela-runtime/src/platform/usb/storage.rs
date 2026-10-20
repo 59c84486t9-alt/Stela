@@ -30,8 +30,8 @@ use super::{
         RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
     },
 };
-use crate::platform::pc::block::BlockDevice;
 use alloc::{boxed::Box, string::String, vec, vec::Vec};
+use stela_drivers::block::BlockDevice;
 
 const BULK_IN: u8 = 0x81;
 const BULK_OUT: u8 = 0x02;
@@ -828,11 +828,19 @@ impl Function for MassStorage {
 mod tests {
     use super::*;
     use crate::platform::{
-        pc::block::tests::RamDisk,
-        usb::control::{
-            SET_ADDRESS, SET_CONFIGURATION,
-            tests::{setup, transfer},
+        apple::dwc3::xhci::tests::host,
+        usb::{
+            Speed,
+            control::{
+                SET_ADDRESS, SET_CONFIGURATION,
+                tests::{setup, transfer},
+            },
+            hub::{Hub, Ports},
         },
+    };
+    use stela_drivers::{
+        block::{BlockError, RamDisk},
+        usb::storage::Data,
     };
 
     const SERIAL: &str = "0123456789ABCDEF";
@@ -1150,5 +1158,99 @@ mod tests {
         }
         let (_, _, status) = run(&mut d, 3, 0, false, &[TEST_UNIT_READY, 0, 0, 0, 0, 0], &[]);
         assert_eq!(status, PASSED);
+    }
+
+    struct Disks(Vec<MassStorage>);
+    impl Ports for Disks {
+        fn count(&self) -> usize {
+            self.0.len()
+        }
+        fn speed(&self, _: usize) -> Speed {
+            Speed::High
+        }
+        fn function(&mut self, port: usize) -> &mut dyn Function {
+            &mut self.0[port]
+        }
+        fn function_ref(&self, port: usize) -> &dyn Function {
+            &self.0[port]
+        }
+    }
+
+    fn disk(serial: &str, blocks: u64, read_only: bool) -> MassStorage {
+        let mut ram = RamDisk::new(serial, blocks, 512);
+        ram.identity.read_only = read_only;
+        for (n, byte) in ram.bytes.iter_mut().enumerate() {
+            *byte = (n / 512) as u8 ^ (n % 7) as u8;
+        }
+        MassStorage::new(Box::new(ram), "00000000000A", "Native Disk").unwrap()
+    }
+
+    #[test]
+    fn a_disk_on_the_root_port_needs_no_hub() {
+        let mut bench = host::bench(disk("c", 8, false));
+        let mut found = host::run(&mut bench);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        let mut disk = found.disks.remove(0);
+        assert!(
+            disk.identity().location.ends_with("port 1"),
+            "{}",
+            disk.identity().location
+        );
+        let mut block = [0u8; 512];
+        disk.read(7, &mut block).unwrap();
+        assert_eq!(block[1], 7 ^ ((7 * 512 + 1) % 7) as u8);
+    }
+
+    #[test]
+    fn disks_behind_a_hub_enumerate_read_write_and_flush() {
+        let hub = Hub::new(
+            Disks(vec![disk("a", 300, false), disk("b", 16, true)]),
+            "HUB",
+        )
+        .unwrap();
+        let mut bench = host::bench(hub);
+        let mut found = host::run(&mut bench);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        assert_eq!(found.disks.len(), 2);
+        let mut first = found.disks.remove(0);
+        let identity = first.identity().clone();
+        assert_eq!((identity.blocks, identity.block_size), (300, 512));
+        assert_eq!(identity.model, "STELA Native Disk");
+        assert_eq!(identity.serial, "00000000000A");
+        assert!(
+            identity.location.ends_with("port 1.1"),
+            "{}",
+            identity.location
+        );
+        assert!(!identity.read_only);
+        // 200 blocks: two chunks of at most 64 KiB.
+        let mut bytes = vec![0u8; 200 * 512];
+        first.read(50, &mut bytes).unwrap();
+        let expected = |at: usize| (at / 512) as u8 ^ (at % 7) as u8;
+        assert_eq!(bytes[0], expected(50 * 512));
+        assert_eq!(bytes[512 * 199 + 3], expected(249 * 512 + 3));
+        let payload: Vec<u8> = (0..3 * 512).map(|n| (n % 253) as u8).collect();
+        first.write(7, &payload).unwrap();
+        let mut back = vec![0u8; 3 * 512];
+        first.read(7, &mut back).unwrap();
+        assert_eq!(back, payload);
+        first.flush().unwrap();
+        // Out of range fails before the bus; the device's own refusals
+        // report their sense.
+        assert!(first.read(300, &mut [0u8; 512]).is_err());
+        let mut second = found.disks.remove(0);
+        assert!(second.identity().read_only);
+        assert!(matches!(
+            second.write(0, &[0u8; 512]),
+            Err(BlockError::ReadOnly)
+        ));
+        assert_eq!(
+            second.command(&[0x04, 0, 0, 0, 0, 0], Data::None),
+            Err(BlockError::Device { status: 0x05_2000 })
+        );
+        // The device still answers after the failed command.
+        let mut block = [0u8; 512];
+        second.read(15, &mut block).unwrap();
+        assert_eq!(block[0], expected(15 * 512));
     }
 }

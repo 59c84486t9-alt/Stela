@@ -1,7 +1,7 @@
 //! GUID partition tables, and a block device confined to one partition.
-use super::block::{BlockDevice, BlockError, Identity};
 use alloc::{format, string::String, vec::Vec};
 use core::{fmt, str::FromStr};
+use stela_drivers::block::{BlockDevice, BlockError, Identity};
 
 const SIGNATURE: &[u8; 8] = b"EFI PART";
 const HEADER_BYTES: usize = 92;
@@ -359,8 +359,8 @@ impl<D: BlockDevice> BlockDevice for PartitionDevice<D> {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::block::tests::RamDisk;
     use super::*;
+    use stela_drivers::block::RamDisk;
 
     pub(crate) const DATA: &str = "0FC63DAF-8483-4772-8E79-3D69D8477DE4";
 

@@ -18,9 +18,9 @@ use super::{
         persist::{BANK_BYTES, HostStore},
     },
 };
-use crate::platform::pc::block::{BlockDevice, Shared};
 use alloc::{boxed::Box, vec, vec::Vec};
 use sha2::{Digest, Sha256};
+use stela_drivers::block::{BlockDevice, Shared};
 use zeroize::Zeroizing;
 
 /// The SEP's area of the machine-state partition.
@@ -147,7 +147,7 @@ pub fn open(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::pc::block::tests::RamDisk;
+    use stela_drivers::block::RamDisk;
 
     const ECID: u64 = 0xa5a5_0001;
 

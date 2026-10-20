@@ -11,6 +11,7 @@
 //! ANS2 model only the rest, so the guest never sees the machine state.
 use crate::output;
 use alloc::boxed::Box;
+use stela_drivers::block::{BlockDevice, BlockError, Shared};
 use stela_runtime::{
     boot_bundle::Nvram,
     machine::apple::{
@@ -18,10 +19,7 @@ use stela_runtime::{
         nor::{CAPACITY, Image, persist},
         sep_state,
     },
-    pc::{
-        block::{BlockDevice, BlockError, Shared},
-        boot_log, machine_state,
-    },
+    pc::{boot_log, machine_state},
 };
 
 /// Split the Apple region `partition` into the guest's ANS2 namespace and

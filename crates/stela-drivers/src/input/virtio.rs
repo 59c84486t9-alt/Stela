@@ -16,15 +16,17 @@
 //! Codes with no keyboard usage (media keys beyond volume and mute,
 //! horizontal wheel, extra buttons) and relative axes of a tablet are
 //! counted and dropped, never mapped to something else.
-use super::{
+use super::{Input, POINTER_MAX};
+use crate::{
     Handoff,
     block::BlockError,
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
-    virtio::{AVAIL, DESCRIPTOR_WRITE, Modern, USED, VENDOR},
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+        virtio::{AVAIL, DESCRIPTOR_WRITE, Modern, USED, VENDOR},
+    },
 };
-use crate::platform::usb::hid::{Input, POINTER_MAX};
 use alloc::{string::String, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 

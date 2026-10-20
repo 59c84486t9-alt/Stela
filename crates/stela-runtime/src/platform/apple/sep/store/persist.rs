@@ -11,9 +11,9 @@
 //! anti-rollback needs a monotonic secret the host does not have; this adapter
 //! provides durability and torn-write/older-bank protection only.
 use super::{Backend, Head};
-use crate::platform::pc::block::BlockDevice;
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use sha2::{Digest, Sha256};
+use stela_drivers::block::BlockDevice;
 
 const MAGIC: &[u8; 8] = b"STXARTB1";
 const GENERATION: core::ops::Range<usize> = 8..16;
@@ -168,7 +168,7 @@ mod tests {
     use super::super::Nonces;
     use super::*;
     use crate::platform::apple::sep::keys::Roots;
-    use crate::platform::pc::block::tests::RamDisk;
+    use stela_drivers::block::RamDisk;
 
     fn roots() -> Roots {
         Roots::provisioned([9; 32], [8; 32], 0xa5a5_0003).unwrap()

@@ -3,11 +3,12 @@
 //! exchanges. One operation runs at a time; while it waits, the stack
 //! answers ARP requests for its address and drops traffic for no waiter.
 use super::{
-    Clock, Ipv4, Link, Mac, NetError, dhcp, dns, http,
+    Clock, Ipv4, NetError, dhcp, dns, http,
     tcp::{self, Connection, Emit, Incoming},
     wire::{self, Arp, Frame, Ipv4Packet, Segment, Udp},
 };
 use alloc::{string::String, vec::Vec};
+use stela_drivers::net::{Link, Mac};
 
 /// An interface's IPv4 configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,7 +308,7 @@ impl<L: Link, C: Clock> Stack<L, C> {
         self.ip_id = self.ip_id.wrapping_add(1);
         let packet = wire::ipv4(self.address(), destination, protocol, self.ip_id, payload);
         let frame = wire::frame(mac, self.mac, wire::ETHERTYPE_IPV4, &packet);
-        self.link.transmit(&frame)
+        Ok(self.link.transmit(&frame)?)
     }
 
     fn send_udp(
@@ -637,6 +638,7 @@ pub(crate) mod tests {
     use crate::platform::net::wire::{ACK, FIN, PSH, RST, SYN};
     use alloc::collections::VecDeque;
     use core::cell::Cell;
+    use stela_drivers::net::{LinkError, MAX_FRAME, MIN_FRAME};
 
     pub(crate) struct TestClock(pub Cell<u64>);
     impl Clock for TestClock {
@@ -906,13 +908,13 @@ pub(crate) mod tests {
             self.carrier_after = self.carrier_after.saturating_sub(1);
             self.carrier_after == 0
         }
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
-            assert!(frame.len() >= wire::MIN_FRAME && frame.len() <= wire::MAX_FRAME);
+        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+            assert!(frame.len() >= MIN_FRAME && frame.len() <= MAX_FRAME);
             self.sent.push(frame.to_vec());
             self.handle(frame);
             Ok(())
         }
-        fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
             Ok(self.rx.pop_front())
         }
     }

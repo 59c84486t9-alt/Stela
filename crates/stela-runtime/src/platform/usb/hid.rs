@@ -35,6 +35,7 @@
 //! report at that rate while nothing changes (HID 1.11 7.2.4).
 use super::{BusPeer, Function, Reply, Token};
 use alloc::{collections::VecDeque, vec::Vec};
+use stela_drivers::input::{Input, POINTER_MAX};
 
 const EP0_PACKET: usize = 64;
 const KEYBOARD_ENDPOINT: u8 = 0x81;
@@ -62,7 +63,6 @@ const IDLE_UNIT: u64 = 96_000;
 /// HID 1.11 7.2.4's recommended keyboard default, 500 ms; pointers report
 /// only on change.
 const KEYBOARD_IDLE: u8 = 125;
-pub const POINTER_MAX: u16 = 0x7fff;
 
 const GET_STATUS: u8 = 0;
 const CLEAR_FEATURE: u8 = 1;
@@ -206,26 +206,6 @@ fn string(text: &str) -> Vec<u8> {
     bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
     bytes[0] = bytes.len() as u8;
     bytes
-}
-
-/// One host input change, in HID usages, the pointer's absolute range and
-/// the mouse's counts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Input {
-    /// A Keyboard/Keypad page usage: 04h..DDh, or a modifier E0h..E7h.
-    Key { usage: u8, pressed: bool },
-    /// The pointer's position, each axis 0..=[`POINTER_MAX`].
-    Move { x: u16, y: u16 },
-    /// The pointer's buttons 1..3 held, as bits 0..2.
-    Buttons(u8),
-    /// Pointer wheel detents, positive away from the user.
-    Wheel(i8),
-    /// Mouse motion in counts, positive right and down.
-    Motion { dx: i16, dy: i16 },
-    /// The mouse's buttons 1..3 held, as bits 0..2.
-    MouseButtons(u8),
-    /// Mouse wheel detents, positive away from the user.
-    MouseWheel(i8),
 }
 
 #[derive(Clone)]
@@ -764,6 +744,13 @@ impl Function for Peripheral {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{
+        apple::dwc3::xhci::tests::host,
+        usb::{
+            Speed,
+            hub::{Hub, Ports},
+        },
+    };
 
     fn control(p: &mut Peripheral, setup: [u8; 8], out: &[u8]) -> Result<Vec<u8>, ()> {
         assert_eq!(
@@ -997,5 +984,113 @@ mod tests {
         assert_eq!(status, [1, 0]);
         control(&mut p, setup(0x02, CLEAR_FEATURE, 0, 0x81, 0), &[]).unwrap();
         assert_ne!(p.packet(0x81, Token::In, &mut buffer), Ok(Reply::Stall));
+    }
+
+    struct One(Peripheral);
+    impl Ports for One {
+        fn count(&self) -> usize {
+            1
+        }
+        fn speed(&self, _: usize) -> Speed {
+            Speed::Full
+        }
+        fn function(&mut self, _: usize) -> &mut dyn Function {
+            &mut self.0
+        }
+        fn function_ref(&self, _: usize) -> &dyn Function {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn the_native_keyboard_and_pointer_reach_the_host_through_a_hub() {
+        let hub = Hub::new(One(Peripheral::new()), "HUB").unwrap();
+        let mut bench = host::bench(hub);
+        let mut found = host::run(&mut bench);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        assert_eq!(found.inputs.len(), 3);
+        let mut keyboard = found.inputs.remove(0);
+        let mut pointer = found.inputs.remove(0);
+        let mut mouse = found.inputs.remove(0);
+        assert!(keyboard.poll().is_empty());
+        assert!(pointer.poll().is_empty());
+        assert!(mouse.poll().is_empty());
+        let feed = |input: Input| {
+            bench
+                .model
+                .borrow_mut()
+                .function
+                .ports
+                .0
+                .input(input)
+                .unwrap();
+        };
+        feed(Input::Key {
+            usage: 0x04,
+            pressed: true,
+        });
+        feed(Input::Key {
+            usage: 0xe1,
+            pressed: true,
+        });
+        feed(Input::Move { x: 100, y: 0x7000 });
+        feed(Input::Buttons(1));
+        let mut keys = Vec::new();
+        let mut motion = Vec::new();
+        for _ in 0..50 {
+            keys.extend(keyboard.poll());
+            motion.extend(pointer.poll());
+        }
+        assert_eq!(
+            keys,
+            [
+                Input::Key {
+                    usage: 0x04,
+                    pressed: true
+                },
+                Input::Key {
+                    usage: 0xe1,
+                    pressed: true
+                },
+            ]
+        );
+        assert!(
+            motion.contains(&Input::Move { x: 100, y: 0x7000 }),
+            "{motion:?}"
+        );
+        assert_eq!(motion.last(), Some(&Input::Buttons(1)));
+        feed(Input::Key {
+            usage: 0x04,
+            pressed: false,
+        });
+        let mut released = Vec::new();
+        for _ in 0..50 {
+            released.extend(keyboard.poll());
+        }
+        assert_eq!(
+            released,
+            [Input::Key {
+                usage: 0x04,
+                pressed: false
+            }]
+        );
+        // The native mouse runs the report protocol: its counts and wheel
+        // arrive as they were sent.
+        feed(Input::Motion { dx: -20, dy: 7 });
+        feed(Input::MouseButtons(4));
+        feed(Input::MouseWheel(-1));
+        let mut moved = Vec::new();
+        for _ in 0..50 {
+            moved.extend(mouse.poll());
+        }
+        assert_eq!(
+            moved,
+            [
+                Input::Motion { dx: -20, dy: 7 },
+                Input::MouseButtons(4),
+                Input::MouseWheel(-1),
+            ]
+        );
+        assert!(!keyboard.failed() && !pointer.failed() && !mouse.failed());
     }
 }

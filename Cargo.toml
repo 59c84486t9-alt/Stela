@@ -3,6 +3,7 @@ members = [
     "crates/stela-cli",
     "crates/stela-loader",
     "crates/stela-compiler",
+    "crates/stela-drivers",
     "crates/stela-runtime",
     "xtask",
 ]
@@ -26,6 +27,7 @@ hex = "0.4"
 libc = "0.2"
 tempfile = "3"
 stela-compiler = { path = "crates/stela-compiler" }
+stela-drivers = { path = "crates/stela-drivers" }
 stela-runtime = { path = "crates/stela-runtime" }
 stela-loader = { path = "crates/stela-loader" }
 stela-cli = { path = "crates/stela-cli" }

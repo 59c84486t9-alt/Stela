@@ -1,5 +1,5 @@
 //! Host-physical memory that devices read and write.
-use super::block::BlockError;
+use crate::block::BlockError;
 use core::ops::Range;
 
 /// Zeroed, physically contiguous memory a device may access, at the same

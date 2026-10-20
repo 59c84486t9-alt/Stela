@@ -5,17 +5,22 @@
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
 //! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
-//! after-EBS driver (`pc::virtio_net`, `pc::igc` for an Intel I225/I226,
-//! or `pc::xhci::cdc` for a USB Ethernet adapter). Its registers and DMA pages are
-//! identity-mapped in the loader's root, so every frame moves inside that
-//! root (`storage::RestoreRoot`), as block and input I/O do.
+//! after-EBS driver (`stela_drivers::net::virtio`, `stela_drivers::net::igc`
+//! for an Intel I225/I226, or `stela_drivers::usb::cdc` for a USB Ethernet
+//! adapter). Its registers and DMA pages are identity-mapped in the
+//! loader's root, so every frame moves inside that root
+//! (`storage::RestoreRoot`), as block and input I/O do.
 use super::storage::RestoreRoot;
 use crate::output;
 use alloc::{format, string::String, vec::Vec};
+use stela_drivers::{
+    Clock,
+    net::{Link, LinkError, Mac},
+    probe::Adapter,
+};
 use stela_runtime::{
     machine::apple::AppleDevices,
-    net::{Link, Mac, NetError, Stack},
-    pc::{self, storage::Adapter},
+    net::{NetError, Stack},
 };
 
 /// The host's network adapters and the loader root they are reached in.
@@ -39,12 +44,12 @@ impl Link for RootLink {
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.carrier()
     }
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.transmit(frame)
     }
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         // SAFETY: as in `carrier`.
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.device.receive()
@@ -52,7 +57,7 @@ impl Link for RootLink {
 }
 
 /// The PC's clock, moving the screen's running step as the stack waits.
-struct Ticking(pc::Clock);
+struct Ticking(Clock);
 
 impl stela_runtime::net::Clock for Ticking {
     fn now_us(&self) -> u64 {
@@ -70,7 +75,7 @@ pub struct HostNetwork {
 impl HostNetwork {
     /// The first adapter, configured by DHCP now so that a missing network
     /// is reported at mount start rather than in the middle of a restore.
-    pub fn open(links: Links, clock: pc::Clock) -> Result<Self, String> {
+    pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
         let Some(device) = links.devices.into_iter().next() else {
             return Err(String::from(
                 "no host network adapter: the mount drives virtio-net, Intel I225/I226 and USB CDC Ethernet adapters after ExitBootServices",
@@ -224,7 +229,7 @@ impl GuestNetwork {
                 break;
             };
             if let Err(error) = self.link.transmit(&frame) {
-                self.refuse(error);
+                self.refuse(error.into());
             }
         }
         for _ in 0..FRAMES_PER_POLL {
@@ -235,7 +240,7 @@ impl GuestNetwork {
                 }
                 Ok(None) => break,
                 Err(error) => {
-                    self.refuse(error);
+                    self.refuse(error.into());
                     break;
                 }
             }

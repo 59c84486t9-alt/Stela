@@ -6,8 +6,8 @@
 //! content must hold a valid NVRAM bank, so a wrong partition is refused
 //! instead of overwritten. Committed changes are stored by erase sector.
 use super::{CAPACITY, Image, SECTOR_SIZE};
-use crate::platform::pc::block::BlockDevice;
 use alloc::{format, string::String, vec};
+use stela_drivers::block::BlockDevice;
 
 /// The image `device` holds, and whether it was blank and has just been
 /// initialized.
@@ -84,7 +84,7 @@ fn sector_blocks(device: &dyn BlockDevice) -> Result<(u64, u32), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::pc::block::tests::RamDisk;
+    use stela_drivers::block::RamDisk;
 
     #[test]
     fn a_blank_partition_is_initialized_and_sectors_persist() {

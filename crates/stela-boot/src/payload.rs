@@ -632,9 +632,10 @@ pub(crate) fn disk_serial(handle: Handle, path: &str) -> Option<String> {
 }
 
 /// The iSerialNumber string of the USB device the disk belongs to, in US
-/// English and trimmed as Stela's own USB driver reads it (`pc::xhci`), so
-/// both name the disk alike. Hubs' paths prefix their devices', so the
-/// device is the one with the longest path the disk's starts with.
+/// English and trimmed as Stela's own USB driver reads it
+/// (`stela_drivers::usb::xhci`), so both name the disk alike. Hubs' paths
+/// prefix their devices', so the device is the one with the longest path
+/// the disk's starts with.
 fn usb_serial(path: &str) -> Option<String> {
     use uefi::proto::usb::io::UsbIo;
     const LANGUAGE_EN_US: u16 = 0x0409;

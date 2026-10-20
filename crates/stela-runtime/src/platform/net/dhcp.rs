@@ -1,8 +1,9 @@
 //! DHCPv4 client messages (RFC 2131 sections 2, 3.1 and 4.4; option codes
 //! of RFC 2132). The client broadcasts DISCOVER and REQUEST with the
 //! broadcast flag set, so it needs no address to hear OFFER and ACK.
-use super::{Ipv4, Mac};
+use super::Ipv4;
 use alloc::vec::Vec;
+use stela_drivers::net::Mac;
 
 pub const SERVER_PORT: u16 = 67;
 pub const CLIENT_PORT: u16 = 68;

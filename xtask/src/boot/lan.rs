@@ -20,8 +20,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use stela_drivers::net::Mac;
 use stela_runtime::net::{
-    Ipv4, Mac,
+    Ipv4,
     wire::{self, ACK, Arp, FIN, Frame, Ipv4Packet, Outgoing, PSH, RST, SYN, Segment, Udp},
 };
 
@@ -784,7 +785,8 @@ mod tests {
         collections::VecDeque,
         sync::{Arc, Mutex},
     };
-    use stela_runtime::net::{Clock, Link, NetError, Stack};
+    use stela_drivers::net::{Link, LinkError};
+    use stela_runtime::net::{Clock, NetError, Stack};
 
     #[derive(Clone, Default)]
     struct Log(Arc<Mutex<Vec<u8>>>);
@@ -808,12 +810,12 @@ mod tests {
         fn mac(&self) -> Mac {
             Mac([0x52, 0x54, 0, 0x12, 0x34, 0x56])
         }
-        fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
+        fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
             self.lan.handle(Event::Frame(frame.to_vec()));
             self.frames.extend(self.lan.take_frames());
             Ok(())
         }
-        fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+        fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
             if self.frames.is_empty() {
                 if let Ok(event) = self.inbox.recv_timeout(Duration::from_millis(1)) {
                     self.lan.handle(event);

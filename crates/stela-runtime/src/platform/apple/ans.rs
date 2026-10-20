@@ -35,16 +35,13 @@ use super::{
     bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
-use crate::platform::{
-    apple::sart::Sart,
-    dma::Port,
-    pc::block::{BlockDevice, BlockError},
-};
+use crate::platform::{apple::sart::Sart, dma::Port};
 use alloc::{boxed::Box, collections::VecDeque};
 pub use bfh::{BootImage, Identity};
 pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
+use stela_drivers::block::{BlockDevice, BlockError};
 
 const NAME: &str = "ans2";
 pub const TAGS: u16 = 64;
@@ -783,9 +780,9 @@ mod tests {
             sart::{Bounds, Sart},
         },
         dma::{Memory, Physical, tests::Ram},
-        pc::block::tests::RamDisk,
     };
     use alloc::{vec, vec::Vec};
+    use stela_drivers::block::RamDisk;
     const RAM: u64 = 0x8_0000_0000;
     const SQ: u64 = RAM;
     const CQ: u64 = RAM + 0x1000;

@@ -25,6 +25,12 @@ use core::arch::{
     asm,
     x86_64::{__cpuid, __cpuid_count},
 };
+use stela_drivers::{
+    Handoff,
+    block::{BlockDevice, BlockError},
+    bus::dma::RegionAllocator,
+    probe::probe,
+};
 use stela_loader::{
     boot_bundle::Options, boot_selection::BootVolume, installed, recovery, upgrade,
 };
@@ -34,8 +40,6 @@ use stela_runtime::{
     payload::{self, PayloadManifest, ReadAt},
     pc::{
         self,
-        block::{BlockDevice, BlockError},
-        dma::RegionAllocator,
         storage::{self, Target},
     },
 };
@@ -332,14 +336,14 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
 /// `target`'s partition, through Stela's own drivers for the controllers
 /// `storage` describes. Runs after boot services end.
 fn open_partition(
-    storage: &pc::Handoff,
+    storage: &Handoff,
     target: &Target,
 ) -> Result<pc::gpt::PartitionDevice<alloc::boxed::Box<dyn BlockDevice>>, String> {
     // SAFETY: the DMA pages were reserved for the storage drivers alone.
     let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
     // SAFETY: `storage` describes this machine after ExitBootServices, with
     // its ranges mapped uncached, and nothing else drives the controllers.
-    let mut disks = unsafe { storage::probe(storage, &mut dma) };
+    let mut disks = unsafe { probe(storage, &mut dma) };
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
@@ -348,7 +352,7 @@ fn open_partition(
 }
 
 pub fn from_disk(
-    storage: &pc::Handoff,
+    storage: &Handoff,
     target: &Target,
     request: &installed::Request,
     options: &Options,
@@ -379,7 +383,7 @@ pub fn from_disk(
 /// boot-args and OS environment; returns `bundle.json` first. Runs after
 /// boot services end.
 pub fn upgrade_from_disk(
-    storage: &pc::Handoff,
+    storage: &Handoff,
     target: &Target,
     volume: Option<BootVolume>,
     options: &Options,
@@ -409,7 +413,7 @@ pub fn upgrade_from_disk(
 /// NVRAM's boot `volume` names them; returns `bundle.json` first. Runs
 /// after boot services end.
 pub fn recovery_from_disk(
-    storage: &pc::Handoff,
+    storage: &Handoff,
     target: &Target,
     kind: recovery::Kind,
     volume: Option<BootVolume>,

@@ -13,15 +13,17 @@
 //! autonegotiation, and the driver only clears the PHY power manager's link
 //! disconnect and sets link up, as the reference driver's copper setup does.
 //! A controller with a blank NVM has no station address and is refused.
-use super::{
+use super::{Link, LinkError, MAX_FRAME, Mac};
+use crate::{
     Clock, Handoff,
     block::BlockError,
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+    },
     registers,
 };
-use crate::platform::net::{Link, Mac, NetError, wire};
 use alloc::{format, string::String, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 
@@ -107,7 +109,7 @@ const TX_PAYLEN_SHIFT: u32 = 14;
 const DESCRIPTORS: usize = 32;
 const DESCRIPTOR: usize = 16;
 const BUFFER: usize = 2048;
-const _: () = assert!((DESCRIPTORS * DESCRIPTOR).is_multiple_of(128) && BUFFER >= wire::MAX_FRAME);
+const _: () = assert!((DESCRIPTORS * DESCRIPTOR).is_multiple_of(128) && BUFFER >= MAX_FRAME);
 /// The reference driver's bounds, doubled: 80 ms for master requests to
 /// drain, 10 ms for the NVM auto-read, and the 10 ms settle before reset.
 const MASTER_DISABLE_US: u64 = 160_000;
@@ -336,14 +338,14 @@ impl Link for Igc {
         self.device.read32(STATUS) & STATUS_LU != 0
     }
 
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
-        if frame.len() > wire::MAX_FRAME {
-            return Err(NetError::Invalid("frame exceeds the Ethernet maximum"));
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+        if frame.len() > MAX_FRAME {
+            return Err(LinkError::Invalid("frame exceeds the Ethernet maximum"));
         }
         if !self.reclaim() {
             let clock = self.clock;
             if !clock.wait(TRANSMIT_WAIT_US, || self.reclaim()) {
-                return Err(NetError::Link(format!(
+                return Err(LinkError::Adapter(format!(
                     "Intel I225/I226 {} transmit ring stalled",
                     self.location
                 )));
@@ -364,7 +366,7 @@ impl Link for Igc {
         Ok(())
     }
 
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         loop {
             let index = self.received;
             let base = index * DESCRIPTOR;

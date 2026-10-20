@@ -48,16 +48,19 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
-use stela_runtime::machine::apple::HidInput;
-use stela_runtime::pc::{
-    self,
+use stela_drivers::{
+    Handoff,
     block::{BlockDevice, Shared, Transport},
-    boot_log,
-    dma::RegionAllocator,
+    bus::dma::RegionAllocator,
+    input::Input,
+    probe::probe,
+    usb::hid::UsbInput,
+};
+use stela_runtime::pc::{
+    self, boot_log,
     fat32::Fat32,
     gpt::{self, Guid},
     power::HostPower,
-    xhci::hid::UsbInput,
 };
 use uefi::boot;
 
@@ -210,7 +213,7 @@ struct Machine {
     options: Options,
     timing: Timing,
     screen: Option<Framebuffer>,
-    storage: Option<pc::Handoff>,
+    storage: Option<Handoff>,
     power: Option<HostPower>,
     apic_base: u64,
     stack_top: usize,
@@ -354,11 +357,11 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
 }
 
 /// The storage, GPT and log checks; returns the USB keyboards.
-fn disks(machine: &mut Machine, handoff: &pc::Handoff) -> Vec<UsbInput> {
+fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
     let mut dma = unsafe { RegionAllocator::new(handoff.dma.clone()) };
     // SAFETY: this handoff describes the running machine and its tables.
-    let mut disks = unsafe { pc::storage::probe(handoff, &mut dma) };
+    let mut disks = unsafe { probe(handoff, &mut dma) };
     for window in &disks.unmapped {
         output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
     }
@@ -631,7 +634,7 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
 fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
     keyboards.iter_mut().find_map(|device| {
         let usage = device.poll().into_iter().find_map(|input| match input {
-            HidInput::Key {
+            Input::Key {
                 usage,
                 pressed: true,
             } if !MODIFIERS.contains(&usage) => Some(usage),

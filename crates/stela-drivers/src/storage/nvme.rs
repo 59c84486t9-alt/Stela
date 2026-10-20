@@ -1,11 +1,13 @@
 //! NVMe controllers with one admin and one I/O queue pair, polled. Each
 //! active NVM namespace with plain logical blocks becomes one device.
-use super::{
+use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+    },
     registers,
 };
 use alloc::{format, rc::Rc, vec::Vec};

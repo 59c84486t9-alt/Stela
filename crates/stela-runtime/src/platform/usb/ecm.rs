@@ -43,8 +43,8 @@ use super::{
         RECIPIENT_INTERFACE, Requests, SET_FEATURE, SET_INTERFACE, STANDARD, Setup,
     },
 };
-use crate::platform::net::Mac;
 use alloc::{collections::VecDeque, format, string::String, vec, vec::Vec};
+use stela_drivers::net::Mac;
 
 const NOTIFY: u8 = 0x83;
 const BULK_IN: u8 = 0x81;
@@ -622,10 +622,18 @@ impl Function for Ecm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::usb::control::{
-        GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION,
-        tests::{setup, transfer},
+    use crate::platform::{
+        apple::dwc3::xhci::tests::host,
+        usb::{
+            Speed,
+            control::{
+                GET_DESCRIPTOR, SET_ADDRESS, SET_CONFIGURATION,
+                tests::{setup, transfer},
+            },
+            hub::{Hub, Ports},
+        },
     };
+    use stela_drivers::net::Link;
 
     const MAC: Mac = Mac([0x02, 0x53, 0x54, 0x00, 0x00, 0x01]);
 
@@ -814,5 +822,57 @@ mod tests {
         // Power-management pattern filters are not offered.
         assert!(transfer(&mut e, setup(0x21, 0x41, 0, 0, 0), &[]).is_err());
         assert!(transfer(&mut e, setup(0xa1, 0x42, 0, 0, 2), &[]).is_err());
+    }
+
+    struct One(Ecm);
+    impl Ports for One {
+        fn count(&self) -> usize {
+            1
+        }
+        fn speed(&self, _: usize) -> Speed {
+            Speed::High
+        }
+        fn function(&mut self, _: usize) -> &mut dyn Function {
+            &mut self.0
+        }
+        fn function_ref(&self, _: usize) -> &dyn Function {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn the_native_ecm_adapter_moves_frames_for_the_host() {
+        let mac = Mac([0x02, 0x53, 0x54, 0, 0, 7]);
+        let hub = Hub::new(One(Ecm::new(mac).unwrap()), "HUB").unwrap();
+        let mut bench = host::bench(hub);
+        let mut found = host::run(&mut bench);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        assert_eq!(found.links.len(), 1);
+        let mut link = found.links.remove(0);
+        assert_eq!(link.mac(), mac);
+        assert!(link.carrier());
+        assert!(bench.model.borrow().function.ports.0.up());
+        // Host to network: a 1024-byte frame (two full packets and a ZLP).
+        let mut frame = vec![0u8; 1024];
+        frame[..6].copy_from_slice(&Mac::BROADCAST.0);
+        frame[6..12].copy_from_slice(&mac.0);
+        link.transmit(&frame).unwrap();
+        assert_eq!(
+            bench.model.borrow_mut().function.ports.0.take(),
+            Some(frame.clone())
+        );
+        // Network to host.
+        let mut inbound = vec![7u8; 600];
+        inbound[..6].copy_from_slice(&mac.0);
+        bench.model.borrow_mut().function.ports.0.deliver(&inbound);
+        let mut received = None;
+        for _ in 0..50 {
+            if let Some(frame) = link.receive().unwrap() {
+                received = Some(frame);
+                break;
+            }
+        }
+        assert_eq!(received, Some(inbound));
+        assert!(link.transmit(&[0u8; 1515]).is_err());
     }
 }

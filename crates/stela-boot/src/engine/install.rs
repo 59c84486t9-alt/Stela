@@ -11,9 +11,10 @@
 use super::bundle::{self, Bytes};
 use crate::output;
 use alloc::{boxed::Box, format, string::String, vec::Vec};
+use stela_drivers::block::BlockDevice;
 use stela_runtime::{
     payload::{Layout, PayloadManifest, piece_name, pieces::Joined},
-    pc::{block::BlockDevice, fat32::Fat32},
+    pc::fat32::Fat32,
 };
 use uefi::proto::media::file::Directory;
 

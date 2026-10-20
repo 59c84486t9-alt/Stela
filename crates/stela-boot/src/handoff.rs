@@ -43,13 +43,13 @@ impl File {
     }
 }
 
-/// The host storage drivers' handoff (`stela_runtime::pc::Handoff`) in
+/// The host storage drivers' handoff (`stela_drivers::Handoff`) in
 /// fixed arrays, for `--preboot`; `present` is false otherwise.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Storage {
     pub present: bool,
-    pub ecam: [pc::pci::EcamWindow; MAX_ECAM],
+    pub ecam: [stela_drivers::bus::pci::EcamWindow; MAX_ECAM],
     pub ecam_count: usize,
     /// Ranges the loader identity-mapped uncached.
     pub mapped: [Region; MAX_MAPPED],
@@ -62,7 +62,7 @@ impl Storage {
     pub fn absent() -> Self {
         Self {
             present: false,
-            ecam: [pc::pci::EcamWindow {
+            ecam: [stela_drivers::bus::pci::EcamWindow {
                 base: 0,
                 segment: 0,
                 start_bus: 0,
@@ -76,7 +76,7 @@ impl Storage {
         }
     }
 
-    pub fn new(handoff: &pc::Handoff) -> Result<Self, &'static str> {
+    pub fn new(handoff: &stela_drivers::Handoff) -> Result<Self, &'static str> {
         if handoff.ecam.len() > MAX_ECAM || handoff.mapped.len() > MAX_MAPPED {
             return Err("too many storage ranges for the engine handoff");
         }
@@ -99,15 +99,15 @@ impl Storage {
         Ok(storage)
     }
 
-    pub fn handoff(&self) -> Option<pc::Handoff> {
-        self.present.then(|| pc::Handoff {
+    pub fn handoff(&self) -> Option<stela_drivers::Handoff> {
+        self.present.then(|| stela_drivers::Handoff {
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()
                 .map(|r| r.physical..r.physical + r.bytes)
                 .collect::<Vec<_>>(),
             dma: self.dma.physical..self.dma.physical + self.dma.bytes,
-            clock: pc::Clock {
+            clock: stela_drivers::Clock {
                 ticks_per_microsecond: self.ticks_per_microsecond,
             },
         })

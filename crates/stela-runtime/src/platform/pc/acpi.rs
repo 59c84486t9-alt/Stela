@@ -1,8 +1,8 @@
 //! The ACPI tables the host drivers need: the RSDP's root table, the
 //! MCFG table that locates PCI configuration space, and any table by
 //! address ([`power`](super::power) reads the FADT and DSDT).
-use super::pci::EcamWindow;
 use alloc::vec::Vec;
+use stela_drivers::bus::pci::EcamWindow;
 
 const HEADER: usize = 36;
 

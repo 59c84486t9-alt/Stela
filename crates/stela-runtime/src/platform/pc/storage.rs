@@ -1,24 +1,14 @@
-//! Finding the host disks and selecting the one partition Stela may use.
+//! Selecting, among the disks the drivers found (`stela_drivers::probe`),
+//! the one partition Stela may use.
 //!
 //! Nothing is guessed: `stela.cfg` names the disk by its serial number and
 //! the partition by its unique GPT GUID. Exactly one disk must report that
 //! serial and exactly one of its partitions must carry that GUID, and the
 //! EFI system partition is refused.
-use super::{
-    Handoff, ahci,
-    block::{BlockDevice, BlockError, Identity, Shared, Window},
-    dma::DmaAllocator,
-    gpt::{self, GptError, Guid, PartitionDevice},
-    igc::{self, Igc},
-    input, nvme,
-    pci::{Address, Function},
-    virtio,
-    virtio_net::{self, VirtioNet},
-    xhci,
-};
-use crate::platform::net::{Link, Mac, NetError};
+use super::gpt::{self, GptError, Guid, PartitionDevice};
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
+use stela_drivers::block::{BlockDevice, BlockError, Identity, Shared, Window};
 
 /// The disk and partition `stela.cfg` names, as `SERIAL:GUID`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,161 +32,6 @@ impl core::str::FromStr for Target {
             partition: partition.parse()?,
         })
     }
-}
-
-/// A host network adapter, as a raw Ethernet link.
-pub enum Adapter {
-    Virtio(VirtioNet),
-    Igc(Igc),
-    Usb(xhci::cdc::UsbNet),
-}
-
-impl Adapter {
-    /// Where the adapter is, for logs.
-    pub fn location(&self) -> &str {
-        match self {
-            Self::Virtio(device) => &device.location,
-            Self::Igc(device) => &device.location,
-            Self::Usb(device) => &device.location,
-        }
-    }
-}
-
-impl Link for Adapter {
-    fn mac(&self) -> Mac {
-        match self {
-            Self::Virtio(device) => device.mac(),
-            Self::Igc(device) => device.mac(),
-            Self::Usb(device) => device.mac(),
-        }
-    }
-    fn carrier(&mut self) -> bool {
-        match self {
-            Self::Virtio(device) => device.carrier(),
-            Self::Igc(device) => device.carrier(),
-            Self::Usb(device) => device.carrier(),
-        }
-    }
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
-        match self {
-            Self::Virtio(device) => device.transmit(frame),
-            Self::Igc(device) => device.transmit(frame),
-            Self::Usb(device) => device.transmit(frame),
-        }
-    }
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
-        match self {
-            Self::Virtio(device) => device.receive(),
-            Self::Igc(device) => device.receive(),
-            Self::Usb(device) => device.receive(),
-        }
-    }
-}
-
-/// Every block and input device the drivers brought up, and every
-/// controller they could not.
-#[derive(Default)]
-pub struct Disks {
-    pub devices: Vec<Box<dyn BlockDevice>>,
-    pub inputs: Vec<input::VirtioInput>,
-    /// USB keyboards and pointers behind xHCI controllers.
-    pub usb_inputs: Vec<xhci::hid::UsbInput>,
-    /// Network adapters, as raw Ethernet links.
-    pub links: Vec<Adapter>,
-    pub failures: Vec<(Address, BlockError)>,
-    /// USB devices that failed to enumerate or bind, by location.
-    pub usb_failures: Vec<(String, BlockError)>,
-    /// USB interfaces no driver here takes, and why.
-    pub usb_unused: Vec<(String, &'static str)>,
-    /// ECAM windows that were not mapped, and so not scanned.
-    pub unmapped: Vec<super::pci::EcamWindow>,
-}
-
-/// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
-/// every virtio-input device, every virtio-net and Intel I225/I226 adapter,
-/// and every xHCI
-/// controller with the USB disks, keyboards, pointers and Ethernet
-/// adapters on it.
-///
-/// # Safety
-///
-/// `handoff` must describe the running machine after ExitBootServices,
-/// with its ranges mapped as it says, and nothing else may drive these
-/// controllers afterwards.
-pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
-    let mut disks = Disks::default();
-    for window in &handoff.ecam {
-        if !handoff.is_mapped(&window.range()) {
-            disks.unmapped.push(*window);
-            continue;
-        }
-        // SAFETY: mapped as checked; the caller owns the machine.
-        for mut function in unsafe { Function::enumerate(window) } {
-            let address = function.address;
-            let result = if virtio::matches(&function) {
-                virtio::VirtioBlk::new(&mut function, handoff, dma)
-                    .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
-            } else if function.class == nvme::CLASS {
-                nvme::attach(&mut function, handoff, dma).map(|namespaces| {
-                    namespaces
-                        .into_iter()
-                        .map(|device| Box::new(device) as Box<dyn BlockDevice>)
-                        .collect()
-                })
-            } else if function.class == xhci::CLASS {
-                match xhci::attach(&mut function, handoff, dma) {
-                    Ok(found) => {
-                        disks.devices.extend(
-                            found
-                                .disks
-                                .into_iter()
-                                .map(|d| Box::new(d) as Box<dyn BlockDevice>),
-                        );
-                        disks.usb_inputs.extend(found.inputs);
-                        disks
-                            .links
-                            .extend(found.links.into_iter().map(Adapter::Usb));
-                        disks.usb_failures.extend(found.failures);
-                        disks.usb_unused.extend(found.unused);
-                    }
-                    Err(error) => disks.failures.push((address, error)),
-                }
-                continue;
-            } else if virtio_net::matches(&function) {
-                match VirtioNet::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.links.push(Adapter::Virtio(device)),
-                    Err(error) => disks.failures.push((address, error)),
-                }
-                continue;
-            } else if igc::matches(&function) {
-                match Igc::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.links.push(Adapter::Igc(device)),
-                    Err(error) => disks.failures.push((address, error)),
-                }
-                continue;
-            } else if input::matches(&function) {
-                match input::VirtioInput::new(&mut function, handoff, dma) {
-                    Ok(device) => disks.inputs.push(device),
-                    Err(error) => disks.failures.push((address, error)),
-                }
-                continue;
-            } else if function.class == ahci::CLASS {
-                ahci::attach(&mut function, handoff, dma).map(|ports| {
-                    ports
-                        .into_iter()
-                        .map(|device| Box::new(device) as Box<dyn BlockDevice>)
-                        .collect()
-                })
-            } else {
-                continue;
-            };
-            match result {
-                Ok(devices) => disks.devices.extend(devices),
-                Err(error) => disks.failures.push((address, error)),
-            }
-        }
-    }
-    disks
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -449,8 +284,9 @@ pub fn check(device: &mut dyn BlockDevice, bytes: usize) -> Result<String, Stora
 
 #[cfg(test)]
 mod tests {
-    use super::super::{block::tests::RamDisk, gpt::tests as table};
+    use super::super::gpt::tests as table;
     use super::*;
+    use stela_drivers::block::RamDisk;
 
     const TARGET: &str = "AAAAAAAA-0000-0000-0000-000000000002";
 

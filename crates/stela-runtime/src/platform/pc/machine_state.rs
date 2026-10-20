@@ -10,9 +10,9 @@
 //! the boot log at [`boot_log::OFFSET`](super::boot_log::OFFSET). The
 //! guest's ANS2 namespace is everything before it. Both are windows of one
 //! shared device ([`Shared::window`]), so no write of one reaches the other.
-use super::block::{BlockDevice, BlockError, Shared, Window};
 use alloc::boxed::Box;
 use core::fmt;
+use stela_drivers::block::{BlockDevice, BlockError, Shared, Window};
 
 /// The machine state kept at the end of the partition, before alignment.
 pub const MACHINE_STATE_BYTES: u64 = 8 << 20;
@@ -104,8 +104,8 @@ pub fn split_device(device: Box<dyn BlockDevice>) -> Result<(Window, Window, Spl
 
 #[cfg(test)]
 mod tests {
-    use super::super::block::tests::RamDisk;
     use super::*;
+    use stela_drivers::block::RamDisk;
 
     #[test]
     fn the_state_takes_the_aligned_tail_and_the_namespace_the_rest() {

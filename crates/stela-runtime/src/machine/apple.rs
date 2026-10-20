@@ -59,25 +59,23 @@ use crate::platform::apple::{
     wdt::{self, AppleWdt},
 };
 use crate::platform::dma::{Physical, Port};
-use crate::platform::net::Mac;
-use crate::platform::pc::block::BlockDevice;
 use crate::platform::usb::{
     Function, Speed,
     ecm::Ecm,
-    hid::{Input, Peripheral},
+    hid::Peripheral,
     hub::{self, Hub},
     session::Session as UsbSession,
     storage::MassStorage,
 };
 pub use crate::platform::usb::{
     ecm::Counters as UsbNetworkCounters,
-    hid::Input as HidInput,
     host::{Descriptor as UsbDescriptor, MuxEndpoints},
     mux::{State as MuxState, StreamId as MuxStream, StreamState as MuxStreamState},
     session::Log as UsbLog,
 };
 use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
+use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
 mod sleep;
 pub use sleep::PowerLog;
@@ -491,7 +489,7 @@ impl AppleDevices {
     pub fn ans_zero_erased(
         &mut self,
         mut blocks: u64,
-    ) -> Result<u64, crate::platform::pc::block::BlockError> {
+    ) -> Result<u64, stela_drivers::block::BlockError> {
         let mut pending = 0;
         for &(id, _) in &self.storage_masters {
             let ans = self.bus.device_mut::<Ans>(id).expect("ANS controller");
@@ -888,7 +886,7 @@ impl AppleDevices {
     pub fn add_ans(
         &mut self,
         placement: &super::soc::AnsController,
-        backing: Box<dyn crate::platform::pc::block::BlockDevice>,
+        backing: Box<dyn stela_drivers::block::BlockDevice>,
     ) -> Result<(), String> {
         let irq = |n| AicInput::new(0, n);
         let rtkit = RtKit::new(
@@ -2552,11 +2550,9 @@ mod tests {
     #[test]
     fn ans_dma_and_sart_idle_share_the_nvme_aperture_without_aliasing() {
         use crate::machine::soc::AnsController;
+        use crate::platform::apple::{ans, sart};
         use crate::platform::dma::tests::Ram;
-        use crate::platform::{
-            apple::{ans, sart},
-            pc::block::tests::RamDisk,
-        };
+        use stela_drivers::block::RamDisk;
         const NVME: u64 = 0x2_7bcc_0000;
         const SART: u64 = 0x2_7bc5_0000;
         const WRAPPER: u64 = 0x2_7740_0000;

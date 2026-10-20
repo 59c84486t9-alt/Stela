@@ -9,11 +9,20 @@
 use crate::{output, paging::Tables};
 use alloc::{string::String, vec::Vec};
 use core::time::Duration;
-use stela_runtime::pc::{
-    self, Clock, Handoff, acpi,
+use stela_drivers::{
+    Clock, Handoff,
     block::BlockDevice,
-    dma::RegionAllocator,
-    pci::{Bar, Function},
+    bus::{
+        dma::RegionAllocator,
+        pci::{Bar, Function},
+    },
+    input, net,
+    probe::probe,
+    storage::{ahci, nvme, virtio},
+    usb::xhci,
+};
+use stela_runtime::pc::{
+    acpi,
     storage::{self, Target},
 };
 use uefi::{
@@ -104,13 +113,13 @@ pub fn discover() -> Result<Handoff, &'static str> {
         for window in &ecam {
             // SAFETY: the firmware maps configuration space while it runs.
             for mut function in unsafe { Function::enumerate(window) } {
-                let storage = pc::virtio::matches(&function)
-                    || pc::input::matches(&function)
-                    || pc::virtio_net::matches(&function)
-                    || pc::igc::matches(&function)
-                    || function.class == pc::nvme::CLASS
-                    || function.class == pc::ahci::CLASS
-                    || function.class == pc::xhci::CLASS;
+                let storage = virtio::matches(&function)
+                    || input::virtio::matches(&function)
+                    || net::virtio::matches(&function)
+                    || net::igc::matches(&function)
+                    || function.class == nvme::CLASS
+                    || function.class == ahci::CLASS
+                    || function.class == xhci::CLASS;
                 if storage {
                     mapped.extend(function.bars().iter().filter_map(|bar| match bar {
                         Some(bar @ Bar::Memory { .. }) => bar.memory(),
@@ -145,7 +154,7 @@ impl Prepared {
         // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
         let mut dma = unsafe { RegionAllocator::new(self.handoff.dma.clone()) };
         // SAFETY: this handoff describes the running machine and its tables.
-        let mut disks = unsafe { storage::probe(&self.handoff, &mut dma) };
+        let mut disks = unsafe { probe(&self.handoff, &mut dma) };
         for window in &disks.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }

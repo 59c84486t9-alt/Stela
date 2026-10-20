@@ -307,7 +307,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
 }
 
 /// `source.bin`, the bundle files, and the storage drivers' ranges.
-type Inputs = (Vec<u8>, BundleFiles, Option<pc::Handoff>);
+type Inputs = (Vec<u8>, BundleFiles, Option<stela_drivers::Handoff>);
 
 /// Identity-map the storage controllers' registers uncached; none may
 /// overlap RAM.
@@ -395,7 +395,7 @@ fn load(
     options: Vec<u8>,
     source: Vec<u8>,
     bundle: BundleFiles,
-    storage: Option<pc::Handoff>,
+    storage: Option<stela_drivers::Handoff>,
     log: Option<Guid>,
 ) -> Result<core::convert::Infallible, &'static str> {
     // SAFETY: written once at entry, read here.

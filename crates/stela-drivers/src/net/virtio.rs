@@ -7,15 +7,17 @@
 //! `virtio_net_hdr` (section 5.1.6, `num_buffers` included under
 //! VERSION_1) with all-zero offload fields. A device without a MAC
 //! address refuses: the stack needs a stable station address.
-use super::{
+use super::{Link, LinkError, MAX_FRAME, Mac};
+use crate::{
     Clock, Handoff,
     block::BlockError,
-    dma::{DmaAllocator, DmaBuffer},
-    mmio::Mmio,
-    pci::Function,
-    virtio::{AVAIL, DESCRIPTOR_WRITE, Modern, USED, VENDOR},
+    bus::{
+        dma::{DmaAllocator, DmaBuffer},
+        mmio::Mmio,
+        pci::Function,
+        virtio::{AVAIL, DESCRIPTOR_WRITE, Modern, USED, VENDOR},
+    },
 };
-use crate::platform::net::{Link, Mac, NetError, wire};
 use alloc::{format, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 
@@ -172,9 +174,9 @@ impl Link for VirtioNet {
         !self.status || self.device.read16(CONFIG_STATUS) & LINK_UP != 0
     }
 
-    fn transmit(&mut self, frame: &[u8]) -> Result<(), NetError> {
-        if frame.len() > wire::MAX_FRAME {
-            return Err(NetError::Invalid("frame exceeds the Ethernet maximum"));
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+        if frame.len() > MAX_FRAME {
+            return Err(LinkError::Invalid("frame exceeds the Ethernet maximum"));
         }
         self.reclaim();
         if self.free.is_empty() {
@@ -188,7 +190,7 @@ impl Link for VirtioNet {
             });
         }
         let id = self.free.pop().ok_or_else(|| {
-            NetError::Link(format!(
+            LinkError::Adapter(format!(
                 "virtio-net {} transmit queue stalled",
                 self.location
             ))
@@ -201,7 +203,7 @@ impl Link for VirtioNet {
         Ok(())
     }
 
-    fn receive(&mut self) -> Result<Option<Vec<u8>>, NetError> {
+    fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         let Some((id, length)) = self.receive.take() else {
             return Ok(None);
         };

@@ -35,12 +35,12 @@
 //! region alone. Writes reach its blocks directly, never the volume's
 //! directory or FAT, so [`file_blocks`] takes only a file that is one
 //! contiguous, block-aligned run of the bytes its layout needs.
-use super::block::{BlockDevice, BlockError};
 use super::fat32;
 use crate::machine::apple::{nor::CAPACITY, sep_state};
 use alloc::{format, vec, vec::Vec};
 use core::fmt::{self, Write as _};
 use sha2::{Digest, Sha256};
+use stela_drivers::block::{BlockDevice, BlockError};
 
 /// Where the region starts in the machine-state partition.
 pub const OFFSET: u64 = CAPACITY as u64 + sep_state::BYTES;
@@ -613,8 +613,8 @@ pub fn read(region: &[u8]) -> Result<Log, HeaderError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::pc::block::{Identity, tests::RamDisk};
     use alloc::{string::String, vec::Vec};
+    use stela_drivers::block::{Identity, RamDisk};
 
     /// A RAM disk that records its transfers and can fail from a given
     /// write on.
