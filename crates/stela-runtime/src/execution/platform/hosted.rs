@@ -68,6 +68,12 @@ impl Mapping {
         Ok(mapping)
     }
 
+    /// The address of the mapped code, for a caller that binds its ABI.
+    #[cfg(test)]
+    pub(crate) fn entry(&self) -> usize {
+        self.pointer.as_ptr() as usize
+    }
+
     pub unsafe fn call(&self, state: &mut GuestState) -> Result<()> {
         // SAFETY: the mapping is still owned and the caller upholds the
         // leaf ABI.

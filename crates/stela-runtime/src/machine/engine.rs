@@ -50,7 +50,6 @@ use stela_compiler::{
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
-    context::ExecutionContext,
     x86_64::{
         MemoryChecks, NativeSystem, cache_clean,
         chain::{self, ChainControl},
@@ -227,22 +226,13 @@ pub trait Host {
     /// `code` was returned by [`Host::install`] since the last discard and
     /// was compiled for the system-mode block ABI.
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit;
-    /// Call installed context-leaf code (`stela_compiler::extended`'s
-    /// two-argument ABI) on `state` and `context`, as the SVE and SME
-    /// instructions run. False, before running anything, on a host that
-    /// cannot.
-    ///
-    /// # Safety
-    /// `code` was returned by [`Host::install`] since the last discard and
-    /// was compiled as a context leaf for the profile `context`'s views
-    /// were validated against; the views stay valid through the call.
-    unsafe fn call_context(
-        &mut self,
-        _code: NativeCode,
-        _state: &mut GuestState,
-        _context: &mut ExecutionContext,
-    ) -> bool {
-        false
+    /// The address to call installed context-leaf code at, with
+    /// `stela_compiler::extended`'s two-argument ABI (the SVE and SME
+    /// instructions run so), or `None` on a host that cannot run it. The
+    /// engine calls it outside any borrow of the host, whose RAM the leaf's
+    /// memory service then reads and writes.
+    fn context_entry(&mut self, _code: NativeCode) -> Option<usize> {
+        None
     }
     /// Make the shadow translation follow `regime`: drop what a change of
     /// its controls translates differently (a TTBR0 write arrives only
@@ -942,7 +932,8 @@ pub struct Machine<H: Host, D: Devices> {
     survey: Option<Survey>,
     /// The context leaves SVE and SME instructions run as, by PC, word and
     /// scalable profile ([`scalable`]); discarded with the blocks.
-    scalable_leaves: BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), NativeCode>,
+    scalable_leaves:
+        BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), scalable::Leaf>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -4507,6 +4498,8 @@ mod tests {
         invalidations: usize,
         reaches: Vec<mmu::tlbi::Reach>,
         installed: Vec<Vec<u8>>,
+        /// Executable copies of the context leaves the engine called.
+        executables: Vec<crate::execution::platform::Mapping>,
         patches: Vec<(usize, Vec<u8>)>,
         /// The chaining state the next native run leaves, as thunks would.
         chained: Option<(*mut ChainControl, ChainControl)>,
@@ -4551,20 +4544,16 @@ mod tests {
         }
         fn discard_code(&mut self) {
             self.installed.clear();
+            self.executables.clear();
         }
-        unsafe fn call_context(
-            &mut self,
-            code: NativeCode,
-            state: &mut GuestState,
-            context: &mut ExecutionContext,
-        ) -> bool {
-            // Context leaves run: they touch only the state and the context.
+        fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
+            // Context leaves run: they touch only the state, the context and
+            // the memory service.
             let mapping = crate::execution::platform::Mapping::new(&self.installed[code.0 - 1])
                 .expect("an executable mapping of the leaf");
-            // SAFETY: the engine passes an installed context leaf and views
-            // valid for the call.
-            unsafe { mapping.call_context(state, context) }.expect("a context leaf call");
-            true
+            let entry = mapping.entry();
+            self.executables.push(mapping);
+            Some(entry)
         }
         unsafe fn execute(&mut self, _: NativeCode, _: &mut GuestState) -> NativeExit {
             assert!(!self.exits.is_empty(), "unit tests do not run native code");
@@ -4674,6 +4663,7 @@ mod tests {
             invalidations: 0,
             reaches: Vec::new(),
             installed: Vec::new(),
+            executables: Vec::new(),
             patches: Vec::new(),
             chained: None,
             exits: Vec::new(),
@@ -7730,7 +7720,8 @@ mod tests {
         assert_eq!(taken(&mut machine, 2), trapped(2, 3));
         // In streaming mode AdvSIMD traps as streaming; SVE, the ZA load and
         // scalar FP pass their checks: the SVE addition runs, the ZA load
-        // and scalar FP stop explicitly.
+        // from address 0, which has no RAM or device, and scalar FP stop
+        // explicitly.
         machine.cpu.set_svcr(true, true).unwrap();
         assert_eq!(taken(&mut machine, 0), trapped(0, 1));
         assert_eq!(run(&mut machine, 1).0, Ok(()));

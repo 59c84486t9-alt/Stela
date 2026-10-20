@@ -19,7 +19,7 @@ use core::{
     cell::Cell,
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
+use stela_compiler::{GuestState, block::BlockExit};
 
 /// Bytes reserved for native blocks and chain thunks. Chained jumps are
 /// rel32, so the arena stays below 2 GiB.
@@ -533,20 +533,9 @@ impl Host for ProcessHost {
         }
     }
 
-    unsafe fn call_context(
-        &mut self,
-        code: NativeCode,
-        state: &mut GuestState,
-        context: &mut ExecutionContext,
-    ) -> bool {
-        // SAFETY: the engine passes installed context-leaf code in the arena, whose
-        // views stay valid through this synchronous call.
-        unsafe {
-            let leaf: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) =
-                core::mem::transmute(code.0);
-            leaf(state, context);
-        }
-        true
+    fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
+        // Installed code is callable where it lies in the arena.
+        Some(code.0)
     }
 
     fn set_regime(&mut self, _regime: &Regime) {}

@@ -22,7 +22,7 @@ use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_compiler::{GuestState, block::BlockExit, context::ExecutionContext};
+use stela_compiler::{GuestState, block::BlockExit};
 use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
     mmu::{
@@ -751,20 +751,9 @@ impl Host for BareHost {
         }
     }
 
-    unsafe fn call_context(
-        &mut self,
-        code: NativeCode,
-        state: &mut GuestState,
-        context: &mut ExecutionContext,
-    ) -> bool {
-        // SAFETY: the engine passes installed context-leaf code through the executable arena alias, whose
-        // views stay valid through this synchronous call.
-        unsafe {
-            let leaf: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) =
-                core::mem::transmute(code.0);
-            leaf(state, context);
-        }
-        true
+    fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
+        // Installed code is callable where it lies, through the executable arena alias.
+        Some(code.0)
     }
 
     fn set_regime(&mut self, regime: &Regime) {

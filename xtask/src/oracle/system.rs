@@ -22,7 +22,7 @@ use super::{
     native::{Executable, windows},
 };
 use anyhow::{Result, bail};
-use stela_compiler::{GuestState, TargetCpu, context::ExecutionContext};
+use stela_compiler::{GuestState, TargetCpu};
 use stela_runtime::hosted::host::{HostFault, NativeRunner};
 use stela_runtime::machine::{
     Chip, Cpu, FaultCause, Host, InstallError, Machine, NativeCode, NativeExit, NoDevices, Regime,
@@ -314,20 +314,9 @@ impl Host for OracleHost {
         }
     }
 
-    unsafe fn call_context(
-        &mut self,
-        code: NativeCode,
-        state: &mut GuestState,
-        context: &mut ExecutionContext,
-    ) -> bool {
-        // SAFETY: the engine passes installed context-leaf code in an executable mapping, whose
-        // views stay valid through this synchronous call.
-        unsafe {
-            let leaf: unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext) =
-                core::mem::transmute(code.0);
-            leaf(state, context);
-        }
-        true
+    fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
+        // Installed code is callable where it lies, in its executable mapping.
+        Some(code.0)
     }
 
     fn set_regime(&mut self, regime: &Regime) {
