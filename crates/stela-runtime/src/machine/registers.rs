@@ -105,7 +105,11 @@ pub mod encodings {
         GMID_EL1 = 3, 1, 0, 0, 4;
         FPCR = 3, 3, 4, 4, 0;
         FPSR = 3, 3, 4, 4, 1;
+        TPIDR_EL0 = 3, 3, 13, 0, 2;
+        TPIDRRO_EL0 = 3, 3, 13, 0, 3;
         TPIDR_EL1 = 3, 0, 13, 0, 4;
+        TPIDR_EL2 = 3, 4, 13, 0, 2;
+        DAIF = 3, 3, 4, 2, 1;
         // Apple SPRR and GXF (m1n1 `cpu_regs.h`; Asahi "SPRR and GXF").
         SPRR_CONFIG_EL1 = 3, 6, 15, 1, 0;
         GXF_CONFIG_EL1 = 3, 6, 15, 1, 2;

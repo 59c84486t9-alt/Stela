@@ -996,16 +996,49 @@ struct Variant {
     timing: bool,
 }
 
-/// Xt of `word` at `pc` if it is MRS Xt, TPIDR_EL1.
-fn thread_pointer_read(pc: u64, word: u32) -> Option<u8> {
+/// The System registers whose MRS native code completes from a mirror
+/// cell (`x86_64::register_read`): reads without side effects whose result
+/// and plainness follow from System registers and PSTATE alone, so a read
+/// the engine found plain stays plain, with the same value, until derived
+/// state may change ([`Machine::derived_changed`]). They are the thread
+/// pointers, Apple's GL2 thread pointer and GXF status, and DAIF.
+const MIRRORED: [Encoding; 7] = {
+    use registers::encodings::{
+        DAIF, GXF_STATUS_EL1, TPIDR_EL0, TPIDR_EL1, TPIDR_EL2, TPIDR_GL2, TPIDRRO_EL0,
+    };
+    [
+        TPIDR_EL0,
+        TPIDRRO_EL0,
+        TPIDR_EL1,
+        TPIDR_EL2,
+        TPIDR_GL2,
+        GXF_STATUS_EL1,
+        DAIF,
+    ]
+};
+
+/// Rt 31 in MRS: XZR, which discards the value.
+const ZERO_REGISTER: u8 = 31;
+
+/// The cells of the [`MIRRORED`] registers, in its order.
+type Mirrors = [register_read::Cell; MIRRORED.len()];
+
+/// The [`MIRRORED`] index of a read of `access`, other than to XZR.
+fn mirrored(access: RegisterAccess) -> Option<usize> {
+    if access.direction() != Direction::Read || access.rt() == ZERO_REGISTER {
+        return None;
+    }
+    MIRRORED
+        .iter()
+        .position(|&encoding| encoding == access.encoding())
+}
+
+/// The [`MIRRORED`] index and Xt of `word` at `pc` if it is MRS of a
+/// mirrored register to Xt, other than XZR.
+fn mirrored_read(pc: u64, word: u32) -> Option<(usize, u8)> {
     let instruction = block::decode_system_mode_instruction(GuestAddress(pc), word).ok()??;
     match instruction.operation {
-        SystemOperation::Register(access)
-            if access.direction() == Direction::Read
-                && access.encoding() == registers::encodings::TPIDR_EL1 =>
-        {
-            Some(access.rt())
-        }
+        SystemOperation::Register(access) => Some((mirrored(access)?, access.rt())),
         _ => None,
     }
 }
@@ -1107,10 +1140,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The PAC context, the memo of results and the key tag words, which
     /// native code reads and completes misses through (`pointer`).
     pointer: alloc::boxed::Box<pointer::PointerService>,
-    /// TPIDR_EL1 for native MRS reads (`x86_64::register_read`): readable
-    /// once an MRS exit finds the read plain at the current EL
-    /// (`system::thread_pointer_readable`), until derived state may change.
-    thread_pointer: alloc::boxed::Box<register_read::Cell>,
+    /// The [`MIRRORED`] registers for native MRS reads
+    /// (`x86_64::register_read`): each readable once an MRS exit completes
+    /// as a plain read, until derived state may change.
+    mirrors: alloc::boxed::Box<Mirrors>,
     /// The chip's `Chip::admit`, indexed.
     admit_table: Arc<AdmitTable>,
     /// The watched pages the host keeps unmapped.
@@ -1244,7 +1277,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             debug: None,
             device_lines: None,
             pointer: alloc::boxed::Box::new(pointer::PointerService::new()),
-            thread_pointer: alloc::boxed::Box::default(),
+            mirrors: alloc::boxed::Box::default(),
             admit_table,
             watch: Watch::default(),
             prediction_context: None,
@@ -1307,7 +1340,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.pointer.close();
         // A closed cell keeps no value a mispredicted native read could use
         // (FEAT_CSV3's System register rule).
-        *self.thread_pointer = register_read::Cell::default();
+        *self.mirrors = Mirrors::default();
         self.device_lines = None;
     }
 
@@ -2914,7 +2947,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .unwrap_or_default();
             successors.extend(successor);
             dynamic_site = dynamic_site.or(dynamic);
-            successors.extend(self.complete_thread_pointer_natively(
+            successors.extend(self.complete_mirrored_read_natively(
                 code,
                 &compiled.native.x86_64_code,
                 terminal_pc,
@@ -2991,10 +3024,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Redirect the System exit ending a block's `native` code, installed at
     /// `code`, through a thunk that completes `word` at `pc`, if it is MRS
-    /// TPIDR_EL1, from [`Self::thread_pointer`] while it is readable
-    /// (`x86_64::register_read`); the thunk's direct exit to the next
-    /// instruction.
-    fn complete_thread_pointer_natively(
+    /// of a [`MIRRORED`] register, from its cell in [`Self::mirrors`] while
+    /// it is readable (`x86_64::register_read`); the thunk's direct exit to
+    /// the next instruction.
+    fn complete_mirrored_read_natively(
         &mut self,
         code: NativeCode,
         native: &[u8],
@@ -3006,8 +3039,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if native[site..] != exit {
             return None;
         }
-        let rt = thread_pointer_read(pc, word)?;
-        let cell = &*self.thread_pointer as *const register_read::Cell as u64;
+        let (index, rt) = mirrored_read(pc, word)?;
+        let cell = &self.mirrors[index] as *const register_read::Cell as u64;
         let thunk = register_read::thunk(GuestAddress(pc), rt, cell);
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
@@ -4652,10 +4685,39 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.next()
     }
 
+    /// MRS and MSR (`register_access`); a read of a [`MIRRORED`] register
+    /// that completes as a plain read, taking no exception, opens its cell
+    /// with the value read.
+    fn register_instruction(&mut self, word: u32, access: RegisterAccess) -> Step {
+        let Some(index) = mirrored(access) else {
+            return self.register_access(word, access);
+        };
+        let before = (
+            self.cpu.pc + INSTRUCTION,
+            self.cpu.pstate.el,
+            self.cpu.pstate.guarded,
+            self.statistics.exceptions,
+        );
+        let step = self.register_access(word, access);
+        let after = (
+            self.cpu.pc,
+            self.cpu.pstate.el,
+            self.cpu.pstate.guarded,
+            self.statistics.exceptions,
+        );
+        if step.is_ok() && after == before {
+            self.mirrors[index] = register_read::Cell {
+                readable: 1,
+                value: self.cpu.state.x[usize::from(access.rt())],
+            };
+        }
+        step
+    }
+
     /// MRS and MSR: the generated accessor of an architectural register, or
     /// Apple's implementation-defined dispatch; any other encoding is
     /// UNDEFINED.
-    fn register_instruction(&mut self, word: u32, access: RegisterAccess) -> Step {
+    fn register_access(&mut self, word: u32, access: RegisterAccess) -> Step {
         use registers::encodings::{FPCR, FPSR};
         let encoding = access.encoding();
         if matches!(encoding, FPCR | FPSR) && !self.floating_point_enabled() {
@@ -4679,18 +4741,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             return step;
         }
-        // Whether the access is a plain TPIDR_EL1 read, judged before it
-        // runs: one that is UNDEFINED or traps changes the EL.
-        let thread_pointer = encoding == registers::encodings::TPIDR_EL1
-            && access.direction() == Direction::Read
-            && system::thread_pointer_readable(&self.cpu);
         if let Some(step) = self.system_access(word, access) {
-            if thread_pointer && step.is_ok() {
-                *self.thread_pointer = register_read::Cell {
-                    readable: 1,
-                    value: self.cpu.read(SystemRegister::TPIDR_EL1),
-                };
-            }
             return step;
         }
         if let Some(outcome) = self.board_register(access) {
@@ -8024,9 +8075,15 @@ mod tests {
     /// the engine's cell takes over, chaining on to the next instruction;
     /// the cell opens on a plain read and closes on any derived change.
     #[test]
-    fn tpidr_el1_reads_complete_natively_from_the_open_cell() {
+    fn mirrored_reads_complete_natively_from_the_open_cell() {
         const ADD: u32 = 0x9100_0400; // add x0, x0, #1
         const MRS: u32 = 0xd538_d088; // mrs x8, tpidr_el1
+        const MSR: u32 = 0xd518_d089; // msr tpidr_el1, x9
+        const MRS_DAIF: u32 = 0xd53b_4228; // mrs x8, daif
+        const DAIFCLR_I: u32 = 0xd503_42ff; // msr daifclr, #2
+        let index = |encoding| MIRRORED.iter().position(|&e| e == encoding).unwrap();
+        let thread = index(registers::encodings::TPIDR_EL1);
+        let daif = index(registers::encodings::DAIF);
         let mut machine = machine(&[ADD, MRS, ADD]);
         let base = machine.cpu.pc;
         machine.host.exits = vec![NativeExit::Exit {
@@ -8036,7 +8093,7 @@ mod tests {
         machine.step().unwrap();
         let block = &machine.blocks[0];
         let code = &machine.host.installed[block.code.0 - 1];
-        let cell = &*machine.thread_pointer as *const register_read::Cell as u64;
+        let cell = &machine.mirrors[thread] as *const register_read::Cell as u64;
         let thunk = register_read::thunk(GuestAddress(base + 4), 8, cell);
         let installed = machine.host.installed.len();
         assert_eq!(machine.host.installed[installed - 1], thunk.code);
@@ -8068,7 +8125,7 @@ mod tests {
         machine.system_instruction(MRS).unwrap();
         assert_eq!(machine.cpu.state.x[8], 0x5000);
         assert_eq!(
-            *machine.thread_pointer,
+            machine.mirrors[thread],
             register_read::Cell {
                 readable: 1,
                 value: 0x5000
@@ -8076,7 +8133,23 @@ mod tests {
         );
         machine.derived_changed();
         // Closed, the cell keeps no value a mispredicted read could use.
-        assert_eq!(*machine.thread_pointer, register_read::Cell::default());
+        assert_eq!(*machine.mirrors, Mirrors::default());
+        // A write of the register closes it, as does a PSTATE write.
+        machine.cpu.pc = base + 4;
+        machine.system_instruction(MRS).unwrap();
+        machine.system_instruction(MRS_DAIF).unwrap();
+        assert_eq!(machine.mirrors[daif].readable, 1);
+        machine.cpu.state.x[9] = 0x6000;
+        machine.system_instruction(MSR).unwrap();
+        assert_eq!(*machine.mirrors, Mirrors::default());
+        machine.system_instruction(MRS_DAIF).unwrap();
+        let masks = machine.cpu.state.x[8];
+        machine.system_instruction(DAIFCLR_I).unwrap();
+        assert_eq!(*machine.mirrors, Mirrors::default());
+        machine.system_instruction(MRS_DAIF).unwrap();
+        assert_ne!(machine.mirrors[daif].value, masks);
+        // A read to XZR has no cell to open, nor a thunk.
+        assert_eq!(mirrored_read(base, 0xd538_d09f), None); // mrs xzr, tpidr_el1
     }
 
     /// Native accesses check and mask their own addresses at every access
