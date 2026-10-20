@@ -3299,7 +3299,7 @@ mod tests {
                 path
             })
             .collect();
-        fs::write(packs.join(format!("{}.stltpack", "ab".repeat(32))), b"STLT").unwrap();
+        fs::write(packs.join(translations::pack_name(&[0xab; 32])), b"STLT").unwrap();
         let report = update(false).unwrap();
         assert!(
             report.contains("translates anew into its own pack"),

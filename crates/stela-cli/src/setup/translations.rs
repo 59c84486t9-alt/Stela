@@ -5,9 +5,14 @@
 //! its header.
 //!
 //! ```text
-//! EFI/stela/translations/store.cfg              `bytes N`: one pack's bound
-//! EFI/stela/translations/<translator id>.stltpack  one pack per translator id
+//! EFI/stela/store/store.cfg      `bytes N`: one pack's bound
+//! EFI/stela/store/XXXXXXXX.pak   one pack per translator id
 //! ```
+//!
+//! Every name is an 8.3 name, which `stela.efi`'s own FAT32 reader finds
+//! after boot services end to rewrite its pack in place: a pack is named by
+//! the first four bytes of its translator id in hex, and its header names
+//! the whole id.
 //!
 //! The home is one FAT32 volume of the boot USB, as the firmware writes it:
 //! the install medium's partition when the setup has one, else the bundle
@@ -28,11 +33,13 @@ use std::{
 };
 
 /// The store's directory on its volume.
-pub(super) const DIRECTORY: &str = "EFI/stela/translations";
+pub(super) const DIRECTORY: &str = "EFI/stela/store";
 /// The bound setup gives `stela.efi`.
 pub(super) const CONFIG: &str = "store.cfg";
 const BYTES_KEY: &str = "bytes";
-const PACK_EXTENSION: &str = "stltpack";
+const PACK_EXTENSION: &str = "pak";
+/// The translator id bytes a pack's file name holds.
+const NAME_BYTES: usize = 4;
 /// A pack's leading bytes: magic, schema, record count, translator id.
 const PACK_MAGIC: &[u8; 8] = b"STLTPACK";
 const PACK_SCHEMA: u32 = 1;
@@ -214,12 +221,18 @@ fn check(path: &Path, bytes: u64, bound: u64) -> Result<(), String> {
     if schema != PACK_SCHEMA {
         return Err(format!("has pack schema {schema}, not {PACK_SCHEMA}"));
     }
-    let id = hex::encode(&header[16..16 + ID_BYTES]);
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    if stem != id {
+    let id = &header[16..16 + ID_BYTES];
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    if !name.eq_ignore_ascii_case(&pack_name(id)) {
+        let id = hex::encode(id);
         return Err(format!("names translator {id}, not its file name"));
     }
     Ok(())
+}
+
+/// The file name of translator `id`'s pack.
+pub(super) fn pack_name(id: &[u8]) -> String {
+    format!("{}.{PACK_EXTENSION}", hex::encode(&id[..NAME_BYTES]))
 }
 
 /// The bytes a store of `pack_bytes` needs on its volume: the kept packs
@@ -352,7 +365,7 @@ pub(super) mod tests {
         pack.extend_from_slice(&id);
         pack.resize(bytes.max(HEADER_BYTES), 0);
         fs::create_dir_all(directory).unwrap();
-        let path = directory.join(format!("{}.{PACK_EXTENSION}", hex::encode(id)));
+        let path = directory.join(pack_name(&id));
         fs::write(&path, pack).unwrap();
         path
     }
@@ -383,17 +396,9 @@ pub(super) mod tests {
         }
         // A pack under another id's name, a short one and one past the
         // bound are damaged.
-        let wrong = store
-            .directory()
-            .join(format!("{}.stltpack", hex::encode([9u8; 32])));
+        let wrong = store.directory().join(pack_name(&[9u8; 32]));
         fs::copy(&paths[0], &wrong).unwrap();
-        fs::write(
-            store
-                .directory()
-                .join(format!("{}.stltpack", "ab".repeat(32))),
-            b"STLT",
-        )
-        .unwrap();
+        fs::write(store.directory().join(pack_name(&[0xab; 32])), b"STLT").unwrap();
         write_pack(&store.directory(), [7; 32], 5000);
         let problems: Vec<String> = store
             .packs()

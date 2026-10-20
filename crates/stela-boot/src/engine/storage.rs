@@ -88,6 +88,7 @@ pub unsafe fn open(
     handoff: &pc::Handoff,
     targets: &[&Target],
     medium: Option<Guid>,
+    store: Option<Guid>,
     usb_disks: &[String],
 ) -> Result<Opened, String> {
     if targets
@@ -151,7 +152,46 @@ pub unsafe fn open(
         })
         .collect::<Result<_, String>>()?;
     // After the targets, so a medium GUID on a target's disk finds no disk.
+    // The translation store's partition may share the medium's disk, or be
+    // the medium's partition; one it cannot open is reported and left out.
+    let service = |partition: Box<dyn BlockDevice>| -> Box<dyn BlockDevice> {
+        Box::new(Service {
+            inner: partition,
+            root,
+        })
+    };
+    let mut store_partition = None;
+    let mut shared_medium = None;
+    if let Some(guid) = store {
+        let guids: alloc::vec::Vec<Guid> = medium.into_iter().chain([guid]).collect();
+        match storage::open_unique_shared(&mut disks.devices, &guids) {
+            Ok(mut partitions) => {
+                let partition = partitions.pop().expect("the store's partition");
+                output::arguments(format_args!(
+                    "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (translation store)\n",
+                    partition.disk().serial,
+                    partition.identity().blocks,
+                    partition.identity().block_size
+                ));
+                store_partition = Some(service(Box::new(partition)));
+                shared_medium = partitions.pop();
+            }
+            Err(error) => output::arguments(format_args!(
+                "TRANSLATIONS store partition {guid}: {error}\n"
+            )),
+        }
+    }
+    if let (Some(guid), Some(partition)) = (medium, &shared_medium) {
+        output::arguments(format_args!(
+            "HOST PARTITION serial={} partition={guid} blocks={} block_size={} (install medium)\n",
+            partition.disk().serial,
+            partition.identity().blocks,
+            partition.identity().block_size
+        ));
+    }
+    let shared_medium = shared_medium.map(|partition| service(Box::new(partition)));
     let medium = medium
+        .filter(|_| shared_medium.is_none())
         .map(|guid| {
             let partition = storage::open_unique(&mut disks.devices, guid)
                 .map_err(|error| format!("install medium {guid}: {error}"))?;
@@ -166,7 +206,8 @@ pub unsafe fn open(
                 root,
             }) as Box<dyn BlockDevice>)
         })
-        .transpose()?;
+        .transpose()?
+        .or(shared_medium);
     let usb_disks = usb_disks
         .iter()
         .map(|serial| {
@@ -185,6 +226,7 @@ pub unsafe fn open(
     Ok(Opened {
         services,
         medium,
+        store: store_partition,
         inputs,
         links,
         usb_disks,
@@ -197,6 +239,8 @@ pub struct Opened {
     pub services: alloc::vec::Vec<Box<dyn BlockDevice>>,
     /// The install medium's partition, found by its GUID.
     pub medium: Option<Box<dyn BlockDevice>>,
+    /// The translation store's partition, found by its GUID.
+    pub store: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
     /// Whole disks for the guest's USB mass storage, in option order.

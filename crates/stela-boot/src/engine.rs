@@ -18,6 +18,7 @@ mod power;
 mod restore;
 mod speculation;
 mod storage;
+pub(crate) mod translations;
 
 use crate::{
     console,
@@ -1312,6 +1313,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             range.guest, range.bytes, range.host
         ));
     }
+    // The translation store the loader read, and its partition when the
+    // pack can be rewritten.
+    let translation_store = handoff.files[..handoff.file_count]
+        .iter()
+        .find(|file| file.name() == translations::FILE)
+        .and_then(|file| translations::install(bundle::contents(file)))
+        .filter(|_| handoff.storage.present);
     // `--nor` naming the `--storage` partition keeps the machine state in
     // that partition's tail (`pc::machine_state`): one device, split below.
     let state_in_storage = options.nor.is_some() && options.nor == options.storage;
@@ -1329,6 +1337,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         && !wants_network
         && options.usb_storage.is_empty()
         && !options.guest_network
+        && translation_store.is_none()
     {
         (Vec::new(), None, None, None, Vec::new(), None)
     } else {
@@ -1340,6 +1349,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let storage::Opened {
             services,
             medium,
+            store,
             inputs,
             mut links,
             usb_disks,
@@ -1348,6 +1358,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 &storage_handoff,
                 &targets,
                 options.install_source,
+                translation_store,
                 &options.usb_storage,
             )
         }
@@ -1355,6 +1366,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("host storage refusal: {error}\n"));
             output::fatal("host storage could not be opened")
         });
+        if let Some(store) = store {
+            translations::set_partition(store);
+        }
         // The guest's adapter is its own: the mount's client keeps the
         // first one.
         let guest_network = options.guest_network.then(|| {
@@ -2431,6 +2445,7 @@ fn finish(
         }
         Stop::Reset(reset) => {
             output::arguments(format_args!("STOP reset: {reset}\n"));
+            translations::write();
             match reset.transition {
                 Transition::Restart => host_power.restart(),
                 Transition::PowerOff => host_power.power_off(),

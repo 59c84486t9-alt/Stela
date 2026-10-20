@@ -6,7 +6,7 @@
 //! EFI system partition is refused.
 use super::{
     Handoff, ahci,
-    block::{BlockDevice, BlockError, Identity},
+    block::{BlockDevice, BlockError, Identity, Shared, Window},
     dma::DmaAllocator,
     gpt::{self, GptError, Guid, PartitionDevice},
     input, nvme,
@@ -284,6 +284,49 @@ pub fn open_unique(
     devices: &mut Vec<Box<dyn BlockDevice>>,
     guid: Guid,
 ) -> Result<PartitionDevice<Box<dyn BlockDevice>>, StorageError> {
+    let (index, partition) = find_unique(devices, guid)?;
+    Ok(PartitionDevice::new(devices.swap_remove(index), partition))
+}
+
+/// [`open_unique`] for each of `guids`, each disk taken once and shared by
+/// the partitions found on it: the install medium and the translation store
+/// `stela.efi` rewrites are partitions of one USB, or one partition. When
+/// any GUID is refused, no disk is taken.
+pub fn open_unique_shared(
+    devices: &mut Vec<Box<dyn BlockDevice>>,
+    guids: &[Guid],
+) -> Result<Vec<PartitionDevice<Window>>, StorageError> {
+    let found = guids
+        .iter()
+        .map(|&guid| find_unique(devices, guid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut indices: Vec<usize> = found.iter().map(|(index, _)| *index).collect();
+    indices.sort_unstable();
+    indices.dedup();
+    // Highest first, so each swap_remove leaves the lower indices in place.
+    let disks: Vec<(usize, Shared)> = indices
+        .iter()
+        .rev()
+        .map(|&index| (index, Shared::new(devices.swap_remove(index))))
+        .collect();
+    Ok(found
+        .into_iter()
+        .map(|(index, partition)| {
+            let (_, disk) = disks
+                .iter()
+                .find(|(taken, _)| *taken == index)
+                .expect("every found disk is taken");
+            PartitionDevice::new(disk.whole(), partition)
+        })
+        .collect())
+}
+
+/// The index of the one disk in `devices` whose GPT holds partition `guid`,
+/// and that partition, as [`open_unique`] requires them.
+fn find_unique(
+    devices: &mut [Box<dyn BlockDevice>],
+    guid: Guid,
+) -> Result<(usize, gpt::Partition), StorageError> {
     let mut found = None;
     for (index, device) in devices.iter_mut().enumerate() {
         let Ok(table) = gpt::read(&mut **device) else {
@@ -302,7 +345,7 @@ pub fn open_unique(
     if partition.kind == Guid::ESP {
         return Err(StorageError::SystemPartition(guid));
     }
-    Ok(PartitionDevice::new(devices.swap_remove(index), partition))
+    Ok((index, partition))
 }
 
 /// The byte at `offset` of the storage check's pattern.
@@ -444,6 +487,45 @@ mod tests {
             Some(StorageError::SystemPartition(esp.parse().unwrap()))
         );
         assert_eq!(devices.len(), 2);
+    }
+
+    #[test]
+    fn partitions_of_one_disk_share_it_and_a_refusal_takes_no_disk() {
+        let data: Guid = table::DATA.parse().unwrap();
+        let (medium, store) = (
+            "CCCCCCCC-0000-0000-0000-000000000003",
+            "CCCCCCCC-0000-0000-0000-000000000004",
+        );
+        let mut devices = disks();
+        devices.push(Box::new(table::formatted(
+            "usb",
+            &[
+                table::partition(data, medium, 40, 139),
+                table::partition(data, store, 140, 179),
+            ],
+        )));
+        let guids: Vec<Guid> = [medium, store, store]
+            .iter()
+            .map(|guid| guid.parse().unwrap())
+            .collect();
+        assert_eq!(
+            open_unique_shared(&mut devices, &[guids[0], TARGET.parse().unwrap()]).err(),
+            Some(StorageError::AmbiguousPartition(TARGET.parse().unwrap()))
+        );
+        assert_eq!(devices.len(), 4, "a refusal takes no disk");
+        let mut opened = open_unique_shared(&mut devices, &guids).unwrap();
+        assert_eq!(devices.len(), 3, "the USB is taken once");
+        let blocks: Vec<u64> = opened
+            .iter()
+            .map(|device| device.identity().blocks)
+            .collect();
+        assert_eq!(blocks, [100, 40, 40]);
+        opened[1].write(0, &[7; 512]).unwrap();
+        let mut read = [0; 512];
+        opened[2].read(0, &mut read).unwrap();
+        assert_eq!(read, [7; 512], "one partition opened twice is one");
+        opened[0].read(99, &mut read).unwrap();
+        assert_ne!(read, [7; 512], "the medium ends before the store");
     }
 
     #[test]

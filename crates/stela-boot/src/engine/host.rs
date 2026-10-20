@@ -904,4 +904,9 @@ impl Host for BareHost {
     fn report(&mut self, event: &stela_runtime::machine::Event) {
         super::report(event);
     }
+
+    fn translations(&mut self) -> Option<&mut dyn stela_runtime::machine::Translations> {
+        super::translations::store()
+            .map(|store| store as &mut dyn stela_runtime::machine::Translations)
+    }
 }

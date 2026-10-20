@@ -155,6 +155,16 @@ impl Shared {
         Self(Rc::new(RefCell::new(device)))
     }
 
+    /// Every block, as a device of its own.
+    pub fn whole(&self) -> Window {
+        let identity = self.0.borrow().identity().clone();
+        Window {
+            disk: self.clone(),
+            first: 0,
+            identity,
+        }
+    }
+
     /// The `blocks` blocks from `first`, as a device of their own.
     pub fn window(&self, first: u64, blocks: u64) -> Result<Window, BlockError> {
         let mut identity = self.0.borrow().identity().clone();

@@ -283,6 +283,17 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
     if files.len() > MAX_FILES {
         return Err("bundle lists too many files");
     }
+    // The translation store, when a volume has one and a file slot is
+    // left; rewriting its pack needs the storage drivers.
+    let mut storage = storage;
+    if files.len() < MAX_FILES
+        && let Some((store, writable)) = crate::engine::translations::read()
+    {
+        files.push((String::from(crate::engine::translations::FILE), store));
+        if writable && storage.is_none() {
+            storage = storage::discover().ok();
+        }
+    }
     Ok((source, files, storage))
 }
 
