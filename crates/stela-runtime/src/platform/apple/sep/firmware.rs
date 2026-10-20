@@ -13,12 +13,13 @@
 //! contract and the trust-policy boundary.
 use super::super::asc::{Firmware, Message};
 use super::{
-    Entropy, SecurityMode,
+    Entropy, SecurityMode, control,
     image::{self, signature},
     message::{self, Frame},
+    observe,
     os::SepOs,
     rom::Rom,
-    state,
+    state, xart,
 };
 use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, vec::Vec};
@@ -28,6 +29,18 @@ use alloc::{boxed::Box, vec::Vec};
 /// accepts the container; requests here use tag 1 and the AP ignores the tag.
 const IMAGE_ACCEPTED: u8 = 106;
 const IMAGE_TAG: u8 = 1;
+/// SEPROM's failure report: opcode 199 with the failed command in the data
+/// word. `_bootAction` 0x2d72ca8 tolerates only data 0x1e (the iBIC capture
+/// a platform lacks) and panics on any other.
+const ROM_FAILURE: u8 = 199;
+/// The errno-style status a graceful `xars` reply carries for an operation
+/// the SEP does not implement: Darwin `ENOTSUP`, which `_xmsgSendLocked`
+/// returns to the caller as its error.
+const XART_UNSUPPORTED: u8 = 45;
+/// A graceful `pnon` reply's status: BootPolicy's `handleSEPMessage`
+/// 0x329d940 takes any nonzero opcode byte as the command's failure. The
+/// value is Stela's; sepOS's status codes are not recovered.
+const BOOT_POLICY_FAILURE: u8 = 1;
 const FIRMWARE_SEPI: u8 = 0;
 
 /// What Stela measured and recorded about the delivered firmware. Evidence,
@@ -147,6 +160,41 @@ impl Firmware for SepFirmware {
         } else {
             self.rom.receive(message, outbox)
         }
+    }
+
+    /// SEPROM answers a command it lacks with its failure report; sepOS
+    /// answers a tagged control request with kIOReturnDeviceError's status,
+    /// an `xars` operation with `ENOTSUP` and a `pnon` command with a
+    /// failure status. `sks`, `scrd` and notifications have no recovered
+    /// error reply and stay refused.
+    fn error_reply(&mut self, message: Message, _reason: &'static str) -> Option<Vec<Message>> {
+        let frame = Frame::from_mailbox(message).ok()?;
+        let reply = match (&self.phase, frame.service) {
+            (Phase::Rom, message::ROM) => Frame {
+                service: message::ROM,
+                tag: frame.tag,
+                opcode: ROM_FAILURE,
+                parameter: 0,
+                data: u32::from(frame.opcode),
+            },
+            (Phase::Active(_), message::CONTROL) if frame.tag != 0 => {
+                control::reply(frame, control::Status::DeviceError, 0)
+            }
+            (Phase::Active(_), xart::SLAVE_ID) => Frame {
+                opcode: XART_UNSUPPORTED,
+                parameter: 0,
+                data: 0,
+                ..frame
+            },
+            (Phase::Active(_), observe::BOOT_POLICY_ID) => Frame {
+                opcode: BOOT_POLICY_FAILURE,
+                parameter: 0,
+                data: 0,
+                ..frame
+            },
+            _ => return None,
+        };
+        Some(alloc::vec![reply.mailbox()])
     }
 
     fn dma_pending(&self) -> bool {
@@ -368,5 +416,60 @@ mod tests {
             assert!(fw.evidence().is_none());
             assert!(!fw.booted());
         }
+    }
+
+    #[test]
+    fn error_replies_follow_each_phase_protocol_and_refuse_without_one() {
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
+        booted(&mut fw);
+        let request = |service, tag, opcode| {
+            Frame {
+                service,
+                tag,
+                opcode,
+                parameter: 7,
+                data: 9,
+            }
+            .mailbox()
+        };
+        let reply = |fw: &mut SepFirmware, message| {
+            fw.error_reply(message, "unimplemented")
+                .map(|replies| Frame::from_mailbox(replies[0]).unwrap())
+        };
+        let rom = reply(&mut fw, request(message::ROM, 2, 0x30)).unwrap();
+        assert_eq!((rom.tag, rom.opcode, rom.data), (2, ROM_FAILURE, 0x30));
+        assert_eq!(reply(&mut fw, request(observe::BOOT_POLICY_ID, 3, 4)), None);
+
+        let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+        deliver(&mut fw, &image, false).unwrap();
+        let mut outbox = Vec::new();
+        fw.receive(request(message::BOOT, 0, 0x20), &mut outbox)
+            .unwrap();
+        assert!(fw.booted());
+        let policy = reply(&mut fw, request(observe::BOOT_POLICY_ID, 3, 4)).unwrap();
+        assert_eq!(
+            (policy.service, policy.tag, policy.opcode, policy.data),
+            (observe::BOOT_POLICY_ID, 3, BOOT_POLICY_FAILURE, 0)
+        );
+        let xart = reply(&mut fw, request(xart::SLAVE_ID, 5, 6)).unwrap();
+        assert_eq!((xart.tag, xart.opcode), (5, XART_UNSUPPORTED));
+        let control = reply(&mut fw, request(message::CONTROL, 1, 99)).unwrap();
+        assert_eq!(
+            control,
+            control::reply(
+                Frame::from_mailbox(request(message::CONTROL, 1, 99)).unwrap(),
+                control::Status::DeviceError,
+                0
+            )
+        );
+        assert_eq!(reply(&mut fw, request(message::CONTROL, 0, 99)), None);
+        assert_eq!(reply(&mut fw, request(observe::KEYSTORE_ID, 3, 4)), None);
+        assert_eq!(reply(&mut fw, request(message::ROM, 2, 0x30)), None);
     }
 }

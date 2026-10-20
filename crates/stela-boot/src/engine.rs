@@ -1654,6 +1654,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     machine.set_idle_skip(options.idle_skip);
     let strict = options.strict || options.restore;
     machine.set_graceful(!strict);
+    machine.devices.set_graceful(!strict);
     output::arguments(format_args!(
         "UNSUPPORTED OPERATIONS {}\n",
         if strict {
@@ -2194,6 +2195,9 @@ fn text_report(machine: &mut Machine<BareHost, AppleDevices>) {
 fn unsupported_report(machine: &mut Machine<BareHost, AppleDevices>) {
     for requirement in machine.take_unsupported() {
         output::arguments(format_args!("UNSUPPORTED {requirement}\n"));
+    }
+    for line in machine.devices.take_unsupported() {
+        output::arguments(format_args!("UNSUPPORTED {line}\n"));
     }
 }
 

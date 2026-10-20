@@ -104,6 +104,16 @@ impl Sep {
         self.mailbox.dma_pending()
     }
 
+    /// Graceful mode for the SEP's unimplemented requests ([`Asc::set_graceful`]).
+    pub fn set_graceful(&mut self, graceful: bool) {
+        self.mailbox.set_graceful(graceful);
+    }
+
+    /// The requests graceful mode answered for the first time since the last call.
+    pub fn take_unsupported(&mut self) -> alloc::vec::Vec<alloc::string::String> {
+        self.mailbox.take_unsupported()
+    }
+
     /// Firmware Stela measured and accepted under its own trust policy, if any.
     pub fn evidence(&self) -> Option<&firmware::Evidence> {
         self.mailbox
