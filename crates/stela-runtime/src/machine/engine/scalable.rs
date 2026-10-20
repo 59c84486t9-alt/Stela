@@ -748,7 +748,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let features = features(self.profile.chip);
         let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)
             .ok_or_else(|| String::from("the streaming vector length"))?;
-        let controls = ScalableControls::new(length, features.contains(ScalableFeature::Sme2));
+        // The FP8 forms read FPMR, which the PE reaches once their
+        // CheckFPMREnabled passes.
+        let controls = ScalableControls::new(length, features.contains(ScalableFeature::Sme2))
+            .with_fpmr_enabled(streaming::fpmr_enabled(&self.cpu));
         ScalableProfile::new_with_features(length, scalable.mode(), features, controls)
             .map_err(|error| error.0)
     }
@@ -809,6 +812,8 @@ mod tests {
     const MOVA_Z3_ZA0H: u32 = 0xc002_0003; // mova z3.b, p0/m, za0h.b[w12, 0]
     const RDSVL_X5: u32 = 0x04bf_5825; // rdsvl x5, #1
     const ZERO_ZA: u32 = 0xc008_00ff; // zero {za}
+    /// HCRX_EL2.EnFPM: FPMR at EL0 and EL1 outside the host.
+    const HCRX_ENFPM: u64 = 1 << 23;
 
     /// A PE of the test chip at EL1 with FP, SVE and SME enabled, in
     /// streaming mode with ZA, running `words` from BASE; `None` on a chip
@@ -1047,34 +1052,34 @@ mod tests {
     /// Every SVE and SME form of the M4, M5 and M6 that runs through
     /// [`Machine::prepare_scalable`], its operand fields filled in 24 ways,
     /// in each mode its access checks allow: each form has a filling that
-    /// runs or decodes as UNDEFINED, and no filling stops for a feature,
-    /// apart from the FP8 forms the engine does not implement. Scalar FP,
-    /// Advanced SIMD and non-streaming SVE forms take other paths, and the
-    /// FPMR-checked ones are FP8's. The other fillings decline the reserved
-    /// encodings they hit.
+    /// runs or decodes as UNDEFINED, and no filling stops for a feature, the
+    /// M6's FPMR-checked FP8 forms included. Scalar FP, Advanced SIMD and
+    /// non-streaming SVE forms take other paths. The other fillings decline
+    /// the reserved encodings they hit.
     #[test]
     fn every_sve_and_sme_form_of_the_sme_chips_runs_or_is_undefined() {
         use crate::machine::{Chip, chip::Check};
-        // FSCALE (multiple vectors) needs FEAT_FP8. BFSCALE, of
-        // FEAT_SVE_BFSCALE, which no Apple chip has, lies inside FSCALE's
-        // encodings, and the compiler declines it as unknown.
-        const FP8: [u32; 4] = [0xc120_a180, 0xc120_a980, 0xc120_b180, 0xc120_b980];
+        // BFSCALE, of FEAT_SVE_BFSCALE, which no Apple chip has, lies inside
+        // FSCALE's encodings, and the compiler declines it as unknown: the
+        // SVE form, and the multi-vector forms, FSCALE's with size 0.
+        const FSCALE: [u32; 4] = [0xc120_a180, 0xc120_a980, 0xc120_b180, 0xc120_b980];
+        const SIZE: u32 = 0b11 << 22;
         const BFSCALE: (u32, u32) = (0xffff_e000, 0x6509_8000);
         let mut runs = 0;
         let mut undefined = 0;
         for chip in [Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
             let mut machine = super::super::tests::machine_on(chip, &[]);
             machine.target = stela_compiler::TargetCpu::detect();
+            // HCRX_EL2.EnFPM gives EL1 FPMR, for the M6's FP8 forms.
+            machine.cpu.registers.set(Register::HCRX_EL2, 0, HCRX_ENFPM);
             for (mask, value, checks) in chip.check_forms() {
                 if checks.iter().any(|check| {
-                    matches!(
-                        check,
-                        Check::Fp | Check::FpAdvSimd | Check::NonStreamingSve | Check::Fpmr
-                    )
+                    matches!(check, Check::Fp | Check::FpAdvSimd | Check::NonStreamingSve)
                 }) {
                     continue;
                 }
-                let known = FP8.contains(&value) || (mask, value) == BFSCALE;
+                let known = (mask, value) == BFSCALE
+                    || FSCALE.contains(&value) && mask & SIZE == SIZE && value & SIZE == 0;
                 let streaming_only = checks.iter().any(|check| {
                     matches!(
                         check,
@@ -1088,6 +1093,7 @@ mod tests {
                     machine.cpu.set_svcr(streaming, true).unwrap();
                     let profile = machine.scalable_profile().unwrap();
                     let (mut tried, mut handled) = (false, false);
+                    let mut declined = alloc::string::String::new();
                     let mut seed = value ^ 0x9e37_79b9;
                     for _ in 0..24 {
                         seed ^= seed << 13;
@@ -1107,15 +1113,18 @@ mod tests {
                                 handled = true;
                                 runs += 1;
                             }
-                            Err(error) => assert!(
-                                known || !error.contains("unavailable guest features"),
-                                "{chip:?} {word:#010x}: {error}"
-                            ),
+                            Err(error) => {
+                                assert!(
+                                    known || !error.contains("unavailable guest features"),
+                                    "{chip:?} {word:#010x}: {error}"
+                                );
+                                declined = error;
+                            }
                         }
                     }
                     assert!(
                         !tried || handled || known,
-                        "{chip:?} streaming {streaming}: {value:#010x} under {mask:#010x}"
+                        "{chip:?} streaming {streaming}: {value:#010x} under {mask:#010x}: {declined}"
                     );
                 }
             }
@@ -1213,6 +1222,79 @@ mod tests {
         assert_eq!(ram(&machine, source, STREAMING_VECTOR_BYTES), counted);
         assert_eq!(z(&machine, 2), counted);
         assert_eq!(ram(&machine, destination, STREAMING_VECTOR_BYTES), counted);
+    }
+
+    /// The M6's FP8 SME forms run under FPMR's formats once
+    /// CheckFPMREnabled passes: the FP8 to FP16 (FEAT_SME_F8F16) and FP32
+    /// (FEAT_SME_F8F32) outer products, FSCALE (multiple vectors) and the
+    /// multi-vector FP8 conversions.
+    #[test]
+    fn the_m6_fp8_sme_forms_run_under_fpmr() {
+        const PTRUE_P1_B: u32 = 0x2518_e3e1; // ptrue p1.b
+        const DUP_Z0: u32 = 0x2538_c700; // mov z0.b, #0x38
+        const DUP_Z1: u32 = 0x2538_c701; // mov z1.b, #0x38
+        const FMOPA_ZA0_H: u32 = 0x80a1_2008; // fmopa za0.h, p0/m, p1/m, z0.b, z1.b
+        const FMOPA_ZA1_S: u32 = 0x80a1_2001; // fmopa za1.s, p0/m, p1/m, z0.b, z1.b
+        const MOVA_Z3_ZA0H_H: u32 = 0xc042_0003; // mov z3.h, p0/m, za0h.h[w12, 0]
+        const MOVA_Z4_ZA1H_S: u32 = 0xc082_0084; // mov z4.s, p0/m, za1h.s[w12, 0]
+        const DUP_Z6_3: u32 = 0x25b8_c066; // mov z6.s, #3
+        const FSCALE: u32 = 0xc1a6_a184; // fscale {z4.s, z5.s}, {z4.s, z5.s}, z6.s
+        const F1CVT: u32 = 0xc126_e006; // f1cvt {z6.h, z7.h}, z0.b
+        // F8S1 and F8S2 E4M3, whose 0x38 is 1.0.
+        const E4M3: u64 = 1 | 1 << 3;
+        let words = [
+            PTRUE_P0_B,
+            PTRUE_P1_B,
+            DUP_Z0,
+            DUP_Z1,
+            ZERO_ZA,
+            FMOPA_ZA0_H,
+            FMOPA_ZA1_S,
+            MOVA_Z3_ZA0H_H,
+            MOVA_Z4_ZA1H_S,
+            DUP_Z6_3,
+            FSCALE,
+            F1CVT,
+        ];
+        let mut machine = super::super::tests::machine_on(crate::machine::Chip::AppleM6, &words);
+        enable_streaming(&mut machine);
+        for _ in 0..5 {
+            machine.step().unwrap();
+        }
+        // HCRX_EL2.EnFPM clear makes them UNDEFINED at EL1.
+        assert_eq!(machine.step(), Ok(()));
+        assert_eq!(
+            (
+                machine.cpu.read(Register::ESR_EL1),
+                machine.cpu.read(Register::ELR_EL1)
+            ),
+            (1 << 25, BASE + 20)
+        );
+        machine.cpu.registers.set(Register::HCRX_EL2, 0, HCRX_ENFPM);
+        machine.derived_changed();
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine.cpu.scalable.as_mut().unwrap().set_fpmr(E4M3);
+        machine.cpu.pc = BASE + 20;
+        for index in 5..words.len() as u64 {
+            assert_eq!(machine.step(), Ok(()), "{index}");
+            assert_eq!(machine.cpu.pc, BASE + 4 * (index + 1), "{index}");
+        }
+        let repeat = |bytes: &[u8]| -> Vec<u8> {
+            bytes
+                .iter()
+                .copied()
+                .cycle()
+                .take(STREAMING_VECTOR_BYTES)
+                .collect()
+        };
+        // Two products of 1.0 make each half 2.0, and four each single 4.0,
+        // which FSCALE takes to 32.0 (Z5, zero, stays zero); F1CVT widens
+        // E4M3 1.0 to half 1.0.
+        assert_eq!(z(&machine, 3), repeat(&0x4000u16.to_le_bytes()));
+        assert_eq!(z(&machine, 4), repeat(&32.0f32.to_le_bytes()));
+        assert_eq!(z(&machine, 5), repeat(&[0]));
+        assert_eq!(z(&machine, 6), repeat(&0x3c00u16.to_le_bytes()));
+        assert_eq!(z(&machine, 7), repeat(&0x3c00u16.to_le_bytes()));
     }
 
     /// On the M5 and M6, with tag checks on, each element of a tag-checked

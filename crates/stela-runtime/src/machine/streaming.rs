@@ -136,6 +136,16 @@ fn one(cpu: &Cpu, check: Check) -> Result<(), Denial> {
 /// every chip with FEAT_FPMR, which all have FEAT_HCX). Either clear makes
 /// the instruction UNDEFINED.
 fn fpmr(cpu: &Cpu) -> Result<(), Denial> {
+    fpmr_access(cpu)
+}
+
+/// Whether the current EL reaches FPMR: `CheckFPMREnabled` passes, which a
+/// context leaf's FP8 forms are compiled for.
+pub(crate) fn fpmr_enabled(cpu: &Cpu) -> bool {
+    fpmr_access(cpu).is_ok()
+}
+
+fn fpmr_access(cpu: &Cpu) -> Result<(), Denial> {
     match cpu.registers.chip().implemented(Feature::FEAT_FPMR) {
         Ok(true) => {}
         Ok(false) => return Err(Denial::Undefined),

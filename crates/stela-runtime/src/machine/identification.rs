@@ -140,12 +140,11 @@ const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPAC
 const SME_RUNS: &str = "the engine runs streaming mode, ZA and ZT0 at a 512-bit SVL and every \
      SVE and SME form of the chip's features, or takes UNDEFINED where Arm's decode does \
      (engine::scalable)";
-const FP8_PENDING: &str = "the FP8 outer products and dot products need FPMR, which the engine \
-     does not implement";
 const FPMR: &str = "FPMR holds its fields with the scalable state, which clears it as \
      PSTATE.SM changes, behind SCTLR_ELx.EnFPM and HCRX_EL2.EnFPM";
 const FP8: &str = "the engine completes F1CVTL, F2CVTL, BF1CVTL, BF2CVTL and FCVTN (FP8) \
-     with FPMR's formats and scales, and FSCALE compiles; the SVE and SME FP8 forms stop";
+     with FPMR's formats and scales, FSCALE compiles, and the SME FP8 forms run in streaming \
+     mode (engine::scalable)";
 const MTE: &str = "IRG, ADDG and SUBG run in the engine under GCR_EL1 and RGSR_EL1, GMI and \
      SUBP(S) compile, and PSTATE.TCO has its MSR and MRS forms and is set by exception entry";
 const MTE2: &str = "the engine keeps an Allocation Tag for each 16-byte granule of Tagged \
@@ -410,14 +409,14 @@ pub const TABLE: &[Row] = &[
         40,
         1,
         "FEAT_SME_F8F32",
-        engine(false, FP8_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
         41,
         1,
         "FEAT_SME_F8F16",
-        engine(false, FP8_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
@@ -1706,7 +1705,7 @@ mod tests {
         // PFR1.SME 2 (FEAT_SME2) from the M4. SMFR0: F32F32, BI32I32,
         // B16F32, F16F32, I8I32 0xf, I16I32 0b0101, F64F64, I16I64 0xf and
         // SMEver 1 on the M4; the M5 adds F16F16, B16B16 and SMEver 2
-        // (FEAT_SME2p1), the M6 LUTv2, whose F8F32 and F8F16 wait for FP8.
+        // (FEAT_SME2p1), the M6 F8F32, F8F16 and LUTv2.
         // ZFR0: SVEver 0, BF16 and I8MM, and B16B16 from the M5.
         for (chip, sme, smfr0, zfr0) in [
             (Chip::AppleM1, 0, 0, 0),
@@ -1714,7 +1713,7 @@ mod tests {
             (Chip::AppleM3, 0, 0, 0),
             (Chip::AppleM4, 2, 0x01f1_50ff_0000_0000, 0x1000_0010_0000),
             (Chip::AppleM5, 2, 0x02f1_5cff_0000_0000, 0x1000_0110_0000),
-            (Chip::AppleM6, 2, 0x12f1_5cff_0000_0000, 0x1000_0110_0000),
+            (Chip::AppleM6, 2, 0x12f1_5fff_0000_0000, 0x1000_0110_0000),
         ] {
             assert_eq!(value(chip, ID_AA64PFR1_EL1) >> 24 & 0xf, sme, "{chip:?}");
             assert_eq!(value(chip, ID_AA64SMFR0_EL1), smfr0, "{chip:?}");

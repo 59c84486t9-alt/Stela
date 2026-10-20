@@ -376,8 +376,9 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_SME_F64F64
         | Feature::FEAT_SME_I16I64
         | Feature::FEAT_SME_LUTv2
-        | Feature::FEAT_SVE_B16B16 => true,
-        Feature::FEAT_SME_F8F16 | Feature::FEAT_SME_F8F32 => false,
+        | Feature::FEAT_SVE_B16B16
+        | Feature::FEAT_SME_F8F16
+        | Feature::FEAT_SME_F8F32 => true,
     }
 }
 
