@@ -193,11 +193,11 @@ fn commpage_time() -> Result<commpage::Time> {
 /// [`Launch::model`]) compiles its blocks on this host, for translating its
 /// images ahead of time outside it (`stelad`).
 pub fn preparation(model: &str) -> Result<std::sync::Arc<crate::machine::Preparation>> {
-    let chip = hardware::Hardware::of_model(model, host_memory()?)?.chip;
+    let hardware = hardware::Hardware::of_model(model, host_memory()?)?;
     let target = TargetCpu::detect();
-    let profile = pe::profile(chip, target);
+    let profile = pe::profile(&hardware, target)?;
     let (engine, _) = threads::engine(
-        chip,
+        hardware.chip,
         profile,
         target,
         pe::Keys::random()?,
