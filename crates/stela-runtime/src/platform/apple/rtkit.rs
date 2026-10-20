@@ -58,11 +58,21 @@
 //! `_handleEPRollCall` (0xfffffe000b6746e8) requires at VersionOk. The
 //! rail-gated AP-power wake is not modeled and refuses.
 //!
-//! The roll call lists exactly the endpoints the model provides. RTKit's
+//! The roll call lists exactly the endpoints the model provides. Of RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
-//! ...) are services of Apple's firmware this coprocessor does not have, so
-//! they are not listed rather than advertised with nothing behind them.
-//! Every other management message refuses.
+//! ...) only the crashlog endpoint is listed: the kernel assumes it. On a
+//! panic, `RTBuddy::callPlatformFunction` (0x4659480) hands every nub marked
+//! `crashlog-non-fatal` (J473's ANS2; `_initCoreDump` 0x4663514) to
+//! `RTBuddyCrashlogEndpoint::forceNonFatalCrashlog` without checking that the
+//! endpoint exists, so a coprocessor without it turns any panic into a
+//! nested one that loses the first panic's message. A native coprocessor
+//! never crashes, so its crashlog endpoint requests no buffer (the AP
+//! allocates one only on that request, `_messageHandler` 0x4669c74) and
+//! takes no AP message; with no buffer, `_checkForCrashGated` (0x466b214)
+//! returns before reading or forcing anything. The other system endpoints
+//! are services of Apple's firmware this coprocessor does not have, so they
+//! are not listed rather than advertised with nothing behind them. Every
+//! other management message refuses.
 //!
 //! Application endpoints also send on their own (the SMC's board
 //! notifications): an enabled endpoint's pending messages leave at each
@@ -76,6 +86,8 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 const MANAGEMENT: u8 = 0;
+/// The crashlog system endpoint (see the module comment).
+const CRASHLOG: u8 = 1;
 const TYPE_SHIFT: u32 = 52;
 const TYPE: u64 = 0xf << TYPE_SHIFT;
 const HELLO: u64 = 1;
@@ -158,6 +170,8 @@ pub enum Management {
 /// The RTKit operating system of one coprocessor.
 pub struct RtKit {
     endpoints: BTreeMap<u8, (Box<dyn Endpoint>, bool)>,
+    /// Whether the AP enabled the crashlog endpoint.
+    crashlog: bool,
     management: Management,
     stage: Stage,
     quiesced: bool,
@@ -193,6 +207,7 @@ impl RtKit {
         }
         Ok(Self {
             endpoints: map,
+            crashlog: false,
             management,
             stage: Stage::Hello,
             quiesced: false,
@@ -220,15 +235,16 @@ impl RtKit {
         outbox.push(management(HELLO, VERSION | VERSION << 16));
     }
 
-    /// Group `group`'s bitmap: the management endpoint and the endpoints the
-    /// model provides.
+    /// Group `group`'s bitmap: the management and crashlog endpoints and the
+    /// endpoints the model provides.
     fn bitmap(&self, group: u8) -> u32 {
         let provided = self
             .endpoints
             .keys()
             .filter(|&&n| n / 32 == group)
             .fold(0u32, |bits, &n| bits | 1 << (n % 32));
-        provided | u32::from(group == 0)
+        let system = 1 << MANAGEMENT | 1 << CRASHLOG;
+        provided | if group == 0 { system } else { 0 }
     }
 
     /// Groups 0 and every later one with endpoints, in order.
@@ -254,6 +270,16 @@ impl RtKit {
         }
         let number = u8::try_from((fields & CONTROL_ENDPOINT) >> CONTROL_ENDPOINT_SHIFT)
             .map_err(|_| "RTKit endpoint control of an endpoint above 255")?;
+        if number == CRASHLOG {
+            // The crashlog endpoint sends nothing when started: a native
+            // coprocessor requests no crashlog buffer.
+            self.crashlog = match fields & LOW {
+                ENABLE => true,
+                DISABLE => false,
+                _ => return Err("RTKit endpoint control other than enable and disable"),
+            };
+            return Ok(());
+        }
         let (endpoint, enabled) = self
             .endpoints
             .get_mut(&number)
@@ -354,6 +380,13 @@ impl Firmware for RtKit {
         if message.endpoint == MANAGEMENT {
             return self.manage(message.payload, outbox);
         }
+        if message.endpoint == CRASHLOG {
+            return Err(if self.crashlog {
+                "RTKit crashlog endpoint takes no AP message: the coprocessor requested no buffer"
+            } else {
+                "RTKit message to an endpoint the AP has not enabled"
+            });
+        }
         let (endpoint, enabled) = self
             .endpoints
             .get_mut(&message.endpoint)
@@ -444,9 +477,9 @@ mod tests {
     fn the_coprocessor_says_hello_rolls_call_and_serves_its_endpoints() {
         let mut rtkit = booted(Management::Enumeration);
         assert!(mgmt(&mut rtkit, HELLO_REPLY, 11 | 11 << 16).is_err());
-        // Group 0 holds the management endpoint alone.
+        // Group 0 holds the management and crashlog endpoints.
         let call = mgmt(&mut rtkit, HELLO_REPLY, 1 << 32 | 12 | 12 << 16).unwrap();
-        assert_eq!(call, vec![management(ROLL_CALL, 1)]);
+        assert_eq!(call, vec![management(ROLL_CALL, 3)]);
         assert!(mgmt(&mut rtkit, ROLL_CALL, 1 << 32 | 1).is_err());
         // 0x20 is bit 0 of group 1, 0x41 bit 1 of group 2, the last.
         let call = mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
@@ -488,6 +521,30 @@ mod tests {
         assert!(step(&mut rtkit, 0x20, 1).is_err());
         assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x21 << 32 | ENABLE).is_err());
         assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x20 << 32 | 3).is_err());
+    }
+
+    #[test]
+    fn the_crashlog_endpoint_starts_silently_and_takes_no_ap_message() {
+        let mut rtkit = booted(Management::Enumeration);
+        mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, 3).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
+        assert!(step(&mut rtkit, CRASHLOG, 1).is_err());
+        // Enabling it requests no buffer; a buffer answer or any other AP
+        // message refuses, enabled or not.
+        let started = mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | ENABLE).unwrap();
+        assert!(started.is_empty());
+        let refusal = step(&mut rtkit, CRASHLOG, 0x1 << 52 | 0x8000).unwrap_err();
+        assert!(refusal.contains("no buffer"), "{refusal}");
+        assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | 3).is_err());
+        assert!(
+            mgmt(&mut rtkit, ENDPOINT_CONTROL, 1 << 32 | DISABLE)
+                .unwrap()
+                .is_empty()
+        );
+        // Other system endpoints stay absent.
+        assert!(mgmt(&mut rtkit, ENDPOINT_CONTROL, 2 << 32 | ENABLE).is_err());
     }
 
     #[test]
@@ -540,9 +597,11 @@ mod tests {
                 .collect()
         };
         assert_eq!(payloads(outbox), [0x0010_0000_000c_000c]);
+        // Group 0 now also lists the crashlog endpoint (bit 1), which s25's
+        // coprocessor did not; the AP's answers are unchanged.
         assert_eq!(
             payloads(raw(&mut rtkit, 0x0020_0000_000c_000c)),
-            [0x0080_0000_0000_0001]
+            [0x0080_0000_0000_0003]
         );
         assert_eq!(
             payloads(raw(&mut rtkit, 0x0080_0000_0000_0001)),

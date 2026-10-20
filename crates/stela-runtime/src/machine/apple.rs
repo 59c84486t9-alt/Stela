@@ -2607,8 +2607,9 @@ mod tests {
 
     /// The AP side of the RTKit start-up handshake restore boot s25 logged
     /// for a coprocessor listing one application endpoint 0x20, word for
-    /// word, up to the client driver's STARTEP of it. The coprocessor must
-    /// end enumeration with the power-on announcement the AP waits for.
+    /// word, up to the client driver's STARTEP of it, except that group 0
+    /// now also lists the crashlog endpoint. The coprocessor must end
+    /// enumeration with the power-on announcement the AP waits for.
     fn walk_rtkit_start(devices: &mut AppleDevices, wrapper: u64) {
         let send = |devices: &mut AppleDevices, payload| {
             devices.write(0, wrapper + 0x8800, 8, payload, 0).unwrap();
@@ -2621,7 +2622,7 @@ mod tests {
         );
         assert_eq!(
             send(devices, 0x0020_0000_000c_000c),
-            [(0, 0x0080_0000_0000_0001)]
+            [(0, 0x0080_0000_0000_0003)]
         );
         assert_eq!(
             send(devices, 0x0080_0000_0000_0001),
@@ -2733,8 +2734,9 @@ mod tests {
         let mgmt = |kind: u64, fields: u64| kind << 52 | fields;
         assert_eq!(receive(&mut devices), (0, mgmt(1, 12 | 12 << 16)));
         send(&mut devices, 0, mgmt(2, 12 | 12 << 16));
-        assert_eq!(receive(&mut devices), (0, mgmt(8, 1)));
-        send(&mut devices, 0, mgmt(8, 1));
+        // Group 0: the management and crashlog endpoints.
+        assert_eq!(receive(&mut devices), (0, mgmt(8, 3)));
+        send(&mut devices, 0, mgmt(8, 3));
         // 0x20 and 0x21 are bits 0 and 1 of the last group, 1.
         assert_eq!(receive(&mut devices), (0, mgmt(8, 1 << 51 | 1 << 32 | 3)));
         send(&mut devices, 0, mgmt(8, 1 << 51 | 1 << 32 | 3));
