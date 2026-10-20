@@ -6033,16 +6033,29 @@ mod tests {
             assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
             assert_eq!(machine.first_translated(), Some((BASE, ADDRESS)));
             let current = machine.current_variant(false, false);
-            let variant = machine.page_variant(current, BASE);
-            assert!(variant.translated, "{cause:?}");
+            assert!(!machine.page_variant(current, BASE + FETCH_PAGE).translated);
+            let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+                panic!("block")
+            };
+            let block = &machine.blocks[index];
+            assert!(block.variant.translated, "{cause:?}");
             assert_eq!(
-                variant.checks,
+                block.checks,
                 current.checks.with_translation(HELPER),
                 "{cause:?}"
             );
-            assert!(!machine.page_variant(current, BASE + FETCH_PAGE).translated);
+            // Its failed check calls the helper through the slot.
+            let mut call = vec![0x48, 0xa1]; // movabs rax, [HELPER]
+            call.extend(HELPER.to_le_bytes());
+            let code = &machine.host.installed[block.code.0 - 1];
+            assert!(code.windows(call.len()).any(|bytes| bytes == call));
         }
         assert_eq!(machine.statistics.translated_pages, 2);
+        // A translated block that still leaves the ranges stops.
+        assert!(matches!(
+            run(&mut machine, FaultCause::InvalidOpcode),
+            Err(Stop::Unsupported(_))
+        ));
     }
 
     /// System-mode blocks check every access against the guest's ranges,
