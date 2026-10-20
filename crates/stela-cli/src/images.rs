@@ -50,7 +50,8 @@ pub(crate) struct ImageManifest {
     aea_keys: Option<PathBuf>,
     /// Also write the in-place archive `payload.json`, carrying the keys
     /// `--aea-keys` fetched, for a restore that reads this IPSW unchanged
-    /// from its own source partition.
+    /// from its own source partition, and beside it `blocks.bin`, the
+    /// members' block hashes it names, so the restore host needs no scan.
     #[arg(long, requires = "payload")]
     payload_manifest: Option<PathBuf>,
 }
@@ -146,14 +147,18 @@ impl ImageManifest {
         let report = restore::archive::manifest(&input, model.as_deref(), hash_members)?;
         if let (true, Some(model)) = (payload, model.as_deref()) {
             let mut value = serde_json::to_value(&report)?;
-            let (inventory, manifest) =
-                restore::payload::inventory(&input, model, aea_keys.as_deref())?;
-            value["payload"] = inventory;
+            let inventory = restore::payload::inventory(&input, model, false, aea_keys.as_deref())?;
+            value["payload"] = inventory.report;
             write_json(&output, &value)?;
             if let Some(path) = payload_manifest {
+                // The block hashes go beside the manifest, which names them.
+                let blocks = path.with_file_name(stela_runtime::payload::BLOCK_HASHES_FILE);
+                std::fs::File::create_new(&blocks)
+                    .with_context(|| format!("{} exists", blocks.display()))?
+                    .write_all(&inventory.blocks)?;
                 let mut file = std::fs::File::create_new(&path)
                     .with_context(|| format!("{} exists", path.display()))?;
-                std::io::Write::write_all(&mut file, (manifest.to_json() + "\n").as_bytes())?;
+                file.write_all((inventory.manifest.to_json() + "\n").as_bytes())?;
             }
         } else {
             write_json(&output, &report)?;

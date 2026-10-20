@@ -9,7 +9,7 @@
 use super::{aea, manifest};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::json;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
 use std::{
     collections::BTreeSet,
     fs::{self, File},
@@ -17,8 +17,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use stela_runtime::payload::{
-    AeaKey, IdentitySet, KIND, Layout, MANIFEST_FILE, Member, PayloadManifest, Purpose,
-    SourceImage, images_directory, slice_count, slice_path,
+    AeaKey, BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, IdentitySet, KIND, Layout,
+    MANIFEST_FILE, Member, PayloadManifest, Purpose, SourceImage, images_directory, slice_count,
+    slice_path,
 };
 use zip::ZipArchive;
 
@@ -113,15 +114,26 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
     })
 }
 
-/// Stream one member through `sink`, returning its length and SHA-256.
+/// A member's hashes: its entry, with its SHA-384, and the SHA-256 of each
+/// of its [`HASH_BLOCK_BYTES`] blocks, as [`BlockHashes`] lists them.
+struct Hashed {
+    member: Member,
+    blocks: Vec<u8>,
+}
+
+/// Stream one member through `sink`, returning its length and hashes.
 fn stream(
     archive: &mut ZipArchive<File>,
     name: &str,
     mut sink: impl FnMut(&[u8]) -> Result<()>,
-) -> Result<Member> {
+) -> Result<Hashed> {
     let mut member = archive.by_name(name)?;
     let expected = member.size();
     let mut hash = Sha256::new();
+    let mut hash384 = Sha384::new();
+    let mut block = Sha256::new();
+    let mut in_block = 0u64;
+    let mut blocks = Vec::new();
     let mut total = 0u64;
     let mut buffer = vec![0u8; BUFFER];
     loop {
@@ -135,24 +147,57 @@ fn stream(
             "{name} is longer than its directory entry"
         );
         hash.update(&buffer[..count]);
+        hash384.update(&buffer[..count]);
+        let mut rest = &buffer[..count];
+        while !rest.is_empty() {
+            let take = rest.len().min((HASH_BLOCK_BYTES - in_block) as usize);
+            block.update(&rest[..take]);
+            in_block += take as u64;
+            rest = &rest[take..];
+            if in_block == HASH_BLOCK_BYTES {
+                blocks.extend_from_slice(&std::mem::take(&mut block).finalize());
+                in_block = 0;
+            }
+        }
         sink(&buffer[..count])?;
     }
     ensure!(total == expected, "{name} is truncated");
-    Ok(Member {
-        name: name.into(),
-        bytes: total,
-        sha256: hex::encode(hash.finalize()),
+    if in_block > 0 {
+        blocks.extend_from_slice(&block.finalize());
+    }
+    Ok(Hashed {
+        member: Member {
+            name: name.into(),
+            bytes: total,
+            sha256: hex::encode(hash.finalize()),
+            sha384: Some(hex::encode(hash384.finalize())),
+        },
+        blocks,
     })
 }
 
+/// The block hash file of `hashed`, in their order, and its entry.
+fn block_hashes(hashed: &[Hashed]) -> (Vec<u8>, BlockHashes) {
+    let file: Vec<u8> = hashed
+        .iter()
+        .flat_map(|h| h.blocks.iter().copied())
+        .collect();
+    let entry = BlockHashes {
+        file: BLOCK_HASHES_FILE.into(),
+        block_bytes: HASH_BLOCK_BYTES,
+        sha256: stela_runtime::sha256(&file),
+    };
+    (file, entry)
+}
+
 /// Hash the named members on several threads; each opens the IPSW itself.
-fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Member>> {
+fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Hashed>> {
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get().min(8));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let results: Vec<Result<Vec<(usize, Member)>>> = std::thread::scope(|scope| {
+    let results: Vec<Result<Vec<(usize, Hashed)>>> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
-                scope.spawn(|| -> Result<Vec<(usize, Member)>> {
+                scope.spawn(|| -> Result<Vec<(usize, Hashed)>> {
                     let mut archive = ZipArchive::new(File::open(image)?)?;
                     let mut done = Vec::new();
                     loop {
@@ -170,7 +215,7 @@ fn hash_members(image: &Path, names: &[String]) -> Result<Vec<Member>> {
             .map(|worker| worker.join().expect("hash worker panicked"))
             .collect()
     });
-    let mut members: Vec<(usize, Member)> = Vec::new();
+    let mut members: Vec<(usize, Hashed)> = Vec::new();
     for result in results {
         members.extend(result?);
     }
@@ -265,6 +310,7 @@ fn manifest_for(
         identities: selection.identities.clone(),
         global_manifests: selection.global_manifests.clone(),
         aea_keys,
+        block_hashes: None,
     };
     manifest
         .validate()
@@ -272,16 +318,30 @@ fn manifest_for(
     Ok(manifest)
 }
 
+/// An IPSW's restore inventory, read where it is.
+pub struct Inventory {
+    /// The `image-manifest --payload` report.
+    pub report: serde_json::Value,
+    /// The archive manifest, carrying the fetched public AEA keys and
+    /// naming the block hash file.
+    pub manifest: PayloadManifest,
+    /// The block hash file (`BLOCK_HASHES_FILE`), written beside the
+    /// manifest so the restore host needs no scan of the payload.
+    pub blocks: Vec<u8>,
+}
+
 /// The `image-manifest --payload` report: member sets with SHA-256s, the
-/// global manifests and each AEA member's key URL. Key material goes only
-/// to `key_dir`, as 0600 files named by header SHA-256, never into the
-/// report. Also returns the in-place archive manifest, carrying the fetched
-/// public AEA keys, for an IPSW read where it is (a restore source disk).
+/// global manifests and each AEA member's key URL. With `fetch_keys` the
+/// public AEA key responses go into the returned manifest; with `key_dir`
+/// they also go to 0600 files named by header SHA-256, and never into the
+/// report. The manifest describes the IPSW read in place (a restore source
+/// disk), and the hashes of every member's blocks come with it.
 pub fn inventory(
     image: &Path,
     model: &str,
+    fetch_keys: bool,
     key_dir: Option<&Path>,
-) -> Result<(serde_json::Value, PayloadManifest)> {
+) -> Result<Inventory> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
     let metadata = aea_metadata(&mut archive, image, &selection.names)?;
@@ -290,11 +350,16 @@ pub fn inventory(
         let members = hash_members(image, &selection.names);
         (whole.join().expect("hash worker panicked"), members)
     });
+    let hashed = members?;
+    let (blocks, block_entry) = block_hashes(&hashed);
     let mut keys = Vec::new();
-    let mut aea_keys = Vec::new();
+    let aea_keys = if fetch_keys || key_dir.is_some() {
+        self::fetch_keys(&metadata)?
+    } else {
+        Vec::new()
+    };
     if let Some(directory) = key_dir {
         fs::create_dir_all(directory)?;
-        aea_keys = fetch_keys(&metadata)?;
         for key in &aea_keys {
             let path = directory.join(format!("{}.pem", key.header_sha256));
             if !path.exists() {
@@ -317,12 +382,13 @@ pub fn inventory(
                 + "/"
                 + &image.file_name().unwrap().to_string_lossy(),
         },
-        members?,
+        hashed.into_iter().map(|h| h.member).collect(),
         Vec::new(),
         ipsw?,
     )?;
     let keyed = PayloadManifest {
         aea_keys,
+        block_hashes: Some(block_entry),
         ..manifest.clone()
     };
     keyed
@@ -336,7 +402,11 @@ pub fn inventory(
         "aea_keys": keys,
         "limits": "Member SHA-256s are of the bytes in this IPSW; the BuildManifest's own digests are opaque and not reinterpreted. Key bodies are omitted from this report.",
     });
-    Ok((report, keyed))
+    Ok(Inventory {
+        report,
+        manifest: keyed,
+        blocks,
+    })
 }
 
 /// The product version and build of an IPSW's restore identity for
@@ -416,7 +486,10 @@ pub fn write(options: &WriteOptions<'_>) -> Result<serde_json::Value> {
             let copy = directory.join(name);
             ensure!(!copy.exists(), "{} exists", copy.display());
             let whole = copy_hashed(image, &copy)?;
-            let members = hash_members(&copy, &selection.names)?;
+            let members = hash_members(&copy, &selection.names)?
+                .into_iter()
+                .map(|h| h.member)
+                .collect();
             let path = format!(
                 "{}/{}",
                 images_directory(&selection.restore.product_build),
@@ -484,7 +557,7 @@ fn write_slices(
         index + 1 == paths.len(),
         "{name} ended before its last slice"
     );
-    Ok(member)
+    Ok(member.member)
 }
 
 fn copy_hashed(from: &Path, to: &Path) -> Result<(u64, String)> {
@@ -680,12 +753,35 @@ mod tests {
             fs::read(directory.join("Synthetic.ipsw"))?,
             fs::read(&image)?
         );
-        let (report, in_place) = inventory(&image, SYNTHETIC_MODEL, None)?;
+        let Inventory {
+            report,
+            manifest: in_place,
+            blocks,
+        } = inventory(&image, SYNTHETIC_MODEL, true, None)?;
         assert_eq!(report["payload"]["members"], json!(manifest.members));
         // The in-place manifest describes the same archive bytes.
         assert_eq!(in_place.members, manifest.members);
         assert_eq!(in_place.source, manifest.source);
-        assert!(inventory(&image, "Missing1,1", None).is_err());
+        // Its block hashes cover every member's blocks, in order.
+        let entry = in_place.block_hashes.as_ref().unwrap();
+        assert_eq!(entry.sha256, stela_runtime::sha256(&blocks));
+        assert_eq!(blocks.len() as u64, in_place.hash_blocks() * 32);
+        let mut archive = ZipArchive::new(File::open(&image)?)?;
+        let mut at = 0;
+        for member in &in_place.members {
+            let mut bytes = Vec::new();
+            archive.by_name(&member.name)?.read_to_end(&mut bytes)?;
+            assert_eq!(
+                member.sha384.as_deref(),
+                Some(hex::encode(Sha384::digest(&bytes)).as_str())
+            );
+            for block in bytes.chunks(HASH_BLOCK_BYTES as usize) {
+                assert_eq!(blocks[at..at + 32], Sha256::digest(block)[..]);
+                at += 32;
+            }
+        }
+        assert_eq!(at, blocks.len());
+        assert!(inventory(&image, "Missing1,1", false, None).is_err());
         Ok(())
     }
 }
