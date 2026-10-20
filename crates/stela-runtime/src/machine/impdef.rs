@@ -568,7 +568,8 @@ const GUARDED_AFSR1_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to A
 
 const GUEST_AFSR1_EVIDENCE: &str = "no public name; 26A434 XNU's hypervisor saves and \
     restores it with a vCPU's GL12 registers (0xfffffe000bd9ede4, 0xfffffe000bda2bbc); \
-    inference: GL1's AFSR1 reached from EL2. As for AFSRn_ELx, it takes only 0";
+    inference: GL1's AFSR1 reached from EL2. As for AFSRn_ELx, this machine records no fault \
+    status in it, so it holds what the hypervisor writes, 0 from reset (inference)";
 
 const VM_KEY_EVIDENCE: &str = "m1n1 cpu_regs.h names it; SPTM 26A434 clears it before \
     entering EL1 (__text+0x49ecc) and 26A434 XNU's hypervisor loads each VM's key into it \
@@ -1034,7 +1035,7 @@ pub const TABLE: &[Entry] = &[
     entry(
         GUEST_AFSR1,
         "S3_6_C15_C0_3 (unnamed)",
-        Class::Control,
+        Class::Scratch,
         GUEST_AFSR1_EVIDENCE,
     )
     .el2(),

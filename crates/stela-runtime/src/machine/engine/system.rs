@@ -90,25 +90,41 @@ pub(super) fn identification(register: Register) -> bool {
 /// offsets.
 const HCR_AMVOFFEN: u32 = 51;
 
-/// Registers whose whole contents are IMPLEMENTATION DEFINED. Apple's
-/// ACTLR_EL1 bits that XNU `xnu-12377.121.6` `proc_reg.h` names (USAT, EnTSO,
-/// EnAPFLG, EnAFP, EnPRSV) select features AIDR_EL1 does not advertise here,
-/// and nothing describes the other bits or the other registers' contents.
-/// A value with no bit set completes; any set bit stops. 26A434 XNU only
-/// clears ACTLR_EL1 bits outside its TSO-thread paths.
-fn implementation_defined_contents(register: Register) -> bool {
-    matches!(
-        register,
-        Register::ACTLR_EL1
-            | Register::ACTLR_EL2
-            | Register::AFSR0_EL1
-            | Register::AFSR0_EL2
-            | Register::AFSR1_EL1
-            | Register::AFSR1_EL2
-            | Register::AMAIR_EL1
-            | Register::AMAIR_EL2
-            | Register::HACR_EL2
-    )
+/// ACTLR_ELx bit 1, which XNU `xnu-12377.121.6` `proc_reg.h` names EnTSO.
+const ACTLR_EN_TSO: u64 = 1 << 1;
+
+/// The bits a write may set in a register whose whole contents Arm leaves
+/// IMPLEMENTATION DEFINED, or `None` for every other register. A write that
+/// sets any other bit stops. The 26A434 census (docs/design/system.md)
+/// gives each bit its treatment:
+///
+/// - AFSRn_ELx report additional fault status. This machine records none,
+///   so exceptions leave them unchanged, and every bit holds what software
+///   writes: the SPTM copies the guarded level's AFSR1 into AFSR1_EL2 and
+///   the hypervisor saves and restores AFSRn_EL12, both expecting the value
+///   back.
+/// - ACTLR_ELx bit 1, EnTSO, asks for total store order. Every execution
+///   here is already sequentially consistent (one PE runs at a time and its
+///   accesses complete in program order), so the bit needs no further
+///   effect. XNU sets it with bit 4 (EnAPFLG), or with bits 5 and 6 (EnAFP,
+///   EnPRSV) as its patched alternatives choose, before returning to EL0 in
+///   a thread whose machine flag bit 0 is set, and its context switch copies that
+///   flag into bit 9 while the `icdsb` boot argument (1 by default) is
+///   nonzero. Those bits change execution in ways no source defines, and no
+///   component sets any other bit, so they stop.
+/// - AMAIR_ELx and HACR_EL2 take no set bit: no component writes AMAIR_EL1
+///   or AMAIR_EL2 (the hypervisor round-trips a guest's AMAIR_EL12), and
+///   the SPTM's VM entry sets HACR_EL2 bits whose traps of Apple guest
+///   operation no source defines.
+fn implementation_defined_bits(register: Register) -> Option<u64> {
+    match register {
+        Register::AFSR0_EL1 | Register::AFSR0_EL2 | Register::AFSR1_EL1 | Register::AFSR1_EL2 => {
+            Some(u64::MAX)
+        }
+        Register::ACTLR_EL1 | Register::ACTLR_EL2 => Some(ACTLR_EN_TSO),
+        Register::AMAIR_EL1 | Register::AMAIR_EL2 | Register::HACR_EL2 => Some(0),
+        _ => None,
+    }
 }
 
 /// The MRS encoding of a register, from its generated accessor.
@@ -629,7 +645,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             return written;
         }
         let cpu = &mut self.machine.cpu;
-        if implementation_defined_contents(register) && value != 0 {
+        if implementation_defined_bits(register).is_some_and(|bits| value & !bits != 0) {
             return Err(Effect::Refused(
                 "an IMPLEMENTATION DEFINED register bit without a modelled effect",
             ));
@@ -3086,32 +3102,72 @@ mod tests {
     }
 
     #[test]
-    fn implementation_defined_registers_take_only_values_without_set_bits() {
-        const MSR_ACTLR_EL1_X1: u32 = 0xd518_1021;
-        const MSR_AMAIR_EL1_X1: u32 = 0xd518_a301;
-        const MSR_AFSR0_EL1_X1: u32 = 0xd518_5101;
-        const MSR_HACR_EL2_X1: u32 = 0xd51c_11e1;
-        const MSR_ACTLR_EL12_X1: u32 = 0xd51d_1021;
+    fn implementation_defined_registers_take_the_bits_the_census_models() {
+        const ACTLR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 1);
+        const ACTLR_EL12: Encoding = Encoding::new(3, 5, 1, 0, 1);
+        const AFSR0_EL1: Encoding = Encoding::new(3, 0, 5, 1, 0);
+        const AFSR1_EL12: Encoding = Encoding::new(3, 5, 5, 1, 1);
+        const AMAIR_EL1: Encoding = Encoding::new(3, 0, 10, 3, 0);
+        const AMAIR_EL12: Encoding = Encoding::new(3, 5, 10, 3, 0);
+        const HACR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 7);
+        const EN_TSO: u64 = 1 << 1;
+        const EN_APFLG: u64 = 1 << 4;
+        const ICDSB: u64 = 1 << 9;
         let mut machine = machine(&[]);
         machine.cpu.set_pstate(Pstate::reset(2));
         machine.cpu.registers.set(Register::HCR_EL2, 0, 1 << 34);
-        for word in [
-            MSR_ACTLR_EL1_X1,
-            MSR_AMAIR_EL1_X1,
-            MSR_AFSR0_EL1_X1,
-            MSR_HACR_EL2_X1,
-            MSR_ACTLR_EL12_X1,
+        let write = |machine: &mut TestMachine, encoding, value| {
+            machine.cpu.state.x[1] = value;
+            machine.system_instruction(access(false, encoding, 1))
+        };
+        let read = |machine: &mut TestMachine, encoding| {
+            machine
+                .system_instruction(access(true, encoding, 2))
+                .unwrap();
+            machine.cpu.state.x[2]
+        };
+        // XNU clears ACTLR bits at CPU initialization, and every register
+        // takes 0.
+        for encoding in [ACTLR_EL1, ACTLR_EL12, AMAIR_EL1, AMAIR_EL12, HACR_EL2] {
+            write(&mut machine, encoding, 0).unwrap();
+        }
+        // EnTSO is held, through the host's ACTLR_EL2 and the guest's
+        // ACTLR_EL1, as the context switch and the EL0 return leave it.
+        write(&mut machine, ACTLR_EL1, EN_TSO).unwrap();
+        write(&mut machine, ACTLR_EL12, EN_TSO).unwrap();
+        assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
+        assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO);
+        // EnAPFLG and the bit the icdsb context switch sets stop, as does
+        // any AMAIR or HACR_EL2 bit.
+        for (encoding, value) in [
+            (ACTLR_EL1, EN_TSO | EN_APFLG),
+            (ACTLR_EL12, ICDSB),
+            (AMAIR_EL12, 1),
+            (HACR_EL2, 0x041f_0000_0000_0000),
         ] {
-            // XNU's boot path clears ACTLR_EL1's TSO and alternate bits.
-            machine.cpu.state.x[1] = 0;
-            machine.system_instruction(word).unwrap();
-            machine.cpu.state.x[1] = 1 << 1;
             assert!(
-                matches!(machine.system_instruction(word), Err(Stop::Unsupported(_))),
-                "{word:#x}"
+                matches!(
+                    write(&mut machine, encoding, value),
+                    Err(Stop::Unsupported(_))
+                ),
+                "{encoding:?}"
             );
         }
-        assert_eq!(machine.cpu.read(Register::ACTLR_EL1), 0);
+        assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
+        // The fault status registers hold what software writes, as the
+        // hypervisor's save and restore needs, and no exception records in
+        // them.
+        write(&mut machine, AFSR0_EL1, 0xdead_beef_0000_0001).unwrap();
+        write(&mut machine, AFSR1_EL12, 0x20).unwrap();
+        machine.cpu.set_pstate(Pstate::reset(1));
+        machine
+            .system_instruction(access(true, HACR_EL2, 2))
+            .unwrap();
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+        machine.cpu.set_pstate(Pstate::reset(2));
+        assert_eq!(read(&mut machine, AFSR0_EL1), 0xdead_beef_0000_0001);
+        assert_eq!(read(&mut machine, AFSR1_EL12), 0x20);
+        assert_eq!(machine.cpu.read(Register::AFSR0_EL2), 0xdead_beef_0000_0001);
     }
 
     #[test]
