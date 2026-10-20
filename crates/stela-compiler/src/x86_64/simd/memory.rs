@@ -21,10 +21,12 @@ const MOVZX_ECX_WORD_AT_RAX: [u8; 3] = [0x0f, 0xb7, 0x08];
 const MOVD_XMM0_ECX: [u8; 4] = [0x66, 0x0f, 0x6e, 0xc1];
 const MOV_RCX_STATE_DISP32: [u8; 3] = [0x48, 0x8b, 0x8f];
 
+/// With `held`, XMM0 holds the vector whole ([`transfer`]).
 pub(super) fn emit_register_offset(
     code: &mut Vec<u8>,
     operand: &Operand,
     checks: super::super::MemoryChecks,
+    held: bool,
 ) {
     super::super::register_offset::address(
         code,
@@ -42,7 +44,14 @@ pub(super) fn emit_register_offset(
             operand.shift,
             operand.bytes,
         );
-    transfer(code, operand.load, operand.bytes, operand.vector, aligned);
+    transfer(
+        code,
+        operand.load,
+        operand.bytes,
+        operand.vector,
+        aligned,
+        held,
+    );
 }
 
 /// S/D/Q at [RAX+displacement], using XMM0/XMM1. Loads zero higher bits.
@@ -79,14 +88,23 @@ pub(super) fn wide_transfer(
     }
 }
 
+/// Whether [`transfer`] passes the vector through XMM0, which then holds
+/// it whole: every load, which commits from there, and the stores of
+/// more than a halfword.
+pub(super) fn transfers_xmm0(load: bool, bytes: u8) -> bool {
+    load || bytes > HALFWORD_BYTES
+}
+
 /// Transfer one vector through RAX, without base writeback. A failed load
-/// commits nothing.
+/// commits nothing. With `held`, XMM0 holds the vector whole, and a store
+/// through XMM0 ([`transfers_xmm0`]) takes it from there.
 pub(in crate::x86_64) fn transfer(
     code: &mut Vec<u8>,
     load: bool,
     bytes: u8,
     vector: u8,
     aligned: bool,
+    held: bool,
 ) {
     if load {
         match bytes {
@@ -116,7 +134,9 @@ pub(in crate::x86_64) fn transfer(
             aligned,
         );
     } else {
-        read_vector(code, vector, 0);
+        if !held {
+            read_vector(code, vector, 0);
+        }
         wide_transfer(code, false, bytes, 0, 0, aligned);
     }
 }

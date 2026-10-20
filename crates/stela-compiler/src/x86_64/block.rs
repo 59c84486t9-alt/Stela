@@ -182,11 +182,11 @@ fn emit_selected(
         ..checks
     };
     let mut cursor = 0;
-    // What the last instruction emitted left in RAX.
-    let mut rax = super::Rax::Unknown;
+    // What the last instruction emitted left in registers.
+    let mut after = Held::NOTHING;
     let mut out_of_line = OutOfLine::default();
     while cursor < instructions.len() {
-        let held = core::mem::replace(&mut rax, super::Rax::Unknown);
+        let held = core::mem::replace(&mut after, Held::NOTHING);
         // Build the new candidate privately. Rejection leaves both cursor and
         // output untouched, so the legacy clean-load chunk partition is exact.
         if optimize_regions
@@ -227,17 +227,17 @@ fn emit_selected(
             let mut baseline_code = vec![];
             let mut baseline_map = vec![];
             let mut baseline_fixups = vec![];
-            let mut baseline_rax = held;
+            let mut baseline_held = held;
             for (index, instruction) in instructions[cursor..cursor + count].iter().enumerate() {
                 baseline_map.push((instruction.pc, baseline_code.len()));
-                baseline_rax = emit_single(
+                baseline_held = emit_single(
                     &mut baseline_code,
                     None,
                     instruction,
                     &mut baseline_fixups,
                     target,
                     checks_at(cursor + index),
-                    baseline_rax,
+                    baseline_held,
                 );
             }
             debug_assert!(baseline_fixups.is_empty());
@@ -261,7 +261,7 @@ fn emit_selected(
                     .source_map
                     .extend(baseline_map.iter().map(|(pc, at)| (*pc, offset + at)));
                 code.extend(baseline_code);
-                rax = baseline_rax;
+                after = baseline_held;
             }
             // Each region wrote back the full register frame, so what follows
             // sees the ordinary direct-RAM ABI.
@@ -270,7 +270,7 @@ fn emit_selected(
         }
         let instruction = &instructions[cursor];
         block.source_map.push((instruction.pc, code.len()));
-        rax = emit_single(
+        after = emit_single(
             code,
             Some(&mut out_of_line),
             instruction,
@@ -293,15 +293,32 @@ fn emit_selected(
         fallthrough,
         target,
         native,
-        rax,
+        after.rax,
     );
     (block, fault_recovery)
 }
 
-/// One instruction outside the regions, after an emission that left `held`
-/// in RAX; returns what it leaves there. An instruction that first loads
-/// the register the previous one just stored from RAX finds it there.
-/// With `out_of_line`, numerical instructions move their slow paths there.
+/// What registers hold where an instruction outside the regions begins,
+/// left there by the previous one.
+#[derive(Clone, Copy)]
+struct Held {
+    rax: super::Rax,
+    /// The guest vector XMM0 holds whole.
+    xmm0: Option<u8>,
+}
+
+impl Held {
+    const NOTHING: Self = Self {
+        rax: super::Rax::Unknown,
+        xmm0: None,
+    };
+}
+
+/// One instruction outside the regions, after an emission that left
+/// `held`; returns what it leaves. An instruction that first loads the
+/// register the previous one just stored from RAX finds it there, and one
+/// that reads a vector XMM0 holds may take it from there. With
+/// `out_of_line`, numerical instructions move their slow paths there.
 #[allow(clippy::too_many_arguments)]
 fn emit_single(
     code: &mut Vec<u8>,
@@ -310,24 +327,34 @@ fn emit_single(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
     target: crate::TargetCpu,
     checks: super::MemoryChecks,
-    held: super::Rax,
-) -> super::Rax {
+    held: Held,
+) -> Held {
     if let Operation::FloatingPoint(operand) = &instruction.operation {
         let Some(out_of_line) = out_of_line else {
             super::simd::emit_numerical(code, operand, instruction.pc, target);
-            return super::Rax::Unknown;
+            return Held::NOTHING;
         };
         let start = code.len();
-        let checked = !out_of_line.continues_at(start);
-        let split =
-            super::simd::emit_numerical_split(code, operand, instruction.pc, target, checked);
+        let entry = super::simd::numerical::Entry {
+            checked: !out_of_line.continues_at(start),
+            xmm0: held.xmm0,
+        };
+        let split = super::simd::emit_numerical_split(code, operand, instruction.pc, target, entry);
+        let xmm0 = split.as_ref().map(|split| split.result);
         out_of_line.take(code, start, split);
-        return super::Rax::Unknown;
+        return Held {
+            rax: super::Rax::Unknown,
+            xmm0,
+        };
     }
     let start = code.len();
-    super::emit_instruction(code, instruction, fixups, target, checks);
+    if let Operation::Simd(operand) = &instruction.operation {
+        super::simd::emit_after(code, operand, target, checks, held.xmm0);
+    } else {
+        super::emit_instruction(code, instruction, fixups, target, checks);
+    }
     // The instruction keeps a non-empty native range for its source map.
-    if let super::Rax::Guest(register) = held
+    if let super::Rax::Guest(register) = held.rax
         && let Some(load) = super::frame_load(register)
         && code[start..].starts_with(&load)
         && code.len() > start + load.len()
@@ -341,7 +368,11 @@ fn emit_single(
         super::Rax::Guest(register) =>
             super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
     });
-    rax
+    let xmm0 = match &instruction.operation {
+        Operation::Simd(operand) => super::simd::xmm0_after(operand),
+        _ => None,
+    };
+    Held { rax, xmm0 }
 }
 
 /// Where a branch field or its target lies once the block is laid out.
@@ -686,7 +717,8 @@ mod tests {
     }
 
     /// A block whose numerical slow paths are out of line, with runs that
-    /// check FPCR and FPSR once, runs on the host exactly as its
+    /// check FPCR and FPSR once and inputs taken from XMM0 where the
+    /// previous instruction left them, runs on the host exactly as its
     /// instructions do one at a time with the inline layout: in every
     /// sticky-path state and outside it, through zero-product resumes and
     /// helper exits in mid-run.
@@ -718,12 +750,15 @@ mod tests {
             pc: u64,
             kind: u64,
         }
-        fn run(code: &[u8], state: &mut GuestState) -> Exit {
+        /// Guest memory at X1.
+        type Memory = [u64; 14];
+        fn run(code: &[u8], state: &mut GuestState, memory: &mut Memory) -> Exit {
             let bytes = code.len().next_multiple_of(PAGE);
+            state.x[1] = memory.as_mut_ptr() as u64;
             // SAFETY: private anonymous memory, RX after the copy, unmapped
-            // after the call; the block touches only `state` and its own
-            // stack slots.
-            unsafe {
+            // after the call; the block touches only `state`, `memory`
+            // through X1 and its own stack slots.
+            let exit = unsafe {
                 let page = mmap(core::ptr::null_mut(), bytes, 3, 2 | MAP_ANONYMOUS, -1, 0);
                 assert_ne!(page as usize, usize::MAX);
                 core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
@@ -733,26 +768,36 @@ mod tests {
                 let exit = entry(state);
                 assert_eq!(munmap(page, bytes), 0);
                 exit
-            }
+            };
+            state.x[1] = 0;
+            exit
         }
-        // fmul s2,s0,s1; fadd s3,s2,s0; fmul s4,s7,s0; fsub s5,s3,s4;
-        // fmadd d6,d16,d17,d18; fsqrt d19,d6; fadd v20.4s,v21.4s,v22.4s;
-        // fmul v23.2d,v24.2d,v25.2d; add x0,x0,#1; fmul s8,s5,s1;
-        // fdiv s9,s8,s0; fnmul d10,d16,d17; fmla v26.4s,v21.4s,v22.4s
-        const WORDS: [u32; 13] = [
-            0x1e21_0802,
-            0x1e20_2843,
-            0x1e20_08e4,
-            0x1e24_3865,
-            0x1f51_4a06,
-            0x1e61_c0d3,
-            0x4e36_d6b4,
-            0x6e79_df17,
-            0x9100_0400,
-            0x1e21_08a8,
-            0x1e20_1909,
-            0x1e71_8a0a,
-            0x4e36_ceba,
+        const WORDS: [u32; 25] = [
+            0xbd40_0021, // ldr s1,[x1]
+            0x1e21_0802, // fmul s2,s0,s1
+            0x1e20_2843, // fadd s3,s2,s0
+            0x1e20_08e4, // fmul s4,s7,s0
+            0x1e24_3865, // fsub s5,s3,s4
+            0xbd00_0425, // str s5,[x1,#4]
+            0xfd40_0430, // ldr d16,[x1,#8]
+            0x1f50_4a26, // fmadd d6,d17,d16,d18
+            0x3d80_1826, // str q6,[x1,#96]
+            0x1e61_c0d3, // fsqrt d19,d6
+            0x3dc0_0435, // ldr q21,[x1,#16]
+            0x4e36_d6b4, // fadd v20.4s,v21.4s,v22.4s
+            0x6e79_df17, // fmul v23.2d,v24.2d,v25.2d
+            0x9100_0400, // add x0,x0,#1
+            0x1e21_08a8, // fmul s8,s5,s1
+            0x1e20_1909, // fdiv s9,s8,s0
+            0x1e71_8a0a, // fnmul d10,d16,d17
+            0x4e36_ceba, // fmla v26.4s,v21.4s,v22.4s
+            0x3d80_083a, // str q26,[x1,#32]
+            0xfd00_182a, // str d10,[x1,#48]
+            0x6f00_e41b, // movi v27.2d,#0
+            0x0e35_d77c, // fadd v28.2s,v27.2s,v21.2s
+            0x3d80_103c, // str q28,[x1,#64]
+            0x1e3c_2b9e, // fadd s30,s28,s28
+            0x3d80_143e, // str q30,[x1,#80]
         ];
         const IXC: u32 = 1 << 4;
         const NEP: u32 = 1 << 2;
@@ -773,26 +818,28 @@ mod tests {
             .collect();
         let fallthrough = GuestAddress(pc.0 + 4 * WORDS.len() as u64);
         let single = |s: f32| u64::from(s.to_bits()) | UPPER_GARBAGE << 32;
+        let lanes = |values: [f32; 4]| {
+            let bits = values.map(|value| u64::from(value.to_bits()));
+            [bits[0] | bits[1] << 32, bits[2] | bits[3] << 32]
+        };
         let initial = |s7: f32, s1: f32, d18: f64| {
             let mut state = GuestState::default();
             for (index, vector) in state.v.iter_mut().enumerate() {
                 *vector = [UPPER_GARBAGE.rotate_left(index as u32), UPPER_GARBAGE];
             }
             state.v[0][0] = single(1.1);
-            state.v[1][0] = single(s1);
             state.v[7][0] = single(s7);
-            for (index, value) in [(16, 1.3f64), (17, 2.7), (18, d18)] {
+            for (index, value) in [(17, 2.7f64), (18, d18)] {
                 state.v[index][0] = value.to_bits();
             }
-            let lanes = |values: [f32; 4]| {
-                let bits = values.map(|value| u64::from(value.to_bits()));
-                [bits[0] | bits[1] << 32, bits[2] | bits[3] << 32]
-            };
-            state.v[21] = lanes([1.5, -2.25, 3.1, 1e-3]);
             state.v[22] = lanes([0.7, 5.5, -1.9, 7e3]);
             state.v[24] = [1.7f64.to_bits(), (-0.3f64).to_bits()];
             state.v[25] = [2.9f64.to_bits(), 1e10f64.to_bits()];
-            state
+            let mut memory: Memory = [UPPER_GARBAGE; 14];
+            memory[0] = single(s1);
+            memory[1] = 1.3f64.to_bits();
+            [memory[2], memory[3]] = lanes([1.5, -2.25, 3.1, 1e-3]);
+            (state, memory)
         };
         for target in [crate::TargetCpu::Baseline, crate::TargetCpu::detect()] {
             let block = emit_for_target(
@@ -802,10 +849,11 @@ mod tests {
                 target,
                 super::super::MemoryChecks::DEFAULT,
             );
-            // An exact zero product resumes; a subnormal one takes the
-            // helper mid-run, as does the root of a negative; an infinite
-            // input takes it at once.
+            // Normal values complete; an exact zero product resumes; a subnormal one takes the
+            // helper mid-run, as does the root of a negative or an infinite
+            // addend; an infinite input takes it at once.
             for (s7, s1, d18) in [
+                (2.0, 3.3, 0.9),
                 (0.0, 3.3, 0.9),
                 (-0.0, 3.3, 0.9),
                 (1e-40, 3.3, 0.9),
@@ -822,15 +870,15 @@ mod tests {
                     (DN, IXC),
                     (FZ, IXC),
                 ] {
-                    let mut state = initial(s7, s1, d18);
+                    let (mut state, mut memory) = initial(s7, s1, d18);
                     state.fpcr = fpcr;
                     state.fpsr = fpsr;
-                    let mut expected = state.clone();
+                    let (mut expected, mut expected_memory) = (state.clone(), memory);
                     let mut expected_exit = None;
-                    // The state before each instruction.
+                    // The state and memory before each instruction.
                     let mut before = vec![];
                     for instruction in &instructions {
-                        before.push((instruction.pc.0, expected.clone()));
+                        before.push((instruction.pc.0, expected.clone(), expected_memory));
                         let next = GuestAddress(instruction.pc.0 + 4);
                         let mut code = vec![];
                         match &instruction.operation {
@@ -851,7 +899,7 @@ mod tests {
                             ),
                         }
                         direct_exit(&mut code, next, ExitKind::Fallthrough);
-                        let exit = run(&code, &mut expected);
+                        let exit = run(&code, &mut expected, &mut expected_memory);
                         if exit.pc != next.0 || exit.kind != ExitKind::Fallthrough as u64 {
                             expected_exit = Some(exit);
                             break;
@@ -861,7 +909,7 @@ mod tests {
                         pc: fallthrough.0,
                         kind: ExitKind::Fallthrough as u64,
                     });
-                    let exit = run(&block.x86_64_code, &mut state);
+                    let exit = run(&block.x86_64_code, &mut state, &mut memory);
                     let case = (target, s7, s1, d18, fpcr, fpsr);
                     // With FPSR.IXC clear, the first full path of a run may
                     // set it; the run's later instructions then take full
@@ -871,12 +919,15 @@ mod tests {
                     if exit != expected_exit && fpcr == 0 && fpsr & IXC == 0 {
                         assert_eq!(exit.kind, ExitKind::FloatingPoint as u64, "{case:?}");
                         assert!(exit.pc < expected_exit.pc, "{case:?}");
-                        let (_, at_exit) = before.iter().find(|(pc, _)| *pc == exit.pc).unwrap();
+                        let (_, at_exit, memory_at_exit) =
+                            before.iter().find(|(pc, ..)| *pc == exit.pc).unwrap();
                         assert_eq!(&state, at_exit, "{case:?}");
+                        assert_eq!(&memory, memory_at_exit, "{case:?}");
                         continue;
                     }
                     assert_eq!(exit, expected_exit, "{case:?}");
                     assert_eq!(state, expected, "{case:?}");
+                    assert_eq!(memory, expected_memory, "{case:?}");
                 }
             }
         }

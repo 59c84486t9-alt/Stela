@@ -56,7 +56,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
             store(code, destination);
         }
         Transfer::Simd { destination, bytes } => {
-            simd::memory::transfer(code, true, bytes, destination, false);
+            simd::memory::transfer(code, true, bytes, destination, false, false);
         }
     }
 }

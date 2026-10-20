@@ -1,9 +1,9 @@
 //! FSQRT: SSE2 for positive normals, software fallback otherwise.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ColdSplit, Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar,
-    commit_inexact, environment_round, positive_exponent_range, prepare_vector_input_range,
-    read_numerical_scalar, read_numerical_vector, reject_other_status, resolve,
+    ColdSplit, Condition, Entry, INPUT_MINIMUM_EXPONENT, Input, Rounding, VZEROUPPER, branch,
+    clear_scalar, commit_inexact, environment_round, positive_exponent_range,
+    prepare_vector_input_range, read_inputs, read_numerical_vector, reject_other_status, resolve,
     restore_environment, sticky_inexact, sticky_result_check, test_control,
     vector_positive_exponent_range,
 };
@@ -255,14 +255,13 @@ fn commit_result(code: &mut Vec<u8>, operand: &Operand) {
     commit(code, operand.destination, RESULT);
 }
 
-/// S/D forms return their [`ColdSplit`]; `checked` as for
-/// `numerical::sticky_inexact`.
+/// S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
-    checked: bool,
+    entry: Entry,
 ) -> Option<ColdSplit> {
     let checked_half = operand.format == Format::Half && target.supports(TargetCpu::F16c);
     if checked_half {
@@ -276,16 +275,15 @@ pub(in crate::x86_64) fn emit(
     // the helper; every other root is exact IEEE on both sides.
     let mut sticky = None;
     if operand.format != Format::Half {
-        let mut crossing = sticky_inexact(code, checked);
+        let mut crossing = sticky_inexact(code, entry);
         // NEP is zero on this path: scalar upper bits clear, as the root
         // of a zeroing load into RESULT leaves them.
-        let source = if operand.shape == Shape::Scalar {
-            read_numerical_scalar(code, operand.format, operand.source, RESULT);
-            RESULT
+        let (input, source) = if operand.shape == Shape::Scalar {
+            (Input::Scalar(operand.format), RESULT)
         } else {
-            read_numerical_vector(code, operand.shape, operand.source, SOURCE);
-            SOURCE
+            (Input::Vector(operand.shape), SOURCE)
         };
+        read_inputs(code, entry.xmm0, target, &[(input, operand.source, source)]);
         square_root(code, operand.format, operand.shape, source);
         let rejected = sticky_result_check(code, operand.format, operand.shape, RESULT, true);
         helper.push(rejected);
@@ -330,5 +328,6 @@ pub(in crate::x86_64) fn emit(
         cold: done + size_of::<i32>(),
         full,
         crossing,
+        result: operand.destination,
     })
 }

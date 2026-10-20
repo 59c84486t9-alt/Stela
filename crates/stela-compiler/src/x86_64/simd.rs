@@ -203,18 +203,17 @@ pub(super) fn emit_numerical(
     pc: crate::GuestAddress,
     target: crate::TargetCpu,
 ) {
-    emit_numerical_split(code, operation, pc, target, true);
+    emit_numerical_split(code, operation, pc, target, numerical::Entry::UNKNOWN);
 }
 
-/// [`emit_numerical`], returning the [`numerical::ColdSplit`] of an
-/// emission with a sticky-inexact path; `checked` as for
-/// `numerical::sticky_inexact`.
+/// [`emit_numerical`] after what `entry` says, returning the
+/// [`numerical::ColdSplit`] of an emission with a sticky-inexact path.
 pub(super) fn emit_numerical_split(
     code: &mut Vec<u8>,
     operation: &crate::aarch64::FloatingPointOperation,
     pc: crate::GuestAddress,
     target: crate::TargetCpu,
-    checked: bool,
+    entry: numerical::Entry,
 ) -> Option<numerical::ColdSplit> {
     match operation {
         crate::aarch64::FloatingPointOperation::Estimate(operand) => {
@@ -224,10 +223,10 @@ pub(super) fn emit_numerical_split(
             refinement::emit(code, operand, pc, target);
         }
         crate::aarch64::FloatingPointOperation::Binary(operand) => {
-            return arithmetic::emit(code, operand, pc, target, checked);
+            return arithmetic::emit(code, operand, pc, target, entry);
         }
         crate::aarch64::FloatingPointOperation::Fused(operand) => {
-            return fused::emit(code, operand, pc, target, checked);
+            return fused::emit(code, operand, pc, target, entry);
         }
         crate::aarch64::FloatingPointOperation::Widening(operand) => {
             widening::emit(code, operand, pc, target)
@@ -249,7 +248,7 @@ pub(super) fn emit_numerical_split(
             rounding::emit(code, operand, pc, target)
         }
         crate::aarch64::FloatingPointOperation::SquareRoot(operand) => {
-            return sqrt::emit(code, operand, pc, target, checked);
+            return sqrt::emit(code, operand, pc, target, entry);
         }
         crate::aarch64::FloatingPointOperation::Conversion(operand) => {
             use crate::aarch64::simd::conversion::Operand;
@@ -286,6 +285,18 @@ pub(super) fn emit_for_target(
     target: crate::TargetCpu,
     checks: MemoryChecks,
 ) {
+    emit_after(code, operand, target, checks, None);
+}
+
+/// [`emit_for_target`] where XMM0 holds guest vector `xmm0` whole: a
+/// store of it takes it from there.
+pub(super) fn emit_after(
+    code: &mut Vec<u8>,
+    operand: &Operand,
+    target: crate::TargetCpu,
+    checks: MemoryChecks,
+    xmm0: Option<u8>,
+) {
     match *operand {
         Operand::Lut(ref operand) => lut::emit(code, operand, target),
         Operand::Aes(ref operand) => aes::emit(code, operand, target),
@@ -296,7 +307,7 @@ pub(super) fn emit_for_target(
         Operand::Sha512(ref operand) => sha512::emit(code, operand, target),
         Operand::Floating(ref operand) => floating::emit(code, operand, target),
         Operand::MemoryRegisterOffset(ref operand) => {
-            memory::emit_register_offset(code, operand, checks)
+            memory::emit_register_offset(code, operand, checks, xmm0 == Some(operand.vector))
         }
         Operand::StructureMemory(ref operand) => {
             structure_memory::emit(code, operand, target, checks)
@@ -515,10 +526,30 @@ pub(super) fn emit_for_target(
                 vector,
                 checks.stack_alignment
                     && super::memory_store::aligned_immediate(base, displacement, mode, bytes),
+                xmm0 == Some(vector),
             );
             // RDX retains the potential writeback across all SSE/GPR staging.
             memory_writeback(code, base, mode);
         }
+    }
+}
+
+/// The guest vector XMM0 holds whole after `operand`'s emission: a vector
+/// load's or MOVI's destination, committed from it, or a vector store's
+/// source, transferred from it.
+pub(super) fn xmm0_after(operand: &Operand) -> Option<u8> {
+    match *operand {
+        Operand::Memory {
+            load,
+            bytes,
+            vector,
+            ..
+        } => memory::transfers_xmm0(load, bytes).then_some(vector),
+        Operand::MemoryRegisterOffset(ref operand) => {
+            memory::transfers_xmm0(operand.load, operand.bytes).then_some(operand.vector)
+        }
+        Operand::MoveImmediate { vector, .. } => Some(vector),
+        _ => None,
     }
 }
 

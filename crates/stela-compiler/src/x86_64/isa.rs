@@ -107,6 +107,7 @@ catalog! {
     RoundPackedDouble => ("roundpd", Sse41, [0x66,0x0f,0x3a,0x09]),
     RoundScalarSingle => ("roundss", Sse41, [0x66,0x0f,0x3a,0x0a]),
     RoundScalarDouble => ("roundsd", Sse41, [0x66,0x0f,0x3a,0x0b]),
+    InsertSingle => ("insertps", Sse41, [0x66,0x0f,0x3a,0x21]),
     SquareRootPackedSingle => ("sqrtps", Baseline, [0x0f,0x51]),
     SquareRootPackedDouble => ("sqrtpd", Baseline, [0x66,0x0f,0x51]),
     SquareRootScalarSingle => ("sqrtss", Baseline, [0xf3,0x0f,0x51]),

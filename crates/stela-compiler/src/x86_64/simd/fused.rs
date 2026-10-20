@@ -1,13 +1,13 @@
 //! Fused multiply-add: FMA3 when available, otherwise an exact-product SSE2 path.
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
-    ArithmeticOpcode, ColdSplit, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT,
+    ArithmeticOpcode, ColdSplit, Condition, Entry, FusedOpcode, INPUT_MINIMUM_EXPONENT, Input,
     RESULT_MINIMUM_EXPONENT, ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma,
     emit_opcode, environment, exponent_range, jump, prepare_vector_input_range,
-    prepare_vector_result_range, read_numerical_right, read_numerical_scalar,
-    read_numerical_vector, reject_other_status, reject_product_status, resolve,
-    restore_environment, restore_environment_with_product, save_product_status, sticky_inexact,
-    sticky_result_check, test_control, vector_exponent_range, zero_product_check,
+    prepare_vector_result_range, read_inputs, read_numerical_right, read_numerical_vector,
+    reject_other_status, reject_product_status, resolve, restore_environment,
+    restore_environment_with_product, save_product_status, sticky_inexact, sticky_result_check,
+    test_control, vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::{
@@ -78,14 +78,13 @@ fn prepare_negation(code: &mut Vec<u8>, operand: &Operand) -> u8 {
     merge
 }
 
-/// With FMA3, S/D forms return their [`ColdSplit`]; `checked` as for
-/// `numerical::sticky_inexact`.
+/// With FMA3, S/D forms return their [`ColdSplit`].
 pub(in crate::x86_64) fn emit(
     code: &mut Vec<u8>,
     operand: &Operand,
     pc: GuestAddress,
     target: TargetCpu,
-    checked: bool,
+    entry: Entry,
 ) -> Option<ColdSplit> {
     if operand.format == Format::Half {
         super::super::block::direct_exit(code, pc, ExitKind::FloatingPoint);
@@ -93,7 +92,7 @@ pub(in crate::x86_64) fn emit(
     }
     let native_fma = target.supports(TargetCpu::Fma);
     let (mut helper, sticky) = if native_fma {
-        let (full, helper, done, mut crossing) = sticky_path(code, operand, target, checked);
+        let (full, helper, done, mut crossing) = sticky_path(code, operand, target, entry);
         let full_start = code.len();
         for &patch in &full {
             resolve(code, patch, full_start);
@@ -186,6 +185,8 @@ pub(in crate::x86_64) fn emit(
         let commit_start = code.len();
         resolve(code, merging, commit_start);
         commit(code, operand.destination, merge);
+        // XMM0 holds the destination wherever the emission ends.
+        packed(code, Host::MoveAligned, LEFT, merge);
     } else {
         if operand.shape == Shape::Vector64 {
             packed(code, Host::MoveQword, LEFT, LEFT);
@@ -199,6 +200,7 @@ pub(in crate::x86_64) fn emit(
         cold: done + size_of::<i32>(),
         full,
         crossing,
+        result: operand.destination,
     })
 }
 
@@ -213,18 +215,25 @@ fn sticky_path(
     code: &mut Vec<u8>,
     operand: &Operand,
     target: TargetCpu,
-    checked: bool,
+    entry: Entry,
 ) -> (Vec<usize>, Vec<usize>, usize, Vec<usize>) {
-    let full = sticky_inexact(code, checked);
+    let full = sticky_inexact(code, entry);
     // A zeroing load of the destination LEFT leaves a scalar result's
     // upper bits clear.
-    if operand.shape == Shape::Scalar {
-        read_numerical_scalar(code, operand.format, operand.left, LEFT);
+    let left = if operand.shape == Shape::Scalar {
+        Input::Scalar(operand.format)
     } else {
-        read_numerical_vector(code, operand.shape, operand.left, LEFT);
+        Input::Vector(operand.shape)
+    };
+    let vector = Input::Vector(operand.shape);
+    let mut inputs = vec![(left, operand.left, LEFT), (vector, operand.addend, ADDEND)];
+    if operand.right_lane.is_none() {
+        inputs.push((vector, operand.right, RIGHT));
     }
-    read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
-    prepare_right(code, operand);
+    read_inputs(code, entry.xmm0, target, &inputs);
+    if operand.right_lane.is_some() {
+        prepare_right(code, operand);
+    }
     emit_checked_fma(code, operand, target);
     let rejected = sticky_result_check(code, operand.format, operand.shape, LEFT, false);
     let resume = code.len();

@@ -251,12 +251,10 @@ const JMP_REL32: u8 = 0xe9;
 /// below twice the minimum normal, which the caller's classification sends
 /// to the exact helper.
 ///
-/// Unless `checked`, the caller knows the conditions hold: the previous
-/// instruction's sticky path falls through here, and the previous
-/// instruction's full path continues in this one's ([`ColdSplit`]). There
-/// are then no branches.
-pub(super) fn sticky_inexact(code: &mut Vec<u8>, checked: bool) -> Vec<usize> {
-    if !checked {
+/// Unless `entry.checked`, the caller knows the conditions hold
+/// ([`Entry`]). There are then no branches.
+pub(super) fn sticky_inexact(code: &mut Vec<u8>, entry: Entry) -> Vec<usize> {
+    if !entry.checked {
         return vec![];
     }
     test_control(code, FPCR_STICKY_MASK);
@@ -266,6 +264,27 @@ pub(super) fn sticky_inexact(code: &mut Vec<u8>, checked: bool) -> Vec<usize> {
     code.push(FPSR_INEXACT);
     let status = branch(code, Condition::Zero);
     vec![control, status]
+}
+
+/// What the block knows where a numerical instruction begins.
+#[derive(Clone, Copy)]
+pub(in crate::x86_64) struct Entry {
+    /// Whether the sticky-inexact path checks its conditions
+    /// ([`sticky_inexact`]). The block may omit the check where the
+    /// previous instruction's sticky path falls through, if that
+    /// instruction's full path continues in this one's ([`ColdSplit`]).
+    pub(in crate::x86_64) checked: bool,
+    /// The guest vector XMM0 holds whole, which the sticky path's inputs
+    /// may take from there ([`read_inputs`]).
+    pub(in crate::x86_64) xmm0: Option<u8>,
+}
+
+impl Entry {
+    /// Nothing known.
+    pub(in crate::x86_64) const UNKNOWN: Self = Self {
+        checked: true,
+        xmm0: None,
+    };
 }
 
 /// An S/D emission with a sticky-inexact path ([`sticky_inexact`]), laid
@@ -281,6 +300,9 @@ pub(in crate::x86_64) struct ColdSplit {
     pub(in crate::x86_64) full: usize,
     /// Every rel32 branch field in one part that targets the other.
     pub(in crate::x86_64) crossing: Vec<usize>,
+    /// The destination vector, which XMM0 holds whole wherever the
+    /// emission ends: every path there ends with its commit from XMM0.
+    pub(in crate::x86_64) result: u8,
 }
 
 /// An unconditional `jmp rel32` to resolve later.
@@ -830,6 +852,66 @@ pub(super) fn read_numerical_scalar(code: &mut Vec<u8>, format: Format, source: 
     .append(code, crate::TargetCpu::Baseline);
     code.push(STATE_MEMORY | (xmm << MODRM_REGISTER_SHIFT));
     code.extend(vector_offset(source).to_le_bytes());
+}
+
+/// How a sticky path reads one input from the frame: a zeroing scalar
+/// load ([`read_numerical_scalar`]) or a vector one
+/// ([`read_numerical_vector`]).
+#[derive(Clone, Copy)]
+pub(super) enum Input {
+    Scalar(Format),
+    Vector(Shape),
+}
+
+/// INSERTPS selector copying source lane 0 to destination lane 0 and
+/// clearing lanes 1 to 3.
+const INSERT_LOW_LANE_ALONE: u8 = 0b1110;
+
+/// Read each `(input, source vector, xmm)`, taking a source that XMM0
+/// holds whole (`xmm0`) from there rather than the frame, and producing
+/// the bits a frame read would. Copies out of XMM0 come first, before a
+/// read into XMM0 replaces it. A Single scalar copy needs SSE4.1's
+/// INSERTPS; without it the frame provides the input.
+pub(super) fn read_inputs(
+    code: &mut Vec<u8>,
+    xmm0: Option<u8>,
+    target: crate::TargetCpu,
+    inputs: &[(Input, u8, u8)],
+) {
+    let held = |input: Input, source: u8| {
+        xmm0 == Some(source)
+            && !matches!(input, Input::Scalar(Format::Single) if !target.supports(crate::TargetCpu::Sse41))
+    };
+    let copy = |code: &mut Vec<u8>, input: Input, xmm: u8| match input {
+        Input::Scalar(Format::Single) => {
+            Host::InsertSingle.register(code, xmm, LEFT_VECTOR, target);
+            code.push(INSERT_LOW_LANE_ALONE);
+        }
+        Input::Scalar(Format::Double) | Input::Vector(Shape::Vector64) => {
+            packed(code, Host::MoveQword, xmm, LEFT_VECTOR);
+        }
+        Input::Scalar(Format::Half) => unreachable!("Half has its own mapping policy"),
+        Input::Vector(Shape::Vector128 | Shape::Scalar) => {
+            if xmm != LEFT_VECTOR {
+                packed(code, Host::MoveAligned, xmm, LEFT_VECTOR);
+            }
+        }
+    };
+    for &(input, source, xmm) in inputs {
+        if held(input, source) && xmm != LEFT_VECTOR {
+            copy(code, input, xmm);
+        }
+    }
+    for &(input, source, xmm) in inputs {
+        if !held(input, source) {
+            match input {
+                Input::Scalar(format) => read_numerical_scalar(code, format, source, xmm),
+                Input::Vector(shape) => read_numerical_vector(code, shape, source, xmm),
+            }
+        } else if xmm == LEFT_VECTOR {
+            copy(code, input, xmm);
+        }
+    }
 }
 
 /// Select from the whole indexed source before broadcasting. A 64-bit indexed
