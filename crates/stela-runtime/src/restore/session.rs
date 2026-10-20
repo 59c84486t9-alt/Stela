@@ -7,7 +7,7 @@ use super::{
     asr,
     plist::{Limits, Value},
     route::Route,
-    store::Store,
+    store::{MAX_READ_BYTES, Store},
     stream::{ByteStream, Endian, Framed, Output},
 };
 use crate::payload::ReadAt;
@@ -439,6 +439,11 @@ pub struct Job {
     raw: Output,
     index: usize,
     offset: u64,
+    /// Verified member bytes read ahead for segment `window_segment`, from
+    /// member offset `window_at`.
+    window: Vec<u8>,
+    window_at: u64,
+    window_segment: Option<usize>,
     done: bool,
     failed: bool,
     reply_queued: bool,
@@ -454,6 +459,9 @@ impl Job {
             raw: Output::default(),
             index: 0,
             offset: 0,
+            window: Vec::new(),
+            window_at: 0,
+            window_segment: None,
             done: false,
             failed: false,
             reply_queued: false,
@@ -535,8 +543,27 @@ impl Job {
                         Segment::Bytes(bytes) => {
                             bytes[self.offset as usize..self.offset as usize + n].to_vec()
                         }
-                        Segment::Member { path, offset, .. } => {
-                            store.read_at(path, offset + self.offset, n)?
+                        Segment::Member {
+                            path,
+                            offset,
+                            bytes,
+                        } => {
+                            // Read the member in large verified runs and frame
+                            // them in FILE_CHUNK pieces: a deflated member's
+                            // random read replays its inflater from the start.
+                            let at = offset + self.offset;
+                            let start = self.window_at;
+                            if self.window_segment != Some(self.index)
+                                || at < start
+                                || at + n as u64 > start + self.window.len() as u64
+                            {
+                                let run = (bytes - self.offset).min(MAX_READ_BYTES as u64);
+                                self.window = store.read_at(path, at, run as usize)?;
+                                self.window_at = at;
+                                self.window_segment = Some(self.index);
+                            }
+                            let skip = (at - self.window_at) as usize;
+                            self.window[skip..skip + n].to_vec()
                         }
                     };
                     self.offset += n as u64;
@@ -790,6 +817,42 @@ mod tests {
         session.final_ack_sent().unwrap();
         assert_eq!(session.phase(), Phase::Complete);
         assert!(session.ledger().len() >= 6);
+    }
+    /// FileData frames stay FILE_CHUNK bytes while the member is read in
+    /// MAX_READ_BYTES runs, across a run boundary, from a deflated member.
+    #[test]
+    fn a_deflated_member_streams_whole_in_file_chunks_across_read_runs() {
+        let data: Vec<u8> = (0..MAX_READ_BYTES + 3 * FILE_CHUNK + 5)
+            .map(|i| (i * 7 / 3) as u8)
+            .collect();
+        let mut answers = Answers::new(fixture(&data, true));
+        answers.store.prepare().unwrap();
+        let request = Value::dict([
+            ("DataType", Value::from("SourceBootObjectV4")),
+            ("Arguments", Value::dict([("ImageName", Value::from("OS"))])),
+        ]);
+        let mut job = Job::new(
+            1,
+            Some(2345),
+            request.clone(),
+            answers.plan(&request).unwrap(),
+        );
+        let mut stream = Memory::new(Vec::new(), 1 << 20);
+        while job.poll(&mut stream, &mut answers.store).is_pending() {}
+        stream.input = core::mem::take(&mut stream.output);
+        let mut frame = Framed::new(Endian::Big, Limits::default());
+        let mut got = Vec::new();
+        loop {
+            let v = receive(&mut frame, &mut stream).unwrap();
+            if let Some(done) = v.get("FileDataDone") {
+                assert!(done.boolean().unwrap());
+                break;
+            }
+            let chunk = v.required("FileData").unwrap().data().unwrap();
+            assert!(chunk.len() <= FILE_CHUNK);
+            got.extend_from_slice(chunk);
+        }
+        assert_eq!(got, data);
     }
     #[test]
     fn unknown_updater_recovery_policy_and_failure_status_retain_full_context() {
