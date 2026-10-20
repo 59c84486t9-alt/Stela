@@ -3,7 +3,8 @@
 //! Every vector runs on an interrupt stack (IST), never on the interrupted
 //! stack, so native code may use any stack space below its RSP. Faults raised
 //! by native code go to the host's fault handler; host interrupts set a flag;
-//! anything else is fatal with its x86 detail.
+//! anything else is fatal with its x86 detail. The host check
+//! (`crate::host_check`) installs the same tables with its own handler.
 use super::host;
 use crate::output;
 use core::arch::{asm, global_asm};
@@ -70,6 +71,8 @@ static mut GDT: [u64; 5] = [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0, 
 static mut IDT: [[u64; 2]; 256] = [[0; 2]; 256];
 static mut FAULT_STACK: Stack = Stack([0; IST_BYTES]);
 static mut FATAL_STACK: Stack = Stack([0; IST_BYTES]);
+/// What every vector's stub calls with its frame; [`install`] sets it.
+static mut HANDLER: extern "sysv64" fn(&mut Frame) = interrupt;
 
 #[repr(C, packed)]
 struct Pointer {
@@ -96,7 +99,7 @@ global_asm!(
     "push r15",
     "cld",
     "mov rdi, rsp",
-    "call {handler}",
+    "call [rip + {handler}]",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -114,7 +117,7 @@ global_asm!(
     "pop rax",
     "add rsp, 16",
     "iretq",
-    handler = sym interrupt,
+    handler = sym HANDLER,
 );
 
 // One stub per vector: push a zero error code when the CPU pushes none,
@@ -167,13 +170,15 @@ fn gate(handler: usize, ist: u8) -> [u64; 2] {
     [low, handler >> 32]
 }
 
-/// Load the window's GDT, TSS and IDT. Runs first in the engine phase.
+/// Load the GDT, TSS and IDT, with every vector going to `handler`. Runs
+/// first in the engine phase, with the engine's [`interrupt`].
 ///
 /// # Safety
 /// Interrupts are disabled and nothing else uses the descriptor tables.
-pub unsafe fn install() {
+pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
     // SAFETY: the statics are only touched here, on one CPU.
     unsafe {
+        HANDLER = handler;
         let tss = &raw mut TSS;
         (*tss).ist[0] = (&raw mut FAULT_STACK as u64) + IST_BYTES as u64;
         (*tss).ist[1] = (&raw mut FATAL_STACK as u64) + IST_BYTES as u64;
@@ -231,7 +236,7 @@ fn cr2() -> u64 {
     value
 }
 
-extern "sysv64" fn interrupt(frame: &mut Frame) {
+pub extern "sysv64" fn interrupt(frame: &mut Frame) {
     match frame.vector as u8 {
         14 => host::page_fault(frame, cr2()),
         13 | 6 => host::native_exception(frame),
@@ -244,6 +249,12 @@ extern "sysv64" fn interrupt(frame: &mut Frame) {
 
 /// Report an x86 exception that is a Stela failure, never a guest event.
 pub fn fatal(frame: &Frame) -> ! {
+    report(frame);
+    output::fatal("unexpected x86 exception in the system engine")
+}
+
+/// Print an x86 exception's detail.
+pub fn report(frame: &Frame) {
     output::arguments(format_args!(
         "x86 exception vector={} error={:#x} rip={:#x} rsp={:#x} cr2={:#x} rflags={:#x}\n",
         frame.vector,
@@ -253,5 +264,4 @@ pub fn fatal(frame: &Frame) -> ! {
         cr2(),
         frame.rflags
     ));
-    output::fatal("unexpected x86 exception in the system engine")
 }

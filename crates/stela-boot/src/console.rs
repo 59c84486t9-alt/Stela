@@ -103,11 +103,35 @@ impl Framebuffer {
         }
     }
 
+    /// Pixels per row in memory, at least the width.
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Whether pixels are blue in the low byte (GOP's BGR); otherwise red.
+    pub fn is_bgr(&self) -> bool {
+        self.bgr
+    }
+
+    /// The same mode with only its top `height` rows, so that text written
+    /// to it leaves the rows below for something else.
+    pub fn top(self, height: usize) -> Self {
+        Self {
+            height: height.min(self.height),
+            ..self
+        }
+    }
+
     fn pixel(&self, color: Color) -> u32 {
-        let (red, green, blue) = match color {
-            Color::Text => (0xe0, 0xe0, 0xe0),
-            Color::Fatal => (0xff, 0x50, 0x50),
-        };
+        match color {
+            Color::Text => self.rgb(0xe0, 0xe0, 0xe0),
+            Color::Fatal => self.rgb(0xff, 0x50, 0x50),
+        }
+    }
+
+    /// The pixel value of a colour in this mode's order.
+    pub fn rgb(&self, red: u8, green: u8, blue: u8) -> u32 {
+        let (red, green, blue) = (u32::from(red), u32::from(green), u32::from(blue));
         if self.bgr {
             (red << 16) | (green << 8) | blue
         } else {
@@ -116,14 +140,27 @@ impl Framebuffer {
     }
 
     fn fill(&self, x: usize, y: usize, size: usize, value: u32) {
-        for row in y..y + size {
+        self.rectangle(x, y, size, size, value);
+    }
+
+    /// Fill `width` by `height` pixels from (`x`, `y`), cut to the mode's
+    /// visible rows and columns.
+    pub fn rectangle(&self, x: usize, y: usize, width: usize, height: usize, value: u32) {
+        for row in y..(y + height).min(self.height) {
             let line = (self.base + row * self.stride * BYTES_PER_PIXEL) as *mut u32;
-            for column in x..x + size {
-                // SAFETY: callers keep `x + size <= width` and
-                // `y + size <= height`, inside the mode's framebuffer.
+            for column in x..(x + width).min(self.width) {
+                // SAFETY: inside the mode's visible framebuffer.
                 unsafe { line.add(column).write_volatile(value) };
             }
         }
+    }
+
+    /// The pixel at (`x`, `y`), which is visible.
+    pub fn read(&self, x: usize, y: usize) -> u32 {
+        assert!(x < self.width && y < self.height, "pixel outside the mode");
+        let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *const u32;
+        // SAFETY: inside the mode's visible framebuffer, as checked.
+        unsafe { line.add(x).read_volatile() }
     }
 
     fn clear(&self) {

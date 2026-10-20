@@ -19,7 +19,7 @@ use uefi::{
 const OPTIONS: &CStr16 = cstr16!("\\EFI\\stela\\stela.cfg");
 /// The original ARM bytes, loaded unchanged.
 const SOURCE: &CStr16 = cstr16!("\\EFI\\stela\\source.bin");
-const STACK_PAGES: usize = 256;
+pub(crate) const STACK_PAGES: usize = 256;
 pub const NATIVE_ARENAS: usize = 2;
 pub const RAM_ARENAS: usize = 8;
 
@@ -212,7 +212,7 @@ pub(crate) fn ram() -> Result<Vec<(usize, usize)>, &'static str> {
 /// fill a whole chunk and 4 KiB pages elsewhere. Page zero and the stack
 /// guard stay unmapped; the image gets its section rights, and each arena an
 /// empty table.
-fn tables(
+pub(crate) fn tables(
     image: &Image,
     holes: [usize; 2],
     arenas: &[BootArena],

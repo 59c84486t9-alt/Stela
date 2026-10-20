@@ -62,6 +62,10 @@ impl Apic {
         }
     }
 
+    pub fn is_x2apic(&self) -> bool {
+        self.x2
+    }
+
     pub fn read(&self, register: u32) -> u32 {
         if self.x2 {
             let (low, _high): (u32, u32);

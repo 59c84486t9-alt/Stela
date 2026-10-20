@@ -11,10 +11,10 @@ mod erase;
 mod host;
 mod input;
 pub(crate) mod install;
-mod interrupts;
+pub(crate) mod interrupts;
 mod network;
-mod nor;
-mod power;
+pub(crate) mod nor;
+pub(crate) mod power;
 mod restore;
 mod speculation;
 mod storage;
@@ -1235,7 +1235,7 @@ pub(crate) fn report(event: &Event) {
 /// Engine-phase entry, called by the loader on the window stack.
 pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: the first engine code; interrupts are off and nothing else runs.
-    unsafe { interrupts::install() };
+    unsafe { interrupts::install(interrupts::interrupt) };
     // SAFETY: the loader wrote the handoff page and passed its physmap address.
     let handoff = unsafe { &*(handoff as *const Handoff) };
     if handoff.magic != MAGIC {

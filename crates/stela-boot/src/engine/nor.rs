@@ -102,20 +102,21 @@ impl HostNor {
 }
 
 /// Open the boot log after the SEP's state and hand it to the output, when
-/// the partition holds the region; otherwise say why there is none.
-fn open_log(disk: &Shared, block: u64, available: u64) {
+/// the partition holds the region; otherwise say why there is none. Returns
+/// whether the log is open.
+pub(crate) fn open_log(disk: &Shared, block: u64, available: u64) -> bool {
     if available < boot_log::PARTITION_BYTES {
         output::arguments(format_args!(
             "BOOT LOG off: the machine-state partition holds {available:#x} bytes; the log needs {:#x}\n",
             boot_log::PARTITION_BYTES
         ));
-        return;
+        return false;
     }
     if !boot_log::OFFSET.is_multiple_of(block) || !boot_log::LOG_BYTES.is_multiple_of(block) {
         output::arguments(format_args!(
             "BOOT LOG off: {block}-byte blocks do not divide the log region\n"
         ));
-        return;
+        return false;
     }
     let mut device: Box<dyn BlockDevice> = Box::new(
         disk.window(boot_log::OFFSET / block, boot_log::LOG_BYTES / block)
@@ -125,7 +126,7 @@ fn open_log(disk: &Shared, block: u64, available: u64) {
         Ok(writer) => writer,
         Err(error @ (BlockError::Unsupported(_) | BlockError::ReadOnly)) => {
             output::arguments(format_args!("BOOT LOG off: {error}\n"));
-            return;
+            return false;
         }
         Err(error) => {
             output::arguments(format_args!("BOOT LOG refusal: {error}\n"));
@@ -143,4 +144,5 @@ fn open_log(disk: &Shared, block: u64, available: u64) {
         writer.head()
     ));
     output::install_log(writer, device);
+    true
 }

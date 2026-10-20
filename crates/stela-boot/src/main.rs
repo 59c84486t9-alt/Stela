@@ -5,7 +5,8 @@
 //! `\EFI\stela\source.bin` from its own volume, leaves boot services,
 //! installs its own page tables and runs the image on `SoftwareEl1Machine`.
 //! A `stela.cfg` that starts with `--system` instead runs the image on the
-//! system-mode engine (`docs/design/system.md#system-mode-execution`).
+//! system-mode engine (`docs/design/system.md#system-mode-execution`), and
+//! one that starts with `--host-check` reports on the PC (`host_check`).
 //! With `\EFI\stela\choices.cfg` beside it, the startup choices (`choice`)
 //! pick the option line first.
 #![no_std]
@@ -32,10 +33,12 @@ use uefi::{
 mod apic;
 mod choice;
 mod console;
+mod cpu;
 mod engine;
 mod firmware;
 mod handoff;
 mod heap;
+mod host_check;
 mod la57;
 mod layout;
 mod output;
@@ -177,6 +180,10 @@ fn main() -> Status {
     let options = choice::choose(&mut volume, options);
     if options.starts_with(b"--system") {
         system::boot(options, volume);
+    }
+    if options.starts_with(host_check::OPTION) {
+        drop(volume);
+        host_check::boot(options);
     }
     // Install mode needs no ARM image; `take_over` checks it is present.
     let source = firmware::source(&mut volume).ok();

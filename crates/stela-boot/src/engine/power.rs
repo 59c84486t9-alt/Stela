@@ -152,8 +152,23 @@ impl HostPowerControl {
     /// A press of the host's power button since the last poll goes to the
     /// guest as a press and a release.
     pub fn poll(&mut self, devices: &mut AppleDevices) {
-        let Some(power) = self.power.filter(|_| self.button) else {
+        if !self.pressed() {
             return;
+        }
+        let result = devices
+            .power_button(true)
+            .and_then(|()| devices.power_button(false));
+        if let Err(error) = result
+            && !core::mem::replace(&mut self.refused, true)
+        {
+            output::arguments(format_args!("POWER host button refused: {error}\n"));
+        }
+    }
+
+    /// Whether the host's power button was pressed since the last call.
+    pub fn pressed(&mut self) -> bool {
+        let Some(power) = self.power.filter(|_| self.button) else {
+            return false;
         };
         let mut pressed = false;
         for block in power.blocks() {
@@ -165,18 +180,10 @@ impl HostPowerControl {
                 }
             }
         }
-        if !pressed {
-            return;
+        if pressed {
+            output::arguments(format_args!("POWER host button pressed\n"));
         }
-        output::arguments(format_args!("POWER host button pressed\n"));
-        let result = devices
-            .power_button(true)
-            .and_then(|()| devices.power_button(false));
-        if let Err(error) = result
-            && !core::mem::replace(&mut self.refused, true)
-        {
-            output::arguments(format_args!("POWER host button refused: {error}\n"));
-        }
+        pressed
     }
 
     /// Restart the host machine.

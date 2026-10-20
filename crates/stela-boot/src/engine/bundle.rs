@@ -265,18 +265,18 @@ fn random_word(seed: bool) -> Option<u64> {
 const TRANSFER_BYTES: usize = 1 << 20;
 
 /// Byte-addressed reads over a block device, for the APFS reader.
-pub(super) struct Bytes<D> {
+pub(crate) struct Bytes<D> {
     device: D,
     block: Vec<u8>,
 }
 
 impl<D: BlockDevice> Bytes<D> {
-    pub(super) fn new(device: D) -> Self {
+    pub(crate) fn new(device: D) -> Self {
         let block = vec![0; device.identity().block_size as usize];
         Self { device, block }
     }
 
-    pub(super) fn into_inner(self) -> D {
+    pub(crate) fn into_inner(self) -> D {
         self.device
     }
 }

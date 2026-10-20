@@ -614,7 +614,7 @@ fn load(
 
 /// The host's ACPI power hardware, reported while the firmware's tables
 /// are still mapped; the engine gets it without the report.
-fn host_power() -> Option<pc::power::HostPower> {
+pub(crate) fn host_power() -> Option<pc::power::HostPower> {
     let rsdp = storage::rsdp()?;
     // SAFETY: the firmware's RSDP, its tables mapped while boot services last.
     match unsafe { pc::power::discover(rsdp) } {
