@@ -8,8 +8,10 @@
 //! engine one element at a time through the context's memory service
 //! ([`serve`]), which translates and checks each as a plain data access and
 //! raises its exception after the leaf returns. What a leaf cannot run stops
-//! explicitly: numerical floating point, tag-checked accesses with tag checks
-//! enabled, and PSTATE.DIT set, whose timing the leaves do not keep.
+//! explicitly: tag-checked accesses with tag checks enabled, and PSTATE.DIT
+//! set, whose timing the leaves do not keep. Numerical floating point, which
+//! needs Arm's FP semantics, is completed in software
+//! ([`Machine::scalable_numerical`]).
 use super::{
     DeviceError, Devices, FETCH_PAGE, Host, InstallError, Machine, NativeCode, RamTables,
     RequirementKind, Step, Stop, Translated,
@@ -25,10 +27,17 @@ use crate::machine::{
 use alloc::{format, string::String, vec::Vec};
 use stela_compiler::{
     GuestAddress, GuestState,
-    aarch64::scalable::{
-        VectorLength,
-        features::{ScalableFeature, ScalableFeatures},
-        profile::ScalableControls,
+    aarch64::{
+        floating::features::NumericalFeatures,
+        scalable::{
+            VectorLength,
+            features::{ScalableFeature, ScalableFeatures},
+            profile::ScalableControls,
+        },
+    },
+    block::scalable::{
+        ScalableNumericalInstruction, admit_scalable_numerical_instruction,
+        decode_scalable_numerical_instruction,
     },
     context::{
         ExecutionContext,
@@ -40,6 +49,9 @@ use stela_compiler::{
     extended::{self, ScalableProfile},
 };
 
+/// The numerical features of every Apple chip's identification: no
+/// FEAT_SME_FA64 (FullA64 off), FEAT_EBF16 or FEAT_RPRES.
+const NUMERICAL_FEATURES: NumericalFeatures = NumericalFeatures::new(false, false, false);
 /// RET X30, which ends a context leaf.
 const RET_X30: u32 = 0xd65f_03c0;
 /// SCTLR_ELx.TCF and TCF0: tag check faults at EL1 or EL2, and at EL0.
@@ -169,6 +181,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(profile) => profile,
             Err(detail) => return refuse(self, &detail),
         };
+        match decode_scalable_numerical_instruction(GuestAddress(pc), word) {
+            Ok(Some(instruction)) => return self.scalable_numerical(instruction, profile),
+            Ok(None) => {}
+            Err(error) => return refuse(self, &error.0),
+        }
         let leaf = match self.scalable_leaf(pc, word, profile) {
             Ok(leaf) => leaf,
             Err(detail) => return refuse(self, &detail),
@@ -186,6 +203,38 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // for the two-argument context ABI.
         let entry: Entry = unsafe { core::mem::transmute::<usize, Entry>(entry) };
         self.completing(pc, |machine| machine.call_leaf(entry, profile, word))
+    }
+
+    /// Complete the numerical floating-point instruction `instruction` in
+    /// software (`floating::scalable`), with FPCR's controls and FPSR's
+    /// cumulative flags; in streaming mode without FEAT_SME_FA64 Arm's
+    /// `FPProcessException` takes no FP trap, so none is.
+    fn scalable_numerical(
+        &mut self,
+        instruction: ScalableNumericalInstruction,
+        profile: ScalableProfile,
+    ) -> Step {
+        let (pc, word) = (instruction.instruction_pc.0, instruction.word);
+        let refuse = |machine: &Self, detail: String| {
+            Err(machine.unsupported(RequirementKind::Instruction { word, detail }))
+        };
+        let admitted =
+            match admit_scalable_numerical_instruction(instruction, profile, NUMERICAL_FEATURES) {
+                Ok(admitted) => admitted,
+                Err(error) => return refuse(self, error.0),
+            };
+        self.completing(pc, |machine| {
+            let Some(scalable) = machine.cpu.scalable.as_mut() else {
+                return refuse(machine, "a PE without SME state".into());
+            };
+            if let Err(error) =
+                crate::floating::scalable::complete(&mut machine.cpu.state, scalable, &admitted)
+            {
+                return refuse(machine, format!("{error}"));
+            }
+            machine.statistics.blocks += 1;
+            machine.next()
+        })
     }
 
     /// Call `entry` on the PE's state, lent with its scalable registers, and
@@ -620,6 +669,66 @@ mod tests {
         let compiled = machine.statistics.compiled;
         machine.step().unwrap();
         assert_eq!(machine.statistics.compiled, compiled);
+    }
+
+    #[test]
+    fn scalable_floating_point_follows_fpcr_and_sets_fpsr_without_trapping() {
+        const PTRUE_P0_S: u32 = 0x2598_e3e0; // ptrue p0.s
+        const FDUP_Z0_1: u32 = 0x25b9_ce00; // fdup z0.s, #1.0
+        const FDUP_Z1_2: u32 = 0x25b9_c001; // fdup z1.s, #2.0
+        const FADD_Z0_Z1: u32 = 0x6580_8020; // fadd z0.s, p0/m, z0.s, z1.s
+        const DUP_Z1_0: u32 = 0x25b8_c001; // dup z1.s, #0
+        const FDIV_Z0_Z1: u32 = 0x658d_8020; // fdiv z0.s, p0/m, z0.s, z1.s
+        const FPCR_DZE: u32 = 1 << 9;
+        const FPSR_DZC: u32 = 1 << 1;
+        const FMOPA_ZA0_Z0_Z1: u32 = 0x8081_0000; // fmopa za0.s, p0/m, p0/m, z0.s, z1.s
+        let words = [
+            PTRUE_P0_S,
+            FDUP_Z0_1,
+            FDUP_Z1_2,
+            FADD_Z0_Z1,
+            DUP_Z1_0,
+            FDIV_Z0_Z1,
+            FDUP_Z0_1,
+            FDUP_Z1_2,
+            FMOPA_ZA0_Z0_Z1,
+        ];
+        let Some(mut machine) = streaming(&words) else {
+            return;
+        };
+        // Divide-by-zero trapping enabled: streaming mode without FA64
+        // ignores it and only accumulates DZC.
+        machine.cpu.state.fpcr = FPCR_DZE;
+        machine.cpu.state.fpsr = 0;
+        for index in 0..4 {
+            assert_eq!(machine.step(), Ok(()), "{index}");
+        }
+        let lanes = |machine: &TestMachine| -> Vec<u32> {
+            z(machine, 0)
+                .chunks(4)
+                .map(|lane| u32::from_le_bytes(lane.try_into().unwrap()))
+                .collect()
+        };
+        assert_eq!(lanes(&machine), [3.0f32.to_bits(); 16]);
+        assert_eq!(machine.cpu.state.fpsr, 0);
+        for index in 4..6 {
+            assert_eq!(machine.step(), Ok(()), "{index}");
+        }
+        assert_eq!(lanes(&machine), [f32::INFINITY.to_bits(); 16]);
+        assert_eq!(machine.cpu.state.fpsr, FPSR_DZC);
+        // The outer product of ones and twos: row 0 of ZA0.S is ZA's first
+        // array vector.
+        for index in 6..9 {
+            assert_eq!(machine.step(), Ok(()), "{index}");
+        }
+        let mut row = [0u8; STREAMING_VECTOR_BYTES];
+        let scalable = machine.cpu.scalable.as_ref().unwrap();
+        scalable.read_za(0, &mut row).unwrap();
+        assert!(
+            row.chunks(4)
+                .all(|lane| lane == 2.0f32.to_bits().to_le_bytes())
+        );
+        assert_eq!(machine.cpu.pc, BASE + 36);
     }
 
     #[test]
