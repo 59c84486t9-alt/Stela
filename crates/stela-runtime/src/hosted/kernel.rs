@@ -39,6 +39,7 @@ mod status;
 
 pub use bsd::Signature;
 pub(super) use bsd::signal::host as signals;
+pub(super) use bsd::sysctl::Release;
 
 pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 
@@ -209,6 +210,7 @@ pub(super) struct Config {
     pub(super) signer: Option<pauth::Context>,
     pub(super) hardware: Hardware,
     pub(super) features: Vec<(&'static str, bool)>,
+    pub(super) release: Release,
     pub(super) executable: Executable,
     /// The dynamic linker's Mach header, slid.
     pub(super) dyld_header: u64,
@@ -239,7 +241,7 @@ impl Process {
         mach::exception::set_guard_default(restricted);
         Arc::new(Self {
             pac_exception_fatal,
-            sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
+            sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features, &config.release),
             signer: config.signer,
             hardware: config.hardware,
             user_stack: config.user_stack,

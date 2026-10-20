@@ -273,6 +273,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         signer,
         hardware,
         features,
+        release: kernel::Release::read(&launch.roots)?,
         executable: Executable {
             path: launch.executable_path.clone(),
             code_signing_flags: launch.signature.exec_flags(),

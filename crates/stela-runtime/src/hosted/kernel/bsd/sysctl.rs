@@ -2,9 +2,11 @@
 //!
 //! The kernel the guest runs on is the host's, so the kernel's own
 //! variables (`kern.*`, `vm.*`, `vfs.*`, `net.*`, ...) are the host's and
-//! are forwarded, except the kernel's identity (`kern.version`,
-//! `kern.osrelease` and `kern.osversion`), which names the 26A434 arm64
-//! kernel. The machine is the modeled Apple-silicon one: the `hw.*`
+//! are forwarded, except the guest system's identity: the kernel's
+//! (`kern.version` and `kern.osrelease`), from the kernel version its
+//! install recorded, and the release launchd publishes at boot
+//! (`kern.osversion`, `kern.osproductversion`, `kern.iossupportversion`),
+//! from its `SystemVersion.plist` ([`Release`]). The machine is the modeled Apple-silicon one: the `hw.*`
 //! and `machdep.*` namespaces are owned here and answered as an arm64 XNU
 //! release kernel answers them (`bsd/kern/kern_mib.c`,
 //! `bsd/dev/arm64/sysctl.c`) for [`Hardware`] and the PE's identification
@@ -25,7 +27,8 @@ use crate::hosted::{
     hardware::{self, Hardware},
     memory,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use std::path::PathBuf;
 
 /// `CTL_MAXNAME`.
 const MAX_NAME: u64 = 12;
@@ -52,16 +55,73 @@ const CTLFLAG_LOCKED: u32 = 0x0080_0000;
 const LITTLE_ENDIAN: i32 = 1234;
 const CACHE_ENTRIES: usize = 10;
 
-const KERNEL_RELEASE: &str = "27.0.0";
-/// The OS build the kernel belongs to (`kern.osversion`).
-const OS_BUILD: &str = "26A434";
-
 /// The namespaces whose variables describe the machine.
 const OWNED: &[&str] = &["hw.", "machdep."];
 
 /// Variables the installed guest system answers, absent when it did not
 /// record them (an imported or development root), never the host's.
-const INSTALLED: &[&str] = &["kern.version"];
+const INSTALLED: &[&str] = &[
+    "kern.version",
+    "kern.osrelease",
+    "kern.osversion",
+    "kern.osproductversion",
+    "kern.iossupportversion",
+];
+
+/// The OS cryptex's version file, which CoreFoundation reads first.
+const OS_CRYPTEX_SYSTEM_VERSION: &str =
+    "System/Cryptexes/OS/System/Library/CoreServices/SystemVersion.plist";
+
+/// The prefix of XNU's `version[]`, before `osrelease[]`.
+const KERNEL_VERSION_PREFIX: &str = "Darwin Kernel Version ";
+
+/// The guest system's release, from its `SystemVersion.plist`, which
+/// launchd publishes at boot (`kern.osversion`, `kern.osproductversion`,
+/// `kern.iossupportversion`): the OS cryptex's, then the system volume's,
+/// as CoreFoundation looks them up, under the first guest root holding
+/// one. Without one the variables are absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Release {
+    pub(crate) build: Option<String>,
+    pub(crate) product_version: Option<String>,
+    pub(crate) ios_support_version: Option<String>,
+}
+
+impl Release {
+    pub(crate) fn read(roots: &[PathBuf]) -> Result<Self> {
+        let path = [OS_CRYPTEX_SYSTEM_VERSION, crate::preboot::SYSTEM_VERSION]
+            .iter()
+            .flat_map(|path| roots.iter().map(move |root| root.join(path)))
+            .find(|path| path.is_file());
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let bytes =
+            std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        let plist = crate::restore::plist::decode(&bytes, Default::default())
+            .map_err(|error| anyhow!("{} is not a property list: {error:?}", path.display()))?;
+        let field = |key: &str| {
+            plist
+                .get(key)
+                .and_then(|value| value.string().ok())
+                .map(str::to_owned)
+        };
+        Ok(Self {
+            build: field("ProductBuildVersion"),
+            product_version: field("ProductVersion"),
+            ios_support_version: field("iOSSupportVersion"),
+        })
+    }
+}
+
+/// `osrelease[]` of a kernel version: "Darwin Kernel Version 27.0.0: ..."
+/// names release 27.0.0.
+fn kernel_release(version: &str) -> Option<&str> {
+    let (release, _) = version
+        .strip_prefix(KERNEL_VERSION_PREFIX)?
+        .split_once(':')?;
+    Some(release)
+}
 
 /// Machine variables that are the host's own: its memory and byte order.
 const HOST_MACHINE: &[&str] = &[
@@ -193,7 +253,11 @@ struct Level {
 }
 
 impl Model {
-    pub(crate) fn new(hardware: &Hardware, features: &[(&'static str, bool)]) -> Self {
+    pub(crate) fn new(
+        hardware: &Hardware,
+        features: &[(&'static str, bool)],
+        release: &Release,
+    ) -> Self {
         let cpus = i32::from(hardware.cpus());
         let levels = levels(hardware);
         // Unscoped cache variables describe the lowest performance level.
@@ -357,9 +421,19 @@ impl Model {
         // xnu tag, as the guest system's install recorded it.
         if let Some(version) = &hardware.kernel_version {
             add("kern.version", Value::String(version.clone()));
+            if let Some(release) = kernel_release(version) {
+                add("kern.osrelease", Value::String(release.into()));
+            }
         }
-        add("kern.osrelease", Value::String(KERNEL_RELEASE.into()));
-        add("kern.osversion", Value::String(OS_BUILD.into()));
+        for (name, value) in [
+            ("kern.osversion", &release.build),
+            ("kern.osproductversion", &release.product_version),
+            ("kern.iossupportversion", &release.ios_support_version),
+        ] {
+            if let Some(value) = value {
+                add(name, Value::String(value.clone()));
+            }
+        }
         Self { entries }
     }
 
@@ -669,13 +743,53 @@ mod tests {
     use super::*;
     use crate::machine::Chip;
 
-    /// A synthetic kernel version, as an install records it.
+    /// A synthetic kernel version, as an install records it, and release.
     const VERSION: &str = "Darwin Kernel Version 1.2.3: synthetic; root:test~1/RELEASE_TEST";
+
+    fn release() -> Release {
+        Release {
+            build: Some("0Z0".into()),
+            product_version: Some("9.8.7".into()),
+            ios_support_version: Some("6.5".into()),
+        }
+    }
 
     fn model() -> Model {
         let mut hardware = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
         hardware.kernel_version = Some(VERSION.into());
-        Model::new(&hardware, &[("FEAT_LSE", true), ("AdvSIMD", true)])
+        Model::new(
+            &hardware,
+            &[("FEAT_LSE", true), ("AdvSIMD", true)],
+            &release(),
+        )
+    }
+
+    #[test]
+    fn the_release_is_the_guest_systems_version_file() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join(crate::preboot::SYSTEM_VERSION);
+        std::fs::create_dir_all(path.parent().unwrap())?;
+        std::fs::write(
+            &path,
+            "<plist><dict><key>ProductBuildVersion</key><string>0Z0</string>\
+             <key>ProductVersion</key><string>9.8.7</string>\
+             <key>iOSSupportVersion</key><string>6.5</string></dict></plist>",
+        )?;
+        assert_eq!(Release::read(&[root.path().to_owned()])?, release());
+        // The OS cryptex's file comes first.
+        let cryptex = root.path().join(OS_CRYPTEX_SYSTEM_VERSION);
+        std::fs::create_dir_all(cryptex.parent().unwrap())?;
+        std::fs::write(
+            &cryptex,
+            "<plist><dict><key>ProductBuildVersion</key><string>1Y1</string></dict></plist>",
+        )?;
+        let read = Release::read(&[root.path().to_owned()])?;
+        assert_eq!(read.build.as_deref(), Some("1Y1"));
+        assert_eq!(read.product_version, None);
+        assert_eq!(Release::read(&[])?, Release::default());
+        assert_eq!(kernel_release(VERSION), Some("1.2.3"));
+        assert_eq!(kernel_release("Darwin Kernel Version"), None);
+        Ok(())
     }
 
     /// One performance level per core type: its cores in every cluster,
@@ -684,7 +798,7 @@ mod tests {
     fn perflevels_are_core_types_and_l2_sharing_is_one_cluster() {
         let value = |model: &Model, name: &str| model.entries[model.index(name).unwrap()].1.clone();
         let m2 = model();
-        let m1_pro = Model::new(&Hardware::of_soc(0x6000, 1 << 34).unwrap(), &[]);
+        let m1_pro = Model::new(&Hardware::of_soc(0x6000, 1 << 34).unwrap(), &[], &release());
         for (model, cpus, subfamily, levels) in [
             (&m2, 8, hardware::CPUSUBFAMILY_ARM_HG, [(4, 4), (4, 4)]),
             (&m1_pro, 10, hardware::CPUSUBFAMILY_ARM_HS, [(8, 4), (2, 2)]),
@@ -762,15 +876,30 @@ mod tests {
             Ok(Lookup::Absent)
         ));
         assert!(matches!(lookup(&model, "kern.ostype"), Ok(Lookup::Host)));
-        assert_eq!(value("kern.osrelease"), &Value::String("27.0.0".into()));
+        assert_eq!(value("kern.osrelease"), &Value::String("1.2.3".into()));
         assert_eq!(value("kern.version"), &Value::String(VERSION.into()));
-        // Without the install's record the variable is absent, not the
-        // host's.
-        let unrecorded = Model::new(&Hardware::of(Chip::AppleM2, 1 << 34).unwrap(), &[]);
-        assert!(matches!(
-            lookup(&unrecorded, "kern.version"),
-            Ok(Lookup::Absent)
-        ));
+        assert_eq!(value("kern.osversion"), &Value::String("0Z0".into()));
+        assert_eq!(
+            value("kern.osproductversion"),
+            &Value::String("9.8.7".into())
+        );
+        assert_eq!(
+            value("kern.iossupportversion"),
+            &Value::String("6.5".into())
+        );
+        // Without the install's record, or the guest's version file, the
+        // variables are absent, not the host's.
+        let unrecorded = Model::new(
+            &Hardware::of(Chip::AppleM2, 1 << 34).unwrap(),
+            &[],
+            &Release::default(),
+        );
+        for name in INSTALLED {
+            assert!(
+                matches!(lookup(&unrecorded, name), Ok(Lookup::Absent)),
+                "{name}"
+            );
+        }
         assert!(matches!(lookup(&model, "hw.memsize"), Ok(Lookup::Host)));
         assert!(lookup(&model, "machdep.wake_abstime").is_err());
         let index = model.index("hw.optional.arm.FEAT_LSE").unwrap();
