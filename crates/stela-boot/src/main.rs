@@ -29,6 +29,7 @@ use uefi::{
     Status,
     boot::{AllocateType, MemoryType},
 };
+mod apic;
 mod choice;
 mod console;
 mod engine;

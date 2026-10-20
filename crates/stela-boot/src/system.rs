@@ -33,7 +33,6 @@ const RELOCATION_DIRECTORY: usize = 5;
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
 const IMAGE_REL_BASED_DIR64: u16 = 10;
 const CPUID_LA57: u32 = 1 << 16;
-const APIC_BASE_MSR: u32 = 0x1b;
 
 #[derive(Clone, Copy)]
 struct Snapshot {
@@ -404,15 +403,7 @@ fn load(
         .ok()
         .and_then(|time| unix_seconds(&time));
     let power = host_power();
-    let apic_base: u64 = {
-        let (low, high): (u32, u32);
-        // SAFETY: IA32_APIC_BASE exists on every x86-64 CPU.
-        unsafe {
-            asm!("rdmsr", in("ecx") APIC_BASE_MSR, out("eax") low, out("edx") high,
-                options(nomem, nostack, preserves_flags));
-        }
-        (u64::from(high) << 32) | u64::from(low)
-    };
+    let apic_base = crate::apic::base_msr();
 
     let mut frames = FirmwareFrames;
     let ram = firmware::ram()?;
@@ -504,7 +495,7 @@ fn load(
             )?;
         }
     }
-    let apic = apic_base & 0x000f_ffff_ffff_f000;
+    let apic = apic_base & crate::apic::BASE_ADDRESS;
     if !ram.iter().any(|r| r.0 as u64 <= apic && apic < r.1 as u64) {
         tables::map_page(&mut frames, root, layout::physical(apic), apic, data)?;
     }

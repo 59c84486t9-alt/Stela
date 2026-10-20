@@ -14,6 +14,7 @@
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
 use super::interrupts::{Frame, SPURIOUS_VECTOR, TIMER_VECTOR};
 use crate::{
+    apic::{self, Apic},
     layout,
     tables::{self, Frames, NX, PAGE, PRESENT, WRITABLE},
 };
@@ -134,56 +135,6 @@ struct Recorded {
     registers: [u64; 16],
 }
 
-struct Apic {
-    x2: bool,
-    base: u64,
-    /// Timer ticks per second at divide-by-one.
-    hz: u64,
-}
-
-impl Apic {
-    fn read(&self, register: u32) -> u32 {
-        if self.x2 {
-            let (low, _high): (u32, u32);
-            // SAFETY: an x2APIC MSR of this CPU.
-            unsafe {
-                asm!("rdmsr", in("ecx") 0x800 + (register >> 4), out("eax") low, out("edx") _high,
-                    options(nomem, nostack, preserves_flags));
-            }
-            low
-        } else {
-            // SAFETY: the xAPIC page is in the physmap.
-            unsafe {
-                ((layout::physical(self.base) + u64::from(register)) as *const u32).read_volatile()
-            }
-        }
-    }
-    fn write(&self, register: u32, value: u32) {
-        if self.x2 {
-            // SAFETY: an x2APIC MSR of this CPU.
-            unsafe {
-                asm!("wrmsr", in("ecx") 0x800 + (register >> 4), in("eax") value, in("edx") 0,
-                    options(nostack, preserves_flags));
-            }
-        } else {
-            // SAFETY: the xAPIC page is in the physmap.
-            unsafe {
-                ((layout::physical(self.base) + u64::from(register)) as *mut u32)
-                    .write_volatile(value)
-            };
-        }
-    }
-}
-
-const APIC_EOI: u32 = 0xb0;
-const APIC_SVR: u32 = 0xf0;
-const APIC_LVT_TIMER: u32 = 0x320;
-const APIC_LVT_LINT0: u32 = 0x350;
-const APIC_INITIAL: u32 = 0x380;
-const APIC_CURRENT: u32 = 0x390;
-const APIC_DIVIDE: u32 = 0x3e0;
-const LVT_MASKED: u32 = 1 << 16;
-
 pub struct State {
     ram: Vec<RamRange>,
     pool: Pool,
@@ -206,6 +157,8 @@ pub struct State {
     /// call.
     counter_per_tsc: u64,
     apic: Apic,
+    /// The APIC timer's ticks per second at divide-by-one.
+    apic_hz: u64,
     pub fills: u64,
     pub resets: u64,
     /// Resets of the lower half alone.
@@ -233,12 +186,7 @@ fn state() -> &'static mut State {
     unsafe { (*STATE.0.get()).as_mut().expect("host state installed") }
 }
 
-pub fn rdtsc() -> u64 {
-    let (low, high): (u32, u32);
-    // SAFETY: RDTSC has no side effects.
-    unsafe { asm!("rdtsc", out("eax") low, out("edx") high, options(nomem, nostack)) };
-    (u64::from(high) << 32) | u64::from(low)
-}
+pub use crate::apic::rdtsc;
 
 fn load_root(root: u64) {
     // SAFETY: every root maps the window, which holds all code and data in use.
@@ -294,12 +242,10 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         *slot = root()?;
     }
     load_root(host_root);
-    let x2 = config.apic_base & (1 << 10) != 0;
-    let apic = Apic {
-        x2,
-        base: config.apic_base & 0x000f_ffff_ffff_f000,
-        hz: 0,
-    };
+    let apic = Apic::new(
+        config.apic_base,
+        layout::physical(config.apic_base & apic::BASE_ADDRESS),
+    );
     // SAFETY: the single initialization.
     unsafe {
         *STATE.0.get() = Some(State {
@@ -322,6 +268,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             )
             .expect("the TSC is faster than the 24 MHz counter"),
             apic,
+            apic_hz: 0,
             fills: 0,
             native_ticks: 0,
             resets: 0,
@@ -332,32 +279,11 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             stray: 0,
         });
     }
-    start_apic();
-    Ok(())
-}
-
-/// Mask the legacy PICs, enable the local APIC and measure its timer.
-fn start_apic() {
-    // SAFETY: legacy PIC data ports; masking every line.
-    unsafe {
-        asm!("out 0x21, al", "out 0xa1, al", in("al") 0xffu8, options(nomem, nostack));
-    }
     let state = state();
-    let apic = &mut state.apic;
-    apic.write(APIC_SVR, 0x100 | u32::from(SPURIOUS_VECTOR));
-    apic.write(APIC_LVT_LINT0, LVT_MASKED);
-    apic.write(APIC_DIVIDE, 0b1011);
-    apic.write(APIC_LVT_TIMER, LVT_MASKED | u32::from(TIMER_VECTOR));
-    apic.write(APIC_INITIAL, u32::MAX);
-    let start = rdtsc();
-    let wait = state.tsc_hz / 100;
-    while rdtsc() - start < wait {
-        core::hint::spin_loop();
-    }
-    let elapsed = u64::from(u32::MAX - apic.read(APIC_CURRENT));
-    let tsc = rdtsc() - start;
-    apic.write(APIC_INITIAL, 0);
-    apic.hz = (u128::from(elapsed) * u128::from(state.tsc_hz) / u128::from(tsc.max(1))) as u64;
+    state.apic_hz = state
+        .apic
+        .start(SPURIOUS_VECTOR, TIMER_VECTOR, state.tsc_hz);
+    Ok(())
 }
 
 /// The host's counters for the statistics line.
@@ -385,7 +311,7 @@ pub fn statistics() -> Statistics {
         lower_resets: state.lower_resets,
         scoped: state.scoped,
         stray: state.stray,
-        apic_hz: state.apic.hz,
+        apic_hz: state.apic_hz,
     }
 }
 
@@ -664,13 +590,13 @@ pub fn native_exception(frame: &mut Frame) {
 
 pub fn timer_interrupt() {
     HOST_INTERRUPT.store(true, Ordering::Release);
-    state().apic.write(APIC_EOI, 0);
+    state().apic.eoi();
 }
 
 pub fn stray_interrupt(_vector: u8) {
     let state = state();
     state.stray += 1;
-    state.apic.write(APIC_EOI, 0);
+    state.apic.eoi();
 }
 
 /// The engine's handle; all state is in [`STATE`].
@@ -885,14 +811,14 @@ impl Host for BareHost {
         let now = self.counter();
         let state = state();
         let Some(deadline) = deadline else {
-            state.apic.write(APIC_INITIAL, 0);
+            state.apic.write(apic::INITIAL, 0);
             return;
         };
         let guest = deadline.saturating_sub(now).max(1);
-        let ticks = u128::from(guest) * u128::from(state.apic.hz) / u128::from(COUNTER_HZ);
+        let ticks = u128::from(guest) * u128::from(state.apic_hz) / u128::from(COUNTER_HZ);
         let ticks = ticks.clamp(1, u128::from(u32::MAX)) as u32;
-        state.apic.write(APIC_LVT_TIMER, u32::from(TIMER_VECTOR));
-        state.apic.write(APIC_INITIAL, ticks);
+        state.apic.write(apic::LVT_TIMER, u32::from(TIMER_VECTOR));
+        state.apic.write(apic::INITIAL, ticks);
     }
 
     fn wait_for_interrupt(&mut self) {
