@@ -85,7 +85,11 @@ pub fn analyze_with_profile(
     base: GuestAddress,
     profile: BlockProfile,
 ) -> Result<BlockAnalysis, BlockAnalysisError> {
-    let parsed = parse(source, base, profile)?;
+    parse(source, base, profile).map(|parsed| analyze_parsed(&parsed))
+}
+
+/// The analysis of a parsed block.
+pub(super) fn analyze_parsed(parsed: &ParsedBlock) -> BlockAnalysis {
     let mut successors = Vec::new();
     let mut dynamic_edge = None;
     let mut trap = None;
@@ -195,9 +199,9 @@ pub fn analyze_with_profile(
             unreachable!("private parser only stores branch operations as terminators")
         }
     }
-    Ok(BlockAnalysis {
+    BlockAnalysis {
         source_bytes: parsed.source_bytes,
-        terminator_pc: parsed.terminal.map(|(pc, _)| pc),
+        terminator_pc: parsed.terminal.as_ref().map(|(pc, _)| *pc),
         static_successors: successors,
         dynamic_edge,
         trap,
@@ -206,7 +210,7 @@ pub fn analyze_with_profile(
         clock_instruction,
         thread_register_instruction,
         amx_instruction,
-    })
+    }
 }
 
 pub(super) fn parse(

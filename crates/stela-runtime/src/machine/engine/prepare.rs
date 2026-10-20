@@ -174,8 +174,20 @@ impl Preparation {
     /// Compile the admitted words `input` at `pc` as the engine compiles a
     /// block's consumed prefix.
     pub fn compile_input(&self, input: &[u8], pc: u64) -> Result<CompiledBlock, CompileError> {
-        CompilationPlan::new(input, GuestAddress(pc), PROFILE, self.target)
-            .and_then(|plan| plan.with_memory_checks(self.checks))
+        self.compile_plan(CompilationPlan::new(
+            input,
+            GuestAddress(pc),
+            PROFILE,
+            self.target,
+        ))
+    }
+
+    /// Compile a plan of this preparation's target as the engine compiles.
+    fn compile_plan(
+        &self,
+        plan: Result<CompilationPlan, CompileError>,
+    ) -> Result<CompiledBlock, CompileError> {
+        plan.and_then(|plan| plan.with_memory_checks(self.checks))
             .and_then(|plan| plan.with_zero_block(self.system.zero_block))
             .and_then(|plan| plan.with_cache_clean(self.system.cache_clean))
             .and_then(CompilationPlan::compile)
@@ -230,18 +242,17 @@ impl Preparation {
             }
         }
         let refused = |at: u64, detail: String| Refused { pc: at, detail };
-        let analysis =
-            match block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE) {
-                Ok(analysis) => analysis,
-                Err(error) if error.pc.0 > pc => {
-                    length = (error.pc.0 - pc) as usize;
-                    block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE)
-                        .map_err(|error| refused(error.pc.0, error.detail))?
-                }
-                Err(error) => return Err(refused(pc, error.detail)),
-            };
+        let analyze = |length: usize| {
+            block::analyze_and_plan(&source[..length], GuestAddress(pc), PROFILE, self.target)
+        };
+        let (analysis, plan) = match analyze(length) {
+            Ok(analyzed) => analyzed,
+            Err(error) if error.pc.0 > pc => analyze((error.pc.0 - pc) as usize)
+                .map_err(|error| refused(error.pc.0, error.detail))?,
+            Err(error) => return Err(refused(pc, error.detail)),
+        };
         let consumed = analysis.source_bytes;
-        let (compiled, input) = self.compile_prefix(&source[..consumed], pc)?;
+        let (compiled, input) = self.compile_prefix(&source[..consumed], pc, plan)?;
         // A block a host refusal cut short falls through to the refused
         // word; a whole one has the analysis's static successors.
         let successors = if input < consumed {
@@ -261,14 +272,20 @@ impl Preparation {
         })
     }
 
-    /// Compile the longest prefix of `source` the target can emit, and the
-    /// bytes of it the compiler was given.
-    fn compile_prefix(&self, source: &[u8], pc: u64) -> Result<(CompiledBlock, usize), Refused> {
+    /// Compile the longest prefix of `source` the target can emit, starting
+    /// from `plan`, the whole source's, and the bytes of it the compiler was
+    /// given.
+    fn compile_prefix(
+        &self,
+        source: &[u8],
+        pc: u64,
+        plan: Result<CompilationPlan, CompileError>,
+    ) -> Result<(CompiledBlock, usize), Refused> {
         let refused = |error: CompileError| Refused {
             pc,
             detail: error.0,
         };
-        match self.compile_input(source, pc) {
+        match self.compile_plan(plan) {
             Ok(compiled) => Ok((compiled, source.len())),
             Err(error) => {
                 // A host-capability refusal names no PC; find the longest

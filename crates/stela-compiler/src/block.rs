@@ -21,7 +21,7 @@ pub use analysis::{
     BlockAnalysis, BlockAnalysisError, DynamicEdge, DynamicEdgeKind, StaticSuccessor,
     SuccessorKind, analyze, analyze_with_profile, source_bytes, source_bytes_with_profile,
 };
-use analysis::{ParsedBlock, parse};
+use analysis::{ParsedBlock, analyze_parsed, parse};
 pub use memory::{
     CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID, CheckedMemoryProfile,
     ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID,
@@ -465,6 +465,22 @@ pub fn compile_for_target(
     CompilationPlan::new(source, base, profile, target)?.compile()
 }
 
+/// [`analyze_with_profile`] of `source` and [`CompilationPlan::new`] of the
+/// block it finds (`source[..analysis.source_bytes]`) from one parse.
+pub fn analyze_and_plan(
+    source: &[u8],
+    base: GuestAddress,
+    profile: BlockProfile,
+    target: crate::TargetCpu,
+) -> Result<(BlockAnalysis, Result<CompilationPlan, CompileError>), BlockAnalysisError> {
+    let parsed = parse(source, base, profile)?;
+    let analysis = analyze_parsed(&parsed);
+    Ok((
+        analysis,
+        CompilationPlan::from_parsed(parsed, profile, target),
+    ))
+}
+
 /// One immutable parsed consumed vector shared by cache requirements and emission.
 /// A cache hit may avoid emission; it still derives exact requirements from source.
 pub struct CompilationPlan {
@@ -486,6 +502,14 @@ impl CompilationPlan {
         target: crate::TargetCpu,
     ) -> Result<Self, CompileError> {
         let parsed = parse(source, base, profile).map_err(|error| CompileError(error.detail))?;
+        Self::from_parsed(parsed, profile, target)
+    }
+
+    fn from_parsed(
+        parsed: ParsedBlock,
+        profile: BlockProfile,
+        target: crate::TargetCpu,
+    ) -> Result<Self, CompileError> {
         // System mode emits for a single agent, whose atomics and acquire
         // loads need neither CMPXCHG16B nor a 16-byte snapshot.
         let validated = crate::x86_64::MemoryChecks {
@@ -731,6 +755,44 @@ impl CompilationPlan {
 mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
+
+    #[test]
+    fn one_parse_analyzes_and_plans_the_block_it_finds() {
+        const BASE: GuestAddress = GuestAddress(0x4000);
+        // add x0, x0, #1; ret; then a word after the block
+        let source: Vec<u8> = [0x9100_0400_u32, 0xd65f_03c0, 0x9100_0400]
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        for profile in [BlockProfile::Ordinary, BlockProfile::SystemModeV1] {
+            let target = crate::TargetCpu::Baseline;
+            let (analysis, plan) = analyze_and_plan(&source, BASE, profile, target).unwrap();
+            assert_eq!(
+                analysis,
+                analyze_with_profile(&source, BASE, profile).unwrap()
+            );
+            let consumed = &source[..analysis.source_bytes];
+            assert_eq!(consumed.len(), 8);
+            // CompiledBlock has no PartialEq; its Debug form shows every field.
+            assert_eq!(
+                alloc::format!("{:?}", plan.unwrap().compile().unwrap()),
+                alloc::format!(
+                    "{:?}",
+                    compile_for_target(consumed, BASE, profile, target).unwrap()
+                )
+            );
+        }
+        assert!(
+            analyze_and_plan(
+                &[],
+                BASE,
+                BlockProfile::Ordinary,
+                crate::TargetCpu::Baseline
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn el1_direct_branch_profile_is_exact_no_memory_and_source_derived() {
         let profile = BlockProfile::El1DirectBranchV1;
