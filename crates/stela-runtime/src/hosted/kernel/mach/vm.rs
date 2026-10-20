@@ -1978,32 +1978,71 @@ mod tests {
         call(task, "_kernelrpc_mach_vm_reallocate", false, body).unwrap()
     }
 
-    /// Whether a byte of `address` is mapped readable.
-    fn mapped(address: u64) -> bool {
-        memory::read(address, 1).is_some()
-    }
-
-    /// Take the guest page after `source`, unless something holds it
-    /// already: either way growing the source cannot stay in place. The
-    /// page, when this took it.
-    fn block_after(source: u64) -> Option<u64> {
-        let mut blocker = source + PAGE_BYTES;
-        // SAFETY: a fixed allocation of a free page of this task.
-        (unsafe { mach_vm_allocate(host(), &mut blocker, PAGE_BYTES, 0) } == KERN_SUCCESS)
-            .then_some(blocker)
-    }
-
     fn release(address: u64, bytes: u64) {
         // SAFETY: pages this test allocated.
         unsafe { mach_vm_deallocate(host(), address, bytes) };
     }
 
+    /// The VM tag only [`reallocate_moves_whole_guest_pages_and_unmaps_the_source`]
+    /// gives its pages (`VM_MEMORY_APPLICATION_SPECIFIC_16`), so that its
+    /// checks do not depend on what other tests map in the freed range.
+    const REALLOCATED_TAG: u32 = 255;
+
+    /// The VM tag of the mapping holding `address`, if one does.
+    fn tag_at(address: u64) -> Option<u32> {
+        unsafe extern "C" {
+            fn mach_vm_region_recurse(
+                task: u32,
+                address: *mut u64,
+                size: *mut u64,
+                depth: *mut u32,
+                info: *mut i32,
+                count: *mut u32,
+            ) -> i32;
+        }
+        /// `vm_region_submap_info_64.user_tag`, by word.
+        const USER_TAG: usize = 5;
+        let (mut start, mut size, mut depth) = (address, 0u64, 0u32);
+        let mut info = [0i32; SUBMAP_INFO_V1_COUNT as usize];
+        let mut count = SUBMAP_INFO_V1_COUNT;
+        // SAFETY: out-parameters sized for the submap info's V1 layout.
+        let code = unsafe {
+            mach_vm_region_recurse(
+                host(),
+                &mut start,
+                &mut size,
+                &mut depth,
+                info.as_mut_ptr(),
+                &mut count,
+            )
+        };
+        (code == KERN_SUCCESS && start <= address).then_some(info[USER_TAG] as u32)
+    }
+
     #[test]
     fn reallocate_moves_whole_guest_pages_and_unmaps_the_source() {
         let mut task = bare();
-        let source = allocate_pages(&mut task, 1);
+        // Two tagged pages: the second, which stays, keeps the first from
+        // growing in place whatever other tests map.
+        let body = simple(&[
+            &0u64.to_le_bytes(),
+            &(2 * PAGE_BYTES).to_le_bytes(),
+            &(VM_FLAGS_ANYWHERE | (REALLOCATED_TAG << 24) as i32).to_le_bytes(),
+        ]);
+        let source = u64_at(
+            &success(
+                call(
+                    &mut task,
+                    "_kernelrpc_mach_vm_allocate_external",
+                    false,
+                    &body,
+                )
+                .unwrap(),
+            ),
+            0,
+        );
+        assert_eq!(tag_at(source), Some(REALLOCATED_TAG));
         assert!(memory::write(source + 0x10, b"moved"));
-        let blocker = block_after(source);
         let body = reallocate_body(source, PAGE_BYTES, 0, 3 * PAGE_BYTES, 0, VM_FLAGS_ANYWHERE);
         let moved = u64_at(&success(reallocate(&mut task, &body)), 0);
         assert_ne!(moved, source);
@@ -2012,20 +2051,20 @@ mod tests {
         // The grown pages are zero-filled with the source's protections.
         assert_eq!(memory::read(moved + 2 * PAGE_BYTES, 4).unwrap(), [0; 4]);
         assert!(memory::write(moved + 3 * PAGE_BYTES - 1, b"!"));
-        // The default option unmaps the source.
-        assert!(!mapped(source));
+        // The default option unmaps the source: whatever holds its page
+        // now (another test may map it) is not this test's memory.
+        assert_ne!(tag_at(source), Some(REALLOCATED_TAG));
+        assert_eq!(tag_at(source + PAGE_BYTES), Some(REALLOCATED_TAG));
         release(moved, 3 * PAGE_BYTES);
-        if let Some(blocker) = blocker {
-            release(blocker, PAGE_BYTES);
-        }
+        release(source + PAGE_BYTES, PAGE_BYTES);
     }
 
     #[test]
     fn reallocate_can_leave_zero_filled_pages_at_the_source() {
         let mut task = bare();
-        let source = allocate_pages(&mut task, 1);
+        // The second page keeps the first from growing in place.
+        let source = allocate_pages(&mut task, 2);
         assert!(memory::write(source, b"data"));
-        let blocker = block_after(source);
         let body = reallocate_body(
             source,
             PAGE_BYTES,
@@ -2038,10 +2077,7 @@ mod tests {
         assert_eq!(memory::read(moved, 4).unwrap(), b"data");
         assert_eq!(memory::read(source, 4).unwrap(), [0; 4]);
         release(moved, 2 * PAGE_BYTES);
-        release(source, PAGE_BYTES);
-        if let Some(blocker) = blocker {
-            release(blocker, PAGE_BYTES);
-        }
+        release(source, 2 * PAGE_BYTES);
     }
 
     #[test]
