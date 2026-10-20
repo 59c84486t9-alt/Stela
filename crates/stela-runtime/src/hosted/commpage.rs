@@ -13,7 +13,10 @@
 //! base and boot time whenever the host announces a calendar change
 //! (a set or a wake, `host_notify_calendar_change`). The approximate time
 //! (`CONFIG_MACH_APPROXIMATE_TIME`) is the latest absolute time at a kernel
-//! entry or a time slice's end, where XNU's scheduler stores it.
+//! entry or a time slice's end, where XNU's scheduler stores it. The ATM
+//! diagnostic configuration libtrace reads is the host's, which a guest
+//! cannot change (`host_set_atm_diagnostic_flag` is the host's), mirrored
+//! with the time fields.
 //!
 //! The text page holds the routines libplatform's `OSAtomicFifoEnqueue` and
 //! `OSAtomicFifoDequeue` and the atomic TPIDR_EL0 update call through its
@@ -35,7 +38,7 @@ use crate::hosted::darwin::{
     mach_port_allocate,
 };
 use anyhow::{Result, ensure};
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering, fence};
 use std::sync::OnceLock;
 
 pub const DATA_ADDRESS: u64 = 0xf_ffff_c000;
@@ -71,6 +74,7 @@ const CONT_HW_TIMEBASE: usize = 0x0a8;
 const APPROX_TIME: usize = 0x0c0;
 const APPROX_TIME_SUPPORTED: usize = 0x0c8;
 const KDEBUG_ENABLE: usize = 0x100;
+const ATM_DIAGNOSTIC_CONFIG: usize = 0x104;
 /// `new_commpage_timeofday_data_t`: `TimeStamp_tick`, `TimeStamp_sec`,
 /// `TimeStamp_frac`, `Ticks_scale`, `Ticks_per_sec`.
 const NEWTIMEOFDAY_DATA: usize = 0x120;
@@ -314,10 +318,18 @@ fn field(offset: usize) -> Option<&'static AtomicU64> {
     Some(unsafe { &*((base + offset as u64) as *const AtomicU64) })
 }
 
-/// The x86 host's commpage (`osfmk/i386/cpu_capabilities.h`): its
-/// continuous-time base and boot time, and its `gettimeofday` data in
-/// nanosecond ticks.
+/// The data page's 32-bit field at `offset`, once mapped.
+fn field32(offset: usize) -> Option<&'static AtomicU32> {
+    let base = *WRITABLE.get()?;
+    // SAFETY: as [`field`]'s, of an aligned 32-bit word.
+    Some(unsafe { &*((base + offset as u64) as *const AtomicU32) })
+}
+
+/// The x86 host's commpage (`osfmk/i386/cpu_capabilities.h`): its ATM
+/// diagnostic configuration, continuous-time base and boot time, and its
+/// `gettimeofday` data in nanosecond ticks.
 const HOST_COMMPAGE: u64 = 0x7fff_ffe0_0000;
+const HOST_ATM_DIAGNOSTIC_CONFIG: u64 = 0x048;
 const HOST_CONT_TIMEBASE: u64 = 0x0c0;
 const HOST_BOOTTIME_USEC: u64 = 0x0c8;
 const HOST_NEWTIMEOFDAY_DATA: u64 = 0x0d0;
@@ -325,6 +337,11 @@ const HOST_NEWTIMEOFDAY_DATA: u64 = 0x0d0;
 fn host_word(offset: u64) -> u64 {
     // SAFETY: the host commpage is mapped read-only in every x86 process.
     unsafe { core::ptr::read_volatile((HOST_COMMPAGE + offset) as *const u64) }
+}
+
+fn host_u32(offset: u64) -> u32 {
+    // SAFETY: as [`host_word`]'s.
+    unsafe { core::ptr::read_volatile((HOST_COMMPAGE + offset) as *const u32) }
 }
 
 /// `new_commpage_timeofday_data_t`.
@@ -382,8 +399,12 @@ pub fn guest_time_of_day(host: TimeOfDay) -> TimeOfDay {
 
 /// Restate the host's timestamp, continuous-time base and boot time in
 /// the data page (`commpage_set_timestamp`, `commpage_update_boottime`,
-/// `commpage_update_mach_continuous_time`).
+/// `commpage_update_mach_continuous_time`), and mirror its ATM diagnostic
+/// configuration (`commpage_update_atm_diagnostic_config`).
 pub fn refresh_time() {
+    if let Some(config) = field32(ATM_DIAGNOSTIC_CONFIG) {
+        config.store(host_u32(HOST_ATM_DIAGNOSTIC_CONFIG), Ordering::SeqCst);
+    }
     let Some(tick) = field(NEWTIMEOFDAY_DATA) else {
         return;
     };
