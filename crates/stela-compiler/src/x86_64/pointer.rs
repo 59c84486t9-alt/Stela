@@ -14,8 +14,12 @@
 //! layout and remembers it ([`Completion`]); a result it does not complete
 //! (an authentication that fails) takes the original exit.
 //!
+//! A key whose SCTLR enable is clear has the tag word [`DISABLED`]: the
+//! thunk completes with the pointer unchanged, as Arm `AddPAC` and `Auth`
+//! return it, so BRA*, BLRA* and RETA* branch to it.
+//!
 //! The engine keeps a key's tag word zero while the key's result is not the
-//! memo's to give (the key disabled or its use trapped, or the memo's keys,
+//! memo's to give (the key's use trapped, or the memo's keys,
 //! PAC version or TCR stale), so no entry matches it and the service is
 //! never asked: entry tags are at least [`tag`] of generation 1. A memo hit
 //! clobbers RAX, RCX, RDX, R8, R9 and flags; a service call every register
@@ -32,6 +36,12 @@ use alloc::vec::Vec;
 
 /// Entries in the memo.
 pub const MEMO_ENTRIES: usize = 1 << 14;
+/// The tag word of a key whose SCTLR enable is clear, so that every
+/// signing and authentication with it returns its pointer unchanged (Arm
+/// `AddPAC`, `Auth`, which test the enable before any trap): a thunk then
+/// completes the instruction with the pointer itself, without the memo.
+/// No open tag word, at least [`tag`] of generation 1, equals it.
+pub const DISABLED: u64 = 1;
 /// A signing result.
 pub const SIGNED: u64 = 1;
 /// A successful authentication, which answers both the plain and the
@@ -239,6 +249,9 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     code.extend([0x4d, 0x8b, 0x00]); // mov r8,[r8]
     code.extend([0x4d, 0x85, 0xc0]); // test r8,r8
     jump(&mut code, &mut exits, JZ); // jz: the key is not open
+    let mut identities = Vec::new();
+    code.extend([0x49, 0x83, 0xf8, DISABLED as u8]); // cmp r8,DISABLED
+    jump(&mut code, &mut identities, JZ); // je: the result is the pointer in RAX
     code.extend([0x48, 0x89, 0xd1]); // mov rcx,rdx
     code.extend([0x48, 0xc1, 0xc1, 29]); // rol rcx,29
     code.extend([0x48, 0x31, 0xc1]); // xor rcx,rax
@@ -259,6 +272,7 @@ pub fn thunk(form: Form, pc: GuestAddress, memo: u64, tags: u64, service: Servic
     code.extend([0x4c, 0x3b, 0x41, TAG]); // cmp r8,[rcx+tag]
     jump(&mut code, &mut misses, JNZ);
     code.extend([0x48, 0x8b, 0x41, VALUE]); // mov rax,[rcx+value]
+    land(&mut code, &identities);
     let complete = code.len();
     let next_pc = GuestAddress(pc.0.wrapping_add(4));
     let mut next = None;
@@ -619,7 +633,26 @@ mod tests {
             REQUEST.load(SeqCst),
             u64::from(u32::from(ia) | REQUEST_AUTHENTICATE | REQUEST_COMBINED)
         );
+        // A disabled key returns every pointer unchanged, without the memo
+        // or the service: PACIBSP leaves X30, BLRAA branches to X8 itself.
+        let calls = CALLS.load(SeqCst);
+        set_tag(ib, DISABLED);
+        state.x[30] = pointer;
+        state.sp = modifier + 32;
+        assert_eq!(run(&sign.code, &mut state, false), next);
+        assert_eq!(state.x[30], pointer);
+        set_tag(ia, DISABLED);
+        state.x[30] = 0;
+        assert_eq!(
+            run(&call.code, &mut state, false),
+            taken(pointer, ExitKind::Call)
+        );
+        assert_eq!((state.x[8], state.x[30]), (pointer, pc.0 + 4));
+        assert_eq!(CALLS.load(SeqCst), calls);
     }
+
+    /// `mov [rdi+disp32],rax`.
+    const REGISTER_WRITE_BYTES: usize = 7;
 
     #[test]
     fn register_completions_chain_onward_and_misses_exit_unchanged() {
@@ -642,7 +675,9 @@ mod tests {
         );
         // The closed key and the refused service land on the exit; the
         // three memo misses on the service call, just after the completion.
-        let (mut exits, mut calls) = (0, 0);
+        // The disabled key's identity lands on the completion's register write.
+        let complete = next - REGISTER_WRITE_BYTES;
+        let (mut exits, mut calls, mut identities) = (0, 0, 0);
         for at in 0..end - 6 {
             if thunk.code[at] == 0x0f && [JZ, JNZ].contains(&thunk.code[at + 1]) {
                 let relative =
@@ -650,11 +685,12 @@ mod tests {
                 match at + 6 + relative {
                     target if target == end - 16 => exits += 1,
                     target if target == next + 16 => calls += 1,
+                    target if target == complete => identities += 1,
                     target => panic!("a jump to {target}"),
                 }
             }
         }
-        assert_eq!((exits, calls), (2, 3));
+        assert_eq!((exits, calls, identities), (2, 3, 1));
         assert_eq!(thunk.dynamic, None);
         // A return completes at its exit to the target in RAX, which the
         // service path reaches too.

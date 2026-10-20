@@ -3466,13 +3466,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// With the key's SCTLR enable clear, AddPAC and Auth return the pointer
-    /// unchanged (Arm ARM `AddPAC`, `Auth`).
+    /// unchanged (Arm ARM `AddPAC`, `Auth`). Until derived state changes,
+    /// the key's tag word lets PAC thunks complete its instructions the
+    /// same way (`x86_64::pointer::DISABLED`).
     fn disabled_pointer_authentication(
         &mut self,
         word: u32,
         instruction: PointerAuthentication,
     ) -> Step {
         use PointerAuthenticationOperation as Operation;
+        if let Some(key) = instruction.operation.required_key() {
+            self.pointer.tags[usize::from(x86_64_pointer::key_index(key))] =
+                x86_64_pointer::DISABLED;
+        }
         let next = instruction.next_pc.0;
         self.cpu.pstate.btype = self.pointer_branch_type(self.cpu.pc, instruction.operation);
         match instruction.operation {
@@ -7354,12 +7360,15 @@ mod tests {
             (2, SystemRegister::SCTLR_EL2, sctlr2),
         ] {
             machine.cpu.set_pstate(Pstate::reset(el));
-            for (word, enable) in [
+            for (key, (word, enable)) in [
                 (0xdac1_0041, 31),
                 (0xdac1_0441, 30),
                 (0xdac1_0841, 27),
                 (0xdac1_0c41, 13),
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 for enabled in [false, true] {
                     let bit = u64::from(enabled) << enable;
                     machine
@@ -7374,6 +7383,15 @@ mod tests {
                         enabled,
                         "EL{el} {word:#x}"
                     );
+                    // A disabled key lets thunks complete with the pointer
+                    // until derived state changes.
+                    assert_eq!(
+                        machine.pointer.tags[key] == x86_64_pointer::DISABLED,
+                        !enabled,
+                        "EL{el} {word:#x}"
+                    );
+                    machine.derived_changed();
+                    assert_eq!(machine.pointer.tags[key], 0);
                 }
             }
         }
