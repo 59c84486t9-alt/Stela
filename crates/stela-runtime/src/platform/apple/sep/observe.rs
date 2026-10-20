@@ -22,8 +22,10 @@ pub const KEYSTORE_ID: u8 = 0x12;
 pub const BOOT_POLICY_ID: u8 = 0x13;
 pub const CREDENTIALS_ID: u8 = 0x14;
 const CAPACITIES: [u8; 4] = [1, 0x20, 1, 0x20];
-/// The OOL input prefix each recorded request logs.
-pub const INPUT_PREFIX: usize = 256;
+/// The OOL input prefix each recorded request logs: one 4 KiB page, enough
+/// for a whole LocalPolicy-sized request, since every observed request
+/// stops the boot and so costs a full restore run.
+pub const INPUT_PREFIX: usize = 4096;
 /// Lines the journal keeps before the host drains it; older ones are counted.
 const JOURNAL_LINES: usize = 512;
 
