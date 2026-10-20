@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(find(Area::Bsd, "__mac_execve").service, "process");
         assert!(matches!(
             find(Area::Bsd, "kqueue_workloop_ctl").status,
-            Status::Refused(_)
+            Status::Partial(_)
         ));
         // Each 26A434 addition is serviced by its family or refused by name.
         for name in ["pipe2", "dup3", "getumask", "register_uexc_handler"] {

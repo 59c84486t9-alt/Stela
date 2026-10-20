@@ -901,7 +901,13 @@ fn clear_voucher() {
     let _ = super::thread::set_self(0, 0, SET_SELF_VOUCHER_FLAG);
 }
 
-pub(super) const CALLS: &[&str] = &["workq_open", "workq_kernreturn", "kevent_qos", "kevent_id"];
+pub(super) const CALLS: &[&str] = &[
+    "workq_open",
+    "workq_kernreturn",
+    "kevent_qos",
+    "kevent_id",
+    "kqueue_workloop_ctl",
+];
 
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
@@ -919,6 +925,10 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
         },
         "kevent_id" => match kqworkloop::kevent_id(kernel, call.arguments)? {
             Ok(count) => Outcome::value(count),
+            Err(errno) => Outcome::Error(errno),
+        },
+        "kqueue_workloop_ctl" => match kqworkloop::ctl(kernel, call.arguments)? {
+            Ok(value) => Outcome::value(value),
             Err(errno) => Outcome::Error(errno),
         },
         _ => return Ok(None),

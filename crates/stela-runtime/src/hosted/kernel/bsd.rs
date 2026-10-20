@@ -317,16 +317,18 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
          file mapping at or above it can find one of the hosted runtime's own",
     ),
     (
+        "kqueue_workloop_ctl",
+        "a workloop's fixed priority, policy and CPU limit are not applied to its servicer, \
+         which is scheduled by QoS; a work interval or a bound thread stops the run",
+    ),
+    (
         "bsdthread_ctl",
         "REALTIME and DISPATCH_APPLY_ATTR are refused",
     ),
 ];
 
 /// Calls the hosted kernel refuses, stopping the run with the reason.
-pub(crate) const REFUSED: &[(&str, &str)] = &[(
-    "kqueue_workloop_ctl",
-    "workloop scheduling parameters are not implemented",
-)];
+pub(crate) const REFUSED: &[(&str, &str)] = &[];
 
 fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let name = call.entry.name;

@@ -24,6 +24,19 @@
 //! knotes (`NOTE_WL_SYNC_IPC`) only link priority inheritance chains; no
 //! port here can start one, so attaching one finds no chain (ENOENT, as
 //! for a port whose chain broke).
+//!
+//! `kqueue_workloop_ctl(cmd, options, addr, sz)` (`kern_event.c`) copies
+//! in `struct kqueue_workloop_params`, whose version must be `sz`.
+//! `KQ_WORKLOOP_CREATE` validates the scheduling parameters, creates a
+//! workloop that must not exist with them, and keeps it alive while they
+//! are unreleased (the creation's reference); `KQ_WORKLOOP_DESTROY`
+//! releases them once (EINVAL for a workloop without them or already
+//! released). Another command succeeds doing nothing, as XNU's switch
+//! falls through. The parameters' fixed priority, policy and CPU limit
+//! adjust only the servicer's scheduling, which the hosted workqueue does
+//! by QoS. A work interval to preadopt (`KQ_WORKLOOP_CREATE_WORK_INTERVAL`)
+//! and a permanently bound servicer
+//! (`KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD`) stop the run.
 use super::{
     EFAULT, EINVAL, Kernel,
     kqworkq::{
@@ -35,7 +48,7 @@ use super::{
     priority, workqueue,
 };
 use crate::hosted::{kernel::Process, memory, threads::lock};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -72,6 +85,23 @@ const EALREADY: u64 = 37;
 const ENOTSUP: u64 = 45;
 const ESTALE: u64 = 70;
 const EOWNERDEAD: u64 = 105;
+/// `kqueue_workloop_ctl` commands and `kqwlp_flags`
+/// (`bsd/pthread/workqueue_syscalls.h`).
+const KQ_WORKLOOP_CREATE: u64 = 0x01;
+const KQ_WORKLOOP_DESTROY: u64 = 0x02;
+const KQ_WORKLOOP_CREATE_SCHED_PRI: i32 = 0x01;
+const KQ_WORKLOOP_CREATE_SCHED_POL: i32 = 0x02;
+const KQ_WORKLOOP_CREATE_CPU_PERCENT: i32 = 0x04;
+const KQ_WORKLOOP_CREATE_WORK_INTERVAL: i32 = 0x08;
+const KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD: i32 = 0x10;
+/// The packed `struct kqueue_workloop_params`.
+const PARAMS_BYTES: usize = 36;
+/// `MAXPRI_USER`.
+const MAXPRI_USER: i32 = 63;
+/// `POLICY_TIMESHARE`, `POLICY_RR` and `POLICY_FIFO`.
+const POLICIES: [i32; 3] = [1, 2, 4];
+/// The largest `kqwlp_cpu_refillms`.
+const MAX_REFILL_MS: i32 = 0x00ff_ffff;
 
 /// The thread request knote (`NOTE_WL_THREAD_REQUEST`).
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +129,18 @@ impl RequestKnote {
             ..self.kevent
         }
     }
+}
+
+/// A workloop's `workq_threadreq_param_t` (`kqwl_params`): what
+/// `kqueue_workloop_ctl` set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Params {
+    priority: Option<u8>,
+    policy: Option<u8>,
+    /// `trp_cpupercent` and `trp_refillms`.
+    cpu_limit: Option<(u8, u32)>,
+    /// `TRP_RELEASED`.
+    released: bool,
 }
 
 /// A synchronous waiter's knote, named by the waiter's thread port.
@@ -129,9 +171,31 @@ struct Workloop {
     overcommit: bool,
     /// Calls in flight on it, each holding it alive.
     calls: u32,
+    params: Option<Params>,
 }
 
 impl Workloop {
+    fn new(tag: u32) -> Self {
+        Self {
+            tag,
+            host: HostBuckets::new(BUCKETS, tag),
+            queued: [false; BUCKETS as usize],
+            request: None,
+            sync: HashMap::new(),
+            owner: None,
+            qos_index: 0,
+            overcommit: false,
+            calls: 0,
+            params: None,
+        }
+    }
+
+    /// Created with parameters not yet released: `kqueue_workloop_ctl`'s
+    /// creation reference holds it.
+    fn live(&self) -> bool {
+        self.params.is_some_and(|params| !params.released)
+    }
+
     /// `kqwl_wakeup_qos`.
     fn wakeup_qos(&self) -> u8 {
         let request = self
@@ -146,7 +210,11 @@ impl Workloop {
     }
 
     fn idle(&self) -> bool {
-        self.calls == 0 && self.request.is_none() && self.sync.is_empty() && self.host.is_empty()
+        self.calls == 0
+            && !self.live()
+            && self.request.is_none()
+            && self.sync.is_empty()
+            && self.host.is_empty()
     }
 }
 
@@ -298,20 +366,7 @@ impl Table {
         self.next_tag += 1;
         let tag = self.next_tag;
         self.by_tag.insert(tag, id);
-        self.by_id.insert(
-            id,
-            Workloop {
-                tag,
-                host: HostBuckets::new(BUCKETS, tag),
-                queued: [false; BUCKETS as usize],
-                request: None,
-                sync: HashMap::new(),
-                owner: None,
-                qos_index: 0,
-                overcommit: false,
-                calls: 0,
-            },
-        );
+        self.by_id.insert(id, Workloop::new(tag));
         Ok(())
     }
 
@@ -919,6 +974,117 @@ pub(super) fn kevent_id(kernel: &Kernel, arguments: [u64; 8]) -> Result<Result<u
     Ok(delivered)
 }
 
+/// `kqueue_workloop_ctl` and `kqueue_workloop_ctl_internal`.
+pub(super) fn ctl(kernel: &Kernel, arguments: [u64; 8]) -> Result<Result<u64, u64>> {
+    let [command, _options, address, size, ..] = arguments;
+    if size < 4 {
+        return Ok(Err(EINVAL));
+    }
+    let copied = (size as usize).min(PARAMS_BYTES);
+    let Some(bytes) = memory::read(address, copied) else {
+        return Ok(Err(EFAULT));
+    };
+    let mut raw = [0u8; PARAMS_BYTES];
+    raw[..copied].copy_from_slice(&bytes);
+    let word = |at: usize| i32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
+    if word(0) != size as i32 {
+        return Ok(Err(EINVAL));
+    }
+    let id = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+    let process = &kernel.process;
+    match command {
+        KQ_WORKLOOP_CREATE => {
+            let params = match create_params(word(4), word(16), word(20), word(24), word(28)) {
+                Ok(params) => params,
+                Err(errno) => return Ok(Err(errno)),
+            };
+            let flags = word(4);
+            // XNU looks the work interval up before the workloop.
+            if flags & KQ_WORKLOOP_CREATE_WORK_INTERVAL != 0 {
+                bail!(
+                    "kqueue_workloop_ctl creating workloop {id:#x} with work interval port \
+                     {:#x}: preadopting a work interval's thread group is not implemented",
+                    word(32) as u32
+                );
+            }
+            let mut table = process.workloops.table();
+            if id == 0 || id == u64::MAX {
+                return Ok(Err(EINVAL));
+            }
+            if table.by_id.contains_key(&id) {
+                return Ok(Err(EEXIST));
+            }
+            if flags & KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD != 0 {
+                bail!(
+                    "kqueue_workloop_ctl creating workloop {id:#x} with a bound thread: a \
+                     servicer permanently bound to its workloop is not implemented"
+                );
+            }
+            if let Err(errno) = table.get_or_create(id, KEVENT_FLAG_DYNAMIC_KQ_MUST_NOT_EXIST) {
+                return Ok(Err(errno));
+            }
+            table.by_id.get_mut(&id).expect("the workloop").params = Some(params);
+            Ok(Ok(0))
+        }
+        KQ_WORKLOOP_DESTROY => {
+            let mut table = process.workloops.table();
+            if let Err(errno) = table.get_or_create(id, KEVENT_FLAG_DYNAMIC_KQ_MUST_EXIST) {
+                return Ok(Err(errno));
+            }
+            let workloop = table.by_id.get_mut(&id).expect("the workloop");
+            let result = match workloop.params.as_mut() {
+                Some(params) if !params.released => {
+                    params.released = true;
+                    Ok(0)
+                }
+                _ => Err(EINVAL),
+            };
+            table.release(process, id);
+            Ok(result)
+        }
+        _ => Ok(Ok(0)),
+    }
+}
+
+/// The parameters `KQ_WORKLOOP_CREATE` sets from `kqwlp_flags`,
+/// `kqwlp_sched_pri`, `kqwlp_sched_pol`, `kqwlp_cpu_percent` and
+/// `kqwlp_cpu_refillms`, or EINVAL as XNU checks them.
+fn create_params(
+    flags: i32,
+    priority: i32,
+    policy: i32,
+    cpu_percent: i32,
+    refill_ms: i32,
+) -> Result<Params, u64> {
+    if flags == 0 {
+        return Err(EINVAL);
+    }
+    let priority = (flags & KQ_WORKLOOP_CREATE_SCHED_PRI != 0).then_some(priority);
+    let policy = (flags & KQ_WORKLOOP_CREATE_SCHED_POL != 0).then_some(policy);
+    let cpu_limit =
+        (flags & KQ_WORKLOOP_CREATE_CPU_PERCENT != 0).then_some((cpu_percent, refill_ms));
+    if priority.is_some_and(|priority| !(1..=MAXPRI_USER).contains(&priority))
+        || policy.is_some_and(|policy| !POLICIES.contains(&policy))
+        || cpu_limit.is_some_and(|(percent, refill)| {
+            !(1..=100).contains(&percent) || !(1..=MAX_REFILL_MS).contains(&refill)
+        })
+    {
+        return Err(EINVAL);
+    }
+    let params = Params {
+        priority: priority.map(|priority| priority as u8),
+        policy: policy.map(|policy| policy as u8),
+        cpu_limit: cpu_limit.map(|(percent, refill)| (percent as u8, refill as u32)),
+        released: false,
+    };
+    let any = params.priority.is_some() || params.policy.is_some() || params.cpu_limit.is_some();
+    let other = flags & (KQ_WORKLOOP_CREATE_WORK_INTERVAL | KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD);
+    if !any && other == 0 {
+        return Err(EINVAL);
+    }
+    Ok(params)
+}
+
 /// Block until the sync knote `ident` is woken or dropped.
 fn wait_for_wake<'a>(
     process: &'a Arc<Process>,
@@ -985,17 +1151,7 @@ mod tests {
 
     #[test]
     fn the_wakeup_qos_is_the_highest_active_bucket() {
-        let mut workloop = Workloop {
-            tag: 1,
-            host: HostBuckets::new(BUCKETS, 1),
-            queued: [false; BUCKETS as usize],
-            request: None,
-            sync: HashMap::new(),
-            owner: None,
-            qos_index: 0,
-            overcommit: false,
-            calls: 0,
-        };
+        let mut workloop = Workloop::new(1);
         assert_eq!(workloop.wakeup_qos(), 0);
         workloop.queued[usize::from(priority::THREAD_QOS_BACKGROUND - 1)] = true;
         assert_eq!(workloop.wakeup_qos(), priority::THREAD_QOS_BACKGROUND);
@@ -1013,5 +1169,42 @@ mod tests {
         workloop.request.as_mut().unwrap().active = false;
         assert_eq!(workloop.wakeup_qos(), priority::THREAD_QOS_BACKGROUND);
         assert!(!workloop.idle());
+    }
+
+    #[test]
+    fn workloop_parameters_validate_and_hold_the_workloop_as_xnu() {
+        assert_eq!(create_params(0, 0, 0, 0, 0), Err(EINVAL));
+        // A flag naming no parameter sets none.
+        assert_eq!(create_params(0x20, 0, 0, 0, 0), Err(EINVAL));
+        assert_eq!(
+            create_params(KQ_WORKLOOP_CREATE_SCHED_PRI, 64, 0, 0, 0),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            create_params(KQ_WORKLOOP_CREATE_SCHED_POL, 0, 3, 0, 0),
+            Err(EINVAL)
+        );
+        assert_eq!(
+            create_params(KQ_WORKLOOP_CREATE_CPU_PERCENT, 0, 0, 50, 0x0100_0000),
+            Err(EINVAL)
+        );
+        let params = create_params(
+            KQ_WORKLOOP_CREATE_SCHED_PRI | KQ_WORKLOOP_CREATE_SCHED_POL,
+            47,
+            4,
+            0,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            (params.priority, params.policy, params.cpu_limit),
+            (Some(47), Some(4), None)
+        );
+        let mut workloop = Workloop::new(1);
+        assert!(workloop.idle());
+        workloop.params = Some(params);
+        assert!(!workloop.idle());
+        workloop.params.as_mut().unwrap().released = true;
+        assert!(workloop.idle());
     }
 }
