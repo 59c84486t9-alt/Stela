@@ -227,6 +227,11 @@ pub struct MemoryChecks {
     /// ([`plain_ordering`]). `SystemModeV1` sets it for every block, and no
     /// other profile does.
     pub(crate) single_agent: bool,
+    /// FEAT_CSV3: every access checks the guest range, those
+    /// [`guest_range`] would leave to an earlier check through the same base
+    /// included. A mispredicted check then never runs an access whose
+    /// address its own check did not mask ([`GUEST_RANGE_CHECK`]).
+    pub every_access_masked: bool,
 }
 
 impl MemoryChecks {
@@ -238,15 +243,24 @@ impl MemoryChecks {
         ordered_granule: true,
         guest_range: false,
         single_agent: false,
+        every_access_masked: false,
     };
-    /// SCTLR_ELx's checks, as the system-mode engine selects them.
-    pub const fn system(stack_alignment: bool, alignment: bool, ordered_granule: bool) -> Self {
+    /// SCTLR_ELx's checks, as the system-mode engine selects them, and
+    /// whether every access masks its address
+    /// ([`Self::every_access_masked`]).
+    pub const fn system(
+        stack_alignment: bool,
+        alignment: bool,
+        ordered_granule: bool,
+        every_access_masked: bool,
+    ) -> Self {
         Self {
             stack_alignment,
             alignment,
             ordered_granule,
             guest_range: false,
             single_agent: false,
+            every_access_masked,
         }
     }
 }
@@ -267,18 +281,36 @@ fn plain_ordering(target: crate::TargetCpu, checks: MemoryChecks) -> bool {
 /// turns into the fault the guest's translation gives it. Every other PML5
 /// entry, Stela's window (entry 64) among them, is then out of a guest
 /// access's reach. RCX and host flags are scratch.
-pub(crate) const GUEST_RANGE_CHECK: [u8; 16] = [
+///
+/// The check's branch can be mispredicted, so past it a CMOVA, which uses
+/// the comparison's flags and no prediction, replaces an out-of-range RAX
+/// with [`MASKED_ADDRESS`]: an access that speculation runs past a failed
+/// check reaches an unmapped entry, never Stela's memory (Intel's and AMD's
+/// bounds-check bypass guidance). A passed check leaves RAX unchanged, and
+/// the UD2 runs before the CMOVA with the guest's address.
+pub(crate) const GUEST_RANGE_CHECK: [u8; 30] = [
     0x48, 0x89, 0xc1, // mov rcx,rax
     0x48, 0xc1, 0xf9, 48, // sar rcx,48: 0 or -1 in range
     0xff, 0xc1, // inc ecx: 1 or 0 in range
     0x83, 0xf9, 0x01, // cmp ecx,1
     0x76, 0x02, // jbe +2
     0x0f, 0x0b, // ud2
+    0x48, 0xb9, 0, 0, 0, 0, 0, 0, 0x01, 0, // mov rcx,MASKED_ADDRESS
+    0x48, 0x0f, 0x47, 0xc1, // cmova rax,rcx
 ];
 
-/// The end of each of the six host instructions of [`GUEST_RANGE_CHECK`],
-/// which the region cost gates count one by one.
-pub(crate) const GUEST_RANGE_CHECK_ENDS: [usize; 6] = [3, 7, 9, 12, 14, 16];
+/// Where a mispredicted [`GUEST_RANGE_CHECK`] sends an access: the start of
+/// PML5 entry 1, which no shadow root maps and which is 2^48 bytes from
+/// any other entry, so no access's extent leaves it.
+pub(crate) const MASKED_ADDRESS: u64 = 1 << 48;
+const _: () = assert!(u64::from_le_bytes([0, 0, 0, 0, 0, 0, 0x01, 0]) == MASKED_ADDRESS);
+
+/// The end of each of the eight host instructions of [`GUEST_RANGE_CHECK`],
+/// which the region cost gates count one by one; the UD2 ends at the sixth.
+pub(crate) const GUEST_RANGE_CHECK_ENDS: [usize; 8] = [3, 7, 9, 12, 14, 16, 26, 30];
+/// The offset of [`GUEST_RANGE_CHECK`]'s UD2.
+#[cfg(test)]
+const GUEST_RANGE_TRAP: usize = 14;
 
 /// SCTLR_ELx.SA's check of an SP base in RAX, before the address addition
 /// as Arm checks it ([`MemoryChecks::stack_alignment`]).
@@ -936,15 +968,28 @@ mod tests {
         #[cfg(target_os = "linux")]
         const MAP_ANONYMOUS: i32 = 0x20;
         const PAGE: usize = 4096;
-        let (check, trap) = GUEST_RANGE_CHECK.split_at(GUEST_RANGE_CHECK.len() - 2);
+        let (check, rest) = GUEST_RANGE_CHECK.split_at(GUEST_RANGE_TRAP);
+        let (trap, mask) = rest.split_at(2);
         assert_eq!(trap, [0x0f, 0x0b]);
         assert_eq!(GUEST_RANGE_CHECK_ENDS[4], check.len());
-        assert_eq!(GUEST_RANGE_CHECK_ENDS[5], GUEST_RANGE_CHECK.len());
+        assert_eq!(GUEST_RANGE_CHECK_ENDS[5], GUEST_RANGE_TRAP + 2);
+        assert_eq!(GUEST_RANGE_CHECK_ENDS[7], GUEST_RANGE_CHECK.len());
         // mov rax,rdi; the check with `xor eax,eax` (a failure, also two
-        // bytes) where its UD2 is; ret.
+        // bytes, whose flags the mask then leaves alone) where its UD2 is;
+        // the mask; ret. Then the same with the branch replaced by a
+        // two-byte NOP, as a mispredicted check runs it: the mask alone
+        // must replace every out-of-range address.
         let mut code = vec![0x48, 0x89, 0xf8];
         code.extend(check);
-        code.extend([0x31, 0xc0, 0xc3]);
+        code.extend([0x31, 0xc0]);
+        code.extend(mask);
+        code.push(0xc3);
+        let speculated = code.len();
+        code.extend([0x48, 0x89, 0xf8]);
+        code.extend(&check[..check.len() - 2]);
+        code.extend([0x66, 0x90]);
+        code.extend(mask);
+        code.push(0xc3);
         // SAFETY: private anonymous memory, RX after the copy and unmapped
         // after the calls; the code touches no memory.
         unsafe {
@@ -956,6 +1001,14 @@ mod tests {
                 let entry: unsafe extern "sysv64" fn(u64) -> u64 = core::mem::transmute(page);
                 let result = entry(address);
                 assert!(result == address || result == 0);
+                let masked: unsafe extern "sysv64" fn(u64) -> u64 =
+                    core::mem::transmute(page.cast::<u8>().add(speculated));
+                let expected = if result == address {
+                    address
+                } else {
+                    MASKED_ADDRESS
+                };
+                assert_eq!(masked(address), expected, "{address:#x}");
                 result == address
             };
             for (address, expected) in [

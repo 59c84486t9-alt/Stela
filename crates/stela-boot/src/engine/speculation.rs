@@ -1,5 +1,5 @@
-//! The branch prediction isolation the bare-metal host gives guest code,
-//! which the engine discloses in ID_AA64PFR0_EL1.CSV2
+//! The speculation guarantees the bare-metal host gives guest code, which
+//! the engine discloses in ID_AA64PFR0_EL1.CSV2 and CSV3
 //! (`identification::Speculation`).
 //!
 //! Every guest exception level runs as CPL0 code on this one logical
@@ -8,6 +8,14 @@
 //! barrier: the engine calls [`isolate`] at every guest context change
 //! (`engine::PredictionContext`), which issues IBPB and refills the return
 //! stack buffer.
+//!
+//! FEAT_CSV3 holds where the CPU documents that its loads forward no data
+//! from a faulting access, nor stale buffer data to one, to later
+//! speculative instructions ([`forwards_no_faulting_data`]). Native guest
+//! accesses then fault through the shadow tables, an address a mispredicted
+//! range check lets through is masked into an unmapped entry
+//! (`x86_64::GUEST_RANGE_CHECK`), and [`fence`] keeps each of the engine's
+//! own guest reads behind the translation that allows it.
 use core::{
     arch::{
         asm,
@@ -38,8 +46,37 @@ const AMD_ZEN3_FAMILY: u32 = 0x19;
 /// x86 core's return stack buffer.
 const RETURN_STACK_ENTRIES: usize = 32;
 
+/// CPUID.(EAX=07H,ECX=0):EDX bit 29: IA32_ARCH_CAPABILITIES (Intel).
+const CPUID_7_EDX_ARCH_CAPABILITIES: u32 = 1 << 29;
+/// CPUID.(EAX=07H,ECX=0):EBX bit 11: RTM, Intel TSX.
+const CPUID_7_EBX_RTM: u32 = 1 << 11;
+/// IA32_ARCH_CAPABILITIES (MSR 10AH) and the bits that each rule out one
+/// way a load forwards data to speculation (Intel, "Affected Processors:
+/// Transient Execution Attacks"): RDCL_NO (rogue data cache load and L1
+/// terminal fault), MDS_NO (microarchitectural data sampling), TAA_NO
+/// (TSX asynchronous abort, which needs RTM), GDS_NO (gather data
+/// sampling) and RFDS_NO (register file data sampling).
+const IA32_ARCH_CAPABILITIES: u32 = 0x10a;
+const ARCH_CAP_RDCL_NO: u64 = 1 << 0;
+const ARCH_CAP_MDS_NO: u64 = 1 << 5;
+const ARCH_CAP_TAA_NO: u64 = 1 << 8;
+const ARCH_CAP_GDS_NO: u64 = 1 << 26;
+const ARCH_CAP_RFDS_NO: u64 = 1 << 27;
+/// CPUID.80000021H:EAX bit 2: LFENCE is always dispatch serializing, so it
+/// orders speculation without a DE_CFG write (AMD).
+const CPUID_80000021_EAX_LFENCE_SERIALIZING: u32 = 1 << 2;
+/// CPUID.80000021H:ECX bits 1 and 2, TSA_SQ_NO and TSA_L1_NO: no transient
+/// scheduler attack through the store queue or the L1 data cache (AMD
+/// security bulletin AMD-SB-7029). AMD's Zen processors do not forward
+/// data from faulting loads otherwise (AMD, "Speculation Behavior in AMD
+/// Micro-Architectures").
+const CPUID_80000021_ECX_TSA_SQ_NO: u32 = 1 << 1;
+const CPUID_80000021_ECX_TSA_L1_NO: u32 = 1 << 2;
+
 /// [`isolate`] issues IBPB.
 static BARRIER: AtomicBool = AtomicBool::new(false);
+/// [`fence`] issues LFENCE.
+static FENCE: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Vendor {
@@ -93,7 +130,47 @@ pub fn probe() -> Speculation {
         Vendor::Other => false,
     };
     BARRIER.store(contexts, Ordering::Relaxed);
-    Speculation { contexts }
+    let faulting_data = forwards_no_faulting_data(vendor());
+    FENCE.store(faulting_data, Ordering::Relaxed);
+    Speculation {
+        contexts,
+        faulting_data,
+    }
+}
+
+/// Whether the CPU documents that no load forwards data from a faulting
+/// access, or stale buffer data to one, to later speculative instructions,
+/// and has an LFENCE that stops speculation.
+fn forwards_no_faulting_data(vendor: Vendor) -> bool {
+    match vendor {
+        Vendor::Intel => {
+            let leaf = __cpuid_count(7, 0);
+            if leaf.edx & CPUID_7_EDX_ARCH_CAPABILITIES == 0 {
+                return false;
+            }
+            // SAFETY: CPUID enumerates the MSR; ring 0.
+            let capabilities = unsafe { super::read_msr(IA32_ARCH_CAPABILITIES) };
+            let tsx = leaf.ebx & CPUID_7_EBX_RTM != 0;
+            let all = |bits: u64| capabilities & bits == bits;
+            all(ARCH_CAP_RDCL_NO | ARCH_CAP_MDS_NO | ARCH_CAP_GDS_NO | ARCH_CAP_RFDS_NO)
+                && (!tsx || all(ARCH_CAP_TAA_NO))
+        }
+        Vendor::Amd => extended(0x8000_0021).is_some_and(|leaf| {
+            let no_tsa = CPUID_80000021_ECX_TSA_SQ_NO | CPUID_80000021_ECX_TSA_L1_NO;
+            leaf.eax & CPUID_80000021_EAX_LFENCE_SERIALIZING != 0 && leaf.ecx & no_tsa == no_tsa
+        }),
+        Vendor::Other => false,
+    }
+}
+
+/// Keep the reads after the call from executing before the branches before
+/// it resolve, where the host gives FEAT_CSV3: LFENCE, which Intel and (with
+/// an always-serializing LFENCE) AMD document as stopping speculation.
+pub fn fence() {
+    if FENCE.load(Ordering::Relaxed) {
+        // SAFETY: LFENCE has no effect but ordering.
+        unsafe { asm!("lfence", options(nostack, nomem, preserves_flags)) };
+    }
 }
 
 /// Keep branch predictions trained before the call from steering

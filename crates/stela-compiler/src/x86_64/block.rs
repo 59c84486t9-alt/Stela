@@ -169,7 +169,9 @@ fn emit_selected(
     let optimize_regions = optimize_regions && !target.data_independent_timing();
     // Which accesses check the guest range (`guest_range`), and each
     // instruction's checks.
-    let ranges = if checks.guest_range {
+    let ranges = if checks.guest_range && checks.every_access_masked {
+        vec![true; instructions.len()]
+    } else if checks.guest_range {
         super::guest_range::checks(instructions)
     } else {
         vec![]

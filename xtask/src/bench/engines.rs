@@ -74,7 +74,7 @@ pub(super) fn compile_blocks(
         let plan = match profile {
             Profile::Ordinary => plan.with_resident_loops(),
             Profile::System => plan
-                .with_memory_checks(MemoryChecks::system(true, false, true))
+                .with_memory_checks(MemoryChecks::system(true, false, true, false))
                 .map_err(refused)?,
         };
         let resident = plan.profile() == BlockProfile::OrdinaryResidentV1;

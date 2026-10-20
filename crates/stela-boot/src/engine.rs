@@ -1542,10 +1542,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let el = if options.bundle { 2 } else { 1 };
     output::arguments(format_args!(
         "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz} \
-         prediction_isolation={}\n",
+         prediction_isolation={} faulting_data_barrier={}\n",
         profile.name,
         target.id(),
         speculation.contexts,
+        speculation.faulting_data,
     ));
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;

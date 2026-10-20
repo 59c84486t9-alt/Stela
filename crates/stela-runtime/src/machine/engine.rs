@@ -65,6 +65,8 @@ const INSTRUCTION: u64 = 4;
 const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
 const FETCH_CACHE: usize = 1024;
+/// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
+const CSV3_SHIFT: u32 = 60;
 const JUMP_CACHE: usize = 4096;
 /// The most blocks one native run chains into, which bounds how late the
 /// engine sees an interrupt, a timer or the end of a time slice.
@@ -315,6 +317,13 @@ pub trait Host {
     /// that cannot isolate them leaves this empty and identifies no FEAT_CSV2
     /// (`identification::Speculation::contexts`).
     fn isolate_predictions(&mut self) {}
+    /// Keep the reads after this call from executing before the branches
+    /// before it resolve (FEAT_CSV3): the engine calls it between its
+    /// software translation of an access and the device or tag read it
+    /// permits, and [`Host::read_ram`] keeps the same order itself. A host
+    /// that cannot order them leaves both empty and identifies no FEAT_CSV3
+    /// (`identification::Speculation::faulting_data`).
+    fn speculation_barrier(&self) {}
     /// Drop every cached translation.
     fn invalidate_translations(&mut self);
     /// Drop the cached translations a TLBI reaches in the current context,
@@ -1138,7 +1147,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.native_system = None;
         self.debug = None;
         self.pointer.close();
-        self.thread_pointer.readable = 0;
+        // A closed cell keeps no value a mispredicted native read could use
+        // (FEAT_CSV3's System register rule).
+        *self.thread_pointer = register_read::Cell::default();
         self.device_lines = None;
     }
 
@@ -1183,7 +1194,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The checks native code makes for the current regime's SCTLR_ELx: SP
-    /// alignment, A (Arm `AlignmentEnforced`) and nAA.
+    /// alignment, A (Arm `AlignmentEnforced`) and nAA; and, where
+    /// ID_AA64PFR0_EL1.CSV3 discloses FEAT_CSV3, the guest range check at
+    /// every access (`identification::Speculation::faulting_data`).
     fn memory_checks(&mut self) -> MemoryChecks {
         *self.memory_checks.get_or_insert_with(|| {
             let sctlr = self.cpu.regime_sctlr();
@@ -1192,6 +1205,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 sctlr & (1 << bit) != 0,
                 sctlr & mmu::alignment::SCTLR_A != 0,
                 sctlr & mmu::alignment::SCTLR_NAA == 0,
+                self.cpu
+                    .field(SystemRegister::ID_AA64PFR0_EL1, CSV3_SHIFT, 4)
+                    != 0,
             )
         })
     }
@@ -1334,6 +1350,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// A device read by the running PE, watched.
     fn device_read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        self.host.speculation_barrier();
         let result = self.devices.read(self.current, physical, bytes, now);
         self.watch(physical, bytes, result.as_ref().ok().copied(), false);
         result
@@ -7575,7 +7592,25 @@ mod tests {
             }
         );
         machine.derived_changed();
-        assert_eq!(machine.thread_pointer.readable, 0);
+        // Closed, the cell keeps no value a mispredicted read could use.
+        assert_eq!(*machine.thread_pointer, register_read::Cell::default());
+    }
+
+    /// Native accesses check and mask their own addresses at every access
+    /// exactly where ID_AA64PFR0_EL1.CSV3 discloses FEAT_CSV3.
+    #[test]
+    fn every_access_masks_its_address_where_csv3_is_disclosed() {
+        let mut machine = machine(&[0xd503_201f]);
+        for csv3 in [0, 1] {
+            let pfr0 = machine.cpu.read(SystemRegister::ID_AA64PFR0_EL1);
+            let pfr0 = pfr0 & !(0xf << CSV3_SHIFT) | csv3 << CSV3_SHIFT;
+            machine
+                .cpu
+                .registers
+                .set_raw(SystemRegister::ID_AA64PFR0_EL1, 0, pfr0);
+            machine.derived_changed();
+            assert_eq!(machine.memory_checks().every_access_masked, csv3 == 1);
+        }
     }
 
     /// Where DC ZVA cannot trap, a block ending in it zeroes natively and

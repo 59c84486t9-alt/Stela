@@ -2068,7 +2068,7 @@ mod tests {
                 let mut raw = vec![];
                 super::super::memory_pair(
                     &mut raw,
-                    super::super::MemoryChecks::system(stack_alignment, false, true),
+                    super::super::MemoryChecks::system(stack_alignment, false, true, false),
                     MemoryTransfer::Load {
                         signed: false,
                         width,
@@ -2163,7 +2163,7 @@ mod tests {
                     instruction,
                     &mut vec![],
                     crate::TargetCpu::Baseline,
-                    super::super::MemoryChecks::system(stack_alignment, false, true),
+                    super::super::MemoryChecks::system(stack_alignment, false, true, false),
                 );
             }
             assert!(analysis::selected_output_instruction_count(&baseline).is_some());

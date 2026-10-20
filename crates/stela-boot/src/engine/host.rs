@@ -678,6 +678,8 @@ pub struct BareHost;
 
 impl Host for BareHost {
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
+        // The engine reads guest RAM only once its translation allowed it.
+        super::speculation::fence();
         state().copy(physical, buffer.len(), |host, done, chunk| {
             // SAFETY: guest RAM through the physmap and a distinct buffer.
             unsafe {
@@ -819,6 +821,10 @@ impl Host for BareHost {
 
     fn isolate_predictions(&mut self) {
         super::speculation::isolate();
+    }
+
+    fn speculation_barrier(&self) {
+        super::speculation::fence();
     }
 
     fn invalidate_translations(&mut self) {

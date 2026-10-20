@@ -333,6 +333,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// its tags are unreachable.
     fn read_tag(&self, granule: Granule, offset: u64) -> u8 {
         if granule.tagged {
+            self.host.speculation_barrier();
             self.tags.get(granule.translation.physical + offset)
         } else {
             0
@@ -598,8 +599,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 &mut RamTables(&mut self.host),
             ) {
                 Translated::Mapped(translation)
-                    if translation.attributes == TAGGED
-                        && self.tags.get(translation.physical) != tag =>
+                    if translation.attributes == TAGGED && {
+                        self.host.speculation_barrier();
+                        self.tags.get(translation.physical) != tag
+                    } =>
                 {
                     let fault = mmu::Fault::stage1(mmu::FaultKind::TagCheck, 0);
                     let write = access.write && !access.read;

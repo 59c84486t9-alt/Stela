@@ -934,6 +934,12 @@ mod tests {
         // literal always checks.
         let system = compile(&words, BlockProfile::SystemModeV1, |plan| plan);
         assert_eq!(count(&system), 4);
+        // Under FEAT_CSV3 each access checks, so each masks its own address.
+        let masked = compile(&words, BlockProfile::SystemModeV1, |plan| {
+            plan.with_memory_checks(crate::x86_64::MemoryChecks::system(true, false, true, true))
+                .unwrap()
+        });
+        assert_eq!(count(&masked), words.len() - 2);
         assert_eq!(
             count(&compile(&words, BlockProfile::Ordinary, |plan| plan)),
             0

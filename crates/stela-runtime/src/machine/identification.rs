@@ -45,10 +45,13 @@ pub enum Basis {
     /// Holds when the host keeps branch predictions within one guest
     /// context ([`Speculation::contexts`]).
     Contexts(&'static str),
+    /// Holds when no data a faulting access would load reaches later
+    /// speculative execution ([`Speculation::faulting_data`]).
+    FaultingData(&'static str),
 }
 
 /// The speculation guarantees the host gives guest code, which the
-/// ID_AA64PFR0_EL1 CSV2 field discloses. Arm's 0 there means "not
+/// ID_AA64PFR0_EL1 CSV2 and CSV3 fields disclose. Arm's 0 there means "not
 /// disclosed", so a host that cannot establish the guarantee reports 0.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Speculation {
@@ -60,14 +63,34 @@ pub struct Speculation {
     /// CPU enumerates IBPB. A hosted process is one guest context, and the
     /// host OS's process isolation separates it from other processes'.
     pub contexts: bool,
+    /// FEAT_CSV3: data loaded under speculation by an access with a
+    /// permission or domain fault, or read from a System register the
+    /// current EL cannot access, is not used by later speculative
+    /// instructions. Native accesses fault through the shadow tables on a
+    /// host whose loads forward no faulting data (`speculation::probe` on
+    /// bare metal: Intel's RDCL_NO, MDS_NO, TAA_NO or no TSX, GDS_NO and
+    /// RFDS_NO; AMD's TSA_SQ_NO and TSA_L1_NO with an always-serializing
+    /// LFENCE); every access then masks its address into an unmapped entry
+    /// on a mispredicted range check (`x86_64::GUEST_RANGE_CHECK`, checked
+    /// at every access), the engine fences each guest RAM read behind its
+    /// translation, and closed native System register cells hold no value.
+    /// A hosted process cannot read the host's capabilities and discloses
+    /// nothing.
+    pub faulting_data: bool,
 }
 
 impl Speculation {
     /// A host that establishes no guarantee.
-    pub const NONE: Self = Self { contexts: false };
+    pub const NONE: Self = Self {
+        contexts: false,
+        faulting_data: false,
+    };
     /// A hosted process: one guest context per host process, whose
     /// predictions the host OS's process isolation separates.
-    pub const HOSTED: Self = Self { contexts: true };
+    pub const HOSTED: Self = Self {
+        contexts: true,
+        faulting_data: false,
+    };
 }
 
 /// One level of one field. A field's rows are listed in increasing level;
@@ -131,6 +154,10 @@ const VIRTUAL_OFFSETS: &str = "HCR_EL2.AMVOFFEN applies AMEVCNTVOFF0<n>_EL2 and 
 const PREDICTION_ISOLATION: &str = "the host isolates branch predictions at every guest \
      context change (IBPB and a return stack refill), or the host OS does between hosted \
      processes; SCXTNUM_ELx is held and distinguishes no context";
+const FAULTING_DATA: &str = "the host's loads forward no data from a faulting access, every \
+     native access masks its address on a mispredicted guest range check, the engine fences \
+     guest RAM reads behind their translation, and closed native System register cells are \
+     cleared";
 const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's audited \
      data-independent-timing tier, whose lowerings of every listed instruction use only \
      Intel's data operand independent timing instructions (isa/dit-timing-audit.json)";
@@ -339,8 +366,8 @@ pub const TABLE: &[Row] = &[
     // CSV2 2 (FEAT_CSV2_2, which the chips' clang features name, above
     // Armv8.5's FEAT_CSV2), as the chip has it, where the host gives the
     // guarantee ([`Speculation`]). CSV2_frac stays 0, its only value with
-    // CSV2 2. CSV3 reads 0: translated code gives no faulting-data
-    // guarantee.
+    // CSV2 2. CSV3 1 likewise, where the host gives no faulting data to
+    // speculation.
     row(
         ID_AA64PFR0_EL1,
         56,
@@ -355,6 +382,16 @@ pub const TABLE: &[Row] = &[
         2,
         "FEAT_CSV2_2",
         Basis::Contexts(PREDICTION_ISOLATION),
+    ),
+    // FEAT_CSV3 is mandatory from Armv8.5, which every chip's profile
+    // implies, so no per-chip feature names it.
+    row(
+        ID_AA64PFR0_EL1,
+        60,
+        1,
+        0,
+        None,
+        Basis::FaultingData(FAULTING_DATA),
     ),
     // ID_AA64PFR1_EL1
     feature(
@@ -1233,6 +1270,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Specu
         Basis::Host(_) => el2,
         Basis::Timing(_) => target.data_independent_timing_target().is_some(),
         Basis::Contexts(_) => speculation.contexts,
+        Basis::FaultingData(_) => speculation.faulting_data,
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),
@@ -1422,12 +1460,19 @@ mod tests {
                 value(ID_AA64PFR1_EL1) >> CSV2_FRAC & 0xf,
             )
         };
-        // The chip has FEAT_CSV2_2 (CSV2 2, where CSV2_frac is 0), disclosed
-        // only where the host isolates predictions; CSV3 stays 0.
+        // The chip has FEAT_CSV2_2 (CSV2 2, where CSV2_frac is 0) and, from
+        // Armv8.5, FEAT_CSV3, each disclosed only where the host gives its
+        // guarantee.
         let chip = crate::machine::test_chip();
         assert!(has(chip, "FEAT_CSV2_2"));
         assert_eq!(fields(chip, Speculation::NONE), (0, 0, 0));
         assert_eq!(fields(chip, Speculation::HOSTED), (2, 0, 0));
+        let faulting_data = |contexts| Speculation {
+            contexts,
+            faulting_data: true,
+        };
+        assert_eq!(fields(chip, faulting_data(false)), (0, 1, 0));
+        assert_eq!(fields(chip, faulting_data(true)), (2, 1, 0));
     }
 
     #[test]
