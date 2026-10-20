@@ -179,31 +179,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Host, "_kernelrpc_host_create_mach_voucher", None),
     (Object::Host, "kmod_get_info", None),
     (Object::Host, "host_virtual_physical_table_info", None),
-    (
-        Object::Host,
-        "host_lockgroup_info",
-        Some("the lock groups are the x86 host kernel's"),
-    ),
-    (
-        Object::Host,
-        "mach_zone_info",
-        Some("a caller shown zones receives the x86 host kernel's"),
-    ),
-    (
-        Object::Host,
-        "mach_zone_info_for_zone",
-        Some("a caller shown zones receives the x86 host kernel's"),
-    ),
-    (
-        Object::Host,
-        "mach_memory_info",
-        Some("a caller shown zones receives the x86 host kernel's zones and memory"),
-    ),
-    (
-        Object::Host,
-        "mach_memory_info_redacted",
-        Some("a caller shown zones receives the x86 host kernel's zones and memory"),
-    ),
+    (Object::Host, "host_lockgroup_info", None),
+    (Object::Host, "mach_zone_info", None),
+    (Object::Host, "mach_zone_info_for_zone", None),
+    (Object::Host, "mach_memory_info", None),
+    (Object::Host, "mach_memory_info_redacted", None),
     (
         Object::Host,
         "host_set_atm_diagnostic_flag",
@@ -367,16 +347,8 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Task, "task_test_sync_upcall", None),
     (Object::Task, "task_test_async_upcall_propagation", None),
     (Object::Task, "task_set_corpse_forking_behavior", None),
-    (
-        Object::Task,
-        "task_purgable_info",
-        Some("the counts include the hosted runtime's own purgeable memory"),
-    ),
-    (
-        Object::Task,
-        "task_set_phys_footprint_limit",
-        Some("the footprint includes the hosted runtime's own memory"),
-    ),
+    (Object::Task, "task_purgable_info", None),
+    (Object::Task, "task_set_phys_footprint_limit", None),
     (Object::Task, "task_get_state", None),
     (
         Object::Task,
@@ -386,11 +358,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
              stops the run",
         ),
     ),
-    (
-        Object::Task,
-        "task_inspect",
-        Some("TASK_INSPECT_BASIC_COUNTS would count the x86 host's instructions and cycles"),
-    ),
+    (Object::Task, "task_inspect", None),
     (
         Object::Task,
         "thread_create_from_user",
@@ -438,14 +406,7 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some("the kernel port"),
     ),
     (Object::Thread, "thread_set_special_port", None),
-    (
-        Object::Thread,
-        "thread_info",
-        Some(
-            "the times, CPU usage and priorities are the host thread's, whose user time counts \
-             the hosted kernel's work",
-        ),
-    ),
+    (Object::Thread, "thread_info", None),
     (
         Object::Thread,
         "thread_set_exception_ports",
@@ -495,8 +456,8 @@ const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port i
 /// applies to the calls it serves), trace dyld's image registrations
 /// (`kdebug` only) or answer as every release kernel does (the dyld
 /// image list and state routines, the test upcalls, corpse forking). The
-/// purgeable counts and the footprint limit cover the host task's memory,
-/// which holds the hosted runtime's too.
+/// purgeable counts and the footprint limit are the host task's, which is
+/// this process (process accounting).
 const TASK_FORWARDED: &[&str] = &[
     "task_terminate",
     "task_set_info",
@@ -787,21 +748,10 @@ pub(super) fn serve(
         (Object::Task, routine, _) if TASK_FORWARDED.contains(&routine) => Reply::Forward,
         (Object::Task, "task_get_state", false) => task_get_state(kernel, request),
         (Object::Task, "task_set_state", false) => task_set_state(kernel, request)?,
-        // `flavor`, `info_outCnt`, which MIG bounds to 4.
-        (Object::Task, "task_inspect", false) => {
-            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
-                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
-            };
-            if flavor != TASK_INSPECT_BASIC_COUNTS || count.min(4) < TASK_INSPECT_BASIC_COUNTS_COUNT
-            {
-                Reply::Failure(KERN_INVALID_ARGUMENT)
-            } else {
-                bail!(
-                    "task_inspect(TASK_INSPECT_BASIC_COUNTS): the host would count the x86 \
-                     host's instructions and cycles, not the profile's processors'"
-                )
-            }
-        }
+        // `flavor`, `info_outCnt`, which MIG bounds to 4. The process's
+        // instructions and cycles are the host process's, as a Rosetta
+        // process's are the real processor's (process accounting).
+        (Object::Task, "task_inspect", false) => Reply::Forward,
         (Object::Task, "thread_create_from_user", false) => {
             if !request.body.is_empty() {
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
@@ -942,9 +892,6 @@ const ARM_DEBUG_STATE64: u32 = 15;
 const DEBUG_STATE64_COUNT: u32 = 130;
 /// `MACH_VM_MAX_ADDRESS` of a 64-bit macOS task.
 const MACH_VM_MAX_ADDRESS: u64 = 0x0000_7fff_fe00_0000;
-/// `task_inspect`'s one flavor and its count.
-const TASK_INSPECT_BASIC_COUNTS: u32 = 1;
-const TASK_INSPECT_BASIC_COUNTS_COUNT: u32 = 4;
 
 /// The doubleword `index` of an `arm_debug_state64_t` (`bvr[16]`,
 /// `bcr[16]`, `wvr[16]`, `wcr[16]`, `mdscr_el1`).
@@ -1126,8 +1073,10 @@ pub(crate) fn refusal(object: Object, routine: &str) -> &'static str {
 /// forwarded to the host port. The host-privileged routines refuse the
 /// host port as an unprivileged arm64 process's kernel refuses it (only
 /// root obtains the privileged port); the others act on this machine's
-/// calendar notifications, vouchers and flags, or answer as every
-/// release kernel does (`kmod_get_info`, `host_virtual_physical_table_info`).
+/// calendar notifications, vouchers and flags, answer as every release
+/// kernel does (`kmod_get_info`, `host_virtual_physical_table_info`), or
+/// describe the kernel beneath this process, the host's (its lock groups,
+/// zones and memory: kernel-internal state).
 const HOST_FORWARDED: &[&str] = &[
     "host_request_notification",
     "_kernelrpc_host_create_mach_voucher",
