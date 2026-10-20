@@ -38,6 +38,11 @@ pub const MAX_PIECES: usize = 1000;
 pub const HASH_BLOCK_BYTES: u64 = 64 * 1024;
 /// The block hashes' file name beside `payload.json`.
 pub const BLOCK_HASHES_FILE: &str = "blocks.bin";
+/// The install medium's piece block hashes' file name beside
+/// `payload.json`.
+pub const PIECE_HASHES_FILE: &str = "pieces.bin";
+/// The largest block a hash may cover.
+const MAX_HASH_BLOCK_BYTES: u64 = 1024 * 1024;
 /// The most block hashes a manifest may name: 64 GiB of members.
 pub const MAX_HASH_BLOCKS: u64 = 1 << 20;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
@@ -200,9 +205,13 @@ pub enum Layout {
     Staged,
     /// The whole IPSW as `ipsw.NNN` pieces beside the manifest, each
     /// `piece_bytes` but the last; their concatenation is the IPSW.
+    /// `block_hashes` names the SHA-256 of every block of every piece, in
+    /// piece order, each piece's last block its remainder, so a reader
+    /// checks every block it reads without hashing a whole piece first.
     Pieces {
         piece_bytes: u64,
         pieces: Vec<Piece>,
+        block_hashes: BlockHashes,
     },
 }
 
@@ -280,6 +289,11 @@ pub struct PayloadManifest {
     pub aea_keys: Vec<AeaKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_hashes: Option<BlockHashes>,
+}
+
+/// A file name of one ordinary component.
+fn safe_name(name: &str) -> bool {
+    !name.contains('/') && safe_path(name)
 }
 
 /// A relative path made of ordinary components only.
@@ -379,7 +393,15 @@ impl PayloadManifest {
             Layout::Pieces {
                 piece_bytes,
                 pieces,
+                block_hashes,
             } => {
+                if !safe_name(&block_hashes.file) || !sha256_hex(&block_hashes.sha256) {
+                    return fail("unsafe piece hash file or invalid digest");
+                }
+                let block = block_hashes.block_bytes;
+                if !(1..=MAX_HASH_BLOCK_BYTES).contains(&block) || piece_bytes % block != 0 {
+                    return fail("piece blocks do not divide the piece size");
+                }
                 if !(1..=MAX_SLICE_BYTES).contains(piece_bytes) {
                     return fail("piece size outside 1..=4 GiB-1");
                 }
@@ -409,11 +431,7 @@ impl PayloadManifest {
             names.push(&member.name);
         }
         if let Some(blocks) = &self.block_hashes {
-            if blocks.file.is_empty()
-                || blocks.file.contains('/')
-                || !safe_path(&blocks.file)
-                || !sha256_hex(&blocks.sha256)
-            {
+            if !safe_name(&blocks.file) || !sha256_hex(&blocks.sha256) {
                 return fail("unsafe block hash file or invalid digest");
             }
             if blocks.block_bytes != HASH_BLOCK_BYTES {
@@ -511,6 +529,22 @@ impl PayloadManifest {
             .iter()
             .map(|member| member.bytes.div_ceil(HASH_BLOCK_BYTES))
             .sum()
+    }
+
+    /// The install medium's piece blocks, in the order its piece hash file
+    /// lists them; zero for another layout.
+    pub fn piece_hash_blocks(&self) -> u64 {
+        match &self.layout {
+            Layout::Pieces {
+                pieces,
+                block_hashes,
+                ..
+            } => pieces
+                .iter()
+                .map(|piece| piece.bytes.div_ceil(block_hashes.block_bytes))
+                .sum(),
+            _ => 0,
+        }
     }
 
     pub fn total_bytes(&self) -> u64 {
@@ -617,7 +651,7 @@ pub(crate) mod tests {
         let (manifest, _) = manifest();
         let json = manifest.to_json();
         assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
-        let broken: [fn(&mut PayloadManifest); 16] = [
+        let broken: [fn(&mut PayloadManifest); 17] = [
             |m| m.members[0].name = "../escape".into(),
             |m| m.members[0].sha256 = "A".repeat(64),
             |m| m.members[1].name = m.members[0].name.clone(),
@@ -646,6 +680,12 @@ pub(crate) mod tests {
             |m| m.layout = pieces(&[1], 0),
             |m| m.layout = pieces(&[], 2),
             |m| m.layout = pieces(&[1, 1], 2),
+            |m| {
+                m.layout = pieces(&[1], 2);
+                if let Layout::Pieces { block_hashes, .. } = &mut m.layout {
+                    block_hashes.block_bytes = 3;
+                }
+            },
             |m| {
                 m.layout = pieces(&[1], 2);
                 if let Layout::Pieces { pieces, .. } = &mut m.layout {
@@ -687,6 +727,11 @@ pub(crate) mod tests {
     /// A pieces layout of these sizes.
     fn pieces(sizes: &[u64], piece_bytes: u64) -> Layout {
         Layout::Pieces {
+            block_hashes: BlockHashes {
+                file: PIECE_HASHES_FILE.into(),
+                block_bytes: 1,
+                sha256: "7".repeat(64),
+            },
             piece_bytes,
             pieces: sizes
                 .iter()
@@ -715,9 +760,10 @@ pub(crate) mod tests {
         assert!(piece_sizes(0, 2).is_empty());
         // The 26A434 IPSW (26,637,307,067 bytes) takes seven pieces.
         assert_eq!(piece_sizes(26_637_307_067, PIECE_BYTES).len(), 7);
-        assert!(PIECE_BYTES < MAX_SLICE_BYTES);
+        const { assert!(PIECE_BYTES < MAX_SLICE_BYTES) };
         assert_eq!(piece_name(7), "ipsw.007");
         assert_eq!(install_directory("26A434"), "EFI/stela/install/26A434");
+        assert_eq!(manifest.piece_hash_blocks(), 5);
         assert_eq!(manifest.erase_identity().unwrap(), 20);
         manifest.identities[1].purpose = Purpose::Erase;
         assert!(manifest.erase_identity().is_err());
