@@ -280,8 +280,6 @@ const IDENTITY: &[&str] = &[
 /// Process and system information about this process and the host whose
 /// structures are architecture-neutral, MAC policy calls and tracing.
 const INFORMATION: &[&str] = &[
-    "proc_info",
-    "proc_info_extended_id",
     "proc_rlimit_control",
     "proc_uuid_policy",
     "process_policy",

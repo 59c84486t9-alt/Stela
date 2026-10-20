@@ -24,8 +24,9 @@
 //! `fork` and `vfork` ([`super::fork`]) fork the host process.
 use super::{Call, Kernel, Outcome, Pe, paths};
 use crate::hosted::activation::{self, Activator};
-use crate::hosted::darwin::{E2BIG, EACCES, EFAULT, EINVAL, MAX_PATH};
+use crate::hosted::darwin::{E2BIG, EACCES, EFAULT, EINVAL, KERN_SUCCESS, MAX_PATH};
 use crate::hosted::kernel::End;
+use crate::hosted::kernel::mach::task::DyldInfo;
 use crate::hosted::{Termination, memory};
 use anyhow::{Result, bail};
 use std::ffi::{CString, OsStr};
@@ -38,6 +39,11 @@ const ARG_MAX: usize = 1 << 20;
 const ENAMETOOLONG: u64 = 63;
 /// `MAC_MAX_LABEL_BUF_LEN` (`security/mac.h`).
 const MAC_MAX_LABEL_BUF_LEN: u64 = 8192;
+/// `PROC_INFO_CALL_SET_DYLD_IMAGES` (`sys/proc_info_private.h`).
+const PROC_INFO_CALL_SET_DYLD_IMAGES: i32 = 0xf;
+/// `PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID`, which
+/// `proc_info_extended_id` refuses together before any call.
+const PIF_COMPARE_BOTH: u64 = 0x3;
 
 unsafe extern "C" {
     /// `__mac_execve(fname, argv, envp, mac_p)`, system call 380.
@@ -115,6 +121,8 @@ pub(super) const CALLS: &[&str] = &[
     "posix_spawn",
     "fork",
     "vfork",
+    "proc_info",
+    "proc_info_extended_id",
 ];
 
 pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Option<Outcome>> {
@@ -127,8 +135,54 @@ pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Opt
         "__mac_execve" => Some(execve(kernel, call, call.argument(3))?),
         "posix_spawn" => Some(super::spawn::posix_spawn(kernel, call)?),
         "fork" | "vfork" => super::fork::call(kernel, call)?,
+        "proc_info" => Some(proc_info(kernel, call, 4)?),
+        "proc_info_extended_id" if call.argument(3) & PIF_COMPARE_BOTH != PIF_COMPARE_BOTH => {
+            Some(proc_info(kernel, call, 6)?)
+        }
+        "proc_info_extended_id" => Some(super::forward(kernel, call)?),
         _ => None,
     })
+}
+
+/// `proc_info_internal`, whose buffer and size are the arguments from
+/// `buffer`: `PROC_INFO_CALL_SET_DYLD_IMAGES` sets the guest's task's dyld
+/// image list location, which the host's task keeps for its own x86 dyld;
+/// every other call is about this process's or the host's processes'
+/// architecture-neutral state and is the host kernel's.
+fn proc_info(kernel: &mut Kernel, call: &Call, buffer: usize) -> Result<Outcome> {
+    if call.argument(0) as i32 != PROC_INFO_CALL_SET_DYLD_IMAGES {
+        return super::forward(kernel, call);
+    }
+    // SAFETY: no arguments.
+    let own = unsafe { libc::getpid() };
+    let mut info = crate::hosted::threads::lock(&kernel.process.dyld_info);
+    Ok(
+        match set_dyld_images(
+            &mut info,
+            own,
+            call.argument(1) as i32,
+            call.argument(buffer),
+            call.argument(buffer + 1) as u32,
+        ) {
+            Ok(()) => Outcome::value(0),
+            Err(errno) => Outcome::Error(errno),
+        },
+    )
+}
+
+/// `proc_set_dyld_images`: only the calling process's own task, with a
+/// nonzero buffer, and EINVAL when `task_set_dyld_info` refuses.
+fn set_dyld_images(
+    info: &mut DyldInfo,
+    own: i32,
+    pid: i32,
+    buffer: u64,
+    size: u32,
+) -> Result<(), u64> {
+    if pid != own || buffer == 0 || info.set(buffer, u64::from(size)) != KERN_SUCCESS {
+        return Err(EINVAL);
+    }
+    Ok(())
 }
 
 /// A NULL-terminated guest vector of strings, or the errno reading it.
@@ -337,6 +391,18 @@ fn execve(kernel: &mut Kernel, call: &Call, label: u64) -> Result<Outcome> {
 mod tests {
     use super::*;
     use crate::hosted::memory::{PAGE_BYTES, Protection};
+
+    #[test]
+    fn dyld_images_are_set_only_for_this_process_with_a_buffer() {
+        let mut info = DyldInfo::default();
+        assert_eq!(set_dyld_images(&mut info, 7, 8, 0x1000, 0x170), Err(EINVAL));
+        assert_eq!(set_dyld_images(&mut info, 7, 7, 0, 0x170), Err(EINVAL));
+        assert_eq!(info, DyldInfo::default());
+        assert_eq!(set_dyld_images(&mut info, 7, 7, 0x1000, 0x170), Ok(()));
+        // The second nonzero location is final.
+        assert_eq!(set_dyld_images(&mut info, 7, 7, 0x2000, 0x170), Ok(()));
+        assert_eq!(set_dyld_images(&mut info, 7, 7, 0x3000, 0x170), Err(EINVAL));
+    }
 
     #[test]
     fn a_mac_label_fails_as_mac_execve_enter_reads_it() {
