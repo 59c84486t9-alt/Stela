@@ -163,7 +163,7 @@ encodings! {
     GUEST_C14_1 = 4, 14, 1;
     GUEST_C14_2 = 4, 14, 2;
     GUEST_C14_3 = 4, 14, 3;
-    GUEST_RANGE_COMMAND = 4, 15, 1;
+    JIT_RANGE = 4, 15, 1;
     GUEST_C15_2 = 4, 15, 2;
     SPTM_CONTEXT = 4, 15, 4;
     GUEST_C15_5 = 4, 15, 5;
@@ -551,9 +551,13 @@ const NESTED_PAGE_EVIDENCE: &str = "no public name; SPTM 26A434 reads and writes
     and clears it before entering EL1 (__text+0x49edc). The M2 has no FEAT_NV2, so only 0 \
     is accepted (inference: a companion of VNCR_EL2)";
 
-const GUEST_RANGE_EVIDENCE: &str = "refused: no public name; 26A434 XNU's hypervisor writes \
-    an address-and-size encoding to it followed by ISB (0xfffffe000bda5670) and never reads \
-    it, a command whose effect is not documented";
+const JIT_RANGE_EVIDENCE: &str = "refused: no public name; 26A434 XNU's JIT box (its panic \
+    names jitbox.c) writes a task's JIT range to it, a 32 MiB-aligned user address ORed with a \
+    size code, then ISB (0xfffffe000bda5670), after writing the task's mode to S3_4_C15_C15_4 \
+    (2 for none), and never reads it. The context switch does so when the incoming task's JIT \
+    box settings or S3_4_C15_C15_6 differ from the CPU's (0xfffffe000bd839f0), and so does an \
+    update of the running task's (0xfffffe000bda5964); a task without a JIT box never changes \
+    them. What the range enforces is not documented";
 
 const GUARDED_HPFAR_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to HPFAR_EL2, \
     as it copies the GL bank's ESR and FAR to EL1's, when it reflects a guarded-level \
@@ -738,6 +742,12 @@ pub const TABLE: &[Entry] = &[
         "S3_4_C15_C15_4 (unnamed)",
         Class::Storage,
         SPTM_CONTEXT_EVIDENCE,
+    ),
+    entry(
+        JIT_RANGE,
+        "S3_4_C15_C15_1 (unnamed)",
+        Class::Unsupported,
+        JIT_RANGE_EVIDENCE,
     ),
     entry(
         SPTM_KEY_0,
@@ -1061,13 +1071,6 @@ pub const TABLE: &[Entry] = &[
         "S3_1_C15_C9_4 (unnamed)",
         Class::Guest,
         VM_COUNTER_OFFSET_EVIDENCE,
-    )
-    .el2(),
-    entry(
-        GUEST_RANGE_COMMAND,
-        "S3_4_C15_C15_1 (unnamed)",
-        Class::Unsupported,
-        GUEST_RANGE_EVIDENCE,
     )
     .el2(),
     guest(GUEST_C2_6, "S3_4_C15_C2_6 (unnamed)"),
