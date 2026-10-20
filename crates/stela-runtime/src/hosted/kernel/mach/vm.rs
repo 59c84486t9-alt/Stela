@@ -57,7 +57,7 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     ),
     (
         "_kernelrpc_mach_vm_allocate_external",
-        Some("VM_FLAGS_TPRO and VM_FLAGS_MTE allocations are refused"),
+        Some("VM_FLAGS_TPRO allocations are refused"),
     ),
     ("_kernelrpc_mach_vm_deallocate_external", None),
     (
@@ -276,7 +276,7 @@ impl Task for Kernel {
     }
 
     fn memory_tagging(&self) -> bool {
-        self.process.hardware.memory_tagging
+        crate::hosted::pe::memory_tagging(self.process.hardware.memory_tagging)
     }
 
     fn address_space_debugged(&self) -> bool {
@@ -311,11 +311,11 @@ const VM_OFFSET_LIST_MAX: u32 = 1024;
 const ALLOCATION_TAG: u64 = 0xf << 56;
 
 /// `mach_vm_update_pointers_with_remote_tags(in_pointer_listCnt,
-/// in_pointer_list, out_pointer_listCnt)` on a profile with memory
+/// in_pointer_list, out_pointer_listCnt)` on a machine presenting memory
 /// tagging: for a debugged address space, each pointer with its memory's
 /// allocation tag, which is 0 for every page of the hosted machine (no
-/// memory is tagged: `VM_FLAGS_MTE` is refused), and a zero slot for an
-/// address that cannot be read; otherwise KERN_INVALID_ARGUMENT.
+/// memory is tagged), and a zero slot for an address that cannot be read;
+/// otherwise KERN_INVALID_ARGUMENT.
 fn remote_tags(task: &dyn Task, request: &Request) -> Reply {
     let Some(count) = request
         .word(SIMPLE)
@@ -773,7 +773,9 @@ fn allocate(task: &mut dyn Task, request: &Request) -> Result<Reply> {
     if flags & VM_FLAGS_SUPERPAGE_MASK != 0 {
         return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
     }
-    if flags & (VM_FLAGS_TPRO | VM_FLAGS_MTE) != 0 {
+    // A kernel without memory tagging (`HAS_MTE`) accepts VM_FLAGS_MTE and
+    // ignores it, as the host does.
+    if flags & VM_FLAGS_TPRO != 0 || (flags & VM_FLAGS_MTE != 0 && task.memory_tagging()) {
         bail!("mach_vm_allocate with flags {flags:#x}: TPRO and MTE memory are not implemented");
     }
     if size == 0 {
@@ -2087,6 +2089,26 @@ mod tests {
         );
         assert_eq!(address & PAGE_MASK, 0);
         address
+    }
+
+    #[test]
+    fn a_kernel_without_memory_tagging_ignores_vm_flags_mte() {
+        let body = simple(&[
+            &0u64.to_le_bytes(),
+            &PAGE_BYTES.to_le_bytes(),
+            &(VM_FLAGS_ANYWHERE | VM_FLAGS_MTE).to_le_bytes(),
+        ]);
+        let routine = "_kernelrpc_mach_vm_allocate_external";
+        let address = u64_at(
+            &success(call(&mut bare(), routine, false, &body).unwrap()),
+            0,
+        );
+        assert!(memory::write(address, &[1]));
+        let mut tagging = Bare {
+            memory_tagging: true,
+            debugged: false,
+        };
+        assert!(call(&mut tagging, routine, false, &body).is_err());
     }
 
     fn remap_body(target: u64, size: u64, flags: i32, source: u64, copy: bool) -> Vec<u8> {

@@ -233,7 +233,11 @@ pub fn run(launch: Launch) -> Result<Report> {
     let keys = pe::Keys::random()?;
     let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
     let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
-    let security_config = launch.signature.security_config(hardware.memory_tagging)?;
+    let memory_tagging = pe::memory_tagging(hardware.memory_tagging);
+    if hardware.memory_tagging && !memory_tagging {
+        eprintln!("stela: {}", pe::MEMORY_TAGGING_LIMIT);
+    }
+    let security_config = launch.signature.security_config(memory_tagging)?;
     let ipc_space_policy = launch.signature.ipc_space_policy(jop)?;
     // A platform plugin host runs with its keys off, as an arm64 image
     // (`IMGPF_3P_PLUGINS` sets `IMGPF_NOJOP`).

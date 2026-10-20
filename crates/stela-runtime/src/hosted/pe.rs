@@ -11,7 +11,10 @@
 use super::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK};
 use super::tables::{T0SZ, Tables};
 use crate::machine::{
-    Chip, Cpu, CpuProfile, exception::Pstate, registers::encodings::DCZID_EL0, system::Register,
+    Chip, Cpu, CpuProfile,
+    exception::Pstate,
+    registers::encodings::{DCZID_EL0, ID_AA64PFR1_EL1},
+    system::Register,
 };
 use stela_compiler::TargetCpu;
 
@@ -203,10 +206,38 @@ impl Keys {
     }
 }
 
+/// Hosted memory tagging is not implemented: guest memory is the host's,
+/// mapped by 1 GiB identity blocks of one Normal attribute, and nothing
+/// keeps its Allocation Tags, enables tag access at EL0 (SCTLR_EL1.ATA0)
+/// or checks them in translated code. Presenting it also makes the hosted
+/// kernel's tagging answers (tag storage, remote pointer tags) read the
+/// tags kept.
+const HOSTED_MEMORY_TAGGING: bool = false;
+
+/// ID_AA64PFR1_EL1.MTE and MTE_frac.
+const PFR1_MTE_FIELDS: u64 = 0xf << 8 | 0xf << 40;
+
+/// Whether the hosted machine presents memory tagging, given whether the
+/// chip has it (`Hardware::memory_tagging`): not until hosted memory
+/// tagging exists, so a tagging chip's hosted process sees a machine
+/// without it (no FEAT_MTE in its identification, sysctls and commpage,
+/// and a kernel that ignores `VM_FLAGS_MTE` as non-MTE kernels do) rather
+/// than one whose tag stores silently keep nothing.
+pub const fn memory_tagging(chip: bool) -> bool {
+    chip && HOSTED_MEMORY_TAGGING
+}
+
+/// The hosted limit exec reports once for a chip with memory tagging.
+pub const MEMORY_TAGGING_LIMIT: &str = "the chip's memory tagging (FEAT_MTE2) is not presented \
+     to hosted processes: hosted memory keeps no Allocation Tags, so the process runs as on a \
+     chip without it";
+
 /// The chip profile of the hosted PE: identification the engine implements
-/// on this host, capped at the chip, with the M2's 24 MHz counter. The
-/// process is one guest context, so its speculation guarantees are the host
-/// OS's process isolation (`Speculation::HOSTED`).
+/// on this host, capped at the chip, with the M2's 24 MHz counter and
+/// without memory tagging unless the hosted machine presents it
+/// ([`memory_tagging`]). The process is one guest context, so its
+/// speculation guarantees are the host OS's process isolation
+/// (`Speculation::HOSTED`).
 pub fn profile(chip: Chip, target: TargetCpu) -> CpuProfile {
     let mut fixed = crate::machine::identification::derive(
         chip,
@@ -214,6 +245,12 @@ pub fn profile(chip: Chip, target: TargetCpu) -> CpuProfile {
         true,
         crate::machine::identification::Speculation::HOSTED,
     );
+    let tagging = memory_tagging(crate::machine::identification::memory_tagging(chip));
+    for (register, value) in &mut fixed {
+        if *register == ID_AA64PFR1_EL1 && !tagging {
+            *value &= !PFR1_MTE_FIELDS;
+        }
+    }
     fixed.push((DCZID_EL0, DCZID_BLOCK_64));
     CpuProfile {
         name: chip.name(),
@@ -305,6 +342,24 @@ mod tests {
         assert_eq!(cpu.read(Register::TTBR0_EL1), tables.root());
         assert_eq!(cpu.read(Register::APIBKeyHi_EL1), keys.ib[1]);
         assert_eq!(VECTOR_BASE & 0x7ff, 0);
+    }
+
+    #[test]
+    fn a_tagging_chip_presents_no_memory_tagging_to_hosted_processes() {
+        let field = |chip| {
+            profile(chip, TargetCpu::detect())
+                .fixed
+                .iter()
+                .find(|(register, _)| *register == ID_AA64PFR1_EL1)
+                .map_or(0, |(_, value)| *value)
+        };
+        assert!(crate::machine::identification::memory_tagging(
+            Chip::AppleM5
+        ));
+        assert!(!memory_tagging(true));
+        assert_eq!(field(Chip::AppleM5) & PFR1_MTE_FIELDS, 0);
+        // The register's other features stay.
+        assert_ne!(field(Chip::AppleM5), 0);
     }
 
     #[test]

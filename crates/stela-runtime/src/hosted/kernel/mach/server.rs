@@ -1560,7 +1560,12 @@ fn host_statistics(
         // answers whether or not the host kernel has them.
         words.resize(words.len().max(VM_INFO64_REV3_COUNT), 0);
     }
-    restate_pages(&mut words, flavor, tag_storage_pages(hardware));
+    let tagging = crate::hosted::pe::memory_tagging(hardware.memory_tagging);
+    restate_pages(
+        &mut words,
+        flavor,
+        tag_storage_pages(hardware.memory_bytes, tagging),
+    );
     if flavor == HOST_LOAD_INFO {
         restate_load(&mut words, hardware.cpus().into());
     }
@@ -1571,14 +1576,14 @@ fn host_statistics(
     Ok(Reply::Success(body))
 }
 
-/// The tag storage of the hosted machine's memory, in guest pages: on a
-/// profile with memory tagging, the memory's share holding its allocation
-/// tags, none of it storing tags or reused for other data, since no page
-/// of the hosted machine is tagged (`VM_FLAGS_MTE` memory is refused);
+/// The tag storage of the hosted machine's `memory_bytes`, in guest pages:
+/// on a machine presenting memory tagging (`pe::memory_tagging`), the
+/// memory's share holding its allocation tags, none of it storing tags or
+/// reused for other data, since no page of the hosted machine is tagged;
 /// without memory tagging, none.
-fn tag_storage_pages(hardware: &hardware::Hardware) -> u64 {
-    if hardware.memory_tagging {
-        hardware.memory_bytes / TAG_STORAGE_RATIO / memory::PAGE_BYTES
+fn tag_storage_pages(memory_bytes: u64, tagging: bool) -> u64 {
+    if tagging {
+        memory_bytes / TAG_STORAGE_RATIO / memory::PAGE_BYTES
     } else {
         0
     }
@@ -1780,7 +1785,8 @@ mod tests {
         restate_pages(&mut load, 1, 0);
         assert_eq!(load, [400; 6]);
         // The host answers the load and VM flavors, rev3's tag storage
-        // zero on every profile.
+        // zero on every profile: the hosted machine presents no memory
+        // tagging, even on a chip with it.
         let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
         let tagging = hardware::Hardware {
             memory_tagging: true,
@@ -1799,18 +1805,21 @@ mod tests {
                 .map(|word| u32::from_le_bytes(*word))
                 .collect();
             assert_eq!(words[0], VM_INFO64_REV3_COUNT as u32);
-            let storage = tag_storage_pages(profile);
             let tags = &words[1 + VM_INFO64_TAGGING..];
-            for (index, pair) in tags.as_chunks::<2>().0.iter().enumerate() {
-                let value = u64::from(pair[0]) | u64::from(pair[1]) << 32;
-                // The total and the free tag storage.
-                let expected = if matches!(index, 0 | 3) { storage } else { 0 };
-                assert_eq!(value, expected, "tag statistic {index}");
-            }
+            assert!(tags.iter().all(|&word| word == 0));
         }
-        assert_eq!(tag_storage_pages(&hardware), 0);
-        // 16 GiB holds 512 MiB of tags: 32768 guest pages.
-        assert_eq!(tag_storage_pages(&tagging), 0x8000);
+        assert_eq!(tag_storage_pages(hardware.memory_bytes, false), 0);
+        // 16 GiB holds 512 MiB of tags: 32768 guest pages, the total and
+        // the free tag storage of a machine presenting memory tagging.
+        assert_eq!(tag_storage_pages(hardware.memory_bytes, true), 0x8000);
+        let mut words = vec![0u32; VM_INFO64_REV3_COUNT];
+        restate_pages(&mut words, HOST_VM_INFO64, 0x8000);
+        let tags = &words[VM_INFO64_TAGGING..];
+        for (index, pair) in tags.as_chunks::<2>().0.iter().enumerate() {
+            let value = u64::from(pair[0]) | u64::from(pair[1]) << 32;
+            let expected = if matches!(index, 0 | 3) { 0x8000 } else { 0 };
+            assert_eq!(value, expected, "tag statistic {index}");
+        }
     }
 
     #[test]
