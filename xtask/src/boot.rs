@@ -186,6 +186,10 @@ pub struct Run {
     /// Serve the QEMU monitor over telnet on this loopback port.
     #[arg(long)]
     monitor: Option<u16>,
+    /// Hide five-level paging from the guest CPU, so system mode runs on
+    /// its four-level placement, as on a host without LA57.
+    #[arg(long)]
+    no_la57: bool,
     /// Advance QEMU's clocks by 2^SHIFT ns per executed x86 instruction
     /// (`-icount shift=SHIFT,sleep=off`) instead of host time, so that guest
     /// timeouts measure emulated work, as they would on hardware, and an idle
@@ -528,11 +532,17 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let usb = arguments.usb_image.is_some();
     let mut command = Process::new(&qemu);
     // A USB's startup choices take a keyboard, and its setup writes the boot
-    // log. System mode needs LA57, which `max` provides.
+    // log. System mode places the guest beside the window with LA57, which
+    // `max` provides unless `--no-la57` hides it.
+    let max = if arguments.no_la57 {
+        "max,la57=off"
+    } else {
+        "max"
+    };
     let (keyboard, cpu, access) = if usb {
-        ("on", "max", "readonly=off,file=fat:rw:")
+        ("on", max, "readonly=off,file=fat:rw:")
     } else if system {
-        ("off", "max", "readonly=on,file=fat:")
+        ("off", max, "readonly=on,file=fat:")
     } else {
         ("off", "qemu64", "readonly=on,file=fat:")
     };
@@ -799,6 +809,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "image": binding(&image)?,
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
+        "no_la57": arguments.no_la57,
         "options": options,
         "scenario": verification,
         "bundle": arguments.bundle,
