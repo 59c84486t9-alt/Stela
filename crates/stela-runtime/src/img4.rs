@@ -230,6 +230,16 @@ pub fn peek_payload_type(prefix: &[u8]) -> Result<[u8; 4], Img4Error> {
         .map_err(|_| Img4Error::Malformed("IM4P type is not four characters"))
 }
 
+/// The bytes of a DER element whose contents are `contents` bytes long:
+/// tag, length and contents, as `encode` writes them.
+fn encoded_bytes(contents: usize) -> usize {
+    let length_bytes = match contents {
+        0..0x80 => 1,
+        length => 1 + (8 - (length as u64).leading_zeros() as usize / 8),
+    };
+    1 + length_bytes + contents
+}
+
 /// A DER length and contents after `tag`.
 fn encode(tag: u8, contents: &[u8]) -> alloc::vec::Vec<u8> {
     let mut out = alloc::vec![tag];
@@ -261,6 +271,12 @@ pub fn container(im4p: &[u8]) -> alloc::vec::Vec<u8> {
     let mut contents = encode(IA5_STRING, b"IMG4");
     contents.extend_from_slice(im4p);
     encode(SEQUENCE, &contents)
+}
+
+/// The length of `container` for an `IM4P` of `im4p` bytes, without
+/// building it.
+pub fn container_bytes(im4p: usize) -> usize {
+    encoded_bytes(encoded_bytes(b"IMG4".len()) + im4p)
 }
 
 /// Where an `IMG4`'s manifest and restore information begin, from the first
@@ -368,6 +384,14 @@ pub(crate) mod tests {
         let file = img4(&payload, &manifest);
         assert_eq!(compose(&payload, &manifest), file);
         let alone = container(&payload);
+        assert_eq!(container_bytes(payload.len()), alone.len());
+        // Every DER length width: short form and one to three length bytes.
+        for bytes in [0, 0x70, 0x7a, 0x100, 0xfff0, 0x1_0000] {
+            assert_eq!(
+                container_bytes(bytes),
+                container(&alloc::vec![0; bytes]).len()
+            );
+        }
         let parts = parse(&alone).unwrap();
         assert_eq!(parts.payload, payload.as_slice());
         assert!(parts.manifest.is_none() && parts.restore_info.is_none());

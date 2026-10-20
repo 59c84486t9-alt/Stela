@@ -537,6 +537,13 @@ fn page_round(bytes: u64) -> u64 {
     bytes.next_multiple_of(PAGE_BYTES)
 }
 
+/// The SEPFW staging bytes for a SEP image: its `IMG4` container, the form
+/// the restore host delivers to `seputil` and the largest form `seputil`
+/// can pass to `AppleSEPManager::setFirmwareBytes`.
+fn sep_firmware_region_bytes(image: &[u8]) -> u64 {
+    stela_runtime::img4::container_bytes(image.len()) as u64
+}
+
 fn range_value(base: u64, length: u64) -> Vec<u8> {
     [base.to_le_bytes(), length.to_le_bytes()].concat()
 }
@@ -875,26 +882,31 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                 },
                 None => continue,
             },
-            // Stela's SEP has no `fromPreload` path: it stays in SEPROM and
-            // boots via the ROM runtime path, where restored delivers the
-            // firmware through `load_sep_os` (opcode 6) and the SEP model
-            // authenticates it. iBoot only ever maps SEPFW together with
-            // `/arm-io/sep` `sepfw-loaded`/`sepfw-booted`/`sep-boot-slot`/
-            // `rsepfirmware` (docs/research/iboot-handoff.md), and
-            // `AppleSEPManager::start` takes `fromPreload` only when
-            // `sepfw-loaded` exists, so a SEPFW region mapped without those
-            // properties is a pairing iBoot never produces. Keep SEPFW
-            // unmapped (and those properties unpublished) until the model
-            // admits a preloaded sepOS image. The `sepfw.im4p` input still
-            // travels in the bundle as the runtime-load source.
-            "SEPFW" => {
-                unresolved.push(
-                    "SEPFW: Stela delivers SEP firmware at runtime (load_sep_os), not preloaded; \
-                     the region is absent"
-                        .into(),
-                );
-                continue;
-            }
+            // iBoot adds the SEPFW entry whether or not it loaded SEP firmware
+            // (0x29dd8, before its loaded test at 0x29df4); only
+            // `sepfw-loaded`/`sepfw-booted`/`sep-boot-slot` depend on a load.
+            // The run-time load needs the region: `seputil --restore` reaches
+            // `AppleSEPFirmware::_initFromMemory`, whose
+            // `_setupSepFirmwareMemoryRegion` panics without SEPFW and whose
+            // `_copyInData` copies the delivered image into it, refusing an
+            // image longer than the region. Stela's SEP has no `fromPreload`
+            // path, so the region is reserved (zero-filled), large enough for
+            // the SEP image in the `IMG4` container the restore host delivers,
+            // and `sepfw-loaded` stays unpublished.
+            "SEPFW" => match &inputs.sep_firmware {
+                Some(sep) => Content {
+                    name: (*name).into(),
+                    file: SEP_FILE.into(),
+                    file_offset: 0,
+                    bytes: 0,
+                    memory_bytes: page_round(sep_firmware_region_bytes(sep.bytes)),
+                    virtual_address: None,
+                },
+                None => {
+                    unresolved.push("SEPFW: no SEP firmware input; the region is absent".into());
+                    continue;
+                }
+            },
             "BootArgs" => Content {
                 name: (*name).into(),
                 file: BOOT_ARGS_FILE.into(),
@@ -2047,6 +2059,39 @@ mod tests {
         let ramdisk = inputs.ramdisk.take();
         assert!(prepare(&inputs, &image_root).is_err());
         inputs.ramdisk = ramdisk;
+
+        // With SEP firmware, SEPFW is a reserved, zero-filled staging region
+        // between RAMDisk and BootArgs that holds the image's IMG4 container;
+        // the image itself travels as a bundle file for the run-time load.
+        let sep = vec![0x5e; 3 * PAGE as usize];
+        inputs.sep_firmware = Some(input(leak(sep.clone()), "RestoreSEP"));
+        let staged = prepare(&inputs, &options)?;
+        inputs.sep_firmware = None;
+        let names: Vec<_> = staged.manifest.regions.iter().map(|r| &*r.name).collect();
+        assert_eq!(names, REGION_ORDER);
+        let sepfw = staged
+            .manifest
+            .regions
+            .iter()
+            .find(|r| r.name == "SEPFW")
+            .unwrap();
+        assert_eq!(sepfw.bytes, 0);
+        assert_eq!(sepfw.memory_bytes, 4 * PAGE);
+        assert!(sepfw.memory_bytes >= stela_runtime::img4::container(&sep).len() as u64);
+        let file = |name: &str| &staged.files.iter().find(|(n, _)| n == name).unwrap().1;
+        assert_eq!(file(SEP_FILE), &sep);
+        let tree = DeviceTree::parse(file(DEVICE_TREE_FILE))?;
+        assert_eq!(
+            tree.property(MEMORY_MAP, "SEPFW").unwrap().value,
+            range_value(sepfw.guest_pa, sepfw.memory_bytes)
+        );
+        assert!(
+            !staged
+                .manifest
+                .unresolved
+                .iter()
+                .any(|u| u.starts_with("SEPFW"))
+        );
 
         // A manifest for another board is refused.
         let mut other = Inputs { ..inputs };

@@ -221,9 +221,9 @@ fn unproduced(tree: &DeviceTree) -> Vec<String> {
     if tree.node("/arm-io/sep").is_some() {
         gaps.push(
             "/arm-io/sep sepfw-loaded, sepfw-booted, sep-boot-slot; /arm-io/sep/iop-sep-nub \
-             rsepfirmware: iBoot writes them with the SEPFW memory-map entry when it loads SEP \
-             firmware (0x29dbc, 0x105a48); the bundle maps SEPFW without them, so \
-             AppleSEPManager loads its firmware at run time"
+             rsepfirmware: iBoot writes them only when it loads SEP firmware (0x29df4, \
+             0x105a48), while its SEPFW memory-map entry is unconditional (0x29dd8); the bundle \
+             reserves SEPFW without them, so AppleSEPManager loads its firmware at run time"
                 .into(),
         );
     }
