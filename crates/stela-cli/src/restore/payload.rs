@@ -258,6 +258,7 @@ fn manifest_for(
             bytes,
             sha256,
             build_manifest_sha256: selection.restore.manifest_sha256.clone(),
+            catalog_sha1: None,
         },
         layout,
         members,

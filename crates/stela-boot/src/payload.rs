@@ -282,6 +282,9 @@ impl Source {
                     Store::Archive { file, archive }
                 }
                 Layout::Staged => return Err("payload.json describes a staged copy"),
+                Layout::Pieces { .. } => {
+                    return Err("payload.json describes an install medium, which --install reads");
+                }
             };
             let path = device_path(handle).unwrap_or_default();
             return Ok((

@@ -7,6 +7,10 @@
 //! and copies the Erase subset into the target disk's staging partition.
 //! The restore client reads the staged copy through the same
 //! [`PayloadSource`] trait afterwards.
+//!
+//! `stela setup` writes the install medium instead: the whole IPSW as
+//! numbered pieces below FAT32's file limit ([`Layout::Pieces`]), which
+//! [`pieces::Joined`] presents to the restore host as one IPSW.
 use alloc::{
     format,
     string::{String, ToString},
@@ -17,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub mod gpt;
+pub mod pieces;
 pub mod staging;
 pub mod zip;
 
@@ -24,6 +29,11 @@ pub const KIND: &str = "stela_restore_payload";
 pub const MANIFEST_FILE: &str = "payload.json";
 /// FAT32's largest file.
 pub const MAX_SLICE_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 1;
+/// The install medium's piece size: below FAT32's largest file, on a
+/// 1 MiB boundary.
+pub const PIECE_BYTES: u64 = 4 * 1024 * 1024 * 1024 - 1024 * 1024;
+/// Pieces an install medium may have: `ipsw.000` to `ipsw.999`.
+pub const MAX_PIECES: usize = 1000;
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +171,16 @@ pub struct SourceImage {
     pub bytes: u64,
     pub sha256: String,
     pub build_manifest_sha256: String,
+    /// The SHA-1 Apple's catalog lists for the image, when it was checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_sha1: Option<String>,
+}
+
+/// One piece of the install medium's IPSW.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Piece {
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -172,6 +192,12 @@ pub enum Layout {
     Archive { path: String },
     /// Members in a staging partition.
     Staged,
+    /// The whole IPSW as `ipsw.NNN` pieces beside the manifest, each
+    /// `piece_bytes` but the last; their concatenation is the IPSW.
+    Pieces {
+        piece_bytes: u64,
+        pieces: Vec<Piece>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,7 +265,34 @@ pub fn safe_path(path: &str) -> bool {
 }
 
 fn sha256_hex(text: &str) -> bool {
-    text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    lower_hex(text, 64)
+}
+
+fn lower_hex(text: &str, digits: usize) -> bool {
+    text.len() == digits && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The install medium's directory for a build, relative to the volume root.
+pub fn install_directory(build: &str) -> String {
+    format!("EFI/stela/install/{build}")
+}
+
+/// A piece's file name in the install directory: an 8.3 name, as FAT
+/// keeps it.
+pub fn piece_name(index: usize) -> String {
+    format!("ipsw.{index:03}")
+}
+
+/// Pieces of `piece_bytes` that hold `bytes`.
+pub fn piece_sizes(bytes: u64, piece_bytes: u64) -> Vec<u64> {
+    let mut sizes = Vec::new();
+    let mut left = bytes;
+    while left > 0 && piece_bytes > 0 {
+        let size = left.min(piece_bytes);
+        sizes.push(size);
+        left -= size;
+    }
+    sizes
 }
 
 /// The payload directory for a build, relative to the volume root.
@@ -281,7 +334,14 @@ impl PayloadManifest {
         {
             return fail("invalid build");
         }
-        if !sha256_hex(&self.source.sha256) || !sha256_hex(&self.source.build_manifest_sha256) {
+        if !sha256_hex(&self.source.sha256)
+            || !sha256_hex(&self.source.build_manifest_sha256)
+            || self
+                .source
+                .catalog_sha1
+                .as_ref()
+                .is_some_and(|digest| !lower_hex(digest, 40))
+        {
             return fail("invalid source digest");
         }
         match &self.layout {
@@ -290,6 +350,24 @@ impl PayloadManifest {
             Layout::Archive { path } if safe_path(path) => {}
             Layout::Archive { .. } => return fail("unsafe archive path"),
             Layout::Staged => {}
+            Layout::Pieces {
+                piece_bytes,
+                pieces,
+            } => {
+                if !(1..=MAX_SLICE_BYTES).contains(piece_bytes) {
+                    return fail("piece size outside 1..=4 GiB-1");
+                }
+                if pieces.is_empty() || pieces.len() > MAX_PIECES {
+                    return fail("piece count outside 1..=1000");
+                }
+                let sizes: Vec<u64> = pieces.iter().map(|piece| piece.bytes).collect();
+                if sizes != piece_sizes(self.source.bytes, *piece_bytes) {
+                    return fail("pieces do not cover the IPSW in piece-size steps");
+                }
+                if !pieces.iter().all(|piece| sha256_hex(&piece.sha256)) {
+                    return fail("invalid piece digest");
+                }
+            }
         }
         let mut names: Vec<&str> = Vec::with_capacity(self.members.len());
         for member in &self.members {
@@ -320,6 +398,21 @@ impl PayloadManifest {
             }
         }
         Ok(())
+    }
+
+    /// The BuildManifest index of the one Erase identity, which a full
+    /// restore uses.
+    pub fn erase_identity(&self) -> Result<u32, PayloadError> {
+        let mut erase = self
+            .identities
+            .iter()
+            .filter(|identity| identity.purpose == Purpose::Erase);
+        match (erase.next(), erase.next()) {
+            (Some(identity), None) => Ok(identity.index),
+            _ => Err(PayloadError::Manifest(
+                "expected exactly one Erase identity",
+            )),
+        }
     }
 
     pub fn member(&self, name: &str) -> Option<&Member> {
@@ -421,6 +514,7 @@ pub(crate) mod tests {
                 bytes: 1,
                 sha256: "0".repeat(64),
                 build_manifest_sha256: "1".repeat(64),
+                catalog_sha1: None,
             },
             layout: Layout::Split { slice_bytes: 1000 },
             members: contents
@@ -462,7 +556,7 @@ pub(crate) mod tests {
         let (manifest, _) = manifest();
         let json = manifest.to_json();
         assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
-        let broken: [fn(&mut PayloadManifest); 8] = [
+        let broken: [fn(&mut PayloadManifest); 13] = [
             |m| m.members[0].name = "../escape".into(),
             |m| m.members[0].sha256 = "A".repeat(64),
             |m| m.members[1].name = m.members[0].name.clone(),
@@ -479,12 +573,61 @@ pub(crate) mod tests {
             },
             |m| m.aea_keys[0].key_pem.push('x'),
             |m| m.product_build = "26A434/..".into(),
+            |m| m.source.catalog_sha1 = Some("A".repeat(40)),
+            |m| m.layout = pieces(&[1], 0),
+            |m| m.layout = pieces(&[], 2),
+            |m| m.layout = pieces(&[1, 1], 2),
+            |m| {
+                m.layout = pieces(&[1], 2);
+                if let Layout::Pieces { pieces, .. } = &mut m.layout {
+                    pieces[0].sha256 = "x".into();
+                }
+            },
         ];
         for change in broken {
             let mut bad = manifest.clone();
             change(&mut bad);
             assert!(bad.validate().is_err(), "{bad:?}");
         }
+    }
+
+    /// A pieces layout of these sizes.
+    fn pieces(sizes: &[u64], piece_bytes: u64) -> Layout {
+        Layout::Pieces {
+            piece_bytes,
+            pieces: sizes
+                .iter()
+                .map(|&bytes| Piece {
+                    bytes,
+                    sha256: "3".repeat(64),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn pieces_cover_the_ipsw_in_piece_size_steps() {
+        let (mut manifest, _) = manifest();
+        manifest.source.bytes = 5;
+        manifest.source.catalog_sha1 = Some("4".repeat(40));
+        manifest.layout = pieces(&[2, 2, 1], 2);
+        manifest.validate().unwrap();
+        let json = manifest.to_json();
+        assert_eq!(PayloadManifest::parse(json.as_bytes()).unwrap(), manifest);
+        assert!(json.contains("\"kind\": \"pieces\""), "{json}");
+        manifest.layout = pieces(&[2, 1, 2], 2);
+        assert!(manifest.validate().is_err());
+        assert_eq!(piece_sizes(5, 2), [2, 2, 1]);
+        assert_eq!(piece_sizes(4, 2), [2, 2]);
+        assert!(piece_sizes(0, 2).is_empty());
+        // The 26A434 IPSW (26,637,307,067 bytes) takes seven pieces.
+        assert_eq!(piece_sizes(26_637_307_067, PIECE_BYTES).len(), 7);
+        assert!(PIECE_BYTES < MAX_SLICE_BYTES);
+        assert_eq!(piece_name(7), "ipsw.007");
+        assert_eq!(install_directory("26A434"), "EFI/stela/install/26A434");
+        assert_eq!(manifest.erase_identity().unwrap(), 20);
+        manifest.identities[1].purpose = Purpose::Erase;
+        assert!(manifest.erase_identity().is_err());
     }
 
     #[test]
