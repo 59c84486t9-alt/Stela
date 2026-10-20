@@ -519,12 +519,16 @@ impl Ans {
                      (sep::inline_key); its slot/wrapped-key encoding is not recovered",
                 ));
             }
+            // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
+            // 1 (`270c8130`): a grant of device writes (bit 0) and reads
+            // (bit 1). A read into an in-out descriptor grants both, so the
+            // command's own direction need only be within the grant.
             let flags = tcb[1];
             command.validate().map_err(error)?;
             let direction = command.direction(queue).map_err(error)?;
-            if flags & !3 != 0 || flags != direction {
+            if flags & !3 != 0 || direction & !flags != 0 {
                 return Err(error(
-                    "ANS NVMMU TCB DMA permissions disagree with the command",
+                    "ANS NVMMU TCB DMA permissions do not grant the command's direction",
                 ));
             }
             if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50]
@@ -871,6 +875,21 @@ mod tests {
             prp: u64,
             words: [u32; 6],
         ) -> Result<(), MmioError> {
+            self.submit_granting(queue, tag, opcode, nsid, prp, words, None)
+        }
+        /// `submit` with TCB DMA permissions `grant` in place of the
+        /// command's own direction.
+        #[allow(clippy::too_many_arguments)]
+        fn submit_granting(
+            &mut self,
+            queue: usize,
+            tag: u16,
+            opcode: u8,
+            nsid: u32,
+            prp: u64,
+            words: [u32; 6],
+            grant: Option<u8>,
+        ) -> Result<(), MmioError> {
             let mut cmd = [0u8; 64];
             cmd[0] = opcode;
             cmd[2..4].copy_from_slice(&tag.to_le_bytes());
@@ -883,7 +902,7 @@ mod tests {
             tcb[2] = tag as u8;
             tcb[4..6].copy_from_slice(&(words[2] as u16).to_le_bytes());
             tcb[24..32].copy_from_slice(&prp.to_le_bytes());
-            tcb[1] = commands::Command(cmd).direction(queue).unwrap_or(0);
+            tcb[1] = grant.unwrap_or_else(|| commands::Command(cmd).direction(queue).unwrap_or(0));
             tcb[56..64].copy_from_slice(&cmd[56..64]);
             let (sq, tcbs, doorbell) = if queue == 0 {
                 (SQ, TCB, ADMIN_SUBMIT)
@@ -1030,6 +1049,31 @@ mod tests {
             "phase flips after wrapping CQ"
         );
         assert!(rig.write(ADMIN_HEAD, 2).is_err());
+    }
+
+    /// TCB byte 1 grants DMA directions: a read whose descriptor is in-out
+    /// grants both and runs; a grant without the command's direction
+    /// refuses.
+    #[test]
+    fn tcb_dma_permissions_must_grant_the_command_direction() {
+        let mut rig = Rig::new();
+        rig.io_queues();
+        let pattern = vec![0x5a; 4096];
+        assert!(rig.ram.write(DATA, &pattern));
+        rig.submit(1, 2, 1, 1, DATA, [3, 0, 0, 0, 0, 0]).unwrap();
+        rig.retire(1, 2);
+        assert!(rig.ram.write(DATA, &[0; 4096]));
+        rig.submit_granting(1, 3, 2, 1, DATA, [3, 0, 0, 0, 0, 0], Some(3))
+            .unwrap();
+        rig.retire(1, 3);
+        assert_eq!(rig.bytes(DATA, 4096), pattern);
+        let error = rig
+            .submit_granting(1, 4, 2, 1, DATA, [3, 0, 0, 0, 0, 0], Some(2))
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("do not grant the command's direction"),
+            "{error:?}"
+        );
     }
 
     #[test]
