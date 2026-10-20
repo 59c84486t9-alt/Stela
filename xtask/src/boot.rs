@@ -146,7 +146,8 @@ pub struct Run {
     preboot_disk: Option<PathBuf>,
     /// A restore payload inventory (`stela image-manifest
     /// --payload-manifest`), placed at `\EFI\stela\payload.json` for the
-    /// mount's `--restore-manifest`.
+    /// mount's `--restore-manifest`, with the block hash file it names
+    /// (`blocks.bin` beside it).
     #[arg(long, requires = "bundle")]
     restore_manifest: Option<PathBuf>,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
@@ -490,6 +491,15 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             if let Some(manifest) = &arguments.restore_manifest {
                 fs::copy(manifest, volume.join("EFI/stela/payload.json"))
                     .with_context(|| format!("restore manifest {}", manifest.display()))?;
+                // The block hashes the manifest names go beside it, so the
+                // restore host needs no scan of the payload.
+                let parsed = stela_runtime::payload::PayloadManifest::parse(&fs::read(manifest)?)
+                    .map_err(|error| anyhow::anyhow!("{}: {error}", manifest.display()))?;
+                if let Some(blocks) = &parsed.block_hashes {
+                    let from = manifest.with_file_name(&blocks.file);
+                    fs::copy(&from, volume.join("EFI/stela").join(&blocks.file))
+                        .with_context(|| format!("block hashes {}", from.display()))?;
+                }
             }
         }
         Some(esp) => {
