@@ -342,6 +342,20 @@ pub trait Host {
     fn fetch_permitted(&mut self, _virtual: u64) -> bool {
         true
     }
+    /// Where the host places the guest's address space beside its own,
+    /// which decides the addresses native code accesses directly
+    /// ([`mmu::placement`]).
+    fn placement(&self) -> mmu::placement::Placement {
+        mmu::placement::Placement::FiveLevel
+    }
+    /// The address of the 8 bytes that hold the host's translation helper,
+    /// which blocks of the translated variant call for each access outside
+    /// [`Host::placement`]'s native ranges ([`mmu::translated`]); `None`
+    /// on a host without one, which stops explicitly where a guest maps
+    /// such an address.
+    fn translation_helper(&self) -> Option<u64> {
+        None
+    }
     /// Make the shadow translation follow `regime`: drop what a change of
     /// its controls translates differently (a TTBR0 write arrives only
     /// here, not through [`Host::invalidate_translations`]).
@@ -812,6 +826,10 @@ pub struct Statistics {
     /// Guest context changes at which the host isolated its branch
     /// predictions ([`PredictionContext`]).
     pub prediction_isolations: u64,
+    /// Fetch pages whose blocks run in the translated variant, because one
+    /// of their accesses reached a guest address outside the host's native
+    /// ranges.
+    pub translated_pages: u64,
 }
 
 impl core::ops::AddAssign for Statistics {
@@ -842,6 +860,7 @@ impl core::ops::AddAssign for Statistics {
             scoped_maintenance,
             table_base_changes,
             prediction_isolations,
+            translated_pages,
         } = other;
         for (total, count) in self.exit_kinds.iter_mut().zip(exit_kinds) {
             *total += count;
@@ -871,6 +890,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.scoped_maintenance, scoped_maintenance),
             (&mut self.table_base_changes, table_base_changes),
             (&mut self.prediction_isolations, prediction_isolations),
+            (&mut self.translated_pages, translated_pages),
         ] {
             *total += count;
         }
@@ -1007,6 +1027,11 @@ struct Variant {
     /// compiled for the host's data-independent-timing tier
     /// ([`Machine::timing_target`]).
     timing: bool,
+    /// The block's page needs the translated variant: every access checks
+    /// its address and calls the host's translation helper outside the
+    /// native ranges ([`Machine::run_translated`]). Like `guarded_page`, it
+    /// belongs to a page, not to the PE.
+    translated: bool,
 }
 
 /// The System registers whose MRS native code completes from a mirror
@@ -1209,6 +1234,12 @@ pub struct Machine<H: Host, D: Devices> {
     block_limit: u64,
     /// Suspended guest threads by thread pointer (see [`Suspension`]).
     suspended: BTreeMap<u64, Suspension>,
+    /// The physical fetch pages whose blocks are compiled for the
+    /// translated variant ([`Machine::run_translated`]).
+    translated_pages: BTreeSet<u64>,
+    /// The guest PC and data address that first needed the translated
+    /// variant, for a report.
+    first_translated: Option<(u64, u64)>,
     /// Device accesses answered without a model ([`Self::begin_survey`]).
     survey: Option<Survey>,
     /// The device registers and directions whose external abort has been
@@ -1315,6 +1346,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             chain: alloc::boxed::Box::default(),
             block_limit: u64::MAX,
             suspended: BTreeMap::new(),
+            translated_pages: BTreeSet::new(),
+            first_translated: None,
             survey: None,
             aborted: BTreeSet::new(),
             scalable_leaves: BTreeMap::new(),
@@ -2739,12 +2772,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(Err(stop)) => return Err(stop),
         };
         let guarded = self.fetch_guarded(pc);
-        let variant = self.current_variant(single, guarded);
+        let variant = Variant {
+            translated: self.page_translated(physical),
+            ..self.current_variant(single, guarded)
+        };
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         self.chain.context = self.context(
             el,
             Variant {
                 guarded_page: false,
+                translated: false,
                 ..variant
             },
         );
@@ -2954,6 +2991,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             system: self.native_system(),
             guarded_page,
             timing: self.cpu.pstate.dit && self.timing_target().is_some(),
+            translated: false,
         }
     }
 
@@ -4047,12 +4085,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             FaultCause::Translation(unsupported) => {
                 Err(self.unsupported(RequirementKind::Translation(unsupported)))
             }
+            // The access left the native ranges past a check an earlier
+            // one through its base stood for: its own check finds which.
             FaultCause::NonCanonical => {
-                let mut requirement = self.requirement(RequirementKind::Native(
-                    "x86 #GP: non-canonical guest address (tagged or outside both ranges)",
-                ));
-                requirement.address = Some(fault.address);
-                Err(Stop::Unsupported(requirement))
+                let word = self.word(index, pc)?;
+                self.native_check_fault(index, pc, word)
             }
             // Native blocks raise #UD for a misaligned SP base when compiled
             // with the check (SCTLR_ELx.SA or SA0 set), which comes first,
@@ -4070,10 +4107,52 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.take(Exception::synchronous(Class::SpAlignment, 0, pc));
                     Ok(())
                 } else {
-                    self.native_check_fault(pc, word)
+                    self.native_check_fault(index, pc, word)
                 }
             }
         }
+    }
+
+    /// Run the instruction at `pc` of block `index`, whose access to the
+    /// guest's mapped `address` lies outside the host's native ranges
+    /// (`docs/design/system.md#host-placement`), again in the translated
+    /// variant: its fetch page's blocks are compiled again so that every
+    /// access calls the host's translation helper outside those ranges,
+    /// which translates it, delivers its fault or completes it. `GuestState`
+    /// is the instruction's own (`native_fault`). A translated block that
+    /// still leaves the ranges, or a host without the helper, stops
+    /// explicitly.
+    fn run_translated(&mut self, index: usize, pc: u64, address: u64) -> Step {
+        let block = &self.blocks[index];
+        if block.variant.translated || self.host.translation_helper().is_none() {
+            let mut requirement = self.requirement(RequirementKind::Native(
+                "a mapped guest address outside the host's native ranges",
+            ));
+            requirement.address = Some(address);
+            return Err(Stop::Unsupported(requirement));
+        }
+        let page = block.physical.wrapping_add(pc.wrapping_sub(block.pc)) & !(FETCH_PAGE - 1);
+        self.translated_pages.insert(page);
+        self.first_translated.get_or_insert((pc, address));
+        self.statistics.translated_pages += 1;
+        self.invalidate_code_page(page);
+        Ok(())
+    }
+
+    /// The guest PC and data address that first needed the translated
+    /// variant, once one has: a guest that maps an address outside the
+    /// host's native ranges, which runs correctly but slower.
+    pub fn first_translated(&self) -> Option<(u64, u64)> {
+        self.first_translated
+    }
+
+    /// Whether blocks of the fetch page holding `physical` run in the
+    /// translated variant.
+    fn page_translated(&self, physical: u64) -> bool {
+        !self.translated_pages.is_empty()
+            && self
+                .translated_pages
+                .contains(&(physical & !(FETCH_PAGE - 1)))
     }
 
     /// ADDPT, SUBPT, MADDPT and MSUBPT (FEAT_CPA), UNDEFINED on a chip
@@ -5250,6 +5329,8 @@ mod tests {
         refused: Vec<u64>,
         fetch_checks: usize,
         counter_reads: usize,
+        placement: mmu::placement::Placement,
+        translation_helper: Option<u64>,
     }
 
     impl Host for FakeHost {
@@ -5321,6 +5402,12 @@ mod tests {
             !self
                 .refused
                 .contains(&(virtual_address & !(FETCH_PAGE - 1)))
+        }
+        fn placement(&self) -> mmu::placement::Placement {
+            self.placement
+        }
+        fn translation_helper(&self) -> Option<u64> {
+            self.translation_helper
         }
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
@@ -5435,6 +5522,8 @@ mod tests {
             refused: Vec::new(),
             fetch_checks: 0,
             counter_reads: 0,
+            placement: mmu::placement::Placement::FiveLevel,
+            translation_helper: None,
         };
         let profile = CpuProfile {
             name: "test",
@@ -5849,6 +5938,90 @@ mod tests {
             );
         }
         assert_eq!(run(0, WINDOW + 4, SCTLR_A).0.unwrap(), (load, WINDOW + 4));
+    }
+
+    /// On a four-level host, an access to an address the guest maps below
+    /// the native upper range, where Stela's window is, runs its page in
+    /// the translated variant from the faulting instruction; the same
+    /// address is native under LA57, and a host without the translation
+    /// helper stops explicitly.
+    #[test]
+    fn a_mapped_address_outside_the_native_ranges_runs_its_page_translated() {
+        // TTBR1_EL1 at 47 bits with a 4 KiB granule: L0 entry 0, then a
+        // 1 GiB block of L1 entry 0, maps the upper half's first GiB to RAM.
+        const LEVEL0: u64 = 0xd000;
+        const LEVEL1: u64 = 0xe000;
+        const TCR: u64 = 25
+            | 1 << 8
+            | 1 << 10
+            | 3 << 12
+            | 17 << 16
+            | 1 << 24
+            | 1 << 26
+            | 3 << 28
+            | 0b10 << 30
+            | 5 << 32;
+        const ADDRESS: u64 = mmu::placement::UPPER_HALF + 0x100;
+        let mut machine = machine(&[0xf940_0020]); // ldr x0, [x1]
+        normal_memory(&mut machine, false);
+        let table = |machine: &mut Machine<FakeHost, NoDevices>, at: u64, entry: u64| {
+            let at = at as usize;
+            machine.host.ram[at..at + 8].copy_from_slice(&entry.to_le_bytes());
+        };
+        table(&mut machine, LEVEL0, (BASE + LEVEL1) | 0b11);
+        table(&mut machine, LEVEL1, BASE | 1 << 10 | 3 << 8 | 0b01);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TTBR1_EL1, 0, BASE + LEVEL0);
+        machine.cpu.registers.set(SystemRegister::TCR_EL1, 0, TCR);
+        machine.translations_changed();
+        let outside = |cause| {
+            NativeExit::Fault(NativeFault {
+                registers: [0; 16],
+                offset: 0,
+                address: 0,
+                write: false,
+                cause,
+            })
+        };
+        let run = |machine: &mut Machine<FakeHost, NoDevices>, cause| {
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[1] = ADDRESS;
+            machine.host.exits.push(outside(cause));
+            machine.step()
+        };
+        // Native under LA57: a failed check there has no fault to take.
+        assert!(matches!(
+            run(&mut machine, FaultCause::InvalidOpcode),
+            Err(Stop::Unsupported(_))
+        ));
+        // Four-level without the helper.
+        machine.host.placement = mmu::placement::Placement::four_level(2).unwrap();
+        let Err(Stop::Unsupported(requirement)) = run(&mut machine, FaultCause::InvalidOpcode)
+        else {
+            panic!("an explicit stop")
+        };
+        assert_eq!(requirement.address, Some(ADDRESS));
+        assert_eq!(machine.statistics.translated_pages, 0);
+        // With it, a range check's #UD and an elided access's #GP alike.
+        machine.host.translation_helper = Some(0x1000);
+        for cause in [FaultCause::InvalidOpcode, FaultCause::NonCanonical] {
+            machine.translated_pages.clear();
+            run(&mut machine, cause).unwrap();
+            assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
+            assert_eq!(machine.first_translated(), Some((BASE, ADDRESS)));
+            let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+                panic!("block")
+            };
+            assert!(machine.blocks[index].variant.translated, "{cause:?}");
+        }
+        assert_eq!(machine.statistics.translated_pages, 2);
+        // A translated block that still leaves the ranges stops.
+        assert!(matches!(
+            run(&mut machine, FaultCause::InvalidOpcode),
+            Err(Stop::Unsupported(_))
+        ));
     }
 
     /// System-mode blocks check every access against the guest's ranges,

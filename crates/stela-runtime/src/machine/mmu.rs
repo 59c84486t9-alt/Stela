@@ -9,11 +9,13 @@
 pub mod alignment;
 pub mod attributes;
 mod geometry;
+pub mod placement;
 pub mod shadow;
 mod sprr;
 mod stage1;
 mod stage2;
 pub mod tlbi;
+pub mod translated;
 
 pub use sprr::{
     SPRR_CONFIG_EN, SPRR_CONFIG_LOCK_CONFIG, SPRR_CONFIG_LOCK_PERM_EL0, SPRR_CONFIG_LOCK_PERM_EL1,

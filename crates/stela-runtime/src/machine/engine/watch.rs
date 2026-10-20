@@ -36,12 +36,6 @@ use stela_compiler::{
 
 const PAGE: u64 = super::FETCH_PAGE;
 
-/// Whether native code accesses `address` directly: bits 63:48 all clear
-/// or all set, as `x86_64::RangeCheck::FIVE_LEVEL` tests.
-fn in_guest_range(address: u64) -> bool {
-    matches!(address >> 48, 0 | 0xffff)
-}
-
 /// `address` with its top byte replaced by bit 55's sign, as translation
 /// regards it under TBI (Arm `AddrTop` and `AArch64_TranslateAddress`).
 fn without_tag(address: u64) -> u64 {
@@ -335,11 +329,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `AArch64_UnalignedAccessFaults`, which comes before translation), or
     /// the fault its translation gives an address outside the guest's two
     /// ranges (`x86_64::RangeCheck`), which the shadow never maps.
-    pub(super) fn native_check_fault(&mut self, pc: u64, word: u32) -> Step {
+    pub(super) fn native_check_fault(&mut self, index: usize, pc: u64, word: u32) -> Step {
         let accesses = self
             .data_accesses(pc, word)
             .map_err(|detail| self.refuse_word(word, detail))?;
         let sctlr = self.cpu.regime_sctlr();
+        let placement = self.host.placement();
+        let in_guest_range = |address| placement.native(address);
         for (access, shape) in accesses {
             // An atomic access reads and writes: its fault is not a write
             // (Arm `NoFault`).
@@ -359,6 +355,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     }
                     mmu::Outcome::Unsupported(unsupported) => {
                         Err(self.unsupported(RequirementKind::Translation(unsupported)))
+                    }
+                    // An untagged address the host does not map natively:
+                    // the page runs in the translated variant.
+                    mmu::Outcome::Mapped(_) if !in_guest_range(without_tag(access.address)) => {
+                        self.run_translated(index, pc, access.address)
                     }
                     // TBI, or a 52-bit range: the shadow maps 48-bit
                     // untagged addresses only. A tagged base runs again
@@ -400,6 +401,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// untagged address is outside the guest's ranges, or [`untagging`]
     /// refuses the base.
     fn retry_untagged(&mut self, pc: u64, word: u32, address: u64) -> Option<Step> {
+        let placement = self.host.placement();
+        let in_guest_range = |address| placement.native(address);
         let untagged = without_tag(address);
         if untagged == address || !in_guest_range(untagged) {
             return None;
