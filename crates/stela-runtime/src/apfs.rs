@@ -19,6 +19,7 @@ use core::fmt;
 
 pub mod btree;
 pub mod container;
+pub mod decmpfs;
 pub mod object;
 pub mod volume;
 

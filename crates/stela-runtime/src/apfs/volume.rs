@@ -54,7 +54,7 @@ const INO_EXT_TYPE_NAME: u8 = 4;
 const INO_EXT_TYPE_DSTREAM: u8 = 8;
 const S_IFMT: u16 = 0o170000;
 /// `UF_COMPRESSED` from BSD `sys/stat.h`: the data lives in a decmpfs
-/// extended attribute or resource fork, which this reader does not inflate.
+/// extended attribute or resource fork ([`super::decmpfs`]).
 const UF_COMPRESSED: u32 = 0x0000_0020;
 const INODE_HAS_UNCOMPRESSED_SIZE: u64 = 0x0004_0000;
 pub const SYMLINK_EA_NAME: &str = "com.apple.fs.symlink";
@@ -625,8 +625,22 @@ impl Volume {
         self.read_stream(device, inode.private_id, inode.size, offset, buffer)
     }
 
-    /// A whole regular file.
+    /// A whole regular file; a transparently compressed one is inflated
+    /// from its decmpfs attribute or resource fork.
     pub fn read<R: ReadAt>(&self, device: &mut Device<R>, inode: &Inode) -> Result<Vec<u8>> {
+        if inode.kind == FileKind::Regular && inode.bsd_flags & UF_COMPRESSED != 0 {
+            let header = self
+                .xattr(device, inode.oid, super::decmpfs::ATTRIBUTE)?
+                .ok_or(ApfsError::Malformed("compressed file without decmpfs"))?;
+            let fork = match super::decmpfs::in_resource_fork(&header)? {
+                true => Some(
+                    self.xattr(device, inode.oid, super::decmpfs::RESOURCE_FORK)?
+                        .ok_or(ApfsError::Malformed("decmpfs resource fork missing"))?,
+                ),
+                false => None,
+            };
+            return super::decmpfs::decode(&header, fork.as_deref());
+        }
         let mut bytes =
             vec![0; usize::try_from(inode.size).map_err(|_| ApfsError::Malformed("file size"))?];
         self.read_at(device, inode, 0, &mut bytes)?;

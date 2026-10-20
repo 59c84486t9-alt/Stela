@@ -675,6 +675,21 @@ fn opcode(op: u8) -> Opcode {
     }
 }
 
+/// Decode one bare LZVN stream, without a `bvxn` header, as decmpfs stores
+/// its chunks: it must produce exactly `raw_bytes` and end with its
+/// end-of-stream opcode.
+pub fn decode_lzvn(src: &[u8], raw_bytes: usize) -> Result<Vec<u8>> {
+    let mut out = Output {
+        bytes: Vec::new(),
+        limit: raw_bytes,
+        block_end: 0,
+    };
+    out.begin_block(u32::try_from(raw_bytes).map_err(|_| LzfseError::Limit)?)?;
+    lzvn(src, &mut out)?;
+    out.end_block()?;
+    Ok(out.bytes)
+}
+
 /// Decode one LZVN block payload, which must end with its end-of-stream
 /// opcode exactly at the end of the payload.
 fn lzvn(src: &[u8], out: &mut Output) -> Result<()> {
@@ -783,6 +798,15 @@ mod tests {
     }
 
     const LZVN_END: [u8; 8] = [0x06, 0, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn bare_lzvn_streams_decode_to_exactly_their_size() {
+        // "abc", then a match of 3 at distance 3: "abcabc".
+        let stream = [&[0xe3, b'a', b'b', b'c', 0b00_000_111, 3, 0][..], &LZVN_END].concat();
+        assert_eq!(decode_lzvn(&stream, 6).unwrap(), b"abcabc");
+        assert!(decode_lzvn(&stream, 7).is_err());
+        assert!(decode_lzvn(&stream, 5).is_err());
+    }
 
     #[test]
     fn decodes_stored_blocks_and_enforces_the_limit() {
