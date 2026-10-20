@@ -142,10 +142,10 @@ impl Session {
         }
         hw.required("UniqueChipID")?.uint()?;
         let info = identity.info()?;
+        let behavior = info.required("RestoreBehavior")?;
         let mut opts = BTreeMap::new();
         for key in [
             "AutoBootDelay",
-            "CreateFilesystemPartitions",
             "FlashNOR",
             "FormatForAPFS",
             "InstallRecoveryOS",
@@ -161,11 +161,17 @@ impl Session {
                 },
             );
         }
-        opts.insert("AllowUntetheredRestore".into(), Value::Boolean(false));
+        // An erase restore lays out the disk anew; an update restore keeps
+        // its partitions and the user's data. restored_update sets this
+        // itself (false, R_update 0x10001a39c..0x10001a3c4), and
+        // restored_external takes the host's value (R 0x100027008), so the
+        // host says what the identity does.
         opts.insert(
-            "AuthInstallRestoreBehavior".into(),
-            info.required("RestoreBehavior")?.clone(),
+            "CreateFilesystemPartitions".into(),
+            Value::Boolean(behavior.string()? == super::store::ERASE_BEHAVIOR),
         );
+        opts.insert("AllowUntetheredRestore".into(), Value::Boolean(false));
+        opts.insert("AuthInstallRestoreBehavior".into(), behavior.clone());
         opts.insert(
             "AuthInstallRestoreVariant".into(),
             info.required("Variant")?.clone(),
@@ -587,8 +593,14 @@ mod tests {
     };
     use super::*;
     fn ready() -> (Session, Answers<crate::payload::tests::Memory>) {
+        let (session, answers, _) = ready_with(fixture(b"payload", false));
+        (session, answers)
+    }
+    type Fixture = super::super::store::Store<crate::payload::tests::Memory>;
+    /// A session past StartRestore, and the StartRestore request it sent.
+    fn ready_with(store: Fixture) -> (Session, Answers<crate::payload::tests::Memory>, Value) {
         let mut s = Session::new();
-        let mut a = Answers::new(fixture(b"payload", false));
+        let mut a = Answers::new(store);
         a.store.prepare().unwrap();
         assert_eq!(
             s.query_type()
@@ -639,7 +651,47 @@ mod tests {
                 .is_none()
         );
         s.started().unwrap();
-        (s, a)
+        (s, a, start)
+    }
+    /// The options StartRestore sent for `store`'s identity.
+    fn start_options(store: Fixture) -> Value {
+        let (_, _, start) = ready_with(store);
+        start.required("RestoreOptions").unwrap().clone()
+    }
+    #[test]
+    fn an_update_identity_keeps_the_partitions_an_erase_identity_lays_out() {
+        use super::super::store::{
+            ERASE_BEHAVIOR, Store, UPDATE_BEHAVIOR,
+            tests::{ERASE, UPDATE, parts},
+        };
+        for (behavior, creates) in [(ERASE, true), (UPDATE, false)] {
+            let (reader, manifest) = parts(b"payload", false, &[], &[], behavior);
+            let options = start_options(Store::open(reader, manifest, 0).unwrap());
+            let flag = |key: &str| options.required(key).unwrap().boolean().unwrap();
+            assert_eq!(flag("CreateFilesystemPartitions"), creates);
+            assert_eq!(
+                options
+                    .required("AuthInstallRestoreBehavior")
+                    .unwrap()
+                    .string()
+                    .unwrap(),
+                if creates {
+                    ERASE_BEHAVIOR
+                } else {
+                    UPDATE_BEHAVIOR
+                }
+            );
+            assert_eq!(
+                options
+                    .required("AuthInstallRestoreVariant")
+                    .unwrap()
+                    .string()
+                    .unwrap(),
+                behavior.0
+            );
+            // Both restore the system and the paired recoveryOS.
+            assert!(flag("ShouldRestoreSystemImage") && flag("InstallRecoveryOS"));
+        }
     }
     fn request(kind: &str) -> Value {
         Value::dict([

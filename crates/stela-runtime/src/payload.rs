@@ -480,14 +480,27 @@ impl PayloadManifest {
     /// The BuildManifest index of the one Erase identity, which a full
     /// restore uses.
     pub fn erase_identity(&self) -> Result<u32, PayloadError> {
-        let mut erase = self
+        self.restore_identity(Purpose::Erase)
+    }
+
+    /// The BuildManifest index of the one identity of `purpose`: Erase for
+    /// a full restore, Update for one that keeps the installed system's
+    /// data.
+    pub fn restore_identity(&self, purpose: Purpose) -> Result<u32, PayloadError> {
+        let mut found = self
             .identities
             .iter()
-            .filter(|identity| identity.purpose == Purpose::Erase);
-        match (erase.next(), erase.next()) {
-            (Some(identity), None) => Ok(identity.index),
-            _ => Err(PayloadError::Manifest(
+            .filter(|identity| identity.purpose == purpose);
+        match (found.next(), found.next(), purpose) {
+            (Some(identity), None, _) => Ok(identity.index),
+            (_, _, Purpose::Erase) => Err(PayloadError::Manifest(
                 "expected exactly one Erase identity",
+            )),
+            (_, _, Purpose::Update) => Err(PayloadError::Manifest(
+                "expected exactly one Update identity",
+            )),
+            (_, _, Purpose::Installed) => Err(PayloadError::Manifest(
+                "an installed-system identity is no restore",
             )),
         }
     }
@@ -775,8 +788,10 @@ pub(crate) mod tests {
         assert_eq!(install_directory("26A434"), "EFI/stela/install/26A434");
         assert_eq!(manifest.piece_hash_blocks(), 5);
         assert_eq!(manifest.erase_identity().unwrap(), 20);
+        assert_eq!(manifest.restore_identity(Purpose::Update).unwrap(), 80);
         manifest.identities[1].purpose = Purpose::Erase;
         assert!(manifest.erase_identity().is_err());
+        assert!(manifest.restore_identity(Purpose::Update).is_err());
     }
 
     #[test]

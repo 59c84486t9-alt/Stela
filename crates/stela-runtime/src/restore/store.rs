@@ -19,7 +19,7 @@ use super::{
     plist::{self, Limits, Value},
 };
 use crate::payload::{
-    MemberRead, PayloadManifest, ReadAt,
+    MemberRead, PayloadManifest, Purpose, ReadAt,
     zip::{Archive, Entry},
 };
 use alloc::{
@@ -34,6 +34,11 @@ pub const BLOCK_BYTES: usize = crate::payload::HASH_BLOCK_BYTES as usize;
 pub const MAX_READ_BYTES: usize = 1024 * 1024;
 const MAX_BLOCKS: usize = 1 << 20;
 const MAX_BUILD_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+/// `Info.RestoreBehavior` of a BuildManifest identity that erases the
+/// target, and of one that updates its installed system in place, keeping
+/// the user's data.
+pub const ERASE_BEHAVIOR: &str = "Erase";
+pub const UPDATE_BEHAVIOR: &str = "Update";
 #[derive(Debug, Clone)]
 pub struct Identity {
     pub index: usize,
@@ -167,16 +172,24 @@ impl<R: ReadAt> Store<R> {
             .position(|identity| identity.index == selected)
             .ok_or(Error::Invalid("BuildManifest identity index"))?;
         let identity = &identities[current];
-        if identity.info()?.required("RestoreBehavior")?.string()? != "Erase" {
-            return Err(Error::Invalid("selected identity is not erase"));
-        }
+        // A restore runs an erase or an update identity; the inventory's
+        // purpose must name the same behavior.
+        let purpose = match identity.info()?.required("RestoreBehavior")?.string()? {
+            ERASE_BEHAVIOR => Purpose::Erase,
+            UPDATE_BEHAVIOR => Purpose::Update,
+            _ => {
+                return Err(Error::Invalid(
+                    "selected identity is neither erase nor update",
+                ));
+            }
+        };
         let set = manifest
             .identities
             .iter()
             .find(|s| s.index as usize == selected)
             .ok_or(Error::Invalid("identity absent from payload inventory"))?;
         if set.variant != identity.variant()?
-            || set.purpose != crate::payload::Purpose::Erase
+            || set.purpose != purpose
             || identity.info()?.required("DeviceClass")?.string()? != manifest.device_class
         {
             return Err(Error::Invalid("payload/BuildManifest identity mismatch"));
@@ -468,7 +481,7 @@ impl<R: ReadAt> Store<R> {
 pub(crate) mod tests {
     use super::*;
     use crate::payload::{
-        IdentitySet, Member, Purpose,
+        IdentitySet, Member,
         tests::{Memory, manifest},
         zip::tests::archive,
     };
@@ -497,7 +510,32 @@ pub(crate) mod tests {
         extra: &[(&str, &str, &[u8])],
         digests: &[(&str, [u8; 48])],
     ) -> Store<Memory> {
+        let (reader, manifest) = parts(data, deflate, extra, digests, ERASE);
+        Store::open(reader, manifest, 0).unwrap()
+    }
+    /// A BuildManifest identity's variant and behavior, and the purpose the
+    /// inventory records for it.
+    pub(crate) type Behavior = (&'static str, &'static str, Purpose);
+    pub(crate) const ERASE: Behavior = (
+        "Customer Erase Install (IPSW)",
+        ERASE_BEHAVIOR,
+        Purpose::Erase,
+    );
+    pub(crate) const UPDATE: Behavior = (
+        "Customer Upgrade Install (IPSW)",
+        UPDATE_BEHAVIOR,
+        Purpose::Update,
+    );
+    /// The fixture's IPSW and inventory, its one identity `behavior`'s.
+    pub(crate) fn parts(
+        data: &[u8],
+        deflate: bool,
+        extra: &[(&str, &str, &[u8])],
+        digests: &[(&str, [u8; 48])],
+        behavior: Behavior,
+    ) -> (Memory, PayloadManifest) {
         use sha2::{Digest, Sha384};
+        let (variant, restore_behavior, purpose) = behavior;
         let mut components: BTreeMap<String, Value> = [(
             "OS".into(),
             Value::dict([
@@ -530,8 +568,8 @@ pub(crate) mod tests {
             (
                 "Info",
                 Value::dict([
-                    ("Variant", Value::from("Customer Erase Install (IPSW)")),
-                    ("RestoreBehavior", Value::from("Erase")),
+                    ("Variant", Value::from(variant)),
+                    ("RestoreBehavior", Value::from(restore_behavior)),
                     ("DeviceClass", Value::from("testap")),
                     ("OSDiskImageSize", Value::Integer(123)),
                 ]),
@@ -568,15 +606,15 @@ pub(crate) mod tests {
             .collect();
         m.identities = vec![IdentitySet {
             index: 0,
-            variant: "Customer Erase Install (IPSW)".into(),
-            purpose: Purpose::Erase,
+            variant: variant.into(),
+            purpose,
             members: files.iter().map(|(name, _)| (*name).into()).collect(),
         }];
         let entries: Vec<(&str, &[u8], bool)> =
             core::iter::once(("BuildManifest.plist", build.as_slice(), false))
                 .chain(files.iter().map(|(name, bytes)| (*name, *bytes, deflate)))
                 .collect();
-        Store::open(Memory(archive(&entries, true)), m, 0).unwrap()
+        (Memory(archive(&entries, true)), m)
     }
     /// `s`'s member hashes as a block hash file, its manifest naming it.
     fn precomputed(s: &mut Store<Memory>, data: &[u8]) -> Vec<u8> {
@@ -712,6 +750,37 @@ pub(crate) mod tests {
                 assert!(s.read_at("os.dmg", 0, 1).is_err());
             }
         }
+    }
+    #[test]
+    fn a_restore_opens_an_erase_or_update_identity_its_inventory_names_alike() {
+        let (reader, manifest) = parts(b"os", false, &[], &[], UPDATE);
+        let store = Store::open(reader, manifest, 0).unwrap();
+        assert_eq!(
+            store
+                .identity()
+                .info()
+                .unwrap()
+                .required("RestoreBehavior")
+                .unwrap()
+                .string()
+                .unwrap(),
+            UPDATE_BEHAVIOR
+        );
+        // The inventory's purpose must name the identity's behavior.
+        let (reader, mut manifest) = parts(b"os", false, &[], &[], UPDATE);
+        manifest.identities[0].purpose = Purpose::Erase;
+        let error = Store::open(reader, manifest, 0).err().unwrap().to_string();
+        assert!(error.contains("identity mismatch"), "{error}");
+        // An installed-system identity is no restore.
+        let (reader, manifest) = parts(
+            b"os",
+            false,
+            &[],
+            &[],
+            ("macOS Customer", "Install", Purpose::Installed),
+        );
+        let error = Store::open(reader, manifest, 0).err().unwrap().to_string();
+        assert!(error.contains("neither erase nor update"), "{error}");
     }
     #[test]
     fn corrupt_inventory_fails_before_any_bytes_are_returned() {
