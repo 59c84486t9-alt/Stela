@@ -286,15 +286,13 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
             arguments[..entry.argument_count]
                 .copy_from_slice(&pe.cpu.state.x[..entry.argument_count]);
             let arguments = &arguments[..entry.argument_count];
-            let result = match dispatch(kernel, entry.name, index, arguments) {
+            let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
+            let result = match dispatch(kernel, entry.name, index, arguments, pc) {
                 Ok(result) => result,
-                Err(error) => {
-                    let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
-                    match unsupported::recover(error, Kind::MachTrap, pc)? {
-                        Failure::Kern(code) => u64::from(code),
-                        _ => u64::from(KERN_INVALID_ARGUMENT),
-                    }
-                }
+                Err(error) => match unsupported::recover(error, Kind::MachTrap, pc)? {
+                    Failure::Kern(code) => u64::from(code),
+                    _ => u64::from(KERN_INVALID_ARGUMENT),
+                },
             };
             if kernel.trace {
                 eprintln!("stela: mach {}({arguments:x?}) = {result:#x}", entry.name);
@@ -320,7 +318,13 @@ fn syscall_exception(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()>
     Ok(())
 }
 
-fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u64]) -> Result<u64> {
+fn dispatch(
+    kernel: &mut Kernel,
+    name: &'static str,
+    index: u32,
+    arguments: &[u64],
+    pc: u64,
+) -> Result<u64> {
     if FORWARDED.contains(&name) {
         return forward_trap(kernel, index, arguments);
     }
@@ -496,7 +500,7 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
         // The M2's 26A434 kernel is built without exclaves.
         "_exclaves_ctl_trap" => u64::from(KERN_NOT_SUPPORTED),
         "mach_msg_trap" | "mach_msg_overwrite_trap" | "mach_msg2_trap" => {
-            let status = message::send(kernel, name, index, arguments)?;
+            let status = message::send(kernel, name, index, arguments, pc)?;
             if status == u64::from(KERN_SUCCESS) {
                 message::received(name, arguments)?;
             }

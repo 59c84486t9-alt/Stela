@@ -32,6 +32,7 @@ use crate::hosted::darwin::{self, KERN_FAILURE, KERN_INVALID_ADDRESS, KERN_INVAL
 use crate::hosted::memory::{self, HOST_PAGE_MASK, PAGE_BYTES, PAGE_MASK, Protection};
 use crate::hosted::shared_region::{REGION_SIZE, REGION_START};
 use crate::hosted::threads::lock;
+use crate::hosted::unsupported::{self, Failure};
 use anyhow::{Result, bail};
 
 /// The limit of a routine over guest pages the host may map in parts.
@@ -411,9 +412,18 @@ const PAGE_INFO_BASIC_COUNT: u32 = 8;
 /// and the send dispositions a request may carry a port with.
 const MACH_MSG_PORT_DESCRIPTOR: u8 = 0;
 const MACH_MSG_OOL_DESCRIPTOR: u8 = 1;
+const MACH_MSG_TYPE_MOVE_RECEIVE: u8 = 16;
 const MACH_MSG_TYPE_MOVE_SEND: u8 = 17;
+const MACH_MSG_TYPE_MOVE_SEND_ONCE: u8 = 18;
 const MACH_MSG_TYPE_COPY_SEND: u8 = darwin::MACH_MSG_TYPE_COPY_SEND as u8;
+const MACH_MSG_TYPE_MAKE_SEND: u8 = darwin::MACH_MSG_TYPE_MAKE_SEND as u8;
+const MACH_MSG_TYPE_MAKE_SEND_ONCE: u8 = 21;
 const MACH_PORT_DEAD: u32 = u32::MAX;
+/// The send failures of a request's body: a right the space lacks, a
+/// disposition no right has, and unreadable out-of-line data.
+const MACH_SEND_INVALID_RIGHT: u32 = 0x1000_000a;
+const MACH_SEND_INVALID_MEMORY: u32 = 0x1000_000c;
+const MACH_SEND_INVALID_TYPE: u32 = 0x1000_000f;
 
 /// A simple request's arguments start after its NDR record; a request
 /// with one port descriptor's after the descriptor count, the 12-byte
@@ -590,11 +600,11 @@ fn split_pages(
     let mut cursor = start;
     // The previous region's end and protections.
     let mut previous: Option<(u64, i32, i32)> = None;
-    let refuse = |at: u64, parts: String| {
-        bail!(
-            "{what} over guest pages {start:#x}..{end:#x}: the host maps the guest page at \
-             {:#x} in parts it treats apart ({parts}), where the arm64 kernel maps it whole; a \
-             partial guest page is not implemented",
+    let refuse = |at: u64, parts: String| -> Result<()> {
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "{what} over guest pages {start:#x}..{end:#x}, where the host maps the guest page \
+             at {:#x} in parts it treats apart ({parts}) and the arm64 kernel maps it whole",
             memory::trunc_page(at)
         )
     };
@@ -650,20 +660,21 @@ fn source_task(task: &dyn Task, request: &Request) -> Result<Result<u8, Reply>> 
         return Ok(Err(Reply::Failure(KERN_INVALID_ARGUMENT)));
     }
     if name != task.port() {
-        bail!(
-            "mach_vm_remap from task port {name:#x}: remapping another task's memory is not \
-             implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_remap from task port {name:#x}: remapping another task's memory"
         );
     }
-    if !matches!(
-        disposition,
-        MACH_MSG_TYPE_COPY_SEND | MACH_MSG_TYPE_MOVE_SEND
-    ) {
-        bail!(
-            "mach_vm_remap: a source task port sent with disposition {disposition} is not implemented"
-        );
-    }
-    Ok(Ok(disposition))
+    Ok(match disposition {
+        MACH_MSG_TYPE_COPY_SEND | MACH_MSG_TYPE_MOVE_SEND => Ok(disposition),
+        // The space holds only a send right to its task port, so the copy
+        // in of any other right fails the send (`ipc_kmsg_copyin_body`).
+        MACH_MSG_TYPE_MOVE_RECEIVE
+        | MACH_MSG_TYPE_MOVE_SEND_ONCE
+        | MACH_MSG_TYPE_MAKE_SEND
+        | MACH_MSG_TYPE_MAKE_SEND_ONCE => Err(Reply::NotSent(MACH_SEND_INVALID_RIGHT)),
+        _ => Err(Reply::NotSent(MACH_SEND_INVALID_TYPE)),
+    })
 }
 
 /// `mach_vm_remap_external` and `mach_vm_remap_new_external`
@@ -796,7 +807,10 @@ fn allocate(task: &mut dyn Task, request: &Request) -> Result<Reply> {
     // A kernel without memory tagging (`HAS_MTE`) accepts VM_FLAGS_MTE and
     // ignores it, as the host does.
     if flags & VM_FLAGS_TPRO != 0 || (flags & VM_FLAGS_MTE != 0 && task.memory_tagging()) {
-        bail!("mach_vm_allocate with flags {flags:#x}: TPRO and MTE memory are not implemented");
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_allocate with flags {flags:#x}: TPRO or MTE memory"
+        );
     }
     if size == 0 {
         // No page is touched: the host's answer is the kernel's.
@@ -902,9 +916,9 @@ fn reallocate(task: &mut dyn Task, request: &Request) -> Result<Reply> {
     }
     whole_pages("mach_vm_reallocate", source, source_size)?;
     let Some(host_reallocate) = host_reallocate() else {
-        bail!(
-            "mach_vm_reallocate: the host kernel has no mach_vm_reallocate (macOS 26 or later), \
-             and relocating map entries otherwise is not implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_reallocate on a host kernel without mach_vm_reallocate (macOS 26 or later)"
         );
     };
     let mut placed = destination;
@@ -1122,11 +1136,9 @@ fn write(task: &mut dyn Task, request: &Request) -> Result<Reply> {
         return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
     };
     task.page_in(source, source + source_bytes)?;
+    // Unreadable out-of-line data fails the send (`vm_map_copyin`).
     let Some(bytes_in) = memory::read(data, count as usize) else {
-        bail!(
-            "mach_vm_write: its out-of-line data at {data:#x} ({count:#x} bytes) is unreadable, \
-             which fails the send (MACH_SEND_INVALID_MEMORY): not implemented"
-        );
+        return Ok(Reply::NotSent(MACH_SEND_INVALID_MEMORY));
     };
     whole_pages("mach_vm_write", start, bytes)?;
     task.page_in(start, start + bytes)?;
@@ -1333,9 +1345,9 @@ fn msync(request: &Request) -> Result<Reply> {
         return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
     };
     if flags & (VM_SYNC_KILLPAGES | VM_SYNC_REUSABLEPAGES) != 0 && in_shared_region(start, bytes) {
-        bail!(
-            "mach_vm_msync({start:#x}, {bytes:#x}, {flags:#x}): discarding shared-region pages \
-             is not implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_msync({start:#x}, {bytes:#x}, {flags:#x}) discarding shared-region pages"
         );
     }
     // SAFETY: the guest's own pages.
@@ -1363,9 +1375,10 @@ fn behavior_set(request: &Request) -> Result<Reply> {
         || (VM_BEHAVIOR_REUSABLE..=VM_BEHAVIOR_CAN_REUSE).contains(&behavior))
         && in_shared_region(start, bytes)
     {
-        bail!(
-            "mach_vm_behavior_set({start:#x}, {bytes:#x}, {behavior}): discarding shared-region \
-             pages is not implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_behavior_set({start:#x}, {bytes:#x}, {behavior}) discarding shared-region \
+             pages"
         );
     }
     // SAFETY: the guest's own pages.
@@ -1411,9 +1424,10 @@ fn region(request: &Request) -> Result<Reply> {
     };
     match flavor {
         flavor if flavor == VM_REGION_BASIC_INFO_64 as u32 || flavor == VM_REGION_BASIC_INFO => {}
-        VM_REGION_TOP_INFO | VM_REGION_EXTENDED_INFO => bail!(
+        VM_REGION_TOP_INFO | VM_REGION_EXTENDED_INFO => unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
             "mach_vm_region flavor {flavor} at {address:#x}: its page counts restated in guest \
-             pages are not implemented"
+             pages"
         ),
         _ => return Ok(Reply::Failure(KERN_INVALID_ARGUMENT)),
     }
@@ -1422,9 +1436,9 @@ fn region(request: &Request) -> Result<Reply> {
         return Ok(Reply::Failure(code as u32));
     }
     if in_shared_region(start, size) {
-        bail!(
-            "mach_vm_region at {address:#x}: the shared region's nested submap is not \
-             implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_region at {address:#x}: the shared region's nested submap"
         );
     }
     if (start | size) & PAGE_MASK != 0 {
@@ -1614,9 +1628,9 @@ fn region_recurse(request: &Request) -> Result<Reply> {
     let start = memory::trunc_page(head.start);
     let size = end - start;
     if in_shared_region(start, size) {
-        bail!(
-            "mach_vm_region_recurse at {address:#x}: the shared region's nested submap is not \
-             implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "mach_vm_region_recurse at {address:#x}: the shared region's nested submap"
         );
     }
     let mut info = merge_submap(&pieces, start, count);
@@ -2444,6 +2458,23 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("another task"), "{error}");
+        let refusal = error.downcast_ref::<unsupported::Unsupported>().unwrap();
+        assert_eq!(refusal.failure, Failure::Kern(KERN_FAILURE));
+        // A right the space lacks, or a disposition no right has, fails the
+        // send.
+        for (disposition, status) in [
+            (MACH_MSG_TYPE_MAKE_SEND, MACH_SEND_INVALID_RIGHT),
+            (MACH_MSG_TYPE_MOVE_RECEIVE, MACH_SEND_INVALID_RIGHT),
+            (0x30, MACH_SEND_INVALID_TYPE),
+        ] {
+            let mut body = remap_body(0, 8, VM_FLAGS_ANYWHERE, source, false);
+            body[14] = disposition;
+            let reply = call(&mut task, "_kernelrpc_mach_vm_remap_external", true, &body).unwrap();
+            assert!(
+                matches!(reply, Reply::NotSent(code) if code == status),
+                "disposition {disposition}"
+            );
+        }
         assert_eq!(
             failure(
                 call(
@@ -2583,6 +2614,12 @@ mod tests {
         // A write into the read-only page fails as the kernel's does.
         body[ONE_OOL..ONE_OOL + 8].copy_from_slice(&(base + PAGE_BYTES).to_le_bytes());
         failure(call(&mut task, "mach_vm_write", true, &body).unwrap());
+        // Unreadable data (this process's __PAGEZERO) fails the send.
+        body[4..12].copy_from_slice(&8u64.to_le_bytes());
+        assert!(matches!(
+            call(&mut task, "mach_vm_write", true, &body).unwrap(),
+            Reply::NotSent(MACH_SEND_INVALID_MEMORY)
+        ));
         // Deallocate one byte of the last page: the whole page goes.
         let body = range(base + 2 * PAGE_BYTES + 7, 1, &[]);
         success(

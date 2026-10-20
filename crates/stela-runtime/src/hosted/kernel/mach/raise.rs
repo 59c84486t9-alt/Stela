@@ -24,6 +24,7 @@ use super::super::{Kernel, Pe};
 use super::server::NDR_RECORD;
 use crate::hosted::darwin::{self, mach_msg, mach_port_allocate};
 use crate::hosted::host;
+use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::mach::mig;
 use anyhow::{Result, bail};
 
@@ -64,12 +65,13 @@ unsafe extern "C" {
 }
 
 /// One level's action for an exception: a send right of this space to its
-/// port, and its behavior and flavor.
+/// port, and its behavior and flavor (or the x86 flavor of an inherited
+/// port, which has no arm64 counterpart).
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Action {
     pub(super) name: u32,
     pub(super) behavior: u32,
-    pub(super) flavor: u32,
+    pub(super) flavor: Result<u32, u32>,
 }
 
 /// A guest exception: its type and the codes the kernel raises it with
@@ -111,7 +113,14 @@ pub(crate) fn deliver(kernel: &Kernel, pe: &mut Pe, exception: Exception) -> Res
         if !handled && outcome.is_ok() {
             match raise(kernel, pe, exception, *action) {
                 Ok(code) => handled = code == darwin::KERN_SUCCESS || code == MACH_RCV_PORT_DIED,
-                Err(error) => outcome = Err(error),
+                // An unsupported delivery fails at this level, which goes
+                // on to the next.
+                Err(error) => {
+                    let pc = UserState::capture(pe).pc;
+                    if let Err(error) = unsupported::recover(error, Kind::Exception, pc) {
+                        outcome = Err(error);
+                    }
+                }
             }
         }
         super::server::release_send(action.name);
@@ -251,9 +260,10 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
         flavor,
     } = action;
     if behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED != 0 {
-        bail!(
+        unsupported::refuse!(
+            Failure::Kern(darwin::KERN_FAILURE),
             "an exception port with MACH_EXCEPTION_BACKTRACE_PREFERRED (behavior \
-             {behavior:#x}): delivering a backtrace kcdata object is not implemented"
+             {behavior:#x}): a backtrace kcdata object"
         );
     }
     let kind = behavior & !MACH_EXCEPTION_MASK;
@@ -264,7 +274,10 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
     ) && !code64
     {
         // The kernel's stub exists only for 64-bit codes.
-        bail!("an identity-protected exception behavior without MACH_EXCEPTION_CODES");
+        unsupported::refuse!(
+            Failure::Kern(darwin::KERN_FAILURE),
+            "an identity-protected exception behavior without MACH_EXCEPTION_CODES"
+        );
     }
     let with_state = matches!(
         kind,
@@ -272,6 +285,18 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
     );
     let signer = kernel.process.signer.as_ref();
     let state = user_state(kernel, pe);
+    let flavor = match flavor {
+        Ok(flavor) => flavor,
+        Err(x86) if with_state => unsupported::refuse!(
+            Failure::Kern(darwin::KERN_FAILURE),
+            "{} to an inherited exception port with x86 state flavor {x86}, which has no arm64 \
+             counterpart",
+            super::exception::NAMES
+                .get(exception.kind)
+                .unwrap_or(&"an exception")
+        ),
+        Err(_) => 0,
+    };
     let old = if with_state {
         match control::get_state(&state, flavor, control::THREAD_STATE_MAX, signer)? {
             Ok(words) => Some(words),
@@ -284,9 +309,10 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
     let (ports, thread_id): (Vec<(u32, u8)>, Option<u64>) = match kind {
         EXCEPTION_DEFAULT | EXCEPTION_STATE_IDENTITY => {
             if !super::vm::developer_mode() {
-                bail!(
+                unsupported::refuse!(
+                    Failure::Kern(darwin::KERN_FAILURE),
                     "an exception port with behavior {behavior:#x} without developer mode: the \
-                     task and thread read ports it carries are not served by the hosted kernel"
+                     task and thread read ports it carries"
                 );
             }
             (
@@ -310,7 +336,10 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
             (vec![(token, MOVE_SEND)], Some(id))
         }
         EXCEPTION_STATE => (Vec::new(), None),
-        _ => bail!("an exception port with behavior {behavior:#x}"),
+        _ => unsupported::refuse!(
+            Failure::Kern(darwin::KERN_FAILURE),
+            "an exception port with behavior {behavior:#x}"
+        ),
     };
     let id = message_id(behavior);
     let body = request_body(

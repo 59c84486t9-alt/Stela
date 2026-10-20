@@ -29,9 +29,10 @@ use super::raise;
 use super::server::{
     Descriptor, MACH_PORT_DEAD, MIG_BAD_ARGUMENTS, MOVE_SEND, Reply, Request, release_send,
 };
-use crate::hosted::darwin::KERN_INVALID_ARGUMENT;
+use crate::hosted::darwin::{ENOTSUP, KERN_FAILURE, KERN_INVALID_ARGUMENT};
 use crate::hosted::host;
 use crate::hosted::threads::{lock, try_lock};
+use crate::hosted::unsupported::{self, Failure};
 use anyhow::{Result, bail};
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
@@ -46,7 +47,7 @@ const EXC_MASK_VALID: u32 = 0x3ffe;
 pub(crate) const EXC_BAD_ACCESS: usize = 1;
 pub(crate) const EXC_BREAKPOINT: usize = 6;
 /// Exception names, by type, for diagnostics.
-const NAMES: [&str; EXC_TYPES_COUNT] = [
+pub(super) const NAMES: [&str; EXC_TYPES_COUNT] = [
     "exception 0",
     "EXC_BAD_ACCESS",
     "EXC_BAD_INSTRUCTION",
@@ -311,9 +312,10 @@ impl Holder {
         for group in host_groups(true, host::task(), EXC_MASK_VALID)? {
             let Some(flavor) = arm64_flavor(group.flavor) else {
                 release_send(group.name);
-                bail!(
-                    "the host task inherited exception ports with x86 flavor {} (mask {:#x}), \
-                     which has no arm64 counterpart",
+                unsupported::refuse!(
+                    Failure::Kern(KERN_FAILURE),
+                    "task exception ports, which the host task inherited with x86 flavor {} \
+                     (mask {:#x}) that has no arm64 counterpart",
                     group.flavor,
                     group.mask
                 );
@@ -400,12 +402,13 @@ impl ExceptionPorts {
     }
 
     /// Whether a new process would inherit this one's actions as the host
-    /// task holds them; otherwise the run stops naming `call`.
+    /// task holds them; otherwise `call` is refused (ENOTSUP).
     pub(crate) fn inheritable(&self, call: &str) -> Result<()> {
         if self.lock().changed {
-            bail!(
-                "{call} after this process set its task exception ports: the new process would \
-                 not inherit them, which is not implemented"
+            unsupported::refuse!(
+                ENOTSUP,
+                "{call} after this process set its task exception ports, which the new process \
+                 would inherit"
             );
         }
         Ok(())
@@ -437,29 +440,19 @@ impl ExceptionPorts {
                     release_send(group.name);
                     continue;
                 }
-                let action = if inherited {
-                    match arm64_flavor(group.flavor) {
-                        Some(flavor) => Action {
-                            behavior: group.behavior,
-                            flavor,
-                        },
-                        None => {
-                            release_send(group.name);
-                            bail!(
-                                "{} for an inherited exception port with x86 flavor {}, which \
-                                 has no arm64 counterpart",
-                                NAMES[exception],
-                                group.flavor
-                            );
-                        }
-                    }
+                let (behavior, flavor) = if inherited {
+                    (
+                        group.behavior,
+                        arm64_flavor(group.flavor).ok_or(group.flavor),
+                    )
                 } else {
-                    holder.actions[exception]
+                    let action = holder.actions[exception];
+                    (action.behavior, Ok(action.flavor))
                 };
                 actions.push(raise::Action {
                     name: group.name,
-                    behavior: action.behavior,
-                    flavor: action.flavor,
+                    behavior,
+                    flavor,
                 });
             }
         }
@@ -556,10 +549,11 @@ fn validate(
         EXCEPTION_IDENTITY_PROTECTED | EXCEPTION_STATE | EXCEPTION_STATE_IDENTITY_PROTECTED
     );
     if signature.entitled(ONLY_ONE_EXCEPTION_PORT) || (valid(name) && !protected) {
-        bail!(
-            "{routine}: behavior {behavior:#x} breaks this platform-restricted task's exception \
-             policy: the KERN_DENIED and fatal EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) \
-             are not implemented"
+        unsupported::refuse!(
+            Failure::Kern(KERN_DENIED),
+            "{routine}: behavior {behavior:#x} breaking this platform-restricted task's \
+             exception policy, whose fatal EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) \
+             ends the task"
         );
     }
     Ok(Ok(()))
@@ -581,7 +575,8 @@ pub(super) fn carried_send(
         request.body.get(14),
         request.body.get(15),
     ) else {
-        bail!("{routine}: a request without its one port descriptor is not implemented");
+        // The server's check of the request's one descriptor.
+        return Ok(Err(Reply::Failure(MIG_BAD_ARGUMENTS)));
     };
     let (name, received) = match super::message::carry_port(kernel, routine, name, disposition)? {
         Ok(carried) => carried,

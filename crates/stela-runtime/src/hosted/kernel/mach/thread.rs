@@ -9,10 +9,13 @@ use super::super::control::{self, Control, Kind};
 use super::super::{End, Kernel};
 use super::exception::{self, Target};
 use super::server::{MIG_BAD_ARGUMENTS, Reply, Request, release_send};
-use crate::hosted::darwin::{KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, KERN_SUCCESS};
+use crate::hosted::darwin::{
+    KERN_FAILURE, KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED, KERN_SUCCESS,
+};
 use crate::hosted::host;
 use crate::hosted::threads::lock;
-use anyhow::{Result, bail};
+use crate::hosted::unsupported::{self, Failure};
+use anyhow::Result;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -121,9 +124,10 @@ pub(super) fn serve(
         // The kernel port is this thread's own kernel object, whose name
         // the reply repeats; the kernels refuse every unknown number alike.
         ("thread_get_special_port_from_user", false) => match request.word(8) {
-            Some(which @ (THREAD_INSPECT_PORT | THREAD_READ_PORT)) => bail!(
-                "thread_get_special_port({which}): the host thread's read and inspect ports \
-                 would answer for the x86 thread, which is not implemented"
+            Some(which @ (THREAD_INSPECT_PORT | THREAD_READ_PORT)) => unsupported::refuse!(
+                Failure::Kern(KERN_FAILURE),
+                "thread_get_special_port({which}): the thread's read and inspect ports, which \
+                 as the host thread's would answer for the x86 thread"
             ),
             Some(_) => Reply::Forward,
             None => Reply::Failure(MIG_BAD_ARGUMENTS),

@@ -24,6 +24,7 @@ use crate::hosted::darwin::{
     self, MACH_MSG_TYPE_MAKE_SEND, MACH_PORT_RIGHT_RECEIVE, MACH_SEND_INVALID_DEST, mach_msg,
 };
 use crate::hosted::threads::lock;
+use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::hosted::{forward, memory};
 use crate::mach::mig;
 use anyhow::{Context as _, Result, bail};
@@ -37,6 +38,10 @@ const HEADER_REMOTE_PORT: u64 = 8;
 const HEADER_ID: u64 = 20;
 const HEADER_BYTES: u64 = 24;
 const LOW_HALF: u64 = 0xffff_ffff;
+/// `MIG_BAD_ID`: no routine of the destination has the message's ID.
+const MIG_BAD_ID: u32 = (-303i32) as u32;
+/// `MACH_SEND_INVALID_OPTIONS`.
+const MACH_SEND_INVALID_OPTIONS: u32 = 0x1000_0013;
 /// `MACH64_MSG_VECTOR`: the message travels in data vectors.
 const MESSAGE_VECTOR: u64 = 1 << 32;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
@@ -63,6 +68,7 @@ pub(super) fn send(
     name: &'static str,
     index: u32,
     arguments: &[u64],
+    pc: u64,
 ) -> Result<u64> {
     if let Some((port, id)) = destination(name, arguments)
         && let Some(object) = kernel_object(kernel, port, id)
@@ -72,75 +78,92 @@ pub(super) fn send(
         if object == Object::Thread && super::thread::guest_references(port) == 0 {
             return Ok(u64::from(MACH_SEND_INVALID_DEST));
         }
-        match (mig::subsystem(id), mig::routine(id)) {
-            (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {}
+        let routine = match (mig::subsystem(id), mig::routine(id)) {
+            (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {
+                return forward_trap(kernel, index, arguments);
+            }
             // A routine of another object's subsystem: the kernel converts
             // the destination to that object, which fails for this one in
             // either kernel, and the routine answers the failure.
-            (Some(subsystem), Some(_)) if super::object_of(subsystem.name) != Some(object) => {}
+            (Some(subsystem), Some(_)) if super::object_of(subsystem.name) != Some(object) => {
+                return forward_trap(kernel, index, arguments);
+            }
             (Some(_), Some(routine))
-                if FORWARDED_ROUTINES.contains(&(routine.subsystem, routine.name)) => {}
-            (Some(_), Some(routine))
-                if let Some(request) = request(name, arguments).with_context(|| {
-                    format!("{}.{} (message {id})", routine.subsystem, routine.name)
-                })? =>
+                if FORWARDED_ROUTINES.contains(&(routine.subsystem, routine.name)) =>
             {
-                let body = Request {
-                    body: &request.body,
+                return forward_trap(kernel, index, arguments);
+            }
+            (_, routine) => routine,
+        };
+        let Some(request) = request(name, arguments)
+            .with_context(|| format!("message {id} to kernel object {port:#x}"))?
+        else {
+            return forward_trap(kernel, index, arguments);
+        };
+        let body = Request {
+            body: &request.body,
+        };
+        let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
+        let moves = request.bits & 0x1f == MACH_MSG_TYPE_MOVE_SEND;
+        if moves && let Some(status) = moved_destination(kernel, name, object, port)? {
+            return Ok(u64::from(status));
+        }
+        let reply = match routine {
+            // A number no routine of the object's subsystem has, or of no
+            // kernel-served subsystem: the kernel's MIG server answers
+            // MIG_BAD_ID.
+            None => Reply::Failure(MIG_BAD_ID),
+            Some(routine) => {
+                let served = match server::serve(kernel, object, port, routine.name, complex, &body)
+                {
+                    Ok(served) => served,
+                    // An unsupported operation fails as the routine's error,
+                    // its reply's RetCode.
+                    Err(error) => Some(Reply::Failure(
+                        match unsupported::recover(error, Kind::MigRoutine, pc)? {
+                            Failure::Kern(code) => code,
+                            _ => darwin::KERN_FAILURE,
+                        },
+                    )),
                 };
-                let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
-                let moves = request.bits & 0x1f == MACH_MSG_TYPE_MOVE_SEND;
-                if moves && let Some(status) = moved_destination(kernel, name, object, port)? {
-                    return Ok(u64::from(status));
-                }
-                let served = server::serve(kernel, object, port, routine.name, complex, &body)?;
                 match served {
                     // The host kernel consumes a moved destination itself.
                     Some(Reply::Forward) => return forward_trap(kernel, index, arguments),
                     Some(Reply::NotSent(status)) => return Ok(u64::from(status)),
-                    _ => {}
-                }
-                if let Some(reply) = served {
-                    if kernel.trace {
-                        eprintln!("stela: mig {}.{} answered", routine.subsystem, routine.name);
+                    Some(reply) => {
+                        if kernel.trace {
+                            eprintln!("stela: mig {}.{} answered", routine.subsystem, routine.name);
+                        }
+                        reply
                     }
-                    if moves {
-                        // The request consumed the moved reference.
-                        server::release_send(port);
+                    // A routine the hosted kernel does not serve: MIG_BAD_ID,
+                    // as for a routine the kernel lacks.
+                    None => {
+                        unsupported::report(
+                            Kind::MigRoutine,
+                            pc,
+                            &format!(
+                                "{}.{} (message {id}) to this process's kernel object: {}",
+                                routine.subsystem,
+                                routine.name,
+                                server::refusal(object, routine.name)
+                            ),
+                            Failure::Kern(MIG_BAD_ID),
+                        )?;
+                        Reply::Failure(MIG_BAD_ID)
                     }
-                    return answer(kernel, name, index, arguments, &request, id, reply);
                 }
-                bail!(
-                    "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is \
-                     not serviced by the hosted kernel: {} (arguments {arguments:x?})",
-                    routine.subsystem,
-                    routine.name,
-                    server::refusal(object, routine.name)
-                )
             }
-            (Some(_), Some(routine)) if server::refused(object, routine.name).is_some() => bail!(
-                "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is not \
-                 serviced by the hosted kernel: {} (arguments {arguments:x?})",
-                routine.subsystem,
-                routine.name,
-                server::refusal(object, routine.name)
-            ),
-            (Some(subsystem), Some(routine)) => bail!(
-                "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is \
-                 not serviced by the hosted kernel (arguments {arguments:x?})",
-                subsystem.name,
-                routine.name
-            ),
-            (Some(subsystem), None) => bail!(
-                "{name}: message {id} to kernel object {port:#x} is a skipped number of \
-                 {}: the kernel answers MIG_BAD_ID, which is not modeled",
-                subsystem.name
-            ),
-            (None, _) => bail!(
-                "{name}: message {id} to this process's kernel object {port:#x} belongs to \
-                 no kernel-served MIG subsystem"
-            ),
+        };
+        if moves {
+            // The request consumed the moved reference.
+            server::release_send(port);
         }
+        // The kernel destroys the request with the voucher it carried.
+        if (request.bits >> 16) & 0x1f == MACH_MSG_TYPE_MOVE_SEND {
+            server::release_send(request.voucher);
+        }
+        return answer(kernel, name, index, arguments, &request, id, reply);
     }
     forward_trap(kernel, index, arguments)
 }
@@ -240,7 +263,10 @@ fn moved_destination(
     port: u32,
 ) -> Result<Option<u32>> {
     if object != Object::Thread {
-        bail!("{name}: a request that moves its {object:?} kernel-object right is not implemented");
+        unsupported::refuse!(
+            Failure::Kern(MACH_SEND_INVALID_DEST),
+            "{name}: a request that moves its {object:?} kernel-object right"
+        );
     }
     if !super::thread::pinned(kernel, port) || super::thread::guest_references(port) > 1 {
         return Ok(None);
@@ -250,10 +276,10 @@ fn moved_destination(
         .as_ref()
         .is_some_and(|signature| signature.platform_restricted());
     if restricted {
-        bail!(
-            "{name}: moving the last reference of the pinned thread port {port:#x} raises a \
-             platform-restricted task's fatal EXC_GUARD (kGUARD_EXC_MOD_REFS), which is not \
-             implemented"
+        unsupported::refuse!(
+            Failure::Kern(MACH_SEND_INVALID_DEST),
+            "{name}: moving the last reference of the pinned thread port {port:#x}, which \
+             raises a platform-restricted task's fatal EXC_GUARD (kGUARD_EXC_MOD_REFS)"
         );
     }
     Ok(Some(MACH_SEND_INVALID_DEST))
@@ -319,6 +345,7 @@ fn destination(name: &str, arguments: &[u64]) -> Option<(u32, u32)> {
 struct Sent {
     bits: u32,
     reply_port: u32,
+    voucher: u32,
     body: Vec<u8>,
 }
 
@@ -327,7 +354,10 @@ struct Sent {
 fn request(name: &str, arguments: &[u64]) -> Result<Option<Sent>> {
     let (header, bits, size, reply_port, voucher) = if name == "mach_msg2_trap" {
         if arguments[1] & MESSAGE_VECTOR != 0 {
-            bail!("{name}: a vector message to a kernel object is not implemented");
+            unsupported::refuse!(
+                Failure::Kern(MACH_SEND_INVALID_OPTIONS),
+                "{name}: a vector message to a kernel object"
+            );
         }
         (
             arguments[0],
@@ -347,12 +377,6 @@ fn request(name: &str, arguments: &[u64]) -> Result<Option<Sent>> {
         };
         (header, bits, arguments[2] & LOW_HALF, local, voucher)
     };
-    if voucher != 0 {
-        bail!(
-            "{name}: a request to a kernel object carrying a voucher is not implemented (bits \
-             {bits:#x}, voucher {voucher:#x})"
-        );
-    }
     let Some(body_bytes) = size.checked_sub(HEADER_BYTES) else {
         return Ok(None);
     };
@@ -362,6 +386,7 @@ fn request(name: &str, arguments: &[u64]) -> Result<Option<Sent>> {
     Ok(Some(Sent {
         bits,
         reply_port,
+        voucher,
         body,
     }))
 }

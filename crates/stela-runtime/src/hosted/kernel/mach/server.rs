@@ -10,11 +10,12 @@ use crate::hosted::darwin::{
     KERN_NOT_SUPPORTED, mach_host_self,
 };
 use crate::hosted::threads::lock;
+use crate::hosted::unsupported::{self, Failure};
 use crate::hosted::{
     hardware,
     memory::{self, Protection},
 };
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// A request's body after its header.
 pub(super) struct Request<'a> {
@@ -514,10 +515,13 @@ pub(super) fn serve(
         // alike. The name, inspect and read ports are other ports of the
         // host task, whose requests would answer for the x86 task.
         (Object::Task, "task_get_special_port_from_user", false) => match request.word(8) {
-            Some(which @ (TASK_NAME_PORT | TASK_INSPECT_PORT | TASK_READ_PORT)) => bail!(
-                "task_get_special_port({which}): the host task's name, inspect and read ports \
-                 would answer for the x86 task, which is not implemented"
-            ),
+            Some(which @ (TASK_NAME_PORT | TASK_INSPECT_PORT | TASK_READ_PORT)) => {
+                unsupported::refuse!(
+                    Failure::Kern(KERN_FAILURE),
+                    "task_get_special_port({which}): the task's name, inspect and read ports, \
+                     which as the host task's would answer for the x86 task"
+                )
+            }
             Some(_) => Reply::Forward,
             None => Reply::Failure(MIG_BAD_ARGUMENTS),
         },
@@ -612,9 +616,10 @@ pub(super) fn serve(
                 .as_ref()
                 .is_some_and(|signature| signature.entitled(ATM_DIAGNOSTIC_ENTITLEMENT)) =>
         {
-            bail!(
+            unsupported::refuse!(
+                Failure::Kern(KERN_NO_ACCESS),
                 "host_set_atm_diagnostic_flag by a task entitled to it: setting the machine's \
-                 diagnostic flag, which the host refuses the hosted runtime, is not implemented"
+                 diagnostic flag, which the host refuses the hosted runtime"
             )
         }
         (Object::Host, routine, _) if HOST_FORWARDED.contains(&routine) => Reply::Forward,
@@ -947,9 +952,10 @@ fn task_set_state(kernel: &Kernel, request: &Request) -> Result<Reply> {
                     .chain(48..64)
                     .any(|index| debug_double(&words, index) & ENABLE != 0)
             {
-                bail!(
+                unsupported::refuse!(
+                    Failure::Kern(KERN_FAILURE),
                     "task_set_state(ARM_DEBUG_STATE64) enabling a hardware breakpoint, watchpoint \
-                     or single step for new threads: guest debug exceptions are not implemented"
+                     or single step for new threads, whose debug exceptions"
                 );
             }
             *debug = Some(words);
@@ -1148,9 +1154,10 @@ fn partial_memory_entry(
     let data = permission & (MAP_MEM_USE_DATA_ADDR | MAP_MEM_4K_DATA_ADDR) != 0;
     if !from_map || size == 0 || (data && offset & memory::PAGE_MASK & !memory::HOST_PAGE_MASK != 0)
     {
-        bail!(
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
             "mach_make_memory_entry of {size:#x} bytes at {offset:#x} (permission \
-             {permission:#x}): this range in partial guest pages is not implemented"
+             {permission:#x}): a range in partial guest pages"
         );
     }
     let Some(end) = offset.checked_add(size).and_then(memory::round_page) else {
@@ -1351,9 +1358,10 @@ fn processor_info(hardware: &hardware::Hardware, host: u32, flavor: u32) -> Resu
                 accounting::CPU_STATES as u32,
             )
         }
-        PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => bail!(
+        PROCESSOR_CPU_STAT | PROCESSOR_CPU_STAT64 => unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
             "host_processor_info flavor {flavor:#x}: the arm64 kernel's exception counters of \
-             the profile's {cpus} processors have no host counterpart"
+             the profile's {cpus} processors, which have no host counterpart"
         ),
         _ => return Ok(Reply::Failure(KERN_FAILURE)),
     };
