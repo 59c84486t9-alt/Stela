@@ -557,20 +557,8 @@ fn in_shared_region(start: u64, size: u64) -> bool {
 /// host regions meeting inside a guest page must be contiguous and of the
 /// same protections, and no hole may begin or end inside one.
 fn whole_pages(what: &str, start: u64, size: u64) -> Result<()> {
-    let end = start.saturating_add(size);
-    let mut cursor = start;
-    // The previous region's end and protections.
-    let mut previous: Option<(u64, i32, i32)> = None;
-    let refuse = |at: u64, parts: String| {
-        bail!(
-            "{what} over guest pages {start:#x}..{end:#x}: the host maps the guest page at \
-             {:#x} in parts it treats apart ({parts}), where the arm64 kernel maps it whole; a \
-             partial guest page is not implemented",
-            memory::trunc_page(at)
-        )
-    };
-    while cursor < end {
-        let (mut at, mut bytes) = (cursor, 0u64);
+    split_pages(what, start, size, |mut at| {
+        let mut bytes = 0u64;
         let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
         let mut count = VM_REGION_BASIC_INFO_COUNT_64;
         let mut object = 0u32;
@@ -586,18 +574,43 @@ fn whole_pages(what: &str, start: u64, size: u64) -> Result<()> {
                 &mut object,
             )
         };
+        (found == KERN_SUCCESS).then_some((at, bytes, info[0], info[1]))
+    })
+}
+
+/// [`whole_pages`] over the regions `region` gives: the start, size,
+/// protection and maximum protection of the first at or after an address.
+fn split_pages(
+    what: &str,
+    start: u64,
+    size: u64,
+    mut region: impl FnMut(u64) -> Option<(u64, u64, i32, i32)>,
+) -> Result<()> {
+    let end = start.saturating_add(size);
+    let mut cursor = start;
+    // The previous region's end and protections.
+    let mut previous: Option<(u64, i32, i32)> = None;
+    let refuse = |at: u64, parts: String| {
+        bail!(
+            "{what} over guest pages {start:#x}..{end:#x}: the host maps the guest page at \
+             {:#x} in parts it treats apart ({parts}), where the arm64 kernel maps it whole; a \
+             partial guest page is not implemented",
+            memory::trunc_page(at)
+        )
+    };
+    while cursor < end {
         let open = previous.filter(|&(previous_end, ..)| previous_end & PAGE_MASK != 0);
         // No region at or after the cursor in the range: the rest is a
         // hole, which must begin on a guest page.
-        if found != KERN_SUCCESS || at >= end {
+        let Some((at, bytes, protection, maximum)) = region(cursor).filter(|&(at, ..)| at < end)
+        else {
             return match open {
                 Some((previous_end, ..)) => {
                     refuse(previous_end, format!("a hole from {previous_end:#x}"))
                 }
                 None => Ok(()),
             };
-        }
-        let (protection, maximum) = (info[0], info[1]);
+        };
         let joined = previous.is_some_and(|(previous_end, current, max)| {
             previous_end == at && current == protection && max == maximum
         });
@@ -2477,10 +2490,42 @@ mod tests {
             error.to_string().contains("protections 3/7 before"),
             "{error}"
         );
-        memory::deallocate(part, HOST_PAGE_BYTES).unwrap();
-        let error = remap(&mut task).err().unwrap();
-        assert!(error.to_string().contains("a hole from"), "{error}");
         memory::deallocate(source, PAGE_BYTES).unwrap();
+    }
+
+    #[test]
+    fn a_hole_inside_a_guest_page_is_refused() {
+        // Over given regions: a host page freed for the test could be
+        // filled at once by another test's host allocation.
+        let hole = |regions: &[(u64, u64)], start: u64, size: u64| {
+            split_pages("test", start, size, |at| {
+                regions
+                    .iter()
+                    .find(|&&(start, bytes)| start + bytes > at)
+                    .map(|&(start, bytes)| (start, bytes, 3, 7))
+            })
+            .err()
+            .map(|error| error.to_string())
+        };
+        let page = 16 * PAGE_BYTES;
+        let host_page = HOST_PAGE_BYTES;
+        // A hole from inside the guest page to its end.
+        let error = hole(&[(page, host_page)], page, PAGE_BYTES).unwrap();
+        assert!(error.contains("a hole from"), "{error}");
+        // A hole between two host pages of the guest page.
+        let regions = [
+            (page, host_page),
+            (page + 2 * host_page, PAGE_BYTES - 2 * host_page),
+        ];
+        let error = hole(&regions, page, PAGE_BYTES).unwrap();
+        assert!(error.contains("a hole from"), "{error}");
+        // A hole at the guest page's start.
+        let error = hole(&[(page + host_page, PAGE_BYTES)], page, PAGE_BYTES).unwrap();
+        assert!(error.contains("a hole before"), "{error}");
+        // Holes of whole guest pages are the kernel's too.
+        let regions = [(page, PAGE_BYTES), (page + 2 * PAGE_BYTES, PAGE_BYTES)];
+        assert_eq!(hole(&regions, page, 3 * PAGE_BYTES), None);
+        assert_eq!(hole(&[], page, PAGE_BYTES), None);
     }
 
     #[test]
@@ -2752,7 +2797,6 @@ mod tests {
             failure(call(&mut task, "mach_vm_region", false, &body).unwrap()),
             KERN_INVALID_ARGUMENT
         );
-        memory::deallocate(outer, 4 * PAGE_BYTES).unwrap();
         // A non-purgeable object's state.
         let body = simple(&[
             &base.to_le_bytes(),
