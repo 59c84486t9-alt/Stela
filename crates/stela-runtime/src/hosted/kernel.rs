@@ -73,6 +73,10 @@ pub struct Executable {
     pub signature: Option<Signature>,
     /// The executable's Mach header, slid.
     pub header: u64,
+    /// `task_get_security_config` ([`Signature::security_config`]).
+    pub security_config: u32,
+    /// The task's `ipc_space_policy_t` ([`Signature::ipc_space_policy`]).
+    pub ipc_space_policy: u32,
 }
 
 /// The process's kernel state, shared by its threads: what exec fixed, and

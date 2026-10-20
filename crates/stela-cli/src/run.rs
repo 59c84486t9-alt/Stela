@@ -376,4 +376,98 @@ mod tests {
         );
         assert!(message.contains("stela run --trace ./hello"), "{message}");
     }
+
+    /// The 26A434 guest system the process work extracted
+    /// (`.stela/process-work/guest-os` of the main checkout, or
+    /// `STELA_TEST_GUEST_OS`).
+    fn guest_os() -> Option<PathBuf> {
+        if let Some(root) = std::env::var_os("STELA_TEST_GUEST_OS") {
+            return Some(root.into());
+        }
+        let common = std::process::Command::new("git")
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()?;
+        let checkout = PathBuf::from(String::from_utf8(common.stdout).ok()?.trim())
+            .parent()?
+            .to_owned();
+        let root = checkout.join(".stela/process-work/guest-os");
+        root.join("receipt.json").is_file().then_some(root)
+    }
+
+    /// The exec security state of an image's arm64e slice: its security
+    /// config and IPC space policy, or `None` when it is unsigned.
+    fn security(data: &[u8]) -> Result<Option<(u32, u32)>> {
+        let (_, slice) = select_slice(data, None)?;
+        let jop = hosted::pe::UserJop::of_subtype(cpu_subtype(slice)?);
+        let Some(signature) = signature(slice)? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            signature.security_config(false)?,
+            signature.ipc_space_policy(jop)?,
+        )))
+    }
+
+    #[test]
+    fn exec_security_follows_the_signature_and_entitlements_of_26a434_images() -> Result<()> {
+        let Some(root) = guest_os() else {
+            eprintln!("skipped: no 26A434 guest system (see guest_os)");
+            return Ok(());
+        };
+        // Platform binaries take restrictions version 3 and the platform
+        // IPC policy; hardened processes their version and guard objects,
+        // legacy names included; plugin hosts (library validation off, or
+        // a hardening-exception identity) opt out of Mach hardening.
+        for (path, config, policy) in [
+            ("bin/ls", 0x18, 0x407),
+            ("usr/bin/plutil", 0x2_0118, 0x407),
+            ("usr/sbin/mDNSResponder", 0x2_0119, 0x407),
+            ("usr/sbin/securityd", 0x58, 0x407),
+            ("usr/sbin/coreaudiod", 0x1_0018, 0x487),
+            // aa grants disable-library-validation as false.
+            ("usr/bin/aa", 0x18, 0x407),
+            ("bin/bash", 0x18, 0x487),
+        ] {
+            let data = std::fs::read(root.join(path))?;
+            assert_eq!(security(&data)?, Some((config, policy)), "{path}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn exec_security_of_third_party_and_unsigned_images() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let source = work.path().join("main.c");
+        std::fs::write(&source, "int main(void) { return 0; }\n")?;
+        let build = |name: &str, flags: &[&str]| -> Option<PathBuf> {
+            let output = work.path().join(name);
+            std::process::Command::new("xcrun")
+                .args(["clang", "-arch", "arm64e"])
+                .args(flags)
+                .arg(&source)
+                .arg("-o")
+                .arg(&output)
+                .status()
+                .ok()?
+                .success()
+                .then_some(output)
+        };
+        let Some(hardened) = build("hardened", &[]) else {
+            eprintln!("skipped: xcrun clang cannot build arm64e programs here");
+            return Ok(());
+        };
+        let signed = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-", "--options", "runtime"])
+            .arg(&hardened)
+            .status()?;
+        assert!(signed.success());
+        // Hardened runtime alone: no restrictions version, the enhanced V0
+        // IPC policy.
+        assert_eq!(security(&std::fs::read(&hardened)?)?, Some((0, 0x103)));
+        let unsigned = build("unsigned", &["-Wl,-no_adhoc_codesign"]).unwrap();
+        assert_eq!(security(&std::fs::read(&unsigned)?)?, None);
+        Ok(())
+    }
 }

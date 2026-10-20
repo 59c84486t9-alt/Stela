@@ -217,6 +217,9 @@ pub fn run(launch: Launch) -> Result<Report> {
     let stack = exec::map_stack()?;
     let keys = pe::Keys::random()?;
     let [guard0, guard1, guard2, guard3, entropy0, entropy1, munge] = random_words::<7>()?;
+    let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
+    let security_config = launch.signature.security_config(hardware.memory_tagging)?;
+    let ipc_space_policy = launch.signature.ipc_space_policy(jop)?;
     let mut apple = exec::AppleStrings {
         pfz: commpage::TEXT_ADDRESS,
         stack_guard: [guard0, guard1, guard2, guard3],
@@ -228,7 +231,7 @@ pub fn run(launch: Launch) -> Result<Report> {
         cdhash: Some(launch.signature.cdhash),
         boot_hash: None,
         thread_port: None,
-        security_config: 0,
+        security_config,
     };
     let entry = launch.dylinker.entry + dylinker.slide;
     if launch.trace {
@@ -238,7 +241,6 @@ pub fn run(launch: Launch) -> Result<Report> {
             executable.slide, dylinker.slide, stack.top
         );
     }
-    let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
     let (engine, signer) = threads::engine(launch.chip, profile, target, keys, jop)?;
     let process = kernel::Process::new(kernel::Config {
         shared_region,
@@ -250,6 +252,8 @@ pub fn run(launch: Launch) -> Result<Report> {
             code_signing_flags: launch.signature.exec_flags(),
             signature: Some(launch.signature.clone()),
             header,
+            security_config,
+            ipc_space_policy,
         },
         user_stack: stack.top,
         roots: launch.roots.clone(),

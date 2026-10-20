@@ -14,8 +14,9 @@
 use super::{Call, Kernel, Outcome, forward};
 use crate::code_signature;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ERANGE, ESRCH};
+use crate::hosted::pe::UserJop;
 use crate::hosted::{memory, threads::lock};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 const CS_OPS_STATUS: u64 = 0;
 const CS_OPS_MARKINVALID: u64 = 1;
@@ -70,6 +71,87 @@ const CS_VALIDATION_CATEGORY_PLATFORM: u32 = 1;
 const CDHASH_BYTES: usize = 20;
 const BLOB_HEADER_BYTES: u64 = 8;
 
+/// The exec security mitigations' entitlements, legacy and security
+/// names (`exec_security_mitigation_entitlement`, `bsd/kern/kern_exec.c`).
+const HARDENED_PROCESS: [&str; 2] = [
+    "com.apple.developer.hardened-process",
+    "com.apple.security.hardened-process",
+];
+const HARDENED_HEAP: [&str; 2] = [
+    "com.apple.developer.hardened-process.hardened-heap",
+    "com.apple.security.hardened-process.hardened-heap",
+];
+const CHECKED_ALLOCATIONS: [&str; 2] = [
+    "com.apple.developer.hardened-process.checked-allocations",
+    "com.apple.security.hardened-process.checked-allocations",
+];
+const SCRIPT_RESTRICTIONS: &str = "com.apple.security.script-restrictions";
+const IPC_CONTAINMENT_VESSEL: &str = "com.apple.security.hardened-process.containment.ipc";
+const NO_GUARD_OBJECTS: &str = "com.apple.security.hardened-process.no-guard-objects";
+/// `HARDENED_PROCESS_VERSION_STRING`, `HARDENED_PROCESS_VERSION` and
+/// `HARDENED_PROCESS_VERSION_LATEST` (`kern_exec_internal.h`).
+const HARDENED_PROCESS_VERSION_STRING: &str =
+    "com.apple.security.hardened-process.enhanced-security-version-string";
+const HARDENED_PROCESS_VERSION: &str =
+    "com.apple.security.hardened-process.enhanced-security-version";
+const HARDENED_PROCESS_VERSION_LATEST: u64 = 2;
+/// `SPAWN_ENABLE_PLATFORM_RESTRICTIONS_ENT_STR` and `_INT`.
+const PLATFORM_RESTRICTIONS_STRING: &str =
+    "com.apple.security.hardened-process.platform-restrictions-string";
+const PLATFORM_RESTRICTIONS: &str = "com.apple.security.hardened-process.platform-restrictions";
+/// `kCSWebBrowser*Entitlement`: a hardened browser engine.
+const BROWSER_ENGINE: [&str; 4] = [
+    "com.apple.developer.web-browser-engine.host",
+    "com.apple.developer.web-browser-engine.rendering",
+    "com.apple.developer.web-browser-engine.networking",
+    "com.apple.developer.web-browser-engine.webcontent",
+];
+/// `kIODriverKitEntitlementKey`.
+const DRIVERKIT: &str = "com.apple.developer.driverkit";
+/// `process_is_plugin_host`'s entitlements (`bsd/kern/mach_loader.c`,
+/// `OVERRIDE_PLUGIN_HOST_ENTITLEMENT`, `CLEAR_LV_ENTITLEMENT`) and the
+/// identities of `/System/Library/Security/HardeningExceptions.plist`,
+/// matched as prefixes.
+const OVERRIDE_PLUGIN_HOST: &str = "com.apple.private.security.override-plugin-host-detection";
+const DISABLE_LIBRARY_VALIDATION: [&str; 3] = [
+    "com.apple.security.cs.disable-library-validation",
+    "com.apple.private.cs.automator-plugins",
+    "com.apple.private.security.clear-library-validation",
+];
+const HARDENING_EXCEPTIONS: [&str; 11] = [
+    "com.apple.perl5",
+    "com.apple.perl",
+    "org.python.python",
+    "com.apple.expect",
+    "com.tcltk.wish",
+    "com.tcltk.tclsh",
+    "com.apple.ruby",
+    "com.apple.bash",
+    "com.apple.zsh",
+    "com.apple.ksh",
+    "com.apple.sh",
+];
+
+/// `struct task_security_config` (`osfmk/kern/task.h`): its `uint16_t`
+/// bit fields, then `hardened_process_version` in the third byte.
+const CONFIG_HARDENED_HEAP: u32 = 1 << 0;
+const CONFIG_PLATFORM_RESTRICTIONS_SHIFT: u32 = 3;
+const CONFIG_SCRIPT_RESTRICTIONS: u32 = 1 << 6;
+const CONFIG_IPC_CONTAINMENT_VESSEL: u32 = 1 << 7;
+const CONFIG_GUARD_OBJECTS: u32 = 1 << 8;
+const CONFIG_HARDENED_PROCESS_SHIFT: u32 = 16;
+
+/// `ipc_space_policy_t` (`osfmk/ipc/ipc_types.h`) as macOS defines it.
+pub const IPC_SPACE_POLICY_DEFAULT: u32 = 0x0001;
+pub const IPC_SPACE_POLICY_ENHANCED: u32 = 0x0002;
+pub const IPC_SPACE_POLICY_PLATFORM: u32 = 0x0004;
+pub const IPC_SPACE_POLICY_CONTAINED: u32 = 0x0008;
+pub const IPC_SPACE_POLICY_OPTED_OUT: u32 = 0x0080;
+pub const IPC_SPACE_POLICY_ENHANCED_V0: u32 = 0x0100;
+pub const IPC_SPACE_POLICY_ENHANCED_V1: u32 = 0x0200;
+pub const IPC_SPACE_POLICY_ENHANCED_V2: u32 = 0x0300;
+pub const IPC_SPACE_POLICY_ENHANCED_V3: u32 = 0x0400;
+
 /// The executable's code signature, as exec read it.
 #[derive(Debug, Clone, Default)]
 pub struct Signature {
@@ -101,33 +183,189 @@ impl Signature {
         flags
     }
 
-    /// Whether exec gives the task a platform-restrictions version
-    /// (`imgact_setup_platform_restrictions`, `task_set_hardened_runtime`):
-    /// a platform binary, a hardened-process entitlement or a hardened
+    /// Whether exec gives the task a platform-restrictions version: a
+    /// platform binary, a platform-restrictions entitlement or a hardened
     /// browser engine. Such a task's IPC space takes the enhanced policies
     /// (`ipc_policy_for_task`) and its EXC_GUARD defaults are the
-    /// platform's (`task_set_exc_guard_default`). Mach-hardening opt-outs
-    /// are AMFI boot-args, which Stela does not set.
+    /// platform's (`task_set_exc_guard_default`).
     pub fn platform_restricted(&self) -> bool {
-        const HARDENING: [&str; 2] = [
-            "com.apple.security.hardened-process.platform-restrictions-string",
-            "com.apple.security.hardened-process.platform-restrictions",
-        ];
-        const BROWSER_ENGINE: [&str; 4] = [
-            "com.apple.developer.web-browser-engine.host",
-            "com.apple.developer.web-browser-engine.rendering",
-            "com.apple.developer.web-browser-engine.networking",
-            "com.apple.developer.web-browser-engine.webcontent",
-        ];
-        let present = |name: &str| {
-            self.entitlements.as_deref().is_some_and(|blob| {
-                blob.get(BLOB_HEADER_BYTES as usize..)
-                    .is_some_and(|plist| code_signature::xml_entitlement_present(plist, name))
-            })
+        self.restrictions_version()
+            .is_ok_and(|version| version != 0)
+    }
+
+    /// The task's platform-restrictions version: 1 for a hardened browser
+    /// engine (`imgact_setup_runtime_mitigations`), then as
+    /// `imgact_setup_platform_restrictions` overrides it: 3 for a platform
+    /// binary, the string entitlement's version (2 to 7), 2 for the
+    /// integer entitlement. An invalid string fails exec with `EINVAL`.
+    pub fn restrictions_version(&self) -> Result<u8> {
+        if self.platform_binary() {
+            return Ok(3);
+        }
+        if let Some(value) = self.entitlement_value(PLATFORM_RESTRICTIONS_STRING) {
+            let version = string_value(value)
+                .and_then(|text| text.parse::<u8>().ok())
+                .filter(|version| (2..8).contains(version));
+            return version.with_context(|| {
+                format!(
+                    "exec fails with EINVAL: {PLATFORM_RESTRICTIONS_STRING} is {value:?}, not a \
+                     version from 2 to 7"
+                )
+            });
+        }
+        if self.entitlement_value(PLATFORM_RESTRICTIONS).is_some() {
+            return Ok(2);
+        }
+        Ok(u8::from(
+            BROWSER_ENGINE.iter().any(|name| self.entitled(name)),
+        ))
+    }
+
+    /// The task's hardened-process version (`load_machfile`): with the
+    /// hardened-process entitlement, the string or integer version
+    /// entitlement's, else and at most `HARDENED_PROCESS_VERSION_LATEST`;
+    /// 0 without it. A string that is no number fails exec.
+    pub fn hardened_process_version(&self) -> Result<u8> {
+        if !self.mitigation(HARDENED_PROCESS)? {
+            return Ok(0);
+        }
+        let version = match self.entitlement_value(HARDENED_PROCESS_VERSION_STRING) {
+            Some(value) => string_value(value)
+                .and_then(|text| text.parse::<u32>().ok())
+                .with_context(|| {
+                    format!(
+                        "exec fails with LOAD_BADMACHO: {HARDENED_PROCESS_VERSION_STRING} is \
+                         {value:?}"
+                    )
+                })?
+                .into(),
+            None => self
+                .entitlement_value(HARDENED_PROCESS_VERSION)
+                .and_then(integer_value)
+                .unwrap_or(HARDENED_PROCESS_VERSION_LATEST),
         };
+        Ok(version.min(HARDENED_PROCESS_VERSION_LATEST) as u8)
+    }
+
+    /// `task_get_security_config` after exec
+    /// (`imgact_setup_runtime_mitigations`): hardened heap, the
+    /// platform-restrictions version, script restrictions, the IPC
+    /// containment vessel, guard objects and the hardened-process version.
+    /// TPRO has no setter in xnu-12377. On a chip with memory tagging the
+    /// checked-allocations bit also depends on AMFI's opt-out list, which
+    /// is not modeled, so a task that could take it is refused there.
+    pub fn security_config(&self, memory_tagging: bool) -> Result<u32> {
+        let hardened_process = self.hardened_process_version()?;
+        let platform_driver = self.platform_binary() && self.entitled(DRIVERKIT);
+        ensure!(
+            !memory_tagging || (hardened_process == 0 && !platform_driver),
+            "the checked-allocations (MTE) configuration of a hardened process is not modeled"
+        );
+        let mut config = u32::from(self.restrictions_version()?)
+            << CONFIG_PLATFORM_RESTRICTIONS_SHIFT
+            | u32::from(hardened_process) << CONFIG_HARDENED_PROCESS_SHIFT;
+        if self.mitigation(HARDENED_HEAP)? {
+            config |= CONFIG_HARDENED_HEAP;
+        }
+        if self.entitled(SCRIPT_RESTRICTIONS) {
+            config |= CONFIG_SCRIPT_RESTRICTIONS;
+        }
+        if self.entitled(IPC_CONTAINMENT_VESSEL) {
+            config |= CONFIG_IPC_CONTAINMENT_VESSEL;
+        }
+        // `imgact_setup_guard_objects`.
+        if !self.entitled(NO_GUARD_OBJECTS) && (u64::from(hardened_process) >= 2 || platform_driver)
+        {
+            config |= CONFIG_GUARD_OBJECTS;
+        }
+        // Both checked-allocations names fail exec, as every mitigation's.
+        self.mitigation(CHECKED_ALLOCATIONS)?;
+        Ok(config)
+    }
+
+    /// Whether exec treats the image as a platform plugin host and runs it
+    /// with JOP keys off and Mach hardening opted out
+    /// (`process_is_plugin_host`): a pointer-authenticating platform binary
+    /// that disables library validation or whose identity is a hardening
+    /// exception. With the override entitlement only the
+    /// `posix_spawnattr_disable_ptr_auth_a_keys_np` attribute makes one,
+    /// which is not modeled.
+    pub fn plugin_host(&self, jop: UserJop) -> bool {
+        if jop == UserJop::Disabled || !self.platform_binary() {
+            return false;
+        }
+        let Some(identity) = &self.identifier else {
+            return false;
+        };
+        if self.entitled(OVERRIDE_PLUGIN_HOST) {
+            return false;
+        }
+        DISABLE_LIBRARY_VALIDATION
+            .iter()
+            .any(|name| self.entitled(name))
+            || HARDENING_EXCEPTIONS
+                .iter()
+                .any(|exception| identity.starts_with(exception))
+    }
+
+    /// The task's IPC space policy (`ipc_policy_for_task`): the platform
+    /// level for a platform binary, the enhanced version of its
+    /// platform-restrictions version or hardened runtime, opted out for a
+    /// plugin host, contained for the IPC containment vessel.
+    pub fn ipc_space_policy(&self, jop: UserJop) -> Result<u32> {
+        let mut policy = IPC_SPACE_POLICY_DEFAULT;
+        if self.platform_binary() {
+            policy |= IPC_SPACE_POLICY_PLATFORM | IPC_SPACE_POLICY_ENHANCED;
+        }
+        policy |= match self.restrictions_version()? {
+            3.. => IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V3,
+            2 => IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V2,
+            1 => IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V1,
+            0 if self.exec_flags() & CS_RUNTIME != 0 => {
+                IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V0
+            }
+            0 => 0,
+        };
+        if self.plugin_host(jop) {
+            policy |= IPC_SPACE_POLICY_OPTED_OUT;
+        }
+        if self.entitled(IPC_CONTAINMENT_VESSEL) {
+            policy |= IPC_SPACE_POLICY_CONTAINED;
+        }
+        Ok(policy)
+    }
+
+    /// Whether exec's load result is a platform binary (`TFRO_PLATFORM`).
+    fn platform_binary(&self) -> bool {
         self.exec_flags() & CS_PLATFORM_BINARY != 0
-            || HARDENING.iter().any(|name| present(name))
-            || BROWSER_ENGINE.iter().any(|name| self.entitled(name))
+    }
+
+    /// Whether a mitigation's legacy or security entitlement is granted
+    /// (`exec_check_security_entitlement`); both fail exec.
+    fn mitigation(&self, [legacy, security]: [&str; 2]) -> Result<bool> {
+        let (legacy, security) = (self.entitled(legacy), self.entitled(security));
+        ensure!(
+            !(legacy && security),
+            "exec fails: the image has both the legacy and the security name of an exec \
+             security mitigation entitlement"
+        );
+        Ok(legacy || security)
+    }
+
+    /// The XML text after `<key>name</key>`, when the entitlements hold
+    /// `name` with any value (`IOVnodeIsEntitlementPresentWithAnyValue`).
+    fn entitlement_value(&self, name: &str) -> Option<&str> {
+        let plist = self
+            .entitlements
+            .as_deref()?
+            .get(BLOB_HEADER_BYTES as usize..)?;
+        if !code_signature::xml_entitlement_present(plist, name) {
+            return None;
+        }
+        let text = core::str::from_utf8(plist).ok()?;
+        let key = format!("<key>{name}</key>");
+        let at = text.find(&key)? + key.len();
+        Some(text[at..].trim_start())
     }
 
     /// Whether a pointer-authentication failure ends the process rather
@@ -149,6 +387,20 @@ impl Signature {
                 .is_some_and(|plist| code_signature::xml_entitlement_true(plist, name))
         })
     }
+}
+
+/// The text of a `<string>` value (`IOVnodeGetEntitlement`).
+fn string_value(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("<string>")?
+        .split_once("</string>")
+        .map(|(text, _)| text)
+}
+
+/// The number of an `<integer>` value (`IOVnodeGetIntegerEntitlement`).
+fn integer_value(value: &str) -> Option<u64> {
+    let (text, _) = value.strip_prefix("<integer>")?.split_once("</integer>")?;
+    text.trim().parse().ok()
 }
 
 pub(super) const CALLS: &[&str] = &["csops", "csops_audittoken"];
@@ -386,5 +638,97 @@ mod tests {
             ..Signature::default()
         };
         assert!(restricted.pac_exception_fatal(false));
+    }
+
+    fn entitled(keys: &str) -> Signature {
+        let mut blob = vec![0; BLOB_HEADER_BYTES as usize];
+        blob.extend(format!("<plist><dict>{keys}</dict></plist>").bytes());
+        Signature {
+            entitlements: Some(blob),
+            ..Signature::default()
+        }
+    }
+
+    #[test]
+    fn restriction_versions_follow_the_string_then_the_integer_entitlement() {
+        let string = |value: &str| {
+            entitled(&format!(
+                "<key>{PLATFORM_RESTRICTIONS_STRING}</key><string>{value}</string>"
+            ))
+        };
+        assert_eq!(string("5").restrictions_version().unwrap(), 5);
+        for invalid in ["1", "8", "x", ""] {
+            assert!(string(invalid).restrictions_version().is_err(), "{invalid}");
+        }
+        let integer = entitled(&format!(
+            "<key>{PLATFORM_RESTRICTIONS}</key><integer>7</integer>"
+        ));
+        assert_eq!(integer.restrictions_version().unwrap(), 2);
+        let browser = entitled(&format!("<key>{}</key><true/>", BROWSER_ENGINE[0]));
+        assert_eq!(browser.restrictions_version().unwrap(), 1);
+        assert_eq!(
+            browser.ipc_space_policy(UserJop::Enabled).unwrap(),
+            IPC_SPACE_POLICY_DEFAULT | IPC_SPACE_POLICY_ENHANCED | IPC_SPACE_POLICY_ENHANCED_V1
+        );
+        assert_eq!(Signature::default().restrictions_version().unwrap(), 0);
+    }
+
+    #[test]
+    fn the_security_config_packs_each_mitigation() {
+        let hardened = |extra: &str| {
+            entitled(&format!(
+                "<key>com.apple.security.hardened-process</key><true/>{extra}"
+            ))
+        };
+        // The latest version without a version entitlement, and guard
+        // objects from version 2.
+        assert_eq!(hardened("").security_config(false).unwrap(), 0x2_0100);
+        let version_one = hardened(&format!(
+            "<key>{HARDENED_PROCESS_VERSION}</key><integer>1</integer>"
+        ));
+        assert_eq!(version_one.security_config(false).unwrap(), 0x1_0000);
+        let opted_out = hardened(&format!("<key>{NO_GUARD_OBJECTS}</key><true/>"));
+        assert_eq!(opted_out.security_config(false).unwrap(), 0x2_0000);
+        let contained = entitled(&format!(
+            "<key>{IPC_CONTAINMENT_VESSEL}</key><true/><key>{SCRIPT_RESTRICTIONS}</key><true/>"
+        ));
+        assert_eq!(contained.security_config(false).unwrap(), 0xc0);
+        assert_eq!(
+            contained.ipc_space_policy(UserJop::Enabled).unwrap(),
+            IPC_SPACE_POLICY_DEFAULT | IPC_SPACE_POLICY_CONTAINED
+        );
+        let bad_version = hardened(&format!(
+            "<key>{HARDENED_PROCESS_VERSION_STRING}</key><string>two</string>"
+        ));
+        assert!(bad_version.security_config(false).is_err());
+        let both = hardened("<key>com.apple.developer.hardened-process</key><true/>");
+        assert!(both.security_config(false).is_err());
+        // Memory tagging hardware: the checked-allocations bit of a hardened
+        // process is refused, an ordinary task's is clear.
+        assert!(hardened("").security_config(true).is_err());
+        assert_eq!(Signature::default().security_config(true).unwrap(), 0);
+    }
+
+    #[test]
+    fn plugin_hosts_are_pointer_authenticating_platform_binaries() {
+        let shell = Signature {
+            platform: 13,
+            identifier: Some("com.apple.zsh".into()),
+            ..Signature::default()
+        };
+        assert!(shell.plugin_host(UserJop::Enabled));
+        assert!(!shell.plugin_host(UserJop::Disabled));
+        let third_party = Signature {
+            identifier: Some("com.apple.zsh".into()),
+            ..Signature::default()
+        };
+        assert!(!third_party.plugin_host(UserJop::Enabled));
+        let mut overridden = entitled(&format!(
+            "<key>{OVERRIDE_PLUGIN_HOST}</key><true/><key>{}</key><true/>",
+            DISABLE_LIBRARY_VALIDATION[0]
+        ));
+        overridden.platform = 13;
+        overridden.identifier = Some("com.example.host".into());
+        assert!(!overridden.plugin_host(UserJop::Enabled));
     }
 }
