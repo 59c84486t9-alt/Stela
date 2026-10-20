@@ -380,7 +380,19 @@ impl SharedRegion {
         memory::protect(page, bytes, Protection::READ_WRITE)?;
         let start = mapping.info.page_starts[index];
         if start != PAGE_ATTR_NO_REBASE {
-            slide_page(page, bytes, start, mapping.info.value_add, slide, signer)?;
+            // One copy in and out: a copy per pointer costs a Mach call
+            // each, thousands a page.
+            let mut contents =
+                memory::read(page, bytes as usize).context("slide page unreadable")?;
+            slide_page(
+                &mut contents,
+                page,
+                start,
+                mapping.info.value_add,
+                slide,
+                signer,
+            )?;
+            ensure!(memory::write(page, &contents), "slide page unwritable");
         }
         memory::protect(page, bytes, protection)?;
         mapping.pending[index] = None;
@@ -389,26 +401,24 @@ impl SharedRegion {
     }
 }
 
-/// `vm_shared_region_slide_page_v5` on the page at `page`, which this
-/// process maps read/write.
+/// `vm_shared_region_slide_page_v5` on `contents`, the bytes of the page
+/// at `page`.
 fn slide_page(
+    contents: &mut [u8],
     page: u64,
-    bytes: u64,
     start: u16,
     value_add: u64,
     slide: u64,
     signer: Option<&pauth::Context>,
 ) -> Result<()> {
-    let mut offset = u64::from(start);
+    let mut offset = usize::from(start);
     loop {
-        ensure!(
-            offset + 8 <= bytes,
-            "slide chain leaves its page at {:#x}",
-            page + offset
-        );
-        let location = page + offset;
-        let raw = memory::read_u64(location).context("slide location unreadable")?;
-        let delta = ((raw >> NEXT_SHIFT) & NEXT_MASK) * 8;
+        let Some(word) = contents.get_mut(offset..offset + 8) else {
+            bail!("slide chain leaves its page at {:#x}", page + offset as u64);
+        };
+        let location = page + offset as u64;
+        let raw = u64::from_le_bytes((&*word).try_into().expect("eight"));
+        let delta = ((raw >> NEXT_SHIFT) & NEXT_MASK) as usize * 8;
         let target = (raw & RUNTIME_OFFSET_MASK) + value_add + slide;
         let value = if raw & AUTHENTICATED != 0 {
             let diversity = (raw >> DIVERSITY_SHIFT) & 0xffff;
@@ -432,10 +442,7 @@ fn slide_page(
         } else {
             target + ((raw << HIGH8_SHIFT) & HIGH8_MASK)
         };
-        ensure!(
-            memory::write_u64(location, value),
-            "slide location unwritable"
-        );
+        word.copy_from_slice(&value.to_le_bytes());
         if delta == 0 {
             return Ok(());
         }
@@ -455,6 +462,20 @@ mod tests {
             pauth::Version::FaultingCombined,
         )
         .with_translation_regime(super::super::pe::TCR_EL1)
+    }
+
+    #[test]
+    fn a_slide_chain_that_leaves_its_page_is_refused() {
+        // An ordinary pointer at the page's last word whose next link
+        // points past the page.
+        let mut contents = vec![0u8; 0x4000];
+        let last = contents.len() - 8;
+        let chained = 0x100u64 | 1 << NEXT_SHIFT;
+        contents[last..].copy_from_slice(&chained.to_le_bytes());
+        let error = slide_page(&mut contents, 0x1_0000, last as u16, 0, 0, None).unwrap_err();
+        assert!(error.to_string().contains("leaves its page"), "{error}");
+        // The pointer before the bad link was slid.
+        assert_eq!(&contents[last..], &0x100u64.to_le_bytes());
     }
 
     #[test]
