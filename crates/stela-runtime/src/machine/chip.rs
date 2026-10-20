@@ -324,7 +324,8 @@ pub fn test_chip() -> Chip {
 /// FEAT_SME2, FEAT_SME_F64F64 and FEAT_SME_I16I64, whose streaming mode, ZA,
 /// ZT0 and instructions the engine runs (`engine::scalable`); the M5's
 /// FEAT_SME2p1, FEAT_SME_B16B16, FEAT_SME_F16F16 and FEAT_SVE_B16B16 too,
-/// FEAT_SPECRES2 and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
+/// FEAT_SPECRES2, FEAT_MTE and FEAT_MTE2 (Allocation Tags and synchronous
+/// Tag Checks) and the instruction-only FEAT_CSSC and FEAT_HBC; and the M6's
 /// FEAT_SME_LUTv2, FEAT_FPACCOMBINE, FEAT_FP8 with FEAT_FPMR (the AdvSIMD
 /// FP8 conversions), FEAT_CPA (whose arithmetic the engine completes),
 /// FEAT_PAuth_LR with FEAT_SCTLR2 (PACM and the two-modifier PAC forms),
@@ -367,6 +368,8 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_AMUv1
         | Feature::FEAT_FP8
         | Feature::FEAT_FPMR
+        | Feature::FEAT_MTE
+        | Feature::FEAT_MTE2
         | Feature::FEAT_SME2p1
         | Feature::FEAT_SME_B16B16
         | Feature::FEAT_SME_F16F16
@@ -374,10 +377,7 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_SME_I16I64
         | Feature::FEAT_SME_LUTv2
         | Feature::FEAT_SVE_B16B16 => true,
-        Feature::FEAT_MTE
-        | Feature::FEAT_MTE2
-        | Feature::FEAT_SME_F8F16
-        | Feature::FEAT_SME_F8F32 => false,
+        Feature::FEAT_SME_F8F16 | Feature::FEAT_SME_F8F32 => false,
     }
 }
 
@@ -440,10 +440,8 @@ mod tests {
         assert_eq!(Chip::AppleM2.implemented(Feature::FEAT_HCX), Ok(false));
         assert_eq!(Chip::AppleM3.implemented(Feature::FEAT_HCX), Ok(true));
         assert_eq!(Chip::AppleM4.implemented(Feature::FEAT_SME), Ok(true));
-        assert_eq!(
-            Chip::AppleM5.implemented(Feature::FEAT_MTE),
-            Err("FEAT_MTE of the chip is not implemented")
-        );
+        assert_eq!(Chip::AppleM4.implemented(Feature::FEAT_MTE2), Ok(false));
+        assert_eq!(Chip::AppleM5.implemented(Feature::FEAT_MTE2), Ok(true));
         assert_eq!(Chip::AppleM1.implemented(Feature::FEAT_FGT), Ok(false));
     }
 

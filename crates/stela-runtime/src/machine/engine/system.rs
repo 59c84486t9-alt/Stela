@@ -67,6 +67,7 @@ pub(super) fn identification(register: Register) -> bool {
                 | Register::AIDR_EL1
                 | Register::CTR_EL0
                 | Register::DCZID_EL0
+                | Register::GMID_EL1
                 | Register::CLIDR_EL1
                 | Register::CCSIDR_EL1
                 | Register::MVFR0_EL1
@@ -508,12 +509,6 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
     }
 }
 
-/// Every PSTATE.TCO accessor first tests FEAT_MTE, which stops on a chip
-/// that has it until the engine implements it.
-/// Allocation tag maintenance needs FEAT_MTE2, which no chip implements yet.
-const TAG_MAINTENANCE: &str = "allocation tag cache maintenance needs FEAT_MTE2";
-const TCO_UNREACHABLE: &str = "PSTATE.TCO is reached only through an implemented FEAT_MTE";
-
 impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     fn chip(&self) -> Chip {
         self.machine.cpu.registers.chip()
@@ -542,7 +537,7 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Pstate::UAO => u64::from(state.uao),
             Pstate::DIT => u64::from(state.dit),
             Pstate::SSBS => u64::from(state.ssbs),
-            Pstate::TCO => unreachable!("{TCO_UNREACHABLE}"),
+            Pstate::TCO => u64::from(state.tco),
         }
     }
 
@@ -588,7 +583,11 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             Pstate::UAO => next.uao = bit,
             Pstate::DIT => next.dit = bit,
             Pstate::SSBS => next.ssbs = bit,
-            Pstate::TCO => unreachable!("{TCO_UNREACHABLE}"),
+            // PSTATE.TCO decides which accesses are tag checked.
+            Pstate::TCO => {
+                next.tco = bit;
+                self.regime = true;
+            }
         }
         cpu.set_pstate(next);
         if field == Pstate::D {
@@ -854,14 +853,8 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 access,
                 address,
             } => self.address_translation(stage, el, access, address),
-            Operation::Dc {
-                kind: CacheType::Tag | CacheType::DataTag,
-                ..
-            }
-            | Operation::ZeroBlock {
-                kind: CacheType::Tag | CacheType::DataTag,
-                ..
-            } => Err(Effect::Refused(TAG_MAINTENANCE)),
+            // The tag forms (FEAT_MTE2) act as their data forms: the host
+            // has no caches, of data or of Allocation Tags.
             Operation::Dc {
                 op, scope, operand, ..
             } => {
@@ -900,7 +893,28 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
                 };
                 Ok(())
             }
-            Operation::ZeroBlock { address, .. } => self.zero_block(address),
+            Operation::ZeroBlock {
+                kind: CacheType::Data,
+                address,
+            } => self.zero_block(address),
+            // DC GVA and DC GZVA.
+            Operation::ZeroBlock {
+                kind: kind @ (CacheType::Tag | CacheType::DataTag),
+                address,
+            } => self
+                .machine
+                .set_block_tags(address, kind == CacheType::DataTag)
+                .map_err(|failure| match failure {
+                    super::tags::Failure::Exception(exception) => Effect::Exception(exception),
+                    super::tags::Failure::Translation(_) => {
+                        Effect::Refused("DC GVA or GZVA address needs an unsupported translation")
+                    }
+                    super::tags::Failure::Refused(reason) => Effect::Refused(reason),
+                }),
+            Operation::ZeroBlock {
+                kind: CacheType::Instruction,
+                ..
+            } => Err(Effect::Refused("an instruction cache zero operation")),
             // No speculation to restrict.
             Operation::RestrictPrediction { .. } => Ok(()),
         }
@@ -1120,6 +1134,18 @@ impl<H: Host, D: Devices> Access<'_, H, D> {
                     .watchpoint_exception(&access, self.machine.cpu.pc)
                 {
                     return Err(Effect::Exception(exception));
+                }
+                // DC ZVA is tag checked (FEAT_MTE2); its fault reports Xt.
+                match self.machine.tag_check(&access, requester, Some(address)) {
+                    Ok(super::tags::TagCheck::Passed | super::tags::TagCheck::Untranslated) => {}
+                    Ok(super::tags::TagCheck::Failed(exception)) => {
+                        return Err(Effect::Exception(exception));
+                    }
+                    Err(_) => {
+                        return Err(Effect::Refused(
+                            "DC ZVA tag check needs an unsupported translation",
+                        ));
+                    }
                 }
                 if self
                     .machine

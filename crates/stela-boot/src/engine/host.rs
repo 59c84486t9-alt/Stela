@@ -5,9 +5,10 @@
 //! halves and whose entry 64 is the shared window, which native code's
 //! guest range checks keep every guest access out of; no other entry is
 //! ever mapped, which those checks rely on. There is one root per
-//! permission view (EL0, EL1, EL1 with PAN, GL1), filled on demand by the #PF
-//! handler from the software walk of the guest's tables, a window of the
-//! guest leaf per fault. Each half takes its tables from its own part of the
+//! permission view (EL0, EL1, EL1 with PAN, GL1), and a second set for the
+//! same views while tag checks keep Tagged memory out (`Regime::tag_checks`),
+//! filled on demand by the #PF handler from the software walk of the
+//! guest's tables, a window of the guest leaf per fault. Each half takes its tables from its own part of the
 //! pool, so a change of TTBR0 alone (a context switch) drops the lower half
 //! and keeps the upper half's, and records the leaves it was filled from
 //! (`mmu::shadow::Extents`), so a TLBI unmaps only the ranges it reaches.
@@ -107,7 +108,9 @@ impl Pool {
     }
 }
 
-const ROOTS: usize = 4;
+/// Permission views; the tag-checked roots follow the unchecked ones.
+const VIEWS: usize = 4;
+const ROOTS: usize = 2 * VIEWS;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
 const GUEST_LOW: usize = 0;
@@ -189,6 +192,8 @@ pub struct State {
     roots: [u64; ROOTS],
     current: usize,
     regime: Option<Regime>,
+    /// The halves whose Tagged memory the tag-checked roots keep out.
+    tag_checks: [bool; 2],
     code_physical: u64,
     code_bytes: u64,
     code_used: u64,
@@ -284,7 +289,10 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         Ok(frame)
     };
     let host_root = root()?;
-    let roots = [root()?, root()?, root()?, root()?];
+    let mut roots = [0; ROOTS];
+    for slot in &mut roots {
+        *slot = root()?;
+    }
     load_root(host_root);
     let x2 = config.apic_base & (1 << 10) != 0;
     let apic = Apic {
@@ -301,6 +309,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             roots,
             current: usize::MAX,
             regime: None,
+            tag_checks: [false; 2],
             code_physical: config.code_physical,
             code_bytes: config.code_bytes,
             code_used: 0,
@@ -569,9 +578,13 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
         }
     };
     // Watchpoints are checked after translation (Arm
-    // `AArch64_TranslateAddress`); the engine checks this access.
+    // `AArch64_TranslateAddress`), then Tag Checks; the engine checks this
+    // access.
     if regime.watch.blocks(address & !(PAGE - 1)) {
         return abandon(state, frame, address, write, FaultCause::Watched);
+    }
+    if regime.tag_blocks(address, translation.attributes) {
+        return abandon(state, frame, address, write, FaultCause::TagChecked);
     }
     let page = translation.physical & !(PAGE - 1);
     let Some(host) = state.host_physical(page) else {
@@ -605,7 +618,12 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     state.extents[half].record(address, translation.size, translation.global);
     // The rest of the leaf's window has the same translation and rights:
     // map its RAM pages that are not watched now, as a TLB entry covers
-    // the whole leaf. Pages that were absent need no flush.
+    // the whole leaf. Pages that were absent need no flush. A Tagged leaf
+    // whose tags are checked maps only the passed page.
+    if regime.tag_checks[half] && translation.attributes == mmu::attributes::TAGGED {
+        state.fills += 1;
+        return;
+    }
     let (first, last) = shadow::window(address, translation.size, FILL_WINDOW);
     let mut page = first;
     loop {
@@ -774,6 +792,13 @@ impl Host for BareHost {
                 state.reset_shadow();
             }
         }
+        // The tag-checked roots hold one pattern of checked halves.
+        if regime.tag_checked() && regime.tag_checks != state.tag_checks {
+            if state.tag_checks.contains(&true) {
+                state.reset_shadow();
+            }
+            state.tag_checks = regime.tag_checks;
+        }
         state.regime = Some(*regime);
         // EL0, EL1, EL1 with PAN, and the GXF guarded level (GL1).
         let view = match (
@@ -785,7 +810,7 @@ impl Host for BareHost {
             (_, _, true) => 3,
             (_, false, false) => 1,
             (_, true, false) => 2,
-        };
+        } + if regime.tag_checked() { VIEWS } else { 0 };
         if state.current != view {
             state.current = view;
             load_root(state.roots[view]);

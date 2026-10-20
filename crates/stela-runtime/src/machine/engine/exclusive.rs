@@ -5,8 +5,9 @@
 //! exclusive load; a store-exclusive to that granule passes once and clears
 //! it, as do CLREX and exception return. The local and global monitors
 //! coincide; another observer's write to the granule clears it
-//! (`processors`). `IsExclusiveVA` is TRUE.
-use super::{Devices, Host, Machine, RamTables, RequirementKind, Step, Translated};
+//! (`processors`). `IsExclusiveVA` is TRUE. With FEAT_MTE2 a load, and a
+//! store that passes, is tag checked unless its base is SP.
+use super::{Devices, Host, Machine, RamTables, RequirementKind, Step, Translated, tags::TagCheck};
 use crate::machine::{
     cpu::{Exception, RESERVATION_GRANULE, Reservation},
     debug,
@@ -92,12 +93,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.take(exception);
             return Ok(());
         }
+        let tag_checked = base != Register::Sp;
         let physical = translation.physical;
         let granule = physical & !(RESERVATION_GRANULE - 1);
         let mut bytes = [0u8; 16];
         let bytes = &mut bytes[..size as usize];
         match kind {
             Kind::Load { .. } => {
+                if tag_checked && self.exclusive_tag_fault(&access)? {
+                    return Ok(());
+                }
                 let mut reservation = Reservation {
                     granule,
                     bytes: [0; RESERVATION_GRANULE as usize],
@@ -128,6 +133,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .is_some_and(|reservation| reservation.granule == granule)
                     && last == granule;
                 self.cpu.monitor = None;
+                if passed && tag_checked && self.exclusive_tag_fault(&access)? {
+                    return Ok(());
+                }
                 if passed {
                     for (index, register) in registers.iter().enumerate() {
                         if let Some(register) = register {
@@ -147,5 +155,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         self.next()
+    }
+
+    /// Take the Tag Check fault of an exclusive access, if it has one.
+    fn exclusive_tag_fault(&mut self, access: &debug::Access) -> Result<bool, super::Stop> {
+        let requester = self.cpu.requester();
+        match self.tag_check(access, requester, None)? {
+            TagCheck::Failed(exception) => {
+                self.take(exception);
+                Ok(true)
+            }
+            TagCheck::Passed | TagCheck::Untranslated => Ok(false),
+        }
     }
 }

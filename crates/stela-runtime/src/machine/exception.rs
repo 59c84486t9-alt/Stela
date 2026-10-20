@@ -118,13 +118,14 @@ pub fn spsr_target(spsr: u64) -> Result<(u8, bool), IllegalReturn> {
 
 /// PSTATE and NZCV after an exception return to `spsr` from `current` (Arm
 /// `SetPSTATEFromPSR`). A legal return restores EL, SPSel, IL, UAO, DIT,
-/// SSBS, BTYPE and PACM. An illegal one keeps EL and SPSel and sets IL; UAO,
-/// DIT, SSBS, BTYPE and PACM are then ARBITRARY and Stela takes them from
-/// SPSR. Both restore NZCV, PAN and DAIF. PSTATE.SS is 0 here: the caller
-/// sets it (Arm `DebugExceptionReturnSS`, `machine::debug::return_ss`), and
-/// the caller clears PACM where IsPACMEnabled is false at the new EL. TCO is
-/// untouched because the profile has no MTE.
-pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
+/// SSBS, BTYPE, PACM and, with FEAT_MTE (`mte`), TCO. An illegal one keeps
+/// EL and SPSel and sets IL; UAO, DIT, SSBS, BTYPE, PACM and TCO are then
+/// ARBITRARY and Stela takes them from SPSR. Both restore NZCV, PAN and
+/// DAIF. PSTATE.SS is 0 here: the caller sets it (Arm
+/// `DebugExceptionReturnSS`, `machine::debug::return_ss`), and the caller
+/// clears PACM where IsPACMEnabled is false at the new EL. Without FEAT_MTE
+/// TCO stays as it is, 0.
+pub fn restore(current: Pstate, spsr: u64, illegal: bool, mte: bool) -> (Pstate, u32) {
     let (el, sp, il) = match spsr_target(spsr) {
         Ok((el, sp)) if !illegal => (el, sp, spsr & SPSR_IL != 0),
         _ => (current.el, current.sp, true),
@@ -138,7 +139,11 @@ pub fn restore(current: Pstate, spsr: u64, illegal: bool) -> (Pstate, u32) {
             uao: spsr & SPSR_UAO != 0,
             dit: spsr & SPSR_DIT != 0,
             ssbs: spsr & SPSR_SSBS != 0,
-            tco: current.tco,
+            tco: if mte {
+                spsr & SPSR_TCO != 0
+            } else {
+                current.tco
+            },
             il,
             btype: ((spsr >> SPSR_BTYPE_SHIFT) & 3) as u8,
             ss: false,
@@ -237,10 +242,10 @@ const SCTLR_DSSBS: u64 = 1 << 44;
 /// PSTATE after taking an exception to `target` (Arm
 /// `AArch64_TakeException`): IL, UAO, BTYPE and PACM clear, the target's SCTLR.SPAN clear sets PAN at EL1,
 /// and at EL2 while EL0 runs in the host (HCR_EL2.TGE); DSSBS gives SSBS.
-/// TCO is untouched because the profile has no MTE. An exception taken at
+/// With FEAT_MTE (`mte`) TCO is set; without it TCO stays 0. An exception taken at
 /// the guarded level stays there (m1n1 `gxf_asm.S` handles GL exceptions at
 /// VBAR_GLx and returns with GEXIT); the caller keeps `guarded`.
-pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Pstate {
+pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool, mte: bool) -> Pstate {
     let span = sctlr & SCTLR_SPAN == 0 && (target == 1 || in_host);
     Pstate {
         el: target,
@@ -250,7 +255,7 @@ pub fn entry_pstate(from: Pstate, sctlr: u64, target: u8, in_host: bool) -> Psta
         uao: false,
         dit: from.dit,
         ssbs: sctlr & SCTLR_DSSBS != 0,
-        tco: from.tco,
+        tco: mte || from.tco,
         il: false,
         btype: 0,
         ss: false,
@@ -290,10 +295,16 @@ mod tests {
                     il: daif == 5,
                     btype: daif & 3,
                     pacm: daif & 8 == 0,
+                    // Without FEAT_MTE, TCO is 0 and return keeps it.
+                    tco: daif & 4 == 0 && has(Feature::FEAT_MTE),
                     ..Pstate::reset(2)
                 };
+                let mte = has(Feature::FEAT_MTE);
                 let spsr = state.to_spsr(0xa000_0000);
-                assert_eq!(restore(Pstate::reset(2), spsr, false), (state, 0xa000_0000));
+                assert_eq!(
+                    restore(Pstate::reset(2), spsr, false, mte),
+                    (state, 0xa000_0000)
+                );
                 // Through the chip's SPSR_EL2, a field its features lack
                 // returns 0. Every chip has PAN, UAO, DIT and BTI.
                 let kept = Pstate {
@@ -302,7 +313,10 @@ mod tests {
                     ..state
                 };
                 let spsr = through_the_chip(Register::SPSR_EL2, spsr);
-                assert_eq!(restore(Pstate::reset(2), spsr, false), (kept, 0xa000_0000));
+                assert_eq!(
+                    restore(Pstate::reset(2), spsr, false, mte),
+                    (kept, 0xa000_0000)
+                );
             }
         }
         assert_eq!(Pstate::reset(1).to_spsr(0), 0x3c5);
@@ -324,12 +338,18 @@ mod tests {
         // only the always-restored fields change.
         let spsr = through_the_chip(Register::SPSR_EL1, 0x6000_0000 | SPSR_PAN | 0x209);
         assert_eq!(spsr, 0x6000_0000 | SPSR_PAN | 0x209);
-        let (next, nzcv) = restore(current, spsr, true);
+        let (next, nzcv) = restore(current, spsr, true, false);
         assert_eq!((next.el, next.sp, next.il), (1, false, true));
         assert_eq!((next.daif, next.pan, nzcv), (DAIF_D, true, 0x6000_0000));
         // An invalid mode is illegal whatever the caller decided.
-        assert!(restore(current, 0x10, false).0.il);
-        assert!(!entry_pstate(next, 0, 1, false).il);
+        assert!(restore(current, 0x10, false, false).0.il);
+        assert!(!entry_pstate(next, 0, 1, false, false).il);
+        // With FEAT_MTE an illegal return takes SPSR.TCO, Stela's choice
+        // for the ARBITRARY value, and exception entry sets TCO.
+        let (next, _) = restore(current, spsr | SPSR_TCO, true, true);
+        assert!(next.tco && !restore(current, spsr, true, true).0.tco);
+        assert!(entry_pstate(Pstate::reset(1), 0, 1, false, true).tco);
+        assert!(!entry_pstate(Pstate::reset(1), 0, 1, false, false).tco);
         assert_eq!(next.to_spsr(0) & SPSR_IL, SPSR_IL);
     }
 
@@ -356,28 +376,28 @@ mod tests {
             syndrome(Class::DataAbortSame, data_abort_iss(0b000111, true)),
             0x9600_0047
         );
-        let entered = entry_pstate(user, 0, 1, false);
+        let entered = entry_pstate(user, 0, 1, false, false);
         assert!(entered.pan && entered.sp && entered.el == 1);
         assert_eq!(entered.daif, DAIF_ALL);
         assert!(!entered.ssbs);
-        let entered = entry_pstate(user, SCTLR_SPAN | SCTLR_DSSBS, 1, false);
+        let entered = entry_pstate(user, SCTLR_SPAN | SCTLR_DSSBS, 1, false, false);
         assert!(!entered.pan && entered.ssbs);
         // The chip's SCTLR_EL1 keeps SPAN, and DSSBS only with FEAT_SSBS:
         // without it, entry clears PSTATE.SSBS.
         let chip = crate::machine::test_chip();
         let sctlr = through_the_chip(Register::SCTLR_EL1, SCTLR_SPAN | SCTLR_DSSBS);
-        let entered = entry_pstate(user, sctlr, 1, false);
+        let entered = entry_pstate(user, sctlr, 1, false, false);
         assert!(!entered.pan);
         assert_eq!(entered.ssbs, Feature::FEAT_SSBS.on(chip));
         // At EL2, SPAN only applies while EL0 is in the host.
-        assert!(!entry_pstate(user, 0, 2, false).pan);
-        assert!(entry_pstate(user, 0, 2, true).pan);
+        assert!(!entry_pstate(user, 0, 2, false, false).pan);
+        assert!(entry_pstate(user, 0, 2, true, false).pan);
         // BTYPE is saved in SPSR and clear in the handler.
         let branched = Pstate {
             btype: 0b10,
             ..user
         };
         assert_eq!((branched.to_spsr(0) >> 10) & 3, 0b10);
-        assert_eq!(entry_pstate(branched, 0, 1, false).btype, 0);
+        assert_eq!(entry_pstate(branched, 0, 1, false, false).btype, 0);
     }
 }

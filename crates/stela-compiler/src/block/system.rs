@@ -7,7 +7,7 @@ use crate::{
     CompileError, GuestAddress,
     aarch64::{
         system::{exception, registers, synchronization},
-        tag_memory,
+        tag_arithmetic, tag_memory,
     },
 };
 use serde::{Serialize, Serializer};
@@ -20,6 +20,10 @@ pub enum SystemOperation {
     /// The effect to apply; the runtime decides whether it is admitted.
     Synchronization(synchronization::Operation),
     TagMemory(tag_memory::Operand),
+    /// ADDG and SUBG, whose tag depends on GCR_EL1.Exclude and Allocation
+    /// Tag access, which the runtime holds. Only the system-mode profile
+    /// produces it.
+    TagOffset(tag_arithmetic::Operand),
     Register(registers::RegisterAccess),
     /// SYS/SYSL (op0=1): address translation, cache and TLB maintenance.
     /// Only the system-mode profile produces it.
@@ -127,6 +131,7 @@ fn serialize_family<S: Serializer>(
         SystemOperation::Exception(_) => "exception",
         SystemOperation::Synchronization(_) => "synchronization",
         SystemOperation::TagMemory(_) => "tag_memory",
+        SystemOperation::TagOffset(_) => "tag_offset",
         SystemOperation::Register(_) => "system_register",
         SystemOperation::Maintenance(_) => "maintenance",
         SystemOperation::Guarded(_) => "guarded",
@@ -250,6 +255,14 @@ pub fn decode_system_mode_instruction(
         SystemOperation::Exclusive(decoded)
     } else if let Some(operand) = crate::aarch64::checked_pointer::decode(word) {
         SystemOperation::CheckedPointer(operand)
+    } else if let Some(
+        operand @ tag_arithmetic::Operand {
+            kind: tag_arithmetic::Kind::Offset { .. },
+            ..
+        },
+    ) = tag_arithmetic::decode(word)
+    {
+        SystemOperation::TagOffset(operand)
     } else if let Some(decoded) = crate::aarch64::unprivileged::decode(word) {
         // Reserved sizes and opcodes stay with the ordinary decoder.
         match decoded {

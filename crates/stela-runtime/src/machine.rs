@@ -23,6 +23,7 @@ pub mod registers;
 pub mod soc;
 pub mod streaming;
 pub mod system;
+pub mod tags;
 pub mod timer;
 pub mod vgic;
 

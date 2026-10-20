@@ -123,7 +123,9 @@ impl TagGenerationState {
     }
 }
 
-fn choose_non_excluded_tag(
+/// Arm `AArch64_ChooseNonExcludedTag`: `offset` steps from `tag` over the
+/// tags `excluded_tags` leaves, or 0 when it excludes them all.
+pub fn choose_non_excluded_tag(
     mut tag: AllocationTag,
     mut offset: u8,
     excluded_tags: u16,

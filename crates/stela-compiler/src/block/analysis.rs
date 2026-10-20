@@ -138,6 +138,7 @@ pub fn analyze_with_profile(
             if matches!(
                 value.operation,
                 system::SystemOperation::TagMemory(_)
+                    | system::SystemOperation::TagOffset(_)
                     | system::SystemOperation::SendEvent { .. }
                     | system::SystemOperation::Register(_)
                     | system::SystemOperation::PstateImmediate(_)

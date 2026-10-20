@@ -2,10 +2,12 @@
 //! memory with the current EL's permissions. Arm `AArch64_IsUnprivAccessPriv`
 //! makes them unprivileged at EL1, and at EL2 when EL0 is in the host, unless
 //! PSTATE.UAO is set; an unprivileged access is checked with EL0 permissions
-//! and ignores PAN, in the current translation regime.
+//! and ignores PAN, in the current translation regime. With FEAT_MTE2 an
+//! access whose base is not SP is tag checked as one from the EL it is
+//! made at, EL0 when unprivileged.
 use super::{
     DeviceError, Devices, FETCH_PAGE, Host, Machine, RamTables, RequirementKind, Step, Stop,
-    Translated,
+    Translated, tags::TagCheck,
 };
 use crate::machine::{
     cpu::Exception,
@@ -89,6 +91,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             el: if privileged { self.cpu.pstate.el } else { 0 },
         };
         if let Some(exception) = self.watchpoint_exception(&watched, self.cpu.pc) {
+            self.take(exception);
+            return Ok(());
+        }
+        if operand.base != Register::Sp
+            && let TagCheck::Failed(exception) = self.tag_check(&watched, requester, None)?
+        {
             self.take(exception);
             return Ok(());
         }

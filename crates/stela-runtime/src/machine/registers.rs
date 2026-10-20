@@ -23,7 +23,7 @@ use super::{
     exception::Pstate,
     impdef,
     pmu::Pmu,
-    system::Register,
+    system::{Feature, Register},
 };
 use alloc::vec::Vec;
 use stela_compiler::aarch64::system::registers::{Direction, Encoding, RegisterAccess};
@@ -102,6 +102,7 @@ pub mod encodings {
         AIDR_EL1 = 3, 1, 0, 0, 7;
         CTR_EL0 = 3, 3, 0, 0, 1;
         DCZID_EL0 = 3, 3, 0, 0, 7;
+        GMID_EL1 = 3, 1, 0, 0, 4;
         FPCR = 3, 3, 4, 4, 0;
         FPSR = 3, 3, 4, 4, 1;
         TPIDR_EL1 = 3, 0, 13, 0, 4;
@@ -656,11 +657,11 @@ impl Cpu {
 
     /// MSR (immediate), following Arm's `MSR (immediate)` decode for the
     /// profile: SPSel, PAN and UAO from EL1, DAIFSet, DAIFClr, DIT and SSBS
-    /// from EL0, and with FEAT_SME SVCRSM, SVCRZA and SVCRSMZA (SMSTART and
-    /// SMSTOP) from EL0 after `CheckSMEAccess`. Every other PSTATE field
-    /// encoding is UNDEFINED, including those of features outside the
-    /// profile (NMI, MTE and the EBEP family) and the EL2, EL3 and Secure
-    /// op1 values. DAIFSet and DAIFClr
+    /// from EL0, with FEAT_MTE TCO from EL0, and with FEAT_SME SVCRSM, SVCRZA
+    /// and SVCRSMZA (SMSTART and SMSTOP) from EL0 after `CheckSMEAccess`.
+    /// Every other PSTATE field encoding is UNDEFINED, including those of
+    /// features outside the profile (NMI and the EBEP family) and the EL2,
+    /// EL3 and Secure op1 values. DAIFSet and DAIFClr
     /// at EL0 trap in the host or while SCTLR_EL1.UMA is clear, to EL2 under
     /// HCR_EL2.TGE (Arm `AArch64_CheckDAIFAccess`).
     pub fn write_pstate_field(&mut self, encoding: Encoding) -> Outcome {
@@ -670,6 +671,11 @@ impl Cpu {
         let minimum = match (encoding.op1(), encoding.op2()) {
             (0, 3..=5) => 1,
             (3, 1 | 2 | 6 | 7) => 0,
+            (3, 4) => match self.registers.chip().implemented(Feature::FEAT_MTE) {
+                Ok(true) => 0,
+                Ok(false) => return Outcome::Undefined,
+                Err(reason) => return Outcome::Refused(Refusal::UnsupportedSetting(reason)),
+            },
             // CRm<3:1> selects SM, ZA or both; 0b000 and 0b1xx are
             // unallocated.
             (3, 3) if self.scalable.is_some() && matches!(immediate >> 1, 1..=3) => 0,
@@ -726,6 +732,11 @@ impl Cpu {
             }
             (0, 3) => self.pstate.uao = bit,
             (3, 2) => self.pstate.dit = bit,
+            // PSTATE.TCO decides which accesses are tag checked.
+            (3, 4) => {
+                self.pstate.tco = bit;
+                changes.regime = true;
+            }
             _ => self.pstate.ssbs = bit,
         }
         Outcome::Written(changes)

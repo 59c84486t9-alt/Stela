@@ -33,6 +33,19 @@ pub const HCR_TGE: u32 = 27;
 pub const HCR_HCD: u32 = 29;
 pub const HCR_TEA: u32 = 37;
 pub const HCR_API: u32 = 41;
+/// HCR_EL2.ATA: EL0 and EL1 outside the host may access Allocation Tags.
+pub const HCR_ATA: u32 = 56;
+/// SCTLR_ELx.ATA0, ATA, TCF0 and TCF (FEAT_MTE2).
+const SCTLR_ATA0: u32 = 42;
+const SCTLR_ATA: u32 = 43;
+const SCTLR_TCF0: u32 = 38;
+const SCTLR_TCF: u32 = 40;
+/// TCF 0b01: Tag Check faults are synchronous.
+const TCF_SYNC: u64 = 0b01;
+const TCR_TBI0: u64 = 1 << 37;
+const TCR_TBI1: u64 = 1 << 38;
+const TCR_TCMA0: u64 = 1 << 57;
+const TCR_TCMA1: u64 = 1 << 58;
 
 /// The streaming vector length of a chip with FEAT_SME: 512 bits, the M4's.
 /// It is the only length implemented (Arm `SupportedPowerTwoSVL`), so
@@ -600,6 +613,71 @@ impl Cpu {
         })
     }
 
+    /// The chip has FEAT_MTE: exception entry sets PSTATE.TCO, and return
+    /// restores it.
+    pub fn mte(&self) -> bool {
+        Feature::FEAT_MTE.on(self.registers.chip())
+    }
+
+    /// SCTLR_ELx of `el`'s translation regime: SCTLR_EL2 at EL2 and at EL0
+    /// in the host.
+    fn sctlr_of(&self, el: u8) -> u64 {
+        self.read(if el == 2 || el == 0 && self.in_host() {
+            Register::SCTLR_EL2
+        } else {
+            Register::SCTLR_EL1
+        })
+    }
+
+    /// Arm `IsMTEEnabled(el)`: the chip implements FEAT_MTE2, HCR_EL2.ATA
+    /// is set for EL0 and EL1 outside the host, and SCTLR_ELx.ATA (ATA0 for
+    /// EL0) of `el`'s regime enables Allocation Tag access.
+    pub fn allocation_tags(&self, el: u8) -> bool {
+        if self.registers.chip().implemented(Feature::FEAT_MTE2) != Ok(true) {
+            return false;
+        }
+        if el < 2 && !self.in_host() && !self.hcr(HCR_ATA) {
+            return false;
+        }
+        let enable = if el == 0 { SCTLR_ATA0 } else { SCTLR_ATA };
+        self.sctlr_of(el) >> enable & 1 != 0
+    }
+
+    /// Whether a tag-checked data access by `el` to `address` takes a
+    /// synchronous Tag Check fault on a mismatch (Arm
+    /// `AArch64_AccessIsTagChecked` and `AArch64_EffectiveTCF`): Allocation
+    /// Tag access is enabled at `el`, PSTATE.TCO is clear, SCTLR_ELx.TCF
+    /// (TCF0 for EL0) is 0b01, and the current regime has TBI for the
+    /// address's half without a TCMA match (bits 59:55 all clear or all
+    /// set). Without FEAT_MTE_ASYNC and FEAT_MTE_ASYM_FAULT, TCF 0b10 leaves
+    /// a mismatch without effect, as the reserved 0b11 does too
+    /// (Unpredictable_RESTCF: Stela takes 0b00).
+    pub fn tag_checked(&self, el: u8, address: u64) -> bool {
+        if !self.allocation_tags(el) || self.pstate.tco {
+            return false;
+        }
+        let shift = if el == 0 { SCTLR_TCF0 } else { SCTLR_TCF };
+        if self.sctlr_of(el) >> shift & 0b11 != TCF_SYNC {
+            return false;
+        }
+        let tcr = self.regime_tcr();
+        let (tbi, tcma) = if address & (1 << 55) != 0 {
+            (TCR_TBI1, TCR_TCMA1)
+        } else {
+            (TCR_TBI0, TCR_TCMA0)
+        };
+        let top = address >> 55 & 0x1f;
+        tcr & tbi != 0 && !(tcr & tcma != 0 && (top == 0 || top == 0x1f))
+    }
+
+    /// For each half of the current regime, lower then upper, whether the
+    /// current EL's tag-checked accesses through untagged pointers (logical
+    /// tag 0 below, 0xf above) are checked: the shadow tables then keep
+    /// Tagged memory of that half out (`engine::Regime::tag_checks`).
+    pub fn tag_checks(&self) -> [bool; 2] {
+        [0, u64::MAX].map(|address| self.tag_checked(self.pstate.el, address))
+    }
+
     /// Translation controls of a regime: its stage-1 registers and, for
     /// EL1&0, the stage-2 registers that `mmu` applies under HCR_EL2.VM or DC.
     pub fn controls(&self, regime: TranslationRegime) -> Controls {
@@ -715,7 +793,7 @@ impl Cpu {
         if let Some(illegal) = self.illegal_return(spsr) {
             return Ok(Err(illegal));
         }
-        let (mut next, nzcv) = exception::restore(self.pstate, spsr, false);
+        let (mut next, nzcv) = exception::restore(self.pstate, spsr, false, self.mte());
         next.guarded = aspsr & ASPSR_GUARDED != 0;
         // GL0 is reachable from a guarded level: SPTM 26A434 resumes saved
         // contexts with their ASPSR_GL (`__text+0x44e0`), TXM's at GL0
@@ -801,7 +879,7 @@ impl Cpu {
             }
             let vbar = bank.vbar;
             let sctlr = self.read(bank_sctlr(target));
-            let entry = exception::entry_pstate(from, sctlr, target, self.in_host());
+            let entry = exception::entry_pstate(from, sctlr, target, self.in_host(), self.mte());
             self.set_pstate(Pstate {
                 guarded: true,
                 ..entry
@@ -829,7 +907,7 @@ impl Cpu {
         let sctlr = self.read(bank.sctlr);
         self.set_pstate(Pstate {
             guarded: false,
-            ..exception::entry_pstate(from, sctlr, target, self.in_host())
+            ..exception::entry_pstate(from, sctlr, target, self.in_host(), self.mte())
         });
         let vbar = self.read(bank.vbar) & !0x7ff;
         self.pc = vbar.wrapping_add(exception::vector_offset(from, target, exception.vector));
@@ -901,7 +979,7 @@ impl Cpu {
             _ => self.pstate.el,
         };
         let ss = super::debug::return_ss(self, spsr, destination);
-        let (mut next, nzcv) = exception::restore(self.pstate, spsr, illegal);
+        let (mut next, nzcv) = exception::restore(self.pstate, spsr, illegal, self.mte());
         next.ss = ss;
         next.guarded = guarded;
         self.step_advance = false;

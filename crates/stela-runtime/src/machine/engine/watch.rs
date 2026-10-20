@@ -4,9 +4,18 @@
 //! the instruction's accesses in order (Arm `AArch64_CheckWatchpoint`) and
 //! either takes the watchpoint exception or runs that one instruction with
 //! its pages mapped.
+//!
+//! Tag checks (FEAT_MTE2) take the same path: while the current EL checks
+//! the tags of untagged pointers in a half of the address space
+//! ([`super::Regime::tag_checks`]), the shadow keeps that half's Tagged
+//! memory out, an access to it exits with [`super::FaultCause::TagChecked`],
+//! and each access's Tag Check follows its watchpoint check. Tagged
+//! pointers reach [`Machine::native_check_fault`], which checks their tags
+//! before the untagged retry.
 use super::{
-    Devices, Host, Machine, RequirementKind, Step,
+    Devices, Host, Machine, RequirementKind, Step, Stop,
     debug::{self, Access},
+    tags::{TagCheck, tag_checked_form},
 };
 use crate::machine::{
     cpu::Exception,
@@ -355,7 +364,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     // untagged addresses only. A tagged base runs again
                     // with its tag cleared.
                     mmu::Outcome::Mapped(_) => {
-                        if let Some(step) = self.retry_untagged(pc, word, access.address) {
+                        // The retry's accesses are untagged: their
+                        // watchpoints and tags are checked here first.
+                        if in_guest_range(without_tag(access.address))
+                            && let Some(exception) = self.access_exception(pc, word, sctlr)?
+                        {
+                            self.take(exception);
+                            return Ok(());
+                        }
+                        self.tags_checked_at = Some(pc);
+                        let step = self.retry_untagged(pc, word, access.address);
+                        self.tags_checked_at = None;
+                        if let Some(step) = step {
                             return step;
                         }
                         let mut requirement = self.requirement(RequirementKind::Native(
@@ -428,14 +448,52 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .into_iter()
             .map(|(access, _)| access)
             .collect();
-        if let Some(exception) = accesses
-            .iter()
-            .find_map(|access| self.watchpoint_exception(access, pc))
-        {
+        if let Some(exception) = self.access_exception(pc, word, self.cpu.regime_sctlr())? {
             self.take(exception);
             return Ok(());
         }
         self.pass_watched(pc, &accesses)
+    }
+
+    /// The first exception the data accesses of `word` at `pc` take after
+    /// translation, in Arm's order: each access's watchpoint, then its Tag
+    /// Check for a tag-checked form ([`tag_checked_form`]), unless the
+    /// tagged retry of this instruction checked its tags already. Checking
+    /// stops at an access that faults before or in translation, which the
+    /// instruction then takes when it runs.
+    fn access_exception(
+        &mut self,
+        pc: u64,
+        word: u32,
+        sctlr: u64,
+    ) -> Result<Option<Exception>, Stop> {
+        let accesses = self
+            .data_accesses(pc, word)
+            .map_err(|detail| self.refuse_word(word, detail))?;
+        let checked = self.tags_checked_at != Some(pc)
+            && Decoder
+                .lift(GuestAddress(pc), word)
+                .is_ok_and(|instruction| tag_checked_form(&instruction.operation));
+        for (access, shape) in accesses {
+            if alignment::before_translation(sctlr, access.address, shape) {
+                break;
+            }
+            if let Some(exception) = self.watchpoint_exception(&access, pc) {
+                return Ok(Some(exception));
+            }
+            if !checked {
+                continue;
+            }
+            // LDTR and STTR from EL1 check as EL0 (`data_accesses`).
+            let mut requester = self.cpu.requester();
+            requester.unprivileged = access.el != self.cpu.pstate.el;
+            match self.tag_check(&access, requester, None)? {
+                TagCheck::Passed => {}
+                TagCheck::Untranslated => break,
+                TagCheck::Failed(exception) => return Ok(Some(exception)),
+            }
+        }
+        Ok(None)
     }
 
     /// The watchpoint exception `access` by the instruction at `pc` takes,
@@ -453,14 +511,16 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Some(exception)
     }
 
-    /// Run the instruction at `pc` once with the watched pages it touches
-    /// mapped, then unmap them again.
+    /// Run the instruction at `pc` once with the watched pages it touches,
+    /// and those of halves whose tags are checked, mapped, then unmap them
+    /// again.
     fn pass_watched(&mut self, pc: u64, accesses: &[Access]) -> Step {
         let mut pages: Vec<u64> = Vec::new();
         for access in accesses {
             let last = access.address.wrapping_add(access.size.max(1) - 1);
             for page in [access.address & !(PAGE - 1), last & !(PAGE - 1)] {
-                if self.watch.blocks(page) && !pages.contains(&page) {
+                let tag_checked = self.tag_checks[usize::from(page >> 55 & 1 != 0)];
+                if (self.watch.blocks(page) || tag_checked) && !pages.contains(&page) {
                     pages.push(page);
                 }
             }

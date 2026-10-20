@@ -8,6 +8,7 @@ mod pointer;
 mod processors;
 mod scalable;
 mod system;
+mod tags;
 mod unprivileged;
 mod watch;
 
@@ -114,6 +115,29 @@ pub struct Regime {
     pub requester: mmu::Requester,
     /// Pages the shadow tables must leave unmapped for watchpoints.
     pub watch: Watch,
+    /// For the lower and upper half, whether the current EL's tag-checked
+    /// accesses through untagged pointers are checked (`Cpu::tag_checks`):
+    /// the shadow tables then leave that half's Tagged memory
+    /// (`mmu::attributes::TAGGED`) unmapped, apart from the `watch.pass`
+    /// pages, so that every access to it exits with
+    /// [`FaultCause::TagChecked`]. A tagged pointer always fails the native
+    /// range check.
+    pub tag_checks: [bool; 2],
+}
+
+impl Regime {
+    /// Whether the 4 KiB page at `page`, whose translation has the memory
+    /// `attributes`, must stay unmapped for tag checks.
+    pub fn tag_blocks(&self, page: u64, attributes: u8) -> bool {
+        self.tag_checks[usize::from(page >> 55 & 1 != 0)]
+            && attributes == mmu::attributes::TAGGED
+            && !self.watch.pass.contains(&Some(page & !(FETCH_PAGE - 1)))
+    }
+
+    /// Whether the regime keeps any Tagged memory out of the shadow.
+    pub fn tag_checked(&self) -> bool {
+        self.tag_checks.contains(&true)
+    }
 }
 
 /// The virtual address ranges enabled watchpoints can match: a page that
@@ -222,6 +246,9 @@ pub enum FaultCause {
     InvalidOpcode,
     /// The access reached a page [`Watch`] keeps unmapped.
     Watched,
+    /// The access reached Tagged memory of a half whose accesses are
+    /// tag checked ([`Regime::tag_checks`]).
+    TagChecked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -989,6 +1016,13 @@ pub struct Machine<H: Host, D: Devices> {
     /// scalable profile ([`scalable`]); discarded with the blocks.
     scalable_leaves:
         BTreeMap<(u64, u32, stela_compiler::extended::ScalableProfile), scalable::Leaf>,
+    /// The Allocation Tags of guest memory (FEAT_MTE2).
+    tags: crate::machine::tags::Store,
+    /// The current [`Regime::tag_checks`].
+    tag_checks: [bool; 2],
+    /// The PC of an instruction whose Tag Checks are done while it runs
+    /// again untagged (`watch::retry_untagged`).
+    tags_checked_at: Option<u64>,
 }
 
 /// Breakpoints that can match and an enabled software step make every
@@ -1071,6 +1105,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             suspended: BTreeMap::new(),
             survey: None,
             scalable_leaves: BTreeMap::new(),
+            tags: crate::machine::tags::Store::default(),
+            tag_checks: [false; 2],
+            tags_checked_at: None,
         };
         machine.chain.table = machine.targets.as_ptr() as u64;
         machine.peers = processors::boot(&machine.profile);
@@ -1179,10 +1216,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.host.invalidate_translations();
         }
         self.watch = watch;
+        self.tag_checks = self.cpu.tag_checks();
         let regime = Regime {
             controls: self.cpu.controls(self.cpu.regime()),
             requester: self.cpu.requester(),
             watch,
+            tag_checks: self.tag_checks,
         };
         self.host.set_regime(&regime);
         let context = PredictionContext::of(&self.cpu);
@@ -3496,6 +3535,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     self.take(exception);
                     return Ok(());
                 }
+                // Tag checked with writeback or a base other than SP
+                // (FEAT_MTE2), after the watchpoint.
+                if let Some(access) = access
+                    && (load.writeback || load.base != 31)
+                    && let tags::TagCheck::Failed(exception) =
+                        self.tag_check(&access, requester, None)?
+                {
+                    self.cpu.state = before;
+                    self.take(exception);
+                    return Ok(());
+                }
                 self.cpu.pc = pc;
                 self.next()
             }
@@ -3599,7 +3649,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             // SCTLR_ELx.A, or an atomic, or an ordered access with nAA
             // clear, crossing its 16-byte granule; and for an address outside
             // the guest's two ranges.
-            FaultCause::Watched => self.watched_access(index, pc),
+            FaultCause::Watched | FaultCause::TagChecked => self.watched_access(index, pc),
             FaultCause::InvalidOpcode => {
                 let word = self.word(index, pc)?;
                 if self.blocks[index].checks.stack_alignment
@@ -4020,8 +4070,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 kind,
                 timeout_register,
             } => self.wait(word, kind, timeout_register),
+            SystemOperation::TagMemory(operand) => self.tag_memory(word, operand),
+            SystemOperation::TagOffset(operand) => self.tag_offset(word, operand),
             // No halting debug: Debug-state-only instructions are UNDEFINED.
-            SystemOperation::TagMemory(_) | SystemOperation::DebugStateOnly(_) => self.undefined(),
+            SystemOperation::DebugStateOnly(_) => self.undefined(),
             SystemOperation::Unprivileged(operand) => self.unprivileged(operand),
             SystemOperation::Exclusive(Ok(operand)) => self.exclusive(operand),
             SystemOperation::Exclusive(Err(_)) => self.undefined(),
@@ -4684,7 +4736,7 @@ mod tests {
         pub(super) ram: Vec<u8>,
         base: u64,
         pub(super) now: u64,
-        regimes: Vec<Regime>,
+        pub(super) regimes: Vec<Regime>,
         invalidations: usize,
         /// Calls of [`Host::isolate_predictions`].
         pub(super) isolations: usize,

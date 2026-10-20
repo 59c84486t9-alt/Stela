@@ -6,17 +6,17 @@
 //! features the engine implements; leaves are cached by PC, word and profile
 //! and discarded with the blocks. A leaf's memory accesses come back to the
 //! engine one element at a time through the context's memory service
-//! ([`serve`]), which translates and checks each as a plain data access and
-//! raises its exception after the leaf returns. A word that Arm's decode
+//! ([`serve`]), which translates and checks each as a plain data access,
+//! with its watchpoints and, for a tag-checked form, its Tag Check
+//! (`engine::tags`), and raises its exception after the leaf returns. A word that Arm's decode
 //! makes UNDEFINED on the chip takes that, before its access checks
 //! ([`Machine::scalable_undefined`]). What a leaf cannot run stops
-//! explicitly: tag-checked accesses with tag checks enabled, and PSTATE.DIT
-//! set, whose timing the leaves do not keep. Numerical floating point, which
+//! explicitly: PSTATE.DIT set, whose timing the leaves do not keep. Numerical floating point, which
 //! needs Arm's FP semantics, is completed in software
 //! ([`Machine::scalable_numerical`]).
 use super::{
     DeviceError, Devices, FETCH_PAGE, Fetched, Host, InstallError, Machine, NativeCode, RamTables,
-    RequirementKind, Step, Stop, Translated, Variant,
+    RequirementKind, Step, Stop, Translated, Variant, tags::TagCheck,
 };
 use crate::machine::{
     Chip,
@@ -59,9 +59,6 @@ use stela_compiler::{
 const NUMERICAL_FEATURES: NumericalFeatures = NumericalFeatures::new(false, false, false);
 /// RET X30, which ends a context leaf.
 const RET_X30: u32 = 0xd65f_03c0;
-/// SCTLR_ELx.TCF and TCF0: tag check faults at EL1 or EL2, and at EL0.
-const SCTLR_TCF: u32 = 40;
-const SCTLR_TCF0: u32 = 38;
 
 /// The chip features the compiler's scalable profiles name.
 const FEATURES: [(Feature, ScalableFeature); 17] = [
@@ -528,12 +525,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return Err(stop(self, "a malformed SVE or SME memory request"));
         }
         let write = request.flags & flags::WRITE != 0;
-        if request.flags & flags::TAG_CHECKED != 0 && self.tag_checks_enabled() {
-            return Err(stop(
-                self,
-                "tag-checked SVE and SME accesses are not run by the system engine",
-            ));
-        }
         let address = request.address;
         let shape = alignment::Shape {
             kind: alignment::Kind::Plain,
@@ -603,6 +594,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(exception) = self.watchpoint_exception(&watched, self.cpu.pc) {
             return Err(Failure::Exception(MemoryStatus::Permission, exception));
         }
+        if request.flags & flags::TAG_CHECKED != 0 {
+            match self.tag_check(&watched, requester, None) {
+                Ok(TagCheck::Failed(exception)) => {
+                    return Err(Failure::Exception(MemoryStatus::TagCheck, exception));
+                }
+                Ok(TagCheck::Passed | TagCheck::Untranslated) => {}
+                Err(stop) => return Err(Failure::Stop(MemoryStatus::Unsupported, stop)),
+            }
+        }
         // SAFETY: the leaf's request names `bytes` of private staging.
         let data = unsafe { core::slice::from_raw_parts_mut(request.data, bytes) };
         let ram = pieces.iter().all(|&(physical, length, _)| {
@@ -666,21 +666,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
         });
         requirement.address = Some(address);
         Stop::Unsupported(requirement)
-    }
-
-    /// Whether a tag-checked access would be checked (FEAT_MTE2 with
-    /// SCTLR_ELx.TCF, or TCF0 at EL0, of the regime not 0), which the engine
-    /// does not implement.
-    fn tag_checks_enabled(&self) -> bool {
-        if !Feature::FEAT_MTE2.on(self.profile.chip) {
-            return false;
-        }
-        let shift = if self.cpu.pstate.el == 0 {
-            SCTLR_TCF0
-        } else {
-            SCTLR_TCF
-        };
-        (self.cpu.regime_sctlr() >> shift) & 0b11 != 0
     }
 
     /// What `word` at `pc` runs as under `profile`, compiling its leaf.
@@ -1228,6 +1213,59 @@ mod tests {
         assert_eq!(ram(&machine, source, STREAMING_VECTOR_BYTES), counted);
         assert_eq!(z(&machine, 2), counted);
         assert_eq!(ram(&machine, destination, STREAMING_VECTOR_BYTES), counted);
+    }
+
+    /// On the M5 and M6, with tag checks on, each element of a tag-checked
+    /// SVE access is checked against its granule's Allocation Tag.
+    #[test]
+    fn tag_checked_scalable_accesses_take_tag_check_faults_by_element() {
+        const LD1B_Z2_X5: u32 = 0xa400_a0a2; // ld1b {z2.b}, p0/z, [x5]
+        const TAGGED: u64 = 0xf0;
+        const HCR_ATA: u64 = 1 << 56;
+        const SCTLR_ATA_TCF_SYNC: u64 = 1 << 43 | 1 << 40;
+        const TCR_TBI0: u64 = 1 << 37;
+        for chip in [crate::machine::Chip::AppleM5, crate::machine::Chip::AppleM6] {
+            let mut machine = super::super::tests::machine_on(chip, &[PTRUE_P0_B, LD1B_Z2_X5]);
+            enable_streaming(&mut machine);
+            normal_memory(&mut machine, false);
+            machine.cpu.registers.set(Register::MAIR_EL1, 0, TAGGED);
+            for (register, set) in [
+                (Register::HCR_EL2, HCR_ATA),
+                (Register::SCTLR_EL1, SCTLR_ATA_TCF_SYNC),
+                (Register::TCR_EL1, TCR_TBI0),
+            ] {
+                let value = machine.cpu.read(register) | set;
+                machine.cpu.registers.set(register, 0, value);
+            }
+            machine.translations_changed();
+            let data = BASE + 0x8000;
+            for offset in (0..STREAMING_VECTOR_BYTES as u64).step_by(16) {
+                machine
+                    .tags
+                    .set(data + offset, if offset == 16 { 0xb } else { 0xa });
+            }
+            machine.step().unwrap();
+            // The second granule's first element mismatches.
+            let pointer = 0xa << 56 | data;
+            machine.cpu.state.x[5] = pointer;
+            machine.cpu.pc = BASE + 4;
+            assert_eq!(machine.step(), Ok(()));
+            assert_eq!(
+                (
+                    machine.cpu.read(Register::ESR_EL1),
+                    machine.cpu.read(Register::FAR_EL1),
+                    machine.cpu.read(Register::ELR_EL1),
+                ),
+                (0x25 << 26 | 1 << 25 | 0b01_0001, pointer + 16, BASE + 4)
+            );
+            // With every tag matching the load completes.
+            machine.tags.set(data + 16, 0xa);
+            machine.cpu.set_pstate(Pstate::reset(1));
+            machine.cpu.set_svcr(true, true).unwrap();
+            machine.cpu.pc = BASE + 4;
+            assert_eq!(machine.step(), Ok(()));
+            assert_eq!(machine.cpu.pc, BASE + 8);
+        }
     }
 
     #[test]

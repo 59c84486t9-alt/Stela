@@ -7,7 +7,7 @@
 //! fault prioritization).
 
 pub mod alignment;
-mod attributes;
+pub mod attributes;
 mod geometry;
 pub mod shadow;
 mod sprr;
@@ -270,6 +270,10 @@ pub enum FaultKind {
     /// An access the alignment rules forbid (`mmu::alignment`); it has no
     /// level.
     Alignment,
+    /// A synchronous Tag Check fault (FEAT_MTE2): the logical tag of a
+    /// tag-checked access differs from the Allocation Tag of its memory
+    /// (`engine::tags`). It has no level.
+    TagCheck,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -342,7 +346,7 @@ impl Fault {
         let reported = match self.kind {
             FaultKind::Translation | FaultKind::AccessFlag | FaultKind::AddressSize => true,
             FaultKind::Permission => second_stage.walk,
-            FaultKind::ExternalOnWalk | FaultKind::Alignment => false,
+            FaultKind::ExternalOnWalk | FaultKind::Alignment | FaultKind::TagCheck => false,
         };
         reported.then_some(second_stage.ipa >> 12 << HPFAR_FIPA_SHIFT)
     }
@@ -357,6 +361,7 @@ impl Fault {
             FaultKind::Permission => 0b00_1100 | level,
             FaultKind::ExternalOnWalk => 0b01_0100 | level,
             FaultKind::Alignment => 0b10_0001,
+            FaultKind::TagCheck => 0b01_0001,
         }
     }
 }

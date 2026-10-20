@@ -146,6 +146,11 @@ const FPMR: &str = "FPMR holds its fields with the scalable state, which clears 
      PSTATE.SM changes, behind SCTLR_ELx.EnFPM and HCRX_EL2.EnFPM";
 const FP8: &str = "the engine completes F1CVTL, F2CVTL, BF1CVTL, BF2CVTL and FCVTN (FP8) \
      with FPMR's formats and scales, and FSCALE compiles; the SVE and SME FP8 forms stop";
+const MTE: &str = "IRG, ADDG and SUBG run in the engine under GCR_EL1 and RGSR_EL1, GMI and \
+     SUBP(S) compile, and PSTATE.TCO has its MSR and MRS forms and is set by exception entry";
+const MTE2: &str = "the engine keeps an Allocation Tag for each 16-byte granule of Tagged \
+     memory, runs the tag loads and stores and DC GVA and GZVA, and checks the tags of \
+     tag-checked accesses, synchronously";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -174,6 +179,8 @@ pub const REGISTERS: &[Encoding] = &[
     ID_AA64MMFR4_EL1,
     CTR_EL0,
     AIDR_EL1,
+    // GMID_EL1.BS: LDGM and STGM move the tags of 64 bytes (FEAT_MTE2).
+    GMID_EL1,
     // Without a board identity's caches (`machine::caches`) none are
     // visible: memory is coherent and CTR_EL0.IDC holds, so CLIDR_EL1
     // reports no cache level and LoC, LoUU and LoUIS 0, and CCSIDR_EL1
@@ -376,6 +383,11 @@ pub const TABLE: &[Row] = &[
         "FEAT_SSBS2",
         engine(true, "MRS and MSR of SSBS"),
     ),
+    // ID_AA64PFR1_EL1.MTE and MTE_frac: synchronous Tag Check faults only
+    // (MTE_frac 0b1111, no FEAT_MTE_ASYNC).
+    feature(ID_AA64PFR1_EL1, 8, 1, "FEAT_MTE", engine(true, MTE)),
+    feature(ID_AA64PFR1_EL1, 8, 2, "FEAT_MTE2", engine(true, MTE2)),
+    feature(ID_AA64PFR1_EL1, 40, 0b1111, "FEAT_MTE2", engine(true, MTE2)),
     feature(ID_AA64PFR1_EL1, 24, 1, "FEAT_SME", engine(true, SME_RUNS)),
     feature(ID_AA64PFR1_EL1, 24, 2, "FEAT_SME2", engine(true, SME_RUNS)),
     // ID_AA64SMFR0_EL1: F32F32, BI32I32, B16F32, F16F32, I8I32, F8F32,
@@ -1110,6 +1122,9 @@ pub const TABLE: &[Row] = &[
         "IDC: no data clean for instruction coherence",
     ),
     fixed(CTR_EL0, 31, 1, "RES1"),
+    // CTR_EL0.TminLine: the tag cache line is 64 bytes, as the data's.
+    feature(CTR_EL0, 32, 4, "FEAT_MTE2", engine(true, MTE2)),
+    feature(GMID_EL1, 0, 4, "FEAT_MTE2", engine(true, MTE2)),
     // ID_AA64MMFR4_EL1.E2H0 = 0b1110: HCR_EL2.E2H is RES1 (no FEAT_E2H0) and
     // HCR_EL2.NV1 is RES0 (RAZ where FEAT_NV is, an IMPLEMENTATION DEFINED
     // choice). The M2 itself predates the field.
@@ -1528,7 +1543,9 @@ mod tests {
         assert_eq!(value(ID_AA64DFR0_EL1), 0xf0_1030_5009);
         assert_eq!(value(ID_AA64DFR1_EL1), 0);
         assert_eq!(value(ID_AA64DFR2_EL1), 0);
-        assert_eq!(value(CTR_EL0), 0x9444_c004);
+        // With FEAT_MTE2, TminLine 4.
+        let tag_line = if has(chip, "FEAT_MTE2") { 4 << 32 } else { 0 };
+        assert_eq!(value(CTR_EL0), 0x9444_c004 | tag_line);
         assert_eq!(value(AIDR_EL1), 1 << 4 | 1 << 16);
         assert_eq!(value(ID_AA64MMFR1_EL1) >> 8 & 0xf, 0);
         // No stage 2 without EL2; HPDS; CnP, TTL and E0PD.
@@ -1628,6 +1645,14 @@ mod tests {
             // Spec_FPACC, present with the M6's FEAT_FPACCOMBINE, reads 0:
             // not disclosed.
             assert_eq!(field(chip, ID_AA64MMFR3_EL1, 60), 0);
+            // The M5's and M6's FEAT_MTE2 with synchronous Tag Checks only
+            // (PFR1.MTE 2, MTE_frac 0b1111), the 64-byte tag line of
+            // CTR_EL0.TminLine and GMID_EL1.BS.
+            let mte = matches!(chip, Chip::AppleM5 | Chip::AppleM6);
+            assert_eq!(field(chip, ID_AA64PFR1_EL1, 8), 2 * u64::from(mte));
+            assert_eq!(field(chip, ID_AA64PFR1_EL1, 40), 0xf * u64::from(mte));
+            assert_eq!(field(chip, CTR_EL0, 32), 4 * u64::from(mte));
+            assert_eq!(field(chip, GMID_EL1, 0), 4 * u64::from(mte));
         }
         // Apple clang drops SSBS from the M4 on (PFR1.SSBS).
         assert_ne!(field(Chip::AppleM3, ID_AA64PFR1_EL1, 4), 0);
