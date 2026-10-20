@@ -118,10 +118,14 @@ const VIEWS: usize = 4;
 const ROOTS: usize = 2 * VIEWS;
 /// Frames reserved for roots and other permanent tables.
 const PERMANENT_FRAMES: u64 = 64;
-const GUEST_LOW: usize = 0;
-const GUEST_HIGH: usize = 511;
-/// The addresses of each half's root entry.
-const HALVES: [(u64, u64); 2] = [(0, (1 << 48) - 1), (0xffff_0000_0000_0000, u64::MAX)];
+/// A root's entries.
+const ROOT_ENTRIES: usize = 512;
+/// log2 of the bytes a four-level root entry maps: 512 GiB.
+const PML4_ENTRY_BITS: u32 = 39;
+/// The last address of the lower half under LA57 (48 bits) and four-level
+/// paging (47 bits).
+const FIVE_LEVEL_LOWER_END: u64 = (1 << 48) - 1;
+const FOUR_LEVEL_LOWER_END: u64 = (1 << 47) - 1;
 /// The aligned bytes of a guest leaf one fault maps.
 const FILL_WINDOW: u64 = 64 * 1024;
 /// Pages a scoped invalidation flushes one by one; more reload CR3.
@@ -407,10 +411,36 @@ impl State {
     fn clear(&mut self, half: usize) {
         self.pool.reset_half(half);
         self.extents[half].clear();
-        let entry = if half == LOWER { GUEST_LOW } else { GUEST_HIGH };
+        let (first, last) = self.half_entries(half);
         for root in self.roots {
-            // SAFETY: permanent root frames through the physmap.
-            unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
+            for entry in first..=last {
+                // SAFETY: permanent root frames through the physmap.
+                unsafe { (layout::physical(root) as *mut u64).add(entry).write(0) };
+            }
+        }
+    }
+
+    /// The first and last root entries of `half` of the guest's native
+    /// ranges: under LA57 PML5 entry 0 or 511; on a four-level host the
+    /// PML4 entries of the lower half, or those from `U` up.
+    fn half_entries(&self, half: usize) -> (usize, usize) {
+        match (self.placement, half) {
+            (Placement::FiveLevel, LOWER) => (0, 0),
+            (Placement::FiveLevel, _) => (ROOT_ENTRIES - 1, ROOT_ENTRIES - 1),
+            (Placement::FourLevel { .. }, LOWER) => (0, ROOT_ENTRIES / 2 - 1),
+            (Placement::FourLevel { .. }, _) => (
+                ((self.placement.native_upper() >> PML4_ENTRY_BITS) as usize) % ROOT_ENTRIES,
+                ROOT_ENTRIES - 1,
+            ),
+        }
+    }
+
+    /// The first and last address of `half` of the native ranges.
+    fn half_range(&self, half: usize) -> (u64, u64) {
+        match (self.placement, half) {
+            (Placement::FiveLevel, LOWER) => (0, FIVE_LEVEL_LOWER_END),
+            (Placement::FourLevel { .. }, LOWER) => (0, FOUR_LEVEL_LOWER_END),
+            _ => (self.placement.native_upper(), u64::MAX),
         }
     }
 
@@ -812,7 +842,7 @@ impl Host for BareHost {
         let mut unmapped = Vec::new();
         let mut whole = false;
         for half in [LOWER, UPPER] {
-            match state.extents[half].ranges(reach, HALVES[half]) {
+            match state.extents[half].ranges(reach, state.half_range(half)) {
                 None => {
                     state.clear(half);
                     whole = true;
