@@ -67,9 +67,25 @@ pub(crate) struct Run {
     #[arg(long, help_heading = ADVANCED)]
     strict: bool,
     /// The Mac to model, by product type (such as Mac14,3 or Mac15,10);
-    /// else STELA_MODEL, else the default board.
+    /// else STELA_MODEL, else the `stela apps --model` preference, else the
+    /// default board.
     #[arg(long, help_heading = ADVANCED)]
     model: Option<String>,
+}
+
+/// The board a hosted run models: `explicit` (`--model`), else
+/// `STELA_MODEL`, else Stela's preference (`stela apps --model`), which
+/// launchers and `stelad`'s translations follow too, else the default.
+pub(crate) fn model(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| {
+            std::env::var("STELA_MODEL")
+                .ok()
+                .filter(|model| !model.is_empty())
+        })
+        .or_else(crate::apps::preferred_model)
+        .unwrap_or_else(|| hosted::hardware::DEFAULT_MODEL.to_owned())
 }
 
 /// The CPU subtype of a thin Mach-O slice, capability bits included.
@@ -240,16 +256,9 @@ impl Run {
         })
     }
 
-    /// The board to model: `--model`, else `STELA_MODEL`, else the default.
+    /// The board to model ([`model`]).
     fn model(&self) -> String {
-        self.model
-            .clone()
-            .or_else(|| {
-                std::env::var("STELA_MODEL")
-                    .ok()
-                    .filter(|model| !model.is_empty())
-            })
-            .unwrap_or_else(|| hosted::hardware::DEFAULT_MODEL.to_owned())
+        model(self.model.as_deref())
     }
 
     /// The host command that activates another guest image here, with the

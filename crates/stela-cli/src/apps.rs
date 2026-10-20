@@ -33,6 +33,11 @@ const UNSUPPORTED_LOG: &str = "unsupported.log";
 /// The record below the Stela support directory.
 const RECORD: &str = "apps.json";
 const RECORD_SCHEMA: u32 = 1;
+/// Stela's preferences below its support directory: the Mac every hosted
+/// run models unless told otherwise.
+const PREFERENCES: &str = "preferences.json";
+/// What `--model` takes to return to the default board.
+const DEFAULT_MODEL_WORD: &str = "default";
 /// The launcher program built with `stela`, found beside it.
 const LAUNCHER_PROGRAM: &str = "stela-launcher";
 /// How deep below a scanned folder apps are looked for: the folder itself
@@ -54,6 +59,11 @@ pub(crate) struct Apps {
     /// until `stela apps` runs again.
     #[arg(long, conflicts_with_all = ["add", "remove"])]
     uninstall: bool,
+    /// Model this Mac (a product type, such as Mac15,10) in every hosted
+    /// run without --model or STELA_MODEL: the launchers, stelad's
+    /// translations and the terminal; `default` models the default board.
+    #[arg(long, value_name = "PRODUCT", conflicts_with_all = ["add", "remove", "list", "uninstall"])]
+    model: Option<String>,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,
@@ -85,6 +95,8 @@ pub(crate) struct Environment {
     logs: PathBuf,
     /// The unsupported-operations log processes append to, in `logs`.
     unsupported: PathBuf,
+    /// Stela's preferences, beside the record.
+    preferences: PathBuf,
     /// `stelad`'s state, beside the record.
     state: PathBuf,
     /// The translation store's spool, when the store is on.
@@ -114,6 +126,7 @@ impl Environment {
             agents: home.join(agent::AGENTS),
             logs: home.join(LOGS),
             unsupported: home.join(LOGS).join(UNSUPPORTED_LOG),
+            preferences: support.join(PREFERENCES),
             state: support.join(stelad::STATE),
             spool: Config::from_environment().map(|config| service::spool_directory(&config)),
             launcher_program: stela.with_file_name(LAUNCHER_PROGRAM),
@@ -135,6 +148,63 @@ impl Environment {
             launchd_home().is_some_and(|own| same_file(&own, &home)),
         )
     }
+}
+
+/// Stela's preferences (`preferences.json`).
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct Preferences {
+    /// The Mac hosted runs model, by product type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+}
+
+impl Preferences {
+    fn read(path: &Path) -> Self {
+        std::fs::read(path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
+/// The Mac the user chose for hosted runs (`stela apps --model`), if any.
+pub(crate) fn preferred_model() -> Option<String> {
+    let path = guest_system::support_directory().ok()?.join(PREFERENCES);
+    Preferences::read(&path).model
+}
+
+/// Set the Mac hosted runs model to `model` (`default` for the default
+/// board), which must be one Stela models.
+fn set_model(environment: &Environment, model: &str, dry_run: bool) -> Result<()> {
+    let chosen = (model != DEFAULT_MODEL_WORD).then(|| model.to_owned());
+    if let Some(model) = &chosen {
+        ensure!(
+            stela_runtime::hosted::hardware::models().any(|known| known == model),
+            "Stela models no Mac {model:?}; the models are {}",
+            stela_runtime::hosted::hardware::models()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    let shown = chosen
+        .as_deref()
+        .unwrap_or(stela_runtime::hosted::hardware::DEFAULT_MODEL);
+    println!(
+        "{} {shown} in hosted runs without --model or STELA_MODEL",
+        if dry_run { "Would model" } else { "Modeling" }
+    );
+    if dry_run {
+        return Ok(());
+    }
+    let mut preferences = Preferences::read(&environment.preferences);
+    preferences.model = chosen;
+    std::fs::create_dir_all(
+        environment
+            .preferences
+            .parent()
+            .context("no support folder")?,
+    )?;
+    stela_runtime::write_json(&environment.preferences, &preferences)
 }
 
 /// The calling user's home directory in the user database.
@@ -647,6 +717,9 @@ impl Apps {
         if self.uninstall {
             return uninstall(&environment, &mut record, self.dry_run);
         }
+        if let Some(model) = &self.model {
+            return set_model(&environment, model, self.dry_run);
+        }
         let changes = sync(
             &environment,
             &mut record,
@@ -706,6 +779,7 @@ pub(crate) mod tests {
             agents: work.join("home/Library/LaunchAgents"),
             logs: work.join("home/Library/Logs/Stela"),
             unsupported: work.join("home/Library/Logs/Stela/unsupported.log"),
+            preferences: work.join("home/Library/Application Support/Stela/preferences.json"),
             state: work.join("home/Library/Application Support/Stela/stelad.json"),
             spool: Some(work.join("home/Library/Caches/stela/translations/v1/spool")),
             stela: PathBuf::from("/usr/local/bin/stela"),
@@ -884,6 +958,29 @@ pub(crate) mod tests {
             },
             "the record stays while stelad is installed"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn the_modeled_mac_is_one_preference_and_only_a_known_one() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let environment = environment(work.path());
+        let model = stela_runtime::hosted::hardware::models()
+            .find(|model| *model != stela_runtime::hosted::hardware::DEFAULT_MODEL)
+            .expect("another board");
+        set_model(&environment, model, true)?;
+        assert!(
+            !environment.preferences.exists(),
+            "a dry run changes nothing"
+        );
+        set_model(&environment, model, false)?;
+        assert_eq!(
+            Preferences::read(&environment.preferences).model.as_deref(),
+            Some(model)
+        );
+        assert!(set_model(&environment, "Mac0,0", false).is_err());
+        set_model(&environment, DEFAULT_MODEL_WORD, false)?;
+        assert_eq!(Preferences::read(&environment.preferences).model, None);
         Ok(())
     }
 

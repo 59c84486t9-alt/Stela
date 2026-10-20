@@ -1,9 +1,9 @@
 //! `stelad`'s per-user LaunchAgent (`docs/design/hosted-cli.md#stelad`):
 //! launchd runs `stela stelad` at login and whenever a scanned applications
-//! folder, the translation spool, the unsupported-operations log or the
-//! `stela` executable changes; it never keeps it alive. It lives in the
-//! user's own `~/Library/LaunchAgents` and is bootstrapped into the user's
-//! GUI domain only. The opt-in launcher agent earlier versions installed
+//! folder, the translation spool, the unsupported-operations log, Stela's
+//! preferences (the modeled Mac) or the `stela` executable changes; it
+//! never keeps it alive. It lives in the user's own `~/Library/LaunchAgents`
+//! and is bootstrapped into the user's GUI domain only. The opt-in launcher agent earlier versions installed
 //! (`stela apps --watch`) is replaced by it.
 use super::Environment;
 use anyhow::{Context, Result, ensure};
@@ -38,6 +38,7 @@ fn watched(environment: &Environment) -> Vec<PathBuf> {
     let mut paths = environment.scan.clone();
     paths.extend(environment.spool.clone());
     paths.push(environment.unsupported.clone());
+    paths.push(environment.preferences.clone());
     paths.push(environment.stela.clone());
     paths
 }

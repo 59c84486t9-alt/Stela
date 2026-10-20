@@ -99,7 +99,9 @@ fn pass(environment: &Environment) -> Result<bool> {
             .iter()
             .flat_map(|entry| code_files(&entry.target))
             .collect();
-        let report = service::serve(config, &images, crate::run::CHIP)?;
+        // The Mac the launchers' runs model, so the translations match them.
+        let model = crate::run::model(None);
+        let report = service::serve(config, &images, &model)?;
         if report != service::Report::default() {
             println!(
                 "stelad: {} spooled translations, {} image files translated ({} unchanged), \
