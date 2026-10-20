@@ -51,8 +51,6 @@ const CTLTYPE_OPAQUE: u32 = 5;
 const CTLFLAG_RD: u32 = 0x8000_0000;
 const CTLFLAG_KERN: u32 = 0x0100_0000;
 const CTLFLAG_LOCKED: u32 = 0x0080_0000;
-/// `CPUSUBFAMILY_ARM_HG`.
-const CPUSUBFAMILY_ARM_HG: i32 = 2;
 const LITTLE_ENDIAN: i32 = 1234;
 /// `num_watchpoint_pairs` and `num_breakpoint_pairs` of Apple cores.
 pub(crate) const WATCHPOINT_PAIRS: i32 = 4;
@@ -185,9 +183,15 @@ pub(crate) struct Model {
 }
 
 /// One performance level's cores and caches (`ml_cpu_get_info_type`).
+/// One performance level: every core of one type (`cpu_type_for_perflevel`).
 struct Level {
     name: &'static str,
+    /// The type's cores in all its clusters (`ml_get_cpu_number_type`).
     cores: i32,
+    /// The cores sharing one L2: the type's first cluster's
+    /// (`ml_cpu_cache_sharing(2, type)`).
+    cores_per_l2: i32,
+    /// The type's caches (`ml_cpu_get_info_type`), the L2 one cluster's.
     l1i: i64,
     l1d: i64,
     l2: i64,
@@ -224,11 +228,11 @@ impl Model {
         );
         add("hw.cpu64bit_capable", Value::Int(1));
         add("hw.cpufamily", Value::Int(hardware.cpu_family as i32));
-        add("hw.cpusubfamily", Value::Int(CPUSUBFAMILY_ARM_HG));
+        add("hw.cpusubfamily", Value::Int(hardware.cpu_subfamily as i32));
         let mut config = [0u64; CACHE_ENTRIES];
         config[0] = u64::from(hardware.cpus());
         config[1] = 1;
-        config[2] = lowest.cores as u64;
+        config[2] = lowest.cores_per_l2 as u64;
         add("hw.cacheconfig", Value::Opaque(words(&config)));
         let mut sizes = [0u64; CACHE_ENTRIES];
         sizes[0] = hardware.memory_bytes;
@@ -281,10 +285,13 @@ impl Model {
                 "physicalcpu_max",
                 "logicalcpu",
                 "logicalcpu_max",
-                "cpusperl2",
             ] {
                 add(&format!("{prefix}{field}"), Value::Int(level.cores));
             }
+            add(
+                &format!("{prefix}cpusperl2"),
+                Value::Int(level.cores_per_l2),
+            );
             add(
                 &format!("{prefix}l1icachesize"),
                 Value::Int(level.l1i as i32),
@@ -377,23 +384,29 @@ impl Model {
 
 fn levels(hardware: &Hardware) -> Vec<Level> {
     // Descending performance, as `cpu_type_for_perflevel` orders them.
-    let mut levels: Vec<Level> = hardware
-        .clusters
-        .iter()
-        .map(|cluster| Level {
-            name: if cluster.performance {
-                "Performance"
-            } else {
-                "Efficiency"
-            },
-            cores: cluster.cores.into(),
-            l1i: cluster.l1i_bytes.into(),
-            l1d: cluster.l1d_bytes.into(),
-            l2: cluster.l2_bytes.into(),
+    [true, false]
+        .into_iter()
+        .filter_map(|performance| {
+            let mut clusters = hardware
+                .clusters
+                .iter()
+                .filter(|cluster| cluster.performance == performance);
+            let first = clusters.next()?;
+            let others: i32 = clusters.map(|cluster| i32::from(cluster.cores)).sum();
+            Some(Level {
+                name: if performance {
+                    "Performance"
+                } else {
+                    "Efficiency"
+                },
+                cores: i32::from(first.cores) + others,
+                cores_per_l2: first.cores.into(),
+                l1i: first.l1i_bytes.into(),
+                l1d: first.l1d_bytes.into(),
+                l2: first.l2_bytes.into(),
+            })
         })
-        .collect();
-    levels.sort_by_key(|level| level.name != "Performance");
-    levels
+        .collect()
 }
 
 fn words(values: &[u64]) -> Vec<u8> {
@@ -652,6 +665,51 @@ mod tests {
     fn model() -> Model {
         let hardware = Hardware::of(Chip::AppleM2, 1 << 34).unwrap();
         Model::new(&hardware, &[("FEAT_LSE", true), ("AdvSIMD", true)])
+    }
+
+    /// One performance level per core type: its cores in every cluster,
+    /// and the cores sharing one L2 its first cluster's.
+    #[test]
+    fn perflevels_are_core_types_and_l2_sharing_is_one_cluster() {
+        let value = |model: &Model, name: &str| model.entries[model.index(name).unwrap()].1.clone();
+        let m2 = model();
+        let m1_pro = Model::new(&Hardware::of_soc(0x6000, 1 << 34).unwrap(), &[]);
+        for (model, cpus, subfamily, levels) in [
+            (&m2, 8, hardware::CPUSUBFAMILY_ARM_HG, [(4, 4), (4, 4)]),
+            (&m1_pro, 10, hardware::CPUSUBFAMILY_ARM_HS, [(8, 4), (2, 2)]),
+        ] {
+            assert_eq!(value(model, "hw.ncpu"), Value::Int(cpus));
+            assert_eq!(
+                value(model, "hw.cpusubfamily"),
+                Value::Int(subfamily as i32)
+            );
+            assert_eq!(value(model, "hw.nperflevels"), Value::Int(2));
+            assert!(model.index("hw.perflevel2.physicalcpu").is_none());
+            for (index, (cores, per_l2)) in levels.into_iter().enumerate() {
+                let field = |name: &str| value(model, &format!("hw.perflevel{index}.{name}"));
+                assert_eq!(field("physicalcpu"), Value::Int(cores));
+                assert_eq!(field("logicalcpu_max"), Value::Int(cores));
+                assert_eq!(field("cpusperl2"), Value::Int(per_l2));
+            }
+            // `hw.cacheconfig` describes the lowest level.
+            let Value::Opaque(config) = value(model, "hw.cacheconfig") else {
+                panic!("hw.cacheconfig is not opaque");
+            };
+            assert_eq!(
+                u64::from_le_bytes(config[16..24].try_into().unwrap()),
+                levels[1].1 as u64
+            );
+        }
+        let hardware = Hardware::of_soc(0x6000, 1 << 34).unwrap();
+        let performance = hardware
+            .clusters
+            .iter()
+            .find(|cluster| cluster.performance)
+            .unwrap();
+        assert_eq!(
+            value(&m1_pro, "hw.perflevel0.l2cachesize"),
+            Value::Int(performance.l2_bytes as i32)
+        );
     }
 
     #[test]
