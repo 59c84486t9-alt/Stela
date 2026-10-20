@@ -319,12 +319,7 @@ fn create(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     if flags & PTHREAD_START_CUSTOM == 0 {
         return Ok(Outcome::Error(EINVAL));
     }
-    if flags & PTHREAD_START_SUSPENDED != 0 {
-        bail!(
-            "bsdthread_create with PTHREAD_START_SUSPENDED: a thread held until \
-             thread_resume is not implemented"
-        );
-    }
+    let suspended = flags & PTHREAD_START_SUSPENDED != 0;
     let schedule = if flags & PTHREAD_START_SETSCHED != 0 {
         Schedule::Policy {
             timeshare: (flags >> PTHREAD_START_POLICY_SHIFT) & PTHREAD_START_POLICY_MASK
@@ -353,6 +348,13 @@ fn create(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         kernel.signals.creation_mask(),
         move |kernel, pe| {
             let port = kernel.thread_port;
+            // The thread parks before its first instruction until a
+            // `thread_resume` (`thread_create_suspended`).
+            if suspended
+                && let Some(control) = kernel.process.runtime.registry.control(kernel.thread)
+            {
+                control.start_suspended();
+            }
             if tsd_offset != 0
                 && thread_self_offset != 0
                 && !memory::write_u64(pthread + tsd_offset + thread_self_offset, port.into())

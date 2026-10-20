@@ -3,7 +3,7 @@
 //! returns its reply body after the header (`NDR_record`, `RetCode`, then
 //! the out arguments), as the routine's MIG server stub lays it out, or a
 //! failing `RetCode` for the short `mig_reply_error_t`.
-use super::super::Kernel;
+use super::super::{Kernel, control};
 use super::reclaim;
 use crate::hosted::threads::lock;
 use crate::hosted::{
@@ -170,6 +170,20 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "host_get_io_main",
         Some("the IOKit main port is the host's: its registry describes the x86 host"),
     ),
+    (Object::Thread, "thread_suspend", None),
+    (Object::Thread, "thread_resume", None),
+    (Object::Thread, "thread_get_state_to_user", None),
+    (
+        Object::Thread,
+        "thread_set_state_from_user",
+        Some("a debug state enabling a breakpoint, watchpoint or single step stops the run"),
+    ),
+    (Object::Thread, "act_get_state_to_user", None),
+    (
+        Object::Thread,
+        "act_set_state_from_user",
+        Some("a debug state enabling a breakpoint, watchpoint or single step stops the run"),
+    ),
     (Object::Task, "task_create_identity_token", None),
     (Object::Task, "task_threads_from_user", None),
     (Object::Task, "task_policy_set", None),
@@ -205,11 +219,29 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
 pub(super) fn serve(
     kernel: &mut Kernel,
     object: Object,
+    port: u32,
     routine: &str,
     complex: bool,
     request: &Request,
 ) -> Result<Option<Reply>> {
     Ok(Some(match (object, routine, complex) {
+        (Object::Thread, "thread_suspend" | "thread_resume", false) => {
+            let own = port == kernel.thread_port;
+            match kernel.process.runtime.registry.control_by_port(port) {
+                Some(thread) => status(if routine == "thread_suspend" {
+                    thread.suspend(own)
+                } else {
+                    thread.resume()
+                }),
+                None => Reply::Failure(control::KERN_TERMINATED),
+            }
+        }
+        (Object::Thread, "thread_get_state_to_user" | "act_get_state_to_user", false) => {
+            get_state(kernel, port, routine, request)?
+        }
+        (Object::Thread, "thread_set_state_from_user" | "act_set_state_from_user", false) => {
+            set_state(kernel, port, routine, request)?
+        }
         (Object::Host, "host_info", false) => {
             // `flavor`, then `host_info_outCnt` after the NDR record.
             let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
@@ -363,6 +395,88 @@ pub(super) fn serve(
         (Object::Task, _, _) => return super::vm::serve(kernel, routine, complex, request),
         _ => return Ok(None),
     }))
+}
+
+/// A routine whose only out argument is its `kern_return_t`.
+fn status(code: u32) -> Reply {
+    if code == control::KERN_SUCCESS {
+        Reply::Success(Vec::new())
+    } else {
+        Reply::Failure(code)
+    }
+}
+
+/// `thread_get_state_to_user(flavor, old_stateCnt)` and its `act_` form,
+/// which refuses the caller's own thread: the state words after their
+/// count.
+fn get_state(kernel: &Kernel, port: u32, routine: &str, request: &Request) -> Result<Reply> {
+    let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let own = port == kernel.thread_port;
+    if own && routine.starts_with("act_") {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    let Some(thread) = kernel.process.runtime.registry.control_by_port(port) else {
+        return Ok(Reply::Failure(control::KERN_TERMINATED));
+    };
+    let signer = kernel.process.signer.as_ref();
+    let count = count.min(control::THREAD_STATE_MAX);
+    match thread.with_state(own, |state| {
+        (control::get_state(state, flavor, count, signer), None)
+    }) {
+        Ok(words) => Ok(match words? {
+            Ok(words) => {
+                let mut body = (words.len() as u32).to_le_bytes().to_vec();
+                for word in words {
+                    body.extend(word.to_le_bytes());
+                }
+                Reply::Success(body)
+            }
+            Err(code) => Reply::Failure(code),
+        }),
+        Err(code) => Ok(Reply::Failure(code)),
+    }
+}
+
+/// `thread_set_state_from_user(flavor, new_stateCnt, new_state)` and its
+/// `act_` form, which refuses the caller's own thread.
+fn set_state(kernel: &Kernel, port: u32, routine: &str, request: &Request) -> Result<Reply> {
+    let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let Some(bytes) = (count <= control::THREAD_STATE_MAX)
+        .then(|| request.body.get(16..16 + count as usize * 4))
+        .flatten()
+    else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let words: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect();
+    let own = port == kernel.thread_port;
+    if own && routine.starts_with("act_") {
+        return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+    }
+    let Some(thread) = kernel.process.runtime.registry.control_by_port(port) else {
+        return Ok(Reply::Failure(control::KERN_TERMINATED));
+    };
+    let signer = kernel.process.signer.as_ref();
+    match thread.with_state(own, |state| {
+        match control::set_state(state, flavor, &words, signer) {
+            Ok(Ok(set)) => (Ok(Ok(())), Some(set)),
+            other => (other.map(|result| result.map(|_| ())), None),
+        }
+    }) {
+        Ok(result) => Ok(match result? {
+            Ok(()) => Reply::Success(Vec::new()),
+            Err(code) => Reply::Failure(code),
+        }),
+        Err(code) => Ok(Reply::Failure(code)),
+    }
 }
 
 /// `osfmk/mach/host_special_ports.h`.

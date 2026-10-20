@@ -52,6 +52,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
     if vfork && unsafe { libc::pipe(handshake.as_mut_ptr()) } != 0 {
         return Ok(Outcome::Error(errno()));
     }
+    let control = process.runtime.registry.control(kernel.thread);
     let pid = loop {
         let held = (|| {
             let runtime = process.runtime.hold_for_fork()?;
@@ -69,9 +70,13 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             let workqueue = process.workqueue.hold_for_fork()?;
             let kqworkq = process.kqworkq.hold_for_fork()?;
             let workloops = process.workloops.hold_for_fork()?;
-            Some((runtime, others, workqueue, kqworkq, workloops))
+            let control = match &control {
+                Some(control) => Some(control.hold_for_fork()?),
+                None => None,
+            };
+            Some((runtime, others, workqueue, kqworkq, workloops, control))
         })();
-        let Some((runtime, others, workqueue, kqworkq, workloops)) = held else {
+        let Some((runtime, others, workqueue, kqworkq, workloops, held_control)) = held else {
             std::thread::yield_now();
             continue;
         };
@@ -93,6 +98,10 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             workqueue.child();
             kqworkq.child();
             workloops.child();
+            // XNU's fork leaves the child's thread unsuspended.
+            if let Some(held_control) = held_control {
+                held_control.child();
+            }
             drop(others);
             signal::fork_child(kernel);
             kernel.thread_port = thread_port;
@@ -101,7 +110,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             // The child's working directory is the thread's (`fdt_fork`).
             kernel.thread_directory = false;
         } else {
-            drop((runtime, others, workqueue, kqworkq, workloops));
+            drop((runtime, others, workqueue, kqworkq, workloops, held_control));
         }
         break pid;
     };

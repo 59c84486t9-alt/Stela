@@ -76,7 +76,7 @@ pub(super) fn send(
                     body: &request.body,
                 };
                 let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
-                let served = server::serve(kernel, object, routine.name, complex, &body)?;
+                let served = server::serve(kernel, object, port, routine.name, complex, &body)?;
                 if matches!(served, Some(Reply::Forward)) {
                     return forward_trap(kernel, index, arguments);
                 }

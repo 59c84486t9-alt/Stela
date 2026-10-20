@@ -310,7 +310,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "vfork",
         "the child has its own copy of memory, not the parent's",
     ),
-    ("bsdthread_create", "PTHREAD_START_SUSPENDED is refused"),
     (
         "bsdthread_ctl",
         "REALTIME and DISPATCH_APPLY_ATTR are refused",

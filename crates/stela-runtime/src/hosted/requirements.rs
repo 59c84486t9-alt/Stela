@@ -470,7 +470,11 @@ mod tests {
             Status::Partial(_)
         ));
         assert!(matches!(
-            find(Area::Mig, "thread_act.thread_get_state_to_user (thread)").status,
+            find(Area::Mig, "thread_act.thread_set_state_from_user (thread)").status,
+            Status::Partial(_)
+        ));
+        assert!(matches!(
+            find(Area::Mig, "thread_act.thread_abort (thread)").status,
             Status::Refused(_)
         ));
         let rendered = render(&rows);
