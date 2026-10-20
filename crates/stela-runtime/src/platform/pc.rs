@@ -20,6 +20,7 @@ pub mod ahci;
 pub mod block;
 pub mod boot_log;
 pub mod dma;
+pub mod fat32;
 pub mod gpt;
 pub mod input;
 pub mod machine_state;
