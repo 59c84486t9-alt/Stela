@@ -152,7 +152,7 @@ pub struct Copied {
 
 /// What [`copy_into`] copied from one image.
 #[derive(Debug)]
-pub struct Copy {
+pub struct Extraction {
     /// The mounted volume's name.
     pub volume: Option<String>,
     pub files: Vec<Copied>,
@@ -193,7 +193,7 @@ fn select_volume<'a>(mounts: &'a [PathBuf], selection: &Selection) -> Result<&'a
 
 /// Copy the selection from `image` into the directory `root`, keeping guest
 /// paths; no file there is replaced.
-pub fn copy_into(image: &Path, root: &Path, selection: &Selection) -> Result<Copy> {
+pub fn copy_into(image: &Path, root: &Path, selection: &Selection) -> Result<Extraction> {
     let mount_root = tempfile::tempdir()?;
     let attachment = Attachment::new(image, mount_root.path())?;
     let volume = select_volume(&attachment.mounts, selection)?.to_path_buf();
@@ -252,7 +252,7 @@ pub fn copy_into(image: &Path, root: &Path, selection: &Selection) -> Result<Cop
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
     drop(attachment);
-    Ok(Copy {
+    Ok(Extraction {
         volume,
         files,
         missing_optional: missing,

@@ -46,7 +46,7 @@
 mod bundle;
 mod doctor;
 mod ecid;
-mod host;
+pub(crate) mod host;
 mod installed;
 mod machines;
 mod medium;

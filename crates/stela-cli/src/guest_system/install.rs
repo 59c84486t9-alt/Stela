@@ -209,7 +209,7 @@ fn install_member(
             .component
             .replace(|c: char| !c.is_ascii_alphanumeric(), "-")
     ));
-    let decrypted = TemporaryFile(image.clone());
+    let decrypted = tempfile::TempPath::try_from_path(&image)?;
     {
         let reader = archive.by_name(&plan.member)?;
         let mut progress = Progress::new(reader, plan.bytes, plan.part.component);
@@ -372,15 +372,6 @@ fn finish(partial: &Path, result: Result<()>) -> Result<()> {
         let _ = fs::remove_dir_all(partial);
     }
     result
-}
-
-/// A file removed when dropped.
-struct TemporaryFile(PathBuf);
-
-impl Drop for TemporaryFile {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
 }
 
 /// A reader that shows how much of `total` it has read on a terminal.

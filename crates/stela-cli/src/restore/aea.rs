@@ -375,32 +375,12 @@ pub fn verify_key(metadata: &Metadata, pem: &str) -> Result<()> {
 /// The archive key is unwrapped here; macOS `aea` authenticates and decrypts
 /// the payload. The key exists on disk only in a private temporary file.
 pub fn decrypt(input: &Path, key: &Path, output: &Path) -> Result<serde_json::Value> {
-    ensure!(!output.try_exists()?, "{} exists", output.display());
     let metadata = inspect(input)?;
     let pem = std::fs::read_to_string(key)?;
-    ensure!(pem.len() <= MAX_KEY, "key file exceeds 64 KiB");
-    let archive_key = archive_key(&metadata, &pem)?;
-    let parent = output
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut key_file = tempfile::NamedTempFile::new_in(parent)?;
-    key_file.write_all(&archive_key)?;
-    let status = std::process::Command::new(AEA_TOOL)
-        .arg("decrypt")
-        .arg("-key")
-        .arg(key_file.path())
-        .arg("-i")
-        .arg(input)
-        .arg("-o")
-        .arg(output)
-        .stdin(std::process::Stdio::null())
-        .status()
-        .with_context(|| format!("cannot run {AEA_TOOL}"))?;
-    drop(key_file);
-    ensure!(status.success(), "{AEA_TOOL} decrypt failed with {status}");
-    let decrypted = File::open(output)?.metadata()?.len();
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let decrypted = decrypt_reader(&metadata, &pem, &mut File::open(input)?, output)?;
     Ok(serde_json::json!({
         "kind": "aea1_decrypt",
         "input": metadata.source,

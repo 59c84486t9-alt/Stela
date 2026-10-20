@@ -102,8 +102,8 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
         eprintln!("skipped: xcrun clang cannot build arm64e programs here");
         return;
     };
-    let intel = compile(&programs, "intel", &["-arch", "x86_64"]).unwrap();
-    let unsigned = compile(
+    compile(&programs, "intel", &["-arch", "x86_64"]).unwrap();
+    compile(
         &programs,
         "unsigned",
         &["-arch", "arm64", "-Wl,-no_adhoc_codesign"],
@@ -195,7 +195,6 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
         "{:?}",
         text(&output)
     );
-    let _ = (intel, unsigned);
 
     // The guest's own execve of a relative name stays relative: no PATH
     // lookup.

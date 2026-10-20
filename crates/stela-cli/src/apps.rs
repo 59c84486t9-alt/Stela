@@ -594,18 +594,11 @@ impl Apps {
 pub(crate) mod tests {
     use super::*;
     use crate::bundle::tests::{info, make};
+    use crate::run::program::tests::thin;
     use plist::Value;
 
-    /// A thin Mach-O header of `cpu`.
-    pub(crate) fn mach_o(cpu: u32) -> Vec<u8> {
-        let mut bytes = 0xfeed_facfu32.to_le_bytes().to_vec();
-        bytes.extend(cpu.to_le_bytes());
-        bytes.resize(4096, 0);
-        bytes
-    }
-
-    pub(crate) const ARM64: u32 = 0x0100_000c;
-    pub(crate) const X86_64: u32 = 0x0100_0007;
+    pub(crate) use crate::run::program::CPU_TYPE_X86_64 as X86_64;
+    pub(crate) use stela_runtime::hosted::hardware::CPU_TYPE_ARM64 as ARM64;
 
     /// An app `name` in `folder` whose executable is a Mach-O of `cpu`.
     pub(crate) fn app(folder: &Path, name: &str, cpu: u32) -> Result<PathBuf> {
@@ -625,7 +618,7 @@ pub(crate) mod tests {
                     Value::Array(vec![Value::Dictionary(document)]),
                 ),
             ]),
-            &mach_o(cpu),
+            &thin(cpu, 0),
         )?;
         std::fs::create_dir_all(path.join("Contents/Resources"))?;
         std::fs::write(path.join("Contents/Resources/AppIcon.icns"), b"icns")?;

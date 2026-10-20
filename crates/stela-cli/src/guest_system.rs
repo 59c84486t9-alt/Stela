@@ -5,6 +5,7 @@
 //! See `docs/design/hosted-cli.md`.
 mod install;
 
+use crate::setup::host::{Host, System};
 use crate::setup::{PINNED_BUILD, download_dir};
 use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
@@ -23,9 +24,9 @@ const ROOT_DIRECTORY: &str = "root";
 const RECEIPT: &str = "receipt.json";
 /// The guest file the install must hold for a hosted exec to start.
 const DYLD: &str = "usr/lib/dyld";
-/// Places an IPSW the user already has is looked for, below the home
+/// Where an IPSW the user already has is looked for below the home
 /// directory, besides setup's download directory.
-const IPSW_DIRECTORIES: [&str; 1] = ["Downloads"];
+const DOWNLOADS: &str = "Downloads";
 
 /// The home directory everything per-user lives under.
 pub(crate) fn home() -> Result<PathBuf> {
@@ -167,28 +168,28 @@ fn pinned_ipsw_name(name: &str) -> bool {
     name.starts_with("UniversalMac_") && name.ends_with(&format!("_{PINNED_BUILD}_Restore.ipsw"))
 }
 
-/// The first pinned-build IPSW in setup's download directory or the places
-/// in [`IPSW_DIRECTORIES`].
+/// The first pinned-build IPSW in setup's download directory or
+/// [`DOWNLOADS`].
 pub(crate) fn find_ipsw() -> Option<PathBuf> {
     let home = home().ok()?;
-    let directories =
-        std::iter::once(download_dir()).chain(IPSW_DIRECTORIES.iter().map(|name| home.join(name)));
-    directories.into_iter().find_map(|directory| {
-        let mut found: Vec<PathBuf> = std::fs::read_dir(directory)
-            .ok()?
-            .filter_map(|entry| entry.ok())
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_file()
-                    && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(pinned_ipsw_name)
-            })
-            .collect();
-        found.sort();
-        found.into_iter().next()
-    })
+    [download_dir(), home.join(DOWNLOADS)]
+        .into_iter()
+        .find_map(|directory| {
+            let mut found: Vec<PathBuf> = std::fs::read_dir(directory)
+                .ok()?
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.is_file()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(pinned_ipsw_name)
+                })
+                .collect();
+            found.sort();
+            found.into_iter().next()
+        })
 }
 
 #[derive(Args)]
@@ -280,17 +281,7 @@ fn remove(layout: &Layout, dry_run: bool) -> Result<()> {
 
 /// The free bytes of the file system holding `path`.
 fn available_bytes(path: &Path) -> Result<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    // SAFETY: a query into this frame's zeroed buffer.
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    let status = unsafe { libc::statvfs(path.as_ptr(), &raw mut stats) };
-    ensure!(
-        status == 0,
-        "cannot read the free space: {}",
-        std::io::Error::last_os_error()
-    );
-    Ok(stats.f_bavail as u64 * stats.f_frsize)
+    Ok(System.volume(path)?.free_bytes)
 }
 
 /// `bytes` for people, in decimal gigabytes.

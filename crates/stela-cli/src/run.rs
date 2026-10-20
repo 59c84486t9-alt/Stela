@@ -25,13 +25,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use stela_loader::{code_signature, load_plan, split_slices};
 use stela_runtime::hosted::activation::{self, Activator};
+use stela_runtime::hosted::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, CPU_TYPE_ARM64};
 use stela_runtime::hosted::{self, Dylinker, Launch, Signature};
 use stela_runtime::machine::Chip;
 
-/// `CPU_TYPE_ARM64` and the arm64e subtype, without capability bits.
-const CPU_TYPE_ARM64: u32 = 0x0100_000c;
-const CPU_SUBTYPE_ARM64E: u32 = 2;
-const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
 /// The help heading of the developer options.
 const ADVANCED: &str = "Advanced options";
 

@@ -9,20 +9,19 @@ use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use stela_runtime::hosted::activation;
+use stela_runtime::hosted::{
+    activation,
+    hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, CPU_TYPE_ARM64},
+    memory::PAGE_BYTES,
+};
 
-const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 const CPU_TYPE_ARM64_32: u32 = 0x0200_000c;
 const CPU_TYPE_X86: u32 = 7;
-const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+pub(crate) const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 const CPU_TYPE_ARM: u32 = 12;
 const CPU_TYPE_POWERPC: u32 = 18;
 const CPU_TYPE_POWERPC64: u32 = 0x0100_0012;
-const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
-const CPU_SUBTYPE_ARM64E: u32 = 2;
 const CPU_SUBTYPE_X86_64_H: u32 = 8;
-/// The first bytes read to classify a file: exec's first page.
-const HEAD_BYTES: u64 = 16 * 1024;
 /// The environment variable LaunchServices names a started app's bundle in.
 const BUNDLE_IDENTIFIER_VARIABLE: &str = "__CFBundleIdentifier";
 
@@ -74,13 +73,13 @@ fn name(cpu: u32, subtype: u32) -> String {
     }
 }
 
-/// The first bytes of the file at `path`.
+/// The first bytes of the file at `path`: exec's first page.
 fn head(path: &Path) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut head = vec![];
     std::fs::File::open(path)
         .map_err(|error| anyhow!("cannot read {}: {error}", path.display()))?
-        .take(HEAD_BYTES)
+        .take(PAGE_BYTES)
         .read_to_end(&mut head)?;
     Ok(head)
 }
@@ -255,11 +254,12 @@ pub(crate) fn unsigned(program: &Path) -> anyhow::Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::bundle::tests::{info, make};
 
-    fn thin(cpu: u32, subtype: u32) -> Vec<u8> {
+    /// A thin Mach-O header of `cpu` and `subtype`.
+    pub(crate) fn thin(cpu: u32, subtype: u32) -> Vec<u8> {
         let mut head = 0xfeed_facfu32.to_le_bytes().to_vec();
         head.extend(cpu.to_le_bytes());
         head.extend(subtype.to_le_bytes());
