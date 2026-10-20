@@ -763,19 +763,9 @@ impl<R: ReadAt> Answers<R> {
             if !safe_path(name) {
                 return Err(Error::Invalid("unsafe Bootability path"));
             }
-            let mode = entry
-                .unix_mode
-                .ok_or(Error::Invalid("Bootability ZIP Unix mode absent"))?;
-            let file_type = mode & 0o170000;
-            if !matches!(file_type, 0o100000 | 0o040000 | 0o120000) {
-                return Err(Error::Invalid("unsupported Bootability file type"));
-            }
-            if file_type == 0o040000 && entry.bytes != 0 {
-                return Err(Error::Invalid("nonempty Bootability directory"));
-            }
-            if self.store.member_len(&entry.name)? != entry.bytes {
-                return Err(Error::Invalid("Bootability inventory size"));
-            }
+            let mode = bootability_mode(entry.unix_mode, entry.bytes, || {
+                self.store.member_len(&entry.name)
+            })?;
             segments.push(Segment::Bytes(cpio_header(name, mode as u64, entry.bytes)?));
             if entry.bytes != 0 {
                 segments.push(Segment::Member {
@@ -790,6 +780,27 @@ impl<R: ReadAt> Answers<R> {
         }
         segments.push(Segment::Bytes(cpio_header("TRAILER!!!", 0, 0)?));
         Ok(Plan::Raw(segments))
+    }
+}
+/// The cpio mode of a Bootability ZIP entry: a file or link the inventory
+/// lists at its ZIP size, or an empty directory, which has no bytes to verify
+/// and so no inventory entry.
+fn bootability_mode(
+    mode: Option<u16>,
+    bytes: u64,
+    listed: impl FnOnce() -> Result<u64>,
+) -> Result<u16> {
+    let mode = mode.ok_or(Error::Invalid("Bootability ZIP Unix mode absent"))?;
+    match u32::from(mode) & 0o170000 {
+        0o040000 if bytes != 0 => Err(Error::Invalid("nonempty Bootability directory")),
+        0o040000 => Ok(mode),
+        0o100000 | 0o120000 => {
+            if listed()? != bytes {
+                return Err(Error::Invalid("Bootability inventory size"));
+            }
+            Ok(mode)
+        }
+        _ => Err(Error::Invalid("unsupported Bootability file type")),
     }
 }
 /// A reply value whose data objects may stream from IPSW members.
@@ -1147,6 +1158,26 @@ mod tests {
         d.insert("RequestURL".into(), Value::from("https://else.invalid/key"));
         assert!(staged.get("URLAsset", &changed).is_err());
         assert!(staged.get("StreamedImageDecryptionKey", &args).is_err());
+    }
+    /// Directories need no inventory entry; files and links need one of
+    /// their ZIP size.
+    #[test]
+    fn bootability_directories_need_no_inventory_entry() {
+        let absent = || {
+            Err(Error::Invalid(
+                "member absent from immutable payload inventory",
+            ))
+        };
+        assert_eq!(bootability_mode(Some(0o40755), 0, absent).unwrap(), 0o40755);
+        assert!(bootability_mode(Some(0o40755), 1, || Ok(1)).is_err());
+        assert!(bootability_mode(Some(0o100644), 5, absent).is_err());
+        assert!(bootability_mode(Some(0o100644), 5, || Ok(4)).is_err());
+        assert_eq!(
+            bootability_mode(Some(0o120755), 1, || Ok(1)).unwrap(),
+            0o120755
+        );
+        assert!(bootability_mode(Some(0o10644), 0, || Ok(0)).is_err());
+        assert!(bootability_mode(None, 0, || Ok(0)).is_err());
     }
     #[test]
     fn cpio_header_has_the_public_wire_layout() {
