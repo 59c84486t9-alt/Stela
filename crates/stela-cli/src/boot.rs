@@ -200,6 +200,11 @@ pub(crate) struct Prepare {
     /// (`stela_loader::upgrade`) instead of its installed system.
     #[arg(long, requires = "disk", conflicts_with_all = ["boot_hash"])]
     upgrade: bool,
+    /// Boot a recoveryOS the disk holds (`stela_loader::recovery`) instead
+    /// of its installed system: `paired`, its container's Recovery volume,
+    /// or `system`, System Recovery in its RecoveryOSContainer.
+    #[arg(long, value_enum, requires = "disk", conflicts_with_all = ["boot_hash", "upgrade"])]
+    disk_recovery: Option<DiskRecovery>,
     /// A new directory for the bundle.
     #[arg(long)]
     output: PathBuf,
@@ -287,6 +292,13 @@ pub(crate) struct Prepare {
     /// taken from the IPSW's restore ramdisk.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
+}
+
+/// The recoveryOS copy `--disk-recovery` boots.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub(crate) enum DiskRecovery {
+    Paired,
+    System,
 }
 
 fn parse_ecid(value: &str) -> Result<u64, String> {

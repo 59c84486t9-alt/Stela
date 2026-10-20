@@ -45,6 +45,7 @@ pub mod lock_regs;
 pub mod mapped_image;
 pub mod mount_interface;
 pub mod nvram;
+pub mod recovery;
 pub mod root_selection;
 #[cfg(feature = "std")]
 pub mod shared_cache;

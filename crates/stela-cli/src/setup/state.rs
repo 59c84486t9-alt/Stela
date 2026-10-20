@@ -89,10 +89,12 @@ pub(super) fn next_boot(variables: &Variables) -> String {
             let target = match selection.target {
                 boot_selection::Target::MacOs { safe: false } => "macOS".into(),
                 boot_selection::Target::MacOs { safe: true } => "macOS in safe mode".into(),
-                boot_selection::Target::PairedRecovery => {
-                    "recoveryOS (Stela's System Recovery bundle)".into()
-                }
-                boot_selection::Target::SystemRecovery => "System Recovery".into(),
+                boot_selection::Target::PairedRecovery => "the paired recoveryOS (the Recovery \
+                     volume's, else System Recovery)"
+                    .into(),
+                boot_selection::Target::SystemRecovery => "System Recovery (the \
+                     RecoveryOSContainer's, else Stela's bundle)"
+                    .into(),
                 boot_selection::Target::Upgrade => {
                     "the macOS update staged on the Update volume".to_string()
                 }

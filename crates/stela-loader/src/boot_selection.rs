@@ -56,6 +56,11 @@
 //! consumed with a note rather than activated; Stela takes iBEC's place in
 //! an upgrade boot (`stela_loader::upgrade`).
 //!
+//! A recoveryOS boot prefers the copy on the boot disk, as LLB does: the
+//! paired recoveryOS from the boot container's Recovery volume, then System
+//! Recovery from the RecoveryOSContainer, then Stela's own System Recovery
+//! bundle ([`route`], `stela_loader::recovery`).
+//!
 //! Refused explicitly: `device-recovery` (iBoot's recovery mode, which waits
 //! for a USB restore host) and `field-diags-paired` (a diagnostics image
 //! Stela does not read), and a machine with `auto-boot=false`, which LLB
@@ -306,9 +311,12 @@ pub struct Selection {
     /// Effects of the boot Stela does not reproduce, for the boot log.
     pub notes: Vec<String>,
     /// The boot disk holds the paired recoveryOS (`--paired-recovery`);
-    /// otherwise a paired recovery boot falls back to Stela's System
-    /// Recovery bundle.
+    /// otherwise a paired recovery boot falls back to System Recovery.
     pub paired_on_disk: bool,
+    /// The boot disk holds System Recovery in its RecoveryOSContainer
+    /// (`--system-recovery`); otherwise System Recovery is Stela's own
+    /// bundle (`--recovery-bundle`).
+    pub system_on_disk: bool,
 }
 
 impl Selection {
@@ -372,6 +380,7 @@ pub fn select(variables: &Variables) -> Result<Selection> {
         assigned: Vec::new(),
         notes: Vec::new(),
         paired_on_disk: false,
+        system_on_disk: false,
     };
     if let Some(value) = lookup(variables, AUTO_BOOT)
         && !flag(AUTO_BOOT, value)?
@@ -535,23 +544,28 @@ pub const SAFE_BOOT_OPTION: &str = "--safe-boot";
 /// Build the bundle from the Preboot disk's Update volume
 /// (`stela_loader::upgrade`) instead of its installed system.
 pub const UPGRADE_OPTION: &str = "--upgrade";
-/// Build the bundle from the Preboot disk's Recovery volume
-/// (`stela_loader::installed`, its paired recoveryOS).
+/// Build the bundle from the Preboot disk's Recovery volume, the paired
+/// recoveryOS (`stela_loader::recovery`).
 pub const PAIRED_RECOVERY_OPTION: &str = "--paired-recovery";
+/// Build the bundle from the Preboot disk's RecoveryOSContainer, System
+/// Recovery (`stela_loader::recovery`).
+pub const SYSTEM_RECOVERY_OPTION: &str = "--system-recovery";
 /// What the engine is told only by NVRAM.
-const NVRAM_OPTIONS: [&str; 4] = [
+const NVRAM_OPTIONS: [&str; 5] = [
     BOOT_VOLUME_OPTION,
     SAFE_BOOT_OPTION,
     UPGRADE_OPTION,
     PAIRED_RECOVERY_OPTION,
+    SYSTEM_RECOVERY_OPTION,
 ];
 
 /// The engine options for `selection` (none when NVRAM was not read): a
 /// macOS boot keeps `--preboot` and adds the boot volume and safe mode; an
-/// update adds `--upgrade`, and a paired recoveryOS the disk holds
-/// `--paired-recovery`; any other recoveryOS boot replaces `--preboot` with
-/// `--bundle` of the `--recovery-bundle` directory, and is refused without
-/// one.
+/// update adds `--upgrade`, a paired recoveryOS the disk holds
+/// `--paired-recovery`, and System Recovery the disk holds (also in place
+/// of a paired recoveryOS it lacks) `--system-recovery`; any other
+/// recoveryOS boot replaces `--preboot` with `--bundle` of the
+/// `--recovery-bundle` directory, and is refused without one.
 /// `--recovery-bundle` never reaches the engine. Returns the options and
 /// what the boot log should say.
 pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, String)> {
@@ -617,6 +631,17 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             extra.push(PAIRED_RECOVERY_OPTION.into());
             format!("paired recoveryOS from the Recovery volume ({reasons})")
         }
+        target @ (Target::PairedRecovery | Target::SystemRecovery) if selection.system_on_disk => {
+            on_disk(&mut extra, "System Recovery")?;
+            extra.push(SYSTEM_RECOVERY_OPTION.into());
+            match target {
+                Target::PairedRecovery => format!(
+                    "System Recovery from the RecoveryOSContainer ({reasons}): the boot disk \
+                     holds no paired recoveryOS"
+                ),
+                _ => format!("System Recovery from the RecoveryOSContainer ({reasons})"),
+            }
+        }
         target @ (Target::PairedRecovery | Target::SystemRecovery) => {
             let Some(directory) = recovery else {
                 bail!(
@@ -633,8 +658,8 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             extra.push(directory);
             match target {
                 Target::PairedRecovery => format!(
-                    "recoveryOS ({reasons}): the boot disk holds no paired recoveryOS, so \
-                     Stela's System Recovery bundle boots"
+                    "recoveryOS ({reasons}): the boot disk holds neither a paired recoveryOS \
+                     nor System Recovery, so Stela's System Recovery bundle boots"
                 ),
                 _ => format!("System Recovery ({reasons})"),
             }
@@ -851,6 +876,64 @@ mod tests {
         assert!(log.starts_with("paired recoveryOS"));
         assert!(route("--system --upgrade", None).is_err());
         assert!(route("--system --paired-recovery", None).is_err());
+    }
+
+    #[test]
+    fn recoveryos_prefers_the_disk_s_paired_copy_then_its_system_recovery() {
+        let paired = select(&variables(&[(Partition::System, BOOT_COMMAND, b"recover")])).unwrap();
+        let system = select(&variables(&[(
+            Partition::System,
+            BOOT_COMMAND,
+            b"recover-system",
+        )]))
+        .unwrap();
+        let routed = |selection: &Selection, paired_on_disk: bool, system_on_disk: bool| {
+            let mut selection = selection.clone();
+            selection.paired_on_disk = paired_on_disk;
+            selection.system_on_disk = system_on_disk;
+            route(CONFIG, Some(&selection)).unwrap()
+        };
+        let (options, log) = routed(&paired, true, true);
+        assert!(options.ends_with(PAIRED_RECOVERY_OPTION), "{options}");
+        assert!(log.starts_with("paired recoveryOS"));
+        // No paired copy: System Recovery from the disk.
+        let (options, log) = routed(&paired, false, true);
+        assert!(options.contains("--preboot S:G") && options.ends_with(SYSTEM_RECOVERY_OPTION));
+        assert!(log.contains("holds no paired recoveryOS"), "{log}");
+        // recover-system never boots the paired copy.
+        let (options, _) = routed(&system, true, true);
+        assert!(options.ends_with(SYSTEM_RECOVERY_OPTION), "{options}");
+        // Neither on the disk: Stela's bundle, without the Preboot disk.
+        let (options, _) = routed(&system, true, false);
+        assert!(
+            options.ends_with("--bundle \\EFI\\stela\\recovery") && !options.contains("--preboot")
+        );
+        // A missing-boot-media boot is System Recovery too.
+        let mut blank = select(&variables(&[])).unwrap();
+        blank.missing_boot_media();
+        assert!(
+            routed(&blank, false, true)
+                .0
+                .ends_with(SYSTEM_RECOVERY_OPTION)
+        );
+        // The engine is told by NVRAM alone.
+        assert!(route("--system --system-recovery", None).is_err());
+        // A recoveryOS boot volume names the RecoveryOSContainer to boot.
+        let named = variables(&[
+            (
+                Partition::System,
+                BOOT_VOLUME,
+                &volume(VolumeType::Recovery),
+            ),
+            (Partition::System, BOOT_COMMAND, b"recover-system"),
+        ]);
+        let mut named = select(&named).unwrap();
+        named.system_on_disk = true;
+        let (options, _) = route(CONFIG, Some(&named)).unwrap();
+        assert!(options.contains(&format!(
+            "{BOOT_VOLUME_OPTION} {}",
+            String::from_utf8(volume(VolumeType::Recovery)).unwrap()
+        )));
     }
 
     const CONFIG: &str = "--system --storage S:G --nor S:N --preboot S:G \

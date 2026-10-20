@@ -503,7 +503,7 @@ impl<R: ReadAt> Disk<'_, R> {
 /// The `<string>` value of `key` in the top-level dictionary of an XML
 /// property list; `None` when the key is absent. Binary property lists are
 /// refused.
-fn plist_string(text: &str, key: &str) -> Result<Option<String>> {
+pub(crate) fn plist_string(text: &str, key: &str) -> Result<Option<String>> {
     ensure!(
         !text.starts_with("bplist"),
         "binary property lists are unsupported"

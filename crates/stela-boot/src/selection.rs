@@ -6,8 +6,11 @@
 //! before it boots) and hands the engine the options for that boot. A macOS
 //! boot whose Preboot disk holds no installed system boots System Recovery
 //! instead (missing boot media), as a Mac with an erased disk does. A
-//! recoveryOS boot reads the `--recovery-bundle` directory here, because the
-//! ESP is readable only through the firmware.
+//! recoveryOS boot takes the disk's own copy when it has one, the paired
+//! recoveryOS of the Recovery volume and then System Recovery of the
+//! RecoveryOSContainer (`stela_loader::recovery::find`), which the engine
+//! builds from the disk; otherwise it reads the `--recovery-bundle`
+//! directory here, because the ESP is readable only through the firmware.
 //!
 //! Each partition is found as the engine finds it: exactly one whole disk
 //! reports the serial, and exactly one of its GPT partitions has the GUID;
@@ -21,7 +24,10 @@ use crate::{
     payload::{Aligned, device_path, disk_serial},
 };
 use alloc::{format, string::String, vec, vec::Vec};
-use stela_loader::boot_selection::{self, BootVolume, Selection};
+use stela_loader::{
+    boot_selection::{self, BootVolume, Selection},
+    recovery,
+};
 use stela_runtime::{
     apfs::{self, ApfsError, Container},
     machine::apple::nor::{
@@ -283,6 +289,36 @@ fn installed(target: &Target, part: Part, volume: Option<&BootVolume>) -> Result
     Ok(false)
 }
 
+/// Whether the Preboot disk holds a recoveryOS of `kind`
+/// (`stela_loader::recovery::find`): a Recovery volume with a boot
+/// directory. A disk that cannot be read for it is reported and counts as
+/// holding none, so the boot falls back to the next recoveryOS.
+fn holds_recovery(
+    target: &Target,
+    part: Part,
+    kind: recovery::Kind,
+    volume: Option<&BootVolume>,
+) -> bool {
+    let probe = || -> Result<bool, String> {
+        let mut disk = find(target).map_err(|e| format!("Preboot disk: {e}"))?;
+        disk.confine(part)
+            .map_err(|e| format!("Preboot disk: {e}"))?;
+        recovery::find(&mut disk, kind, volume)
+            .map(|found| !found.is_empty())
+            .map_err(|e| format!("{e:#}"))
+    };
+    match probe() {
+        Ok(found) => found,
+        Err(error) => {
+            output::arguments(format_args!(
+                "RECOVERY probe of the {} refused: {error}\n",
+                kind.label()
+            ));
+            false
+        }
+    }
+}
+
 /// The value after `name` in the options.
 fn option<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let mut words = text.split_ascii_whitespace();
@@ -297,6 +333,7 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
         output::arguments(format_args!("NVRAM boot refusal: {error}\n"));
         "NVRAM's boot choice could not be read or is not modeled"
     };
+    let parse = |text: &str| text.parse::<Target>();
     let selection = match option(text, boot_selection::PREBOOT_OPTION) {
         Some(preboot) => {
             let nor = option(text, "--nor");
@@ -314,28 +351,40 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, &'static str> {
                     } else {
                         Part::Whole
                     };
-                    select(&nor.parse()?, part).map_err(refuse)?
+                    select(&parse(nor)?, part).map_err(refuse)?
                 }
                 None => boot_selection::select(
                     &Variables::parse(&empty_bank()).map_err(|e| refuse(e.into()))?,
                 )
                 .map_err(|e| refuse(format!("{e:#}")))?,
             };
+            let disk = parse(preboot)?;
+            let part = if in_storage(preboot) {
+                Part::Namespace
+            } else {
+                Part::Whole
+            };
             let recovery = option(text, boot_selection::RECOVERY_BUNDLE_OPTION).is_some();
             if recovery
                 && matches!(selection.target, boot_selection::Target::MacOs { .. })
-                && !installed(
-                    &preboot.parse()?,
-                    if in_storage(preboot) {
-                        Part::Namespace
-                    } else {
-                        Part::Whole
-                    },
-                    selection.volume.as_ref(),
-                )
-                .map_err(refuse)?
+                && !installed(&disk, part, selection.volume.as_ref()).map_err(refuse)?
             {
                 selection.missing_boot_media();
+            }
+            // A recoveryOS boot takes the disk's own copy first, as LLB does.
+            let volume = selection.volume;
+            match selection.target {
+                boot_selection::Target::PairedRecovery => {
+                    selection.paired_on_disk =
+                        holds_recovery(&disk, part, recovery::Kind::Paired, volume.as_ref());
+                    selection.system_on_disk = !selection.paired_on_disk
+                        && holds_recovery(&disk, part, recovery::Kind::System, volume.as_ref());
+                }
+                boot_selection::Target::SystemRecovery => {
+                    selection.system_on_disk =
+                        holds_recovery(&disk, part, recovery::Kind::System, volume.as_ref());
+                }
+                _ => {}
             }
             Some(selection)
         }

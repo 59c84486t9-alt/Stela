@@ -38,7 +38,7 @@ use stela_compiler::TargetCpu;
 use stela_loader::{
     boot_bundle,
     boot_selection::{self, BootVolume},
-    installed,
+    installed, recovery,
 };
 use stela_runtime::machine::apple::WallClock;
 use stela_runtime::machine::{
@@ -98,9 +98,11 @@ struct Options {
     /// NVRAM chose a staged macOS update (`--upgrade`): build from the
     /// Preboot disk's Update volume.
     upgrade: bool,
-    /// NVRAM chose the paired recoveryOS (`--paired-recovery`): build from
-    /// the Preboot disk's Recovery volume.
-    paired_recovery: bool,
+    /// NVRAM chose a recoveryOS the Preboot disk holds: its Recovery
+    /// volume's paired copy (`--paired-recovery`) or its RecoveryOSContainer's
+    /// System Recovery (`--system-recovery`), built from the disk
+    /// (`stela_loader::recovery`).
+    recovery: Option<recovery::Kind>,
     /// One host partition backing all ANS namespaces.
     storage: Option<Target>,
     /// The host partition holding the NOR flash image (`--nor`); the
@@ -227,7 +229,7 @@ impl Options {
             boot_volume: None,
             safe_boot: false,
             upgrade: false,
-            paired_recovery: false,
+            recovery: None,
             storage: None,
             nor: None,
             restore: false,
@@ -413,8 +415,15 @@ impl Options {
                 options.upgrade = true;
                 continue;
             }
-            if name == boot_selection::PAIRED_RECOVERY_OPTION {
-                options.paired_recovery = true;
+            let kind = match name {
+                boot_selection::PAIRED_RECOVERY_OPTION => Some(recovery::Kind::Paired),
+                boot_selection::SYSTEM_RECOVERY_OPTION => Some(recovery::Kind::System),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                if options.recovery.replace(kind).is_some() {
+                    return Err("--paired-recovery and --system-recovery name one recoveryOS");
+                }
                 continue;
             }
             if name == "--dump" {
@@ -485,14 +494,18 @@ impl Options {
             && (options.boot_volume.is_some()
                 || options.safe_boot
                 || options.upgrade
-                || options.paired_recovery)
+                || options.recovery.is_some())
         {
             return Err(
-                "--boot-volume, --safe-boot, --upgrade and --paired-recovery choose a --preboot boot",
+                "--boot-volume, --safe-boot, --upgrade, --paired-recovery and --system-recovery \
+                 choose a --preboot boot",
             );
         }
-        if options.upgrade && (options.paired_recovery || options.safe_boot) {
-            return Err("--upgrade is neither a safe-mode boot nor the paired recoveryOS");
+        if options.upgrade && (options.recovery.is_some() || options.safe_boot) {
+            return Err("--upgrade is neither a safe-mode boot nor a recoveryOS");
+        }
+        if options.recovery.is_some() && options.safe_boot {
+            return Err("a recoveryOS boot is not a safe-mode boot");
         }
         if !options.dram_base.is_multiple_of(LARGE) || options.ram_bytes < LARGE {
             return Err("guest DRAM base must be 2 MiB aligned and hold at least 2 MiB");
@@ -1226,18 +1239,14 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .storage
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        if options.paired_recovery {
-            output::fatal(
-                "the paired recoveryOS is not built from disk yet; stela.efi boots Stela's \
-                 System Recovery bundle for it",
-            );
-        }
         let defaults = boot_bundle::Options {
             ecid: options.ecid,
             ..boot_bundle::Options::default()
         };
         let result = if options.upgrade {
             bundle::upgrade_from_disk(&storage, target, options.boot_volume, &defaults)
+        } else if let Some(kind) = options.recovery {
+            bundle::recovery_from_disk(&storage, target, kind, options.boot_volume, &defaults)
         } else {
             let request = installed::Request {
                 volume: options.boot_volume,

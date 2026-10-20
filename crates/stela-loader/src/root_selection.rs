@@ -74,10 +74,21 @@ pub enum Root {
         volume_group: String,
         boot_hash: String,
     },
-    /// The Recovery volume paired with `volume_group`.
+    /// The Recovery volume paired with `volume_group`, booting from its
+    /// directory `<volume_group>/boot/<boot_hash>`.
     PairedRecovery {
         volume_group: String,
         recovery_volume: String,
+        boot_hash: String,
+    },
+    /// System Recovery: the RecoveryOSContainer's volume `volume`, booting
+    /// from its directory `<directory>/boot/<boot_hash>`. It pairs with no
+    /// installed system, so only `boot-uuid` names the root (Inferred:
+    /// without `apfs-preboot-uuid` and `associated-volume-group`,
+    /// AppleFileSystemDriver roots from the volume `boot-uuid` names).
+    SystemRecovery {
+        volume: String,
+        directory: String,
         boot_hash: String,
     },
     /// A ramdisk; no installed volume.
@@ -168,6 +179,21 @@ pub fn apply(tree: &mut DeviceTree, root: &Root) -> Result<Vec<Decision>> {
                 &[ASSOCIATED_VOLUME_GROUP, BOOT_UUID, BOOT_OBJECTS_PATH],
                 source,
             )
+        }
+        Root::SystemRecovery {
+            volume,
+            directory,
+            boot_hash,
+        } => {
+            let source = format!("System Recovery volume {volume}");
+            set(tree, BOOT_UUID, uuid_property(volume)?, source.clone())?;
+            set(
+                tree,
+                BOOT_OBJECTS_PATH,
+                boot_objects_path(directory, boot_hash)?,
+                source.clone(),
+            )?;
+            (&[BOOT_UUID, BOOT_OBJECTS_PATH], source)
         }
         Root::Ramdisk => (&[], "a ramdisk root".into()),
         Root::RamImage { volume } => {
@@ -286,6 +312,28 @@ mod tests {
         assert_eq!(
             value(&tree, BOOT_UUID),
             Some(format!("{RECOVERY}\0").as_bytes())
+        );
+    }
+
+    #[test]
+    fn system_recovery_names_its_volume_and_boot_directory_alone() {
+        let mut tree = tree();
+        let hash = "EF".repeat(48);
+        let root = Root::SystemRecovery {
+            volume: RECOVERY.into(),
+            directory: GROUP.into(),
+            boot_hash: hash.clone(),
+        };
+        apply(&mut tree, &root).unwrap();
+        assert_eq!(value(&tree, APFS_PREBOOT_UUID), None);
+        assert_eq!(value(&tree, ASSOCIATED_VOLUME_GROUP), None);
+        assert_eq!(
+            value(&tree, BOOT_UUID),
+            Some(format!("{RECOVERY}\0").as_bytes())
+        );
+        assert_eq!(
+            value(&tree, BOOT_OBJECTS_PATH),
+            Some(format!("/{GROUP}/boot/{hash}\0").as_bytes())
         );
     }
 

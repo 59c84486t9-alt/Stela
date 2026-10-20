@@ -11,7 +11,9 @@
 //! [`from_disk`] runs after them instead: Stela's own storage drivers read
 //! the installed system on a host disk's APFS container, and
 //! `stela_loader::installed` builds the same bundle `stela boot prepare
-//! --disk` writes, in the heap.
+//! --disk` writes, in the heap. [`upgrade_from_disk`] and
+//! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
+//! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
 use crate::{
     firmware,
     handoff::{File, Region},
@@ -23,7 +25,9 @@ use core::arch::{
     asm,
     x86_64::{__cpuid, __cpuid_count},
 };
-use stela_loader::{boot_bundle::Options, boot_selection::BootVolume, installed, upgrade};
+use stela_loader::{
+    boot_bundle::Options, boot_selection::BootVolume, installed, recovery, upgrade,
+};
 use stela_runtime::{
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
     machine::Host,
@@ -312,12 +316,12 @@ impl<D: BlockDevice> ReadAt for Bytes<D> {
 /// the boot's own boot-args); returns `bundle.json` first and then every
 /// file it lists. Runs after boot services end, on the controllers
 /// `storage` describes.
-pub fn from_disk(
+/// `target`'s partition, through Stela's own drivers for the controllers
+/// `storage` describes. Runs after boot services end.
+fn open_partition(
     storage: &pc::Handoff,
     target: &Target,
-    request: &installed::Request,
-    options: &Options,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
+) -> Result<pc::gpt::PartitionDevice<alloc::boxed::Box<dyn BlockDevice>>, String> {
     // SAFETY: the DMA pages were reserved for the storage drivers alone.
     let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
     // SAFETY: `storage` describes this machine after ExitBootServices, with
@@ -326,8 +330,17 @@ pub fn from_disk(
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    let partition = storage::open(&mut disks.devices, target)
-        .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))?;
+    storage::open(&mut disks.devices, target)
+        .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))
+}
+
+pub fn from_disk(
+    storage: &pc::Handoff,
+    target: &Target,
+    request: &installed::Request,
+    options: &Options,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let partition = open_partition(storage, target)?;
     let (offset, installed) = installed::prepare_disk(&mut Bytes::new(partition), request, options)
         .map_err(|e| format!("{e:#}"))?;
     output::arguments(format_args!(
@@ -358,16 +371,7 @@ pub fn upgrade_from_disk(
     volume: Option<BootVolume>,
     options: &Options,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    // SAFETY: the DMA pages were reserved for the storage drivers alone.
-    let mut dma = unsafe { RegionAllocator::new(storage.dma.clone()) };
-    // SAFETY: `storage` describes this machine after ExitBootServices, with
-    // its ranges mapped uncached, and nothing else drives the controllers.
-    let mut disks = unsafe { storage::probe(storage, &mut dma) };
-    for (address, error) in &disks.failures {
-        output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
-    }
-    let partition = storage::open(&mut disks.devices, target)
-        .map_err(|e| format!("{}:{}: {e}", target.serial, target.partition))?;
+    let partition = open_partition(storage, target)?;
     let mut options = options.clone();
     options.boot_args = upgrade_boot_args(&options.boot_args);
     options.osenvironment = Some(upgrade::ENVIRONMENT);
@@ -383,6 +387,46 @@ pub fn upgrade_from_disk(
         serde_json::to_vec(&staged.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
     let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
     files.extend(staged.bundle.files);
+    Ok(files)
+}
+
+/// Build the boot bundle of the recoveryOS of `kind` on `target`'s disk
+/// (`stela_loader::recovery`): the paired recoveryOS of the boot container's
+/// Recovery volume, or System Recovery of the RecoveryOSContainer, as
+/// NVRAM's boot `volume` names them; returns `bundle.json` first. Runs
+/// after boot services end.
+pub fn recovery_from_disk(
+    storage: &pc::Handoff,
+    target: &Target,
+    kind: recovery::Kind,
+    volume: Option<BootVolume>,
+    options: &Options,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let partition = open_partition(storage, target)?;
+    let (offset, recovered) = recovery::prepare_disk(
+        &mut Bytes::new(partition),
+        kind,
+        volume.as_ref(),
+        None,
+        options,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    output::arguments(format_args!(
+        "RECOVERY {} {} volume={:?} container={offset:#x} objects={} named-by={}\n",
+        kind.label(),
+        recovered.set.directory(),
+        recovered.volume.name,
+        recovered.set.objects.len(),
+        recovered
+            .evidence
+            .named_by
+            .as_deref()
+            .unwrap_or("evidence alone")
+    ));
+    let manifest =
+        serde_json::to_vec(&recovered.bundle.manifest).map_err(|e| format!("bundle.json: {e}"))?;
+    let mut files = vec![(String::from(MANIFEST_FILE), manifest)];
+    files.extend(recovered.bundle.files);
     Ok(files)
 }
 

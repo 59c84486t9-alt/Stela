@@ -26,7 +26,7 @@ use super::{
 use crate::efi;
 use anyhow::{Result, bail};
 use std::{fmt::Write as _, fs, path::Path};
-use stela_loader::{boot_selection, mount_interface};
+use stela_loader::{boot_selection, mount_interface, recovery};
 use stela_runtime::{
     apfs::{self, Container, volume::APFS_VOL_ROLE_UPDATE},
     machine::apple::{nor::CAPACITY, sep_state},
@@ -59,7 +59,8 @@ impl ReadAt for Partition<'_> {
 }
 
 /// The installed systems on an Apple region: each container's boot
-/// directories, and whether it has a staged update.
+/// directories, whether it has a staged update, and the boot directories
+/// of its paired recoveryOS and System Recovery (`stela_loader::recovery`).
 fn systems(host: &dyn Host, identifier: &str, bytes: u64) -> Vec<String> {
     let mut disk = Partition {
         host,
@@ -93,6 +94,24 @@ fn systems(host: &dyn Host, identifier: &str, bytes: u64) -> Vec<String> {
             Err(error) => found.push(format!(
                 "container at {offset:#x}: no boot objects ({error})"
             )),
+        }
+    }
+    // The recoveryOS copies stela.efi boots before Stela's own bundle.
+    for kind in [recovery::Kind::Paired, recovery::Kind::System] {
+        match recovery::find(&mut disk, kind, None) {
+            Ok(copies) => {
+                for copy in copies {
+                    for set in &copy.sets {
+                        found.push(format!(
+                            "{} at {:#x}: {}",
+                            kind.label(),
+                            copy.offset,
+                            set.directory()
+                        ));
+                    }
+                }
+            }
+            Err(error) => found.push(format!("{}: unreadable ({error:#})", kind.label())),
         }
     }
     found

@@ -12,7 +12,9 @@
 //!
 //! Inside a boot directory, objects are identified by their Image4 payload
 //! type (`krnl`, `dtre`, `sptm`, `trxm`, `trst`, `isys`, …) rather than by
-//! file name, so no undocumented name is assumed.
+//! file name, so no undocumented name is assumed. The same listing
+//! ([`boot_sets`]) reads the recoveryOS volumes, which lay out their boot
+//! directories alike (`stela_loader::recovery`).
 use crate::{
     apfs::{
         ApfsError, Container, FileKind, Volume,
@@ -133,25 +135,32 @@ fn is_boot_hash(name: &str) -> bool {
     name.len() == BOOT_HASH_CHARACTERS && name.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// Every volume group directory with a `boot` directory on `preboot`: the
-/// groups of the container's System volumes when there are any, else every
-/// top-level directory that has one.
-fn volume_groups<R: ReadAt>(container: &mut Container<R>, preboot: &Volume) -> Result<Vec<String>> {
-    let systems: Vec<String> = container
+/// The volume groups of the container's System volumes.
+pub fn system_groups<R: ReadAt>(container: &mut Container<R>) -> Result<Vec<String>> {
+    Ok(container
         .volumes()?
         .iter()
         .filter(|v| v.role == APFS_VOL_ROLE_SYSTEM)
         .map(|v| uuid_text(&v.volume_group))
-        .collect();
+        .collect())
+}
+
+/// Every top-level directory of `volume` with a `boot` directory, among
+/// `groups` when it names any.
+fn volume_groups<R: ReadAt>(
+    container: &mut Container<R>,
+    volume: &Volume,
+    groups: &[String],
+) -> Result<Vec<String>> {
     let device = &mut container.device;
-    let root = preboot.entries(device, crate::apfs::volume::ROOT_DIR_INO_NUM)?;
+    let root = volume.entries(device, crate::apfs::volume::ROOT_DIR_INO_NUM)?;
     Ok(root
         .into_iter()
         .filter(|entry| entry.kind == FileKind::Directory)
         .filter(|entry| {
-            systems.is_empty() || systems.iter().any(|s| s.eq_ignore_ascii_case(&entry.name))
+            groups.is_empty() || groups.iter().any(|s| s.eq_ignore_ascii_case(&entry.name))
         })
-        .filter(|entry| preboot.child(device, entry.oid, "boot").is_ok())
+        .filter(|entry| volume.child(device, entry.oid, "boot").is_ok())
         .map(|entry| entry.name)
         .collect())
 }
@@ -196,22 +205,41 @@ fn collect<R: ReadAt>(
 /// its objects, and the Preboot volume itself.
 pub fn candidates<R: ReadAt>(container: &mut Container<R>) -> Result<(Volume, Vec<BootSet>)> {
     let preboot = container.volume_with_role(APFS_VOL_ROLE_PREBOOT)?;
+    let groups = system_groups(container)?;
+    let sets = boot_sets(container, &preboot, &groups)?;
+    if sets.is_empty() {
+        return Err(PrebootError::NoBootDirectory);
+    }
+    Ok((preboot, sets))
+}
+
+/// Every `<group>/boot/<hash>/` directory of `volume`, with its Image4
+/// objects, for the top-level directories `groups` names (every one with a
+/// `boot` directory when it names none). A Preboot volume, a container's
+/// paired Recovery volume and the RecoveryOSContainer's volume share this
+/// layout (Asahi Linux docs `platform/stock-partition-layout.md`, commit
+/// `0d1f891`).
+pub fn boot_sets<R: ReadAt>(
+    container: &mut Container<R>,
+    volume: &Volume,
+    groups: &[String],
+) -> Result<Vec<BootSet>> {
     let mut sets = Vec::new();
-    for group in volume_groups(container, &preboot)? {
+    for group in volume_groups(container, volume, groups)? {
         let device = &mut container.device;
-        let boot = preboot.lookup(device, &format!("{group}/boot"), true)?;
-        for entry in preboot.entries(device, boot.oid)? {
+        let boot = volume.lookup(device, &format!("{group}/boot"), true)?;
+        for entry in volume.entries(device, boot.oid)? {
             if entry.kind != FileKind::Directory || !is_boot_hash(&entry.name) {
                 continue;
             }
             let mut objects = Vec::new();
             for directory in OBJECT_DIRECTORIES {
                 let path = format!("{group}/boot/{}/{directory}", entry.name);
-                let Ok(inode) = preboot.lookup(device, &path, true) else {
+                let Ok(inode) = volume.lookup(device, &path, true) else {
                     continue;
                 };
                 if inode.kind == FileKind::Directory {
-                    collect(&preboot, device, &inode, &path, 0, &mut objects)?;
+                    collect(volume, device, &inode, &path, 0, &mut objects)?;
                 }
             }
             sets.push(BootSet {
@@ -221,10 +249,7 @@ pub fn candidates<R: ReadAt>(container: &mut Container<R>) -> Result<(Volume, Ve
             });
         }
     }
-    if sets.is_empty() {
-        return Err(PrebootError::NoBootDirectory);
-    }
-    Ok((preboot, sets))
+    Ok(sets)
 }
 
 /// The boot directory `<group>/boot/active` names: the 26A434 J473 LLB

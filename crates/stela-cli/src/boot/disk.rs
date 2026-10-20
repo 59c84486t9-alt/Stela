@@ -1,11 +1,13 @@
 //! `boot prepare --disk`: the boot bundle from an installed system's Preboot
 //! volume, built by `stela_loader::installed` with Stela's own APFS reader,
-//! the same code `stela.efi` runs at boot.
-use super::Prepare;
+//! the same code `stela.efi` runs at boot; with `--upgrade` a staged
+//! update's (`stela_loader::upgrade`), and with `--disk-recovery` a
+//! recoveryOS's (`stela_loader::recovery`).
+use super::{DiskRecovery, Prepare};
 use crate::apfs::open_image;
 use anyhow::{Result, ensure};
 use std::path::Path;
-use stela_loader::{boot_selection::BootVolume, installed, upgrade};
+use stela_loader::{boot_selection::BootVolume, installed, recovery, upgrade};
 use stela_runtime::apfs;
 
 impl Prepare {
@@ -23,6 +25,13 @@ impl Prepare {
             .transpose()?;
         if self.upgrade {
             return self.run_upgrade(&mut image, path, volume, &options);
+        }
+        if let Some(kind) = self.disk_recovery {
+            let kind = match kind {
+                DiskRecovery::Paired => recovery::Kind::Paired,
+                DiskRecovery::System => recovery::Kind::System,
+            };
+            return self.run_recovery(&mut image, path, kind, volume, &options);
         }
         let request = installed::Request {
             boot_hash: self.boot_hash.as_deref(),
@@ -47,6 +56,35 @@ impl Prepare {
             }
         });
         self.write(&installed.bundle, provenance)
+    }
+
+    fn run_recovery(
+        &self,
+        image: &mut crate::apfs::Image,
+        path: &Path,
+        kind: recovery::Kind,
+        volume: Option<BootVolume>,
+        options: &stela_loader::boot_bundle::Options,
+    ) -> Result<()> {
+        let (offset, recovered) =
+            recovery::prepare_disk(image, kind, volume.as_ref(), self.model.as_deref(), options)?;
+        let provenance = serde_json::json!({
+            "disk": {
+                "path": path.canonicalize()?.display().to_string(),
+                "container_offset": offset,
+                "recovery": kind.label(),
+                "recovery_volume": recovered.volume.name,
+                "recovery_uuid": apfs::uuid_text(&recovered.volume.uuid),
+                "boot_directory": recovered.set.directory(),
+                "evidence": recovered.evidence,
+                "objects": recovered.set.objects.iter().map(|o| serde_json::json!({
+                    "path": o.path,
+                    "payload_type": String::from_utf8_lossy(&o.payload_type),
+                    "bytes": o.bytes,
+                })).collect::<Vec<_>>(),
+            }
+        });
+        self.write(&recovered.bundle, provenance)
     }
 
     fn run_upgrade(

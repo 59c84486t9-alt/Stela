@@ -1583,6 +1583,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "miniz_oxide",
  "object",
  "serde",
  "serde_json",
