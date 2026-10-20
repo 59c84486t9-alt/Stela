@@ -31,24 +31,37 @@ const KERNEL_DECODED_LIMIT: u64 = 512 << 20;
 /// The prefix of the arm64e shared cache's files.
 const SHARED_CACHE: &str = "System/Library/dyld/dyld_shared_cache_arm64e";
 
+/// The release files CoreFoundation (`_CFCopySystemVersionDictionary`) and
+/// `sw_vers` read, the OS cryptex's before the system volume's: each
+/// part's own copy, at its place in the guest, so the guest reports its
+/// own release rather than the host's.
+const SYSTEM_VERSION: &str = "/System/Library/CoreServices/SystemVersion.plist";
+const RESTORE_VERSION: &str = "/System/Library/CoreServices/RestoreVersion.plist";
+
 /// One BuildManifest component the install reads, and what it takes.
 struct Part {
     component: &'static str,
     required: &'static [&'static str],
     shared_cache: bool,
+    /// Where the guest mounts the component's volume: its required files
+    /// go below it. The shared cache goes to the system volume's
+    /// `/System/Library/dyld`, where dyld also looks.
+    mount: &'static str,
 }
 
 /// The smaller member first, so a short disk fails before the large one.
 const PARTS: [Part; 2] = [
     Part {
         component: "Cryptex1,SystemOS",
-        required: &[],
+        required: &[SYSTEM_VERSION, RESTORE_VERSION],
         shared_cache: true,
+        mount: "System/Cryptexes/OS",
     },
     Part {
         component: "OS",
-        required: &["/usr/lib/dyld"],
+        required: &["/usr/lib/dyld", SYSTEM_VERSION, RESTORE_VERSION],
         shared_cache: false,
+        mount: "",
     },
 ];
 
@@ -297,18 +310,7 @@ fn install_member(
         progress.done();
     }
     println!("Copying the files of {}", plan.part.component);
-    let selection = disk::Selection {
-        required: plan
-            .part
-            .required
-            .iter()
-            .map(|path| path.to_string())
-            .collect(),
-        optional: vec![],
-        shared_cache: plan.part.shared_cache,
-        volume: None,
-    };
-    let copy = disk::copy_into(&image, &partial.join(super::ROOT_DIRECTORY), &selection)?;
+    let (volume, files) = copy_part(&image, &partial.join(super::ROOT_DIRECTORY), plan.part)?;
     drop(decrypted);
     Ok((
         Member {
@@ -316,10 +318,46 @@ fn install_member(
             member: plan.member.clone(),
             member_bytes: plan.bytes,
             aea_header_sha256: metadata.header_sha256,
-            volume: copy.volume,
+            volume,
         },
-        copy.files,
+        files,
     ))
+}
+
+/// Copy `part`'s files out of its decrypted `image` into the guest `root`:
+/// its required files below its mount, its shared cache into the system
+/// volume. The copied files are listed by their guest paths.
+fn copy_part(
+    image: &Path,
+    root: &Path,
+    part: &Part,
+) -> Result<(Option<String>, Vec<disk::Copied>)> {
+    let selection = |required: &[&str], shared_cache: bool| disk::Selection {
+        required: required.iter().map(|path| path.to_string()).collect(),
+        optional: vec![],
+        shared_cache,
+        volume: None,
+    };
+    let mounted = !part.mount.is_empty();
+    let copy = disk::copy_into(
+        image,
+        &root.join(part.mount),
+        &selection(part.required, part.shared_cache && !mounted),
+    )?;
+    let mut files: Vec<disk::Copied> = copy
+        .files
+        .into_iter()
+        .map(|mut file| {
+            if mounted {
+                file.path = format!("/{}{}", part.mount, file.path);
+            }
+            file
+        })
+        .collect();
+    if part.shared_cache && mounted {
+        files.extend(disk::copy_into(image, root, &selection(&[], true))?.files);
+    }
+    Ok((copy.volume, files))
 }
 
 /// Install `layout`'s build from guest roots with `extract-guest-files`
@@ -600,6 +638,64 @@ mod tests {
             .to_string();
         assert!(error.contains("99Z999"), "{error}");
         assert!(!layout.base.exists());
+        Ok(())
+    }
+
+    /// The OS cryptex's release files go below its mount, its shared cache
+    /// into the system volume, each listed at its guest path.
+    #[test]
+    fn a_cryptex_places_its_release_below_its_mount_and_its_cache_in_the_system() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let volume = work.path().join("volume");
+        for (path, text) in [
+            (SYSTEM_VERSION, "system"),
+            (RESTORE_VERSION, "restore"),
+            ("/System/Library/dyld/dyld_shared_cache_arm64e", "cache"),
+            (
+                "/System/Library/dyld/dyld_shared_cache_arm64e.01",
+                "cache 1",
+            ),
+            ("/System/Library/dyld/dyld_shared_cache_x86_64", "other"),
+        ] {
+            let file = volume.join(path.trim_start_matches('/'));
+            fs::create_dir_all(file.parent().unwrap())?;
+            fs::write(file, text)?;
+        }
+        let image = work.path().join("cryptex.dmg");
+        let created = std::process::Command::new("/usr/bin/hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-format",
+                "UDRO",
+                "-volname",
+                "Cryptex",
+                "-srcfolder",
+            ])
+            .arg(&volume)
+            .arg(&image)
+            .status()?;
+        ensure!(created.success(), "hdiutil create failed");
+        let root = work.path().join("root");
+        let (_, files) = copy_part(&image, &root, &PARTS[0])?;
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "/System/Cryptexes/OS/System/Library/CoreServices/SystemVersion.plist",
+                "/System/Cryptexes/OS/System/Library/CoreServices/RestoreVersion.plist",
+                "/System/Library/dyld/dyld_shared_cache_arm64e",
+                "/System/Library/dyld/dyld_shared_cache_arm64e.01",
+            ]
+        );
+        for path in paths {
+            assert!(root.join(path.trim_start_matches('/')).is_file(), "{path}");
+        }
+        assert!(
+            !root
+                .join("System/Library/dyld/dyld_shared_cache_x86_64")
+                .exists()
+        );
         Ok(())
     }
 
