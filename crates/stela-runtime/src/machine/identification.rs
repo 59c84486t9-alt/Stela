@@ -32,6 +32,10 @@ pub enum Basis {
     /// Holds when the profile has EL2, which runs only as a VHE host
     /// (HCR_EL2.E2H set, EL1 never executing).
     Host(&'static str),
+    /// Holds when the chip also has the named feature, an engine property
+    /// with why: a field that describes the feature's instructions only
+    /// within the other's.
+    With(&'static str, &'static str),
     /// Holds when the host target has a data-independent-timing target
     /// ([`TargetCpu::data_independent_timing_target`]: it declares Intel's
     /// data operand independent timing and supports a tier the DIT audit
@@ -104,8 +108,11 @@ const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's 
 const PAUTH_LR: &str = "PACM sets PSTATE.PACM for the next instruction, as IsPACMEnabled \
      allows, and the two-modifier forms and the PACM-modified PAC*SP, AUT*SP, RETA* and \
      *1716 forms compute ComputePAC2QARMA";
-const SME_PENDING: &str = "the engine runs streaming mode and the SME and SVE instructions, \
-     but does not derive ID_AA64SMFR0_EL1 and ID_AA64ZFR0_EL1 yet";
+const SME_RUNS: &str = "the engine runs streaming mode, ZA and ZT0 at a 512-bit SVL and every \
+     SVE and SME form of the chip's features, or takes UNDEFINED where Arm's decode does \
+     (engine::scalable)";
+const FP8_PENDING: &str = "the FP8 outer products and dot products need FPMR, which the engine \
+     does not implement";
 const PREDICTION_RESTRICTION: &str = "CFP, DVP, CPP and (FEAT_SPECRES2) COSP RCTX run their \
      generated accessors, with SCTLR_ELx.EnRCTX and HFGITR_EL2 traps, and complete with no \
      effect: the engine keeps no prediction state a later context could use";
@@ -323,69 +330,111 @@ pub const TABLE: &[Row] = &[
         "FEAT_SSBS2",
         engine(true, "MRS and MSR of SSBS"),
     ),
+    feature(ID_AA64PFR1_EL1, 24, 1, "FEAT_SME", engine(true, SME_RUNS)),
+    feature(ID_AA64PFR1_EL1, 24, 2, "FEAT_SME2", engine(true, SME_RUNS)),
+    // ID_AA64SMFR0_EL1: F32F32, BI32I32, B16F32, F16F32, I8I32, F8F32,
+    // F8F16, F16F16, B16B16, I16I32, F64F64, I16I64, SMEver and LUTv2, with
+    // the levels AARCHMRS requires of each feature. FA64 (bit 63) reads 0:
+    // no Apple chip has FEAT_SME_FA64.
+    feature(ID_AA64SMFR0_EL1, 32, 1, "FEAT_SME", engine(true, SME_RUNS)),
+    feature(ID_AA64SMFR0_EL1, 33, 1, "FEAT_SME2", engine(true, SME_RUNS)),
+    feature(ID_AA64SMFR0_EL1, 34, 1, "FEAT_SME", engine(true, SME_RUNS)),
+    feature(ID_AA64SMFR0_EL1, 35, 1, "FEAT_SME", engine(true, SME_RUNS)),
     feature(
-        ID_AA64PFR1_EL1,
-        24,
-        1,
+        ID_AA64SMFR0_EL1,
+        36,
+        0xf,
         "FEAT_SME",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
-        ID_AA64PFR1_EL1,
-        24,
-        2,
-        "FEAT_SME2",
-        engine(false, SME_PENDING),
+        ID_AA64SMFR0_EL1,
+        40,
+        1,
+        "FEAT_SME_F8F32",
+        engine(false, FP8_PENDING),
     ),
-    // ID_AA64SMFR0_EL1 and ID_AA64ZFR0_EL1
+    feature(
+        ID_AA64SMFR0_EL1,
+        41,
+        1,
+        "FEAT_SME_F8F16",
+        engine(false, FP8_PENDING),
+    ),
     feature(
         ID_AA64SMFR0_EL1,
         42,
         1,
         "FEAT_SME_F16F16",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
         43,
         1,
         "FEAT_SME_B16B16",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
+    ),
+    feature(
+        ID_AA64SMFR0_EL1,
+        44,
+        0b0101,
+        "FEAT_SME2",
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
         48,
         1,
         "FEAT_SME_F64F64",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
         52,
         0xf,
         "FEAT_SME_I16I64",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
     ),
+    feature(ID_AA64SMFR0_EL1, 56, 1, "FEAT_SME2", engine(true, SME_RUNS)),
     feature(
         ID_AA64SMFR0_EL1,
         56,
         2,
         "FEAT_SME2p1",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
     ),
     feature(
         ID_AA64SMFR0_EL1,
         60,
         1,
         "FEAT_SME_LUTv2",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
+    ),
+    // ID_AA64ZFR0_EL1 describes the SVE instructions of streaming mode:
+    // SVEver reads 0, since no Apple chip has FEAT_SVE (AARCHMRS: FEAT_SVE2
+    // if and only if SVEver is at least 1), and with FEAT_SME the BF16,
+    // I8MM and B16B16 fields follow FEAT_BF16, FEAT_I8MM and FEAT_SVE_B16B16.
+    feature(
+        ID_AA64ZFR0_EL1,
+        20,
+        1,
+        "FEAT_BF16",
+        Basis::With("FEAT_SME", SME_RUNS),
     ),
     feature(
         ID_AA64ZFR0_EL1,
         24,
         1,
         "FEAT_SVE_B16B16",
-        engine(false, SME_PENDING),
+        engine(true, SME_RUNS),
+    ),
+    feature(
+        ID_AA64ZFR0_EL1,
+        44,
+        1,
+        "FEAT_I8MM",
+        Basis::With("FEAT_SME", SME_RUNS),
     ),
     // ID_AA64ISAR0_EL1
     feature(
@@ -1100,6 +1149,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
     }
     match row.basis {
         Basis::Engine(holds, _) => holds,
+        Basis::With(feature, _) => has(chip, feature),
         Basis::Host(_) => el2,
         Basis::Timing(_) => target.data_independent_timing_target().is_some(),
         Basis::Instructions(samples) => samples.iter().all(|word| {
@@ -1339,9 +1389,12 @@ mod tests {
                 assert_eq!(field, row.absent, "{:?} field {}", row.register, row.shift);
             }
         }
-        // Features the M2 lacks are never advertised: SVE stays 0.
+        // Features the M2 lacks are never advertised: SVE stays 0, and
+        // ZFR0 describes streaming SVE only on a chip with SME.
         assert_eq!(value(ID_AA64PFR0_EL1) >> 32 & 0xf, 0);
-        assert_eq!(value(ID_AA64ZFR0_EL1), 0);
+        if !has(crate::machine::test_chip(), "FEAT_SME") {
+            assert_eq!(value(ID_AA64ZFR0_EL1), 0);
+        }
     }
 
     #[test]
@@ -1488,5 +1541,33 @@ mod tests {
         let specres = 1 + u64::from(crate::machine::system::Feature::FEAT_SPECRES2.on(chip));
         assert_eq!(field(chip, ID_AA64ISAR1_EL1, 40), specres);
         assert_eq!(field(chip, ID_AA64MMFR2_EL1, 32), 1);
+    }
+
+    #[test]
+    fn the_sme_chips_advertise_streaming_sve_and_sme_by_feature() {
+        let value = |chip, register| {
+            derive(chip, TargetCpu::detect(), true)
+                .into_iter()
+                .find(|(r, _)| *r == register)
+                .unwrap()
+                .1
+        };
+        // PFR1.SME 2 (FEAT_SME2) from the M4. SMFR0: F32F32, BI32I32,
+        // B16F32, F16F32, I8I32 0xf, I16I32 0b0101, F64F64, I16I64 0xf and
+        // SMEver 1 on the M4; the M5 adds F16F16, B16B16 and SMEver 2
+        // (FEAT_SME2p1), the M6 LUTv2, whose F8F32 and F8F16 wait for FP8.
+        // ZFR0: SVEver 0, BF16 and I8MM, and B16B16 from the M5.
+        for (chip, sme, smfr0, zfr0) in [
+            (Chip::AppleM1, 0, 0, 0),
+            (Chip::AppleM2, 0, 0, 0),
+            (Chip::AppleM3, 0, 0, 0),
+            (Chip::AppleM4, 2, 0x01f1_50ff_0000_0000, 0x1000_0010_0000),
+            (Chip::AppleM5, 2, 0x02f1_5cff_0000_0000, 0x1000_0110_0000),
+            (Chip::AppleM6, 2, 0x12f1_5cff_0000_0000, 0x1000_0110_0000),
+        ] {
+            assert_eq!(value(chip, ID_AA64PFR1_EL1) >> 24 & 0xf, sme, "{chip:?}");
+            assert_eq!(value(chip, ID_AA64SMFR0_EL1), smfr0, "{chip:?}");
+            assert_eq!(value(chip, ID_AA64ZFR0_EL1), zfr0, "{chip:?}");
+        }
     }
 }
