@@ -371,9 +371,15 @@ pub fn apply(
 /// container's device reports a `Virtual Interface` (a disk image attached
 /// by DiskImages) and the volume's role is System
 /// (`apfs_vfsop_mount`, 0xfffffe000b8a48d4..0xfffffe000b8a4904). The blob is
-/// iBoot's `base_system_root_hash.img4` (its `base-system-roothash-path`):
-/// the root-hash `IM4P` with the manifest that signs it.
+/// iBoot's `base_system_root_hash.img4` (its `base-system-roothash-path`),
+/// authenticated against the manifest that signs it, of which iBoot forwards
+/// only the payload: `validate_root_hash` (0xfffffe000b89cc28) takes a
+/// forwarded payload of exactly [`ROOT_HASH_RECORD_BYTES`] and compares its
+/// fields with the volume's on-disk seal (0xfffffe000b89ce00..0xb89ce48),
+/// logging "root_hash size mismatch" otherwise.
 const SECURE_BOOT_HASHES: &str = "/chosen/secure-boot-hashes";
+/// The root-hash record a `csys`/`isys` `IM4P` carries.
+const ROOT_HASH_RECORD_BYTES: usize = 0xd0;
 
 /// The boot-args XNU's `imageboot_desired` takes as the disk image to root
 /// from (xnu `bsd/kern/imageboot.c`). iBoot passes BaseSystem as
@@ -469,8 +475,9 @@ impl SealedVolume {
     }
 }
 
-/// Forward `volume`'s root hash: an `IMG4` of its root-hash `IM4P` and the
-/// boot manifest, which must sign it.
+/// Forward `volume`'s root hash: the payload of its root-hash `IM4P`, once
+/// the boot manifest is shown to sign that `IM4P`, as iBoot authenticates
+/// the image before forwarding its record.
 pub fn apply_root_hash(
     tree: &mut DeviceTree,
     volume: SealedVolume,
@@ -478,7 +485,7 @@ pub fn apply_root_hash(
     boot_manifest: Option<(&[u8], &Manifest)>,
 ) -> Result<(Vec<Decision>, Vec<String>)> {
     let property = volume.property();
-    let (im4p, (manifest_bytes, manifest)) = match (im4p, boot_manifest) {
+    let (im4p, (_, manifest)) = match (im4p, boot_manifest) {
         (Some(im4p), Some(manifest)) => (im4p, manifest),
         (None, _) => {
             return Ok((
@@ -514,6 +521,14 @@ pub fn apply_root_hash(
         matches!(signed, Some(Value::Data(digest)) if digest.as_slice() == crate::im4m::sha384(im4p).as_slice()),
         "the boot manifest does not sign this {tag} root hash"
     );
+    let (record, _) = crate::im4p::decode(im4p, ROOT_HASH_RECORD_BYTES as u64)
+        .map_err(|e| anyhow::anyhow!("the {tag} root hash payload: {e}"))?;
+    ensure!(
+        record.len() == ROOT_HASH_RECORD_BYTES,
+        "the {tag} root hash payload is {} bytes, not the {ROOT_HASH_RECORD_BYTES}-byte record \
+         APFS's validate_root_hash takes",
+        record.len()
+    );
     tree.ensure_child(CHOSEN, "secure-boot-hashes")?;
     let mut writer = Writer {
         tree,
@@ -522,8 +537,8 @@ pub fn apply_root_hash(
     writer.set(
         SECURE_BOOT_HASHES,
         property,
-        stela_runtime::img4::compose(im4p, manifest_bytes),
-        &format!("IMG4 of the {tag} root hash and the boot manifest that signs it"),
+        record,
+        &format!("the {tag} root-hash record, signed by the boot manifest"),
     )?;
     Ok((writer.decisions, vec![]))
 }
@@ -970,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn the_root_hash_is_forwarded_as_an_img4_the_boot_manifest_signs() -> Result<()> {
+    fn the_root_hash_record_is_forwarded_once_the_boot_manifest_signs_it() -> Result<()> {
         let im4p = der(
             &[0x30],
             &[
@@ -1002,9 +1017,7 @@ mod tests {
             .property(SECURE_BOOT_HASHES, "base-system-volume-auth-blob")
             .unwrap()
             .value;
-        let parts = stela_runtime::img4::parse(blob).unwrap();
-        assert_eq!(parts.payload, im4p.as_slice());
-        assert_eq!(parts.manifest, Some(signed.as_slice()));
+        assert_eq!(blob, &[0x5a; 208]);
 
         // Without the object the gap is reported; a manifest that does not
         // sign it, or the wrong payload type, is refused.
