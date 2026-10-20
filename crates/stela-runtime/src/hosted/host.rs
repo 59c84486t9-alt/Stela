@@ -439,6 +439,9 @@ pub struct ProcessHost {
     /// Where this thread's IC invalidations reach the other threads,
     /// whose engines keep compiled code of their own.
     peers: Option<Box<dyn FnMut(Option<u64>) + Send>>,
+    /// The process's JIT ranges while this thread's SPRR view gives JIT
+    /// pages `rw-`, in which their RWX pages refuse execution.
+    writable_jit: Option<std::sync::Arc<std::sync::Mutex<super::jit::Jit>>>,
 }
 
 impl ProcessHost {
@@ -469,7 +472,24 @@ impl ProcessHost {
             runner: NativeRunner::new(vec![(start, start + ARENA_BYTES as u64)]),
             translations: super::translations::Store::open(),
             peers: None,
+            writable_jit: None,
         })
+    }
+
+    /// Follow this thread's JIT view: `jit` while it is writable, `None`
+    /// while it is executable. Whether the view changed.
+    pub fn set_jit_view(
+        &mut self,
+        jit: Option<std::sync::Arc<std::sync::Mutex<super::jit::Jit>>>,
+    ) -> bool {
+        let changed = self.writable_jit.is_some() != jit.is_some();
+        self.writable_jit = jit;
+        changed
+    }
+
+    /// Whether this thread's JIT view is writable.
+    pub fn jit_writable(&self) -> bool {
+        self.writable_jit.is_some()
     }
 
     /// Reach the process's other threads with this thread's IC
@@ -509,6 +529,12 @@ impl Drop for ProcessHost {
 }
 
 impl Host for ProcessHost {
+    fn fetch_permitted(&mut self, virtual_address: u64) -> bool {
+        self.writable_jit
+            .as_ref()
+            .is_none_or(|jit| super::threads::lock(jit).executable(virtual_address))
+    }
+
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         self.tables.read(physical, buffer) || copy_in(physical, buffer)
     }

@@ -346,6 +346,9 @@ static void emit(uint32_t *code, uint16_t value) {
 static int call(uint32_t *code) {
     return ((int (*)(void))ptrauth_sign_unauthenticated(code, ptrauth_key_function_pointer, 0))();
 }
+static void execute(uint32_t *code) {
+    if (sigsetjmp(back, 1) == 0) printf("executed %d\n", call(code));
+}
 static void *other(void *code) {
     printf("thread runs %d\n", call(code));
     store(code, 0);
@@ -375,6 +378,7 @@ int main(void) {
     printf("runs %d\n", call(code));
     pthread_jit_write_protect_np(0);
     emit(code, 7);
+    execute(code);
     sys_icache_invalidate(code, 8);
     pthread_t thread;
     pthread_create(&thread, NULL, other, code);
@@ -444,7 +448,7 @@ fn map_jit_regions_follow_each_threads_write_protection() {
     let refusals = "supported 1\nfixed 22\nshared 22\n";
     let jit = |second: i32| {
         format!(
-            "{refusals}fault 10\nregion 7 1 1\nruns 42\nthread runs 7\nfault 10\nstored\nruns 7\nsecond \
+            "{refusals}fault 10\nregion 7 1 1\nruns 42\nfault 10\nthread runs 7\nfault 10\nstored\nruns 7\nsecond \
              {second}\n"
         )
     };

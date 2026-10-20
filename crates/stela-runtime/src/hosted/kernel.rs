@@ -162,7 +162,7 @@ pub(super) struct Process {
     /// Its asynchronous I/O queues and workers.
     pub(super) aio: Arc<bsd::aio::Aio>,
     /// Its MAP_JIT ranges and the view their host protection follows.
-    pub(super) jit: Mutex<Jit>,
+    pub(super) jit: Arc<Mutex<Jit>>,
     /// The hosted devices' user clients, which serve
     /// `iokit_user_client_trap` on their connections.
     pub(super) user_client_traps: Option<Arc<dyn UserClientTraps>>,
@@ -294,7 +294,7 @@ impl Process {
             signature.is_some_and(Signature::single_jit),
         );
         Arc::new(Self {
-            jit: Mutex::new(jit),
+            jit: Arc::new(Mutex::new(jit)),
             user_client_traps: config.user_client_traps.clone(),
             user_clients_closed: AtomicBool::new(false),
             pac_exception_fatal,
@@ -419,6 +419,10 @@ impl Kernel {
     /// in this thread's engine now, in the others' before they next run.
     pub(super) fn invalidate_code(&self, pe: &mut Pe, address: u64, bytes: u64) {
         pe.invalidate_code(address, bytes);
+        // The range may have become an RWX JIT page this view refuses.
+        if pe.host.jit_writable() {
+            pe.fetch_permissions_changed();
+        }
         self.process
             .runtime
             .registry
@@ -659,7 +663,7 @@ impl Kernel {
                     return Ok(false);
                 }
                 self.jit_permissions = value;
-                self.jit_view()?;
+                self.jit_view(pe)?;
             }
             _ => return Ok(false),
         }
@@ -668,10 +672,25 @@ impl Kernel {
     }
 
     /// Give the RWX MAP_JIT pages the host protection of this thread's
-    /// view ([`super::jit`]), while it holds the execution lock: as it
-    /// takes the lock, or writes SPRR_PERM_EL0.
-    pub(super) fn jit_view(&mut self) -> Result<()> {
-        lock(&self.process.jit).set_view(jit::writable(self.jit_permissions))
+    /// view ([`super::jit`]), and its engine the view's execute half, while
+    /// it holds the execution lock: as it takes the lock, or writes
+    /// SPRR_PERM_EL0. The engine checks its fetches again only when the
+    /// view changed while a JIT page is RWX.
+    pub(super) fn jit_view(&mut self, pe: &mut Pe) -> Result<()> {
+        let writable = jit::writable(self.jit_permissions);
+        let rwx = {
+            let mut jit = lock(&self.process.jit);
+            jit.set_view(writable)?;
+            jit.has_rwx()
+        };
+        if pe
+            .host
+            .set_jit_view(writable.then(|| self.process.jit.clone()))
+            && rwx
+        {
+            pe.fetch_permissions_changed();
+        }
+        Ok(())
     }
 
     /// EXC_BAD_INSTRUCTION with EXC_ARM_UNDEFINED and the instruction the

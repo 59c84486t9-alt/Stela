@@ -612,11 +612,15 @@ fn resume(kernel: &mut Kernel, member: &Member, pe: &mut Pe) -> Result<()> {
     if kernel.process.runtime.execution.acquire(kernel.thread) {
         pe.cpu.monitor = None;
     }
-    kernel.jit_view()?;
+    kernel.jit_view(pe)?;
     if member.has_stale.swap(false, Ordering::SeqCst) {
         let ranges = std::mem::take(&mut *lock(&member.stale));
         for (address, bytes) in ranges {
             pe.invalidate_code(address, bytes);
+        }
+        // A stale range may have become an RWX JIT page this view refuses.
+        if pe.host.jit_writable() {
+            pe.fetch_permissions_changed();
         }
     }
     Ok(())

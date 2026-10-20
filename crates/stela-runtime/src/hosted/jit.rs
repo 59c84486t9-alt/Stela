@@ -20,9 +20,10 @@
 //! the view of the thread that holds it: read/write while that thread's
 //! view is writable, read-only otherwise, so its writes fault as the
 //! arm64 kernel's permission fault does. Guest code never executes from
-//! host pages, and the engine's fetch translation does not yet take the
-//! view's execute half: a thread whose view is writable still executes JIT
-//! code ([`Jit::executable`] names the pages where it would fault).
+//! host pages, so the view's execute half is the engine's: while a
+//! thread's view is writable its host refuses fetches from RWX JIT pages
+//! ([`Jit::executable`]), which take the permission instruction abort the
+//! arm64 kernel's SPRR fault is.
 use crate::hosted::darwin::EINVAL;
 use crate::hosted::memory::{self, Protection};
 use anyhow::Result;
@@ -230,13 +231,18 @@ impl Jit {
         Some((low, high, None))
     }
 
-    /// Whether the thread holding the execution lock may execute at
-    /// `address`: anywhere but an RWX JIT page while its view is writable.
+    /// Whether a thread whose view is writable may execute at `address`:
+    /// anywhere but an RWX JIT page.
     pub fn executable(&self, address: u64) -> bool {
-        !self.writable
-            || self
-                .at(address)
-                .is_none_or(|(_, _, p)| p != Protection::ALL)
+        self.at(address)
+            .is_none_or(|(_, _, protection)| protection != Protection::ALL)
+    }
+
+    /// Whether any JIT page is RWX, in the per-thread view.
+    pub fn has_rwx(&self) -> bool {
+        self.ranges
+            .values()
+            .any(|range| range.protection == Protection::ALL)
     }
 
     /// The RWX JIT ranges, whose compiled code a thread drops when its view
@@ -352,7 +358,7 @@ mod tests {
         jit.insert(0x10_0000, 0x4000, Protection::ALL);
         jit.insert(0x20_0000, 0x4000, Protection::READ_WRITE);
         assert_eq!(jit.host_protection(Protection::ALL), Protection::READ);
-        assert!(jit.executable(0x10_0000));
+        assert!(jit.has_rwx());
         jit.writable = true;
         assert_eq!(jit.host_protection(Protection::ALL), Protection::READ_WRITE);
         assert_eq!(
@@ -361,5 +367,7 @@ mod tests {
         );
         assert!(!jit.executable(0x10_0000));
         assert!(jit.executable(0x20_0000) && jit.executable(0x30_0000));
+        jit.protect(0x10_0000, 0x4000, |_| Protection::READ_EXECUTE);
+        assert!(!jit.has_rwx() && jit.executable(0x10_0000));
     }
 }
