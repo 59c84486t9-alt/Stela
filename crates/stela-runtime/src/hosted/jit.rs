@@ -197,6 +197,39 @@ impl Jit {
         (address < range.end).then_some((start, range.end, range.protection))
     }
 
+    /// The arm64 map entry a region report for `address` names when the
+    /// host reports its region `[start, end)`: the host coalesces an
+    /// anonymous mapping with an adjacent one of equal attributes, and XNU
+    /// never coalesces a JIT entry (`used_for_jit`). The entry's start,
+    /// end and, for a JIT part, VM protection; `None` when no JIT range
+    /// meets the host region.
+    pub fn entry(
+        &self,
+        address: u64,
+        start: u64,
+        end: u64,
+    ) -> Option<(u64, u64, Option<Protection>)> {
+        let (_, last) = self.ranges.range(..end).next_back()?;
+        if last.end <= start {
+            return None;
+        }
+        let at = address.max(start);
+        if let Some((low, high, protection)) = self.at(at) {
+            return Some((low.max(start), high.min(end), Some(protection)));
+        }
+        let low = self
+            .ranges
+            .range(..at)
+            .next_back()
+            .map_or(start, |(_, range)| range.end.max(start));
+        let high = self
+            .ranges
+            .range(at..)
+            .next()
+            .map_or(end, |(&next, _)| next.min(end));
+        Some((low, high, None))
+    }
+
     /// Whether the thread holding the execution lock may execute at
     /// `address`: anywhere but an RWX JIT page while its view is writable.
     pub fn executable(&self, address: u64) -> bool {
@@ -283,6 +316,34 @@ mod tests {
         assert_eq!(jit.switched(), [(0x10_0000, 0x4000), (0x10_8000, 0x4000)]);
         let changed = jit.protect(0x10_c000, 0x4000, |_| Protection::ALL);
         assert_eq!(changed, [(0x10_c000, 0x4000, Protection::READ)]);
+    }
+
+    #[test]
+    fn region_reports_name_the_jit_entry_inside_a_coalesced_host_region() {
+        let mut jit = Jit::new(true, false);
+        jit.insert(0x10_8000, 0x4000, Protection::ALL);
+        jit.insert(0x11_0000, 0x4000, Protection::READ);
+        assert_eq!(jit.entry(0x10_0000, 0x10_0000, 0x10_8000), None);
+        assert_eq!(
+            jit.entry(0x10_8000, 0x10_0000, 0x10_c000),
+            Some((0x10_8000, 0x10_c000, Some(Protection::ALL)))
+        );
+        assert_eq!(
+            jit.entry(0x10_2000, 0x10_0000, 0x11_8000),
+            Some((0x10_0000, 0x10_8000, None))
+        );
+        assert_eq!(
+            jit.entry(0x10_c000, 0x10_0000, 0x11_8000),
+            Some((0x10_c000, 0x11_0000, None))
+        );
+        assert_eq!(
+            jit.entry(0x0f_0000, 0x11_0000, 0x11_8000),
+            Some((0x11_0000, 0x11_4000, Some(Protection::READ)))
+        );
+        assert_eq!(
+            jit.entry(0x11_4000, 0x10_0000, 0x11_8000),
+            Some((0x11_4000, 0x11_8000, None))
+        );
     }
 
     #[test]

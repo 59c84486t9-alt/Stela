@@ -42,12 +42,15 @@ const MAC_MAX_LABEL_BUF_LEN: u64 = 8192;
 /// `PROC_INFO_CALL_SET_DYLD_IMAGES` (`sys/proc_info_private.h`).
 const PROC_INFO_CALL_SET_DYLD_IMAGES: i32 = 0xf;
 /// `PROC_INFO_CALL_PIDINFO` and its region flavors, whose
-/// `proc_regioninfo` starts with `pri_protection` and has `pri_address`
-/// at 80 of its 96 bytes (`sys/proc_info.h`).
+/// `proc_regioninfo` starts with `pri_protection` and has `pri_offset` at
+/// 16, `pri_address` at 80 and `pri_size` at 88 of its 96 bytes
+/// (`sys/proc_info.h`).
 const PROC_INFO_CALL_PIDINFO: i32 = 2;
 const PROC_PIDREGIONINFO: i32 = 7;
 const PROC_PIDREGIONPATHINFO: i32 = 8;
+const REGION_OFFSET: u64 = 16;
 const REGION_ADDRESS: u64 = 80;
+const REGION_SIZE: u64 = 88;
 const REGION_INFO_BYTES: u64 = 96;
 /// `PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID`, which
 /// `proc_info_extended_id` refuses together before any call.
@@ -172,7 +175,7 @@ fn proc_info(kernel: &mut Kernel, call: &Call, buffer: usize) -> Result<Outcome>
             )
             && matches!(outcome, Outcome::Return(bytes, _) if bytes >= REGION_INFO_BYTES)
         {
-            jit_region_protection(kernel, call.argument(buffer));
+            jit_region(kernel, call.argument(buffer - 1), call.argument(buffer));
         }
         return Ok(outcome);
     }
@@ -193,15 +196,30 @@ fn proc_info(kernel: &mut Kernel, call: &Call, buffer: usize) -> Result<Outcome>
     )
 }
 
-/// A `proc_regioninfo` at `info` of an RWX JIT range gives the range's VM
-/// protection, not the host's current one.
-fn jit_region_protection(kernel: &Kernel, info: u64) {
-    let Some(address) = memory::read_u64(info + REGION_ADDRESS) else {
+/// A `proc_regioninfo` at `info` for `address` whose host region meets a
+/// JIT range names the arm64 map's own entry ([`crate::hosted::jit::Jit::entry`]):
+/// its bounds and offset, and a JIT part's VM protection in place of the
+/// host's current one. Its page counts stay the host region's.
+fn jit_region(kernel: &Kernel, address: u64, info: u64) {
+    let (Some(start), Some(size), Some(offset)) = (
+        memory::read_u64(info + REGION_ADDRESS),
+        memory::read_u64(info + REGION_SIZE),
+        memory::read_u64(info + REGION_OFFSET),
+    ) else {
         return;
     };
-    if let Some((_, _, protection)) = crate::hosted::threads::lock(&kernel.process.jit).at(address)
-        && protection == memory::Protection::ALL
-    {
+    let entry = crate::hosted::threads::lock(&kernel.process.jit).entry(
+        address,
+        start,
+        start.saturating_add(size),
+    );
+    let Some((low, high, protection)) = entry else {
+        return;
+    };
+    memory::write_u64(info + REGION_ADDRESS, low);
+    memory::write_u64(info + REGION_SIZE, high - low);
+    memory::write_u64(info + REGION_OFFSET, offset.wrapping_add(low - start));
+    if let Some(protection) = protection {
         memory::write_u32(info, protection.0 as u32);
     }
 }

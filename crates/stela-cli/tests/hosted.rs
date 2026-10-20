@@ -357,12 +357,17 @@ int main(void) {
     printf("supported %d\n", pthread_jit_write_protect_supported_np());
     printf("fixed %d\n", mmap((void *)0x300000000, 0x4000, all, flags | MAP_FIXED, -1, 0) == MAP_FAILED ? errno : 0);
     printf("shared %d\n", mmap(NULL, 0x4000, all, MAP_ANON | MAP_SHARED | MAP_JIT, -1, 0) == MAP_FAILED ? errno : 0);
-    uint32_t *code = mmap(NULL, 0x4000, all, flags, -1, 0);
+    // Directly above a read-only anonymous neighbor, which the host's
+    // region coalesces with the JIT mapping and the arm64 kernel does not.
+    char *below = mmap(NULL, 0x8000, PROT_READ, MAP_ANON | MAP_PRIVATE, -1, 0);
+    munmap(below + 0x4000, 0x4000);
+    uint32_t *code = mmap(below + 0x4000, 0x4000, all, flags, -1, 0);
     if (code == MAP_FAILED) { printf("jit %d\n", errno); return 0; }
     store(code, 0);
     struct proc_regioninfo region;
     int size = proc_pidinfo(getpid(), PROC_PIDREGIONINFO, (uint64_t)code, &region, sizeof region);
-    printf("region %d\n", size == sizeof region ? (int)region.pri_protection : -1);
+    printf("region %d %d %d\n", size == sizeof region ? (int)region.pri_protection : -1,
+           (char *)code == below + 0x4000, region.pri_address == (uint64_t)code);
     pthread_jit_write_protect_np(0);
     emit(code, 42);
     pthread_jit_write_protect_np(1);
@@ -439,7 +444,7 @@ fn map_jit_regions_follow_each_threads_write_protection() {
     let refusals = "supported 1\nfixed 22\nshared 22\n";
     let jit = |second: i32| {
         format!(
-            "{refusals}fault 10\nregion 7\nruns 42\nthread runs 7\nfault 10\nstored\nruns 7\nsecond \
+            "{refusals}fault 10\nregion 7 1 1\nruns 42\nthread runs 7\nfault 10\nstored\nruns 7\nsecond \
              {second}\n"
         )
     };
