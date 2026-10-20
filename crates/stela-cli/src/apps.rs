@@ -418,7 +418,8 @@ fn sync(
         }
     }
     let program_digest = launcher::program_digest(environment)?;
-    let mut taken: Vec<PathBuf> = vec![];
+    // Kept launchers keep their names; a new one takes a free name.
+    let mut taken: Vec<PathBuf> = kept.iter().map(|entry| entry.launcher.clone()).collect();
     for wanted in &wanted {
         let earlier = kept
             .iter()
@@ -428,7 +429,6 @@ fn sync(
             Some(entry) => entry.launcher.clone(),
             None => launcher_path(environment, &wanted.bundle, &taken),
         };
-        taken.push(path.clone());
         let fingerprint = launcher::fingerprint(environment, &wanted.bundle, &program_digest)?;
         let current = earlier.as_ref().is_some_and(|entry| {
             entry.fingerprint == fingerprint && launcher::is_ours(&path, &entry.target)
@@ -442,8 +442,10 @@ fn sync(
                 path.display(),
                 wanted.bundle.path.display()
             ));
-            taken.pop();
             continue;
+        }
+        if earlier.is_none() {
+            taken.push(path.clone());
         }
         let verb = match (&earlier, dry_run) {
             (None, true) => "Would add",
@@ -799,6 +801,47 @@ pub(crate) mod tests {
             .map(|entry| entry.launcher.file_name().unwrap().to_string_lossy().into())
             .collect();
         assert_eq!(names, ["Arm (Beta).app", "Arm.app"]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_kept_launcher_keeps_its_name_when_a_same_named_app_is_added() -> Result<()> {
+        let work = tempfile::tempdir()?;
+        let applications = work.path().join("Applications");
+        let elsewhere = work.path().join("Downloads");
+        std::fs::create_dir_all(&applications)?;
+        std::fs::create_dir_all(&elsewhere)?;
+        let scanned = app(&applications, "Arm", ARM64)?;
+        let added = app(&elsewhere, "Arm", ARM64)?;
+        let environment = environment(work.path());
+        let mut record = Record::default();
+        sync(&environment, &mut record, &[], &[], false)?;
+        let changes = sync(
+            &environment,
+            &mut record,
+            std::slice::from_ref(&added),
+            &[],
+            false,
+        )?;
+        assert!(changes.warnings.is_empty(), "{:?}", changes.warnings);
+        let launchers: Vec<(&Path, &Path)> = record
+            .launchers
+            .iter()
+            .map(|entry| (entry.launcher.as_path(), entry.target.as_path()))
+            .collect();
+        assert_eq!(
+            launchers,
+            [
+                (
+                    environment.launchers.join("Arm (Downloads).app").as_path(),
+                    added.as_path()
+                ),
+                (
+                    environment.launchers.join("Arm.app").as_path(),
+                    scanned.as_path()
+                ),
+            ]
+        );
         Ok(())
     }
 }
