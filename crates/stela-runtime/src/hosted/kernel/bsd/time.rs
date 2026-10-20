@@ -2,7 +2,8 @@
 //! is the generic timer's 24 MHz count of the host's nanosecond absolute
 //! time ([`host::counter_at`]); a value crossing the boundary is converted.
 //! Wall-clock and `timespec` arguments are the same on both kernels and stay
-//! with the forwarded families.
+//! with the forwarded families. `kevent` and `kevent64` timers in absolute
+//! units are [`super::timer`]'s.
 use super::{Call, EFAULT, Kernel, Outcome, forward};
 use crate::hosted::{host, memory};
 use anyhow::{Result, bail};
@@ -14,6 +15,8 @@ pub(super) const CALLS: &[&str] = &[
     "gettimeofday",
     "mach_eventlink_wait_until",
     "mach_eventlink_signal_wait_until",
+    "kevent",
+    "kevent64",
 ];
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
@@ -21,6 +24,7 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
         "gettimeofday" => gettimeofday(kernel, call)?,
         "mach_eventlink_wait_until" => eventlink_wait(kernel, call, 2, 3)?,
         "mach_eventlink_signal_wait_until" => eventlink_wait(kernel, call, 3, 4)?,
+        "kevent" | "kevent64" => return super::timer::call(kernel, call),
         _ => return Ok(None),
     }))
 }

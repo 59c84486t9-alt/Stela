@@ -911,7 +911,7 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
         // data_out, data_available, flags)`: an ordinary kqueue's events
         // have one layout in both ABIs.
         "kevent_qos" if call.argument(7) & kqworkq::KEVENT_FLAG_WORKQ == 0 => {
-            super::forward(kernel, call)?
+            super::timer::kevent(kernel, call, super::timer::KEVENT_QOS)?
         }
         "kevent_qos" => match kqworkq::kevent(&kernel.process, call.arguments)? {
             Ok(count) => Outcome::value(count),

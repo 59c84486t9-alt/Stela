@@ -362,7 +362,7 @@ impl HostBuckets {
     /// with `KEVENT_FLAG_ERROR_EVENTS`: its `EV_ERROR` result (an errno, or
     /// 0 for `EV_RECEIPT`), or none on a quiet success.
     fn register_on(descriptor: i32, change: &Kevent) -> Option<Kevent> {
-        let input = change.encode();
+        let input = super::timer::qos_change_to_host(change).encode();
         let mut output = [0u8; KEVENT_BYTES as usize];
         let returned = forward::bsd(
             super::number_of("kevent_qos"),
@@ -380,7 +380,11 @@ impl HostBuckets {
         if returned.carry {
             return Some(change.failed_with(returned.rax));
         }
-        (returned.rax != 0).then(|| Kevent::decode(&output))
+        (returned.rax != 0).then(|| {
+            let mut result = Kevent::decode(&output);
+            super::timer::qos_event_to_guest(&mut result, Some(change));
+            result
+        })
     }
 
     /// `kevent_register`. A knote found is touched in its bucket; `EV_ADD`
@@ -496,6 +500,7 @@ impl HostBuckets {
             let Some(mut event) = Kevent::read(list, index) else {
                 return Err(EFAULT);
             };
+            super::timer::qos_event_to_guest(&mut event, None);
             let key = event.key();
             if let Some(knote) = self.knotes.get(&key) {
                 event.qos = knote.qos;

@@ -34,6 +34,7 @@ pub(super) mod sysctl;
 mod system;
 pub(super) mod thread;
 mod time;
+mod timer;
 pub(super) mod workqueue;
 
 pub use codesign::Signature;
@@ -291,14 +292,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     (
         "ptrace",
         "PT_STEP stops the run: the host would single-step the target's x86 host thread",
-    ),
-    (
-        "kevent",
-        "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
-    ),
-    (
-        "kevent64",
-        "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
     ),
     (
         "sigaction",

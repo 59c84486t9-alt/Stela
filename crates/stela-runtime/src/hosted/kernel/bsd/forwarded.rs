@@ -8,9 +8,6 @@
 //! process shares with the host. Calls that touch the CPU, page size,
 //! clock base, signals, threads or code signing are not here; their
 //! families service them.
-//!
-//! Known limit: `kevent`/`kevent64` timers with `NOTE_MACHTIME` take the
-//! host's nanosecond timebase rather than the guest's 24 MHz ticks.
 
 /// Descriptors, files, directories, extended attributes and file systems.
 const FILES: &[&str] = &[
@@ -170,8 +167,6 @@ const FILES: &[&str] = &[
     "mkfifoat",
     "mknodat",
     "kqueue",
-    "kevent",
-    "kevent64",
     "aio_fsync",
     "aio_return",
     "aio_suspend",
