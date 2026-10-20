@@ -137,8 +137,11 @@ const ACTLR_REFUSED: [(u64, &str); 3] = [
 ///   EnPRSV) as its patched alternatives choose, before returning to EL0 in
 ///   a Rosetta thread; each refuses by name ([`ACTLR_REFUSED`]), and no
 ///   component sets any other bit, so they stop.
-/// - AMAIR_ELx take no set bit: no component writes AMAIR_EL1 or AMAIR_EL2
-///   (the hypervisor round-trips a guest's AMAIR_EL12).
+/// - AMAIR_ELx refine MAIR_ELx's attributes, and Arm lets that refinement
+///   have no effect. Stela's memory model gives memory attributes none
+///   beyond what MAIR_ELx selects (one PE at a time on coherent host RAM),
+///   so every bit holds what software writes: no component writes AMAIR_EL1
+///   or AMAIR_EL2, and the hypervisor round-trips a guest's AMAIR_EL12.
 /// - HACR_EL2 holds every bit but the guest timer mask
 ///   (`machine::hacr`), which decides what each bit traps.
 fn implementation_defined_refusal(register: Register, value: u64) -> Option<&'static str> {
@@ -149,7 +152,6 @@ fn implementation_defined_refusal(register: Register, value: u64) -> Option<&'st
             .find(|(bit, _)| value & bit != 0)
             .map(|&(_, reason)| reason)
             .or((value & !(ACTLR_EN_TSO | ACTLR_ICDSB) != 0).then_some(UNMODELED)),
-        Register::AMAIR_EL1 | Register::AMAIR_EL2 => (value != 0).then_some(UNMODELED),
         Register::HACR_EL2 => crate::machine::hacr::unsupported_bits(value),
         _ => None,
     }
@@ -3303,8 +3305,16 @@ mod tests {
         assert_eq!(machine.cpu.read(Register::ACTLR_EL2), EN_TSO);
         assert_eq!(read(&mut machine, ACTLR_EL12), EN_TSO | ICDSB);
         write(&mut machine, ACTLR_EL1, EN_TSO | ICDSB).unwrap();
-        // EnAPFLG, EnAFP and EnPRSV refuse by name, as does any AMAIR bit
-        // and HACR_EL2's guest timer mask.
+        // AMAIR holds any value, through the host's AMAIR_EL2 and the
+        // guest's AMAIR_EL1, as the hypervisor's save and restore needs.
+        write(&mut machine, AMAIR_EL1, 0x0123_4567_89ab_cdef).unwrap();
+        write(&mut machine, AMAIR_EL12, u64::MAX).unwrap();
+        assert_eq!(machine.cpu.read(Register::AMAIR_EL2), 0x0123_4567_89ab_cdef);
+        assert_eq!(machine.cpu.read(Register::AMAIR_EL1), u64::MAX);
+        assert_eq!(read(&mut machine, AMAIR_EL1), 0x0123_4567_89ab_cdef);
+        assert_eq!(read(&mut machine, AMAIR_EL12), u64::MAX);
+        // EnAPFLG, EnAFP and EnPRSV refuse by name, as does HACR_EL2's guest
+        // timer mask.
         for (encoding, value, reason) in [
             (
                 ACTLR_EL1,
@@ -3317,11 +3327,6 @@ mod tests {
                 "ACTLR EnAFP: Apple alternate floating-point mode semantics not recovered",
             ),
             (ACTLR_EL1, EN_PRSV, "ACTLR EnPRSV: semantics not recovered"),
-            (
-                AMAIR_EL12,
-                1,
-                "an IMPLEMENTATION DEFINED register bit without a modelled effect",
-            ),
             (
                 HACR_EL2,
                 1 << 20,
