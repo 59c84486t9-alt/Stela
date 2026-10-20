@@ -30,6 +30,8 @@ use std::{
 };
 
 mod bsd;
+#[allow(dead_code, reason = "the run loop and the thread routines use it next")]
+pub(crate) mod control;
 mod mach;
 mod platform;
 pub mod services;
