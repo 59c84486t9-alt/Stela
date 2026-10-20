@@ -16,7 +16,8 @@
 //! to the report protocol so that its wheel reaches the guest; one whose
 //! report descriptor this driver cannot read runs the boot protocol
 //! (Appendix B.2: buttons, X and Y). A pointer with one absolute and one
-//! relative axis, and an interface with neither report, are refused.
+//! relative axis is refused; an interface with neither report (a vendor
+//! control interface) is left unused.
 mod report;
 
 use super::{
@@ -75,6 +76,9 @@ fn read_reports(
     report::parse(&descriptor).map_err(BlockError::Unsupported)
 }
 
+/// Why an interface is left unused.
+pub const NO_REPORTS: &str = "HID interface with neither a keyboard nor a pointer report";
+
 /// One HID interface the host polls.
 pub struct UsbInput {
     controller: Shared,
@@ -103,7 +107,7 @@ impl UsbInput {
         interface: &Interface,
         endpoint: Endpoint,
         dma: &mut dyn DmaAllocator,
-    ) -> Result<Self, BlockError> {
+    ) -> Result<Option<Self>, BlockError> {
         let index = u16::from(interface.number);
         let reports = {
             let mut c = controller.borrow_mut();
@@ -139,9 +143,7 @@ impl UsbInput {
             }
         };
         if reports.keys.is_none() && reports.pointer.is_none() {
-            return Err(BlockError::Unsupported(
-                "HID interface with neither a keyboard nor a pointer report",
-            ));
+            return Ok(None);
         }
         if let Some(pointer) = &reports.pointer
             && pointer.x.map(|f| f.relative) != pointer.y.map(|f| f.relative)
@@ -151,7 +153,7 @@ impl UsbInput {
             ));
         }
         let buffer = dma.allocate(REPORT_BYTES, REPORT_BYTES)?;
-        Ok(Self {
+        Ok(Some(Self {
             controller,
             slot: device.slot,
             endpoint,
@@ -164,7 +166,7 @@ impl UsbInput {
             dropped: 0,
             failed: false,
             name: format!("{} ({})", device.name(), device.location),
-        })
+        }))
     }
 
     fn length(&self) -> usize {

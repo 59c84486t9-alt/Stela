@@ -1489,8 +1489,12 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
                     .map(|disk| found.disks.push(disk))
             }
             Plan::Hid(endpoint) => {
-                hid::UsbInput::new(shared.clone(), &device, &interface, endpoint, dma)
-                    .map(|input| found.inputs.push(input))
+                hid::UsbInput::new(shared.clone(), &device, &interface, endpoint, dma).map(
+                    |input| match input {
+                        Some(input) => found.inputs.push(input),
+                        None => found.unused.push((location.clone(), hid::NO_REPORTS)),
+                    },
+                )
             }
             Plan::Ecm(plan) => ecm::UsbNet::new(shared.clone(), &device, plan, dma)
                 .map(|link| found.links.push(link)),
