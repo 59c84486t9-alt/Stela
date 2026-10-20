@@ -30,7 +30,6 @@ use stela_loader::{code_signature, load_plan, split_slices};
 use stela_runtime::hosted::activation::{self, Activator};
 use stela_runtime::hosted::hardware::{CPU_SUBTYPE_ARM64E, CPU_SUBTYPE_MASK, CPU_TYPE_ARM64};
 use stela_runtime::hosted::{self, Dylinker, Launch, Signature};
-use stela_runtime::machine::Chip;
 
 /// The help heading of the developer options.
 const ADVANCED: &str = "Advanced options";
@@ -67,6 +66,10 @@ pub(crate) struct Run {
     /// STELA_STRICT=1).
     #[arg(long, help_heading = ADVANCED)]
     strict: bool,
+    /// The Mac to model, by product type (such as Mac14,3 or Mac15,10);
+    /// else STELA_MODEL, else the default board.
+    #[arg(long, help_heading = ADVANCED)]
+    model: Option<String>,
 }
 
 /// The CPU subtype of a thin Mach-O slice, capability bits included.
@@ -233,7 +236,20 @@ impl Run {
             trace: false,
             statistics: false,
             strict: false,
+            model: None,
         })
+    }
+
+    /// The board to model: `--model`, else `STELA_MODEL`, else the default.
+    fn model(&self) -> String {
+        self.model
+            .clone()
+            .or_else(|| {
+                std::env::var("STELA_MODEL")
+                    .ok()
+                    .filter(|model| !model.is_empty())
+            })
+            .unwrap_or_else(|| hosted::hardware::DEFAULT_MODEL.to_owned())
     }
 
     /// The host command that activates another guest image here, with the
@@ -252,6 +268,10 @@ impl Run {
         }
         if self.strict {
             command.push("--strict".into());
+        }
+        if let Some(model) = &self.model {
+            command.push("--model".into());
+            command.push(model.into());
         }
         Ok(command)
     }
@@ -272,6 +292,13 @@ impl Run {
     }
 
     pub(crate) fn run(self) -> Result<()> {
+        let model = self.model();
+        if !hosted::hardware::models().any(|known| known == model) {
+            bail!(
+                "Stela models no Mac {model:?} (--model or STELA_MODEL); the models are {}",
+                hosted::hardware::models().collect::<Vec<_>>().join(", ")
+            );
+        }
         let roots = match guest_system::roots(&self.root) {
             Ok(roots) => roots,
             Err(missing) => {
@@ -323,7 +350,7 @@ impl Run {
             })
             .collect();
         let launch = Launch {
-            chip: Chip::AppleM2,
+            model,
             executable: image(&program_file, slice_offset, &plan),
             slice_offset,
             cpu_subtype: cpu_subtype(slice)?,

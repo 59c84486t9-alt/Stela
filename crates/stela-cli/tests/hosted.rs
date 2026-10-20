@@ -314,3 +314,47 @@ fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
     assert!(out.is_empty(), "{out}");
     assert!(error.contains("fcntl F_ADDSIGS"), "{error}");
 }
+
+#[test]
+fn guest_tools_run_on_each_chosen_mac() {
+    let Some(roots) = guest_roots() else {
+        eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
+        return;
+    };
+    let run = |model: Option<&str>, environment: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
+        command.arg("run");
+        for root in &roots {
+            command.arg("--root").arg(root);
+        }
+        if let Some(model) = model {
+            command.args(["--model", model]);
+        }
+        command.args([
+            "/usr/sbin/sysctl",
+            "-n",
+            "hw.model",
+            "machdep.cpu.brand_string",
+        ]);
+        command.env("STELA_STRICT", "1").env_remove("STELA_MODEL");
+        if let Some(model) = environment {
+            command.env("STELA_MODEL", model);
+        }
+        command.output().unwrap()
+    };
+    // The default, an explicit model, the environment's, and an explicit
+    // model over the environment's.
+    for (model, environment, expected) in [
+        (None, None, "Mac14,3\nApple M2\n"),
+        (Some("Macmini9,1"), None, "Macmini9,1\nApple M1\n"),
+        (None, Some("Mac15,10"), "Mac15,10\nApple M3 Max\n"),
+        (Some("Mac16,10"), Some("Mac15,10"), "Mac16,10\nApple M4\n"),
+    ] {
+        let output = run(model, environment);
+        assert!(output.status.success(), "{:?}", text(&output));
+        assert_eq!(text(&output).0, expected, "{:?}", text(&output));
+    }
+    let output = run(Some("Mac0,0"), None);
+    assert!(!output.status.success());
+    assert!(text(&output).1.contains("Mac14,3"), "{:?}", text(&output));
+}

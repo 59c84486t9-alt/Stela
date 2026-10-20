@@ -13,7 +13,6 @@
 //! [`kernel`] services it as XNU's exception handlers do and returns
 //! through ERET. Each guest thread is a host thread with its own PE
 //! (`threads`). The run ends at the guest's `exit`.
-use crate::machine::Chip;
 use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,7 +98,8 @@ pub struct Dylinker {
 /// Everything exec needs for one process.
 #[derive(Debug, Clone)]
 pub struct Launch {
-    pub chip: Chip,
+    /// The modeled board's product type ([`hardware::Hardware::of_model`]).
+    pub model: String,
     pub executable: exec::Image,
     /// The image's slice offset in its file, where its Mach header lies.
     pub slice_offset: u64,
@@ -198,11 +198,12 @@ pub fn run(launch: Launch) -> Result<Report> {
     };
     // SAFETY: restores an inherited disposition.
     unsafe { libc::signal(libc::SIGPIPE, sigpipe) };
-    let target = TargetCpu::detect();
-    let profile = pe::profile(launch.chip, target);
-    let identification = features::Identification(&profile.fixed);
     let memory_bytes = host_memory()?;
-    let mut hardware = hardware::Hardware::of(launch.chip, memory_bytes)?;
+    let mut hardware = hardware::Hardware::of_model(&launch.model, memory_bytes)?;
+    let chip = hardware.chip;
+    let target = TargetCpu::detect();
+    let profile = pe::profile(chip, target);
+    let identification = features::Identification(&profile.fixed);
     hardware.kernel_version = launch.kernel_versions.get(hardware.model).cloned();
     unsupported::set_strict(launch.strict);
     unsupported::set_program(&String::from_utf8_lossy(&launch.executable_path));
@@ -285,7 +286,7 @@ pub fn run(launch: Launch) -> Result<Report> {
             executable.slide, dylinker.slide, stack.top
         );
     }
-    let (engine, signer) = threads::engine(launch.chip, profile, target, keys, jop)?;
+    let (engine, signer) = threads::engine(chip, profile, target, keys, jop)?;
     let process = kernel::Process::new(kernel::Config {
         shared_region,
         signer,

@@ -358,7 +358,31 @@ pub struct Hardware {
     pub memory_tagging: bool,
 }
 
+/// The board a hosted run models unless one is chosen (`stela run
+/// --model`): the M2 Mac mini, until performance and translation evidence
+/// choose the default.
+pub const DEFAULT_MODEL: &str = "Mac14,3";
+
+/// The hosted boards' product types (`hw.model`), in table order.
+pub fn models() -> impl Iterator<Item = &'static str> {
+    BOARDS.iter().map(|board| board.model)
+}
+
 impl Hardware {
+    /// The hosted board whose product type is `model`, such as Mac14,3.
+    pub fn of_model(model: &str, memory_bytes: u64) -> Result<Self> {
+        let board = BOARDS
+            .iter()
+            .find(|board| board.model == model)
+            .with_context(|| {
+                format!(
+                    "Stela models no Mac {model:?}; the models are {}",
+                    models().collect::<Vec<_>>().join(", ")
+                )
+            })?;
+        Self::of_soc(board.chip_id, memory_bytes)
+    }
+
     /// The base SoC of `chip`: the M1, M2, M3, M4, M5 or M6.
     pub fn of(chip: Chip, memory_bytes: u64) -> Result<Self> {
         let board = BOARDS
