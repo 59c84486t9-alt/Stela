@@ -475,7 +475,7 @@ mod tests {
             Status::Partial(_)
         ));
         assert!(matches!(
-            find(Area::Mig, "thread_act.thread_suspend2 (thread)").status,
+            find(Area::Mig, "task.task_generate_corpse (task)").status,
             Status::Refused(_)
         ));
         let rendered = render(&rows);

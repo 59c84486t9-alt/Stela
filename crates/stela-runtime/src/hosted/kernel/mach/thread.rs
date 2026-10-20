@@ -165,6 +165,14 @@ pub(super) fn serve(
         }
         ("thread_adopt_exception_handler", true) => exception::adopt(kernel, request)?,
         ("thread_convert_thread_state", false) => convert(kernel, request)?,
+        ("thread_suspend2", false) => {
+            if !request.body.is_empty() {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            }
+            super::suspension::suspend(kernel, port)?
+        }
+        // A thread port is no suspension token (`IKOT_THREAD_RESUME`).
+        ("thread_resume2", false) => Reply::Failure(KERN_INVALID_ARGUMENT),
         _ => return Ok(None),
     }))
 }

@@ -24,6 +24,7 @@ pub(super) mod exception;
 mod message;
 pub(super) mod reclaim;
 mod server;
+pub(super) mod suspension;
 mod thread;
 mod vm;
 

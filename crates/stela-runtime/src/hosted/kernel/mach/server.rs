@@ -280,6 +280,12 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some("the IOKit main port is the host's: its registry describes the x86 host"),
     ),
     (Object::Thread, "thread_suspend", None),
+    (
+        Object::Thread,
+        "thread_suspend2",
+        Some("the token's name also holds the hosted kernel's receive right of the resume port"),
+    ),
+    (Object::Thread, "thread_resume2", None),
     (Object::Thread, "thread_resume", None),
     (Object::Thread, "thread_get_state_to_user", None),
     (
@@ -1090,17 +1096,6 @@ pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
         Object::Task,
         "task_map_kcdata_object_64",
         "a kcdata object is the host kernel's report, mapped in 4 KiB host pages",
-    ),
-    (
-        Object::Thread,
-        "thread_suspend2",
-        "its suspension token is a kernel object of its own, whose release resumes the thread, \
-         which is not implemented",
-    ),
-    (
-        Object::Thread,
-        "thread_resume2",
-        "it takes a suspension token, a kernel object of its own, which is not implemented",
     ),
     (
         Object::Task,

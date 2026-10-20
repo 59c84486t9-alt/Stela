@@ -161,8 +161,13 @@ enum Place {
 
 #[derive(Debug, Default)]
 struct Inner {
-    /// `user_stop_count`: `thread_suspend`s not yet resumed.
+    /// `user_stop_count`: suspensions not yet resumed.
     user_stops: u32,
+    /// `legacy_user_stop_count`: those of them `thread_suspend` made (or
+    /// a thread's creation), which only `thread_resume` resumes.
+    legacy_stops: u32,
+    /// The thread's suspension tokens (`thread_suspend2`).
+    token: Token,
     /// `thread_hold`s of callers acting on the stopped thread.
     holds: u32,
     place: Place,
@@ -192,6 +197,16 @@ impl Inner {
     fn inactive(&self) -> bool {
         self.place == Place::Ended || self.terminated
     }
+}
+
+/// A thread's resume port (`thread->thread_resume_port`), which
+/// [`super::mach::suspension`] keeps: the receive right, null until the
+/// first `thread_suspend2`, and whether its no-senders notification is
+/// requested.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Token {
+    pub(crate) port: u32,
+    pub(crate) armed: bool,
 }
 
 /// How a thread was made, which decides what `thread_terminate` may do
@@ -298,12 +313,14 @@ impl Control {
         true
     }
 
-    /// The thread ended: every waiter sees it gone.
+    /// The thread ended: every waiter sees it gone, and its suspension
+    /// tokens are dead names.
     pub(crate) fn ended(&self) {
         let mut inner = self.lock();
         inner.place = Place::Ended;
         inner.published = None;
         inner.pending = None;
+        super::mach::suspension::destroy(std::mem::take(&mut inner.token));
         self.update(&inner);
     }
 
@@ -332,35 +349,105 @@ impl Control {
         }
     }
 
-    /// `thread_suspend`: one more user stop; another thread's caller then
-    /// waits until it is off its CPU (`thread_wait(thread, FALSE)`).
+    /// `thread_suspend`: one more legacy user stop; another thread's
+    /// caller then waits until it is off its CPU (`thread_wait(thread,
+    /// FALSE)`).
     pub(crate) fn suspend(&self, own: bool) -> u32 {
+        match self.stop(own, true, |_| Ok(())) {
+            Ok(()) => KERN_SUCCESS,
+            Err(code) => code,
+        }
+    }
+
+    /// `thread_suspend2`: one more user stop, represented by a suspension
+    /// token `mint` makes on the thread's resume port while the stop is
+    /// counted (`ipc_kobject_make_send` under the thread mutex), or the
+    /// failure. The caller then waits as for `thread_suspend`.
+    pub(crate) fn suspend_with_token<T>(
+        &self,
+        own: bool,
+        mint: impl FnOnce(&mut Token) -> std::result::Result<T, u32>,
+    ) -> std::result::Result<T, u32> {
+        self.stop(own, false, mint)
+    }
+
+    fn stop<T>(
+        &self,
+        own: bool,
+        legacy: bool,
+        mint: impl FnOnce(&mut Token) -> std::result::Result<T, u32>,
+    ) -> std::result::Result<T, u32> {
         let mut inner = self.lock();
         if inner.inactive() {
-            return KERN_TERMINATED;
+            return Err(KERN_TERMINATED);
         }
+        let minted = mint(&mut inner.token)?;
         inner.user_stops += 1;
+        if legacy {
+            inner.legacy_stops += 1;
+        }
         self.update(&inner);
         if !own {
             while inner.place == Place::Running && !inner.closed {
                 inner = self.wait(inner);
             }
         }
-        KERN_SUCCESS
+        Ok(minted)
     }
 
-    /// `thread_resume`: one user stop fewer, KERN_FAILURE without one.
+    /// `thread_resume`: one legacy user stop fewer, KERN_FAILURE without
+    /// one (`thread_resume_internal(THREAD_SUSPEND_LEGACY)`).
     pub(crate) fn resume(&self) -> u32 {
+        self.release(true)
+    }
+
+    /// `thread_resume2`: one user stop fewer, KERN_FAILURE without one
+    /// (`THREAD_SUSPEND_NORMAL`).
+    pub(crate) fn resume_from_token(&self) -> u32 {
+        self.release(false)
+    }
+
+    fn release(&self, legacy: bool) -> u32 {
         let mut inner = self.lock();
         if inner.inactive() {
             return KERN_TERMINATED;
         }
-        if inner.user_stops == 0 {
+        if inner.user_stops == 0 || (legacy && inner.legacy_stops == 0) {
             return KERN_FAILURE;
         }
         inner.user_stops -= 1;
+        if legacy {
+            inner.legacy_stops -= 1;
+        }
         self.update(&inner);
         KERN_SUCCESS
+    }
+
+    /// The thread's resume port `port` has no senders left, as of its
+    /// make-send count `current` tells (`thread_suspension_no_senders`):
+    /// with no token made since, every stop a token made is resumed
+    /// (`THREAD_SUSPEND_ALL`); otherwise `rearm` requests the next
+    /// notification. Nothing for another port.
+    pub(crate) fn tokens_released(
+        &self,
+        port: u32,
+        current: impl FnOnce() -> bool,
+        rearm: impl FnOnce() -> bool,
+    ) {
+        let mut inner = self.lock();
+        if inner.token.port != port || port == 0 {
+            return;
+        }
+        inner.token.armed = false;
+        if current() {
+            if inner.inactive() {
+                return;
+            }
+            inner.user_stops = inner.legacy_stops;
+            self.update(&inner);
+        } else {
+            inner.token.armed = rearm();
+        }
     }
 
     /// Run `act` on the stopped thread's published state as
@@ -421,6 +508,7 @@ impl Control {
     pub(crate) fn start_suspended(&self) {
         let mut inner = self.lock();
         inner.user_stops += 1;
+        inner.legacy_stops += 1;
         self.update(&inner);
     }
 
@@ -1126,6 +1214,43 @@ mod tests {
             control.with_state(false, |state| (state.x[0], None)),
             Err(KERN_TERMINATED)
         );
+    }
+
+    #[test]
+    fn token_stops_and_legacy_stops_resume_apart() {
+        let control = Control::default();
+        running(&control);
+        let minted = control.suspend_with_token(true, |token| {
+            token.port = 0x1234;
+            token.armed = true;
+            Ok(token.port)
+        });
+        assert_eq!(minted, Ok(0x1234));
+        assert_eq!(control.suspend(true), KERN_SUCCESS);
+        assert_eq!(
+            control.suspend_with_token(true, |token| Ok(token.port)),
+            Ok(0x1234)
+        );
+        assert_eq!(control.suspension().0, 3);
+        // A token's resume takes one stop, legacy or not; `thread_resume`
+        // only a legacy one.
+        assert_eq!(control.resume_from_token(), KERN_SUCCESS);
+        assert_eq!(control.resume(), KERN_SUCCESS);
+        assert_eq!(control.resume(), KERN_FAILURE);
+        assert_eq!(control.suspension().0, 1);
+        // A notification after a newer token rearms it; a current one
+        // resumes every token's stop.
+        control.tokens_released(0x1234, || false, || true);
+        assert_eq!(control.suspension().0, 1);
+        control.tokens_released(0x1234, || true, || unreachable!());
+        assert_eq!(control.suspension().0, 0);
+        assert!(!control.pending());
+        // A failed token adds no stop.
+        assert_eq!(
+            control.suspend_with_token(true, |_| Err::<u32, _>(6)),
+            Err(6)
+        );
+        assert_eq!(control.resume_from_token(), KERN_FAILURE);
     }
 
     #[test]
