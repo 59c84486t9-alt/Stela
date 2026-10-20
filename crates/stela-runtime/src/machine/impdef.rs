@@ -493,21 +493,28 @@ const UNCORE_COUNTER: &str = "m1n1 cpu_regs.h names this uncore counter; 26A434 
     0xfffffe000bd8d020). It counts only under a UPMCR0 counter enable, which stops here, so \
     it holds what software writes, 0 from reset (inference). One per cluster";
 
+/// S3_7_C15_C5_0 bit 0, which enableCore sets and clears.
+const AON_ENABLED: u64 = 1;
+
 const AON_ENABLE_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CorePerfSampler::readAONCounterEnable and writeAONCounterEnable read and write it \
     (0xfffffe0009f40a3c, 0xfffffe0009f40a48), and enableCore sets it after selecting three \
     core counters' events in S3_7_C15_C1_3, C3_3 and C5_3 (0xfffffe0009f40b14). What those \
-    counters count is not documented, so only 0 (disabled) is accepted";
+    counters count is not documented: bit 0 is held, the counters keep what software writes \
+    (platform::apple::core_counters) and enabling them is reported once";
 
 const AON_SELECT_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CorePerfSampler::enableCore writes the selectors 0x8000, 0x8100 and 0x8700 to \
     S3_7_C15_C1_3, C3_3 and C5_3 before setting S3_7_C15_C5_0 (0xfffffe0009f40afc) and never \
-    reads them; they act only once that enable is set, which stops here";
+    reads them; they act only once that enable is set, whose counting is not modeled, so \
+    they are stored";
 
 const AON_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's CorePerfSampler::sample \
     and SchedulerInterface::contextSwitch read it as a wrapping 32-bit count \
-    (0xfffffe0009f39778, 0xfffffe0009f382ac). It counts only under S3_7_C15_C5_0, which \
-    accepts only 0 here, so it holds what software wrote, 0 from reset (inference)";
+    (0xfffffe0009f39778, 0xfffffe0009f382ac), and other PEs read it through this PE's \
+    cpu-impl-reg + 0x4000 (platform::apple::core_counters, which a board's PEs read it from). It \
+    counts only under S3_7_C15_C5_0, whose counting is not modeled, so it holds what software \
+    wrote, 0 from reset (inference)";
 
 const AON_FOURTH_EVIDENCE: &str = "no public name; the CorePerfSampler of AppleT6000CLPCv3, \
     AppleT6020CLPC and the M3-and-later CLPCs selects a fourth core counter: enableCore writes \
@@ -515,20 +522,30 @@ const AON_FOURTH_EVIDENCE: &str = "no public name; the CorePerfSampler of AppleT
     S3_7_C15_C5_0 (kernelcache.release.mac14j 0xfffffe0009efa014, mac13j 0xfffffe0009e74e38), \
     and sample reads S3_7_C15_C6_3 after C0_3, C2_3 and C4_3 as a wrapping 32-bit count \
     (mac14j 0xfffffe0009ef29ac, mac13j 0xfffffe0009e6d85c). The selector acts and the \
-    counter counts only under S3_7_C15_C5_0, which accepts only 0 here, so the selector is \
-    stored and the counter holds what software wrote, 0 from reset (inference)";
+    counter counts only under S3_7_C15_C5_0, whose counting is not modeled, so the selector \
+    is stored and the counter holds what software wrote, 0 from reset (inference)";
+
+/// What a running sampler's counters lack here.
+const CORE_COUNTERS_UNMODELED: &str = "core performance counters enabled; events not counted: \
+    CLPC reads zero work from them, which only lowers its DVFS and shared-resource placement \
+    inputs (docs/research/j473-kernel.md, CLPC samplers)";
+
+const MEM_STALL_UNMODELED: &str = "memory-stall counters started; events not counted: CLPC \
+    reads no stalls, which only changes its efficiency-stall DVFS caps \
+    (docs/research/j473-kernel.md, CLPC samplers)";
 
 const MEM_STALL_SELECT_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CoreMemStallSampler::enableCore writes two 32-bit selectors into each of S3_1_C15_C0_3 \
     and C1_3 (0x801 and 0x805, 0x807 and 0x3) with read-modify-write to start four \
     memory-stall counters, and 0 to stop them (0xfffffe0009f41790). The events are not \
-    documented, so only 0 is accepted";
+    documented: the selectors are held and starting the counters is reported once";
 
 const MEM_STALL_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     CoreMemStallSampler::sample reads it as a 48-bit count whose bit 47 is its overflow, \
-    which it clears by writing 0 (0xfffffe0009f41878). It counts only under the \
-    S3_1_C15_C0_3 and C1_3 selectors, which accept only 0 here, so it holds what software \
-    wrote, 0 from reset (inference)";
+    which it clears by writing 0 (0xfffffe0009f41878), and other PEs read and clear it through \
+    this PE's cpu-impl-reg + 0x6030 (platform::apple::core_counters, which a board's PEs read it \
+    from). It counts only under the S3_1_C15_C0_3 and C1_3 selectors, whose counting is not \
+    modeled, so it holds what software wrote, 0 from reset (inference)";
 
 const CLUSTER_COUNTER_EVIDENCE: &str = "no public name; AppleT8112CLPC's \
     ClusterPerfSampler::enableCluster sets the cluster's counter enable and seven event \
@@ -566,13 +583,14 @@ const MEM_STALL_WIDE_SELECT_EVIDENCE: &str = "no public name; the 26A434 CoreMem
     kernelcache.release.mac14j 0xfffffe0009efa63c) and of the Ultras' AppleT6002CLPC and \
     AppleT6022CLPC (S3_1_C15_C3_3; mac14j 0xfffffe0009f7dab0) writes two more 32-bit selectors \
     into it, with the read-modify-write AppleT8112CLPC uses for S3_1_C15_C0_3 and C1_3, and 0 \
-    to stop them. The events are not documented, so only 0 is accepted";
+    to stop them. The events are not documented: the selectors are held and starting the \
+    counters is reported once";
 
 const MEM_STALL_WIDE_COUNTER_EVIDENCE: &str = "no public name; the same samplers read it as a \
     48-bit count after S3_1_C15_C8_3 to C11_3 and clear its overflow bit 47 by writing 0 \
     (C12_3 and C13_3: mac14j 0xfffffe0009efa7b0; C14_3 and C15_3: mac14j \
-    0xfffffe0009f7c420). It counts only under its selectors, which accept only 0 here, so it \
-    holds what software wrote, 0 from reset (inference)";
+    0xfffffe0009f7c420). It counts only under its selectors, whose counting is not modeled, so \
+    it holds what software wrote, 0 from reset (inference)";
 
 const ACTLR_EL12_EVIDENCE: &str = "m1n1 cpu_regs.h names it ACTLR_EL12; the 26A434 T8103 \
     and T6000 SPTMs save it with the EL12 bank when an EL1 guest exits and load it before \
@@ -889,7 +907,9 @@ pub const TABLE: &[Entry] = &[
         "S3_7_C15_C5_0 (unnamed)",
         Class::Control,
         AON_ENABLE_EVIDENCE,
-    ),
+    )
+    .permitting(AON_ENABLED)
+    .unmodeled(AON_ENABLED, CORE_COUNTERS_UNMODELED),
     entry(
         AON_SELECT_0,
         "S3_7_C15_C1_3 (unnamed)",
@@ -945,25 +965,33 @@ pub const TABLE: &[Entry] = &[
         "S3_1_C15_C0_3 (unnamed)",
         Class::Control,
         MEM_STALL_SELECT_EVIDENCE,
-    ),
+    )
+    .permitting(u64::MAX)
+    .unmodeled(u64::MAX, MEM_STALL_UNMODELED),
     entry(
         MEM_STALL_SELECT_1,
         "S3_1_C15_C1_3 (unnamed)",
         Class::Control,
         MEM_STALL_SELECT_EVIDENCE,
-    ),
+    )
+    .permitting(u64::MAX)
+    .unmodeled(u64::MAX, MEM_STALL_UNMODELED),
     entry(
         MEM_STALL_SELECT_2,
         "S3_1_C15_C2_3 (unnamed)",
         Class::Control,
         MEM_STALL_WIDE_SELECT_EVIDENCE,
-    ),
+    )
+    .permitting(u64::MAX)
+    .unmodeled(u64::MAX, MEM_STALL_UNMODELED),
     entry(
         MEM_STALL_SELECT_3,
         "S3_1_C15_C3_3 (unnamed)",
         Class::Control,
         MEM_STALL_WIDE_SELECT_EVIDENCE,
-    ),
+    )
+    .permitting(u64::MAX)
+    .unmodeled(u64::MAX, MEM_STALL_UNMODELED),
     entry(
         MEM_STALL_COUNTER_4,
         "S3_1_C15_C12_3 (unnamed)",
@@ -1479,14 +1507,22 @@ mod tests {
         }
     }
 
-    /// CLPC's samplers can only be disabled; their counters, the cluster
+    /// CLPC's sampler enables and selectors are held, and starting a
+    /// sampler reports its uncounted events; the counters, the cluster
     /// counters among them, hold what software writes.
     #[test]
-    fn clpc_counters_stay_disabled() {
+    fn clpc_samplers_hold_their_enables_and_report_uncounted_events() {
         let mut registers = Registers::default();
         let enable = lookup(AON_ENABLE).unwrap();
         registers.write(enable, 0).unwrap();
-        assert!(registers.write(enable, 1).is_err());
+        assert_eq!(enable.unmodeled_effect(0), None);
+        registers.write(enable, AON_ENABLED).unwrap();
+        assert_eq!(registers.read(enable), Ok(AON_ENABLED));
+        assert_eq!(
+            enable.unmodeled_effect(AON_ENABLED),
+            Some(CORE_COUNTERS_UNMODELED)
+        );
+        assert!(registers.write(enable, 2).is_err());
         registers
             .write(lookup(AON_SELECT_0).unwrap(), 0x8000)
             .unwrap();
@@ -1497,8 +1533,14 @@ mod tests {
             let counter = super::lookup(AON_COUNTER_3, chip).unwrap();
             assert_eq!(registers.read(counter), Ok(0));
         }
+        // enableCore's two selectors in one register, then its stop.
         let select = lookup(MEM_STALL_SELECT_0).unwrap();
-        assert!(registers.write(select, 0x801).is_err());
+        let started = 0x805 << 32 | 0x801;
+        registers.write(select, started).unwrap();
+        assert_eq!(registers.read(select), Ok(started));
+        assert_eq!(select.unmodeled_effect(started), Some(MEM_STALL_UNMODELED));
+        registers.write(select, 0).unwrap();
+        assert_eq!(select.unmodeled_effect(0), None);
         let counter = lookup(MEM_STALL_COUNTER_2).unwrap();
         assert_eq!(registers.read(counter), Ok(0));
         registers.write(counter, 0).unwrap();

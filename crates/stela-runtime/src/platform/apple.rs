@@ -19,6 +19,7 @@ pub mod atc_phy;
 pub mod bridge;
 pub mod bus;
 pub mod cluster;
+pub mod core_counters;
 pub mod coresight;
 pub mod counter;
 pub mod cpm;

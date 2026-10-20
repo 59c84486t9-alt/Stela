@@ -21,8 +21,8 @@ use crate::platform::apple::{
     agx,
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, ans, asc, atc_phy, bridge, cluster, coresight, cpm, cpustart, dart, dpe, energy, fuse,
-    gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
+    amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dpe,
+    energy, fuse, gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -809,6 +809,16 @@ pub struct LockdownBlock {
     pub cpu: Option<usize>,
 }
 
+/// One PE's CLPC sampler counters: the PE (in `/cpus` order), its
+/// `cpu-impl-reg`'s guest PA and the SoC's counters
+/// (`platform::apple::core_counters`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CounterBlock {
+    pub cpu: usize,
+    pub physical: u64,
+    pub layout: core_counters::Layout,
+}
+
 /// The AIC: its core block's guest PA, its input count and its layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterruptController {
@@ -1309,6 +1319,9 @@ pub struct Board {
     /// Every PE's `cpu-impl-reg` and every cluster's `cpm-impl-reg`, once
     /// each, on a SoC whose lockdown offsets are known; none otherwise.
     pub lockdown: Vec<LockdownBlock>,
+    /// Every PE's CLPC sampler counters in its `cpu-impl-reg`, on a SoC
+    /// whose counters are known.
+    pub counters: Vec<CounterBlock>,
     /// CPU CoreSight component bases, for their architectural Software Locks.
     pub coresight: Vec<u64>,
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
@@ -4393,6 +4406,28 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     let cpus = cpus(chip_id, soc_name, &processors)?;
+    let mut counters = Vec::new();
+    if let Some(layout) = core_counters::layout(chip_id) {
+        let end = layout
+            .windows()
+            .map(|(offset, bytes)| offset + bytes)
+            .max()
+            .unwrap_or(0);
+        for (_, name, pairs, cpu) in blocks.iter().filter(|block| block.0 == 0) {
+            let (physical, bytes) = pairs
+                .as_ref()
+                .and_then(|pairs| pairs.first().copied())
+                .ok_or_else(|| format!("a /cpus node has no {name}"))?;
+            if end > bytes {
+                return Err(format!("{name} at {physical:#x} has no sampler counters"));
+            }
+            counters.push(CounterBlock {
+                cpu: cpu.expect("every cpu-impl-reg names its PE"),
+                physical,
+                layout,
+            });
+        }
+    }
     let mut lockdown: Vec<LockdownBlock> = Vec::new();
     for (index, name, pairs, cpu) in blocks.into_iter().filter(|_| cpus.lockdown.is_some()) {
         let (physical, bytes) = pairs
@@ -4523,6 +4558,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         watchdog,
         watchdog_side,
         lockdown,
+        counters,
         coresight,
         memory_controller,
         darts,
@@ -5764,6 +5800,23 @@ mod tests {
                 block("cpm-impl-reg", 0x2_10e4_0000, 0x9000, None),
                 block("cpu-impl-reg", 0x2_1105_0000, 0x5000, Some(1)),
                 block("cpm-impl-reg", 0x2_11e4_0000, 0x9000, None),
+            ]
+        );
+        // Each PE's sampler counters, in its cpu-impl-reg.
+        let layout = core_counters::layout(0x8112).unwrap();
+        assert_eq!(
+            found.counters,
+            [
+                CounterBlock {
+                    cpu: 0,
+                    physical: 0x2_1005_0000,
+                    layout
+                },
+                CounterBlock {
+                    cpu: 1,
+                    physical: 0x2_1105_0000,
+                    layout
+                },
             ]
         );
         // The UART's input 739 is the highest that names the AIC.

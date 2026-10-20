@@ -24,6 +24,7 @@ use crate::platform::apple::{
     bridge::Bridge,
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
+    core_counters::{self, CoreCounters},
     coresight::{self, SoftwareLock},
     cpm::Cpm,
     cpustart::{self, CpuStart},
@@ -127,6 +128,9 @@ pub struct AppleDevices {
     usb_masters: Vec<UsbMaster>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
+    /// Each PE's CLPC sampler counters (`platform::apple::core_counters`),
+    /// by PE number.
+    core_counters: Vec<Option<DeviceId>>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
     /// The AP GPIO bank's base and the board nets on its input pins.
@@ -409,6 +413,7 @@ impl AppleDevices {
             usb_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
+            core_counters: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
             gpio: None,
@@ -759,6 +764,27 @@ impl AppleDevices {
             device,
             mpidrs: mpidrs.to_vec(),
         });
+        Ok(())
+    }
+
+    /// PE `cpu`'s CLPC sampler counters of `layout`, whose windows lie in
+    /// its `cpu-impl-reg` at `physical`; its MRS and MSR of the counters
+    /// reach the same model (`system_register`).
+    pub fn add_core_counters(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        layout: core_counters::Layout,
+    ) -> Result<(), MapError> {
+        let device = self.bus.add(Box::new(CoreCounters::new(layout)));
+        for (offset, bytes) in layout.windows() {
+            let start = physical.checked_add(offset).ok_or(MapError::Overflow)?;
+            self.bus.map(device, start, bytes, offset)?;
+        }
+        if self.core_counters.len() <= cpu {
+            self.core_counters.resize(cpu + 1, None);
+        }
+        self.core_counters[cpu] = Some(device);
         Ok(())
     }
 
@@ -1973,6 +1999,14 @@ impl Devices for AppleDevices {
         write: Option<u64>,
         now: u64,
     ) -> Option<Result<u64, &'static str>> {
+        if let Some(device) = self.core_counters.get(cpu).copied().flatten()
+            && let Some(value) = self
+                .bus
+                .device_mut::<CoreCounters>(device)
+                .and_then(|counters| counters.register(encoding, write))
+        {
+            return Some(Ok(value));
+        }
         let register = ipi::Register::decode(encoding)?;
         let ipi = self.ipi.as_mut()?;
         let kind = match write {
@@ -2924,6 +2958,34 @@ mod tests {
                 .read(0, core + energy::CONTROL_OFFSET, 8, 0)
                 .is_err()
         );
+    }
+
+    /// A PE's sampler counters are one value through its own MRS and MSR
+    /// and through any PE's access to its `cpu-impl-reg` window.
+    #[test]
+    fn a_pes_sampler_counters_share_its_registers_and_window() {
+        let mut devices = AppleDevices::new();
+        let layout = core_counters::layout(0x8112).unwrap();
+        let blocks = [0x2_1005_0000, 0x2_1015_0000];
+        for (cpu, physical) in blocks.into_iter().enumerate() {
+            devices.add_core_counters(cpu, physical, layout).unwrap();
+        }
+        let aon_2 = Encoding::new(3, 7, 15, 4, 3);
+        let stall_1 = Encoding::new(3, 1, 15, 9, 3);
+        assert_eq!(devices.system_register(1, aon_2, Some(77), 0), Some(Ok(0)));
+        // PE 0 samples PE 1's counter remotely; its own is untouched.
+        assert_eq!(devices.read(0, blocks[1] + 0x4020, 8, 0), Ok(77));
+        assert_eq!(devices.read(0, blocks[0] + 0x4020, 8, 0), Ok(0));
+        devices.write(0, blocks[1] + 0x6038, 8, 1 << 47, 0).unwrap();
+        assert_eq!(
+            devices.system_register(1, stall_1, None, 0),
+            Some(Ok(1 << 47))
+        );
+        assert_eq!(devices.system_register(0, stall_1, None, 0), Some(Ok(0)));
+        // A register the T8112 lacks is not the board's.
+        let aon_3 = Encoding::new(3, 7, 15, 6, 3);
+        assert_eq!(devices.system_register(1, aon_3, None, 0), None);
+        assert!(devices.read(0, blocks[1] + 0x4030, 8, 0).is_err());
     }
 
     #[test]

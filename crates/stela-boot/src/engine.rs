@@ -878,6 +878,11 @@ fn devices<'f>(
             .add_lockdown(block.name, block.control, range, rvbar)
             .map_err(|error| alloc::format!("{} placement: {error:?}", block.name))?;
     }
+    for block in board.map_or(&[][..], |board| &board.counters) {
+        devices
+            .add_core_counters(block.cpu, block.physical, block.layout)
+            .map_err(|error| alloc::format!("sampler counter placement: {error:?}"))?;
+    }
     if let Some(board) = board {
         let mpidrs: Vec<u64> = board.cpus.processors.iter().map(|pe| pe.mpidr).collect();
         devices.add_fast_ipi(&mpidrs);
