@@ -24,7 +24,8 @@
 //! guest pages of its own; `mach_vm_read_list` copies each range into new
 //! guest pages of this task. `mach_vm_region`'s reply carries its
 //! `object_name` port and is forwarded where the host's answer is the
-//! arm64 kernel's.
+//! arm64 kernel's, and answered with a null one, merged, where host
+//! regions meet inside a guest page.
 use super::super::Kernel;
 use super::server::{Descriptor, KERN_INVALID_ARGUMENT, MIG_BAD_ARGUMENTS, Reply, Request};
 use crate::hosted::memory::{self, HOST_PAGE_MASK, PAGE_BYTES, PAGE_MASK, Protection};
@@ -96,9 +97,9 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
     (
         "mach_vm_region",
         Some(
-            "the basic flavors of a region in whole guest pages outside the shared region, \
-             forwarded (its reply is complex); the x86 runtime's own mappings are regions of \
-             this task",
+            "the basic flavors of a region outside the shared region, host regions meeting \
+             inside a guest page merged into one entry; the x86 runtime's own mappings are \
+             regions of this task",
         ),
     ),
     (
@@ -1295,8 +1296,9 @@ fn host_region(address: u64) -> (i32, u64, u64) {
 /// after `address`. The basic flavors describe it in protections,
 /// inheritance and sharing, the same for the arm64 kernel as the host's
 /// where the region is whole guest pages, so the request is forwarded; its
-/// reply carries the `object_name` port. The top and extended flavors
-/// count pages.
+/// reply carries the `object_name` port. Host regions meeting inside a
+/// guest page are one map entry there, answered merged. The top and
+/// extended flavors count pages.
 fn region(request: &Request) -> Result<Reply> {
     let Some((address, flavor)) =
         fields(|| Some((request.double(SIMPLE)?, request.word(SIMPLE + 8)?)))
@@ -1306,8 +1308,8 @@ fn region(request: &Request) -> Result<Reply> {
     match flavor {
         flavor if flavor == VM_REGION_BASIC_INFO_64 as u32 || flavor == VM_REGION_BASIC_INFO => {}
         VM_REGION_TOP_INFO | VM_REGION_EXTENDED_INFO => bail!(
-            "mach_vm_region flavor {flavor} at {address:#x}: page counts in guest pages need a \
-             complex reply, which is not implemented"
+            "mach_vm_region flavor {flavor} at {address:#x}: its page counts restated in guest \
+             pages are not implemented"
         ),
         _ => return Ok(Reply::Failure(KERN_INVALID_ARGUMENT)),
     }
@@ -1322,12 +1324,139 @@ fn region(request: &Request) -> Result<Reply> {
         );
     }
     if (start | size) & PAGE_MASK != 0 {
-        bail!(
-            "mach_vm_region at {address:#x}: the host region {start:#x}+{size:#x} splits a guest \
-             page; a merged region needs a complex reply, which is not implemented"
-        );
+        let Some(count) = request.word(SIMPLE + 12) else {
+            return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+        };
+        return Ok(split_region(address, flavor, count));
     }
     Ok(Reply::Forward)
+}
+
+/// `vm_region_basic_info_64` words: protections, inheritance, `shared`,
+/// `reserved` (a submap), the offset, behavior and wiring; the legacy
+/// layout's offset is one word, which moves the last two back.
+const BASIC_PROTECTION: usize = 0;
+const BASIC_MAX_PROTECTION: usize = 1;
+const BASIC_SHARED: usize = 3;
+const BASIC_RESERVED: usize = 4;
+const BASIC_OFFSET: usize = 5;
+const BASIC_WIRED: usize = 8;
+const VM_REGION_BASIC_INFO_COUNT: u32 = 8;
+
+/// One host region: its start, size and `vm_region_basic_info_64`.
+type BasicPiece = (u64, u64, [u32; 9]);
+
+/// The host regions, with their basic information, that share guest pages
+/// with the region at or after `address`: from the first host region of
+/// the guest page it starts in, over every one beginning before the
+/// merged end. The merged range is in whole guest pages.
+fn basic_pieces(address: u64) -> Option<(u64, u64, Vec<BasicPiece>)> {
+    let region = |at: u64| {
+        let (mut at, mut size) = (at, 0u64);
+        let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
+        let mut count = VM_REGION_BASIC_INFO_COUNT_64;
+        let mut object = 0u32;
+        // SAFETY: out-parameters sized for VM_REGION_BASIC_INFO_64.
+        let code = unsafe {
+            mach_vm_region(
+                host(),
+                &mut at,
+                &mut size,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr(),
+                &mut count,
+                &mut object,
+            )
+        };
+        (code == KERN_SUCCESS).then(|| (at, size, info.map(|word| word as u32)))
+    };
+    let first = region(address)?;
+    let mut start = memory::trunc_page(first.0);
+    while start < first.0 {
+        match region(start) {
+            Some(earlier) if earlier.0 < start => start = memory::trunc_page(earlier.0),
+            _ => break,
+        }
+    }
+    let mut pieces = Vec::new();
+    let (mut cursor, mut end) = (start, start);
+    while let Some(piece) = region(cursor) {
+        if !pieces.is_empty() && piece.0 >= end {
+            break;
+        }
+        let piece_end = piece.0 + piece.1;
+        end = end.max(memory::round_page(piece_end).unwrap_or(!PAGE_MASK));
+        cursor = piece_end;
+        pieces.push(piece);
+        if piece_end >= end {
+            break;
+        }
+    }
+    let head = pieces.first()?.0;
+    let start = memory::trunc_page(head);
+    Some((start, end - start, pieces))
+}
+
+/// One map entry's basic information from host regions sharing guest
+/// pages, as [`merge_submap`] merges the submap layout: the first
+/// region's inheritance, behavior and offset (moved back to `start`); the
+/// protections all allow; shared or a submap if any is; the largest
+/// wiring.
+fn merge_basic(pieces: &[BasicPiece], start: u64) -> [u32; 9] {
+    let mut info = pieces[0].2;
+    let offset = u64::from(info[BASIC_OFFSET]) | u64::from(info[BASIC_OFFSET + 1]) << 32;
+    let offset = offset.saturating_sub(pieces[0].0 - start);
+    info[BASIC_OFFSET] = offset as u32;
+    info[BASIC_OFFSET + 1] = (offset >> 32) as u32;
+    for (_, _, other) in &pieces[1..] {
+        info[BASIC_PROTECTION] &= other[BASIC_PROTECTION];
+        info[BASIC_MAX_PROTECTION] &= other[BASIC_MAX_PROTECTION];
+        info[BASIC_SHARED] |= other[BASIC_SHARED];
+        info[BASIC_RESERVED] |= other[BASIC_RESERVED];
+        let wired = (info[BASIC_WIRED] & 0xffff).max(other[BASIC_WIRED] & 0xffff);
+        info[BASIC_WIRED] = info[BASIC_WIRED] & !0xffff | wired;
+    }
+    info
+}
+
+/// The basic flavors of a region the host maps in parts inside a guest
+/// page: one map entry over the merged guest pages, in a complex reply
+/// whose `object_name` is null, as the kernel reports every region's.
+fn split_region(address: u64, flavor: u32, count: u32) -> Reply {
+    let legacy = flavor == VM_REGION_BASIC_INFO;
+    let needed = if legacy {
+        VM_REGION_BASIC_INFO_COUNT
+    } else {
+        VM_REGION_BASIC_INFO_COUNT_64
+    };
+    if count < needed {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    }
+    let Some((start, size, pieces)) = basic_pieces(address) else {
+        return Reply::Failure(KERN_INVALID_ADDRESS);
+    };
+    let info = merge_basic(&pieces, start);
+    let info: Vec<u32> = if legacy {
+        // `offset` is 32 bits there; behavior and wiring follow it.
+        info[..BASIC_OFFSET + 1]
+            .iter()
+            .chain(&info[BASIC_OFFSET + 2..])
+            .copied()
+            .collect()
+    } else {
+        info.to_vec()
+    };
+    let mut body = start.to_le_bytes().to_vec();
+    body.extend(size.to_le_bytes());
+    body.extend(words([needed]));
+    body.extend(words(info));
+    Reply::Complex {
+        descriptors: vec![Descriptor::Port {
+            name: 0,
+            disposition: MACH_MSG_TYPE_MOVE_SEND,
+        }],
+        body,
+    }
 }
 
 /// `mach_vm_region_recurse` (`address`, `nesting_depth`, `infoCnt`): the
@@ -2351,6 +2480,64 @@ mod tests {
             failure(call(&mut task, "mach_vm_region", false, &body).unwrap()),
             KERN_INVALID_ARGUMENT
         );
+        // A host page of the guest page read-only splits the host region:
+        // the guest's entry is the merged pages, with what all allow.
+        // Inaccessible guest pages around it keep other tests' memory out
+        // of its host regions.
+        let outer = allocate_pages(&mut task, 4);
+        let split = outer + PAGE_BYTES;
+        // SAFETY: pages of this test's own allocation.
+        unsafe {
+            assert_eq!(
+                mach_vm_protect(host(), outer, PAGE_BYTES, 0, 0),
+                KERN_SUCCESS
+            );
+            assert_eq!(
+                mach_vm_protect(host(), split + 2 * PAGE_BYTES, PAGE_BYTES, 0, 0),
+                KERN_SUCCESS
+            );
+            assert_eq!(
+                mach_vm_protect(host(), split + HOST_PAGE_BYTES, HOST_PAGE_BYTES, 0, 1),
+                KERN_SUCCESS
+            );
+        }
+        for (flavor, count) in [(9u32, 9u32), (VM_REGION_BASIC_INFO, 8)] {
+            let body = simple(&[
+                &(split + 3 * HOST_PAGE_BYTES).to_le_bytes(),
+                &flavor.to_le_bytes(),
+                &count.to_le_bytes(),
+            ]);
+            let Reply::Complex { descriptors, body } =
+                call(&mut task, "mach_vm_region", false, &body).unwrap()
+            else {
+                panic!("not a complex reply");
+            };
+            assert_eq!(
+                descriptors,
+                vec![Descriptor::Port {
+                    name: 0,
+                    disposition: MACH_MSG_TYPE_MOVE_SEND
+                }]
+            );
+            assert_eq!(
+                (u64_at(&body, 0), u64_at(&body, 8)),
+                (split, 2 * PAGE_BYTES)
+            );
+            assert_eq!(u32_at(&body, 16), count);
+            assert_eq!(body.len(), 20 + count as usize * 4);
+            assert_eq!(u32_at(&body, 20), 1);
+            assert_eq!(u32_at(&body, 24), 7);
+        }
+        let body = simple(&[
+            &split.to_le_bytes(),
+            &VM_REGION_BASIC_INFO.to_le_bytes(),
+            &7u32.to_le_bytes(),
+        ]);
+        assert_eq!(
+            failure(call(&mut task, "mach_vm_region", false, &body).unwrap()),
+            KERN_INVALID_ARGUMENT
+        );
+        memory::deallocate(outer, 4 * PAGE_BYTES).unwrap();
         // A non-purgeable object's state.
         let body = simple(&[
             &base.to_le_bytes(),
