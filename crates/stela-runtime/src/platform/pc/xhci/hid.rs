@@ -1,11 +1,13 @@
 //! USB HID keyboards and pointers (HID 1.11) as sources of the native
 //! peripheral's inputs.
 //!
-//! Boot keyboards (subclass 1, protocol 1) run the boot protocol, read as
-//! the boot report (Appendix B.1). Every other HID interface runs the
-//! report protocol, read through its report descriptor ([`report`]), and
-//! may carry a keyboard report, a pointer report or both, told apart by
-//! report ID. A keyboard report's held Keyboard/Keypad usages, compared
+//! Every HID interface runs the report protocol, read through its report
+//! descriptor ([`report`]), and may carry a keyboard report, a pointer
+//! report or both, told apart by report ID. A boot keyboard (subclass 1,
+//! protocol 1) whose descriptor describes no keyboard runs the boot
+//! protocol, read as the boot report (Appendix B.1): a device that keeps
+//! report IDs, or ignores SET_PROTOCOL, is read correctly only through its
+//! descriptor. A keyboard report's held Keyboard/Keypad usages, compared
 //! with the previous report's, become key presses and releases; a report
 //! in an error state (ErrorRollOver and the like) changes nothing, and
 //! usages the native keyboard does not report (beyond DDh, other than the
@@ -79,6 +81,21 @@ fn read_reports(
 /// Why an interface is left unused.
 pub const NO_REPORTS: &str = "HID interface with neither a keyboard nor a pointer report";
 
+/// The protocol and layout to read a boot interface with: its report
+/// descriptor's, in the report protocol, when that is `usable` (describes
+/// the keyboard or pointer the interface is), else `boot` in the boot
+/// protocol.
+fn boot_interface(
+    described: Result<Reports, BlockError>,
+    boot: Reports,
+    usable: impl Fn(&Reports) -> bool,
+) -> (u16, Reports) {
+    match described {
+        Ok(reports) if usable(&reports) => (REPORT_PROTOCOL, reports),
+        _ => (BOOT_PROTOCOL, boot),
+    }
+}
+
 /// One HID interface the host polls.
 pub struct UsbInput {
     controller: Shared,
@@ -97,6 +114,8 @@ pub struct UsbInput {
     pub dropped: u64,
     /// The first transfer failure, reported once.
     failed: bool,
+    /// The last report received, as it arrived.
+    last_report: Vec<u8>,
     pub name: String,
 }
 
@@ -118,28 +137,31 @@ impl UsbInput {
                 let _ = c.control(device.slot, setup(0x21, SET_IDLE, 0, index, 0), &[]);
                 Ok(())
             };
-            match (interface.subclass, interface.protocol) {
-                (BOOT, KEYBOARD) => {
-                    protocol(&mut c, BOOT_PROTOCOL)?;
+            let boot = match (interface.subclass, interface.protocol) {
+                (BOOT, KEYBOARD) => Some(boot_interface(
+                    read_reports(&mut c, device, interface),
                     Reports {
                         keys: Some(Keys::boot()),
                         pointer: None,
-                    }
+                    },
+                    |reports| reports.keys.is_some(),
+                )),
+                (BOOT, MOUSE) => Some(boot_interface(
+                    read_reports(&mut c, device, interface),
+                    Reports {
+                        keys: None,
+                        pointer: Some(Pointer::boot()),
+                    },
+                    |reports| reports.pointer.is_some(),
+                )),
+                _ => None,
+            };
+            match boot {
+                Some((chosen, reports)) => {
+                    protocol(&mut c, chosen)?;
+                    reports
                 }
-                (BOOT, MOUSE) => match read_reports(&mut c, device, interface) {
-                    Ok(reports) if reports.pointer.is_some() => {
-                        protocol(&mut c, REPORT_PROTOCOL)?;
-                        reports
-                    }
-                    _ => {
-                        protocol(&mut c, BOOT_PROTOCOL)?;
-                        Reports {
-                            keys: None,
-                            pointer: Some(Pointer::boot()),
-                        }
-                    }
-                },
-                _ => read_reports(&mut c, device, interface)?,
+                None => read_reports(&mut c, device, interface)?,
             }
         };
         if reports.keys.is_none() && reports.pointer.is_none() {
@@ -165,6 +187,7 @@ impl UsbInput {
             position: None,
             dropped: 0,
             failed: false,
+            last_report: Vec::new(),
             name: format!("{} ({})", device.name(), device.location),
         }))
     }
@@ -233,12 +256,18 @@ impl UsbInput {
         inputs
     }
 
+    /// The last report received, as it arrived, for diagnostics.
+    pub fn last_report(&self) -> &[u8] {
+        &self.last_report
+    }
+
     /// Whether polling stopped on a transfer failure.
     pub fn failed(&self) -> bool {
         self.failed
     }
 
     fn report(&mut self, report: &[u8], inputs: &mut Vec<Input>) {
+        self.last_report = report.to_vec();
         let (id, body) = if self.reports.numbered() {
             match report.split_first() {
                 Some((&id, body)) => (Some(id), body),
@@ -475,5 +504,53 @@ mod tests {
             ]
         );
         assert!(!keyboard.failed() && !pointer.failed() && !mouse.failed());
+    }
+
+    /// A boot keyboard whose descriptor numbers its 8-byte report 1.
+    const NUMBERED_KEYBOARD: [u8; 43] = [
+        0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0x85, 0x01, // keyboard, report 1
+        0x05, 0x07, 0x19, 0xe0, 0x29, 0xe7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81,
+        0x02, // modifiers
+        0x95, 0x01, 0x75, 0x08, 0x81, 0x01, // reserved
+        0x95, 0x06, 0x75, 0x08, 0x25, 0x65, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, // keys
+        0xc0,
+    ];
+
+    #[test]
+    fn a_boot_keyboard_with_report_ids_is_read_through_its_descriptor() {
+        let boot = || Reports {
+            keys: Some(Keys::boot()),
+            pointer: None,
+        };
+        let usable = |reports: &Reports| reports.keys.is_some();
+        let described = report::parse(&NUMBERED_KEYBOARD).map_err(BlockError::Unsupported);
+        let (protocol, reports) = boot_interface(described, boot(), usable);
+        assert_eq!(protocol, REPORT_PROTOCOL);
+        assert!(reports.numbered());
+        // Y held, after the report ID.
+        let report = [0x01, 0x00, 0x00, 0x1c, 0, 0, 0, 0, 0];
+        let keys = reports.keys.unwrap();
+        assert_eq!(keys.pressed(&report[1..]), Some(alloc::vec![0x1c]));
+        // Read as the boot report, the ID byte is Left Control.
+        assert_eq!(
+            Keys::boot().pressed(&report[..8]),
+            Some(alloc::vec![0xe0, 0x1c])
+        );
+        // Without a usable descriptor the boot report is read.
+        let (protocol, reports) = boot_interface(
+            Err(BlockError::Unsupported("no descriptor")),
+            boot(),
+            usable,
+        );
+        assert_eq!((protocol, reports), (BOOT_PROTOCOL, boot()));
+        let pointer_only = report::parse(&[
+            0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x02,
+            0x81, 0x06,
+        ])
+        .map_err(BlockError::Unsupported);
+        assert_eq!(
+            boot_interface(pointer_only, boot(), usable).0,
+            BOOT_PROTOCOL
+        );
     }
 }

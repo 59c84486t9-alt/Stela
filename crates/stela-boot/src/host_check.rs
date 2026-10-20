@@ -92,6 +92,8 @@ const BARS: [(u8, u8, u8); 7] = [
 /// HID Keyboard/Keypad usages (HID Usage Tables, chapter 10).
 const USAGE_N: u8 = 0x11;
 const USAGE_Y: u8 = 0x1c;
+/// LeftControl through Right GUI, which never answer a prompt alone.
+const MODIFIERS: core::ops::RangeInclusive<u8> = 0xe0..=0xe7;
 
 /// Timer interrupts the handler took, and other interrupts.
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -622,16 +624,23 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
     );
 }
 
-/// The first key pressed on any of `keyboards`.
+/// The first non-modifier key pressed on any of `keyboards`, logged with
+/// the raw report it arrived in.
 fn key(keyboards: &mut [UsbInput]) -> Option<u8> {
     keyboards.iter_mut().find_map(|device| {
-        device.poll().into_iter().find_map(|input| match input {
+        let usage = device.poll().into_iter().find_map(|input| match input {
             HidInput::Key {
                 usage,
                 pressed: true,
-            } => Some(usage),
+            } if !MODIFIERS.contains(&usage) => Some(usage),
             _ => None,
-        })
+        })?;
+        output::arguments(format_args!(
+            "KEY usage={usage:#04x} report={:02x?} from {}\n",
+            device.last_report(),
+            device.name
+        ));
+        Some(usage)
     })
 }
 
