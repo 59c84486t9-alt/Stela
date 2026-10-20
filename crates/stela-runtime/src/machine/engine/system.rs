@@ -1315,6 +1315,11 @@ pub(super) fn identify(
             None => missing.push(register),
         }
     }
+    if Feature::FEAT_SME.on(profile.chip) && !missing.contains(&Register::MPIDR_EL1) {
+        let smidr = crate::machine::streaming::smidr(cpu.read(Register::MPIDR_EL1));
+        cpu.registers.set_raw(Register::SMIDR_EL1, 0, smidr);
+        missing.retain(|&register| register != Register::SMIDR_EL1);
+    }
     for (virtual_register, physical) in [
         (Register::VPIDR_EL2, Register::MIDR_EL1),
         (Register::VMPIDR_EL2, Register::MPIDR_EL1),
@@ -1619,7 +1624,8 @@ mod tests {
         assert_eq!(machine.cpu.svcr(), 0b01);
         run(&mut machine, 1, SMSTOP).unwrap();
         assert_eq!(machine.cpu.svcr(), 0);
-        // SMIDR_EL1 has no profile value: reading it stops.
+        // SMIDR_EL1 derives from MPIDR_EL1, which this profile has no value
+        // for: reading it stops.
         const SMIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 6);
         assert!(matches!(
             run(&mut machine, 1, access(true, SMIDR_EL1, 9)),
@@ -1671,6 +1677,117 @@ mod tests {
             machine.cpu.read(Register::SMPRIMAP_EL2),
             !Register::SMPRIMAP_EL2.res0(chip)
         );
+    }
+
+    #[test]
+    fn smidr_tpidr2_priority_mapping_and_mpamsm_follow_the_chips_sme() {
+        use crate::machine::registers::Identity;
+        const SMIDR_EL1: Encoding = Encoding::new(3, 1, 0, 0, 6);
+        const TPIDR2_EL0: Encoding = Encoding::new(3, 3, 13, 0, 5);
+        const HCRX_EL2: Encoding = Encoding::new(3, 4, 1, 2, 2);
+        const SCTLR_ENTP2: u64 = 1 << 60;
+        const HCRX_SMPME: u64 = 1 << 5;
+        const MPAM2_EL2: Encoding = Encoding::new(3, 4, 10, 5, 0);
+        const MPAMSM_EL1: Encoding = Encoding::new(3, 0, 10, 5, 3);
+        const MPAM2_ENMPAMSM: u64 = 1 << 50;
+        // A P-cluster core: Aff2 1, Aff1 1.
+        const MPIDR: u64 = 0x8001_0100;
+        let identity = Identity {
+            midr: 0x611f_0490,
+            mpidr: MPIDR,
+            clock: None,
+            caches: None,
+        };
+        let mut machine = super::super::tests::board(&[], super::super::NoDevices, vec![identity]);
+        let chip = machine.profile.chip;
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x2_0000);
+        machine.derived_changed();
+        let run = |machine: &mut TestMachine, el: u8, word: u32| {
+            machine.cpu.pstate = Pstate {
+                sp: el != 0,
+                ..Pstate::reset(el.max(1))
+            };
+            machine.cpu.pstate.el = el;
+            machine.cpu.pc = BASE;
+            machine.system_instruction(word).unwrap();
+        };
+        run(&mut machine, 1, access(true, SMIDR_EL1, 1));
+        if !Feature::FEAT_SME.on(chip) {
+            // An unimplemented ID register traps with EC 0x18.
+            assert_eq!(
+                machine.cpu.read(Register::ESR_EL1),
+                0x18 << 26 | 1 << 25 | trap_iss_of(true, SMIDR_EL1, 1)
+            );
+            return;
+        }
+        // Apple's implementer code, priorities supported, shared by the
+        // cluster: Affinity2 and Affinity hold Aff2:Aff1.
+        assert_eq!(
+            (machine.cpu.state.x[1], machine.cpu.pc),
+            (0x61 << 24 | 1 << 15 | 0b11 << 13 | 0x101, BASE + 4)
+        );
+        // In the host, SCTLR_EL2.EnTP2 clear traps EL0's TPIDR2_EL0 accesses
+        // to EL2 with EC 0x18; set, they reach the register.
+        machine
+            .cpu
+            .registers
+            .set(Register::HCR_EL2, 0, 1 << 34 | 1 << 27);
+        machine.cpu.registers.set(Register::TPIDR2_EL0, 0, 0x5a);
+        machine.derived_changed();
+        for (read, rt) in [(true, 2), (false, 2)] {
+            run(&mut machine, 0, access(read, TPIDR2_EL0, rt));
+            assert_eq!(
+                (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL2)),
+                (2, 0x18 << 26 | 1 << 25 | trap_iss_of(read, TPIDR2_EL0, rt)),
+                "{read}"
+            );
+        }
+        let sctlr = machine.cpu.read(Register::SCTLR_EL2);
+        machine
+            .cpu
+            .registers
+            .set(Register::SCTLR_EL2, 0, sctlr | SCTLR_ENTP2);
+        run(&mut machine, 0, access(true, TPIDR2_EL0, 3));
+        assert_eq!((machine.cpu.state.x[3], machine.cpu.pc), (0x5a, BASE + 4));
+        // HCRX_EL2.SMPME holds, as SMIDR_EL1.SMPS has priority mapping.
+        machine.cpu.state.x[4] = HCRX_SMPME;
+        run(&mut machine, 2, access(false, HCRX_EL2, 4));
+        run(&mut machine, 2, access(true, HCRX_EL2, 5));
+        assert_eq!(machine.cpu.state.x[5] & HCRX_SMPME, HCRX_SMPME);
+        // MPAM2_EL2.EnMPAMSM clear traps EL1's MPAMSM_EL1 accesses to EL2;
+        // set, MPAMSM_EL1 holds PARTID_D and PMG_D, which tag nothing with
+        // MPAMIDR_EL1 0.
+        machine.cpu.registers.set(Register::HCR_EL2, 0, 0);
+        machine.cpu.state.x[6] = 0;
+        run(&mut machine, 2, access(false, MPAM2_EL2, 6));
+        machine.cpu.state.x[7] = u64::MAX;
+        run(&mut machine, 1, access(false, MPAMSM_EL1, 7));
+        assert_eq!(
+            (machine.cpu.pstate.el, machine.cpu.read(Register::ESR_EL2)),
+            (2, 0x18 << 26 | 1 << 25 | trap_iss_of(false, MPAMSM_EL1, 7))
+        );
+        machine.cpu.state.x[6] = MPAM2_ENMPAMSM;
+        run(&mut machine, 2, access(false, MPAM2_EL2, 6));
+        run(&mut machine, 2, access(true, MPAM2_EL2, 8));
+        assert_eq!(machine.cpu.state.x[8], MPAM2_ENMPAMSM);
+        run(&mut machine, 1, access(false, MPAMSM_EL1, 7));
+        run(&mut machine, 1, access(true, MPAMSM_EL1, 9));
+        assert_eq!(
+            (machine.cpu.state.x[9], machine.cpu.pc),
+            (0x0000_ff00_ffff_0000, BASE + 4)
+        );
+    }
+
+    /// The ISS of a trapped MRS (`read`) or MSR of `encoding` with `rt`.
+    fn trap_iss_of(read: bool, encoding: Encoding, rt: u32) -> u64 {
+        u64::from(encoding.op0()) << 20
+            | u64::from(encoding.op2()) << 17
+            | u64::from(encoding.op1()) << 14
+            | u64::from(encoding.crn()) << 10
+            | u64::from(rt) << 5
+            | u64::from(encoding.crm()) << 1
+            | u64::from(read)
     }
 
     #[test]

@@ -20,6 +20,38 @@ const CPACR_FPEN: u32 = 20;
 const SMEN: u32 = 24;
 const SMCR_EZT0: u32 = 30;
 
+/// SMIDR_EL1.Implementer: Apple's code, as MIDR_EL1 has it.
+const SMIDR_IMPLEMENTER_APPLE: u64 = 0x61 << 24;
+/// SMIDR_EL1.SMPS: streaming execution priority is supported, so SMPRI_EL1,
+/// SMPRIMAP_EL2 and HCRX_EL2.SMPME hold their fields.
+const SMIDR_SMPS: u64 = 1 << 15;
+/// SMIDR_EL1.SH 0b11: the PE shares its implementation of Streaming SVE
+/// mode with other PEs.
+const SMIDR_SHARED: u64 = 0b11 << 13;
+/// SMIDR_EL1.Affinity, bits 11:0, and Affinity2, bits 51:32: the low and
+/// high parts of the 32-bit SMCU affinity.
+const SMIDR_AFFINITY_BITS: u32 = 12;
+const SMIDR_AFFINITY2_SHIFT: u32 = 32;
+/// MPIDR_EL1.Aff1 and Aff2, which Apple's PEs number their cluster with.
+const MPIDR_CLUSTER_SHIFT: u32 = 8;
+const MPIDR_CLUSTER_MASK: u64 = 0xffff;
+
+/// SMIDR_EL1 of a PE with MPIDR_EL1 `mpidr`. The architecture leaves
+/// Revision and the affinity IMPLEMENTATION DEFINED and Apple publishes
+/// neither: Revision reads 0, and the PEs of one cluster (MPIDR_EL1 Aff2 and
+/// Aff1) share one SMCU (SH 0b11, NSMC 0), as Apple's per-cluster matrix
+/// unit is shared by that cluster's cores (inference). Priorities are held
+/// (SMPS 1); with one PE executing at a time none changes execution, whose
+/// effect the architecture leaves IMPLEMENTATION DEFINED.
+pub fn smidr(mpidr: u64) -> u64 {
+    let affinity = (mpidr >> MPIDR_CLUSTER_SHIFT) & MPIDR_CLUSTER_MASK;
+    SMIDR_IMPLEMENTER_APPLE
+        | SMIDR_SMPS
+        | SMIDR_SHARED
+        | (affinity & ((1 << SMIDR_AFFINITY_BITS) - 1))
+        | (affinity >> SMIDR_AFFINITY_BITS) << SMIDR_AFFINITY2_SHIFT
+}
+
 /// Why a check denies an instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Denial {
