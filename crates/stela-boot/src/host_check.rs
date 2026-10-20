@@ -616,7 +616,7 @@ fn bars(machine: &mut Machine, screen: &Framebuffer, top: usize) {
         format!(
             "{width}x{height} stride={} {} base={:#x} bytes={:#x} bars={} read_back_mismatches={mismatches}",
             screen.stride(),
-            if screen.is_bgr() { "BGR" } else { "RGB" },
+            screen.format(),
             screen.base,
             screen.bytes,
             BARS.len()

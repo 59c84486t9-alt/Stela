@@ -79,6 +79,58 @@ pub trait Scanout {
     fn present(&mut self, rows: &[u8]) -> Result<(), &'static str>;
 }
 
+/// A host framebuffer's 32-bit pixel given as one bit mask per channel: the
+/// UEFI GOP `PixelBitMask` mode (UEFI 2.10 section 12.9,
+/// `EFI_PIXEL_BITMASK`), whose reserved bits the display ignores. A
+/// blue-low pixel is re-encoded through it, each 8-bit channel widened by
+/// repeating its high bits or narrowed to its high bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChannelMasks {
+    /// Each of red, green and blue: its lowest bit and its width. They are
+    /// bytes so that the boot crate's framebuffer description stays small:
+    /// it travels in the one-page loader handoff.
+    channels: [(u8, u8); 3],
+}
+
+impl ChannelMasks {
+    /// The layout of `red`, `green` and `blue`. Each mask must be one
+    /// contiguous run of at most 16 bits, and no two masks may overlap.
+    pub fn new(red: u32, green: u32, blue: u32) -> Result<Self, &'static str> {
+        if red & green != 0 || red & blue != 0 || green & blue != 0 {
+            return Err("framebuffer channel masks overlap");
+        }
+        let channel = |mask: u32| {
+            let shift = mask.trailing_zeros();
+            let width = mask.count_ones();
+            if mask == 0 || width > 16 || (mask >> shift).trailing_ones() != width {
+                Err("framebuffer channel mask is not one contiguous run of 1 to 16 bits")
+            } else {
+                Ok((shift as u8, width as u8))
+            }
+        };
+        Ok(Self {
+            channels: [channel(red)?, channel(green)?, channel(blue)?],
+        })
+    }
+
+    /// The pixel of 8-bit `red`, `green` and `blue`, its reserved bits zero.
+    pub fn encode(&self, red: u8, green: u8, blue: u8) -> u32 {
+        [red, green, blue]
+            .into_iter()
+            .zip(self.channels)
+            .map(|(value, (shift, width))| {
+                let (value, shift, width) = (u32::from(value), u32::from(shift), u32::from(width));
+                let scaled = if width >= 8 {
+                    value << (width - 8) | value >> (16 - width)
+                } else {
+                    value >> (8 - width)
+                };
+                scaled << shift
+            })
+            .fold(0, |pixel, channel| pixel | channel)
+    }
+}
+
 /// One surface plane the model reads pixels from: its format, size and the
 /// DART I/O address (DVA) of its top-left pixel. Built from the driver's
 /// `SurfaceContents` (`IOMFB::DCP::SurfaceContents::from`).
@@ -329,6 +381,25 @@ mod tests {
             bytes.copy_from_slice(&memory[start..start + bytes.len()]);
             true
         }
+    }
+
+    #[test]
+    fn channel_masks_encode_8_bit_channels_into_any_contiguous_layout() {
+        // The masks of GOP's two fixed orders.
+        let bgr = ChannelMasks::new(0xff_0000, 0xff00, 0xff).unwrap();
+        assert_eq!(bgr.encode(0x12, 0x34, 0x56), 0x12_3456);
+        let rgb = ChannelMasks::new(0xff, 0xff00, 0xff_0000).unwrap();
+        assert_eq!(rgb.encode(0x12, 0x34, 0x56), 0x56_3412);
+        // 10 bits widen by repeating the high bits; 5:6:5 narrows to them.
+        let wide = ChannelMasks::new(0x3ff << 20, 0x3ff << 10, 0x3ff).unwrap();
+        assert_eq!(wide.encode(0xff, 0x80, 0), 0x3ff << 20 | 0x202 << 10);
+        let narrow = ChannelMasks::new(0xf800, 0x7e0, 0x1f).unwrap();
+        assert_eq!(narrow.encode(0xff, 0x80, 0x08), 0xf800 | 0x20 << 5 | 1);
+        // Gaps, overlaps, empty or over-wide channels refuse.
+        assert!(ChannelMasks::new(0xf0f, 0xf000, 0xf0).is_err());
+        assert!(ChannelMasks::new(0xff, 0x1ff, 0xff_0000).is_err());
+        assert!(ChannelMasks::new(0, 0xff00, 0xff).is_err());
+        assert!(ChannelMasks::new(0x1_ffff, 0xfe_0000, 0xff00_0000).is_err());
     }
 
     #[test]

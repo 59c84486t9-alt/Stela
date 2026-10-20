@@ -7,7 +7,7 @@
 //! (`stela_runtime::boot_bundle::Machine`), and copies it to the firmware's
 //! framebuffer between engine slices. XNU's 32-bit pixels are x8r8g8b8 with
 //! blue in the low byte (public XNU `osfmk/console/video_console.c`), GOP's
-//! BGR order; an RGB mode swaps red and blue.
+//! BGR order; an RGB or channel-mask mode re-encodes each pixel.
 use super::host::BareHost;
 use crate::console::{self, Framebuffer};
 use crate::output;
@@ -24,8 +24,8 @@ static DCP_PRESENTED: AtomicBool = AtomicBool::new(false);
 /// The host scanout the modeled DCP presents completed swaps to: the UEFI GOP
 /// framebuffer at its own mode. The DCP model composes each swap's layers in
 /// this scanout's pixel order (blue-low, which `Framebuffer::show_row` writes,
-/// swapping red and blue for an RGB panel), so a frame arrives here as rows
-/// ready for the firmware's mode.
+/// re-encoding it for an RGB or channel-mask mode), so a frame arrives here
+/// as rows ready for the firmware's mode.
 pub struct GopScanout {
     screen: Framebuffer,
 }
@@ -49,7 +49,7 @@ impl Scanout for GopScanout {
         ScanoutMode {
             width: width as u32,
             height: height as u32,
-            // show_row takes blue-low pixels and swaps for an RGB panel.
+            // show_row takes blue-low pixels and re-encodes them for the mode.
             format: ScanoutFormat::Bgra8888,
         }
     }

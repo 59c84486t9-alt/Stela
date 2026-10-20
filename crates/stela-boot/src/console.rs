@@ -6,6 +6,7 @@
 //! framebuffer back to scroll is too slow on uncached video memory.
 use core::cell::UnsafeCell;
 use font8x8::legacy::BASIC_LEGACY;
+use stela_runtime::machine::apple::ScanoutMasks;
 use uefi::{
     boot::{self, OpenProtocolAttributes, OpenProtocolParams},
     proto::console::gop::{GraphicsOutput, PixelFormat},
@@ -24,6 +25,32 @@ pub enum Color {
     Fatal,
 }
 
+/// How a GOP mode lays out a 32-bit pixel.
+#[derive(Debug, Clone, Copy)]
+enum Encoding {
+    /// `PixelBlueGreenRedReserved8BitPerColor`: blue in the low byte, as the
+    /// pixels Stela draws and presents already are.
+    Bgr,
+    /// `PixelRedGreenBlueReserved8BitPerColor`: red in the low byte.
+    Rgb,
+    /// `PixelBitMask`: the layout its channel masks give.
+    Masks(ScanoutMasks),
+}
+
+impl Encoding {
+    /// The mode's pixel for one with blue in the low byte.
+    fn encode(self, pixel: u32) -> u32 {
+        match self {
+            Encoding::Bgr => pixel,
+            Encoding::Rgb => pixel & 0xff00_ff00 | (pixel & 0xff) << 16 | (pixel >> 16) & 0xff,
+            Encoding::Masks(masks) => {
+                let [blue, green, red, _] = pixel.to_le_bytes();
+                masks.encode(red, green, blue)
+            }
+        }
+    }
+}
+
 /// The GOP mode in use when Stela takes over.
 #[derive(Debug, Clone, Copy)]
 pub struct Framebuffer {
@@ -32,13 +59,16 @@ pub struct Framebuffer {
     width: usize,
     height: usize,
     stride: usize,
-    bgr: bool,
+    encoding: Encoding,
 }
 
 impl Framebuffer {
-    /// The first GOP's current mode, when it is a 32-bit RGB or BGR
-    /// framebuffer. Boot managers keep their own handle open, so this only
-    /// reads the protocol rather than opening it exclusively.
+    /// The first GOP's current mode, when it is a linear 32-bit framebuffer:
+    /// RGB, BGR or channel masks (`scanout::ChannelMasks`). A `PixelBltOnly`
+    /// mode has no framebuffer to draw in once boot services end, so it gives
+    /// none, as do masks that `ChannelMasks` refuses. Boot managers keep
+    /// their own handle open, so this only reads the protocol rather than
+    /// opening it exclusively.
     pub fn from_firmware() -> Option<Self> {
         let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
         // SAFETY: the protocol is only read, and only while boot services run.
@@ -54,10 +84,13 @@ impl Framebuffer {
         }
         .ok()?;
         let mode = gop.current_mode_info();
-        let bgr = match mode.pixel_format() {
-            PixelFormat::Rgb => false,
-            PixelFormat::Bgr => true,
-            PixelFormat::Bitmask | PixelFormat::BltOnly => return None,
+        let encoding = match (mode.pixel_format(), mode.pixel_bitmask()) {
+            (PixelFormat::Rgb, _) => Encoding::Rgb,
+            (PixelFormat::Bgr, _) => Encoding::Bgr,
+            (PixelFormat::Bitmask, Some(masks)) => {
+                Encoding::Masks(ScanoutMasks::new(masks.red, masks.green, masks.blue).ok()?)
+            }
+            (PixelFormat::Bitmask | PixelFormat::BltOnly, _) => return None,
         };
         let (width, height) = mode.resolution();
         let mut buffer = gop.frame_buffer();
@@ -67,7 +100,7 @@ impl Framebuffer {
             width,
             height,
             stride: mode.stride(),
-            bgr,
+            encoding,
         };
         (framebuffer.stride * framebuffer.height * BYTES_PER_PIXEL <= framebuffer.bytes)
             .then_some(framebuffer)
@@ -91,12 +124,7 @@ impl Framebuffer {
         let line = (self.base + y * self.stride * BYTES_PER_PIXEL) as *mut u32;
         let (pixels, _) = pixels.as_chunks::<BYTES_PER_PIXEL>();
         for (column, pixel) in pixels.iter().take(self.width).enumerate() {
-            let value = u32::from_le_bytes(*pixel);
-            let value = if self.bgr {
-                value
-            } else {
-                value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
-            };
+            let value = self.encoding.encode(u32::from_le_bytes(*pixel));
             // SAFETY: `column < width` and `y < height`, inside the mode's
             // visible framebuffer.
             unsafe { line.add(column).write_volatile(value) };
@@ -108,9 +136,13 @@ impl Framebuffer {
         self.stride
     }
 
-    /// Whether pixels are blue in the low byte (GOP's BGR); otherwise red.
-    pub fn is_bgr(&self) -> bool {
-        self.bgr
+    /// The mode's pixel layout, as GOP names it.
+    pub fn format(&self) -> &'static str {
+        match self.encoding {
+            Encoding::Bgr => "BGR",
+            Encoding::Rgb => "RGB",
+            Encoding::Masks(_) => "bitmask",
+        }
     }
 
     /// The same mode with only its top `height` rows, so that text written
@@ -129,14 +161,10 @@ impl Framebuffer {
         }
     }
 
-    /// The pixel value of a colour in this mode's order.
+    /// The pixel value of a colour in this mode's layout.
     pub fn rgb(&self, red: u8, green: u8, blue: u8) -> u32 {
         let (red, green, blue) = (u32::from(red), u32::from(green), u32::from(blue));
-        if self.bgr {
-            (red << 16) | (green << 8) | blue
-        } else {
-            (blue << 16) | (green << 8) | red
-        }
+        self.encoding.encode((red << 16) | (green << 8) | blue)
     }
 
     fn fill(&self, x: usize, y: usize, size: usize, value: u32) {

@@ -89,7 +89,9 @@ pub use crate::platform::apple::{
     dcp::Log as DisplayLog,
     interrupt::AicInput,
     nor,
-    scanout::{Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout},
+    scanout::{
+        ChannelMasks as ScanoutMasks, Mode as ScanoutMode, PixelFormat as ScanoutFormat, Scanout,
+    },
     sep::Entropy as SepEntropy,
     sep::image::signature::{
         Evidence as SepSignatureEvidence, ManifestEvidence as SepManifestEvidence,
