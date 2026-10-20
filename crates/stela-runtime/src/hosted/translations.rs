@@ -407,7 +407,7 @@ impl Shared {
             };
             state.busy += 1;
             drop(state);
-            let entry = prove(&offer);
+            let entry = offer.prove();
             let mut state = lock(&self.state);
             state.busy -= 1;
             match entry {
@@ -570,27 +570,6 @@ impl Shared {
         let _ = std::io::Seek::rewind(&mut file);
         let _ = file.write_all(usage.to_string().as_bytes());
     }
-}
-
-/// Compile the offered block at both probe addresses and prove its entry.
-fn prove(offer: &Offer) -> Option<translations::Entry> {
-    let displacements = translations::probe_displacements(offer.page);
-    let probes = displacements.map(|displacement| {
-        offer
-            .preparation
-            .compile_input(&offer.input, offer.pc.wrapping_add(displacement))
-            .ok()
-    });
-    let [Some(first), Some(second)] = &probes else {
-        return None;
-    };
-    translations::prove(
-        &offer.block,
-        offer.page,
-        offer.pc,
-        offer.context,
-        [first, second],
-    )
 }
 
 /// The process ends or replaces its image: write what the workers proved.

@@ -5,7 +5,10 @@
 //! proof that a block's code depends on its address only through them.
 //!
 //! The format is the same in every container: the hosted directory store
-//! (`crate::hosted::translations`) and the pack `stela.efi` keeps.
+//! (`crate::hosted::translations`) and the pack `stela.efi` keeps
+//! ([`pack`]).
+pub mod pack;
+
 use alloc::{string::String, vec::Vec};
 use sha2::{Digest as _, Sha256};
 use stela_compiler::{

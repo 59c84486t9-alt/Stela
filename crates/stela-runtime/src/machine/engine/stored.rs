@@ -43,6 +43,29 @@ pub struct Offer {
     pub block: CompiledBlock,
 }
 
+impl Offer {
+    /// Its block's stored form: the block compiled again at both probe
+    /// addresses of its page, proven to move only by them
+    /// ([`translations::prove`](crate::translations::prove)).
+    pub fn prove(&self) -> Option<crate::translations::Entry> {
+        let probes = crate::translations::probe_displacements(self.page).map(|displacement| {
+            self.preparation
+                .compile_input(&self.input, self.pc.wrapping_add(displacement))
+                .ok()
+        });
+        let [Some(first), Some(second)] = &probes else {
+            return None;
+        };
+        crate::translations::prove(
+            &self.block,
+            self.page,
+            self.pc,
+            self.context,
+            [first, second],
+        )
+    }
+}
+
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
     pub(super) key: Digest,
@@ -177,20 +200,7 @@ pub(super) mod tests {
 
     /// What the hosted store's workers do with an offer.
     fn proven(offer: &Offer) -> translations::Entry {
-        let [first, second] = translations::probe_displacements(offer.page).map(|displacement| {
-            offer
-                .preparation
-                .compile_input(&offer.input, offer.pc.wrapping_add(displacement))
-                .unwrap()
-        });
-        translations::prove(
-            &offer.block,
-            offer.page,
-            offer.pc,
-            offer.context,
-            [&first, &second],
-        )
-        .unwrap()
+        offer.prove().unwrap()
     }
 
     #[test]
