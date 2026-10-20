@@ -8,8 +8,8 @@
 //!
 //! | Type | Direction | Meaning |
 //! | --- | --- | --- |
-//! | 0x80 `INIT` | AP | start the endpoint |
-//! | 0xa0 `INIT_ACK` | coprocessor | the endpoint is alive (both AP sides accept it) |
+//! | 0x80 `INIT` | AP | start the endpoint; 26A434 sends 0x100 |
+//! | 0xa0 `INIT_ACK` | coprocessor | the endpoint is alive; `[15:0]` picks the ring layout |
 //! | 0x89 `GETBUF` | coprocessor | lend me `[31:16]` 64-byte blocks, tag `[15:0]` |
 //! | 0xa1 `GETBUF_ACK` | AP | the buffer's DVA in `[47:0]` |
 //! | 0x8a `INIT_TX` / 0x8b `INIT_RX` | coprocessor | the AP-to-coprocessor / coprocessor-to-AP ring at block `[47:32]`, `[31:16]` blocks, tag `[15:0]` |
@@ -18,11 +18,18 @@
 //! | 0xa2 `SEND` / 0x85 `RECV` | AP / coprocessor | a ring's new write pointer in `[31:0]` |
 //! | 0xc0 `SHUTDOWN` / 0xc1 `SHUTDOWN_ACK` | AP / coprocessor | stop |
 //!
-//! A ring starts with a 0xc0-byte header the coprocessor writes: the data
-//! size at +0, the read pointer at +0x40 and the write pointer at +0x80
-//! (Linux `struct afk_ringbuffer_header`; the AP checks `bufsz + 0xc0` is
-//! the ring's size). Entries are a 16-byte `afk_qe` (`' POI'` magic, size,
-//! channel, type) and an EPIC header, aligned to 64 bytes.
+//! A ring starts with a header the coprocessor writes: the data size, the
+//! read pointer and the write pointer, one layout block each. Both sides
+//! of the 26A434 messenger pick the block from the peer's INIT word: low
+//! 16 bits of 8 select 0x40-byte blocks (Linux `struct
+//! afk_ringbuffer_header`), anything else 0x80-byte blocks. The DCP
+//! firmware (`ipad14dcp` restore image, 0x2df40..0x2df6c) answers INIT
+//! with `INIT_ACK` 0x100 whatever the AP sent, so the AP's
+//! `_afk_msgr_handle_ready_ack` (AppleFirmwareKit 0x24c32c0) always takes
+//! the 0x80-byte layout and `_iop_ringbuffer_init_ex` (0x24c1ce4) checks
+//! `bufsz + 0x180` is the ring's size. Entries are a 16-byte `afk_qe`
+//! (`' POI'` magic, size, channel, type) and an EPIC header, aligned to the
+//! layout's 0x80 bytes.
 //!
 //! EPIC services are announced by the coprocessor (an `EPIC_SUBTYPE_ANNOUNCE`
 //! report on a new channel, `afk_recv_handle_init`); the AP only talks to an
@@ -50,7 +57,9 @@ pub const RECV: u64 = 0x85;
 pub const SHUTDOWN: u64 = 0xc0;
 pub const SHUTDOWN_ACK: u64 = 0xc1;
 
-/// Buffer and ring sizes are counted in 64-byte blocks.
+/// `GETBUF` and `INIT_TX`/`INIT_RX` count bytes in 64-byte units, whatever
+/// the ring layout (`_afk_msgr_handle_q_reg` decodes `(word >> 10) &
+/// 0x3fffc0`).
 const BLOCK_SHIFT: u32 = 6;
 /// The buffer the coprocessor asks for: two rings of half of it each. A
 /// `GETBUF` size is a 16-bit byte count once shifted (Linux `afk_getbuf`).
@@ -59,10 +68,14 @@ const RING_BYTES: u64 = BUFFER_BYTES / 2;
 /// The ring the AP writes (`INIT_TX`) and the one the coprocessor writes.
 const TX_RING: u64 = 0;
 const RX_RING: u64 = RING_BYTES;
-/// The ring header: size, read pointer, write pointer, a block each.
-pub const RING_HEADER: u64 = 0xc0;
-const RPTR: u64 = 0x40;
-const WPTR: u64 = 0x80;
+/// The `INIT_ACK` the DCP firmware sends, which selects 0x80-byte blocks.
+const INIT_ACK_VALUE: u64 = 0x100;
+/// An INIT whose low 16 bits are this asks for 0x40-byte blocks.
+const SMALL_LAYOUT: u64 = 8;
+/// The ring header: size, read pointer, write pointer, a 0x80-byte block each.
+pub const RING_HEADER: u64 = 0x180;
+const RPTR: u64 = 0x80;
+const WPTR: u64 = 0x100;
 /// `afk_qe.magic`, `' POI'` little-endian.
 const QE_MAGIC: u32 = 0x2050_4f49;
 
@@ -160,9 +173,14 @@ impl Afk {
     pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         self.seen.push_back(Event::Received(word));
         match (kind(word), self.state) {
+            // The firmware would lay its rings out in 0x40-byte blocks while
+            // its `INIT_ACK` tells the AP 0x80; no 26A434 AP asks for that.
+            (INIT, State::Stopped) if word & 0xffff == SMALL_LAYOUT => {
+                Err("DCP AFK INIT asks for the 0x40-byte ring layout")
+            }
             (INIT, State::Stopped) => {
                 self.state = State::Asked;
-                outbox.push(message(INIT_ACK, 0));
+                outbox.push(message(INIT_ACK, INIT_ACK_VALUE));
                 outbox.push(message(
                     GETBUF,
                     (BUFFER_BYTES >> BLOCK_SHIFT) << 16 | self.tag(),
@@ -297,8 +315,9 @@ mod tests {
     fn started(memory: &mut Memory) -> Afk {
         let mut afk = Afk::new(0x20, "system", Some(WINDOW));
         let mut out = Vec::new();
-        afk.receive(message(INIT, 0), &mut out).unwrap();
-        assert_eq!(kind(out[0]), INIT_ACK);
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
+        // 0x100, not 8: the AP takes the 0x80-byte ring layout.
+        assert_eq!(out[0], 0xa0 << 48 | 0x100);
         // GETBUF: 0x4000 bytes is 0x100 blocks, tagged with the endpoint.
         assert_eq!(out[1], 0x89 << 48 | 0x100 << 16 | 0x20);
         out.clear();
@@ -312,7 +331,7 @@ mod tests {
                 0x8b << 48 | 0x80 << 32 | 0x80 << 16 | 0x20,
             ]
         );
-        // Each ring header gives bufsz + 0xc0 == its size, as the AP checks.
+        // Each ring header gives bufsz + 0x180 == its size, as the AP checks.
         for ring in [0, 0x2000] {
             let mut size = [0u8; 4];
             memory.read(WINDOW + 0x4000 + ring, &mut size).unwrap();
@@ -368,12 +387,14 @@ mod tests {
         assert!(afk.receive(message(SEND, 0), &mut out).is_err());
         assert!(afk.receive(message(GETBUF_ACK, 0), &mut out).is_err());
         assert!(afk.receive(message(0x99, 0), &mut out).is_err());
-        afk.receive(message(INIT, 0), &mut out).unwrap();
-        assert!(afk.receive(message(INIT, 0), &mut out).is_err());
+        assert!(afk.receive(message(INIT, 8), &mut out).is_err());
+        assert!(out.is_empty());
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
+        assert!(afk.receive(message(INIT, 0x100), &mut out).is_err());
         out.clear();
         afk.receive(message(SHUTDOWN, 0), &mut out).unwrap();
         assert_eq!(out, [SHUTDOWN_ACK << 48]);
-        afk.receive(message(INIT, 0), &mut out).unwrap();
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
         assert_eq!(afk.seen.front(), Some(&Event::Received(START << 48)));
     }
 }

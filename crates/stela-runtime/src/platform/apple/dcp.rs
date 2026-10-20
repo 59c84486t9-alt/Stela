@@ -578,7 +578,9 @@ mod tests {
         let shared = coprocessor.afk[0].clone();
         let mut endpoint = AfkEndpoint(shared);
         let mut sent = Vec::new();
-        endpoint.receive(afk::INIT << 48, &mut sent).unwrap();
+        endpoint
+            .receive(afk::INIT << 48 | 0x100, &mut sent)
+            .unwrap();
         assert_eq!(afk::kind(sent[1]), afk::GETBUF);
         endpoint
             .receive(afk::GETBUF_ACK << 48 | 0x4000, &mut sent)
