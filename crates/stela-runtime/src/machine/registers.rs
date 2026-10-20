@@ -92,6 +92,9 @@ pub mod encodings {
         ERRIDR_EL1 = 3, 0, 5, 3, 0;
         MDRAR_EL1 = 2, 0, 1, 0, 0;
         DBGAUTHSTATUS_EL1 = 2, 0, 7, 14, 6;
+        AMCFGR_EL0 = 3, 3, 13, 2, 1;
+        AMCGCR_EL0 = 3, 3, 13, 2, 2;
+        AMCG1IDR_EL0 = 3, 3, 13, 2, 6;
         CCSIDR_EL1 = 3, 1, 0, 0, 0;
         CLIDR_EL1 = 3, 1, 0, 0, 1;
         AIDR_EL1 = 3, 1, 0, 0, 7;

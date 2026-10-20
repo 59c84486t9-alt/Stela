@@ -226,6 +226,8 @@ pub struct Cpu {
     /// Apple's core performance monitor (`machine::pmu`), on the PEs whose
     /// chip and core clock the profile declares.
     pub pmu: Option<super::pmu::Pmu>,
+    /// The activity monitors (`machine::amu`), on a chip with FEAT_AMUv1.
+    pub amu: Option<super::amu::Amu>,
     /// The instructions this PE has retired (`machine::pmu`).
     pub retired: u64,
     /// The CTRR registers of this PE's cluster, shared with its other PEs
@@ -346,6 +348,7 @@ impl Cpu {
                 ScalableState::new(length, Feature::FEAT_SME2.on(chip))
             }),
             pmu: None,
+            amu: None,
             retired: 0,
             ctrr: Rc::default(),
             memory_lock: None,

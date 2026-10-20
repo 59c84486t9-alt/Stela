@@ -1366,23 +1366,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
         })
     }
 
-    /// Bring the running PE's performance monitor up to now and continue
-    /// counting in its current EL and wait state. Every change of either
-    /// passes here: exception entry and return through `sync_regime`, and
-    /// the start and end of a wait.
+    /// Bring the running PE's performance monitor and activity monitors up
+    /// to now and continue counting in its current EL and wait state. Every
+    /// change of either passes here: exception entry and return through
+    /// `sync_regime`, and the start and end of a wait.
     pub(super) fn sync_monitor(&mut self) {
         let context = pmu::Context {
             el: self.cpu.pstate.el,
             waiting: self.waiting.is_some(),
         };
         let retired = self.cpu.retired;
-        let Some(timed) = self.cpu.pmu.as_ref().map(|monitor| monitor.timed()) else {
+        let pmu_timed = self.cpu.pmu.as_ref().map(|monitor| monitor.timed());
+        let amu_timed = self.cpu.amu.as_ref().map(|monitors| monitors.timed());
+        if pmu_timed.is_none() && amu_timed.is_none() {
             return;
+        }
+        // Without a cycle counter nothing counts time, so the count need not
+        // be read.
+        let now = if pmu_timed == Some(true) || amu_timed == Some(true) {
+            self.now()
+        } else {
+            0
         };
-        // Without PMC0 nothing counts time, so the count need not be read.
-        let now = if timed { self.now() } else { 0 };
         if let Some(monitor) = self.cpu.pmu.as_mut() {
             monitor.sync(now, retired, context);
+        }
+        if let Some(monitors) = self.cpu.amu.as_mut() {
+            monitors.sync(now, retired, context.waiting);
         }
     }
 

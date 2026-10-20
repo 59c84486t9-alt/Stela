@@ -4,6 +4,7 @@
 //! [`Host`].
 //! The design is in `docs/design/system.md#system-mode-execution`.
 pub mod adt;
+pub mod amu;
 pub mod amx;
 pub mod apple;
 pub mod caches;

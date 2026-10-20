@@ -17,6 +17,7 @@ use super::{
 };
 use crate::machine::{
     CpuProfile,
+    amu::{self, Amu},
     cpu::{
         Cpu, Exception, HCR_AMO, HCR_FMO, HCR_IMO, HCR_TGE, HCR_VF, HCR_VI, HCR_VSE,
         TranslationRegime,
@@ -84,10 +85,10 @@ pub(super) fn identification(register: Register) -> bool {
         )
 }
 
-/// FEAT_AMUv1 is in the declared profile only through Apple clang's Armv8.4
-/// implication, and the engine counts no activity: every AMU register access
-/// stops instead of reading or storing counter values that never count.
-const AMU_REFUSAL: &str = "activity monitors (FEAT_AMUv1) do not count";
+/// HCR_EL2.AMVOFFEN (FEAT_AMUv1p1): reads of the architected activity
+/// monitor counters at EL0 and EL1 outside the host subtract the virtual
+/// offsets.
+const HCR_AMVOFFEN: u32 = 51;
 
 /// Registers whose whole contents are IMPLEMENTATION DEFINED. Apple's
 /// ACTLR_EL1 bits that XNU `xnu-12377.121.6` `proc_reg.h` names (USAT, EnTSO,
@@ -108,11 +109,6 @@ fn implementation_defined_contents(register: Register) -> bool {
             | Register::AMAIR_EL2
             | Register::HACR_EL2
     )
-}
-
-fn activity_monitor(register: Register) -> bool {
-    let name = register.name();
-    name.starts_with("AMC") || name.starts_with("AMEV") || name.starts_with("AMUSERENR")
 }
 
 /// The MRS encoding of a register, from its generated accessor.
@@ -568,10 +564,6 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     fn read(&self, register: Register, index: u64) -> u64 {
         let machine = &*self.machine;
         let cpu = &machine.cpu;
-        if activity_monitor(register) {
-            self.refuse(AMU_REFUSAL);
-            return 0;
-        }
         // The reset address, where the board holds it (Apple's
         // `cpu-impl-reg` RVBAR); with none it has no profile value.
         if register == Register::RVBAR_EL2
@@ -584,6 +576,10 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
             return 0;
         }
         match register {
+            Register::AMEVCNTR0_EL0 | Register::AMCNTENSET0_EL0 | Register::AMCNTENCLR0_EL0 => {
+                self.read_activity_monitor(register, index)
+            }
+            Register::AMEVTYPER0_EL0 => amu::EVENTS[index as usize],
             Register::SP_EL0 => cpu.sp(0),
             Register::SP_EL1 => cpu.sp(1),
             Register::SP_EL2 => cpu.sp(2),
@@ -624,13 +620,15 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
     }
 
     fn write(&mut self, register: Register, index: u64, value: u64) -> Result<(), Effect> {
-        let cpu = &mut self.machine.cpu;
-        if let Some(reason) = crate::machine::registers::vmsa_locked(cpu, register, value) {
+        if let Some(reason) =
+            crate::machine::registers::vmsa_locked(&self.machine.cpu, register, value)
+        {
             return Err(Effect::Refused(reason));
         }
-        if activity_monitor(register) {
-            return Err(Effect::Refused(AMU_REFUSAL));
+        if let Some(written) = self.write_activity_monitor(register, index, value) {
+            return written;
         }
+        let cpu = &mut self.machine.cpu;
         if implementation_defined_contents(register) && value != 0 {
             return Err(Effect::Refused(
                 "an IMPLEMENTATION DEFINED register bit without a modelled effect",
@@ -870,6 +868,65 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
 }
 
 impl<H: Host, D: Devices> Access<'_, H, D> {
+    /// AMEVCNTR0<n>_EL0, or the group 0 enables AMCNTENSET0_EL0 and
+    /// AMCNTENCLR0_EL0 report. With FEAT_AMUv1p1 and HCR_EL2.AMVOFFEN, a
+    /// counter read at EL0 or EL1 outside the host returns the physical
+    /// count less its virtual offset: AMEVCNTVOFF0<n>_EL2, or CNTVOFF_EL2
+    /// for the constant frequency counter, which has no offset register.
+    fn read_activity_monitor(&self, register: Register, index: u64) -> u64 {
+        let cpu = &self.machine.cpu;
+        let Some(monitors) = cpu.amu.as_ref() else {
+            self.refuse("activity monitors without their model");
+            return 0;
+        };
+        if register != Register::AMEVCNTR0_EL0 {
+            return monitors.enabled();
+        }
+        let count = monitors.count(index as usize, self.now, cpu.retired);
+        let virtual_view = Feature::FEAT_AMUv1p1.on(cpu.registers.chip())
+            && cpu.pstate.el < 2
+            && !cpu.in_host()
+            && cpu.hcr(HCR_AMVOFFEN);
+        if !virtual_view {
+            return count;
+        }
+        let offset = if index == 1 {
+            cpu.registers.get(Register::CNTVOFF_EL2, 0)
+        } else {
+            cpu.registers.get(Register::AMEVCNTVOFF0_EL2, index)
+        };
+        count.wrapping_sub(offset)
+    }
+
+    /// The group 0 counters and enables, which the activity monitors hold,
+    /// and the group 1 enables, RAZ/WI with no group 1 counter; `None` for
+    /// every other register.
+    fn write_activity_monitor(
+        &mut self,
+        register: Register,
+        index: u64,
+        value: u64,
+    ) -> Option<Result<(), Effect>> {
+        let set = match register {
+            Register::AMCNTENSET1_EL0 | Register::AMCNTENCLR1_EL0 => return Some(Ok(())),
+            Register::AMCNTENSET0_EL0 => Some(true),
+            Register::AMCNTENCLR0_EL0 => Some(false),
+            Register::AMEVCNTR0_EL0 => None,
+            _ => return None,
+        };
+        let (now, retired) = (self.now, self.machine.cpu.retired);
+        let Some(monitors) = self.machine.cpu.amu.as_mut() else {
+            return Some(Err(Effect::Refused(
+                "activity monitors without their model",
+            )));
+        };
+        match set {
+            Some(set) => monitors.set_enables(value, set, now, retired),
+            None => monitors.set_count(index as usize, value, now, retired),
+        }
+        Some(Ok(()))
+    }
+
     /// ISR_EL1: virtual interrupts while routed to EL2 from EL1 or EL0
     /// outside the host, physical lines otherwise.
     fn pending(&self) -> u64 {
@@ -1181,6 +1238,15 @@ pub(super) fn identify(
         .and_then(|identity| identity.clock)
         .filter(|_| Pmu::on(profile.chip))
         .map(|clock| Pmu::new(clock, profile.counter_frequency));
+    // The activity monitors count the board's core clock, or the counter's
+    // frequency where the board gives none (`machine::amu`).
+    cpu.amu = (profile.chip.implemented(Feature::FEAT_AMUv1) == Ok(true)).then(|| {
+        let clock = own.and_then(|identity| identity.clock);
+        Amu::new(
+            clock.unwrap_or(profile.counter_frequency),
+            profile.counter_frequency,
+        )
+    });
     cpu.caches = own.and_then(|identity| identity.caches);
     for register in Register::ALL {
         if !identification(register) {
@@ -2580,8 +2646,8 @@ mod tests {
     /// Every FEAT_FGT control the profile implements changes whether some
     /// EL1 access traps to EL2 with EC 0x18. HFGITR_EL2.ERET, SVC_EL0 and
     /// SVC_EL1 trap instructions without accessors and are tested in
-    /// engine.rs. HAFGRTR_EL2 is left out: every activity monitor access is
-    /// refused.
+    /// engine.rs. HAFGRTR_EL2 is left out: it applies only with
+    /// FEAT_AMUv1, and the activity monitor test covers it.
     #[test]
     fn every_fine_grained_trap_control_traps_an_el1_access() {
         const CONTROLS: [Register; 5] = [
@@ -3093,22 +3159,148 @@ mod tests {
         write(&mut machine, Encoding::new(3, 0, 5, 4, 1), u64::MAX);
         assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 1)), 0);
         assert_eq!(read(&mut machine, Encoding::new(3, 0, 5, 4, 2)), 0);
-        // Without activity monitors (the M1 to M3) an AMU access is
-        // UNDEFINED. Where the chip has them, it stops: its counters would
-        // never count.
-        let amcr = access(true, Encoding::new(3, 3, 13, 2, 0), 2);
-        if Feature::FEAT_AMUv1.on(machine.profile.chip) {
-            let Err(super::super::Stop::Unsupported(requirement)) =
-                machine.system_instruction(amcr)
-            else {
-                panic!("AMCR_EL0 read")
-            };
-            assert!(format!("{:?}", requirement.kind).contains("AMUv1"));
-        } else {
-            machine.cpu.pstate = Pstate::reset(1);
-            machine.system_instruction(amcr).unwrap();
+    }
+
+    #[test]
+    fn activity_monitors_count_group_zero_and_trap_as_the_architecture_defines() {
+        const AMCR_EL0: Encoding = Encoding::new(3, 3, 13, 2, 0);
+        const AMCFGR_EL0: Encoding = Encoding::new(3, 3, 13, 2, 1);
+        const AMUSERENR_EL0: Encoding = Encoding::new(3, 3, 13, 2, 3);
+        const AMCNTENCLR0_EL0: Encoding = Encoding::new(3, 3, 13, 2, 4);
+        const AMCNTENSET0_EL0: Encoding = Encoding::new(3, 3, 13, 2, 5);
+        const AMCNTENSET1_EL0: Encoding = Encoding::new(3, 3, 13, 3, 1);
+        const AMCNTENCLR1_EL0: Encoding = Encoding::new(3, 3, 13, 3, 0);
+        const AMEVCNTR1_0: Encoding = Encoding::new(3, 3, 13, 12, 0);
+        const AMEVTYPER1_0: Encoding = Encoding::new(3, 3, 13, 14, 0);
+        const AMEVCNTVOFF1_0: Encoding = Encoding::new(3, 4, 13, 10, 0);
+        const AMEVCNTVOFF0_1: Encoding = Encoding::new(3, 4, 13, 8, 1);
+        const HAFGRTR_EL2: Encoding = Encoding::new(3, 4, 3, 1, 6);
+        const CPTR_EL2: Encoding = Encoding::new(3, 4, 1, 1, 2);
+        const CNTVOFF_EL2: Encoding = Encoding::new(3, 4, 14, 0, 3);
+        const HCR_E2H: u64 = 1 << 34;
+        const HCR_AMVOFFEN: u64 = 1 << 51;
+        const TAM: u64 = 1 << 30;
+        const EC_SYSTEM: u64 = 0x18;
+        let counter = |n| Encoding::new(3, 3, 13, 4, n);
+        let event = |n| Encoding::new(3, 3, 13, 6, n);
+        let offset = |n| Encoding::new(3, 4, 13, 8, n);
+        let mut machine = machine(&[]);
+        let chip = machine.profile.chip;
+        let at = |machine: &mut TestMachine, el: u8, read: bool, encoding, value: u64| {
+            machine.cpu.pc = BASE;
+            machine.cpu.pstate = Pstate::reset(el);
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(read, encoding, if read { 2 } else { 1 }))
+                .unwrap();
+            machine.cpu.state.x[2]
+        };
+        if !Feature::FEAT_AMUv1.on(chip) {
+            // The M1 to M3 have no activity monitors: UNDEFINED at EL1.
+            at(&mut machine, 1, true, AMCR_EL0, 0);
             assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+            return;
         }
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x2_0000);
+        machine.cpu.registers.set(Register::VBAR_EL2, 0, 0x4_0000);
+        machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H);
+        machine.cpu.registers.set(Register::CPTR_EL2, 0, 0);
+        // The identification the boot builds (`identification::derive`).
+        let derived =
+            crate::machine::identification::derive(chip, stela_compiler::TargetCpu::Baseline, true);
+        let amcfgr = derived
+            .iter()
+            .find(|(encoding, _)| *encoding == AMCFGR_EL0)
+            .map(|(_, value)| *value);
+        machine
+            .profile_missing
+            .retain(|register| *register != Register::AMCFGR_EL0);
+        machine
+            .cpu
+            .registers
+            .set_raw(Register::AMCFGR_EL0, 0, amcfgr.unwrap());
+        // Four architected 64-bit counters and their mandated events.
+        assert_eq!(at(&mut machine, 2, true, AMCFGR_EL0, 0), 0x0100_3f03);
+        let events: Vec<u64> = (0..4)
+            .map(|n| at(&mut machine, 2, true, event(n), 0))
+            .collect();
+        assert_eq!(events, [0x11, 0x4004, 0x8, 0x4005]);
+        // EL2, the highest EL, enables them; the instructions-retired
+        // counter counts what the engine retires, and memory stalls never
+        // occur on the modeled core.
+        at(&mut machine, 2, false, AMCNTENSET0_EL0, u64::MAX);
+        assert_eq!(at(&mut machine, 2, true, AMCNTENSET0_EL0, 0), 0xf);
+        at(&mut machine, 2, false, counter(2), 100);
+        machine.cpu.retired += 7;
+        assert_eq!(at(&mut machine, 2, true, counter(2), 0), 107);
+        assert_eq!(at(&mut machine, 2, true, counter(3), 0), 0);
+        at(&mut machine, 2, false, AMCNTENCLR0_EL0, 1 << 2);
+        assert_eq!(at(&mut machine, 2, true, AMCNTENCLR0_EL0, 0), 0b1011);
+        machine.cpu.retired += 7;
+        assert_eq!(at(&mut machine, 2, true, counter(2), 0), 107);
+        // No group 1: its enables hold nothing and its counters are
+        // UNDEFINED, as is the absent offset of the constant frequency
+        // counter.
+        at(&mut machine, 2, false, AMCNTENSET1_EL0, u64::MAX);
+        assert_eq!(at(&mut machine, 2, true, AMCNTENSET1_EL0, 0), 0);
+        assert_eq!(at(&mut machine, 2, true, AMCNTENCLR1_EL0, 0), 0);
+        for encoding in [AMEVCNTR1_0, AMEVTYPER1_0, AMEVCNTVOFF1_0, AMEVCNTVOFF0_1] {
+            at(&mut machine, 2, true, encoding, 0);
+            assert_eq!(machine.cpu.pc, 0x4_0200, "{encoding:?}");
+        }
+        // EL1 reads; EL1 never writes the monitors.
+        assert_eq!(at(&mut machine, 1, true, counter(2), 0), 107);
+        at(&mut machine, 1, false, counter(2), 0);
+        assert_eq!(machine.cpu.read(Register::ESR_EL1), 0x0200_0000);
+        // FEAT_AMUv1p1's virtual offsets apply at EL1 under AMVOFFEN.
+        if Feature::FEAT_AMUv1p1.on(chip) {
+            at(&mut machine, 2, false, offset(2), 7);
+            at(&mut machine, 2, false, CNTVOFF_EL2, 5);
+            machine
+                .cpu
+                .registers
+                .set(Register::HCR_EL2, 0, HCR_E2H | HCR_AMVOFFEN);
+            assert_eq!(at(&mut machine, 1, true, counter(2), 0), 100);
+            let physical = at(&mut machine, 2, true, counter(1), 0);
+            let virtual_count = at(&mut machine, 1, true, counter(1), 0);
+            // The test host's counter stands still between the reads.
+            assert_eq!(physical.wrapping_sub(virtual_count), 5, "CNTVOFF_EL2");
+            assert_eq!(at(&mut machine, 2, true, counter(2), 0), 107);
+            machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H);
+        }
+        // CPTR_EL2.TAM traps EL1 to EL2, and a clear AMUSERENR_EL0.EN traps
+        // EL0 to EL1 outside the host.
+        at(&mut machine, 2, false, CPTR_EL2, TAM);
+        at(&mut machine, 1, true, counter(0), 0);
+        assert_eq!(machine.cpu.read(Register::ESR_EL2) >> 26, EC_SYSTEM);
+        at(&mut machine, 2, false, CPTR_EL2, 0);
+        at(&mut machine, 0, true, counter(0), 0);
+        assert_eq!(machine.cpu.read(Register::ESR_EL1) >> 26, EC_SYSTEM);
+        at(&mut machine, 1, false, AMUSERENR_EL0, 1);
+        assert_eq!(at(&mut machine, 0, true, counter(3), 0), 0);
+        // With FEAT_FGT, HAFGRTR_EL2 traps EL1 reads of the enables
+        // (AMCNTEN0, bit 0) and of each counter (AMEVCNTR0<n>, bit n + 1).
+        if Feature::FEAT_FGT.on(chip) {
+            at(&mut machine, 2, false, HAFGRTR_EL2, 1 | 1 << 3);
+            for encoding in [AMCNTENSET0_EL0, counter(2)] {
+                machine.cpu.registers.set(Register::ESR_EL2, 0, 0);
+                at(&mut machine, 1, true, encoding, 0);
+                assert_eq!(
+                    machine.cpu.read(Register::ESR_EL2) >> 26,
+                    EC_SYSTEM,
+                    "{encoding:?}"
+                );
+            }
+            assert_eq!(at(&mut machine, 1, true, counter(3), 0), 0);
+        }
+        // AMCR_EL0 holds HDBG (and CG1RZ with FEAT_AMUv1p1); nothing halts.
+        at(&mut machine, 2, false, AMCR_EL0, u64::MAX);
+        let cg1rz = if Feature::FEAT_AMUv1p1.on(chip) {
+            1 << 17
+        } else {
+            0
+        };
+        assert_eq!(at(&mut machine, 2, true, AMCR_EL0, 0), 1 << 10 | cg1rz);
     }
 
     #[test]

@@ -301,7 +301,8 @@ pub fn test_chip() -> Chip {
 
 /// Whether the engine implements a feature that only some chips have: every
 /// feature the M2 has; the M3's FEAT_HCX, FEAT_NV and FEAT_NV2; the M4's
-/// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS) and FEAT_SME with
+/// Armv8.7 (FEAT_AFP, FEAT_PAN3, FEAT_WFxT and FEAT_XS), the activity
+/// monitors FEAT_AMUv1 and FEAT_AMUv1p1 (`machine::amu`) and FEAT_SME with
 /// FEAT_SME2, whose System registers and PSTATE.ZA the engine holds (it
 /// refuses streaming mode, and the compiler refuses the SME and SVE
 /// instructions, explicitly); the M5's
@@ -343,11 +344,9 @@ const fn engine_implements(feature: Feature) -> bool {
         | Feature::FEAT_WFxT
         | Feature::FEAT_XS
         | Feature::FEAT_SME
-        | Feature::FEAT_SME2 => true,
-        // The M4 and later keep FEAT_AMUv1 from Apple clang's export; the
-        // engine counts no activity, so their AMU accesses stop.
-        Feature::FEAT_AMUv1
-        | Feature::FEAT_FP8
+        | Feature::FEAT_SME2
+        | Feature::FEAT_AMUv1 => true,
+        Feature::FEAT_FP8
         | Feature::FEAT_FPMR
         | Feature::FEAT_MTE
         | Feature::FEAT_MTE2

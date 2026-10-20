@@ -93,7 +93,10 @@ const NESTING: &str = "HCR_EL2.NV traps and reports EL2 to a guest hypervisor at
      NV2 redirects its register accesses to VNCR_EL2 memory (NV1 is RAZ)";
 const VHE_HOST: &str = "EL2 with E2H set and the EL1 register redirection";
 const STAGE2_HOST: &str = "stage-2 translation of the EL1&0 regime";
-const NO_MONITORS: &str = "no activity, performance or trace monitor is modeled";
+const NO_MONITORS: &str = "no Arm performance or trace monitor is modeled";
+const ACTIVITY_MONITORS: &str = "machine::amu counts the four architected group 0 events";
+const VIRTUAL_OFFSETS: &str = "HCR_EL2.AMVOFFEN applies AMEVCNTVOFF0<n>_EL2 and CNTVOFF_EL2 \
+     to EL0 and EL1 counter reads";
 const NO_GUARANTEE: &str = "translated code gives no such speculation guarantee";
 const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's audited \
      data-independent-timing tier, whose lowerings of every listed instruction use only \
@@ -148,6 +151,11 @@ pub const REGISTERS: &[Encoding] = &[
     // No external debug ROM table.
     MDRAR_EL1,
     DBGAUTHSTATUS_EL1,
+    // The activity monitors' configuration (`machine::amu`), 0 and
+    // unreachable on a chip without them.
+    AMCFGR_EL0,
+    AMCGCR_EL0,
+    AMCG1IDR_EL0,
 ];
 
 pub const TABLE: &[Row] = &[
@@ -235,7 +243,45 @@ pub const TABLE: &[Row] = &[
         44,
         1,
         "FEAT_AMUv1",
-        engine(false, NO_MONITORS),
+        engine(true, ACTIVITY_MONITORS),
+    ),
+    feature(
+        ID_AA64PFR0_EL1,
+        44,
+        2,
+        "FEAT_AMUv1p1",
+        engine(true, VIRTUAL_OFFSETS),
+    ),
+    // AMCFGR_EL0: N 3 (four counters), SIZE 63 (64 bits), HDBG 1 and NCG 0
+    // (group 0 alone); AMCGCR_EL0: CG0NC 4 and CG1NC 0 (`machine::amu`).
+    // AMCG1IDR_EL0 reads 0: no group 1 counter or offset.
+    feature(
+        AMCFGR_EL0,
+        0,
+        3,
+        "FEAT_AMUv1",
+        engine(true, ACTIVITY_MONITORS),
+    ),
+    feature(
+        AMCFGR_EL0,
+        8,
+        63,
+        "FEAT_AMUv1",
+        engine(true, ACTIVITY_MONITORS),
+    ),
+    feature(
+        AMCFGR_EL0,
+        24,
+        1,
+        "FEAT_AMUv1",
+        engine(true, ACTIVITY_MONITORS),
+    ),
+    feature(
+        AMCGCR_EL0,
+        0,
+        4,
+        "FEAT_AMUv1",
+        engine(true, ACTIVITY_MONITORS),
     ),
     feature(
         ID_AA64PFR0_EL1,
@@ -989,11 +1035,13 @@ pub const TABLE: &[Row] = &[
 ];
 
 /// The chip has `feature`: in its Apple clang feature set, or implied by it.
+/// A feature only some chips' profiles have is the profile's: the M1 to M3
+/// exclude the FEAT_AMUv1 their clang sets list.
 fn has(chip: Chip, feature: &str) -> bool {
-    chip.cap().contains(&feature)
-        || Feature::ALL
-            .iter()
-            .any(|implied| implied.name() == feature && implied.on(chip))
+    match Feature::ALL.iter().find(|known| known.name() == feature) {
+        Some(known) => known.on(chip),
+        None => chip.cap().contains(&feature),
+    }
 }
 
 fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
@@ -1060,14 +1108,13 @@ mod tests {
     #[test]
     fn every_implemented_feature_that_varies_by_chip_is_identified() {
         // The varying features with no ID field level of their own.
-        const NO_FIELD: [(&str, &str); 4] = [
+        const NO_FIELD: [(&str, &str); 3] = [
             ("v8Ap6", "an architecture version, not a field"),
             ("v8Ap7", "an architecture version, not a field"),
             (
                 "FEAT_PAuth2",
                 "APA 3, below the FEAT_FPAC level 4 of every chip with it",
             ),
-            ("FEAT_AMUv1p1", "the AMU is withheld, so no AMU level shows"),
         ];
         for feature in Feature::ALL {
             if !Chip::ALL
@@ -1116,15 +1163,28 @@ mod tests {
         let values = derive(crate::machine::test_chip(), TargetCpu::detect(), true);
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         let field = |register, shift: u32| (value(register) >> shift) & 0xf;
-        // RASv1p1 (RASv2 on the M6), MPAM v1.0 and no AMU in
-        // ID_AA64PFR0_EL1; LOR in MMFR1.
+        // RASv1p1 (RASv2 on the M6), MPAM v1.0 and the AMU (none on the M1
+        // to M3, AMUv1p1 from the M4) in ID_AA64PFR0_EL1; LOR in MMFR1.
         let chip = crate::machine::test_chip();
         assert_eq!(
             field(ID_AA64PFR0_EL1, 28),
             if has(chip, "FEAT_RASv2") { 3 } else { 2 }
         );
         assert_eq!(field(ID_AA64PFR0_EL1, 40), 1);
-        assert_eq!(field(ID_AA64PFR0_EL1, 44), 0);
+        let amu = Feature::FEAT_AMUv1.on(chip);
+        assert_eq!(
+            field(ID_AA64PFR0_EL1, 44),
+            if Feature::FEAT_AMUv1p1.on(chip) {
+                2
+            } else {
+                u64::from(amu)
+            }
+        );
+        // Four architected 64-bit counters and no auxiliary group.
+        let (amcfgr, amcgcr) = if amu { (0x0100_3f03, 4) } else { (0, 0) };
+        assert_eq!(value(AMCFGR_EL0), amcfgr);
+        assert_eq!(value(AMCGCR_EL0), amcgcr);
+        assert_eq!(value(AMCG1IDR_EL0), 0);
         // CSV2 and CSV3 (PFR0 56, 60) and CSV2_frac (PFR1 32) are withheld
         // on every chip: translated code gives no speculation guarantee. DIT
         // (PFR0 48) needs a host that declares DOIT, which a hosted
