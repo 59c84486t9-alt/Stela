@@ -24,6 +24,7 @@ pub(super) mod exception;
 mod message;
 pub(super) mod reclaim;
 mod server;
+mod thread;
 mod vm;
 
 /// The fast traps `handle_svc` answers before the table.
@@ -241,7 +242,10 @@ pub(crate) fn forwarded(name: &str) -> Option<bool> {
 
 fn forward_trap(kernel: &mut Kernel, index: u32, arguments: &[u64]) -> Result<u64> {
     kernel.page_in_arguments(arguments)?;
-    Ok(forward::mach(index, arguments).rax)
+    // A terminated thread never sees the result.
+    Ok(kernel
+        .forwarding(|| forward::mach(index, arguments).rax)
+        .unwrap_or(u64::from(super::control::KERN_ABORTED)))
 }
 
 pub(super) fn index_of(name: &str) -> u32 {

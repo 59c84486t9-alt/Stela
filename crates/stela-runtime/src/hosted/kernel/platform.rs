@@ -15,6 +15,9 @@ pub(super) fn call(kernel: &mut Kernel, trap: &mut Trap) -> Result<()> {
         SET_CTHREAD_SELF => {
             let value = trap.x(0);
             trap.cpu.registers.set_raw(Register::TPIDRRO_EL0, 0, value);
+            if let Some(control) = kernel.control() {
+                control.set_thread_pointer(value);
+            }
         }
         GET_CTHREAD_SELF => {
             let value = trap.cpu.read(Register::TPIDRRO_EL0);

@@ -395,6 +395,64 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     ),
     (Object::Task, "task_get_exception_ports_from_user", None),
     (Object::Task, "task_get_exception_ports_info", None),
+    (
+        Object::Thread,
+        "thread_terminate_from_user",
+        Some(
+            "a thread waiting in a call the hosted kernel models finishes the call before it \
+             ends",
+        ),
+    ),
+    (
+        Object::Thread,
+        "thread_abort",
+        Some("a wait in a call the hosted kernel models is not interrupted"),
+    ),
+    (
+        Object::Thread,
+        "thread_abort_safely",
+        Some("a wait in a call the hosted kernel models is not interrupted"),
+    ),
+    (Object::Thread, "thread_depress_abort_from_user", None),
+    (
+        Object::Thread,
+        "thread_get_special_port_from_user",
+        Some("the kernel port"),
+    ),
+    (Object::Thread, "thread_set_special_port", None),
+    (
+        Object::Thread,
+        "thread_info",
+        Some(
+            "the times, CPU usage and priorities are the host thread's, whose user time counts \
+             the hosted kernel's work",
+        ),
+    ),
+    (
+        Object::Thread,
+        "thread_set_exception_ports",
+        Some(THREAD_EXCEPTION_PORT_LIMITS),
+    ),
+    (
+        Object::Thread,
+        "thread_swap_exception_ports",
+        Some(THREAD_EXCEPTION_PORT_LIMITS),
+    ),
+    (Object::Thread, "thread_get_exception_ports_from_user", None),
+    (Object::Thread, "thread_get_exception_ports_info", None),
+    (Object::Thread, "thread_adopt_exception_handler", None),
+    (Object::Thread, "_kernelrpc_thread_policy", None),
+    (
+        Object::Thread,
+        "_kernelrpc_thread_policy_set",
+        Some("a time constraint of over 4.29 seconds, past the host's nanoseconds"),
+    ),
+    (Object::Thread, "thread_policy_get", None),
+    (Object::Thread, "_kernelrpc_thread_set_policy", None),
+    (Object::Thread, "thread_get_mach_voucher", None),
+    (Object::Thread, "thread_set_mach_voucher", None),
+    (Object::Thread, "thread_swap_mach_voucher", None),
+    (Object::Thread, "thread_convert_thread_state", None),
 ];
 
 /// The extra reference a hosted thread's port name carries.
@@ -406,6 +464,11 @@ const EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port is set s
      the host kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports go to the ports the process \
      inherited; a fork, exec or spawn after a change stops the run; a platform-restricted task's \
      policy violation stops the run";
+
+/// What setting a thread's exception ports does not reach.
+const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port is set stops the \
+     run; the host kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports pass the thread's ports \
+     for the task's; a platform-restricted task's policy violation stops the run";
 
 /// Task routines whose answer is the arm64 kernel's: the request is
 /// forwarded to the task port, which is the host task's. They suspend,
@@ -686,18 +749,21 @@ pub(super) fn serve(
             thread_create(kernel, Some((flavor, words)))?
         }
         (Object::Task, "task_set_exception_ports", true) => {
-            super::exception::set(kernel, request, false)?
+            super::exception::set(kernel, request, false, super::exception::Target::Task)?
         }
         (Object::Task, "task_swap_exception_ports", true) => {
-            super::exception::set(kernel, request, true)?
+            super::exception::set(kernel, request, true, super::exception::Target::Task)?
         }
         (Object::Task, "task_get_exception_ports_from_user", false) => {
-            super::exception::get(kernel, request)?
+            super::exception::get(kernel, request, super::exception::Target::Task)?
         }
         (Object::Task, "task_get_exception_ports_info", false) => {
-            super::exception::info(kernel, request)?
+            super::exception::info(kernel, request, super::exception::Target::Task)?
         }
         (Object::Task, _, _) => return super::vm::serve(kernel, routine, complex, request),
+        (Object::Thread, _, _) => {
+            return super::thread::serve(kernel, port, routine, complex, request);
+        }
         _ => return Ok(None),
     }))
 }
@@ -900,6 +966,9 @@ fn thread_create(kernel: &mut Kernel, state: Option<(u32, Vec<u32>)>) -> Result<
         0,
         kernel.signals.creation_mask(),
         move |kernel, pe| {
+            if let Some(control) = kernel.control() {
+                control.set_kind(control::Kind::Mach);
+            }
             match state {
                 None => {
                     if let Some(control) = kernel.process.runtime.registry.control(kernel.thread) {
@@ -972,6 +1041,17 @@ pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
         Object::Task,
         "task_map_kcdata_object_64",
         "a kcdata object is the host kernel's report, mapped in 4 KiB host pages",
+    ),
+    (
+        Object::Thread,
+        "thread_suspend2",
+        "its suspension token is a kernel object of its own, whose release resumes the thread, \
+         which is not implemented",
+    ),
+    (
+        Object::Thread,
+        "thread_resume2",
+        "it takes a suspension token, a kernel object of its own, which is not implemented",
     ),
     (
         Object::Task,

@@ -69,7 +69,7 @@ const ILL_ILLTRP: i32 = 2;
 const BUS_ADRALN: i32 = 1;
 const SEGV_MAPERR: i32 = 1;
 pub(crate) const SEGV_ACCERR: i32 = 2;
-const EINTR: u64 = 4;
+pub(super) const EINTR: u64 = 4;
 const ENOTSUP: u64 = 45;
 
 const fn bit(signal: u64) -> u32 {
@@ -616,11 +616,14 @@ fn suspend(kernel: &mut Kernel, call: &Call) -> Outcome {
     let mask = call.argument(0) as u32 & !CANT_MASK;
     kernel.signals.old_mask = Some(kernel.signals.mask());
     kernel.signals.set_mask(mask);
-    host_call::bsd_interruptible(
-        call.entry.number,
-        &[u64::from(mask & !host::OWNED_MASK)],
-        kernel.signals.interrupt_flag(),
-    );
+    let interrupt = kernel.signals.interrupt_flag();
+    kernel.forwarding(|| {
+        host_call::bsd_interruptible(
+            call.entry.number,
+            &[u64::from(mask & !host::OWNED_MASK)],
+            interrupt,
+        )
+    });
     Outcome::Error(EINTR)
 }
 

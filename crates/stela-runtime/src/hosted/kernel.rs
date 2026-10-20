@@ -164,6 +164,9 @@ pub(super) struct Kernel {
     /// (`__pthread_chdir`), which [`bsd::files`] restores.
     pub(super) thread_directory: bool,
     pub(super) end: Option<End>,
+    /// Its suspension and published state, which `thread_abort` and
+    /// `thread_terminate` reach.
+    control: Option<Arc<control::Control>>,
 }
 
 /// The trapped guest thread as the exception left it: X0..X30 in the
@@ -298,6 +301,7 @@ impl Kernel {
         Self {
             trace: process.trace,
             signals: bsd::signal::ThreadSignals::new(&process.signal_slots, mask),
+            control: process.runtime.registry.control(thread),
             process,
             thread,
             thread_port,
@@ -305,6 +309,22 @@ impl Kernel {
             worker: None,
             thread_directory: false,
             end: None,
+        }
+    }
+
+    /// This thread's control, once it is a registered guest thread.
+    pub(super) fn control(&self) -> Option<&Arc<control::Control>> {
+        self.control.as_ref()
+    }
+
+    /// Perform `call`, which the host kernel serves for this thread, where
+    /// another thread's `thread_abort` or `thread_terminate` interrupts it
+    /// as it interrupts the arm64 kernel's wait: `None` without performing
+    /// it once the thread is terminated.
+    pub(super) fn forwarding<T>(&self, call: impl FnOnce() -> T) -> Option<T> {
+        match &self.control {
+            Some(control) => control.forwarding(call),
+            None => Some(call()),
         }
     }
 
@@ -392,7 +412,7 @@ impl Kernel {
                 // turn it into a signal.
                 self.process
                     .exception_ports
-                    .deliverable(mach::exception::EXC_BAD_ACCESS)?;
+                    .deliverable(self.thread_port, mach::exception::EXC_BAD_ACCESS)?;
                 let data = class == EC_DATA_ABORT_LOWER;
                 let looked_up = if data { address & TBI_MASK } else { address };
                 let fault = bsd::signal::FaultSignal::of(
@@ -421,7 +441,7 @@ impl Kernel {
             EC_BRK64 => {
                 self.process
                     .exception_ports
-                    .deliverable(mach::exception::EXC_BREAKPOINT)?;
+                    .deliverable(self.thread_port, mach::exception::EXC_BREAKPOINT)?;
                 let shared_cache_slide = self.shared_cache_slide();
                 self.exception_signal(bsd::signal::SIGTRAP, 0, false, || {
                     format!(
@@ -440,7 +460,7 @@ impl Kernel {
             EC_PAC_FAIL => {
                 self.process
                     .exception_ports
-                    .deliverable(mach::exception::EXC_BAD_ACCESS)?;
+                    .deliverable(self.thread_port, mach::exception::EXC_BAD_ACCESS)?;
                 let shared_cache_slide = self.shared_cache_slide();
                 let describe = || {
                     format!(

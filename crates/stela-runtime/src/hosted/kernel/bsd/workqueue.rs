@@ -665,6 +665,9 @@ fn spawn(process: &Arc<Process>) -> Result<()> {
         registration.workqueue_thread,
         !super::signal::WORKQ_THREADMASK,
         move |kernel, _pe| {
+            if let Some(control) = kernel.control() {
+                control.set_kind(super::super::control::Kind::Pthread);
+            }
             let workqueue = &kernel.process.workqueue;
             let Ok(stack) =
                 memory::allocate(registration.stack_hint, size, true, Protection::READ_WRITE)
@@ -878,6 +881,9 @@ fn enter(
         thread_pointer: set_tsd.then_some(address + tsd_offset),
     }
     .apply(pe);
+    if set_tsd && let Some(control) = kernel.control() {
+        control.set_thread_pointer(address + tsd_offset);
+    }
     let entry = registration.workqueue_thread;
     if in_exception {
         pe.cpu.registers.set_raw(Register::ELR_EL1, 0, entry);

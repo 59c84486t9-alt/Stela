@@ -150,13 +150,34 @@ impl ExecutionLock {
         self.waiting.load(Ordering::SeqCst) != 0
     }
 
-    /// Take the lock (unless `thread` holds it) and close it for good.
-    fn close(&self, thread: u64) {
-        let held = lock(&self.state).holder == Some(thread);
-        if !held {
-            self.acquire(thread);
+    /// Take the lock (unless `thread` holds it) and close it for good:
+    /// false when another thread closed it first, whose end is the
+    /// process's.
+    fn close(&self, thread: u64) -> bool {
+        let mut state = lock(&self.state);
+        if state.holder != Some(thread) {
+            self.waiting.fetch_add(1, Ordering::SeqCst);
+            let ticket = state.next_ticket;
+            state.next_ticket += 1;
+            while !state.closed && state.serving != ticket {
+                state = self
+                    .turn
+                    .wait(state)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            self.waiting.fetch_sub(1, Ordering::SeqCst);
+            if state.closed {
+                return false;
+            }
+            state.holder = Some(thread);
         }
-        lock(&self.state).closed = true;
+        if state.closed {
+            return false;
+        }
+        state.closed = true;
+        drop(state);
+        self.turn.notify_all();
+        true
     }
 }
 
@@ -196,8 +217,11 @@ impl Registry {
         (id, member)
     }
 
-    fn remove(&self, id: u64) {
-        lock(&self.members).remove(&id);
+    /// Remove the thread `id`: whether it was the last.
+    fn remove(&self, id: u64) -> bool {
+        let mut members = lock(&self.members);
+        members.remove(&id);
+        members.is_empty()
     }
 
     /// The thread ports of the process's threads, in creation order.
@@ -223,10 +247,18 @@ impl Registry {
             .map(|member| member.control.clone())
     }
 
-    /// The process ended: wake every parked thread for good.
+    /// The process ended: wake every parked thread for good and interrupt
+    /// the host calls of those in one.
     fn close(&self) {
-        for member in lock(&self.members).values() {
-            member.control.close();
+        let members: Vec<(u32, Arc<Control>)> = lock(&self.members)
+            .values()
+            .map(|member| (member.port.load(Ordering::SeqCst), member.control.clone()))
+            .collect();
+        for (_, control) in &members {
+            control.close();
+        }
+        for (port, control) in &members {
+            control.interrupt(*port);
         }
     }
 
@@ -397,7 +429,9 @@ impl Runtime {
     /// End the process with `outcome`: no guest code runs after it, and
     /// no thread stays parked.
     fn end(&self, thread: u64, outcome: Result<Termination>) {
-        self.execution.close(thread);
+        if !self.execution.close(thread) {
+            return;
+        }
         self.registry.close();
         self.lifetime.end(outcome);
     }
@@ -436,9 +470,8 @@ where
 {
     let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
     let process = process.clone();
-    let builder = std::thread::Builder::new()
-        .name("stela-guest".into())
-        .stack_size(HOST_STACK_BYTES);
+    // Unnamed, as a new thread's `pth_name` is.
+    let builder = std::thread::Builder::new().stack_size(HOST_STACK_BYTES);
     let spawned = signals::without_signals(|| {
         builder.spawn(move || enter(&process, pc, mask, prepare, sender))
     });
@@ -472,6 +505,10 @@ where
 {
     let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
     process.runtime.lifetime.wait_here();
+    // A new process's main thread is unnamed (`pth_name`); the host
+    // runtime may have named this one.
+    // SAFETY: a NUL-terminated name for the calling thread.
+    unsafe { libc::pthread_setname_np(c"".as_ptr()) };
     enter(process, pc, mask, prepare, sender);
     match receiver.recv() {
         Ok(Ok(Ok(_))) => {}
@@ -523,11 +560,25 @@ fn enter<F>(
     };
     drop(sender);
     let outcome = run(&mut kernel, pe, &member);
-    process.runtime.registry.remove(id);
-    match outcome {
-        Ok(None) => {}
-        Ok(Some(termination)) => process.runtime.end(id, Ok(termination)),
-        Err(error) => process.runtime.end(id, Err(error)),
+    process.exception_ports.thread_ended(port);
+    // A thread ending the process records the end while it is still a
+    // member, so that no thread the end wakes counts itself the last.
+    let ending = match outcome {
+        Ok(None) => false,
+        Ok(Some(termination)) => {
+            process.runtime.end(id, Ok(termination));
+            true
+        }
+        Err(error) => {
+            process.runtime.end(id, Err(error));
+            true
+        }
+    };
+    // The last thread's termination is the process's exit
+    // (`thread_terminate_self`, `proc_exit`), with the status no `exit`
+    // set.
+    if process.runtime.registry.remove(id) && !ending {
+        process.runtime.end(id, Ok(Termination::Exited(0)));
     }
 }
 
@@ -584,6 +635,7 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
     if let Some(end) = kernel.begin(&mut pe)? {
         return Ok(ended(end));
     }
+    control.set_thread_pointer(pe.cpu.read(Register::TPIDRRO_EL0));
     // `PTHREAD_START_SUSPENDED` parks before the first instruction.
     if !control.leave(&mut pe) {
         return Ok(None);
@@ -841,7 +893,7 @@ mod tests {
         assert!(second_member.has_stale.load(Ordering::SeqCst));
         assert_eq!(*second_member.stale.lock().unwrap(), vec![(0x4000, 0x8000)]);
         assert!(registry.contains_port(0x203));
-        registry.remove(first);
+        assert!(!registry.remove(first));
         assert!(!registry.contains_port(0x103));
     }
 

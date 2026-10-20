@@ -99,19 +99,20 @@ pub(super) fn number_of(name: &str) -> u16 {
 /// repeat it after its handler runs.
 pub(super) fn forward(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     kernel.page_in_arguments(call.arguments())?;
-    let returned = forward::bsd_interruptible(
-        call.entry.number,
-        call.arguments(),
-        kernel.signals.interrupt_flag(),
-    );
-    Ok(outcome(returned))
+    let interrupt = kernel.signals.interrupt_flag();
+    // A terminated thread never sees the outcome.
+    Ok(kernel
+        .forwarding(|| forward::bsd_interruptible(call.entry.number, call.arguments(), interrupt))
+        .map_or(Outcome::Error(signal::EINTR), outcome))
 }
 
 /// Forward `call` to the host kernel uninterruptibly, for a model whose
 /// effects before the call a repeat would duplicate.
 pub(super) fn forward_uninterruptible(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     kernel.page_in_arguments(call.arguments())?;
-    Ok(outcome(forward::bsd(call.entry.number, call.arguments())))
+    Ok(kernel
+        .forwarding(|| forward::bsd(call.entry.number, call.arguments()))
+        .map_or(Outcome::Error(signal::EINTR), outcome))
 }
 
 fn outcome(returned: forward::Returned) -> Outcome {

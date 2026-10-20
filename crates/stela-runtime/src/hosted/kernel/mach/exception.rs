@@ -1,9 +1,11 @@
-//! The task's exception actions (`osfmk/kern/ipc_tt.c`): the port, behavior
-//! and flavor `task_set_exception_ports`, `task_swap_exception_ports`,
-//! `task_get_exception_ports` and `task_get_exception_ports_info` act on,
-//! one action per exception type.
+//! The task's and its threads' exception actions (`osfmk/kern/ipc_tt.c`):
+//! the port, behavior and flavor the `task_` and `thread_`
+//! `set_exception_ports`, `swap_exception_ports`, `get_exception_ports`
+//! and `get_exception_ports_info` routines act on, one action per
+//! exception type. A thread has none until one is first set
+//! (`ipc_thread_init_exc_actions`); its actions end with it.
 //!
-//! The host task must not hold them: the host kernel would deliver the
+//! The host task and threads must not hold them: the host kernel would deliver the
 //! host faults the hosted runtime recovers from (every guest memory fault
 //! is one) to the guest's ports, with x86 state. A host Mach thread that
 //! never starts (`thread_create`) holds them instead: its exception ports
@@ -30,6 +32,7 @@ use super::server::{
 use crate::hosted::host;
 use crate::hosted::threads::{lock, try_lock};
 use anyhow::{Result, bail};
+use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard};
 
 /// `EXC_TYPES_COUNT` with the illegal exception 0, and `FIRST_EXCEPTION`.
@@ -75,6 +78,7 @@ const VALID_FLAVORS: [u32; 14] = [1, 2, 3, 4, 5, 6, 7, 9, 10, 14, 15, 16, 17, 27
 /// kernel's MIG server passes as the count.
 const REPLY_ENTRIES: usize = 32;
 const KERN_INVALID_RIGHT: u32 = 17;
+const KERN_DENIED: u32 = 53;
 /// `MIG_TYPE_ERROR`: a request's right is not the routine's type.
 const MIG_TYPE_ERROR: u32 = (-300i32) as u32;
 /// Received rights' dispositions: `MACH_MSG_TYPE_PORT_RECEIVE` and
@@ -87,6 +91,7 @@ const ONLY_ONE_EXCEPTION_PORT: &str = "com.apple.security.only-one-exception-por
 
 unsafe extern "C" {
     fn thread_create(task: u32, thread: *mut u32) -> i32;
+    fn thread_terminate(thread: u32) -> i32;
     fn thread_set_exception_ports(
         thread: u32,
         mask: u32,
@@ -149,6 +154,25 @@ struct State {
     task: Option<Holder>,
     /// Whether this process changed them from those it inherited.
     changed: bool,
+    /// The actions of the threads that have any, by thread port.
+    threads: BTreeMap<u32, Holder>,
+}
+
+/// Whose actions a routine acts on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Target {
+    Task,
+    /// The guest thread of this port.
+    Thread(u32),
+}
+
+impl Target {
+    fn routine(self, name: &str) -> String {
+        match self {
+            Self::Task => format!("task_{name}"),
+            Self::Thread(_) => format!("thread_{name}"),
+        }
+    }
 }
 
 /// One action group the host kernel reports for a mask.
@@ -376,14 +400,18 @@ impl ExceptionPorts {
         Ok(())
     }
 
-    /// Stop the run if the task holds a port for `exception`, which XNU
-    /// would deliver to it before any signal.
-    pub(crate) fn deliverable(&self, exception: usize) -> Result<()> {
+    /// Stop the run if the thread `thread` or its task holds a port for
+    /// `exception`, which XNU would deliver to it before any signal.
+    pub(crate) fn deliverable(&self, thread: u32, exception: usize) -> Result<()> {
         let state = self.lock();
-        let groups = match &state.task {
+        let mut groups = match state.threads.get(&thread) {
+            Some(holder) => host_groups(false, holder.thread, 1 << exception)?,
+            None => Vec::new(),
+        };
+        groups.extend(match &state.task {
             Some(holder) => host_groups(false, holder.thread, 1 << exception)?,
             None => host_groups(true, host::task(), 1 << exception)?,
-        };
+        });
         let held = groups.iter().any(|group| valid(group.name));
         for group in &groups {
             release_send(group.name);
@@ -395,6 +423,16 @@ impl ExceptionPorts {
             );
         }
         Ok(())
+    }
+
+    /// The guest thread of port `thread` ended: its actions' rights are
+    /// released (`ipc_thread_terminate`).
+    pub(crate) fn thread_ended(&self, thread: u32) {
+        if let Some(holder) = self.lock().threads.remove(&thread) {
+            // SAFETY: the holder thread never started; ending it releases
+            // the rights its exception ports hold.
+            unsafe { thread_terminate(holder.thread) };
+        }
     }
 }
 
@@ -433,6 +471,7 @@ impl ForkHeld<'_> {
 /// then `set_exception_behavior_allowed`.
 fn validate(
     kernel: &Kernel,
+    routine: &str,
     holder: u32,
     mask: u32,
     name: u32,
@@ -477,9 +516,9 @@ fn validate(
     );
     if signature.entitled(ONLY_ONE_EXCEPTION_PORT) || (valid(name) && !protected) {
         bail!(
-            "task_set_exception_ports: behavior {behavior:#x} breaks this platform-restricted \
-             task's exception policy: the KERN_DENIED and fatal EXC_GUARD \
-             (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) are not implemented"
+            "{routine}: behavior {behavior:#x} breaks this platform-restricted task's exception \
+             policy: the KERN_DENIED and fatal EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) \
+             are not implemented"
         );
     }
     Ok(Ok(()))
@@ -488,7 +527,7 @@ fn validate(
 /// The request's one port descriptor, carried in as the kernel copies the
 /// request in: the send right's name (which the caller releases, as the
 /// kernel consumes it), or the reply when the request fails first.
-fn carried_send(
+pub(super) fn carried_send(
     kernel: &mut Kernel,
     routine: &str,
     request: &Request,
@@ -565,26 +604,38 @@ fn task_holder<'a>(state: &'a mut MutexGuard<'_, State>) -> Result<&'a mut Holde
     Ok(state.task.as_mut().expect("just created"))
 }
 
-/// `task_set_exception_ports(new_port; exception_mask, behavior,
-/// new_flavor)`, or `task_swap_exception_ports`, whose reply also lists
-/// the replaced actions.
-pub(super) fn set(kernel: &mut Kernel, request: &Request, swap: bool) -> Result<Reply> {
-    let routine = if swap {
-        "task_swap_exception_ports"
+/// `set_exception_ports(new_port; exception_mask, behavior, new_flavor)`
+/// of the task or a thread, or `swap_exception_ports`, whose reply also
+/// lists the replaced actions.
+pub(super) fn set(
+    kernel: &mut Kernel,
+    request: &Request,
+    swap: bool,
+    target: Target,
+) -> Result<Reply> {
+    let routine = target.routine(if swap {
+        "swap_exception_ports"
     } else {
-        "task_set_exception_ports"
-    };
+        "set_exception_ports"
+    });
     // The descriptor count, the descriptor, the NDR record, three words.
-    let name = match carried_send(kernel, routine, request, 36)? {
+    let name = match carried_send(kernel, &routine, request, 36)? {
         Ok(name) => name,
         Err(reply) => return Ok(reply),
     };
-    let reply = set_carried(kernel, request, swap, name);
+    let reply = set_carried(kernel, &routine, request, swap, name, target);
     release_send(name);
     reply
 }
 
-fn set_carried(kernel: &Kernel, request: &Request, swap: bool, name: u32) -> Result<Reply> {
+fn set_carried(
+    kernel: &Kernel,
+    routine: &str,
+    request: &Request,
+    swap: bool,
+    name: u32,
+    target: Target,
+) -> Result<Reply> {
     let (Some(mask), Some(behavior), Some(flavor)) =
         (request.word(24), request.word(28), request.word(32))
     else {
@@ -592,10 +643,19 @@ fn set_carried(kernel: &Kernel, request: &Request, swap: bool, name: u32) -> Res
     };
     let ports = &kernel.process.exception_ports;
     let mut state = ports.lock();
-    let holder = task_holder(&mut state)?;
-    if let Err(code) = validate(kernel, holder.thread, mask, name, behavior, flavor)? {
+    // The task's holder checks the port, so that a thread without actions
+    // keeps none when the check fails.
+    let checker = task_holder(&mut state)?.thread;
+    if let Err(code) = validate(kernel, routine, checker, mask, name, behavior, flavor)? {
         return Ok(Reply::Failure(code));
     }
+    let holder = match target {
+        Target::Task => task_holder(&mut state)?,
+        Target::Thread(port) => match state.threads.entry(port) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(Holder::new()?),
+        },
+    };
     let replaced = if swap {
         Some(holder.entries(mask, true)?)
     } else {
@@ -606,13 +666,13 @@ fn set_carried(kernel: &Kernel, request: &Request, swap: bool, name: u32) -> Res
         for entry in replaced.iter().flatten() {
             release_send(entry.name);
         }
-        // The sandbox's `mac_task_check_set_task_exception_ports`.
+        // The sandbox's `mac_task_check_set_*_exception_ports`.
         return Ok(Reply::Failure(status));
     }
     for slot in bits(mask) {
         holder.actions[slot] = Action { behavior, flavor };
     }
-    if mask != 0 {
+    if mask != 0 && target == Target::Task {
         state.changed = true;
     }
     Ok(match replaced {
@@ -621,8 +681,16 @@ fn set_carried(kernel: &Kernel, request: &Request, swap: bool, name: u32) -> Res
     })
 }
 
-/// `task_get_exception_ports_from_user(exception_mask)`.
-pub(super) fn get(kernel: &Kernel, request: &Request) -> Result<Reply> {
+/// The holder of `target`'s actions, if it has any.
+fn holder<'a>(state: &'a mut MutexGuard<'_, State>, target: Target) -> Result<Option<&'a Holder>> {
+    Ok(match target {
+        Target::Task => Some(task_holder(state)?),
+        Target::Thread(port) => state.threads.get(&port),
+    })
+}
+
+/// `get_exception_ports_from_user(exception_mask)` of the task or a thread.
+pub(super) fn get(kernel: &Kernel, request: &Request, target: Target) -> Result<Reply> {
     let (Some(mask), 12) = (request.word(8), request.body.len()) else {
         return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
     };
@@ -630,14 +698,17 @@ pub(super) fn get(kernel: &Kernel, request: &Request) -> Result<Reply> {
         return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
     }
     let mut state = kernel.process.exception_ports.lock();
-    let entries = task_holder(&mut state)?.entries(mask, false)?;
+    let entries = match holder(&mut state, target)? {
+        Some(holder) => holder.entries(mask, false)?,
+        None => Vec::new(),
+    };
     Ok(ports_reply(&entries))
 }
 
-/// `task_get_exception_ports_info(exception_mask)`: each entry's port and
-/// receiving task as the host kernel hashes them (`VM_KERNEL_ADDRHASH`),
-/// for the same ports.
-pub(super) fn info(kernel: &Kernel, request: &Request) -> Result<Reply> {
+/// `get_exception_ports_info(exception_mask)` of the task or a thread:
+/// each entry's port and receiving task as the host kernel hashes them
+/// (`VM_KERNEL_ADDRHASH`), for the same ports.
+pub(super) fn info(kernel: &Kernel, request: &Request, target: Target) -> Result<Reply> {
     let (Some(mask), 12) = (request.word(8), request.body.len()) else {
         return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
     };
@@ -645,7 +716,9 @@ pub(super) fn info(kernel: &Kernel, request: &Request) -> Result<Reply> {
         return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
     }
     let mut state = kernel.process.exception_ports.lock();
-    let holder = task_holder(&mut state)?;
+    let Some(holder) = holder(&mut state, target)? else {
+        return Ok(Reply::Success(0u32.to_le_bytes().to_vec()));
+    };
     let mut masks = [0u32; REPLY_ENTRIES];
     let mut hashes = [[0u32; 2]; REPLY_ENTRIES];
     let mut behaviors = [0u32; REPLY_ENTRIES];
@@ -700,6 +773,19 @@ pub(super) fn info(kernel: &Kernel, request: &Request) -> Result<Reply> {
         body.extend(action.flavor.to_le_bytes());
     }
     Ok(Reply::Success(body))
+}
+
+/// `thread_adopt_exception_handler(exc_port; exc_mask, behavior_mask,
+/// flavor_mask)`: a task's exception ports are frozen only by
+/// `task_register_hardened_exception_handler`, which stops the run, so
+/// adoption is refused (`KERN_DENIED`), the port released.
+pub(super) fn adopt(kernel: &mut Kernel, request: &Request) -> Result<Reply> {
+    let name = match carried_send(kernel, "thread_adopt_exception_handler", request, 36)? {
+        Ok(name) => name,
+        Err(reply) => return Ok(reply),
+    };
+    release_send(name);
+    Ok(Reply::Failure(KERN_DENIED))
 }
 
 #[cfg(test)]

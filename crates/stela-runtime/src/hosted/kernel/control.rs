@@ -26,7 +26,7 @@ use crate::pauth::{Context, Key};
 use anyhow::{Result, bail};
 use std::sync::{
     Condvar, Mutex, MutexGuard,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 /// `kern_return_t` values these routines answer.
@@ -174,12 +174,37 @@ struct Inner {
     pending: Option<UserState>,
     /// The process ended: nothing parks any more.
     closed: bool,
+    /// `thread_terminate`: the thread never returns to guest code.
+    terminated: bool,
+    /// It has executed guest code.
+    started: bool,
+    /// In a call the host kernel performs for it, which a host
+    /// `thread_abort` interrupts.
+    forwarding: bool,
 }
 
 impl Inner {
     fn stopping(&self) -> bool {
-        self.user_stops + self.holds > 0
+        self.user_stops + self.holds > 0 || self.terminated
     }
+
+    /// `!thread->active`.
+    fn inactive(&self) -> bool {
+        self.place == Place::Ended || self.terminated
+    }
+}
+
+/// How a thread was made, which decides what `thread_terminate` may do
+/// to it and whether its port right is pinned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Kind {
+    /// The process's first thread (`THREAD_TAG_MAINTHREAD`).
+    #[default]
+    Main,
+    /// `bsdthread_create` or the workqueue's (`THREAD_TAG_PTHREAD`).
+    Pthread,
+    /// `thread_create`: its port right is not pinned.
+    Mach,
 }
 
 /// One guest thread's suspension and published user state.
@@ -189,6 +214,10 @@ pub(crate) struct Control {
     changed: Condvar,
     /// `user_stops + holds > 0`, for the run loop's slice check.
     stopping: AtomicBool,
+    kind: Mutex<Kind>,
+    /// TPIDRRO_EL0, its TSD base (`machine.cthread_self`), which no thread
+    /// state sets.
+    thread_pointer: AtomicU64,
 }
 
 /// Where a thread is, as its tests see it.
@@ -247,7 +276,7 @@ impl Control {
             UserState::merged(&entry, &UserState::capture(pe), &set).apply(pe);
         }
         inner.entry = None;
-        while inner.stopping() && !inner.closed {
+        while inner.stopping() && !inner.closed && !inner.terminated {
             if inner.place != Place::Parked {
                 inner.place = Place::Parked;
                 inner.published = Some(UserState::capture(pe));
@@ -259,9 +288,10 @@ impl Control {
                 inner.published = Some(set);
             }
         }
-        if inner.closed {
+        if inner.closed || inner.terminated {
             return false;
         }
+        inner.started = true;
         inner.place = Place::Running;
         inner.published = None;
         self.update(&inner);
@@ -306,7 +336,7 @@ impl Control {
     /// waits until it is off its CPU (`thread_wait(thread, FALSE)`).
     pub(crate) fn suspend(&self, own: bool) -> u32 {
         let mut inner = self.lock();
-        if inner.place == Place::Ended {
+        if inner.inactive() {
             return KERN_TERMINATED;
         }
         inner.user_stops += 1;
@@ -322,7 +352,7 @@ impl Control {
     /// `thread_resume`: one user stop fewer, KERN_FAILURE without one.
     pub(crate) fn resume(&self) -> u32 {
         let mut inner = self.lock();
-        if inner.place == Place::Ended {
+        if inner.inactive() {
             return KERN_TERMINATED;
         }
         if inner.user_stops == 0 {
@@ -344,7 +374,7 @@ impl Control {
         act: impl FnOnce(&UserState) -> (T, Option<UserState>),
     ) -> std::result::Result<T, u32> {
         let mut inner = self.lock();
-        if inner.place == Place::Ended {
+        if inner.inactive() {
             return Err(KERN_TERMINATED);
         }
         if !own {
@@ -392,6 +422,137 @@ impl Control {
         let mut inner = self.lock();
         inner.user_stops += 1;
         self.update(&inner);
+    }
+
+    /// Record the thread's TSD base as its entry or `thread_set_tsd_base`
+    /// set it.
+    pub(crate) fn set_thread_pointer(&self, pointer: u64) {
+        self.thread_pointer.store(pointer, Ordering::SeqCst);
+    }
+
+    pub(crate) fn thread_pointer(&self) -> u64 {
+        self.thread_pointer.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn kind(&self) -> Kind {
+        *self
+            .kind
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn set_kind(&self, kind: Kind) {
+        *self
+            .kind
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
+    }
+
+    /// `thread->active`: neither ended nor terminated.
+    pub(crate) fn active(&self) -> bool {
+        !self.lock().inactive()
+    }
+
+    /// `user_stop_count`, and whether the thread has yet to execute guest
+    /// code.
+    pub(crate) fn suspension(&self) -> (u32, bool) {
+        let inner = self.lock();
+        (inner.user_stops, !inner.started)
+    }
+
+    /// Perform `call`, which the host kernel serves on this thread (whose
+    /// host port is `port`), where `thread_abort` can interrupt it: `None`
+    /// without performing it once the thread is terminated, since it will
+    /// not return to guest code.
+    pub(crate) fn forwarding<T>(&self, call: impl FnOnce() -> T) -> Option<T> {
+        {
+            let mut inner = self.lock();
+            if inner.terminated || inner.closed {
+                return None;
+            }
+            inner.forwarding = true;
+        }
+        let result = call();
+        let mut inner = self.lock();
+        inner.forwarding = false;
+        self.changed.notify_all();
+        Some(result)
+    }
+
+    /// `thread_abort` and `thread_abort_safely` of another thread, whose
+    /// host port is `port` (`act_abort`, `clear_wait`): a call the host
+    /// kernel performs for it is interrupted as the arm64 kernel
+    /// interrupts its wait; a thread in user code or stopped has no wait
+    /// to interrupt, and the abort clears at its return to user space.
+    pub(crate) fn abort(&self, port: u32, safely: bool) -> u32 {
+        let inner = self.lock();
+        if inner.inactive() {
+            return KERN_TERMINATED;
+        }
+        if inner.forwarding {
+            host_abort(port, safely);
+        }
+        KERN_SUCCESS
+    }
+
+    /// `thread_terminate` of another thread (`thread_terminate_internal`):
+    /// it never returns to guest code, a call the host kernel performs for
+    /// it is interrupted, and the caller waits until it is off its CPU
+    /// (`thread_wait`).
+    pub(crate) fn terminate(&self, port: u32) -> u32 {
+        let mut inner = self.lock();
+        if inner.inactive() {
+            return KERN_TERMINATED;
+        }
+        inner.terminated = true;
+        self.update(&inner);
+        while (inner.place == Place::Running || inner.forwarding) && !inner.closed {
+            inner = if inner.forwarding {
+                self.abort_once(inner, port)
+            } else {
+                self.wait(inner)
+            };
+        }
+        KERN_SUCCESS
+    }
+
+    /// The process ended (after [`Control::close`]): a call the host
+    /// kernel performs for the thread is interrupted, as exit aborts every
+    /// thread, and no further one starts.
+    pub(crate) fn interrupt(&self, port: u32) {
+        let mut inner = self.lock();
+        while inner.forwarding {
+            inner = self.abort_once(inner, port);
+        }
+    }
+
+    /// Abort the thread's host call and wait a moment for it to return:
+    /// an abort that reaches the host thread before it enters the call is
+    /// cleared at its return to user space, so callers repeat it until
+    /// the call returns.
+    fn abort_once<'a>(&self, inner: MutexGuard<'a, Inner>, port: u32) -> MutexGuard<'a, Inner> {
+        host_abort(port, false);
+        self.changed
+            .wait_timeout(inner, std::time::Duration::from_millis(1))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0
+    }
+}
+
+/// The host kernel's `thread_abort` or `thread_abort_safely` of the host
+/// thread `port`.
+fn host_abort(port: u32, safely: bool) {
+    unsafe extern "C" {
+        fn thread_abort(thread: u32) -> i32;
+        fn thread_abort_safely(thread: u32) -> i32;
+    }
+    // SAFETY: a plain thread port of this task.
+    unsafe {
+        if safely {
+            thread_abort_safely(port);
+        } else {
+            thread_abort(port);
+        }
     }
 }
 
@@ -510,6 +671,47 @@ impl ThreadState64 {
         }
         if self.lr != 0 && self.flags & FLAGS_IB_SIGNED_LR == 0 {
             self.lr = signer.sign(Key::Ia, self.lr, DISCRIMINATOR_LR)?;
+        }
+        if self.sp != 0 {
+            self.sp = signer.sign(Key::Da, self.sp, DISCRIMINATOR_SP)?;
+        }
+        if self.fp != 0 {
+            self.fp = signer.sign(Key::Da, self.fp, DISCRIMINATOR_FP)?;
+        }
+        Ok(())
+    }
+
+    /// `machine_thread_state_convert_to_user` with `TSSF_PRESERVE_FLAGS`:
+    /// the state's user diversifier and kernel-signed flags are kept, and a
+    /// PC or LR the caller signed itself (no kernel-signed flag) is signed
+    /// with the diversifier blended into its discriminator.
+    fn sign_preserving(&mut self, signer: Option<&Context>) -> Result<()> {
+        let Some(signer) = signer else {
+            self.flags = FLAGS_NO_PTRAUTH;
+            return Ok(());
+        };
+        let old = self.flags;
+        self.flags = 0;
+        if self.lr != 0 && signer.strip(Key::Ib, self.lr)? != self.lr {
+            self.flags |= FLAGS_IB_SIGNED_LR;
+        }
+        let diversifier = old & USER_DIVERSIFIER_MASK;
+        self.flags |= diversifier | old & (FLAGS_KERNEL_SIGNED_PC | FLAGS_KERNEL_SIGNED_LR);
+        // `ptrauth_blend_discriminator`.
+        let discriminator = |kernel_signed: u32, discriminator: u64| {
+            if old & kernel_signed == 0 && diversifier != 0 {
+                u64::from(diversifier) & 0xffff_ffff_ffff | discriminator << 48
+            } else {
+                discriminator
+            }
+        };
+        if self.pc != 0 {
+            let modifier = discriminator(FLAGS_KERNEL_SIGNED_PC, DISCRIMINATOR_PC);
+            self.pc = signer.sign(Key::Ia, self.pc, modifier)?;
+        }
+        if self.lr != 0 && self.flags & FLAGS_IB_SIGNED_LR == 0 {
+            let modifier = discriminator(FLAGS_KERNEL_SIGNED_LR, DISCRIMINATOR_LR);
+            self.lr = signer.sign(Key::Ia, self.lr, modifier)?;
         }
         if self.sp != 0 {
             self.sp = signer.sign(Key::Da, self.sp, DISCRIMINATOR_SP)?;
@@ -674,6 +876,40 @@ pub(crate) fn get_state(
         _ => return Ok(Err(KERN_INVALID_ARGUMENT)),
     };
     Ok(Ok(words))
+}
+
+/// `__DARWIN_ARM_THREAD_STATE64_USER_DIVERSIFIER_MASK`.
+const USER_DIVERSIFIER_MASK: u32 = 0xff00_0000;
+
+/// `thread_convert_thread_state`'s conversion of `words`, a state of
+/// `flavor`, between two threads of this process, which share its user
+/// JOP key: `machine_thread_state_convert_from_user` with no option flags
+/// (a thread state of exactly its count), then
+/// `machine_thread_state_convert_to_user` with `TSSF_PRESERVE_FLAGS` (one
+/// of at least its count). Other states pass unchanged.
+pub(crate) fn convert_state(
+    flavor: u32,
+    words: &mut [u32],
+    signer: Option<&Context>,
+) -> Result<()> {
+    let count = words.len() as u32;
+    let (at, authenticated) = match flavor {
+        ARM_THREAD_STATE
+            if count >= UNIFIED_THREAD_STATE_COUNT && words[0] == ARM_THREAD_STATE64 =>
+        {
+            (2, true)
+        }
+        ARM_THREAD_STATE64 if count >= THREAD_STATE64_COUNT => (0, count == THREAD_STATE64_COUNT),
+        _ => return Ok(()),
+    };
+    let state = &mut words[at..at + THREAD_STATE64_COUNT as usize];
+    let mut thread = ThreadState64::from_words(state);
+    if authenticated {
+        thread.authenticate_from_user(signer)?;
+    }
+    thread.sign_preserving(signer)?;
+    state.copy_from_slice(&thread.words());
+    Ok(())
 }
 
 /// `ARM_DBGBCR_TYPE_MASK`, `ARM_DBG_CR_LINKED_MASK`,
@@ -890,6 +1126,38 @@ mod tests {
             control.with_state(false, |state| (state.x[0], None)),
             Err(KERN_TERMINATED)
         );
+    }
+
+    #[test]
+    fn a_terminated_thread_never_returns_to_guest_code() {
+        // A created thread parked before its first instruction.
+        let control = Arc::new(Control::default());
+        control.start_suspended();
+        assert_eq!(control.suspension(), (1, true));
+        let target = control.clone();
+        let thread = std::thread::spawn(move || {
+            let mut inner = target.lock();
+            while inner.stopping() && !inner.closed && !inner.terminated {
+                inner.place = Place::Parked;
+                target.update(&inner);
+                inner = target.wait(inner);
+            }
+            inner.terminated
+        });
+        while control.stopped() != Some(Stopped::State) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(control.active());
+        assert_eq!(control.terminate(0), KERN_SUCCESS);
+        assert!(thread.join().unwrap());
+        // Gone for every other routine, and no host call starts.
+        assert!(!control.active());
+        assert_eq!(control.terminate(0), KERN_TERMINATED);
+        assert_eq!(control.abort(0, false), KERN_TERMINATED);
+        assert_eq!(control.suspend(false), KERN_TERMINATED);
+        assert_eq!(control.forwarding(|| 1), None);
+        // Not forwarding: nothing to interrupt.
+        control.interrupt(0);
     }
 
     #[test]

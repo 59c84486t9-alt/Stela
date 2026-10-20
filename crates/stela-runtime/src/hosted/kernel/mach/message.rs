@@ -20,6 +20,7 @@
 //! ([`received`]), as the arm64 kernel places it.
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
+use crate::hosted::threads::lock;
 use crate::hosted::{forward, memory};
 use crate::mach::mig;
 use anyhow::{Context as _, Result, bail};
@@ -63,6 +64,11 @@ pub(super) fn send(
     if let Some((port, id)) = destination(name, arguments)
         && let Some(object) = kernel_object(kernel, port)
     {
+        // A guest thread's name with no reference of the guest's left is
+        // the host thread library's alone: the guest holds no right.
+        if object == Object::Thread && super::thread::guest_references(port) == 0 {
+            return Ok(u64::from(super::thread::MACH_SEND_INVALID_DEST));
+        }
         match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {}
             (Some(_), Some(routine))
@@ -76,8 +82,13 @@ pub(super) fn send(
                     body: &request.body,
                 };
                 let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
+                let moves = request.bits & 0x1f == MACH_MSG_TYPE_MOVE_SEND;
+                if moves && let Some(status) = moved_destination(kernel, name, object, port)? {
+                    return Ok(u64::from(status));
+                }
                 let served = server::serve(kernel, object, port, routine.name, complex, &body)?;
                 match served {
+                    // The host kernel consumes a moved destination itself.
                     Some(Reply::Forward) => return forward_trap(kernel, index, arguments),
                     Some(Reply::NotSent(status)) => return Ok(u64::from(status)),
                     _ => {}
@@ -85,6 +96,10 @@ pub(super) fn send(
                 if let Some(reply) = served {
                     if kernel.trace {
                         eprintln!("stela: mig {}.{} answered", routine.subsystem, routine.name);
+                    }
+                    if moves {
+                        // The request consumed the moved reference.
+                        server::release_send(port);
                     }
                     return answer(kernel, name, index, arguments, &request, id, reply);
                 }
@@ -204,6 +219,39 @@ pub(super) fn received(name: &str, arguments: &[u64]) -> Result<()> {
     Ok(())
 }
 
+/// Copy in a request's moved destination right (`ipc_right_copyin`): a
+/// guest thread's (`thread_act_consume_ref_t`), whose pinned last
+/// reference cannot move (`KERN_INVALID_CAPABILITY`, so
+/// `MACH_SEND_INVALID_DEST`). A third-party task's violation is a soft
+/// EXC_GUARD (`ICP_OPTIONS_PINNED_3P_SOFT`), a crash report the process
+/// does not see; a platform-restricted task's is fatal, which stops the
+/// run. The failure, if the send fails.
+fn moved_destination(
+    kernel: &Kernel,
+    name: &str,
+    object: Object,
+    port: u32,
+) -> Result<Option<u32>> {
+    if object != Object::Thread {
+        bail!("{name}: a request that moves its {object:?} kernel-object right is not implemented");
+    }
+    if !super::thread::pinned(kernel, port) || super::thread::guest_references(port) > 1 {
+        return Ok(None);
+    }
+    let restricted = lock(&kernel.process.executable)
+        .signature
+        .as_ref()
+        .is_some_and(|signature| signature.platform_restricted());
+    if restricted {
+        bail!(
+            "{name}: moving the last reference of the pinned thread port {port:#x} raises a \
+             platform-restricted task's fatal EXC_GUARD (kGUARD_EXC_MOD_REFS), which is not \
+             implemented"
+        );
+    }
+    Ok(Some(super::thread::MACH_SEND_INVALID_DEST))
+}
+
 /// The kernel object `port` names in this task: the task, the host, or
 /// any of the task's threads.
 fn kernel_object(kernel: &Kernel, port: u32) -> Option<Object> {
@@ -272,10 +320,10 @@ fn request(name: &str, arguments: &[u64]) -> Result<Option<Sent>> {
         };
         (header, bits, arguments[2] & LOW_HALF, local, voucher)
     };
-    if bits & 0x1f == MACH_MSG_TYPE_MOVE_SEND || voucher != 0 {
+    if voucher != 0 {
         bail!(
-            "{name}: a request that moves its kernel-object right or carries a voucher is not \
-             implemented (bits {bits:#x}, voucher {voucher:#x})"
+            "{name}: a request to a kernel object carrying a voucher is not implemented (bits \
+             {bits:#x}, voucher {voucher:#x})"
         );
     }
     let Some(body_bytes) = size.checked_sub(HEADER_BYTES) else {

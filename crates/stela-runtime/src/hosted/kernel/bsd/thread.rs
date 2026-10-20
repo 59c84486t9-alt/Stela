@@ -348,6 +348,9 @@ fn create(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         kernel.signals.creation_mask(),
         move |kernel, pe| {
             let port = kernel.thread_port;
+            if let Some(control) = kernel.control() {
+                control.set_kind(super::super::control::Kind::Pthread);
+            }
             // The thread parks before its first instruction until a
             // `thread_resume` (`thread_create_suspended`).
             if suspended
