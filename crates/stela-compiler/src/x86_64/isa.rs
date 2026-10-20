@@ -124,6 +124,8 @@ catalog! {
     LoadUnaligned => ("movdqu", Baseline, [0xf3,0x0f,0x6f]),
     StoreUnaligned => ("movdqu", Baseline, [0xf3,0x0f,0x7f]),
     MoveQword => ("movq", Baseline, [0xf3,0x0f,0x7e]),
+    MoveScalarSingle => ("movss", Baseline, [0xf3,0x0f,0x10]),
+    MoveScalarDouble => ("movsd", Baseline, [0xf2,0x0f,0x10]),
     ByteShuffle => ("pshufb", Ssse3, [0x66,0x0f,0x38,0x00]),
     AlignBytes => ("palignr", Ssse3, [0x66,0x0f,0x3a,0x0f]),
 }

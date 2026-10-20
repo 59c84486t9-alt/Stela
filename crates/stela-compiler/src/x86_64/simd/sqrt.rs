@@ -2,9 +2,9 @@
 use super::super::isa::ShiftOpcode;
 use super::numerical::{
     Condition, INPUT_MINIMUM_EXPONENT, Rounding, VZEROUPPER, branch, clear_scalar, commit_inexact,
-    environment_round, positive_exponent_range, prepare_vector_input_range, read_numerical_vector,
-    reject_other_status, resolve, restore_environment, sticky_inexact, sticky_result_check,
-    test_control, vector_positive_exponent_range,
+    environment_round, positive_exponent_range, prepare_vector_input_range, read_numerical_scalar,
+    read_numerical_vector, reject_other_status, resolve, restore_environment, sticky_inexact,
+    sticky_result_check, test_control, vector_positive_exponent_range,
 };
 use super::{Host, commit, packed, read_vector};
 use crate::{
@@ -273,8 +273,16 @@ pub(in crate::x86_64) fn emit(
     let mut sticky_done = None;
     if operand.format != Format::Half {
         let full = sticky_inexact(code);
-        read_numerical_vector(code, operand.shape, operand.source, SOURCE);
-        square_root(code, operand.format, operand.shape, SOURCE);
+        // NEP is zero on this path: scalar upper bits clear, as the root
+        // of a zeroing load into RESULT leaves them.
+        let source = if operand.shape == Shape::Scalar {
+            read_numerical_scalar(code, operand.format, operand.source, RESULT);
+            RESULT
+        } else {
+            read_numerical_vector(code, operand.shape, operand.source, SOURCE);
+            SOURCE
+        };
+        square_root(code, operand.format, operand.shape, source);
         helper.push(sticky_result_check(
             code,
             operand.format,
@@ -282,11 +290,8 @@ pub(in crate::x86_64) fn emit(
             RESULT,
             true,
         ));
-        // NEP is zero on this path: scalar upper bits clear.
-        match operand.shape {
-            Shape::Scalar => clear_scalar(code, operand.format, RESULT),
-            Shape::Vector64 => clear_scalar(code, Format::Double, RESULT),
-            Shape::Vector128 => {}
+        if operand.shape == Shape::Vector64 {
+            clear_scalar(code, Format::Double, RESULT);
         }
         commit(code, operand.destination, RESULT);
         sticky_done = Some(jump(code));

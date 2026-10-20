@@ -287,10 +287,14 @@ pub(super) fn sticky_result_check(
         } else {
             RESULT_MINIMUM_EXPONENT
         };
-        exponent_range(code, format, source, minimum);
+        if format == Format::Single {
+            single_exponent_range(code, source, minimum);
+        } else {
+            exponent_range(code, format, source, minimum);
+        }
         return branch(code, Condition::AboveOrEqual);
     }
-    prepare_vector_input_range(code, format);
+    prepare_vector_maximum(code, format);
     if exact_tiny {
         vector_below_maximum(code, format, shape, source);
     } else {
@@ -298,6 +302,27 @@ pub(super) fn sticky_result_check(
         vector_exponent_range(code, format, shape, source);
     }
     branch(code, Condition::NotZero)
+}
+
+/// [`exponent_range`] of a Single in `source` (XMM0 or XMM1) with one
+/// instruction fewer: doubling its bits drops the sign and puts the
+/// exponent field at the top, so the range bounds shift with it.
+fn single_exponent_range(code: &mut Vec<u8>, source: u8, minimum: u8) {
+    const SUB_EAX_IMM32: u8 = 0x2d;
+    const FIELD_SHIFT: u32 = u32::BITS - 8;
+    let maximum = (Format::Single.exponent_mask() >> Format::Single.fraction_bits()) as u32;
+    code.extend(match source {
+        0 => MOVD_EAX_XMM0,
+        1 => MOVD_EAX_XMM1,
+        _ => unreachable!("allocated numerical source register"),
+    });
+    code.extend(ADD_EAX_EAX);
+    if minimum != 0 {
+        code.push(SUB_EAX_IMM32);
+        code.extend((u32::from(minimum) << FIELD_SHIFT).to_le_bytes());
+    }
+    code.push(CMP_EAX_IMM32);
+    code.extend(((maximum - u32::from(minimum)) << FIELD_SHIFT).to_le_bytes());
 }
 
 /// Leave ZF set when every active S/D lane of `source` has an exponent
@@ -762,6 +787,23 @@ pub(super) fn read_numerical_vector(code: &mut Vec<u8>, shape: Shape, source: u8
     }
 }
 
+/// The low S or D element of guest vector `source` in `xmm`, the rest of
+/// it clear (MOVSS or MOVSD from memory), so that a scalar operation with
+/// `xmm` as its destination leaves the upper bits an Arm scalar write
+/// clears already clear.
+pub(super) fn read_numerical_scalar(code: &mut Vec<u8>, format: Format, source: u8, xmm: u8) {
+    const STATE_MEMORY: u8 = 0x87;
+    const MODRM_REGISTER_SHIFT: u8 = 3;
+    match format {
+        Format::Single => Host::MoveScalarSingle,
+        Format::Double => Host::MoveScalarDouble,
+        Format::Half => unreachable!("Half has its own mapping policy"),
+    }
+    .append(code, crate::TargetCpu::Baseline);
+    code.push(STATE_MEMORY | (xmm << MODRM_REGISTER_SHIFT));
+    code.extend(vector_offset(source).to_le_bytes());
+}
+
 /// Select from the whole indexed source before broadcasting. A 64-bit indexed
 /// form may read a lane in the upper qword.
 pub(super) fn read_numerical_right(
@@ -797,6 +839,18 @@ pub(super) fn read_numerical_right(
 }
 
 pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: Format) {
+    prepare_vector_maximum(code, format);
+    packed(
+        code,
+        Host::Xor,
+        MINIMUM_EXPONENT_VECTOR,
+        MINIMUM_EXPONENT_VECTOR,
+    );
+}
+
+/// The all-ones exponent of `format` in every lane of
+/// MAXIMUM_EXPONENT_VECTOR.
+fn prepare_vector_maximum(code: &mut Vec<u8>, format: Format) {
     packed(
         code,
         Host::EqualDword,
@@ -810,12 +864,6 @@ pub(in crate::x86_64) fn prepare_vector_input_range(code: &mut Vec<u8>, format: 
         (ShiftOpcode::RightDword, u32::BITS)
     };
     shift.emit(code, MAXIMUM_EXPONENT_VECTOR, (width - exponent_bits) as u8);
-    packed(
-        code,
-        Host::Xor,
-        MINIMUM_EXPONENT_VECTOR,
-        MINIMUM_EXPONENT_VECTOR,
-    );
 }
 /// Set an exclusive upper bound, keeping the normal lower bound used by
 /// `vector_exponent_range`. Half precision repeats the limit in both words.

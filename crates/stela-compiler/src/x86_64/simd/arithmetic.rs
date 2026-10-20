@@ -8,8 +8,9 @@ use super::numerical::{
     MOVLHPS_XMM1_XMM2, MOVQ_XMM0_XMM0, RESULT_MINIMUM_EXPONENT, RIGHT_VECTOR,
     SINGLE_EXPONENT_BIAS_BITS, ZeroProduct, branch, clear_scalar, commit_inexact, emit_opcode,
     environment, exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_right, read_numerical_vector, reject_other_status, resolve, restore_environment,
-    sticky_inexact, sticky_result_check, test_control, vector_exponent_range, zero_product_check,
+    read_numerical_right, read_numerical_scalar, read_numerical_vector, reject_other_status,
+    resolve, restore_environment, sticky_inexact, sticky_result_check, test_control,
+    vector_exponent_range, zero_product_check,
 };
 use super::{Host, commit, packed, read_vector, shuffle};
 use crate::{
@@ -238,7 +239,20 @@ fn product_left(operand: &Operand) -> u8 {
 /// and past the full path.
 fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>, usize) {
     let full = sticky_inexact(code);
-    let right = prepare_inputs(code, operand);
+    // Zeroing loads leave a scalar result's upper bits clear.
+    let zeroed = match operand.inputs {
+        Inputs::Elementwise { left, right } if operand.shape == Shape::Scalar => {
+            read_numerical_scalar(code, operand.format, left, LEFT_VECTOR);
+            read_numerical_scalar(code, operand.format, right, RIGHT_VECTOR);
+            true
+        }
+        _ => false,
+    };
+    let right = if zeroed {
+        RIGHT_VECTOR
+    } else {
+        prepare_inputs(code, operand)
+    };
     emit_opcode(
         code,
         operand.format,
@@ -256,9 +270,9 @@ fn sticky_path(code: &mut Vec<u8>, operand: &Operand) -> ([usize; 2], Vec<usize>
     let resume = code.len();
     result_sign(code, operand);
     match operand.shape {
-        Shape::Scalar => clear_scalar(code, operand.format, LEFT_VECTOR),
+        Shape::Scalar if !zeroed => clear_scalar(code, operand.format, LEFT_VECTOR),
         Shape::Vector64 => code.extend(MOVQ_XMM0_XMM0),
-        Shape::Vector128 => {}
+        Shape::Scalar | Shape::Vector128 => {}
     }
     commit(code, operand.destination, LEFT_VECTOR);
     let done = jump(code);

@@ -4,9 +4,10 @@ use super::numerical::{
     ArithmeticOpcode, Condition, FusedOpcode, INPUT_MINIMUM_EXPONENT, RESULT_MINIMUM_EXPONENT,
     ZeroProduct, branch, clear_scalar, commit_inexact, emit_fma, emit_opcode, environment,
     exponent_range, jump, prepare_vector_input_range, prepare_vector_result_range,
-    read_numerical_right, read_numerical_vector, reject_other_status, reject_product_status,
-    resolve, restore_environment, restore_environment_with_product, save_product_status,
-    sticky_inexact, sticky_result_check, test_control, vector_exponent_range, zero_product_check,
+    read_numerical_right, read_numerical_scalar, read_numerical_vector, reject_other_status,
+    reject_product_status, resolve, restore_environment, restore_environment_with_product,
+    save_product_status, sticky_inexact, sticky_result_check, test_control, vector_exponent_range,
+    zero_product_check,
 };
 use super::{Host, commit, packed};
 use crate::{
@@ -204,16 +205,20 @@ fn sticky_path(
     target: TargetCpu,
 ) -> ([usize; 2], Vec<usize>, usize) {
     let full = sticky_inexact(code);
-    read_numerical_vector(code, operand.shape, operand.left, LEFT);
+    // A zeroing load of the destination LEFT leaves a scalar result's
+    // upper bits clear.
+    if operand.shape == Shape::Scalar {
+        read_numerical_scalar(code, operand.format, operand.left, LEFT);
+    } else {
+        read_numerical_vector(code, operand.shape, operand.left, LEFT);
+    }
     read_numerical_vector(code, operand.shape, operand.addend, ADDEND);
     prepare_right(code, operand);
     emit_checked_fma(code, operand, target);
     let rejected = sticky_result_check(code, operand.format, operand.shape, LEFT, false);
     let resume = code.len();
-    match operand.shape {
-        Shape::Scalar => clear_scalar(code, operand.format, LEFT),
-        Shape::Vector64 => packed(code, Host::MoveQword, LEFT, LEFT),
-        Shape::Vector128 => {}
+    if operand.shape == Shape::Vector64 {
+        packed(code, Host::MoveQword, LEFT, LEFT);
     }
     commit(code, operand.destination, LEFT);
     let done = jump(code);
