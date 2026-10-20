@@ -10,6 +10,8 @@
 //! An address outside the native ranges that the guest maps runs in the
 //! translated variant, through the software TLB ([`super::translated`]).
 
+pub use stela_compiler::x86_64::RangeCheck;
+
 /// The upper half of the x86 four-level canonical space, and of an ARM
 /// regime's 47-bit TTBR1 range.
 pub const UPPER_HALF: u64 = 0xffff_8000_0000_0000;
@@ -23,11 +25,6 @@ pub const HALF_SLICES: u8 = 64;
 /// the same base (`stela_compiler::x86_64::guest_range`). A guard must
 /// be at least this large.
 pub const ELISION_REACH: u64 = 1 << 35;
-/// The five-level check's shift: bits 63:48 all clear or all set.
-const FIVE_LEVEL_SHIFT: u8 = 48;
-/// Where a mispredicted five-level check sends an access: PML5 entry 1,
-/// which no root maps.
-const FIVE_LEVEL_MASKED: u64 = 1 << 48;
 
 /// The host's placement of the guest's address space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -43,20 +40,6 @@ pub enum Placement {
         /// fewer than [`HALF_SLICES`].
         slices: u8,
     },
-}
-
-/// The native guest range check, as `mov rcx,rax; sar rcx,shift; add
-/// ecx,bias; cmp ecx,bound; jbe ok`: an address is native exactly when
-/// `(address >> shift) + bias`, arithmetic and taken in 32 bits, is at most
-/// `bound` unsigned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RangeCheck {
-    pub shift: u8,
-    pub bias: u8,
-    pub bound: u8,
-    /// Where a mispredicted check's CMOVA sends the access: an address no
-    /// root maps, never Stela's.
-    pub masked: u64,
 }
 
 impl Placement {
@@ -84,26 +67,19 @@ impl Placement {
         Self::four_level(window as u8 + 1)
     }
 
-    /// The check native code runs before each guest access.
+    /// The check native code runs before each guest access, as `mov
+    /// rcx,rax; sar rcx,shift; add ecx,bias; cmp ecx,bound; jbe ok`, and
+    /// where a mispredicted one sends the access: an address no root maps.
     pub const fn check(self) -> RangeCheck {
         match self {
-            Self::FiveLevel => RangeCheck {
-                shift: FIVE_LEVEL_SHIFT,
-                bias: 1,
-                bound: 1,
-                masked: FIVE_LEVEL_MASKED,
-            },
-            Self::FourLevel { slices } => RangeCheck {
-                shift: SLICE_BITS as u8,
-                bias: HALF_SLICES - slices,
-                bound: 2 * HALF_SLICES - 1 - slices,
-                masked: self.native_upper() - SLICE / 2,
-            },
+            Self::FiveLevel => RangeCheck::FIVE_LEVEL,
+            Self::FourLevel { slices } => RangeCheck::four_level(slices),
         }
     }
 
     /// Whether native code may access `address` directly: exactly the
-    /// addresses [`Self::check`] passes.
+    /// addresses [`Self::check`] passes, whose `(address >> shift) +
+    /// bias`, arithmetic and taken in 32 bits, is at most `bound` unsigned.
     pub const fn native(self, address: u64) -> bool {
         let check = self.check();
         let slice = ((address as i64) >> check.shift) as u32;
@@ -113,7 +89,7 @@ impl Placement {
     /// The start of the guest's native upper range, `U`.
     pub const fn native_upper(self) -> u64 {
         match self {
-            Self::FiveLevel => 0u64.wrapping_sub(1 << FIVE_LEVEL_SHIFT),
+            Self::FiveLevel => 0u64.wrapping_sub(1 << RangeCheck::FIVE_LEVEL.shift),
             Self::FourLevel { slices } => UPPER_HALF + slices as u64 * SLICE,
         }
     }
@@ -166,6 +142,7 @@ mod tests {
         let placement = Placement::four_level(2).unwrap();
         let upper = placement.native_upper();
         assert_eq!(upper, 0xffff_8400_0000_0000);
+        assert_eq!(placement.check().masked, upper - SLICE / 2);
         assert_eq!(placement.check().bias, 62);
         assert_eq!(placement.check().bound, 125);
         for address in [

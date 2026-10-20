@@ -1446,6 +1446,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     .field(SystemRegister::ID_AA64PFR0_EL1, CSV3_SHIFT, 4)
                     != 0,
             )
+            .with_range(self.host.placement().check())
         })
     }
 
@@ -2772,17 +2773,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Err(Err(stop)) => return Err(stop),
         };
         let guarded = self.fetch_guarded(pc);
-        let variant = Variant {
-            translated: self.page_translated(physical),
-            ..self.current_variant(single, guarded)
-        };
+        let current = self.current_variant(single, guarded);
+        let variant = self.page_variant(current, physical);
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
         self.chain.context = self.context(
             el,
             Variant {
                 guarded_page: false,
-                translated: false,
-                ..variant
+                ..current
             },
         );
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
@@ -4144,6 +4142,19 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// host's native ranges, which runs correctly but slower.
     pub fn first_translated(&self) -> Option<(u64, u64)> {
         self.first_translated
+    }
+
+    /// `variant` for a block of the fetch page holding `physical`: in the
+    /// translated variant when the page needs it, through the host's
+    /// translation helper.
+    fn page_variant(&self, mut variant: Variant, physical: u64) -> Variant {
+        if self.page_translated(physical)
+            && let Some(helper) = self.host.translation_helper()
+        {
+            variant.translated = true;
+            variant.checks = variant.checks.with_translation(helper);
+        }
+        variant
     }
 
     /// Whether blocks of the fetch page holding `physical` run in the
@@ -5998,30 +6009,39 @@ mod tests {
         ));
         // Four-level without the helper.
         machine.host.placement = mmu::placement::Placement::four_level(2).unwrap();
+        machine.derived_changed();
         let Err(Stop::Unsupported(requirement)) = run(&mut machine, FaultCause::InvalidOpcode)
         else {
             panic!("an explicit stop")
         };
         assert_eq!(requirement.address, Some(ADDRESS));
         assert_eq!(machine.statistics.translated_pages, 0);
-        // With it, a range check's #UD and an elided access's #GP alike.
-        machine.host.translation_helper = Some(0x1000);
+        // Four-level blocks check the four-level ranges.
+        let check = machine.host.placement.check();
+        let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        assert_eq!(machine.blocks[index].checks.range, check);
+        // With the helper, a range check's #UD and an elided access's #GP
+        // alike run the page in the translated variant.
+        const HELPER: u64 = 0x1000;
+        machine.host.translation_helper = Some(HELPER);
         for cause in [FaultCause::InvalidOpcode, FaultCause::NonCanonical] {
             machine.translated_pages.clear();
             run(&mut machine, cause).unwrap();
             assert_eq!(machine.cpu.pc, BASE, "{cause:?}");
             assert_eq!(machine.first_translated(), Some((BASE, ADDRESS)));
-            let Ok(Fetched::Block(index)) = machine.fetch_block(BASE, false) else {
-                panic!("block")
-            };
-            assert!(machine.blocks[index].variant.translated, "{cause:?}");
+            let current = machine.current_variant(false, false);
+            let variant = machine.page_variant(current, BASE);
+            assert!(variant.translated, "{cause:?}");
+            assert_eq!(
+                variant.checks,
+                current.checks.with_translation(HELPER),
+                "{cause:?}"
+            );
+            assert!(!machine.page_variant(current, BASE + FETCH_PAGE).translated);
         }
         assert_eq!(machine.statistics.translated_pages, 2);
-        // A translated block that still leaves the ranges stops.
-        assert!(matches!(
-            run(&mut machine, FaultCause::InvalidOpcode),
-            Err(Stop::Unsupported(_))
-        ));
     }
 
     /// System-mode blocks check every access against the guest's ranges,

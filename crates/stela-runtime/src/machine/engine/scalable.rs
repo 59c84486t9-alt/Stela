@@ -335,8 +335,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             system: self.native_system(),
             guarded_page: self.fetch_guarded(pc),
             timing: self.cpu.pstate.dit && self.timing_target().is_some(),
-            translated: self.page_translated(physical),
+            translated: false,
         };
+        let variant = self.page_variant(variant, physical);
         let index = match self.index.get(&(pc, physical, variant)) {
             Some(&index) => index,
             None => match self.compile(pc, physical, variant)? {
