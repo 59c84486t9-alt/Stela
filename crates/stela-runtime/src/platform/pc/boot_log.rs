@@ -28,7 +28,14 @@
 //! the ring does not hold. Once the ring has wrapped, an interrupted flush can
 //! leave the bytes it wrote in place of the oldest ones the old header still
 //! counts, at most the bytes of that one flush.
+//!
+//! A machine-state file (`--nor-file`) stands in for the partition: a file
+//! preallocated on a FAT32 volume, laid out as the partition is. Writes
+//! reach its blocks directly, never the volume's directory or FAT, so
+//! [`file_blocks`] takes only a file that is one contiguous, block-aligned
+//! run of at least [`PARTITION_BYTES`].
 use super::block::{BlockDevice, BlockError};
+use super::fat32;
 use crate::machine::apple::{nor::CAPACITY, sep_state};
 use alloc::{format, vec, vec::Vec};
 use core::fmt::{self, Write as _};
@@ -96,6 +103,61 @@ impl fmt::Display for HeaderError {
 }
 
 impl core::error::Error for HeaderError {}
+
+/// Why a file cannot stand in for the machine-state partition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileError {
+    /// Its clusters are not one contiguous run.
+    Fragmented { extents: usize },
+    /// It does not start on a block boundary.
+    Misaligned { offset: u64, block: u64 },
+    /// It holds fewer than [`PARTITION_BYTES`] in whole blocks.
+    Short { bytes: u64 },
+}
+
+impl fmt::Display for FileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fragmented { extents } => write!(
+                f,
+                "the file is in {extents} pieces, not one; preallocate it on a freshly formatted \
+                 volume"
+            ),
+            Self::Misaligned { offset, block } => write!(
+                f,
+                "the file starts at byte {offset:#x}, not on a {block}-byte block boundary"
+            ),
+            Self::Short { bytes } => write!(
+                f,
+                "the file holds {bytes:#x} bytes in whole blocks; the machine state needs \
+                 {PARTITION_BYTES:#x}"
+            ),
+        }
+    }
+}
+
+/// The first block and the block count of `file`, a machine-state file on
+/// a partition of `block`-byte blocks.
+pub fn file_blocks(file: &fat32::File, block: u64) -> Result<(u64, u64), FileError> {
+    let [extent] = file.extents[..] else {
+        return Err(FileError::Fragmented {
+            extents: file.extents.len(),
+        });
+    };
+    if !extent.offset.is_multiple_of(block) {
+        return Err(FileError::Misaligned {
+            offset: extent.offset,
+            block,
+        });
+    }
+    let blocks = extent.bytes / block;
+    if blocks * block < PARTITION_BYTES {
+        return Err(FileError::Short {
+            bytes: blocks * block,
+        });
+    }
+    Ok((extent.offset / block, blocks))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Header {
@@ -796,5 +858,48 @@ mod tests {
         ));
         assert_eq!(PARTITION_BYTES, 0x51_0000);
         assert_eq!(OFFSET, 0x11_0000);
+    }
+
+    #[test]
+    fn a_machine_state_file_is_one_aligned_run_of_the_partition_size() {
+        use crate::payload::pieces::Extent;
+        let file = |extents: &[(u64, u64)]| fat32::File {
+            bytes: extents.iter().map(|e| e.1).sum(),
+            extents: extents
+                .iter()
+                .map(|&(offset, bytes)| Extent { offset, bytes })
+                .collect(),
+        };
+        let size = 6 << 20;
+        assert_eq!(
+            file_blocks(&file(&[(0x10_0000, size)]), 512),
+            Ok((0x800, size / 512))
+        );
+        assert_eq!(
+            file_blocks(&file(&[(0x10_0000, 0x1000), (0x20_0000, size)]), 512),
+            Err(FileError::Fragmented { extents: 2 })
+        );
+        assert_eq!(
+            file_blocks(&file(&[]), 512),
+            Err(FileError::Fragmented { extents: 0 })
+        );
+        assert_eq!(
+            file_blocks(&file(&[(0x10_0200, size)]), 4096),
+            Err(FileError::Misaligned {
+                offset: 0x10_0200,
+                block: 4096
+            })
+        );
+        // A partial last block does not count.
+        assert_eq!(
+            file_blocks(&file(&[(0, PARTITION_BYTES + 0x800)]), 4096),
+            Ok((0, PARTITION_BYTES / 4096))
+        );
+        assert_eq!(
+            file_blocks(&file(&[(0, PARTITION_BYTES - 1)]), 512),
+            Err(FileError::Short {
+                bytes: PARTITION_BYTES - 512
+            })
+        );
     }
 }
