@@ -19,7 +19,7 @@ use super::{Call, Kernel, Outcome, process};
 use crate::hosted::darwin::{EBADEXEC, EFAULT, EINVAL};
 use crate::hosted::hardware::CPU_SUBTYPE_ARM64E;
 use crate::hosted::{activation, forward, memory};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::ffi::CString;
 
 /// `struct _posix_spawn_args_desc`: nine (size, pointer) pairs, the first
@@ -148,7 +148,8 @@ pub(super) fn posix_spawn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             match preferred_slice(&preferences, &activation::slices(&head), fat) {
                 Ok(None) => {}
                 Ok(Some((CPU_TYPE_ARM64, subtype))) => cpu_subtype = Some(subtype),
-                Ok(Some((cpu_type, _))) => bail!(
+                Ok(Some((cpu_type, _))) => crate::hosted::unsupported::refuse!(
+                    EBADARCH,
                     "posix_spawn: the binary preferences select a CPU type {cpu_type:#x} slice of \
                      {}, which runs under Rosetta on the M2: running the slice natively would show \
                      it the x86 host instead of the M2 and its Rosetta environment",
@@ -172,7 +173,8 @@ pub(super) fn posix_spawn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         if (0..u64::from(count).min(within)).any(|index| {
             memory::read_u32(actions + 8 + index * PORT_ACTION_BYTES) == Some(PSPA_EXCEPTION)
         }) {
-            bail!(
+            crate::hosted::unsupported::refuse!(
+                EINVAL,
                 "posix_spawn with an exception-port action: the child would hold it on its host \
                  task, where the host kernel delivers the hosted runtime's own faults with x86 \
                  state, which is not implemented"

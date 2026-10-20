@@ -35,6 +35,7 @@ mod frame;
 pub(crate) mod host;
 
 pub(crate) const SIGILL: u32 = 4;
+pub(crate) const SIGSYS: u32 = 12;
 pub(crate) const SIGTRAP: u32 = 5;
 pub(crate) const SIGBUS: u32 = 10;
 pub(crate) const SIGSEGV: u32 = 11;

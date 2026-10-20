@@ -55,11 +55,41 @@ fn stela(home: &Path, directory: &Path, arguments: &[&str]) -> Output {
         .args(arguments)
         .current_dir(directory)
         .env("HOME", home)
+        .env("STELA_STRICT", "1")
         .env_remove("STELA_GUEST_ROOT")
         .env_remove("__CFBundleIdentifier")
         .output()
         .unwrap()
 }
+
+/// A program asking for what the hosted runtime lacks, and for what
+/// macOS itself refuses: an unassigned call number with SIGSYS ignored
+/// (`nosys`), an unsupported `fcntl` command twice, and an UNDEFINED
+/// encoding under a SIGILL handler.
+const UNSUPPORTED: &str = r#"#include <errno.h>
+#include <fcntl.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stdio.h>
+static sigjmp_buf back;
+static void caught(int signal) { printf("caught %d\n", signal); siglongjmp(back, 1); }
+int main(int argc, char **argv) {
+    (void)argc;
+    signal(SIGSYS, SIG_IGN);
+    register long x16 __asm__("x16") = 560;
+    register long x0 __asm__("x0") = 0;
+    __asm__ volatile("svc #0x80" : "+r"(x0) : "r"(x16) : "memory", "cc");
+    printf("nosys %ld\n", x0);
+    int fd = open(argv[0], O_RDONLY);
+    for (int i = 0; i < 2; i++) {
+        int result = fcntl(fd, 59 /* F_ADDSIGS */, 0);
+        printf("fcntl %d %d\n", result, errno);
+    }
+    signal(SIGILL, caught);
+    if (sigsetjmp(back, 1) == 0) __asm__ volatile(".inst 0x00000000");
+    return 0;
+}
+"#;
 
 fn text(output: &Output) -> (String, String) {
     (
@@ -223,4 +253,64 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
     let output = stela(&home, &programs, &["install-system", "--remove"]);
     assert!(output.status.success());
     assert!(!installed.exists());
+}
+
+#[test]
+fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
+    let Some(roots) = guest_roots() else {
+        eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let home = work.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let Some(program) = compile_source(
+        work.path(),
+        "unsupported",
+        UNSUPPORTED,
+        &["-arch", "arm64e"],
+    ) else {
+        eprintln!("skipped: xcrun clang cannot build arm64e programs here");
+        return;
+    };
+    let run = |strict: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
+        command.arg("run");
+        for root in &roots {
+            command.arg("--root").arg(root);
+        }
+        if strict {
+            command.arg("--strict");
+        }
+        command
+            .arg(&program)
+            .env("HOME", &home)
+            .env_remove("STELA_STRICT")
+            .output()
+            .unwrap()
+    };
+    let output = run(false);
+    let (out, error) = text(&output);
+    assert!(output.status.success(), "{out}{error}");
+    assert_eq!(
+        out, "nosys 78\nfcntl -1 22\nfcntl -1 22\ncaught 4\n",
+        "{error}"
+    );
+    // Reported once, on standard error and in the log.
+    assert_eq!(
+        error
+            .matches("stela: unsupported BSD system call: fcntl F_ADDSIGS")
+            .count(),
+        1,
+        "{error}"
+    );
+    let log = std::fs::read_to_string(home.join("Library/Logs/Stela/unsupported.log")).unwrap();
+    assert!(log.contains("fcntl F_ADDSIGS"), "{log}");
+    // Strict mode stops there instead.
+    let output = run(true);
+    let (out, error) = text(&output);
+    assert!(!output.status.success());
+    // The guest's buffered output is never flushed: the run stopped.
+    assert!(out.is_empty(), "{out}");
+    assert!(error.contains("fcntl F_ADDSIGS"), "{error}");
 }

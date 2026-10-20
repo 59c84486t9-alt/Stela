@@ -28,7 +28,7 @@ use crate::hosted::darwin::{
 };
 use crate::machine::system::Register;
 use crate::pauth::{Context, Key};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::sync::{
     Condvar, Mutex, MutexGuard,
     atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1033,7 +1033,8 @@ pub(crate) fn set_state(
                 enabled |= bcr & DBG_CR_ENABLE_MASK != 0 || wcr & DBG_CR_ENABLE_MASK != 0;
             }
             if enabled {
-                bail!(
+                crate::hosted::unsupported::refuse!(
+                    crate::hosted::unsupported::Failure::Kern(KERN_INVALID_ARGUMENT),
                     "thread_set_state(ARM_DEBUG_STATE64) enabling a hardware breakpoint, \
                      watchpoint or single step: guest debug exceptions are not implemented"
                 );

@@ -27,7 +27,7 @@ use crate::hosted::{
     hardware::{self, Hardware},
     memory,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 
 /// `CTL_MAXNAME`.
@@ -514,7 +514,10 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
         return Ok(Lookup::Host);
     }
     if UNMODELED.contains(&name) {
-        bail!("the hosted machine model does not answer sysctl {name}");
+        crate::hosted::unsupported::refuse!(
+            ENOENT,
+            "the hosted machine model does not answer sysctl {name}"
+        );
     }
     Ok(Lookup::Absent)
 }
@@ -692,7 +695,8 @@ fn meta(kernel: &mut Kernel, call: &Call, oid: &[i32], request: &Request) -> Res
             }
             forward(kernel, call)
         }
-        META_NEXT => bail!(
+        META_NEXT => crate::hosted::unsupported::refuse!(
+            ENOENT,
             "sysctl enumeration (CTL_UNSPEC.2) over the modeled machine namespaces is not \
              implemented"
         ),

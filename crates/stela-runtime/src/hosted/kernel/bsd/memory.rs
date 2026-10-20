@@ -17,11 +17,12 @@
 //! first file mapping at or above the address must exist (EINVAL), found
 //! as `fill_procregioninfo_onlymappedvnodes` finds it in the host map that
 //! holds the guest's mappings. An empty range then succeeds. Decrypting a
-//! range needs the text crypter the M2's FairPlay kernel extension
+//! range needs the text crypter Apple silicon's FairPlay kernel extension
 //! registers (`text_crypter_create`), which the host does not provide for
-//! arm64 images: the run stops.
+//! arm64 images: it fails with ENOTSUP, as XNU without one, and is
+//! reported.
 use super::{Call, Kernel, Outcome, Pe, forward, forward_uninterruptible};
-use crate::hosted::darwin::{EFAULT, EINVAL, ENOMEM, KERN_FAILURE};
+use crate::hosted::darwin::{EFAULT, EINVAL, ENOMEM, ENOTSUP, KERN_FAILURE};
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
 use crate::hosted::{shared_region, threads::lock};
 use anyhow::{Result, bail};
@@ -262,7 +263,8 @@ fn mremap_encrypted(call: &Call) -> Result<Outcome> {
     if bytes == 0 {
         return Ok(Outcome::value(0));
     }
-    bail!(
+    crate::hosted::unsupported::refuse!(
+        ENOTSUP,
         "mremap_encrypted of {bytes:#x} bytes at {address:#x} (cryptid {cryptid:#x}, CPU type \
          {:#x}/{:#x}): decrypting needs the text crypter of the M2's FairPlay kernel extension, \
          which the host does not provide",
@@ -285,7 +287,10 @@ fn shared_region_check(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         return Ok(Outcome::Error(EINVAL));
     };
     if pointer == 0 {
-        bail!("shared_region_check_np(NULL): removing the shared region is not implemented");
+        crate::hosted::unsupported::refuse!(
+            EINVAL,
+            "shared_region_check_np(NULL): removing the shared region is not implemented"
+        );
     }
     // A region nothing has mapped yet has no first mapping
     // (`vm_shared_region_start_address` fails, and the call with ENOMEM).

@@ -7,15 +7,18 @@
 //! forwarded to the host kernel unchanged ([`forwarded`]): guest pointers are
 //! host pointers here and both kernels munge results alike. Calls whose
 //! meaning depends on the CPU, the page size, the clock or the execution
-//! state are serviced by their family. Everything else stops the process
-//! naming the call.
+//! state are serviced by their family. A call no family services, or an
+//! unsupported request of one, fails as XNU fails it and is reported
+//! ([`unsupported`]): an unknown call with `nosys`, an unsupported flavor
+//! or option with the call's own error.
 use crate::hosted::darwin::{EINTR, ENOSYS};
+use crate::hosted::unsupported::{self, Failure, Kind};
 // Kept for the MIG routines that still name it through this module.
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
 use crate::hosted::forward;
 use crate::machine::system::Register;
-use anyhow::{Result, anyhow, bail};
+use anyhow::Result;
 
 pub(super) mod additions;
 pub(super) mod aio;
@@ -126,6 +129,8 @@ fn outcome(returned: forward::Returned) -> Outcome {
 }
 
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
+    // The SVC, before the return address.
+    let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
     let registers = &pe.cpu.state.x;
     // A zero X16 is the indirect call: its number is X0 and its arguments
     // start at X1.
@@ -142,7 +147,13 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
     // The 26A434 additions lie at numbers the pinned catalog reserves.
     if let Some(name) = additions::addition(number) {
         kernel.count(name);
-        let (return_type, outcome) = additions::call(kernel, pe, number, name, &arguments)?;
+        let (return_type, outcome) = match additions::call(kernel, pe, number, name, &arguments) {
+            Ok(serviced) => serviced,
+            Err(error) => (
+                BsdReturnType::Int,
+                failed(unsupported::recover(error, Kind::BsdCall, pc)?),
+            ),
+        };
         if kernel.trace {
             eprintln!("stela: bsd {name}({arguments:x?}) = {outcome:x?}");
         }
@@ -156,14 +167,22 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
     let Some(entry) = entry.filter(|entry| entry.prototype().is_some()) else {
         // `enosys` rows fail quietly; `nosys` and numbers past the table
         // also raise SIGSYS (`bsd/kern/kern_sig.c` `nosys`).
-        if entry.is_some_and(|entry| entry.name == ENOSYS_ROUTINE) {
-            return complete(&mut trap, BsdReturnType::Int, Outcome::Error(ENOSYS));
+        let outcome = if entry.is_some_and(|entry| entry.name == ENOSYS_ROUTINE) {
+            Outcome::Error(ENOSYS)
+        } else {
+            nosys()
+        };
+        if kernel.trace {
+            eprintln!("stela: bsd {number}({arguments:x?}) = {outcome:x?}");
         }
-        bail!("BSD system call {number} is unassigned: SIGSYS delivery is not implemented");
+        return complete(&mut trap, BsdReturnType::Int, outcome);
     };
     let call = Call { entry, arguments };
     kernel.count(entry.name);
-    let outcome = dispatch(kernel, pe, &call)?;
+    let outcome = match dispatch(kernel, pe, &call) {
+        Ok(outcome) => outcome,
+        Err(error) => failed(unsupported::recover(error, Kind::BsdCall, pc)?),
+    };
     if kernel.trace {
         eprintln!(
             "stela: bsd {}({}) = {outcome:x?}",
@@ -179,6 +198,21 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
         return Ok(());
     }
     complete(&mut Trap { cpu: &mut pe.cpu }, entry.return_type, outcome)
+}
+
+/// XNU's `nosys`: SIGSYS to the calling thread, whose disposition acts on
+/// it, and ENOSYS.
+fn nosys() -> Outcome {
+    super::signals::raise(signal::SIGSYS as i32);
+    Outcome::Error(ENOSYS)
+}
+
+/// What a refused call returns.
+fn failed(failure: Failure) -> Outcome {
+    match failure {
+        Failure::Errno(errno) => Outcome::Error(errno),
+        _ => nosys(),
+    }
 }
 
 /// `arm_prepare_u64_syscall_return`: an error sets X0 to the errno, X1 to
@@ -293,7 +327,8 @@ pub(crate) fn overlay(name: &str) -> Option<&'static str> {
 pub(crate) const LIMITS: &[(&str, &str)] = &[
     (
         "ptrace",
-        "PT_STEP stops the run: the host would single-step the target's x86 host thread",
+        "PT_STEP fails with EINVAL and is reported: the host would single-step the target's x86 \
+         host thread",
     ),
     (
         "sigaction",
@@ -306,8 +341,9 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     ),
     (
         "posix_spawn",
-        "binary preferences naming an x86-64 slice stop the run: the slice runs under Rosetta \
-         on the M2, and running it natively would show it the x86 host instead",
+        "binary preferences naming an x86-64 slice fail with EBADARCH and are reported: the \
+         slice runs under Rosetta on Apple silicon, and running it natively would show it the \
+         x86 host instead; an exception-port action fails with EINVAL",
     ),
     (
         "vfork",
@@ -315,14 +351,15 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     ),
     (
         "mremap_encrypted",
-        "decrypting a range stops the run: the text crypter is the M2's FairPlay kernel \
-         extension, which the host does not provide for arm64 images; an address with no guest \
+        "decrypting a range fails with ENOTSUP, as XNU without a text crypter, and is \
+         reported: the text crypter is Apple silicon's FairPlay kernel extension, which the host does not provide for arm64 images; an address with no guest \
          file mapping at or above it can find one of the hosted runtime's own",
     ),
     (
         "kqueue_workloop_ctl",
         "a workloop's fixed priority, policy and CPU limit are not applied to its servicer, \
-         which is scheduled by QoS; a work interval or a bound thread stops the run",
+         which is scheduled by QoS; a work interval or a bound thread fails with EINVAL and \
+         is reported",
     ),
 ];
 
@@ -357,16 +394,18 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         // number.
         Some(Family::Additions) | None => None,
     };
-    outcome.ok_or_else(|| {
+    let Some(outcome) = outcome else {
         let reason = REFUSED
             .iter()
             .find(|(refused, _)| *refused == name)
             .map_or("no family services it", |&(_, reason)| reason);
-        anyhow!(
+        unsupported::refuse!(
+            Failure::Nosys,
             "BSD system call {name} ({}) is not implemented by the hosted kernel: {reason} \
              (arguments {:x?})",
             call.entry.number,
             call.arguments()
-        )
-    })
+        );
+    };
+    Ok(outcome)
 }

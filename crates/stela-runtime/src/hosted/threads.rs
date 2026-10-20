@@ -29,6 +29,8 @@ use super::{
     tables::Tables,
 };
 use crate::hosted::darwin::THREAD_SELF_TRAP;
+use crate::hosted::unsupported::{self, Failure, Kind};
+use crate::machine::engine::RequirementKind;
 use crate::machine::{Chip, CpuProfile, Machine, NoDevices, Stop, system::Register};
 use anyhow::{Context as _, Result, anyhow, bail};
 use std::{
@@ -700,6 +702,31 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                     return Ok(None);
                 }
                 std::thread::yield_now();
+                if let Some(end) = deliver(kernel, &mut pe)? {
+                    return Ok(ended(end));
+                }
+                resume(&process, thread, member, &mut pe);
+            }
+            // An instruction the runtime does not implement: as an Apple
+            // CPU's UNDEFINED encoding, EXC_BAD_INSTRUCTION at its pc.
+            Stop::Unsupported(requirement)
+                if requirement.el == 0
+                    && matches!(
+                        requirement.kind,
+                        RequirementKind::Instruction { .. }
+                            | RequirementKind::SystemRegister { .. }
+                            | RequirementKind::SystemInstruction { .. }
+                    ) =>
+            {
+                execution.release(thread);
+                unsupported::report(
+                    Kind::Instruction,
+                    requirement.pc,
+                    &requirement.to_string(),
+                    Failure::BadInstruction,
+                )?;
+                pe.cpu.pc = requirement.pc;
+                kernel.bad_instruction(&mut pe, || format!("unsupported {requirement}"))?;
                 if let Some(end) = deliver(kernel, &mut pe)? {
                     return Ok(ended(end));
                 }

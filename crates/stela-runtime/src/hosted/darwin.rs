@@ -109,6 +109,10 @@ pub(crate) fn user_cpsr(current: u32, requested: u32) -> u32 {
     (current & !(PSR64_NZCV_MASK | PSR64_MODE_MASK)) | (requested & PSR64_NZCV_MASK)
 }
 
+// Mach exception types (`osfmk/mach/exception_types.h`).
+pub(crate) const EXC_BAD_INSTRUCTION: usize = 2;
+pub(crate) const EXC_SYSCALL: usize = 7;
+
 // The self-port traps (`-x16`).
 pub(crate) const THREAD_SELF_TRAP: u32 = 27;
 pub(crate) const TASK_SELF_TRAP: u32 = 28;

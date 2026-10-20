@@ -36,7 +36,8 @@
 //! adjust only the servicer's scheduling, which the hosted workqueue does
 //! by QoS. A work interval to preadopt (`KQ_WORKLOOP_CREATE_WORK_INTERVAL`)
 //! and a permanently bound servicer
-//! (`KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD`) stop the run.
+//! (`KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD`) fail with EINVAL and are
+//! reported.
 use super::{
     Kernel,
     kqworkq::{
@@ -52,7 +53,7 @@ use crate::hosted::darwin::{
     EV_ERROR,
 };
 use crate::hosted::{kernel::Process, memory, threads::lock};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::{
     collections::HashMap,
     sync::{Arc, Condvar, Mutex, MutexGuard},
@@ -1001,7 +1002,8 @@ pub(super) fn ctl(kernel: &Kernel, arguments: [u64; 8]) -> Result<Result<u64, u6
             let flags = word(4);
             // XNU looks the work interval up before the workloop.
             if flags & KQ_WORKLOOP_CREATE_WORK_INTERVAL != 0 {
-                bail!(
+                crate::hosted::unsupported::refuse!(
+                    EINVAL,
                     "kqueue_workloop_ctl creating workloop {id:#x} with work interval port \
                      {:#x}: preadopting a work interval's thread group is not implemented",
                     word(32) as u32
@@ -1015,7 +1017,8 @@ pub(super) fn ctl(kernel: &Kernel, arguments: [u64; 8]) -> Result<Result<u64, u6
                 return Ok(Err(EEXIST));
             }
             if flags & KQ_WORKLOOP_CREATE_WITH_BOUND_THREAD != 0 {
-                bail!(
+                crate::hosted::unsupported::refuse!(
+                    EINVAL,
                     "kqueue_workloop_ctl creating workloop {id:#x} with a bound thread: a \
                      servicer permanently bound to its workloop is not implemented"
                 );

@@ -9,20 +9,25 @@
 //! host's nanoseconds. A message to this task's, thread's or host's own
 //! kernel object would be answered by the x86 host's MIG servers with x86
 //! semantics (page size, thread states, CPU information), so such messages
-//! are serviced here by routine, and a routine not serviced stops the
-//! process naming it.
+//! are serviced here by routine. An unassigned trap number takes
+//! EXC_SYSCALL (`mach_syscall`), which becomes SIGSYS at the trap; a trap
+//! or request the hosted kernel does not service fails with its own error,
+//! or `kern_invalid`'s KERN_INVALID_ARGUMENT, and is reported
+//! ([`unsupported`]).
 use super::{Kernel, Pe, Trap};
 use crate::hosted::darwin::{
     ENOTSUP, KERN_FAILURE, KERN_INVALID_ADDRESS, KERN_INVALID_ARGUMENT, KERN_NOT_SUPPORTED,
     KERN_SUCCESS, MACH_SEND_INVALID_DEST, VM_PROT_DEFAULT,
 };
 use crate::hosted::threads::lock;
+use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::hosted::{
     forward, host,
     memory::{PAGE_MASK, Protection},
 };
 use crate::mach::catalog::{self, Reserved};
-use anyhow::{Result, bail};
+use crate::machine::system::Register;
+use anyhow::Result;
 
 mod accounting;
 pub(super) mod exception;
@@ -273,17 +278,23 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
             }
             let Some(entry) = catalog::entry(index).filter(|entry| entry.reserved == Reserved::No)
             else {
-                bail!(
-                    "Mach trap -{index} is unassigned: the guest would take EXC_SYSCALL, whose \
-                     delivery is not implemented"
-                );
+                return syscall_exception(kernel, pe, index);
             };
             kernel.count(entry.name);
             let mut arguments = [0u64; forward::MAX_ARGUMENTS];
             arguments[..entry.argument_count]
                 .copy_from_slice(&pe.cpu.state.x[..entry.argument_count]);
             let arguments = &arguments[..entry.argument_count];
-            let result = dispatch(kernel, entry.name, index, arguments)?;
+            let result = match dispatch(kernel, entry.name, index, arguments) {
+                Ok(result) => result,
+                Err(error) => {
+                    let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
+                    match unsupported::recover(error, Kind::MachTrap, pc)? {
+                        Failure::Kern(code) => u64::from(code),
+                        _ => u64::from(KERN_INVALID_ARGUMENT),
+                    }
+                }
+            };
             if kernel.trace {
                 eprintln!("stela: mach {}({arguments:x?}) = {result:#x}", entry.name);
             }
@@ -291,6 +302,20 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
         }
     };
     Trap { cpu: &mut pe.cpu }.set_x(0, result);
+    Ok(())
+}
+
+/// `mach_syscall`'s unassigned number: EXC_SYSCALL with the number, which
+/// becomes SIGSYS at the trap (`ux_exception`); X0 is left as it was.
+fn syscall_exception(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
+    kernel
+        .process
+        .exception_ports
+        .deliverable(kernel.thread_port, crate::hosted::darwin::EXC_SYSCALL)?;
+    let pc = pe.cpu.read(Register::ELR_EL1).wrapping_sub(4);
+    kernel.exception_signal(super::bsd::signal::SIGSYS, 0, false, || {
+        format!("unassigned Mach trap -{index} at pc {pc:#x}")
+    });
     Ok(())
 }
 
@@ -481,7 +506,8 @@ fn dispatch(kernel: &mut Kernel, name: &'static str, index: u32, arguments: &[u6
                 .iter()
                 .find(|(refused, _)| *refused == other)
                 .map_or("no family services it", |&(_, reason)| reason);
-            bail!(
+            unsupported::refuse!(
+                Failure::Kern(KERN_INVALID_ARGUMENT),
                 "Mach trap {other} (-{index}) is not implemented by the hosted kernel: {reason} \
                  (arguments {arguments:x?})"
             )

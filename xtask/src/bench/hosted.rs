@@ -297,7 +297,7 @@ impl HostedBench {
             None => Command::new(binary),
             Some(stela) => {
                 let mut command = Command::new(stela);
-                command.arg("run");
+                command.arg("run").env("STELA_STRICT", "1");
                 for root in roots {
                     command.arg("--root").arg(root);
                 }

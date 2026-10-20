@@ -516,7 +516,8 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
         }
         CS_OPS_VALIDATION_CATEGORY => {
             if signature.platform == 0 {
-                bail!(
+                crate::hosted::unsupported::refuse!(
+                    EINVAL,
                     "csops CS_OPS_VALIDATION_CATEGORY for a non-platform executable needs \
                      AMFI's signer classification, which is not modeled"
                 );
@@ -536,7 +537,10 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
             lock(&kernel.process.executable).code_signing_flags |= flag;
             // A process already invalid becomes killed or fails here.
             if flags & CS_VALID == 0 {
-                bail!("csops marking an invalid process is not modeled");
+                crate::hosted::unsupported::refuse!(
+                    EINVAL,
+                    "csops marking an invalid process is not modeled"
+                );
             }
             Outcome::value(0)
         }
@@ -554,9 +558,15 @@ fn own_process(kernel: &mut Kernel, operation: u64, address: u64, size: u64) -> 
             Outcome::value(0)
         }
         CS_OPS_MARKINVALID => {
-            bail!("csops CS_OPS_MARKINVALID: invalidating the process's signature is not modeled")
+            crate::hosted::unsupported::refuse!(
+                EINVAL,
+                "csops CS_OPS_MARKINVALID: invalidating the process's signature is not modeled"
+            )
         }
-        other => bail!("csops operation {other} on this process is not implemented"),
+        other => crate::hosted::unsupported::refuse!(
+            EINVAL,
+            "csops operation {other} on this process is not implemented"
+        ),
     })
 }
 

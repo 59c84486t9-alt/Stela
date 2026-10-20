@@ -20,23 +20,24 @@
 //!   `grab_pgo_data` describe the kernel itself and first check that the
 //!   effective user is the superuser: anyone else gets EPERM. The
 //!   superuser's request would describe the arm64 kernel's text, threads
-//!   or profile, which this machine does not run, so it stops the run.
+//!   or profile, which this machine does not run, so it fails with ENOTSUP
+//!   and is reported.
 //! - The calls in [`ENTITLED`] first check a private entitlement of the
 //!   calling task (or, for `pid_suspend`, `pid_resume`,
 //!   `pid_shutdown_sockets` and `funmount`, use one to widen a check).
 //!   They are the host kernel's own calls of the same xnu, so they are
 //!   forwarded and its checks give their answers; but the host checks the
 //!   hosted runtime's entitlements, not the guest's, so a guest holding
-//!   the entitlement stops the run.
+//!   the entitlement is answered EPERM, as unentitled, and reported.
 //! - `ptrace` traces host processes, which hosted guests are: denying
 //!   attachment, being traced by the parent, attaching to, continuing,
 //!   killing and detaching from another process are the host kernel's,
 //!   whose checks are the same xnu's. Single-stepping (`PT_STEP`) would set
 //!   the x86 trap flag of the target's host thread rather than step its
-//!   guest code, so it stops the run.
+//!   guest code, so it fails with EINVAL and is reported.
 use super::{Call, Kernel, Outcome, forward};
-use crate::hosted::darwin::{EACCES, ENOTSUP, EPERM};
-use anyhow::{Result, bail};
+use crate::hosted::darwin::{EACCES, EINVAL, ENOTSUP, EPERM};
+use anyhow::Result;
 
 /// `PT_STEP`.
 const PT_STEP: i32 = 9;
@@ -128,7 +129,8 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
         }
         "__mach_bridge_remote_time" => Outcome::value(0),
         "objc_bp_assist_cfg_np" => Outcome::Error(EACCES),
-        "ptrace" if call.argument(0) as i32 == PT_STEP => bail!(
+        "ptrace" if call.argument(0) as i32 == PT_STEP => crate::hosted::unsupported::refuse!(
+            EINVAL,
             "ptrace(PT_STEP, {}) would single-step the target's x86 host thread, not its guest \
              code",
             call.argument(1) as i32
@@ -138,7 +140,8 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
             if !superuser() {
                 return Ok(Some(Outcome::Error(EPERM)));
             }
-            bail!(
+            crate::hosted::unsupported::refuse!(
+                ENOTSUP,
                 "{name} by the superuser describes the arm64 kernel itself (its text, threads or \
                  profile), which this machine does not run (arguments {:x?})",
                 call.arguments()
@@ -149,7 +152,8 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
                 return Ok(None);
             };
             if guest_entitled(kernel, entitlement) {
-                bail!(
+                crate::hosted::unsupported::refuse!(
+                    EPERM,
                     "{name}: the guest holds {entitlement}, which the arm64 kernel checks, but the \
                      host kernel checks the hosted runtime's own entitlements"
                 );

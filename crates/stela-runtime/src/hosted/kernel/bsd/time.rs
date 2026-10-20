@@ -6,9 +6,9 @@
 //! units are [`super::timer`]'s. `gettimeofday` and `settimeofday` also
 //! refresh the commpage's timestamp ([`commpage::refresh_time`]).
 use super::{Call, Kernel, Outcome, forward};
-use crate::hosted::darwin::EFAULT;
+use crate::hosted::darwin::{EFAULT, EINVAL};
 use crate::hosted::{commpage, host, memory};
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 /// `KERN_CLOCK_MACH_ABSOLUTE_TIME`, the eventlink deadline clock.
 const KERN_CLOCK_MACH_ABSOLUTE_TIME: u64 = 1;
@@ -77,7 +77,8 @@ fn eventlink_wait(
     clock: usize,
 ) -> Result<Outcome> {
     if call.argument(clock) != KERN_CLOCK_MACH_ABSOLUTE_TIME {
-        bail!(
+        crate::hosted::unsupported::refuse!(
+            EINVAL,
             "{} on clock {}: only KERN_CLOCK_MACH_ABSOLUTE_TIME deadlines are defined",
             call.entry.name,
             call.argument(clock)

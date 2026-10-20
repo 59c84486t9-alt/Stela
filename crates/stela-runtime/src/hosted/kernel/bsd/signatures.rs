@@ -22,7 +22,7 @@ use super::{Call, Kernel, Outcome};
 use crate::code_signature::{self, CodeSignature};
 use crate::hosted::darwin::{E2BIG, EBADEXEC, EBADF, EFAULT, EINVAL, ENOENT, ENOTSUP, EPERM};
 use crate::hosted::{memory, threads::lock};
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 const F_ADDSIGS: u64 = 59;
 const F_ADDFILESIGS: u64 = 61;
@@ -123,12 +123,21 @@ pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> 
     };
     let outcome = match command {
         F_GETCODEDIR | F_FINDSIGS => Outcome::Error(ENOTSUP),
-        F_ADDSIGS => bail!("fcntl F_ADDSIGS: detached signatures are not implemented"),
+        F_ADDSIGS => crate::hosted::unsupported::refuse!(
+            EINVAL,
+            "fcntl F_ADDSIGS: detached signatures are not implemented"
+        ),
         F_ADDFILESUPPL => {
-            bail!("fcntl F_ADDFILESUPPL: supplemental signatures are not implemented")
+            crate::hosted::unsupported::refuse!(
+                EINVAL,
+                "fcntl F_ADDFILESUPPL: supplemental signatures are not implemented"
+            )
         }
         F_ADDFILESIGS_FOR_DYLD_SIM => {
-            bail!("fcntl F_ADDFILESIGS_FOR_DYLD_SIM: simulator dyld is not supported")
+            crate::hosted::unsupported::refuse!(
+                EINVAL,
+                "fcntl F_ADDFILESIGS_FOR_DYLD_SIM: simulator dyld is not supported"
+            )
         }
         F_CHECK_LV => check_library(kernel, file, argument)?,
         F_GETSIGSINFO => {

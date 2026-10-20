@@ -34,6 +34,7 @@ pub mod requirements;
 pub mod shared_region;
 pub mod tables;
 mod threads;
+pub mod unsupported;
 
 pub use kernel::{Executable, Signature};
 
@@ -123,6 +124,9 @@ pub struct Launch {
     pub argv: Vec<Vec<u8>>,
     pub environment: Vec<Vec<u8>>,
     pub trace: bool,
+    /// Stop at the first unsupported operation instead of failing it as
+    /// the guest's platform does ([`unsupported`]).
+    pub strict: bool,
 }
 
 /// What a run produced.
@@ -200,6 +204,20 @@ pub fn run(launch: Launch) -> Result<Report> {
     let memory_bytes = host_memory()?;
     let mut hardware = hardware::Hardware::of(launch.chip, memory_bytes)?;
     hardware.kernel_version = launch.kernel_versions.get(hardware.model).cloned();
+    unsupported::set_strict(launch.strict);
+    unsupported::set_program(&String::from_utf8_lossy(&launch.executable_path));
+    if hardware.kernel_version.is_none() {
+        unsupported::note(
+            unsupported::Kind::GuestSystem,
+            "kernel version",
+            &format!(
+                "the guest system records no kernel version for the {}, so kern.version and \
+                 kern.osrelease are absent and uname(3) fails: run `stela install-system` again \
+                 to record it",
+                hardware.model
+            ),
+        );
+    }
     let features = identification.optional_features();
     commpage::map(&commpage::data_page(
         &hardware,

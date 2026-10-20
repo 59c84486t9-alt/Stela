@@ -47,6 +47,13 @@ pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 const EC_SHIFT: u32 = 26;
 const ISS_MASK: u64 = (1 << 25) - 1;
 const EC_SVC64: u64 = 0x15;
+/// The classes `sleh_synchronous` turns into EXC_BAD_INSTRUCTION for user
+/// code: an UNDEFINED encoding (`ESR_EC_UNCATEGORIZED`), a trapped WFI or
+/// WFE, SIMD or SME access, and a trapped system register access.
+const EC_UNCATEGORIZED: u64 = 0x00;
+const EC_WFI_WFE: u64 = 0x01;
+const EC_SIMD_TRAP: u64 = 0x07;
+const EC_MSR_TRAP: u64 = 0x18;
 const EC_BRK64: u64 = 0x3c;
 /// A pointer-authentication failure under FEAT_FPAC (`ESR_EC_PAC_FAIL`).
 const EC_PAC_FAIL: u64 = 0x1c;
@@ -504,6 +511,10 @@ impl Kernel {
                 }
                 Ok(())
             }
+            EC_UNCATEGORIZED | EC_WFI_WFE | EC_SIMD_TRAP | EC_MSR_TRAP => self
+                .bad_instruction(pe, || {
+                    format!("guest exception class {class:#x} (ESR {esr:#x})")
+                }),
             _ => bail!(
                 "guest exception class {class:#x} (ESR {esr:#x}) at pc {elr:#x} (lr {:#x}, fp \
                  {:#x}, frames {:x?}, shared cache slide {:#x}): Mach exception and signal \
@@ -514,6 +525,35 @@ impl Kernel {
                 self.shared_cache_slide(),
             ),
         }
+    }
+
+    /// EXC_BAD_INSTRUCTION for the instruction the thread stopped at
+    /// (`handle_uncategorized`, `handle_msr_trap`, ...), which becomes SIGILL
+    /// there (`ux_exception`).
+    pub(super) fn bad_instruction(
+        &mut self,
+        pe: &mut Pe,
+        describe: impl FnOnce() -> String,
+    ) -> Result<()> {
+        self.process
+            .exception_ports
+            .deliverable(self.thread_port, super::darwin::EXC_BAD_INSTRUCTION)?;
+        let pc = if pe.cpu.pstate.el == 0 {
+            pe.cpu.pc
+        } else {
+            pe.cpu.read(Register::ELR_EL1)
+        };
+        let shared_cache_slide = self.shared_cache_slide();
+        self.exception_signal(bsd::signal::SIGILL, 0, false, || {
+            format!(
+                "{} at pc {pc:#x} (lr {:#x}, frames {:x?}, shared cache slide \
+                 {shared_cache_slide:#x})",
+                describe(),
+                pe.cpu.state.x[30],
+                frames(pe.cpu.state.x[29]),
+            )
+        });
+        Ok(())
     }
 
     /// The shared cache's slide, for diagnostics.

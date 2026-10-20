@@ -62,6 +62,11 @@ pub(crate) struct Run {
     /// Print the serviced-call counts when the program exits.
     #[arg(long, help_heading = ADVANCED)]
     statistics: bool,
+    /// Stop at the first operation Stela does not support instead of
+    /// failing it as macOS fails an operation it lacks (also
+    /// STELA_STRICT=1).
+    #[arg(long, help_heading = ADVANCED)]
+    strict: bool,
 }
 
 /// The CPU subtype of a thin Mach-O slice, capability bits included.
@@ -227,6 +232,7 @@ impl Run {
             cpu_subtype: None,
             trace: false,
             statistics: false,
+            strict: false,
         })
     }
 
@@ -243,6 +249,9 @@ impl Run {
         }
         if self.statistics {
             command.push("--statistics".into());
+        }
+        if self.strict {
+            command.push("--strict".into());
         }
         Ok(command)
     }
@@ -330,6 +339,7 @@ impl Run {
             argv,
             environment,
             trace: self.trace,
+            strict: self.strict,
         };
         let report = hosted::run(launch).map_err(|error| stopped(&target.program, error))?;
         if self.statistics {

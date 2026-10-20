@@ -2,7 +2,8 @@
 //! the pinned xnu-12377 catalog reserves, found by the census of the
 //! guest's `SVC #0x80` sites ([`crate::hosted::requirements`]). The x86-64
 //! host kernel has none of them, so each is composed from host calls with
-//! the arm64 kernel's contract, or stops the run naming it.
+//! the arm64 kernel's contract, or fails a request it cannot complete with
+//! the call's own error and reports it ([`crate::hosted::unsupported`]).
 //!
 //! Each contract is read from the 26A434 kernel itself: its `sysent` row
 //! (argument count and return type) and handler, behind the plain
@@ -38,6 +39,7 @@ use super::{Kernel, Outcome, Pe, files};
 use crate::darwin::BsdReturnType;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOTSUP, EPERM, F_GETFL, F_SETFD, O_CLOEXEC};
 use crate::hosted::forward;
+use crate::hosted::unsupported::{self, Failure};
 use anyhow::{Result, bail};
 
 /// Each addition's number and its libsystem_kernel stub's call name.
@@ -72,7 +74,7 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     (
         "dup3",
         "O_CLOFORK of a descriptor the host cannot guard (other than a file, pipe, socket, \
-         kqueue or network policy) stops the run",
+         kqueue or network policy) fails with EINVAL and is reported",
     ),
     (
         "fchflagsat",
@@ -81,17 +83,17 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
     ),
     (
         "fsctlat",
-        "an FSOPT_RESOLVE_BENEATH lookup stops the run: the host's fsctl does not confine a \
-         path beneath its starting directory",
+        "an FSOPT_RESOLVE_BENEATH lookup fails with EINVAL and is reported: the host's fsctl \
+         does not confine a path beneath its starting directory",
     ),
     (
         "register_uexc_handler",
-        "answers EPERM as without -enable_uexc; with it in the host's boot arguments the run \
-         stops, as the handler would need guest exception delivery",
+        "answers EPERM as without -enable_uexc; with it in the host's boot arguments it also \
+         answers EPERM and is reported, as the handler would need guest exception delivery",
     ),
 ];
 
-/// Why an addition [`call`] does not service stops the run.
+/// Why an addition [`call`] does not service fails with `nosys`.
 pub(crate) const UNIMPLEMENTED: &str =
     "a 26A434 addition at a number the pinned catalog reserves: not implemented";
 
@@ -104,9 +106,10 @@ pub(crate) fn addition(number: u16) -> Option<&'static str> {
 }
 
 /// A request the hosted kernel cannot complete with the arm64 kernel's
-/// contract: the run stops naming it.
+/// contract: the failure the guest sees, and why. A refusal without one
+/// is a host failure that stops the run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Refusal(&'static str);
+struct Refusal(Option<Failure>, &'static str);
 
 type Serviced = std::result::Result<Outcome, Refusal>;
 
@@ -165,13 +168,17 @@ pub(super) fn call(
             arguments[0],
             name == "aio_writev",
         )?),
-        _ => Err(Refusal(UNIMPLEMENTED)),
+        _ => Err(Refusal(Some(Failure::Nosys), UNIMPLEMENTED)),
     };
     match serviced {
         Ok(outcome) => Ok((BsdReturnType::Int, outcome)),
-        Err(Refusal(reason)) => bail!(
-            "BSD system call {name} ({number}) is not implemented by the hosted kernel: \
-             {reason} (arguments {arguments:x?})"
+        Err(Refusal(Some(failure), reason)) => unsupported::refuse!(
+            failure,
+            "BSD system call {name} ({number}): {reason} (arguments {arguments:x?})"
+        ),
+        Err(Refusal(None, reason)) => bail!(
+            "BSD system call {name} ({number}) failed in the host: {reason} (arguments \
+             {arguments:x?})"
         ),
     }
 }
@@ -295,11 +302,16 @@ fn dup3(from: i32, to: i32, flags: u32) -> Serviced {
     // `dup2` leaves the copy without FD_CLOEXEC and FD_CLOFORK.
     match apply_flags(copy, flags) {
         Ok(()) => Ok(Outcome::value(copy)),
-        Err(ENOTSUP) => Err(Refusal(
-            "O_CLOFORK of a descriptor the host cannot guard: its close-on-fork flag is set \
-             only by removing a guard, which the host adds to files, pipes, sockets, kqueues \
-             and network policies alone",
-        )),
+        Err(ENOTSUP) => {
+            // The copy the guest will not learn of is closed again.
+            let _ = host("sys_close", &[copy]);
+            Err(Refusal(
+                Some(Failure::Errno(EINVAL)),
+                "O_CLOFORK of a descriptor the host cannot guard: its close-on-fork flag is \
+                 set only by removing a guard, which the host adds to files, pipes, sockets, \
+                 kqueues and network policies alone",
+            ))
+        }
         Err(errno) => Ok(Outcome::Error(errno)),
     }
 }
@@ -317,7 +329,7 @@ fn from_directory(thread_directory: bool, fd: i32, call: impl FnOnce() -> Outcom
     match files::at_directory(thread_directory, fd, call) {
         Ok(outcome) => Ok(outcome),
         Err(Some(errno)) => Ok(Outcome::Error(errno)),
-        Err(None) => Err(Refusal(files::UNRESTORABLE)),
+        Err(None) => Err(Refusal(None, files::UNRESTORABLE)),
     }
 }
 
@@ -378,6 +390,7 @@ fn fsctlat(
 ) -> Serviced {
     if options & FSOPT_RESOLVE_BENEATH != 0 {
         return Err(Refusal(
+            Some(Failure::Errno(EINVAL)),
             "FSOPT_RESOLVE_BENEATH: the host's fsctl does not confine a path beneath its \
              starting directory",
         ));
@@ -477,6 +490,7 @@ fn boot_arguments() -> Vec<u8> {
 fn register_uexc_handler() -> Serviced {
     if enables_uexc(&boot_arguments()) {
         return Err(Refusal(
+            Some(Failure::Errno(EPERM)),
             "-enable_uexc is set: a registered handler needs the com.apple.private.uexc \
              entitlement check and delivery of guest exceptions to it, which the hosted \
              kernel does not implement",
