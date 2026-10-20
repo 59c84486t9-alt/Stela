@@ -192,7 +192,9 @@ fn find(target: &Target) -> Result<Partition, &'static str> {
     // left to the next staging run.
     let found = gpt::read(disk, |lba, blocks| {
         let mut bytes = vec![0u8; (blocks * disk.block_bytes) as usize];
-        whole.read_blocks(lba, &mut bytes).map_err(PayloadError::Disk)?;
+        whole
+            .read_blocks(lba, &mut bytes)
+            .map_err(PayloadError::Disk)?;
         Ok(bytes)
     })
     .map_err(|_| "the disk's GPT is invalid")?;
