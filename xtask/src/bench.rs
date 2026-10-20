@@ -23,12 +23,16 @@
 //! blocks both engines compile, and this build's workers run either build's
 //! blocks under one minimal dispatcher (engines `n-blocks` and `n-hosted`),
 //! where only the native code differs.
+//!
+//! `bench hosted` ([`hosted`]) instead times whole same-source programs,
+//! natively and as hosted processes.
 mod engines;
 mod fixtures;
+mod hosted;
 
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
-use clap::Args;
+use clap::{Args, Subcommand};
 use engines::{Blocks, Hosted, Native, NativeBlock, Profile, Runner, compile_blocks};
 use fixtures::{
     ARENA, CODE, STOP, Source, WORKLOADS, arm64e_slice, function, prepare, state_digest,
@@ -64,7 +68,10 @@ const RET: u32 = 0xd65f_03c0;
 const ADDRESS_SPACE: u64 = 1;
 
 #[derive(Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Bench {
+    #[command(subcommand)]
+    command: Option<BenchCommand>,
     /// Another build's xtask executable to compare against.
     #[arg(long)]
     baseline: Option<PathBuf>,
@@ -97,6 +104,13 @@ pub struct Bench {
     /// Worker: run the native blocks of this dump instead of the engines.
     #[arg(long, hide = true)]
     native_code: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum BenchCommand {
+    /// Time same-source C programs natively and as hosted processes, with
+    /// the hosted/native ratio per kernel.
+    Hosted(Box<hosted::HostedBench>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +156,9 @@ enum Mode<'a> {
 
 impl Bench {
     pub fn run(self) -> Result<()> {
+        if let Some(BenchCommand::Hosted(task)) = self.command {
+            return task.run();
+        }
         ensure!(
             !cfg!(debug_assertions),
             "time a release build: cargo run --release --locked -p xtask -- bench"

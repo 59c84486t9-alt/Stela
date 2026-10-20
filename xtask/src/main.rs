@@ -40,7 +40,8 @@ enum Task {
     /// Compare native translations with the QEMU original, form by form.
     Differential(differential::Differential),
     /// Time unchanged real-program functions in the process engines, against
-    /// a baseline build (release builds only).
+    /// a baseline build (release builds only); `bench hosted` times
+    /// same-source programs natively and as hosted processes.
     Bench(bench::Bench),
     /// Compare Stela's AMX model with the corsix/amx emulator on QEMU.
     AmxReference(amx::AmxReference),
