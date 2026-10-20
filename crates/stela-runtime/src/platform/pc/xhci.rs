@@ -47,8 +47,6 @@ use core::{
 
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 
-const REGISTER_BYTES: u64 = 0x10000;
-
 // Capability registers.
 const HCSPARAMS1: usize = 0x04;
 const HCSPARAMS2: usize = 0x08;
@@ -1398,7 +1396,13 @@ pub fn attach(
     dma: &mut dyn DmaAllocator,
 ) -> Result<Found, BlockError> {
     let bars = function.bars();
-    let registers = registers(handoff, bars[0], 0, REGISTER_BYTES)?;
+    // The capability, operational, runtime and doorbell registers all lie
+    // in BAR 0, whatever its size (5.2.1): QEMU's is 16 KiB, a PC's 64 KiB
+    // or more.
+    let bytes = bars[0]
+        .and_then(|bar| bar.memory())
+        .map_or(0, |range| range.end - range.start);
+    let registers = registers(handoff, bars[0], 0, bytes)?;
     function.enable();
     let address = function.address;
     let location = format!(
