@@ -33,12 +33,14 @@
 //! `DCP_REMOVE_LAYERS` (bit 31: layers outside the mask are removed) is
 //! honored as Linux defines it.
 //!
-//! The `SurfaceContents` fields (`SurfaceContents::from`): tiled +0, plane
-//! count +0x3, the CoreVideo pixel format +0xb (`'BGRA'`, stored
+//! The `SurfaceContents` fields (`SurfaceContents::from`): tiled +0,
+//! premultiplied +0x2 (set when an IOSurface descriptor byte masked with
+//! 0xfd is zero; Linux's `is_premultiplied`), plane count +0x3, the CoreVideo pixel format +0xb (`'BGRA'`, stored
 //! little-endian as the bytes `"ARGB"`), bytes per row +0x15, base offset
 //! +0x1d, width +0x21, height +0x25, allocation size +0x29, has compression
 //! info +0x1ed. The DVAs are I/O addresses in the display pipe's DART
 //! (`dart-dispext0` stream 0 on J473AP), not the DCP's.
+pub use super::super::scanout::Rect;
 use super::super::scanout::{PixelFormat, Surface};
 
 /// One `SurfaceContents` record.
@@ -73,6 +75,7 @@ pub const REMOVE_LAYERS: u32 = 1 << 31;
 
 /// Field offsets in a `SurfaceContents` record.
 const IS_TILED: usize = 0x0;
+const PREMULTIPLIED: usize = 0x2;
 const PLANE_COUNT: usize = 0x3;
 const FORMAT: usize = 0xb;
 const STRIDE: usize = 0x15;
@@ -95,6 +98,8 @@ fn u64_at(bytes: &[u8], at: usize) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Record {
     pub tiled: bool,
+    /// Whether the colour is premultiplied by alpha.
+    pub premultiplied: bool,
     pub planes: u32,
     /// The CoreVideo fourcc as the record stores it.
     pub format: u32,
@@ -113,6 +118,7 @@ impl Record {
         }
         Ok(Self {
             tiled: bytes[IS_TILED] != 0,
+            premultiplied: bytes[PREMULTIPLIED] != 0,
             planes: u32_at(bytes, PLANE_COUNT),
             format: u32_at(bytes, FORMAT),
             stride: u32_at(bytes, STRIDE),
@@ -163,33 +169,13 @@ impl Record {
     }
 }
 
-/// `IOMFBRect`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Rect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl Rect {
-    fn at(bytes: &[u8], at: usize) -> Self {
-        Self {
-            x: u32_at(bytes, at),
-            y: u32_at(bytes, at + 4),
-            width: u32_at(bytes, at + 8),
-            height: u32_at(bytes, at + 12),
-        }
-    }
-
-    /// The rectangle at the origin of a `width` by `height` area.
-    pub fn whole(width: u32, height: u32) -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            width,
-            height,
-        }
+/// The `IOMFBRect` at `at`.
+fn rect_at(bytes: &[u8], at: usize) -> Rect {
+    Rect {
+        x: u32_at(bytes, at),
+        y: u32_at(bytes, at + 4),
+        width: u32_at(bytes, at + 8),
+        height: u32_at(bytes, at + 12),
     }
 }
 
@@ -246,8 +232,8 @@ impl Submission {
             *slot = Some(Layer {
                 record: Record::parse(&input[at..at + SURFACE_BYTES])?,
                 dva,
-                source: Rect::at(input, SOURCE_RECTS + index * 16),
-                destination: Rect::at(input, DESTINATION_RECTS + index * 16),
+                source: rect_at(input, SOURCE_RECTS + index * 16),
+                destination: rect_at(input, DESTINATION_RECTS + index * 16),
             });
         }
         Ok(Self {
@@ -282,6 +268,7 @@ pub mod tests {
 
     pub fn record(width: u32, height: u32, format: PixelFormat) -> [u8; SURFACE_BYTES] {
         let mut bytes = [0u8; SURFACE_BYTES];
+        bytes[PREMULTIPLIED] = 1;
         bytes[PLANE_COUNT..PLANE_COUNT + 4].copy_from_slice(&1u32.to_le_bytes());
         bytes[FORMAT..FORMAT + 4].copy_from_slice(&format.fourcc().to_le_bytes());
         bytes[STRIDE..STRIDE + 4].copy_from_slice(&(width * 4).to_le_bytes());

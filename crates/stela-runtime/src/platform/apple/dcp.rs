@@ -85,7 +85,8 @@ pub enum Log {
     /// A swap's pixels reached the host scanout.
     Presented {
         swap_id: u32,
-        surface: Option<Surface>,
+        /// The composed layers' surfaces, bottom to top.
+        surfaces: Vec<Surface>,
     },
     /// A named refusal, with the call's interface row.
     Refused(String),
@@ -142,8 +143,8 @@ impl core::fmt::Display for Log {
                 }
                 Ok(())
             }
-            Log::Presented { swap_id, surface } => {
-                write!(f, "DCP presented swap {swap_id} surface={surface:x?}")
+            Log::Presented { swap_id, surfaces } => {
+                write!(f, "DCP presented swap {swap_id} surfaces={surfaces:x?}")
             }
             Log::Refused(text) => write!(f, "DCP refused {text}"),
             Log::Afk {

@@ -4,12 +4,12 @@
 //!
 //! The DCP model terminates the J473AP display pipeline at the AP boundary:
 //! it has no real display controller to scan a surface out of DRAM, so a
-//! completed swap's front surface is read through its DART (dart-dispext0)
-//! and handed to a [`Scanout`] the host implements. A swap completes only
+//! completed swap's layers are read through their DART (dart-dispext0),
+//! composed ([`compose`]) and handed to a [`Scanout`] the host implements. A swap completes only
 //! after the scanout has consumed the pixels, so the guest never recycles a
 //! surface the host is still reading (the DCP's own swap-complete contract).
 //!
-//! The model converts the surface's pixel format to the scanout's and honors
+//! The model converts each surface's pixel format to the scanout's and honors
 //! its row stride; a format the model cannot convert is refused explicitly
 //! rather than presented as garbage.
 #[cfg(not(feature = "std"))]
@@ -61,10 +61,10 @@ pub struct Mode {
 /// framebuffer; a swap is presented one row at a time.
 pub trait Scanout {
     /// The fixed mode the one connected monitor runs. The model's EDID and
-    /// mode answers are this mode; a swap of another size is refused.
+    /// mode answers are this mode; swaps are composed onto it.
     fn mode(&self) -> Mode;
     /// Present one completed frame: `rows` are its pixels top to bottom, each
-    /// `width` pixels of the scanout's format, already converted and clipped
+    /// `width` pixels of the scanout's format, already composed and clipped
     /// to the mode. Called once per completed swap, before the swap completes.
     fn present(&mut self, rows: &[u8]) -> Result<(), &'static str>;
 }
@@ -83,80 +83,176 @@ pub struct Surface {
     pub iova: u64,
 }
 
-/// Why a surface could not be presented.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PresentError {
-    /// The surface's mode differs from the scanout's fixed mode.
-    Mode,
-    /// The surface's pixel format is one the model does not convert.
-    Format,
-    /// The scanout refused the frame.
-    Scanout(&'static str),
+/// A rectangle in pixels (`IOMFBRect`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
 }
 
-/// Convert `source` (one surface row, `width` pixels of `from`) into `out`
-/// (the same pixels in `to`), in place of a copy when the formats match.
-pub fn convert_row(
-    source: &[u8],
-    width: usize,
-    from: PixelFormat,
-    to: PixelFormat,
-    out: &mut [u8],
-) {
-    let pixels = width.min(source.len() / 4).min(out.len() / 4);
-    for pixel in 0..pixels {
-        let bytes = &source[pixel * 4..pixel * 4 + 4];
-        let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        let converted = if from == to {
-            value
-        } else {
-            // The two formats differ only in red/blue order; swap them and
-            // keep the green and alpha bytes.
-            value & 0xff00_ff00 | (value & 0xff) << 16 | (value >> 16) & 0xff
-        };
-        out[pixel * 4..pixel * 4 + 4].copy_from_slice(&converted.to_le_bytes());
+impl Rect {
+    /// The rectangle at the origin of a `width` by `height` area.
+    pub fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Whether this rectangle has an area and lies inside a `width` by
+    /// `height` area.
+    fn inside(&self, width: u32, height: u32) -> bool {
+        self.width != 0
+            && self.height != 0
+            && u64::from(self.x) + u64::from(self.width) <= u64::from(width)
+            && u64::from(self.y) + u64::from(self.height) <= u64::from(height)
     }
 }
 
-/// A frame built from a front surface for one [`Scanout::present`]: the
-/// scanout mode's rows, converted and clipped. `read` fills a byte range of
-/// the surface from its DART (returning false when any byte is not reachable).
-pub fn frame(
-    surface: &Surface,
+/// One layer of a composed frame: a source rectangle of a surface shown in
+/// a destination rectangle of the screen, its colour premultiplied by its
+/// alpha or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Layer {
+    pub surface: Surface,
+    pub source: Rect,
+    pub destination: Rect,
+    pub premultiplied: bool,
+}
+
+impl Layer {
+    /// A layer, or why its rectangles cannot be shown: a source outside its
+    /// surface, or an empty destination. A destination reaching past the
+    /// screen is clipped when composed.
+    pub fn new(
+        surface: Surface,
+        source: Rect,
+        destination: Rect,
+        premultiplied: bool,
+    ) -> Result<Self, &'static str> {
+        if !source.inside(surface.width, surface.height) {
+            return Err("layer source rectangle is empty or outside its surface");
+        }
+        if destination.width == 0 || destination.height == 0 {
+            return Err("layer destination rectangle is empty");
+        }
+        Ok(Self {
+            surface,
+            source,
+            destination,
+            premultiplied,
+        })
+    }
+}
+
+/// `value * weight / 255`, rounded.
+fn scale(value: u32, weight: u32) -> u32 {
+    (value * weight + 127) / 255
+}
+
+/// Compose `layers`, bottom to top, over opaque black on `mode`'s screen and
+/// return the frame for one [`Scanout::present`]: the mode's rows in its
+/// pixel order, alpha opaque. `read` fills a byte range of a surface from
+/// its DART (false when any byte is not reachable).
+///
+/// Each destination pixel takes the source pixel under its centre (nearest
+/// neighbour), so an unscaled layer is copied exactly; a layer is blended
+/// source-over, its colour taken as premultiplied or multiplied by its
+/// alpha first. Over the opaque black background a premultiplied layer
+/// shows its colour whatever its alpha.
+pub fn compose(
+    layers: &[Layer],
     mode: Mode,
     mut read: impl FnMut(u64, &mut [u8]) -> bool,
-) -> Result<Vec<u8>, PresentError> {
-    if surface.width != mode.width || surface.height != mode.height {
-        return Err(PresentError::Mode);
-    }
-    let out_row = mode.width as usize * 4;
-    let mut out = alloc::vec![0u8; out_row * mode.height as usize];
-    let mut source = alloc::vec![0u8; surface.stride as usize];
-    for y in 0..mode.height as u64 {
-        let iova = surface
-            .iova
-            .checked_add(y * u64::from(surface.stride))
-            .ok_or(PresentError::Mode)?;
-        if !read(iova, &mut source) {
-            return Err(PresentError::Scanout(
-                "surface row is not reachable through its DART",
-            ));
+) -> Result<Vec<u8>, &'static str> {
+    let (width, height) = (mode.width as usize, mode.height as usize);
+    // Red, green and blue per pixel; the background is opaque black.
+    let mut canvas = alloc::vec![[0u32; 3]; width * height];
+    let mut row = Vec::new();
+    for layer in layers {
+        let (surface, source, destination) = (layer.surface, layer.source, layer.destination);
+        let x_end =
+            (u64::from(destination.x) + u64::from(destination.width)).min(mode.width.into());
+        let y_end =
+            (u64::from(destination.y) + u64::from(destination.height)).min(mode.height.into());
+        row.resize(source.width as usize * 4, 0);
+        for y in u64::from(destination.y)..y_end {
+            let from_y = (2 * (y - u64::from(destination.y)) + 1) * u64::from(source.height)
+                / (2 * u64::from(destination.height));
+            let iova = (u64::from(source.y) + from_y)
+                .checked_mul(surface.stride.into())
+                .and_then(|offset| offset.checked_add(u64::from(source.x) * 4))
+                .and_then(|offset| surface.iova.checked_add(offset))
+                .ok_or("layer row address overflows")?;
+            if !read(iova, &mut row) {
+                return Err("surface row is not reachable through its DART");
+            }
+            for x in u64::from(destination.x)..x_end {
+                let from_x = (2 * (x - u64::from(destination.x)) + 1) * u64::from(source.width)
+                    / (2 * u64::from(destination.width));
+                let pixel = &row[from_x as usize * 4..][..4];
+                let (red, blue) = match surface.format {
+                    PixelFormat::Bgra8888 => (pixel[2], pixel[0]),
+                    PixelFormat::Rgba8888 => (pixel[0], pixel[2]),
+                };
+                let alpha = u32::from(pixel[3]);
+                let out = &mut canvas[y as usize * width + x as usize];
+                for (channel, value) in out.iter_mut().zip([red, pixel[1], blue]) {
+                    let value = u32::from(value);
+                    let value = if layer.premultiplied {
+                        value
+                    } else {
+                        scale(value, alpha)
+                    };
+                    *channel = (value + scale(*channel, 255 - alpha)).min(255);
+                }
+            }
         }
-        let row = &mut out[y as usize * out_row..][..out_row];
-        convert_row(
-            &source,
-            mode.width as usize,
-            surface.format,
-            mode.format,
-            row,
-        );
     }
-    Ok(out)
+    Ok(canvas
+        .into_iter()
+        .flat_map(|[red, green, blue]| {
+            let (low, high) = match mode.format {
+                PixelFormat::Bgra8888 => (blue, red),
+                PixelFormat::Rgba8888 => (red, blue),
+            };
+            [low as u8, green as u8, high as u8, 0xff]
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MODE: Mode = Mode {
+        width: 4,
+        height: 2,
+        format: PixelFormat::Bgra8888,
+    };
+
+    fn surface(width: u32, height: u32, stride: u32, iova: u64) -> Surface {
+        Surface {
+            width,
+            height,
+            stride,
+            format: PixelFormat::Bgra8888,
+            iova,
+        }
+    }
+
+    /// A reader over `memory` from address 0.
+    fn reader(memory: &[u8]) -> impl FnMut(u64, &mut [u8]) -> bool + '_ {
+        |iova, bytes| {
+            let start = iova as usize;
+            bytes.copy_from_slice(&memory[start..start + bytes.len()]);
+            true
+        }
+    }
 
     #[test]
     fn fourcc_round_trips_the_two_known_formats() {
@@ -167,83 +263,84 @@ mod tests {
     }
 
     #[test]
-    fn convert_swaps_red_and_blue_only_across_formats() {
-        let source = 0x11_22_33_44u32.to_le_bytes();
-        let mut out = [0u8; 4];
-        convert_row(
-            &source,
-            1,
-            PixelFormat::Bgra8888,
-            PixelFormat::Bgra8888,
-            &mut out,
-        );
-        assert_eq!(out, source);
-        convert_row(
-            &source,
-            1,
-            PixelFormat::Bgra8888,
-            PixelFormat::Rgba8888,
-            &mut out,
-        );
-        // byte 0 (0x44, blue) and byte 2 (0x22, red) swap; green/alpha hold.
-        assert_eq!(u32::from_le_bytes(out), 0x11_44_33_22);
-    }
-
-    #[test]
-    fn frame_reads_rows_at_the_stride_and_refuses_a_wrong_mode() {
-        let mode = Mode {
-            width: 2,
-            height: 2,
-            format: PixelFormat::Bgra8888,
-        };
-        let surface = Surface {
-            width: 2,
-            height: 2,
-            stride: 16,
-            format: PixelFormat::Bgra8888,
-            iova: 0x1000,
-        };
-        // Two rows of two pixels at a 16-byte stride (8 used, 8 padding).
+    fn an_unscaled_layer_is_read_at_its_stride_and_copied() {
+        // Two rows of four pixels at a 32-byte stride (16 used, 16 padding).
         let mut memory = alloc::vec![0u8; 0x2000];
-        for (i, byte) in memory[0x1000..0x1000 + 8].iter_mut().enumerate() {
-            *byte = i as u8;
+        for (i, byte) in memory[0x1000..0x1010].iter_mut().enumerate() {
+            *byte = if i % 4 == 3 { 0xff } else { i as u8 };
         }
-        for (i, byte) in memory[0x1010..0x1010 + 8].iter_mut().enumerate() {
-            *byte = 0x80 + i as u8;
+        for (i, byte) in memory[0x1020..0x1030].iter_mut().enumerate() {
+            *byte = if i % 4 == 3 { 0xff } else { 0x80 + i as u8 };
         }
-        let pixels = frame(&surface, mode, |iova, buf| {
-            let start = iova as usize;
-            buf.copy_from_slice(&memory[start..start + buf.len()]);
-            true
-        })
-        .unwrap();
-        assert_eq!(&pixels[0..8], &memory[0x1000..0x1008]);
-        assert_eq!(&pixels[8..16], &memory[0x1010..0x1018]);
-
-        let wrong = Surface {
-            width: 3,
-            ..surface
+        let surface = surface(4, 2, 32, 0x1000);
+        let layer = Layer::new(surface, Rect::whole(4, 2), Rect::whole(4, 2), false).unwrap();
+        let frame = compose(&[layer], MODE, reader(&memory)).unwrap();
+        assert_eq!(&frame[0..16], &memory[0x1000..0x1010]);
+        assert_eq!(&frame[16..32], &memory[0x1020..0x1030]);
+        // The RGBA scanout swaps red and blue.
+        let rgba = Mode {
+            format: PixelFormat::Rgba8888,
+            ..MODE
         };
-        assert_eq!(frame(&wrong, mode, |_, _| true), Err(PresentError::Mode));
+        let frame = compose(&[layer], rgba, reader(&memory)).unwrap();
+        assert_eq!(&frame[0..4], &[2, 1, 0, 0xff]);
     }
 
     #[test]
-    fn frame_refuses_an_unreachable_surface() {
-        let mode = Mode {
-            width: 1,
-            height: 1,
-            format: PixelFormat::Bgra8888,
+    fn layers_crop_scale_place_and_blend_bottom_to_top() {
+        // Surface A, 2x1: a red then a green opaque pixel (BGRA bytes).
+        let mut memory = alloc::vec![0u8; 0x3000];
+        memory[0x1000..0x1008].copy_from_slice(&[0, 0, 0xff, 0xff, 0, 0xff, 0, 0xff]);
+        // Surface B, 1x1: blue at half alpha, premultiplied (0x80 of 0xff).
+        memory[0x2000..0x2004].copy_from_slice(&[0x80, 0, 0, 0x80]);
+        let a = surface(2, 1, 8, 0x1000);
+        let b = surface(1, 1, 4, 0x2000);
+        // A's green pixel alone, scaled up to the whole screen; B's pixel
+        // in the last column, reaching past the screen's right edge.
+        let crop = Rect {
+            x: 1,
+            ..Rect::whole(1, 1)
         };
-        let surface = Surface {
-            width: 1,
-            height: 1,
-            stride: 4,
-            format: PixelFormat::Bgra8888,
-            iova: 0,
+        let bottom = Layer::new(a, crop, Rect::whole(4, 2), true).unwrap();
+        let place = Rect {
+            x: 3,
+            ..Rect::whole(2, 2)
         };
-        assert!(matches!(
-            frame(&surface, mode, |_, _| false),
-            Err(PresentError::Scanout(_))
-        ));
+        let top = Layer::new(b, Rect::whole(1, 1), place, true).unwrap();
+        let frame = compose(&[bottom, top], MODE, reader(&memory)).unwrap();
+        let green = [0, 0xff, 0, 0xff];
+        // Blue 0x80 plus half of green: 0xff * 0x7f / 0xff = 0x7f.
+        let blended = [0x80, 0x7f, 0, 0xff];
+        for y in 0..2 {
+            for x in 0..4 {
+                let want = if x == 3 { blended } else { green };
+                assert_eq!(&frame[(y * 4 + x) * 4..][..4], &want, "{x},{y}");
+            }
+        }
+        // Straight alpha multiplies the colour first; a 2x downscale takes
+        // the pixel under each centre.
+        let straight = Layer::new(b, Rect::whole(1, 1), Rect::whole(1, 1), false).unwrap();
+        let frame = compose(&[straight], MODE, reader(&memory)).unwrap();
+        assert_eq!(&frame[0..4], &[0x40, 0, 0, 0xff]);
+        let down = Layer::new(a, Rect::whole(2, 1), Rect::whole(1, 1), true).unwrap();
+        let frame = compose(&[down], MODE, reader(&memory)).unwrap();
+        assert_eq!(&frame[0..4], &green);
+    }
+
+    #[test]
+    fn bad_rectangles_and_unreachable_surfaces_refuse() {
+        let surface = surface(2, 2, 8, 0);
+        let outside = Rect {
+            x: 1,
+            ..Rect::whole(2, 2)
+        };
+        assert!(Layer::new(surface, outside, Rect::whole(2, 2), true).is_err());
+        assert!(Layer::new(surface, Rect::whole(0, 2), Rect::whole(2, 2), true).is_err());
+        assert!(Layer::new(surface, Rect::whole(2, 2), Rect::whole(2, 0), true).is_err());
+        let layer = Layer::new(surface, Rect::whole(2, 2), Rect::whole(2, 2), true).unwrap();
+        assert!(compose(&[layer], MODE, |_, _| false).is_err());
+        // No layer: opaque black.
+        let frame = compose(&[], MODE, |_, _| panic!("no surface is read")).unwrap();
+        assert!(frame.chunks(4).all(|pixel| pixel == [0, 0, 0, 0xff]));
     }
 }

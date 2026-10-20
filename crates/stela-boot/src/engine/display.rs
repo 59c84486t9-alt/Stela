@@ -22,10 +22,10 @@ use stela_runtime::{boot_bundle, machine::Host};
 static DCP_PRESENTED: AtomicBool = AtomicBool::new(false);
 
 /// The host scanout the modeled DCP presents completed swaps to: the UEFI GOP
-/// framebuffer at its own mode. The DCP model converts each front surface to
+/// framebuffer at its own mode. The DCP model composes each swap's layers in
 /// this scanout's pixel order (blue-low, which `Framebuffer::show_row` writes,
-/// swapping red and blue for an RGB panel) and honors its stride, so a frame
-/// arrives here as rows ready for the firmware's mode.
+/// swapping red and blue for an RGB panel), so a frame arrives here as rows
+/// ready for the firmware's mode.
 pub struct GopScanout {
     screen: Framebuffer,
 }

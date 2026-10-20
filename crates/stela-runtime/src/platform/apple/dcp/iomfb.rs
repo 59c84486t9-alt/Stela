@@ -32,16 +32,24 @@
 //!
 //! A swap is `A406 swap_start_dcp` (the coprocessor assigns the swap id)
 //! then `A407 swap_submit_dcp` ([`super::swap`]). The submitted layers
-//! update the four layer slots; the one visible layer is queued as a
-//! [`Frame`]; the coprocessor reads its pixels through the display pipe's
-//! DART, presents them and only then completes the swap with `D594
-//! swap_complete_ap_gated` ([`super::Coprocessor::present`]).
-use super::super::scanout::{self, Mode, Scanout, Surface};
+//! update the four layer slots; the visible layers are queued as a
+//! [`Frame`]; the coprocessor reads their pixels through the display pipe's
+//! DART, composes and presents them and only then completes the swap with
+//! `D594 swap_complete_ap_gated` ([`super::Coprocessor::present`]).
+//!
+//! Composition (Inferred: the coprocessor's compositor is undocumented):
+//! layers 0..3 stack bottom to top over opaque black, each a source
+//! rectangle of its surface scaled nearest-neighbour into its destination
+//! rectangle, clipped to the screen, and blended source-over with the
+//! premultiplied flag the AP sets per surface. Linux drives the same
+//! records the same way: its primary plane is layer 0 and its cursor a
+//! higher layer, every surface marked premultiplied.
+use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};
 use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
-use super::swap::{self, Layer, Rect, Submission};
+use super::swap::{self, Layer, Submission};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
@@ -83,12 +91,13 @@ const PLUGGED: u64 = 1;
 /// ("Will use display %s").
 const DIGITAL_OUT_CONNECTED: u32 = 1;
 
-/// A submitted swap waiting for its pixels: its id and its surface, or none
-/// for a swap that only clears to the background.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A submitted swap waiting for its pixels: its id and its layers, none for
+/// a swap that only clears to the background.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     pub swap_id: u32,
-    pub surface: Option<Surface>,
+    /// The visible layers, bottom to top.
+    pub layers: Vec<scanout::Layer>,
 }
 
 /// A callback the coprocessor makes on its own initiative.
@@ -192,9 +201,9 @@ impl Methods {
         !self.frames.is_empty()
     }
 
-    /// Present the oldest submitted swap: read its surface through `read`
-    /// (DVA, bytes; false when unreachable), hand the rows to the scanout and
-    /// queue its completion. A swap is never completed before its pixels
+    /// Present the oldest submitted swap: read its layers through `read`
+    /// (DVA, bytes; false when unreachable), hand the composed rows to the
+    /// scanout and queue its completion. A swap is never completed before its pixels
     /// are consumed.
     pub fn present(
         &mut self,
@@ -204,19 +213,11 @@ impl Methods {
             return Ok(());
         };
         let mode = self.mode();
-        let rows = match frame.surface {
-            Some(surface) => scanout::frame(&surface, mode, read).map_err(|error| match error {
-                scanout::PresentError::Mode => "DCP swap surface differs from the fixed mode",
-                scanout::PresentError::Format => "DCP swap surface format is not converted",
-                scanout::PresentError::Scanout(reason) => reason,
-            })?,
-            // A swap without a visible layer clears to opaque black.
-            None => alloc::vec![0u8; mode.width as usize * mode.height as usize * 4],
-        };
+        let rows = scanout::compose(&frame.layers, mode, read)?;
         self.scanout.present(&rows)?;
         self.record_log(Log::Presented {
             swap_id: frame.swap_id,
-            surface: frame.surface,
+            surfaces: frame.layers.iter().map(|layer| layer.surface).collect(),
         });
         self.completed.push_back(frame.swap_id);
         Ok(())
@@ -567,8 +568,8 @@ impl Service for Methods {
 }
 
 impl Methods {
-    /// `swap_submit_dcp`: update the layer slots, queue the visible layer
-    /// (or none, a background clear) and answer `{bool, u32, link status}`.
+    /// `swap_submit_dcp`: update the layer slots, queue the visible layers
+    /// (none is a background clear) and answer `{bool, u32, link status}`.
     fn submit(
         &mut self,
         tag: [u8; 4],
@@ -590,12 +591,12 @@ impl Methods {
             Err(reason) => return self.refuse(tag, reason),
         };
         let planes = submission.apply(&self.planes);
-        let surface = match visible(&planes, submission.background, self.mode()) {
-            Ok(surface) => surface,
+        let layers = match visible(&planes, submission.background) {
+            Ok(layers) => layers,
             Err(reason) => return self.refuse(tag, reason),
         };
         self.planes = planes;
-        self.frames.push_back(Frame { swap_id, surface });
+        self.frames.push_back(Frame { swap_id, layers });
         let packed = Packed::new()
             .bool(false)
             .u32(0)
@@ -605,32 +606,29 @@ impl Methods {
     }
 }
 
-/// The surface the layer slots show on the fixed `mode`: none when no layer
-/// is visible and the background is black; the one layer when it covers the
-/// screen unscaled. Anything else refuses by name.
+/// The layers the slots show, bottom to top, over a black background. A
+/// non-black background, or a layer whose surface or rectangles the model
+/// cannot show, refuses by name.
 fn visible(
     planes: &[Option<Layer>; swap::LAYERS],
     background: u32,
-    mode: Mode,
-) -> Result<Option<Surface>, &'static str> {
-    let mut layers = planes.iter().flatten();
-    match (layers.next(), layers.next()) {
-        (None, _) if background == 0 => Ok(None),
-        (None, _) => Err("swap clears to a background color; the model presents black only"),
-        (Some(layer), None) => {
-            let surface = layer.record.surface(layer.dva)?;
-            if layer.source != Rect::whole(surface.width, surface.height)
-                || layer.destination != Rect::whole(mode.width, mode.height)
-                || (surface.width, surface.height) != (mode.width, mode.height)
-            {
-                return Err(
-                    "swap crops, scales or places its layer off the full screen; the model presents an unscaled full-screen layer",
-                );
-            }
-            Ok(Some(surface))
-        }
-        (Some(_), Some(_)) => Err("swap composes several layers; the model scans out one"),
+) -> Result<Vec<scanout::Layer>, &'static str> {
+    if background != 0 {
+        return Err("swap clears to a background color; the model presents black only");
     }
+    planes
+        .iter()
+        .flatten()
+        .map(|layer| {
+            let surface = layer.record.surface(layer.dva)?;
+            scanout::Layer::new(
+                surface,
+                layer.source,
+                layer.destination,
+                layer.record.premultiplied,
+            )
+        })
+        .collect()
 }
 
 /// A boolean DCP reply (the low bit set is true).
@@ -1059,7 +1057,7 @@ mod tests {
                 true
             })
             .unwrap();
-        assert_eq!(frames.borrow()[0], [0x5a; 32]);
+        assert_eq!(frames.borrow()[0], [0x5a, 0x5a, 0x5a, 0xff].repeat(8));
         let callback = methods.take_callback().unwrap();
         assert_eq!(&callback.tag, b"D594");
         assert_eq!(callback.input.len(), 0x730);
@@ -1094,7 +1092,29 @@ mod tests {
                 true
             })
             .unwrap();
-        assert_eq!(frames.borrow()[1], [2; 32]);
+        assert_eq!(frames.borrow()[1], [2, 2, 2, 0xff].repeat(8));
+    }
+
+    #[test]
+    fn several_layers_are_composed_bottom_to_top() {
+        let screen = TestScreen(Rc::default(), Some(MODE));
+        let frames = screen.0.clone();
+        let mut methods = Methods::new(Box::new(screen));
+        start_swap(&mut methods);
+        // Layer 0 covers the screen; layer 1, one pixel, sits at (3, 1).
+        let mut two = submission(1, &[(0, 4, 2, 0x1000), (1, 1, 1, 0x2000)]);
+        let at = swap::DESTINATION_RECTS + 16;
+        two[at..at + 8].copy_from_slice(&[3, 0, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(returned(methods.call(*b"A407", &two, 0xc)), [0; 12]);
+        methods
+            .present(|dva, bytes| {
+                bytes.fill(if dva >= 0x2000 { 0xff } else { 0x10 });
+                true
+            })
+            .unwrap();
+        let mut want = [0x10, 0x10, 0x10, 0xff].repeat(8);
+        want[28..32].fill(0xff);
+        assert_eq!(frames.borrow()[0], want);
     }
 
     #[test]
@@ -1109,27 +1129,21 @@ mod tests {
         methods
             .present(|_, _| panic!("a clear reads no surface"))
             .unwrap();
-        assert_eq!(frames.borrow()[0], [0; 32]);
-        // A surface of another size than the mode refuses.
+        assert_eq!(frames.borrow()[0], [0, 0, 0, 0xff].repeat(8));
+        // A source rectangle outside its surface refuses.
         start_swap(&mut methods);
+        let mut outside = submission(2, &[(0, 4, 2, 0x1000)]);
+        outside[swap::SOURCE_RECTS] = 1;
+        assert!(methods.call(*b"A407", &outside, 0xc).is_err());
         assert!(
             methods
-                .call(*b"A407", &submission(2, &[(0, 2, 2, 0x1000)]), 0xc)
-                .is_err()
+                .last_refusal()
+                .unwrap()
+                .contains("outside its surface")
         );
-        // Two visible layers refuse.
-        start_swap(&mut methods);
-        let two = submission(3, &[(0, 4, 2, 0x1000), (1, 4, 2, 0x2000)]);
-        assert!(methods.call(*b"A407", &two, 0xc).is_err());
-        assert!(methods.last_refusal().unwrap().contains("several layers"));
-        // An offset destination refuses.
-        start_swap(&mut methods);
-        let mut offset = submission(4, &[(0, 4, 2, 0x1000)]);
-        offset[swap::DESTINATION_RECTS] = 1;
-        assert!(methods.call(*b"A407", &offset, 0xc).is_err());
         // A non-black background refuses.
         start_swap(&mut methods);
-        let mut red = submission(5, &[]);
+        let mut red = submission(3, &[]);
         red[swap::BACKGROUND] = 0xff;
         assert!(methods.call(*b"A407", &red, 0xc).is_err());
     }
