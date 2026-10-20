@@ -26,7 +26,7 @@ use crate::{
     handoff::{Handoff, MAGIC},
     layout, output,
 };
-use alloc::{collections::BTreeMap, string::String, vec::Vec};
+use alloc::{collections::BTreeMap, format, string::String, vec::Vec};
 use core::{
     arch::{
         asm,
@@ -1275,9 +1275,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     layout::set(handoff.placement);
     // SAFETY: the window heap is reserved for this allocator and still unused.
     unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
-    if let Some(screen) = handoff.screen {
-        console::install(screen.relocated(layout::physical(screen.base as u64) as usize));
-    }
+    crate::status::set_clock(handoff.tsc_hz);
+    crate::status::take_screen(
+        handoff
+            .screen
+            .map(|screen| screen.relocated(layout::physical(screen.base as u64) as usize)),
+    );
+    crate::status::replay(&handoff.history[..handoff.history_bytes]);
     output::arguments(format_args!(
         "STELA SYSTEM ENGINE window={:#x} placement={:?} tsc_hz={} guest_ranges={}\n",
         layout::window(),
@@ -1384,6 +1388,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .storage
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        crate::status::begin("Starting the PC's disks and USB devices");
         // SAFETY: before host::install, with sole ownership of DMA/controllers.
         let storage::Opened {
             services,
@@ -1407,8 +1412,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         .unwrap_or_else(|error| {
             output::arguments(format_args!("host storage refusal: {error}\n"));
-            output::fatal("host storage could not be opened")
+            output::fatal(&format!("host storage could not be opened: {error}"))
         });
+        crate::status::done(&format!(
+            "{} partitions in use, {} more disks for macOS",
+            services.len() + usize::from(medium.is_some()),
+            usb_disks.len()
+        ));
         if let Some(store) = store {
             translations::set_partition(store);
         }
@@ -1423,9 +1433,13 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         // A missing network is reported here and refused only by what
         // needs it, so the mount still boots and logs how far it gets.
         let network = wants_network.then(|| {
-            network::HostNetwork::open(links, storage_handoff.clock).inspect_err(|error| {
-                output::arguments(format_args!("host network refusal: {error}\n"))
-            })
+            crate::status::begin("Getting a network address");
+            network::HostNetwork::open(links, storage_handoff.clock)
+                .inspect(|network| crate::status::done(network.describe()))
+                .inspect_err(|error| {
+                    output::arguments(format_args!("host network refusal: {error}\n"));
+                    crate::status::warn(error);
+                })
         });
         (
             services,
@@ -1821,6 +1835,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut host_input = host_input;
     let mut guest_network = guest_network;
     let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz);
+    crate::status::begin(match restore {
+        Some(_) => "Starting the macOS installer",
+        None => "Starting macOS",
+    });
     let started = host::rdtsc();
     let stop = run(
         &mut machine,
@@ -1904,6 +1922,7 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
+        crate::status::tick();
         unmodeled_report(machine);
         sep_observation_report(machine);
         for hit in machine.take_trace_hits() {

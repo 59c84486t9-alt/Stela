@@ -329,6 +329,7 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     let band = machine.screen.map(|screen| {
         let height = screen.resolution().1;
         let top = height - height / BAND_FRACTION;
+        output::raw_screen();
         console::install(screen.top(top));
         top
     });

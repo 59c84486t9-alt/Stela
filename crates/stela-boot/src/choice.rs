@@ -9,7 +9,7 @@
 //! `stela.cfg` boots, so a damaged file never stops the default boot. A
 //! machine that can only be restored waits at the menu with no countdown and
 //! its install entry highlighted ([`hold`]).
-use crate::{engine, output};
+use crate::{console, engine, output, status};
 use alloc::{format, string::String, vec::Vec};
 use core::{fmt::Write, time::Duration};
 use stela_loader::mount_interface::{CHOICES_FILE, Choices};
@@ -167,6 +167,7 @@ impl Menu<'_> {
 
     /// The chosen entry; `None` without console input.
     fn run(mut self) -> Option<usize> {
+        console::release();
         let top = uefi::system::with_stdout(|out| self.open(out));
         loop {
             uefi::system::with_stdout(|out| self.draw(out, top));
@@ -201,10 +202,10 @@ fn chosen(choices: &Choices, index: usize) -> Vec<u8> {
     uefi::system::with_stdout(|out| {
         let _ = out.set_color(Color::LightGray, Color::Black);
         let _ = out.clear();
-        let _ = out.enable_cursor(true);
     });
     let entry = &choices.entries[index];
     output::arguments(format_args!("CHOICE {} ({})\n", index + 1, entry.name));
+    status::info(&format!("Starting {}", entry.name));
     entry.options.clone().into_bytes()
 }
 

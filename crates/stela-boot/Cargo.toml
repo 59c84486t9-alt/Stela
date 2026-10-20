@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 uefi = { version = "0.41", default-features = false, features = ["alloc"] }
-font8x8 = { version = "0.3", default-features = false }
 stela-runtime = { path = "../stela-runtime", default-features = false }
 stela-loader = { path = "../stela-loader", default-features = false }
 stela-compiler = { path = "../stela-compiler", default-features = false }

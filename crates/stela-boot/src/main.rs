@@ -47,6 +47,7 @@ mod paging;
 mod payload;
 mod selection;
 mod serial;
+mod status;
 mod storage;
 mod system;
 mod tables;
@@ -177,10 +178,12 @@ fn main() -> Status {
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
     firmware::connect_all();
+    status::set_clock(firmware::tsc_hz());
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     let held = system::held_at_start(&options);
     let options = choice::choose(&mut volume, options, held);
+    status::take_screen(console::Framebuffer::from_firmware());
     if options.starts_with(b"--system") {
         system::boot(options, volume);
     }

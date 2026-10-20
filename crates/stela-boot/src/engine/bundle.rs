@@ -117,15 +117,8 @@ fn read_bounded(root: &mut Directory, path: &str, limit: u64) -> Result<Region, 
         }
         done += count;
         if length > PROGRESS_STEP {
-            output::firmware_console(&format!(
-                "\rReading {name}: {} of {} MB",
-                done >> 20,
-                length >> 20
-            ));
+            crate::status::progress(&format!("{name}  {} of {} MB", done >> 20, length >> 20));
         }
-    }
-    if length > PROGRESS_STEP {
-        output::firmware_console("\n");
     }
     Ok(Region {
         physical: physical as u64,
@@ -158,11 +151,15 @@ pub fn read(directory: &str) -> Result<Vec<(String, Region)>, &'static str> {
             "bundle.json is not a boot bundle"
         })?;
         let mut files = alloc::vec![(String::from(MANIFEST_FILE), json)];
+        crate::status::begin("Reading the boot files");
         for file in &manifest.files {
             output::arguments(format_args!("READ {directory}\\{}\n", file.name));
-            let contents = read_file(&mut root, &format!("{directory}\\{}", file.name))?;
+            let contents = read_file(&mut root, &format!("{directory}\\{}", file.name))
+                .inspect_err(|error| crate::status::fail(error))?;
             files.push((file.name.clone(), contents));
         }
+        let bytes: u64 = files.iter().map(|(_, region)| region.bytes).sum();
+        crate::status::done(&format!("{} MB", bytes >> 20));
         return Ok(files);
     }
     Err("no volume has the bundle's bundle.json")

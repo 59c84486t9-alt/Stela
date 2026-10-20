@@ -314,3 +314,12 @@ pub fn take_over(
         tables,
     ))
 }
+
+/// The time-stamp counter's rate, measured against the firmware's stall.
+pub fn tsc_hz() -> u64 {
+    // SAFETY: RDTSC has no memory effects.
+    let before = unsafe { core::arch::x86_64::_rdtsc() };
+    boot::stall(core::time::Duration::from_millis(10));
+    // SAFETY: as above.
+    (unsafe { core::arch::x86_64::_rdtsc() } - before) * 100
+}

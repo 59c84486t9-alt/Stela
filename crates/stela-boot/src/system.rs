@@ -16,7 +16,7 @@ use crate::{
     storage,
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE, WRITE_COMBINING},
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell, ops::Range};
 use stela_runtime::{machine::mmu::placement::Placement, pc};
 use uefi::{
@@ -286,8 +286,14 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
     // The translation store, when a volume has one and a file slot is
     // left; rewriting its pack needs the storage drivers.
     let mut storage = storage;
+    crate::status::begin("Opening the translation cache");
+    let translations = crate::engine::translations::read();
+    match &translations {
+        Some((store, _)) => crate::status::done(&format!("{} MB", store.bytes >> 20)),
+        None => crate::status::done("none on this USB"),
+    }
     if files.len() < MAX_FILES
-        && let Some((store, writable)) = crate::engine::translations::read()
+        && let Some((store, writable)) = translations
     {
         files.push((String::from(crate::engine::translations::FILE), store));
         if writable && storage.is_none() {
@@ -365,6 +371,7 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
                 if !options.starts_with(b"--system") {
                     output::fatal("the chosen startup option is not a system-mode boot");
                 }
+                crate::status::take_screen(Framebuffer::from_firmware());
             }
         }
     };
@@ -574,6 +581,8 @@ fn load(
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
+    let mut history = [0; crate::status::HISTORY_BYTES];
+    let history_bytes = crate::status::history(&mut history);
     crate::output::leave_firmware_console();
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
@@ -622,6 +631,8 @@ fn load(
             root,
             bounce,
             screen,
+            history,
+            history_bytes,
             tsc_hz,
             apic_base,
             wall_seconds,

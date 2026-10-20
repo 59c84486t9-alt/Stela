@@ -1,9 +1,10 @@
-//! The mount's output: every line goes to the UART, to the firmware's
-//! console until boot services end, then to the framebuffer console once
-//! installed, and waits from the very first line in a bounded
-//! buffer for the persistent boot log (`pc::boot_log`). Once `--nor` opens
-//! the log ([`install_log`]), [`flush_log`] stores what waits: between
-//! engine slices and at every stop, which [`terminate`] reaches.
+//! The mount's detailed output: every line goes to the UART and waits from
+//! the very first line in a bounded buffer for the persistent boot log
+//! (`pc::boot_log`). Once `--nor` opens the log ([`install_log`]),
+//! [`flush_log`] stores what waits: between engine slices and at every
+//! stop, which [`terminate`] reaches. The screen shows the curated steps of
+//! [`status`](crate::status) instead, and a fatal error or panic, which
+//! reach it before the console exists through the firmware's.
 use crate::{console, serial::Serial};
 use alloc::boxed::Box;
 use core::{
@@ -43,8 +44,11 @@ static SINK: Global<Option<Sink>> = Global(RefCell::new(None));
 /// A flush is running: a fatal or panic raised inside it halts without
 /// flushing again.
 static FLUSHING: AtomicBool = AtomicBool::new(false);
-/// Boot services still run, so the firmware's console is the screen.
+/// Boot services still run, so the firmware's console can show a fatal
+/// error before Stela's own console takes the screen.
 static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
+/// `--host-check` shows its report itself, so every line reaches the screen.
+static RAW_SCREEN: AtomicBool = AtomicBool::new(false);
 
 /// Stop writing to the firmware's console: called just before boot services
 /// end, which take the console with them.
@@ -52,9 +56,14 @@ pub fn leave_firmware_console() {
     FIRMWARE_CONSOLE.store(false, Ordering::Relaxed);
 }
 
+/// Send every line to the screen as well, for a report that is all detail.
+pub fn raw_screen() {
+    RAW_SCREEN.store(true, Ordering::Relaxed);
+}
+
 /// Write `text` to the firmware's console while boot services run and the
 /// firmware has one.
-pub fn firmware_console(text: &str) {
+fn firmware_console(text: &str) {
     // SAFETY: the firmware's system table, valid while boot services run.
     let console = || {
         uefi::table::system_table_raw()
@@ -67,12 +76,13 @@ pub fn firmware_console(text: &str) {
     }
 }
 
-struct Output(console::Color);
+struct Output;
 impl Write for Output {
     fn write_str(&mut self, value: &str) -> fmt::Result {
         let _ = Serial.write_str(value);
-        firmware_console(value);
-        console::write(value, self.0);
+        if RAW_SCREEN.load(Ordering::Relaxed) {
+            console::write(&[(value, console::Color::Text)]);
+        }
         if let Ok(mut pending) = PENDING.0.try_borrow_mut() {
             pending.push(value.as_bytes());
         }
@@ -111,7 +121,7 @@ pub fn flush_log() {
 }
 
 pub fn arguments(args: fmt::Arguments<'_>) {
-    let _ = Output(console::Color::Text).write_fmt(args);
+    let _ = Output.write_fmt(args);
 }
 
 /// Report `code` to QEMU's `isa-debug-exit`, which ends a harness run
@@ -138,17 +148,29 @@ pub fn terminate(code: u32) -> ! {
     }
 }
 
+/// Show `message` as the reason the mount stopped: as a failed step on
+/// Stela's console, or on the firmware's before it exists.
+fn stopped(message: &str) {
+    if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
+        crate::status::fail(message);
+        crate::status::info("Stela stopped. Turn the PC off to try again.");
+    } else {
+        firmware_console(&alloc::format!("\nStela stopped: {message}\n"));
+    }
+}
+
 pub fn fatal(message: &str) -> ! {
-    let _ = Output(console::Color::Fatal).write_fmt(format_args!("\nSTELA FATAL {message}\n"));
+    arguments(format_args!("\nSTELA FATAL {message}\n"));
+    stopped(message);
     terminate(0x11)
 }
 
 pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let mut output = Output(console::Color::Fatal);
-    let _ = output.write_str("\nSTELA PANIC");
-    if let Some(location) = info.location() {
-        let _ = write!(output, " {}:{}", location.file(), location.line());
-    }
-    let _ = output.write_str("\n");
+    let place = info
+        .location()
+        .map(|location| alloc::format!(" at {}:{}", location.file(), location.line()))
+        .unwrap_or_default();
+    arguments(format_args!("\nSTELA PANIC{place}\n"));
+    stopped(&alloc::format!("internal error{place}"));
     terminate(0x11)
 }

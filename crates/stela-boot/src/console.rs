@@ -1,28 +1,33 @@
 //! Text on the firmware's linear framebuffer, so a PC without a serial port
-//! still shows the mount's output after boot services end.
+//! still shows the mount's progress, from the startup choice until the
+//! guest's display takes the screen.
 //!
-//! Glyphs are the public-domain 8x8 IBM PC set, scaled to the screen height.
-//! When the screen fills, it clears and continues from the top: reading the
-//! framebuffer back to scroll is too slow on uncached video memory.
+//! Glyphs come from bitmap fonts drawn at their own resolution, in the size
+//! the Linux console would choose for the screen ([`font::choose`]). The
+//! text is a grid of cells kept in memory, and drawing writes only the cells
+//! that changed: video memory is uncached and slow to read back, so
+//! scrolling redraws from the grid instead of moving pixels.
+mod font;
+
+use alloc::{vec, vec::Vec};
 use core::cell::UnsafeCell;
-use font8x8::legacy::BASIC_LEGACY;
+use font::Font;
 use stela_runtime::machine::apple::ScanoutMasks;
 use uefi::{
     boot::{self, OpenProtocolAttributes, OpenProtocolParams},
     proto::console::gop::{GraphicsOutput, PixelFormat},
 };
 
-const GLYPH: usize = 8;
-/// Two blank scaled rows between lines.
-const LINE: usize = GLYPH + 2;
-/// Scale so that at least this many lines fit.
-const MIN_LINES: usize = 60;
 const BYTES_PER_PIXEL: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     Text,
+    Dim,
+    Good,
+    Warn,
     Fatal,
+    Busy,
 }
 
 /// How a GOP mode lays out a 32-bit pixel.
@@ -156,8 +161,12 @@ impl Framebuffer {
 
     fn pixel(&self, color: Color) -> u32 {
         match color {
-            Color::Text => self.rgb(0xe0, 0xe0, 0xe0),
-            Color::Fatal => self.rgb(0xff, 0x50, 0x50),
+            Color::Text => self.rgb(0xd0, 0xd0, 0xd0),
+            Color::Dim => self.rgb(0x80, 0x80, 0x80),
+            Color::Good => self.rgb(0x5f, 0xd7, 0x5f),
+            Color::Warn => self.rgb(0xff, 0xd7, 0x5f),
+            Color::Fatal => self.rgb(0xff, 0x5f, 0x5f),
+            Color::Busy => self.rgb(0xff, 0x5f, 0x5f),
         }
     }
 
@@ -165,10 +174,6 @@ impl Framebuffer {
     pub fn rgb(&self, red: u8, green: u8, blue: u8) -> u32 {
         let (red, green, blue) = (u32::from(red), u32::from(green), u32::from(blue));
         self.encoding.encode((red << 16) | (green << 8) | blue)
-    }
-
-    fn fill(&self, x: usize, y: usize, size: usize, value: u32) {
-        self.rectangle(x, y, size, size, value);
     }
 
     /// Fill `width` by `height` pixels from (`x`, `y`), cut to the mode's
@@ -202,98 +207,163 @@ impl Framebuffer {
     }
 }
 
-struct Cursor {
-    screen: Framebuffer,
-    scale: usize,
-    columns: usize,
-    lines: usize,
-    column: usize,
-    line: usize,
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Cell {
+    character: u8,
+    color: Color,
 }
 
-impl Cursor {
+const BLANK: Cell = Cell {
+    character: b' ',
+    color: Color::Text,
+};
+
+/// The text grid and what the screen shows of it.
+struct Text {
+    screen: Framebuffer,
+    font: Font,
+    columns: usize,
+    rows: usize,
+    cells: Vec<Cell>,
+    shown: Vec<Cell>,
+    column: usize,
+    row: usize,
+}
+
+impl Text {
     fn new(screen: Framebuffer) -> Option<Self> {
-        let scale = (screen.height / (MIN_LINES * LINE)).max(1);
-        let columns = screen.width / (GLYPH * scale);
-        let lines = screen.height / (LINE * scale);
-        (columns > 0 && lines > 0).then_some(Self {
+        let (width, height) = screen.resolution();
+        let font = font::choose(width, height)?;
+        // A one-cell margin all round.
+        let columns = (width / font.width).checked_sub(2)?;
+        let rows = (height / font.height).checked_sub(2)?;
+        (columns > 0 && rows > 0).then(|| Self {
             screen,
-            scale,
+            font,
             columns,
-            lines,
+            rows,
+            cells: vec![BLANK; columns * rows],
+            shown: vec![BLANK; columns * rows],
             column: 0,
-            line: 0,
+            row: 0,
         })
     }
 
     fn newline(&mut self) {
         self.column = 0;
-        self.line += 1;
-        if self.line == self.lines {
-            self.screen.clear();
-            self.line = 0;
+        if self.row + 1 < self.rows {
+            self.row += 1;
+            return;
         }
+        self.cells.copy_within(self.columns.., 0);
+        let last = self.cells.len() - self.columns;
+        self.cells[last..].fill(BLANK);
     }
 
-    fn glyph(&mut self, byte: u8, color: Color) {
-        if self.column == self.columns {
-            self.newline();
-        }
-        let bits = BASIC_LEGACY[usize::from(byte & 0x7f)];
-        let (x, y) = (
-            self.column * GLYPH * self.scale,
-            self.line * LINE * self.scale,
-        );
-        let (on, off) = (self.screen.pixel(color), 0);
-        for (row, pattern) in bits.iter().enumerate() {
-            for bit in 0..GLYPH {
-                let value = if pattern & (1 << bit) != 0 { on } else { off };
-                self.screen.fill(
-                    x + bit * self.scale,
-                    y + row * self.scale,
-                    self.scale,
-                    value,
-                );
+    fn put(&mut self, character: u8, color: Color) {
+        match character {
+            b'\n' => self.newline(),
+            b'\r' => self.column = 0,
+            _ => {
+                if self.column == self.columns {
+                    self.newline();
+                }
+                let character = match character {
+                    b' '..=b'~' => character,
+                    _ => b'?',
+                };
+                self.cells[self.row * self.columns + self.column] = Cell { character, color };
+                self.column += 1;
             }
         }
-        self.column += 1;
     }
 
-    fn write(&mut self, text: &str, color: Color) {
-        for byte in text.bytes() {
-            match byte {
-                b'\n' => self.newline(),
-                b'\r' => self.column = 0,
-                byte if byte.is_ascii_graphic() || byte == b' ' => self.glyph(byte, color),
-                _ => self.glyph(b'?', color),
+    /// Draw every cell that differs from what the screen shows.
+    fn present(&mut self) {
+        let (on_width, on_height) = (self.font.width, self.font.height);
+        for index in 0..self.cells.len() {
+            let cell = self.cells[index];
+            if cell == self.shown[index] {
+                continue;
+            }
+            self.shown[index] = cell;
+            let x = (index % self.columns + 1) * on_width;
+            let y = (index / self.columns + 1) * on_height;
+            let (on, off) = (self.screen.pixel(cell.color), 0);
+            for row in 0..on_height {
+                let line = (self.screen.base + (y + row) * self.screen.stride * BYTES_PER_PIXEL)
+                    as *mut u32;
+                for column in 0..on_width {
+                    let value = if self.font.pixel(cell.character, column, row) {
+                        on
+                    } else {
+                        off
+                    };
+                    // SAFETY: the grid and its margin lie inside the mode's
+                    // visible framebuffer.
+                    unsafe { line.add(x + column).write_volatile(value) };
+                }
             }
         }
     }
 }
 
 /// The boot processor is the only writer, with interrupts disabled.
-struct Console(UnsafeCell<Option<Cursor>>);
+struct Console(UnsafeCell<Option<Text>>);
 // SAFETY: Stela runs on one CPU and never writes from an interrupt handler.
 unsafe impl Sync for Console {}
 static CONSOLE: Console = Console(UnsafeCell::new(None));
 
-/// Clear the screen and send later output to it as well.
-pub fn install(screen: Framebuffer) {
-    screen.clear();
-    // SAFETY: see `Console`; no reference to the cursor is live here.
-    unsafe { *CONSOLE.0.get() = Cursor::new(screen) };
+fn with<R>(f: impl FnOnce(&mut Text) -> R) -> Option<R> {
+    // SAFETY: see `Console`; this is the only access, and it does not nest.
+    unsafe { &mut *CONSOLE.0.get() }.as_mut().map(f)
 }
 
-/// Stop drawing text: the screen now shows something else. Output still
-/// reaches the UART.
+/// Clear the screen and send later text to it.
+pub fn install(screen: Framebuffer) {
+    screen.clear();
+    // SAFETY: see `Console`; no reference to the text is live here.
+    unsafe { *CONSOLE.0.get() = Text::new(screen) };
+}
+
+/// Stop drawing text: the screen now shows something else.
 pub fn release() {
-    // SAFETY: see `Console`; no reference to the cursor is live here.
+    // SAFETY: see `Console`; no reference to the text is live here.
     unsafe { *CONSOLE.0.get() = None };
 }
 
-pub fn write(text: &str, color: Color) {
-    // SAFETY: see `Console`; this is the only access, and it does not nest.
-    if let Some(cursor) = unsafe { &mut *CONSOLE.0.get() } {
-        cursor.write(text, color);
-    }
+/// Whether text reaches the screen.
+pub fn active() -> bool {
+    with(|_| ()).is_some()
+}
+
+/// Write `segments` at the cursor.
+pub fn write(segments: &[(&str, Color)]) {
+    with(|text| {
+        for (part, color) in segments {
+            for character in part.bytes() {
+                text.put(character, *color);
+            }
+        }
+        text.present();
+    });
+}
+
+/// Replace the cursor's line with `segments`, cut to the line, and leave
+/// the cursor on it, so that a line can change in place.
+pub fn rewrite(segments: &[(&str, Color)]) {
+    with(|text| {
+        let start = text.row * text.columns;
+        text.cells[start..start + text.columns].fill(BLANK);
+        text.column = 0;
+        for (part, color) in segments {
+            for character in part.bytes().filter(|&c| c != b'\n') {
+                if text.column == text.columns {
+                    break;
+                }
+                text.put(character, *color);
+            }
+        }
+        text.present();
+    });
 }

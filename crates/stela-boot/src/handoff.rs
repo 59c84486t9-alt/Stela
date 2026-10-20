@@ -136,6 +136,10 @@ pub struct Handoff {
     /// The physical addresses of the bounce slot's two leaf entries.
     pub bounce: [u64; 2],
     pub screen: Option<Framebuffer>,
+    /// The loader's finished status lines, which the engine's screen starts
+    /// with (`status::replay`).
+    pub history: [u8; crate::status::HISTORY_BYTES],
+    pub history_bytes: usize,
     /// TSC ticks per second, measured against the firmware's Stall.
     pub tsc_hz: u64,
     /// IA32_APIC_BASE as the firmware left it.

@@ -51,8 +51,20 @@ impl Link for RootLink {
     }
 }
 
+/// The PC's clock, moving the screen's running step as the stack waits.
+struct Ticking(pc::Clock);
+
+impl stela_runtime::net::Clock for Ticking {
+    fn now_us(&self) -> u64 {
+        crate::status::tick();
+        self.0.now_us()
+    }
+}
+
 pub struct HostNetwork {
-    stack: Stack<RootLink, pc::Clock>,
+    stack: Stack<RootLink, Ticking>,
+    /// The address and adapter, for the screen.
+    description: String,
 }
 
 impl HostNetwork {
@@ -69,19 +81,27 @@ impl HostNetwork {
             device.location(),
             device.mac()
         ));
+        let location = String::from(device.location());
+        crate::status::progress(&format!("adapter {location}"));
         let mut stack = Stack::new(
             RootLink {
                 device,
                 root: links.root,
             },
-            clock,
+            Ticking(clock),
         );
         let config = stack.dhcp().map_err(|error| format!("{error}"))?;
         output::arguments(format_args!(
             "NETWORK address={} mask={} router={:?} dns={:?}\n",
             config.address, config.mask, config.router, config.dns
         ));
-        Ok(Self { stack })
+        let description = format!("{} on adapter {location}", config.address);
+        Ok(Self { stack, description })
+    }
+
+    /// The address and adapter, as the screen names them.
+    pub fn describe(&self) -> &str {
+        &self.description
     }
 
     /// One POST to `http://host/path`; the response body on a 2xx status.
