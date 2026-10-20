@@ -13,10 +13,10 @@
 //!
 //! A fork child starts its own store state: the parent's workers and
 //! unwritten entries stay the parent's.
-use crate::machine::{Offer, Translations, compile_input};
+use crate::machine::{Offer, Translations};
 use crate::translations::{self, Digest, Record};
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
     sync::{
@@ -25,6 +25,7 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
+use stela_compiler::block::CompiledBlock;
 
 /// The environment variable naming the store's home, or `off`.
 pub const HOME_VARIABLE: &str = "STELA_TRANSLATION_CACHE";
@@ -50,6 +51,8 @@ const REFRESH_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const EVICT_TO_PERCENT: u64 = 90;
 /// No record is larger: a page's 4 KiB of code in every context.
 const MAX_RECORD_BYTES: u64 = 64 << 20;
+/// The most native code a process keeps prepared for its threads.
+const MAX_PREPARED_BYTES: usize = 512 << 20;
 
 /// What the store did, for `--statistics`.
 #[derive(Debug, Default)]
@@ -115,6 +118,11 @@ impl Config {
 struct State {
     /// Records looked up, `None` for those absent or invalid.
     loaded: BTreeMap<Digest, Option<Arc<Record>>>,
+    /// Blocks this process prepared, by page key, PC and context, for its
+    /// other threads, whose engines compile separately.
+    prepared: HashMap<(Digest, u64, Digest), CompiledBlock>,
+    /// The native bytes `prepared` holds.
+    prepared_bytes: usize,
     queue: VecDeque<Offer>,
     /// Offers a worker is proving.
     busy: usize,
@@ -172,6 +180,8 @@ fn shared() -> Option<&'static Shared> {
         pid,
         state: Mutex::new(State {
             loaded: BTreeMap::new(),
+            prepared: HashMap::new(),
+            prepared_bytes: 0,
             queue: VecDeque::new(),
             busy: 0,
             unwritten: BTreeMap::new(),
@@ -207,11 +217,26 @@ impl Translations for Store {
         record
     }
 
+    fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+        let shared = shared()?;
+        lock(&shared.state)
+            .prepared
+            .get(&(*key, pc, *context))
+            .cloned()
+    }
+
     fn offer(&mut self, offer: Offer) {
         let Some(shared) = shared() else {
             return;
         };
         let mut state = lock(&shared.state);
+        let bytes = offer.block.native.x86_64_code.len();
+        if state.prepared_bytes + bytes <= MAX_PREPARED_BYTES {
+            state.prepared_bytes += bytes;
+            state
+                .prepared
+                .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+        }
         if state.closed {
             return;
         }
@@ -409,14 +434,10 @@ impl Shared {
 fn prove(offer: &Offer) -> Option<translations::Entry> {
     let displacements = translations::probe_displacements(offer.page);
     let probes = displacements.map(|displacement| {
-        compile_input(
-            &offer.input,
-            offer.pc.wrapping_add(displacement),
-            offer.target,
-            offer.checks,
-            offer.system,
-        )
-        .ok()
+        offer
+            .preparation
+            .compile_input(&offer.input, offer.pc.wrapping_add(displacement))
+            .ok()
     });
     let [Some(first), Some(second)] = &probes else {
         return None;
@@ -444,6 +465,10 @@ pub fn finish() {
 /// The engine's and the store's counts, one line each, for `--statistics`.
 pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
     let ticks_per_millisecond = super::host::COUNTER_HZ / 1000;
+    // Seconds of counter ticks per item.
+    let per = |ticks: u64, items: u64| {
+        ticks as f64 / super::host::COUNTER_HZ as f64 / items.max(1) as f64
+    };
     let counter = |value: &AtomicU64| value.load(Ordering::Relaxed);
     let mut lines = vec![
         format!(
@@ -454,10 +479,15 @@ pub fn summary(engine: &crate::machine::Statistics) -> Vec<String> {
             engine.exit_kinds.iter().sum::<u64>()
         ),
         format!(
-            "engine: {} blocks compiled in {} ms, {} from the store, {} offered to it",
+            "engine: {} blocks ({} instructions) compiled in {} ms ({:.1} us a block, {:.0} ns \
+             an instruction), {} from the store, {} shared by threads, {} offered to it",
             engine.compiled,
+            engine.compiled_instructions,
             engine.compile_ticks / ticks_per_millisecond,
+            per(engine.compile_ticks, engine.compiled) * 1e6,
+            per(engine.compile_ticks, engine.compiled_instructions) * 1e9,
             engine.stored,
+            engine.shared,
             engine.offered
         ),
         format!("engine: exits by kind {:?}", engine.exit_kinds),

@@ -5,6 +5,7 @@ mod clock;
 mod exclusive;
 mod hosted;
 mod pointer;
+mod prepare;
 mod processors;
 mod scalable;
 mod stored;
@@ -39,11 +40,13 @@ use alloc::{
     collections::{BTreeMap, BTreeSet},
     format,
     string::String,
+    sync::Arc,
     vec,
     vec::Vec,
 };
 use core::fmt;
 use pointer::{PointerInputs, PointerOperation, PointerResult};
+pub use prepare::{Preparation, Prepared, Refused};
 pub use processors::PeerState;
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -58,8 +61,8 @@ use stela_compiler::{
         },
     },
     block::{
-        self, BlockProfile, CompilationPlan, ExitKind, PointerAuthentication,
-        PointerAuthenticationKey, PointerAuthenticationModifier, PointerAuthenticationOperation,
+        self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
+        PointerAuthenticationModifier, PointerAuthenticationOperation,
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
         system::{GuardedOperation, SystemOperation},
     },
@@ -743,6 +746,11 @@ pub struct Statistics {
     /// compiled, and compiled blocks offered to it.
     pub stored: u64,
     pub offered: u64,
+    /// Blocks another thread of the process (or its ahead-of-time
+    /// translation) had prepared, installed instead of compiled.
+    pub shared: u64,
+    /// Guest instructions in `compiled`.
+    pub compiled_instructions: u64,
     pub exceptions: u64,
     pub interrupts: u64,
     pub system_exits: u64,
@@ -779,6 +787,8 @@ impl core::ops::AddAssign for Statistics {
             compile_ticks,
             stored,
             offered,
+            shared,
+            compiled_instructions,
             exceptions,
             interrupts,
             system_exits,
@@ -806,6 +816,8 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.compile_ticks, compile_ticks),
             (&mut self.stored, stored),
             (&mut self.offered, offered),
+            (&mut self.shared, shared),
+            (&mut self.compiled_instructions, compiled_instructions),
             (&mut self.exceptions, exceptions),
             (&mut self.interrupts, interrupts),
             (&mut self.system_exits, system_exits),
@@ -1013,6 +1025,8 @@ pub struct Machine<H: Host, D: Devices> {
     pages: BTreeMap<u64, stored::StoredPage>,
     /// Entry contexts by variant and address class.
     stored_contexts: BTreeMap<(Variant, u64), crate::translations::Digest>,
+    /// How each variant's blocks are compiled ([`prepare`]).
+    preparations: BTreeMap<Variant, Arc<Preparation>>,
     fetch: Vec<Option<FetchEntry>>,
     jump: Vec<Option<JumpEntry>>,
     /// Advances when cached fetch translations become stale.
@@ -1061,7 +1075,7 @@ pub struct Machine<H: Host, D: Devices> {
     /// (`system::thread_pointer_readable`), until derived state may change.
     thread_pointer: alloc::boxed::Box<register_read::Cell>,
     /// The chip's `Chip::admit`, indexed.
-    admit_table: AdmitTable,
+    admit_table: Arc<AdmitTable>,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
     /// The context the host last isolated predictions for.
@@ -1130,24 +1144,6 @@ pub struct Machine<H: Host, D: Devices> {
     tags_checked_at: Option<u64>,
 }
 
-/// Compile the admitted words `input` at `pc` as the engine compiles a
-/// block: the system-mode profile for `target`, with `checks` and the
-/// System instructions `system` completes natively. A pure function of its
-/// arguments, which the translation store's probes rely on.
-pub fn compile_input(
-    input: &[u8],
-    pc: u64,
-    target: TargetCpu,
-    checks: MemoryChecks,
-    system: NativeSystem,
-) -> Result<stela_compiler::block::CompiledBlock, stela_compiler::CompileError> {
-    CompilationPlan::new(input, GuestAddress(pc), PROFILE, target)
-        .and_then(|plan| plan.with_memory_checks(checks))
-        .and_then(|plan| plan.with_zero_block(system.zero_block))
-        .and_then(|plan| plan.with_cache_clean(system.cache_clean))
-        .and_then(CompilationPlan::compile)
-}
-
 /// Breakpoints that can match and an enabled software step make every
 /// block a single instruction checked before it runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1173,7 +1169,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             profile.chip,
             "the boot PE is not the profile's chip"
         );
-        let admit_table = profile.chip.admit_table();
+        let admit_table = Arc::new(profile.chip.admit_table());
         let mut machine = Self {
             cpu,
             host,
@@ -1188,6 +1184,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             code_pages: BTreeMap::new(),
             pages: BTreeMap::new(),
             stored_contexts: BTreeMap::new(),
+            preparations: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],
             jump: vec![None; JUMP_CACHE],
             translation_generation: 1,
@@ -2625,22 +2622,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// trapped FP/SIMD instruction or one whose access checks the engine
     /// applies.
     fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Fetched, Stop> {
-        let Variant {
-            fp,
-            checks,
-            single,
-            scalable,
-            system,
-            guarded_page: _,
-            timing,
-        } = variant;
-        let target = match timing {
-            true => self
-                .timing_target()
-                .expect("a timing variant has its target"),
-            false => self.target,
-        };
-        let available = if single {
+        let available = if variant.single {
             INSTRUCTION
         } else {
             (FETCH_PAGE - (pc & (FETCH_PAGE - 1))).min(MAX_BLOCK_BYTES)
@@ -2651,99 +2633,57 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
-        let stored = match single {
+        let stored = match variant.single {
             true => None,
             false => self
                 .stored_page(pc, physical, &source)
                 .map(|stored| (stored.key, stored.record.clone())),
         };
-        // A form the chip lacks compiles as the UDF or NOP it executes as.
-        for bytes in source.as_chunks_mut::<4>().0 {
-            *bytes = self.admit(u32::from_le_bytes(*bytes)).to_le_bytes();
-        }
+        let preparation = self.preparation(variant);
+        preparation.admit(&mut source);
         let context = stored
             .is_some()
-            .then(|| self.stored_context(variant, target, page));
-        if let (Some((_, Some(record))), Some(context)) = (&stored, &context)
-            && let Some(compiled) = record
-                .find(offset as u16, context)
-                .and_then(|entry| entry.rebase(page))
-        {
-            self.statistics.stored += 1;
-            return self.install(pc, physical, variant, &source, compiled);
+            .then(|| self.stored_context(variant, &preparation, page));
+        if let (Some((key, record)), Some(context)) = (&stored, &context) {
+            let found = record
+                .as_ref()
+                .and_then(|record| record.find(offset as u16, context))
+                .and_then(|entry| entry.rebase(page));
+            if let Some(compiled) = found {
+                self.statistics.stored += 1;
+                return self.install(pc, physical, variant, &source, compiled);
+            }
+            if let Some(compiled) = self
+                .host
+                .translations()
+                .and_then(|translations| translations.prepared(key, pc, context))
+            {
+                self.statistics.shared += 1;
+                return self.install(pc, physical, variant, &source, compiled);
+            }
         }
         let started = self.host.counter();
-        let chip = self.profile.chip;
-        let mut length = source.len();
         // No block runs into a host breakpoint or trace point: one ends
         // before it.
-        if let Some(stop) = self
+        let limit = self
             .breakpoints
             .iter()
             .chain(&self.traces)
-            .filter(|&&stop| stop > pc && stop < pc + length as u64)
+            .filter(|&&stop| stop > pc && stop < pc + source.len() as u64)
             .min()
-        {
-            length = (stop - pc) as usize;
-        }
-        if !fp {
-            let first = source
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .position(|word| is_floating_point(u32::from_le_bytes(*word)));
-            match first {
-                // CheckFPMREnabled comes before the FP access check.
-                Some(0) => {
-                    let word = u32::from_le_bytes(source[..4].try_into().expect("a word"));
-                    if chip.checks(word).contains(&Check::Fpmr) {
-                        return Ok(Fetched::Checked(word));
-                    }
-                    return Ok(Fetched::Exception(self.floating_point_exception(pc)));
-                }
-                Some(index) => length = index * 4,
-                None => {}
+            .map_or(source.len(), |&stop| (stop - pc) as usize);
+        let (compiled, input) = match preparation.prepare(&source, pc, limit) {
+            Ok(Prepared::Block { compiled, input }) => (compiled, input),
+            Ok(Prepared::Checked(word)) => return Ok(Fetched::Checked(word)),
+            Ok(Prepared::FloatingPointTrap) => {
+                return Ok(Fetched::Exception(self.floating_point_exception(pc)));
             }
-        }
-        if let Some(streaming) = scalable {
-            let first = source.as_chunks::<4>().0[..length / 4]
-                .iter()
-                .map(|word| u32::from_le_bytes(*word))
-                .position(|word| {
-                    let checks = chip.checks(word);
-                    if streaming {
-                        !checks.is_empty()
-                    } else {
-                        checks
-                            .iter()
-                            .any(|check| !matches!(check, Check::Fp | Check::FpAdvSimd))
-                    }
-                });
-            match first {
-                Some(0) => {
-                    let word = u32::from_le_bytes(source[..4].try_into().expect("a word"));
-                    return Ok(Fetched::Checked(word));
-                }
-                Some(index) => length = index * 4,
-                None => {}
+            Err(refused) => {
+                return Err(self.unsupported_word(&source, pc, refused.pc, refused.detail));
             }
-        }
-        let consumed =
-            match block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE) {
-                Ok(analysis) => analysis.source_bytes,
-                Err(error) if error.pc.0 > pc => {
-                    length = (error.pc.0 - pc) as usize;
-                    block::analyze_with_profile(&source[..length], GuestAddress(pc), PROFILE)
-                        .map_err(|error| {
-                            self.unsupported_word(&source, pc, error.pc.0, error.detail)
-                        })?
-                        .source_bytes
-                }
-                Err(error) => return Err(self.unsupported_word(&source, pc, pc, error.detail)),
-            };
-        let (compiled, input) =
-            self.compile_prefix(&source[..consumed], pc, target, checks, system)?;
+        };
         self.statistics.compiled += 1;
+        self.statistics.compiled_instructions += (compiled.source_bytes as u64) / INSTRUCTION;
         self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
         if let (Some((key, _)), Some(context)) = (stored, context)
             && let Some(translations) = self.host.translations()
@@ -2754,14 +2694,40 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 pc,
                 context,
                 input: source[..input].to_vec(),
-                target,
-                checks,
-                system,
+                preparation,
                 block: compiled.clone(),
             });
             self.statistics.offered += 1;
         }
         self.install(pc, physical, variant, &source, compiled)
+    }
+
+    /// How blocks of `variant` are compiled, made once per variant.
+    fn preparation(&mut self, variant: Variant) -> Arc<Preparation> {
+        let variant = Variant {
+            guarded_page: false,
+            ..variant
+        };
+        if let Some(preparation) = self.preparations.get(&variant) {
+            return preparation.clone();
+        }
+        let target = match variant.timing {
+            true => self
+                .timing_target()
+                .expect("a timing variant has its target"),
+            false => self.target,
+        };
+        let preparation = Arc::new(Preparation::new(
+            self.profile.chip,
+            self.admit_table.clone(),
+            target,
+            variant.fp,
+            variant.checks,
+            variant.scalable,
+            variant.system,
+        ));
+        self.preparations.insert(variant, preparation.clone());
+        preparation
     }
 
     /// Install `compiled`, the block at `pc` of `variant` compiled from the
@@ -2930,42 +2896,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// PSTATE.DIT changes no code.
     fn timing_target(&self) -> Option<TargetCpu> {
         self.target.data_independent_timing_target()
-    }
-
-    /// Compile the longest prefix `target` can emit, and the bytes of
-    /// `source` the compiler was given for it.
-    fn compile_prefix(
-        &self,
-        source: &[u8],
-        pc: u64,
-        target: TargetCpu,
-        checks: MemoryChecks,
-        system: NativeSystem,
-    ) -> Result<(stela_compiler::block::CompiledBlock, usize), Stop> {
-        let attempt = |bytes: &[u8]| compile_input(bytes, pc, target, checks, system);
-        match attempt(source) {
-            Ok(compiled) => Ok((compiled, source.len())),
-            Err(error) => {
-                // A host-capability refusal names no PC; find the longest
-                // prefix that compiles and report the first refused word.
-                let words = source.len() / 4;
-                let (mut good, mut bad) = (0, words);
-                while bad - good > 1 {
-                    let middle = (good + bad) / 2;
-                    if attempt(&source[..middle * 4]).is_ok() {
-                        good = middle;
-                    } else {
-                        bad = middle;
-                    }
-                }
-                if good == 0 {
-                    return Err(self.unsupported_word(source, pc, pc, error.0));
-                }
-                attempt(&source[..good * 4])
-                    .map(|compiled| (compiled, good * 4))
-                    .map_err(|error| self.unsupported_word(source, pc, pc, error.0))
-            }
-        }
     }
 
     fn unsupported_word(&self, source: &[u8], base: u64, pc: u64, detail: String) -> Stop {

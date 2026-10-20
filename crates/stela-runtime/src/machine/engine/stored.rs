@@ -1,23 +1,27 @@
 //! Block translations from and to the persistent translation store
 //! (`crate::translations`): a fetch page is read and hashed once, its
 //! record looked up once, and each block of it compiled in a context the
-//! record has is rebased instead of compiled. A block compiled anew is
-//! offered back, with what the host needs to compile it again at the probe
+//! record has is rebased instead of compiled. A block the store's process
+//! already prepared at the same PC (another thread's, or ahead-of-time
+//! translation's) is installed as it is. A block compiled anew is offered
+//! back, with what the host needs to compile it again at the probe
 //! addresses (`translations::prove`).
-use super::{Devices, FETCH_PAGE, Host, Machine, Variant};
-use crate::translations::{self, Digest, PAGE_BYTES, Record};
-use alloc::{boxed::Box, format, sync::Arc, vec::Vec};
-use stela_compiler::{
-    TargetCpu,
-    block::CompiledBlock,
-    x86_64::{MemoryChecks, NativeSystem},
-};
+use super::{Devices, FETCH_PAGE, Host, Machine, Preparation, Variant};
+use crate::translations::{Digest, PAGE_BYTES, Record};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use stela_compiler::block::CompiledBlock;
 
 /// The store a host keeps for the engine.
 pub trait Translations {
     /// The record of the page whose bytes hash to `key`, if the store has
     /// a valid one.
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>>;
+    /// The block at `pc` of the page whose bytes hash to `key`, prepared
+    /// in `context` at that very PC since the record was read, if the
+    /// store has one.
+    fn prepared(&mut self, _key: &Digest, _pc: u64, _context: &Digest) -> Option<CompiledBlock> {
+        None
+    }
     /// A block the engine compiled from a page the store had no entry for.
     fn offer(&mut self, offer: Offer);
 }
@@ -32,9 +36,7 @@ pub struct Offer {
     pub context: Digest,
     /// The admitted words the compiler was given.
     pub input: Vec<u8>,
-    pub target: TargetCpu,
-    pub checks: MemoryChecks,
-    pub system: NativeSystem,
+    pub preparation: Arc<Preparation>,
     pub block: CompiledBlock,
 }
 
@@ -92,36 +94,23 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.pages.get(&frame)
     }
 
-    /// The entry context of blocks compiled for `variant` with `target` in
-    /// the page at `page`: everything besides their bytes and offset that
-    /// shapes their compilation.
+    /// The entry context of blocks compiled for `variant` through
+    /// `preparation` in the page at `page` ([`Preparation::context`]).
     pub(super) fn stored_context(
         &mut self,
         variant: Variant,
-        target: TargetCpu,
+        preparation: &Preparation,
         page: u64,
     ) -> Digest {
-        let class = translations::address_class(page);
-        if let Some(context) = self.stored_contexts.get(&(variant, class)) {
-            return *context;
-        }
-        let Variant {
-            fp,
-            checks,
-            single,
-            scalable,
-            system,
-            guarded_page: _,
-            timing: _,
-        } = variant;
-        let described = format!(
-            "chip {:?} target {target:?} fp {fp} checks {checks:?} single {single} scalable \
-             {scalable:?} system {system:?} class {class:#x}",
-            self.profile.chip
-        );
-        let context = Digest::of(described.as_bytes());
-        self.stored_contexts.insert((variant, class), context);
-        context
+        let class = crate::translations::address_class(page);
+        let variant = Variant {
+            guarded_page: false,
+            ..variant
+        };
+        *self
+            .stored_contexts
+            .entry((variant, class))
+            .or_insert_with(|| preparation.context(page))
     }
 }
 
@@ -129,35 +118,67 @@ impl<H: Host, D: Devices> Machine<H, D> {
 pub(super) mod tests {
     use super::super::{Fetched, tests::BASE, tests::machine};
     use super::*;
+    use crate::translations;
     use alloc::collections::BTreeMap;
 
-    /// A store in memory: records by key, and the blocks offered to it.
+    /// A store in memory: records by key, the blocks offered to it, and
+    /// the blocks it has prepared by key, PC and context.
     #[derive(Default)]
     pub(crate) struct MemoryStore {
         pub(crate) records: BTreeMap<Digest, Arc<Record>>,
         pub(crate) offers: Vec<Offer>,
+        pub(crate) prepared: BTreeMap<(Digest, u64, Digest), CompiledBlock>,
     }
 
     impl Translations for MemoryStore {
         fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
             self.records.get(key).cloned()
         }
+        fn prepared(&mut self, key: &Digest, pc: u64, context: &Digest) -> Option<CompiledBlock> {
+            self.prepared.get(&(*key, pc, *context)).cloned()
+        }
         fn offer(&mut self, offer: Offer) {
             self.offers.push(offer);
         }
     }
 
+    #[test]
+    fn a_block_another_thread_prepared_at_the_same_pc_is_installed_as_it_is() {
+        // adr x0, #8; add x0, x0, #1; svc #0
+        let words = [0x1000_0040, 0x9100_0400, 0xd400_0001];
+        let mut first = machine(&words);
+        first.host.store = Some(MemoryStore::default());
+        assert!(first.fetch_block(BASE + 4, false).is_ok());
+        let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
+        let mut store = MemoryStore::default();
+        store
+            .prepared
+            .insert((offer.key, offer.pc, offer.context), offer.block.clone());
+        let mut second = machine(&words);
+        second.host.store = Some(store);
+        let Ok(Fetched::Block(index)) = second.fetch_block(BASE + 4, false) else {
+            panic!("shared block")
+        };
+        assert_eq!(
+            (second.statistics.compiled, second.statistics.shared),
+            (0, 1)
+        );
+        assert_eq!(
+            second.host.installed[second.blocks[index].code.0 - 1],
+            offer.block.native.x86_64_code
+        );
+        // Another PC of the same page is compiled.
+        assert!(second.fetch_block(BASE, false).is_ok());
+        assert_eq!(second.statistics.compiled, 1);
+    }
+
     /// What the hosted store's workers do with an offer.
     fn proven(offer: &Offer) -> translations::Entry {
         let [first, second] = translations::probe_displacements(offer.page).map(|displacement| {
-            super::super::compile_input(
-                &offer.input,
-                offer.pc.wrapping_add(displacement),
-                offer.target,
-                offer.checks,
-                offer.system,
-            )
-            .unwrap()
+            offer
+                .preparation
+                .compile_input(&offer.input, offer.pc.wrapping_add(displacement))
+                .unwrap()
         });
         translations::prove(
             &offer.block,
