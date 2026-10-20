@@ -139,6 +139,9 @@ const fn fixed(register: Encoding, shift: u8, level: u64, reason: &'static str) 
     row(register, shift, level, 0, None, Basis::Engine(true, reason))
 }
 
+/// The bits of one ID register field, at its shift: Arm's feature ID fields
+/// are four bits wide.
+const ID_FIELD: u64 = 0xf;
 /// ID_AA64DFR0_EL1.BRPs and WRPs, the breakpoint and watchpoint counts less
 /// one.
 const DFR0_BRPS: u8 = 12;
@@ -1373,7 +1376,7 @@ fn presents(index: usize, row: &Row, fixed: &[(Encoding, u64)]) -> bool {
     let Some(value) = fixed
         .iter()
         .find(|(register, _)| *register == row.register)
-        .map(|(_, value)| value >> row.shift & 0xf)
+        .map(|(_, value)| value >> row.shift & ID_FIELD)
     else {
         return true;
     };
