@@ -220,6 +220,13 @@ pub fn run(launch: Launch) -> Result<Report> {
     let jop = pe::UserJop::of_subtype(launch.cpu_subtype);
     let security_config = launch.signature.security_config(hardware.memory_tagging)?;
     let ipc_space_policy = launch.signature.ipc_space_policy(jop)?;
+    // A platform plugin host runs with its keys off, as an arm64 image
+    // (`IMGPF_3P_PLUGINS` sets `IMGPF_NOJOP`).
+    let jop = if launch.signature.plugin_host(jop) {
+        pe::UserJop::Disabled
+    } else {
+        jop
+    };
     let mut apple = exec::AppleStrings {
         pfz: commpage::TEXT_ADDRESS,
         stack_guard: [guard0, guard1, guard2, guard3],
