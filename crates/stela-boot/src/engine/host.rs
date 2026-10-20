@@ -792,6 +792,10 @@ impl Host for BareHost {
         }
     }
 
+    fn isolate_predictions(&mut self) {
+        super::speculation::isolate();
+    }
+
     fn invalidate_translations(&mut self) {
         state().reset_shadow();
     }

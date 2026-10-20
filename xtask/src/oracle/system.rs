@@ -341,7 +341,13 @@ const HCR_ENSCXT: u32 = 53;
 
 /// The engine's M2 profile, with EL2 only when the oracle machine has it.
 fn profile(target: TargetCpu, el2: bool) -> CpuProfile {
-    let mut fixed = identification::derive(Chip::DEFAULT, target, el2);
+    // The oracle's host isolates no predictions: no speculation guarantee.
+    let mut fixed = identification::derive(
+        Chip::DEFAULT,
+        target,
+        el2,
+        identification::Speculation::NONE,
+    );
     fixed.push((DCZID_EL0, DCZID));
     // J473AP cpu0's MIDR and MPIDR, as the bundle profile gives them; only
     // the access outcome of an MRS is compared.

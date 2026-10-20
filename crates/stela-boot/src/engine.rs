@@ -16,6 +16,7 @@ mod network;
 mod nor;
 mod power;
 mod restore;
+mod speculation;
 mod storage;
 
 use crate::{
@@ -44,6 +45,7 @@ use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
     exception::Pstate,
+    identification::Speculation,
     registers::encodings::DCZID_EL0,
     soc,
     system::Register,
@@ -639,9 +641,10 @@ fn test_profile() -> CpuProfile {
 /// ID_AA64* and CTR_EL0 registers advertise what this engine implements,
 /// capped at the chip's features (`machine::identification`); MIDR, MPIDR and
 /// DCZID are the board's own values. Every other identification read refuses.
-fn board_profile(board: &soc::Board, target: TargetCpu) -> CpuProfile {
+/// The CSV fields disclose the host's `speculation` guarantees.
+fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation) -> CpuProfile {
     let chip = board.cpus.chip;
-    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true);
+    let mut fixed = stela_runtime::machine::identification::derive(chip, target, true, speculation);
     // 64-byte DC ZVA blocks, enabled: XNU `osfmk/arm64/bzero.s` zeroes with
     // `dc zva` in fixed 64-byte steps.
     fixed.push((DCZID_EL0, 4));
@@ -1417,6 +1420,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let apic_hz = host::statistics().apic_hz;
     let mut bare = BareHost;
     let target = target();
+    let speculation = speculation::probe();
     let mut read_only_region = None;
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
     let mut display = handoff
@@ -1504,7 +1508,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
     }
     let profile = match &board {
-        Some(board) => board_profile(board, target),
+        Some(board) => board_profile(board, target, speculation),
         None => test_profile(),
     };
     // The real kernelcache starts SPTM at EL2: it writes TPIDR_EL2 and keeps
@@ -1514,9 +1518,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // other HCR_EL2 bits reset to 0. Stela's test kernel runs at EL1.
     let el = if options.bundle { 2 } else { 1 };
     output::arguments(format_args!(
-        "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz}\n",
+        "ENTRY pc={entry:#x} x0={x0:#x} el={el} mmu=off profile={} target={} apic_hz={apic_hz} \
+         prediction_isolation={}\n",
         profile.name,
         target.id(),
+        speculation.contexts,
     ));
     let mut cpu = Cpu::of(profile.chip, entry, Pstate::reset(el));
     cpu.state.x[0] = x0;

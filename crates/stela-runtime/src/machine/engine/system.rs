@@ -793,7 +793,14 @@ impl<H: Host, D: Devices> Context for Access<'_, H, D> {
         } else if translates(register) {
             self.translation = Translation::All;
         }
-        if watches(register) {
+        // A CONTEXTIDR write changes the guest's prediction context
+        // (`PredictionContext`) without changing translation.
+        if watches(register)
+            || matches!(
+                register,
+                Register::CONTEXTIDR_EL1 | Register::CONTEXTIDR_EL2
+            )
+        {
             self.regime = true;
         }
         Ok(())
@@ -1415,6 +1422,69 @@ mod tests {
             "{word:#x}"
         );
         machine.cpu.read(Register::ESR_EL2)
+    }
+
+    /// FEAT_CSV2: the host isolates branch predictions at each change of the
+    /// guest's context (its table bases with their ASIDs, CONTEXTIDR and
+    /// the VMID), and only then: not at exceptions and returns within one
+    /// address space, nor at a write that keeps the value.
+    #[test]
+    fn guest_context_changes_isolate_branch_predictions() {
+        const TTBR0_EL1: Encoding = Encoding::new(3, 0, 2, 0, 0);
+        const TTBR1_EL1: Encoding = Encoding::new(3, 0, 2, 0, 1);
+        const CONTEXTIDR_EL1: Encoding = Encoding::new(3, 0, 13, 0, 1);
+        const VTTBR_EL2: Encoding = Encoding::new(3, 4, 2, 1, 0);
+        const MRS_X0_TPIDR_EL1: u32 = 0xd538_d080;
+        const ERET: u32 = 0xd69f_03e0;
+        let mut machine = machine(&[]);
+        machine.cpu.registers.set(Register::VBAR_EL1, 0, 0x1_0000);
+        let write = |machine: &mut TestMachine, el, encoding, value| {
+            machine.cpu.set_pstate(Pstate::reset(el));
+            machine.cpu.state.x[1] = value;
+            machine
+                .system_instruction(access(false, encoding, 1))
+                .unwrap();
+            machine.host.isolations
+        };
+        let mut isolations = machine.host.isolations;
+        let writes = |machine: &mut TestMachine,
+                      isolations: &mut usize,
+                      list: &[(u8, Encoding, u64, bool)]| {
+            for &(el, encoding, value, changes) in list {
+                let after = write(machine, el, encoding, value);
+                assert_eq!(after, *isolations + usize::from(changes), "{encoding:?}");
+                *isolations = after;
+            }
+        };
+        writes(
+            &mut machine,
+            &mut isolations,
+            &[
+                // A new ASID in TTBR0, then the same value again.
+                (1, TTBR0_EL1, 1 << 48 | 0x8000, true),
+                (1, TTBR0_EL1, 1 << 48 | 0x8000, false),
+                (1, TTBR1_EL1, 0xc000, true),
+                (1, CONTEXTIDR_EL1, 7, true),
+            ],
+        );
+        // An exception from EL0 to EL1 and the return keep the context.
+        machine.cpu.set_pstate(Pstate::reset(0));
+        machine.system_instruction(MRS_X0_TPIDR_EL1).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 1);
+        machine.cpu.registers.set(Register::SPSR_EL1, 0, 0);
+        machine.system_instruction(ERET).unwrap();
+        assert_eq!(machine.cpu.pstate.el, 0);
+        assert_eq!(machine.host.isolations, isolations);
+        // A new VMID, written in the EL2&0 host regime, a context of its own.
+        writes(
+            &mut machine,
+            &mut isolations,
+            &[(2, VTTBR_EL2, 3 << 48 | 0x4000, true)],
+        );
+        assert_eq!(
+            machine.statistics.prediction_isolations,
+            machine.host.isolations as u64
+        );
     }
 
     #[test]
@@ -3455,8 +3525,12 @@ mod tests {
         machine.cpu.registers.set(Register::HCR_EL2, 0, HCR_E2H);
         machine.cpu.registers.set(Register::CPTR_EL2, 0, 0);
         // The identification the boot builds (`identification::derive`).
-        let derived =
-            crate::machine::identification::derive(chip, stela_compiler::TargetCpu::Baseline, true);
+        let derived = crate::machine::identification::derive(
+            chip,
+            stela_compiler::TargetCpu::Baseline,
+            true,
+            crate::machine::identification::Speculation::NONE,
+        );
         let amcfgr = derived
             .iter()
             .find(|(encoding, _)| *encoding == AMCFGR_EL0)

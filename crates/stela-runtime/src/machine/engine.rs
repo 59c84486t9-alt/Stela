@@ -159,6 +159,48 @@ impl Watch {
     }
 }
 
+/// The guest context branch predictions must not cross (FEAT_CSV2): the
+/// translation regime, its table bases (with the ASID one carries),
+/// CONTEXTIDR_ELx and VTTBR_EL2 (the VMID). A change of any of these is a
+/// guest context switch, at which the engine has the host isolate its
+/// predictions ([`Host::isolate_predictions`]). An exception or return
+/// that keeps them, between EL0 and EL1 of one address space, is not one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredictionContext {
+    pub host: bool,
+    pub ttbr0: u64,
+    pub ttbr1: u64,
+    pub contextidr: u64,
+    pub vttbr: u64,
+}
+
+impl PredictionContext {
+    fn of(cpu: &Cpu) -> Self {
+        use crate::machine::cpu::TranslationRegime;
+        let host = cpu.regime() == TranslationRegime::El20;
+        let (ttbr0, ttbr1, contextidr) = if host {
+            (
+                SystemRegister::TTBR0_EL2,
+                SystemRegister::TTBR1_EL2,
+                SystemRegister::CONTEXTIDR_EL2,
+            )
+        } else {
+            (
+                SystemRegister::TTBR0_EL1,
+                SystemRegister::TTBR1_EL1,
+                SystemRegister::CONTEXTIDR_EL1,
+            )
+        };
+        Self {
+            host,
+            ttbr0: cpu.read(ttbr0),
+            ttbr1: cpu.read(ttbr1),
+            contextidr: cpu.read(contextidr),
+            vttbr: cpu.read(SystemRegister::VTTBR_EL2),
+        }
+    }
+}
+
 /// Entry address of installed native code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeCode(pub usize);
@@ -239,6 +281,12 @@ pub trait Host {
     /// its controls translates differently (a TTBR0 write arrives only
     /// here, not through [`Host::invalidate_translations`]).
     fn set_regime(&mut self, regime: &Regime);
+    /// Keep the branch predictions trained before this call from steering
+    /// speculation after it (FEAT_CSV2): the engine calls it whenever the
+    /// guest's context for prediction changes ([`PredictionContext`]). A host
+    /// that cannot isolate them leaves this empty and identifies no FEAT_CSV2
+    /// (`identification::Speculation::contexts`).
+    fn isolate_predictions(&mut self) {}
     /// Drop every cached translation.
     fn invalidate_translations(&mut self);
     /// Drop the cached translations a TLBI reaches in the current context,
@@ -654,6 +702,9 @@ pub struct Statistics {
     pub scoped_maintenance: u64,
     /// TTBR0 writes, which drop the lower half's.
     pub table_base_changes: u64,
+    /// Guest context changes at which the host isolated its branch
+    /// predictions ([`PredictionContext`]).
+    pub prediction_isolations: u64,
 }
 
 struct Block {
@@ -890,6 +941,8 @@ pub struct Machine<H: Host, D: Devices> {
     admit_table: AdmitTable,
     /// The watched pages the host keeps unmapped.
     watch: Watch,
+    /// The context the host last isolated predictions for.
+    prediction_context: Option<PredictionContext>,
     /// The number of the running PE.
     current: usize,
     /// The WFI, WFE, WFIT or WFET the running PE waits in, until it wakes.
@@ -996,6 +1049,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             thread_pointer: alloc::boxed::Box::default(),
             admit_table,
             watch: Watch::default(),
+            prediction_context: None,
             current: 0,
             waiting: None,
             peers: Vec::new(),
@@ -1130,6 +1184,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
             watch,
         };
         self.host.set_regime(&regime);
+        let context = PredictionContext::of(&self.cpu);
+        if self.prediction_context != Some(context) {
+            self.prediction_context = Some(context);
+            self.statistics.prediction_isolations += 1;
+            self.host.isolate_predictions();
+        }
     }
 
     /// Stop the run when any PE reaches one of these guest PCs, before its
@@ -4574,6 +4634,8 @@ mod tests {
         pub(super) now: u64,
         regimes: Vec<Regime>,
         invalidations: usize,
+        /// Calls of [`Host::isolate_predictions`].
+        pub(super) isolations: usize,
         reaches: Vec<mmu::tlbi::Reach>,
         installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
@@ -4643,6 +4705,9 @@ mod tests {
         }
         fn set_regime(&mut self, regime: &Regime) {
             self.regimes.push(*regime);
+        }
+        fn isolate_predictions(&mut self) {
+            self.isolations += 1;
         }
         fn invalidate_translations(&mut self) {
             self.invalidations += 1;
@@ -4739,6 +4804,7 @@ mod tests {
             now: 0,
             regimes: Vec::new(),
             invalidations: 0,
+            isolations: 0,
             reaches: Vec::new(),
             installed: Vec::new(),
             executables: Vec::new(),
@@ -5179,7 +5245,10 @@ mod tests {
         // An IMPDEF register no censused component accesses (S3_5_C15_C15_7)
         // is UNDEFINED, as an unallocated encoding.
         let unconsumed = Encoding::new(3, 5, 15, 15, 7);
-        assert!(!crate::machine::impdef::consumed(unconsumed, machine.cpu.registers.chip()));
+        assert!(!crate::machine::impdef::consumed(
+            unconsumed,
+            machine.cpu.registers.chip()
+        ));
         machine.system_instruction(0xd53d_ffe0).unwrap();
         assert_eq!(machine.cpu.pc, 0x1_0200);
         assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x0200_0000);

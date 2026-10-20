@@ -204,9 +204,16 @@ impl Keys {
 }
 
 /// The chip profile of the hosted PE: identification the engine implements
-/// on this host, capped at the chip, with the M2's 24 MHz counter.
+/// on this host, capped at the chip, with the M2's 24 MHz counter. The
+/// process is one guest context, so its speculation guarantees are the host
+/// OS's process isolation (`Speculation::HOSTED`).
 pub fn profile(chip: Chip, target: TargetCpu) -> CpuProfile {
-    let mut fixed = crate::machine::identification::derive(chip, target, true);
+    let mut fixed = crate::machine::identification::derive(
+        chip,
+        target,
+        true,
+        crate::machine::identification::Speculation::HOSTED,
+    );
     fixed.push((DCZID_EL0, DCZID_BLOCK_64));
     CpuProfile {
         name: chip.name(),

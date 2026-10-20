@@ -10,9 +10,10 @@
 //! basis must hold here. An
 //! instruction feature holds when its sample encodings compile for the
 //! system-mode block profile on the host target; any other feature is an
-//! engine property stated with its reason, or holds only when the kernel
-//! level is EL2 as a VHE host. A field with no satisfied row reads its "not
-//! implemented" value.
+//! engine property stated with its reason, holds only when the kernel
+//! level is EL2 as a VHE host, or is a speculation guarantee the host gives
+//! ([`Speculation`]). A field with no satisfied row reads its "not
+//! implemented" (or "not disclosed") value.
 use super::{Chip, registers::encodings::*, system::Feature};
 use alloc::vec::Vec;
 use stela_compiler::{
@@ -41,6 +42,32 @@ pub enum Basis {
     /// data operand independent timing and supports a tier the DIT audit
     /// covers), which the engine compiles PSTATE.DIT code for.
     Timing(&'static str),
+    /// Holds when the host keeps branch predictions within one guest
+    /// context ([`Speculation::contexts`]).
+    Contexts(&'static str),
+}
+
+/// The speculation guarantees the host gives guest code, which the
+/// ID_AA64PFR0_EL1 CSV2 field discloses. Arm's 0 there means "not
+/// disclosed", so a host that cannot establish the guarantee reports 0.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Speculation {
+    /// FEAT_CSV2 and FEAT_CSV2_2: branch targets trained in one guest
+    /// context cannot steer speculation in another. The bare-metal host
+    /// issues an indirect branch prediction barrier and refills the return
+    /// stack buffer at every guest context change
+    /// (`engine::PredictionContext`, `Host::isolate_predictions`), where the
+    /// CPU enumerates IBPB. A hosted process is one guest context, and the
+    /// host OS's process isolation separates it from other processes'.
+    pub contexts: bool,
+}
+
+impl Speculation {
+    /// A host that establishes no guarantee.
+    pub const NONE: Self = Self { contexts: false };
+    /// A hosted process: one guest context per host process, whose
+    /// predictions the host OS's process isolation separates.
+    pub const HOSTED: Self = Self { contexts: true };
 }
 
 /// One level of one field. A field's rows are listed in increasing level;
@@ -101,7 +128,9 @@ const NO_MONITORS: &str = "no Arm performance or trace monitor is modeled";
 const ACTIVITY_MONITORS: &str = "machine::amu counts the four architected group 0 events";
 const VIRTUAL_OFFSETS: &str = "HCR_EL2.AMVOFFEN applies AMEVCNTVOFF0<n>_EL2 and CNTVOFF_EL2 \
      to EL0 and EL1 counter reads";
-const NO_GUARANTEE: &str = "translated code gives no such speculation guarantee";
+const PREDICTION_ISOLATION: &str = "the host isolates branch predictions at every guest \
+     context change (IBPB and a return stack refill), or the host OS does between hosted \
+     processes; SCXTNUM_ELx is held and distinguishes no context";
 const DATA_INDEPENDENT_TIMING: &str = "PSTATE.DIT blocks compile for the host's audited \
      data-independent-timing tier, whose lowerings of every listed instruction use only \
      Intel's data operand independent timing instructions (isa/dit-timing-audit.json)";
@@ -297,12 +326,25 @@ pub const TABLE: &[Row] = &[
         "FEAT_DIT",
         Basis::Timing(DATA_INDEPENDENT_TIMING),
     ),
+    // CSV2 2 (FEAT_CSV2_2, which the chips' clang features name, above
+    // Armv8.5's FEAT_CSV2), as the chip has it, where the host gives the
+    // guarantee ([`Speculation`]). CSV2_frac stays 0, its only value with
+    // CSV2 2. CSV3 reads 0: translated code gives no faulting-data
+    // guarantee.
+    row(
+        ID_AA64PFR0_EL1,
+        56,
+        1,
+        0,
+        None,
+        Basis::Contexts(PREDICTION_ISOLATION),
+    ),
     feature(
         ID_AA64PFR0_EL1,
         56,
         2,
         "FEAT_CSV2_2",
-        engine(false, NO_GUARANTEE),
+        Basis::Contexts(PREDICTION_ISOLATION),
     ),
     // ID_AA64PFR1_EL1
     feature(
@@ -1158,7 +1200,7 @@ fn has(chip: Chip, feature: &str) -> bool {
     }
 }
 
-fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
+fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool, speculation: Speculation) -> bool {
     if row.feature.is_some_and(|feature| !has(chip, feature)) {
         return false;
     }
@@ -1167,6 +1209,7 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
         Basis::With(feature, _) => has(chip, feature),
         Basis::Host(_) => el2,
         Basis::Timing(_) => target.data_independent_timing_target().is_some(),
+        Basis::Contexts(_) => speculation.contexts,
         Basis::Instructions(samples) => samples.iter().all(|word| {
             CompilationPlan::new(
                 &word.to_le_bytes(),
@@ -1181,8 +1224,13 @@ fn holds(row: &Row, chip: Chip, target: TargetCpu, el2: bool) -> bool {
 }
 
 /// Every register of [`REGISTERS`] with its value for `chip` on this host
-/// target, with or without EL2.
-pub fn derive(chip: Chip, target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> {
+/// target, with or without EL2, with the host's `speculation` guarantees.
+pub fn derive(
+    chip: Chip,
+    target: TargetCpu,
+    el2: bool,
+    speculation: Speculation,
+) -> Vec<(Encoding, u64)> {
     REGISTERS
         .iter()
         .map(|&register| {
@@ -1196,7 +1244,7 @@ pub fn derive(chip: Chip, target: TargetCpu, el2: bool) -> Vec<(Encoding, u64)> 
                         fields.last_mut().expect("just pushed")
                     }
                 };
-                if holds(row, chip, target, el2) {
+                if holds(row, chip, target, el2, speculation) {
                     current.1 = row.level;
                 }
             }
@@ -1275,7 +1323,12 @@ mod tests {
 
     #[test]
     fn minimal_feature_configurations_are_advertised() {
-        let values = derive(crate::machine::test_chip(), TargetCpu::detect(), true);
+        let values = derive(
+            crate::machine::test_chip(),
+            TargetCpu::detect(),
+            true,
+            Speculation::NONE,
+        );
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         let field = |register, shift: u32| (value(register) >> shift) & 0xf;
         // RASv1p1 (RASv2 on the M6), MPAM v1.0 and the AMU (none on the M1
@@ -1300,10 +1353,10 @@ mod tests {
         assert_eq!(value(AMCFGR_EL0), amcfgr);
         assert_eq!(value(AMCGCR_EL0), amcgcr);
         assert_eq!(value(AMCG1IDR_EL0), 0);
-        // CSV2 and CSV3 (PFR0 56, 60) and CSV2_frac (PFR1 32) are withheld
-        // on every chip: translated code gives no speculation guarantee. DIT
-        // (PFR0 48) needs a host that declares DOIT, which a hosted
-        // process's detected target never does.
+        // CSV2 and CSV3 (PFR0 56, 60) and CSV2_frac (PFR1 32) read 0 on a
+        // host that gives no speculation guarantee. DIT (PFR0 48) needs a
+        // host that declares DOIT, which a hosted process's detected target
+        // never does.
         for shift in [48, 56, 60] {
             assert_eq!(field(ID_AA64PFR0_EL1, shift), 0, "PFR0 {shift}");
         }
@@ -1333,10 +1386,32 @@ mod tests {
     }
 
     #[test]
+    fn csv_fields_disclose_the_speculation_guarantees_the_host_gives() {
+        const CSV2: u32 = 56;
+        const CSV3: u32 = 60;
+        const CSV2_FRAC: u32 = 32;
+        let fields = |chip, speculation| {
+            let values = derive(chip, TargetCpu::detect(), true, speculation);
+            let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
+            (
+                value(ID_AA64PFR0_EL1) >> CSV2 & 0xf,
+                value(ID_AA64PFR0_EL1) >> CSV3 & 0xf,
+                value(ID_AA64PFR1_EL1) >> CSV2_FRAC & 0xf,
+            )
+        };
+        // The chip has FEAT_CSV2_2 (CSV2 2, where CSV2_frac is 0), disclosed
+        // only where the host isolates predictions; CSV3 stays 0.
+        let chip = crate::machine::test_chip();
+        assert!(has(chip, "FEAT_CSV2_2"));
+        assert_eq!(fields(chip, Speculation::NONE), (0, 0, 0));
+        assert_eq!(fields(chip, Speculation::HOSTED), (2, 0, 0));
+    }
+
+    #[test]
     fn dit_is_advertised_only_with_a_data_independent_timing_target() {
         const DIT_SHIFT: u32 = 48;
         let dit = |chip, target| {
-            let values = derive(chip, target, true);
+            let values = derive(chip, target, true, Speculation::NONE);
             let pfr0 = values
                 .iter()
                 .find(|(r, _)| *r == ID_AA64PFR0_EL1)
@@ -1358,7 +1433,12 @@ mod tests {
     #[test]
     fn advertised_instruction_fields_match_what_the_decoder_compiles() {
         let target = TargetCpu::detect();
-        let values = derive(crate::machine::test_chip(), target, false);
+        let values = derive(
+            crate::machine::test_chip(),
+            target,
+            false,
+            Speculation::NONE,
+        );
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         for row in TABLE {
             let Basis::Instructions(samples) = row.basis else {
@@ -1371,7 +1451,7 @@ mod tests {
                     .find(|chip| has(*chip, feature))
                     .unwrap()
             });
-            let chip_values = derive(chip, target, false);
+            let chip_values = derive(chip, target, false, Speculation::NONE);
             let chip_value = |register| chip_values.iter().find(|(r, _)| *r == register).unwrap().1;
             let field = (chip_value(row.register) >> row.shift) & 0xf;
             let compiles = samples.iter().all(|word| {
@@ -1414,7 +1494,12 @@ mod tests {
 
     #[test]
     fn fixed_and_engine_fields() {
-        let values = derive(crate::machine::test_chip(), TargetCpu::detect(), false);
+        let values = derive(
+            crate::machine::test_chip(),
+            TargetCpu::detect(),
+            false,
+            Speculation::NONE,
+        );
         let value = |register| values.iter().find(|(r, _)| *r == register).unwrap().1;
         // EL0/EL1 AArch64, no EL2/EL3; 48-bit PA, 16-bit ASID, 16K and 4K but
         // not 64K granules; PAN2, or PAN3 from the M4; Armv8.0 debug without
@@ -1446,7 +1531,12 @@ mod tests {
             1 << 60 | 1 << 48 | 1
         );
         // With EL2: AArch64 EL2 and VHE.
-        let hosted = derive(crate::machine::test_chip(), TargetCpu::detect(), true);
+        let hosted = derive(
+            crate::machine::test_chip(),
+            TargetCpu::detect(),
+            true,
+            Speculation::NONE,
+        );
         let host = |register| hosted.iter().find(|(r, _)| *r == register).unwrap().1;
         assert_eq!(host(ID_AA64PFR0_EL1), value(ID_AA64PFR0_EL1) | 0x100);
         // With EL2, stage 2 adds 4 KiB and 16 KiB stage-2 granules, XNX and
@@ -1478,7 +1568,7 @@ mod tests {
     #[test]
     fn each_chip_advertises_only_its_own_features() {
         let field = |chip: Chip, register, shift: u32| {
-            let values = derive(chip, TargetCpu::detect(), true);
+            let values = derive(chip, TargetCpu::detect(), true, Speculation::NONE);
             let value = values.iter().find(|(r, _)| *r == register).unwrap().1;
             (value >> shift) & 0xf
         };

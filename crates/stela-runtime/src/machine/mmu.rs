@@ -164,7 +164,12 @@ pub(crate) fn test_xs() -> bool {
 pub(crate) fn test_translation_chip() -> super::Chip {
     use super::registers::encodings::{ID_AA64ISAR0_EL1, ID_AA64MMFR0_EL1, ID_AA64MMFR2_EL1};
     let chip = super::test_chip();
-    let values = super::identification::derive(chip, stela_compiler::TargetCpu::Baseline, true);
+    let values = super::identification::derive(
+        chip,
+        stela_compiler::TargetCpu::Baseline,
+        true,
+        super::identification::Speculation::NONE,
+    );
     let value = |register| {
         values
             .iter()
