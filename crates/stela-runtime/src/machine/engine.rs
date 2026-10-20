@@ -3053,9 +3053,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The word an instruction inside a compiled block executes as: its
-    /// original word, or the UDF or NOP of a form the chip lacks.
+    /// original word, or the UDF or NOP of a form the chip lacks. The
+    /// block's last is kept as it was compiled; others are read again.
     fn word(&mut self, index: usize, pc: u64) -> Result<u32, Stop> {
         let block = &self.blocks[index];
+        if pc == block.terminal.0 {
+            return Ok(block.terminal.1);
+        }
         let physical = block.physical + (pc - block.pc);
         let mut bytes = [0; 4];
         if !self.host.read_ram(physical, &mut bytes) {
