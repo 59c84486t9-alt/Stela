@@ -173,7 +173,7 @@ fn prune(record: &mut Record) -> Result<()> {
 
 /// Delete a medium the record no longer names.
 fn remove_medium(medium: &super::medium::Medium) -> Result<()> {
-    let directory = medium.directory();
+    let directory = medium.removable_directory()?;
     if directory.is_dir() {
         fs::remove_dir_all(&directory)
             .with_context(|| format!("cannot remove {}", directory.display()))?;

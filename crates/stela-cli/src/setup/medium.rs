@@ -53,6 +53,21 @@ impl Medium {
         directory(&self.volume, &self.build)
     }
 
+    /// Its directory, checked to be an install medium's on its volume
+    /// before setup removes it.
+    pub(super) fn removable_directory(&self) -> Result<PathBuf> {
+        let directory = self.directory();
+        ensure!(
+            directory.starts_with(&self.volume)
+                && directory
+                    .parent()
+                    .is_some_and(|p| p.ends_with("EFI/stela/install")),
+            "the setup record names an unexpected install medium {}",
+            directory.display()
+        );
+        Ok(directory)
+    }
+
     /// `payload.json` as `stela.cfg` names it on the firmware's volume.
     pub(super) fn firmware_manifest(&self) -> String {
         format!(
@@ -630,6 +645,21 @@ pub(super) mod tests {
             manifest_sha256: String::new(),
         };
         assert_eq!(medium.problems().len(), 1);
+    }
+
+    #[test]
+    fn only_an_install_directory_on_its_volume_is_removable() {
+        let medium = |build: &str| Medium {
+            build: build.into(),
+            volume: PathBuf::from("/Volumes/STELA"),
+            partition_guid: String::new(),
+            manifest_sha256: String::new(),
+        };
+        assert_eq!(
+            medium("26A434").removable_directory().unwrap(),
+            Path::new("/Volumes/STELA/EFI/stela/install/26A434")
+        );
+        assert!(medium("../../../Users").removable_directory().is_err());
     }
 
     #[test]

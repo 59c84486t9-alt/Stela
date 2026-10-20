@@ -2004,15 +2004,7 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
             }
         }
         for medium in &record.media {
-            let directory = medium.directory();
-            ensure!(
-                directory.starts_with(&medium.volume)
-                    && directory
-                        .parent()
-                        .is_some_and(|p| p.ends_with("EFI/stela/install")),
-                "the setup record names an unexpected install medium {}",
-                directory.display()
-            );
+            let directory = medium.removable_directory()?;
             if directory.exists() {
                 removals.push(directory);
             }
