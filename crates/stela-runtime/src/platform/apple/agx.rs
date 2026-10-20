@@ -25,8 +25,11 @@
 //!   reads (Flag, shared-event signal, CLPC notice).
 //! - [`isa`]: the AGX2 shader ISA, decoded from tables generated out of
 //!   Mesa's `AGX2.xml` and interpreted a SIMD group at a time.
-//! - [`format`]: pixel and texture formats.
+//! - [`format`]: pixel and texture formats, layouts, compression and
+//!   sampling.
 //! - [`stream`]: the CDM, VDM, PPP and USC control streams.
+//! - [`raster`]: clipping, coverage, coefficient planes and depth/stencil
+//!   tests.
 //! - [`exec`]: the execution engine that runs those streams' work.
 //!
 //! The requirement matrix and its statuses are docs/research/agx.md §5.
@@ -34,11 +37,11 @@
 pub mod channel;
 pub mod event;
 pub mod exec;
-
 pub mod firmware;
 pub mod format;
 pub mod initdata;
 pub mod isa;
+pub mod raster;
 pub mod ring;
 pub mod sgx;
 pub mod signal;

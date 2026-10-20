@@ -164,6 +164,53 @@ impl Image {
         })
     }
 
+    /// A depth or stencil surface as the ZLS reaches it: one level of
+    /// `width` x `height` pixels at `base` (the level's first layer), its
+    /// layers `layer_stride` bytes apart, and optionally its compression
+    /// metadata at `meta` with layers `meta_stride` bytes apart (Public: Mesa
+    /// `hk_cmd_draw.c` points the ZLS at the level and passes both
+    /// strides; Inferred: the level is laid out as a single-level image of
+    /// the render's size).
+    #[allow(clippy::too_many_arguments)]
+    pub fn surface(
+        format: Format,
+        tiling: Tiling,
+        size: (u32, u32),
+        layers: u32,
+        samples: u32,
+        base: u64,
+        layer_stride: u64,
+        meta: Option<(u64, u64)>,
+    ) -> Result<Self, &'static str> {
+        let mut image = Self::new(Parts {
+            dimension: if samples > 1 {
+                Dimension::D2ArrayMultisampled
+            } else {
+                Dimension::D2Array
+            },
+            tiling,
+            format,
+            width: size.0,
+            height: size.1,
+            layers,
+            samples,
+            mipmapped: false,
+            page_aligned_layers: true,
+            linear_stride: 0,
+            linear_layer_stride: None,
+            acceleration_buffer: meta.map(|(address, _)| address),
+            compressed: meta.is_some(),
+            base,
+            first_level: 0,
+            last_level: 0,
+        })?;
+        image.layout.layer_stride = layer_stride;
+        if let (Some(compression), Some((_, stride))) = (image.compression.as_mut(), meta) {
+            compression.layer_stride = stride;
+        }
+        Ok(image)
+    }
+
     fn new(parts: Parts) -> Result<Self, &'static str> {
         let (bw, bh, bytes) = parts.format.block()?;
         let depth = if parts.dimension == Dimension::D3 {

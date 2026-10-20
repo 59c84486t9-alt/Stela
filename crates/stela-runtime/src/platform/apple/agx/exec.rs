@@ -7,8 +7,14 @@
 //! main shader. Execution is in order and completes before the next block
 //! is read, so a launch sees every earlier launch's writes and barriers
 //! need no cache work.
+//!
+//! [`render`] runs a render pass: the VDM stream's draws are shaded,
+//! assembled, clipped and binned, then every tile runs its background
+//! program, the binned primitives' fragments in order and its end-of-tile
+//! program, with depth and stencil loaded and stored through the ZLS.
 
 pub mod compute;
+pub mod render;
 
 use super::isa::machine::{
     Env, ExecError, Exit, Memory, Program, SAMPLER_STATE_BYTES, STATE_REGISTERS, SimdGroup,
