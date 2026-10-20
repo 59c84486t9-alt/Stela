@@ -64,6 +64,20 @@ fn boot_volume() -> Option<FileSystem> {
         .map(FileSystem::new)
 }
 
+/// Connect every controller to its drivers, recursively, as a boot manager
+/// does before it lists boot options (edk2 `EfiBootManagerConnectAll`). A
+/// firmware that boots fast connects only the path to the boot loader, and
+/// the bundle, the install medium and the host disks lie on other
+/// partitions and devices. A controller no driver takes stays as it was.
+pub(crate) fn connect_all() {
+    let Ok(handles) = boot::locate_handle_buffer(boot::SearchType::AllHandles) else {
+        return;
+    };
+    for &handle in handles.iter() {
+        let _ = boot::connect_controller(handle, &[], None, true);
+    }
+}
+
 /// The first file system that has `stela.cfg`.
 fn configured_volume() -> Option<FileSystem> {
     boot::find_handles::<SimpleFileSystem>()

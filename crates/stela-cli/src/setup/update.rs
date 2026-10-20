@@ -6,7 +6,7 @@
 //!
 //! - Stela: every `stela.efi` setup has run is kept under
 //!   `EFI/stela/versions/<id>/stela.efi` on the ESP (`id`: the first 16
-//!   hexadecimal digits of its SHA-256); the OpenCore tool is replaced
+//!   hexadecimal digits of its SHA-256); the USB's boot loader is replaced
 //!   atomically by the new one. A new `stela.efi` must carry this `stela`'s
 //!   mount interface. When it reads another boot-bundle schema than the
 //!   setup's bundles have, the update prepares every machine's bundle of
@@ -29,7 +29,7 @@
 //!
 //! Neither touches the installed disks' partitions.
 use super::{
-    Environment, MEDIA_KEPT, Record, TOOL_PATH, apply_install, bundle, check_space, copy_bundles,
+    Environment, LOADER_PATH, MEDIA_KEPT, Record, apply_install, bundle, check_space, copy_bundles,
     describe_install, first_schema, plan_install, prepare_bundles, publish, read_efi,
     restore_bundles, write_record,
 };
@@ -216,8 +216,8 @@ pub(super) fn update_stela(
         |pending| matches!(pending, Change::Stela { to: t, .. } if *t == to),
     )?;
     let esp = record.esp.clone();
-    let current = fs::read(esp.join(TOOL_PATH))
-        .with_context(|| format!("{} has no {TOOL_PATH}", esp.display()))?;
+    let current = fs::read(esp.join(LOADER_PATH))
+        .with_context(|| format!("{} has no {LOADER_PATH}", esp.display()))?;
     let (from, from_schema) = match &record.pending {
         Some(Change::Stela {
             from, from_schema, ..

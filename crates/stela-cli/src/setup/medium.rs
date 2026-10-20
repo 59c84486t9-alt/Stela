@@ -164,7 +164,7 @@ pub(super) fn locate(
         }
         if partition.content == "EFI" {
             reasons.push_str(&format!(
-                "  {} is the EFI partition, which keeps OpenCore and Stela\n",
+                "  {} is the EFI partition, which keeps Stela\n",
                 mount.display()
             ));
             continue;

@@ -58,7 +58,7 @@ pub(crate) enum Command {
     /// Make native launchers in ~/Applications/Stela for arm64-only apps, so
     /// they open from Finder, the Dock and Open With.
     Apps(apps::Apps),
-    /// Prepare an OpenCore USB to install macOS 27 with Stela, or undo it.
+    /// Prepare a USB that boots Stela to install macOS 27, or undo it.
     Setup(setup::Setup),
     /// Print the boot log stela.efi keeps on a machine-state partition, from a
     /// disk image or a raw partition.
@@ -144,7 +144,7 @@ pub(crate) enum Command {
     /// such as a disk image for a QEMU run.
     #[command(hide = true)]
     InstallMedium(setup::InstallMedium),
-    /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
+    /// Make stela.efi an EFI partition's boot loader, or remove it.
     #[command(subcommand, hide = true)]
     Efi(efi::EfiCommand),
 }

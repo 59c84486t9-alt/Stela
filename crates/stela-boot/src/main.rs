@@ -1,7 +1,8 @@
 //! UEFI application that runs an ARM image on the shared compiler and runtime.
 //!
-//! The firmware, or a boot manager such as OpenCore, starts `stela.efi`. It
-//! reads `\EFI\stela\stela.cfg` and the original ARM bytes in
+//! The firmware starts `stela.efi`, on a USB as its removable-media boot
+//! loader `\EFI\BOOT\BOOTX64.EFI`. It connects every controller to its
+//! drivers, reads `\EFI\stela\stela.cfg` and the original ARM bytes in
 //! `\EFI\stela\source.bin` from its own volume, leaves boot services,
 //! installs its own page tables and runs the image on `SoftwareEl1Machine`.
 //! A `stela.cfg` that starts with `--system` instead runs the image on the
@@ -175,6 +176,7 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
+    firmware::connect_all();
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     let options = choice::choose(&mut volume, options);

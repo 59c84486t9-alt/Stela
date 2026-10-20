@@ -1,4 +1,4 @@
-//! `stela setup`: prepare a user's own OpenCore USB to install macOS 27 onto
+//! `stela setup`: prepare a USB to install macOS 27 onto
 //! a disk of the PC and boot it, and keep it working over the installed
 //! system's life.
 //!
@@ -16,9 +16,10 @@
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the recoveryOS boot bundle (`stela boot prepare
-//! --recovery`) on this computer, then copies it to a volume of the USB that
-//! OpenCore can read, adds `stela.efi` to OpenCore's boot picker with a
-//! `stela.cfg` that boots that bundle, and records what it wrote in
+//! --recovery`) on this computer, then copies it to a FAT32 volume of the
+//! USB, which the PC's firmware can read, installs `stela.efi` as the USB's
+//! boot loader (`efi`) with a `stela.cfg` that boots that bundle, and
+//! records what it wrote in
 //! `EFI/stela/setup.json`. `--dry-run` stops after the checks; `--uninstall`
 //! removes everything the record names.
 //!
@@ -28,7 +29,7 @@
 //! (`setup::installed`): one empty partition becomes the Mac's internal SSD
 //! and keeps the machine state (NVRAM, the SEP's state, the boot log) in its
 //! last bytes, outside what the guest sees, or `--nor` names a partition of
-//! its own for that state. The entry then boots the installed macOS from
+//! its own for that state. The USB then boots the installed macOS from
 //! that disk, or recoveryOS when NVRAM asks for it or the disk holds no
 //! system yet, as a Mac does. Further disks become further installs of the same
 //! setup (`setup::machines`), each its own machine, chosen at boot from
@@ -53,7 +54,6 @@ mod medium;
 mod state;
 mod translations;
 mod update;
-mod usb;
 
 pub(crate) use installed::NextBoot;
 
@@ -80,8 +80,8 @@ pub(crate) const PINNED_MODEL: &str = "Mac14,3";
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
 pub(super) const MARGIN: u64 = 64 * 1024 * 1024;
-/// The OpenCore tool `stela setup` installs.
-pub(super) const TOOL_PATH: &str = efi::INSTALLED[0];
+/// The boot loader `stela setup` installs: `stela.efi` itself.
+pub(super) const LOADER_PATH: &str = efi::LOADER;
 /// The startup choices beside `stela.cfg`.
 const CHOICES_PATH: &str = "EFI/stela/choices.cfg";
 /// The startup choices' timeout with several installs; with one, the list
@@ -732,7 +732,7 @@ fn remove_bundles(record: &Record, stale: &[bundle::Bundle]) -> Result<()> {
 fn publish(record: &mut Record) -> Result<()> {
     record.options = record.options_text();
     let choices = record.choices_text()?;
-    let tool = record.esp.join(TOOL_PATH);
+    let tool = record.esp.join(LOADER_PATH);
     efi::add_mount(&record.esp, &tool, None, Some(&record.options))?;
     let path = record.esp.join(CHOICES_PATH);
     match choices {
@@ -829,7 +829,7 @@ fn read_efi(environment: &Environment<'_>, path: &Path) -> Result<Vec<u8>> {
 /// Refuse to change a setup whose installed `stela.efi` reads another
 /// interface than this `stela` writes; `--update-stela` replaces it first.
 fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result<()> {
-    let tool = record.esp.join(TOOL_PATH);
+    let tool = record.esp.join(LOADER_PATH);
     let image = fs::read(&tool).with_context(|| format!("cannot read {}", tool.display()))?;
     if let Some(reason) =
         mount_interface::mismatch(environment.interface, mount_interface::find(&image))
@@ -1156,8 +1156,8 @@ impl Setup {
     }
 }
 
-/// The ESP to change: `usb` itself, or the EFI partition of its disk. It
-/// must hold OpenCore and sit on a removable disk.
+/// The ESP to change: the EFI partition of `usb`'s disk, which must be
+/// mounted, sit on a removable disk and boot no loader but Stela's.
 fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     ensure!(usb.is_dir(), "{} is not a mounted volume", usb.display());
     let volume = host.volume(usb)?;
@@ -1166,28 +1166,28 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
         .disk
         .as_ref()
         .and_then(|id| disks.iter().find(|d| &d.identifier == id));
-    let esp = match usb::detect(usb) {
-        usb::BootManager::OpenCore => usb.to_path_buf(),
-        manager => {
-            let partition = disk.and_then(|d| d.partitions.iter().find(|p| p.content == "EFI"));
-            match partition {
-                Some(partition) => match &partition.mount {
-                    Some(mount) if usb::detect(mount) == usb::BootManager::OpenCore => {
-                        mount.clone()
-                    }
-                    Some(mount) => bail!(usb::refusal(&usb::detect(mount), mount)),
-                    None => bail!(
-                        "{} is on the same disk as EFI partition {}, which is not mounted. \
-                         Mount it with `sudo diskutil mount {}` and run setup again.",
-                        usb.display(),
-                        partition.identifier,
-                        partition.identifier
-                    ),
-                },
-                None => bail!(usb::refusal(&manager, usb)),
-            }
-        }
+    let partition = disk.and_then(|d| d.partitions.iter().find(|p| p.content == "EFI"));
+    let esp = match partition {
+        Some(partition) => match &partition.mount {
+            Some(mount) => mount.clone(),
+            None => bail!(
+                "{} is on the same disk as EFI partition {}, which is not mounted. Mount it \
+                 with `sudo diskutil mount {}` and run setup again.",
+                usb.display(),
+                partition.identifier,
+                partition.identifier
+            ),
+        },
+        None => bail!(
+            "{} is on a disk without an EFI partition. Erase the USB in Disk Utility with the \
+             GUID Partition Map scheme, which gives it one, then run setup again.",
+            usb.display()
+        ),
     };
+    // A USB setup prepared owns its loader, damaged or old as it may be.
+    if !esp.join(RECORD).is_file() {
+        efi::check_loader(&esp)?;
+    }
     if let Some(disk) = host
         .volume(&esp)?
         .disk
@@ -1196,7 +1196,7 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
         ensure!(
             !disk.system && !disk.internal,
             "{} is on {} ({}), an internal disk{}. Setup changes only a removable USB; use \
-             `stela efi install` to add Stela to another EFI partition by hand.",
+             `stela efi install` to install Stela on another EFI partition by hand.",
             esp.display(),
             disk.identifier,
             disk.name,
@@ -1210,28 +1210,18 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     Ok(esp)
 }
 
-/// Whether `stela.efi` can read files on this file system through OpenCore.
-fn readable(filesystem: &FileSystem, drivers: &[String]) -> Result<(), String> {
-    let has = |name: &str| drivers.iter().any(|d| d.contains(name));
+/// Whether `stela.efi` can read files on this file system: the firmware
+/// reads FAT, the file system UEFI requires, and no other.
+fn readable(filesystem: &FileSystem) -> Result<(), String> {
     match filesystem {
         FileSystem::Fat => Ok(()),
-        FileSystem::Hfs if has("hfsplus") => Ok(()),
-        FileSystem::Hfs => Err(
-            "is HFS+, but OpenCore loads no OpenHfsPlus.efi or HfsPlus.efi \
-             driver to read it"
-                .into(),
-        ),
-        FileSystem::Ntfs if has("openntfsdxe") => Ok(()),
-        FileSystem::Ntfs => Err("is NTFS, but OpenCore loads no OpenNtfsDxe.efi driver".into()),
-        FileSystem::ExFat => Err("is exFAT, which OpenCore cannot read; use FAT32 or HFS+".into()),
-        FileSystem::Apfs => Err("is APFS, which stela.efi cannot read; use FAT32 or HFS+".into()),
-        FileSystem::Other(name) => Err(format!(
-            "has file system {name}, which stela.efi cannot read"
+        other => Err(format!(
+            "is {other}, which the PC's firmware cannot read; use FAT32"
         )),
     }
 }
 
-/// The first volume of the USB that OpenCore can read and the bundle fits
+/// The first volume of the USB that the firmware can read and the bundle fits
 /// on.
 fn choose_volume(
     host: &dyn Host,
@@ -1240,7 +1230,6 @@ fn choose_volume(
     explicit: Option<&Path>,
     bundle_bytes: u64,
 ) -> Result<PathBuf> {
-    let drivers = usb::opencore_drivers(esp);
     let esp_disk = host.volume(esp)?.disk;
     let mut volumes: Vec<PathBuf> = match explicit {
         Some(path) => vec![path.to_path_buf()],
@@ -1270,7 +1259,7 @@ fn choose_volume(
                 esp.display()
             );
         }
-        if let Err(reason) = readable(&info.filesystem, &drivers) {
+        if let Err(reason) = readable(&info.filesystem) {
             writeln!(reasons, "  {} {reason}", volume.display())?;
             continue;
         }
@@ -1288,9 +1277,8 @@ fn choose_volume(
         return Ok(volume);
     }
     bail!(
-        "No volume of the USB can hold the recoveryOS bundle:\n{reasons}Add a FAT32 or HFS+ \
-         data partition of at least 4 GB beside the EFI partition (HFS+ needs OpenCore's \
-         OpenHfsPlus.efi driver), then pass it with --volume."
+        "No volume of the USB can hold the recoveryOS bundle:\n{reasons}Add a FAT32 data \
+         partition of at least 4 GB beside the EFI partition, then pass it with --volume."
     )
 }
 
@@ -1649,7 +1637,6 @@ struct Plan {
 fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result<Plan> {
     let host = environment.host;
     let esp = locate_esp(host, &command.usb)?;
-    efi::check_config(&esp)?;
     if esp.join(RECORD).exists() {
         let interrupted = stela_runtime::read_json::<Record>(&esp.join(RECORD))
             .is_ok_and(|record| !record.complete);
@@ -1852,7 +1839,7 @@ fn describe(plan: &Plan) -> Result<String> {
         plan.product_version, record.build, record.model
     )?;
     writeln!(text, "  restore image  {}", plan.ipsw.display())?;
-    writeln!(text, "  OpenCore ESP   {}", record.esp.display())?;
+    writeln!(text, "  EFI partition  {}", record.esp.display())?;
     writeln!(
         text,
         "  ECID           {}",
@@ -1877,9 +1864,8 @@ fn describe(plan: &Plan) -> Result<String> {
     }
     writeln!(
         text,
-        "  OpenCore       adds the \"{}\" tool entry; keeps the old config.plist as {}",
-        efi::NAME,
-        record.esp.join("EFI/stela/config.plist.backup").display()
+        "  boot loader    {}: stela.efi",
+        record.esp.join(LOADER_PATH).display()
     )?;
     match (&plan.installed, record.installs.first()) {
         (Some(checked), Some(install)) => {
@@ -1954,9 +1940,8 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
     let start = match &command.target {
         Some(target) => format!(
             "choose \"{INSTALL_CHOICE}\" in Stela's startup choices to install macOS onto \
-             {target}, then reboot and choose \"{}\" again, which boots the installed macOS \
-             (or recoveryOS while {target} holds none, or when NVRAM asks)",
-            efi::NAME
+             {target}, then boot from the USB again, which boots the installed macOS (or \
+             recoveryOS while {target} holds none, or when NVRAM asks)"
         ),
         _ => "stela.efi starts recoveryOS, where Disk Utility prepares a disk and Reinstall \
               macOS installs onto it, as on a Mac"
@@ -1964,10 +1949,9 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
     };
     writeln!(
         report,
-        "Done. Boot the PC from this USB and choose \"{}\" in OpenCore's picker: {start}. \
-         Stela does not run recoveryOS to its window yet.\nCheck it with: stela setup --status \
-         --usb {}\nUndo with: stela setup --uninstall --usb {}",
-        efi::NAME,
+        "Done. Boot the PC from this USB (the firmware's boot menu lists it as a UEFI USB \
+         device): {start}. Stela does not run recoveryOS to its window yet.\nCheck it with: \
+         stela setup --status --usb {}\nUndo with: stela setup --uninstall --usb {}",
         command.usb.display(),
         command.usb.display()
     )?;
@@ -2017,7 +2001,6 @@ fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
 
 fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result<String> {
     let esp = locate_esp(environment.host, usb)?;
-    efi::check_config(&esp)?;
     let record: Option<Record> = esp
         .join(RECORD)
         .is_file()
@@ -2072,7 +2055,7 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
     } else {
         writeln!(
             text,
-            "No setup record on {}; removing only the OpenCore entry and Stela's files.",
+            "No setup record on {}; removing only Stela's boot loader and files.",
             esp.display()
         )?;
     }
@@ -2085,12 +2068,6 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
             writeln!(text, "  remove   {}", esp.join(file).display())?;
         }
     }
-    writeln!(
-        text,
-        "  OpenCore remove the \"{}\" entry from {}",
-        efi::NAME,
-        esp.join("EFI/OC/config.plist").display()
-    )?;
     for install in record.iter().flat_map(|r| {
         let mut r = r.clone();
         r.migrate();
@@ -2127,14 +2104,7 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
         }
         fs::remove_file(esp.join(RECORD))?;
     }
-    let report = efi::uninstall(&esp)?;
-    if let Some(backup) = report["kept_backup"].as_str() {
-        writeln!(
-            text,
-            "  kept     {backup}: config.plist changed since install, so only the entry was \
-             removed; the backup holds the configuration from before Stela"
-        )?;
-    }
+    efi::uninstall(&esp, record.is_some())?;
     text.push_str("Done.\n");
     Ok(text)
 }
@@ -2147,11 +2117,6 @@ mod tests {
     use stela_runtime::machine::apple::nor::nvram::Variables;
 
     const GIB: u64 = 1024 * 1024 * 1024;
-
-    const FIXTURE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/opencore-config.plist"
-    );
 
     /// A computer whose volumes and disks the test declares.
     pub(super) struct FakeHost {
@@ -2278,8 +2243,8 @@ mod tests {
         image
     }
 
-    /// A USB (disk5) with an OpenCore ESP and an HFS+ data volume, and this
-    /// computer's system disk (disk0).
+    /// A USB (disk5) with an empty EFI partition and a data volume, HFS+ or
+    /// FAT, and this computer's system disk (disk0).
     struct Fixture {
         _dir: tempfile::TempDir,
         esp: PathBuf,
@@ -2289,18 +2254,17 @@ mod tests {
         host: FakeHost,
     }
 
-    fn fixture(esp_free: u64, hfs_driver: bool) -> Fixture {
+    fn fixture(esp_free: u64, fat_data: bool) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let esp = dir.path().join("ESP");
         let data = dir.path().join("Data");
-        fs::create_dir_all(esp.join("EFI/OC/Tools")).unwrap();
+        fs::create_dir_all(&esp).unwrap();
         fs::create_dir_all(&data).unwrap();
-        let mut config = fs::read_to_string(FIXTURE).unwrap();
-        if hfs_driver {
-            config = config.replace("OpenRuntime.efi", "OpenHfsPlus.efi");
-        }
-        fs::write(esp.join("EFI/OC/config.plist"), config).unwrap();
-        fs::write(esp.join("EFI/OC/OpenCore.efi"), b"MZoc").unwrap();
+        let data_filesystem = if fat_data {
+            FileSystem::Fat
+        } else {
+            FileSystem::Hfs
+        };
         let ipsw = dir.path().join("Synthetic.ipsw");
         efi::synthetic_ipsw(&ipsw).unwrap();
         let efi = dir.path().join("stela.efi");
@@ -2308,7 +2272,7 @@ mod tests {
         let host = FakeHost::new(
             [
                 (esp.clone(), (FileSystem::Fat, esp_free, Some("disk5"))),
-                (data.clone(), (FileSystem::Hfs, 100 * GIB, Some("disk5"))),
+                (data.clone(), (data_filesystem, 100 * GIB, Some("disk5"))),
                 (
                     dir.path().to_path_buf(),
                     (FileSystem::Apfs, 100 * GIB, Some("disk0")),
@@ -2438,7 +2402,7 @@ mod tests {
     }
 
     #[test]
-    fn setup_boots_recovery_from_the_entry_and_uninstall_restores_the_usb() {
+    fn setup_boots_recovery_from_the_usb_and_uninstall_restores_it() {
         let f = fixture(64 * GIB, false);
         let before = (snapshot(&f.esp), snapshot(&f.data));
         let host = &f.host;
@@ -2476,11 +2440,9 @@ mod tests {
         assert!(!f.esp.join("EFI/stela/source.bin").exists());
         assert!(!f.esp.join(CHOICES_PATH).exists());
         assert_eq!(
-            fs::read(f.esp.join("EFI/OC/Tools/Stela.efi")).unwrap(),
+            fs::read(f.esp.join(efi::LOADER)).unwrap(),
             efi_image(b"stela")
         );
-        let config = fs::read_to_string(f.esp.join("EFI/OC/config.plist")).unwrap();
-        assert!(config.contains("Stela.efi"));
         assert!(record.complete);
         assert_eq!(record.schema_version, RECORD_SCHEMA);
         // A second setup is refused until the first is undone.
@@ -2519,51 +2481,60 @@ mod tests {
 
     #[test]
     fn a_small_esp_sends_the_bundle_to_a_readable_data_volume_of_the_same_usb() {
-        // No HFS+ driver: the data volume is unreadable and nothing fits.
+        // The firmware cannot read HFS+, so nothing fits.
         let f = fixture(GIB / 32, false);
         let error = setup(&environment(&f.host), command(&f, &f.data))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("OpenHfsPlus"), "{error}");
+        assert!(error.contains("use FAT32"), "{error}");
         assert!(error.contains("recoveryOS bundle needs"), "{error}");
-        // With the driver, the HFS+ volume holds the bundle; the ESP keeps
-        // only the entry, the tool and stela.cfg.
+        // A FAT data volume holds the bundle; the EFI partition keeps only
+        // the boot loader and stela.cfg.
         let f = fixture(GIB / 32, true);
         setup(&environment(&f.host), command(&f, &f.data)).unwrap();
         let ecid = record(&f).ecid;
         assert!(bundle_of(&f, ecid).join("ramdisk.img").is_file());
         assert!(bundle_of(&f, ecid).starts_with(&f.data));
         assert!(!f.esp.join("EFI/stela/boot").exists());
-        assert!(f.esp.join("EFI/OC/Tools/Stela.efi").is_file());
+        assert!(f.esp.join(efi::LOADER).is_file());
         uninstall(&environment(&f.host), &f.data, false).unwrap();
         assert!(!f.data.join("EFI").exists());
     }
 
     #[test]
-    fn usbs_without_opencore_are_explained_and_left_unchanged() {
+    fn usbs_setup_cannot_boot_from_are_explained_and_left_unchanged() {
         let f = fixture(64 * GIB, false);
-        for (layout, expected) in [
-            ("EFI/CLOVER", "Clover"),
-            ("Install macOS Tahoe.app", "Apple installer"),
-            ("EFI/BOOT", "does not know"),
-        ] {
-            let dir = tempfile::tempdir().unwrap();
-            fs::create_dir_all(dir.path().join(layout)).unwrap();
-            let mut host = FakeHost::new(f.host.volumes.clone(), Vec::new());
-            host.volumes
-                .insert(dir.path().to_path_buf(), (FileSystem::Fat, GIB, None));
-            let before = snapshot(dir.path());
-            let error = setup(&environment(&host), command(&f, dir.path()))
-                .unwrap_err()
-                .to_string();
-            assert!(error.contains(expected), "{error}");
-            assert!(error.contains("OpenCore"), "{error}");
-            assert_eq!(snapshot(dir.path()), before);
-        }
-        // An internal OpenCore ESP is another system's boot partition.
+        // A USB without an EFI partition, one whose partition is not
+        // mounted, and one that already boots another loader.
+        let dir = tempfile::tempdir().unwrap();
+        let mut host = FakeHost::new(f.host.volumes.clone(), Vec::new());
+        host.volumes
+            .insert(dir.path().to_path_buf(), (FileSystem::Fat, GIB, None));
+        let error = setup(&environment(&host), command(&f, dir.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GUID Partition Map"), "{error}");
+        let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
+        host.disks[1].partitions[0].mount = None;
+        let error = setup(&environment(&host), command(&f, &f.data))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("sudo diskutil mount disk5s1"), "{error}");
+        let loader = f.esp.join(efi::LOADER);
+        fs::create_dir_all(loader.parent().unwrap()).unwrap();
+        fs::write(&loader, b"MZopencore").unwrap();
+        let before = snapshot(&f.esp);
+        let error = setup(&environment(&f.host), command(&f, &f.esp))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("another loader"), "{error}");
+        assert_eq!(snapshot(&f.esp), before);
+        // An internal EFI partition is another system's boot partition.
+        let f = fixture(64 * GIB, false);
         let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
         host.volumes
             .insert(f.esp.clone(), (FileSystem::Fat, 64 * GIB, Some("disk0")));
+        host.disks[0].partitions[0].mount = Some(f.esp.clone());
         let error = setup(&environment(&host), command(&f, &f.esp))
             .unwrap_err()
             .to_string();
@@ -2608,9 +2579,8 @@ mod tests {
         let f = fixture(64 * GIB, false);
         let before = snapshot(&f.esp);
         // A schema 3 setup's stela.efi has no interface marker.
-        let old = f._dir.path().join("old.efi");
-        fs::write(&old, b"MZstela-old").unwrap();
-        efi::add_mount(&f.esp, &old, None, Some("--system\n")).unwrap();
+        efi::add_mount(&f.esp, &f.efi, None, Some("--system\n")).unwrap();
+        fs::write(f.esp.join(efi::LOADER), b"MZstela-old").unwrap();
         let legacy = f.esp.join("EFI/stela/boot/STELA1/recovery");
         bundle::tests::write(&legacy, 1, b"old").unwrap();
         let disk = installed::InstalledDisk {
@@ -3270,8 +3240,8 @@ mod tests {
         let f = fixture(64 * GIB, false);
         let before = snapshot(&f.esp);
         setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
-        let tool = f.esp.join("EFI/OC/Tools/Stela.efi");
-        let config = fs::read(f.esp.join("EFI/OC/config.plist")).unwrap();
+        let tool = f.esp.join(efi::LOADER);
+        let config = fs::read(f.esp.join(efi::OPTIONS)).unwrap();
         let new = f._dir.path().join("new.efi");
         fs::write(&new, efi_image(b"stela-2")).unwrap();
         let update = |dry_run: bool| {
@@ -3319,8 +3289,8 @@ mod tests {
             "store.cfg and three packs"
         );
         assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela-2"));
-        // Only the tool changed: the entry and stela.cfg stay.
-        assert_eq!(fs::read(f.esp.join("EFI/OC/config.plist")).unwrap(), config);
+        // Only the loader changed: stela.cfg stays.
+        assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
         assert!(update(false).unwrap().contains("already installed"));
         let record1 = record(&f);
         assert_eq!(record1.stela_versions.len(), 2);
@@ -3610,7 +3580,7 @@ mod tests {
         let ecid = record(&f).ecid;
         let ramdisk = bundle_of(&f, ecid).join("ramdisk.img");
         fs::write(&ramdisk, [0u8; 10]).unwrap();
-        fs::write(f.esp.join(TOOL_PATH), b"MZ damaged").unwrap();
+        fs::write(f.esp.join(LOADER_PATH), b"MZ damaged").unwrap();
         fs::write(f.esp.join("EFI/stela/stela.cfg"), b"--system\n").unwrap();
         let error = status().unwrap_err().to_string();
         assert!(error.contains("problems:"), "{error}");

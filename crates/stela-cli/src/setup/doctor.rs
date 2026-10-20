@@ -2,7 +2,7 @@
 //!
 //! Status reads everything a setup consists of and changes nothing: the
 //! record and any pending update, the installed `stela.efi` against its
-//! kept version and this `stela`'s mount interface, OpenCore's entry,
+//! kept version and this `stela`'s mount interface, the USB's boot loader,
 //! `stela.cfg` and the startup choices against the record, every recoveryOS
 //! and restore bundle file against its `bundle.json`, the install medium's
 //! manifest and pieces, and for each install its
@@ -19,7 +19,7 @@
 //! machine's own ECID, and gives a machine of an older setup without one its
 //! ECID (`machines::machine_ecid`).
 use super::{
-    CHOICES_PATH, Environment, RECORD, Record, Setup, TOOL_PATH, apply_install, bundle,
+    CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Setup, apply_install, bundle,
     check_space, copy_bundles, describe_install, ecid::Ecid, host::Host, installed, machines,
     plan_install, prepare_bundles, publish, read_record, state, update, write_record,
 };
@@ -161,7 +161,7 @@ fn translations_status(record: &Record, report: &mut Report) {
 }
 
 fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
-    let tool = record.esp.join(TOOL_PATH);
+    let tool = record.esp.join(LOADER_PATH);
     match fs::read(&tool) {
         Ok(image) => {
             let id = update::version_id(&image);
@@ -205,14 +205,6 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
         }
     }
     report.line("kept versions", record.stela_versions.join(", "));
-    match efi::entry_installed(&record.esp) {
-        Ok(true) => report.line("OpenCore", format!("\"{}\" entry present", efi::NAME)),
-        Ok(false) => report.problem(format!(
-            "OpenCore's config.plist lacks the \"{}\" entry: `stela setup --repair`",
-            efi::NAME
-        )),
-        Err(error) => report.problem(format!("OpenCore's config.plist: {error:#}")),
-    }
     let options = fs::read_to_string(record.esp.join("EFI/stela/stela.cfg")).unwrap_or_default();
     if options != record.options_text() {
         report.problem("stela.cfg differs from the setup record: `stela setup --repair`".into());
@@ -517,7 +509,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     let kept_image = fs::read(&kept)
         .ok()
         .filter(|image| update::version_id(image) == id);
-    let tool = fs::read(esp.join(TOOL_PATH)).ok();
+    let tool = fs::read(esp.join(LOADER_PATH)).ok();
     let restore_tool = tool
         .as_ref()
         .is_none_or(|image| update::version_id(image) != id);
@@ -699,8 +691,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     };
     writeln!(
         text,
-        "  OpenCore       the \"{}\" entry, stela.cfg and the startup choices as recorded",
-        efi::NAME
+        "  boot loader    stela.efi, stela.cfg and the startup choices as recorded"
     )?;
     for note in &notes {
         writeln!(text, "  note           {note}")?;
