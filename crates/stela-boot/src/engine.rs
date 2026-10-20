@@ -2162,6 +2162,11 @@ struct ExitsSeen {
     entries: u64,
     kinds: [u64; EXIT_KINDS],
     words: BTreeMap<u32, u64>,
+    /// Lookup thunks installed, lookup hits, and the events that drop cached translations
+    /// and lookups: translation control writes, TLBIs, TTBR0 writes and
+    /// IC IVAU.
+    lookups: [u64; 2],
+    drops: [u64; 4],
 }
 
 /// The `ExitKind`s `Statistics::exit_kinds` counts.
@@ -2177,6 +2182,13 @@ impl ExitsSeen {
         let statistics = &machine.statistics;
         let entries = statistics.blocks - statistics.chained;
         let kinds = statistics.exit_kinds;
+        let lookups = [statistics.lookups, statistics.lookup_hits];
+        let drops = [
+            statistics.translation_changes,
+            statistics.tlb_maintenance,
+            statistics.table_base_changes,
+            statistics.code_invalidations,
+        ];
         let words = machine.exit_words();
         let mut top: Vec<_> = words
             .iter()
@@ -2200,6 +2212,15 @@ impl ExitsSeen {
             let separator = if index == 0 { "" } else { "," };
             output::arguments(format_args!("{separator}{}", now - last));
         }
+        output::arguments(format_args!(
+            " thunks={} hits={} controls={} tlbi={} ttbr0={} ivau={}",
+            lookups[0] - self.lookups[0],
+            lookups[1] - self.lookups[1],
+            drops[0] - self.drops[0],
+            drops[1] - self.drops[1],
+            drops[2] - self.drops[2],
+            drops[3] - self.drops[3],
+        ));
         for (count, word) in top.into_iter().take(SHOWN) {
             output::arguments(format_args!(" {word:#010x}:{count}"));
         }
@@ -2208,6 +2229,8 @@ impl ExitsSeen {
             entries,
             kinds,
             words,
+            lookups,
+            drops,
         };
     }
 }
