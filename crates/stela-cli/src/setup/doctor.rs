@@ -4,7 +4,8 @@
 //! record and any pending update, the installed `stela.efi` against its
 //! kept version and this `stela`'s mount interface, OpenCore's entry,
 //! `stela.cfg` and the startup choices against the record, every recoveryOS
-//! bundle file against its `bundle.json`, and for each install its
+//! and restore bundle file against its `bundle.json`, the install medium's
+//! manifest and pieces, and for each install its
 //! partitions (still the recorded ones), the systems on its Apple region,
 //! its NVRAM (what the next boot will be, and a failed update's
 //! `ota-result`) and whether its SEP state is provisioned. Each problem
@@ -13,13 +14,14 @@
 //! Repair puts back what the record says: the active `stela.efi` from its
 //! kept copy, the entry, `stela.cfg` and the startup choices, and, from the
 //! active build's restore image (`--ipsw` or `--fetch`), every damaged or
-//! missing recoveryOS bundle; with an image it prepares every bundle of the
-//! active build again, with each machine's own ECID, and gives a machine of
-//! an older setup without one its ECID (`machines::machine_ecid`).
+//! missing recoveryOS or restore bundle and a damaged install medium; with
+//! an image it prepares every bundle of the active build again, with each
+//! machine's own ECID, and gives a machine of an older setup without one its
+//! ECID (`machines::machine_ecid`).
 use super::{
-    CHOICES_PATH, Environment, RECORD, Record, Setup, TOOL_PATH, bundle, check_space, copy_bundles,
-    ecid::Ecid, host::Host, installed, machines, prepare_bundles, publish, read_record, state,
-    update, write_record,
+    CHOICES_PATH, Environment, RECORD, Record, Setup, TOOL_PATH, apply_install, bundle,
+    check_space, copy_bundles, describe_install, ecid::Ecid, host::Host, installed, machines,
+    plan_install, prepare_bundles, publish, read_record, state, update, write_record,
 };
 use crate::efi;
 use anyhow::{Result, bail};
@@ -183,7 +185,7 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
 
 fn bundle_status(record: &Record, report: &mut Report) {
     for kept in &record.bundles {
-        let directory = bundle::directory(&record.volume, &kept.build, kept.ecid, kept.schema);
+        let directory = kept.directory(&record.volume);
         let role = if kept.build == record.build && kept.schema == record.bundle_schema {
             "active"
         } else {
@@ -191,7 +193,7 @@ fn bundle_status(record: &Record, report: &mut Report) {
         };
         let problems = bundle::verify(&directory, &kept.manifest_sha256);
         report.line(
-            "recoveryOS",
+            kept.kind.label(),
             format!(
                 "{} ({role}, schema {}{}): {}",
                 directory.display(),
@@ -219,6 +221,44 @@ fn bundle_status(record: &Record, report: &mut Report) {
             record.build,
             ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}"))
         ));
+    }
+    for ecid in record.missing_restore_bundles() {
+        report.problem(format!(
+            "the active build {} has no restore bundle for {}, so its Install macOS (Stela) \
+             choice is missing: `stela setup --repair --ipsw`",
+            record.build,
+            ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}"))
+        ));
+    }
+    if let Some(medium) = &record.medium {
+        let problems = medium.problems();
+        report.line(
+            "install medium",
+            format!(
+                "{} (macOS {}, partition {}): {}",
+                medium.directory().display(),
+                medium.build,
+                medium.partition_guid,
+                if problems.is_empty() {
+                    "intact"
+                } else {
+                    "DAMAGED"
+                }
+            ),
+        );
+        for problem in problems {
+            report.problem(format!(
+                "{problem}: `stela setup --repair --ipsw` with the macOS {} restore image",
+                medium.build
+            ));
+        }
+        if medium.build == record.build && !record.tss {
+            report.problem(
+                "the Install macOS (Stela) choices are off because the restore needs Apple's \
+                 signing server: `stela setup --tss`"
+                    .into(),
+            );
+        }
     }
 }
 
@@ -521,9 +561,50 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         writeln!(
             text,
             "  remove         {}",
-            bundle::directory(&record.volume, &old.build, old.ecid, old.schema).display()
+            old.directory(&record.volume).display()
         )?;
     }
+    // The install's restore bundles and medium: all again with an image.
+    let damaged_medium = record
+        .active_medium()
+        .is_some_and(|medium| !medium.problems().is_empty());
+    let mut restore: Vec<Option<Ecid>> = Vec::new();
+    if record.active_medium().is_some() {
+        for install in &record.installs {
+            let intact = record.restore_bundle(install.ecid).is_some_and(|b| {
+                bundle::verify(&b.directory(&record.volume), &b.manifest_sha256).is_empty()
+            });
+            if (ipsw.is_some() || !intact) && !restore.contains(&install.ecid) {
+                restore.push(install.ecid);
+            }
+        }
+    }
+    let install = match (&ipsw, restore.is_empty() && !damaged_medium) {
+        (_, true) => None,
+        (Some(ipsw), false) => {
+            let plan = plan_install(
+                environment,
+                &record,
+                record.active_medium().map(|medium| medium.volume.as_path()),
+                ipsw,
+                &restore,
+                prepared.iter().map(|p| p.bytes).sum(),
+            )?;
+            describe_install(&record, &plan, &mut text)?;
+            Some(plan)
+        }
+        (None, false) => bail!(
+            "{text}  install        {} restore bundles of macOS {} are damaged or missing{}: \
+             pass its restore image with --ipsw or --fetch",
+            restore.len(),
+            record.build,
+            if damaged_medium {
+                ", and so is the install medium"
+            } else {
+                ""
+            }
+        ),
+    };
     writeln!(
         text,
         "  OpenCore       the \"{}\" entry, stela.cfg and the startup choices as recorded",
@@ -538,6 +619,9 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     }
     copy_bundles(&mut record, &prepared)?;
     write_record(&esp, &record)?;
+    if let (Some(plan), Some(ipsw)) = (install, &ipsw) {
+        apply_install(environment, &mut record, ipsw, plan)?;
+    }
     if restore_tool {
         efi::add_mount(&esp, &kept, None, None)?;
     }

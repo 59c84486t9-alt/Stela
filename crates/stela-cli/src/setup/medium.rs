@@ -1,0 +1,651 @@
+//! The install medium: the full IPSW on the USB's FAT32 data partition, as
+//! `stela.efi`'s `--install` reads it (`docs/research/installation.md`,
+//! "Install medium").
+//!
+//! ```text
+//! EFI/stela/install/<build>/ipsw.000 ...   PIECE_BYTES each, the last shorter
+//! EFI/stela/install/<build>/pieces.bin     SHA-256 of every 64 KiB block of every piece
+//! EFI/stela/install/<build>/blocks.bin     SHA-256 of every 64 KiB block of every member
+//! EFI/stela/install/<build>/payload.json   the restore inventory, written last
+//! ```
+//!
+//! No partition is created or formatted: the pieces are files below FAT32's
+//! 4 GiB limit, so their concatenation is the IPSW byte for byte. Each piece
+//! is written as `ipsw.NNN.partial`, read back, and renamed; a rerun keeps
+//! every complete piece whose bytes still match the IPSW and writes only
+//! the rest. The IPSW's SHA-256 and SHA-1 are taken while its pieces are
+//! written, and compared with its download receipt and Apple's catalog
+//! digest; `payload.json` is written only when they match, so a medium
+//! without it is never taken for a complete one.
+use super::{MARGIN, host::FileSystem, host::Host};
+use crate::{efi, restore};
+use anyhow::{Context, Result, bail, ensure};
+use serde::{Deserialize, Serialize};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+};
+use stela_runtime::payload::{
+    BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, Layout, MANIFEST_FILE, MAX_PIECES,
+    PIECE_HASHES_FILE, Piece, install_directory, piece_name, piece_sizes,
+};
+
+/// Bytes read at a time: a whole number of hash blocks.
+const BUFFER: usize = 64 * HASH_BLOCK_BYTES as usize;
+
+/// The install medium a setup wrote.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct Medium {
+    pub(super) build: String,
+    /// The mounted FAT32 data partition of the USB that holds it.
+    pub(super) volume: PathBuf,
+    /// That partition's GPT unique GUID, by which `stela.efi` finds it.
+    pub(super) partition_guid: String,
+    /// SHA-256 of its `payload.json`.
+    pub(super) manifest_sha256: String,
+}
+
+impl Medium {
+    pub(super) fn directory(&self) -> PathBuf {
+        directory(&self.volume, &self.build)
+    }
+
+    /// `payload.json` as `stela.cfg` names it on the firmware's volume.
+    pub(super) fn firmware_manifest(&self) -> String {
+        format!(
+            "\\{}\\{MANIFEST_FILE}",
+            install_directory(&self.build).replace('/', "\\")
+        )
+    }
+
+    /// The engine options that restore from it.
+    pub(super) fn options(&self) -> String {
+        format!(
+            "--install {} --install-source {}",
+            self.firmware_manifest(),
+            self.partition_guid
+        )
+    }
+
+    /// What is wrong with it: a missing or changed `payload.json`, or a
+    /// missing or short piece. Empty when it is intact; the pieces' bytes
+    /// are checked block by block when `stela.efi` reads them.
+    pub(super) fn problems(&self) -> Vec<String> {
+        let directory = self.directory();
+        let manifest = directory.join(MANIFEST_FILE);
+        let bytes = match fs::read(&manifest) {
+            Ok(bytes) => bytes,
+            Err(_) => return vec![format!("{} is missing", manifest.display())],
+        };
+        if stela_runtime::sha256(&bytes) != self.manifest_sha256 {
+            return vec![format!(
+                "{} differs from the one setup wrote",
+                manifest.display()
+            )];
+        }
+        let Ok(parsed) = stela_runtime::payload::PayloadManifest::parse(&bytes) else {
+            return vec![format!("{} is not a restore inventory", manifest.display())];
+        };
+        let Layout::Pieces { pieces, .. } = &parsed.layout else {
+            return vec![format!("{} names no pieces", manifest.display())];
+        };
+        let mut problems = Vec::new();
+        for (index, piece) in pieces.iter().enumerate() {
+            let path = directory.join(piece_name(index));
+            match fs::metadata(&path) {
+                Ok(metadata) if metadata.len() == piece.bytes => {}
+                Ok(metadata) => problems.push(format!(
+                    "{} holds {} bytes, not {}",
+                    path.display(),
+                    metadata.len(),
+                    piece.bytes
+                )),
+                Err(_) => problems.push(format!("{} is missing", path.display())),
+            }
+        }
+        for file in [PIECE_HASHES_FILE, BLOCK_HASHES_FILE] {
+            if !directory.join(file).is_file() {
+                problems.push(format!("{} is missing", directory.join(file).display()));
+            }
+        }
+        problems
+    }
+}
+
+/// `EFI/stela/install/<build>` on `volume`.
+pub(super) fn directory(volume: &Path, build: &str) -> PathBuf {
+    volume.join(install_directory(build))
+}
+
+/// The USB's FAT32 data partition: `explicit`, or the first mounted FAT
+/// partition of the ESP's disk that is not the ESP. Returns its mount and
+/// GPT unique GUID.
+pub(super) fn locate(
+    host: &dyn Host,
+    esp: &Path,
+    explicit: Option<&Path>,
+) -> Result<(PathBuf, String)> {
+    let usb = host.volume(esp)?.disk.with_context(|| {
+        format!(
+            "this computer does not say which disk {} is on",
+            esp.display()
+        )
+    })?;
+    let disks = host.disks()?;
+    let disk = disks
+        .iter()
+        .find(|disk| disk.identifier == usb)
+        .with_context(|| format!("this computer does not list {usb}'s partitions"))?;
+    let mut reasons = String::new();
+    for partition in &disk.partitions {
+        let Some(mount) = &partition.mount else {
+            continue;
+        };
+        if explicit.is_some_and(|explicit| explicit != mount) {
+            continue;
+        }
+        if partition.content == "EFI" {
+            reasons.push_str(&format!(
+                "  {} is the EFI partition, which keeps OpenCore and Stela\n",
+                mount.display()
+            ));
+            continue;
+        }
+        let filesystem = host.volume(mount)?.filesystem;
+        if filesystem != FileSystem::Fat {
+            reasons.push_str(&format!(
+                "  {} is {filesystem}, not FAT32\n",
+                mount.display()
+            ));
+            continue;
+        }
+        let guid = host.partition(&partition.identifier)?.guid;
+        ensure!(
+            !guid.is_empty(),
+            "{} has no GPT partition GUID, by which stela.efi would find it",
+            partition.identifier
+        );
+        return Ok((mount.clone(), guid));
+    }
+    if let Some(explicit) = explicit {
+        bail!(
+            "{} is not a FAT32 data partition of the USB that holds {}:\n{reasons}",
+            explicit.display(),
+            esp.display()
+        );
+    }
+    bail!(
+        "The install medium goes on a FAT32 data partition of the USB beside its EFI partition, \
+         and {usb} has none mounted:\n{reasons}Setup does not repartition the USB: add a FAT32 \
+         partition of at least 30 GB with a disk utility, mount it, and run setup again."
+    )
+}
+
+/// What writing the medium needs: the IPSW's pieces not already on
+/// `volume` with their sizes, the hash files and a margin.
+pub(super) fn needed_bytes(volume: &Path, build: &str, ipsw_bytes: u64, piece_bytes: u64) -> u64 {
+    let directory = directory(volume, build);
+    let mut need = MARGIN;
+    for (index, size) in piece_sizes(ipsw_bytes, piece_bytes).into_iter().enumerate() {
+        let present = fs::metadata(directory.join(piece_name(index))).map(|m| m.len());
+        if present.ok() != Some(size) {
+            need += size;
+        }
+        // Its block hashes in pieces.bin.
+        need += size.div_ceil(HASH_BLOCK_BYTES) * 32;
+    }
+    need
+}
+
+/// Refuse a volume without room for the medium, with the sizes.
+pub(super) fn check_space(
+    host: &dyn Host,
+    volume: &Path,
+    build: &str,
+    ipsw_bytes: u64,
+    piece_bytes: u64,
+) -> Result<u64> {
+    let need = needed_bytes(volume, build, ipsw_bytes, piece_bytes);
+    let free = host.volume(volume)?.free_bytes;
+    ensure!(
+        free >= need,
+        "{} has {:.1} GB free; the install medium needs {:.1} GB more (the macOS {build} IPSW is \
+         {:.1} GB). Free space on it, or use a larger USB.",
+        volume.display(),
+        free as f64 / 1e9,
+        need as f64 / 1e9,
+        ipsw_bytes as f64 / 1e9
+    );
+    Ok(need)
+}
+
+/// The digests a download receipt names for the IPSW.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Expected {
+    pub(super) sha256: Option<String>,
+    /// Apple's catalog SHA-1.
+    pub(super) sha1: Option<String>,
+}
+
+impl Expected {
+    pub(super) fn of(receipt: Option<&restore::Receipt>) -> Self {
+        Self {
+            sha256: receipt.map(|r| r.sha256.clone()),
+            sha1: receipt.and_then(|r| r.image.sha1.clone()),
+        }
+    }
+}
+
+/// A piece's SHA-256 and the SHA-256 of each of its hash blocks.
+#[derive(Default)]
+struct Hashes {
+    whole: Sha256,
+    blocks: Vec<u8>,
+}
+
+impl Hashes {
+    /// `bytes` is a whole number of blocks, but for a piece's last.
+    fn update(&mut self, bytes: &[u8]) {
+        self.whole.update(bytes);
+        for block in bytes.chunks(HASH_BLOCK_BYTES as usize) {
+            self.blocks.extend(Sha256::digest(block));
+        }
+    }
+
+    fn finish(self) -> (String, Vec<u8>) {
+        (hex::encode(self.whole.finalize()), self.blocks)
+    }
+}
+
+/// Read `size` bytes of `source` at its position, feeding each buffer to
+/// `each`.
+fn stream(
+    source: &mut impl Read,
+    size: u64,
+    mut each: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    let mut buffer = vec![0u8; BUFFER];
+    let mut left = size;
+    while left > 0 {
+        let n = left.min(BUFFER as u64) as usize;
+        source.read_exact(&mut buffer[..n])?;
+        each(&buffer[..n])?;
+        left -= n as u64;
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path, size: u64) -> Result<(String, Vec<u8>)> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut hashes = Hashes::default();
+    stream(&mut file, size, |bytes| {
+        hashes.update(bytes);
+        Ok(())
+    })?;
+    Ok(hashes.finish())
+}
+
+/// The whole IPSW's SHA-256 and catalog SHA-1.
+#[derive(Default)]
+struct Whole {
+    sha256: Sha256,
+    sha1: Sha1,
+}
+
+/// Read `size` bytes of `ipsw` from `offset` and return their hashes;
+/// with `partial`, also copy them there durably; with `whole`, also add
+/// them to the IPSW's digests.
+fn piece(
+    ipsw: &mut fs::File,
+    offset: u64,
+    size: u64,
+    partial: Option<&Path>,
+    mut whole: Option<&mut Whole>,
+) -> Result<(String, Vec<u8>)> {
+    ipsw.seek(SeekFrom::Start(offset))?;
+    let mut out = partial
+        .map(|path| {
+            fs::File::create(path).with_context(|| format!("cannot write {}", path.display()))
+        })
+        .transpose()?;
+    let mut hashes = Hashes::default();
+    stream(ipsw, size, |bytes| {
+        hashes.update(bytes);
+        if let Some(whole) = whole.as_deref_mut() {
+            whole.sha256.update(bytes);
+            whole.sha1.update(bytes);
+        }
+        match (&mut out, partial) {
+            (Some(out), Some(path)) => out
+                .write_all(bytes)
+                .with_context(|| format!("cannot write {}", path.display())),
+            _ => Ok(()),
+        }
+    })?;
+    if let Some(out) = out {
+        out.sync_all()?;
+    }
+    Ok(hashes.finish())
+}
+
+/// What [`write`] did.
+#[derive(Debug, Default)]
+pub(super) struct Written {
+    pub(super) kept: usize,
+    pub(super) wrote: usize,
+    pub(super) manifest_sha256: String,
+}
+
+/// Write the medium for `ipsw` to `volume`, with `inventory`, its restore
+/// inventory, in `piece_bytes` pieces.
+pub(super) fn write(
+    volume: &Path,
+    ipsw: &Path,
+    inventory: restore::payload::Inventory,
+    expected: &Expected,
+    piece_bytes: u64,
+) -> Result<Written> {
+    let mut manifest = inventory.manifest;
+    let build = manifest.product_build.clone();
+    let directory = directory(volume, &build);
+    fs::create_dir_all(&directory)?;
+    // The old manifest goes first, so a medium being rewritten is never
+    // taken for a complete one.
+    let manifest_path = directory.join(MANIFEST_FILE);
+    if manifest_path.exists() {
+        fs::remove_file(&manifest_path)?;
+    }
+    let mut file =
+        fs::File::open(ipsw).with_context(|| format!("cannot read {}", ipsw.display()))?;
+    let total = file.metadata()?.len();
+    ensure!(
+        total == manifest.source.bytes,
+        "{} changed while setup read it",
+        ipsw.display()
+    );
+    let sizes = piece_sizes(total, piece_bytes);
+    ensure!(
+        !sizes.is_empty() && sizes.len() <= MAX_PIECES,
+        "{} takes {} pieces of {piece_bytes} bytes",
+        ipsw.display(),
+        sizes.len()
+    );
+    let mut whole = Whole::default();
+    let mut pieces = Vec::new();
+    let mut piece_blocks = Vec::new();
+    let mut written = Written::default();
+    let mut offset = 0;
+    for (index, &size) in sizes.iter().enumerate() {
+        let name = piece_name(index);
+        let path = directory.join(&name);
+        let partial = directory.join(format!("{name}.partial"));
+        let present = fs::metadata(&path).is_ok_and(|m| m.len() == size);
+        // The IPSW's bytes for this piece, read once: hashed, added to the
+        // IPSW's digests, and written when the piece is not there yet.
+        let source = piece(
+            &mut file,
+            offset,
+            size,
+            (!present).then_some(partial.as_path()),
+            Some(&mut whole),
+        )?;
+        let keep = present && hash_file(&path, size)? == source;
+        if keep {
+            written.kept += 1;
+        } else {
+            if present {
+                // A complete piece whose bytes differ: written again.
+                piece(&mut file, offset, size, Some(&partial), None)?;
+            }
+            // Read back, so a USB that loses writes is found now.
+            ensure!(
+                hash_file(&partial, size)? == source,
+                "{} does not read back as written; the USB may be failing",
+                partial.display()
+            );
+            fs::rename(&partial, &path)?;
+            written.wrote += 1;
+        }
+        let (digest, blocks) = source;
+        pieces.push(Piece {
+            bytes: size,
+            sha256: digest,
+        });
+        piece_blocks.extend(blocks);
+        offset += size;
+    }
+    // Leftovers of an interrupted or larger earlier copy.
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stale = name.ends_with(".partial")
+            || name
+                .strip_prefix("ipsw.")
+                .and_then(|n| n.parse::<usize>().ok())
+                .is_some_and(|n| n >= sizes.len());
+        if stale {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    let sha256 = hex::encode(whole.sha256.finalize());
+    let sha1 = hex::encode(whole.sha1.finalize());
+    ensure!(
+        sha256 == manifest.source.sha256,
+        "{} changed while setup read it: its SHA-256 is now {sha256}",
+        ipsw.display()
+    );
+    if let Some(receipt) = &expected.sha256 {
+        ensure!(
+            &sha256 == receipt,
+            "{}'s SHA-256 {sha256} differs from its download receipt's {receipt}; download it \
+             again",
+            ipsw.display()
+        );
+    }
+    if let Some(catalog) = &expected.sha1 {
+        ensure!(
+            sha1.eq_ignore_ascii_case(catalog),
+            "{}'s SHA-1 {sha1} differs from Apple's catalog digest {catalog}; download it again",
+            ipsw.display()
+        );
+    }
+    manifest.source.catalog_sha1 = expected.sha1.as_ref().map(|_| sha1);
+    manifest.layout = Layout::Pieces {
+        piece_bytes,
+        pieces,
+        block_hashes: BlockHashes {
+            file: PIECE_HASHES_FILE.into(),
+            block_bytes: HASH_BLOCK_BYTES,
+            sha256: stela_runtime::sha256(&piece_blocks),
+        },
+    };
+    manifest
+        .validate()
+        .map_err(|error| anyhow::anyhow!("the install medium's inventory: {error}"))?;
+    efi::write_atomic(&directory.join(PIECE_HASHES_FILE), &piece_blocks, false)?;
+    efi::write_atomic(&directory.join(BLOCK_HASHES_FILE), &inventory.blocks, false)?;
+    let json = manifest.to_json();
+    efi::write_atomic(&manifest_path, json.as_bytes(), false)?;
+    written.manifest_sha256 = stela_runtime::sha256(json.as_bytes());
+    Ok(written)
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use stela_runtime::payload::{PayloadManifest, pieces::Extent};
+
+    /// Small pieces, so the synthetic IPSW takes several.
+    pub(in crate::setup) const PIECE_BYTES: u64 = HASH_BLOCK_BYTES;
+
+    fn ipsw(dir: &Path) -> PathBuf {
+        let path = dir.join("Synthetic.ipsw");
+        efi::synthetic_ipsw(&path).unwrap();
+        path
+    }
+
+    fn inventory(ipsw: &Path) -> restore::payload::Inventory {
+        restore::payload::inventory(ipsw, restore::payload::SYNTHETIC_MODEL, false, None).unwrap()
+    }
+
+    fn expected(ipsw: &Path) -> Expected {
+        let bytes = fs::read(ipsw).unwrap();
+        Expected {
+            sha256: Some(stela_runtime::sha256(&bytes)),
+            sha1: Some(hex::encode(Sha1::digest(&bytes))),
+        }
+    }
+
+    /// An in-memory disk image holding the pieces back to back.
+    struct Joined(Vec<u8>);
+
+    impl stela_runtime::payload::ReadAt for Joined {
+        type Error = &'static str;
+        fn len(&self) -> u64 {
+            self.0.len() as u64
+        }
+        fn read_at(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), Self::Error> {
+            let start = offset as usize;
+            buffer.copy_from_slice(self.0.get(start..start + buffer.len()).ok_or("past end")?);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_medium_is_the_ipsw_in_pieces_that_the_restore_host_joins() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipsw = ipsw(dir.path());
+        let volume = dir.path().join("STELA");
+        fs::create_dir_all(&volume).unwrap();
+        let bytes = fs::read(&ipsw).unwrap();
+        let first = write(
+            &volume,
+            &ipsw,
+            inventory(&ipsw),
+            &expected(&ipsw),
+            PIECE_BYTES,
+        )
+        .unwrap();
+        let count = piece_sizes(bytes.len() as u64, PIECE_BYTES).len();
+        assert!(count > 1, "the synthetic IPSW takes several pieces");
+        assert_eq!((first.kept, first.wrote), (0, count));
+        let directory = directory(&volume, restore::payload::SYNTHETIC_BUILD);
+        let manifest =
+            PayloadManifest::parse(&fs::read(directory.join(MANIFEST_FILE)).unwrap()).unwrap();
+        assert_eq!(
+            manifest.source.catalog_sha1.as_deref(),
+            Some(hex::encode(Sha1::digest(&bytes)).as_str())
+        );
+        // The restore host's own reader joins the pieces into the IPSW,
+        // checking every block against pieces.bin.
+        let mut disk = Vec::new();
+        let mut extents = Vec::new();
+        for index in 0..count {
+            let piece = fs::read(directory.join(piece_name(index))).unwrap();
+            extents.push(vec![Extent {
+                offset: disk.len() as u64,
+                bytes: piece.len() as u64,
+            }]);
+            disk.extend(piece);
+        }
+        let hashes = fs::read(directory.join(PIECE_HASHES_FILE)).unwrap();
+        let mut joined =
+            stela_runtime::payload::pieces::Joined::new(Joined(disk), &manifest, extents, &hashes)
+                .unwrap();
+        let mut read = vec![0; bytes.len()];
+        stela_runtime::payload::ReadAt::read_at(&mut joined, 0, &mut read).unwrap();
+        assert_eq!(read, bytes);
+        assert!(
+            Medium {
+                build: manifest.product_build.clone(),
+                volume: volume.clone(),
+                partition_guid: "G".into(),
+                manifest_sha256: first.manifest_sha256.clone(),
+            }
+            .problems()
+            .is_empty()
+        );
+
+        // A rerun keeps the complete pieces, rewrites a changed one and a
+        // half-written one, and removes leftovers.
+        let last = count - 1;
+        fs::write(directory.join(piece_name(0)), vec![0; PIECE_BYTES as usize]).unwrap();
+        fs::remove_file(directory.join(piece_name(last))).unwrap();
+        let partial = directory.join(format!("{}.partial", piece_name(last)));
+        fs::write(&partial, b"interrupted").unwrap();
+        fs::write(directory.join(piece_name(count + 3)), b"stale").unwrap();
+        let again = write(
+            &volume,
+            &ipsw,
+            inventory(&ipsw),
+            &expected(&ipsw),
+            PIECE_BYTES,
+        )
+        .unwrap();
+        assert_eq!((again.kept, again.wrote), (count - 2, 2));
+        assert_eq!(again.manifest_sha256, first.manifest_sha256);
+        assert!(!partial.exists());
+        assert!(!directory.join(piece_name(count + 3)).exists());
+        let joined: Vec<u8> = (0..count)
+            .flat_map(|index| fs::read(directory.join(piece_name(index))).unwrap())
+            .collect();
+        assert_eq!(joined, bytes);
+    }
+
+    #[test]
+    fn an_ipsw_that_differs_from_its_receipt_writes_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let ipsw = ipsw(dir.path());
+        let volume = dir.path().join("STELA");
+        let mut wrong = expected(&ipsw);
+        wrong.sha1 = Some("0".repeat(40));
+        let error = write(&volume, &ipsw, inventory(&ipsw), &wrong, PIECE_BYTES)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("differs from Apple's catalog digest"),
+            "{error}"
+        );
+        let directory = directory(&volume, restore::payload::SYNTHETIC_BUILD);
+        assert!(!directory.join(MANIFEST_FILE).exists());
+        let mut wrong = expected(&ipsw);
+        wrong.sha256 = Some("0".repeat(64));
+        let error = write(&volume, &ipsw, inventory(&ipsw), &wrong, PIECE_BYTES)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("differs from its download receipt"),
+            "{error}"
+        );
+        assert!(!directory.join(MANIFEST_FILE).exists());
+        let medium = Medium {
+            build: restore::payload::SYNTHETIC_BUILD.into(),
+            volume,
+            partition_guid: "G".into(),
+            manifest_sha256: String::new(),
+        };
+        assert_eq!(medium.problems().len(), 1);
+    }
+
+    #[test]
+    fn space_counts_only_the_pieces_still_to_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let volume = dir.path();
+        let build = "26A434";
+        let bytes = 5 * HASH_BLOCK_BYTES + 7;
+        let all = needed_bytes(volume, build, bytes, PIECE_BYTES);
+        assert_eq!(all, MARGIN + bytes + 6 * 32);
+        assert_eq!(piece_sizes(bytes, PIECE_BYTES).len(), 6);
+        let directory = directory(volume, build);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(piece_name(0)), vec![0; PIECE_BYTES as usize]).unwrap();
+        assert_eq!(
+            needed_bytes(volume, build, bytes, PIECE_BYTES),
+            all - PIECE_BYTES
+        );
+    }
+}

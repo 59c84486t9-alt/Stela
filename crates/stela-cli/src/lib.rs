@@ -88,6 +88,10 @@ pub(crate) enum Command {
     BootLog(boot_log::BootLog),
     /// Prepare an OpenCore USB to install macOS 27 with Stela, or undo it.
     Setup(setup::Setup),
+    /// Write the install medium `stela setup --target` puts on the USB (the
+    /// full IPSW in pieces, with its inventory) to a mounted FAT32 volume,
+    /// such as a disk image for a QEMU run.
+    InstallMedium(setup::InstallMedium),
     /// Add the UEFI mount to an OpenCore EFI folder, or remove it.
     #[command(subcommand)]
     Efi(efi::EfiCommand),
@@ -122,6 +126,7 @@ impl Command {
             Self::Boot(command) => command.run(),
             Self::BootLog(command) => command.run(),
             Self::Setup(command) => command.run(),
+            Self::InstallMedium(command) => command.run(),
             Self::Efi(command) => command.run(),
         }
     }

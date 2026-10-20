@@ -1,12 +1,16 @@
-//! The recoveryOS bundles on the USB: one for each macOS build setup keeps,
-//! each Stela machine (its ECID is in the bundle's `/chosen`) and boot-bundle
+//! The boot bundles on the USB: one for each macOS build setup keeps, each
+//! Stela machine (its ECID is in the bundle's `/chosen`), boot-bundle
 //! schema (`stela_runtime::boot_bundle::SCHEMA_VERSION` of the `stela.efi`
-//! that reads it), in `EFI/stela/boot/<build>/<leaf>` of the bundle volume:
+//! that reads it) and [`Kind`], in `EFI/stela/boot/<build>/<leaf>` of the
+//! bundle volume:
 //!
-//! - `recovery`: a bundle from before machines had ECIDs, schema 1;
-//! - `recovery-<ECID>`: a machine's bundle, schema 1;
-//! - either with `-s<schema>` for another schema, so a Stela update that
-//!   reads a new schema adds its bundles beside the old ones and its
+//! - `recovery`: a recoveryOS bundle from before machines had ECIDs, schema
+//!   1;
+//! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1;
+//! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
+//!   --restore`), which the Install macOS (Stela) choice boots;
+//! - any of these with `-s<schema>` for another schema, so a Stela update
+//!   that reads a new schema adds its bundles beside the old ones and its
 //!   rollback finds them.
 //!
 //! A bundle is copied to a `.partial` sibling and renamed into place, so an
@@ -26,7 +30,39 @@ const LEGACY_LEAF: &str = "recovery";
 /// The schema bundles without a suffix have.
 const FIRST_SCHEMA: u32 = 1;
 
-/// One recoveryOS bundle setup wrote.
+/// What a bundle boots.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum Kind {
+    /// recoveryOS (`boot prepare --recovery`).
+    #[default]
+    Recovery,
+    /// The restore ramdisk (`boot prepare --restore`).
+    Restore,
+}
+
+impl Kind {
+    fn is_recovery(&self) -> bool {
+        *self == Self::Recovery
+    }
+
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Recovery => LEGACY_LEAF,
+            Self::Restore => "restore",
+        }
+    }
+
+    /// What it is called in reports.
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Recovery => "recoveryOS",
+            Self::Restore => "restore",
+        }
+    }
+}
+
+/// One boot bundle setup wrote.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Bundle {
     pub(super) build: String,
@@ -37,18 +73,43 @@ pub(super) struct Bundle {
     /// wrote without recording it.
     #[serde(default)]
     pub(super) manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Kind::is_recovery")]
+    pub(super) kind: Kind,
 }
 
 impl Bundle {
+    /// Whether it is the recoveryOS bundle of `build`, `ecid` and `schema`.
     pub(super) fn same(&self, build: &str, ecid: Option<Ecid>, schema: u32) -> bool {
-        self.build == build && self.ecid == ecid && self.schema == schema
+        self.same_kind(Kind::Recovery, build, ecid, schema)
+    }
+
+    pub(super) fn same_kind(
+        &self,
+        kind: Kind,
+        build: &str,
+        ecid: Option<Ecid>,
+        schema: u32,
+    ) -> bool {
+        self.kind == kind && self.build == build && self.ecid == ecid && self.schema == schema
+    }
+
+    /// Its directory on `volume`.
+    pub(super) fn directory(&self, volume: &Path) -> PathBuf {
+        directory_of(self.kind, volume, &self.build, self.ecid, self.schema)
     }
 }
 
+/// A recoveryOS bundle's leaf.
+#[cfg(test)]
 pub(super) fn leaf(ecid: Option<Ecid>, schema: u32) -> String {
+    leaf_of(Kind::Recovery, ecid, schema)
+}
+
+pub(super) fn leaf_of(kind: Kind, ecid: Option<Ecid>, schema: u32) -> String {
+    let prefix = kind.prefix();
     let mut leaf = match ecid {
-        Some(ecid) => format!("{LEGACY_LEAF}-{}", ecid.digits()),
-        None => LEGACY_LEAF.into(),
+        Some(ecid) => format!("{prefix}-{}", ecid.digits()),
+        None => prefix.into(),
     };
     if schema != FIRST_SCHEMA {
         leaf.push_str(&format!("-s{schema}"));
@@ -61,14 +122,32 @@ pub(super) fn build_directory(volume: &Path, build: &str) -> PathBuf {
     volume.join(format!("EFI/stela/boot/{build}"))
 }
 
-/// The bundle's directory on `volume`.
+/// The recoveryOS bundle's directory on `volume`.
 pub(super) fn directory(volume: &Path, build: &str, ecid: Option<Ecid>, schema: u32) -> PathBuf {
-    build_directory(volume, build).join(leaf(ecid, schema))
+    directory_of(Kind::Recovery, volume, build, ecid, schema)
 }
 
-/// The bundle's directory as `stela.cfg` names it on the firmware's volume.
+pub(super) fn directory_of(
+    kind: Kind,
+    volume: &Path,
+    build: &str,
+    ecid: Option<Ecid>,
+    schema: u32,
+) -> PathBuf {
+    build_directory(volume, build).join(leaf_of(kind, ecid, schema))
+}
+
+/// The recoveryOS bundle's directory as `stela.cfg` names it on the
+/// firmware's volume.
 pub(super) fn firmware_path(build: &str, ecid: Option<Ecid>, schema: u32) -> String {
-    format!("\\EFI\\stela\\boot\\{build}\\{}", leaf(ecid, schema))
+    firmware_path_of(Kind::Recovery, build, ecid, schema)
+}
+
+pub(super) fn firmware_path_of(kind: Kind, build: &str, ecid: Option<Ecid>, schema: u32) -> String {
+    format!(
+        "\\EFI\\stela\\boot\\{build}\\{}",
+        leaf_of(kind, ecid, schema)
+    )
 }
 
 /// What `bundle.json` says of itself and its files.
@@ -228,6 +307,14 @@ pub(super) mod tests {
         assert_eq!(leaf(Some(Ecid(0xab)), 1), "recovery-00000000000000AB");
         assert_eq!(leaf(Some(Ecid(0xab)), 2), "recovery-00000000000000AB-s2");
         assert_eq!(leaf(None, 3), "recovery-s3");
+        assert_eq!(
+            leaf_of(Kind::Restore, Some(Ecid(0xab)), 2),
+            "restore-00000000000000AB-s2"
+        );
+        assert_eq!(
+            firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), 1),
+            "\\EFI\\stela\\boot\\26A434\\restore-0000000000000001"
+        );
         assert_eq!(
             firmware_path("26A434", Some(Ecid(1)), 1),
             "\\EFI\\stela\\boot\\26A434\\recovery-0000000000000001"

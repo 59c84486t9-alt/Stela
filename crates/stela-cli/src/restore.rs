@@ -225,6 +225,26 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     value.into()
 }
 
+/// The download receipt beside an image (`IMAGE.json`), when there is one;
+/// it must name the image's own size.
+pub fn receipt(image: &Path) -> Result<Option<Receipt>> {
+    let path = sidecar(image, ".json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let receipt: Receipt = stela_runtime::read_json(&path)
+        .with_context(|| format!("{} is not a download receipt", path.display()))?;
+    let bytes = std::fs::metadata(image)?.len();
+    ensure!(
+        bytes == receipt.bytes,
+        "{} holds {bytes} bytes, but its download receipt {} names {}; download it again",
+        image.display(),
+        path.display(),
+        receipt.bytes
+    );
+    Ok(Some(receipt))
+}
+
 /// A Content-Range must cover exactly the remaining suffix of the image.
 fn range_total(value: &str, offset: u64) -> Result<u64> {
     let (span, total) = value
@@ -412,6 +432,32 @@ mod tests {
         assert_eq!(range_total("bytes 5-9/10", 5).unwrap(), 10);
         assert!(range_total("bytes 0-9/10", 5).is_err());
         assert!(range_total("bytes 5-8/10", 5).is_err());
+    }
+    #[test]
+    fn a_receipt_must_name_its_image_s_size() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let image = dir.path().join("Restore.ipsw");
+        std::fs::write(&image, b"ipsw")?;
+        assert!(receipt(&image)?.is_none());
+        let written = Receipt {
+            schema_version: 1,
+            image: Image {
+                version: "27.0.1".into(),
+                build: "26A434".into(),
+                models: vec!["Mac14,3".into()],
+                url: "https://updates.cdn-apple.com/Restore.ipsw".into(),
+                sha1: Some("0".repeat(40)),
+            },
+            bytes: 4,
+            sha256: "0".repeat(64),
+            catalog_sha1_verified: true,
+        };
+        stela_runtime::write_json(&sidecar(&image, ".json"), &written)?;
+        assert_eq!(receipt(&image)?.unwrap().image, written.image);
+        std::fs::write(&image, b"ipsw!")?;
+        let error = receipt(&image).unwrap_err().to_string();
+        assert!(error.contains("names 4"), "{error}");
+        Ok(())
     }
     #[test]
     fn parses_real_feed_structure_and_unknown_universal() -> Result<()> {

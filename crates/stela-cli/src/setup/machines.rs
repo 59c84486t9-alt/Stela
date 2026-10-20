@@ -2,9 +2,11 @@
 //! tail holds the machine state, or an Apple region and a machine-state
 //! partition) that is its own Stela machine with its own ECID,
 //! NVRAM and SEP state, as two Macs are. One is the default `stela.cfg`
-//! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install
-//! and its System Recovery, opening on their own with several installs and
-//! when a key is held with one.
+//! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install,
+//! its System Recovery and its Install macOS (Stela), which restores the
+//! USB's install medium onto it with the machine's own restore bundle. They
+//! open on their own with several installs or an install medium, and when a
+//! key is held otherwise.
 //!
 //! A machine's ECID is kept for its life: an install whose machine-state
 //! partition already holds SEP state takes the ECID given with `--ecid`, and
@@ -14,8 +16,9 @@
 //! bundle serves it; every further install needs its own bundle, prepared
 //! from the active build's restore image.
 use super::{
-    Environment, Prepared, Setup, bundle, check_installed_efi, check_space, copy_bundles,
-    ecid::Ecid, installed, prepare_bundles, publish, read_record, tss_note, write_record,
+    Environment, Prepared, Setup, TSS_REQUIRED, apply_install, bundle, check_installed_efi,
+    check_space, copy_bundles, describe_install, ecid::Ecid, installed, plan_install,
+    prepare_bundles, publish, read_record, tss_note, write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -24,8 +27,9 @@ use stela_loader::{boot_bundle::Options as BundleOptions, mount_interface::MAX_C
 
 /// The first install's name unless `--install` gives one.
 pub(super) const FIRST_NAME: &str = "macOS";
-/// Each install takes two startup choices: itself and its System Recovery.
-const MAX_INSTALLS: usize = MAX_CHOICES / 2;
+/// Each install takes three startup choices: itself, its System Recovery
+/// and its Install macOS (Stela).
+const MAX_INSTALLS: usize = MAX_CHOICES / 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(super) struct Install {
@@ -109,6 +113,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     let Some(target) = &command.target else {
         bail!("an install needs --target");
     };
+    ensure!(record.tss || command.tss, TSS_REQUIRED);
     // An install's Apple region is never converted to keep its machine
     // state in its own tail, before anything of it is read.
     if command.nor.is_none() {
@@ -192,18 +197,21 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     if next.installs.len() == 1 {
         next.ecid = Some(ecid);
     }
+    next.tss |= command.tss;
+    next.verify_on_read = command.verify_on_read;
     let stale = next.drop_stale_bundles();
     let missing = next.missing_bundles(&record.build);
+    // Every install restores from the medium with its own restore bundle.
+    let Some(ipsw) = command.optional_image()? else {
+        bail!(
+            "install \"{name}\" (ECID {ecid}) is installed from the macOS {} IPSW, with a restore \
+             bundle of its own: pass the restore image with --ipsw or --fetch",
+            record.build
+        );
+    };
     let prepared: Vec<Prepared> = if missing.is_empty() {
         Vec::new()
     } else {
-        let Some(ipsw) = command.optional_image()? else {
-            bail!(
-                "install \"{name}\" is a new machine (ECID {ecid}) and needs its own recoveryOS \
-                 bundle: pass the macOS {} restore image with --ipsw or --fetch",
-                record.build
-            );
-        };
         let (_, _, prepared) = prepare_bundles(
             environment,
             &ipsw,
@@ -214,6 +222,20 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         check_space(host, &record.volume, &prepared)?;
         prepared
     };
+    let restore: Vec<Option<Ecid>> = next
+        .installs
+        .iter()
+        .map(|install| install.ecid)
+        .filter(|ecid| next.restore_bundle(*ecid).is_none())
+        .collect();
+    let install_plan = plan_install(
+        environment,
+        &next,
+        command.install_volume.as_deref(),
+        &ipsw,
+        &restore,
+        prepared.iter().map(|p| p.bytes).sum(),
+    )?;
     let mut text = String::new();
     writeln!(text, "Add install \"{name}\" to {}:", record.esp.display())?;
     writeln!(text, "  ECID           {ecid}")?;
@@ -238,14 +260,11 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
             bundle.bytes as f64 / 1e9
         )?;
     }
+    describe_install(&next, &install_plan, &mut text)?;
     writeln!(
         text,
-        "  choices.cfg    lists \"{name}\" and its System Recovery{}",
-        if next.installs.len() > 1 {
-            "; the startup choices open at every boot"
-        } else {
-            ""
-        }
+        "  choices.cfg    lists \"{name}\", its System Recovery and its Install macOS (Stela); \
+         the startup choices open at every boot"
     )?;
     if checked.nor_image.is_some() {
         writeln!(
@@ -258,7 +277,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         writeln!(
             text,
             "  remove         {}",
-            bundle::directory(&record.volume, &kept.build, kept.ecid, kept.schema).display()
+            kept.directory(&record.volume).display()
         )?;
     }
     for note in &notes {
@@ -270,6 +289,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     }
     copy_bundles(&mut next, &prepared)?;
     write_record(&next.esp.clone(), &next)?;
+    apply_install(environment, &mut next, &ipsw, install_plan)?;
     if let Some(image) = &checked.nor_image {
         installed::initialize_nor(host, &checked.disk, image)?;
     }
@@ -311,7 +331,7 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
             writeln!(
                 text,
                 "  remove         {}",
-                bundle::directory(&record.volume, &kept.build, kept.ecid, kept.schema).display()
+                kept.directory(&record.volume).display()
             )?;
         }
     }
@@ -329,6 +349,13 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
                 text,
                 "  TSS            off: nothing is sent to Apple's signing server"
             )?;
+            if record.active_medium().is_some() {
+                writeln!(
+                    text,
+                    "  choices.cfg    drops the Install macOS (Stela) choices: the restore needs \
+                     --tss"
+                )?;
+            }
         }
     }
     if let Some(seconds) = command.chooser_timeout {

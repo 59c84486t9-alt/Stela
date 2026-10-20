@@ -1,6 +1,16 @@
-//! `stela setup`: prepare a user's own OpenCore USB to boot macOS 27's
-//! recoveryOS, from which macOS is installed as on a Mac (Disk Utility, then
-//! Reinstall macOS), and keep it working over the installed system's life.
+//! `stela setup`: prepare a user's own OpenCore USB to install macOS 27 onto
+//! a disk of the PC and boot it, and keep it working over the installed
+//! system's life.
+//!
+//! With `--target`, macOS is installed offline from the full IPSW, in Apple
+//! Configurator's DFU-restore role: setup writes the IPSW onto the USB's
+//! FAT32 data partition as the install medium (`setup::medium`), prepares
+//! each machine's restore bundle (`stela boot prepare --restore`), and adds
+//! an Install macOS (Stela) startup choice that restores the medium onto
+//! the target with Apple's stock restore options (`stela.efi --install`).
+//! "macOS (Stela)" then boots the result. The restore personalizes the
+//! recoveryOS LocalPolicy with Apple's signing server, so `--target` needs
+//! `--tss`.
 //!
 //! One command checks the USB and the restore image without writing
 //! anything, prepares the recoveryOS boot bundle (`stela boot prepare
@@ -36,6 +46,7 @@ mod ecid;
 mod host;
 mod installed;
 mod machines;
+mod medium;
 mod state;
 mod update;
 mod usb;
@@ -44,6 +55,7 @@ pub(crate) use installed::NextBoot;
 
 use crate::{boot, efi, restore};
 use anyhow::{Context, Result, bail, ensure};
+use bundle::Kind;
 use clap::Args;
 use ecid::Ecid;
 use host::{FileSystem, Host};
@@ -71,6 +83,8 @@ const CHOICES_PATH: &str = "EFI/stela/choices.cfg";
 /// The startup choices' timeout with several installs; with one, the list
 /// opens only when a key is held.
 const CHOOSER_SECONDS: u32 = 5;
+/// The startup choice that installs macOS onto a setup's one install.
+const INSTALL_CHOICE: &str = "Install macOS (Stela)";
 
 #[derive(Args)]
 pub(crate) struct Setup {
@@ -157,6 +171,16 @@ pub(crate) struct Setup {
     /// Turn the Apple signing server opt-in off on an existing setup.
     #[arg(long)]
     no_tss: bool,
+    /// Have the install check the IPSW's recorded hashes only as the restore
+    /// reads each block, instead of reading every member whole before the
+    /// restore starts: faster, for QEMU test runs. It adds the engine's
+    /// `--verify-on-read` to the Install macOS (Stela) choice.
+    #[arg(long, requires = "target")]
+    verify_on_read: bool,
+    /// The USB's FAT32 data partition for the install medium (the full IPSW
+    /// in pieces), when it has several; the first one by default.
+    #[arg(long, requires = "target")]
+    install_volume: Option<PathBuf>,
     /// Boot this install by default.
     #[arg(long)]
     default_install: Option<String>,
@@ -207,6 +231,61 @@ pub(crate) struct Setup {
     /// partition (`--install`, or the default install).
     #[arg(long)]
     boot_log: bool,
+}
+
+#[derive(Args)]
+pub(crate) struct InstallMedium {
+    /// The macOS 27 restore image (IPSW); a download receipt beside it is
+    /// checked.
+    #[arg(long)]
+    ipsw: PathBuf,
+    /// The Mac model whose identities the inventory lists.
+    #[arg(long, default_value = PINNED_MODEL)]
+    model: String,
+    /// The mounted FAT32 volume to write `EFI/stela/install/<build>` to.
+    #[arg(long)]
+    volume: PathBuf,
+}
+
+impl InstallMedium {
+    pub(crate) fn run(self) -> Result<()> {
+        let host = host::System;
+        let info = host.volume(&self.volume)?;
+        ensure!(
+            info.filesystem == FileSystem::Fat,
+            "{} is {}, not FAT32",
+            self.volume.display(),
+            info.filesystem
+        );
+        let (_, build) = restore::payload::identity(&self.ipsw, &self.model)?;
+        let bytes = fs::metadata(&self.ipsw)?.len();
+        let piece_bytes = stela_runtime::payload::PIECE_BYTES;
+        medium::check_space(&host, &self.volume, &build, bytes, piece_bytes)?;
+        let expected = medium::Expected::of(restore::receipt(&self.ipsw)?.as_ref());
+        let inventory = restore::payload::inventory(&self.ipsw, &self.model, true, None)?;
+        let written = medium::write(&self.volume, &self.ipsw, inventory, &expected, piece_bytes)?;
+        let directory = medium::directory(&self.volume, &build);
+        println!(
+            "Install medium {}: {} pieces kept, {} written; payload.json SHA-256 {}",
+            directory.display(),
+            written.kept,
+            written.wrote,
+            written.manifest_sha256
+        );
+        println!(
+            "Engine options: --install \\{}\\{} --install-source <the partition's GPT unique \
+             GUID>",
+            stela_runtime::payload::install_directory(&build).replace('/', "\\"),
+            stela_runtime::payload::MANIFEST_FILE
+        );
+        if expected.sha1.is_none() {
+            println!(
+                "The IPSW has no download receipt: it was checked against its BuildManifest, not \
+                 Apple's catalog digest."
+            );
+        }
+        Ok(())
+    }
 }
 
 /// What setup writes, recorded on the ESP so `--uninstall` can remove it.
@@ -271,6 +350,14 @@ struct Record {
     tss: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chooser_timeout: Option<u32>,
+    /// Schema 5: the install medium, the full IPSW on the USB's FAT32 data
+    /// partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    medium: Option<medium::Medium>,
+    /// Schema 5: the Install choice checks the IPSW as it reads it
+    /// (`--verify-on-read`).
+    #[serde(default)]
+    verify_on_read: bool,
 }
 
 fn first_schema() -> u32 {
@@ -278,7 +365,7 @@ fn first_schema() -> u32 {
 }
 
 const RECORD_KIND: &str = "stela_setup";
-const RECORD_SCHEMA: u32 = 4;
+const RECORD_SCHEMA: u32 = 5;
 
 impl Record {
     /// Bring an older schema's record to this one: its installed disk
@@ -304,6 +391,7 @@ impl Record {
                         ecid: None,
                         schema: 1,
                         manifest_sha256: String::new(),
+                        kind: Kind::Recovery,
                     });
                 }
             }
@@ -381,8 +469,73 @@ impl Record {
         self.boot_line(self.default())
     }
 
-    /// The startup choices: each install, default first, and its System
-    /// Recovery. None without an installed disk.
+    /// The restore bundle of `ecid`'s machine for the active build.
+    fn restore_bundle(&self, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
+        self.bundles
+            .iter()
+            .find(|b| b.same_kind(Kind::Restore, &self.build, ecid, self.bundle_schema))
+    }
+
+    /// The active build's install medium.
+    fn active_medium(&self) -> Option<&medium::Medium> {
+        self.medium.as_ref().filter(|m| m.build == self.build)
+    }
+
+    /// The option line of `install`'s Install macOS (Stela) choice: its
+    /// restore bundle, the install medium and its partitions. None without
+    /// the active build's medium or the machine's restore bundle, or
+    /// without the signing server opt-in the restore needs.
+    fn install_line(&self, install: &machines::Install) -> Option<String> {
+        let medium = self.active_medium()?;
+        self.restore_bundle(install.ecid)?;
+        if !self.tss {
+            return None;
+        }
+        let restore =
+            bundle::firmware_path_of(Kind::Restore, &self.build, install.ecid, self.bundle_schema);
+        let base = install.disk.recovery_options(
+            &restore,
+            BundleOptions::default().dram_size,
+            install.ecid,
+        );
+        let verify = if self.verify_on_read {
+            " --verify-on-read"
+        } else {
+            ""
+        };
+        Some(self.line(format!("{base} {}{verify}", medium.options())))
+    }
+
+    /// The name of `install`'s Install macOS (Stela) choice.
+    fn install_choice(&self, install: &machines::Install) -> String {
+        if self.installs.len() == 1 {
+            INSTALL_CHOICE.into()
+        } else {
+            format!("{} - Install macOS", install.name)
+        }
+    }
+
+    /// The installs' machines that need a restore bundle of the active
+    /// build: every install's while the setup has an install medium.
+    fn missing_restore_bundles(&self) -> Vec<Option<Ecid>> {
+        if self.active_medium().is_none() {
+            return Vec::new();
+        }
+        let mut missing = Vec::new();
+        for install in &self.installs {
+            let present = self
+                .restore_bundle(install.ecid)
+                .is_some_and(|b| b.directory(&self.volume).join(bundle::MANIFEST).is_file());
+            if !present && !missing.contains(&install.ecid) {
+                missing.push(install.ecid);
+            }
+        }
+        missing
+    }
+
+    /// The startup choices: each install, default first, its System
+    /// Recovery and its Install macOS (Stela). None without an installed
+    /// disk.
     fn choices(&self) -> Option<Choices> {
         let default = self.default()?;
         let dram_bytes = BundleOptions::default().dram_size;
@@ -404,8 +557,17 @@ impl Record {
                     .trim()
                     .into(),
             });
+            if let Some(line) = self.install_line(install) {
+                entries.push(Choice {
+                    name: self.install_choice(install),
+                    options: line.trim().into(),
+                });
+            }
         }
-        let seconds = if self.installs.len() > 1 {
+        // The list opens on its own with several installs, and while the
+        // USB can install macOS.
+        let installing = self.installs.iter().any(|i| self.install_line(i).is_some());
+        let seconds = if self.installs.len() > 1 || installing {
             CHOOSER_SECONDS
         } else {
             0
@@ -474,7 +636,7 @@ impl Record {
 /// Delete the directories of bundles the record no longer names.
 fn remove_bundles(record: &Record, stale: &[bundle::Bundle]) -> Result<()> {
     for kept in stale {
-        let directory = bundle::directory(&record.volume, &kept.build, kept.ecid, kept.schema);
+        let directory = kept.directory(&record.volume);
         if directory.is_dir() {
             fs::remove_dir_all(directory)?;
         }
@@ -530,9 +692,11 @@ fn write_record(esp: &Path, record: &Record) -> Result<()> {
     stela_runtime::write_json(&path, &record)
 }
 
-/// Writes the recoveryOS bundle for an IPSW, model and machine into a
-/// directory.
+/// Writes a boot bundle for an IPSW, model and machine into a directory.
 type Prepare = dyn Fn(&Path, &str, Option<Ecid>, &Path) -> Result<()>;
+
+/// An IPSW's restore inventory for a model.
+type InventoryOf = dyn Fn(&Path, &str) -> Result<restore::payload::Inventory>;
 
 /// Inputs that the command line fixes and tests replace.
 struct Environment<'a> {
@@ -540,6 +704,12 @@ struct Environment<'a> {
     /// `stela boot prepare --recovery`; tests use synthetic IPSWs, which
     /// have no kernel, and write a stand-in.
     prepare: &'a Prepare,
+    /// `stela boot prepare --restore`, likewise.
+    prepare_restore: &'a Prepare,
+    /// The install medium's inventory, with the public AEA keys fetched.
+    inventory: &'a InventoryOf,
+    /// The install medium's piece size (`payload::PIECE_BYTES`).
+    piece_bytes: u64,
     /// The mount interface this `stela` writes for.
     interface: Interface,
 }
@@ -583,10 +753,11 @@ fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result
     Ok(())
 }
 
-/// A recoveryOS bundle prepared on this computer, not yet copied.
+/// A boot bundle prepared on this computer, not yet copied.
 struct Prepared {
     build: String,
     ecid: Option<Ecid>,
+    kind: Kind,
     directory: tempfile::TempDir,
     bytes: u64,
 }
@@ -606,6 +777,18 @@ fn prepare_bundles(
     build: Option<&str>,
     ecids: &[Option<Ecid>],
 ) -> Result<(String, String, Vec<Prepared>)> {
+    prepare_kind(environment, Kind::Recovery, ipsw, model, build, ecids)
+}
+
+/// [`prepare_bundles`] for bundles of `kind`.
+fn prepare_kind(
+    environment: &Environment<'_>,
+    kind: Kind,
+    ipsw: &Path,
+    model: &str,
+    build: Option<&str>,
+    ecids: &[Option<Ecid>],
+) -> Result<(String, String, Vec<Prepared>)> {
     let (product_version, found) = restore::payload::identity(ipsw, model)?;
     if let Some(build) = build {
         ensure!(
@@ -618,8 +801,12 @@ fn prepare_bundles(
     for &ecid in ecids {
         let directory = tempfile::tempdir()?;
         let output = directory.path().join("recovery");
-        (environment.prepare)(ipsw, model, ecid, &output)
-            .context("preparing the recoveryOS boot bundle")?;
+        let prepare = match kind {
+            Kind::Recovery => environment.prepare,
+            Kind::Restore => environment.prepare_restore,
+        };
+        prepare(ipsw, model, ecid, &output)
+            .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
         let schema = bundle::schema(&output)?;
         ensure!(
             schema == environment.interface.bundle_schema,
@@ -630,6 +817,7 @@ fn prepare_bundles(
         prepared.push(Prepared {
             build: found.clone(),
             ecid,
+            kind,
             directory,
             bytes,
         });
@@ -641,7 +829,13 @@ fn prepare_bundles(
 fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result<()> {
     for bundle in prepared {
         let schema = record.bundle_schema;
-        let destination = bundle::directory(&record.volume, &bundle.build, bundle.ecid, schema);
+        let destination = bundle::directory_of(
+            bundle.kind,
+            &record.volume,
+            &bundle.build,
+            bundle.ecid,
+            schema,
+        );
         fs::create_dir_all(destination.parent().unwrap())?;
         let digest = bundle::install(&bundle.path(), &destination)?;
         // Read back, so a USB that loses writes is found now, not at boot.
@@ -653,12 +847,13 @@ fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result<()> {
         );
         record
             .bundles
-            .retain(|b| !b.same(&bundle.build, bundle.ecid, schema));
+            .retain(|b| !b.same_kind(bundle.kind, &bundle.build, bundle.ecid, schema));
         record.bundles.push(bundle::Bundle {
             build: bundle.build.clone(),
             ecid: bundle.ecid,
             schema,
             manifest_sha256: digest,
+            kind: bundle.kind,
         });
     }
     Ok(())
@@ -670,7 +865,7 @@ fn check_space(host: &dyn Host, volume: &Path, prepared: &[Prepared]) -> Result<
     let free = host.volume(volume)?.free_bytes;
     ensure!(
         free >= need,
-        "{} has {:.1} GB free; the recoveryOS bundles need {:.1} GB",
+        "{} has {:.1} GB free; the boot bundles need {:.1} GB",
         volume.display(),
         free as f64 / 1e9,
         need as f64 / 1e9
@@ -687,6 +882,9 @@ impl Setup {
         let environment = Environment {
             host: &host::System,
             prepare: &prepare_recovery,
+            prepare_restore: &prepare_restore,
+            inventory: &|ipsw, model| restore::payload::inventory(ipsw, model, true, None),
+            piece_bytes: stela_runtime::payload::PIECE_BYTES,
             interface: mount_interface::CURRENT,
         };
         print!("{}", self.dispatch(&environment)?);
@@ -1038,9 +1236,16 @@ fn fetch(command: &Setup) -> Result<PathBuf> {
         "UniversalMac_{}_{}_Restore.ipsw",
         image.version, image.build
     ));
-    let mut receipt = path.as_os_str().to_owned();
-    receipt.push(".json");
-    if path.is_file() && Path::new(&receipt).is_file() {
+    if path.is_file()
+        && let Some(receipt) = restore::receipt(&path)?
+    {
+        // Reused only as the catalog entry it was downloaded from.
+        ensure!(
+            receipt.image == image && receipt.catalog_sha1_verified,
+            "{} was downloaded from another catalog entry than Apple lists for macOS {} now;              move it away, or pass it with --ipsw",
+            path.display(),
+            image.build
+        );
         eprintln!("Using the earlier download {}", path.display());
     } else {
         eprintln!("Downloading {} to {}", image.url, path.display());
@@ -1075,6 +1280,220 @@ fn prepare_recovery(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path)
     Ok(())
 }
 
+/// `stela boot prepare --restore` for the IPSW, model and machine into
+/// `output`: the restore bundle the Install macOS (Stela) choice boots.
+fn prepare_restore(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+    let mut line: Vec<String> = [
+        "--ipsw",
+        ipsw.to_str().context("IPSW path is not UTF-8")?,
+        "--model",
+        model,
+        "--restore",
+        "--output",
+        output.to_str().context("temporary path is not UTF-8")?,
+    ]
+    .map(str::to_owned)
+    .into();
+    if let Some(ecid) = ecid {
+        line.extend(["--ecid".into(), ecid.to_string()]);
+    }
+    boot::prepare(&line)
+}
+
+/// The install medium setup writes.
+struct MediumPlan {
+    volume: PathBuf,
+    guid: String,
+    ipsw_bytes: u64,
+    /// Bytes still to write, with the hash files and a margin.
+    need: u64,
+    expected: medium::Expected,
+    /// Directories it creates, deepest first.
+    created: Vec<PathBuf>,
+}
+
+/// What installing macOS needs besides the recoveryOS bundles: each
+/// machine's restore bundle and, unless the USB holds the build's intact
+/// medium, the install medium.
+struct InstallPlan {
+    restore: Vec<Prepared>,
+    medium: Option<MediumPlan>,
+}
+
+/// Plan the install for `ecids`' machines of `record` from `ipsw`, and
+/// check the space: `also` is what else setup writes to the bundle volume.
+fn plan_install(
+    environment: &Environment<'_>,
+    record: &Record,
+    install_volume: Option<&Path>,
+    ipsw: &Path,
+    ecids: &[Option<Ecid>],
+    also: u64,
+) -> Result<InstallPlan> {
+    let host = environment.host;
+    let restore = match ecids.is_empty() {
+        true => Vec::new(),
+        false => {
+            prepare_kind(
+                environment,
+                Kind::Restore,
+                ipsw,
+                &record.model,
+                Some(&record.build),
+                ecids,
+            )?
+            .2
+        }
+    };
+    let intact = record
+        .active_medium()
+        .is_some_and(|m| m.problems().is_empty());
+    let medium = match intact {
+        true => None,
+        false => {
+            let receipt = restore::receipt(ipsw)?;
+            let (volume, guid) = medium::locate(host, &record.esp, install_volume)?;
+            let ipsw_bytes = fs::metadata(ipsw)?.len();
+            let need =
+                medium::needed_bytes(&volume, &record.build, ipsw_bytes, environment.piece_bytes);
+            let created = missing_directories(&volume, &medium::directory(&volume, &record.build));
+            Some(MediumPlan {
+                volume,
+                guid,
+                ipsw_bytes,
+                need,
+                expected: medium::Expected::of(receipt.as_ref()),
+                created,
+            })
+        }
+    };
+    let restore_bytes: u64 = restore.iter().map(|p| p.bytes).sum();
+    match &medium {
+        Some(plan) if plan.volume == record.volume => {
+            let need = plan.need + restore_bytes + also;
+            let free = host.volume(&plan.volume)?.free_bytes;
+            ensure!(
+                free >= need,
+                "{} has {:.1} GB free; the install medium and boot bundles need {:.1} GB (the \
+                 macOS {} IPSW is {:.1} GB)",
+                plan.volume.display(),
+                free as f64 / 1e9,
+                need as f64 / 1e9,
+                record.build,
+                plan.ipsw_bytes as f64 / 1e9
+            );
+        }
+        Some(plan) => {
+            medium::check_space(
+                host,
+                &plan.volume,
+                &record.build,
+                plan.ipsw_bytes,
+                environment.piece_bytes,
+            )?;
+            check_space(host, &record.volume, &restore)?;
+        }
+        None => check_space(host, &record.volume, &restore)?,
+    }
+    Ok(InstallPlan { restore, medium })
+}
+
+/// The plan's lines, after their two spaces.
+fn describe_install(record: &Record, plan: &InstallPlan, text: &mut String) -> Result<()> {
+    for bundle in &plan.restore {
+        writeln!(
+            text,
+            "  restore        {} ({:.1} GB)",
+            bundle::directory_of(
+                Kind::Restore,
+                &record.volume,
+                &bundle.build,
+                bundle.ecid,
+                record.bundle_schema
+            )
+            .display(),
+            bundle.bytes as f64 / 1e9
+        )?;
+    }
+    if let Some(medium) = &plan.medium {
+        writeln!(
+            text,
+            "  install medium {}: the macOS {} IPSW in pieces of at most 4 GiB on the USB's FAT32 \
+             partition {} ({:.1} GB still to write)",
+            medium::directory(&medium.volume, &record.build).display(),
+            record.build,
+            medium.guid,
+            medium.need as f64 / 1e9
+        )?;
+        if medium.expected.sha1.is_none() {
+            writeln!(
+                text,
+                "  note           the IPSW has no download receipt, so it is checked against its \
+                 BuildManifest but not Apple's catalog digest"
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the restore bundles and write the install medium.
+fn apply_install(
+    environment: &Environment<'_>,
+    record: &mut Record,
+    ipsw: &Path,
+    plan: InstallPlan,
+) -> Result<()> {
+    copy_bundles(record, &plan.restore)?;
+    write_record(&record.esp.clone(), record)?;
+    let Some(plan) = plan.medium else {
+        return Ok(());
+    };
+    // Recorded before the first piece, so an interrupted copy is undone.
+    record.medium = Some(medium::Medium {
+        build: record.build.clone(),
+        volume: plan.volume.clone(),
+        partition_guid: plan.guid.clone(),
+        manifest_sha256: String::new(),
+    });
+    let mut created = record.created_directories.clone();
+    for directory in plan.created {
+        if !created.contains(&directory) {
+            created.push(directory);
+        }
+    }
+    created.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    record.created_directories = created;
+    write_record(&record.esp.clone(), record)?;
+    eprintln!(
+        "Writing the install medium to {}",
+        medium::directory(&plan.volume, &record.build).display()
+    );
+    let inventory = (environment.inventory)(ipsw, &record.model)?;
+    ensure!(
+        inventory.manifest.product_build == record.build,
+        "{} holds macOS build {}, not {}",
+        ipsw.display(),
+        inventory.manifest.product_build,
+        record.build
+    );
+    let written = medium::write(
+        &plan.volume,
+        ipsw,
+        inventory,
+        &plan.expected,
+        environment.piece_bytes,
+    )?;
+    if let Some(medium) = &mut record.medium {
+        medium.manifest_sha256 = written.manifest_sha256;
+    }
+    write_record(&record.esp.clone(), record)
+}
+
+/// Why `--target` needs `--tss`.
+const TSS_REQUIRED: &str = "installing macOS onto --target needs --tss: the restore \
+    personalizes the recoveryOS LocalPolicy with Apple's signing server (gs.apple.com), which \
+    receives this machine's ECID and its boot components' hashes. Add --tss to opt in.";
+
 /// The checks' result: everything setup will write, and where.
 struct Plan {
     record: Record,
@@ -1085,6 +1504,8 @@ struct Plan {
     efi_image: Vec<u8>,
     /// The PC's own disk, and the NOR image setup writes to it.
     installed: Option<installed::Checked>,
+    /// With an installed disk: its restore bundle and the install medium.
+    install: Option<InstallPlan>,
     notes: Vec<String>,
 }
 
@@ -1109,6 +1530,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         );
     }
     let dram_bytes = BundleOptions::default().dram_size;
+    ensure!(command.target.is_none() || command.tss, TSS_REQUIRED);
     let installed = match &command.target {
         Some(target) => {
             let usb_disk = host.volume(&esp)?.disk;
@@ -1150,13 +1572,10 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     // also measures it for the space check.
     let (product_version, build, prepared) =
         prepare_bundles(environment, &ipsw, command.model(), None, &[Some(ecid)])?;
-    let volume = choose_volume(
-        host,
-        &esp,
-        &command.usb,
-        command.volume.as_deref(),
-        prepared[0].bytes,
-    )?;
+    // With an installed disk, its restore bundle (about the size of the
+    // recoveryOS one) goes on the same volume.
+    let bundles = prepared[0].bytes * if command.target.is_some() { 2 } else { 1 };
+    let volume = choose_volume(host, &esp, &command.usb, command.volume.as_deref(), bundles)?;
     let installs = installed
         .iter()
         .map(|checked| machines::Install {
@@ -1199,6 +1618,19 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         bundles: Vec::new(),
         tss: command.tss,
         chooser_timeout: command.chooser_timeout,
+        medium: None,
+        verify_on_read: command.verify_on_read,
+    };
+    let install = match &installed {
+        Some(_) => Some(plan_install(
+            environment,
+            &record,
+            command.install_volume.as_deref(),
+            &ipsw,
+            &[Some(ecid)],
+            prepared[0].bytes,
+        )?),
+        None => None,
     };
     record.options = record.options_text();
     record.choices_text()?;
@@ -1209,9 +1641,10 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
     ));
     notes.push(match &installed {
         Some(checked) => format!(
-            "Paused: Disk Utility and Reinstall macOS see {} as the Mac's internal SSD (ANS2), \
-             but the installer's personalization and the Secure Enclave are not modeled, so an \
-             install does not finish yet.",
+            "The Install macOS (Stela) startup choice restores the install medium onto {} as \
+             the Mac's internal SSD (ANS2); the restore host's live USB transport and the \
+             complete SEP trust route are still being qualified, so an install does not finish \
+             yet.",
             checked.disk.apple_region
         ),
         None => "Paused: Disk Utility and Reinstall macOS reach the PC's disks and keyboard \
@@ -1232,6 +1665,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         prepared,
         efi_image,
         installed,
+        install,
         notes,
     })
 }
@@ -1291,10 +1725,14 @@ fn describe(plan: &Plan) -> Result<String> {
             )?;
             writeln!(
                 text,
-                "  choices.cfg    {}: \"{}\" and its System Recovery, listed when a key is held",
+                "  choices.cfg    {}: \"{}\", its System Recovery and \"{INSTALL_CHOICE}\", \
+                 listed for {CHOOSER_SECONDS} seconds at startup",
                 record.esp.join(CHOICES_PATH).display(),
                 install.name
             )?;
+            if let Some(install) = &plan.install {
+                describe_install(record, install, &mut text)?;
+            }
             writeln!(
                 text,
                 "  Apple region   {} (serial {}, partition {})",
@@ -1347,10 +1785,10 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
     apply(environment, plan)?;
     let start = match &command.target {
         Some(target) => format!(
-            "stela.efi boots the macOS installed on {target}, or recoveryOS while it holds none \
-             or when NVRAM asks (`stela setup --next-boot recovery`, or hold a key at boot for \
-             the startup options); from recoveryOS, Disk Utility and Reinstall macOS install \
-             onto it, as on a Mac"
+            "choose \"{INSTALL_CHOICE}\" in Stela's startup choices to install macOS onto \
+             {target}, then reboot and choose \"{}\" again, which boots the installed macOS \
+             (or recoveryOS while {target} holds none, or when NVRAM asks)",
+            efi::NAME
         ),
         _ => "stela.efi starts recoveryOS, where Disk Utility prepares a disk and Reinstall \
               macOS installs onto it, as on a Mac"
@@ -1388,6 +1826,9 @@ fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     write_record(&esp, &record)?;
     copy_bundles(&mut record, &plan.prepared)?;
     write_record(&esp, &record)?;
+    if let Some(install) = plan.install {
+        apply_install(environment, &mut record, &plan.ipsw, install)?;
+    }
     if let Some(checked) = &plan.installed
         && let Some(nor) = &checked.nor_image
     {
@@ -1438,6 +1879,20 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
                 directory.display()
             );
             if directory.exists() && !removals.contains(&directory) {
+                removals.push(directory);
+            }
+        }
+        if let Some(medium) = &record.medium {
+            let directory = medium.directory();
+            ensure!(
+                directory.starts_with(&medium.volume)
+                    && directory
+                        .parent()
+                        .is_some_and(|p| p.ends_with("EFI/stela/install")),
+                "the setup record names an unexpected install medium {}",
+                directory.display()
+            );
+            if directory.exists() {
                 removals.push(directory);
             }
         }
@@ -1728,6 +2183,8 @@ mod tests {
             new_ecid: false,
             tss: false,
             no_tss: false,
+            verify_on_read: false,
+            install_volume: None,
             default_install: None,
             remove_install: None,
             chooser_timeout: None,
@@ -1751,10 +2208,25 @@ mod tests {
         bundle::tests::write(output, 1, &[byte; 4096])
     }
 
+    /// A stand-in for `boot prepare --restore`.
+    fn fake_prepare_restore(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
+        let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0xa5;
+        bundle::tests::write(output, 1, &[byte; 2048])
+    }
+
+    /// The synthetic IPSW's inventory: it names no AEA member to fetch a
+    /// key for.
+    fn fake_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::Inventory> {
+        restore::payload::inventory(ipsw, model, false, None)
+    }
+
     fn environment(host: &FakeHost) -> Environment<'_> {
         Environment {
             host,
             prepare: &fake_prepare,
+            prepare_restore: &fake_prepare_restore,
+            inventory: &fake_inventory,
+            piece_bytes: medium::tests::PIECE_BYTES,
             interface: mount_interface::CURRENT,
         }
     }
@@ -2024,6 +2496,7 @@ mod tests {
     /// Apple region and a NOR partition, backed by synthetic images that
     /// start with `region` and `nor`.
     fn add_disk(f: &mut Fixture, second: bool, region: &[u8], nor: &[u8]) {
+        add_stela(f);
         let (disk, serial, partitions) = if second {
             (
                 "disk2",
@@ -2065,7 +2538,52 @@ mod tests {
         let mut command = command(f, &f.esp);
         command.target = Some(REGION.into());
         command.nor = Some(NOR.into());
+        command.tss = true;
         command
+    }
+
+    /// The USB's FAT32 data partition, which holds the install medium.
+    const STELA_PARTITION: &str = "disk5s3";
+    const STELA_GUID: &str = "5E1A0000-0000-4000-8000-0000000000aa";
+
+    fn stela_volume(f: &Fixture) -> PathBuf {
+        f._dir.path().join("STELA")
+    }
+
+    /// Give the USB its FAT32 data partition, once.
+    fn add_stela(f: &mut Fixture) {
+        let volume = stela_volume(f);
+        if volume.exists() {
+            return;
+        }
+        fs::create_dir_all(&volume).unwrap();
+        f.host
+            .volumes
+            .insert(volume.clone(), (FileSystem::Fat, 100 * GIB, Some("disk5")));
+        let usb = f
+            .host
+            .disks
+            .iter_mut()
+            .find(|d| d.identifier == "disk5")
+            .unwrap();
+        usb.partitions.push(Partition {
+            identifier: STELA_PARTITION.into(),
+            content: "Microsoft Basic Data".into(),
+            mount: Some(volume.clone()),
+        });
+        let info = PartitionInfo {
+            identifier: STELA_PARTITION.into(),
+            disk: "disk5".into(),
+            guid: STELA_GUID.into(),
+            bytes: 100 * GIB,
+            content: "Microsoft Basic Data".into(),
+            mount: Some(volume.clone()),
+            container: None,
+        };
+        let image = f._dir.path().join("stela-partition.img");
+        f.host
+            .partitions
+            .insert(STELA_PARTITION.into(), (info, image));
     }
 
     fn partition_bytes(f: &Fixture, identifier: &str) -> Vec<u8> {
@@ -2096,11 +2614,26 @@ mod tests {
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], &[]);
         let before = snapshot(&f.esp);
+        let stela_before = snapshot(&stela_volume(&f));
         let disks = (partition_bytes(&f, REGION), partition_bytes(&f, NOR));
+
+        // An install needs the signing server opt-in, and says why.
+        let mut no_tss = installed_command(&f);
+        no_tss.tss = false;
+        let error = setup(&environment(&f.host), no_tss)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("needs --tss"), "{error}");
+        assert!(error.contains("gs.apple.com"), "{error}");
+        assert_eq!(snapshot(&f.esp), before);
 
         let mut dry = installed_command(&f);
         dry.dry_run = true;
         let plan = setup(&environment(&f.host), dry).unwrap();
+        assert!(plan.contains("install medium "), "{plan}");
+        assert!(plan.contains(STELA_GUID), "{plan}");
+        assert!(plan.contains("restore        "), "{plan}");
+        assert_eq!(snapshot(&stela_volume(&f)), stela_before);
         assert!(
             plan.contains("Apple region   disk1s2 (serial STELAPC01"),
             "{plan}"
@@ -2130,11 +2663,11 @@ mod tests {
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
             format!("{line}\n")
         );
-        // The startup choices hold the install and its System Recovery, and
-        // open only when a key is held.
+        // The startup choices hold the install, its System Recovery and
+        // Install macOS (Stela), and open on their own.
         let choices =
             Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
-        assert_eq!(choices.timeout_seconds, 0);
+        assert_eq!(choices.timeout_seconds, CHOOSER_SECONDS);
         assert_eq!(choices.entries[0].name, "macOS");
         assert_eq!(choices.entries[0].options, line);
         assert_eq!(choices.entries[1].name, "macOS - System Recovery");
@@ -2160,18 +2693,78 @@ mod tests {
         routed.sort_unstable();
         expected.sort_unstable();
         assert_eq!(routed, expected);
+        // Install macOS (Stela) restores the install medium onto the disk
+        // with the machine's restore bundle.
+        let build = restore::payload::SYNTHETIC_BUILD;
+        assert_eq!(choices.entries[2].name, INSTALL_CHOICE);
+        assert_eq!(
+            choices.entries[2].options,
+            format!(
+                "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle \
+                 \\EFI\\stela\\boot\\{build}\\restore-{} --ram-bytes 0x200000000 --ecid {ecid} \
+                 --install \\EFI\\stela\\install\\{build}\\payload.json --install-source \
+                 {STELA_GUID} --tss",
+                ecid.digits()
+            )
+        );
+        let restore_bundle = record.restore_bundle(Some(ecid)).unwrap();
+        assert!(
+            bundle::verify(
+                &restore_bundle.directory(&record.volume),
+                &restore_bundle.manifest_sha256
+            )
+            .is_empty()
+        );
+        // The medium is the IPSW in pieces on the USB's FAT32 partition.
+        let medium = record.medium.clone().unwrap();
+        assert_eq!(
+            (medium.volume.as_path(), medium.partition_guid.as_str()),
+            (stela_volume(&f).as_path(), STELA_GUID)
+        );
+        assert!(medium.problems().is_empty());
+        let mut joined = Vec::new();
+        for index in 0.. {
+            let piece = medium
+                .directory()
+                .join(stela_runtime::payload::piece_name(index));
+            let Ok(bytes) = fs::read(piece) else { break };
+            joined.extend(bytes);
+        }
+        assert_eq!(joined, fs::read(&f.ipsw).unwrap());
+        // Status finds a damaged piece by name.
+        let first = medium
+            .directory()
+            .join(stela_runtime::payload::piece_name(0));
+        let piece = fs::read(&first).unwrap();
+        fs::write(&first, &piece[1..]).unwrap();
+        let status = format!("{:#}", rerun(&f, |c| c.status = true).unwrap_err());
+        assert!(status.contains("ipsw.000 holds"), "{status}");
+        fs::write(&first, &piece).unwrap();
+        // --verify-on-read is the engine's, on the Install choice alone.
+        let mut verify = record.clone();
+        verify.verify_on_read = true;
+        let line = verify.install_line(&verify.installs[0]).unwrap();
+        assert!(line.contains("--install-source"), "{line}");
+        assert!(
+            line.trim_end().ends_with("--verify-on-read --tss"),
+            "{line}"
+        );
         // Setup itself writes neither partition.
         assert_eq!(
             (partition_bytes(&f, REGION), partition_bytes(&f, NOR)),
             disks
         );
-        // The opt-in turns off again.
-        rerun(&f, |c| c.no_tss = true).unwrap();
+        // The opt-in turns off again, and the Install choice with it.
+        let off = rerun(&f, |c| c.no_tss = true).unwrap();
+        assert!(off.contains("drops the Install macOS (Stela)"), "{off}");
         assert!(
             !fs::read_to_string(f.esp.join("EFI/stela/stela.cfg"))
                 .unwrap()
                 .contains("--tss")
         );
+        let choices =
+            Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
+        assert_eq!(choices.entries.len(), 2);
 
         // The next boot is chosen in NVRAM, which a dry run leaves alone.
         let dry = rerun(&f, |c| {
@@ -2216,6 +2809,8 @@ mod tests {
         // Uninstall restores the USB and keeps the installed disk and NVRAM.
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert_eq!(snapshot(&f.esp), before);
+        assert_eq!(snapshot(&stela_volume(&f)), stela_before);
+        assert!(!stela_volume(&f).join("EFI").exists());
         assert_eq!(partition_bytes(&f, REGION), disks.0);
         assert_eq!(partition_bytes(&f, NOR), nor);
     }
@@ -2361,15 +2956,30 @@ mod tests {
                 c.nor = Some(nor.into());
                 c.ipsw = ipsw.then(|| f.ipsw.clone());
                 c.dry_run = dry_run;
+                c.tss = true;
             })
         };
-        add(REGION, NOR, false, false).unwrap();
+        // An install restores from the IPSW, which it needs.
+        let error = add(REGION, NOR, false, false).unwrap_err().to_string();
+        assert!(error.contains("is installed from the macOS"), "{error}");
+        // Without the signing server opt-in it is refused by name.
+        let error = rerun(&f, |c| {
+            c.target = Some(REGION.into());
+            c.nor = Some(NOR.into());
+            c.ipsw = Some(f.ipsw.clone());
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("needs --tss"), "{error}");
+        add(REGION, NOR, true, false).unwrap();
         let record1 = record(&f);
         assert_eq!(record1.installs[0].ecid, Some(first));
-        assert_eq!(record1.bundles.len(), 1);
-        // The second is a new machine and needs its own bundle.
+        let kinds: Vec<Kind> = record1.bundles.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [Kind::Recovery, Kind::Restore]);
+        assert!(record1.medium.as_ref().unwrap().problems().is_empty());
+        // The second is a new machine and needs its own bundles.
         let error = add(REGION2, NOR2, false, false).unwrap_err().to_string();
-        assert!(error.contains("its own recoveryOS"), "{error}");
+        assert!(error.contains("is installed from the macOS"), "{error}");
         let before = snapshot(&f.esp);
         assert!(add(REGION2, NOR2, true, true).unwrap().contains("Dry run"));
         assert_eq!(snapshot(&f.esp), before);
@@ -2398,10 +3008,25 @@ mod tests {
             [
                 "macOS",
                 "macOS - System Recovery",
+                "macOS - Install macOS",
                 "macOS 2",
-                "macOS 2 - System Recovery"
+                "macOS 2 - System Recovery",
+                "macOS 2 - Install macOS"
             ]
         );
+        // Each install restores with its own machine's restore bundle.
+        let restore2 = bundle::directory_of(
+            Kind::Restore,
+            &record2.volume,
+            &record2.build,
+            Some(second),
+            record2.bundle_schema,
+        );
+        assert!(choices().entries[5].options.contains(&format!(
+            "--bundle \\EFI\\stela\\boot\\{}\\restore-{}",
+            record2.build,
+            second.digits()
+        )));
         // The default moves, and stela.cfg with it.
         rerun(&f, |c| c.default_install = Some("macOS 2".into())).unwrap();
         assert_eq!(choices().entries[0].name, "macOS 2");
@@ -2437,8 +3062,11 @@ mod tests {
         f2 = rerun(&f, |c| c.remove_install = Some("macOS 2".into())).unwrap();
         assert!(f2.contains(&format!("--ecid {second}")), "{f2}");
         assert!(!bundle_of(&f, Some(second)).exists());
+        assert!(!restore2.exists());
         assert_eq!(partition_bytes(&f, NOR2), nor2);
-        assert_eq!(choices().timeout_seconds, 0);
+        // The list still opens on its own while the USB can install macOS.
+        assert_eq!(choices().timeout_seconds, CHOOSER_SECONDS);
+        assert_eq!(choices().entries[2].name, INSTALL_CHOICE);
         assert_eq!(record(&f).installs.len(), 1);
         uninstall(&environment(&f.host), &f.esp, false).unwrap();
         assert!(!f.esp.join("EFI/stela").exists());
@@ -2512,6 +3140,9 @@ mod tests {
         let environment = Environment {
             host: &f.host,
             prepare: &prepare,
+            prepare_restore: &fake_prepare_restore,
+            inventory: &fake_inventory,
+            piece_bytes: medium::tests::PIECE_BYTES,
             interface: newer,
         };
         let new = f._dir.path().join("new.efi");
@@ -2835,6 +3466,7 @@ mod tests {
     /// region alone is set up, as a sparse image of the whole partition
     /// that starts with `head`.
     fn add_split_disk(f: &mut Fixture, second: bool, head: &[u8]) {
+        add_stela(f);
         let (disk, serial, identifier, guid) = if second {
             ("disk2", SERIAL2, REGION2, REGION2_GUID)
         } else {
@@ -2868,6 +3500,7 @@ mod tests {
     fn split_command(f: &Fixture) -> Setup {
         let mut command = command(f, &f.esp);
         command.target = Some(REGION.into());
+        command.tss = true;
         command
     }
 
@@ -2958,7 +3591,7 @@ mod tests {
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
             format!(
                 "--system --storage {region} --nor {region} --preboot {region} \
-                 --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid}\n"
+                 --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid} --tss\n"
             )
         );
         let choices =
@@ -2967,7 +3600,7 @@ mod tests {
             choices.entries[1].options,
             format!(
                 "--system --storage {region} --nor {region} --bundle {recovery} \
-                 --ram-bytes 0x200000000 --ecid {ecid}"
+                 --ram-bytes 0x200000000 --ecid {ecid} --tss"
             )
         );
         // Setup itself wrote neither the SSD nor the machine state.
@@ -3194,11 +3827,20 @@ mod tests {
             Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
         let region2 = format!("{SERIAL2}:{REGION2_GUID}");
         assert!(
-            choices.entries[2]
+            choices.entries[3]
                 .options
                 .contains(&format!("--storage {region2} --nor {region2}")),
             "{}",
-            choices.entries[2].options
+            choices.entries[3].options
+        );
+        // Its Install choice restores onto the region with the tail kept.
+        assert_eq!(choices.entries[5].name, "Other - Install macOS");
+        assert!(
+            choices.entries[5]
+                .options
+                .contains(&format!("--storage {region2} --nor {region2} --bundle")),
+            "{}",
+            choices.entries[5].options
         );
     }
 }
