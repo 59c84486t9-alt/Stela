@@ -466,6 +466,102 @@ fn map_jit_regions_follow_each_threads_write_protection() {
     );
 }
 
+/// A JIT writer's toggles, timed: each round makes the region writable,
+/// writes 64 bytes of code, makes it executable, invalidates and calls it;
+/// then bare toggle pairs, toggle pairs around one store, and invalidations
+/// with calls alone.
+const JIT_BENCHMARK: &str = r#"#include <libkern/OSCacheControl.h>
+#include <pthread.h>
+#include <ptrauth.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <time.h>
+static double now(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec + t.tv_nsec / 1e9;
+}
+int main(int argc, char **argv) {
+    int rounds = argc > 1 ? atoi(argv[1]) : 100000;
+    uint32_t *code = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE | PROT_EXEC,
+                          MAP_ANON | MAP_PRIVATE | MAP_JIT, -1, 0);
+    if (code == MAP_FAILED) return 1;
+    int (*function)(void) =
+        (int (*)(void))ptrauth_sign_unauthenticated(code, ptrauth_key_function_pointer, 0);
+    long sum = 0;
+    double start = now();
+    for (int i = 0; i < rounds; i++) {
+        pthread_jit_write_protect_np(0);
+        code[0] = 0x52800000 | ((uint32_t)(i & 0xffff) << 5);
+        code[1] = 0xd65f03c0;
+        for (int j = 2; j < 16; j++) code[j] = 0xd503201f;
+        pthread_jit_write_protect_np(1);
+        sys_icache_invalidate(code, 64);
+        sum += function();
+    }
+    double round = now() - start;
+    start = now();
+    for (int i = 0; i < rounds; i++) {
+        pthread_jit_write_protect_np(0);
+        pthread_jit_write_protect_np(1);
+    }
+    double bare = now() - start;
+    start = now();
+    for (int i = 0; i < rounds; i++) {
+        pthread_jit_write_protect_np(0);
+        code[64] = i;
+        pthread_jit_write_protect_np(1);
+    }
+    double written = now() - start;
+    start = now();
+    for (int i = 0; i < rounds; i++) {
+        sys_icache_invalidate(code, 64);
+        sum += function();
+    }
+    double called = now() - start;
+    printf("%d rounds (sum %ld), us each: round %.2f, bare toggle pair %.2f, toggle pair with a "
+           "store %.2f, invalidate and call %.2f\n", rounds, sum, round / rounds * 1e6,
+           bare / rounds * 1e6, written / rounds * 1e6, called / rounds * 1e6);
+    return 0;
+}
+"#;
+
+/// The JIT toggle microbenchmark, headless, for comparing write-protection
+/// designs: `cargo test --release -p stela-cli --test hosted --
+/// --ignored --nocapture map_jit_toggles_benchmark`, with `STELA_JIT_ROUNDS`
+/// rounds (100000 by default).
+#[test]
+#[ignore = "a benchmark, run on request"]
+fn map_jit_toggles_benchmark() {
+    let Some(roots) = guest_roots() else {
+        eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let flags = ["-arch", "arm64e", "-O1"];
+    let Some(program) = compile_source(work.path(), "jit_benchmark", JIT_BENCHMARK, &flags) else {
+        eprintln!("skipped: xcrun clang cannot build arm64e programs here");
+        return;
+    };
+    let rounds = std::env::var("STELA_JIT_ROUNDS").unwrap_or_else(|_| "100000".into());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
+    command.arg("run");
+    for root in &roots {
+        command.arg("--root").arg(root);
+    }
+    let output = command
+        .arg(&program)
+        .arg(&rounds)
+        .env("HOME", work.path())
+        .output()
+        .unwrap();
+    let (out, error) = text(&output);
+    assert!(output.status.success(), "{out}{error}");
+    println!("{out}");
+}
+
 #[test]
 fn guest_tools_run_on_each_chosen_mac() {
     let Some(roots) = guest_roots() else {

@@ -576,7 +576,6 @@ impl Kernel {
                 }
                 Ok(())
             }
-            EC_UNCATEGORIZED if self.jit_register(pe, elr)? => Ok(()),
             EC_UNCATEGORIZED | EC_WFI_WFE | EC_SIMD_TRAP | EC_MSR_TRAP => self
                 .bad_instruction(pe, || {
                     format!("guest exception class {class:#x} (ESR {esr:#x})")
@@ -594,17 +593,23 @@ impl Kernel {
     }
 
     /// MRS and MSR of SPRR_PERM_EL0 (`S3_6_C15_C1_5`), which EL0 executes
-    /// on Apple silicon (libpthread's JIT write protection) and the hosted
-    /// PE, which translates without SPRR, takes as UNDEFINED: the thread's
-    /// own value, whose JIT half the host protection of the MAP_JIT pages
-    /// follows once the thread holds the execution lock again
-    /// ([`super::jit`]). A write that changes a field the kernel locks
-    /// (any but the JIT index's EL0 half) is reported and stays UNDEFINED:
-    /// what the locked register does with it is not described.
-    fn jit_register(&mut self, pe: &mut Pe, elr: u64) -> Result<bool> {
+    /// on Apple silicon (libpthread's JIT write protection) without
+    /// entering the kernel and the hosted PE, which translates without
+    /// SPRR, takes as UNDEFINED. The thread serves them holding the
+    /// execution lock, outside the hosted kernel: the thread's own value,
+    /// whose JIT half the host protection of the MAP_JIT pages follows at
+    /// once ([`Self::jit_view`]). A write that changes a field the kernel
+    /// locks (any but the JIT index's EL0 half) is reported and stays
+    /// UNDEFINED: what the locked register does with it is not described.
+    /// Whether it served the exception, its return address set.
+    pub(super) fn jit_register(&mut self, pe: &mut Pe) -> Result<bool> {
         const MRS: u32 = 0xd53e_f1a0;
         const MSR: u32 = 0xd51e_f1a0;
         const XZR: usize = 31;
+        if pe.cpu.read(Register::ESR_EL1) >> EC_SHIFT != EC_UNCATEGORIZED {
+            return Ok(false);
+        }
+        let elr = pe.cpu.read(Register::ELR_EL1);
         let Some(instruction) = super::memory::read_u32(elr) else {
             return Ok(false);
         };
@@ -632,11 +637,19 @@ impl Kernel {
                     return Ok(false);
                 }
                 self.jit_permissions = value;
+                self.jit_view()?;
             }
             _ => return Ok(false),
         }
         pe.cpu.registers.set_raw(Register::ELR_EL1, 0, elr + 4);
         Ok(true)
+    }
+
+    /// Give the RWX MAP_JIT pages the host protection of this thread's
+    /// view ([`super::jit`]), while it holds the execution lock: as it
+    /// takes the lock, or writes SPRR_PERM_EL0.
+    pub(super) fn jit_view(&mut self) -> Result<()> {
+        lock(&self.process.jit).set_view(jit::writable(self.jit_permissions))
     }
 
     /// EXC_BAD_INSTRUCTION with EXC_ARM_UNDEFINED and the instruction the
