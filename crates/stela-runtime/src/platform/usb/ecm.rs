@@ -31,8 +31,8 @@
 //! when the list fits wNumberMCFilters) and SET_ETHERNET_PACKET_FILTER
 //! (`0x323321c`).
 //!
-//! Frames longer than the 1514-byte maximum segment are discarded and
-//! counted, never truncated. Each direction's queue holds at most
+//! Frames longer than the 1514-byte maximum segment or shorter than the
+//! Ethernet header are discarded and counted, never truncated. Each direction's queue holds at most
 //! [`QUEUE_FRAMES`]; a frame arriving at a full queue is dropped and
 //! counted, as a NIC's full ring drops.
 use super::{
@@ -54,6 +54,8 @@ const FULL_SPEED_PACKET: u16 = 64;
 const NOTIFY_PACKET: u16 = 16;
 const CONTROL_INTERFACE: u16 = 0;
 const DATA_INTERFACE: u16 = 1;
+/// The Ethernet header: destination, source and EtherType.
+const HEADER_BYTES: usize = 14;
 /// The Ethernet maximum segment: header and payload, no FCS.
 pub const MAX_SEGMENT: usize = 1514;
 /// Frames each direction holds.
@@ -64,7 +66,7 @@ const SET_ETHERNET_MULTICAST_FILTERS: u8 = 0x40;
 const SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
 const GET_ETHERNET_STATISTIC: u8 = 0x44;
 /// Perfect multicast filters (wNumberMCFilters, ECM 5.4 table 3).
-pub const MULTICAST_FILTERS: u16 = 32;
+const MULTICAST_FILTERS: u16 = 32;
 
 // Ethernet statistics feature selectors (ECM 6.2.5, table 9).
 const XMIT_OK: u16 = 1;
@@ -86,7 +88,7 @@ const BROADCAST_BYTES_RCV: u16 = 16;
 const BROADCAST_FRAMES_RCV: u16 = 17;
 const TRANSMIT_QUEUE_LENGTH: u16 = 19;
 /// bmEthernetStatistics: selector n is bit n - 1. Selectors 1-17 and 19.
-pub const STATISTICS: u32 = 0x0005_ffff;
+const STATISTICS: u32 = 0x0005_ffff;
 const NETWORK_CONNECTION: u8 = 0x00;
 const CONNECTION_SPEED_CHANGE: u8 = 0x2a;
 
@@ -101,9 +103,15 @@ const MULTICAST: u16 = 0x10;
 pub struct Counters {
     pub to_host: u64,
     pub to_guest: u64,
+    /// Frames outside the Ethernet frame sizes, discarded.
     pub oversized: u64,
     pub filtered: u64,
     pub overflowed: u64,
+}
+
+/// The destination of a frame of at least [`HEADER_BYTES`].
+fn destination(frame: &[u8]) -> Mac {
+    Mac(*frame.first_chunk().unwrap())
 }
 
 /// Destination kinds, as [`Traffic`] indices.
@@ -120,7 +128,7 @@ struct Traffic {
 
 impl Traffic {
     fn count(&mut self, frame: &[u8]) {
-        let destination = Mac(frame[..6].try_into().unwrap());
+        let destination = destination(frame);
         let kind = if destination == Mac::BROADCAST {
             EVERYONE
         } else if destination.is_multicast() {
@@ -316,12 +324,12 @@ impl Ecm {
     /// the queue is full.
     pub fn deliver(&mut self, frame: &[u8]) {
         let state = &mut self.state;
-        if frame.len() < 14 || frame.len() > MAX_SEGMENT {
+        if !(HEADER_BYTES..=MAX_SEGMENT).contains(&frame.len()) {
             state.counters.oversized += 1;
             state.statistics.receive_errors += 1;
             return;
         }
-        let destination = Mac(frame[..6].try_into().unwrap());
+        let destination = destination(frame);
         let filter = state.filter;
         let passes = filter & PROMISCUOUS != 0
             || if destination == Mac::BROADCAST {
@@ -424,7 +432,7 @@ impl State {
         }
         // A short packet, or a ZLP, ends the frame.
         if packet.len() < max {
-            if self.discarding || (1..14).contains(&self.assembling.len()) {
+            if self.discarding || (1..HEADER_BYTES).contains(&self.assembling.len()) {
                 // Longer than a segment, or shorter than an Ethernet header.
                 self.counters.oversized += 1;
                 self.statistics.transmit_errors += 1;
