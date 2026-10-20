@@ -191,18 +191,70 @@ fn long_sum_inputs(code: &mut Vec<u8>, lane: u8, bytes: u8, signed: bool) {
         packed(code, add_opcode(lane * 2), 0, 2);
     }
 }
+/// UMINV or UMAXV of bytes or halfwords in XMM0 with SSE4.1's PHMINPOSUW,
+/// the minimum of eight unsigned words, into its low word; the bits above
+/// the result lane are left for the caller to clear. A maximum is the
+/// complement of the minimum of the complements.
+fn unsigned_word_extremum(
+    code: &mut Vec<u8>,
+    maximum: bool,
+    lane: u8,
+    bytes: u8,
+    target: TargetCpu,
+) {
+    const ONES: u8 = 1;
+    const SCRATCH: u8 = 2;
+    if maximum {
+        packed(code, Host::EqualDword, ONES, ONES);
+        packed(code, Host::Xor, 0, ONES);
+    }
+    match (lane, bytes) {
+        (1, VECTOR_BYTES) => {
+            packed(code, Host::MoveAligned, SCRATCH, 0);
+            Shift::RightBytes.emit(code, SCRATCH, VECTOR_BYTES / 2);
+            Host::MinUnsignedByte.register(code, 0, SCRATCH, target);
+            Host::ZeroExtendByteToWord.register(code, 0, 0, target);
+        }
+        // Only the low eight bytes widen.
+        (1, _) => Host::ZeroExtendByteToWord.register(code, 0, 0, target),
+        (2, VECTOR_BYTES) => {}
+        // Ones in the upper four words never win a minimum.
+        (2, _) => {
+            packed(code, Host::EqualDword, SCRATCH, SCRATCH);
+            packed(code, Host::UnpackLowQword, 0, SCRATCH);
+        }
+        _ => unreachable!("byte or halfword lanes"),
+    }
+    Host::MinimumPositionWord.register(code, 0, 0, target);
+    if maximum {
+        packed(code, Host::Xor, 0, ONES);
+    }
+}
+
 fn across(code: &mut Vec<u8>, operation: Combine, mut lane: u8, mut bytes: u8, target: TargetCpu) {
     if let Combine::LongAdd { signed } = operation {
         long_sum_inputs(code, lane, bytes, signed);
         lane *= 2;
         bytes = 16;
     }
-    let mut stride = bytes / 2;
-    while stride >= lane {
-        packed(code, Host::MoveAligned, 1, 0);
-        Shift::RightBytes.emit(code, 1, stride);
-        combine(code, operation, lane, target);
-        stride /= 2;
+    let extremum = match operation {
+        Combine::Minimum { signed: false } => Some(false),
+        Combine::Maximum { signed: false } => Some(true),
+        _ => None,
+    };
+    if let Some(maximum) = extremum
+        && lane <= 2
+        && target.supports(TargetCpu::Sse41)
+    {
+        unsigned_word_extremum(code, maximum, lane, bytes, target);
+    } else {
+        let mut stride = bytes / 2;
+        while stride >= lane {
+            packed(code, Host::MoveAligned, 1, 0);
+            Shift::RightBytes.emit(code, 1, stride);
+            combine(code, operation, lane, target);
+            stride /= 2;
+        }
     }
     // The low lane alone: shifting it to the top and back clears the rest.
     let clear = VECTOR_BYTES - lane;
@@ -367,4 +419,111 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
         packed(code, Host::MoveQword, 0, 0);
     }
     commit(code, destination, 0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::GuestState;
+    use alloc::vec;
+
+    /// UMINV and UMAXV of bytes and halfwords, both widths, run on the host
+    /// for each target tier and agree with Arm's definition: the extremum
+    /// in the low lane, every other bit clear.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn unsigned_extrema_across_lanes_run_as_arm_defines_them() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const RET: u8 = 0xc3;
+        const SOURCE: u8 = 1;
+        const DESTINATION: u8 = 2;
+        fn run(code: &[u8], state: &mut GuestState) {
+            // SAFETY: private anonymous memory, RX after the copy, unmapped
+            // after the call; the code touches only `state`.
+            unsafe {
+                let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+                assert_ne!(page as usize, usize::MAX);
+                core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+                assert_eq!(mprotect(page, PAGE, 5), 0);
+                let entry: unsafe extern "sysv64" fn(*mut GuestState) = core::mem::transmute(page);
+                entry(state);
+                assert_eq!(munmap(page, PAGE), 0);
+            }
+        }
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut random = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            seed
+        };
+        for target in [TargetCpu::Baseline, TargetCpu::detect()] {
+            for maximum in [false, true] {
+                for (lane_bytes, bytes) in [(1u8, 16u8), (1, 8), (2, 16), (2, 8)] {
+                    let operation = if maximum {
+                        Combine::Maximum { signed: false }
+                    } else {
+                        Combine::Minimum { signed: false }
+                    };
+                    let operand = Operand {
+                        kind: Kind::Combine {
+                            operation,
+                            shape: Shape::Across,
+                        },
+                        destination: DESTINATION,
+                        left: SOURCE,
+                        right: SOURCE,
+                        bytes,
+                        lane_bytes,
+                    };
+                    let mut code = vec![];
+                    emit(&mut code, &operand, target);
+                    code.push(RET);
+                    for sample in 0..256 {
+                        // Edge vectors: all zeros, all ones and lone extrema.
+                        let value = match sample {
+                            0 => [0, 0],
+                            1 => [u64::MAX, u64::MAX],
+                            2 => [u64::MAX, u64::MAX - 1],
+                            3 => [1, 0],
+                            _ => [random(), random()],
+                        };
+                        let mut state = GuestState::default();
+                        state.v[usize::from(SOURCE)] = value;
+                        state.v[usize::from(DESTINATION)] = [random(), random()];
+                        run(&code, &mut state);
+                        let bits = u32::from(lane_bytes) * u8::BITS;
+                        let lanes = (0..u32::from(bytes / lane_bytes)).map(|index| {
+                            let at = index * bits;
+                            let word = value[(at / u64::BITS) as usize] >> (at % u64::BITS);
+                            word & ((1u64 << bits) - 1)
+                        });
+                        let expected = if maximum { lanes.max() } else { lanes.min() };
+                        assert_eq!(
+                            state.v[usize::from(DESTINATION)],
+                            [expected.unwrap(), 0],
+                            "{target:?} {maximum} {lane_bytes} {bytes} {value:x?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
