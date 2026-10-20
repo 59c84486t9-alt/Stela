@@ -413,6 +413,8 @@ fn dispatch(
             } else {
                 runs
             };
+            let process = kernel.process.clone();
+            let mut jit = lock(&process.jit);
             let mut status = u64::from(KERN_SUCCESS);
             for (run, size) in runs {
                 let mut rounded = arguments.to_vec();
@@ -421,6 +423,24 @@ fn dispatch(
                 status = forward_trap(kernel, index, &rounded)?;
                 if status != u64::from(KERN_SUCCESS) {
                     break;
+                }
+            }
+            // The JIT pages leave the table, or take the protection the
+            // running thread's view gives them.
+            if status == u64::from(KERN_SUCCESS) {
+                if deallocate {
+                    jit.forget(start, end - start);
+                } else {
+                    let change = |current: Protection| {
+                        if maximum {
+                            Protection(current.0 & new)
+                        } else {
+                            Protection(new)
+                        }
+                    };
+                    for (run, size, host) in jit.protect(start, end - start, change) {
+                        crate::hosted::memory::protect(run, size, host)?;
+                    }
                 }
             }
             status

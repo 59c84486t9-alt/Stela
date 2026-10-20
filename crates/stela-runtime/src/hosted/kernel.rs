@@ -13,6 +13,7 @@ use super::{
     Termination, forward,
     hardware::Hardware,
     host::ProcessHost,
+    jit::{self, Jit},
     shared_region::SharedRegion,
     threads::{Engine, Runtime, lock},
 };
@@ -160,6 +161,8 @@ pub(super) struct Process {
     pub(super) task_debug: Mutex<Option<Vec<u32>>>,
     /// Its asynchronous I/O queues and workers.
     pub(super) aio: Arc<bsd::aio::Aio>,
+    /// Its MAP_JIT ranges and the view their host protection follows.
+    pub(super) jit: Mutex<Jit>,
 }
 
 /// One `task_restartable_range_t`: location, length, recovery offset and
@@ -195,6 +198,9 @@ pub(super) struct Kernel {
     /// Whether dispatch marked it a heavy user of its cluster's shared
     /// resource (`th_shared_rsrc_heavy_user`).
     pub(super) shared_resource_heavy: bool,
+    /// Its SPRR_PERM_EL0, which gives MAP_JIT pages `r-x` or `rw-`
+    /// (`pthread_jit_write_protect_np`).
+    pub(super) jit_permissions: u64,
     pub(super) end: Option<End>,
     /// Its suspension and published state, which `thread_abort` and
     /// `thread_terminate` reach.
@@ -262,7 +268,13 @@ impl Process {
             .as_ref()
             .is_some_and(Signature::platform_restricted);
         mach::exception::set_guard_default(restricted);
+        let signature = config.executable.signature.as_ref();
+        let jit = Jit::new(
+            signature.is_none_or(Signature::jit_allowed),
+            signature.is_some_and(Signature::single_jit),
+        );
         Arc::new(Self {
+            jit: Mutex::new(jit),
             pac_exception_fatal,
             sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features, &config.release),
             signer: config.signer,
@@ -347,6 +359,7 @@ impl Kernel {
             worker: None,
             thread_directory: false,
             shared_resource_heavy: false,
+            jit_permissions: jit::WRITE_DISABLED,
             end: None,
         }
     }
@@ -563,6 +576,7 @@ impl Kernel {
                 }
                 Ok(())
             }
+            EC_UNCATEGORIZED if self.jit_register(pe, elr)? => Ok(()),
             EC_UNCATEGORIZED | EC_WFI_WFE | EC_SIMD_TRAP | EC_MSR_TRAP => self
                 .bad_instruction(pe, || {
                     format!("guest exception class {class:#x} (ESR {esr:#x})")
@@ -577,6 +591,52 @@ impl Kernel {
                 self.shared_cache_slide(),
             ),
         }
+    }
+
+    /// MRS and MSR of SPRR_PERM_EL0 (`S3_6_C15_C1_5`), which EL0 executes
+    /// on Apple silicon (libpthread's JIT write protection) and the hosted
+    /// PE, which translates without SPRR, takes as UNDEFINED: the thread's
+    /// own value, whose JIT half the host protection of the MAP_JIT pages
+    /// follows once the thread holds the execution lock again
+    /// ([`super::jit`]). A write that changes a field the kernel locks
+    /// (any but the JIT index's EL0 half) is reported and stays UNDEFINED:
+    /// what the locked register does with it is not described.
+    fn jit_register(&mut self, pe: &mut Pe, elr: u64) -> Result<bool> {
+        const MRS: u32 = 0xd53e_f1a0;
+        const MSR: u32 = 0xd51e_f1a0;
+        const XZR: usize = 31;
+        let Some(instruction) = super::memory::read_u32(elr) else {
+            return Ok(false);
+        };
+        let register = (instruction & 0x1f) as usize;
+        match instruction & !0x1f {
+            MRS if register != XZR => pe.cpu.state.x[register] = self.jit_permissions,
+            MRS => {}
+            MSR => {
+                let value = if register == XZR {
+                    0
+                } else {
+                    pe.cpu.state.x[register]
+                };
+                if !jit::user_writable(value) {
+                    super::unsupported::report(
+                        super::unsupported::Kind::Instruction,
+                        elr,
+                        &format!(
+                            "an SPRR_PERM_EL0 write of {value:#x}, which changes a field the \
+                             kernel locks"
+                        ),
+                        super::unsupported::Failure::BadInstruction,
+                        None,
+                    )?;
+                    return Ok(false);
+                }
+                self.jit_permissions = value;
+            }
+            _ => return Ok(false),
+        }
+        pe.cpu.registers.set_raw(Register::ELR_EL1, 0, elr + 4);
+        Ok(true)
     }
 
     /// EXC_BAD_INSTRUCTION with EXC_ARM_UNDEFINED and the instruction the

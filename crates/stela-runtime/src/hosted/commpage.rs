@@ -75,6 +75,13 @@ const APPROX_TIME: usize = 0x0c0;
 const APPROX_TIME_SUPPORTED: usize = 0x0c8;
 const KDEBUG_ENABLE: usize = 0x100;
 const ATM_DIAGNOSTIC_CONFIG: usize = 0x104;
+/// The JIT write-protection toggle (`_COMM_PAGE_APRR_SUPPORT` and the
+/// SPRR_PERM_EL0 values that enable and disable JIT writes), as every
+/// 26A434 Mac kernelcache's `commpage_populate` stores them
+/// ([`super::jit`]).
+const APRR_SUPPORT: usize = 0x10c;
+const APRR_WRITE_ENABLE: usize = 0x110;
+const APRR_WRITE_DISABLE: usize = 0x118;
 /// `new_commpage_timeofday_data_t`: `TimeStamp_tick`, `TimeStamp_sec`,
 /// `TimeStamp_frac`, `Ticks_scale`, `Ticks_per_sec`.
 const NEWTIMEOFDAY_DATA: usize = 0x120;
@@ -131,6 +138,12 @@ pub fn data_page(hardware: &Hardware, identification: &Identification, time: Tim
     put(CONT_HW_TIMEBASE, &time.continuous_offset.to_le_bytes());
     put(APPROX_TIME_SUPPORTED, &[1]);
     put(KDEBUG_ENABLE, &0u32.to_le_bytes());
+    put(APRR_SUPPORT, &[super::jit::APRR_SUPPORT_SPRR]);
+    put(APRR_WRITE_ENABLE, &super::jit::WRITE_ENABLED.to_le_bytes());
+    put(
+        APRR_WRITE_DISABLE,
+        &super::jit::WRITE_DISABLED.to_le_bytes(),
+    );
     put(REMOTETIME_PARAMS, &BT_RESET_SENTINEL_TS.to_le_bytes());
     put(DYLD_FLAGS, &0u64.to_le_bytes());
     put(CPU_TO_CLUSTER, &hardware.cpu_clusters());
@@ -526,6 +539,10 @@ mod tests {
         assert_eq!(page[CPU_TO_CLUSTER + 7], 1);
         assert_eq!(page[BOOTTIME_USEC], 7);
         assert_eq!(page[APPROX_TIME_SUPPORTED], 1);
+        let word = |offset: usize| u64::from_le_bytes(page[offset..offset + 8].try_into().unwrap());
+        assert_eq!(page[APRR_SUPPORT], 3);
+        assert_eq!(word(APRR_WRITE_ENABLE), 0x2010_0020_3030_0000);
+        assert_eq!(word(APRR_WRITE_DISABLE), 0x2010_0020_3010_0000);
     }
 
     #[test]

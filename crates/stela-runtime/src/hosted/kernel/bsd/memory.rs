@@ -23,6 +23,7 @@
 //! reported.
 use super::{Call, Kernel, Outcome, Pe, forward, forward_uninterruptible};
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOMEM, ENOTSUP, KERN_FAILURE};
+use crate::hosted::jit::MAP_JIT;
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
 use crate::hosted::{shared_region, threads::lock};
 use anyhow::{Result, bail};
@@ -59,7 +60,13 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
                 return Ok(Some(Outcome::Error(EINVAL)));
             };
             kernel.unslid_change(address, bytes, |_| None);
+            let process = kernel.process.clone();
+            let mut jit = lock(&process.jit);
             let outcome = forward_range(kernel, call, address, bytes)?;
+            if matches!(outcome, Outcome::Return(..)) {
+                jit.forget(address, bytes);
+            }
+            drop(jit);
             kernel.invalidate_code(pe, address, bytes);
             outcome
         }
@@ -71,11 +78,20 @@ pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Opti
             };
             let protection = Protection(call.argument(2) as i32 & Protection::ALL.0);
             let runs = kernel.unslid_change(start, end - start, |_| Some(protection));
+            let process = kernel.process.clone();
+            let mut jit = lock(&process.jit);
             let mut outcome = Outcome::value(0);
             for (run, size) in runs {
                 outcome = forward_range(kernel, call, run, size)?;
                 if !matches!(outcome, Outcome::Return(..)) {
                     break;
+                }
+            }
+            // The JIT pages take the protection the running thread's view
+            // gives them.
+            if matches!(outcome, Outcome::Return(..)) {
+                for (run, size, host) in jit.protect(start, end - start, |_| protection) {
+                    memory::protect(run, size, host)?;
                 }
             }
             outcome
@@ -111,7 +127,14 @@ fn forward_range(kernel: &mut Kernel, call: &Call, address: u64, bytes: u64) -> 
 /// `mmap`: the file offset's position within its page carries over to the
 /// returned address, and the whole pages are mapped.
 fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
-    let [address, bytes, _, flags, descriptor, position, ..] = call.arguments;
+    let [address, bytes, protection, flags, descriptor, position, ..] = call.arguments;
+    let protection = Protection(protection as i32 & Protection::ALL.0);
+    let process = kernel.process.clone();
+    let mut jit = lock(&process.jit);
+    let for_jit = flags & MAP_JIT != 0;
+    if for_jit && let Err(errno) = jit.check_map(flags) {
+        return Ok(Outcome::Error(errno));
+    }
     let offset = position & PAGE_MASK;
     let Some(size) = bytes.checked_add(offset).and_then(round_page) else {
         return Ok(Outcome::Error(EINVAL));
@@ -138,7 +161,12 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     };
     placed.arguments[0] = start;
     placed.arguments[1] = size;
-    placed.arguments[3] = flags | MAP_FIXED;
+    // A JIT mapping is an anonymous one whose host protection follows the
+    // running thread's view.
+    if for_jit {
+        placed.arguments[2] = jit.host_protection(protection).0 as u64;
+    }
+    placed.arguments[3] = (flags & !MAP_JIT) | MAP_FIXED;
     placed.arguments[4] = descriptor;
     placed.arguments[5] = position - offset;
     let mut outcome = forward_uninterruptible(kernel, &placed)?;
@@ -158,7 +186,6 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
             );
         }
         if matches!(outcome, Outcome::Return(mapped, _) if mapped == start) {
-            let protection = Protection(call.argument(2) as i32 & Protection::ALL.0);
             let status = memory::fill_host_pages(start + host_size, size - host_size, protection);
             if status != 0 {
                 bail!(
@@ -170,6 +197,12 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     }
     match outcome {
         Outcome::Return(mapped, _) if mapped == start => {
+            if for_jit {
+                jit.insert(start, size, protection);
+            } else {
+                jit.forget(start, size);
+            }
+            drop(jit);
             kernel.invalidate_code(pe, start, size);
             Ok(Outcome::value(start + offset))
         }

@@ -326,6 +326,14 @@ pub(crate) fn overlay(name: &str) -> Option<&'static str> {
 /// the hosted kernel does not provide.
 pub(crate) const LIMITS: &[(&str, &str)] = &[
     (
+        "mmap",
+        "a MAP_JIT page a thread's view makes writable still executes for that thread, where \
+         SPRR's `rw-` JIT index faults: the engine's code fetch takes no per-thread execute \
+         permission; and a host-forwarded call writing into an RWX JIT page meets the view of \
+         the thread holding the execution lock, which the calling thread gives up while the \
+         hosted kernel services the call",
+    ),
+    (
         "ptrace",
         "PT_STEP fails with EINVAL and is reported: the host would single-step the target's x86 \
          host thread",

@@ -108,6 +108,11 @@ const BROWSER_ENGINE: [&str; 4] = [
 ];
 /// `kIODriverKitEntitlementKey`.
 const DRIVERKIT: &str = "com.apple.developer.driverkit";
+/// The JIT entitlements: the hardened runtime's (AMFI), the platform's
+/// (TXM's JIT-region check) and `SINGLE_JIT_ENTITLEMENT` (`kern_exec.c`).
+const ALLOW_JIT: &str = "com.apple.security.cs.allow-jit";
+const DYNAMIC_CODESIGNING: &str = "dynamic-codesigning";
+const SINGLE_JIT: &str = "com.apple.security.cs.single-jit";
 /// `process_is_plugin_host`'s entitlements (`bsd/kern/mach_loader.c`,
 /// `OVERRIDE_PLUGIN_HOST_ENTITLEMENT`, `CLEAR_LV_ENTITLEMENT`) and the
 /// identities of `/System/Library/Security/HardeningExceptions.plist`,
@@ -380,6 +385,23 @@ impl Signature {
             || (fpac && platform)
     }
 
+    /// Whether AMFI lets the process map JIT memory
+    /// (`mac_proc_check_map_anon` with MAP_JIT, which exec also asks to
+    /// size the map): any process outside the hardened runtime, and a
+    /// hardened one that holds `com.apple.security.cs.allow-jit` or
+    /// `dynamic-codesigning` (the entitlement TXM's JIT-region check also
+    /// accepts).
+    pub fn jit_allowed(&self) -> bool {
+        self.exec_flags() & CS_RUNTIME == 0
+            || self.entitled(ALLOW_JIT)
+            || self.entitled(DYNAMIC_CODESIGNING)
+    }
+
+    /// Whether exec limits the map to one JIT entry (`vm_map_single_jit`).
+    pub fn single_jit(&self) -> bool {
+        self.entitled(SINGLE_JIT)
+    }
+
     /// Whether the XML entitlements grant the boolean `name`.
     pub fn entitled(&self, name: &str) -> bool {
         self.entitlements.as_deref().is_some_and(|blob| {
@@ -648,6 +670,30 @@ mod tests {
             ..Signature::default()
         };
         assert!(restricted.pac_exception_fatal(false));
+    }
+
+    #[test]
+    fn jit_follows_the_hardened_runtime_and_its_entitlements() {
+        assert!(Signature::default().jit_allowed());
+        let hardened = Signature {
+            directory_flags: CS_RUNTIME,
+            ..Signature::default()
+        };
+        assert!(!hardened.jit_allowed());
+        for key in [ALLOW_JIT, DYNAMIC_CODESIGNING] {
+            let signature = Signature {
+                directory_flags: CS_RUNTIME,
+                ..entitled(&format!("<key>{key}</key><true/>"))
+            };
+            assert!(signature.jit_allowed(), "{key}");
+        }
+        let denied = Signature {
+            directory_flags: CS_RUNTIME,
+            ..entitled("<key>com.apple.security.cs.allow-jit</key><false/>")
+        };
+        assert!(!denied.jit_allowed());
+        assert!(entitled("<key>com.apple.security.cs.single-jit</key><true/>").single_jit());
+        assert!(!hardened.single_jit());
     }
 
     fn entitled(keys: &str) -> Signature {

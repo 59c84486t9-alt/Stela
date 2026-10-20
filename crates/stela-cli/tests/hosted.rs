@@ -318,6 +318,154 @@ fn unsupported_operations_fail_as_macos_does_and_strict_mode_stops() {
     assert!(error.contains("fcntl F_ADDSIGS"), "{error}");
 }
 
+/// A JIT: MAP_JIT's refusals, a write faulting while the thread's view
+/// is executable, the region's RWX protection, code written and run through
+/// `pthread_jit_write_protect_np`, a second thread starting with its own
+/// executable view while the first stays writable, and a second JIT
+/// region.
+const JIT: &str = r#"#include <errno.h>
+#include <libkern/OSCacheControl.h>
+#include <libproc.h>
+#include <pthread.h>
+#include <ptrauth.h>
+#include <setjmp.h>
+#include <signal.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <sys/mman.h>
+#include <unistd.h>
+static sigjmp_buf back;
+static void faulted(int signal) { printf("fault %d\n", signal); siglongjmp(back, 1); }
+static void store(uint32_t *code, uint32_t value) {
+    if (sigsetjmp(back, 1) == 0) { code[0] = value; printf("stored\n"); }
+}
+static void emit(uint32_t *code, uint16_t value) {
+    code[0] = 0x52800000 | ((uint32_t)value << 5); // mov w0, #value
+    code[1] = 0xd65f03c0;                          // ret
+}
+static int call(uint32_t *code) {
+    return ((int (*)(void))ptrauth_sign_unauthenticated(code, ptrauth_key_function_pointer, 0))();
+}
+static void *other(void *code) {
+    printf("thread runs %d\n", call(code));
+    store(code, 0);
+    return NULL;
+}
+int main(void) {
+    signal(SIGBUS, faulted);
+    int flags = MAP_ANON | MAP_PRIVATE | MAP_JIT, all = PROT_READ | PROT_WRITE | PROT_EXEC;
+    printf("supported %d\n", pthread_jit_write_protect_supported_np());
+    printf("fixed %d\n", mmap((void *)0x300000000, 0x4000, all, flags | MAP_FIXED, -1, 0) == MAP_FAILED ? errno : 0);
+    printf("shared %d\n", mmap(NULL, 0x4000, all, MAP_ANON | MAP_SHARED | MAP_JIT, -1, 0) == MAP_FAILED ? errno : 0);
+    uint32_t *code = mmap(NULL, 0x4000, all, flags, -1, 0);
+    if (code == MAP_FAILED) { printf("jit %d\n", errno); return 0; }
+    store(code, 0);
+    struct proc_regioninfo region;
+    int size = proc_pidinfo(getpid(), PROC_PIDREGIONINFO, (uint64_t)code, &region, sizeof region);
+    printf("region %d\n", size == sizeof region ? (int)region.pri_protection : -1);
+    pthread_jit_write_protect_np(0);
+    emit(code, 42);
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(code, 8);
+    printf("runs %d\n", call(code));
+    pthread_jit_write_protect_np(0);
+    emit(code, 7);
+    sys_icache_invalidate(code, 8);
+    pthread_t thread;
+    pthread_create(&thread, NULL, other, code);
+    pthread_join(thread, NULL);
+    store(code, code[0]);
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(code, 8);
+    printf("runs %d\n", call(code));
+    printf("second %d\n", mmap(NULL, 0x4000, all, flags, -1, 0) == MAP_FAILED ? errno : 0);
+    return 0;
+}
+"#;
+
+#[test]
+fn map_jit_regions_follow_each_threads_write_protection() {
+    let Some(roots) = guest_roots() else {
+        eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
+        return;
+    };
+    let work = tempfile::tempdir().unwrap();
+    let Some(program) = compile_source(work.path(), "jit", JIT, &["-arch", "arm64e", "-O1"]) else {
+        eprintln!("skipped: xcrun clang cannot build arm64e programs here");
+        return;
+    };
+    // The same program signed ad hoc with the hardened runtime and the
+    // entitlements given.
+    let signed = |name: &str, runtime: bool, entitlements: &[&str]| {
+        let copy = work.path().join(name);
+        std::fs::copy(&program, &copy).unwrap();
+        let mut command = Command::new("/usr/bin/codesign");
+        command.args(["-f", "-s", "-"]);
+        if runtime {
+            command.args(["-o", "runtime"]);
+        }
+        if !entitlements.is_empty() {
+            let keys: String = entitlements
+                .iter()
+                .map(|key| format!("<key>{key}</key><true/>"))
+                .collect();
+            let plist = work.path().join(format!("{name}.plist"));
+            std::fs::write(
+                &plist,
+                format!("<plist version=\"1.0\"><dict>{keys}</dict></plist>"),
+            )
+            .unwrap();
+            command.arg("--entitlements").arg(plist);
+        }
+        assert!(command.arg(&copy).output().unwrap().status.success());
+        copy
+    };
+    let run = |program: &Path| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
+        command.arg("run");
+        for root in &roots {
+            command.arg("--root").arg(root);
+        }
+        let output = command
+            .arg(program)
+            .env("HOME", work.path())
+            .env("STELA_STRICT", "1")
+            .output()
+            .unwrap();
+        let (out, error) = text(&output);
+        assert!(output.status.success(), "{out}{error}");
+        out
+    };
+    let refusals = "supported 1\nfixed 22\nshared 22\n";
+    let jit = |second: i32| {
+        format!(
+            "{refusals}fault 10\nregion 7\nruns 42\nthread runs 7\nfault 10\nstored\nruns 7\nsecond \
+             {second}\n"
+        )
+    };
+    assert_eq!(run(&program), jit(0));
+    assert_eq!(
+        run(&signed("hardened", true, &[])),
+        format!("{refusals}jit 22\n")
+    );
+    assert_eq!(
+        run(&signed(
+            "allowed",
+            true,
+            &["com.apple.security.cs.allow-jit"]
+        )),
+        jit(0)
+    );
+    assert_eq!(
+        run(&signed(
+            "single",
+            false,
+            &["com.apple.security.cs.single-jit"]
+        )),
+        jit(22)
+    );
+}
+
 #[test]
 fn guest_tools_run_on_each_chosen_mac() {
     let Some(roots) = guest_roots() else {

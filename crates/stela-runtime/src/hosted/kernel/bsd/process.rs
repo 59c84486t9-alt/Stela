@@ -41,6 +41,14 @@ const ENAMETOOLONG: u64 = 63;
 const MAC_MAX_LABEL_BUF_LEN: u64 = 8192;
 /// `PROC_INFO_CALL_SET_DYLD_IMAGES` (`sys/proc_info_private.h`).
 const PROC_INFO_CALL_SET_DYLD_IMAGES: i32 = 0xf;
+/// `PROC_INFO_CALL_PIDINFO` and its region flavors, whose
+/// `proc_regioninfo` starts with `pri_protection` and has `pri_address`
+/// at 80 of its 96 bytes (`sys/proc_info.h`).
+const PROC_INFO_CALL_PIDINFO: i32 = 2;
+const PROC_PIDREGIONINFO: i32 = 7;
+const PROC_PIDREGIONPATHINFO: i32 = 8;
+const REGION_ADDRESS: u64 = 80;
+const REGION_INFO_BYTES: u64 = 96;
 /// `PIF_COMPARE_IDVERSION | PIF_COMPARE_UNIQUEID`, which
 /// `proc_info_extended_id` refuses together before any call.
 const PIF_COMPARE_BOTH: u64 = 0x3;
@@ -148,10 +156,25 @@ pub(super) fn call(kernel: &mut Kernel, _pe: &mut Pe, call: &Call) -> Result<Opt
 /// `buffer`: `PROC_INFO_CALL_SET_DYLD_IMAGES` sets the guest's task's dyld
 /// image list location, which the host's task keeps for its own x86 dyld;
 /// every other call is about this process's or the host's processes'
-/// architecture-neutral state and is the host kernel's.
+/// architecture-neutral state and is the host kernel's, except the
+/// protection of this process's RWX JIT pages, whose host protection
+/// follows the running thread's view ([`crate::hosted::jit`]).
 fn proc_info(kernel: &mut Kernel, call: &Call, buffer: usize) -> Result<Outcome> {
     if call.argument(0) as i32 != PROC_INFO_CALL_SET_DYLD_IMAGES {
-        return super::forward(kernel, call);
+        let outcome = super::forward(kernel, call)?;
+        // SAFETY: no arguments.
+        let own = unsafe { libc::getpid() };
+        if call.argument(0) as i32 == PROC_INFO_CALL_PIDINFO
+            && call.argument(1) as i32 == own
+            && matches!(
+                call.argument(2) as i32,
+                PROC_PIDREGIONINFO | PROC_PIDREGIONPATHINFO
+            )
+            && matches!(outcome, Outcome::Return(bytes, _) if bytes >= REGION_INFO_BYTES)
+        {
+            jit_region_protection(kernel, call.argument(buffer));
+        }
+        return Ok(outcome);
     }
     // SAFETY: no arguments.
     let own = unsafe { libc::getpid() };
@@ -168,6 +191,19 @@ fn proc_info(kernel: &mut Kernel, call: &Call, buffer: usize) -> Result<Outcome>
             Err(errno) => Outcome::Error(errno),
         },
     )
+}
+
+/// A `proc_regioninfo` at `info` of an RWX JIT range gives the range's VM
+/// protection, not the host's current one.
+fn jit_region_protection(kernel: &Kernel, info: u64) {
+    let Some(address) = memory::read_u64(info + REGION_ADDRESS) else {
+        return;
+    };
+    if let Some((_, _, protection)) = crate::hosted::threads::lock(&kernel.process.jit).at(address)
+        && protection == memory::Protection::ALL
+    {
+        memory::write_u32(info, protection.0 as u32);
+    }
 }
 
 /// `proc_set_dyld_images`: only the calling process's own task, with a

@@ -26,6 +26,7 @@ pub mod features;
 pub mod forward;
 pub mod hardware;
 pub mod host;
+pub mod jit;
 pub mod kernel;
 pub mod memory;
 pub mod pe;

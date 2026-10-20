@@ -605,18 +605,28 @@ fn enter<F>(
 }
 
 /// Take the execution lock for `thread` and bring its engine up to date:
-/// the reservation another thread's execution may have broken and the
-/// compiled blocks the hosted kernel made stale.
-fn resume(process: &Process, thread: u64, member: &Member, pe: &mut Pe) {
+/// the reservation another thread's execution may have broken, the
+/// compiled blocks the hosted kernel made stale, and the host protection
+/// of the MAP_JIT pages, which follows its view (`jit_permissions`, its
+/// SPRR_PERM_EL0).
+fn resume(
+    process: &Process,
+    thread: u64,
+    member: &Member,
+    pe: &mut Pe,
+    jit_permissions: u64,
+) -> Result<()> {
     if process.runtime.execution.acquire(thread) {
         pe.cpu.monitor = None;
     }
+    lock(&process.jit).set_view(crate::hosted::jit::writable(jit_permissions))?;
     if member.has_stale.swap(false, Ordering::SeqCst) {
         let ranges = std::mem::take(&mut *lock(&member.stale));
         for (address, bytes) in ranges {
             pe.invalidate_code(address, bytes);
         }
     }
+    Ok(())
 }
 
 /// A thread preempted inside a restartable range resumes at its recovery
@@ -662,7 +672,7 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
     if !control.leave(pe) {
         return Ok(None);
     }
-    resume(&process, thread, member, pe);
+    resume(&process, thread, member, pe, kernel.jit_permissions)?;
     loop {
         match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
@@ -679,7 +689,7 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if !control.leave(pe) {
                     return Ok(None);
                 }
-                resume(&process, thread, member, pe);
+                resume(&process, thread, member, pe, kernel.jit_permissions)?;
                 pe.return_from_exception();
             }
             // XNU defers an AST taken inside the commpage's
@@ -699,18 +709,18 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                     if let Some(end) = deliver(kernel, pe)? {
                         return Ok(ended(end));
                     }
-                    resume(&process, thread, member, pe);
+                    resume(&process, thread, member, pe, kernel.jit_permissions)?;
                 } else if control.pending() {
                     restart_ranges(&process, pe);
                     execution.release(thread);
                     if !control.leave(pe) {
                         return Ok(None);
                     }
-                    resume(&process, thread, member, pe);
+                    resume(&process, thread, member, pe, kernel.jit_permissions)?;
                 } else if execution.contended() {
                     restart_ranges(&process, pe);
                     execution.release(thread);
-                    resume(&process, thread, member, pe);
+                    resume(&process, thread, member, pe, kernel.jit_permissions)?;
                 }
             }
             Stop::Waiting => {
@@ -722,7 +732,7 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(&process, thread, member, pe);
+                resume(&process, thread, member, pe, kernel.jit_permissions)?;
             }
             // An instruction the runtime does not implement: as an Apple
             // CPU's UNDEFINED encoding, EXC_BAD_INSTRUCTION at its pc.
@@ -748,7 +758,7 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                 if let Some(end) = deliver(kernel, pe)? {
                     return Ok(ended(end));
                 }
-                resume(&process, thread, member, pe);
+                resume(&process, thread, member, pe, kernel.jit_permissions)?;
             }
             Stop::Breakpoint(pc) => {
                 execution.release(thread);
