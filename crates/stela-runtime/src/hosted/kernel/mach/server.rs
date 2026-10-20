@@ -181,7 +181,8 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Object::Host,
         "host_set_atm_diagnostic_flag",
         Some(
-            "an entitled caller sets the host's flag, which this process's commpage does not show",
+            "a caller entitled to set the machine's diagnostic flag stops the run: the hosted \
+             runtime holds no entitlement to set the host machine's",
         ),
     ),
     (Object::Host, "host_set_multiuser_config_flags", None),
@@ -596,6 +597,21 @@ pub(super) fn serve(
             } else {
                 Reply::Forward
             }
+        }
+        // `diagnostic_flag`. Without the private entitlement the host's
+        // KERN_NO_ACCESS is the arm64 kernel's; with it the arm64 kernel
+        // sets the machine-wide flag (`atm_set_diagnostic_config`), which
+        // the host refuses the hosted runtime.
+        (Object::Host, "host_set_atm_diagnostic_flag", false)
+            if lock(&kernel.process.executable)
+                .signature
+                .as_ref()
+                .is_some_and(|signature| signature.entitled(ATM_DIAGNOSTIC_ENTITLEMENT)) =>
+        {
+            bail!(
+                "host_set_atm_diagnostic_flag by a task entitled to it: setting the machine's \
+                 diagnostic flag, which the host refuses the hosted runtime, is not implemented"
+            )
         }
         (Object::Host, routine, _) if HOST_FORWARDED.contains(&routine) => Reply::Forward,
         // The default processor set is the host's boot set, whose name
@@ -1082,6 +1098,9 @@ const HOST_FORWARDED: &[&str] = &[
     "host_get_UNDServer",
     "kext_request",
 ];
+
+/// The entitlement `host_set_atm_diagnostic_flag` requires.
+const ATM_DIAGNOSTIC_ENTITLEMENT: &str = "com.apple.private.set-atm-diagnostic-flag";
 
 /// `mach_make_memory_entry_64` flags (`mach/memory_object_types.h`).
 const MAP_MEM_ONLY: u32 = 0x01_0000;
