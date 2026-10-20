@@ -20,7 +20,9 @@
 //! `flush_supportsPower`, `late_init_signal` and `setDisplayRefreshProperties`
 //! back, which re-enter [`Methods::call`]). The model inherits the boot
 //! framebuffer rather than allocating a new default one: `A454
-//! do_create_default_frame_buffer` answers 0.
+//! do_create_default_frame_buffer` answers 0. The pipe's config frame size
+//! starts unset (`A103` answers 0 x 0), so the AP's `start_hardware_boot`
+//! sets it to the display size (`A104`) and programs it (`A105`).
 //!
 //! Once started, the coprocessor publishes its one mode on the IOMFB service
 //! (`D126`..`D128 setDCPAVPropStart/Chunk/End` with the keys `TimingElements`
@@ -125,6 +127,9 @@ pub struct Methods {
     clients: u32,
     /// The mode set by `set_digital_out_mode`, `(color, timing)`.
     digital_out: Option<(u32, u32)>,
+    /// The pipe's config frame size, `(width, height)`; 0 x 0 until the AP
+    /// sets it.
+    config_frame: (u32, u32),
     next_swap: u32,
     /// The swap `swap_start_dcp` opened, not yet submitted.
     open_swap: Option<u32>,
@@ -152,6 +157,7 @@ impl Methods {
             powered: None,
             clients: 0,
             digital_out: None,
+            config_frame: (0, 0),
             next_swap: 1,
             open_swap: None,
             planes: [None; swap::LAYERS],
@@ -474,6 +480,35 @@ impl Service for Methods {
                     .u32(IO_RETURN_SUCCESS)
                     .finish(output);
                 self.reply(tag, packed)
+            }
+            // UPPipe2::get_config_frame_size(u32* width, u32* height)
+            // (0x2a6b264): both values, then a null flag per pointer.
+            // `UnifiedPipeline2::start_hardware_boot` (0x2a5d840) treats a
+            // zero dimension as unset and configures the display size
+            // (Inferred: a freshly started pipe has none configured).
+            b"A103" => {
+                fields.u32()?;
+                fields.u32()?;
+                let (width, height) = self.config_frame;
+                let packed = Packed::new().u32(width).u32(height).finish(output);
+                self.reply(tag, packed)
+            }
+            // set_config_frame_size(u32 width, u32 height) (0x2a6b33c).
+            b"A104" => {
+                self.config_frame = (fields.u32()?, fields.u32()?);
+                Ok(Step::Return(Vec::new()))
+            }
+            // program_config_frame_size() (0x2a6b39c): the pipe scans out
+            // the one mode, so only its size can be programmed.
+            b"A105" => {
+                let mode = self.mode();
+                if self.config_frame != (mode.width, mode.height) {
+                    return self.refuse(
+                        tag,
+                        "program_config_frame_size programs a frame size other than the mode's",
+                    );
+                }
+                Ok(Step::Return(Vec::new()))
             }
             // first_client_open() / last_client_close_dcp(out u32).
             b"A466" => {
@@ -811,6 +846,24 @@ mod tests {
             answer(b"A475", &[], 4, FULL_HD).unwrap(),
             1u32.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn the_config_frame_size_starts_unset_and_programs_only_the_mode() {
+        let mut methods = methods();
+        // Values 0, both pointers present, the AP's 0xaa padding.
+        let query = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xaa, 0xaa];
+        assert_eq!(returned(methods.call(*b"A103", &query, 8)), [0; 8]);
+        let mut size = 1920u32.to_le_bytes().to_vec();
+        size.extend_from_slice(&1080u32.to_le_bytes());
+        assert!(returned(methods.call(*b"A104", &size, 0)).is_empty());
+        assert_eq!(returned(methods.call(*b"A103", &query, 8)), size);
+        assert!(returned(methods.call(*b"A105", &[], 0)).is_empty());
+        let mut other = 1280u32.to_le_bytes().to_vec();
+        other.extend_from_slice(&720u32.to_le_bytes());
+        returned(methods.call(*b"A104", &other, 0));
+        assert!(methods.call(*b"A105", &[], 0).is_err());
+        assert!(methods.last_refusal().unwrap().contains("A105"));
     }
 
     #[test]
