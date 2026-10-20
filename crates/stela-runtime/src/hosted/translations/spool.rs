@@ -174,7 +174,7 @@ mod tests {
         let mut damaged = bytes.clone();
         damaged[50] ^= 1;
         assert_eq!(decode(&damaged, &translator), None);
-        let again = Arc::new(Preparation::from_description(&spooled.description));
+        let again = Arc::new(Preparation::from_description(&spooled.description).unwrap());
         let offer = spooled.offer(again).unwrap();
         let compiled = preparation
             .compile_input(&spooled.input, spooled.pc)
@@ -185,7 +185,9 @@ mod tests {
         other.context = Digest::default();
         assert!(
             other
-                .offer(Arc::new(Preparation::from_description(&other.description)))
+                .offer(Arc::new(
+                    Preparation::from_description(&other.description).unwrap()
+                ))
                 .is_none()
         );
     }

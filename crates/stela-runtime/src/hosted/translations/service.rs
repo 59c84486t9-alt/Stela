@@ -170,7 +170,11 @@ fn take_spool(shared: &'static super::Shared, directory: &Path) -> u64 {
             {
                 Some((_, preparation)) => preparation.clone(),
                 None => {
-                    let made = Arc::new(Preparation::from_description(&spooled.description));
+                    // A description no preparation has is not offered.
+                    let Ok(made) = Preparation::from_description(&spooled.description) else {
+                        continue;
+                    };
+                    let made = Arc::new(made);
                     preparations.push((spooled.description, made.clone()));
                     made
                 }

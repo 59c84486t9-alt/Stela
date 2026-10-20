@@ -116,7 +116,10 @@ impl Preparation {
         }
     }
 
-    pub fn from_description(description: &Description) -> Self {
+    /// The preparation `description` records, or why it records none: a
+    /// stored description may be old or damaged, and its withheld set one
+    /// [`Chip::admit_table`] refuses.
+    pub fn from_description(description: &Description) -> Result<Self, &'static str> {
         let Description {
             chip,
             target,
@@ -126,18 +129,15 @@ impl Preparation {
             system,
             withheld,
         } = *description;
-        Self::new(
+        Ok(Self::new(
             chip,
-            Arc::new(
-                chip.admit_table(withheld)
-                    .expect("a description records the withheld set of an admit table"),
-            ),
+            Arc::new(chip.admit_table(withheld)?),
             target,
             fp,
             checks,
             scalable,
             system,
-        )
+        ))
     }
     /// Replace each word of `source` with the one the chip executes: a
     /// form the chip lacks compiles as the UDF or NOP it executes as.
@@ -300,4 +300,26 @@ pub(crate) fn test_preparation() -> Preparation {
         None,
         NativeSystem::NONE,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::machine::system::Feature;
+
+    /// A description makes its preparation again, and one whose withheld set
+    /// has no admit table is refused rather than trusted.
+    #[test]
+    fn a_description_makes_its_preparation_or_is_refused() {
+        let preparation = test_preparation();
+        let description = preparation.description();
+        let again = Preparation::from_description(&description).unwrap();
+        assert_eq!(again.description(), description);
+        let split = Description {
+            chip: Chip::AppleM4,
+            withheld: 1 << Feature::FEAT_SME_I16I64 as u64,
+            ..description
+        };
+        assert!(Preparation::from_description(&split).is_err());
+    }
 }
