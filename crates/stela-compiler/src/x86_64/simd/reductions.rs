@@ -204,13 +204,14 @@ fn across(code: &mut Vec<u8>, operation: Combine, mut lane: u8, mut bytes: u8, t
         combine(code, operation, lane, target);
         stride /= 2;
     }
-    constant(
-        code,
-        1,
-        core::array::from_fn(|i| if i < usize::from(lane) { 255 } else { 0 }),
-    );
-    packed(code, Host::And, 0, 1);
+    // The low lane alone: shifting it to the top and back clears the rest.
+    let clear = VECTOR_BYTES - lane;
+    Shift::LeftBytes.emit(code, 0, clear);
+    Shift::RightBytes.emit(code, 0, clear);
 }
+
+/// The bytes of an XMM register.
+const VECTOR_BYTES: u8 = 16;
 
 fn nibble_lookup(code: &mut Vec<u8>, reverse: bool, target: TargetCpu) {
     let table = core::array::from_fn(|i| {
