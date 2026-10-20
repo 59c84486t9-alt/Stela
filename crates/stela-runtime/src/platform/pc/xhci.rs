@@ -155,6 +155,8 @@ pub const INTERFACE_DESCRIPTOR: u8 = 4;
 pub const ENDPOINT_DESCRIPTOR: u8 = 5;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
+/// bInterfaceClass 0xff: a vendor-specific interface.
+const VENDOR_CLASS: u8 = 0xff;
 const PORT_RESET: u16 = 4;
 const PORT_POWER: u16 = 8;
 const C_PORT_CONNECTION: u16 = 16;
@@ -317,6 +319,13 @@ pub struct Interface {
     /// Descriptors between this interface's and the next one's, endpoints
     /// excluded, whole (length and type first).
     pub extra: Vec<Vec<u8>>,
+}
+
+/// Whether a configuration's first interface has a standard class.
+fn standard_class(configuration: &[u8]) -> bool {
+    interfaces(configuration)
+        .first()
+        .is_some_and(|interface| interface.class != VENDOR_CLASS)
 }
 
 /// The interfaces of a configuration descriptor, in order.
@@ -1191,12 +1200,20 @@ impl Controller {
             .get(..18)
             .and_then(|b| b.try_into().ok())
             .ok_or(BlockError::Unsupported("short device descriptor"))?;
-        let head = self.descriptor(slot, CONFIGURATION_DESCRIPTOR, 0, 9)?;
-        if head.len() < 9 {
-            return Err(BlockError::Unsupported("short configuration descriptor"));
+        // The USB core's choice (Linux `usb_choose_configuration`): the first
+        // configuration whose first interface has a standard class, so an
+        // adapter that also offers CDC Ethernet after its vendor-specific
+        // configuration (as Realtek RTL8153 adapters do) is used through it.
+        let mut chosen = None;
+        for index in 0..descriptor[17].max(1) {
+            let configuration = self.configuration(slot, index)?;
+            if standard_class(&configuration) {
+                chosen = Some(configuration);
+                break;
+            }
+            chosen.get_or_insert(configuration);
         }
-        let total = u16::from_le_bytes([head[2], head[3]]).min(CONTROL_BYTES as u16);
-        let configuration = self.descriptor(slot, CONFIGURATION_DESCRIPTOR, 0, total)?;
+        let configuration = chosen.expect("at least one configuration is read");
         let manufacturer = self.string(slot, descriptor[14]);
         let product = self.string(slot, descriptor[15]);
         let serial = self.string(slot, descriptor[16]);
@@ -1210,6 +1227,16 @@ impl Controller {
             product,
             serial,
         })
+    }
+
+    /// Configuration descriptor `index`, whole.
+    fn configuration(&mut self, slot: u8, index: u8) -> Result<Vec<u8>, BlockError> {
+        let head = self.descriptor(slot, CONFIGURATION_DESCRIPTOR, index, 9)?;
+        if head.len() < 9 {
+            return Err(BlockError::Unsupported("short configuration descriptor"));
+        }
+        let total = u16::from_le_bytes([head[2], head[3]]).min(CONTROL_BYTES as u16);
+        self.descriptor(slot, CONFIGURATION_DESCRIPTOR, index, total)
     }
 
     fn hub(
@@ -1697,6 +1724,21 @@ pub(crate) mod tests {
         assert_eq!(found[0].endpoints[0].dci(), 3);
         assert_eq!(found[0].endpoints[1].dci(), 4);
         assert_eq!(found[0].endpoints[0].max_packet, 512);
+    }
+
+    #[test]
+    fn a_vendor_specific_configuration_is_passed_over() {
+        let vendor = [
+            9, 2, 18, 0, 1, 1, 0, 0x80, 50, // configuration 1
+            9, 4, 0, 0, 0, 0xff, 0xff, 0, 0, // vendor interface
+        ];
+        let ecm = [
+            9, 2, 18, 0, 2, 2, 0, 0x80, 50, // configuration 2
+            9, 4, 0, 0, 1, 2, 6, 0, 0, // CDC ECM communications interface
+        ];
+        assert!(!standard_class(&vendor));
+        assert!(standard_class(&ecm));
+        assert!(!standard_class(&vendor[..9]));
     }
 
     #[test]
