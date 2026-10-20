@@ -248,6 +248,8 @@ fn install_status(
     match installed::confirm(host, disk, installed::Role::AppleRegion, None) {
         Ok(region) => {
             let bytes = host.partition(&region).map(|p| p.bytes).unwrap_or(0);
+            // The guest's SSD ends where a machine state in its tail starts.
+            let bytes = disk.machine_state_offset.unwrap_or(bytes).min(bytes);
             let systems = systems(host, &region, bytes);
             report.line(
                 "Apple region",
@@ -271,24 +273,28 @@ fn install_status(
             install.name
         )),
     }
-    let nor = match installed::confirm(host, disk, installed::Role::Nor, None) {
-        Ok(nor) => nor,
+    let area = match installed::state_area(host, disk, None) {
+        Ok(area) => area,
         Err(error) => {
-            report.problem(format!("install \"{}\"'s NOR: {error:#}", install.name));
+            report.problem(format!(
+                "install \"{}\"'s machine state: {error:#}",
+                install.name
+            ));
             return;
         }
     };
-    report.line(
-        "NOR",
-        format!(
-            "{nor} (serial {}, partition {})",
-            disk.nor_serial, disk.nor_guid
+    let nor = area.identifier.clone();
+    match disk.machine_state_offset {
+        Some(_) => report.line(
+            "machine state",
+            format!("{}: {:#x} bytes", disk.state_description(), area.bytes),
         ),
-    );
-    let bytes = match host.read(&nor, 0, CAPACITY + sep_state::BYTES as usize) {
+        None => report.line("NOR", disk.state_description()),
+    }
+    let bytes = match area.read(host, 0, CAPACITY + sep_state::BYTES as usize) {
         Ok(bytes) => bytes,
         Err(error) => {
-            report.problem(format!("{nor} cannot be read: {error:#}"));
+            report.problem(format!("{} cannot be read: {error:#}", area.describe()));
             return;
         }
     };
@@ -438,11 +444,11 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
                 continue;
             }
             let install = record.installs[index].clone();
-            let nor =
-                installed::confirm(environment.host, &install.disk, installed::Role::Nor, None)?;
-            let area = environment
-                .host
-                .read(&nor, CAPACITY as u64, sep_state::ROOTS_BYTES)?;
+            let area = installed::state_area(environment.host, &install.disk, None)?.read(
+                environment.host,
+                CAPACITY as u64,
+                sep_state::ROOTS_BYTES,
+            )?;
             let provisioned = state::sep(&area).unwrap_or(false);
             let ecid = machines::machine_ecid(
                 command.ecid,

@@ -11,11 +11,14 @@
 //! removes everything the record names.
 //!
 //! Each Stela machine has its own ECID (`setup::ecid`), drawn once, kept in
-//! the record and given to every bundle prepared for it. With `--target` and
-//! `--nor`, setup runs on the PC itself and also names the PC's own disk
-//! (`setup::installed`): the entry then boots the installed macOS from that
-//! disk, or recoveryOS when NVRAM asks for it or the disk holds no system
-//! yet, as a Mac does. Further disks become further installs of the same
+//! the record and given to every bundle prepared for it. With `--target`,
+//! setup runs on the PC itself and also names the PC's own disk
+//! (`setup::installed`): one empty partition becomes the Mac's internal SSD
+//! and keeps the machine state (NVRAM, the SEP's state, the boot log) in its
+//! last bytes, outside what the guest sees, or `--nor` names a partition of
+//! its own for that state. The entry then boots the installed macOS from
+//! that disk, or recoveryOS when NVRAM asks for it or the disk holds no
+//! system yet, as a Mac does. Further disks become further installs of the same
 //! setup (`setup::machines`), each its own machine, chosen at boot from
 //! `stela.efi`'s startup choices. Setup writes no disk but the USB, except
 //! fresh machine state with `--initialize-nor` and NVRAM with
@@ -108,12 +111,17 @@ pub(crate) struct Setup {
     uninstall: bool,
     /// The PC's partition that becomes the Mac's internal SSD, such as
     /// disk1s2: macOS is installed onto it from recoveryOS and booted from it.
-    /// On an existing setup, it adds another install.
-    #[arg(long, requires = "nor")]
+    /// Without --nor its last 8 MiB keep the machine state (NVRAM, the SEP's
+    /// state and the boot log), which the guest never sees. On an existing
+    /// setup, it adds another install.
+    #[arg(long)]
     target: Option<String>,
-    /// The PC's partition (at least 1 MiB and 64 KiB) that holds the Mac's
-    /// NOR flash, where NVRAM persists, and the SEP's state; with at least
-    /// 0x510000 bytes it also keeps stela.efi's boot log, which is optional.
+    /// Optional: a separate PC partition (at least 1 MiB and 64 KiB) for the
+    /// machine state instead of the target's tail: the Mac's NOR flash, where
+    /// NVRAM persists, and the SEP's state; with at least 0x510000 bytes it
+    /// also keeps stela.efi's boot log. Later commands name the install's
+    /// machine-state partition again with it (the target itself when its
+    /// tail holds the state).
     #[arg(long)]
     nor: Option<String>,
     /// The serial number of the disk holding `--target` and `--nor`, when
@@ -124,7 +132,8 @@ pub(crate) struct Setup {
     /// it erases.
     #[arg(long, requires = "target")]
     erase_target: bool,
-    /// Write a fresh NOR image over a `--nor` that is neither blank nor one.
+    /// Write a fresh NOR image over machine state that is neither blank nor
+    /// one, and blank a foreign SEP area.
     #[arg(long, requires = "target")]
     initialize_nor: bool,
     /// The name of a new install, or the install another option acts on
@@ -334,7 +343,7 @@ impl Record {
                 .with_context(|| format!("this setup has no install named {name:?}")),
             None => self.default().with_context(|| {
                 format!(
-                    "the setup on {} names no installed disk (--target and --nor)",
+                    "the setup on {} names no installed disk (--target)",
                     self.esp.display()
                 )
             }),
@@ -797,8 +806,12 @@ impl Setup {
             let disk = &install.disk;
             let changes = installed::next_boot(environment.host, disk, next, self.dry_run)?;
             let mut text = format!(
-                "NVRAM of {} ({}'s NOR partition):\n",
-                disk.nor, install.name
+                "NVRAM of {} (install \"{}\"'s machine state):\n",
+                match disk.machine_state_offset {
+                    Some(offset) => format!("{} from byte {offset:#x}", disk.nor),
+                    None => disk.nor.clone(),
+                },
+                install.name
             );
             if changes.is_empty() {
                 text.push_str("  nothing to change\n");
@@ -1096,14 +1109,14 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         );
     }
     let dram_bytes = BundleOptions::default().dram_size;
-    let installed = match (&command.target, &command.nor) {
-        (Some(target), Some(nor)) => {
+    let installed = match &command.target {
+        Some(target) => {
             let usb_disk = host.volume(&esp)?.disk;
             Some(installed::check(
                 host,
                 &installed::Request {
                     apple_region: target,
-                    nor,
+                    nor: command.nor.as_deref(),
                     serial: command.disk_serial.as_deref(),
                     erase_target: command.erase_target,
                     initialize_nor: command.initialize_nor,
@@ -1112,7 +1125,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
                 },
             )?)
         }
-        _ => None,
+        None => None,
     };
     let mut notes = Vec::new();
     let ecid = match &installed {
@@ -1287,17 +1300,13 @@ fn describe(plan: &Plan) -> Result<String> {
                 "  Apple region   {} (serial {}, partition {})",
                 disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
             )?;
-            writeln!(
-                text,
-                "  NOR            {} (serial {}, partition {})",
-                disk.nor, disk.nor_serial, disk.nor_guid
-            )?;
+            writeln!(text, "  {}", state_line(disk))?;
             match checked.nor_image {
                 Some(_) => writeln!(
                     text,
                     "  disks          this USB, and fresh machine state (NOR image or SEP area) \
                      on {}",
-                    disk.nor
+                    disk.state_description()
                 )?,
                 None => writeln!(text, "  disks          none are written but this USB")?,
             }
@@ -1317,6 +1326,16 @@ fn describe(plan: &Plan) -> Result<String> {
     Ok(text)
 }
 
+/// The plan's line for an install's machine state, after its two spaces.
+fn state_line(disk: &installed::InstalledDisk) -> String {
+    let label = if disk.machine_state_offset.is_some() {
+        "machine state"
+    } else {
+        "NOR"
+    };
+    format!("{label:<14} {}", disk.state_description())
+}
+
 fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
     let ipsw = command.image()?;
     let plan = plan(environment, &command, ipsw)?;
@@ -1326,8 +1345,8 @@ fn setup(environment: &Environment<'_>, command: Setup) -> Result<String> {
         return Ok(report);
     }
     apply(environment, plan)?;
-    let start = match (&command.target, &command.nor) {
-        (Some(target), Some(_)) => format!(
+    let start = match &command.target {
+        Some(target) => format!(
             "stela.efi boots the macOS installed on {target}, or recoveryOS while it holds none \
              or when NVRAM asks (`stela setup --next-boot recovery`, or hold a key at boot for \
              the startup options); from recoveryOS, Disk Utility and Reinstall macOS install \
@@ -1455,11 +1474,10 @@ fn uninstall(environment: &Environment<'_>, usb: &Path, dry_run: bool) -> Result
     }) {
         writeln!(
             text,
-            "  keep     install \"{}\": {} and {} keep macOS, its NVRAM and SEP state{}; delete \
-             them with a disk utility when no longer wanted",
+            "  keep     install \"{}\": {} keep macOS, its NVRAM and SEP state{}; delete them \
+             with a disk utility when no longer wanted",
             install.name,
-            install.disk.apple_region,
-            install.disk.nor,
+            install.disk.partitions(),
             install
                 .ecid
                 .map(|ecid| format!(" (ECID {ecid}, which a new setup reuses with --ecid)"))
@@ -1558,23 +1576,31 @@ mod tests {
         fn serial(&self, disk: &str) -> Result<Option<String>> {
             Ok(self.serials.get(disk).cloned())
         }
+        // Images may be sparse files as large as the partition, so they
+        // are read and written in place.
         fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>> {
-            let bytes = fs::read(self.image(identifier)?)?;
+            use std::io::{Read, Seek, SeekFrom};
+            let mut file = fs::File::open(self.image(identifier)?)?;
             ensure!(
-                offset as usize + length <= bytes.len(),
+                offset + length as u64 <= file.metadata()?.len(),
                 "read past the partition"
             );
-            Ok(bytes[offset as usize..offset as usize + length].to_vec())
+            file.seek(SeekFrom::Start(offset))?;
+            let mut bytes = vec![0; length];
+            file.read_exact(&mut bytes)?;
+            Ok(bytes)
         }
         fn write(&self, identifier: &str, offset: u64, data: &[u8]) -> Result<()> {
-            let path = self.image(identifier)?;
-            let mut bytes = fs::read(path)?;
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(self.image(identifier)?)?;
             ensure!(
-                offset as usize + data.len() <= bytes.len(),
+                offset + data.len() as u64 <= file.metadata()?.len(),
                 "write past the partition"
             );
-            bytes[offset as usize..offset as usize + data.len()].copy_from_slice(data);
-            fs::write(path, bytes)?;
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(data)?;
             Ok(())
         }
         fn memory_bytes(&self) -> Result<u64> {
@@ -1945,6 +1971,7 @@ mod tests {
             nor: NOR.into(),
             nor_serial: SERIAL.into(),
             nor_guid: NOR_GUID.into(),
+            machine_state_offset: None,
         };
         let record = serde_json::json!({
             "schema_version": 3,
@@ -2799,5 +2826,379 @@ mod tests {
         again.dry_run = true;
         let plan = again.dispatch(&environment(&f.host)).unwrap();
         assert!(plan.contains("boots without a boot log"), "{plan}");
+    }
+
+    /// The Apple region of a one-partition install: 100 GiB, a sparse image.
+    const SPLIT_BYTES: u64 = 100 * GIB;
+
+    /// Give `f`'s PC a disk (`disk1`, or `disk2` with `second`) whose Apple
+    /// region alone is set up, as a sparse image of the whole partition
+    /// that starts with `head`.
+    fn add_split_disk(f: &mut Fixture, second: bool, head: &[u8]) {
+        let (disk, serial, identifier, guid) = if second {
+            ("disk2", SERIAL2, REGION2, REGION2_GUID)
+        } else {
+            ("disk1", SERIAL, REGION, REGION_GUID)
+        };
+        let path = f._dir.path().join(format!("{identifier}.img"));
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(SPLIT_BYTES).unwrap();
+        drop(file);
+        let info = PartitionInfo {
+            identifier: identifier.into(),
+            disk: disk.into(),
+            guid: guid.to_ascii_lowercase(),
+            bytes: SPLIT_BYTES,
+            content: "Apple_APFS".into(),
+            mount: None,
+            container: None,
+        };
+        f.host.partitions.insert(identifier.into(), (info, path));
+        f.host.serials.insert(disk.into(), serial.into());
+        f.host.write(identifier, 0, head).unwrap();
+    }
+
+    /// Where the region's machine state starts.
+    fn tail() -> u64 {
+        stela_runtime::pc::machine_state::split(SPLIT_BYTES)
+            .unwrap()
+            .state_offset()
+    }
+
+    fn split_command(f: &Fixture) -> Setup {
+        let mut command = command(f, &f.esp);
+        command.target = Some(REGION.into());
+        command
+    }
+
+    /// The region's machine state: its NOR image and SEP area.
+    fn state_of(f: &Fixture, identifier: &str) -> Vec<u8> {
+        let bytes = stela_runtime::machine::apple::nor::CAPACITY
+            + stela_runtime::machine::apple::sep_state::BYTES as usize;
+        f.host.read(identifier, tail(), bytes).unwrap()
+    }
+
+    fn tail_nvram(f: &Fixture) -> Variables {
+        let capacity = stela_runtime::machine::apple::nor::CAPACITY;
+        let image = stela_runtime::machine::apple::nor::Image::from_bytes(
+            state_of(f, REGION)[..capacity].to_vec(),
+        )
+        .unwrap();
+        Variables::parse(image.bank(image.current_bank().unwrap()).unwrap()).unwrap()
+    }
+
+    fn next_target(variables: &Variables) -> stela_loader::boot_selection::Target {
+        stela_loader::boot_selection::select(variables)
+            .unwrap()
+            .target
+    }
+
+    /// A guest disk's primary GPT header at LBA 1 of 512-byte blocks, whose
+    /// backup header is at `backup`.
+    fn guest_gpt(backup: u64) -> Vec<u8> {
+        let mut head = vec![0u8; 1024];
+        head[512..520].copy_from_slice(b"EFI PART");
+        head[512 + 32..512 + 40].copy_from_slice(&backup.to_le_bytes());
+        head[512 + 48..512 + 56].copy_from_slice(&(backup - 33).to_le_bytes());
+        head
+    }
+
+    #[test]
+    fn one_partition_keeps_the_machine_state_in_its_tail_outside_the_guest() {
+        use stela_runtime::machine::apple::nor::CAPACITY;
+        let mut f = fixture(64 * GIB, false);
+        add_split_disk(&mut f, false, &[]);
+        let mut dry = split_command(&f);
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        assert!(
+            plan.contains(&format!(
+                "machine state  the tail of disk1s2 from byte {:#x}",
+                tail()
+            )),
+            "{plan}"
+        );
+        assert!(
+            plan.contains(&format!(
+                "recoveryOS sees the {:#x} bytes before it as the Mac's SSD",
+                tail()
+            )),
+            "{plan}"
+        );
+        assert!(plan.contains("also keeps stela.efi's boot log"), "{plan}");
+        assert!(!f.esp.join(RECORD).exists());
+
+        setup(&environment(&f.host), split_command(&f)).unwrap();
+        let record = record(&f);
+        let disk = &record.installs[0].disk;
+        assert_eq!(disk.machine_state_offset, Some(tail()));
+        assert_eq!(
+            (
+                disk.nor.as_str(),
+                disk.nor_serial.as_str(),
+                disk.nor_guid.as_str()
+            ),
+            (REGION, SERIAL, REGION_GUID)
+        );
+        // The record keeps the choice, and the boot line names the region as
+        // both the SSD and the machine state.
+        let json = fs::read_to_string(f.esp.join(RECORD)).unwrap();
+        assert!(
+            json.contains(&format!("\"machine_state_offset\": {}", tail())),
+            "{json}"
+        );
+        let ecid = record.installs[0].ecid.unwrap();
+        let region = format!("{SERIAL}:{REGION_GUID}");
+        let recovery = format!(
+            "\\EFI\\stela\\boot\\{}\\recovery-{}",
+            restore::payload::SYNTHETIC_BUILD,
+            ecid.digits()
+        );
+        assert_eq!(
+            fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
+            format!(
+                "--system --storage {region} --nor {region} --preboot {region} \
+                 --recovery-bundle {recovery} --ram-bytes 0x200000000 --ecid {ecid}\n"
+            )
+        );
+        let choices =
+            Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
+        assert_eq!(
+            choices.entries[1].options,
+            format!(
+                "--system --storage {region} --nor {region} --bundle {recovery} \
+                 --ram-bytes 0x200000000 --ecid {ecid}"
+            )
+        );
+        // Setup itself wrote neither the SSD nor the machine state.
+        assert!(
+            f.host
+                .read(REGION, 0, 1 << 20)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+        assert!(state_of(&f, REGION).iter().all(|&b| b == 0));
+
+        // NVRAM is the tail's: the next boot is chosen there.
+        rerun(&f, |c| c.next_boot = Some(NextBoot::Recovery)).unwrap();
+        assert_eq!(
+            next_target(&tail_nvram(&f)),
+            stela_loader::boot_selection::Target::SystemRecovery
+        );
+        assert!(
+            f.host
+                .read(REGION, 0, 1 << 20)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+        let status = rerun(&f, |c| c.status = true).unwrap();
+        assert!(
+            status.contains(&format!(
+                "machine state  the tail of disk1s2 from byte {:#x}",
+                tail()
+            )),
+            "{status}"
+        );
+        assert!(
+            status.contains("next boot      System Recovery"),
+            "{status}"
+        );
+        assert!(status.contains("SEP state      blank"), "{status}");
+        assert!(status.contains("No problems found."), "{status}");
+
+        // A provisioned SEP area in the tail backs up, survives a reset and
+        // restores, each command addressing the tail.
+        let mut roots = vec![0u8; 8 + 2 * 32];
+        roots[..8].copy_from_slice(b"STSEPR01");
+        roots[8..].fill(0x42);
+        use sha2::{Digest, Sha256};
+        let sum = Sha256::digest(&roots);
+        roots.extend_from_slice(&sum);
+        f.host
+            .write(REGION, tail() + CAPACITY as u64, &roots)
+            .unwrap();
+        let state = state_of(&f, REGION);
+        let file = f._dir.path().join("split.state");
+        rerun(&f, |c| c.backup_state = Some(file.clone())).unwrap();
+        let error = rerun(&f, |c| c.reset_nvram = true).unwrap_err().to_string();
+        assert!(error.contains("Apple region, whose last bytes"), "{error}");
+        let reset = rerun(&f, |c| {
+            c.reset_nvram = true;
+            c.nor = Some(REGION.into());
+        })
+        .unwrap();
+        assert!(
+            reset.contains(&format!("(disk1s2 from byte {:#x})", tail())),
+            "{reset}"
+        );
+        assert_eq!(
+            next_target(&tail_nvram(&f)),
+            stela_loader::boot_selection::Target::MacOs { safe: false }
+        );
+        assert_eq!(state_of(&f, REGION)[CAPACITY..], state[CAPACITY..]);
+        let status = rerun(&f, |c| c.status = true).unwrap();
+        assert!(status.contains("SEP state      provisioned"), "{status}");
+        rerun(&f, |c| {
+            c.restore_state = Some(file.clone());
+            c.nor = Some(REGION.into());
+        })
+        .unwrap();
+        assert_eq!(state_of(&f, REGION), state);
+        assert_eq!(
+            next_target(&tail_nvram(&f)),
+            stela_loader::boot_selection::Target::SystemRecovery
+        );
+
+        // The boot log is read from the tail too.
+        let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
+        assert!(error.contains("the log region is blank"), "{error}");
+        let log = crate::boot_log::tests::region(&["MACHINE STATE in the target's tail\n"]);
+        f.host
+            .write(REGION, tail() + stela_runtime::pc::boot_log::OFFSET, &log)
+            .unwrap();
+        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        assert!(
+            text.contains(&format!(
+                "(disk1s2 from byte {:#x}): Stela boot log: 1 boots",
+                tail()
+            )),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("=== STELA BOOT 1 ===\nMACHINE STATE in the target's tail\n"),
+            "{text}"
+        );
+        assert!(
+            f.host
+                .read(REGION, 0, 1 << 20)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+
+        // A resized partition moves the tail: nothing is written there.
+        f.host.partitions.get_mut(REGION).unwrap().0.bytes = SPLIT_BYTES - (1 << 20);
+        let error = rerun(&f, |c| c.next_boot = Some(NextBoot::Macos))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("was resized"), "{error}");
+        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        assert!(error.contains("was resized"), "{error}");
+        f.host.partitions.get_mut(REGION).unwrap().0.bytes = SPLIT_BYTES;
+        assert_eq!(state_of(&f, REGION), state);
+
+        let removed = uninstall(&environment(&f.host), &f.esp, false).unwrap();
+        assert!(
+            removed.contains("install \"macOS\": disk1s2 keep macOS"),
+            "{removed}"
+        );
+        assert_eq!(state_of(&f, REGION), state);
+    }
+
+    #[test]
+    fn the_tail_is_checked_and_an_existing_guest_disk_is_never_converted() {
+        let refusal = |f: &Fixture, configure: &dyn Fn(&mut Setup)| {
+            let mut command = split_command(f);
+            configure(&mut command);
+            setup(&environment(&f.host), command)
+                .unwrap_err()
+                .to_string()
+        };
+        // A tail holding other bytes needs --initialize-nor, which writes a
+        // fresh image there and leaves the SSD alone.
+        let mut f = fixture(64 * GIB, false);
+        add_split_disk(&mut f, false, &[]);
+        f.host.write(REGION, tail(), b"not a NOR image").unwrap();
+        let error = refusal(&f, &|_| {});
+        assert!(error.contains("disk1s2's machine state"), "{error}");
+        assert!(error.contains("--initialize-nor"), "{error}");
+        let mut initialize = split_command(&f);
+        initialize.initialize_nor = true;
+        setup(&environment(&f.host), initialize).unwrap();
+        assert_eq!(
+            next_target(&tail_nvram(&f)),
+            stela_loader::boot_selection::Target::MacOs { safe: false }
+        );
+        assert!(
+            f.host
+                .read(REGION, 0, 1 << 20)
+                .unwrap()
+                .iter()
+                .all(|&b| b == 0)
+        );
+
+        // A guest disk that spans the whole partition is not converted; one
+        // inside the SSD, laid out by an earlier one-partition install, is
+        // kept.
+        let blocks = SPLIT_BYTES / 512;
+        let mut f = fixture(64 * GIB, false);
+        add_split_disk(&mut f, false, &guest_gpt(blocks - 1));
+        let error = refusal(&f, &|c| c.erase_target = true);
+        assert!(error.contains("is not converted"), "{error}");
+        assert!(error.contains("--nor"), "{error}");
+        let mut f = fixture(64 * GIB, false);
+        add_split_disk(&mut f, false, &guest_gpt(tail() / 512 - 1));
+        let mut dry = split_command(&f);
+        dry.dry_run = true;
+        let plan = setup(&environment(&f.host), dry).unwrap();
+        assert!(plan.contains("already holds a guest disk"), "{plan}");
+
+        // The SSD before the tail must still hold 64 GB.
+        let mut f = fixture(64 * GIB, false);
+        add_split_disk(&mut f, false, &[]);
+        f.host.partitions.get_mut(REGION).unwrap().0.bytes = 64_000_000_000;
+        assert!(refusal(&f, &|_| {}).contains("before the machine state"));
+
+        // An install with a machine-state partition of its own keeps it: its
+        // Apple region is not added again as a one-partition install.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        setup(&environment(&f.host), installed_command(&f)).unwrap();
+        let before = snapshot(&f.esp);
+        let error = rerun(&f, |c| {
+            c.target = Some(REGION.into());
+            c.install = Some("Again".into());
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not converted"), "{error}");
+        assert_eq!(snapshot(&f.esp), before);
+        // Its separate partition still holds its machine state.
+        let record = record(&f);
+        assert_eq!(record.installs[0].disk.machine_state_offset, None);
+        assert!(
+            record
+                .options
+                .contains(&format!("--nor {SERIAL}:{NOR_GUID}")),
+            "{}",
+            record.options
+        );
+
+        // A further disk can be a one-partition install beside it.
+        add_split_disk(&mut f, true, &[]);
+        let added = rerun(&f, |c| {
+            c.target = Some(REGION2.into());
+            c.install = Some("Other".into());
+            c.ipsw = Some(f.ipsw.clone());
+        })
+        .unwrap();
+        assert!(
+            added.contains("machine state  the tail of disk2s2"),
+            "{added}"
+        );
+        let record = self::record(&f);
+        assert_eq!(record.installs[1].disk.machine_state_offset, Some(tail()));
+        let choices =
+            Choices::parse(&fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap()).unwrap();
+        let region2 = format!("{SERIAL2}:{REGION2_GUID}");
+        assert!(
+            choices.entries[2]
+                .options
+                .contains(&format!("--storage {region2} --nor {region2}")),
+            "{}",
+            choices.entries[2].options
+        );
     }
 }

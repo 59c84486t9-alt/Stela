@@ -1,5 +1,6 @@
-//! The installs of a setup: each a disk of the PC (an Apple region and a
-//! machine-state partition) that is its own Stela machine with its own ECID,
+//! The installs of a setup: each a disk of the PC (an Apple region whose
+//! tail holds the machine state, or an Apple region and a machine-state
+//! partition) that is its own Stela machine with its own ECID,
 //! NVRAM and SEP state, as two Macs are. One is the default `stela.cfg`
 //! boots; `stela.efi`'s startup choices (`choices.cfg`) list every install
 //! and its System Recovery, opening on their own with several installs and
@@ -86,7 +87,8 @@ pub(super) fn machine_ecid(
     }
 }
 
-/// `--target` and `--nor` on an existing setup: add an install.
+/// `--target` (and an optional `--nor`) on an existing setup: add an
+/// install.
 pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<String> {
     let record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
@@ -104,15 +106,32 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         "the startup choices list at most {MAX_INSTALLS} installs"
     );
     let host = environment.host;
-    let (Some(target), Some(nor)) = (&command.target, &command.nor) else {
-        bail!("an install needs --target and --nor");
+    let Some(target) = &command.target else {
+        bail!("an install needs --target");
     };
+    // An install's Apple region is never converted to keep its machine
+    // state in its own tail, before anything of it is read.
+    if command.nor.is_none() {
+        let guid = host.partition(target)?.guid;
+        if let Some(install) = record.installs.iter().find(|install| {
+            install.disk.machine_state_offset.is_none()
+                && install.disk.apple_region_guid.eq_ignore_ascii_case(&guid)
+        }) {
+            bail!(
+                "{target} is install \"{}\"'s Apple region, whose machine state is on {}; it is \
+                 not converted to keep the machine state in its own last bytes, which would \
+                 truncate its guest disk and overwrite its backup GPT",
+                install.name,
+                install.disk.nor
+            );
+        }
+    }
     let usb_disk = host.volume(&record.esp)?.disk;
     let checked = installed::check(
         host,
         &installed::Request {
             apple_region: target,
-            nor,
+            nor: command.nor.as_deref(),
             serial: command.disk_serial.as_deref(),
             erase_target: command.erase_target,
             initialize_nor: command.initialize_nor,
@@ -125,7 +144,8 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         ensure!(
             !guids.contains(&&checked.disk.apple_region_guid)
                 && !guids.contains(&&checked.disk.nor_guid),
-            "{target} or {nor} already belongs to install \"{}\"",
+            "{} already belongs to install \"{}\"",
+            checked.disk.partitions(),
             install.name
         );
     }
@@ -203,11 +223,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         "  Apple region   {} (serial {}, partition {})",
         disk.apple_region, disk.apple_region_serial, disk.apple_region_guid
     )?;
-    writeln!(
-        text,
-        "  NOR            {} (serial {}, partition {})",
-        disk.nor, disk.nor_serial, disk.nor_guid
-    )?;
+    writeln!(text, "  {}", super::state_line(disk))?;
     for bundle in &prepared {
         writeln!(
             text,
@@ -235,7 +251,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
         writeln!(
             text,
             "  disks          fresh machine state (NOR image or SEP area) on {}",
-            disk.nor
+            disk.state_description()
         )?;
     }
     for kept in &stale {
@@ -283,10 +299,8 @@ pub(super) fn configure(environment: &Environment<'_>, command: &Setup) -> Resul
         }
         writeln!(
             text,
-            "  remove         install \"{name}\"; {} and {} keep macOS, its NVRAM and SEP \
-             state{}",
-            install.disk.apple_region,
-            install.disk.nor,
+            "  remove         install \"{name}\"; {} keep macOS, its NVRAM and SEP state{}",
+            install.disk.partitions(),
             install
                 .ecid
                 .map(|ecid| format!(" (ECID {ecid}: add it again with --ecid {ecid})"))

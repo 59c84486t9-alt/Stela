@@ -16,7 +16,10 @@
 //!   (`stela_runtime::pc::boot_log`), and writes nothing.
 //!
 //! Both writes need the NOR partition named again with `--nor`, and that
-//! partition must still be the install's (`installed::confirm`).
+//! partition must still be the install's (`installed::confirm`). An install
+//! whose machine state lives in its Apple region's tail is named by that
+//! partition, and every command addresses the tail
+//! (`installed::state_area`).
 use super::{Environment, Record, Setup, check_installed_efi, ecid::Ecid, installed, machines};
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -104,31 +107,30 @@ pub(super) fn next_boot(variables: &Variables) -> String {
     }
 }
 
-/// The install and confirmed NOR partition a state command acts on; the
+/// The install and confirmed machine state a state command acts on; its
 /// partition must be named with `--nor` for a write.
 fn target<'a>(
     environment: &Environment<'_>,
     record: &'a Record,
     command: &Setup,
     write: bool,
-) -> Result<(&'a machines::Install, String)> {
+) -> Result<(&'a machines::Install, installed::StateArea)> {
     let install = record.install(command.install.as_deref())?;
     if write {
         ensure!(
             command.nor.is_some(),
-            "name install \"{}\"'s NOR partition with --nor (it was {}), so no other partition \
-             is written",
+            "name install \"{}\"'s {} with --nor (it was {}), so no other partition is written",
             install.name,
+            if install.disk.machine_state_offset.is_some() {
+                "Apple region, whose last bytes hold its machine state,"
+            } else {
+                "NOR partition"
+            },
             install.disk.nor
         );
     }
-    let nor = installed::confirm(
-        environment.host,
-        &install.disk,
-        installed::Role::Nor,
-        command.nor.as_deref(),
-    )?;
-    Ok((install, nor))
+    let area = installed::state_area(environment.host, &install.disk, command.nor.as_deref())?;
+    Ok((install, area))
 }
 
 /// `--reset-nvram`.
@@ -138,9 +140,14 @@ pub(super) fn reset_nvram(
     command: &Setup,
 ) -> Result<String> {
     check_installed_efi(environment, record)?;
-    let (install, nor) = target(environment, record, command, true)?;
-    let current = environment.host.read(&nor, 0, CAPACITY)?;
-    let mut text = format!("Reset the NVRAM of install \"{}\" ({nor}):\n", install.name);
+    let (install, area) = target(environment, record, command, true)?;
+    let host = environment.host;
+    let current = area.read(host, 0, CAPACITY)?;
+    let mut text = format!(
+        "Reset the NVRAM of install \"{}\" ({}):\n",
+        install.name,
+        area.describe()
+    );
     match nvram(&current) {
         Nvram::Blank => writeln!(text, "  NVRAM          blank; it is written fresh")?,
         Nvram::Valid(variables) => {
@@ -168,10 +175,11 @@ pub(super) fn reset_nvram(
         return Ok(text);
     }
     let fresh = Image::fresh();
-    environment.host.write(&nor, 0, fresh.bytes())?;
+    area.write(host, 0, fresh.bytes())?;
     ensure!(
-        environment.host.read(&nor, 0, CAPACITY)? == fresh.bytes(),
-        "{nor} did not read back as written"
+        area.read(host, 0, CAPACITY)? == fresh.bytes(),
+        "{} did not read back as written",
+        area.describe()
     );
     text.push_str("Done.\n");
     Ok(text)
@@ -184,8 +192,9 @@ pub(super) fn boot_log(
     record: &Record,
     command: &Setup,
 ) -> Result<String> {
-    let (install, nor) = target(environment, record, command, false)?;
-    let bytes = environment.host.partition(&nor)?.bytes;
+    let (install, area) = target(environment, record, command, false)?;
+    let nor = area.describe();
+    let bytes = area.bytes;
     ensure!(
         bytes >= boot_log::PARTITION_BYTES,
         "{nor} holds {bytes:#x} bytes; the boot log needs {:#x}, so stela.efi boots install \
@@ -193,9 +202,11 @@ pub(super) fn boot_log(
         boot_log::PARTITION_BYTES,
         install.name
     );
-    let region = environment
-        .host
-        .read(&nor, boot_log::OFFSET, boot_log::LOG_BYTES as usize)?;
+    let region = area.read(
+        environment.host,
+        boot_log::OFFSET,
+        boot_log::LOG_BYTES as usize,
+    )?;
     let log = boot_log::read(&region)
         .with_context(|| format!("{nor} has no boot log of install \"{}\"", install.name))?;
     let mut text = format!(
@@ -217,13 +228,14 @@ pub(super) fn backup(
     command: &Setup,
     path: &Path,
 ) -> Result<String> {
-    let (install, nor) = target(environment, record, command, false)?;
+    let (install, area) = target(environment, record, command, false)?;
+    let nor = area.describe();
     ensure!(
         !path.exists(),
         "{} exists; choose a new file for the backup",
         path.display()
     );
-    let bytes = environment.host.read(&nor, 0, STATE_BYTES)?;
+    let bytes = area.read(environment.host, 0, STATE_BYTES)?;
     let header = Header {
         install: install.name.clone(),
         ecid: install.ecid,
@@ -306,7 +318,8 @@ pub(super) fn restore(
 ) -> Result<String> {
     check_installed_efi(environment, record)?;
     let (header, bytes) = read_backup(path)?;
-    let (install, nor) = target(environment, record, command, true)?;
+    let (install, area) = target(environment, record, command, true)?;
+    let (host, nor) = (environment.host, area.describe());
     ensure!(
         header.nor_guid.eq_ignore_ascii_case(&install.disk.nor_guid),
         "{} is the state of partition {}, not install \"{}\"'s {}; a machine's state is \
@@ -324,7 +337,7 @@ pub(super) fn restore(
         ),
         _ => {}
     }
-    let current = environment.host.read(&nor, 0, STATE_BYTES)?;
+    let current = area.read(host, 0, STATE_BYTES)?;
     let mut text = format!(
         "Restore the machine state of install \"{}\" ({nor}) from {}:\n",
         install.name,
@@ -347,9 +360,9 @@ pub(super) fn restore(
         text.push_str("Dry run: nothing was changed.\n");
         return Ok(text);
     }
-    environment.host.write(&nor, 0, &bytes)?;
+    area.write(host, 0, &bytes)?;
     ensure!(
-        environment.host.read(&nor, 0, STATE_BYTES)? == bytes,
+        area.read(host, 0, STATE_BYTES)? == bytes,
         "{nor} did not read back as written"
     );
     text.push_str("Done.\n");
