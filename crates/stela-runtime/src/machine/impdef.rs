@@ -234,13 +234,13 @@ encodings! {
     UPMC12 = 7, 4, 5;
     AON_ENABLE = 7, 5, 0;
     AON_SELECT_2 = 7, 5, 3;
-    AON_COUNTER_3 = 7, 6, 3;
-    AON_SELECT_3 = 7, 7, 3;
     UPMPCM_EL1 = 7, 5, 4;
     UPMC13 = 7, 5, 5;
     CLUSTER_COUNTER_C6 = 7, 6, 2;
+    AON_COUNTER_3 = 7, 6, 3;
     UPMSR = 7, 6, 4;
     UPMC14 = 7, 6, 5;
+    AON_SELECT_3 = 7, 7, 3;
     UPMC0 = 7, 7, 4;
     UPMC15 = 7, 7, 5;
     CLUSTER_COUNTER_C8 = 7, 8, 2;
