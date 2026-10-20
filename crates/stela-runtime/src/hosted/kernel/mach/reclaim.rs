@@ -311,6 +311,17 @@ pub(super) fn flush(ring: &Option<Ring>, entries: u32) -> Result<(u64, u64), u32
     }
 }
 
+/// The ring's range, once allocated (a permanent mapping).
+pub(super) fn range(ring: &Option<Ring>) -> Option<(u64, u64)> {
+    ring.as_ref().map(|ring| (ring.address, ring.bytes))
+}
+
+/// `vm_deferred_reclamation_buffer_query_internal`: the ring's address and
+/// size, both zero without one.
+pub(super) fn query(ring: &Option<Ring>) -> (u64, u64) {
+    range(ring).unwrap_or((0, 0))
+}
+
 /// `vm_deferred_reclamation_buffer_resize_internal`.
 pub(super) fn resize(ring: &mut Option<Ring>, len: u32) -> Result<(u64, u64), u32> {
     let Some(ring) = ring else {

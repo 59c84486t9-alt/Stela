@@ -128,6 +128,9 @@ pub(crate) const SERVED: &[(&str, Option<&str>)] = &[
         Some("a guest page's disposition is the union of its host pages'"),
     ),
     ("_kernelrpc_mach_vm_purgable_control_external", None),
+    ("mach_vm_machine_attribute", None),
+    ("mach_vm_range_create", None),
+    ("_kernelrpc_mach_vm_update_pointers_with_remote_tags", None),
 ];
 
 /// Routines whose request carries descriptors (`MACH_MSGH_BITS_COMPLEX`).
@@ -182,6 +185,14 @@ fn route(
         "mach_vm_page_info" => page_info(request),
         "mach_vm_page_range_query" => page_range_query(request),
         "_kernelrpc_mach_vm_purgable_control_external" => purgable_control(request),
+        "mach_vm_machine_attribute" => machine_attribute(task, request),
+        // Release macOS kernels are built without user VM ranges
+        // (`CONFIG_MAP_RANGES`, KERN_NOT_SUPPORTED) and the M2 without
+        // MTE (`HAS_MTE`): the host's answers, after the same argument
+        // checks, are the arm64 kernel's.
+        "mach_vm_range_create" | "_kernelrpc_mach_vm_update_pointers_with_remote_tags" => {
+            Reply::Forward
+        }
         _ => unreachable!("every served routine is routed"),
     }))
 }
@@ -867,6 +878,94 @@ fn protect(task: &mut dyn Task, request: &Request) -> Reply {
         }
     }
     Reply::Success(Vec::new())
+}
+
+/// `MACH_VM_MAX_ADDRESS` of a 64-bit arm64 macOS task, its map's end.
+const MACH_VM_MAX_ADDRESS: u64 = 0x0000_7fff_fe00_0000;
+/// `MATTR_CACHE`, the one machine attribute.
+const MATTR_CACHE: u32 = 1;
+const KERN_FAILURE: u32 = 5;
+
+/// This task's map's start (`vm_map_min`): its `__PAGEZERO`'s end, which
+/// the host task's shares (`TASK_VM_INFO`'s `min_address`).
+fn map_min() -> u64 {
+    const TASK_VM_INFO: i32 = 22;
+    const MIN_ADDRESS: usize = 152 / 4;
+    unsafe extern "C" {
+        fn task_info(task: u32, flavor: i32, info: *mut u32, count: *mut u32) -> i32;
+    }
+    let mut info = [0u32; 128];
+    let mut count = info.len() as u32;
+    // SAFETY: the host fills at most `count` words.
+    let status = unsafe { task_info(host(), TASK_VM_INFO, info.as_mut_ptr(), &mut count) };
+    if status != KERN_SUCCESS || (count as usize) < MIN_ADDRESS + 2 {
+        return 0;
+    }
+    u64::from(info[MIN_ADDRESS]) | u64::from(info[MIN_ADDRESS + 1]) << 32
+}
+
+/// Whether the host maps every byte of `[start, end)`: no hole, as an
+/// atomic range lock requires (`VMRL_EX_ATOMIC`).
+fn covered(start: u64, end: u64) -> bool {
+    let mut cursor = start;
+    while cursor < end {
+        let (mut at, mut bytes) = (cursor, 0u64);
+        let mut info = [0i32; VM_REGION_BASIC_INFO_COUNT_64 as usize];
+        let mut count = VM_REGION_BASIC_INFO_COUNT_64;
+        let mut object = 0u32;
+        // SAFETY: out-parameters sized for VM_REGION_BASIC_INFO_64.
+        let found = unsafe {
+            mach_vm_region(
+                host(),
+                &mut at,
+                &mut bytes,
+                VM_REGION_BASIC_INFO_64,
+                info.as_mut_ptr(),
+                &mut count,
+                &mut object,
+            )
+        };
+        if found != KERN_SUCCESS || at > cursor {
+            return false;
+        }
+        cursor = at + bytes;
+    }
+    true
+}
+
+/// `mach_vm_machine_attribute(address, size, attribute, value)`
+/// (`vm_map_machine_attribute`): `MATTR_CACHE` over a range of mapped
+/// guest pages synchronizes the instruction cache with each resident
+/// page (`pmap_attribute_cache_sync`, `cache_sync_page`), which drops the
+/// range's compiled blocks; the value is returned as given. The x86
+/// host's pmap answers KERN_INVALID_ADDRESS for any resident page, so
+/// the routine is answered here.
+fn machine_attribute(task: &mut dyn Task, request: &Request) -> Reply {
+    let Some((address, size, attribute, value)) = fields(|| {
+        Some((
+            request.double(SIMPLE)?,
+            request.double(SIMPLE + 8)?,
+            request.word(SIMPLE + 16)?,
+            request.word(SIMPLE + 20)?,
+        ))
+    }) else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    if size == 0 {
+        return Reply::Success(value.to_le_bytes().to_vec());
+    }
+    let Some((start, bytes)) = pages(address, size) else {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    };
+    let end = start + bytes;
+    if start < map_min() || end > MACH_VM_MAX_ADDRESS || attribute != MATTR_CACHE {
+        return Reply::Failure(KERN_INVALID_ADDRESS);
+    }
+    if !covered(start, end) {
+        return Reply::Failure(KERN_FAILURE);
+    }
+    task.invalidate(start, bytes);
+    Reply::Success(value.to_le_bytes().to_vec())
 }
 
 /// `mach_vm_inherit` over guest pages. A pending shared-region page is

@@ -317,6 +317,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "mach_vm_deferred_reclamation_buffer_resize",
         None,
     ),
+    (
+        Object::Task,
+        "mach_vm_deferred_reclamation_buffer_query",
+        None,
+    ),
     (Object::Task, "task_terminate", None),
     (Object::Task, "task_set_info", None),
     (Object::Task, "task_suspend", None),
@@ -713,6 +718,16 @@ pub(super) fn serve(
                 return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
             };
             pair(reclaim::resize(&mut lock(&kernel.process.reclaim), len))
+        }
+        // Out `addr`, `size`: the ring's, zero without one.
+        (Object::Task, "mach_vm_deferred_reclamation_buffer_query", false) => {
+            if !request.body.is_empty() {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            }
+            let (address, size) = reclaim::query(&lock(&kernel.process.reclaim));
+            let mut body = address.to_le_bytes().to_vec();
+            body.extend(size.to_le_bytes());
+            Reply::Success(body)
         }
         (Object::Task, routine, _) if TASK_FORWARDED.contains(&routine) => Reply::Forward,
         (Object::Task, "task_get_state", false) => task_get_state(kernel, request),
