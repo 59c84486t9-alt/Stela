@@ -364,6 +364,13 @@ fn emit_single(
     let start = code.len();
     if let Operation::Simd(operand) = &instruction.operation {
         super::simd::emit_after(code, operand, target, checks, held.xmm0);
+        // A first load of the vector XMM0 holds changes nothing.
+        if let Some(vector) = held.xmm0 {
+            let load = super::simd::xmm0_load(vector);
+            if code[start..].starts_with(&load) && code.len() > start + load.len() {
+                code.drain(start..start + load.len());
+            }
+        }
     } else {
         super::emit_instruction(code, instruction, fixups, target, checks);
     }
@@ -383,7 +390,7 @@ fn emit_single(
             super::frame_store(register).is_some_and(|store| code.ends_with(&store)),
     });
     let xmm0 = match &instruction.operation {
-        Operation::Simd(operand) => super::simd::xmm0_after(operand),
+        Operation::Simd(operand) => super::simd::xmm0_after(operand, &code[start..], held.xmm0),
         _ => None,
     };
     Held { rax, xmm0 }
@@ -787,7 +794,7 @@ mod tests {
             kind: u64,
         }
         /// Guest memory at X1.
-        type Memory = [u64; 14];
+        type Memory = [u64; 16];
         fn run(code: &[u8], state: &mut GuestState, memory: &mut Memory) -> Exit {
             let bytes = code.len().next_multiple_of(PAGE);
             state.x[1] = memory.as_mut_ptr() as u64;
@@ -808,7 +815,7 @@ mod tests {
             state.x[1] = 0;
             exit
         }
-        const WORDS: [u32; 25] = [
+        const WORDS: [u32; 45] = [
             0xbd40_0021, // ldr s1,[x1]
             0x1e21_0802, // fmul s2,s0,s1
             0x1e20_2843, // fadd s3,s2,s0
@@ -834,6 +841,26 @@ mod tests {
             0x3d80_103c, // str q28,[x1,#64]
             0x1e3c_2b9e, // fadd s30,s28,s28
             0x3d80_143e, // str q30,[x1,#80]
+            0x3dc0_042c, // ldr q12,[x1,#16]
+            0x6e31_a98d, // uminv b13,v12.16b
+            0x1e26_01a2, // fmov w2,s13
+            0x6e70_a98e, // umaxv h14,v12.8h
+            0x0e02_3dc3, // umov w3,v14.h[0]
+            0x6e36_8d8f, // cmeq v15.16b,v12.16b,v22.16b
+            0x4e01_2de4, // smov x4,v15.b[0]
+            0x4eb6_85f0, // add v16.4s,v15.4s,v22.4s
+            0x4e08_3e05, // umov x5,v16.d[0]
+            0x3dc0_0431, // ldr q17,[x1,#16]
+            0x0e01_3e26, // umov w6,v17.b[0]
+            0x3dc0_0432, // ldr q18,[x1,#16]
+            0x0e02_3e47, // umov w7,v18.h[0]
+            0x3dc0_0433, // ldr q19,[x1,#16]
+            0x9e66_0268, // fmov x8,d19
+            0x3dc0_0435, // ldr q21,[x1,#16]
+            0x6e36_8d94, // cmeq v20.16b,v12.16b,v22.16b
+            0x1e26_0289, // fmov w9,s20
+            0x4eb6_8697, // add v23.4s,v20.4s,v22.4s
+            0x3d80_1c37, // str q23,[x1,#112]
         ];
         const IXC: u32 = 1 << 4;
         const NEP: u32 = 1 << 2;
@@ -871,7 +898,7 @@ mod tests {
             state.v[22] = lanes([0.7, 5.5, -1.9, 7e3]);
             state.v[24] = [1.7f64.to_bits(), (-0.3f64).to_bits()];
             state.v[25] = [2.9f64.to_bits(), 1e10f64.to_bits()];
-            let mut memory: Memory = [UPPER_GARBAGE; 14];
+            let mut memory: Memory = [UPPER_GARBAGE; 16];
             memory[0] = single(s1);
             memory[1] = 1.3f64.to_bits();
             [memory[2], memory[3]] = lanes([1.5, -2.25, 3.1, 1e-3]);

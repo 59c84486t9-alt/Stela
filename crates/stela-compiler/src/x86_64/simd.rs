@@ -312,6 +312,16 @@ pub(super) fn emit_after(
         Operand::StructureMemory(ref operand) => {
             structure_memory::emit(code, operand, target, checks)
         }
+        Operand::Immediate(crate::aarch64::simd::immediates::Operand::LaneMove(
+            ref lane @ crate::aarch64::simd::rearrange::Operand::Extract {
+                source, byte: 0, ..
+            },
+        ))
+        | Operand::Rearrange(
+            ref lane @ crate::aarch64::simd::rearrange::Operand::Extract {
+                source, byte: 0, ..
+            },
+        ) if xmm0 == Some(source) => rearrange::extract(code, lane, true),
         Operand::Immediate(ref operand) => immediates::emit(code, operand, target),
         Operand::Halving(ref operand) => halving::emit(code, operand, target),
         Operand::Product(ref operand) => products::emit(code, operand, target),
@@ -534,11 +544,31 @@ pub(super) fn emit_after(
     }
 }
 
-/// The guest vector XMM0 holds whole after `operand`'s emission: a vector
-/// load's or MOVI's destination, committed from it, or a vector store's
-/// source, transferred from it.
-pub(super) fn xmm0_after(operand: &Operand) -> Option<u8> {
+/// The guest vector XMM0 holds whole after `operand`'s emission, `code`,
+/// where it held `held` before: a vector load's or MOVI's destination,
+/// committed from it, or a vector store's source, transferred from it; the
+/// destination of a branch-free emission that ends with its commit from
+/// XMM0; or, after a lane move to a general register, which leaves XMM0
+/// alone, what it held.
+pub(super) fn xmm0_after(operand: &Operand, code: &[u8], held: Option<u8>) -> Option<u8> {
+    let committed = |vector: u8| {
+        let mut store = Vec::new();
+        commit(&mut store, vector, 0);
+        code.ends_with(&store).then_some(vector)
+    };
     match *operand {
+        Operand::Immediate(crate::aarch64::simd::immediates::Operand::LaneMove(
+            crate::aarch64::simd::rearrange::Operand::Extract { .. },
+        ))
+        | Operand::Rearrange(crate::aarch64::simd::rearrange::Operand::Extract { .. }) => held,
+        Operand::Reduce(ref operand) => committed(operand.destination),
+        Operand::Compare { destination, .. } | Operand::Integer { destination, .. } => {
+            committed(destination)
+        }
+        Operand::Immediate(crate::aarch64::simd::immediates::Operand::Constant {
+            destination,
+            ..
+        }) => committed(destination),
         Operand::Memory {
             load,
             bytes,
@@ -551,6 +581,14 @@ pub(super) fn xmm0_after(operand: &Operand) -> Option<u8> {
         Operand::MoveImmediate { vector, .. } => Some(vector),
         _ => None,
     }
+}
+
+/// [`read_vector`]'s bytes for `vector` into XMM0, which an emission that
+/// begins with them does not need where XMM0 holds the vector already.
+pub(super) fn xmm0_load(vector: u8) -> Vec<u8> {
+    let mut load = Vec::new();
+    read_vector(&mut load, vector, 0);
+    load
 }
 
 #[cfg(test)]

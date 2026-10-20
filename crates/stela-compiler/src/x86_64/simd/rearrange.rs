@@ -38,6 +38,61 @@ fn load_lane(code: &mut Vec<u8>, source: LaneSource, bytes: u8) {
     code.extend(offset.to_le_bytes());
 }
 
+/// MOVD EAX,XMM0 and MOVQ RAX,XMM0.
+const MOVD_EAX_XMM0: [u8; 4] = [0x66, 0x0f, 0x7e, 0xc0];
+const MOVQ_RAX_XMM0: [u8; 5] = [0x66, 0x48, 0x0f, 0x7e, 0xc0];
+/// MOVZX EAX,AL and MOVZX EAX,AX.
+const MOVZX_EAX_AL: [u8; 3] = [0x0f, 0xb6, 0xc0];
+const MOVZX_EAX_AX: [u8; 3] = [0x0f, 0xb7, 0xc0];
+
+/// UMOV, SMOV and FMOV to a general register ([`Operand::Extract`]),
+/// which ends with the destination's store from RAX. With `held`, XMM0
+/// holds the source vector whole and the lane is its lowest.
+pub(super) fn extract(code: &mut Vec<u8>, operand: &Operand, held: bool) {
+    let Operand::Extract {
+        destination,
+        source,
+        byte,
+        lane_bytes,
+        signed,
+        x64,
+    } = *operand
+    else {
+        unreachable!("an extract");
+    };
+    if held {
+        debug_assert_eq!(byte, 0);
+        match lane_bytes {
+            1 | 2 | 4 => code.extend(MOVD_EAX_XMM0),
+            8 => code.extend(MOVQ_RAX_XMM0),
+            _ => unreachable!("reviewed lane size"),
+        }
+        match lane_bytes {
+            1 => code.extend(MOVZX_EAX_AL),
+            2 => code.extend(MOVZX_EAX_AX),
+            _ => {}
+        }
+    } else {
+        load_lane(
+            code,
+            LaneSource::Vector {
+                register: source,
+                byte,
+            },
+            lane_bytes,
+        );
+    }
+    if signed {
+        let shift = 64 - lane_bytes * 8;
+        code.extend([0x48, 0xc1, 0xe0, shift, 0x48, 0xc1, 0xf8, shift]); // shl/sar rax for sign extension
+        if !x64 {
+            code.extend([0x89, 0xc0]); // W writes clear X high half
+        }
+    }
+    // An unsigned lane of at most four bytes is zero-extended already.
+    super::super::store(code, destination);
+}
+
 fn insert_lane(code: &mut Vec<u8>, destination: u8, byte: u8, bytes: u8) {
     // Only the selected lane changes; even scalar-size INS preserves all others.
     match bytes {
@@ -216,31 +271,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, target: TargetCpu) {
             load_lane(code, source, lane_bytes);
             insert_lane(code, destination, byte, lane_bytes);
         }
-        Operand::Extract {
-            destination,
-            source,
-            byte,
-            lane_bytes,
-            signed,
-            x64,
-        } => {
-            load_lane(
-                code,
-                LaneSource::Vector {
-                    register: source,
-                    byte,
-                },
-                lane_bytes,
-            );
-            if signed {
-                let shift = 64 - lane_bytes * 8;
-                code.extend([0x48, 0xc1, 0xe0, shift, 0x48, 0xc1, 0xf8, shift]); // shl/sar rax for sign extension
-            }
-            if !x64 {
-                code.extend([0x89, 0xc0]);
-            } // W writes clear X high half
-            super::super::store(code, destination);
-        }
+        Operand::Extract { .. } => extract(code, operand, false),
         Operand::Permute {
             destination,
             left,

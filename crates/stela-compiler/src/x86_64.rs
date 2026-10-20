@@ -595,10 +595,16 @@ pub(super) fn rax_after(operation: &Operation) -> Rax {
         | Operation::LogicalImmediate { destination, .. }
         | Operation::LogicalRegister { destination, .. }
         | Operation::MoveWide { destination, .. }
-            if destination != Register::Zero =>
-        {
-            Rax::Guest(destination)
-        }
+        | Operation::Simd(
+            crate::aarch64::simd::Operand::Immediate(
+                crate::aarch64::simd::immediates::Operand::LaneMove(
+                    crate::aarch64::simd::rearrange::Operand::Extract { destination, .. },
+                ),
+            )
+            | crate::aarch64::simd::Operand::Rearrange(
+                crate::aarch64::simd::rearrange::Operand::Extract { destination, .. },
+            ),
+        ) if destination != Register::Zero => Rax::Guest(destination),
         _ => Rax::Unknown,
     }
 }
