@@ -4930,8 +4930,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return self.register_outcome(word, Some(access), outcome);
         }
         let physical = self.now();
+        // A write's outcome forgets derived state, and a trap's exception
+        // does; a read changes none of it.
         let outcome = self.cpu.apple_access(access, physical);
-        self.derived_changed();
         self.register_outcome(word, Some(access), outcome)
     }
 
@@ -8366,6 +8367,7 @@ mod tests {
         const MSR: u32 = 0xd518_d089; // msr tpidr_el1, x9
         const MRS_DAIF: u32 = 0xd53b_4228; // mrs x8, daif
         const DAIFCLR_I: u32 = 0xd503_42ff; // msr daifclr, #2
+        const MRS_GXF_STATUS: u32 = 0xd53e_f808; // mrs x8, gxf_status_el1
         let index = |encoding| MIRRORED.iter().position(|&e| e == encoding).unwrap();
         let thread = index(registers::encodings::TPIDR_EL1);
         let daif = index(registers::encodings::DAIF);
@@ -8419,6 +8421,13 @@ mod tests {
         machine.derived_changed();
         // Closed, the cell keeps no value a mispredicted read could use.
         assert_eq!(*machine.mirrors, Mirrors::default());
+        // An Apple register read leaves it open.
+        machine.cpu.pc = base + 4;
+        machine.system_instruction(MRS).unwrap();
+        let exceptions = machine.statistics.exceptions;
+        machine.system_instruction(MRS_GXF_STATUS).unwrap();
+        assert_eq!(machine.statistics.exceptions, exceptions);
+        assert_eq!(machine.mirrors[thread].readable, 1);
         // A write of the register closes it, as does a PSTATE write.
         machine.cpu.pc = base + 4;
         machine.system_instruction(MRS).unwrap();
