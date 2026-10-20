@@ -46,7 +46,7 @@ impl core::str::FromStr for Target {
 /// A host network adapter, as a raw Ethernet link.
 pub enum Adapter {
     Virtio(VirtioNet),
-    Usb(xhci::ecm::UsbNet),
+    Usb(xhci::cdc::UsbNet),
 }
 
 impl Adapter {

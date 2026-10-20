@@ -27,7 +27,7 @@
 //! and SuperSpeed port control, and no class driver here needs one),
 //! isochronous endpoints, streams, hubs more than five tiers deep, and
 //! controllers without 4 KiB pages. Hot plug after attach is not seen.
-pub mod ecm;
+pub mod cdc;
 pub mod hid;
 pub mod storage;
 
@@ -1409,7 +1409,7 @@ fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
 pub struct Found {
     pub disks: Vec<storage::UsbDisk>,
     pub inputs: Vec<hid::UsbInput>,
-    pub links: Vec<ecm::UsbNet>,
+    pub links: Vec<cdc::UsbNet>,
     /// Devices or interfaces no driver here takes, and why.
     pub unused: Vec<(String, &'static str)>,
     pub failures: Vec<(String, BlockError)>,
@@ -1467,8 +1467,8 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
             storage::plan(interface)
         } else if interface.class == hid::CLASS {
             hid::plan(interface)
-        } else if interface.class == ecm::COMMUNICATIONS && interface.subclass == ecm::SUBCLASS {
-            ecm::plan(interface, &all)
+        } else if interface.class == cdc::COMMUNICATIONS {
+            cdc::plan(interface, &all)
         } else {
             Err("no class driver for this interface")
         };
@@ -1523,7 +1523,7 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
                     },
                 )
             }
-            Plan::Ecm(plan) => ecm::UsbNet::new(shared.clone(), &device, plan, dma)
+            Plan::Ethernet(plan) => cdc::UsbNet::new(shared.clone(), &device, plan, dma)
                 .map(|link| found.links.push(link)),
         };
         if let Err(error) = result {
@@ -1538,7 +1538,8 @@ pub enum Plan {
     Storage([Endpoint; 2]),
     /// The interrupt IN endpoint.
     Hid(Endpoint),
-    Ecm(ecm::Binding),
+    /// A CDC Ethernet adapter's interfaces and endpoints.
+    Ethernet(cdc::Binding),
 }
 
 impl Plan {
@@ -1546,7 +1547,7 @@ impl Plan {
         match self {
             Self::Storage(endpoints) => endpoints.to_vec(),
             Self::Hid(endpoint) => vec![*endpoint],
-            Self::Ecm(binding) => binding.endpoints(),
+            Self::Ethernet(binding) => binding.endpoints(),
         }
     }
 }

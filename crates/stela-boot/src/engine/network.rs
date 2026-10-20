@@ -5,7 +5,7 @@
 //! UEFI's Simple Network Protocol ends with boot services, and the request
 //! is made during the restore, long after ExitBootServices, so the client
 //! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
-//! after-EBS driver (`pc::virtio_net`, or `pc::xhci::ecm` for a USB
+//! after-EBS driver (`pc::virtio_net`, or `pc::xhci::cdc` for a USB
 //! Ethernet adapter). Its registers and DMA pages are
 //! identity-mapped in the loader's root, so every frame moves inside that
 //! root (`storage::RestoreRoot`), as block and input I/O do.
