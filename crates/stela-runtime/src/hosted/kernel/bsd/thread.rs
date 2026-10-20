@@ -594,7 +594,7 @@ fn max_parallelism(kernel: &Kernel, qos: u64, flags: u64) -> Result<Outcome> {
 /// default order `rt_init_completed` sets spills among clusters of one
 /// core type only, so it is every performance core; without performance
 /// clusters the scheduler's one node is every core.
-pub(super) fn realtime_parallelism(hardware: &crate::hosted::hardware::Hardware) -> u32 {
+fn realtime_parallelism(hardware: &crate::hosted::hardware::Hardware) -> u32 {
     let performance: u32 = hardware
         .clusters
         .iter()
@@ -681,8 +681,14 @@ mod tests {
         );
         assert_eq!(parallelism(&hardware, THREAD_QOS_BACKGROUND), 4);
         assert_eq!(parallelism(&hardware, THREAD_QOS_MAINTENANCE), 4);
-        // Realtime threads spill only among clusters of one core type.
+        // Realtime threads spill only among clusters of one core type;
+        // without performance clusters every core is one node.
         assert_eq!(realtime_parallelism(&hardware), 4);
+        let mut uniform = hardware.clone();
+        for cluster in &mut uniform.clusters {
+            cluster.performance = false;
+        }
+        assert_eq!(realtime_parallelism(&uniform), 8);
     }
 
     #[test]
