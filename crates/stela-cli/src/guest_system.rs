@@ -252,17 +252,19 @@ impl InstallSystem {
     pub(crate) fn run(self) -> Result<()> {
         let layout = Layout::pinned()?;
         if self.remove {
-            return remove(&layout, self.dry_run);
+            remove(&layout, self.dry_run)?;
+            return crate::apps::remove_service(self.dry_run);
         }
         if let Some(root) = layout.installed()? {
             println!(
                 "The macOS {PINNED_VERSION} ({PINNED_BUILD}) system files are installed in {}.",
                 root.display()
             );
-            return Ok(());
+            return crate::apps::install_service(self.dry_run);
         }
         if !self.import.is_empty() {
-            return install::from_roots(&layout, &self.import, self.dry_run);
+            install::from_roots(&layout, &self.import, self.dry_run)?;
+            return crate::apps::install_service(self.dry_run);
         }
         let ipsw = match (self.ipsw, self.fetch) {
             (Some(ipsw), _) => ipsw,
@@ -283,7 +285,8 @@ impl InstallSystem {
                 )
             })?,
         };
-        install::from_ipsw(&layout, &ipsw, self.aea_keys.as_deref(), self.dry_run)
+        install::from_ipsw(&layout, &ipsw, self.aea_keys.as_deref(), self.dry_run)?;
+        crate::apps::install_service(self.dry_run)
     }
 }
 

@@ -66,6 +66,10 @@ pub(crate) enum Command {
     /// A program to run: `stela PROGRAM [ARGS]...`.
     #[command(external_subcommand)]
     Program(Vec<OsString>),
+    /// The per-user service launchd starts: launchers, translations ahead
+    /// of time and unsupported-operation notifications.
+    #[command(hide = true)]
+    Stelad(apps::Stelad),
     /// Report detected x86 capabilities and the named SIMD output catalog.
     #[command(hide = true)]
     CpuInfo,
@@ -154,6 +158,7 @@ impl Command {
             Self::Setup(command) => command.run(),
             Self::BootLog(command) => command.run(),
             Self::Program(words) => run::Run::shorthand(words)?.run(),
+            Self::Stelad(command) => command.run(),
             Self::CpuInfo => compile::cpu_info(),
             Self::CompileLeaf(command) => command.run(),
             Self::CompileBlock(command) => command.run(),
@@ -213,6 +218,7 @@ mod tests {
         assert_eq!(words, ["./hello", "--help", "-v"]);
         assert!(matches!(parse(&["run", "./hello"]), Command::Run(_)));
         assert!(matches!(parse(&["apps"]), Command::Apps(_)));
+        assert!(matches!(parse(&["stelad"]), Command::Stelad(_)));
     }
 
     #[test]
@@ -221,6 +227,7 @@ mod tests {
         assert!(help.contains("stela PROGRAM [ARGS]..."), "{help}");
         assert!(help.contains("install-system") && help.contains("apps"));
         assert!(!help.contains("compile-block") && !help.contains("decrypt-aea"));
+        assert!(!help.contains("stelad"));
         Cli::command().debug_assert();
     }
 }

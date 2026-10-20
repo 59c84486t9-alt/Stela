@@ -73,7 +73,8 @@ fn fingerprint(path: &Path) -> Option<String> {
     ))
 }
 
-/// Serve the store `config` names once: prove and write the spooled offers,
+/// Serve the store `config` names for one pass, of as many as the process
+/// runs: prove and write the spooled offers,
 /// translate the arm64 slices of `images` that changed since the last run
 /// for processes modeling the Mac `model`, wait for every proof, and evict
 /// past the bound.
@@ -83,6 +84,8 @@ pub fn serve(config: Config, images: &[PathBuf], model: &str) -> Result<Report> 
     set_served(&config, true)?;
     configure(Some(config.clone()));
     let shared = shared().context("the translation store is not configured")?;
+    // An earlier pass of this process closed it.
+    super::lock(&shared.state).closed = false;
     let disk = shared
         .disk
         .as_ref()

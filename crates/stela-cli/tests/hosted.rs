@@ -135,6 +135,9 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
     assert!(output.status.success(), "{:?}", text(&output));
     let installed = home.join("Library/Application Support/Stela/26A434");
     assert!(installed.join("receipt.json").is_file());
+    // stelad's agent, written but not loaded: this home is not launchd's.
+    let agent = home.join("Library/LaunchAgents/local.stela.stelad.plist");
+    assert!(agent.is_file());
     let output = stela(&home, &programs, &["install-system"]);
     assert!(
         text(&output).0.contains("are installed"),
@@ -252,7 +255,7 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
 
     let output = stela(&home, &programs, &["install-system", "--remove"]);
     assert!(output.status.success());
-    assert!(!installed.exists());
+    assert!(!installed.exists() && !agent.exists());
 }
 
 #[test]

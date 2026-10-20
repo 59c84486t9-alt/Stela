@@ -2,9 +2,13 @@
 //! arm64-only app, so it opens from Finder, the Dock, Spotlight and Open
 //! With on an Intel Mac, where macOS refuses the original. The originals
 //! are only read. Every launcher is recorded in `apps.json` and removed
-//! only when it is still Stela's. See `docs/design/hosted-cli.md`.
+//! only when it is still Stela's. `stelad` (`stelad.rs`) keeps them in sync.
+//! See `docs/design/hosted-cli.md`.
 mod agent;
 mod launcher;
+mod stelad;
+
+pub(crate) use stelad::Stelad;
 
 use crate::bundle::AppBundle;
 use crate::guest_system;
@@ -13,6 +17,7 @@ use anyhow::{Context, Result, bail, ensure};
 use clap::Args;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use stela_runtime::hosted::translations::{Config, service};
 
 /// The system-wide applications folder.
 const APPLICATIONS: &str = "/Applications";
@@ -22,6 +27,9 @@ const USER_APPLICATIONS: &str = "Applications";
 const LAUNCHERS: &str = "Stela";
 /// Stela's log folder below the home directory.
 const LOGS: &str = "Library/Logs/Stela";
+/// The unsupported-operations log in it
+/// (`docs/design/runtime.md#unsupported-operations`).
+const UNSUPPORTED_LOG: &str = "unsupported.log";
 /// The record below the Stela support directory.
 const RECORD: &str = "apps.json";
 const RECORD_SCHEMA: u32 = 1;
@@ -40,29 +48,23 @@ pub(crate) struct Apps {
     #[arg(long, value_name = "APP")]
     remove: Vec<String>,
     /// List the launchers, changing nothing.
-    #[arg(long, conflicts_with_all = ["add", "remove", "watch", "no_watch", "uninstall"])]
+    #[arg(long, conflicts_with_all = ["add", "remove", "uninstall"])]
     list: bool,
-    /// Keep the launchers in sync as apps come and go, with a per-user
-    /// LaunchAgent.
-    #[arg(long, conflicts_with = "no_watch")]
-    watch: bool,
-    /// Remove that LaunchAgent.
-    #[arg(long)]
-    no_watch: bool,
-    /// Remove every launcher Stela made, the LaunchAgent and the record.
-    #[arg(long, conflicts_with_all = ["add", "remove", "watch"])]
+    /// Remove every launcher Stela made and the record; stelad makes none
+    /// until `stela apps` runs again.
+    #[arg(long, conflicts_with_all = ["add", "remove"])]
     uninstall: bool,
     /// Show what would change, and change nothing.
     #[arg(long)]
     dry_run: bool,
-    /// Print only changes and warnings (for the LaunchAgent).
+    /// Print only changes and warnings.
     #[arg(long, hide = true)]
     quiet: bool,
     /// Scan these folders instead of /Applications and ~/Applications
     /// (testing).
     #[arg(long, hide = true, value_name = "DIR")]
     scan: Vec<PathBuf>,
-    /// Neither register launchers with LaunchServices nor load the
+    /// Neither register launchers with LaunchServices nor unload a
     /// LaunchAgent (testing).
     #[arg(long, hide = true)]
     no_register: bool,
@@ -81,6 +83,12 @@ pub(crate) struct Environment {
     agents: PathBuf,
     /// `~/Library/Logs/Stela`.
     logs: PathBuf,
+    /// The unsupported-operations log processes append to, in `logs`.
+    unsupported: PathBuf,
+    /// `stelad`'s state, beside the record.
+    state: PathBuf,
+    /// The translation store's spool, when the store is on.
+    spool: Option<PathBuf>,
     /// The `stela` executable launchers run.
     stela: PathBuf,
     /// The launcher program copied into each launcher.
@@ -90,25 +98,113 @@ pub(crate) struct Environment {
 }
 
 impl Environment {
-    fn of(command: &Apps) -> Result<Self> {
+    fn new(scan: &[PathBuf], register: bool) -> Result<Self> {
         let home = guest_system::home()?;
+        let support = guest_system::support_directory()?;
         let stela = std::env::current_exe()?;
-        let scan = if command.scan.is_empty() {
+        let scan = if scan.is_empty() {
             vec![PathBuf::from(APPLICATIONS), home.join(USER_APPLICATIONS)]
         } else {
-            command.scan.clone()
+            scan.to_vec()
         };
         Ok(Self {
             scan,
             launchers: home.join(USER_APPLICATIONS).join(LAUNCHERS),
-            record: guest_system::support_directory()?.join(RECORD),
+            record: support.join(RECORD),
             agents: home.join(agent::AGENTS),
             logs: home.join(LOGS),
+            unsupported: home.join(LOGS).join(UNSUPPORTED_LOG),
+            state: support.join(stelad::STATE),
+            spool: Config::from_environment().map(|config| service::spool_directory(&config)),
             launcher_program: stela.with_file_name(LAUNCHER_PROGRAM),
             stela,
-            register: !command.no_register,
+            register,
         })
     }
+
+    fn of(command: &Apps) -> Result<Self> {
+        Self::new(&command.scan, !command.no_register)
+    }
+
+    /// `stelad`'s, which tells launchd only when `HOME` is the user's own
+    /// home directory, the one launchd's GUI domain loads agents from.
+    fn service() -> Result<Self> {
+        let home = guest_system::home()?;
+        Self::new(
+            &[],
+            launchd_home().is_some_and(|own| same_file(&own, &home)),
+        )
+    }
+}
+
+/// The calling user's home directory in the user database.
+fn launchd_home() -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: getpwuid's result, when not null, points at a record valid
+    // until the next call, read before any other.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() || (*entry).pw_dir.is_null() {
+            return None;
+        }
+        let directory = std::ffi::CStr::from_ptr((*entry).pw_dir);
+        Some(PathBuf::from(std::ffi::OsStr::from_bytes(
+            directory.to_bytes(),
+        )))
+    }
+}
+
+/// Whether `a` and `b` name the same existing file.
+fn same_file(a: &Path, b: &Path) -> bool {
+    matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Install `stelad` for `stela install-system`: its LaunchAgent, which
+/// replaces the launcher agent of earlier versions.
+pub(crate) fn install_service(dry_run: bool) -> Result<()> {
+    let environment = Environment::service()?;
+    if dry_run {
+        println!("Would install {}", agent::path(&environment).display());
+        return Ok(());
+    }
+    for line in agent::install(&environment)? {
+        println!("{line}");
+    }
+    if let Ok(mut record) = Record::read(&environment.record)
+        && record.agent.take().is_some()
+    {
+        record.write(&environment.record)?;
+    }
+    Ok(())
+}
+
+/// Remove `stelad` for `stela install-system --remove`: its LaunchAgent
+/// (and the launcher agent's), and the store's service marker and spool,
+/// so processes prove their own translations again.
+pub(crate) fn remove_service(dry_run: bool) -> Result<()> {
+    let environment = Environment::service()?;
+    if dry_run {
+        println!("Would remove {}", agent::path(&environment).display());
+        return Ok(());
+    }
+    for plist in agent::remove(&environment)? {
+        println!("Removed {}", plist.display());
+    }
+    if let Some(config) = Config::from_environment() {
+        service::set_served(&config, false)?;
+    }
+    if let Some(spool) = &environment.spool
+        && spool.is_dir()
+    {
+        std::fs::remove_dir_all(spool)
+            .with_context(|| format!("cannot remove {}", spool.display()))?;
+    }
+    if let Ok(mut record) = Record::read(&environment.record)
+        && record.agent.take().is_some()
+    {
+        record.write(&environment.record)?;
+    }
+    Ok(())
 }
 
 /// One launcher Stela made.
@@ -129,8 +225,13 @@ struct Entry {
 struct Record {
     schema_version: u32,
     launchers: Vec<Entry>,
-    /// The LaunchAgent's property list, when `--watch` installed it.
+    /// The launcher agent's property list, when an earlier version's
+    /// `--watch` installed it; installing `stelad` replaces it.
     agent: Option<PathBuf>,
+    /// Set by `--uninstall` while `stelad` is installed: its sync makes no
+    /// launchers until `stela apps` runs again.
+    #[serde(default)]
+    paused: bool,
     /// Apps whose launcher `--remove` removed: the scan skips them until
     /// `--add` names them again.
     #[serde(default)]
@@ -180,6 +281,7 @@ impl Record {
     fn write(&self, path: &Path) -> Result<()> {
         if self.launchers.is_empty()
             && self.agent.is_none()
+            && !self.paused
             && self.excluded.is_empty()
             && self.created.is_empty()
         {
@@ -476,16 +578,16 @@ fn sync(
 }
 
 /// Remove every launcher in the record that is still Stela's with its log,
-/// the agent with its log, the record, and the folders Stela created when
-/// they are then empty.
+/// an earlier version's launcher agent with its log, the record, and the
+/// folders Stela created when they are then empty. While `stelad` is
+/// installed, the record stays to pause its sync.
 fn uninstall(environment: &Environment, record: &mut Record, dry_run: bool) -> Result<()> {
     let verb = if dry_run { "Would remove" } else { "Removed" };
     let mut logs = vec![];
     if let Some(plist) = record.agent.clone() {
         println!("{verb} {}", plist.display());
-        logs.push(environment.logs.join(agent::LOG));
         if !dry_run {
-            agent::remove(environment, &plist)?;
+            agent::remove_legacy(environment)?;
             record.agent = None;
         }
     }
@@ -527,6 +629,7 @@ fn uninstall(environment: &Environment, record: &mut Record, dry_run: bool) -> R
         }
     }
     record.excluded.clear();
+    record.paused = agent::path(environment).is_file();
     record.write(&environment.record)
 }
 
@@ -551,40 +654,8 @@ impl Apps {
             &self.remove,
             self.dry_run,
         )?;
-        if self.watch {
-            let plist = agent::path(&environment);
-            println!(
-                "{} {} to keep the launchers in sync",
-                if self.dry_run {
-                    "Would install"
-                } else {
-                    "Installed"
-                },
-                plist.display()
-            );
-            if !self.dry_run {
-                agent::install(&environment)?;
-                record.agent = Some(plist);
-            }
-        }
-        if self.no_watch
-            && let Some(plist) = record.agent.clone()
-        {
-            println!(
-                "{} {}",
-                if self.dry_run {
-                    "Would remove"
-                } else {
-                    "Removed"
-                },
-                plist.display()
-            );
-            if !self.dry_run {
-                agent::remove(&environment, &plist)?;
-                record.agent = None;
-            }
-        }
         if !self.dry_run {
+            record.paused = false;
             record.write(&environment.record)?;
         }
         changes.print(self.quiet, &record);
@@ -634,6 +705,9 @@ pub(crate) mod tests {
             record: work.join("home/Library/Application Support/Stela/apps.json"),
             agents: work.join("home/Library/LaunchAgents"),
             logs: work.join("home/Library/Logs/Stela"),
+            unsupported: work.join("home/Library/Logs/Stela/unsupported.log"),
+            state: work.join("home/Library/Application Support/Stela/stelad.json"),
+            spool: Some(work.join("home/Library/Caches/stela/translations/v1/spool")),
             stela: PathBuf::from("/usr/local/bin/stela"),
             // Any signable Mach-O stands in for the launcher program.
             launcher_program: PathBuf::from("/usr/bin/true"),
@@ -781,6 +855,35 @@ pub(crate) mod tests {
         )?;
         assert_eq!(record.launchers.len(), 1);
         assert!(record.excluded.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn uninstalling_the_launchers_pauses_stelads_sync_and_replaces_the_launcher_agent() -> Result<()>
+    {
+        let work = tempfile::tempdir()?;
+        let applications = work.path().join("Applications");
+        std::fs::create_dir_all(&applications)?;
+        app(&applications, "Arm", ARM64)?;
+        let environment = environment(work.path());
+        let mut record = Record {
+            schema_version: RECORD_SCHEMA,
+            agent: Some(agent::legacy_path(&environment)),
+            ..Record::default()
+        };
+        agent::install(&environment)?;
+        sync(&environment, &mut record, &[], &[], false)?;
+        uninstall(&environment, &mut record, false)?;
+        assert!(record.launchers.is_empty() && record.agent.is_none());
+        assert_eq!(
+            Record::read(&environment.record)?,
+            Record {
+                schema_version: RECORD_SCHEMA,
+                paused: true,
+                ..Record::default()
+            },
+            "the record stays while stelad is installed"
+        );
         Ok(())
     }
 
