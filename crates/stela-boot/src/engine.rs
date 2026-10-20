@@ -545,7 +545,7 @@ impl Options {
 /// The host CPU's compiler target, from CPUID, after setting Intel's data
 /// operand independent timing mode where the CPU has it ([`enable_doit`]).
 fn target() -> TargetCpu {
-    let (basic, extended) = (__cpuid(1), __cpuid_count(7, 0));
+    let (vendor, basic, extended) = (__cpuid(0), __cpuid(1), __cpuid_count(7, 0));
     let (ssse3, sse41, sse42) = (
         basic.ecx & (1 << 9) != 0,
         basic.ecx & (1 << 19) != 0,
@@ -570,6 +570,10 @@ fn target() -> TargetCpu {
         (basic.ecx & (1 << 28) != 0, TargetCpu::with_atomic_load16),
         (extended.ebx & (1 << 3) != 0, TargetCpu::with_bmi1),
         (extended.ebx & (1 << 29) != 0, TargetCpu::with_sha),
+        (
+            [vendor.ebx, vendor.edx, vendor.ecx] == TargetCpu::INTEL_VENDOR,
+            TargetCpu::with_line_atomic,
+        ),
     ] {
         if present {
             target = with(target);

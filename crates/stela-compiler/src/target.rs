@@ -25,6 +25,12 @@ pub struct TargetCpu {
     aes: bool,
     sha: bool,
     atomic_load16: bool,
+    /// An Intel processor: since the P6 family, an unaligned load that lies
+    /// within one cache line is single-copy atomic (Intel SDM Vol. 3A,
+    /// 9.1.1, "Guaranteed Atomic Operations"). A 16-byte granule never
+    /// crosses a line, so an ordered load inside one is a plain load. AMD
+    /// guarantees this only inside a naturally aligned quadword.
+    line_atomic: bool,
     cx8: bool,
     cx16: bool,
     avx2: bool,
@@ -85,6 +91,7 @@ impl TargetCpu {
         aes: false,
         sha: false,
         atomic_load16: false,
+        line_atomic: false,
         cx8: false,
         cx16: false,
         avx2: false,
@@ -119,6 +126,8 @@ impl TargetCpu {
     /// Aligned16 atomic loads, enumerated by AVX hardware support. Lowering uses
     /// legacy SSE2 instructions, independently of OS-enabled AVX register state.
     pub const AtomicLoad16: Self = Self::Baseline.with_atomic_load16();
+    /// Single-copy atomic unaligned loads within a cache line ([`Self::line_atomic`]).
+    pub const LineAtomic: Self = Self::Baseline.with_line_atomic();
     /// CMPXCHG8B, independently enumerated for the W-pair optimized recipe.
     pub const Cx8: Self = Self::Baseline.with_cx8();
     /// CMPXCHG16B, independent of aligned16 load atomicity and AVX state.
@@ -131,6 +140,16 @@ impl TargetCpu {
     pub const Doit: Self = Self::Baseline.with_doit();
     /// Code lowered for PSTATE.DIT ([`Self::data_independent_timing`]).
     pub const DataIndependentTiming: Self = Self::Baseline.with_data_independent_timing();
+    /// `GenuineIntel` as CPUID leaf 0 returns it in EBX, EDX and ECX, which
+    /// identifies a [`Self::line_atomic`] host.
+    pub const INTEL_VENDOR: [u32; 3] = [
+        u32::from_le_bytes(*b"Genu"),
+        u32::from_le_bytes(*b"ineI"),
+        u32::from_le_bytes(*b"ntel"),
+    ];
+    /// x86-64-v2 (SSE4.2, POPCNT, CMPXCHG8B, CMPXCHG16B): the least host
+    /// Stela runs on. Every other feature is optional and has a fallback.
+    pub const X86_64_V2: Self = Self::Sse42.with_popcnt().with_cx8().with_cx16();
     /// SSE4.2 with every other feature the compiler uses that needs no
     /// OS-enabled AVX state: the bare-metal boot's target on a current host.
     pub const Sse42Complete: Self = Self::Sse42
@@ -184,6 +203,12 @@ impl TargetCpu {
     pub const fn with_atomic_load16(self) -> Self {
         Self {
             atomic_load16: true,
+            ..self
+        }
+    }
+    pub const fn with_line_atomic(self) -> Self {
+        Self {
+            line_atomic: true,
             ..self
         }
     }
@@ -243,6 +268,7 @@ impl TargetCpu {
             && (!required.aes || self.aes)
             && (!required.sha || self.sha)
             && (!required.atomic_load16 || self.atomic_load16)
+            && (!required.line_atomic || self.line_atomic)
             && (!required.cx16 || self.cx16)
             && (!required.cx8 || self.cx8)
             && (!required.avx2 || self.avx2)
@@ -271,6 +297,7 @@ impl TargetCpu {
                 cx8: basic.edx & CPUID_CX8 != 0,
                 // Hardware atomicity, rather than permission to execute VEX.
                 atomic_load16: basic.ecx & CPUID_AVX_HARDWARE != 0,
+                line_atomic: intel(),
                 // Rust's detector checks CPUID and XSAVE/OSXSAVE/XCR0 state.
                 avx2: std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"),
                 avx512f: avx512f_usable(),
@@ -344,6 +371,7 @@ impl TargetCpu {
             (self.cx16, "+cx16"),
             (self.avx2, "+avx2"),
             (self.avx512f, "+avx512f"),
+            (self.line_atomic, "+line-atomic"),
             (self.doit, "+doit"),
             (self.data_independent_timing, "+dit"),
         ] {
@@ -358,6 +386,13 @@ impl TargetCpu {
     pub fn supported(self) -> bool {
         cfg!(target_arch = "x86_64") && Self::detect().supports(self)
     }
+}
+
+/// Whether CPUID's vendor string is `GenuineIntel` ([`TargetCpu::line_atomic`]).
+#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
+fn intel() -> bool {
+    let vendor = core::arch::x86_64::__cpuid(0);
+    [vendor.ebx, vendor.edx, vendor.ecx] == TargetCpu::INTEL_VENDOR
 }
 
 /// AVX-512F with OS-enabled opmask and ZMM state. Rust's detector reads XCR0,
@@ -437,6 +472,7 @@ impl core::str::FromStr for TargetCpu {
         for (suffix, enabled) in [
             ("+dit", &mut target.data_independent_timing),
             ("+doit", &mut target.doit),
+            ("+line-atomic", &mut target.line_atomic),
             ("+avx512f", &mut target.avx512f),
             ("+avx2", &mut target.avx2),
             ("+cx16", &mut target.cx16),
@@ -481,7 +517,7 @@ mod tests {
             "x86_64-baseline+ssse3+sse4.1+sse4.2",
         ),
     ];
-    const FEATURES: [TargetCpu; 13] = [
+    const FEATURES: [TargetCpu; 14] = [
         TargetCpu::Pclmulqdq,
         TargetCpu::Fma,
         TargetCpu::F16c,
@@ -495,11 +531,12 @@ mod tests {
         TargetCpu::Avx2,
         TargetCpu::Avx512f,
         TargetCpu::Doit,
+        TargetCpu::LineAtomic,
     ];
 
     fn profiles() -> impl Iterator<Item = TargetCpu> {
         TIERS.into_iter().flat_map(|(tier, _, _)| {
-            (0..16384).map(move |bits| TargetCpu {
+            (0..32768).map(move |bits| TargetCpu {
                 pclmulqdq: bits & 1 != 0,
                 fma: bits & 2 != 0,
                 f16c: bits & 4 != 0,
@@ -514,6 +551,7 @@ mod tests {
                 avx512f: bits & 2048 != 0,
                 doit: bits & 4096 != 0,
                 data_independent_timing: bits & 8192 != 0,
+                line_atomic: bits & 16384 != 0,
                 ..tier
             })
         })
@@ -555,7 +593,7 @@ mod tests {
             let suffix = id.strip_prefix(canonical).unwrap();
             assert_eq!(format!("{alias}{suffix}").parse::<TargetCpu>(), Ok(target));
         }
-        assert_eq!(ids.len(), 65536);
+        assert_eq!(ids.len(), 131072);
         assert_eq!(
             TargetCpu::Sse42
                 .with_sha()
@@ -602,6 +640,8 @@ mod tests {
             "baseline+cx8+atomic-load16",
             "baseline+avx512f+avx2",
             "baseline+dit+doit",
+            "baseline+doit+line-atomic",
+            "baseline+line-atomic+avx512f",
             "avx512f",
         ] {
             assert!(invalid.parse::<TargetCpu>().is_err(), "{invalid}");
@@ -621,6 +661,7 @@ mod tests {
             "avx512f",
             "doit",
             "dit",
+            "line-atomic",
         ] {
             for tier in ["baseline", "x86_64-baseline+ssse3+sse4.1+sse4.2"] {
                 let duplicate = format!("{tier}+{suffix}+{suffix}");
@@ -646,6 +687,7 @@ mod tests {
                 host.avx2,
                 host.avx512f,
                 host.doit,
+                host.line_atomic,
             ]) {
                 assert_eq!(host.supports(required), present);
                 assert_eq!(host >= required, present);
@@ -791,6 +833,7 @@ mod tests {
                     TargetCpu::Cx8,
                     core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).edx & CPUID_CX8 != 0,
                 ),
+                (TargetCpu::LineAtomic, intel()),
             ] {
                 assert_eq!(target.supports(required), detected);
             }

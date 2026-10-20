@@ -111,13 +111,15 @@ fn patch(code: &mut [u8], at: usize) {
 /// Generic wider loads can cross eight bytes. A checked, so aligned, SP makes
 /// the effective residue known; a statically faulting access never needs a
 /// snapshot capability, and neither does a plain load
-/// ([`super::plain_ordering`]).
+/// ([`super::plain_ordering`]) or a load on an Intel host, where a load
+/// inside its 16-byte granule, so inside one cache line, is single-copy
+/// atomic ([`TargetCpu::LineAtomic`]).
 pub(super) fn requires_atomic_load16(
     operand: &Operand,
     target: TargetCpu,
     checks: super::MemoryChecks,
 ) -> bool {
-    if super::plain_ordering(target, checks) {
+    if super::plain_ordering(target, checks) || target.supports(TargetCpu::LineAtomic) {
         return false;
     }
     let Operand::Transfer {
