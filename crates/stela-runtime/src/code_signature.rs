@@ -119,6 +119,13 @@ pub fn xml_entitlement_true(plist: &[u8], name: &str) -> bool {
         .any(|(at, _)| text[at + key.len()..].trim_start().starts_with("<true/>"))
 }
 
+/// Whether the XML entitlements plist holds `name` with any value
+/// (`IOVnodeIsEntitlementPresentWithAnyValue`).
+pub fn xml_entitlement_present(plist: &[u8], name: &str) -> bool {
+    let key = format!("<key>{name}</key>");
+    core::str::from_utf8(plist).is_ok_and(|text| text.contains(&key))
+}
+
 impl CodeSignature {
     /// Whether the kernel treats this code as platform code: a code
     /// directory platform identifier (the trust caches' code), or code

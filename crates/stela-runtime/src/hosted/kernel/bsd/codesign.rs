@@ -102,6 +102,38 @@ impl Signature {
         flags
     }
 
+    /// Whether a pointer-authentication failure ends the process rather
+    /// than raising SIGBUS (`task_set_pac_exception_fatal_flag` at exec):
+    /// for a PAC-hardened task (the private PAC-exception entitlement, or a
+    /// platform-restrictions version from a platform binary, a
+    /// hardened-process entitlement or a hardened browser engine), and for
+    /// any platform binary on FPAC hardware. Mach-hardening opt-outs are
+    /// AMFI boot-args, which Stela does not set.
+    pub fn pac_exception_fatal(&self, fpac: bool) -> bool {
+        const HARDENING: [&str; 2] = [
+            "com.apple.security.hardened-process.platform-restrictions-string",
+            "com.apple.security.hardened-process.platform-restrictions",
+        ];
+        const BROWSER_ENGINE: [&str; 4] = [
+            "com.apple.developer.web-browser-engine.host",
+            "com.apple.developer.web-browser-engine.rendering",
+            "com.apple.developer.web-browser-engine.networking",
+            "com.apple.developer.web-browser-engine.webcontent",
+        ];
+        let platform = self.exec_flags() & CS_PLATFORM_BINARY != 0;
+        let present = |name: &str| {
+            self.entitlements.as_deref().is_some_and(|blob| {
+                blob.get(BLOB_HEADER_BYTES as usize..)
+                    .is_some_and(|plist| code_signature::xml_entitlement_present(plist, name))
+            })
+        };
+        let hardened = self.entitled("com.apple.private.pac.exception")
+            || platform
+            || HARDENING.iter().any(|name| present(name))
+            || BROWSER_ENGINE.iter().any(|name| self.entitled(name));
+        hardened || (fpac && platform)
+    }
+
     /// Whether the XML entitlements grant the boolean `name`.
     pub fn entitled(&self, name: &str) -> bool {
         self.entitlements.as_deref().is_some_and(|blob| {
@@ -314,5 +346,37 @@ mod tests {
             adhoc.exec_flags(),
             CS_ADHOC | CS_LINKER_SIGNED | CS_VALID | CS_SIGNED
         );
+    }
+
+    #[test]
+    fn pac_failures_end_hardened_tasks_only() {
+        let plist = |keys: &str| {
+            let mut blob = vec![0; BLOB_HEADER_BYTES as usize];
+            blob.extend(format!("<plist><dict>{keys}</dict></plist>").bytes());
+            Some(blob)
+        };
+        let third_party = Signature {
+            directory_flags: CS_RUNTIME,
+            ..Signature::default()
+        };
+        assert!(!third_party.pac_exception_fatal(true));
+        let platform = Signature {
+            platform: 13,
+            ..Signature::default()
+        };
+        assert!(platform.pac_exception_fatal(false));
+        let entitled = Signature {
+            entitlements: plist("<key>com.apple.private.pac.exception</key><true/>"),
+            ..Signature::default()
+        };
+        assert!(entitled.pac_exception_fatal(false));
+        let restricted = Signature {
+            entitlements: plist(
+                "<key>com.apple.security.hardened-process.platform-restrictions</key>\
+                 <integer>2</integer>",
+            ),
+            ..Signature::default()
+        };
+        assert!(restricted.pac_exception_fatal(false));
     }
 }

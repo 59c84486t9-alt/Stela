@@ -46,6 +46,10 @@ const EC_SHIFT: u32 = 26;
 const ISS_MASK: u64 = (1 << 25) - 1;
 const EC_SVC64: u64 = 0x15;
 const EC_BRK64: u64 = 0x3c;
+/// A pointer-authentication failure under FEAT_FPAC (`ESR_EC_PAC_FAIL`).
+const EC_PAC_FAIL: u64 = 0x1c;
+/// SIGKILL, which ends a PAC-hardened task's failure.
+const SIGKILL: i32 = 9;
 const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
 /// A data abort's ISS WnR: the access was a write.
@@ -107,6 +111,9 @@ pub(super) struct Process {
     /// The workloops (`fd_kqhash`).
     pub(super) workloops: bsd::kqworkloop::Workloops,
     pub(super) actions: Mutex<bsd::signal::Actions>,
+    /// Whether a pointer-authentication failure ends the process
+    /// (`TFRO_PAC_EXC_FATAL`), fixed at exec.
+    pub(super) pac_exception_fatal: bool,
     /// Its threads' signal slots.
     pub(super) signal_slots: bsd::signal::Slots,
     pub(super) map_with_linking_ended: AtomicBool,
@@ -191,7 +198,17 @@ pub(super) struct Config {
 impl Process {
     pub(super) fn new(config: Config) -> Arc<Self> {
         let port = |trap| forward::mach(trap, &[]).rax as u32;
+        let fpac = config
+            .features
+            .iter()
+            .any(|&(name, present)| name == "FEAT_FPAC" && present);
+        let pac_exception_fatal = config
+            .executable
+            .signature
+            .as_ref()
+            .is_some_and(|signature| signature.pac_exception_fatal(fpac));
         Arc::new(Self {
+            pac_exception_fatal,
             sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
             signer: config.signer,
             hardware: config.hardware,
@@ -387,6 +404,37 @@ impl Kernel {
                         frames(pe.cpu.state.x[29]),
                     )
                 });
+                Ok(())
+            }
+            // `handle_pac_fail`: EXC_BAD_ACCESS with EXC_ARM_PAC_FAIL and the
+            // instruction. `pac_exception_triage` ends a PAC-hardened task
+            // with SIGKILL; any other takes SIGBUS (`ux_exception`).
+            EC_PAC_FAIL => {
+                let shared_cache_slide = self.shared_cache_slide();
+                let describe = || {
+                    format!(
+                        "guest pointer-authentication failure at pc {elr:#x} (ESR {esr:#x}, lr \
+                         {:#x}, frames {:x?}, shared cache slide {shared_cache_slide:#x})",
+                        pe.cpu.state.x[30],
+                        frames(pe.cpu.state.x[29]),
+                    )
+                };
+                if self.process.pac_exception_fatal {
+                    eprintln!(
+                        "stela: {}: the process is PAC-hardened and is killed",
+                        describe()
+                    );
+                    self.end = Some(End::Process(Termination::Signaled(SIGKILL)));
+                } else {
+                    // EXC_ARM_PAC_FAIL is neither an invalid address nor an
+                    // alignment fault: the protection failure's si_code.
+                    self.exception_signal(
+                        bsd::signal::SIGBUS,
+                        bsd::signal::SEGV_ACCERR,
+                        false,
+                        describe,
+                    );
+                }
                 Ok(())
             }
             _ => bail!(
