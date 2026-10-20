@@ -1,21 +1,24 @@
 //! USB HID keyboards and pointers (HID 1.11) as sources of the native
 //! peripheral's inputs.
 //!
-//! Boot keyboards (subclass 1, protocol 1) run the boot protocol: each
-//! report's modifier bits and six-key array, compared with the previous
-//! report, become key presses and releases (Appendix B.1); a report of
-//! ErrorRollOver changes nothing. Other HID interfaces run the report
-//! protocol, read through their report descriptor (6.2.2): a pointer is a
-//! report with Generic Desktop X and Y, with Button 1-3 and the wheel when
-//! present. Absolute axes (tablets, as QEMU's `usb-tablet`) drive the
-//! native absolute pointer; relative ones (mice) drive the native mouse
-//! with their own counts, so macOS applies its pointer acceleration. A boot
-//! mouse (subclass 1, protocol 2) is set to the report protocol so that its
-//! wheel reaches the guest; one whose report descriptor this driver cannot
-//! read runs the boot protocol (Appendix B.2: buttons, X and Y). A pointer
-//! with one absolute and one relative axis is refused. Report-protocol
-//! keyboards and other HID devices are refused: no driver here reads their
-//! reports. Long items, Push and Pop are refused in report descriptors.
+//! Boot keyboards (subclass 1, protocol 1) run the boot protocol, read as
+//! the boot report (Appendix B.1). Every other HID interface runs the
+//! report protocol, read through its report descriptor ([`report`]), and
+//! may carry a keyboard report, a pointer report or both, told apart by
+//! report ID. A keyboard report's held Keyboard/Keypad usages, compared
+//! with the previous report's, become key presses and releases; a report
+//! in an error state (ErrorRollOver and the like) changes nothing, and
+//! usages the native keyboard does not report (beyond DDh, other than the
+//! modifiers) are counted and dropped. Absolute pointer axes (tablets, as
+//! QEMU's `usb-tablet`) drive the native absolute pointer; relative ones
+//! (mice) drive the native mouse with their own counts, so macOS applies
+//! its pointer acceleration. A boot mouse (subclass 1, protocol 2) is set
+//! to the report protocol so that its wheel reaches the guest; one whose
+//! report descriptor this driver cannot read runs the boot protocol
+//! (Appendix B.2: buttons, X and Y). A pointer with one absolute and one
+//! relative axis, and an interface with neither report, are refused.
+mod report;
+
 use super::{
     super::{
         block::BlockError,
@@ -25,6 +28,7 @@ use super::{
 };
 use crate::platform::usb::hid::{Input, POINTER_MAX};
 use alloc::{format, string::String, vec::Vec};
+use report::{Field, Keys, Pointer, Reports};
 
 pub const CLASS: u8 = 3;
 const BOOT: u8 = 1;
@@ -35,9 +39,11 @@ const SET_PROTOCOL: u8 = 0x0b;
 const HID_DESCRIPTOR: u8 = 0x21;
 const REPORT_DESCRIPTOR: u8 = 0x22;
 const REPORT_BYTES: usize = 64;
-const ERROR_ROLLOVER: u8 = 1;
 const BOOT_PROTOCOL: u16 = 0;
 const REPORT_PROTOCOL: u16 = 1;
+/// The Keyboard/Keypad usages the native keyboard reports.
+const KEY_USAGES: core::ops::RangeInclusive<u32> = 0x04..=0xdd;
+const MODIFIER_USAGES: core::ops::RangeInclusive<u32> = 0xe0..=0xe7;
 
 pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
     let endpoint = interface
@@ -49,227 +55,12 @@ pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
     Ok(Plan::Hid(endpoint))
 }
 
-/// One field of a report: where it is and how to read it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Field {
-    /// Bit offset in the report, after any report ID byte.
-    offset: usize,
-    size: usize,
-    minimum: i32,
-    maximum: i32,
-    relative: bool,
-}
-
-impl Field {
-    fn read(&self, report: &[u8]) -> Option<i32> {
-        if self.size == 0 || self.size > 32 || (self.offset + self.size).div_ceil(8) > report.len()
-        {
-            return None;
-        }
-        let mut value: u64 = 0;
-        for bit in 0..self.size {
-            let at = self.offset + bit;
-            if report[at / 8] >> (at % 8) & 1 != 0 {
-                value |= 1 << bit;
-            }
-        }
-        // Signed when the logical minimum is negative (6.2.2.7).
-        Some(
-            if self.minimum < 0 && self.size < 32 && value >> (self.size - 1) & 1 != 0 {
-                (value as i64 - (1i64 << self.size)) as i32
-            } else {
-                value as i32
-            },
-        )
-    }
-}
-
-/// A pointer report's layout.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct Layout {
-    report: Option<u8>,
-    x: Option<Field>,
-    y: Option<Field>,
-    wheel: Option<Field>,
-    buttons: [Option<Field>; 3],
-}
-
-/// The first pointer report a report descriptor describes: one with X and
-/// Y on the Generic Desktop page.
-fn pointer_layout(descriptor: &[u8]) -> Result<Layout, &'static str> {
-    #[derive(Clone, Copy, Default)]
-    struct Global {
-        page: u32,
-        minimum: i32,
-        maximum: i32,
-        size: usize,
-        count: usize,
-        report: Option<u8>,
-    }
-    let mut global = Global::default();
-    let mut usages: Vec<u32> = Vec::new();
-    let mut range: Option<(u32, u32)> = None;
-    let mut offsets: Vec<(Option<u8>, usize)> = Vec::new();
-    let mut layouts: Vec<Layout> = Vec::new();
-    let mut at = 0;
-    while at < descriptor.len() {
-        let prefix = descriptor[at];
-        if prefix == 0xfe {
-            return Err("long items in a report descriptor");
-        }
-        let size = match prefix & 3 {
-            3 => 4,
-            n => usize::from(n),
-        };
-        let Some(data) = descriptor.get(at + 1..at + 1 + size) else {
-            return Err("truncated report descriptor");
-        };
-        at += 1 + size;
-        let unsigned = data
-            .iter()
-            .enumerate()
-            .fold(0u32, |value, (n, byte)| value | u32::from(*byte) << (8 * n));
-        let signed = match size {
-            1 => i32::from(data[0] as i8),
-            2 => i32::from(i16::from_le_bytes([data[0], data[1]])),
-            4 => unsigned as i32,
-            _ => 0,
-        };
-        let full_usage = |usage: u32| {
-            if size == 4 {
-                usage
-            } else {
-                global.page << 16 | usage
-            }
-        };
-        match prefix & 0xfc {
-            // Main items.
-            0x80 => {
-                let flags = unsigned;
-                let offset = match offsets.iter_mut().find(|(id, _)| *id == global.report) {
-                    Some((_, offset)) => offset,
-                    None => {
-                        offsets.push((global.report, 0));
-                        &mut offsets.last_mut().unwrap().1
-                    }
-                };
-                let start = *offset;
-                *offset += global.size * global.count;
-                if flags & 1 == 0 {
-                    for n in 0..global.count {
-                        let usage = match range {
-                            Some((first, last)) => (first + n as u32).min(last),
-                            None => match usages.get(n).or(usages.last()) {
-                                Some(usage) => *usage,
-                                None => continue,
-                            },
-                        };
-                        let field = Field {
-                            offset: start + n * global.size,
-                            size: global.size,
-                            minimum: global.minimum,
-                            maximum: global.maximum,
-                            relative: flags & 4 != 0,
-                        };
-                        let layout = match layouts.iter_mut().find(|l| l.report == global.report) {
-                            Some(layout) => layout,
-                            None => {
-                                layouts.push(Layout {
-                                    report: global.report,
-                                    ..Layout::default()
-                                });
-                                layouts.last_mut().unwrap()
-                            }
-                        };
-                        match usage {
-                            0x0001_0030 => layout.x = layout.x.or(Some(field)),
-                            0x0001_0031 => layout.y = layout.y.or(Some(field)),
-                            0x0001_0038 => layout.wheel = layout.wheel.or(Some(field)),
-                            0x0009_0001..=0x0009_0003 => {
-                                let button = &mut layout.buttons[(usage - 0x0009_0001) as usize];
-                                *button = button.or(Some(field));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                usages.clear();
-                range = None;
-            }
-            0x90 | 0xb0 => {
-                // Output and Feature reports have their own offsets; this
-                // driver reads neither.
-                usages.clear();
-                range = None;
-            }
-            0xa0 | 0xc0 => {
-                usages.clear();
-                range = None;
-            }
-            // Global items.
-            0x04 => global.page = unsigned,
-            0x14 => global.minimum = signed,
-            0x24 => {
-                // A maximum that only fits unsigned (8-bit 0xff) stays positive.
-                global.maximum = if global.minimum >= 0 {
-                    unsigned as i32
-                } else {
-                    signed
-                };
-            }
-            0x74 => global.size = unsigned as usize,
-            0x84 => global.report = Some(unsigned as u8),
-            0x94 => global.count = unsigned as usize,
-            0xa4 | 0xb4 => return Err("Push and Pop in a report descriptor"),
-            0x34 | 0x44 | 0x54 | 0x64 => {}
-            // Local items.
-            0x08 => usages.push(full_usage(unsigned)),
-            0x18 => range = Some((full_usage(unsigned), range.map_or(0, |r| r.1))),
-            0x28 => range = Some((range.map_or(0, |r| r.0), full_usage(unsigned))),
-            _ => {}
-        }
-    }
-    layouts
-        .into_iter()
-        .find(|layout| layout.x.is_some() && layout.y.is_some())
-        .ok_or("HID report descriptor without a pointer")
-}
-
-enum Kind {
-    Keyboard { previous: [u8; 8] },
-    Pointer(Layout),
-}
-
-/// The boot mouse report (Appendix B.2): buttons, then X and Y.
-fn boot_mouse() -> Layout {
-    let field = |offset, size, minimum: i32, relative| {
-        Some(Field {
-            offset,
-            size,
-            minimum,
-            maximum: if minimum < 0 { 127 } else { 1 },
-            relative,
-        })
-    };
-    Layout {
-        report: None,
-        x: field(8, 8, -127, true),
-        y: field(16, 8, -127, true),
-        wheel: None,
-        buttons: [
-            field(0, 1, 0, false),
-            field(1, 1, 0, false),
-            field(2, 1, 0, false),
-        ],
-    }
-}
-
-/// The pointer layout of `interface`'s report descriptor.
-fn report_layout(
+/// The keyboard and pointer reports of `interface`'s report descriptor.
+fn read_reports(
     c: &mut Controller,
     device: &Device,
     interface: &Interface,
-) -> Result<Layout, BlockError> {
+) -> Result<Reports, BlockError> {
     let length = interface
         .extra
         .iter()
@@ -281,7 +72,7 @@ fn report_layout(
     let index = u16::from(interface.number);
     let request = setup(0x81, 6, u16::from(REPORT_DESCRIPTOR) << 8, index, length);
     let descriptor = c.control(device.slot, request, &[])?;
-    pointer_layout(&descriptor).map_err(BlockError::Unsupported)
+    report::parse(&descriptor).map_err(BlockError::Unsupported)
 }
 
 /// One HID interface the host polls.
@@ -292,10 +83,14 @@ pub struct UsbInput {
     buffer: DmaBuffer,
     /// The queued TD, if one is out.
     queued: Option<u64>,
-    kind: Kind,
+    reports: Reports,
+    /// The keyboard usages the last keyboard report held.
+    held: Vec<u32>,
     buttons: u8,
     /// The absolute pointer's last position.
     position: Option<(u16, u16)>,
+    /// Keyboard reports holding usages the native keyboard cannot report.
+    pub dropped: u64,
     /// The first transfer failure, reported once.
     failed: bool,
     pub name: String,
@@ -310,7 +105,7 @@ impl UsbInput {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         let index = u16::from(interface.number);
-        let kind = {
+        let reports = {
             let mut c = controller.borrow_mut();
             let protocol = |c: &mut Controller, protocol: u16| -> Result<(), BlockError> {
                 let request = setup(0x21, SET_PROTOCOL, protocol, index, 0);
@@ -322,23 +117,34 @@ impl UsbInput {
             match (interface.subclass, interface.protocol) {
                 (BOOT, KEYBOARD) => {
                     protocol(&mut c, BOOT_PROTOCOL)?;
-                    Kind::Keyboard { previous: [0; 8] }
-                }
-                (BOOT, MOUSE) => match report_layout(&mut c, device, interface) {
-                    Ok(layout) => {
-                        protocol(&mut c, REPORT_PROTOCOL)?;
-                        Kind::Pointer(layout)
+                    Reports {
+                        keys: Some(Keys::boot()),
+                        pointer: None,
                     }
-                    Err(_) => {
+                }
+                (BOOT, MOUSE) => match read_reports(&mut c, device, interface) {
+                    Ok(reports) if reports.pointer.is_some() => {
+                        protocol(&mut c, REPORT_PROTOCOL)?;
+                        reports
+                    }
+                    _ => {
                         protocol(&mut c, BOOT_PROTOCOL)?;
-                        Kind::Pointer(boot_mouse())
+                        Reports {
+                            keys: None,
+                            pointer: Some(Pointer::boot()),
+                        }
                     }
                 },
-                _ => Kind::Pointer(report_layout(&mut c, device, interface)?),
+                _ => read_reports(&mut c, device, interface)?,
             }
         };
-        if let Kind::Pointer(layout) = &kind
-            && layout.x.map(|f| f.relative) != layout.y.map(|f| f.relative)
+        if reports.keys.is_none() && reports.pointer.is_none() {
+            return Err(BlockError::Unsupported(
+                "HID interface with neither a keyboard nor a pointer report",
+            ));
+        }
+        if let Some(pointer) = &reports.pointer
+            && pointer.x.map(|f| f.relative) != pointer.y.map(|f| f.relative)
         {
             return Err(BlockError::Unsupported(
                 "HID pointer with one absolute and one relative axis",
@@ -351,9 +157,11 @@ impl UsbInput {
             endpoint,
             buffer,
             queued: None,
-            kind,
+            reports,
+            held: Vec::new(),
             buttons: 0,
             position: None,
+            dropped: 0,
             failed: false,
             name: format!("{} ({})", device.name(), device.location),
         })
@@ -429,104 +237,122 @@ impl UsbInput {
     }
 
     fn report(&mut self, report: &[u8], inputs: &mut Vec<Input>) {
-        match &mut self.kind {
-            Kind::Keyboard { previous } => {
-                if report.len() < 8 || report[2..8].contains(&ERROR_ROLLOVER) {
-                    return;
-                }
-                let current: [u8; 8] = report[..8].try_into().unwrap();
-                for bit in 0..8 {
-                    let (was, is) = (previous[0] >> bit & 1, current[0] >> bit & 1);
-                    if was != is {
-                        inputs.push(Input::Key {
-                            usage: 0xe0 + bit,
-                            pressed: is != 0,
-                        });
-                    }
-                }
-                for &usage in previous[2..].iter().filter(|u| **u >= 4) {
-                    if !current[2..].contains(&usage) {
-                        inputs.push(Input::Key {
-                            usage,
-                            pressed: false,
-                        });
-                    }
-                }
-                for &usage in current[2..].iter().filter(|u| **u >= 4) {
-                    if !previous[2..].contains(&usage) {
-                        inputs.push(Input::Key {
-                            usage,
-                            pressed: true,
-                        });
-                    }
-                }
-                *previous = current;
+        let (id, body) = if self.reports.numbered() {
+            match report.split_first() {
+                Some((&id, body)) => (Some(id), body),
+                None => return,
             }
-            Kind::Pointer(layout) => {
-                let body = match layout.report {
-                    Some(id) => match report.split_first() {
-                        Some((&first, rest)) if first == id => rest,
-                        _ => return,
-                    },
-                    None => report,
-                };
-                let mouse = layout.x.is_some_and(|f| f.relative);
-                let value = |field: Option<Field>| field.and_then(|f| f.read(body));
-                if mouse {
-                    let counts = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
-                    let (dx, dy) = (value(layout.x), value(layout.y));
-                    if let (Some(dx), Some(dy)) = (dx, dy)
-                        && (dx, dy) != (0, 0)
-                    {
-                        inputs.push(Input::Motion {
-                            dx: counts(dx),
-                            dy: counts(dy),
-                        });
-                    }
-                } else {
-                    let axis = |field: Option<Field>| -> Option<u16> {
-                        let field = field?;
-                        let value = field.read(body)?;
-                        let max = i64::from(POINTER_MAX);
-                        let span = i64::from(field.maximum) - i64::from(field.minimum);
-                        if span <= 0 {
-                            return None;
-                        }
-                        let scaled = (i64::from(value) - i64::from(field.minimum)) * max / span;
-                        Some(scaled.clamp(0, max) as u16)
-                    };
-                    if let (Some(x), Some(y)) = (axis(layout.x), axis(layout.y))
-                        && Some((x, y)) != self.position
-                    {
-                        self.position = Some((x, y));
-                        inputs.push(Input::Move { x, y });
-                    }
-                }
-                let mut buttons = 0;
-                for (n, field) in layout.buttons.iter().enumerate() {
-                    if value(*field).is_some_and(|v| v != 0) {
-                        buttons |= 1 << n;
-                    }
-                }
-                if buttons != self.buttons {
-                    self.buttons = buttons;
-                    inputs.push(if mouse {
-                        Input::MouseButtons(buttons)
-                    } else {
-                        Input::Buttons(buttons)
-                    });
-                }
-                if let Some(wheel) = value(layout.wheel)
-                    && wheel != 0
-                {
-                    let detents = wheel.clamp(-127, 127) as i8;
-                    inputs.push(if mouse {
-                        Input::MouseWheel(detents)
-                    } else {
-                        Input::Wheel(detents)
-                    });
-                }
+        } else {
+            (None, report)
+        };
+        if let Some(keys) = &self.reports.keys
+            && keys.report == id
+        {
+            self.keys(body, inputs);
+        }
+        if let Some(pointer) = &self.reports.pointer
+            && pointer.report == id
+        {
+            let pointer = pointer.clone();
+            self.pointer(&pointer, body, inputs);
+        }
+    }
+
+    /// Key presses and releases since the last keyboard report: modifiers,
+    /// then releases, then presses, each in report order.
+    fn keys(&mut self, body: &[u8], inputs: &mut Vec<Input>) {
+        let Some(keys) = &self.reports.keys else {
+            return;
+        };
+        let Some(mut held) = keys.pressed(body) else {
+            return;
+        };
+        let before = held.len();
+        held.retain(|usage| KEY_USAGES.contains(usage) || MODIFIER_USAGES.contains(usage));
+        // Count each report that holds usages the native keyboard lacks.
+        if held.len() != before {
+            self.dropped += 1;
+        }
+        let key = |usage: u32, pressed| Input::Key {
+            usage: usage as u8,
+            pressed,
+        };
+        for usage in MODIFIER_USAGES {
+            let (was, is) = (self.held.contains(&usage), held.contains(&usage));
+            if was != is {
+                inputs.push(key(usage, is));
             }
+        }
+        let modifier = |usage: &&u32| MODIFIER_USAGES.contains(*usage);
+        for usage in self.held.iter().filter(|u| !modifier(u)) {
+            if !held.contains(usage) {
+                inputs.push(key(*usage, false));
+            }
+        }
+        for usage in held.iter().filter(|u| !modifier(u)) {
+            if !self.held.contains(usage) {
+                inputs.push(key(*usage, true));
+            }
+        }
+        self.held = held;
+    }
+
+    fn pointer(&mut self, layout: &Pointer, body: &[u8], inputs: &mut Vec<Input>) {
+        let mouse = layout.x.is_some_and(|f| f.relative);
+        let value = |field: Option<Field>| field.and_then(|f| f.read(body));
+        if mouse {
+            let counts = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+            let (dx, dy) = (value(layout.x), value(layout.y));
+            if let (Some(dx), Some(dy)) = (dx, dy)
+                && (dx, dy) != (0, 0)
+            {
+                inputs.push(Input::Motion {
+                    dx: counts(dx),
+                    dy: counts(dy),
+                });
+            }
+        } else {
+            let axis = |field: Option<Field>| -> Option<u16> {
+                let field = field?;
+                let value = field.read(body)?;
+                let max = i64::from(POINTER_MAX);
+                let span = i64::from(field.maximum) - i64::from(field.minimum);
+                if span <= 0 {
+                    return None;
+                }
+                let scaled = (i64::from(value) - i64::from(field.minimum)) * max / span;
+                Some(scaled.clamp(0, max) as u16)
+            };
+            if let (Some(x), Some(y)) = (axis(layout.x), axis(layout.y))
+                && Some((x, y)) != self.position
+            {
+                self.position = Some((x, y));
+                inputs.push(Input::Move { x, y });
+            }
+        }
+        let mut buttons = 0;
+        for (n, field) in layout.buttons.iter().enumerate() {
+            if value(*field).is_some_and(|v| v != 0) {
+                buttons |= 1 << n;
+            }
+        }
+        if buttons != self.buttons {
+            self.buttons = buttons;
+            inputs.push(if mouse {
+                Input::MouseButtons(buttons)
+            } else {
+                Input::Buttons(buttons)
+            });
+        }
+        if let Some(wheel) = value(layout.wheel)
+            && wheel != 0
+        {
+            let detents = wheel.clamp(-127, 127) as i8;
+            inputs.push(if mouse {
+                Input::MouseWheel(detents)
+            } else {
+                Input::Wheel(detents)
+            });
         }
     }
 }
@@ -555,29 +381,6 @@ mod tests {
         fn function_ref(&self, _: usize) -> &dyn Function {
             &self.0
         }
-    }
-
-    #[test]
-    fn report_descriptors_yield_pointer_fields() {
-        // A relative report-protocol mouse with a report ID.
-        let descriptor = [
-            0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x85, 0x02, 0x09, 0x01, 0xa1, 0x00, 0x05, 0x09,
-            0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
-            0x95, 0x01, 0x75, 0x05, 0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38,
-            0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06, 0xc0, 0xc0,
-        ];
-        let layout = pointer_layout(&descriptor).unwrap();
-        assert_eq!(layout.report, Some(2));
-        let x = layout.x.unwrap();
-        assert_eq!(
-            (x.offset, x.size, x.relative, x.minimum),
-            (8, 8, true, -127)
-        );
-        assert_eq!(layout.wheel.unwrap().offset, 24);
-        assert_eq!(layout.buttons[2].unwrap().offset, 2);
-        assert_eq!(x.read(&[0, 0xff]), Some(-1));
-        assert!(pointer_layout(&[0x05, 0x01, 0xa4]).is_err());
-        assert!(pointer_layout(&[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0]).is_err());
     }
 
     #[test]
