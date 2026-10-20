@@ -256,6 +256,29 @@ fn aea_metadata(
     Ok(found)
 }
 
+/// Record an AEA member's recipient key: confirm it unwraps the image and
+/// record the restore host's offline `URLAsset` answer digest.
+fn make_key(
+    member: &str,
+    metadata: &aea::Metadata,
+    url: String,
+    key_pem: String,
+) -> Result<AeaKey> {
+    aea::verify_key(metadata, &key_pem)
+        .with_context(|| format!("the AEA key for {member} does not unwrap its image"))?;
+    let url_asset_sha256 =
+        stela_runtime::restore::answers::staged_system_image_key_digest(&key_pem)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(AeaKey {
+        member: member.into(),
+        header_sha256: metadata.header_sha256.clone(),
+        url,
+        key_sha256: stela_runtime::sha256(key_pem.as_bytes()),
+        url_asset_sha256: Some(url_asset_sha256),
+        key_pem,
+    })
+}
+
 fn fetch_keys(metadata: &[(String, aea::Metadata)]) -> Result<Vec<AeaKey>> {
     metadata
         .iter()
@@ -263,13 +286,26 @@ fn fetch_keys(metadata: &[(String, aea::Metadata)]) -> Result<Vec<AeaKey>> {
             let key = aea::fetch_public_key(metadata)
                 .with_context(|| format!("public AEA key for {member}"))?;
             let key_pem = String::from_utf8(key.body)?;
-            Ok(AeaKey {
-                member: member.clone(),
-                header_sha256: metadata.header_sha256.clone(),
-                url: key.request_url,
-                key_sha256: stela_runtime::sha256(key_pem.as_bytes()),
-                key_pem,
-            })
+            make_key(member, metadata, key.request_url, key_pem)
+        })
+        .collect()
+}
+
+/// Read each member's recipient key from a local directory, named by the
+/// image's AEA header SHA-256 (the user's offline inputs), instead of
+/// fetching it from Apple.
+fn local_keys(metadata: &[(String, aea::Metadata)], dir: &Path) -> Result<Vec<AeaKey>> {
+    metadata
+        .iter()
+        .map(|(member, metadata)| {
+            let url = metadata
+                .public_key_url
+                .clone()
+                .with_context(|| format!("{member} names no fcs-key-url"))?;
+            let path = dir.join(format!("{}.pem", metadata.header_sha256));
+            let key_pem = fs::read_to_string(&path)
+                .with_context(|| format!("offline AEA key {}", path.display()))?;
+            make_key(member, metadata, url, key_pem)
         })
         .collect()
 }
@@ -355,6 +391,7 @@ pub fn inventory(
     model: &str,
     fetch_keys: bool,
     key_dir: Option<&Path>,
+    keys_in: Option<&Path>,
 ) -> Result<Inventory> {
     let mut archive = ZipArchive::new(File::open(image)?)?;
     let selection = select(&mut archive, model)?;
@@ -367,7 +404,11 @@ pub fn inventory(
     let hashed = members?;
     let (blocks, block_entry) = block_hashes(&hashed);
     let mut keys = Vec::new();
-    let aea_keys = if fetch_keys || key_dir.is_some() {
+    // Prefer the user's offline key directory; fetch from Apple only when
+    // asked and no offline keys are given.
+    let aea_keys = if let Some(dir) = keys_in {
+        local_keys(&metadata, dir)?
+    } else if fetch_keys || key_dir.is_some() {
         self::fetch_keys(&metadata)?
     } else {
         Vec::new()
@@ -809,7 +850,7 @@ mod tests {
             report,
             manifest: in_place,
             blocks,
-        } = inventory(&image, SYNTHETIC_MODEL, true, None)?;
+        } = inventory(&image, SYNTHETIC_MODEL, true, None, None)?;
         assert_eq!(report["payload"]["members"], json!(manifest.members));
         // The in-place manifest describes the same archive bytes.
         assert_eq!(in_place.members, manifest.members);
@@ -833,7 +874,7 @@ mod tests {
             }
         }
         assert_eq!(at, blocks.len());
-        assert!(inventory(&image, "Missing1,1", false, None).is_err());
+        assert!(inventory(&image, "Missing1,1", false, None, None).is_err());
         Ok(())
     }
 }

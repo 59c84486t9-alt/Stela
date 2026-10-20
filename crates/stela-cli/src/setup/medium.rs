@@ -489,7 +489,8 @@ pub(super) mod tests {
     }
 
     fn inventory(ipsw: &Path) -> restore::payload::Inventory {
-        restore::payload::inventory(ipsw, restore::payload::SYNTHETIC_MODEL, false, None).unwrap()
+        restore::payload::inventory(ipsw, restore::payload::SYNTHETIC_MODEL, false, None, None)
+            .unwrap()
     }
 
     fn expected(ipsw: &Path) -> Expected {

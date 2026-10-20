@@ -262,7 +262,7 @@ impl InstallMedium {
         let piece_bytes = stela_runtime::payload::PIECE_BYTES;
         medium::check_space(&host, &self.volume, &build, bytes, piece_bytes)?;
         let expected = medium::Expected::of(restore::receipt(&self.ipsw)?.as_ref());
-        let inventory = restore::payload::inventory(&self.ipsw, &self.model, true, None)?;
+        let inventory = restore::payload::inventory(&self.ipsw, &self.model, true, None, None)?;
         let written = medium::write(&self.volume, &self.ipsw, inventory, &expected, piece_bytes)?;
         let directory = medium::directory(&self.volume, &build);
         println!(
@@ -883,7 +883,7 @@ impl Setup {
             host: &host::System,
             prepare: &prepare_recovery,
             prepare_restore: &prepare_restore,
-            inventory: &|ipsw, model| restore::payload::inventory(ipsw, model, true, None),
+            inventory: &|ipsw, model| restore::payload::inventory(ipsw, model, true, None, None),
             piece_bytes: stela_runtime::payload::PIECE_BYTES,
             interface: mount_interface::CURRENT,
         };
@@ -2217,7 +2217,7 @@ mod tests {
     /// The synthetic IPSW's inventory: it names no AEA member to fetch a
     /// key for.
     fn fake_inventory(ipsw: &Path, model: &str) -> Result<restore::payload::Inventory> {
-        restore::payload::inventory(ipsw, model, false, None)
+        restore::payload::inventory(ipsw, model, false, None, None)
     }
 
     fn environment(host: &FakeHost) -> Environment<'_> {

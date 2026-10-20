@@ -360,6 +360,16 @@ fn archive_key(metadata: &Metadata, pem: &str) -> Result<zeroize::Zeroizing<Vec<
     Ok(zeroize::Zeroizing::new(key))
 }
 
+/// Confirm a recipient PEM unwraps this archive's `fcs-response`, i.e. that
+/// the key belongs to this image. Archives with no `fcs-response` (the WKMS
+/// path) cannot be checked this way and pass.
+pub fn verify_key(metadata: &Metadata, pem: &str) -> Result<()> {
+    if metadata.fcs_response.is_none() {
+        return Ok(());
+    }
+    archive_key(metadata, pem).map(|_| ())
+}
+
 /// Decrypt an AEA1 profile-1 archive with its fetched FCS private key.
 ///
 /// The archive key is unwrapped here; macOS `aea` authenticates and decrypts

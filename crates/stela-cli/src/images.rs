@@ -48,6 +48,11 @@ pub(crate) struct ImageManifest {
     /// 0600 files; the report lists them by SHA-256 only.
     #[arg(long, requires = "payload")]
     aea_keys: Option<PathBuf>,
+    /// Read each image's recipient AEA key from this directory (the user's
+    /// offline inputs, named `<header-sha256>.pem`) instead of fetching it,
+    /// and record the offline `URLAsset` answer in the inventory.
+    #[arg(long, requires = "payload")]
+    aea_keys_in: Option<PathBuf>,
     /// Also write the in-place archive `payload.json`, carrying the keys
     /// `--aea-keys` fetched, for a restore that reads this IPSW unchanged
     /// from its own source partition, and beside it `blocks.bin`, the
@@ -138,6 +143,7 @@ impl ImageManifest {
             hash_members,
             payload,
             aea_keys,
+            aea_keys_in,
             payload_manifest,
         } = self;
         ensure!(
@@ -147,7 +153,13 @@ impl ImageManifest {
         let report = restore::archive::manifest(&input, model.as_deref(), hash_members)?;
         if let (true, Some(model)) = (payload, model.as_deref()) {
             let mut value = serde_json::to_value(&report)?;
-            let inventory = restore::payload::inventory(&input, model, false, aea_keys.as_deref())?;
+            let inventory = restore::payload::inventory(
+                &input,
+                model,
+                false,
+                aea_keys.as_deref(),
+                aea_keys_in.as_deref(),
+            )?;
             value["payload"] = inventory.report;
             write_json(&output, &value)?;
             if let Some(path) = payload_manifest {
