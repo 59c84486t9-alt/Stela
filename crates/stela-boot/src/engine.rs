@@ -25,7 +25,7 @@ use crate::{
     handoff::{Handoff, MAGIC},
     layout, output,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, vec::Vec};
 use core::{
     arch::{
         asm,
@@ -1821,6 +1821,7 @@ fn run(
     let mut samples: Vec<[u64; CHAIN]> = Vec::new();
     let mut user = 0;
     let mut beats = 0u64;
+    let mut exits = ExitsSeen::default();
     let mut host_erase = erase::HostErase::default();
     loop {
         let slice = machine.statistics.blocks + SLICE;
@@ -1970,6 +1971,7 @@ fn run(
             ));
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);
+            exits.report(machine);
             peers_report(machine);
             let stale = machine.stale_code();
             if stale.stale > 0 {
@@ -2108,6 +2110,63 @@ fn timer_report(machine: &mut Machine<BareHost, AppleDevices>) {
         ));
     }
     output::arguments(format_args!("\n"));
+}
+
+/// The engine's entries into compiled code, its exits by kind and the
+/// exits by instruction word at the last heartbeat.
+#[derive(Default)]
+struct ExitsSeen {
+    entries: u64,
+    kinds: [u64; EXIT_KINDS],
+    words: BTreeMap<u32, u64>,
+}
+
+/// The `ExitKind`s `Statistics::exit_kinds` counts.
+const EXIT_KINDS: usize = 13;
+
+impl ExitsSeen {
+    /// Since the last heartbeat: the native runs the engine started (those
+    /// that did not end in a counted exit ran out of their chain budget),
+    /// the exits by `ExitKind`, and the instruction words that most often
+    /// left compiled code, so the engine's exit causes can be ranked.
+    fn report(&mut self, machine: &Machine<BareHost, AppleDevices>) {
+        const SHOWN: usize = 12;
+        let statistics = &machine.statistics;
+        let entries = statistics.blocks - statistics.chained;
+        let kinds = statistics.exit_kinds;
+        let words = machine.exit_words();
+        let mut top: Vec<_> = words
+            .iter()
+            .map(|(word, &count)| {
+                let last = self.words.get(word).copied().unwrap_or_default();
+                (count.saturating_sub(last), *word)
+            })
+            .filter(|&(count, _)| count != 0)
+            .collect();
+        top.sort_unstable_by(|a, b| b.cmp(a));
+        let exits: u64 = kinds
+            .iter()
+            .zip(&self.kinds)
+            .map(|(now, last)| now - last)
+            .sum();
+        output::arguments(format_args!(
+            "EXITS entries={} exits={exits} kinds=",
+            entries - self.entries
+        ));
+        for (index, (now, last)) in kinds.iter().zip(&self.kinds).enumerate() {
+            let separator = if index == 0 { "" } else { "," };
+            output::arguments(format_args!("{separator}{}", now - last));
+        }
+        for (count, word) in top.into_iter().take(SHOWN) {
+            output::arguments(format_args!(" {word:#010x}:{count}"));
+        }
+        output::arguments(format_args!("\n"));
+        *self = Self {
+            entries,
+            kinds,
+            words,
+        };
+    }
 }
 
 /// The instruction words that most often left compiled code for the engine.
