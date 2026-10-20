@@ -9,7 +9,7 @@
 //! The shared-region calls (`bsd/vm/vm_unix.c`): `shared_region_check_np`
 //! reports the region's first mapping once `shared_region_map_and_slide_2_np`
 //! has mapped the cache, and fails with ENOMEM before.
-use super::{Call, EFAULT, EINVAL, ENOMEM, Kernel, Outcome, Pe, forward};
+use super::{Call, EFAULT, EINVAL, ENOMEM, Kernel, Outcome, Pe, forward, forward_uninterruptible};
 use crate::hosted::memory::{self, PAGE_BYTES, PAGE_MASK, Protection, round_page};
 use crate::hosted::{shared_region, threads::lock};
 use anyhow::{Result, bail};
@@ -126,7 +126,7 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     placed.arguments[3] = flags | MAP_FIXED;
     placed.arguments[4] = descriptor;
     placed.arguments[5] = position - offset;
-    let mut outcome = forward(kernel, &placed)?;
+    let mut outcome = forward_uninterruptible(kernel, &placed)?;
     // An object shorter than the guest page, such as a host process's
     // POSIX shared memory sized in 4 KiB pages, refuses a mapping past its
     // end: map it in host pages and fill the rest of the guest page with
@@ -135,7 +135,7 @@ fn mmap(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
     let host_size = memory::round_host_page(bytes + offset).unwrap_or(size);
     if matches!(outcome, Outcome::Error(EINVAL | EBUSY)) && host_size < size {
         placed.arguments[1] = host_size;
-        outcome = forward(kernel, &placed)?;
+        outcome = forward_uninterruptible(kernel, &placed)?;
         if kernel.trace {
             eprintln!(
                 "stela: mmap of {size:#x} bytes refused; mapped {host_size:#x} in host pages: \

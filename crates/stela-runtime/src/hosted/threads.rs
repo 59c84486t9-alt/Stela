@@ -24,7 +24,7 @@
 use super::{
     Termination,
     host::ProcessHost,
-    kernel::{End, Kernel, Pe, Process},
+    kernel::{End, Kernel, Pe, Process, signals},
     pe,
     tables::Tables,
 };
@@ -221,35 +221,50 @@ impl Registry {
     }
 }
 
-/// How the process ended, for the host thread that waits for it.
+/// How the process ends: kept for the main thread, which takes it when its
+/// guest thread ends, or, once no host thread will (a fork child, or after
+/// the main thread ended alone), carried out by the thread that ends it.
 #[derive(Default)]
 pub(super) struct Lifetime {
-    end: Mutex<Option<Result<Termination>>>,
-    ended: Condvar,
+    end: Mutex<Ending>,
+}
+
+#[derive(Default)]
+pub(super) struct Ending {
+    outcome: Option<Result<Termination>>,
+    /// No host thread waits in [`Lifetime::wait`].
+    unwaited: bool,
 }
 
 impl Lifetime {
     fn end(&self, outcome: Result<Termination>) {
         let mut end = lock(&self.end);
-        if end.is_none() {
-            *end = Some(outcome);
+        if end.unwaited {
+            drop(end);
+            // The host process ends as the command's would.
+            match outcome {
+                Ok(termination) => termination.end_host_process(),
+                Err(error) => {
+                    eprintln!("error: {error:#}");
+                    std::process::exit(1)
+                }
+            }
         }
-        drop(end);
-        self.ended.notify_all();
+        if end.outcome.is_none() {
+            end.outcome = Some(outcome);
+        }
     }
 
-    /// Block until a guest thread ends the process.
-    pub(super) fn wait(&self) -> Result<Termination> {
+    /// The process's end, if a guest thread ended it. Otherwise the host
+    /// thread asking no longer waits for it, and the thread that ends it
+    /// ends the host process itself.
+    pub(super) fn leave(&self) -> Option<Result<Termination>> {
         let mut end = lock(&self.end);
-        loop {
-            if let Some(outcome) = end.take() {
-                return outcome;
-            }
-            end = self
-                .ended
-                .wait(end)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let outcome = end.outcome.take();
+        if outcome.is_none() {
+            end.unwaited = true;
         }
+        outcome
     }
 }
 
@@ -259,9 +274,6 @@ pub(super) struct Runtime {
     pub(super) execution: ExecutionLock,
     pub(super) registry: Registry,
     pub(super) lifetime: Lifetime,
-    /// Set in a fork child, where no host thread waits in
-    /// [`Lifetime::wait`]: its end exits the host process itself.
-    forked: AtomicBool,
 }
 
 /// Take `mutex` if no other thread holds it.
@@ -278,7 +290,7 @@ pub(super) fn try_lock<T>(mutex: &Mutex<T>) -> Option<MutexGuard<'_, T>> {
 pub(super) struct ForkHeld<'a> {
     execution: MutexGuard<'a, LockState>,
     members: MutexGuard<'a, BTreeMap<u64, Arc<Member>>>,
-    end: MutexGuard<'a, Option<Result<Termination>>>,
+    end: MutexGuard<'a, Ending>,
 }
 
 impl Runtime {
@@ -311,8 +323,12 @@ impl Runtime {
         if let Some(member) = members.get(&thread) {
             member.port.store(port, Ordering::SeqCst);
         }
-        *end = None;
-        self.forked.store(true, Ordering::SeqCst);
+        // No host thread waits in the child: its end exits the host
+        // process itself.
+        *end = Ending {
+            outcome: None,
+            unwaited: true,
+        };
     }
 }
 
@@ -329,16 +345,6 @@ impl Runtime {
     /// End the process with `outcome`: no guest code runs after it.
     fn end(&self, thread: u64, outcome: Result<Termination>) {
         self.execution.close(thread);
-        if self.forked.load(Ordering::SeqCst) {
-            // The fork child's host process ends as the command's would.
-            match outcome {
-                Ok(Termination::Exited(status)) => std::process::exit(status & 0xff),
-                Err(error) => {
-                    eprintln!("error: {error:#}");
-                    std::process::exit(1)
-                }
-            }
-        }
         self.lifetime.end(outcome);
     }
 
@@ -358,57 +364,30 @@ fn own_port() -> u32 {
     super::forward::mach(THREAD_SELF_TRAP, &[]).rax as u32
 }
 
-/// Start a guest thread on a new host thread. `prepare` runs there first,
-/// with the thread's kernel (its port already its own) and its PE entering
-/// at `pc`; it sets the entry registers or refuses with an errno, which
-/// ends the thread before it runs. The creator waits for `prepare` and
-/// receives the new thread's port or that errno.
-pub(super) fn spawn<F>(process: &Arc<Process>, pc: u64, prepare: F) -> Result<Result<u32, u64>>
+/// Start a guest thread on a new host thread with the signal mask `mask`.
+/// `prepare` runs there first, with the thread's kernel (its port already
+/// its own) and its PE entering at `pc`; it sets the entry registers or
+/// refuses with an errno, which ends the thread before it runs. The
+/// creator waits for `prepare` and receives the new thread's port or that
+/// errno. The host thread starts with every signal blocked and takes the
+/// guest mask once its signal slot is registered.
+pub(super) fn spawn<F>(
+    process: &Arc<Process>,
+    pc: u64,
+    mask: u32,
+    prepare: F,
+) -> Result<Result<u32, u64>>
 where
     F: FnOnce(&mut Kernel, &mut Pe) -> Result<Result<(), u64>> + Send + 'static,
 {
     let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
     let process = process.clone();
-    let spawned = std::thread::Builder::new()
+    let builder = std::thread::Builder::new()
         .name("stela-guest".into())
-        .stack_size(HOST_STACK_BYTES)
-        .spawn(move || {
-            let port = own_port();
-            let (id, member) = process.runtime.registry.insert(port);
-            let mut kernel = Kernel::new(process.clone(), id, port);
-            let prepared = process
-                .engine
-                .machine(pc)
-                .and_then(|mut pe| Ok((prepare(&mut kernel, &mut pe)?, pe)));
-            let pe = match prepared {
-                Ok((Ok(()), pe)) => {
-                    let _ = sender.send(Ok(Ok(port)));
-                    pe
-                }
-                Ok((Err(errno), _)) => {
-                    process.runtime.registry.remove(id);
-                    super::forward::mach(
-                        MACH_PORT_DEALLOCATE_TRAP,
-                        &[u64::from(process.task_port()), u64::from(port)],
-                    );
-                    let _ = sender.send(Ok(Err(errno)));
-                    return;
-                }
-                Err(error) => {
-                    process.runtime.registry.remove(id);
-                    let _ = sender.send(Err(error));
-                    return;
-                }
-            };
-            drop(sender);
-            let outcome = run(&mut kernel, pe, &member);
-            process.runtime.registry.remove(id);
-            match outcome {
-                Ok(None) => {}
-                Ok(Some(termination)) => process.runtime.end(id, Ok(termination)),
-                Err(error) => process.runtime.end(id, Err(error)),
-            }
-        });
+        .stack_size(HOST_STACK_BYTES);
+    let spawned = signals::without_signals(|| {
+        builder.spawn(move || enter(&process, pc, mask, prepare, sender))
+    });
     if let Err(error) = spawned {
         return Ok(Err(if error.kind() == std::io::ErrorKind::OutOfMemory {
             super::kernel::ENOMEM
@@ -419,6 +398,82 @@ where
     receiver
         .recv()
         .map_err(|_| anyhow!("a new guest thread ended before it was prepared"))?
+}
+
+/// Run the main thread on the calling host thread, the process's first,
+/// with the signal mask `mask`: the host kernel then parks a signal every
+/// thread blocks on a guest thread, as XNU parks it on the main thread,
+/// rather than on a host thread that runs no guest code. `prepare` is
+/// [`spawn`]'s. Once the thread ends, the process's end if it ended it;
+/// otherwise this host thread stops waiting for the process, which the
+/// thread that ends it ends on the host itself.
+pub(super) fn run_main<F>(
+    process: &Arc<Process>,
+    pc: u64,
+    mask: u32,
+    prepare: F,
+) -> Result<Result<Option<Result<Termination>>, u64>>
+where
+    F: FnOnce(&mut Kernel, &mut Pe) -> Result<Result<(), u64>>,
+{
+    let (sender, receiver) = mpsc::channel::<Result<Result<u32, u64>>>();
+    enter(process, pc, mask, prepare, sender);
+    match receiver.recv() {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(errno))) => return Ok(Err(errno)),
+        Ok(Err(error)) => return Err(error),
+        Err(_) => bail!("the main thread ended before it was prepared"),
+    }
+    Ok(Ok(process.runtime.lifetime.leave()))
+}
+
+/// Run a guest thread on the calling host thread: `prepare`, then the
+/// thread until it ends, which may end the process. `sender` receives the
+/// thread's port or the errno `prepare` refused with.
+fn enter<F>(
+    process: &Arc<Process>,
+    pc: u64,
+    mask: u32,
+    prepare: F,
+    sender: mpsc::Sender<Result<Result<u32, u64>>>,
+) where
+    F: FnOnce(&mut Kernel, &mut Pe) -> Result<Result<(), u64>>,
+{
+    let port = own_port();
+    let (id, member) = process.runtime.registry.insert(port);
+    let mut kernel = Kernel::new(process.clone(), id, port, mask);
+    let prepared = process
+        .engine
+        .machine(pc)
+        .and_then(|mut pe| Ok((prepare(&mut kernel, &mut pe)?, pe)));
+    let pe = match prepared {
+        Ok((Ok(()), pe)) => {
+            let _ = sender.send(Ok(Ok(port)));
+            pe
+        }
+        Ok((Err(errno), _)) => {
+            process.runtime.registry.remove(id);
+            super::forward::mach(
+                MACH_PORT_DEALLOCATE_TRAP,
+                &[u64::from(process.task_port()), u64::from(port)],
+            );
+            let _ = sender.send(Ok(Err(errno)));
+            return;
+        }
+        Err(error) => {
+            process.runtime.registry.remove(id);
+            let _ = sender.send(Err(error));
+            return;
+        }
+    };
+    drop(sender);
+    let outcome = run(&mut kernel, pe, &member);
+    process.runtime.registry.remove(id);
+    match outcome {
+        Ok(None) => {}
+        Ok(Some(termination)) => process.runtime.end(id, Ok(termination)),
+        Err(error) => process.runtime.end(id, Err(error)),
+    }
 }
 
 /// Take the execution lock for `thread` and bring its engine up to date:
@@ -477,7 +532,14 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
                 pe.return_from_exception();
             }
             Stop::Budget => {
-                if execution.contended() {
+                if kernel.signals.deliverable().is_some() {
+                    restart_ranges(&process, &mut pe);
+                    execution.release(thread);
+                    if let Some(end) = deliver(kernel, &mut pe)? {
+                        return Ok(ended(end));
+                    }
+                    resume(&process, thread, member, &mut pe);
+                } else if execution.contended() {
                     restart_ranges(&process, &mut pe);
                     execution.release(thread);
                     resume(&process, thread, member, &mut pe);
@@ -486,6 +548,9 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
             Stop::Waiting => {
                 execution.release(thread);
                 std::thread::yield_now();
+                if let Some(end) = deliver(kernel, &mut pe)? {
+                    return Ok(ended(end));
+                }
                 resume(&process, thread, member, &mut pe);
             }
             Stop::Breakpoint(pc) => {
@@ -503,6 +568,14 @@ fn run(kernel: &mut Kernel, mut pe: Box<Pe>, member: &Member) -> Result<Option<T
             }
         }
     }
+}
+
+/// At a time-slice stop or a wait, outside the execution lock: deliver the
+/// thread's deliverable signals onto its running context, and whether that
+/// ended it.
+fn deliver(kernel: &mut Kernel, pe: &mut Pe) -> Result<Option<End>> {
+    kernel.deliver_pending(pe)?;
+    Ok(kernel.end.take())
 }
 
 fn ended(end: End) -> Option<Termination> {
@@ -585,7 +658,7 @@ mod tests {
         // The child's thread takes the lock at once.
         runtime.execution.acquire(forking);
         runtime.execution.release(forking);
-        assert!(runtime.forked.load(Ordering::SeqCst));
+        assert!(lock(&runtime.lifetime.end).unwaited);
     }
 
     #[test]
@@ -652,10 +725,14 @@ mod tests {
     }
 
     #[test]
-    fn the_lifetime_returns_the_first_end() {
+    fn the_lifetime_keeps_the_first_end_for_the_main_thread() {
         let lifetime = Lifetime::default();
         lifetime.end(Ok(Termination::Exited(3)));
         lifetime.end(Ok(Termination::Exited(4)));
-        assert_eq!(lifetime.wait().unwrap(), Termination::Exited(3));
+        assert_eq!(lifetime.leave().unwrap().unwrap(), Termination::Exited(3));
+        // With no end yet, leaving hands the end to the ending thread.
+        let lifetime = Lifetime::default();
+        assert!(lifetime.leave().is_none());
+        assert!(lock(&lifetime.end).unwaited);
     }
 }

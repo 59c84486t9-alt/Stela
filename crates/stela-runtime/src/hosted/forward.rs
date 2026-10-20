@@ -27,10 +27,15 @@ pub struct Returned {
 
 global_asm!(
     ".global _stela_host_syscall",
+    ".global _stela_host_syscall_ready",
+    ".global _stela_host_syscall_instruction",
+    ".global _stela_host_syscall_done",
     "_stela_host_syscall:",
     "push rbx",
     "push r12",
+    "push r13",
     "mov r12, rdx",
+    "mov r13, rcx",
     "mov rax, rdi",
     "mov rbx, rsi",
     // Arguments seven and eight above the return-address slot.
@@ -45,29 +50,89 @@ global_asm!(
     "mov r10, [rbx + 24]",
     "mov r8, [rbx + 32]",
     "mov r9, [rbx + 40]",
+    // From here to the call, a signal for a guest handler skips the call
+    // (`interruptible`), and so does a set interrupt flag.
+    "_stela_host_syscall_ready:",
+    "test r13, r13",
+    "jz 2f",
+    "cmp byte ptr [r13], 0",
+    "jne 3f",
+    "2:",
+    "_stela_host_syscall_instruction:",
     "syscall",
+    "_stela_host_syscall_done:",
     "setc cl",
     "movzx ecx, cl",
     "mov [r12], rax",
     "mov [r12 + 8], rdx",
     "mov [r12 + 16], rcx",
     "add rsp, 24",
+    "pop r13",
     "pop r12",
     "pop rbx",
     "ret",
+    "3:",
+    "mov rax, -1",
+    "stc",
+    "jmp _stela_host_syscall_done",
 );
 
 unsafe extern "sysv64" {
-    fn stela_host_syscall(selector: u64, arguments: *const u64, results: *mut u64);
+    fn stela_host_syscall(
+        selector: u64,
+        arguments: *const u64,
+        results: *mut u64,
+        interrupt: *const u8,
+    );
+    fn stela_host_syscall_ready();
+    fn stela_host_syscall_instruction();
+    fn stela_host_syscall_done();
+}
+
+/// The result of a BSD call skipped or restarted for a signal (XNU
+/// `ERESTART`, -1): the guest repeats the call after its handler runs.
+pub const ERESTART: u64 = u64::MAX;
+
+/// Where a host signal handler finds an interruptible call: the stub's
+/// instructions from its interrupt-flag check through the `syscall`, and
+/// the instruction after it. R13 holds the call's interrupt flag, zero for
+/// an uninterruptible call.
+#[derive(Debug, Clone, Copy)]
+pub struct Interruptible {
+    pub ready: u64,
+    pub instruction: u64,
+    pub done: u64,
+}
+
+/// The stub's interruptible window. A host signal handler that finds RIP
+/// in `ready..=instruction` with a nonzero R13 and a BSD selector in RAX
+/// may move RIP to `done` with RAX [`ERESTART`] and CF set: the call has
+/// not entered the host kernel, or the host kernel rewound it to restart
+/// it (`pal_syscall_restart`), so the guest repeats it after its handler.
+pub fn interruptible() -> Interruptible {
+    Interruptible {
+        ready: stela_host_syscall_ready as *const () as u64,
+        instruction: stela_host_syscall_instruction as *const () as u64,
+        done: stela_host_syscall_done as *const () as u64,
+    }
+}
+
+/// Whether `rax` holds a BSD call's selector.
+pub fn is_bsd_selector(rax: u64) -> bool {
+    (rax >> CLASS_SHIFT) & 0xff == CLASS_UNIX
 }
 
 fn call(selector: u64, arguments: &[u64]) -> Returned {
+    call_with(selector, arguments, core::ptr::null())
+}
+
+fn call_with(selector: u64, arguments: &[u64], interrupt: *const u8) -> Returned {
     let mut padded = [0u64; MAX_ARGUMENTS];
     padded[..arguments.len()].copy_from_slice(arguments);
     let mut results = [0u64; 3];
     // SAFETY: the guest's own request; its pointers are this process's
     // memory and the kernel validates every one of them.
-    unsafe { stela_host_syscall(selector, padded.as_ptr(), results.as_mut_ptr()) };
+    unsafe { stela_host_syscall(selector, padded.as_ptr(), results.as_mut_ptr(), interrupt) };
     Returned {
         rax: results[0],
         rdx: results[1],
@@ -79,6 +144,18 @@ fn call(selector: u64, arguments: &[u64]) -> Returned {
 pub fn bsd(number: u16, arguments: &[u64]) -> Returned {
     assert!(arguments.len() <= MAX_ARGUMENTS);
     call(CLASS_UNIX << CLASS_SHIFT | u64::from(number), arguments)
+}
+
+/// BSD call `number` on behalf of the guest: skipped with [`ERESTART`]
+/// while `interrupt` is set, or when a signal for a guest handler arrives
+/// before the host kernel takes it.
+pub fn bsd_interruptible(number: u16, arguments: &[u64], interrupt: *const u8) -> Returned {
+    assert!(arguments.len() <= MAX_ARGUMENTS);
+    call_with(
+        CLASS_UNIX << CLASS_SHIFT | u64::from(number),
+        arguments,
+        interrupt,
+    )
 }
 
 /// Mach trap `index` (the guest's `-x16`), returning its kern_return_t or
@@ -107,5 +184,20 @@ mod tests {
         assert_eq!(close.rax, EBADF);
         let task = crate::hosted::host::task();
         assert_eq!(mach(TASK_SELF_TRAP, &[]).rax as u32, task);
+    }
+
+    #[test]
+    fn a_set_interrupt_flag_skips_the_call() {
+        let flag = core::sync::atomic::AtomicU8::new(1);
+        let skipped = bsd_interruptible(GETPID, &[], flag.as_ptr());
+        assert!(skipped.carry);
+        assert_eq!(skipped.rax, ERESTART);
+        flag.store(0, core::sync::atomic::Ordering::SeqCst);
+        let pid = bsd_interruptible(GETPID, &[], flag.as_ptr());
+        assert_eq!((pid.carry, pid.rax), (false, u64::from(std::process::id())));
+        let window = interruptible();
+        assert!(window.ready < window.instruction && window.instruction < window.done);
+        assert!(is_bsd_selector(2 << CLASS_SHIFT | u64::from(GETPID)));
+        assert!(!is_bsd_selector(1 << CLASS_SHIFT | 28));
     }
 }

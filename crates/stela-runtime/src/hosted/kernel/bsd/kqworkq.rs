@@ -680,9 +680,9 @@ pub(crate) fn kevent(process: &Arc<Process>, arguments: [u64; 8]) -> Result<Resu
 
 /// Wait for watched buckets to become readable and tell their owners.
 fn start_monitor(process: Arc<Process>, kqueue: Arc<Kqworkq>) {
-    std::thread::Builder::new()
-        .name("stela-kevent".into())
-        .spawn(move || {
+    let builder = std::thread::Builder::new().name("stela-kevent".into());
+    super::signal::host::without_signals(|| {
+        builder.spawn(move || {
             const FIRED: usize = 16;
             let mut fired = [libc::kevent64_s {
                 ident: 0,
@@ -730,7 +730,8 @@ fn start_monitor(process: Arc<Process>, kqueue: Arc<Kqworkq>) {
                 }
             }
         })
-        .expect("the kevent monitor thread starts");
+    })
+    .expect("the kevent monitor thread starts");
 }
 
 #[cfg(test)]

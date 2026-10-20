@@ -119,8 +119,6 @@ const FILES: &[&str] = &[
     "__pthread_chdir",
     "__pthread_fchdir",
     "lchown",
-    "pselect",
-    "pselect_nocancel",
     "read_nocancel",
     "write_nocancel",
     "open_nocancel",

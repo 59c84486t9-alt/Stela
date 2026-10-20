@@ -36,6 +36,7 @@ pub mod services;
 mod status;
 
 pub use bsd::Signature;
+pub(super) use bsd::signal::host as signals;
 pub(super) use bsd::{EAGAIN, ENOMEM};
 
 pub(super) type Pe = Machine<ProcessHost, NoDevices>;
@@ -44,10 +45,16 @@ pub(super) type Pe = Machine<ProcessHost, NoDevices>;
 const EC_SHIFT: u32 = 26;
 const ISS_MASK: u64 = (1 << 25) - 1;
 const EC_SVC64: u64 = 0x15;
+const EC_BRK64: u64 = 0x3c;
 const EC_INSTRUCTION_ABORT_LOWER: u64 = 0x20;
 const EC_DATA_ABORT_LOWER: u64 = 0x24;
 /// A data abort's ISS WnR: the access was a write.
 const ISS_WRITE_NOT_READ: u64 = 1 << 6;
+/// An abort's ISS fault status code, and its alignment fault.
+const ISS_FSC_MASK: u64 = 0x3f;
+const FSC_ALIGNMENT: u64 = 0x21;
+/// Data addresses ignore their top byte (`VM_USER_STRIP_TBI`).
+const TBI_MASK: u64 = (1 << 56) - 1;
 /// SPSR's C flag, which a BSD call's error sets (`PSR64_CF`).
 const SPSR_CARRY: u64 = 1 << 29;
 /// `PLATFORM_SYSCALL_TRAP_NO`.
@@ -100,6 +107,8 @@ pub(super) struct Process {
     /// The workloops (`fd_kqhash`).
     pub(super) workloops: bsd::kqworkloop::Workloops,
     pub(super) actions: Mutex<bsd::signal::Actions>,
+    /// Its threads' signal slots.
+    pub(super) signal_slots: bsd::signal::Slots,
     pub(super) map_with_linking_ended: AtomicBool,
     /// Code signatures attached to files.
     pub(super) signatures: Mutex<bsd::signatures::Signatures>,
@@ -202,6 +211,7 @@ impl Process {
             kqworkq: Default::default(),
             workloops: Default::default(),
             actions: Mutex::new(bsd::signal::Actions::inherit()),
+            signal_slots: Default::default(),
             map_with_linking_ended: AtomicBool::new(false),
             signatures: Default::default(),
             restartable_ranges: Mutex::new(None),
@@ -245,13 +255,15 @@ fn frames(mut fp: u64) -> Vec<u64> {
 }
 
 impl Kernel {
-    pub(super) fn new(process: Arc<Process>, thread: u64, thread_port: u32) -> Self {
+    /// The kernel of a new thread, on its host thread, with the signal mask
+    /// `mask`.
+    pub(super) fn new(process: Arc<Process>, thread: u64, thread_port: u32, mask: u32) -> Self {
         Self {
             trace: process.trace,
+            signals: bsd::signal::ThreadSignals::new(&process.signal_slots, mask),
             process,
             thread,
             thread_port,
-            signals: bsd::signal::ThreadSignals::inherit(),
             mig_relay: None,
             worker: None,
             end: None,
@@ -300,18 +312,22 @@ impl Kernel {
         self.process.runtime.exclusive(self.thread, section)
     }
 
-    /// Service the synchronous exception the guest took to EL1.
+    /// Service the synchronous exception the guest took to EL1, then, on
+    /// the way back to the guest, deliver its deliverable signals (XNU's
+    /// AST).
     pub(super) fn synchronous(&mut self, pe: &mut Pe) -> Result<()> {
+        self.serve(pe)?;
+        if self.end.is_none() {
+            self.deliver_pending(pe)?;
+        }
+        Ok(())
+    }
+
+    fn serve(&mut self, pe: &mut Pe) -> Result<()> {
         let esr = pe.cpu.read(Register::ESR_EL1);
         let class = esr >> EC_SHIFT;
         let iss = esr & ISS_MASK;
         let elr = pe.cpu.read(Register::ELR_EL1);
-        if let Some(signal) = self.signals.deliverable() {
-            bail!(
-                "signal {signal} arrived for a guest handler: delivery onto the guest stack is \
-                 not implemented"
-            );
-        }
         match class {
             EC_SVC64 => self.supervisor_call(pe),
             EC_DATA_ABORT_LOWER | EC_INSTRUCTION_ABORT_LOWER => {
@@ -333,36 +349,63 @@ impl Kernel {
                 if super::memory::permits(address, access) {
                     return Ok(());
                 }
-                bail!(
-                    "guest {} abort at pc {elr:#x}, address {address:#x} (ISS {iss:#x}, lr {:#x}, \
-                     fp {:#x}, sp {:#x}, frames {:x?}, shared cache slide {:#x}): EXC_BAD_ACCESS \
-                     signal delivery is not implemented",
-                    if class == EC_DATA_ABORT_LOWER {
-                        "data"
-                    } else {
-                        "instruction"
-                    },
-                    pe.cpu.state.x[30],
-                    pe.cpu.state.x[29],
-                    pe.cpu.sp(0),
-                    frames(pe.cpu.state.x[29]),
-                    lock(&self.process.shared_region)
-                        .as_ref()
-                        .map_or(0, |region| region.slide()),
-                )
+                // EXC_BAD_ACCESS, as `handle_user_abort` and `ux_exception`
+                // turn it into a signal.
+                let data = class == EC_DATA_ABORT_LOWER;
+                let looked_up = if data { address & TBI_MASK } else { address };
+                let fault = bsd::signal::FaultSignal::of(
+                    looked_up,
+                    super::memory::mapped(looked_up),
+                    data && iss & ISS_FSC_MASK == FSC_ALIGNMENT,
+                    self.process.user_stack,
+                );
+                let shared_cache_slide = self.shared_cache_slide();
+                self.exception_signal(fault.signal, fault.code, fault.stack_overflow, || {
+                    format!(
+                        "guest {} abort at pc {elr:#x}, address {address:#x} (ISS {iss:#x}, lr \
+                         {:#x}, fp {:#x}, sp {:#x}, frames {:x?}, shared cache slide \
+                         {shared_cache_slide:#x})",
+                        if data { "data" } else { "instruction" },
+                        pe.cpu.state.x[30],
+                        pe.cpu.state.x[29],
+                        pe.cpu.sp(0),
+                        frames(pe.cpu.state.x[29]),
+                    )
+                });
+                Ok(())
+            }
+            // EXC_BREAKPOINT (`handle_user_breakpoint`): SIGTRAP, at the
+            // BRK itself.
+            EC_BRK64 => {
+                let shared_cache_slide = self.shared_cache_slide();
+                self.exception_signal(bsd::signal::SIGTRAP, 0, false, || {
+                    format!(
+                        "guest BRK #{:#x} at pc {elr:#x} (lr {:#x}, frames {:x?}, shared cache \
+                         slide {shared_cache_slide:#x})",
+                        iss & 0xffff,
+                        pe.cpu.state.x[30],
+                        frames(pe.cpu.state.x[29]),
+                    )
+                });
+                Ok(())
             }
             _ => bail!(
                 "guest exception class {class:#x} (ESR {esr:#x}) at pc {elr:#x} (lr {:#x}, fp \
                  {:#x}, frames {:x?}, shared cache slide {:#x}): Mach exception and signal \
-                 delivery are not implemented",
+                 delivery for it are not implemented",
                 pe.cpu.state.x[30],
                 pe.cpu.state.x[29],
                 frames(pe.cpu.state.x[29]),
-                lock(&self.process.shared_region)
-                    .as_ref()
-                    .map_or(0, |region| region.slide()),
+                self.shared_cache_slide(),
             ),
         }
+    }
+
+    /// The shared cache's slide, for diagnostics.
+    fn shared_cache_slide(&self) -> u64 {
+        lock(&self.process.shared_region)
+            .as_ref()
+            .map_or(0, |region| region.slide())
     }
 
     /// Slide in a shared-region page the guest or a forwarded call touched.

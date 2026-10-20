@@ -350,6 +350,7 @@ fn create(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let created = threads::spawn(
         &kernel.process,
         registration.thread_start,
+        kernel.signals.creation_mask(),
         move |kernel, pe| {
             let port = kernel.thread_port;
             if tsd_offset != 0

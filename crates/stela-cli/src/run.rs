@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use stela_loader::{code_signature, load_plan, split_slices};
 use stela_runtime::hosted::activation::{self, Activator};
-use stela_runtime::hosted::{self, Dylinker, Launch, Signature, Termination};
+use stela_runtime::hosted::{self, Dylinker, Launch, Signature};
 use stela_runtime::machine::Chip;
 
 /// `CPU_TYPE_ARM64` and the arm64e subtype, without capability bits.
@@ -267,7 +267,6 @@ impl Run {
             }
             eprintln!("stela: {:>8} shared-region pages slid", report.slid_pages);
         }
-        let Termination::Exited(status) = report.termination;
-        std::process::exit(status & 0xff)
+        report.termination.end_host_process()
     }
 }

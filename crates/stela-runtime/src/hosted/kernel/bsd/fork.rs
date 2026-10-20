@@ -93,7 +93,7 @@ fn fork(kernel: &mut Kernel, vfork: bool) -> Result<Outcome> {
             kqworkq.child();
             workloops.child();
             drop(others);
-            signal::fork_child();
+            signal::fork_child(kernel);
             kernel.thread_port = thread_port;
             kernel.mig_relay = None;
             kernel.worker = None;

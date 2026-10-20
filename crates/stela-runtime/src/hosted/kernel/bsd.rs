@@ -12,6 +12,7 @@
 use super::{Kernel, Pe, Trap};
 use crate::darwin::{BsdReturnType, catalog};
 use crate::hosted::forward;
+use crate::machine::system::Register;
 use anyhow::{Result, anyhow, bail};
 
 pub(super) mod additions;
@@ -53,6 +54,9 @@ pub(super) enum Outcome {
     Error(u64),
     /// Leave every register as the handler set it (`EJUSTRETURN`).
     JustReturn,
+    /// Repeat the call once the thread's signals are delivered
+    /// (`ERESTART`).
+    Restart,
 }
 
 impl Outcome {
@@ -86,15 +90,39 @@ pub(super) fn number_of(name: &str) -> u16 {
         .expect("the call is in the pinned catalog")
 }
 
-/// Forward `call` to the host kernel.
+/// Forward `call` to the host kernel, interruptibly: a signal for the
+/// thread's guest handlers that arrives before the host kernel takes the
+/// call, or for which the host kernel would restart it, makes the guest
+/// repeat it after its handler runs.
 pub(super) fn forward(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     kernel.page_in_arguments(call.arguments())?;
-    let returned = forward::bsd(call.entry.number, call.arguments());
-    Ok(if returned.carry {
-        Outcome::Error(returned.rax)
-    } else {
-        Outcome::Return(returned.rax, returned.rdx)
-    })
+    let returned = forward::bsd_interruptible(
+        call.entry.number,
+        call.arguments(),
+        kernel.signals.interrupt_flag(),
+    );
+    Ok(outcome(returned))
+}
+
+/// Forward `call` to the host kernel uninterruptibly, for a model whose
+/// effects before the call a repeat would duplicate.
+pub(super) fn forward_uninterruptible(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
+    kernel.page_in_arguments(call.arguments())?;
+    Ok(outcome(forward::bsd(call.entry.number, call.arguments())))
+}
+
+fn outcome(returned: forward::Returned) -> Outcome {
+    match returned {
+        forward::Returned {
+            carry: true,
+            rax: forward::ERESTART,
+            ..
+        } => Outcome::Restart,
+        forward::Returned {
+            carry: true, rax, ..
+        } => Outcome::Error(rax),
+        forward::Returned { rax, rdx, .. } => Outcome::Return(rax, rdx),
+    }
 }
 
 pub(super) fn call(kernel: &mut Kernel, pe: &mut Pe) -> Result<()> {
@@ -170,6 +198,11 @@ fn complete(trap: &mut Trap, return_type: BsdReturnType, outcome: Outcome) -> Re
             trap.set_carry(true);
         }
         Outcome::JustReturn => {}
+        // `arm_prepare_syscall_return`: back to the SVC.
+        Outcome::Restart => {
+            let elr = trap.cpu.read(Register::ELR_EL1);
+            trap.cpu.registers.set_raw(Register::ELR_EL1, 0, elr - 4);
+        }
     }
     Ok(())
 }
@@ -256,24 +289,17 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
         "NOTE_MACHTIME timer deadlines are taken in host nanoseconds",
     ),
     (
-        "sigaction",
-        "actions are kept, but no signal is delivered to a guest handler",
-    ),
-    (
-        "kill",
-        "a signal to this process stops the run when a guest handler would take it",
-    ),
-    (
-        "__pthread_kill",
-        "a signal to a guest thread stops the run when a guest handler would take it",
-    ),
-    (
         "sysctl",
         "kern.version and kern.osrelease are the host kernel's",
     ),
     (
-        "sigreturn",
-        "only the alternate-stack forms: no signal is delivered to a guest handler",
+        "sigaction",
+        "a caught signal reaches a thread waiting in a Mach trap or a hosted-kernel wait only \
+         when the wait ends",
+    ),
+    (
+        "sigprocmask",
+        "another thread's host mask follows at its next kernel exit or time slice",
     ),
     (
         "posix_spawn",
@@ -294,14 +320,6 @@ pub(crate) const LIMITS: &[(&str, &str)] = &[
 pub(crate) const REFUSED: &[(&str, &str)] = &[
     ("ptrace", "debugging another process is not modeled"),
     ("__mac_execve", "exec under a MAC label is not modeled"),
-    (
-        "sigsuspend",
-        "delivering signals to guest handlers is not implemented",
-    ),
-    (
-        "sigsuspend_nocancel",
-        "delivering signals to guest handlers is not implemented",
-    ),
     (
         "kqueue_workloop_ctl",
         "workloop scheduling parameters are not implemented",
@@ -432,7 +450,7 @@ fn dispatch(kernel: &mut Kernel, pe: &mut Pe, call: &Call) -> Result<Outcome> {
         Some(Family::CodeSigning) => codesign::call(kernel, call)?,
         Some(Family::Threads) => thread::call(kernel, pe, call)?,
         Some(Family::Workqueue) => workqueue::call(kernel, pe, call)?,
-        Some(Family::Signals) => signal::call(kernel, call)?,
+        Some(Family::Signals) => signal::call(kernel, pe, call)?,
         // The additions have no catalog row: [`call`] dispatches them by
         // number.
         Some(Family::Additions) | None => None,

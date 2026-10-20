@@ -40,57 +40,57 @@ const KERN_SUCCESS: i32 = 0;
 
 /// `<i386/_mcontext.h>` `__darwin_x86_exception_state64`.
 #[repr(C)]
-struct ExceptionState {
-    trapno: u16,
-    cpu: u16,
-    err: u32,
-    faultvaddr: u64,
+pub(crate) struct ExceptionState {
+    pub(crate) trapno: u16,
+    pub(crate) cpu: u16,
+    pub(crate) err: u32,
+    pub(crate) faultvaddr: u64,
 }
 
 /// `<mach/i386/_structs.h>` `__darwin_x86_thread_state64`.
 #[repr(C)]
-struct ThreadState {
-    rax: u64,
-    rbx: u64,
-    rcx: u64,
-    rdx: u64,
-    rdi: u64,
-    rsi: u64,
-    rbp: u64,
-    rsp: u64,
-    r8: u64,
-    r9: u64,
-    r10: u64,
-    r11: u64,
-    r12: u64,
-    r13: u64,
-    r14: u64,
-    r15: u64,
-    rip: u64,
-    rflags: u64,
-    cs: u64,
-    fs: u64,
-    gs: u64,
+pub(crate) struct ThreadState {
+    pub(crate) rax: u64,
+    pub(crate) rbx: u64,
+    pub(crate) rcx: u64,
+    pub(crate) rdx: u64,
+    pub(crate) rdi: u64,
+    pub(crate) rsi: u64,
+    pub(crate) rbp: u64,
+    pub(crate) rsp: u64,
+    pub(crate) r8: u64,
+    pub(crate) r9: u64,
+    pub(crate) r10: u64,
+    pub(crate) r11: u64,
+    pub(crate) r12: u64,
+    pub(crate) r13: u64,
+    pub(crate) r14: u64,
+    pub(crate) r15: u64,
+    pub(crate) rip: u64,
+    pub(crate) rflags: u64,
+    pub(crate) cs: u64,
+    pub(crate) fs: u64,
+    pub(crate) gs: u64,
 }
 
 /// The leading `__darwin_mcontext64` fields the handler reads and redirects.
 #[repr(C)]
-struct MachineContext {
-    exception: ExceptionState,
-    thread: ThreadState,
+pub(crate) struct MachineContext {
+    pub(crate) exception: ExceptionState,
+    pub(crate) thread: ThreadState,
 }
 
 /// `<sys/_types/_ucontext.h>` `__darwin_ucontext` (LP64).
 #[repr(C)]
-struct UserContext {
-    onstack: i32,
-    sigmask: u32,
-    stack_pointer: u64,
-    stack_size: u64,
-    stack_flags: i32,
-    link: u64,
-    machine_context_size: u64,
-    machine_context: *mut MachineContext,
+pub(crate) struct UserContext {
+    pub(crate) onstack: i32,
+    pub(crate) sigmask: u32,
+    pub(crate) stack_pointer: u64,
+    pub(crate) stack_size: u64,
+    pub(crate) stack_flags: i32,
+    pub(crate) link: u64,
+    pub(crate) machine_context_size: u64,
+    pub(crate) machine_context: *mut MachineContext,
 }
 
 /// A fault that stopped native code: where, why, and the host GPRs at the

@@ -16,6 +16,7 @@
 use crate::machine::Chip;
 use anyhow::{Context as _, Result, bail, ensure};
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use stela_compiler::TargetCpu;
 
 pub mod activation;
@@ -40,7 +41,50 @@ pub use kernel::{Executable, Signature};
 pub enum Termination {
     /// `exit(status)`: the host process exits with the status's low byte.
     Exited(i32),
+    /// The default action of a signal the hosted kernel took for it (a
+    /// synchronous exception's, or one recorded for a handler the action
+    /// no longer names): the host process ends by the same signal.
+    Signaled(i32),
 }
+
+impl Termination {
+    /// End the host process as the guest process ended, so that its
+    /// parent's `wait` sees the same status.
+    pub fn end_host_process(self) -> ! {
+        match self {
+            Self::Exited(status) => std::process::exit(status & 0xff),
+            Self::Signaled(signal) => {
+                let set: libc::sigset_t = 1 << (signal - 1);
+                // SAFETY: the default disposition, unblocked, raised on
+                // this thread.
+                unsafe {
+                    libc::signal(signal, libc::SIG_DFL);
+                    libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, core::ptr::null_mut());
+                    libc::raise(signal);
+                }
+                // A signal whose default does not end the process.
+                std::process::exit(128 + signal)
+            }
+        }
+    }
+}
+
+/// Whether SIGPIPE was ignored when this host process was exec'd, before
+/// the Rust runtime's own start-up ignored it: exec keeps an ignored
+/// signal ignored (`execsigs`), so the guest inherits it.
+static SIGPIPE_IGNORED_AT_EXEC: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn record_sigpipe_at_exec() {
+    // SAFETY: a query of the disposition into this frame.
+    let mut current: libc::sigaction = unsafe { core::mem::zeroed() };
+    unsafe { libc::sigaction(libc::SIGPIPE, core::ptr::null(), &raw mut current) };
+    SIGPIPE_IGNORED_AT_EXEC.store(current.sa_sigaction == libc::SIG_IGN, Ordering::SeqCst);
+}
+
+/// A Mach-O initializer, which dyld runs before `main`.
+#[used]
+#[unsafe(link_section = "__DATA,__mod_init_func")]
+static RECORD_SIGPIPE_AT_EXEC: extern "C" fn() = record_sigpipe_at_exec;
 
 /// The dynamic linker `LC_LOAD_DYLINKER` names.
 #[derive(Debug, Clone)]
@@ -135,10 +179,16 @@ fn commpage_time() -> Result<commpage::Time> {
 /// Run the process to its exit.
 pub fn run(launch: Launch) -> Result<Report> {
     check_host_timebase()?;
-    // A process exec'd from a shell starts with SIGPIPE defaulted; the
-    // host runtime's own start-up ignored it.
-    // SAFETY: restores a default disposition.
-    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    // SIGPIPE as exec left it, which the host runtime's own start-up
+    // changed to ignored.
+    core::hint::black_box(&RECORD_SIGPIPE_AT_EXEC);
+    let sigpipe = if SIGPIPE_IGNORED_AT_EXEC.load(Ordering::SeqCst) {
+        libc::SIG_IGN
+    } else {
+        libc::SIG_DFL
+    };
+    // SAFETY: restores an inherited disposition.
+    unsafe { libc::signal(libc::SIGPIPE, sigpipe) };
     let target = TargetCpu::detect();
     let profile = pe::profile(launch.chip, target);
     let identification = features::Identification(&profile.fixed);
@@ -206,16 +256,17 @@ pub fn run(launch: Launch) -> Result<Report> {
         trace: launch.trace,
         engine,
     });
-    // The main thread is a host thread of its own like every other, so the
-    // host thread that waits for the process's end is never one the guest
-    // blocks. Its port, which the apple strings carry, is that thread's.
+    // The main thread runs on this host thread, the process's first, with
+    // the signal mask exec left it; its port, which the apple strings
+    // carry, is this thread's.
+    let exec_mask = kernel::signals::block_all();
     let Launch {
         executable_path,
         argv,
         environment,
         ..
     } = launch;
-    let started = threads::spawn(&process, entry, move |kernel, pe| {
+    let ended = threads::run_main(&process, entry, exec_mask, move |kernel, pe| {
         apple.thread_port = Some(kernel.thread_port);
         let arguments = exec::install_arguments(
             &stack,
@@ -228,10 +279,16 @@ pub fn run(launch: Launch) -> Result<Report> {
         pe.cpu.set_sp(0, arguments.raw_sp);
         Ok(Ok(()))
     })?;
-    if let Err(errno) = started {
-        bail!("the main thread could not be created: errno {errno}");
-    }
-    let termination = process.runtime.lifetime.wait()?;
+    let termination = match ended {
+        Err(errno) => bail!("the main thread could not be created: errno {errno}"),
+        Ok(Some(outcome)) => outcome?,
+        // The main thread ended alone. Natively the process goes on with
+        // its other threads; so does this host process, without this host
+        // thread, which would otherwise be the one the host kernel parks
+        // signals every thread blocks on.
+        // SAFETY: the process's end no longer needs this thread.
+        Ok(None) => unsafe { libc::pthread_exit(core::ptr::null_mut()) },
+    };
     Ok(Report {
         termination,
         calls: threads::lock(&process.counts).clone(),

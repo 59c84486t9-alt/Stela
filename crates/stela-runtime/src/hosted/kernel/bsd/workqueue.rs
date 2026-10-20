@@ -659,9 +659,11 @@ fn spawn(process: &Arc<Process>) -> Result<()> {
     let pthread_bytes = round_page(registration.pthread_size + PTHREAD_T_OFFSET)
         .expect("the pthread size is bounded");
     let size = GUARD_BYTES + DEFAULT_STACK_BYTES + pthread_bytes;
+    // A workqueue thread inherits no mask (`~workq_threadmask`).
     let created = threads::spawn(
         process,
         registration.workqueue_thread,
+        !super::signal::WORKQ_THREADMASK,
         move |kernel, _pe| {
             let workqueue = &kernel.process.workqueue;
             let Ok(stack) =
@@ -1085,9 +1087,9 @@ fn open(kernel: &mut Kernel) -> Outcome {
 /// Re-decide admission as blocked threads' stalled windows pass
 /// (`workq_schedule_delayed_thread_creation`).
 fn start_monitor(process: Arc<Process>) {
-    std::thread::Builder::new()
-        .name("stela-workqueue".into())
-        .spawn(move || {
+    let builder = std::thread::Builder::new().name("stela-workqueue".into());
+    super::signal::host::without_signals(|| {
+        builder.spawn(move || {
             let workqueue = &process.workqueue;
             loop {
                 let mut state = workqueue.state();
@@ -1106,7 +1108,8 @@ fn start_monitor(process: Arc<Process>) {
                 }
             }
         })
-        .expect("the workqueue monitor thread starts");
+    })
+    .expect("the workqueue monitor thread starts");
 }
 
 /// `workq_kernreturn(options, item, affinity, prio)`.
