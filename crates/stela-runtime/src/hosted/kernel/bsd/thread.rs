@@ -565,7 +565,8 @@ fn max_parallelism(kernel: &Kernel, qos: u64, flags: u64) -> Result<Outcome> {
     if flags & !known != 0 {
         return Ok(Outcome::Error(EINVAL));
     }
-    // The M2 has no SME units, so no cluster shared resource.
+    // A cluster's shared resource is its SME unit: a machine presented
+    // without SME has none, and no hosted machine presents SME yet.
     if flags & PARALLELISM_CLUSTER_SHARED_RESOURCE != 0 {
         return Ok(Outcome::Error(ENOTSUP));
     }

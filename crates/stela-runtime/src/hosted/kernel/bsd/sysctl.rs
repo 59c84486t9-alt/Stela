@@ -132,7 +132,7 @@ const HOST_MACHINE: &[&str] = &[
 ];
 
 /// arm64 release-kernel machine variables and nodes this model does not
-/// answer yet.
+/// answer yet (`sme_max_svl_b` only when the machine presents SME).
 const UNMODELED: &[&str] = &[
     "hw",
     "hw.optional",
@@ -391,6 +391,12 @@ impl Model {
             "hw.optional.arm.caps",
             Value::QuadBytes(crate::hosted::features::capability_buffer(features).to_vec()),
         );
+        // The streaming vector length in bytes, which XNU always publishes
+        // and gives as 0 without SME (`arm_sme_svl_b`). A presented SME's
+        // length is not in the identification, so it stays unanswered.
+        if !feature("FEAT_SME") {
+            add("hw.optional.arm.sme_max_svl_b", Value::Int(0));
+        }
         for (legacy, name) in [
             ("neon", "AdvSIMD"),
             ("neon_hpfp", "AdvSIMD_HPFPCvt"),
@@ -862,6 +868,7 @@ mod tests {
         assert_eq!(value("hw.optional.arm.FEAT_LSE"), &Value::Int(1));
         assert_eq!(value("hw.optional.neon"), &Value::Int(1));
         assert_eq!(value("hw.optional.armv8_2_sha3"), &Value::Int(0));
+        assert_eq!(value("hw.optional.arm.sme_max_svl_b"), &Value::Int(0));
         let Value::QuadBytes(caps) = value("hw.optional.arm.caps") else {
             panic!("hw.optional.arm.caps is not a byte buffer");
         };
