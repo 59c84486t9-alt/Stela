@@ -51,6 +51,7 @@ use crate::platform::apple::agx::format::texel::{Format, channels, ty};
 use crate::platform::apple::agx::isa::machine::{
     BlockStore, Env, Exit, Fault, Interpolation, Memory, Program, SIMD_WIDTH, Specials, TileAccess,
 };
+use crate::platform::apple::agx::isa::math;
 use crate::platform::apple::agx::raster::coverage::{self, MAX_SAMPLES, Rect};
 use crate::platform::apple::agx::raster::plane::{Plane, REGION};
 use crate::platform::apple::agx::raster::zs::{self, FaceState, Sample};
@@ -279,7 +280,7 @@ impl FragmentEnv<'_> {
 
 fn quantize(depth: f32, depth_16: bool) -> f32 {
     if depth_16 {
-        ((f64::from(depth).clamp(0.0, 1.0) * UNORM16_MAX).round() / UNORM16_MAX) as f32
+        (math::round(f64::from(depth).clamp(0.0, 1.0) * UNORM16_MAX) / UNORM16_MAX) as f32
     } else {
         depth
     }

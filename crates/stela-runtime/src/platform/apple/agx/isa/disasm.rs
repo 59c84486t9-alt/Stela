@@ -114,7 +114,7 @@ impl Printer {
             }
             Value::Fimm(value) => {
                 let f = minifloat(value);
-                let _ = if f == f.trunc() {
+                let _ = if f64::from(f) == super::math::trunc(f64::from(f)) {
                     write!(self.out, "{f}.0")
                 } else {
                     write!(self.out, "{f}")

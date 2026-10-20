@@ -24,6 +24,16 @@ pub fn trunc(x: f64) -> f64 {
     }
 }
 
+/// Round half away from zero.
+pub fn round(x: f64) -> f64 {
+    let t = trunc(x);
+    if (x - t).abs() >= 0.5 {
+        t + 1.0f64.copysign(x)
+    } else {
+        t
+    }
+}
+
 pub fn floor(x: f64) -> f64 {
     let t = trunc(x);
     if t > x { t - 1.0 } else { t }
@@ -198,6 +208,11 @@ mod tests {
             (7.0, 7.0, 7.0, 7.0),
         ] {
             assert_eq!(trunc(x), t, "trunc {x}");
+            assert_eq!(
+                round(x),
+                if x.abs() == 2.5 { t + x.signum() } else { t },
+                "round {x}"
+            );
             assert_eq!(floor(x), f, "floor {x}");
             assert_eq!(ceil(x), c, "ceil {x}");
         }

@@ -513,7 +513,7 @@ mod tests {
     }
 
     fn unorm8(value: f64) -> i32 {
-        (value.clamp(0.0, 1.0) * 255.0).round() as i32
+        crate::platform::apple::agx::isa::math::round(value.clamp(0.0, 1.0) * 255.0) as i32
     }
 
     const ALWAYS_NO_WRITE: u32 = 7 << 24 | 1 << 21;

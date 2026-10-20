@@ -15,6 +15,8 @@
 //!   triangle and edge rules, so neighbouring primitives never share a
 //!   sample.
 
+use crate::platform::apple::agx::isa::math;
+
 /// Fractional bits of snapped window coordinates.
 pub const SUBPIXEL_BITS: u32 = 8;
 const ONE: f64 = (1u64 << SUBPIXEL_BITS) as f64;
@@ -54,7 +56,7 @@ pub fn sample_positions(packed: u32, samples: u32) -> [[f64; 2]; MAX_SAMPLES] {
 }
 
 fn snap(value: f64) -> i64 {
-    (value * ONE).round() as i64
+    math::round(value * ONE) as i64
 }
 
 /// An edge's function at a sample, and whether it is a top or left edge.
@@ -112,14 +114,10 @@ pub fn triangle(
         Edge::new(s[2], s[0]),
     ];
     let lo = |c: usize| {
-        ((s.iter().map(|p| p[c]).min().unwrap() as f64 / ONE)
-            .floor()
-            .max(0.0)) as u32
+        (math::floor(s.iter().map(|p| p[c]).min().unwrap() as f64 / ONE).max(0.0)) as u32
     };
     let hi = |c: usize| {
-        ((s.iter().map(|p| p[c]).max().unwrap() as f64 / ONE)
-            .ceil()
-            .max(0.0) as u32)
+        (math::ceil(s.iter().map(|p| p[c]).max().unwrap() as f64 / ONE).max(0.0) as u32)
             .saturating_add(1)
     };
     let bounds = Rect {
@@ -150,7 +148,7 @@ pub fn triangle(
 /// The rectangle of a line of `width` pixels, as two triangles.
 pub fn line_quad(p0: [f64; 2], p1: [f64; 2], width: f64) -> Option<[[[f64; 2]; 3]; 2]> {
     let d = [p1[0] - p0[0], p1[1] - p0[1]];
-    let length = (d[0] * d[0] + d[1] * d[1]).sqrt();
+    let length = math::sqrt(d[0] * d[0] + d[1] * d[1]);
     if length == 0.0 {
         return None;
     }

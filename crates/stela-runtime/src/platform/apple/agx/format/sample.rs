@@ -185,7 +185,7 @@ impl Sampling<'_> {
                 let t = (j as f64 + 0.5) / n as f64 * 2.0 - 1.0;
                 let (f, sc, tc, ma) = cube_face(face_direction(base_face, s, t));
                 let to =
-                    |c: f64| (((c / ma + 1.0) * 0.5 * n as f64).floor() as i64).clamp(0, n - 1);
+                    |c: f64| (math::floor((c / ma + 1.0) * 0.5 * n as f64) as i64).clamp(0, n - 1);
                 at = [to(sc), to(tc), 0];
                 face = f;
             }
@@ -239,7 +239,7 @@ impl Sampling<'_> {
         if gather.is_none() && filter == Filter::Nearest {
             let mut index = [0i64; 3];
             for c in 0..self.dims {
-                index[c] = u[c].floor() as i64 + offset[c];
+                index[c] = math::floor(u[c]) as i64 + offset[c];
             }
             return self.texel(level, index);
         }
@@ -247,8 +247,8 @@ impl Sampling<'_> {
         let mut alpha = [0.0f64; 3];
         for c in 0..self.dims {
             let t = u[c] - 0.5;
-            base[c] = t.floor() as i64 + offset[c];
-            alpha[c] = t - t.floor();
+            base[c] = math::floor(t) as i64 + offset[c];
+            alpha[c] = t - math::floor(t);
         }
         if let Some(component) = gather {
             let mut out = [0.0; 4];
@@ -324,10 +324,11 @@ fn lod(
                 [w, h, d].map(f64::from)
             };
             let length = |v: [f64; 3]| {
-                (0..dims)
-                    .map(|c| (v[c] * scale[c]).powi(2))
-                    .sum::<f64>()
-                    .sqrt()
+                math::sqrt(
+                    (0..dims)
+                        .map(|c| (v[c] * scale[c]) * (v[c] * scale[c]))
+                        .sum::<f64>(),
+                )
             };
             let (rx, ry) = (length(dx), length(dy));
             let (rho_max, rho_min, major) = if rx >= ry { (rx, ry, dx) } else { (ry, rx, dy) };
@@ -340,7 +341,7 @@ fn lod(
                 (rho_max / rho_min).min(limit)
             };
             let base = math::log2(rho_max / eta);
-            let probes = (eta > 1.0).then(|| (major, eta.ceil() as u32));
+            let probes = (eta > 1.0).then(|| (major, math::ceil(eta) as u32));
             (min, base + bias, probes)
         }
     };
@@ -477,12 +478,12 @@ pub fn sample(
             let d = if lambda <= 0.5 {
                 0.0
             } else {
-                ((lambda + 0.5).ceil() - 1.0).clamp(0.0, f64::from(q))
+                (math::ceil(lambda + 0.5) - 1.0).clamp(0.0, f64::from(q))
             };
             [(d as u32, 1.0), (0, 0.0)]
         }
         (MipFilter::Linear, _) => {
-            let low = lambda_level.floor();
+            let low = math::floor(lambda_level);
             let delta = lambda_level - low;
             [(low as u32, 1.0 - delta), ((low as u32 + 1).min(q), delta)]
         }
