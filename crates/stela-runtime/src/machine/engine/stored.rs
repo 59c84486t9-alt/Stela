@@ -142,7 +142,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::{Fetched, tests::BASE, tests::machine};
+    use super::super::{FIRST_WINDOW_BYTES, Fetched, INSTRUCTION, tests::BASE, tests::machine};
     use super::*;
     use crate::translations;
     use alloc::collections::BTreeMap;
@@ -257,6 +257,48 @@ pub(super) mod tests {
             changed.fetch_block(BASE + 4, false),
             Ok(Fetched::Block(_))
         ));
+        assert_eq!(
+            (changed.statistics.compiled, changed.statistics.stored),
+            (1, 0)
+        );
+    }
+
+    #[test]
+    fn a_block_longer_than_the_first_window_compiles_and_is_stored_whole() {
+        // 40 × add x0, x0, #1; svc #0
+        const ADDS: usize = 40;
+        let mut words = vec![0x9100_0400; ADDS];
+        words.push(0xd400_0001);
+        let block_bytes = (ADDS + 1) * INSTRUCTION as usize;
+        assert!(block_bytes > FIRST_WINDOW_BYTES);
+        let mut first = machine(&words);
+        first.host.store = Some(MemoryStore::default());
+        let Ok(Fetched::Block(index)) = first.fetch_block(BASE, false) else {
+            panic!("block")
+        };
+        assert_eq!(first.blocks[index].source_bytes, block_bytes);
+        let offer = first.host.store.as_mut().unwrap().offers.pop().unwrap();
+        assert_eq!(offer.input.len(), block_bytes);
+        let mut record = Record::new(translations::translator_id(), offer.key);
+        record.insert(proven(&offer));
+        let mut store = MemoryStore::default();
+        store.records.insert(offer.key, Arc::new(record));
+        let mut second = machine(&words);
+        second.host.store = Some(store);
+        let Ok(Fetched::Block(stored)) = second.fetch_block(BASE, false) else {
+            panic!("stored block")
+        };
+        assert_eq!(
+            (second.statistics.compiled, second.statistics.stored),
+            (0, 1)
+        );
+        assert_eq!(second.blocks[stored].source_bytes, block_bytes);
+        // A changed word past the first window, inside the block: the stored
+        // block's bytes no longer match, and it is compiled.
+        words[ADDS - 1] = 0x9100_0800;
+        let mut changed = machine(&words);
+        changed.host.store = second.host.store.take();
+        assert!(changed.fetch_block(BASE, false).is_ok());
         assert_eq!(
             (changed.statistics.compiled, changed.statistics.stored),
             (1, 0)

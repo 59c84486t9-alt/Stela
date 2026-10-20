@@ -59,11 +59,14 @@ pub struct Description {
 /// What a source window prepares to.
 #[derive(Debug)]
 pub enum Prepared {
-    /// The block, the bytes of the window the compiler was given, and the
-    /// entry PCs its static successors (call continuations included) have.
+    /// The block, the bytes of the window the compiler was given, the
+    /// bytes the analysis read (the block's, or the whole window when the
+    /// block runs to its end), and the entry PCs its static successors
+    /// (call continuations included) have.
     Block {
         compiled: CompiledBlock,
         input: usize,
+        consumed: usize,
         successors: Vec<u64>,
     },
     /// Its first instruction, an FP/SIMD or scalable one, has an access
@@ -181,6 +184,10 @@ impl Preparation {
     /// Prepare the block at `pc` from the admitted window `source`, which
     /// holds the bytes to the end of its fetch page (at most a block's),
     /// ending it at `limit` bytes, before a host breakpoint or trace point.
+    /// From a prefix of the window, a block whose analysis did not reach
+    /// the prefix's end (`consumed`) is the block the whole window
+    /// prepares: the analysis reads words in order and stops at the
+    /// block's last.
     pub fn prepare(&self, source: &[u8], pc: u64, limit: usize) -> Result<Prepared, Refused> {
         let word = |index: usize| {
             u32::from_le_bytes(source[index * 4..index * 4 + 4].try_into().expect("a word"))
@@ -249,6 +256,7 @@ impl Preparation {
         Ok(Prepared::Block {
             compiled,
             input,
+            consumed,
             successors,
         })
     }

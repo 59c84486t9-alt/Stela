@@ -81,6 +81,9 @@ const PROFILE: BlockProfile = BlockProfile::SystemModeV1;
 const INSTRUCTION: u64 = 4;
 const FETCH_PAGE: u64 = 4096;
 const MAX_BLOCK_BYTES: u64 = block::MAX_BLOCK_INSTRUCTIONS as u64 * INSTRUCTION;
+/// The bytes of a block's source window a compile reads and admits first:
+/// most blocks end within them, and the rest compile from the whole window.
+const FIRST_WINDOW_BYTES: usize = 32 * INSTRUCTION as usize;
 const FETCH_CACHE: usize = 1024;
 /// ID_AA64PFR0_EL1.CSV3, FEAT_CSV3's field.
 const CSV3_SHIFT: u32 = 60;
@@ -871,6 +874,16 @@ struct Block {
     /// The guest bytes it was compiled from, for [`Machine::stale_code`].
     source_bytes: usize,
     source_hash: u64,
+}
+
+/// The bytes a block of `variant` at `pc` may be compiled from: one
+/// instruction for a single-instruction block, else [`prepare::window`].
+fn source_window(pc: u64, variant: Variant) -> usize {
+    if variant.single {
+        INSTRUCTION as usize
+    } else {
+        prepare::window(pc)
+    }
 }
 
 /// The exit kind of a branch to a register's value (RET, BR, BLR and their
@@ -2624,17 +2637,39 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// trapped FP/SIMD instruction or one whose access checks the engine
     /// applies.
     fn compile(&mut self, pc: u64, physical: u64, variant: Variant) -> Result<Fetched, Stop> {
-        let available = if variant.single {
-            INSTRUCTION as usize
-        } else {
-            prepare::window(pc)
-        };
+        let window = source_window(pc, variant);
+        if window > FIRST_WINDOW_BYTES
+            && let Some(fetched) = self.compile_window(pc, physical, variant, FIRST_WINDOW_BYTES)?
+        {
+            return Ok(fetched);
+        }
+        Ok(self
+            .compile_window(pc, physical, variant, window)?
+            .expect("a block of the whole window"))
+    }
+
+    /// [`Self::compile`] from the first `available` bytes of the block's
+    /// source window, or nothing when the block may run past them (it
+    /// takes them all, or they are refused) and they are not the whole
+    /// window.
+    fn compile_window(
+        &mut self,
+        pc: u64,
+        physical: u64,
+        variant: Variant,
+        available: usize,
+    ) -> Result<Option<Fetched>, Stop> {
+        let whole = available == source_window(pc, variant);
         let page = pc & !(FETCH_PAGE - 1);
         let offset = (pc - page) as usize;
         let mut source = vec![0u8; available];
         if !self.host.read_ram(physical, &mut source) {
             return Err(self.unsupported(RequirementKind::Fetch { physical }));
         }
+        // A block from elsewhere is used only when its bytes are among
+        // those read, and so validated against the stored page.
+        let within =
+            |compiled: &stela_compiler::block::CompiledBlock| compiled.source_bytes <= available;
         let stored = match variant.single {
             true => None,
             false => self
@@ -2652,16 +2687,26 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .and_then(|record| record.find(offset as u16, context))
                 .and_then(|entry| entry.rebase(page));
             if let Some(compiled) = found {
+                if !within(&compiled) {
+                    return Ok(None);
+                }
                 self.statistics.stored += 1;
-                return self.install(pc, physical, variant, &source, compiled);
+                return self
+                    .install(pc, physical, variant, &source, compiled)
+                    .map(Some);
             }
             if let Some(compiled) = self
                 .host
                 .translations()
                 .and_then(|translations| translations.prepared(key, pc, context))
             {
+                if !within(&compiled) {
+                    return Ok(None);
+                }
                 self.statistics.shared += 1;
-                return self.install(pc, physical, variant, &source, compiled);
+                return self
+                    .install(pc, physical, variant, &source, compiled)
+                    .map(Some);
             }
         }
         let started = self.host.counter();
@@ -2674,15 +2719,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .filter(|&&stop| stop > pc && stop < pc + source.len() as u64)
             .min()
             .map_or(source.len(), |&stop| (stop - pc) as usize);
-        let (compiled, input, successors) = match preparation.prepare(&source, pc, limit) {
+        let prepared = preparation.prepare(&source, pc, limit);
+        let past = match &prepared {
+            Ok(Prepared::Block { consumed, .. }) => *consumed == available,
+            Ok(Prepared::Checked(_) | Prepared::FloatingPointTrap) => false,
+            Err(_) => true,
+        };
+        if past && !whole {
+            return Ok(None);
+        }
+        let (compiled, input, successors) = match prepared {
             Ok(Prepared::Block {
                 compiled,
                 input,
                 successors,
+                ..
             }) => (compiled, input, successors),
-            Ok(Prepared::Checked(word)) => return Ok(Fetched::Checked(word)),
+            Ok(Prepared::Checked(word)) => return Ok(Some(Fetched::Checked(word))),
             Ok(Prepared::FloatingPointTrap) => {
-                return Ok(Fetched::Exception(self.floating_point_exception(pc)));
+                return Ok(Some(Fetched::Exception(self.floating_point_exception(pc))));
             }
             Err(refused) => {
                 return Err(self.unsupported_word(&source, pc, refused.pc, refused.detail));
@@ -2707,6 +2762,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.statistics.offered += 1;
         }
         self.install(pc, physical, variant, &source, compiled)
+            .map(Some)
     }
 
     /// How the next fetch compiles its block, in the PE's current state:

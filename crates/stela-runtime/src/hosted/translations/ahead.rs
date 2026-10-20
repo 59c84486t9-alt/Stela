@@ -353,6 +353,7 @@ pub(super) fn prepare_at(
         compiled,
         input,
         successors,
+        ..
     }) = preparation.prepare(&source, pc, length)
     else {
         COUNTERS.refused.fetch_add(1, Ordering::Relaxed);
