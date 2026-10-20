@@ -26,6 +26,38 @@ const KEYBOARD_PAGE: u32 = 0x07;
 /// The array usages that report an error state instead of keys.
 const KEY_ERRORS: core::ops::RangeInclusive<u32> = 0x01..=0x03;
 
+/// A long item's prefix (6.2.2.3).
+const LONG_ITEM: u8 = 0xfe;
+/// A short item prefix's size field (6.2.2.2), and its code for four bytes.
+const SIZE_MASK: u8 = 0x03;
+const SIZE_FOUR: u8 = 3;
+/// A short item prefix's tag and type (6.2.2.4-6.2.2.8).
+const TAG_MASK: u8 = 0xfc;
+const INPUT: u8 = 0x80;
+const OUTPUT: u8 = 0x90;
+const COLLECTION: u8 = 0xa0;
+const FEATURE: u8 = 0xb0;
+const END_COLLECTION: u8 = 0xc0;
+const USAGE_PAGE: u8 = 0x04;
+const LOGICAL_MINIMUM: u8 = 0x14;
+const LOGICAL_MAXIMUM: u8 = 0x24;
+const PHYSICAL_MINIMUM: u8 = 0x34;
+const PHYSICAL_MAXIMUM: u8 = 0x44;
+const UNIT_EXPONENT: u8 = 0x54;
+const UNIT: u8 = 0x64;
+const REPORT_SIZE: u8 = 0x74;
+const REPORT_ID: u8 = 0x84;
+const REPORT_COUNT: u8 = 0x94;
+const PUSH: u8 = 0xa4;
+const POP: u8 = 0xb4;
+const USAGE: u8 = 0x08;
+const USAGE_MINIMUM: u8 = 0x18;
+const USAGE_MAXIMUM: u8 = 0x28;
+/// Input item flags (6.2.2.5).
+const CONSTANT: u32 = 1 << 0;
+const VARIABLE: u32 = 1 << 1;
+const RELATIVE: u32 = 1 << 2;
+
 /// One field of a report: where it is and how to read it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Field {
@@ -211,11 +243,11 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
     let mut at = 0;
     while at < descriptor.len() {
         let prefix = descriptor[at];
-        if prefix == 0xfe {
+        if prefix == LONG_ITEM {
             return Err("long items in a report descriptor");
         }
-        let size = match prefix & 3 {
-            3 => 4,
+        let size = match prefix & SIZE_MASK {
+            SIZE_FOUR => 4,
             n => usize::from(n),
         };
         let Some(data) = descriptor.get(at + 1..at + 1 + size) else {
@@ -239,9 +271,8 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                 global.page << 16 | usage
             }
         };
-        match prefix & 0xfc {
-            // Input main items.
-            0x80 => {
+        match prefix & TAG_MASK {
+            INPUT => {
                 let flags = unsigned;
                 let offset = match offsets.iter_mut().find(|(id, _)| *id == global.report) {
                     Some((_, offset)) => offset,
@@ -252,8 +283,8 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                 };
                 let start = *offset;
                 *offset += global.size * global.count;
-                let constant = flags & 1 != 0;
-                let variable = flags & 2 != 0;
+                let constant = flags & CONSTANT != 0;
+                let variable = flags & VARIABLE != 0;
                 for n in 0..global.count {
                     if constant {
                         break;
@@ -283,7 +314,7 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                             size: global.size,
                             minimum: global.minimum,
                             maximum: global.maximum,
-                            relative: flags & 4 != 0,
+                            relative: flags & RELATIVE != 0,
                         },
                         usage,
                     });
@@ -291,15 +322,13 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                 usages.clear();
                 range = None;
             }
-            // Output, Feature, Collection and End Collection.
-            0x90 | 0xb0 | 0xa0 | 0xc0 => {
+            OUTPUT | FEATURE | COLLECTION | END_COLLECTION => {
                 usages.clear();
                 range = None;
             }
-            // Global items.
-            0x04 => global.page = unsigned,
-            0x14 => global.minimum = signed,
-            0x24 => {
+            USAGE_PAGE => global.page = unsigned,
+            LOGICAL_MINIMUM => global.minimum = signed,
+            LOGICAL_MAXIMUM => {
                 // A maximum that only fits unsigned (8-bit 0xff) stays positive.
                 global.maximum = if global.minimum >= 0 {
                     unsigned as i32
@@ -307,15 +336,17 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                     signed
                 };
             }
-            0x74 => global.size = unsigned as usize,
-            0x84 => global.report = Some(unsigned as u8),
-            0x94 => global.count = unsigned as usize,
-            0xa4 | 0xb4 => return Err("Push and Pop in a report descriptor"),
-            0x34 | 0x44 | 0x54 | 0x64 => {}
-            // Local items.
-            0x08 => usages.push(full_usage(unsigned)),
-            0x18 => range = Some((full_usage(unsigned), range.map_or(0, |r| r.1))),
-            0x28 => range = Some((range.map_or(0, |r| r.0), full_usage(unsigned))),
+            REPORT_SIZE => global.size = unsigned as usize,
+            REPORT_ID => global.report = Some(unsigned as u8),
+            REPORT_COUNT => global.count = unsigned as usize,
+            PUSH | POP => return Err("Push and Pop in a report descriptor"),
+            // Physical extents and units do not change a field's value.
+            PHYSICAL_MINIMUM | PHYSICAL_MAXIMUM | UNIT_EXPONENT | UNIT => {}
+            USAGE => usages.push(full_usage(unsigned)),
+            USAGE_MINIMUM => range = Some((full_usage(unsigned), range.map_or(0, |r| r.1))),
+            USAGE_MAXIMUM => range = Some((range.map_or(0, |r| r.0), full_usage(unsigned))),
+            // Designators, strings and delimiters name no usage this
+            // reader takes.
             _ => {}
         }
     }
