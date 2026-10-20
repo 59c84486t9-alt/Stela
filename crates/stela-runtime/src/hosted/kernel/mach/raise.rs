@@ -20,9 +20,10 @@
 //! task identity token. The kernel's RPC carries the thread's voucher,
 //! which this one does not.
 use super::super::control::{self, UserState};
-use super::super::{Kernel, Pe};
+use super::super::{End, Kernel, Pe};
 use super::server::NDR_RECORD;
-use crate::hosted::darwin::{self, mach_msg, mach_port_allocate};
+use crate::hosted::Termination;
+use crate::hosted::darwin::{self, SIGKILL, mach_msg, mach_port_allocate};
 use crate::hosted::host;
 use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::mach::mig;
@@ -81,6 +82,68 @@ pub(crate) struct Exception {
     pub(crate) kind: usize,
     pub(crate) codes: [u64; 2],
     pub(crate) count: usize,
+}
+
+/// `EXC_GUARD`.
+const EXC_GUARD: usize = 12;
+/// `GUARD_TYPE_MACH_PORT`, an EXC_GUARD code's type (bits 63..61).
+const GUARD_TYPE_MACH_PORT: u64 = 1;
+/// `kGUARD_EXC_INVALID_OPTIONS`.
+const GUARD_INVALID_OPTIONS: u64 = 3;
+
+/// A Mach port guard violation of the thread (`mach_port_guard_exception`),
+/// which its way back to user space takes (`mach_port_guard_ast`): its
+/// EXC_GUARD code and subcode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Guard {
+    code: u64,
+    subcode: u64,
+}
+
+impl Guard {
+    /// A send's invalid options, `kGUARD_EXC_INVALID_OPTIONS` with no
+    /// target and the call's options (`ipc_current_msg_options`) as the
+    /// subcode.
+    pub(crate) fn invalid_options(options: u64) -> Self {
+        Self::mach_port(GUARD_INVALID_OPTIONS, 0, options)
+    }
+
+    /// `EXC_GUARD_ENCODE_TYPE`, `_FLAVOR` and `_TARGET`.
+    fn mach_port(flavor: u64, target: u32, payload: u64) -> Self {
+        Self {
+            code: GUARD_TYPE_MACH_PORT << 61 | (flavor & 0x1fff_ffff) << 32 | u64::from(target),
+            subcode: payload,
+        }
+    }
+}
+
+/// `mach_port_guard_ast` of a fatal flavor (each one at most
+/// `MAX_FATAL_kGUARD_EXC_CODE`, as [`Guard`] makes them):
+/// `exit_with_fatal_exception_and_notify`. EXC_GUARD is delivered
+/// synchronously to the thread's and the task's actions only with
+/// developer mode on (`task_exception_notify`); the task then ends with
+/// SIGKILL however a handler answered.
+pub(crate) fn fatal_guard(kernel: &mut Kernel, pe: &mut Pe, guard: Guard) -> Result<()> {
+    if super::vm::developer_mode() {
+        deliver(
+            kernel,
+            pe,
+            Exception {
+                kind: EXC_GUARD,
+                codes: [guard.code, guard.subcode],
+                count: 2,
+            },
+        )?;
+    }
+    eprintln!(
+        "stela: EXC_GUARD (code {:#x}, subcode {:#x}) at pc {:#x}: the fatal Mach port guard \
+         ends the process with signal {SIGKILL}",
+        guard.code,
+        guard.subcode,
+        UserState::capture(pe).pc,
+    );
+    kernel.end = Some(End::Process(Termination::Signaled(SIGKILL as i32)));
+    Ok(())
 }
 
 /// Whether this process's address space is debugged
@@ -483,6 +546,24 @@ mod tests {
         let body = request_body(EXCEPTION_STATE | MACH_EXCEPTION_CODES, &[], None, one, None);
         assert_eq!(body.len(), 8 + 8 + 8);
         assert_eq!(&body[12..16], &1u32.to_le_bytes());
+    }
+
+    #[test]
+    fn mach_port_guards_encode_as_the_kernel_does() {
+        // kGUARD_EXC_INVALID_OPTIONS of a mach_msg2 call that set both
+        // MACH64_SEND_KOBJECT_CALL and MACH64_SEND_MQ_CALL.
+        let options = 0x8000_0106_0000_0003;
+        assert_eq!(
+            Guard::invalid_options(options),
+            Guard {
+                code: 0x2000_0003_0000_0000,
+                subcode: options,
+            }
+        );
+        assert_eq!(
+            Guard::mach_port(32, 0x1303, 0x11).code,
+            0x2000_0020_0000_1303
+        );
     }
 
     #[test]

@@ -221,6 +221,9 @@ pub(super) struct Kernel {
     /// (`pthread_jit_write_protect_np`).
     pub(super) jit_permissions: u64,
     pub(super) end: Option<End>,
+    /// A Mach port guard violation its way back to user space takes
+    /// (`thread_guard_violation`'s AST).
+    pub(super) guard: Option<mach::raise::Guard>,
     /// Its suspension and published state, which `thread_abort` and
     /// `thread_terminate` reach.
     control: Option<Arc<control::Control>>,
@@ -383,6 +386,7 @@ impl Kernel {
             shared_resource_heavy: false,
             jit_permissions: jit::WRITE_DISABLED,
             end: None,
+            guard: None,
         }
     }
 

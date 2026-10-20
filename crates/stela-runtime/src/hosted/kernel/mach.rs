@@ -332,6 +332,9 @@ pub(super) fn trap(kernel: &mut Kernel, pe: &mut Pe, index: u32) -> Result<()> {
         }
     };
     Trap { cpu: &mut pe.cpu }.set_x(0, result);
+    if let Some(guard) = kernel.guard.take() {
+        raise::fatal_guard(kernel, pe, guard)?;
+    }
     Ok(())
 }
 

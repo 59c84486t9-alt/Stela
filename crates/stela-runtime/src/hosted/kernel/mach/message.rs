@@ -22,6 +22,17 @@
 //! knote ([`received_event`]), move to guest pages of their own, as the
 //! arm64 kernel places them, and a region a send deallocates goes with
 //! the rest of its guest pages ([`forward_send`]).
+//!
+//! A `mach_msg2_trap` send declares its destination's kind, which the
+//! kernel checks (`ipc_preflight_msg_option64`,
+//! `ipc_validate_kmsg_dest_from_user`): a violation fails the send with
+//! `MACH_SEND_INVALID_OPTIONS` and raises the fatal EXC_GUARD
+//! `kGUARD_EXC_INVALID_OPTIONS` ([`super::raise::fatal_guard`]). The hosted
+//! kernel checks a send to its kernel objects; the host kernel checks a
+//! forwarded one against its own port, with the host task's IPC space
+//! policy and SDK for a send-only kernel-object call, and its guard ends
+//! the run (known limit).
+use super::raise::Guard;
 use super::server::{self, NDR_RECORD, Object, Reply, Request};
 use super::{Kernel, forward_trap, index_of};
 use crate::hosted::darwin::{
@@ -50,6 +61,51 @@ const MACH_SEND_INVALID_OPTIONS: u32 = 0x1000_0013;
 const MESSAGE_VECTOR: u64 = 1 << 32;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 const MACH_MSG_TYPE_MOVE_SEND: u32 = 17;
+/// The destination kinds a `mach_msg2` send declares
+/// (`MACH64_MSG_OPTION_CFI_MASK`): `MACH64_SEND_KOBJECT_CALL`,
+/// `_MQ_CALL`, `_ANY` and `_DK_CALL`.
+const KOBJECT_CALL: u64 = 1 << 33;
+const MQ_CALL: u64 = 1 << 34;
+const SEND_ANY: u64 = 1 << 35;
+const DK_CALL: u64 = 1 << 36;
+const CFI_MASK: u64 = KOBJECT_CALL | MQ_CALL | SEND_ANY | DK_CALL;
+/// `MACH_SEND_USER` and `MACH_RCV_USER`.
+const SEND_USER: u64 = 0x1
+    | 0x10
+    | 0x20
+    | 0x80
+    | 0x200
+    | 0x1000
+    | 0x1_0000
+    | 0x2_0000
+    | 0x4_0000
+    | 0x10_0000
+    | 0x20_0000
+    | 0x80_0000;
+const RECEIVE_USER: u64 =
+    0x2 | 0x4 | 0x8 | 0x100 | 0x200 | 0x800 | 0x1000 | 0x4000 | 0x8000 | 0x0f00_0000;
+/// `MACH64_MSG_OPTION_USER`.
+const USER_OPTIONS: u64 = SEND_USER | RECEIVE_USER | MESSAGE_VECTOR | CFI_MASK;
+/// `MACH64_SEND_FILTER_NONFATAL`, which the kernel restates as
+/// `MACH64_POLICY_FILTER_NON_FATAL`.
+const SEND_FILTER_NONFATAL: u64 = 0x1_0000;
+const POLICY_FILTER_NON_FATAL: u64 = 1 << 38;
+/// `MACH64_POLICY_SHIFT`, `MACH64_POLICY_ENHANCED` and `MACH64_MACH_MSG2`.
+const POLICY_SHIFT: u32 = 40;
+const POLICY_ENHANCED: u64 = 1 << 41;
+const MACH_MSG2: u64 = 1 << 63;
+/// Mach-O load commands that give the executable's platform and SDK.
+const LC_VERSION_MIN_MACOSX: u32 = 0x24;
+const LC_VERSION_MIN_IPHONEOS: u32 = 0x25;
+const LC_VERSION_MIN_TVOS: u32 = 0x2f;
+const LC_VERSION_MIN_WATCHOS: u32 = 0x30;
+const LC_BUILD_VERSION: u32 = 0x32;
+/// `PLATFORM_*`.
+const PLATFORM_MACOS: u32 = 1;
+const PLATFORM_IOS: u32 = 2;
+const PLATFORM_TVOS: u32 = 3;
+const PLATFORM_WATCHOS: u32 = 4;
+const PLATFORM_MACCATALYST: u32 = 6;
 
 /// Subsystems whose requests act only on IPC state, which this task shares
 /// with the host task, and are forwarded.
@@ -74,6 +130,14 @@ pub(super) fn send(
     arguments: &[u64],
     pc: u64,
 ) -> Result<u64> {
+    let options = checked_options(name, arguments[1], || {
+        lock(&kernel.process.executable).ipc_space_policy
+    });
+    if let Some(options) = options
+        && !preflight(options)
+    {
+        return Ok(invalid_options(kernel, options));
+    }
     if let Some((port, id)) = destination(name, arguments)
         && let Some(object) = kernel_object(kernel, port, id)
     {
@@ -81,6 +145,13 @@ pub(super) fn send(
         // the host thread library's alone: the guest holds no right.
         if object == Object::Thread && super::thread::guest_references(port) == 0 {
             return Ok(u64::from(MACH_SEND_INVALID_DEST));
+        }
+        if let Some(options) = options
+            && !kobject_call(options, (arguments[3] >> 32) as u32, || {
+                send_only_kobject_calls(lock(&kernel.process.executable).header)
+            })
+        {
+            return Ok(invalid_options(kernel, options));
         }
         let routine = match (mig::subsystem(id), mig::routine(id)) {
             (Some(subsystem), _) if IPC_ONLY.contains(&subsystem.name) => {
@@ -588,6 +659,119 @@ fn place_received(name: &str, message: u64) -> Result<()> {
     Ok(())
 }
 
+/// The kernel's options of a call the destination-kind checks apply to:
+/// `mach_msg2_trap`'s, not the legacy traps' (`mach_msg_overwrite_trap`
+/// takes any destination).
+fn checked_options(name: &str, user: u64, policy: impl FnOnce() -> u32) -> Option<u64> {
+    (name == "mach_msg2_trap").then(|| kernel_options(user, policy()))
+}
+
+/// `ipc_current_msg_options` of a `mach_msg2_trap` call's `user` options:
+/// the user options, a nonfatal filter rejection restated, the task's IPC
+/// space `policy`, and `MACH64_MACH_MSG2`. (A task the message filter
+/// applies to, `TFRO_FILTER_MSG`, would add `MACH64_POLICY_FILTER_MSG`;
+/// the hosted kernel applies no filter.)
+fn kernel_options(user: u64, policy: u32) -> u64 {
+    let mut options = user & USER_OPTIONS;
+    if options & SEND_FILTER_NONFATAL != 0 {
+        options = options & !SEND_FILTER_NONFATAL | POLICY_FILTER_NON_FATAL;
+    }
+    options | u64::from(policy) << POLICY_SHIFT | MACH_MSG2
+}
+
+/// `ipc_preflight_msg_option64` of a `mach_msg2` call: a send declares
+/// exactly one destination kind (macOS keeps `MACH64_SEND_ANY` among
+/// them), and only a message queue's (or any) takes data vectors.
+fn preflight(options: u64) -> bool {
+    if options & SEND == 0 {
+        return true;
+    }
+    let kinds = options & CFI_MASK;
+    kinds.count_ones() == 1
+        && (options & MESSAGE_VECTOR == 0 || options & (MQ_CALL | SEND_ANY) != 0)
+}
+
+/// `ipc_validate_kmsg_dest_from_user` for a `mach_msg2` send to one of
+/// the kernel objects the hosted kernel serves, none a DriverKit object
+/// or a timer: the send declares a kernel-object call (or any
+/// destination), and receives the reply in the same call unless the
+/// space's policy is not enhanced, the request names no reply port and
+/// the executable's SDK still allows a send-only call
+/// (`ipc_policy_allow_send_only_kobject_calls`).
+fn kobject_call(options: u64, reply_port: u32, send_only_allowed: impl FnOnce() -> bool) -> bool {
+    if options & SEND_ANY != 0 {
+        return true;
+    }
+    if options & KOBJECT_CALL == 0 {
+        return false;
+    }
+    let names_reply_port = reply_port != 0 && reply_port != u32::MAX;
+    options & RECEIVE != 0
+        || (options & POLICY_ENHANCED == 0 && !names_reply_port && send_only_allowed())
+}
+
+/// `ipc_policy_allow_send_only_kobject_calls` for the executable whose
+/// Mach header is at `header`: its platform and SDK
+/// (`proc_setplatformdata` from its `LC_BUILD_VERSION` or
+/// `LC_VERSION_MIN_*` command) predate the requirement. An unreadable
+/// header, or one with neither command, has platform and SDK 0.
+fn send_only_kobject_calls(header: u64) -> bool {
+    let (platform, sdk) = platform_and_sdk(header).unwrap_or((0, 0));
+    let last_allowed = match platform {
+        PLATFORM_IOS | PLATFORM_MACCATALYST | PLATFORM_TVOS => 17,
+        PLATFORM_MACOS => 14,
+        PLATFORM_WATCHOS => 10,
+        _ => return false,
+    };
+    sdk != 0 && sdk >> 16 <= last_allowed
+}
+
+/// The platform and SDK version of the Mach-O image at `header`, from
+/// its first version command, as `load_machfile` reads them.
+fn platform_and_sdk(header: u64) -> Option<(u32, u32)> {
+    const MH_MAGIC_64: u32 = 0xfeed_facf;
+    if memory::read_u32(header)? != MH_MAGIC_64 {
+        return None;
+    }
+    let count = memory::read_u32(header + 16)?;
+    let mut command = header + 32;
+    for _ in 0..count {
+        let kind = memory::read_u32(command)?;
+        let size = memory::read_u32(command + 4)?;
+        match kind {
+            LC_BUILD_VERSION => {
+                return Some((
+                    memory::read_u32(command + 8)?,
+                    memory::read_u32(command + 16)?,
+                ));
+            }
+            LC_VERSION_MIN_MACOSX => {
+                return Some((PLATFORM_MACOS, memory::read_u32(command + 12)?));
+            }
+            LC_VERSION_MIN_IPHONEOS => {
+                return Some((PLATFORM_IOS, memory::read_u32(command + 12)?));
+            }
+            LC_VERSION_MIN_TVOS => return Some((PLATFORM_TVOS, memory::read_u32(command + 12)?)),
+            LC_VERSION_MIN_WATCHOS => {
+                return Some((PLATFORM_WATCHOS, memory::read_u32(command + 12)?));
+            }
+            _ => {}
+        }
+        if size < 8 {
+            return None;
+        }
+        command += u64::from(size);
+    }
+    Some((0, 0))
+}
+
+/// A send's options violation (`mach_port_guard_exception`): the send
+/// fails, and the guard is raised on the way back to user space.
+fn invalid_options(kernel: &mut Kernel, options: u64) -> u64 {
+    kernel.guard = Some(Guard::invalid_options(options));
+    u64::from(MACH_SEND_INVALID_OPTIONS)
+}
+
 /// Copy in a request's moved destination right (`ipc_right_copyin`): a
 /// guest thread's (`thread_act_consume_ref_t`), whose pinned last
 /// reference cannot move (`KERN_INVALID_CAPABILITY`, so
@@ -1067,6 +1251,115 @@ mod tests {
             .iter()
             .map(|(start, end)| end - start)
             .sum()
+    }
+
+    #[test]
+    fn mach_msg2_sends_to_kernel_objects_declare_kernel_object_calls() {
+        // IPC_SPACE_POLICY_DEFAULT, and with IPC_SPACE_POLICY_ENHANCED and
+        // _ENHANCED_V0 (a hardened runtime's).
+        let third_party = || 0x0001;
+        let hardened = || 0x0103;
+        let check = |user: u64, policy: &dyn Fn() -> u32, reply: u32, sdk_allows: bool| {
+            let options = checked_options("mach_msg2_trap", user, policy).unwrap();
+            preflight(options) && kobject_call(options, reply, || sdk_allows)
+        };
+        let call = SEND | RECEIVE;
+        // A MIG stub's combined call.
+        assert!(check(call | KOBJECT_CALL, &third_party, 0x1103, false));
+        // `mach_msg`'s message-queue call, no kind, or two kinds.
+        assert!(!check(call | MQ_CALL, &third_party, 0x1103, true));
+        assert!(!check(call, &third_party, 0x1103, true));
+        assert!(!check(
+            call | KOBJECT_CALL | MQ_CALL,
+            &third_party,
+            0x1103,
+            true
+        ));
+        assert!(!check(call | DK_CALL, &third_party, 0x1103, true));
+        // Data vectors go only to a message queue.
+        assert!(!check(
+            call | KOBJECT_CALL | MESSAGE_VECTOR,
+            &third_party,
+            0,
+            true
+        ));
+        // A send-only call: only an old SDK's, with no reply port, in a
+        // space whose policy is not enhanced.
+        assert!(check(SEND | KOBJECT_CALL, &third_party, 0, true));
+        assert!(!check(SEND | KOBJECT_CALL, &third_party, 0, false));
+        assert!(!check(SEND | KOBJECT_CALL, &third_party, 0x1103, true));
+        assert!(!check(SEND | KOBJECT_CALL, &hardened, 0, true));
+        assert!(check(SEND | KOBJECT_CALL, &third_party, u32::MAX, true));
+        // A receive alone declares nothing.
+        assert!(preflight(kernel_options(RECEIVE, 1)));
+    }
+
+    #[test]
+    fn sends_that_do_not_declare_a_kind_keep_serving() {
+        // Any destination, which the kernel's checks pass on macOS.
+        let options = checked_options("mach_msg2_trap", SEND | SEND_ANY, || 1).unwrap();
+        assert!(preflight(options));
+        assert!(kobject_call(options, 0x1103, || false));
+        let vector = checked_options("mach_msg2_trap", SEND | SEND_ANY | MESSAGE_VECTOR, || 1);
+        assert!(preflight(vector.unwrap()));
+        // The legacy traps take any destination.
+        assert_eq!(checked_options("mach_msg_trap", SEND | RECEIVE, || 1), None);
+        assert_eq!(checked_options("mach_msg_overwrite_trap", SEND, || 1), None);
+    }
+
+    #[test]
+    fn kernel_options_are_the_users_with_the_spaces_policy() {
+        // A kernel-only option is cleared, a nonfatal filter rejection is
+        // restated, and the policy and MACH64_MACH_MSG2 are added.
+        let user = SEND | RECEIVE | KOBJECT_CALL | SEND_FILTER_NONFATAL | 1 << 39 | 1 << 40;
+        assert_eq!(
+            kernel_options(user, 0x0203),
+            SEND | RECEIVE | KOBJECT_CALL | POLICY_FILTER_NON_FATAL | 0x0203 << 40 | MACH_MSG2
+        );
+    }
+
+    #[test]
+    fn send_only_kernel_object_calls_follow_the_executables_sdk() {
+        let image = |commands: &[(u32, &[u32])]| {
+            let mut words = vec![
+                0xfeed_facf,
+                0x0100_000c,
+                0,
+                2,
+                commands.len() as u32,
+                0,
+                0,
+                0,
+            ];
+            words.push(0x19);
+            words.push(72);
+            words.extend([0; 16]);
+            words[4] += 1;
+            for (kind, body) in commands {
+                words.push(*kind);
+                words.push(8 + 4 * body.len() as u32);
+                words.extend(*body);
+            }
+            words
+                .iter()
+                .flat_map(|word| word.to_le_bytes())
+                .collect::<Vec<u8>>()
+        };
+        let allowed = |bytes: &Vec<u8>| send_only_kobject_calls(bytes.as_ptr() as u64);
+        let build = |platform: u32, sdk: u32| image(&[(LC_BUILD_VERSION, &[platform, 0, sdk, 0])]);
+        assert!(!allowed(&build(PLATFORM_MACOS, 26 << 16)));
+        assert!(allowed(&build(PLATFORM_MACOS, 14 << 16 | 5 << 8)));
+        assert!(!allowed(&build(PLATFORM_MACOS, 0)));
+        assert!(allowed(&build(PLATFORM_IOS, 17 << 16)));
+        assert!(!allowed(&build(PLATFORM_IOS, 18 << 16)));
+        assert!(!allowed(&build(7, 13 << 16)));
+        let legacy = image(&[(
+            LC_VERSION_MIN_MACOSX,
+            &[10 << 16 | 9 << 8, 10 << 16 | 15 << 8],
+        )]);
+        assert!(allowed(&legacy));
+        assert!(!allowed(&image(&[])));
+        assert!(!send_only_kobject_calls(0));
     }
 
     #[test]
