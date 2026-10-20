@@ -130,12 +130,15 @@ impl Experiment {
         signer: Option<stela_runtime::restore::tss::Signer>,
     ) -> Result<Self, String> {
         let manifest = inventory(handoff)?;
-        let identity = match (identity, mode) {
-            (Some(identity), _) => identity,
-            (None, Mode::Update) => manifest
-                .restore_identity(Purpose::Update)
+        let purpose = match mode {
+            Mode::Update => Purpose::Update,
+            Mode::Install | Mode::Study => Purpose::Erase,
+        };
+        let identity = match identity {
+            Some(identity) => identity,
+            None => manifest
+                .restore_identity(purpose)
                 .map_err(|e| format!("{e}"))? as usize,
-            (None, _) => manifest.erase_identity().map_err(|e| format!("{e}"))? as usize,
         };
         let recorded = manifest.block_hashes.is_some();
         if verify == Verify::OnRead && !recorded {

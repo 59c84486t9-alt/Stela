@@ -477,31 +477,26 @@ impl PayloadManifest {
         Ok(())
     }
 
-    /// The BuildManifest index of the one Erase identity, which a full
-    /// restore uses.
-    pub fn erase_identity(&self) -> Result<u32, PayloadError> {
-        self.restore_identity(Purpose::Erase)
-    }
-
     /// The BuildManifest index of the one identity of `purpose`: Erase for
     /// a full restore, Update for one that keeps the installed system's
     /// data.
     pub fn restore_identity(&self, purpose: Purpose) -> Result<u32, PayloadError> {
+        let expected = match purpose {
+            Purpose::Erase => "expected exactly one Erase identity",
+            Purpose::Update => "expected exactly one Update identity",
+            Purpose::Installed => {
+                return Err(PayloadError::Manifest(
+                    "an installed-system identity is no restore",
+                ));
+            }
+        };
         let mut found = self
             .identities
             .iter()
             .filter(|identity| identity.purpose == purpose);
-        match (found.next(), found.next(), purpose) {
-            (Some(identity), None, _) => Ok(identity.index),
-            (_, _, Purpose::Erase) => Err(PayloadError::Manifest(
-                "expected exactly one Erase identity",
-            )),
-            (_, _, Purpose::Update) => Err(PayloadError::Manifest(
-                "expected exactly one Update identity",
-            )),
-            (_, _, Purpose::Installed) => Err(PayloadError::Manifest(
-                "an installed-system identity is no restore",
-            )),
+        match (found.next(), found.next()) {
+            (Some(identity), None) => Ok(identity.index),
+            _ => Err(PayloadError::Manifest(expected)),
         }
     }
 
@@ -787,10 +782,14 @@ pub(crate) mod tests {
         assert_eq!(piece_name(7), "ipsw.007");
         assert_eq!(install_directory("26A434"), "EFI/stela/install/26A434");
         assert_eq!(manifest.piece_hash_blocks(), 5);
-        assert_eq!(manifest.erase_identity().unwrap(), 20);
+        assert_eq!(manifest.restore_identity(Purpose::Erase).unwrap(), 20);
         assert_eq!(manifest.restore_identity(Purpose::Update).unwrap(), 80);
+        // Even a manifest's one installed-system identity is no restore.
+        let mut installed = manifest.clone();
+        installed.identities[1].purpose = Purpose::Installed;
+        assert!(installed.restore_identity(Purpose::Installed).is_err());
         manifest.identities[1].purpose = Purpose::Erase;
-        assert!(manifest.erase_identity().is_err());
+        assert!(manifest.restore_identity(Purpose::Erase).is_err());
         assert!(manifest.restore_identity(Purpose::Update).is_err());
     }
 

@@ -27,7 +27,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use stela_runtime::{
-    payload::{PayloadManifest, ReadAt},
+    payload::{PayloadManifest, Purpose, ReadAt},
     restore::{
         Error,
         answers::Answers,
@@ -550,7 +550,9 @@ impl RestoreDryRun {
         .map_err(|e| anyhow!("{e}"))?;
         let index = match self.identity {
             Some(i) => i,
-            None => inventory.erase_identity().map_err(|e| anyhow!("{e}"))? as usize,
+            None => inventory
+                .restore_identity(Purpose::Erase)
+                .map_err(|e| anyhow!("{e}"))? as usize,
         };
         let route = match self.mode {
             Mode::Install => Route::Stock,
