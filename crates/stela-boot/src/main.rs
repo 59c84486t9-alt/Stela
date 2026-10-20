@@ -179,7 +179,8 @@ fn main() -> Status {
     firmware::connect_all();
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
-    let options = choice::choose(&mut volume, options);
+    let held = system::held_at_start(&options);
+    let options = choice::choose(&mut volume, options, held);
     if options.starts_with(b"--system") {
         system::boot(options, volume);
     }

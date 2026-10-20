@@ -326,6 +326,26 @@ fn map_devices(
     Ok(())
 }
 
+/// What the menu says when the machine can only be restored.
+fn held(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::BlankDisk => "The internal SSD is blank. Install macOS to use it.",
+        _ => "The last install did not finish. Install macOS again.",
+    }
+}
+
+/// Why the default boot, `options`, can only wait for a restore, checked
+/// before the startup menu opens so that the menu starts there.
+pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
+    if !options.starts_with(b"--system") {
+        return None;
+    }
+    match crate::selection::route(options.to_vec()) {
+        Err(refusal @ (Refusal::BlankDisk | Refusal::RecoveryMode)) => Some(held(refusal)),
+        _ => None,
+    }
+}
+
 /// Run the engine; never returns.
 pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
     // NVRAM chooses macOS or recoveryOS before any input is read. A machine
@@ -335,18 +355,8 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
         match crate::selection::route(options) {
             Ok(routed) => break routed,
             Err(Refusal::Other(error)) => output::fatal(error),
-            Err(refusal @ (Refusal::RecoveryMode | Refusal::BlankDisk)) => {
-                let reason = match refusal {
-                    Refusal::BlankDisk => {
-                        "This Mac's internal SSD is blank. Choose Install macOS (Stela) to \
-                         restore it."
-                    }
-                    _ => {
-                        "This Mac is in recovery mode: its last restore did not finish. Choose \
-                         Install macOS (Stela) to restore it again."
-                    }
-                };
-                options = crate::choice::hold(&mut volume, reason).unwrap_or_else(|| {
+            Err(refusal) => {
+                options = crate::choice::hold(&mut volume, held(refusal)).unwrap_or_else(|| {
                     output::fatal(
                         "the machine can only be restored and this volume has no startup \
                          choices to restore it from",
