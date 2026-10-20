@@ -4,13 +4,16 @@
 //! Boot keyboards (subclass 1, protocol 1) run the boot protocol: each
 //! report's modifier bits and six-key array, compared with the previous
 //! report, become key presses and releases (Appendix B.1); a report of
-//! ErrorRollOver changes nothing. Boot mice (subclass 1, protocol 2) run
-//! the boot protocol too (Appendix B.2): buttons, and relative motion that
-//! moves a pointer position kept here, since the native pointer is
-//! absolute. Other HID interfaces run the report protocol, read through
-//! their report descriptor (6.2.2): a pointer is a report with Generic
-//! Desktop X and Y, absolute (tablets, as QEMU's `usb-tablet`) or
-//! relative, with Button 1-3 and the wheel when present. Report-protocol
+//! ErrorRollOver changes nothing. Other HID interfaces run the report
+//! protocol, read through their report descriptor (6.2.2): a pointer is a
+//! report with Generic Desktop X and Y, with Button 1-3 and the wheel when
+//! present. Absolute axes (tablets, as QEMU's `usb-tablet`) drive the
+//! native absolute pointer; relative ones (mice) drive the native mouse
+//! with their own counts, so macOS applies its pointer acceleration. A boot
+//! mouse (subclass 1, protocol 2) is set to the report protocol so that its
+//! wheel reaches the guest; one whose report descriptor this driver cannot
+//! read runs the boot protocol (Appendix B.2: buttons, X and Y). A pointer
+//! with one absolute and one relative axis is refused. Report-protocol
 //! keyboards and other HID devices are refused: no driver here reads their
 //! reports. Long items, Push and Pop are refused in report descriptors.
 use super::{
@@ -18,7 +21,7 @@ use super::{
         block::BlockError,
         dma::{DmaAllocator, DmaBuffer},
     },
-    Device, Endpoint, Interface, Plan, STALL, Shared, setup,
+    Controller, Device, Endpoint, Interface, Plan, STALL, Shared, setup,
 };
 use crate::platform::usb::hid::{Input, POINTER_MAX};
 use alloc::{format, string::String, vec::Vec};
@@ -33,8 +36,8 @@ const HID_DESCRIPTOR: u8 = 0x21;
 const REPORT_DESCRIPTOR: u8 = 0x22;
 const REPORT_BYTES: usize = 64;
 const ERROR_ROLLOVER: u8 = 1;
-/// Pointer units per boot-mouse count: about 1/2000 of the range.
-const MOTION_SCALE: i32 = 16;
+const BOOT_PROTOCOL: u16 = 0;
+const REPORT_PROTOCOL: u16 = 1;
 
 pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
     let endpoint = interface
@@ -237,6 +240,50 @@ enum Kind {
     Pointer(Layout),
 }
 
+/// The boot mouse report (Appendix B.2): buttons, then X and Y.
+fn boot_mouse() -> Layout {
+    let field = |offset, size, minimum: i32, relative| {
+        Some(Field {
+            offset,
+            size,
+            minimum,
+            maximum: if minimum < 0 { 127 } else { 1 },
+            relative,
+        })
+    };
+    Layout {
+        report: None,
+        x: field(8, 8, -127, true),
+        y: field(16, 8, -127, true),
+        wheel: None,
+        buttons: [
+            field(0, 1, 0, false),
+            field(1, 1, 0, false),
+            field(2, 1, 0, false),
+        ],
+    }
+}
+
+/// The pointer layout of `interface`'s report descriptor.
+fn report_layout(
+    c: &mut Controller,
+    device: &Device,
+    interface: &Interface,
+) -> Result<Layout, BlockError> {
+    let length = interface
+        .extra
+        .iter()
+        .find(|d| d.len() >= 9 && d[1] == HID_DESCRIPTOR && d[6] == REPORT_DESCRIPTOR)
+        .map(|d| u16::from_le_bytes([d[7], d[8]]))
+        .ok_or(BlockError::Unsupported(
+            "HID interface without a report descriptor",
+        ))?;
+    let index = u16::from(interface.number);
+    let request = setup(0x81, 6, u16::from(REPORT_DESCRIPTOR) << 8, index, length);
+    let descriptor = c.control(device.slot, request, &[])?;
+    pointer_layout(&descriptor).map_err(BlockError::Unsupported)
+}
+
 /// One HID interface the host polls.
 pub struct UsbInput {
     controller: Shared,
@@ -246,8 +293,9 @@ pub struct UsbInput {
     /// The queued TD, if one is out.
     queued: Option<u64>,
     kind: Kind,
-    position: (i32, i32),
     buttons: u8,
+    /// The absolute pointer's last position.
+    position: Option<(u16, u16)>,
     /// The first transfer failure, reported once.
     failed: bool,
     pub name: String,
@@ -264,56 +312,39 @@ impl UsbInput {
         let index = u16::from(interface.number);
         let kind = {
             let mut c = controller.borrow_mut();
+            let protocol = |c: &mut Controller, protocol: u16| -> Result<(), BlockError> {
+                let request = setup(0x21, SET_PROTOCOL, protocol, index, 0);
+                c.control(device.slot, request, &[])?;
+                // Reports on change only; a device may refuse.
+                let _ = c.control(device.slot, setup(0x21, SET_IDLE, 0, index, 0), &[]);
+                Ok(())
+            };
             match (interface.subclass, interface.protocol) {
-                (BOOT, KEYBOARD | MOUSE) => {
-                    c.control(device.slot, setup(0x21, SET_PROTOCOL, 0, index, 0), &[])?;
-                    // Reports on change only; a device may refuse.
-                    let _ = c.control(device.slot, setup(0x21, SET_IDLE, 0, index, 0), &[]);
-                    if interface.protocol == KEYBOARD {
-                        Kind::Keyboard { previous: [0; 8] }
-                    } else {
-                        let field = |offset, size, minimum: i32, relative| {
-                            Some(Field {
-                                offset,
-                                size,
-                                minimum,
-                                maximum: if minimum < 0 { 127 } else { 1 },
-                                relative,
-                            })
-                        };
-                        Kind::Pointer(Layout {
-                            report: None,
-                            x: field(8, 8, -127, true),
-                            y: field(16, 8, -127, true),
-                            wheel: None,
-                            buttons: [
-                                field(0, 1, 0, false),
-                                field(1, 1, 0, false),
-                                field(2, 1, 0, false),
-                            ],
-                        })
+                (BOOT, KEYBOARD) => {
+                    protocol(&mut c, BOOT_PROTOCOL)?;
+                    Kind::Keyboard { previous: [0; 8] }
+                }
+                (BOOT, MOUSE) => match report_layout(&mut c, device, interface) {
+                    Ok(layout) => {
+                        protocol(&mut c, REPORT_PROTOCOL)?;
+                        Kind::Pointer(layout)
                     }
-                }
-                _ => {
-                    let length = interface
-                        .extra
-                        .iter()
-                        .find(|d| {
-                            d.len() >= 9 && d[1] == HID_DESCRIPTOR && d[6] == REPORT_DESCRIPTOR
-                        })
-                        .map(|d| u16::from_le_bytes([d[7], d[8]]))
-                        .ok_or(BlockError::Unsupported(
-                            "HID interface without a report descriptor",
-                        ))?;
-                    let request = setup(0x81, 6, u16::from(REPORT_DESCRIPTOR) << 8, index, length);
-                    let descriptor = c.control(device.slot, request, &[])?;
-                    let layout = pointer_layout(&descriptor).map_err(BlockError::Unsupported)?;
-                    Kind::Pointer(layout)
-                }
+                    Err(_) => {
+                        protocol(&mut c, BOOT_PROTOCOL)?;
+                        Kind::Pointer(boot_mouse())
+                    }
+                },
+                _ => Kind::Pointer(report_layout(&mut c, device, interface)?),
             }
         };
+        if let Kind::Pointer(layout) = &kind
+            && layout.x.map(|f| f.relative) != layout.y.map(|f| f.relative)
+        {
+            return Err(BlockError::Unsupported(
+                "HID pointer with one absolute and one relative axis",
+            ));
+        }
         let buffer = dma.allocate(REPORT_BYTES, REPORT_BYTES)?;
-        let center = i32::from(POINTER_MAX / 2);
         Ok(Self {
             controller,
             slot: device.slot,
@@ -321,8 +352,8 @@ impl UsbInput {
             buffer,
             queued: None,
             kind,
-            position: (center, center),
             buttons: 0,
+            position: None,
             failed: false,
             name: format!("{} ({})", device.name(), device.location),
         })
@@ -439,47 +470,61 @@ impl UsbInput {
                     },
                     None => report,
                 };
-                let axis = |field: Option<Field>, position: i32| -> Option<i32> {
-                    let field = field?;
-                    let value = field.read(body)?;
-                    let max = i32::from(POINTER_MAX);
-                    Some(if field.relative {
-                        (position + value * MOTION_SCALE).clamp(0, max)
-                    } else {
+                let mouse = layout.x.is_some_and(|f| f.relative);
+                let value = |field: Option<Field>| field.and_then(|f| f.read(body));
+                if mouse {
+                    let counts = |v: i32| v.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+                    let (dx, dy) = (value(layout.x), value(layout.y));
+                    if let (Some(dx), Some(dy)) = (dx, dy)
+                        && (dx, dy) != (0, 0)
+                    {
+                        inputs.push(Input::Motion {
+                            dx: counts(dx),
+                            dy: counts(dy),
+                        });
+                    }
+                } else {
+                    let axis = |field: Option<Field>| -> Option<u16> {
+                        let field = field?;
+                        let value = field.read(body)?;
+                        let max = i64::from(POINTER_MAX);
                         let span = i64::from(field.maximum) - i64::from(field.minimum);
                         if span <= 0 {
                             return None;
                         }
-                        let scaled =
-                            (i64::from(value) - i64::from(field.minimum)) * i64::from(max) / span;
-                        scaled.clamp(0, i64::from(max)) as i32
-                    })
-                };
-                let x = axis(layout.x, self.position.0);
-                let y = axis(layout.y, self.position.1);
-                if let (Some(x), Some(y)) = (x, y)
-                    && (x, y) != self.position
-                {
-                    self.position = (x, y);
-                    inputs.push(Input::Move {
-                        x: x as u16,
-                        y: y as u16,
-                    });
+                        let scaled = (i64::from(value) - i64::from(field.minimum)) * max / span;
+                        Some(scaled.clamp(0, max) as u16)
+                    };
+                    if let (Some(x), Some(y)) = (axis(layout.x), axis(layout.y))
+                        && Some((x, y)) != self.position
+                    {
+                        self.position = Some((x, y));
+                        inputs.push(Input::Move { x, y });
+                    }
                 }
                 let mut buttons = 0;
                 for (n, field) in layout.buttons.iter().enumerate() {
-                    if field.and_then(|f| f.read(body)).is_some_and(|v| v != 0) {
+                    if value(*field).is_some_and(|v| v != 0) {
                         buttons |= 1 << n;
                     }
                 }
                 if buttons != self.buttons {
                     self.buttons = buttons;
-                    inputs.push(Input::Buttons(buttons));
+                    inputs.push(if mouse {
+                        Input::MouseButtons(buttons)
+                    } else {
+                        Input::Buttons(buttons)
+                    });
                 }
-                if let Some(wheel) = layout.wheel.and_then(|f| f.read(body))
+                if let Some(wheel) = value(layout.wheel)
                     && wheel != 0
                 {
-                    inputs.push(Input::Wheel(wheel.clamp(-127, 127) as i8));
+                    let detents = wheel.clamp(-127, 127) as i8;
+                    inputs.push(if mouse {
+                        Input::MouseWheel(detents)
+                    } else {
+                        Input::Wheel(detents)
+                    });
                 }
             }
         }
@@ -541,11 +586,13 @@ mod tests {
         let mut bench = bench(hub);
         let mut found = run(&mut bench);
         assert!(found.failures.is_empty(), "{:?}", found.failures);
-        assert_eq!(found.inputs.len(), 2);
+        assert_eq!(found.inputs.len(), 3);
         let mut keyboard = found.inputs.remove(0);
         let mut pointer = found.inputs.remove(0);
+        let mut mouse = found.inputs.remove(0);
         assert!(keyboard.poll().is_empty());
         assert!(pointer.poll().is_empty());
+        assert!(mouse.poll().is_empty());
         let feed = |input: Input| {
             bench
                 .model
@@ -612,6 +659,33 @@ mod tests {
                 pressed: false
             }]
         );
-        assert!(!keyboard.failed() && !pointer.failed());
+        // The native mouse runs the report protocol: its counts and wheel
+        // arrive as they were sent.
+        let feed = |input: Input| {
+            bench
+                .model
+                .borrow_mut()
+                .function
+                .ports
+                .0
+                .input(input)
+                .unwrap();
+        };
+        feed(Input::Motion { dx: -20, dy: 7 });
+        feed(Input::MouseButtons(4));
+        feed(Input::MouseWheel(-1));
+        let mut moved = Vec::new();
+        for _ in 0..50 {
+            moved.extend(mouse.poll());
+        }
+        assert_eq!(
+            moved,
+            [
+                Input::Motion { dx: -20, dy: 7 },
+                Input::MouseButtons(4),
+                Input::MouseWheel(-1),
+            ]
+        );
+        assert!(!keyboard.failed() && !pointer.failed() && !mouse.failed());
     }
 }

@@ -1,15 +1,24 @@
-//! A native full-speed USB keyboard and absolute pointer: one composite
-//! device with two HID 1.11 interfaces, as a host port's [`Function`].
+//! A native full-speed USB keyboard, absolute pointer and mouse: one
+//! composite device with three HID 1.11 interfaces, as a host port's
+//! [`Function`].
 //!
 //! Evidence: USB 2.0 chapter 9 (standard requests and device states) and
 //! Device Class Definition for HID 1.11 (class descriptors, requests,
-//! boot protocol, Appendix B.1 keyboard report). Interface 0 is a boot
-//! keyboard (subclass 1, protocol 1) whose report is the boot format in
-//! both protocols: modifiers, a reserved byte and a six-key array, with an
-//! output report of five LEDs. Interface 1 is a report-protocol pointer
-//! with three buttons, X and Y absolute over 0..=0x7fff and a relative
-//! wheel. Usage values are those of HID Usage Tables 1.4 (Keyboard/Keypad
-//! page 07h); host sources translate their own codes into them.
+//! boot protocol, Appendix B.1 keyboard and B.2 mouse reports). Interface
+//! 0 is a boot keyboard (subclass 1, protocol 1) whose report is the boot
+//! format in both protocols: modifiers, a reserved byte and a six-key
+//! array, with an output report of five LEDs. Interface 1 is a
+//! report-protocol pointer with three buttons, X and Y absolute over
+//! 0..=0x7fff and a relative wheel: host tablets, whose positions macOS
+//! takes as they are. Interface 2 is a boot mouse (subclass 1, protocol 2)
+//! with three buttons and relative X, Y and wheel over -127..=127: host
+//! mice, whose counts macOS accelerates as it does a Mac's own mouse. Its
+//! report protocol report is the boot report followed by the wheel byte;
+//! in the boot protocol it sends the three boot bytes. Motion beyond one
+//! report's range splits across reports, and queued motion of unchanged
+//! buttons coalesces. Usage values are those of HID Usage Tables 1.4
+//! (Keyboard/Keypad page 07h); host sources translate their own codes into
+//! them.
 //!
 //! The device identifies itself with the pid.codes open-source vendor ID
 //! 0x1209 and its test product ID 0x0001, as a self-powered device without
@@ -30,8 +39,18 @@ use alloc::{collections::VecDeque, vec::Vec};
 const EP0_PACKET: usize = 64;
 const KEYBOARD_ENDPOINT: u8 = 0x81;
 const POINTER_ENDPOINT: u8 = 0x82;
+const MOUSE_ENDPOINT: u8 = 0x83;
 const KEYBOARD_REPORT: usize = 8;
 const POINTER_REPORT: usize = 6;
+const MOUSE_REPORT: usize = 4;
+/// The boot mouse report: buttons, X and Y (HID 1.11 B.2).
+const BOOT_MOUSE_REPORT: usize = 3;
+const INTERFACES: usize = 3;
+const KEYBOARD: usize = 0;
+const POINTER: usize = 1;
+const MOUSE: usize = 2;
+/// One relative report's range per axis.
+const MOTION_MAX: i16 = 127;
 const QUEUE: usize = 64;
 /// Keys the boot report reports before it reports rollover.
 const ROLLOVER: usize = 6;
@@ -120,6 +139,18 @@ const POINTER_REPORT_DESCRIPTOR: [u8; 74] = [
     0xc0, 0xc0,
 ];
 
+/// The boot mouse report (HID 1.11 B.2) with a wheel byte after it.
+const MOUSE_REPORT_DESCRIPTOR: [u8; 52] = [
+    0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, // Generic Desktop, Mouse, Application
+    0x09, 0x01, 0xa1, 0x00, // Pointer, Physical
+    0x05, 0x09, 0x19, 0x01, 0x29, 0x03, // buttons 1..3
+    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, //
+    0x95, 0x01, 0x75, 0x05, 0x81, 0x01, // padding
+    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x09, 0x38, // X, Y, wheel
+    0x15, 0x81, 0x25, 0x7f, 0x75, 0x08, 0x95, 0x03, 0x81, 0x06, // relative
+    0xc0, 0xc0,
+];
+
 const fn hid_descriptor(report: usize) -> [u8; 9] {
     [
         9,
@@ -134,28 +165,33 @@ const fn hid_descriptor(report: usize) -> [u8; 9] {
     ]
 }
 
-const CONFIGURATION_BYTES: usize = 9 + 2 * (9 + 9 + 7);
+/// Each interface's interface, HID and endpoint descriptors.
+const INTERFACE_BYTES: usize = 9 + 9 + 7;
+const CONFIGURATION_BYTES: usize = 9 + INTERFACES * INTERFACE_BYTES;
 
 fn configuration_descriptor() -> [u8; CONFIGURATION_BYTES] {
     let mut bytes = [0; CONFIGURATION_BYTES];
-    let parts: [&[u8]; 7] = [
+    let parts: [&[u8]; 10] = [
         &[
             9,
             CONFIGURATION,
             CONFIGURATION_BYTES as u8,
             0,
-            2,    // interfaces
+            INTERFACES as u8,
             1,    // bConfigurationValue
             0,    // no string
             0xc0, // self-powered, no remote wakeup
             0,
         ],
-        &[9, 4, 0, 0, 1, 3, 1, 1, 0], // boot keyboard
+        &[9, 4, KEYBOARD as u8, 0, 1, 3, 1, 1, 0], // boot keyboard
         &hid_descriptor(KEYBOARD_REPORT_DESCRIPTOR.len()),
         &[7, 5, KEYBOARD_ENDPOINT, 3, KEYBOARD_REPORT as u8, 0, 1],
-        &[9, 4, 1, 0, 1, 3, 0, 0, 0], // report-protocol pointer
+        &[9, 4, POINTER as u8, 0, 1, 3, 0, 0, 0], // report-protocol pointer
         &hid_descriptor(POINTER_REPORT_DESCRIPTOR.len()),
         &[7, 5, POINTER_ENDPOINT, 3, POINTER_REPORT as u8, 0, 1],
+        &[9, 4, MOUSE as u8, 0, 1, 3, 1, 2, 0], // boot mouse
+        &hid_descriptor(MOUSE_REPORT_DESCRIPTOR.len()),
+        &[7, 5, MOUSE_ENDPOINT, 3, MOUSE_REPORT as u8, 0, 1],
     ];
     let mut at = 0;
     for part in parts {
@@ -172,17 +208,24 @@ fn string(text: &str) -> Vec<u8> {
     bytes
 }
 
-/// One host input change, in HID usages and the pointer's absolute range.
+/// One host input change, in HID usages, the pointer's absolute range and
+/// the mouse's counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Input {
     /// A Keyboard/Keypad page usage: 04h..DDh, or a modifier E0h..E7h.
     Key { usage: u8, pressed: bool },
     /// The pointer's position, each axis 0..=[`POINTER_MAX`].
     Move { x: u16, y: u16 },
-    /// Buttons 1..3 held, as bits 0..2.
+    /// The pointer's buttons 1..3 held, as bits 0..2.
     Buttons(u8),
-    /// Wheel detents, positive away from the user.
+    /// Pointer wheel detents, positive away from the user.
     Wheel(i8),
+    /// Mouse motion in counts, positive right and down.
+    Motion { dx: i16, dy: i16 },
+    /// The mouse's buttons 1..3 held, as bits 0..2.
+    MouseButtons(u8),
+    /// Mouse wheel detents, positive away from the user.
+    MouseWheel(i8),
 }
 
 #[derive(Clone)]
@@ -241,7 +284,7 @@ pub struct Peripheral {
     address: u8,
     configuration: u8,
     control: Control,
-    interfaces: [Interface; 2],
+    interfaces: [Interface; INTERFACES],
     /// The LEDs the host last set: Num, Caps, Scroll, Compose, Kana lock
     /// as bits 0..4.
     leds: u8,
@@ -251,6 +294,16 @@ pub struct Peripheral {
     buttons: u8,
     x: u16,
     y: u16,
+    mouse_buttons: u8,
+}
+
+/// Each interface's idle rate after configuration.
+fn interfaces() -> [Interface; INTERFACES] {
+    [
+        Interface::new(KEYBOARD_IDLE),
+        Interface::new(0),
+        Interface::new(0),
+    ]
 }
 
 impl Default for Peripheral {
@@ -265,7 +318,7 @@ impl Peripheral {
             address: 0,
             configuration: 0,
             control: Control::Idle,
-            interfaces: [Interface::new(KEYBOARD_IDLE), Interface::new(0)],
+            interfaces: interfaces(),
             leds: 0,
             now: 0,
             modifiers: 0,
@@ -273,6 +326,7 @@ impl Peripheral {
             buttons: 0,
             x: 0,
             y: 0,
+            mouse_buttons: 0,
         }
     }
 
@@ -305,7 +359,7 @@ impl Peripheral {
                     return Err("not a Keyboard/Keypad usage this keyboard reports");
                 }
                 let report = self.keyboard_report().to_vec();
-                self.queue(0, report);
+                self.queue(KEYBOARD, report);
             }
             Input::Move { x, y } => {
                 if x > POINTER_MAX || y > POINTER_MAX {
@@ -314,12 +368,12 @@ impl Peripheral {
                 (self.x, self.y) = (x, y);
                 // Motion coalesces into a queued report of the same buttons.
                 let report = self.pointer_report(0);
-                let queue = &mut self.interfaces[1].queue;
+                let queue = &mut self.interfaces[POINTER].queue;
                 match queue.back_mut() {
                     Some(last) if last[0] == report[0] && last[5] == 0 => {
                         last.copy_from_slice(&report)
                     }
-                    _ => self.queue(1, report.to_vec()),
+                    _ => self.queue(POINTER, report.to_vec()),
                 }
             }
             Input::Buttons(buttons) => {
@@ -328,17 +382,62 @@ impl Peripheral {
                 }
                 self.buttons = buttons;
                 let report = self.pointer_report(0).to_vec();
-                self.queue(1, report);
+                self.queue(POINTER, report);
             }
             Input::Wheel(detents) => {
                 if detents == i8::MIN {
                     return Err("wheel motion outside its logical range");
                 }
                 let report = self.pointer_report(detents).to_vec();
-                self.queue(1, report);
+                self.queue(POINTER, report);
+            }
+            Input::Motion { dx, dy } => self.motion(dx, dy),
+            Input::MouseButtons(buttons) => {
+                if buttons & !7 != 0 {
+                    return Err("the mouse has three buttons");
+                }
+                self.mouse_buttons = buttons;
+                let report = self.mouse_report(0, 0, 0).to_vec();
+                self.queue(MOUSE, report);
+            }
+            Input::MouseWheel(detents) => {
+                if detents == i8::MIN {
+                    return Err("wheel motion outside its logical range");
+                }
+                let report = self.mouse_report(0, 0, detents).to_vec();
+                self.queue(MOUSE, report);
             }
         }
         Ok(())
+    }
+
+    /// Queues mouse motion: first into a queued report of the same
+    /// buttons without wheel motion, as far as its range allows, then in
+    /// reports of at most [`MOTION_MAX`] counts per axis.
+    fn motion(&mut self, mut dx: i16, mut dy: i16) {
+        if self.configuration == 0 {
+            return;
+        }
+        let buttons = self.mouse_buttons;
+        let queue = &mut self.interfaces[MOUSE].queue;
+        if let Some(last) = queue.back_mut()
+            && last[0] == buttons
+            && last[3] == 0
+        {
+            for (byte, delta) in [(1, &mut dx), (2, &mut dy)] {
+                let held = i16::from(last[byte] as i8);
+                let merged = (held + *delta).clamp(-MOTION_MAX, MOTION_MAX);
+                *delta -= merged - held;
+                last[byte] = merged as i8 as u8;
+            }
+        }
+        while dx != 0 || dy != 0 {
+            let step_x = dx.clamp(-MOTION_MAX, MOTION_MAX);
+            let step_y = dy.clamp(-MOTION_MAX, MOTION_MAX);
+            (dx, dy) = (dx - step_x, dy - step_y);
+            let report = self.mouse_report(step_x as i8, step_y as i8, 0).to_vec();
+            self.interfaces[MOUSE].push(report);
+        }
     }
 
     fn queue(&mut self, interface: usize, report: Vec<u8>) {
@@ -364,19 +463,31 @@ impl Peripheral {
         [self.buttons, x0, x1, y0, y1, wheel as u8]
     }
 
+    fn mouse_report(&self, dx: i8, dy: i8, wheel: i8) -> [u8; MOUSE_REPORT] {
+        [self.mouse_buttons, dx as u8, dy as u8, wheel as u8]
+    }
+
+    /// The interface's report now: relative fields report no motion.
     fn current(&self, interface: usize) -> Vec<u8> {
         match interface {
-            0 => self.keyboard_report().to_vec(),
-            _ => self.pointer_report(0).to_vec(),
+            KEYBOARD => self.keyboard_report().to_vec(),
+            POINTER => self.pointer_report(0).to_vec(),
+            _ => self.mouse_report(0, 0, 0).to_vec(),
         }
     }
 
     fn interface_of(endpoint: u8) -> Option<usize> {
         match endpoint {
-            KEYBOARD_ENDPOINT => Some(0),
-            POINTER_ENDPOINT => Some(1),
+            KEYBOARD_ENDPOINT => Some(KEYBOARD),
+            POINTER_ENDPOINT => Some(POINTER),
+            MOUSE_ENDPOINT => Some(MOUSE),
             _ => None,
         }
+    }
+
+    /// The boot-subclass interfaces, which take GET/SET_PROTOCOL.
+    fn boot(interface: usize) -> bool {
+        matches!(interface, KEYBOARD | MOUSE)
     }
 
     fn idle_due(&self, interface: usize) -> Option<u64> {
@@ -396,7 +507,7 @@ impl Peripheral {
         let reply = |bytes: &[u8]| Ok(Outcome::Data(bytes.to_vec()));
         match (kind, request) {
             (0x80, GET_STATUS) => reply(&[1, 0]), // self-powered
-            (0x81, GET_STATUS) if configured && interface < 2 => reply(&[0, 0]),
+            (0x81, GET_STATUS) if configured && interface < INTERFACES => reply(&[0, 0]),
             (0x82, GET_STATUS) => match index as u8 {
                 0 | 0x80 => reply(&[0, 0]),
                 ep if configured => {
@@ -422,31 +533,38 @@ impl Peripheral {
                 (CONFIGURATION, 0) => reply(&configuration_descriptor()),
                 (STRING, 0) => reply(&[4, STRING, 0x09, 0x04]),
                 (STRING, 1) if index == ENGLISH => reply(&string("Stela")),
-                (STRING, 2) if index == ENGLISH => reply(&string("Stela Keyboard and Pointer")),
+                (STRING, 2) if index == ENGLISH => reply(&string("Stela Keyboard and Pointers")),
                 _ => Err(()),
             },
-            (0x81, GET_DESCRIPTOR) if interface < 2 => match ((value >> 8) as u8, value as u8) {
-                (HID, 0) => {
-                    let start = 9 + interface * 25 + 9;
-                    reply(&configuration_descriptor()[start..start + 9])
+            (0x81, GET_DESCRIPTOR) if interface < INTERFACES => {
+                match ((value >> 8) as u8, value as u8) {
+                    (HID, 0) => {
+                        let start = 9 + interface * INTERFACE_BYTES + 9;
+                        reply(&configuration_descriptor()[start..start + 9])
+                    }
+                    (REPORT, 0) => reply(match interface {
+                        KEYBOARD => &KEYBOARD_REPORT_DESCRIPTOR[..],
+                        POINTER => &POINTER_REPORT_DESCRIPTOR[..],
+                        _ => &MOUSE_REPORT_DESCRIPTOR[..],
+                    }),
+                    _ => Err(()),
                 }
-                (REPORT, 0) if interface == 0 => reply(&KEYBOARD_REPORT_DESCRIPTOR),
-                (REPORT, 0) => reply(&POINTER_REPORT_DESCRIPTOR),
-                _ => Err(()),
-            },
+            }
             (0x80, GET_CONFIGURATION) => reply(&[self.configuration]),
             (0x00, SET_CONFIGURATION) if value <= 1 && self.address != 0 => {
                 self.configuration = value as u8;
-                self.interfaces = [Interface::new(KEYBOARD_IDLE), Interface::new(0)];
+                self.interfaces = interfaces();
                 Ok(Outcome::Done(None))
             }
-            (0x81, GET_INTERFACE) if configured && interface < 2 => reply(&[0]),
-            (0x01, SET_INTERFACE) if configured && interface < 2 && value == 0 => {
+            (0x81, GET_INTERFACE) if configured && interface < INTERFACES => reply(&[0]),
+            (0x01, SET_INTERFACE) if configured && interface < INTERFACES && value == 0 => {
                 self.interfaces[interface].halted = false;
                 Ok(Outcome::Done(None))
             }
-            (0xa1, GET_REPORT) if interface < 2 && value == u16::from(INPUT_REPORT) << 8 => {
-                reply(&self.current(interface))
+            (0xa1, GET_REPORT)
+                if interface < INTERFACES && value == u16::from(INPUT_REPORT) << 8 =>
+            {
+                reply(&self.report(interface, self.current(interface)))
             }
             (0x21, SET_REPORT)
                 if interface == 0 && value == u16::from(OUTPUT_REPORT) << 8 && data.len() == 1 =>
@@ -454,22 +572,23 @@ impl Peripheral {
                 self.leds = data[0] & 0x1f;
                 Ok(Outcome::Done(None))
             }
-            (0xa1, GET_IDLE) if interface < 2 && value == 0 => {
+            (0xa1, GET_IDLE) if interface < INTERFACES && value == 0 => {
                 reply(&[self.interfaces[interface].idle])
             }
-            (0x21, SET_IDLE) if interface < 2 && value as u8 == 0 => {
+            (0x21, SET_IDLE) if interface < INTERFACES && value as u8 == 0 => {
                 let i = &mut self.interfaces[interface];
                 i.idle = (value >> 8) as u8;
                 i.sent = self.now;
                 Ok(Outcome::Done(None))
             }
-            (0xa1, GET_PROTOCOL) if interface == 0 && value == 0 => {
-                reply(&[self.interfaces[0].protocol])
+            (0xa1, GET_PROTOCOL) if Self::boot(interface) && value == 0 => {
+                reply(&[self.interfaces[interface].protocol])
             }
             (0x21, SET_PROTOCOL)
-                if interface == 0 && matches!(value as u8, BOOT_PROTOCOL | REPORT_PROTOCOL) =>
+                if Self::boot(interface)
+                    && matches!(value as u8, BOOT_PROTOCOL | REPORT_PROTOCOL) =>
             {
-                self.interfaces[0].protocol = value as u8;
+                self.interfaces[interface].protocol = value as u8;
                 Ok(Outcome::Done(None))
             }
             _ => Err(()),
@@ -568,10 +687,20 @@ impl Peripheral {
             None if self.idle_due(n).is_some_and(|due| self.now >= due) => self.current(n),
             None => return Reply::Nak,
         };
+        let report = self.report(n, report);
         let length = report.len().min(buffer.len());
         buffer[..length].copy_from_slice(&report[..length]);
         self.interfaces[n].sent = self.now;
         Reply::Ack(length)
+    }
+
+    /// `report` as interface `n` sends it in its current protocol: the
+    /// boot mouse report is the first three bytes.
+    fn report(&self, n: usize, mut report: Vec<u8>) -> Vec<u8> {
+        if n == MOUSE && self.interfaces[n].protocol == BOOT_PROTOCOL {
+            report.truncate(BOOT_MOUSE_REPORT);
+        }
+        report
     }
 }
 
@@ -588,7 +717,7 @@ impl BusPeer for Peripheral {
         self.address = 0;
         self.configuration = 0;
         self.control = Control::Idle;
-        self.interfaces = [Interface::new(KEYBOARD_IDLE), Interface::new(0)];
+        self.interfaces = interfaces();
         Ok(())
     }
 
@@ -695,13 +824,14 @@ mod tests {
     fn descriptors_describe_a_composite_keyboard_and_pointer() {
         let mut p = Peripheral::new();
         let config = control(&mut p, setup(0x80, GET_DESCRIPTOR, 0x200, 0, 9), &[]).unwrap();
-        assert_eq!(config[..4], [9, CONFIGURATION, 59, 0]);
+        assert_eq!(config[..5], [9, CONFIGURATION, 84, 0, 3]);
         let full = control(&mut p, setup(0x80, GET_DESCRIPTOR, 0x200, 0, 255), &[]).unwrap();
         assert_eq!(full, configuration_descriptor());
         // The HID descriptors name each report descriptor's length.
         for (n, report) in [
             &KEYBOARD_REPORT_DESCRIPTOR[..],
             &POINTER_REPORT_DESCRIPTOR[..],
+            &MOUSE_REPORT_DESCRIPTOR[..],
         ]
         .into_iter()
         .enumerate()
@@ -724,7 +854,9 @@ mod tests {
             setup(0x80, GET_DESCRIPTOR, 0x302, ENGLISH, 255),
             &[],
         );
-        assert_eq!(product.unwrap()[0], 2 + 2 * 26);
+        assert_eq!(product.unwrap()[0], 2 + 2 * 27);
+        // The mouse is a boot mouse.
+        assert_eq!(&full[59..68], &[9, 4, 2, 0, 1, 3, 1, 2, 0]);
         // A full-speed-only device STALLs the device qualifier.
         assert!(control(&mut p, setup(0x80, GET_DESCRIPTOR, 0x600, 0, 10), &[]).is_err());
         // A STALL clears at the next SETUP.
@@ -796,6 +928,46 @@ mod tests {
         p.packet(0x82, Token::In, &mut pointer).unwrap();
         assert_eq!(pointer[5], (-2i8) as u8);
         assert!(p.input(Input::Move { x: 0x8000, y: 0 }).is_err());
+    }
+
+    #[test]
+    fn mouse_motion_splits_coalesces_and_follows_the_protocol() {
+        let mut p = Peripheral::new();
+        enumerate(&mut p);
+        let read = |p: &mut Peripheral| {
+            let mut report = [0; MOUSE_REPORT];
+            match p.packet(MOUSE_ENDPOINT, Token::In, &mut report).unwrap() {
+                Reply::Ack(n) => Some(report[..n].to_vec()),
+                _ => None,
+            }
+        };
+        // 300 counts right split into 127 + 127 + 46; queued motion of the
+        // same buttons coalesces.
+        p.input(Input::Motion { dx: 300, dy: -5 }).unwrap();
+        p.input(Input::Motion { dx: 10, dy: -5 }).unwrap();
+        assert_eq!(p.ready_at(MOUSE_ENDPOINT), Some(0));
+        assert_eq!(read(&mut p).unwrap(), [0, 127, (-5i8) as u8, 0]);
+        assert_eq!(read(&mut p).unwrap(), [0, 127, 0, 0]);
+        assert_eq!(read(&mut p).unwrap(), [0, 56, (-5i8) as u8, 0]);
+        assert_eq!(read(&mut p), None);
+        // A button change and wheel motion each send a report.
+        p.input(Input::MouseButtons(2)).unwrap();
+        p.input(Input::Motion { dx: -1, dy: 1 }).unwrap();
+        p.input(Input::MouseWheel(3)).unwrap();
+        assert_eq!(read(&mut p).unwrap(), [2, (-1i8) as u8, 1, 0]);
+        assert_eq!(read(&mut p).unwrap(), [2, 0, 0, 3]);
+        assert!(p.input(Input::MouseButtons(8)).is_err());
+        assert!(p.input(Input::MouseWheel(i8::MIN)).is_err());
+        // The pointer's state is its own.
+        assert_eq!(p.buttons, 0);
+        // The boot protocol sends the three boot bytes.
+        control(&mut p, setup(0x21, SET_PROTOCOL, 0, 2, 0), &[]).unwrap();
+        p.input(Input::Motion { dx: 4, dy: 4 }).unwrap();
+        assert_eq!(read(&mut p).unwrap(), [2, 4, 4]);
+        let report = control(&mut p, setup(0xa1, GET_REPORT, 0x100, 2, 4), &[]).unwrap();
+        assert_eq!(report, [2, 0, 0]);
+        // The absolute pointer takes no protocol requests.
+        assert!(control(&mut p, setup(0xa1, GET_PROTOCOL, 0, 1, 1), &[]).is_err());
     }
 
     #[test]

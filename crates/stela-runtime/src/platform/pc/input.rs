@@ -1,6 +1,7 @@
 //! Host keyboards and pointers that the mount reads itself after
 //! ExitBootServices: virtio-input PCI devices (virtio 1.2 section 5.8), as
-//! QEMU's `virtio-keyboard-pci` and `virtio-tablet-pci` present them.
+//! QEMU's `virtio-keyboard-pci`, `virtio-tablet-pci` and
+//! `virtio-mouse-pci` present them.
 //!
 //! The driver keeps the event queue stocked with device-writable 8-byte
 //! buffers and polls its used ring; it leaves the status queue (LED
@@ -8,10 +9,13 @@
 //! [`Translator`] turns into the native USB peripheral's HID inputs: key
 //! codes through the HID Usage Tables' Keyboard/Keypad page, absolute axes
 //! scaled from the device's advertised range to the pointer's, the three
-//! main buttons and the vertical wheel. Position changes go out at each
-//! SYN_REPORT, so one report carries both axes. Codes with no keyboard
-//! usage (media keys beyond volume and mute, horizontal wheel, extra
-//! buttons) are counted and dropped, never mapped to something else.
+//! main buttons and the vertical wheel. A device with absolute X and Y is
+//! a tablet and drives the absolute pointer; any other device's buttons,
+//! relative X and Y and wheel drive the mouse. Position changes and summed
+//! motion go out at each SYN_REPORT, so one report carries both axes.
+//! Codes with no keyboard usage (media keys beyond volume and mute,
+//! horizontal wheel, extra buttons) and relative axes of a tablet are
+//! counted and dropped, never mapped to something else.
 use super::{
     Handoff,
     block::BlockError,
@@ -44,6 +48,8 @@ const EV_ABS: u16 = 3;
 const SYN_REPORT: u16 = 0;
 const ABS_X: u16 = 0;
 const ABS_Y: u16 = 1;
+const REL_X: u16 = 0;
+const REL_Y: u16 = 1;
 const REL_WHEEL: u16 = 8;
 const BTN_LEFT: u16 = 0x110;
 
@@ -196,6 +202,8 @@ pub struct Translator {
     axes: Option<(Axis, Axis)>,
     position: (u16, u16),
     moved: bool,
+    /// Relative motion since the last SYN_REPORT.
+    motion: (i32, i32),
     buttons: u8,
     pub dropped: u64,
 }
@@ -206,9 +214,16 @@ impl Translator {
             axes,
             position: (0, 0),
             moved: false,
+            motion: (0, 0),
             buttons: 0,
             dropped: 0,
         }
+    }
+
+    /// A device without absolute axes is a mouse (or a keyboard, which
+    /// sends neither buttons nor motion).
+    fn mouse(&self) -> bool {
+        self.axes.is_none()
     }
 
     fn scale(axis: Axis, value: i32) -> u16 {
@@ -227,7 +242,11 @@ impl Translator {
                 } else {
                     self.buttons & !bit
                 };
-                Some(Input::Buttons(self.buttons))
+                Some(if self.mouse() {
+                    Input::MouseButtons(self.buttons)
+                } else {
+                    Input::Buttons(self.buttons)
+                })
             }
             // Autorepeat (value 2) is the host's; macOS repeats keys itself.
             (EV_KEY, code) if event.value != 2 => match usage(code) {
@@ -250,11 +269,35 @@ impl Translator {
                 self.moved = true;
                 None
             }
-            (EV_REL, REL_WHEEL) => Some(Input::Wheel(event.value.clamp(-127, 127) as i8)),
+            (EV_REL, REL_WHEEL) => {
+                let detents = event.value.clamp(-127, 127) as i8;
+                Some(if self.mouse() {
+                    Input::MouseWheel(detents)
+                } else {
+                    Input::Wheel(detents)
+                })
+            }
+            (EV_REL, REL_X | REL_Y) if self.mouse() => {
+                let axis = if event.code == REL_X {
+                    &mut self.motion.0
+                } else {
+                    &mut self.motion.1
+                };
+                *axis = axis.saturating_add(event.value);
+                None
+            }
             (EV_SYN, SYN_REPORT) if self.moved => {
                 self.moved = false;
                 let (x, y) = self.position;
                 Some(Input::Move { x, y })
+            }
+            (EV_SYN, SYN_REPORT) if self.motion != (0, 0) => {
+                let (dx, dy) = core::mem::take(&mut self.motion);
+                let counts = |value: i32| value.clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+                Some(Input::Motion {
+                    dx: counts(dx),
+                    dy: counts(dy),
+                })
             }
             (EV_SYN, _) => None,
             _ => self.drop(),
@@ -361,6 +404,38 @@ mod tests {
                 y: 0x7fff
             })
         );
+    }
+
+    #[test]
+    fn mouse_events_become_summed_motion_buttons_and_wheel() {
+        let mut t = Translator::new(None);
+        assert_eq!(t.translate(event(EV_REL, REL_X, 3)), None);
+        assert_eq!(t.translate(event(EV_REL, REL_X, 4)), None);
+        assert_eq!(t.translate(event(EV_REL, REL_Y, -100_000)), None);
+        assert_eq!(
+            t.translate(event(EV_SYN, SYN_REPORT, 0)),
+            Some(Input::Motion {
+                dx: 7,
+                dy: i16::MIN
+            })
+        );
+        assert_eq!(t.translate(event(EV_SYN, SYN_REPORT, 0)), None);
+        assert_eq!(
+            t.translate(event(EV_KEY, BTN_LEFT, 1)),
+            Some(Input::MouseButtons(1))
+        );
+        assert_eq!(
+            t.translate(event(EV_REL, REL_WHEEL, 2)),
+            Some(Input::MouseWheel(2))
+        );
+        // A tablet's relative axes have nowhere to go.
+        let axis = Axis {
+            minimum: 0,
+            maximum: 10,
+        };
+        let mut tablet = Translator::new(Some((axis, axis)));
+        assert_eq!(tablet.translate(event(EV_REL, REL_X, 1)), None);
+        assert_eq!(tablet.dropped, 1);
     }
 
     #[test]
