@@ -274,6 +274,37 @@ pub fn open(
     Ok(PartitionDevice::new(devices.swap_remove(index), partition))
 }
 
+/// Take the one disk in `devices` whose GPT holds partition `guid` and
+/// confine it to that partition: a partition named by its unique GUID
+/// alone, such as the install medium's on the USB `stela.efi` started from,
+/// whose serial the host that wrote it could not read. Every disk's table
+/// is read; a disk without one is passed over. No disk, or several, holding
+/// that GUID is refused, as is an EFI system partition.
+pub fn open_unique(
+    devices: &mut Vec<Box<dyn BlockDevice>>,
+    guid: Guid,
+) -> Result<PartitionDevice<Box<dyn BlockDevice>>, StorageError> {
+    let mut found = None;
+    for (index, device) in devices.iter_mut().enumerate() {
+        let Ok(table) = gpt::read(&mut **device) else {
+            continue;
+        };
+        let mut matching = table.partitions.into_iter().filter(|p| p.unique == guid);
+        let Some(partition) = matching.next() else {
+            continue;
+        };
+        if matching.next().is_some() || found.is_some() {
+            return Err(StorageError::AmbiguousPartition(guid));
+        }
+        found = Some((index, partition));
+    }
+    let (index, partition) = found.ok_or(StorageError::NoPartition(guid))?;
+    if partition.kind == Guid::ESP {
+        return Err(StorageError::SystemPartition(guid));
+    }
+    Ok(PartitionDevice::new(devices.swap_remove(index), partition))
+}
+
 /// The byte at `offset` of the storage check's pattern.
 pub fn pattern(offset: u64) -> u8 {
     let mixed = offset.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ offset >> 7;
@@ -384,6 +415,35 @@ mod tests {
             Some(StorageError::AmbiguousDisk(String::from("disk-a"), 2))
         );
         assert_eq!(devices.len(), 4);
+    }
+
+    #[test]
+    fn a_partition_is_found_by_its_guid_alone_on_exactly_one_disk() {
+        let data: Guid = table::DATA.parse().unwrap();
+        let medium = "CCCCCCCC-0000-0000-0000-000000000003";
+        let mut devices = disks();
+        devices.push(Box::new(table::formatted(
+            "",
+            &[table::partition(data, medium, 40, 139)],
+        )));
+        let device = open_unique(&mut devices, medium.parse().unwrap()).unwrap();
+        assert_eq!((device.identity().blocks, devices.len()), (100, 3));
+        // The target GUID is on both disk-a and disk-b.
+        assert_eq!(
+            open_unique(&mut devices, TARGET.parse().unwrap()).err(),
+            Some(StorageError::AmbiguousPartition(TARGET.parse().unwrap()))
+        );
+        assert_eq!(
+            open_unique(&mut devices, medium.parse().unwrap()).err(),
+            Some(StorageError::NoPartition(medium.parse().unwrap()))
+        );
+        let esp = "AAAAAAAA-0000-0000-0000-000000000001";
+        devices.remove(0);
+        assert_eq!(
+            open_unique(&mut devices, esp.parse().unwrap()).err(),
+            Some(StorageError::SystemPartition(esp.parse().unwrap()))
+        );
+        assert_eq!(devices.len(), 2);
     }
 
     #[test]
