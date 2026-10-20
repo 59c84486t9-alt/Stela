@@ -6,8 +6,8 @@
 //! out under `EFI/stela/images/<build>/`, as FAT32 slices or as the whole
 //! IPSW, and writes `payload.json` last, so a volume without it holds no
 //! payload.
-use super::{aea, manifest};
-use anyhow::{Context, Result, bail, ensure};
+use super::{aea, components, manifest};
+use anyhow::{Context, Result, ensure};
 use serde_json::json;
 use sha2::{Digest, Sha256, Sha384};
 use std::{
@@ -18,23 +18,12 @@ use std::{
 };
 use stela_runtime::payload::{
     AeaKey, BLOCK_HASHES_FILE, BlockHashes, HASH_BLOCK_BYTES, IdentitySet, KIND, Layout,
-    MANIFEST_FILE, Member, PayloadManifest, Purpose, SourceImage, images_directory, slice_count,
-    slice_path,
+    MANIFEST_FILE, Member, PayloadManifest, SourceImage, images_directory, slice_count, slice_path,
 };
 use zip::ZipArchive;
 
 const BUILD_MANIFEST: &str = "BuildManifest.plist";
 const BUFFER: usize = 4 * 1024 * 1024;
-
-fn purpose(variant: &str) -> Purpose {
-    if variant.contains("Erase") {
-        Purpose::Erase
-    } else if variant.contains("Upgrade") || variant.contains("Update") {
-        Purpose::Update
-    } else {
-        Purpose::Installed
-    }
-}
 
 /// Which members a model needs, before anything is hashed.
 struct Selection {
@@ -55,32 +44,39 @@ fn select(archive: &mut ZipArchive<File>, model: &str) -> Result<Selection> {
         bytes.len() <= 64 * 1024 * 1024,
         "restore manifest exceeds 64 MiB"
     );
-    let restore = manifest::inspect(&bytes, Some(model))?;
-    let classes: BTreeSet<&str> = restore
-        .identities
-        .iter()
-        .map(|identity| identity.device_class.as_str())
-        .collect();
-    let [device_class] = classes.into_iter().collect::<Vec<_>>()[..] else {
-        bail!("{model} has identities for several device classes");
-    };
-    let device_class = device_class.to_owned();
+    // The profile's identities, as `components` defines them.
+    let profile = components::Profile::of(model)?;
+    let mut restore = manifest::inspect(&bytes, None)?;
+    restore.identities.retain(|identity| profile.owns(identity));
+    ensure!(
+        !restore.identities.is_empty(),
+        "macOS {} has no identities for {profile}",
+        restore.product_build
+    );
+    let device_class = profile.device_class.clone();
     let identities: Vec<IdentitySet> = restore
         .identities
         .iter()
-        .map(|identity| IdentitySet {
-            index: identity.index,
-            variant: identity.variant.clone(),
-            purpose: purpose(&identity.variant),
-            members: identity
-                .components
-                .values()
-                .map(|component| component.path.clone())
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+        .map(|identity| {
+            Ok(IdentitySet {
+                index: identity.index,
+                variant: identity.variant.clone(),
+                purpose: components::purpose(identity).with_context(|| {
+                    format!(
+                        "macOS {} identity {} ({}) has no RestoreBehavior Stela knows",
+                        restore.product_build, identity.index, identity.variant
+                    )
+                })?,
+                members: identity
+                    .components
+                    .values()
+                    .map(|component| component.path.clone())
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            })
         })
-        .collect();
+        .collect::<Result<_>>()?;
     let suffix = format!("/apticket.{device_class}.im4m");
     let global_manifests: Vec<String> = archive
         .file_names()
@@ -594,45 +590,65 @@ pub fn synthetic_ipsw(path: &Path) -> Result<()> {
 /// [`synthetic_ipsw`] of another build, as a later macOS release would be.
 pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
     use zip::{CompressionMethod, write::SimpleFileOptions};
-    let identity = |model: &str, class: &str, variant: &str, members: &[(&str, &str)]| {
-        let entries: String = members
-            .iter()
-            .map(|(component, path)| {
-                format!(
-                    "<key>{component}</key><dict><key>Digest</key><data>AAECAw==</data>\
+    let identity =
+        |model: &str, class: &str, variant: &str, behavior: &str, members: &[(&str, &str)]| {
+            let entries: String = members
+                .iter()
+                .map(|(component, path)| {
+                    format!(
+                        "<key>{component}</key><dict><key>Digest</key><data>AAECAw==</data>\
                      <key>Info</key><dict><key>Path</key><string>{path}</string></dict></dict>"
-                )
-            })
-            .collect();
-        format!(
-            "<dict><key>Ap,ProductType</key><string>{model}</string><key>Info</key><dict>\
+                    )
+                })
+                .collect();
+            let (_, chip, board, synthetic_class) = components::SYNTHETIC;
+            let board = if class == synthetic_class {
+                board
+            } else {
+                board + 1
+            };
+            format!(
+                "<dict><key>Ap,ProductType</key><string>{model}</string>\
+             <key>ApChipID</key><string>{chip:#x}</string>\
+             <key>ApBoardID</key><string>{board:#x}</string><key>Info</key><dict>\
              <key>DeviceClass</key><string>{class}</string><key>Variant</key>\
-             <string>{variant}</string></dict><key>Manifest</key><dict>{entries}</dict></dict>"
-        )
-    };
+             <string>{variant}</string><key>RestoreBehavior</key><string>{behavior}</string>\
+             </dict><key>Manifest</key><dict>{entries}</dict></dict>"
+            )
+        };
     let kernel = ("KernelCache", "kernelcache.release.stelatest");
     let os = ("OS", "Firmware/stelatest-os.dmg");
+    let ramdisk = ("RestoreRamDisk", "stelatest-ramdisk.dmg");
     let update = ("RestoreRamDisk", "stelatest-update.dmg");
     let identities = [
         identity(
             "Other1,1",
             "otherap",
             "Customer Erase Install (IPSW)",
-            &[kernel],
+            "Erase",
+            &[kernel, ramdisk],
         ),
         identity(
             SYNTHETIC_MODEL,
             "stelatestap",
             "Customer Erase Install (IPSW)",
-            &[kernel, os],
+            "Erase",
+            &[kernel, os, ramdisk],
         ),
         identity(
             SYNTHETIC_MODEL,
             "stelatestap",
             "Customer Upgrade Install (IPSW)",
+            "Update",
             &[kernel, update],
         ),
-        identity(SYNTHETIC_MODEL, "stelatestap", "macOS Customer", &[kernel]),
+        identity(
+            SYNTHETIC_MODEL,
+            "stelatestap",
+            "macOS Customer",
+            "Erase",
+            &[kernel],
+        ),
     ]
     .concat();
     let build_manifest = format!(
@@ -649,10 +665,11 @@ pub fn synthetic_ipsw_of(path: &Path, build: &str) -> Result<()> {
     let mut writer = zip::ZipWriter::new(File::create_new(path)?);
     let stored = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
-    let members: [(&str, Vec<u8>, SimpleFileOptions); 6] = [
+    let members: [(&str, Vec<u8>, SimpleFileOptions); 7] = [
         (BUILD_MANIFEST, build_manifest.into_bytes(), deflated),
         (kernel.1, vec![0x5a; 70_000], stored.large_file(true)),
         (os.1, os_bytes, deflated),
+        (ramdisk.1, b"restore ramdisk".to_vec(), stored),
         (update.1, b"update ramdisk".to_vec(), stored),
         (
             "Firmware/Manifests/restore/Customer/apticket.stelatestap.im4m",
@@ -692,7 +709,7 @@ mod tests {
         synthetic_ipsw(&image)?;
         let root = dir.path().join("usb");
         let report = write(&options(&image, &root, PayloadLayout::Split))?;
-        assert_eq!(report["members"], 4);
+        assert_eq!(report["members"], 5);
         let directory = root.join(images_directory(SYNTHETIC_BUILD));
         let manifest = PayloadManifest::parse(&fs::read(directory.join(MANIFEST_FILE))?).unwrap();
         assert_eq!(manifest.model, SYNTHETIC_MODEL);

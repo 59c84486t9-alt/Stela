@@ -27,6 +27,9 @@ pub struct Identity {
     /// erase identity's `Variant` names the restore, this the installed OS.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macos_variant: Option<String>,
+    /// `Info.RestoreBehavior`: `Erase` or `Update`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restore_behavior: Option<String>,
     pub components: BTreeMap<String, Component>,
     pub components_without_paths: Vec<String>,
 }
@@ -129,6 +132,10 @@ pub fn inspect(bytes: &[u8], model: Option<&str>) -> Result<RestoreManifest> {
             variant: required(info, "Variant")?,
             macos_variant: info
                 .get("MacOSVariant")
+                .and_then(Value::as_string)
+                .map(str::to_owned),
+            restore_behavior: info
+                .get("RestoreBehavior")
                 .and_then(Value::as_string)
                 .map(str::to_owned),
             components,

@@ -255,8 +255,7 @@ fn boot_manifest(kernel_digest: &[u8]) -> Vec<u8> {
     )
 }
 
-const BOOT_MANIFEST_MEMBER: &str =
-    "Firmware/Manifests/restore/macOS Customer/apticket.testmacap.im4m";
+const BOOT_MANIFEST_MEMBER: &str = "Firmware/Manifests/restore/macOS Customer/apticket.j473ap.im4m";
 
 fn component(name: &str, path: &str) -> String {
     format!(
@@ -279,12 +278,12 @@ fn restore_manifest() -> String {
 <plist version="1.0"><dict>
 <key>ProductVersion</key><string>27.0.fixture</string>
 <key>ProductBuildVersion</key><string>FIXTURE</string>
-<key>SupportedProductTypes</key><array><string>TestMac1,1</string></array>
+<key>SupportedProductTypes</key><array><string>Mac14,3</string></array>
 <key>BuildIdentities</key><array><dict>
-<key>Ap,ProductType</key><string>TestMac1,1</string>
+<key>Ap,ProductType</key><string>Mac14,3</string>
 <key>ApChipID</key><string>0x8112</string>
 <key>ApBoardID</key><string>0x24</string>
-<key>Info</key><dict><key>DeviceClass</key><string>testmacap</string><key>Variant</key><string>macOS Customer</string></dict>
+<key>Info</key><dict><key>DeviceClass</key><string>j473ap</string><key>Variant</key><string>macOS Customer</string><key>RestoreBehavior</key><string>Erase</string></dict>
 <key>Manifest</key><dict>{components}</dict></dict></array></dict></plist>"#
     )
 }
@@ -428,7 +427,7 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
         "--ipsw",
         "fixture.ipsw",
         "--model",
-        "TestMac1,1",
+        "Mac14,3",
         "--output",
         "bundle",
         "--dram-size",

@@ -1,5 +1,8 @@
 //! Prepare the kernel boot bundle that the UEFI mount hands to the ARM kernel.
-use crate::{args::parse_address, restore};
+use crate::{
+    args::parse_address,
+    restore::{self, components},
+};
 use anyhow::{Context, Result, bail, ensure};
 use clap::{Args, Subcommand};
 use std::{fs::OpenOptions, io::Write, path::PathBuf};
@@ -9,7 +12,7 @@ use stela_loader::boot_bundle::{
 use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
-use stela_runtime::apfs::btree::Seal;
+use stela_runtime::{apfs::btree::Seal, payload::Purpose};
 
 mod disk;
 mod recovery_volume;
@@ -21,8 +24,6 @@ const RAMDISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 /// The recoveryOS volume holds the whole BaseSystem UDIF image (2.3 GB for
 /// 26A434) and its APFS metadata.
 const RECOVERY_VOLUME_LIMIT: u64 = 3 * 1024 * 1024 * 1024;
-const INSTALLED_VARIANT: &str = "macOS Customer";
-const RESTORE_VARIANT: &str = "Customer Erase Install (IPSW)";
 /// The OS environment of a restore ramdisk: its `/osenvironments` child
 /// turns off the SEP firmware load and protected data access and selects
 /// ephemeral storage.
@@ -212,8 +213,9 @@ pub(crate) struct Prepare {
     /// key server when omitted.
     #[arg(long, requires = "recovery")]
     aea_key: Option<PathBuf>,
-    /// The restore identity variant: `macOS Customer` for the installed
-    /// system, `Customer Erase Install (IPSW)` with `--restore`.
+    /// The restore identity by its variant, such as `Customer Upgrade
+    /// Install (IPSW)`; by default the model's erase restore identity with
+    /// `--restore`, and its installed system's otherwise.
     #[arg(long)]
     variant: Option<String>,
     /// The OS environment iBoot enters (`/chosen osenvironment` and its
@@ -524,28 +526,24 @@ impl Prepare {
         }
         let ipsw = self.ipsw.clone().context("--ipsw is required")?;
         let model = self.model.clone().context("--model is required")?;
-        let report = restore::archive::manifest(&ipsw, Some(&model), false)?;
-        let (roles, default_variant) = match (self.restore, self.recovery) {
-            (true, _) => (RESTORE, RESTORE_VARIANT),
-            (false, true) => (RECOVERY, INSTALLED_VARIANT),
-            (false, false) => (INSTALLED, INSTALLED_VARIANT),
+        // The profile's identities and components, as setup chooses them.
+        let profile = components::Profile::of(&model)?;
+        let report = restore::archive::manifest(&ipsw, None, false)?;
+        let (roles, purpose) = match (self.restore, self.recovery) {
+            (true, _) => (RESTORE, Purpose::Erase),
+            (false, true) => (RECOVERY, Purpose::Installed),
+            (false, false) => (INSTALLED, Purpose::Installed),
         };
-        let variant = self.variant.as_deref().unwrap_or(default_variant);
-        let identity = report
-            .identities
-            .iter()
-            .find(|i| i.variant == variant)
-            .with_context(|| {
-                let variants: Vec<_> = report.identities.iter().map(|i| &i.variant).collect();
-                format!("no {} identity {:?}; found {variants:?}", model, variant)
-            })?;
+        let identity = match self.variant.as_deref() {
+            Some(variant) => components::variant(&report, &profile, variant)?,
+            None => components::identity(&report, &profile, purpose)?,
+        };
+        let owned = components::identities(&report, &profile);
         let component = |name: &str, payload_type: Option<&str>, limit: u64| -> Result<Decoded> {
             // A component absent from the selected identity is taken from
-            // another identity of the same model, and named with its variant.
-            let (owner, entry) = std::iter::once(identity)
-                .chain(report.identities.iter())
-                .find_map(|i| i.components.get(name).map(|c| (i, c)))
-                .with_context(|| format!("no {model} identity lists {name}"))?;
+            // another identity of the same profile, and named with its
+            // variant.
+            let (owner, entry) = components::component(&report, &profile, identity, name)?;
             let container = restore::archive::read_member(&ipsw, &entry.path, limit)?;
             let label = if owner.variant == identity.variant {
                 name.to_owned()
@@ -613,8 +611,7 @@ impl Prepare {
             None => None,
             Some((name, volume)) => Some((
                 volume,
-                report
-                    .identities
+                owned
                     .iter()
                     .any(|i| i.components.contains_key(name))
                     .then(|| component(name, None, COMPONENT_LIMIT))
@@ -624,8 +621,7 @@ impl Prepare {
         if let (Some(seal), Some((_, Some(root_hash)))) = (&base_system_seal, &root_hash) {
             recovery_volume::check_root_hash(seal, &root_hash.bytes)?;
         }
-        let sep = report
-            .identities
+        let sep = owned
             .iter()
             .any(|i| i.components.contains_key(roles.sep))
             .then(|| component(roles.sep, None, COMPONENT_LIMIT))
