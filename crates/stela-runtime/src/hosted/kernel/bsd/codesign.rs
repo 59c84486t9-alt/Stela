@@ -102,14 +102,14 @@ impl Signature {
         flags
     }
 
-    /// Whether a pointer-authentication failure ends the process rather
-    /// than raising SIGBUS (`task_set_pac_exception_fatal_flag` at exec):
-    /// for a PAC-hardened task (the private PAC-exception entitlement, or a
-    /// platform-restrictions version from a platform binary, a
-    /// hardened-process entitlement or a hardened browser engine), and for
-    /// any platform binary on FPAC hardware. Mach-hardening opt-outs are
-    /// AMFI boot-args, which Stela does not set.
-    pub fn pac_exception_fatal(&self, fpac: bool) -> bool {
+    /// Whether exec gives the task a platform-restrictions version
+    /// (`imgact_setup_platform_restrictions`, `task_set_hardened_runtime`):
+    /// a platform binary, a hardened-process entitlement or a hardened
+    /// browser engine. Such a task's IPC space takes the enhanced policies
+    /// (`ipc_policy_for_task`) and its EXC_GUARD defaults are the
+    /// platform's (`task_set_exc_guard_default`). Mach-hardening opt-outs
+    /// are AMFI boot-args, which Stela does not set.
+    pub fn platform_restricted(&self) -> bool {
         const HARDENING: [&str; 2] = [
             "com.apple.security.hardened-process.platform-restrictions-string",
             "com.apple.security.hardened-process.platform-restrictions",
@@ -120,18 +120,27 @@ impl Signature {
             "com.apple.developer.web-browser-engine.networking",
             "com.apple.developer.web-browser-engine.webcontent",
         ];
-        let platform = self.exec_flags() & CS_PLATFORM_BINARY != 0;
         let present = |name: &str| {
             self.entitlements.as_deref().is_some_and(|blob| {
                 blob.get(BLOB_HEADER_BYTES as usize..)
                     .is_some_and(|plist| code_signature::xml_entitlement_present(plist, name))
             })
         };
-        let hardened = self.entitled("com.apple.private.pac.exception")
-            || platform
+        self.exec_flags() & CS_PLATFORM_BINARY != 0
             || HARDENING.iter().any(|name| present(name))
-            || BROWSER_ENGINE.iter().any(|name| self.entitled(name));
-        hardened || (fpac && platform)
+            || BROWSER_ENGINE.iter().any(|name| self.entitled(name))
+    }
+
+    /// Whether a pointer-authentication failure ends the process rather
+    /// than raising SIGBUS (`task_set_pac_exception_fatal_flag` at exec):
+    /// for a PAC-hardened task (the private PAC-exception entitlement, or a
+    /// platform-restrictions version), and for any platform binary on FPAC
+    /// hardware.
+    pub fn pac_exception_fatal(&self, fpac: bool) -> bool {
+        let platform = self.exec_flags() & CS_PLATFORM_BINARY != 0;
+        self.entitled("com.apple.private.pac.exception")
+            || self.platform_restricted()
+            || (fpac && platform)
     }
 
     /// Whether the XML entitlements grant the boolean `name`.

@@ -55,8 +55,8 @@ const CTLFLAG_LOCKED: u32 = 0x0080_0000;
 const CPUSUBFAMILY_ARM_HG: i32 = 2;
 const LITTLE_ENDIAN: i32 = 1234;
 /// `num_watchpoint_pairs` and `num_breakpoint_pairs` of Apple cores.
-const WATCHPOINT_PAIRS: i32 = 4;
-const BREAKPOINT_PAIRS: i32 = 6;
+pub(crate) const WATCHPOINT_PAIRS: i32 = 4;
+pub(crate) const BREAKPOINT_PAIRS: i32 = 6;
 const CACHE_ENTRIES: usize = 10;
 
 /// The kernel the guest runs on: the M2's 26A434 release kernel, whose

@@ -20,6 +20,7 @@ use crate::hosted::{
 use crate::mach::catalog::{self, Reserved};
 use anyhow::{Result, bail};
 
+pub(super) mod exception;
 mod message;
 pub(super) mod reclaim;
 mod server;

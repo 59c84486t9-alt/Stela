@@ -46,12 +46,20 @@ pub(super) enum Reply {
         descriptors: Vec<Descriptor>,
         body: Vec<u8>,
     },
+    /// A complex reply of descriptors alone, without an NDR record.
+    Descriptors(Vec<Descriptor>),
+    /// The request could not be sent: the send's `mach_msg_return_t`,
+    /// which the call returns without a reply.
+    NotSent(u32),
 }
 
 /// One descriptor of a complex reply. Further forms join as routines
 /// need them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Descriptor {
+    /// One right of this space carried with `disposition`
+    /// (`mach_msg_port_descriptor_t`).
+    Port { name: u32, disposition: u8 },
     /// An out-of-line array of rights of this space, each carried with
     /// `disposition` (`mach_msg_ool_ports_descriptor64_t`,
     /// `MACH_MSG_VIRTUAL_COPY`).
@@ -66,18 +74,29 @@ pub(super) enum Descriptor {
     },
 }
 
+/// `MACH_MSG_TYPE_MOVE_SEND`, which is also a received send right's
+/// disposition (`MACH_MSG_TYPE_PORT_SEND`).
+pub(super) const MOVE_SEND: u8 = 17;
 /// `MACH_MSG_TYPE_COPY_SEND`.
 pub(super) const COPY_SEND: u8 = 19;
+/// `MACH_PORT_DEAD`.
+pub(super) const MACH_PORT_DEAD: u32 = !0;
 
 impl Descriptor {
     /// The descriptor as an LP64 sender lays it out; a port array's
     /// address is its names', valid while the descriptor lives.
     pub(super) fn bytes(&self) -> Vec<u8> {
+        const PORT: u8 = 0;
         const OOL: u8 = 1;
         const OOL_PORTS: u8 = 2;
         const VIRTUAL_COPY: u8 = 1;
         let mut out = Vec::with_capacity(16);
         match self {
+            Self::Port { name, disposition } => {
+                out.extend(name.to_le_bytes());
+                out.extend([0; 6]);
+                out.extend([*disposition, PORT]);
+            }
             Self::Ports { names, disposition } => {
                 out.extend((names.as_ptr() as u64).to_le_bytes());
                 out.extend([0, VIRTUAL_COPY, *disposition, OOL_PORTS]);
@@ -94,6 +113,29 @@ impl Descriptor {
             }
         }
         out
+    }
+
+    /// Release the right a moved port carries, as the kernel destroys a
+    /// reply it cannot send.
+    pub(super) fn release(&self) {
+        if let Self::Port {
+            name,
+            disposition: MOVE_SEND,
+        } = self
+        {
+            release_send(*name);
+        }
+    }
+}
+
+/// Release one send right of this space to `name`, if it names a port.
+pub(super) fn release_send(name: u32) {
+    unsafe extern "C" {
+        fn mach_port_deallocate(task: u32, name: u32) -> i32;
+    }
+    if name != 0 && name != MACH_PORT_DEAD {
+        // SAFETY: a right of this task's own space.
+        unsafe { mach_port_deallocate(crate::hosted::host::task(), name) };
     }
 }
 
@@ -275,6 +317,132 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         "mach_vm_deferred_reclamation_buffer_resize",
         None,
     ),
+    (Object::Task, "task_terminate", None),
+    (Object::Task, "task_set_info", None),
+    (Object::Task, "task_suspend", None),
+    (Object::Task, "task_resume", None),
+    (Object::Task, "task_suspend2_mig", None),
+    (Object::Task, "task_resume2_mig", None),
+    (Object::Task, "task_get_mach_voucher", None),
+    (Object::Task, "task_set_mach_voucher", None),
+    (Object::Task, "task_swap_mach_voucher", None),
+    (Object::Task, "task_register_dyld_image_infos", None),
+    (Object::Task, "task_unregister_dyld_image_infos", None),
+    (Object::Task, "task_get_dyld_image_infos", None),
+    (
+        Object::Task,
+        "task_register_dyld_shared_cache_image_info",
+        None,
+    ),
+    (Object::Task, "task_register_dyld_set_dyld_state", None),
+    (Object::Task, "task_register_dyld_get_process_state", None),
+    (Object::Task, "task_get_exc_guard_behavior", None),
+    (Object::Task, "task_set_exc_guard_behavior", None),
+    (Object::Task, "_kernelrpc_mach_task_is_self", None),
+    (Object::Task, "task_dyld_process_info_notify_register", None),
+    (
+        Object::Task,
+        "task_dyld_process_info_notify_deregister",
+        None,
+    ),
+    (Object::Task, "task_identity_token_get_task_port", None),
+    (Object::Task, "task_test_sync_upcall", None),
+    (Object::Task, "task_test_async_upcall_propagation", None),
+    (Object::Task, "task_set_corpse_forking_behavior", None),
+    (
+        Object::Task,
+        "task_purgable_info",
+        Some("the counts include the hosted runtime's own purgeable memory"),
+    ),
+    (
+        Object::Task,
+        "task_set_phys_footprint_limit",
+        Some("the footprint includes the hosted runtime's own memory"),
+    ),
+    (Object::Task, "task_get_state", None),
+    (
+        Object::Task,
+        "task_set_state",
+        Some(
+            "a debug state enabling a breakpoint, watchpoint or single step for new threads \
+             stops the run",
+        ),
+    ),
+    (
+        Object::Task,
+        "task_inspect",
+        Some("TASK_INSPECT_BASIC_COUNTS would count the x86 host's instructions and cycles"),
+    ),
+    (
+        Object::Task,
+        "thread_create_from_user",
+        Some(THREAD_PORT_LIMIT),
+    ),
+    (
+        Object::Task,
+        "thread_create_running_from_user",
+        Some(THREAD_PORT_LIMIT),
+    ),
+    (
+        Object::Task,
+        "task_set_exception_ports",
+        Some(EXCEPTION_PORT_LIMITS),
+    ),
+    (
+        Object::Task,
+        "task_swap_exception_ports",
+        Some(EXCEPTION_PORT_LIMITS),
+    ),
+    (Object::Task, "task_get_exception_ports_from_user", None),
+    (Object::Task, "task_get_exception_ports_info", None),
+];
+
+/// The extra reference a hosted thread's port name carries.
+const THREAD_PORT_LIMIT: &str =
+    "the new thread's port name also carries its host thread library's reference";
+
+/// What setting the task's exception ports does not reach.
+const EXCEPTION_PORT_LIMITS: &str = "a guest exception for which a port is set stops the run; \
+     the host kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports go to the ports the process \
+     inherited; a fork, exec or spawn after a change stops the run; a platform-restricted task's \
+     policy violation stops the run";
+
+/// Task routines whose answer is the arm64 kernel's: the request is
+/// forwarded to the task port, which is the host task's. They suspend,
+/// resume and terminate this task, act on its vouchers, dyld
+/// notification ports and EXC_GUARD behavior (which the host kernel then
+/// applies to the calls it serves), trace dyld's image registrations
+/// (`kdebug` only) or answer as every release kernel does (the dyld
+/// image list and state routines, the test upcalls, corpse forking). The
+/// purgeable counts and the footprint limit cover the host task's memory,
+/// which holds the hosted runtime's too.
+const TASK_FORWARDED: &[&str] = &[
+    "task_terminate",
+    "task_set_info",
+    "task_suspend",
+    "task_resume",
+    "task_suspend2_mig",
+    "task_resume2_mig",
+    "task_get_mach_voucher",
+    "task_set_mach_voucher",
+    "task_swap_mach_voucher",
+    "task_register_dyld_image_infos",
+    "task_unregister_dyld_image_infos",
+    "task_get_dyld_image_infos",
+    "task_register_dyld_shared_cache_image_info",
+    "task_register_dyld_set_dyld_state",
+    "task_register_dyld_get_process_state",
+    "task_get_exc_guard_behavior",
+    "task_set_exc_guard_behavior",
+    "_kernelrpc_mach_task_is_self",
+    "task_dyld_process_info_notify_register",
+    "task_dyld_process_info_notify_deregister",
+    "task_identity_token_get_task_port",
+    "task_test_sync_upcall",
+    "task_test_async_upcall_propagation",
+    "task_set_corpse_forking_behavior",
+    "task_purgable_info",
+    "task_set_phys_footprint_limit",
 ];
 
 /// Answer `routine` sent to `object`, or `None` when the hosted kernel
@@ -483,6 +651,52 @@ pub(super) fn serve(
             };
             pair(reclaim::resize(&mut lock(&kernel.process.reclaim), len))
         }
+        (Object::Task, routine, _) if TASK_FORWARDED.contains(&routine) => Reply::Forward,
+        (Object::Task, "task_get_state", false) => task_get_state(kernel, request),
+        (Object::Task, "task_set_state", false) => task_set_state(kernel, request)?,
+        // `flavor`, `info_outCnt`, which MIG bounds to 4.
+        (Object::Task, "task_inspect", false) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            if flavor != TASK_INSPECT_BASIC_COUNTS || count.min(4) < TASK_INSPECT_BASIC_COUNTS_COUNT
+            {
+                Reply::Failure(KERN_INVALID_ARGUMENT)
+            } else {
+                bail!(
+                    "task_inspect(TASK_INSPECT_BASIC_COUNTS): the host would count the x86 \
+                     host's instructions and cycles, not the M2's"
+                )
+            }
+        }
+        (Object::Task, "thread_create_from_user", false) => {
+            if !request.body.is_empty() {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            }
+            thread_create(kernel, None)?
+        }
+        // `flavor`, `new_stateCnt`, then the state.
+        (Object::Task, "thread_create_running_from_user", false) => {
+            let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            let Some(words) = state_words(request, count) else {
+                return Ok(Some(Reply::Failure(MIG_BAD_ARGUMENTS)));
+            };
+            thread_create(kernel, Some((flavor, words)))?
+        }
+        (Object::Task, "task_set_exception_ports", true) => {
+            super::exception::set(kernel, request, false)?
+        }
+        (Object::Task, "task_swap_exception_ports", true) => {
+            super::exception::set(kernel, request, true)?
+        }
+        (Object::Task, "task_get_exception_ports_from_user", false) => {
+            super::exception::get(kernel, request)?
+        }
+        (Object::Task, "task_get_exception_ports_info", false) => {
+            super::exception::info(kernel, request)?
+        }
         (Object::Task, _, _) => return super::vm::serve(kernel, routine, complex, request),
         _ => return Ok(None),
     }))
@@ -570,6 +784,158 @@ fn set_state(kernel: &Kernel, port: u32, routine: &str, request: &Request) -> Re
     }
 }
 
+/// The `new_stateCnt` words of a request's state after its flavor and
+/// count, at most `THREAD_STATE_MAX`.
+fn state_words(request: &Request, count: u32) -> Option<Vec<u32>> {
+    let bytes = (count <= control::THREAD_STATE_MAX)
+        .then(|| request.body.get(16..16 + count as usize * 4))
+        .flatten()?;
+    Some(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect(),
+    )
+}
+
+/// `thread_state_flavor_t` values the task routines take.
+const THREAD_STATE_NONE: u32 = 5;
+const ARM_DEBUG_STATE64: u32 = 15;
+const DEBUG_STATE64_COUNT: u32 = 130;
+/// `MACH_VM_MAX_ADDRESS` of a 64-bit macOS task.
+const MACH_VM_MAX_ADDRESS: u64 = 0x0000_7fff_fe00_0000;
+/// `task_inspect`'s one flavor and its count.
+const TASK_INSPECT_BASIC_COUNTS: u32 = 1;
+const TASK_INSPECT_BASIC_COUNTS_COUNT: u32 = 4;
+
+/// The doubleword `index` of an `arm_debug_state64_t` (`bvr[16]`,
+/// `bcr[16]`, `wvr[16]`, `wcr[16]`, `mdscr_el1`).
+fn debug_double(words: &[u32], index: usize) -> u64 {
+    u64::from(words[index * 2]) | u64::from(words[index * 2 + 1]) << 32
+}
+
+/// `task_get_state(flavor, old_stateCnt)` (`machine_task_get_state`): the
+/// debug state new threads take, zero when none is set, after its count.
+/// A 64-bit task has no legacy or 32-bit debug state.
+fn task_get_state(kernel: &Kernel, request: &Request) -> Reply {
+    let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+        return Reply::Failure(MIG_BAD_ARGUMENTS);
+    };
+    if flavor != ARM_DEBUG_STATE64 || count.min(control::THREAD_STATE_MAX) != DEBUG_STATE64_COUNT {
+        return Reply::Failure(KERN_INVALID_ARGUMENT);
+    }
+    let words = lock(&kernel.process.task_debug)
+        .clone()
+        .unwrap_or_else(|| vec![0; DEBUG_STATE64_COUNT as usize]);
+    let mut body = DEBUG_STATE64_COUNT.to_le_bytes().to_vec();
+    for word in words {
+        body.extend(word.to_le_bytes());
+    }
+    Reply::Success(body)
+}
+
+/// `task_set_state(flavor, new_stateCnt, new_state)`
+/// (`machine_task_set_state`): the debug state new threads take
+/// (`machine_thread_inherit_taskwide`), kept as given;
+/// `THREAD_STATE_NONE` clears it.
+fn task_set_state(kernel: &Kernel, request: &Request) -> Result<Reply> {
+    let (Some(flavor), Some(count)) = (request.word(8), request.word(12)) else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let Some(words) = state_words(request, count) else {
+        return Ok(Reply::Failure(MIG_BAD_ARGUMENTS));
+    };
+    let mut debug = lock(&kernel.process.task_debug);
+    Ok(match flavor {
+        ARM_DEBUG_STATE64 if count == DEBUG_STATE64_COUNT => {
+            use super::super::bsd::sysctl::{BREAKPOINT_PAIRS, WATCHPOINT_PAIRS};
+            // `debug_state_is_valid64`: a used pair's address is a user
+            // address.
+            let invalid = |control: usize, value: usize, pairs: i32| {
+                (0..pairs as usize).any(|index| {
+                    debug_double(&words, control + index) != 0
+                        && debug_double(&words, value + index) >= MACH_VM_MAX_ADDRESS
+                })
+            };
+            if invalid(16, 0, BREAKPOINT_PAIRS) || invalid(48, 32, WATCHPOINT_PAIRS) {
+                return Ok(Reply::Failure(KERN_INVALID_ARGUMENT));
+            }
+            const ENABLE: u64 = 1;
+            const MDSCR_SS: u64 = 1;
+            if debug_double(&words, 64) & MDSCR_SS != 0
+                || (16..32)
+                    .chain(48..64)
+                    .any(|index| debug_double(&words, index) & ENABLE != 0)
+            {
+                bail!(
+                    "task_set_state(ARM_DEBUG_STATE64) enabling a hardware breakpoint, watchpoint \
+                     or single step for new threads: guest debug exceptions are not implemented"
+                );
+            }
+            *debug = Some(words);
+            Reply::Success(Vec::new())
+        }
+        THREAD_STATE_NONE => match debug.take() {
+            Some(_) => Reply::Success(Vec::new()),
+            None => Reply::Failure(KERN_FAILURE),
+        },
+        _ => Reply::Failure(KERN_INVALID_ARGUMENT),
+    })
+}
+
+/// `thread_create_from_user` and, with its state, `thread_create_running`:
+/// a thread of this task with all-zero user state, held by one user stop
+/// until `thread_resume`, or running from the state set as
+/// `thread_set_state` sets it. The reply moves the reference the new
+/// thread took to its port; the host thread library keeps another.
+fn thread_create(kernel: &mut Kernel, state: Option<(u32, Vec<u32>)>) -> Result<Reply> {
+    use std::sync::{Arc, atomic::AtomicU32};
+    // The state's `kern_return_t`, which ends the new thread unstarted.
+    let refused = Arc::new(AtomicU32::new(control::KERN_SUCCESS));
+    let refusal = refused.clone();
+    let created = crate::hosted::threads::spawn(
+        &kernel.process,
+        0,
+        kernel.signals.creation_mask(),
+        move |kernel, pe| {
+            match state {
+                None => {
+                    if let Some(control) = kernel.process.runtime.registry.control(kernel.thread) {
+                        control.start_suspended();
+                    }
+                }
+                Some((flavor, words)) => {
+                    let current = control::UserState::capture(pe);
+                    let signer = kernel.process.signer.as_ref();
+                    match control::set_state(&current, flavor, &words, signer)? {
+                        Ok(set) => set.apply(pe),
+                        Err(code) => {
+                            refusal.store(code, std::sync::atomic::Ordering::SeqCst);
+                            return Ok(Err(super::super::bsd::EINVAL));
+                        }
+                    }
+                }
+            }
+            Ok(Ok(()))
+        },
+    )?;
+    Ok(match created {
+        Ok(port) => Reply::Descriptors(vec![Descriptor::Port {
+            name: port,
+            disposition: MOVE_SEND,
+        }]),
+        Err(_) => match refused.load(std::sync::atomic::Ordering::SeqCst) {
+            control::KERN_SUCCESS => Reply::Failure(KERN_RESOURCE_SHORTAGE),
+            code => Reply::Failure(code),
+        },
+    })
+}
+
+/// `KERN_RESOURCE_SHORTAGE`: no thread could be made.
+const KERN_RESOURCE_SHORTAGE: u32 = 6;
+
 /// Routines of this process's kernel objects the hosted kernel refuses,
 /// with the reason.
 pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
@@ -583,6 +949,35 @@ pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
         Object::Host,
         "host_processors",
         "its processor ports would be the x86 host's processors, not the M2's eight",
+    ),
+    (
+        Object::Task,
+        "task_generate_corpse",
+        "the host kernel's corpse would hold the x86 host's thread states and the hosted \
+         runtime's own memory",
+    ),
+    (
+        Object::Task,
+        "task_map_corpse_info",
+        "a corpse's crash data is the host kernel's, describing an x86 process, mapped in 4 KiB \
+         host pages",
+    ),
+    (
+        Object::Task,
+        "task_map_corpse_info_64",
+        "a corpse's crash data is the host kernel's, describing an x86 process, mapped in 4 KiB \
+         host pages",
+    ),
+    (
+        Object::Task,
+        "task_map_kcdata_object_64",
+        "a kcdata object is the host kernel's report, mapped in 4 KiB host pages",
+    ),
+    (
+        Object::Task,
+        "task_register_hardened_exception_handler",
+        "whether its port was made an exception port (MPO_EXCEPTION_PORT) is known only to the \
+         host kernel, and hardened exception delivery is not implemented",
     ),
 ];
 

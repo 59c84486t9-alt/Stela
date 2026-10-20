@@ -127,6 +127,10 @@ pub(super) struct Process {
     pub(super) restartable_ranges: Mutex<Option<Vec<RestartableRange>>>,
     /// The deferred-reclamation ring, once libmalloc registers one.
     pub(super) reclaim: Mutex<Option<mach::reclaim::Ring>>,
+    /// The task's exception actions.
+    pub(super) exception_ports: mach::exception::ExceptionPorts,
+    /// The debug state new threads take (`task_debug`), once set.
+    pub(super) task_debug: Mutex<Option<Vec<u32>>>,
 }
 
 /// One `task_restartable_range_t`: location, length, recovery offset and
@@ -214,6 +218,12 @@ impl Process {
             .signature
             .as_ref()
             .is_some_and(|signature| signature.pac_exception_fatal(fpac));
+        let restricted = config
+            .executable
+            .signature
+            .as_ref()
+            .is_some_and(Signature::platform_restricted);
+        mach::exception::set_guard_default(restricted);
         Arc::new(Self {
             pac_exception_fatal,
             sysctl: bsd::sysctl::Model::new(&config.hardware, &config.features),
@@ -241,6 +251,8 @@ impl Process {
             signatures: Default::default(),
             restartable_ranges: Mutex::new(None),
             reclaim: Mutex::new(None),
+            exception_ports: Default::default(),
+            task_debug: Mutex::new(None),
         })
     }
 
@@ -378,6 +390,9 @@ impl Kernel {
                 }
                 // EXC_BAD_ACCESS, as `handle_user_abort` and `ux_exception`
                 // turn it into a signal.
+                self.process
+                    .exception_ports
+                    .deliverable(mach::exception::EXC_BAD_ACCESS)?;
                 let data = class == EC_DATA_ABORT_LOWER;
                 let looked_up = if data { address & TBI_MASK } else { address };
                 let fault = bsd::signal::FaultSignal::of(
@@ -404,6 +419,9 @@ impl Kernel {
             // EXC_BREAKPOINT (`handle_user_breakpoint`): SIGTRAP, at the
             // BRK itself.
             EC_BRK64 => {
+                self.process
+                    .exception_ports
+                    .deliverable(mach::exception::EXC_BREAKPOINT)?;
                 let shared_cache_slide = self.shared_cache_slide();
                 self.exception_signal(bsd::signal::SIGTRAP, 0, false, || {
                     format!(
@@ -420,6 +438,9 @@ impl Kernel {
             // instruction. `pac_exception_triage` ends a PAC-hardened task
             // with SIGKILL; any other takes SIGBUS (`ux_exception`).
             EC_PAC_FAIL => {
+                self.process
+                    .exception_ports
+                    .deliverable(mach::exception::EXC_BAD_ACCESS)?;
                 let shared_cache_slide = self.shared_cache_slide();
                 let describe = || {
                     format!(

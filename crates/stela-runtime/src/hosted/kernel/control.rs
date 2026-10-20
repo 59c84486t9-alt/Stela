@@ -94,7 +94,7 @@ impl UserState {
     /// Make this the thread's user state, as `thread_state64_to_saved_state`
     /// and the NEON copy do: NZCV of the CPSR is copied, its mode reset to
     /// EL0t, the rest kept. The exception state is not settable.
-    fn apply(&self, pe: &mut Pe) {
+    pub(crate) fn apply(&self, pe: &mut Pe) {
         let cpu = &mut pe.cpu;
         cpu.state.x = self.x;
         cpu.state.v = self.v;

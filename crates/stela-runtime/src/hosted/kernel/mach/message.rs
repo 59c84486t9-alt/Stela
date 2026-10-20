@@ -77,8 +77,10 @@ pub(super) fn send(
                 };
                 let complex = request.bits & MACH_MSGH_BITS_COMPLEX != 0;
                 let served = server::serve(kernel, object, port, routine.name, complex, &body)?;
-                if matches!(served, Some(Reply::Forward)) {
-                    return forward_trap(kernel, index, arguments);
+                match served {
+                    Some(Reply::Forward) => return forward_trap(kernel, index, arguments),
+                    Some(Reply::NotSent(status)) => return Ok(u64::from(status)),
+                    _ => {}
                 }
                 if let Some(reply) = served {
                     if kernel.trace {
@@ -88,9 +90,10 @@ pub(super) fn send(
                 }
                 bail!(
                     "{name}: {}.{} (message {id}) to this process's kernel object {port:#x} is \
-                     not serviced by the hosted kernel (arguments {arguments:x?})",
+                     not serviced by the hosted kernel: {} (arguments {arguments:x?})",
                     routine.subsystem,
-                    routine.name
+                    routine.name,
+                    server::refusal(object, routine.name)
                 )
             }
             (Some(_), Some(routine)) if server::refused(object, routine.name).is_some() => bail!(
@@ -329,7 +332,17 @@ fn answer(
                 body.extend(out);
                 _kept = descriptors;
             }
-            Reply::Forward => unreachable!("forwarded requests are not answered"),
+            Reply::Descriptors(descriptors) => {
+                bits |= MACH_MSGH_BITS_COMPLEX;
+                body.extend((descriptors.len() as u32).to_le_bytes());
+                for descriptor in &descriptors {
+                    body.extend(descriptor.bytes());
+                }
+                _kept = descriptors;
+            }
+            Reply::Forward | Reply::NotSent(_) => {
+                unreachable!("forwarded and unsent requests are not answered")
+            }
         }
         let size = HEADER_BYTES as u32 + body.len() as u32;
         let mut message = Vec::with_capacity(size as usize);
@@ -340,6 +353,12 @@ fn answer(
         let sent = host_message(&mut message, SEND, size, 0, 0);
         if sent != 0 {
             bail!("{name}: the reply to message {id} could not be sent: {sent:#x}");
+        }
+    } else if let Reply::Complex { descriptors, .. } | Reply::Descriptors(descriptors) = &reply {
+        // No reply is sent: the kernel destroys it, and the rights it
+        // carries with it.
+        for descriptor in descriptors {
+            descriptor.release();
         }
     }
     let mut receive = arguments.to_vec();
@@ -363,26 +382,7 @@ fn carry_reply_right(
     reply_port: u32,
     disposition: u32,
 ) -> Result<(u32, u32)> {
-    let relay = match kernel.mig_relay {
-        Some(relay) => relay,
-        None => {
-            let mut relay = 0u32;
-            let status = forward::mach(
-                index_of("_kernelrpc_mach_port_allocate_trap"),
-                &[
-                    u64::from(kernel.process.task_port()),
-                    MACH_PORT_RIGHT_RECEIVE,
-                    &raw mut relay as u64,
-                ],
-            )
-            .rax;
-            if status != 0 {
-                bail!("{name}: the MIG reply relay port could not be allocated: {status:#x}");
-            }
-            kernel.mig_relay = Some(relay);
-            relay
-        }
-    };
+    let relay = relay(kernel, name)?;
     let mut carrier = Vec::with_capacity(HEADER_BYTES as usize);
     for word in [
         MACH_MSG_TYPE_MAKE_SEND | disposition << 8,
@@ -407,6 +407,73 @@ fn carry_reply_right(
     // The received header names the carried right as its remote port, its
     // bits' remote field the right's type, which is how a reply moves it.
     Ok((word(8), word(0) & 0x1f))
+}
+
+/// The port only the hosted kernel receives on, which carries rights.
+fn relay(kernel: &mut Kernel, name: &str) -> Result<u32> {
+    if let Some(relay) = kernel.mig_relay {
+        return Ok(relay);
+    }
+    let mut relay = 0u32;
+    let status = forward::mach(
+        index_of("_kernelrpc_mach_port_allocate_trap"),
+        &[
+            u64::from(kernel.process.task_port()),
+            MACH_PORT_RIGHT_RECEIVE,
+            &raw mut relay as u64,
+        ],
+    )
+    .rax;
+    if status != 0 {
+        bail!("{name}: the MIG reply relay port could not be allocated: {status:#x}");
+    }
+    kernel.mig_relay = Some(relay);
+    Ok(relay)
+}
+
+/// A carrier of one port descriptor: header, descriptor count, descriptor.
+const PORT_CARRIER_BYTES: usize = HEADER_BYTES as usize + 4 + PORT_DESCRIPTOR_BYTES as usize;
+
+/// Carry a request's port descriptor, `name` with `disposition`, as the
+/// kernel copies it in with the request: the right then received into
+/// this space, as its name and received disposition (a send right's is
+/// [`server::MOVE_SEND`]), or the send's failure, when the kernel would
+/// not have taken the request.
+pub(super) fn carry_port(
+    kernel: &mut Kernel,
+    routine: &str,
+    name: u32,
+    disposition: u8,
+) -> Result<std::result::Result<(u32, u8), u32>> {
+    let relay = relay(kernel, routine)?;
+    let mut carrier = Vec::with_capacity(PORT_CARRIER_BYTES);
+    for word in [
+        MACH_MSGH_BITS_COMPLEX | MACH_MSG_TYPE_MAKE_SEND,
+        PORT_CARRIER_BYTES as u32,
+        relay,
+        0,
+        0,
+        0,
+        1,
+    ] {
+        carrier.extend(word.to_le_bytes());
+    }
+    carrier.extend(server::Descriptor::Port { name, disposition }.bytes());
+    let status = host_message(&mut carrier, SEND, PORT_CARRIER_BYTES as u32, 0, 0);
+    if status != 0 {
+        return Ok(Err(status as u32));
+    }
+    let mut received = vec![0u8; PORT_CARRIER_BYTES + RELAY_BUFFER_BYTES];
+    let size = received.len() as u32;
+    let status = host_message(&mut received, RECEIVE, 0, size, relay);
+    if status != 0 {
+        bail!(
+            "{routine}: a request's right could not be received from the relay port: {status:#x}"
+        );
+    }
+    let at = HEADER_BYTES as usize + 4;
+    let carried = u32::from_le_bytes(received[at..at + 4].try_into().unwrap());
+    Ok(Ok((carried, received[at + 10])))
 }
 
 unsafe extern "C" {

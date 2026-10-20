@@ -26,6 +26,12 @@ use std::ffi::CString;
 const DESCRIPTOR_WORDS: usize = 18;
 const ATTRIBUTES_SIZE: usize = 0;
 const ATTRIBUTES_POINTER: usize = 1;
+const PORT_ACTIONS_SIZE: usize = 4;
+const PORT_ACTIONS_POINTER: usize = 5;
+/// `struct _posix_spawn_port_actions`: `pspa_alloc`, `pspa_count`, then
+/// `_ps_port_action_t`s of six words, the first `port_type`.
+const PORT_ACTION_BYTES: u64 = 24;
+const PSPA_EXCEPTION: u32 = 1;
 /// `struct _posix_spawnattr`: `psa_binprefs[NBINPREFS]` and
 /// `psa_subcpuprefs[NBINPREFS]`, at the offsets 26A434's
 /// `posix_spawnattr_setarchpref_np` stores them.
@@ -154,6 +160,24 @@ pub(super) fn posix_spawn(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
             attributes[BINARY_PREFERENCES..BINARY_PREFERENCES + PREFERENCES * 4].fill(0);
             attributes[SUBTYPE_PREFERENCES..SUBTYPE_PREFERENCES + PREFERENCES * 4].fill(0);
             descriptor[ATTRIBUTES_POINTER] = attributes.as_ptr() as u64;
+        }
+    }
+    // The child inherits the task's exception actions; an exception-port
+    // action would set the child's on its host task, where the host kernel
+    // delivers the hosted runtime's own faults to them.
+    kernel.process.exception_ports.inheritable("posix_spawn")?;
+    let actions = descriptor[PORT_ACTIONS_POINTER];
+    if adesc != 0 && actions != 0 && descriptor[PORT_ACTIONS_SIZE] >= 8 {
+        let count = memory::read_u32(actions + 4).unwrap_or(0);
+        let within = (descriptor[PORT_ACTIONS_SIZE] - 8) / PORT_ACTION_BYTES;
+        if (0..u64::from(count).min(within)).any(|index| {
+            memory::read_u32(actions + 8 + index * PORT_ACTION_BYTES) == Some(PSPA_EXCEPTION)
+        }) {
+            bail!(
+                "posix_spawn with an exception-port action: the child would hold it on its host \
+                 task, where the host kernel delivers the hosted runtime's own faults with x86 \
+                 state, which is not implemented"
+            );
         }
     }
     let command = process::activation_command(kernel, &path, &arguments, cpu_subtype)?;

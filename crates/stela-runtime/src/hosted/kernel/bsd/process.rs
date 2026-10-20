@@ -297,6 +297,8 @@ fn execve(kernel: &mut Kernel, call: &Call, label: u64) -> Result<Outcome> {
         Ok(files) => files,
         Err(errno) => return Ok(Outcome::Error(errno)),
     };
+    // The new image keeps the task's exception actions.
+    kernel.process.exception_ports.inheritable("execve")?;
     let command = activation_command(kernel, &path, &arguments, None)?;
     let environment = HostVector::new(
         environment
