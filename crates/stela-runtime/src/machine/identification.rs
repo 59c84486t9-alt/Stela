@@ -141,6 +141,11 @@ const fn fixed(register: Encoding, shift: u8, level: u64, reason: &'static str) 
 
 /// ID_AA64PFR1_EL1.MTE, the memory tagging level.
 const PFR1_MTE: u8 = 8;
+/// ID_AA64PFR1_EL1.MTE_frac, the asynchronous Tag Check fault support.
+const PFR1_MTE_FRAC: u8 = 40;
+/// MTE_frac 0b1111: asynchronous Tag Check faults are not supported (no
+/// FEAT_MTE_ASYNC).
+const MTE_FRAC_SYNCHRONOUS_ONLY: u64 = 0b1111;
 
 const fn engine(holds: bool, reason: &'static str) -> Basis {
     Basis::Engine(holds, reason)
@@ -432,7 +437,13 @@ pub const TABLE: &[Row] = &[
         "FEAT_MTE2",
         engine(true, MTE2),
     ),
-    feature(ID_AA64PFR1_EL1, 40, 0b1111, "FEAT_MTE2", engine(true, MTE2)),
+    feature(
+        ID_AA64PFR1_EL1,
+        PFR1_MTE_FRAC,
+        MTE_FRAC_SYNCHRONOUS_ONLY,
+        "FEAT_MTE2",
+        engine(true, MTE2),
+    ),
     feature(ID_AA64PFR1_EL1, 24, 1, "FEAT_SME", engine(true, SME_RUNS)),
     feature(ID_AA64PFR1_EL1, 24, 2, "FEAT_SME2", engine(true, SME_RUNS)),
     // ID_AA64SMFR0_EL1: F32F32, BI32I32, B16F32, F16F32, I8I32, F8F32,
