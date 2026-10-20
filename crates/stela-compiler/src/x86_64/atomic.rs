@@ -99,7 +99,8 @@ pub(super) fn emit(
 /// SP is checked first. LSE2 accesses must fit the selected aligned 16-byte granule.
 /// RAX/RCX are scratch, RDX receives the address, and guest state is untouched.
 pub(super) fn address(code: &mut Vec<u8>, base: Register, bytes: u8, checks: super::MemoryChecks) {
-    address_offset(code, base, bytes, 0, checks, true);
+    let access = super::Access::write(bytes.into()).atomic();
+    address_offset(code, base, bytes, 0, checks, true, access);
 }
 
 /// Check SP before adding the displacement. SCTLR_ELx.A and then, with
@@ -113,6 +114,7 @@ pub(super) fn address_offset(
     displacement: i32,
     checks: super::MemoryChecks,
     granule: bool,
+    access: super::Access,
 ) {
     load(code, base);
     let aligned_sp = base == Register::Sp && checks.stack_alignment;
@@ -126,7 +128,7 @@ pub(super) fn address_offset(
         code.extend(ADD_RAX_IMM32);
         code.extend(displacement.to_le_bytes());
     }
-    super::address_checks(code, checks, bytes);
+    super::address_checks(code, checks, bytes, access);
     if granule && bytes != BYTE_BYTES {
         if !aligned_sp {
             code.extend(MOV_ECX_EAX);

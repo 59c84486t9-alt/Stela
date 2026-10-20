@@ -1,7 +1,7 @@
 //! Register-offset loads and stores to private RAM.
 use super::{
-    AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store, offset,
-    right_operand,
+    Access, AddressMode, MemoryTransfer, Register, Shift, Width, memory_address, memory_store,
+    offset, right_operand,
 };
 use crate::aarch64::register_offset::{IndexExtend, Operand};
 use alloc::vec::Vec;
@@ -15,6 +15,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
         operand.extend,
         operand.shift,
         operand.bytes,
+        operand.transfer == MemoryTransfer::Store,
     );
     transfer(code, operand, checks);
 }
@@ -22,6 +23,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
 /// Shared integer/SIMD address calculation, without guest register writeback.
 /// RAX is the result; RCX/RDX and host flags are scratch. SP is checked first,
 /// and SCTLR_ELx.A checks the result against the access's `bytes`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn address(
     code: &mut Vec<u8>,
     checks: super::MemoryChecks,
@@ -30,6 +32,7 @@ pub(super) fn address(
     extend: IndexExtend,
     shift: u8,
     bytes: u8,
+    write: bool,
 ) {
     // Validate incoming SP before offset addition, even if the effective
     // address would be aligned. No guest register is committed before access.
@@ -38,9 +41,10 @@ pub(super) fn address(
         guest_range: false,
         ..checks
     };
-    memory_address(code, base_checks, base, 0, AddressMode::Offset, 1);
+    let access = Access::of(write, bytes.into());
+    memory_address(code, base_checks, base, 0, AddressMode::Offset, 1, access);
     index_add(code, index, extend, shift);
-    super::address_checks(code, checks, bytes);
+    super::address_checks(code, checks, bytes, access);
 }
 
 const MOV_ECX_STATE: [u8; 2] = [0x8b, 0x8f];

@@ -52,6 +52,10 @@ pub(super) fn emit(
         0,
         AddressMode::Offset,
         operand.element_bytes,
+        super::super::Access::of(
+            operand.direction == Direction::Store,
+            operand.transferred_bytes().into(),
+        ),
     );
     match operand.post_index {
         PostIndex::None => {}

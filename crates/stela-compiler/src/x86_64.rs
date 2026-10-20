@@ -178,7 +178,8 @@ fn memory(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, checks, base, displacement, mode, bytes);
+    let access = Access::of(transfer == MemoryTransfer::Store, bytes.into());
+    memory_address(code, checks, base, displacement, mode, bytes, access);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data, Width::X64, Shift::Lsl, 0);
@@ -443,6 +444,20 @@ impl RangeCheck {
         self.mask(code);
     }
 
+    /// The translated variant's check: a failure calls the translation
+    /// helper whose address the slot at `helper` holds, with the guest
+    /// address in RCX and `access` in the two bytes after the call; the
+    /// helper returns past them with the host address of the access in RAX,
+    /// which skips the mask (docs/design/system.md, "Host placement").
+    pub(crate) fn emit_translated(self, code: &mut Vec<u8>, helper: u64, access: Access) {
+        self.test(code, TRANSLATION_CALL_BYTES);
+        code.extend([0x48, 0x89, 0xc1, 0x48, 0xa1]); // mov rcx,rax; movabs rax,[helper]
+        code.extend(helper.to_le_bytes());
+        code.extend([0xff, 0xd0, access.bytes, access.flags]); // call rax; the access
+        code.extend([0xeb, MASK_BYTES]); // jmp past the mask
+        self.mask(code);
+    }
+
     /// [`Self::emit`]'s bytes.
     #[cfg(test)]
     pub(crate) fn code(self) -> Vec<u8> {
@@ -454,52 +469,133 @@ impl RangeCheck {
     /// If `code` starts with a check of any placement, its length and the
     /// end of each of its eight host instructions, which the region cost
     /// gates count one by one.
-    pub(crate) fn at(code: &[u8]) -> Option<(usize, [usize; 8])> {
+    pub(crate) fn at(code: &[u8]) -> Option<(usize, &'static [usize])> {
+        // The ends with INC and with ADD, with a UD2 and with the
+        // translated variant's call (whose two access bytes count as one).
+        const ENDS: [[&[usize]; 2]; 2] = [
+            [
+                &[3, 7, 9, 12, 14, 16, 26, 30],
+                &[3, 7, 9, 12, 14, 17, 27, 29, 31, 33, 43, 47],
+            ],
+            [
+                &[3, 7, 10, 13, 15, 17, 27, 31],
+                &[3, 7, 10, 13, 15, 18, 28, 30, 32, 34, 44, 48],
+            ],
+        ];
         let [0x48, 0x89, 0xc1, 0x48, 0xc1, 0xf9, shift, rest @ ..] = code else {
             return None;
         };
         let (add, rest) = match rest {
-            [0xff, 0xc1, rest @ ..] => (2, rest),
-            [0x83, 0xc1, _, rest @ ..] => (3, rest),
+            [0xff, 0xc1, rest @ ..] => (0, rest),
+            [0x83, 0xc1, _, rest @ ..] => (1, rest),
+            _ => return None,
+        };
+        let [0x83, 0xf9, bound, 0x76, failure, rest @ ..] = rest else {
+            return None;
+        };
+        let (translated, rest) = match (*failure, rest) {
+            (2, [0x0f, 0x0b, rest @ ..]) => (0, rest),
+            (TRANSLATION_CALL_BYTES, [0x48, 0x89, 0xc1, 0x48, 0xa1, rest @ ..]) => {
+                let [
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    _,
+                    0xff,
+                    0xd0,
+                    _,
+                    _,
+                    0xeb,
+                    MASK_BYTES,
+                    rest @ ..,
+                ] = rest
+                else {
+                    return None;
+                };
+                (1, rest)
+            }
             _ => return None,
         };
         let [
-            0x83,
-            0xf9,
-            bound,
-            0x76,
-            0x02,
-            0x0f,
-            0x0b,
             0x48,
             0xb9,
-            rest @ ..,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            _,
+            0x48,
+            0x0f,
+            0x47,
+            0xc1,
+            ..,
         ] = rest
         else {
-            return None;
-        };
-        let [_, _, _, _, _, _, _, _, 0x48, 0x0f, 0x47, 0xc1, ..] = rest else {
             return None;
         };
         if *shift >= u64::BITS as u8 || *bound > IMM8_MAX {
             return None;
         }
-        let compared = 7 + add + 3;
-        let ends = [
-            3,
-            7,
-            7 + add,
-            compared,
-            compared + 2,
-            compared + 4,
-            compared + 14,
-            compared + 18,
-        ];
-        Some((ends[7], ends))
+        let ends = ENDS[add][translated];
+        Some((ends[ends.len() - 1], ends))
     }
 }
 
 const UD2: [u8; 2] = [0x0f, 0x0b];
+/// The translated variant's call, from `mov rcx,rax` through the jump
+/// past the mask.
+const TRANSLATION_CALL_BYTES: u8 = 19;
+/// `mov rcx,masked; cmova rax,rcx`.
+const MASK_BYTES: u8 = 14;
+
+/// What a guest access makes, which the translated variant's helper
+/// translates its address for: the bytes it covers from its address
+/// (saturating at 255: a larger access, DC ZVA's, is aligned to its size
+/// and lies in one page) and whether it writes, is unprivileged or is an
+/// atomic or exclusive access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Access {
+    bytes: u8,
+    flags: u8,
+}
+
+impl Access {
+    const WRITE: u8 = 1;
+    const ATOMIC: u8 = 4;
+
+    /// An access of `bytes` that writes if `write`, else reads.
+    pub(crate) const fn of(write: bool, bytes: u16) -> Self {
+        Self {
+            bytes: if bytes > u8::MAX as u16 {
+                u8::MAX
+            } else {
+                bytes as u8
+            },
+            flags: if write { Self::WRITE } else { 0 },
+        }
+    }
+    pub(crate) const fn read(bytes: u16) -> Self {
+        Self::of(false, bytes)
+    }
+    pub(crate) const fn write(bytes: u16) -> Self {
+        Self::of(true, bytes)
+    }
+    /// The same access, made by an atomic instruction, which needs the
+    /// location itself.
+    pub(crate) const fn atomic(self) -> Self {
+        Self {
+            flags: self.flags | Self::ATOMIC,
+            ..self
+        }
+    }
+}
 
 /// SCTLR_ELx.SA's check of an SP base in RAX, before the address addition
 /// as Arm checks it ([`MemoryChecks::stack_alignment`]).
@@ -513,16 +609,30 @@ pub(crate) const STACK_ALIGNMENT_CHECK: [u8; 6] = [
 /// [`STACK_ALIGNMENT_CHECK`], which the region cost gates count.
 pub(crate) const STACK_ALIGNMENT_CHECK_ENDS: [usize; 3] = [2, 4, 6];
 
-fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks) {
-    if checks.guest_range {
+/// The guest range check of `access`'s address in RAX, in the variant
+/// `checks` selects.
+pub(crate) fn range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Access) {
+    if checks.translated {
+        checks
+            .range
+            .emit_translated(code, checks.translation_helper, access);
+    } else {
         checks.range.emit(code);
     }
 }
 
-/// The checks of an access's final address in RAX: the guest range, then
-/// SCTLR_ELx.A against `unit`, the bytes of each element it transfers.
-fn address_checks(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
-    guest_range_check(code, checks);
+fn guest_range_check(code: &mut Vec<u8>, checks: MemoryChecks, access: Access) {
+    if checks.guest_range {
+        range_check(code, checks, access);
+    }
+}
+
+/// The checks of `access`'s final address in RAX: the guest range, then
+/// SCTLR_ELx.A against `unit`, the bytes of each element it transfers. The
+/// translated variant's host address keeps the guest address's offset in
+/// its page, so the alignment checks see the same low bits.
+fn address_checks(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8, access: Access) {
+    guest_range_check(code, checks, access);
     alignment_check(code, checks, unit);
 }
 
@@ -537,7 +647,9 @@ fn alignment_check(code: &mut Vec<u8>, checks: MemoryChecks, unit: u8) {
 
 /// RAX is the access address and, for pre- and post-index forms, RDX the
 /// pending writeback ([`address_add`]). `unit` is the bytes of each element
-/// the access transfers, which SCTLR_ELx.A checks.
+/// the access transfers, which SCTLR_ELx.A checks, and `access` the whole
+/// access.
+#[allow(clippy::too_many_arguments)]
 fn memory_address(
     code: &mut Vec<u8>,
     checks: MemoryChecks,
@@ -545,6 +657,7 @@ fn memory_address(
     displacement: i32,
     mode: AddressMode,
     unit: u8,
+    access: Access,
 ) {
     load(code, base);
     if base == Register::Sp && checks.stack_alignment && !checks.stack_checked {
@@ -553,7 +666,7 @@ fn memory_address(
         code.extend(STACK_ALIGNMENT_CHECK);
     }
     address_add(code, displacement, mode);
-    address_checks(code, checks, unit);
+    address_checks(code, checks, unit, access);
 }
 
 const LEA_RAX_RAX_DISP8: [u8; 3] = [0x48, 0x8d, 0x40];
@@ -616,7 +729,8 @@ fn memory_pair(
     displacement: i32,
     mode: AddressMode,
 ) {
-    memory_address(code, checks, base, displacement, mode, bytes);
+    let access = Access::of(transfer == MemoryTransfer::Store, 2 * u16::from(bytes));
+    memory_address(code, checks, base, displacement, mode, bytes, access);
     match transfer {
         MemoryTransfer::Store => {
             right_operand(code, data[0], Width::X64, Shift::Lsl, 0);
@@ -1608,6 +1722,101 @@ mod tests {
         }
     }
 
+    /// The translated variant's check runs on the host: a native address
+    /// passes unchanged, and any other calls the helper, which finds the
+    /// guest address in RCX and the access after its return address, and
+    /// whose host address the access then uses unmasked. A mispredicted
+    /// branch past the call still masks.
+    #[cfg(all(target_arch = "x86_64", any(target_os = "macos", target_os = "linux")))]
+    #[test]
+    fn translated_checks_call_the_helper_outside_the_native_ranges() {
+        use core::ffi::c_void;
+        unsafe extern "C" {
+            fn mmap(
+                address: *mut c_void,
+                bytes: usize,
+                protection: i32,
+                flags: i32,
+                fd: i32,
+                offset: i64,
+            ) -> *mut c_void;
+            fn mprotect(address: *mut c_void, bytes: usize, protection: i32) -> i32;
+            fn munmap(address: *mut c_void, bytes: usize) -> i32;
+        }
+        #[cfg(target_os = "macos")]
+        const MAP_ANONYMOUS: i32 = 0x1000;
+        #[cfg(target_os = "linux")]
+        const MAP_ANONYMOUS: i32 = 0x20;
+        const PAGE: usize = 4096;
+        const KEY: u32 = 0x5a5a_0000;
+        let range = RangeCheck::four_level(2);
+        let upper = UPPER_HALF + (2 << SLICE_SHIFT);
+        let access = Access::write(24).atomic();
+        // The helper: the access's two bytes into the key's low half, the
+        // return address past them, RAX the guest address with the key.
+        // mov rdx,[rsp]; movzx edx,word [rdx]; add qword [rsp],2;
+        // mov rax,rcx; xor rax,KEY; xor rax,rdx; ret.
+        let mut helper = vec![0x48, 0x8b, 0x14, 0x24, 0x0f, 0xb7, 0x12];
+        helper.extend([0x48, 0x83, 0x04, 0x24, 0x02, 0x48, 0x89, 0xc8, 0x48, 0x35]);
+        helper.extend(KEY.to_le_bytes());
+        helper.extend([0x48, 0x31, 0xd0, 0xc3]);
+        // SAFETY: private anonymous memory, RX after the copy and unmapped
+        // after the calls; the code touches only the stack.
+        unsafe {
+            let page = mmap(core::ptr::null_mut(), PAGE, 3, 2 | MAP_ANONYMOUS, -1, 0);
+            assert_ne!(page as usize, usize::MAX);
+            let slot = alloc::boxed::Box::new(page as u64);
+            // mov rax,rdi; the check; ret, then the same with the branch
+            // always taken, as a misprediction runs it.
+            let mut check = vec![];
+            range.emit_translated(&mut check, &*slot as *const u64 as u64, access);
+            let (bytes, ends) = RangeCheck::at(&check).unwrap();
+            assert_eq!(bytes, check.len());
+            let mut code = helper.clone();
+            let entry = code.len();
+            code.extend([0x48, 0x89, 0xf8]);
+            code.extend(&check);
+            code.push(0xc3);
+            let speculated = code.len();
+            code.extend([0x48, 0x89, 0xf8]);
+            let branch = code.len() + ends[4] - 2;
+            code.extend(&check);
+            code[branch] = 0xeb; // jmp in place of jbe
+            code.push(0xc3);
+            core::ptr::copy_nonoverlapping(code.as_ptr(), page.cast(), code.len());
+            assert_eq!(mprotect(page, PAGE, 5), 0);
+            let run = |at: usize, address: u64| {
+                let function: unsafe extern "sysv64" fn(u64) -> u64 =
+                    core::mem::transmute(page.cast::<u8>().add(at));
+                function(address)
+            };
+            let called = |address: u64| {
+                address
+                    ^ u64::from(KEY)
+                    ^ u64::from(u16::from_le_bytes([access.bytes, access.flags]))
+            };
+            for address in [
+                0,
+                0x1234,
+                (1 << 47) - 1,
+                upper,
+                u64::MAX,
+                1 << 47,
+                UPPER_HALF,
+                upper - 1,
+                range.masked,
+                0x0040_0000_0000_0000,
+            ] {
+                let native = address < 1 << 47 || address >= upper;
+                let expected = if native { address } else { called(address) };
+                assert_eq!(run(entry, address), expected, "{address:#x}");
+                let masked = if native { address } else { range.masked };
+                assert_eq!(run(speculated, address), masked, "{address:#x}");
+            }
+            assert_eq!(munmap(page, PAGE), 0);
+        }
+    }
+
     /// A four-level placement's masked address lies in its guard, which no
     /// access extent leaves, and its fields fit the encoding.
     #[test]
@@ -1626,7 +1835,7 @@ mod tests {
             } else {
                 [3, 7, 10, 13, 15, 17, 27, 31]
             };
-            assert_eq!(RangeCheck::at(&code), Some((ends[7], ends)));
+            assert_eq!(RangeCheck::at(&code), Some((ends[7], &ends[..])));
         }
         assert_eq!(
             RangeCheck::at(&RangeCheck::FIVE_LEVEL.code()).unwrap().1,

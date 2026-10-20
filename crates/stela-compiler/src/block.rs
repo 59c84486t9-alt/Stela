@@ -584,11 +584,6 @@ impl CompilationPlan {
                 self.profile
             )));
         }
-        if checks.translated {
-            return Err(CompileError(
-                "the translated variant's helper call is not lowered yet".into(),
-            ));
-        }
         if !checks.stack_alignment {
             let single_agent = crate::x86_64::MemoryChecks {
                 single_agent: true,
@@ -1037,6 +1032,61 @@ mod tests {
                 .unwrap()
         });
         assert_eq!((count(&zero), count(&clean)), (1, 1));
+        // The translated variant checks each access, and each failed check
+        // names the access to the helper: its bytes and whether it writes
+        // (1) or is atomic (4).
+        const SLOT: u64 = 0xffff_8000_0123_4560;
+        const TRANSLATED: crate::x86_64::MemoryChecks =
+            crate::x86_64::MemoryChecks::system(true, false, true, false)
+                .with_range(crate::x86_64::RangeCheck::four_level(2))
+                .with_translation(SLOT);
+        let accesses = |code: &[u8]| {
+            let mut found = vec![];
+            let mut cursor = 0;
+            while cursor < code.len() {
+                match crate::x86_64::RangeCheck::at(&code[cursor..]) {
+                    Some((bytes, ends)) => {
+                        assert_eq!(ends.len(), 12, "a translated check");
+                        let call = &code[cursor + ends[5]..cursor + ends[7]];
+                        assert_eq!(call[..2], [0x48, 0xa1]);
+                        assert_eq!(call[2..10], SLOT.to_le_bytes());
+                        let access = &code[cursor + ends[7]..cursor + ends[8]];
+                        found.push((access[0], access[1]));
+                        cursor += bytes;
+                    }
+                    None => cursor += 1,
+                }
+            }
+            found
+        };
+        let all = compile(&words, BlockProfile::SystemModeV1, |plan| {
+            plan.with_memory_checks(TRANSLATED).unwrap()
+        });
+        assert_eq!(
+            accesses(&all),
+            [
+                (4, 0),
+                (8, 0),
+                (8, 0),
+                (2, 0),
+                (16, 0),
+                (8, 0),
+                (8, 5),
+                (4, 0),
+                (4, 1),
+                (16, 0),
+                (8, 1),
+                (16, 0),
+                (32, 1),
+            ]
+        );
+        assert_eq!(count(&all), 0);
+        let zero = compile(&[0xd50b_7423], BlockProfile::SystemModeV1, |plan| {
+            plan.with_memory_checks(TRANSLATED)
+                .and_then(|plan| plan.with_zero_block(Some(64)))
+                .unwrap()
+        });
+        assert_eq!(accesses(&zero), [(64, 1)]);
     }
 
     #[test]
@@ -1187,7 +1237,7 @@ mod tests {
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
         let mut zeroing = Vec::new();
-        crate::x86_64::zero_block::emit(&mut zeroing, 3, 64, crate::x86_64::RangeCheck::FIVE_LEVEL);
+        crate::x86_64::zero_block::emit(&mut zeroing, 3, 64, crate::x86_64::MemoryChecks::DEFAULT);
         assert_eq!(code[at..at + zeroing.len()], zeroing);
         let next = GuestAddress(BASE + 8);
         assert_eq!(
@@ -1265,7 +1315,7 @@ mod tests {
         let code = &native.native.x86_64_code;
         let at = native.native.source_map[1].1;
         let mut check = Vec::new();
-        crate::x86_64::cache_clean::emit(&mut check, 0, crate::x86_64::RangeCheck::FIVE_LEVEL);
+        crate::x86_64::cache_clean::emit(&mut check, 0, crate::x86_64::MemoryChecks::DEFAULT);
         assert_eq!(code[at..at + check.len()], check);
         let next = GuestAddress(BASE + 8);
         assert_eq!(

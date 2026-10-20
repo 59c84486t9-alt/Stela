@@ -170,6 +170,7 @@ pub(super) fn emit(
                 displacement,
                 checks,
                 checks.ordered_granule,
+                super::Access::of(kind == Kind::Release, bytes.into()),
             );
             // An access that crosses its granule needs no single-copy
             // atomicity: it takes a plain load, or a store and a full fence.

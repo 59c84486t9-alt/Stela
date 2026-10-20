@@ -39,7 +39,7 @@ pub fn operand(instruction: &SystemInstruction) -> Option<u8> {
 
 /// Zero the `bytes` block (a power of two in [`MIN_BYTES`]..=[`MAX_BYTES`])
 /// holding Xt.
-pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, bytes: u16, range: super::RangeCheck) {
+pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, bytes: u16, checks: super::MemoryChecks) {
     debug_assert!(bytes.is_power_of_two() && (MIN_BYTES..=MAX_BYTES).contains(&bytes));
     super::load(
         code,
@@ -51,7 +51,7 @@ pub(crate) fn emit(code: &mut Vec<u8>, rt: u8, bytes: u16, range: super::RangeCh
     );
     // Aligning down keeps bits 63:48, so Xt is in range exactly when the
     // block is.
-    range.emit(code);
+    super::range_check(code, checks, super::Access::write(bytes));
     let mask = -i32::from(bytes);
     if let Ok(mask) = i8::try_from(mask) {
         code.extend([0x48, 0x83, 0xe0, mask as u8]); // and rax,-bytes
@@ -127,7 +127,7 @@ mod tests {
             // Xt points inside the block, past its start.
             state.x[5] = block + u64::from(bytes) - 1;
             let mut code = Vec::new();
-            emit(&mut code, 5, bytes, super::super::RangeCheck::FIVE_LEVEL);
+            emit(&mut code, 5, bytes, super::super::MemoryChecks::DEFAULT);
             code.push(0xc3); // ret
             // SAFETY: private anonymous memory, RX after the copy, unmapped
             // after the call; the code writes only inside `memory`.

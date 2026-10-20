@@ -369,7 +369,7 @@ fn output_instruction_ends(code: &[u8], extended: bool) -> Option<Vec<usize>> {
     while cursor < code.len() {
         // The exact system-mode guest range check of an access address.
         if let Some((bytes, check_ends)) = super::super::RangeCheck::at(&code[cursor..]) {
-            ends.extend(check_ends.map(|end| cursor + end));
+            ends.extend(check_ends.iter().map(|end| cursor + end));
             cursor += bytes;
             continue;
         }

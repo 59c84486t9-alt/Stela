@@ -38,7 +38,7 @@ pub(super) fn emit(code: &mut Vec<u8>, operand: &Operand, checks: super::MemoryC
         Transfer::Integer { .. } => 4,
         Transfer::Simd { bytes, .. } => bytes,
     };
-    super::address_checks(code, checks, bytes);
+    super::address_checks(code, checks, bytes, super::Access::read(bytes.into()));
     match operand.transfer {
         Transfer::Integer {
             destination,

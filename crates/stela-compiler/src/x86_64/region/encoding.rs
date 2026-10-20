@@ -372,7 +372,7 @@ fn ordinary_address_ends(code: &[u8], base: usize, displacement: i32) -> Option<
     }
     // A system-mode access checks the address against the guest's ranges.
     if let Some((_, check_ends)) = RangeCheck::at(&code[cursor..]) {
-        ends.extend(check_ends.map(|end| cursor + end));
+        ends.extend(check_ends.iter().map(|end| cursor + end));
     }
     Some(ends)
 }

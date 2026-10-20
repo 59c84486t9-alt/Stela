@@ -307,7 +307,7 @@ fn emit_selected(
         fallthrough,
         target,
         native,
-        checks.range,
+        checks,
         after.rax,
     );
     (block, fault_recovery)
@@ -580,7 +580,7 @@ fn emit_terminal(
     fallthrough: GuestAddress,
     target: crate::TargetCpu,
     native: super::NativeSystem,
-    range: super::RangeCheck,
+    checks: super::MemoryChecks,
     rax: super::Rax,
 ) {
     // The terminal's own load of a register RAX already holds.
@@ -620,10 +620,10 @@ fn emit_terminal(
                 let clean = super::cache_clean::operand(request)
                     .filter(|(operation, _)| native.cache_clean.contains(*operation));
                 if let Some((bytes, rt)) = zero {
-                    super::zero_block::emit(code, rt, bytes, range);
+                    super::zero_block::emit(code, rt, bytes, checks);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else if let Some((_, rt)) = clean {
-                    super::cache_clean::emit(code, rt, range);
+                    super::cache_clean::emit(code, rt, checks);
                     direct_exit(code, request.next_pc, ExitKind::Fallthrough);
                 } else {
                     direct_exit(code, request.instruction_pc, ExitKind::System);
