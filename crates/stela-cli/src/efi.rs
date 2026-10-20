@@ -28,6 +28,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use stela_loader::mount_interface;
+use stela_runtime::pc::boot_log;
 
 use stela_runtime::payload::MAX_SLICE_BYTES;
 
@@ -37,6 +38,8 @@ pub const LOADER: &str = "EFI/BOOT/BOOTX64.EFI";
 const LOADER_DIRECTORY: &str = "EFI/BOOT";
 const MOUNT: &str = "EFI/stela";
 pub(crate) const OPTIONS: &str = "EFI/stela/stela.cfg";
+/// `mount_interface::BOOT_LOG_FILE`.
+pub(crate) const BOOT_LOG: &str = "EFI/stela/boot.log";
 const SOURCE: &str = "EFI/stela/source.bin";
 
 #[derive(Subcommand)]
@@ -203,17 +206,27 @@ pub(crate) fn add_mount(
     if let Some(options) = options {
         write_atomic(&esp.join(OPTIONS), options.as_bytes(), false)?;
     }
+    // An existing log keeps its earlier boots. Written in one piece on the
+    // volume, it is one contiguous run, as `stela.efi` needs.
+    if !esp.join(BOOT_LOG).is_file() {
+        write_atomic(
+            &esp.join(BOOT_LOG),
+            &vec![0; boot_log::LOG_BYTES as usize],
+            true,
+        )?;
+    }
     // The loader goes in last, so the USB never boots it without its files.
     write_atomic(&esp.join(LOADER), &image, false)?;
     Ok(json!({
         "loader": esp.join(LOADER),
         "source": esp.join(SOURCE).is_file().then(|| esp.join(SOURCE)),
         "options": esp.join(OPTIONS).is_file().then(|| esp.join(OPTIONS)),
+        "boot_log": esp.join(BOOT_LOG),
     }))
 }
 
 /// Paths relative to the ESP that `install` writes, for reports.
-pub(crate) const INSTALLED: [&str; 3] = [LOADER, OPTIONS, SOURCE];
+pub(crate) const INSTALLED: [&str; 4] = [LOADER, OPTIONS, SOURCE, BOOT_LOG];
 
 /// Remove the loader, when it is Stela's, and the files `install` wrote,
 /// and return a report.
@@ -222,7 +235,7 @@ pub fn uninstall(esp: &Path, owned: bool) -> Result<serde_json::Value> {
         true => Some(true),
         false => loader_is_stela(esp)?,
     };
-    let mut remove = vec![esp.join(OPTIONS), esp.join(SOURCE)];
+    let mut remove = vec![esp.join(OPTIONS), esp.join(SOURCE), esp.join(BOOT_LOG)];
     if stela == Some(true) {
         remove.insert(0, esp.join(LOADER));
     }

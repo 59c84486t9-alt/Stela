@@ -29,11 +29,12 @@
 //! leave the bytes it wrote in place of the oldest ones the old header still
 //! counts, at most the bytes of that one flush.
 //!
-//! A machine-state file (`--nor-file`) stands in for the partition: a file
-//! preallocated on a FAT32 volume, laid out as the partition is. Writes
-//! reach its blocks directly, never the volume's directory or FAT, so
-//! [`file_blocks`] takes only a file that is one contiguous, block-aligned
-//! run of at least [`PARTITION_BYTES`].
+//! A file preallocated on a FAT32 volume can hold a log too: a machine-state
+//! file (`--nor-file`) laid out as the partition is, or the USB's own log
+//! (`stela_loader::mount_interface::BOOT_LOG_FILE`), [`LOG_BYTES`] of the
+//! region alone. Writes reach its blocks directly, never the volume's
+//! directory or FAT, so [`file_blocks`] takes only a file that is one
+//! contiguous, block-aligned run of the bytes its layout needs.
 use super::block::{BlockDevice, BlockError};
 use super::fat32;
 use crate::machine::apple::{nor::CAPACITY, sep_state};
@@ -111,8 +112,8 @@ pub enum FileError {
     Fragmented { extents: usize },
     /// It does not start on a block boundary.
     Misaligned { offset: u64, block: u64 },
-    /// It holds fewer than [`PARTITION_BYTES`] in whole blocks.
-    Short { bytes: u64 },
+    /// It holds fewer than the `needed` bytes in whole blocks.
+    Short { bytes: u64, needed: u64 },
 }
 
 impl fmt::Display for FileError {
@@ -127,18 +128,18 @@ impl fmt::Display for FileError {
                 f,
                 "the file starts at byte {offset:#x}, not on a {block}-byte block boundary"
             ),
-            Self::Short { bytes } => write!(
+            Self::Short { bytes, needed } => write!(
                 f,
-                "the file holds {bytes:#x} bytes in whole blocks; the machine state needs \
-                 {PARTITION_BYTES:#x}"
+                "the file holds {bytes:#x} bytes in whole blocks; it needs {needed:#x}"
             ),
         }
     }
 }
 
-/// The first block and the block count of `file`, a machine-state file on
-/// a partition of `block`-byte blocks.
-pub fn file_blocks(file: &fat32::File, block: u64) -> Result<(u64, u64), FileError> {
+/// The first block and the block count of `file`, a file of at least
+/// `needed` bytes on a partition of `block`-byte blocks: [`PARTITION_BYTES`]
+/// for a machine-state file, [`LOG_BYTES`] for a log file.
+pub fn file_blocks(file: &fat32::File, block: u64, needed: u64) -> Result<(u64, u64), FileError> {
     let [extent] = file.extents[..] else {
         return Err(FileError::Fragmented {
             extents: file.extents.len(),
@@ -151,9 +152,10 @@ pub fn file_blocks(file: &fat32::File, block: u64) -> Result<(u64, u64), FileErr
         });
     }
     let blocks = extent.bytes / block;
-    if blocks * block < PARTITION_BYTES {
+    if blocks * block < needed {
         return Err(FileError::Short {
             bytes: blocks * block,
+            needed,
         });
     }
     Ok((extent.offset / block, blocks))
@@ -249,12 +251,16 @@ impl fmt::Write for DroppedLine {
 
 /// Bytes waiting for a flush, at most the storage's length. An overflow
 /// drops the oldest and counts them; [`Pending::drain`] puts a
-/// `[boot log dropped N bytes]` line in their place.
+/// `[boot log dropped N bytes]` line in their place. Several logs can read
+/// the same bytes instead, each from its own position
+/// ([`Pending::copy_since`]).
 pub struct Pending<S> {
     storage: S,
     start: usize,
     len: usize,
     dropped: u64,
+    /// Every byte pushed, held or not.
+    pushed: u64,
 }
 
 impl<S> Pending<S> {
@@ -264,12 +270,14 @@ impl<S> Pending<S> {
             start: 0,
             len: 0,
             dropped: 0,
+            pushed: 0,
         }
     }
 }
 
 impl<S: AsRef<[u8]> + AsMut<[u8]>> Pending<S> {
     pub fn push(&mut self, mut bytes: &[u8]) {
+        self.pushed += bytes.len() as u64;
         let capacity = self.storage.as_ref().len();
         if capacity == 0 {
             self.dropped += bytes.len() as u64;
@@ -307,6 +315,37 @@ impl<S: AsRef<[u8]> + AsMut<[u8]>> Pending<S> {
             } else {
                 DroppedLine::new(self.dropped).len
             }
+    }
+
+    /// The position after every byte pushed so far.
+    pub fn pushed(&self) -> u64 {
+        self.pushed
+    }
+
+    /// Hand `sink` the bytes pushed since position `from` (an earlier
+    /// [`Pending::pushed`]) and keep them, after a dropped-bytes line for
+    /// those no longer held; the position reached.
+    pub fn copy_since<E>(
+        &self,
+        from: u64,
+        mut sink: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<u64, E> {
+        let oldest = self.pushed - self.len as u64;
+        if from < oldest {
+            sink(DroppedLine::new(oldest - from).as_bytes())?;
+        }
+        let skip = from.saturating_sub(oldest).min(self.len as u64) as usize;
+        let storage = self.storage.as_ref();
+        let start = (self.start + skip) % storage.len().max(1);
+        let len = self.len - skip;
+        let first = len.min(storage.len() - start);
+        if first != 0 {
+            sink(&storage[start..start + first])?;
+        }
+        if len > first {
+            sink(&storage[..len - first])?;
+        }
+        Ok(self.pushed)
     }
 
     /// Hand every pending byte to `sink` in order, after the dropped-bytes
@@ -396,10 +435,21 @@ impl Writer {
     /// machine-state partition), count this boot and append its marker
     /// line. A blank or invalid header starts a fresh log ([`Writer::fresh`]).
     pub fn open(device: &mut dyn BlockDevice) -> Result<Self, BlockError> {
-        Self::with_pending(device, PENDING_BYTES)
+        Self::with_pending(device, PENDING_BYTES, true)
     }
 
-    fn with_pending(device: &mut dyn BlockDevice, pending: usize) -> Result<Self, BlockError> {
+    /// Open the log again later in the same boot, as the system engine does
+    /// after the loader wrote it: the boot is not counted again and gets no
+    /// second marker line.
+    pub fn resume(device: &mut dyn BlockDevice) -> Result<Self, BlockError> {
+        Self::with_pending(device, PENDING_BYTES, false)
+    }
+
+    fn with_pending(
+        device: &mut dyn BlockDevice,
+        pending: usize,
+        new_boot: bool,
+    ) -> Result<Self, BlockError> {
         let identity = device.identity();
         let block = identity.block_size as usize;
         if block == 0 || !(HEADER_BYTES as usize).is_multiple_of(block) {
@@ -452,7 +502,7 @@ impl Writer {
         };
         let mut writer = Self {
             ring,
-            boots: header.boots.saturating_add(1),
+            boots: header.boots.saturating_add(u64::from(new_boot)),
             durable: fresh.is_none().then_some(head),
             fresh,
             pending: Pending::new(vec![0; pending]),
@@ -460,7 +510,9 @@ impl Writer {
         if last != b'\n' {
             writer.append(b"\n");
         }
-        writer.append(format!("=== STELA BOOT {} ===\n", writer.boots).as_bytes());
+        if new_boot {
+            writer.append(format!("=== STELA BOOT {} ===\n", writer.boots).as_bytes());
+        }
         Ok(writer)
     }
 
@@ -487,26 +539,16 @@ impl Writer {
         self.pending.push(bytes);
     }
 
-    /// Store the pending bytes: ring blocks first, then the header.
+    /// Store the pending bytes: ring blocks first, durably, then the
+    /// header, durably.
     pub fn flush(&mut self, device: &mut dyn BlockDevice) -> Result<(), BlockError> {
-        self.flush_from(device, &mut Pending::new([0u8; 0]))
-    }
-
-    /// Store this writer's pending bytes, then those `more` holds, in that
-    /// order: ring blocks first, durably, then the header, durably.
-    pub fn flush_from<S: AsRef<[u8]> + AsMut<[u8]>>(
-        &mut self,
-        device: &mut dyn BlockDevice,
-        more: &mut Pending<S>,
-    ) -> Result<(), BlockError> {
-        let mut remaining = self.pending.bytes() + more.bytes();
+        let mut remaining = self.pending.bytes();
         if remaining == 0 && self.durable == Some(self.ring.head) {
             return Ok(());
         }
         let ring = &mut self.ring;
         self.pending
             .drain(|bytes| ring.stage(device, bytes, &mut remaining))?;
-        more.drain(|bytes| ring.stage(device, bytes, &mut remaining))?;
         if ring.dirty {
             device.write(ring.lba(ring.head), &ring.tail)?;
             ring.dirty = false;
@@ -628,6 +670,24 @@ mod tests {
 
     fn text(log: &Log) -> String {
         String::from_utf8(log.stream.clone()).unwrap()
+    }
+
+    #[test]
+    fn a_resumed_log_continues_the_same_boot() {
+        let mut disk = Recorder::new(HEADER_BYTES + 4 * 4096, 512);
+        let mut loader = Writer::open(&mut disk).unwrap();
+        loader.append(b"before the takeover\n");
+        loader.flush(&mut disk).unwrap();
+        let mut engine = Writer::resume(&mut disk).unwrap();
+        assert_eq!(engine.boots(), 1);
+        engine.append(b"after it\n");
+        engine.flush(&mut disk).unwrap();
+        let log = disk.log().unwrap();
+        assert_eq!(log.boots, 1);
+        assert_eq!(
+            text(&log),
+            "=== STELA BOOT 1 ===\nbefore the takeover\nafter it\n"
+        );
     }
 
     #[test]
@@ -776,9 +836,31 @@ mod tests {
             .unwrap();
         assert_eq!(out, b"[boot log dropped 4 bytes]\n456789AB");
 
+        // Logs that read the same bytes from their own positions.
+        let mut pending = Pending::new([0u8; 8]);
+        let copy = |pending: &Pending<[u8; 8]>, from| {
+            let mut out = Vec::new();
+            let at = pending
+                .copy_since(from, |bytes| {
+                    out.extend_from_slice(bytes);
+                    Ok::<_, ()>(())
+                })
+                .unwrap();
+            (at, out)
+        };
+        pending.push(b"abcdef");
+        assert_eq!(copy(&pending, 0), (6, b"abcdef".to_vec()));
+        pending.push(b"ghij");
+        assert_eq!(copy(&pending, 6), (10, b"ghij".to_vec()));
+        assert_eq!(
+            copy(&pending, 0),
+            (10, b"[boot log dropped 2 bytes]\ncdefghij".to_vec())
+        );
+        assert_eq!(copy(&pending, 10), (10, Vec::new()));
+
         // The writer's own buffer between flushes.
         let mut disk = Recorder::new(HEADER_BYTES + 4 * 4096, 512);
-        let mut writer = Writer::with_pending(&mut disk, 64).unwrap();
+        let mut writer = Writer::with_pending(&mut disk, 64, true).unwrap();
         for line in 0..10 {
             writer.append(format!("line {line:02}\n").as_bytes());
         }
@@ -872,19 +954,23 @@ mod tests {
         };
         let size = 6 << 20;
         assert_eq!(
-            file_blocks(&file(&[(0x10_0000, size)]), 512),
+            file_blocks(&file(&[(0x10_0000, size)]), 512, PARTITION_BYTES),
             Ok((0x800, size / 512))
         );
         assert_eq!(
-            file_blocks(&file(&[(0x10_0000, 0x1000), (0x20_0000, size)]), 512),
+            file_blocks(
+                &file(&[(0x10_0000, 0x1000), (0x20_0000, size)]),
+                512,
+                PARTITION_BYTES
+            ),
             Err(FileError::Fragmented { extents: 2 })
         );
         assert_eq!(
-            file_blocks(&file(&[]), 512),
+            file_blocks(&file(&[]), 512, PARTITION_BYTES),
             Err(FileError::Fragmented { extents: 0 })
         );
         assert_eq!(
-            file_blocks(&file(&[(0x10_0200, size)]), 4096),
+            file_blocks(&file(&[(0x10_0200, size)]), 4096, PARTITION_BYTES),
             Err(FileError::Misaligned {
                 offset: 0x10_0200,
                 block: 4096
@@ -892,14 +978,24 @@ mod tests {
         );
         // A partial last block does not count.
         assert_eq!(
-            file_blocks(&file(&[(0, PARTITION_BYTES + 0x800)]), 4096),
+            file_blocks(
+                &file(&[(0, PARTITION_BYTES + 0x800)]),
+                4096,
+                PARTITION_BYTES
+            ),
             Ok((0, PARTITION_BYTES / 4096))
         );
         assert_eq!(
-            file_blocks(&file(&[(0, PARTITION_BYTES - 1)]), 512),
+            file_blocks(&file(&[(0, PARTITION_BYTES - 1)]), 512, PARTITION_BYTES),
             Err(FileError::Short {
-                bytes: PARTITION_BYTES - 512
+                bytes: PARTITION_BYTES - 512,
+                needed: PARTITION_BYTES
             })
+        );
+        // A log file needs only the region.
+        assert_eq!(
+            file_blocks(&file(&[(0, LOG_BYTES)]), 512, LOG_BYTES),
+            Ok((0, LOG_BYTES / 512))
         );
     }
 }

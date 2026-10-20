@@ -296,7 +296,7 @@ pub fn take_over(
     if let Some(storage) = &storage {
         storage.map(&mut tables)?;
     }
-    crate::output::leave_firmware_console();
+    crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
     // stack, arenas and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };

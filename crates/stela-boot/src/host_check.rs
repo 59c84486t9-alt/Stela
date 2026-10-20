@@ -316,7 +316,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     }
     let registers = (machine.apic_base & apic::BASE_ADDRESS) as usize;
     tables.device(registers, registers + PAGE)?;
-    crate::output::leave_firmware_console();
+    crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; the heap,
     // stack and tables are LOADER_DATA, which Stela keeps.
     let map = unsafe { boot::exit_boot_services(None) };
@@ -468,8 +468,8 @@ fn open_log(
     let file = volume
         .file(path)
         .map_err(|error| format!("partition {guid}: {error}"))?;
-    let (first, blocks) =
-        boot_log::file_blocks(&file, block).map_err(|error| format!("{path}: {error}"))?;
+    let (first, blocks) = boot_log::file_blocks(&file, block, boot_log::PARTITION_BYTES)
+        .map_err(|error| format!("{path}: {error}"))?;
     let partition = volume.into_inner().into_inner();
     let window = Shared::new(Box::new(partition))
         .window(first, blocks)

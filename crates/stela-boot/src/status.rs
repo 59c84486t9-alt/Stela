@@ -11,7 +11,8 @@
 //! [`tick`] moves the marker; anything that waits calls it, at most a few
 //! frames a second are drawn. Finished lines are kept as [`history`], which
 //! the loader hands to the system engine so its screen carries on from them
-//! ([`replay`]).
+//! ([`replay`]). Each step's start and end store the boot logs, so a log
+//! read after a hang ends at the step that hung.
 use crate::{
     console::{self, Color},
     output,
@@ -206,6 +207,7 @@ pub fn begin(title: &str) {
         });
         state.draw_running();
     });
+    output::flush_log();
 }
 
 /// Show how far the running step has come, such as `182 of 484 MB`.
@@ -238,17 +240,20 @@ pub fn tick() {
 /// End the running step with `result`, which may be empty.
 pub fn done(result: &str) {
     with(|state| state.finish(Mark::Ok, result));
+    output::flush_log();
 }
 
 /// End the running step as having gone wrong in a way that lets the boot
 /// go on.
 pub fn warn(result: &str) {
     with(|state| state.finish(Mark::Warn, result));
+    output::flush_log();
 }
 
 /// End the running step as failed, or show `result` as a failure.
 pub fn fail(result: &str) {
     with(|state| state.finish(Mark::Failed, result));
+    output::flush_log();
 }
 
 /// A line of its own, under the step lines.

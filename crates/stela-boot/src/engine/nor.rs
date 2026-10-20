@@ -143,6 +143,6 @@ pub(crate) fn open_log(disk: &Shared, block: u64, available: u64) -> bool {
         boot_log::LOG_BYTES,
         writer.head()
     ));
-    output::install_log(writer, device);
+    output::add_log(writer, device, output::Log::Machine);
     true
 }

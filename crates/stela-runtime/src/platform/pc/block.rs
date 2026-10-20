@@ -57,6 +57,8 @@ pub enum Transport {
     Usb,
     /// The engine's own memory ([`Volatile`]).
     Ram,
+    /// A file in the firmware's file system, while boot services run.
+    Firmware,
 }
 
 /// What a device reports about itself.

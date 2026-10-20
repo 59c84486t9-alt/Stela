@@ -3970,10 +3970,32 @@ mod tests {
             "{text}"
         );
         assert_eq!(partition_bytes(&f, NOR), state);
-        // The log is optional: a smaller partition is noted, not refused.
+        // The USB's own log, which setup preallocates, comes first.
+        let usb = crate::boot_log::tests::region(&["CHOICE 3 (Install macOS (Stela))\n"]);
+        fs::write(f.esp.join(efi::BOOT_LOG), &usb).unwrap();
+        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        assert!(text.starts_with("Boot log on the USB ("), "{text}");
+        assert!(
+            text.contains("CHOICE 3 (Install macOS (Stela))\n"),
+            "{text}"
+        );
+        assert!(
+            text.ends_with("=== STELA BOOT 1 ===\nNOR persistent fresh=true\n"),
+            "{text}"
+        );
+        // The log is optional: a smaller partition is noted, not refused,
+        // and the USB's log still prints.
         f.host.partitions.get_mut(NOR).unwrap().0.bytes = PARTITION_BYTES - 1;
+        let text = rerun(&f, |c| c.boot_log = true).unwrap();
+        assert!(text.starts_with("Boot log on the USB ("), "{text}");
+        assert!(text.ends_with("without one\n"), "{text}");
+        fs::write(f.esp.join(efi::BOOT_LOG), vec![0; LOG_BYTES as usize]).unwrap();
         let error = format!("{:#}", rerun(&f, |c| c.boot_log = true).unwrap_err());
-        assert!(error.contains("without one"), "{error}");
+        assert!(
+            error.contains("has no boot log: the log region is blank\n"),
+            "{error}"
+        );
+        assert!(error.ends_with("without one"), "{error}");
         let mut again = installed_command(&f);
         again.target = Some(REGION2.into());
         again.nor = Some(NOR2.into());

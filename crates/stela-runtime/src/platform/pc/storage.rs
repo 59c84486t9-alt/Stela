@@ -304,11 +304,14 @@ pub fn open_unique(
 
 /// A partition to open: by its disk's serial and its GUID, as `stela.cfg`
 /// names a target, or by its unique GUID alone, as the install medium and
-/// the translation store are named.
+/// the translation store are named. An EFI system partition is refused,
+/// except as [`Named::Host`]: a partition where Stela keeps a file of its
+/// own, such as the USB's boot log, which never reaches the guest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Named {
     Disk(Target),
     Unique(Guid),
+    Host(Guid),
 }
 
 /// Open every partition of `named`, each disk taken once and shared by the
@@ -347,13 +350,13 @@ pub fn open_shared(
 }
 
 /// The index of the disk holding `named` and its partition, refusing an
-/// EFI system partition.
+/// EFI system partition unless it is [`Named::Host`].
 fn locate(
     devices: &mut [Box<dyn BlockDevice>],
     named: &Named,
 ) -> Result<(usize, gpt::Partition), StorageError> {
     let (index, partition) = match named {
-        Named::Unique(guid) => find_unique(devices, *guid)?,
+        Named::Unique(guid) | Named::Host(guid) => find_any(devices, *guid)?,
         Named::Disk(target) => {
             let index = find(devices, &target.serial)?;
             let table = gpt::read(&mut *devices[index]).map_err(StorageError::Table)?;
@@ -370,7 +373,7 @@ fn locate(
             (index, partition)
         }
     };
-    if partition.kind == Guid::ESP {
+    if partition.kind == Guid::ESP && !matches!(named, Named::Host(_)) {
         return Err(StorageError::SystemPartition(partition.unique));
     }
     Ok((index, partition))
@@ -379,6 +382,19 @@ fn locate(
 /// The index of the one disk in `devices` whose GPT holds partition `guid`,
 /// and that partition, as [`open_unique`] requires them.
 fn find_unique(
+    devices: &mut [Box<dyn BlockDevice>],
+    guid: Guid,
+) -> Result<(usize, gpt::Partition), StorageError> {
+    let (index, partition) = find_any(devices, guid)?;
+    if partition.kind == Guid::ESP {
+        return Err(StorageError::SystemPartition(guid));
+    }
+    Ok((index, partition))
+}
+
+/// The index of the one disk whose GPT holds partition `guid`, of any type,
+/// and that partition.
+fn find_any(
     devices: &mut [Box<dyn BlockDevice>],
     guid: Guid,
 ) -> Result<(usize, gpt::Partition), StorageError> {
@@ -396,11 +412,7 @@ fn find_unique(
         }
         found = Some((index, partition));
     }
-    let (index, partition) = found.ok_or(StorageError::NoPartition(guid))?;
-    if partition.kind == Guid::ESP {
-        return Err(StorageError::SystemPartition(guid));
-    }
-    Ok((index, partition))
+    found.ok_or(StorageError::NoPartition(guid))
 }
 
 /// The byte at `offset` of the storage check's pattern.
@@ -542,6 +554,14 @@ mod tests {
             Some(StorageError::SystemPartition(esp.parse().unwrap()))
         );
         assert_eq!(devices.len(), 2);
+        // Stela's own files may sit on the ESP; a guest partition may not.
+        let esp: Guid = esp.parse().unwrap();
+        assert_eq!(
+            open_shared(&mut devices, &[Named::Unique(esp)]).err(),
+            Some((0, StorageError::SystemPartition(esp)))
+        );
+        let opened = open_shared(&mut devices, &[Named::Host(esp)]).unwrap();
+        assert_eq!((opened.len(), devices.len()), (1, 1));
     }
 
     #[test]

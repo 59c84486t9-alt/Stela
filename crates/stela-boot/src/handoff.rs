@@ -140,6 +140,9 @@ pub struct Handoff {
     /// with (`status::replay`).
     pub history: [u8; crate::status::HISTORY_BYTES],
     pub history_bytes: usize,
+    /// The partition holding the USB's boot log the loader keeps
+    /// (`log_file`), which the engine writes on to.
+    pub log_partition: Option<[u8; 16]>,
     /// TSC ticks per second, measured against the firmware's Stall.
     pub tsc_hz: u64,
     /// IA32_APIC_BASE as the firmware left it.

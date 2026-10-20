@@ -89,6 +89,7 @@ pub unsafe fn open(
     targets: &[&Target],
     medium: Option<Guid>,
     store: Option<Guid>,
+    log: Option<Guid>,
     usb_disks: &[String],
     external: Option<usize>,
 ) -> Result<Opened, String> {
@@ -128,30 +129,40 @@ pub unsafe fn open(
         root,
     };
     // One disk may hold several of them: the stick holds the Mac's internal
-    // SSD, the install medium and the translation store. A store that
-    // cannot be opened is reported and left out.
+    // SSD, the install medium, the translation store and the boot log. The
+    // last two are optional: one that cannot be opened is reported and
+    // left out.
     let mut named: Vec<Named> = targets
         .iter()
         .map(|target| Named::Disk((*target).clone()))
         .chain(medium.map(Named::Unique))
         .collect();
-    let store = store.inspect(|&guid| named.push(Named::Unique(guid)));
+    let required = named.len();
+    let mut optional: Vec<(Named, Optional)> = store
+        .map(|guid| (Named::Unique(guid), Optional::Store))
+        .into_iter()
+        .chain(log.map(|guid| (Named::Host(guid), Optional::Log)))
+        .collect();
     let describe = |named: &Named, error: storage::StorageError| match named {
         Named::Disk(target) => format!("{}:{}: {error}", target.serial, target.partition),
-        Named::Unique(guid) => format!("partition {guid}: {error}"),
+        Named::Unique(guid) | Named::Host(guid) => format!("partition {guid}: {error}"),
     };
-    let (mut opened, with_store) = match storage::open_shared(&mut disks.devices, &named) {
-        Err((at, error)) if store.is_some() && at == named.len() - 1 => {
-            output::arguments(format_args!(
-                "TRANSLATIONS store partition {}: {error}\n",
-                store.expect("checked")
-            ));
-            named.pop();
-            storage::open_shared(&mut disks.devices, &named).map(|opened| (opened, false))
+    let mut opened = loop {
+        named.truncate(required);
+        named.extend(optional.iter().map(|(named, _)| named.clone()));
+        match storage::open_shared(&mut disks.devices, &named) {
+            Ok(opened) => break opened,
+            Err((at, error)) if at >= required => {
+                let (named, which) = optional.remove(at - required);
+                output::arguments(format_args!(
+                    "HOST PARTITION {} left out: {}\n",
+                    which.role(),
+                    describe(&named, error)
+                ));
+            }
+            Err((at, error)) => return Err(describe(&named[at], error)),
         }
-        opened => opened.map(|opened| (opened, store.is_some())),
-    }
-    .map_err(|(at, error)| describe(&named[at], error))?;
+    };
     let service = |partition: PartitionDevice<Window>, role: &str| -> Box<dyn BlockDevice> {
         output::arguments(format_args!(
             "HOST PARTITION serial={} partition={} blocks={} block_size={}{role}\n",
@@ -165,8 +176,15 @@ pub unsafe fn open(
             root,
         })
     };
-    let store_partition =
-        with_store.then(|| service(opened.pop().expect("the store"), " (translation store)"));
+    let (mut store_partition, mut log_partition) = (None, None);
+    for (_, which) in optional.iter().rev() {
+        let role = format!(" ({})", which.role());
+        let partition = Some(service(opened.pop().expect("an optional partition"), &role));
+        match which {
+            Optional::Store => store_partition = partition,
+            Optional::Log => log_partition = partition,
+        }
+    }
     let medium = medium.map(|_| service(opened.pop().expect("the medium"), " (install medium)"));
     let services = opened
         .into_iter()
@@ -212,10 +230,27 @@ pub unsafe fn open(
         services,
         medium,
         store: store_partition,
+        log: log_partition,
         inputs,
         links,
         usb_disks,
     })
+}
+
+/// A partition [`open`] leaves out when it cannot be opened.
+#[derive(Clone, Copy)]
+enum Optional {
+    Store,
+    Log,
+}
+
+impl Optional {
+    fn role(self) -> &'static str {
+        match self {
+            Optional::Store => "translation store",
+            Optional::Log => "boot log",
+        }
+    }
 }
 
 /// What [`open`] brought up: a service per target, in order, and the
@@ -226,6 +261,8 @@ pub struct Opened {
     pub medium: Option<Box<dyn BlockDevice>>,
     /// The translation store's partition, found by its GUID.
     pub store: Option<Box<dyn BlockDevice>>,
+    /// The partition holding the USB's boot log, found by its GUID.
+    pub log: Option<Box<dyn BlockDevice>>,
     pub inputs: Inputs,
     pub links: super::network::Links,
     /// Whole disks for the guest's USB mass storage, in option order.

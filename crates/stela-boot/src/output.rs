@@ -1,15 +1,18 @@
-//! The mount's detailed output: every line goes to the UART and waits from
-//! the very first line in a bounded buffer for the persistent boot log
-//! (`pc::boot_log`). Once `--nor` opens the log ([`install_log`]),
-//! [`flush_log`] stores what waits: between engine slices and at every
-//! stop, which [`terminate`] reaches. The screen shows the curated steps of
-//! [`status`](crate::status) instead, and a fatal error or panic, which
+//! The mount's detailed output: every line goes to the UART and, from the
+//! very first line, into a bounded record for the persistent boot logs
+//! (`pc::boot_log`): the USB's `EFI/stela/boot.log` ([`crate::log_file`])
+//! and the machine state's, once `--nor` opens it. [`add_log`] adds one,
+//! which starts with everything the record still holds, and [`flush_log`]
+//! stores what each has not: at every step, between engine slices and at
+//! every stop, which [`terminate`] reaches. The screen shows the curated
+//! steps of [`status`](crate::status) instead, and a fatal error or panic, which
 //! reach it before the console exists through the firmware's.
 use crate::{console, serial::Serial};
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 use core::{
     arch::asm,
     cell::RefCell,
+    convert::Infallible,
     fmt::{self, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -30,17 +33,31 @@ struct Global<T>(RefCell<T>);
 // the value is free.
 unsafe impl<T> Sync for Global<T> {}
 
-/// Every output byte since the first line that the log has not stored.
-static PENDING: Global<Pending<[u8; PENDING_BYTES]>> =
+/// The newest output bytes since the first line, which every log reads
+/// from its own position.
+static RECORD: Global<Pending<[u8; PENDING_BYTES]>> =
     Global(RefCell::new(Pending::new([0; PENDING_BYTES])));
 
-/// The open log and its window of the machine-state partition.
+/// An open log, the blocks that hold it and its position in the record.
 struct Sink {
     writer: Writer,
     device: Box<dyn BlockDevice>,
+    kind: Log,
+    stored: u64,
 }
 
-static SINK: Global<Option<Sink>> = Global(RefCell::new(None));
+/// What a log is kept for, which decides what its failure does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Log {
+    /// The machine state's: a failed store stops the machine.
+    Machine,
+    /// The USB's file through the firmware, closed as boot services end.
+    Firmware,
+    /// The USB's file through Stela's drivers.
+    Usb,
+}
+
+static SINKS: Global<Vec<Sink>> = Global(RefCell::new(Vec::new()));
 /// A flush is running: a fatal or panic raised inside it halts without
 /// flushing again.
 static FLUSHING: AtomicBool = AtomicBool::new(false);
@@ -50,9 +67,14 @@ static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
 /// `--host-check` shows its report itself, so every line reaches the screen.
 static RAW_SCREEN: AtomicBool = AtomicBool::new(false);
 
-/// Stop writing to the firmware's console: called just before boot services
-/// end, which take the console with them.
-pub fn leave_firmware_console() {
+/// Store the logs and close those the firmware holds, then stop writing to
+/// the firmware's console: called just before boot services end, which
+/// take both with them.
+pub fn leave_boot_services() {
+    flush_log();
+    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+        sinks.retain(|sink| sink.kind != Log::Firmware);
+    }
     FIRMWARE_CONSOLE.store(false, Ordering::Relaxed);
 }
 
@@ -83,41 +105,62 @@ impl Write for Output {
         if RAW_SCREEN.load(Ordering::Relaxed) {
             console::write(&[(value, console::Color::Text)]);
         }
-        if let Ok(mut pending) = PENDING.0.try_borrow_mut() {
-            pending.push(value.as_bytes());
+        if let Ok(mut record) = RECORD.0.try_borrow_mut() {
+            record.push(value.as_bytes());
         }
         Ok(())
     }
 }
 
 /// Keep the output in `writer`'s log on `device` from now on, starting with
-/// everything printed so far.
-pub fn install_log(writer: Writer, device: Box<dyn BlockDevice>) {
-    if let Ok(mut sink) = SINK.0.try_borrow_mut() {
-        *sink = Some(Sink { writer, device });
+/// everything since the first line that the record still holds.
+pub fn add_log(writer: Writer, device: Box<dyn BlockDevice>, kind: Log) {
+    if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
+        sinks.push(Sink {
+            writer,
+            device,
+            kind,
+            stored: 0,
+        });
     }
     flush_log();
 }
 
-/// Store the pending output in the log, when one is open. A failed store
-/// stops the machine; output printed during the flush is not logged.
+/// Store in every open log the output it does not hold yet. A USB log that
+/// fails is reported and closed; a failed machine-state store stops the
+/// machine. Output printed during the flush is not recorded.
 pub fn flush_log() {
     if FLUSHING.swap(true, Ordering::Acquire) {
         return;
     }
-    let result = match (SINK.0.try_borrow_mut(), PENDING.0.try_borrow_mut()) {
-        (Ok(mut sink), Ok(mut pending)) => match sink.as_mut() {
-            Some(Sink { writer, device }) => writer.flush_from(&mut **device, &mut pending),
-            None => Ok(()),
-        },
-        _ => Ok(()),
-    };
-    if let Err(error) = result {
-        // FLUSHING stays set: the log is not stored again.
-        arguments(format_args!("BOOT LOG refusal: {error}\n"));
-        fatal("the boot log could not be stored");
+    let mut failed = Vec::new();
+    if let (Ok(mut sinks), Ok(record)) = (SINKS.0.try_borrow_mut(), RECORD.0.try_borrow()) {
+        let mut index = 0;
+        while index < sinks.len() {
+            let Sink {
+                writer,
+                device,
+                stored,
+                ..
+            } = &mut sinks[index];
+            let Ok(reached) = record.copy_since(*stored, |bytes| {
+                writer.append(bytes);
+                Ok::<_, Infallible>(())
+            });
+            *stored = reached;
+            match writer.flush(&mut **device) {
+                Ok(()) => index += 1,
+                Err(error) => failed.push((sinks.remove(index).kind, error)),
+            }
+        }
     }
     FLUSHING.store(false, Ordering::Release);
+    for (kind, error) in failed {
+        arguments(format_args!("BOOT LOG refusal: {error}\n"));
+        if kind == Log::Machine {
+            fatal("the boot log could not be stored");
+        }
+    }
 }
 
 pub fn arguments(args: fmt::Arguments<'_>) {

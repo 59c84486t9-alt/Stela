@@ -18,7 +18,10 @@ use crate::{
 };
 use alloc::{format, string::String, vec::Vec};
 use core::{arch::asm, cell::UnsafeCell, ops::Range};
-use stela_runtime::{machine::mmu::placement::Placement, pc};
+use stela_runtime::{
+    machine::mmu::placement::Placement,
+    pc::{self, gpt::Guid},
+};
 use uefi::{
     boot::{self, AllocateType, MemoryType},
     fs::FileSystem,
@@ -353,7 +356,9 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
 }
 
 /// Run the engine; never returns.
-pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
+/// `log` is the partition holding the USB's boot log, when the loader keeps
+/// one there (`log_file`).
+pub fn boot(mut options: Vec<u8>, mut volume: FileSystem, log: Option<Guid>) -> ! {
     // NVRAM chooses macOS or recoveryOS before any input is read. A machine
     // NVRAM holds in recovery mode waits at the startup choices, as LLB
     // waits for a restore host, until one that boots is chosen.
@@ -378,7 +383,8 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem) -> ! {
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
-    let result = inputs.and_then(|(source, files, storage)| load(options, source, files, storage));
+    let result =
+        inputs.and_then(|(source, files, storage)| load(options, source, files, storage, log));
     match result {
         Ok(never) => match never {},
         Err(error) => output::fatal(error),
@@ -390,6 +396,7 @@ fn load(
     source: Vec<u8>,
     bundle: BundleFiles,
     storage: Option<pc::Handoff>,
+    log: Option<Guid>,
 ) -> Result<core::convert::Infallible, &'static str> {
     // SAFETY: written once at entry, read here.
     let snapshot = unsafe { *PRISTINE.0.get() }.ok_or("no pristine image copy")?;
@@ -583,7 +590,7 @@ fn load(
 
     let mut history = [0; crate::status::HISTORY_BYTES];
     let history_bytes = crate::status::history(&mut history);
-    crate::output::leave_firmware_console();
+    crate::output::leave_boot_services();
     // SAFETY: no protocol or pool allocation outlives this call; every page
     // Stela keeps is LOADER_DATA or LOADER_CODE.
     let map = unsafe { boot::exit_boot_services(None) };
@@ -633,6 +640,7 @@ fn load(
             screen,
             history,
             history_bytes,
+            log_partition: log.map(|guid| guid.0),
             tsc_hz,
             apic_base,
             wall_seconds,

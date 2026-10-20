@@ -21,7 +21,7 @@
 //! partition, and every command addresses the tail
 //! (`installed::state_area`).
 use super::{Environment, Record, Setup, check_installed_efi, ecid::Ecid, installed, machines};
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -193,11 +193,42 @@ pub(super) fn reset_nvram(
 
 /// `--boot-log`: the boot log `stela.efi` keeps after the SEP's area, when
 /// the partition holds one.
+/// The USB's own log (`mount_interface::BOOT_LOG_FILE`), which every boot
+/// writes from its first line, then the install's on its machine-state
+/// partition; either may be missing.
 pub(super) fn boot_log(
     environment: &Environment<'_>,
     record: &Record,
     command: &Setup,
 ) -> Result<String> {
+    let path = record.esp.join(crate::efi::BOOT_LOG);
+    let usb = fs::read(&path)
+        .with_context(|| format!("cannot read {}", path.display()))
+        .and_then(|region| {
+            boot_log::read(&region).with_context(|| format!("{} has no boot log", path.display()))
+        })
+        .map(|log| {
+            let mut text = format!(
+                "Boot log on the USB ({}): {}",
+                path.display(),
+                crate::boot_log::summary(&log)
+            );
+            text.push_str(&String::from_utf8_lossy(&log.stream));
+            if !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text
+        });
+    let install = install_log(environment, record, command);
+    match (usb, install) {
+        (Ok(usb), Ok(install)) => Ok(format!("{usb}\n{install}")),
+        (Ok(usb), Err(error)) => Ok(format!("{usb}\n{error:#}\n")),
+        (Err(error), Ok(install)) => Ok(format!("{error:#}\n\n{install}")),
+        (Err(usb), Err(install)) => Err(anyhow!("{usb:#}\n{install:#}")),
+    }
+}
+
+fn install_log(environment: &Environment<'_>, record: &Record, command: &Setup) -> Result<String> {
     let (install, area) = target(environment, record, command, false)?;
     let nor = area.describe();
     let bytes = area.bytes;

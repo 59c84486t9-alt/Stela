@@ -42,6 +42,7 @@ mod heap;
 mod host_check;
 mod la57;
 mod layout;
+mod log_file;
 mod output;
 mod paging;
 mod payload;
@@ -177,6 +178,7 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
+    let log = log_file::open();
     firmware::connect_all();
     status::set_clock(firmware::tsc_hz());
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
@@ -185,7 +187,7 @@ fn main() -> Status {
     let options = choice::choose(&mut volume, options, held);
     status::take_screen(console::Framebuffer::from_firmware());
     if options.starts_with(b"--system") {
-        system::boot(options, volume);
+        system::boot(options, volume, log);
     }
     if options.starts_with(host_check::OPTION) {
         drop(volume);

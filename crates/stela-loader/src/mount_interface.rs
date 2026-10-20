@@ -34,6 +34,11 @@ pub const OPTIONS_REVISION: u32 = 5;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
+/// The USB's own boot log beside them: setup preallocates it, contiguous,
+/// with `stela_runtime::pc::boot_log::LOG_BYTES`, and `stela.efi` keeps its
+/// whole output there from its first line, before and after boot services
+/// end, so every run leaves a log on the USB itself.
+pub const BOOT_LOG_FILE: &str = "\\EFI\\stela\\boot.log";
 /// The keys that choose entries, in order: one per entry.
 const KEYS: &[u8; 35] = b"123456789abcdefghijklmnopqrstuvwxyz";
 /// The most entries the keys choose among.

@@ -108,7 +108,7 @@ fn bound(root: &mut Directory) -> Option<u64> {
 }
 
 /// The GPT partition GUID of the volume on `handle`.
-fn partition(handle: uefi::Handle) -> Option<[u8; 16]> {
+pub(crate) fn partition(handle: uefi::Handle) -> Option<[u8; 16]> {
     // SAFETY: the path is only read, while no driver changes this handle.
     let path = unsafe {
         boot::open_protocol::<DevicePath>(

@@ -1394,6 +1394,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             services,
             medium,
             store,
+            log,
             inputs,
             mut links,
             usb_disks,
@@ -1403,6 +1404,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 &targets,
                 options.install_source,
                 translation_store,
+                handoff.log_partition.map(Guid),
                 &options.usb_storage,
                 options.external_disks.then(|| {
                     stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
@@ -1414,6 +1416,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("host storage refusal: {error}\n"));
             output::fatal(&format!("host storage could not be opened: {error}"))
         });
+        if let Some(log) = log {
+            crate::log_file::resume(log);
+        }
         crate::status::done(&format!(
             "{} partitions in use, {} more disks for macOS",
             services.len() + usize::from(medium.is_some()),
