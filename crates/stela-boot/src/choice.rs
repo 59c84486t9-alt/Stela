@@ -1,6 +1,6 @@
 //! The startup choices (`stela_loader::mount_interface`): when the boot
 //! volume has `choices.cfg`, `stela.efi` lists its entries on the firmware
-//! console and the UART, waits up to its timeout for a digit (Enter, or the
+//! console and the UART, waits up to its timeout for an entry's key (Enter, or the
 //! timeout, boots the first), and boots the chosen option line in place of
 //! `stela.cfg`. A timeout of 0 opens the list only when a key is already
 //! pressed, as a Mac shows its startup options only when asked. A file that
@@ -106,7 +106,8 @@ fn read(volume: &mut FileSystem) -> Option<Choices> {
 fn list(choices: &Choices, heading: &str) -> String {
     let mut text = String::from(heading);
     for (n, entry) in choices.entries.iter().enumerate() {
-        let _ = write!(text, "  {}  {}\r\n", n + 1, entry.name);
+        let key = Choices::key(n).unwrap_or('?');
+        let _ = write!(text, "  {key}  {}\r\n", entry.name);
     }
     text
 }
@@ -128,11 +129,11 @@ pub fn choose(volume: &mut FileSystem, options: Vec<u8>) -> Vec<u8> {
         seconds => {
             let mut text = list(&choices, "\r\nStela startup options:\r\n");
             if seconds == 0 {
-                text.push_str("Press a number to choose, or Enter for 1.\r\n");
+                text.push_str("Press an entry's key to choose, or Enter for 1.\r\n");
             } else {
                 let _ = write!(
                     text,
-                    "Press a number to choose, or Enter for 1; 1 starts in {seconds} s.\r\n"
+                    "Press an entry's key to choose, or Enter for 1; 1 starts in {seconds} s.\r\n"
                 );
             }
             show(&text);
@@ -165,13 +166,13 @@ pub fn hold(volume: &mut FileSystem) -> Option<Vec<u8>> {
         "\r\nThis Mac is in recovery mode: its last restore did not finish. Choose Install \
          macOS (Stela) to restore it again.\r\nStela startup options:\r\n",
     );
-    text.push_str("Press a number to choose.\r\n");
+    text.push_str("Press an entry's key to choose.\r\n");
     show(&text);
     loop {
         match key(None) {
             Wait::Key(key) => {
-                // A digit only: Enter would choose the default boot again.
-                if let Some(index) = choices.chosen(key).filter(|_| key.is_ascii_digit()) {
+                // An entry's key only: Enter would choose the default boot again.
+                if let Some(index) = choices.chosen(key).filter(|_| key.is_ascii_alphanumeric()) {
                     return Some(chosen(&choices, index));
                 }
             }

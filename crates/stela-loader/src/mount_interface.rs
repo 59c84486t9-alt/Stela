@@ -25,13 +25,17 @@ pub const MARKER_BYTES: usize = MAGIC.len() + 4 * FIELDS;
 /// The revision of the option lines setup writes for `stela.efi`: bump it
 /// when an option changes meaning or a required one is added. Revision 3:
 /// `--nor` may name the `--storage` partition, whose tail then holds the
-/// machine state.
-pub const OPTIONS_REVISION: u32 = 3;
+/// machine state. Revision 4: `--update-restore` restores the install
+/// medium's Update identity, and the startup choices hold up to
+/// [`MAX_CHOICES`] entries, chosen with `1`-`9` and then `a`-`z`.
+pub const OPTIONS_REVISION: u32 = 4;
 
 /// The startup choices, beside `stela.cfg` on the ESP.
 pub const CHOICES_FILE: &str = "\\EFI\\stela\\choices.cfg";
-/// The most entries one digit chooses among.
-pub const MAX_CHOICES: usize = 9;
+/// The keys that choose entries, in order: one per entry.
+const KEYS: &[u8; 35] = b"123456789abcdefghijklmnopqrstuvwxyz";
+/// The most entries the keys choose among.
+pub const MAX_CHOICES: usize = KEYS.len();
 /// The longest name; names are printable ASCII.
 pub const MAX_NAME: usize = 40;
 /// The longest timeout `stela.efi` waits.
@@ -185,7 +189,7 @@ impl Choices {
 
     fn check(&self) -> Result<(), &'static str> {
         if self.entries.is_empty() || self.entries.len() > MAX_CHOICES {
-            return Err("startup choices hold one to nine entries");
+            return Err("startup choices hold one to 35 entries");
         }
         if self.timeout_seconds > MAX_TIMEOUT_SECONDS {
             return Err("the startup choice timeout is longer than a minute");
@@ -242,15 +246,21 @@ impl Choices {
         Ok(choices)
     }
 
-    /// The entry a key chooses: digits `1`-`9`, or Enter for the default.
+    /// The key that chooses entry `index`: `1`-`9`, then `a`-`z`.
+    pub fn key(index: usize) -> Option<char> {
+        KEYS.get(index).map(|&key| char::from(key))
+    }
+
+    /// The entry a key chooses: its [`key`](Self::key), in either case, or
+    /// Enter for the default.
     pub fn chosen(&self, key: char) -> Option<usize> {
         match key {
             '\r' | '\n' => Some(0),
-            '1'..='9' => {
-                let index = key as usize - '1' as usize;
+            _ => {
+                let key = u8::try_from(key.to_ascii_lowercase()).ok()?;
+                let index = KEYS.iter().position(|&k| k == key)?;
                 (index < self.entries.len()).then_some(index)
             }
-            _ => None,
         }
     }
 }
@@ -310,6 +320,29 @@ mod tests {
         assert_eq!(choices.chosen('2'), Some(1));
         assert_eq!(choices.chosen('3'), None);
         assert_eq!(choices.chosen('x'), None);
+        assert_eq!(choices.chosen('0'), None);
+        // Past nine entries, letters choose.
+        let many = Choices {
+            timeout_seconds: 0,
+            entries: (0..MAX_CHOICES)
+                .map(|n| Choice {
+                    name: format!("entry {n}"),
+                    options: "--system".into(),
+                })
+                .collect(),
+        };
+        assert_eq!(Choices::parse(&many.encode().unwrap()).unwrap(), many);
+        assert_eq!(Choices::key(9), Some('a'));
+        assert_eq!(Choices::key(MAX_CHOICES - 1), Some('z'));
+        assert_eq!(Choices::key(MAX_CHOICES), None);
+        assert_eq!(many.chosen('a'), Some(9));
+        assert_eq!(many.chosen('Z'), Some(MAX_CHOICES - 1));
+        let mut too_many = many.clone();
+        too_many.entries.push(Choice {
+            name: "one more".into(),
+            options: "--system".into(),
+        });
+        assert!(too_many.encode().is_err());
         for bad in [
             "macOS\t--system\n",
             "timeout 5\n",

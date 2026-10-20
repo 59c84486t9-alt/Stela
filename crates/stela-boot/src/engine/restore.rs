@@ -3,7 +3,7 @@
 //!
 //! Two sources feed it. The install medium (`--install`) is the IPSW as
 //! pieces on the USB's FAT32 partition, restored with Apple's stock options
-//! ([`Mode::Install`]). The opt-in, unqualified option study
+//! ([`Mode::Install`], or [`Mode::Update`] with `--update-restore`). The opt-in, unqualified option study
 //! (`--restore-study`) reads an exact IPSW extent on an explicitly selected
 //! raw partition with the study's options ([`Mode::Study`]). Neither source
 //! is an ANS namespace or a pointer into translated memory. Live USB
@@ -19,7 +19,7 @@ use alloc::{boxed::Box, format, string::String};
 use core::task::Poll;
 use stela_runtime::{
     machine::apple::{AppleDevices, MuxStream, UsbId},
-    payload::{PayloadManifest, ReadAt},
+    payload::{PayloadManifest, Purpose, ReadAt},
     pc::block::BlockDevice,
     restore::{
         answers::Answers,
@@ -36,6 +36,9 @@ pub enum Mode {
     /// The user's install: Apple's stock restore options, the inventory's
     /// Erase identity.
     Install,
+    /// The same, with the inventory's Update identity: restored_update
+    /// installs over the installed system and keeps its data.
+    Update,
     /// The option study, with its explicit identity.
     Study,
 }
@@ -44,6 +47,7 @@ impl Mode {
     fn label(self) -> &'static str {
         match self {
             Self::Install => "INSTALL",
+            Self::Update => "UPDATE",
             Self::Study => "RESTORE STUDY",
         }
     }
@@ -113,7 +117,7 @@ pub struct Experiment {
 }
 impl Experiment {
     /// The study runs `identity`; the install the inventory's one Erase
-    /// identity. `verify` says when the payload's recorded hashes are
+    /// identity, and the update its one Update identity. `verify` says when the payload's recorded hashes are
     /// checked: every member before StartRestore, or each block as it is
     /// read, which needs the hashes recorded.
     pub fn new(
@@ -126,9 +130,12 @@ impl Experiment {
         signer: Option<stela_runtime::restore::tss::Signer>,
     ) -> Result<Self, String> {
         let manifest = inventory(handoff)?;
-        let identity = match identity {
-            Some(identity) => identity,
-            None => manifest.erase_identity().map_err(|e| format!("{e}"))? as usize,
+        let identity = match (identity, mode) {
+            (Some(identity), _) => identity,
+            (None, Mode::Update) => manifest
+                .restore_identity(Purpose::Update)
+                .map_err(|e| format!("{e}"))? as usize,
+            (None, _) => manifest.erase_identity().map_err(|e| format!("{e}"))? as usize,
         };
         let recorded = manifest.block_hashes.is_some();
         if verify == Verify::OnRead && !recorded {
@@ -139,8 +146,8 @@ impl Experiment {
         output::arguments(format_args!(
             "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={} verify={}\n",
             match mode {
-                Mode::Install => "INSTALL",
                 Mode::Study => "RESTORE STUDY UNQUALIFIED",
+                mode => mode.label(),
             },
             manifest.product_build,
             manifest.source.sha256,
@@ -177,7 +184,7 @@ impl Experiment {
             }));
         }
         let route = match mode {
-            Mode::Install => Route::Stock,
+            Mode::Install | Mode::Update => Route::Stock,
             Mode::Study => Route::StelaFirmwareStudy,
         };
         let driver = Driver::new(answers, route).map_err(|e| format!("{e}"))?;
@@ -210,6 +217,7 @@ impl Experiment {
                     "{}\n",
                     match self.mode {
                         Mode::Install => "INSTALL protocol complete; reboot into macOS (Stela)",
+                        Mode::Update => "UPDATE protocol complete; reboot into macOS (Stela)",
                         Mode::Study => {
                             "RESTORE STUDY protocol complete; installed boot is unqualified"
                         }
@@ -222,6 +230,7 @@ impl Experiment {
                 // The restore has no automatic reboot/retry or fallback.
                 output::fatal(match self.mode {
                     Mode::Install => "the install failed; inspect the session ledger",
+                    Mode::Update => "the update failed; inspect the session ledger",
                     Mode::Study => "restore study failed; inspect the session ledger",
                 })
             }

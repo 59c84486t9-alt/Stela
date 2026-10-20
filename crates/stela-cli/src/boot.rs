@@ -212,6 +212,11 @@ pub(crate) struct Prepare {
     /// of the installed system.
     #[arg(long, conflicts_with = "recovery")]
     restore: bool,
+    /// With `--restore`: the model's update restore identity (its
+    /// `RestoreBehavior` is `Update`), whose ramdisk runs restored_update
+    /// over the installed system and keeps its data.
+    #[arg(long, requires = "restore", conflicts_with = "variant")]
+    update: bool,
     /// Boot recoveryOS with the installed system's kernel: the kernel roots
     /// from a volume in memory holding the BaseSystem image, then from that
     /// image. Needs `/usr/bin/aea` to decrypt BaseSystem and
@@ -549,6 +554,7 @@ impl Prepare {
         let profile = components::Profile::of(&model)?;
         let report = restore::archive::manifest(&ipsw, None, false)?;
         let (roles, purpose) = match (self.restore, self.recovery) {
+            (true, _) if self.update => (RESTORE, Purpose::Update),
             (true, _) => (RESTORE, Purpose::Erase),
             (false, true) => (RECOVERY, Purpose::Installed),
             (false, false) => (INSTALLED, Purpose::Installed),
@@ -1055,6 +1061,27 @@ mod tests {
         let restore = parse("--restore").unwrap();
         assert_eq!(
             restore.options(None, None).unwrap().root,
+            Some(Root::Ramdisk)
+        );
+        // `--update` picks the update restore identity, and only with
+        // `--restore`.
+        assert!(parse("--update").is_err());
+        let update = Line::try_parse_from([
+            "prepare",
+            "--ipsw",
+            "a.ipsw",
+            "--model",
+            "Mac14,3",
+            "--output",
+            "out",
+            "--restore",
+            "--update",
+        ])
+        .unwrap()
+        .prepare;
+        assert!(update.update);
+        assert_eq!(
+            update.options(None, None).unwrap().root,
             Some(Root::Ramdisk)
         );
     }

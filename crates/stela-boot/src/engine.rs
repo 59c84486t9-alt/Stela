@@ -61,6 +61,9 @@ const INSTALL_SOURCE_OPTION: &str = "--install-source";
 /// restore reads each block, instead of reading every member whole before
 /// StartRestore (`restore::store::Verify::OnRead`).
 pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
+/// The install restores with the inventory's Update identity, over the
+/// installed system and keeping its data, instead of erasing the target.
+pub const UPDATE_RESTORE_OPTION: &str = "--update-restore";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
@@ -120,6 +123,8 @@ struct Options {
     /// Check the payload's recorded hashes as blocks are read
     /// (`--verify-on-read`), not every member before StartRestore.
     verify_on_read: bool,
+    /// Restore with the inventory's Update identity (`--update-restore`).
+    update_restore: bool,
     /// Answer device accesses no model implements and list them
     /// (`Machine::begin_survey`): research runs only.
     survey: bool,
@@ -239,6 +244,7 @@ impl Options {
             install: None,
             install_source: None,
             verify_on_read: false,
+            update_restore: false,
             survey: false,
             idle_skip: false,
             input: false,
@@ -320,6 +326,10 @@ impl Options {
             }
             if name == VERIFY_ON_READ_OPTION {
                 options.verify_on_read = true;
+                continue;
+            }
+            if name == UPDATE_RESTORE_OPTION {
+                options.update_restore = true;
                 continue;
             }
             if name == "--idle-skip" {
@@ -481,6 +491,9 @@ impl Options {
             return Err(
                 "--install requires --bundle, --storage and --nor; refuses --restore-study, --preboot and --survey",
             );
+        }
+        if options.update_restore && options.install.is_none() {
+            return Err("--update-restore applies to --install");
         }
         if options.verify_on_read && options.install.is_none() && !options.restore {
             return Err("--verify-on-read applies to --install and --restore-study");
@@ -1668,9 +1681,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 ),
             }
         });
-        let mode = match options.install {
-            Some(_) => restore::Mode::Install,
-            None => restore::Mode::Study,
+        let mode = match (&options.install, options.update_restore) {
+            (Some(_), false) => restore::Mode::Install,
+            (Some(_), true) => restore::Mode::Update,
+            (None, _) => restore::Mode::Study,
         };
         restore::Experiment::new(
             source,
