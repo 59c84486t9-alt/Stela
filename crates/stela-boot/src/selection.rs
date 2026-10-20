@@ -264,8 +264,9 @@ fn external(volume: &BootVolume) -> Result<Option<Target>, String> {
     Ok(found)
 }
 
-/// The boot NVRAM chooses, with its one-shot variables consumed and saved.
-fn select(target: &Target, part: Part) -> Result<Selection, String> {
+/// The boot NVRAM chooses, with its one-shot variables consumed and saved
+/// when `consume` holds.
+fn select(target: &Target, part: Part, consume: bool) -> Result<Selection, String> {
     let mut nor = find(target).map_err(|e| format!("NOR partition: {e}"))?;
     nor.confine(part)
         .map_err(|e| format!("NOR partition: {e}"))?;
@@ -289,7 +290,9 @@ fn select(target: &Target, part: Part) -> Result<Selection, String> {
     let mut variables =
         Variables::parse(image.bank(current).map_err(String::from)?).map_err(String::from)?;
     let selection = select(&variables)?;
-    if boot_selection::consume(&mut variables, &selection).map_err(|e| format!("{e:#}"))? {
+    if consume
+        && boot_selection::consume(&mut variables, &selection).map_err(|e| format!("{e:#}"))?
+    {
         let bank = variables.encode().map_err(String::from)?;
         let (written, sectors) = image.save_bank(&bank).map_err(String::from)?;
         for offset in sectors {
@@ -416,8 +419,19 @@ pub enum Refusal {
     Other(&'static str),
 }
 
-/// The engine's options for this boot (`boot_selection::route`).
+/// The engine's options for this boot (`boot_selection::route`), with
+/// NVRAM's one-shot choices consumed.
 pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+    route_with(options, true)
+}
+
+/// Where [`route`] would send `options`, leaving NVRAM unchanged: the
+/// check before the startup menu, which a chosen boot routes again.
+pub fn peek(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+    route_with(options, false)
+}
+
+fn route_with(options: Vec<u8>, consume: bool) -> Result<Vec<u8>, Refusal> {
     let text =
         core::str::from_utf8(&options).map_err(|_| Refusal::Other("stela.cfg is not UTF-8"))?;
     let refuse = |error: String| {
@@ -443,7 +457,7 @@ pub fn route(options: Vec<u8>) -> Result<Vec<u8>, Refusal> {
                     } else {
                         Part::Whole
                     };
-                    select(&parse(nor)?, part).map_err(refuse)?
+                    select(&parse(nor)?, part, consume).map_err(refuse)?
                 }
                 None => boot_selection::select(
                     &Variables::parse(&empty_bank()).map_err(|e| refuse(e.into()))?,

@@ -349,7 +349,7 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
     if !options.starts_with(b"--system") {
         return None;
     }
-    match crate::selection::route(options.to_vec()) {
+    match crate::selection::peek(options.to_vec()) {
         Err(refusal @ (Refusal::BlankDisk | Refusal::RecoveryMode)) => Some(held(refusal)),
         _ => None,
     }
