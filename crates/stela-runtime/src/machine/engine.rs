@@ -1690,6 +1690,22 @@ impl<H: Host, D: Devices> Machine<H, D> {
         result
     }
 
+    /// Native DMA/session service errors cannot become unknown-register
+    /// substitutions. Enforce that boundary even
+    /// when a provider returns an ordinary register error from its service.
+    fn device_transfer(&mut self, now: u64) -> Result<(), DeviceError> {
+        let mut memory = HostMemory(&mut self.host);
+        match self.devices.transfer(self.current, &mut memory, now) {
+            Ok(()) => Ok(()),
+            Err(DeviceError::Refused(reason) | DeviceError::TransferRefused(reason)) => {
+                Err(DeviceError::TransferRefused(reason))
+            }
+            Err(DeviceError::NoDevice) => Err(DeviceError::TransferRefused(
+                "device DMA has no service model".into(),
+            )),
+        }
+    }
+
     /// The trace hits since the last call, oldest first, at most
     /// [`TRACE_HITS`] of them; later hits are counted in the last one.
     pub fn take_trace_hits(&mut self) -> Vec<TraceHit> {
@@ -2280,9 +2296,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .dma_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
-            let mut memory = HostMemory(&mut self.host);
-            self.devices
-                .transfer(self.current, &mut memory, now)
+            self.device_transfer(now)
                 .map_err(|error| {
                     self.unsupported(RequirementKind::DeviceAdvance(format!("{error:?}")))
                 })?;
@@ -4481,10 +4495,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let now = self.now();
             let written = self
                 .device_write(physical, bytes, value, now)
-                .and_then(|()| {
-                    let mut memory = HostMemory(&mut self.host);
-                    self.devices.transfer(self.current, &mut memory, now)
-                });
+                .and_then(|()| self.device_transfer(now));
             match written {
                 Ok(()) => {}
                 Err(error) if self.surveyed(physical, bytes, Some(value), &error) => {}
@@ -4561,10 +4572,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     for (element, value) in elements.into_iter().zip(values) {
                         let written =
                             self.device_write(element, bytes, value, now)
-                                .and_then(|()| {
-                                    let mut memory = HostMemory(&mut self.host);
-                                    self.devices.transfer(self.current, &mut memory, now)
-                                });
+                                .and_then(|()| self.device_transfer(now));
                         match written {
                             Ok(()) => {}
                             Err(error) if self.surveyed(element, bytes, Some(value), &error) => {}
@@ -5895,7 +5903,9 @@ mod tests {
             let (_, value) = self.stores[index];
             assert!(memory.write(BASE + 0x800 + index as u64 * 8, &value.to_le_bytes()));
             if self.failed_transfer == Some(index) {
-                return Err(DeviceError::TransferRefused("injected later DMA failure".into()));
+                // Deliberately use an ordinary register error: the engine
+                // knows this came from service and must never survey it.
+                return Err(DeviceError::Refused("injected later DMA failure".into()));
             }
             Ok(())
         }
@@ -5955,6 +5965,32 @@ mod tests {
                 assert_eq!(hits.iter().filter(|hit| hit.completed).count(), committed);
                 assert!(hits.iter().all(|hit| hit.write));
             }
+        }
+    }
+
+    #[test]
+    fn survey_never_substitutes_a_failed_service_after_an_accepted_scalar_or_pair_store() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        for word in [0xb900_0022, 0xa900_0c22] { // str w2 / stp x2, x3, [x1]
+            let mut devices = pair_fault_device();
+            devices.failed_transfer = Some(0);
+            let mut machine = board(&[], devices, Vec::new());
+            machine.set_strict(true);
+            machine.begin_survey();
+            machine.write_register(Register::X(1), DEVICE);
+            machine.write_register(Register::X(2), 0x1234);
+            machine.write_register(Register::X(3), 0x5678);
+            assert!(matches!(
+                machine.device_access(word, DEVICE, DEVICE, true),
+                Err(Stop::Unsupported(_))
+            ));
+            assert_eq!(machine.cpu.pc, BASE);
+            assert_eq!(machine.devices.stores, [(DEVICE, 0x1234)]);
+            assert_eq!(machine.devices.transfers, 1);
+            assert!(machine.take_survey().is_empty());
+            let mut committed = [0; 8];
+            assert!(machine.host.read_ram(BASE + 0x800, &mut committed));
+            assert_eq!(u64::from_le_bytes(committed), 0x1234);
         }
     }
 

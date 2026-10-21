@@ -2527,7 +2527,7 @@ impl Devices for AppleDevices {
                 memory,
                 access: &mut access,
             };
-            sep.transfer(&mut port).map_err(describe)?;
+            sep.transfer(&mut port).map_err(describe_transfer)?;
         }
         for master in &self.dcp_masters {
             let presenting = self
