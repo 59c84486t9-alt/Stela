@@ -3,6 +3,7 @@
 #define STELA_INTEL_AIR_PROBE_INPUT_H
 
 #include "air_test_fixture.h"
+#include "util/mesa-blake3.h"
 
 /* Raw AIR is already selected by the production archive reader. Preserve the
  * original bounded bytes; never rewrite metadata or unwrap another container.
@@ -39,6 +40,14 @@ stela_intel_air_probe_input(int argc, char **argv, const char **entry)
    fclose(file);
    LLVMMemoryBufferRef input = valid ?
       LLVMCreateMemoryBufferWithMemoryRangeCopy(bytes, size, "unaltered-air-input") : NULL;
+   if (input) {
+      blake3_hash hash;
+      char hex[BLAKE3_OUT_LEN * 2 + 1];
+      _mesa_blake3_compute(bytes, size, hash);
+      _mesa_blake3_format(hex, hash);
+      printf("STELA_AIR_INPUT {\"origin\":\"raw_input_file\",\"bytes\":%zu,"
+             "\"blake3\":\"%s\",\"entry\":\"%s\"}\n", size, hex, *entry);
+   }
    free(bytes);
    return input;
 }

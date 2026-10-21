@@ -8,7 +8,7 @@ use std::{
     collections::BTreeSet,
     env,
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -23,6 +23,8 @@ const LIBRARIES: &[&str] = &[
     "src/amd/common/libamd_compiler_support.a",
     "src/amd/common/libamd_command_support.a",
     "src/stela/libstela_amd_commands.a",
+    "src/stela/libstela_amd_buffer.a",
+    "src/stela/libstela_intel_surface.a",
     "src/intel/dev/libintel_dev.a",
     "src/intel/compiler/gen/libintel_compiler_gen.a",
     "src/intel/compiler/brw/libintel_compiler.a",
@@ -108,6 +110,34 @@ fn inspect_archive(path: &Path) -> Result<Value> {
     }))
 }
 
+fn snapshot_air_inputs(inputs: &[PathBuf], evidence: &Path) -> Result<Vec<Value>> {
+    const MAX_BYTES: u64 = 64 * 1024 * 1024;
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            let original = fs::canonicalize(input)?;
+            let file = File::open(&original)?;
+            let metadata = file.metadata()?;
+            ensure!(
+                metadata.is_file() && (4..=MAX_BYTES).contains(&metadata.len()),
+                "AIR input must be a regular raw bitcode file of 4..={MAX_BYTES} bytes"
+            );
+            // Bound the read even if another process grows the input. Probes
+            // consume this immutable evidence copy, not a changing source path.
+            let mut bytes = Vec::new();
+            file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+            ensure!(
+                bytes.len() <= MAX_BYTES as usize && bytes.starts_with(b"BC\xc0\xde"),
+                "AIR input must contain bounded raw LLVM bitcode, not a wrapper or archive"
+            );
+            let snapshot = evidence.join(format!("air-input-{index}.bc"));
+            File::create_new(&snapshot)?.write_all(&bytes)?;
+            Ok(json!({"original_path": original, "snapshot": tools::binding(&snapshot)?}))
+        })
+        .collect()
+}
+
 fn parse_targets(log: &str, backend: &str) -> Result<Vec<Value>> {
     let mut targets = Vec::new();
     let mut names = BTreeSet::new();
@@ -149,7 +179,43 @@ fn parse_targets(log: &str, backend: &str) -> Result<Vec<Value>> {
     Ok(targets)
 }
 
-pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) -> Result<()> {
+fn parse_original_input(log: &str, entry: &str, bytes: u64) -> Result<Value> {
+    let records = log
+        .lines()
+        .filter_map(|line| line.strip_prefix("STELA_AIR_INPUT "))
+        .map(serde_json::from_str::<Value>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(
+        records.len() == 1,
+        "probe must identify exactly one raw AIR input"
+    );
+    let record = &records[0];
+    ensure!(
+        record["origin"] == "raw_input_file"
+            && record["entry"] == entry
+            && record["bytes"] == bytes,
+        "probe did not compile the requested raw AIR input/entry"
+    );
+    ensure!(
+        record["blake3"].as_str().is_some_and(|hash| {
+            hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }),
+        "probe did not hash its actual AIR input"
+    );
+    Ok(records.into_iter().next().expect("one record"))
+}
+
+pub fn build(
+    jobs: u16,
+    require_all_targets: bool,
+    llvm_library: Option<&Path>,
+    air_inputs: &[PathBuf],
+    entry: Option<&str>,
+) -> Result<()> {
+    ensure!(
+        air_inputs.is_empty() || (llvm_library.is_some() && entry.is_some()),
+        "raw AIR inputs require --llvm-library and --entry"
+    );
     let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
     let meson = tool("meson", "generators/bin")?;
     let ninja = tool("ninja", "generators/bin")?;
@@ -165,17 +231,30 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
     let gpu = tools::root().join("crates/stela-drivers/src/gpu");
     let source = gpu.join("common/mesa");
     let external_inputs = || -> Result<Vec<Value>> {
-        if llvm_library.is_none() {
-            return Ok(Vec::new());
+        let mut paths = vec![
+            "amd/stela/buffer.c",
+            "amd/stela/buffer.h",
+            "amd/tests/buffer_test.c",
+            "intel/stela/hosted/surface.c",
+            "intel/stela/hosted/surface.h",
+            "intel/stela/tests/surface.c",
+        ];
+        if llvm_library.is_some() {
+            paths.extend([
+                "intel/stela/tests/air_brw_probe.c",
+                "intel/stela/tests/air_elk_probe.c",
+                "intel/stela/tests/air_probe_input.h",
+            ]);
         }
-        ["air_brw_probe.c", "air_elk_probe.c"]
+        paths
             .iter()
-            .map(|name| tools::binding(&gpu.join("intel/stela/tests").join(name)))
+            .map(|name| tools::binding(&gpu.join(name)))
             .collect()
     };
     let external_sources = external_inputs()?;
     let build = tools::root().join(".stela/gpu/build/mesa-host");
     let evidence = evidence_directory()?;
+    let input_snapshots = snapshot_air_inputs(air_inputs, &evidence)?;
     let hash = source_binding(&source)?;
     let mut setup = Command::new(&meson);
     setup
@@ -220,7 +299,11 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         .arg(format!("-j{jobs}"))
         .args(LIBRARIES)
         .args(PROBES.iter().map(|(_, binary)| binary));
-    compile.arg("src/stela/stela_amd_commands_probe");
+    compile.args([
+        "src/stela/stela_amd_commands_probe",
+        "src/stela/stela_amd_buffer_probe",
+        "src/stela/stela_intel_surface_probe",
+    ]);
     if llvm_library.is_some() {
         compile.args([
             "src/stela/stela_air_test",
@@ -230,6 +313,9 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
             "src/stela/stela_air_ssbo_test",
             "src/stela/stela_nv_compute_probe",
         ]);
+        if !input_snapshots.is_empty() {
+            compile.arg("src/stela/stela_air_input_nak_probe");
+        }
     }
     run(&mut compile, &evidence, "compile")?;
     run(
@@ -237,6 +323,17 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         &evidence,
         "amd-commands",
     )?;
+    let mut resource_probes = Vec::new();
+    for stage in ["amd_buffer", "intel_surface"] {
+        let binary = build.join(format!("src/stela/stela_{stage}_probe"));
+        run(&mut Command::new(&binary), &evidence, stage)?;
+        resource_probes.push(json!({
+            "stage": stage,
+            "binary": tools::binding(&binary)?,
+            "output": tools::binding(&evidence.join(format!("{stage}.log")))?,
+            "hardware_executed": false,
+        }));
+    }
     let mut probes = Vec::new();
     let mut unsupported = Vec::new();
     let mut compiled = 0;
@@ -311,6 +408,60 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
             "hardware_executed": false,
         }));
     }
+    let mut original_input_probes = Vec::new();
+    let mut original_unsupported = Vec::new();
+    let mut original_compiled = 0;
+    for (index, input) in input_snapshots.iter().enumerate() {
+        let path = input["snapshot"]["path"]
+            .as_str()
+            .context("missing raw AIR snapshot path")?;
+        let entry = entry.context("raw AIR requires an entry point")?;
+        let bytes = input["snapshot"]["bytes"]
+            .as_u64()
+            .context("missing AIR size")?;
+        let mut input_digest = None;
+        for (backend, binary) in [
+            ("air-nak", "src/stela/stela_air_input_nak_probe"),
+            ("air-aco", "src/stela/stela_air_aco_probe"),
+            ("air-brw", "src/stela/stela_air_brw_probe"),
+            ("air-elk", "src/stela/stela_air_elk_probe"),
+        ] {
+            let stage = format!("original-{index}-{backend}");
+            let binary = build.join(binary);
+            let mut probe = Command::new(&binary);
+            probe.args(["--input", path, "--entry", entry]);
+            run(&mut probe, &evidence, &stage)?;
+            let log = evidence.join(format!("{stage}.log"));
+            let output = fs::read_to_string(&log)?;
+            let provenance = parse_original_input(&output, entry, bytes)?;
+            if let Some(previous) = &input_digest {
+                ensure!(
+                    previous == &provenance["blake3"],
+                    "vendor probes read different AIR bytes"
+                );
+            } else {
+                input_digest = Some(provenance["blake3"].clone());
+            }
+            let targets = parse_targets(&output, backend)?;
+            original_compiled += targets.iter().filter(|t| t["state"] == "compiled").count();
+            original_unsupported.extend(
+                targets
+                    .iter()
+                    .filter(|t| t["state"] == "unsupported")
+                    .cloned(),
+            );
+            original_input_probes.push(json!({
+                "input_index": index, "entry": entry, "stage": backend,
+                "binary": tools::binding(&binary)?, "output": tools::binding(&log)?,
+                "targets": targets, "hardware_executed": false,
+                "provenance": provenance,
+            }));
+        }
+        ensure!(
+            tools::binding(Path::new(path))? == input["snapshot"],
+            "AIR snapshot changed during compilation"
+        );
+    }
     let libraries = LIBRARIES
         .iter()
         .map(|name| inspect_archive(&build.join(name)))
@@ -321,7 +472,7 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
     );
     ensure!(
         external_inputs()? == external_sources,
-        "external Intel AIR probe source changed during the build"
+        "external GPU source changed during the build"
     );
     let receipt = json!({
         "schema": 2, "stage": "native-host-shader-compiler-build",
@@ -331,6 +482,10 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
         "external_probe_sources": external_sources,
+        "resource_probes": resource_probes,
+        "original_air_inputs": input_snapshots,
+        "original_air_probes": original_input_probes,
+        "unsupported_input_targets": original_unsupported,
         "origin": serde_json::from_slice::<Value>(&fs::read(gpu.join("sources.json"))?)?,
         "host": {"os": env::consts::OS, "arch": env::consts::ARCH},
         "meson": capture(Command::new(&meson).arg("--version"))?,
@@ -356,8 +511,15 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
             target["backend"], target["target"], target["reason"]
         );
     }
+    if !input_snapshots.is_empty() {
+        println!(
+            "Unchanged raw AIR inputs: {} files, {original_compiled} compiled target fixtures, {} unsupported; no GPU execution.",
+            input_snapshots.len(),
+            original_unsupported.len()
+        );
+    }
     ensure!(
-        !require_all_targets || unsupported.is_empty(),
+        !require_all_targets || (unsupported.is_empty() && original_unsupported.is_empty()),
         "some compiler fixture targets remain unsupported; see {}",
         evidence.join("compilers.json").display()
     );
@@ -367,6 +529,51 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_air_snapshot_is_bounded_and_independent_of_the_source_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("input.bc");
+        let evidence = temp.path().join("evidence");
+        fs::create_dir(&evidence).unwrap();
+        let bytes = b"BC\xc0\xdeoriginal";
+        fs::write(&input, bytes).unwrap();
+        let records = snapshot_air_inputs(std::slice::from_ref(&input), &evidence).unwrap();
+        fs::write(&input, b"changed").unwrap();
+        let snapshot = records[0]["snapshot"]["path"].as_str().unwrap();
+        assert_eq!(fs::read(snapshot).unwrap(), bytes);
+        assert_eq!(
+            records[0]["snapshot"]["sha256"],
+            stela_runtime::sha256(bytes)
+        );
+        assert!(snapshot_air_inputs(std::slice::from_ref(&input), temp.path()).is_err());
+        File::create(&input)
+            .unwrap()
+            .set_len(64 * 1024 * 1024 + 1)
+            .unwrap();
+        assert!(snapshot_air_inputs(&[input], temp.path()).is_err());
+    }
+
+    #[test]
+    fn original_air_evidence_cannot_substitute_a_source_fixture() {
+        let record = format!(
+            "STELA_AIR_INPUT {}\n",
+            json!({"origin":"raw_input_file", "entry":"kernel", "bytes":4, "blake3":"0".repeat(64)})
+        );
+        assert!(parse_original_input(&record, "kernel", 4).is_ok());
+        assert!(parse_original_input("STELA_GPU_TARGET {}", "kernel", 4).is_err());
+        assert!(
+            parse_original_input(
+                &record.replace("raw_input_file", "original_fixture"),
+                "kernel",
+                4
+            )
+            .is_err()
+        );
+        assert!(parse_original_input(&record, "another_entry", 4).is_err());
+        assert!(parse_original_input(&record, "kernel", 5).is_err());
+        assert!(parse_original_input(&format!("{record}{record}"), "kernel", 4).is_err());
+    }
 
     #[test]
     fn codegen_evidence_keeps_unsupported_targets_distinct_from_emitted_code() {

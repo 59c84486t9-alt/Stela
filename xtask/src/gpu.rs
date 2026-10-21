@@ -28,6 +28,13 @@ pub enum Command {
         /// against this native LLVM 23 shared library. No GPU work is submitted.
         #[arg(long)]
         llvm_library: Option<PathBuf>,
+        /// Also compile these unchanged raw AIR bitcode inputs through each
+        /// vendor probe. Repeat for multiple inputs; no GPU work is submitted.
+        #[arg(long, requires_all = ["llvm_library", "entry"])]
+        air_input: Vec<PathBuf>,
+        /// Exact entry point in every supplied raw AIR input.
+        #[arg(long, requires = "air_input")]
+        entry: Option<String>,
     },
     /// Compile NVIDIA's resource-manager and display cores for native Stela
     /// or as Linux reference objects, retaining unresolved platform imports.
@@ -47,7 +54,15 @@ pub fn run(command: Command) -> Result<()> {
             jobs,
             require_all_targets,
             llvm_library,
-        } => mesa::build(jobs, require_all_targets, llvm_library.as_deref()),
+            air_input,
+            entry,
+        } => mesa::build(
+            jobs,
+            require_all_targets,
+            llvm_library.as_deref(),
+            &air_input,
+            entry.as_deref(),
+        ),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
     }
 }

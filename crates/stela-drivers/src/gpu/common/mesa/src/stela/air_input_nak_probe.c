@@ -61,13 +61,16 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm)
    struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
    CHECK(bin && bin->code && bin->code_size && bin->info.num_instrs > 2 &&
          bin->info.sm == sm && bin->info.stage == MESA_SHADER_COMPUTE);
-   printf("air-input-nak sm=%u entry=%s workgroup=32,1,1 buffer=7 "
-          "binding=fixture-global64 va=0x100000 bytes=%u instructions=%u input_blake3=",
-          sm, entry, bin->code_size, bin->info.num_instrs);
+   printf("STELA_GPU_TARGET {\"backend\":\"air-nak\",\"target\":\"sm%u\","
+          "\"state\":\"compiled\",\"input_kind\":\"raw_input\",\"entry\":\"%s\","
+          "\"workgroup\":[32,1,1],\"buffer_index\":7,\"max_instructions\":256,"
+          "\"binding\":\"fixture-global64\",\"fixture_va\":1048576,"
+          "\"bytes\":%u,\"instructions\":%u,\"input_bytes\":%zu,\"input_blake3\":\"",
+          sm, entry, bin->code_size, bin->info.num_instrs, size);
    print_digest(input, size);
-   printf(" code_blake3=");
+   printf("\",\"code_blake3\":\"");
    print_digest(bin->code, bin->code_size);
-   puts("");
+   puts("\"}");
    nak_shader_bin_destroy(bin);
    ralloc_free(nir);
    nak_compiler_destroy(compiler);
@@ -107,6 +110,10 @@ main(int argc, char **argv)
       CHECK(bytes && fread(bytes, 1, length, stream) == (size_t)length);
       CHECK(fgetc(stream) == EOF && !ferror(stream));
       CHECK(!fclose(stream));
+      printf("STELA_AIR_INPUT {\"origin\":\"raw_input_file\",\"bytes\":%ld,"
+             "\"entry\":\"%s\",\"blake3\":\"", length, entry);
+      print_digest(bytes, length);
+      puts("\"}");
       const unsigned targets[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
       for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
          compile_input(bytes, length, entry, targets[i]);

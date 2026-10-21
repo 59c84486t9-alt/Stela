@@ -9,6 +9,9 @@ mod intel;
 mod native;
 
 fn main() {
+    // Active ports declare their native source inputs below. Without this
+    // baseline Cargo watches every vendored file even when no C port is used.
+    println!("cargo:rerun-if-changed=build.rs");
     #[cfg(feature = "amd-port")]
     {
         let mut build = native::configure();

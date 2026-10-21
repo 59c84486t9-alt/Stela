@@ -32,6 +32,15 @@ if stela_air_llvm != ''
     stela_air_test_dependencies += [idep_nak]
     stela_air_test_links += [_libnak_rs]
     stela_air_test_args += ['-DSTELA_AIR_TEST_NAK']
+    stela_air_input_nak_probe = executable(
+      'stela_air_input_nak_probe',
+      'air_input_nak_probe.c',
+      include_directories : [inc_include, inc_src],
+      dependencies : [idep_stela_air, idep_nak],
+      link_with : [_libnak_rs],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
   endif
   stela_air_test = executable(
     'stela_air_test',
@@ -121,6 +130,23 @@ if with_stela_nvidia
 endif
 
 if with_stela_intel
+  stela_intel_surface = static_library(
+    'stela_intel_surface',
+    '../../../../intel/stela/hosted/surface.c',
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [libisl],
+    c_args : ['-Werror'],
+  )
+  stela_intel_surface_probe = executable(
+    'stela_intel_surface_probe',
+    '../../../../intel/stela/tests/surface.c',
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [stela_intel_surface, libisl],
+    c_args : ['-Werror'],
+  )
+  test('stela_intel_surface', stela_intel_surface_probe, suite : 'stela')
   stela_elk_probe = executable(
     'stela_elk_probe',
     'elk_probe.c',
@@ -140,6 +166,23 @@ if with_stela_intel
 endif
 
 if with_stela_amd
+  stela_amd_buffer = static_library(
+    'stela_amd_buffer',
+    '../../../../amd/stela/buffer.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [libamd_compiler_support],
+    c_args : ['-Werror'],
+  )
+  stela_amd_buffer_probe = executable(
+    'stela_amd_buffer_probe',
+    '../../../../amd/tests/buffer_test.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_buffer, libamd_compiler_support],
+    c_args : ['-Werror'],
+  )
+  test('stela_amd_buffer', stela_amd_buffer_probe, suite : 'stela')
   stela_amd_commands = static_library(
     'stela_amd_commands',
     'amd_commands.c',
