@@ -58,6 +58,12 @@ impl UsbIdentity {
             (0x0bda, 0xa728 | 0x8771) | (0x0b05, 0x190e) => Some(Project::Rtl8761Bu),
             // Explicit btusb additional 8822BE entries.
             (0x13d3, 0x3526) | (0x0b05, 0x185c) => Some(Project::Rtl8822B),
+            // Complete explicit btusb 8852BE group; independently require the
+            // 8852B USB stock-ROM profile below, never infer it from the PID.
+            (0x0cb8, 0xc559)
+            | (0x0bda, 0x4853 | 0x887b | 0xb85b)
+            | (0x13d3, 0x3570 | 0x3571 | 0x3572 | 0x3591)
+            | (0x0489, 0xe123 | 0xe125) => Some(Project::Rtl8852Bu),
             _ => None,
         }
     }
@@ -93,11 +99,7 @@ impl Identity {
         let (lmp, hci_rev, hci_ver) = match project {
             Project::Rtl8761Bu => (0x8761, 0xb, 0xa),
             Project::Rtl8822B => (0x8822, 0xb, 7),
-            Project::Rtl8852Bu => {
-                return Err(Error::Unsupported(
-                    "EPATCH v2 live admission not implemented",
-                ));
-            }
+            Project::Rtl8852Bu => (0x8852, 0xb, 0xb),
         };
         if version.manufacturer() != 0x005d
             || version.lmp_subversion() != lmp
@@ -113,7 +115,7 @@ impl Identity {
         }
         if security[0] != 0 {
             return Err(Error::Unsupported(
-                "nonzero Realtek security key requires EPATCH v2 validation",
+                "nonzero Realtek security key input/selection is unsupported",
             ));
         }
         Ok(Self {
@@ -130,8 +132,13 @@ impl Identity {
         let revision = self
             .register_revision
             .map_or_else(|| "none".into(), |v| format!("{v:04x}"));
+        let format = if self.project == Project::Rtl8852Bu {
+            "epatch-v2"
+        } else {
+            "epatch-v1"
+        };
         format!(
-            "epatch-v1:hci-{:02x}-{:04x}:lmp-{:02x}-{:04x}:manufacturer-{:04x}:register-{:04x}-{revision}:rom-{:02x}:security-{:02x}-{:02x}",
+            "{format}:hci-{:02x}-{:04x}:lmp-{:02x}-{:04x}:manufacturer-{:04x}:register-{:04x}-{revision}:rom-{:02x}:security-{:02x}-{:02x}",
             self.version.hci_version(),
             self.version.hci_revision(),
             self.version.lmp_version(),
@@ -145,7 +152,11 @@ impl Identity {
     }
     pub(super) fn target<'a>(&self, hardware: &'a str, revision: &'a str) -> Target<'a> {
         Target {
-            driver: "realtek-bluetooth-usb-epatch-v1",
+            driver: if self.project == Project::Rtl8852Bu {
+                "realtek-bluetooth-usb-epatch-v2"
+            } else {
+                "realtek-bluetooth-usb-epatch-v1"
+            },
             hardware,
             revision,
             board: None,
@@ -166,6 +177,9 @@ impl Identity {
         }
     }
     pub fn configuration_required(&self) -> bool {
-        self.project == Project::Rtl8822B
+        match self.project {
+            Project::Rtl8822B => true,
+            Project::Rtl8761Bu | Project::Rtl8852Bu => false,
+        }
     }
 }

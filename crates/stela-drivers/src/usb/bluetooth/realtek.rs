@@ -71,6 +71,8 @@ pub struct Attempt {
     pub identity: Option<Identity>,
     pub firmware: Option<FirmwareReceipt>,
     pub configuration: Option<core::result::Result<FirmwareReceipt, crate::firmware::Error>>,
+    pub container_version: Option<ContainerVersion>,
+    pub v2: Option<V2Metadata>,
     pub download: Vec<DownloadResponse>,
     pub after: Option<LocalVersion>,
 }
@@ -91,6 +93,8 @@ pub struct OwnedReport {
     pub firmware: Box<FirmwareReceipt>,
     pub configuration: ConfigurationEvidence,
     pub container_version: ContainerVersion,
+    /// Validated v2 hierarchy/control observations, absent for a v1 container.
+    pub v2: Option<V2Metadata>,
     pub download: Vec<DownloadResponse>,
 }
 #[derive(Debug)]
@@ -248,16 +252,29 @@ mod tests {
         b
     }
     fn version(project: Project, after: bool) -> Vec<u8> {
-        let (hci, lmp) = if project == Project::Rtl8761Bu {
-            (10, 0x8761u16)
-        } else {
-            (7, 0x8822)
+        let (hci, lmp) = match project {
+            Project::Rtl8761Bu => (10, 0x8761u16),
+            Project::Rtl8822B => (7, 0x8822),
+            Project::Rtl8852Bu => (11, 0x8852),
         };
         let mut b = vec![0, hci, 11, 0, hci, 0x5d, 0];
         b.extend_from_slice(&(if after { 0x5678 } else { lmp }).to_le_bytes());
         b
     }
     fn firmware(project: Project) -> Vec<u8> {
+        if project == Project::Rtl8852Bu {
+            let mut b = b"RTBTCore".to_vec();
+            b.extend_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            b.extend_from_slice(&2u32.to_le_bytes());
+            b.extend_from_slice(&1u32.to_le_bytes());
+            b.extend_from_slice(&16u32.to_le_bytes());
+            b.extend_from_slice(&[1, 0, 0, 0, 1, 15, 0, 0, 4, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef]);
+            b.extend_from_slice(&8u32.to_le_bytes());
+            b.extend_from_slice(&2u32.to_le_bytes());
+            b.extend_from_slice(&[0x99, 0x98]);
+            b.extend_from_slice(&[0xff, 2, 1, 1, 20, 1, 0, 0x51, 4, 0xfd, 0x77]);
+            return b;
+        }
         let mut b = vec![0; 36];
         b[..8].copy_from_slice(b"Realtech");
         b[8..12].copy_from_slice(&0x12345678u32.to_le_bytes());
@@ -269,10 +286,10 @@ mod tests {
         b
     }
     fn fixture(project: Project, config: bool) -> (Hci<Model>, Catalog, Rc<RefCell<Trace>>) {
-        let (vid, pid, sub, hci) = if project == Project::Rtl8761Bu {
-            (0x0bdau16, 0x8771u16, 0x8761u16, 10)
-        } else {
-            (0x13d3, 0x3526, 0x8822, 7)
+        let (vid, pid, sub, hci) = match project {
+            Project::Rtl8761Bu => (0x0bdau16, 0x8771u16, 0x8761u16, 10),
+            Project::Rtl8822B => (0x13d3, 0x3526, 0x8822, 7),
+            Project::Rtl8852Bu => (0x0bda, 0xb85b, 0x8852, 11),
         };
         let mut descriptor = [18, 1, 0, 2, 0xe0, 1, 1, 64, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1];
         descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
@@ -290,31 +307,41 @@ mod tests {
             product: None,
             serial: None,
         };
-        let hardware = if project == Project::Rtl8761Bu {
-            "usb:0bda:8771:0100"
-        } else {
-            "usb:13d3:3526:0100"
+        let hardware = match project {
+            Project::Rtl8761Bu => "usb:0bda:8771:0100",
+            Project::Rtl8822B => "usb:13d3:3526:0100",
+            Project::Rtl8852Bu => "usb:0bda:b85b:0100",
         };
-        let revision = if project == Project::Rtl8761Bu {
-            "epatch-v1:hci-0a-000b:lmp-0a-8761:manufacturer-005d:register-8761-none:rom-00:security-00-00"
-        } else {
-            "epatch-v1:hci-07-000b:lmp-07-8822:manufacturer-005d:register-8822-000b:rom-00:security-00-00"
+        let revision = match project {
+            Project::Rtl8761Bu => {
+                "epatch-v1:hci-0a-000b:lmp-0a-8761:manufacturer-005d:register-8761-none:rom-00:security-00-00"
+            }
+            Project::Rtl8822B => {
+                "epatch-v1:hci-07-000b:lmp-07-8822:manufacturer-005d:register-8822-000b:rom-00:security-00-00"
+            }
+            Project::Rtl8852Bu => {
+                "epatch-v2:hci-0b-000b:lmp-0b-8852:manufacturer-005d:register-8852-none:rom-00:security-00-00"
+            }
         };
         let target = Target {
-            driver: "realtek-bluetooth-usb-epatch-v1",
+            driver: if project == Project::Rtl8852Bu {
+                "realtek-bluetooth-usb-epatch-v2"
+            } else {
+                "realtek-bluetooth-usb-epatch-v1"
+            },
             hardware,
             revision,
             board: None,
         };
-        let name = if project == Project::Rtl8761Bu {
-            "rtl_bt/rtl8761bu_fw.bin"
-        } else {
-            "rtl_bt/rtl8822b_fw.bin"
+        let name = match project {
+            Project::Rtl8761Bu => "rtl_bt/rtl8761bu_fw.bin",
+            Project::Rtl8822B => "rtl_bt/rtl8822b_fw.bin",
+            Project::Rtl8852Bu => "rtl_bt/rtl8852bu_fw.bin",
         };
-        let cfgname = if project == Project::Rtl8761Bu {
-            "rtl_bt/rtl8761bu_config.bin"
-        } else {
-            "rtl_bt/rtl8822b_config.bin"
+        let cfgname = match project {
+            Project::Rtl8761Bu => "rtl_bt/rtl8761bu_config.bin",
+            Project::Rtl8822B => "rtl_bt/rtl8822b_config.bin",
+            Project::Rtl8852Bu => "rtl_bt/rtl8852bu_config.bin",
         };
         let cfg = vec![0x55, 0xab, 0x23, 0x87, 0, 0];
         let fw = firmware(project);
@@ -324,7 +351,11 @@ mod tests {
             provenance: Provenance {
                 source: "original stateful fixture",
                 revision: "model-v1",
-                member: name,
+                member: if project == Project::Rtl8852Bu && name == cfgname {
+                    "rtl_bt/rtl8761bu_config.bin"
+                } else {
+                    name
+                },
                 license: "MIT",
             },
             expected_length: bytes.len(),
@@ -354,7 +385,11 @@ mod tests {
         add(0x1001, &[], &version(project, false));
         add(0xfc6d, &[], &[0, 0]);
         add(0xfc61, &[0x10, 0xa4, 0xad, 0, 0xb0], &[0, 0, 0]);
-        let mut data = vec![0x80, 0x78, 0x56, 0x34, 0x12];
+        let mut data = if project == Project::Rtl8852Bu {
+            vec![0x80, 0xde, 0xad, 0xbe, 0xef]
+        } else {
+            vec![0x80, 0x78, 0x56, 0x34, 0x12]
+        };
         if config {
             data.extend_from_slice(&cfg);
         }
@@ -382,7 +417,7 @@ mod tests {
     }
     struct Recording<'a> {
         catalog: &'a Catalog,
-        requests: RefCell<Vec<(String, String, String)>>,
+        requests: RefCell<Vec<(String, String, String, String)>>,
     }
     impl Provider for Recording<'_> {
         fn load(
@@ -393,6 +428,7 @@ mod tests {
                 r.name.into(),
                 r.target.hardware.into(),
                 r.target.revision.into(),
+                r.target.driver.into(),
             ));
             self.catalog.load(r)
         }
@@ -406,7 +442,7 @@ mod tests {
     }
     #[test]
     fn native_report_retains_actual_identity_receipts_and_indices_after_provider_drop() {
-        for project in [Project::Rtl8761Bu, Project::Rtl8822B] {
+        for project in [Project::Rtl8761Bu, Project::Rtl8822B, Project::Rtl8852Bu] {
             let (mut hci, catalog, trace) = fixture(project, true);
             {
                 let provider = Recording {
@@ -423,7 +459,24 @@ mod tests {
                 assert_eq!(r.before.security, [0, 0]);
                 assert_eq!(r.after.raw, version(project, true)[..]);
                 assert_eq!(r.address, [1, 2, 3, 4, 5, 6]);
-                assert_eq!(r.container_version, ContainerVersion::V1(0x12345678));
+                if project == Project::Rtl8852Bu {
+                    assert_eq!(
+                        r.container_version,
+                        ContainerVersion::V2([1, 2, 3, 4, 5, 6, 7, 8])
+                    );
+                    let meta = r.v2.as_ref().unwrap();
+                    assert_eq!(meta.project, Project::Rtl8852Bu);
+                    assert_eq!(meta.sections[1].opcode, 8);
+                    assert!(meta.sections[1].skipped);
+                    let ConfigurationEvidence::Supplied(config) = &r.configuration else {
+                        panic!("supplied config expected")
+                    };
+                    assert_eq!(config.name, "rtl_bt/rtl8852bu_config.bin");
+                    assert_eq!(config.member, "rtl_bt/rtl8761bu_config.bin");
+                } else {
+                    assert_eq!(r.container_version, ContainerVersion::V1(0x12345678));
+                    assert!(r.v2.is_none());
+                }
                 assert_eq!(
                     r.download,
                     vec![DownloadResponse {
@@ -593,23 +646,25 @@ mod tests {
                 }
             }
         }
-        for kind in [
-            crate::firmware::ErrorKind::WrongTarget,
-            crate::firmware::ErrorKind::DigestMismatch {
-                expected: [1; 32],
-                actual: [2; 32],
-            },
-        ] {
-            let (mut hci, catalog, trace) = fixture(Project::Rtl8761Bu, true);
-            let provider = RejectConfig {
-                catalog: &catalog,
-                kind: kind.clone(),
-            };
-            let e = initialize(&mut hci, &provider).unwrap_err();
-            assert!(matches!(attempt(&e).0,Error::Resource(e)if e.kind==kind));
-            assert!(attempt(&e).1.download.is_empty());
-            assert_eq!(trace.borrow().commands, 4);
-            assert_eq!(hci.state(), State::Closed);
+        for project in [Project::Rtl8761Bu, Project::Rtl8852Bu] {
+            for kind in [
+                crate::firmware::ErrorKind::WrongTarget,
+                crate::firmware::ErrorKind::DigestMismatch {
+                    expected: [1; 32],
+                    actual: [2; 32],
+                },
+            ] {
+                let (mut hci, catalog, trace) = fixture(project, true);
+                let provider = RejectConfig {
+                    catalog: &catalog,
+                    kind: kind.clone(),
+                };
+                let e = initialize(&mut hci, &provider).unwrap_err();
+                assert!(matches!(attempt(&e).0,Error::Resource(e)if e.kind==kind));
+                assert!(attempt(&e).1.download.is_empty());
+                assert_eq!(trace.borrow().commands, 4);
+                assert_eq!(hci.state(), State::Closed);
+            }
         }
     }
     #[test]
@@ -634,6 +689,139 @@ mod tests {
             );
             assert_eq!(trace.borrow().commands, sent);
             assert_eq!(trace.borrow().closed, 1);
+        }
+    }
+    #[test]
+    fn v2_requires_exact_usb_stock_hci_register_rom_and_key_profile() {
+        for (vendor, product) in [
+            (0x0cb8, 0xc559),
+            (0x0bda, 0x4853),
+            (0x0bda, 0x887b),
+            (0x0bda, 0xb85b),
+            (0x13d3, 0x3570),
+            (0x13d3, 0x3571),
+            (0x13d3, 0x3572),
+            (0x13d3, 0x3591),
+            (0x0489, 0xe123),
+            (0x0489, 0xe125),
+        ] {
+            let usb = UsbIdentity {
+                vendor,
+                product,
+                revision: 0x1234,
+            };
+            let v = LocalVersion::parse(&version(Project::Rtl8852Bu, false)).unwrap();
+            let identity = Identity::select(usb, v.clone(), 0x8852, None, 1, [0, 0x42]).unwrap();
+            assert_eq!(identity.project, Project::Rtl8852Bu);
+            assert!(identity.revision_label().ends_with("rom-01:security-00-42"));
+            assert!(identity.usb.hardware_label().ends_with(":1234"));
+            for wrong in [Project::Rtl8761Bu, Project::Rtl8822B] {
+                assert!(
+                    Identity::select(
+                        usb,
+                        LocalVersion::parse(&version(wrong, false)).unwrap(),
+                        0x8852,
+                        None,
+                        1,
+                        [0, 0]
+                    )
+                    .is_err()
+                );
+            }
+            assert!(Identity::select(usb, v.clone(), 0x8851, None, 1, [0, 0]).is_err());
+            assert!(Identity::select(usb, v, 0x8852, None, 1, [1, 0]).is_err());
+        }
+        for (vendor, product) in [
+            (0x0bda, 0x8520),
+            (0x0cb8, 0xc558),
+            (0x13d3, 0x3573),
+            (0x1209, 0xb85b),
+        ] {
+            assert!(
+                UsbIdentity {
+                    vendor,
+                    product,
+                    revision: 0x100
+                }
+                .project()
+                .is_none()
+            );
+        }
+    }
+    #[test]
+    fn v2_missing_companions_are_exact_and_only_named_optional_config_absence_is_permitted() {
+        let (mut hci, _, trace) = fixture(Project::Rtl8852Bu, true);
+        let empty = Catalog::from_handoff(vec![]).unwrap();
+        let provider = Recording {
+            catalog: &empty,
+            requests: RefCell::new(vec![]),
+        };
+        let e = initialize(&mut hci, &provider).unwrap_err();
+        let (cause, a) = attempt(&e);
+        assert!(matches!(cause,Error::Resource(e)if e.name=="rtl_bt/rtl8852bu_fw.bin"));
+        assert!(a.download.is_empty());
+        assert!(a.v2.is_none());
+        let requests = provider.requests.borrow();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].0, "rtl_bt/rtl8852bu_fw.bin");
+        assert_eq!(requests[1].0, "rtl_bt/rtl8852bu_config.bin");
+        for r in requests.iter() {
+            assert_eq!(r.1, "usb:0bda:b85b:0100");
+            assert_eq!(
+                r.2,
+                "epatch-v2:hci-0b-000b:lmp-0b-8852:manufacturer-005d:register-8852-none:rom-00:security-00-00"
+            );
+            assert_eq!(r.3, "realtek-bluetooth-usb-epatch-v2");
+        }
+        assert_eq!(trace.borrow().commands, 4);
+        assert_eq!(hci.state(), State::Closed);
+        let (mut hci, catalog, _) = fixture(Project::Rtl8852Bu, false);
+        let r = initialize(&mut hci, &catalog).unwrap();
+        assert!(
+            matches!(r.configuration,ConfigurationEvidence::OptionalMissing(e)if e.name=="rtl_bt/rtl8852bu_config.bin")
+        );
+    }
+    #[test]
+    fn v2_validated_metadata_and_alias_receipt_survive_rejected_upload_or_boot() {
+        for boot in [false, true] {
+            let (mut hci, catalog, trace) = fixture(Project::Rtl8852Bu, true);
+            if boot {
+                hci.io.steps[5].response = cc(0x1001, &version(Project::Rtl8852Bu, false));
+            } else {
+                hci.io.steps[4].response = cc(0xfc20, &[0x0c, 0]);
+            }
+            let InitializationError::Realtek(e) = hci
+                .initialize_with_provider(&catalog, PlatformInputs::default())
+                .unwrap_err()
+            else {
+                panic!("Realtek error expected")
+            };
+            let (_, a) = attempt(e);
+            assert_eq!(
+                a.container_version,
+                Some(ContainerVersion::V2([1, 2, 3, 4, 5, 6, 7, 8]))
+            );
+            let metadata = a.v2.as_ref().unwrap();
+            assert_eq!(metadata.sections[0].subsections[0].control, [0, 0]);
+            assert!(metadata.sections[1].skipped);
+            assert_eq!(metadata.sections[1].length, 2);
+            assert_eq!(
+                metadata.sections[1].sha256,
+                <[u8; 32]>::from(Sha256::digest([0x99, 0x98]))
+            );
+            let config = a.configuration.as_ref().unwrap().as_ref().unwrap();
+            assert_eq!(config.name, "rtl_bt/rtl8852bu_config.bin");
+            assert_eq!(config.member, "rtl_bt/rtl8761bu_config.bin");
+            assert_eq!(a.download.len(), usize::from(boot));
+            assert_eq!(a.after.is_some(), boot);
+            assert_eq!(hci.state(), State::Closed);
+            let commands = trace.borrow().commands;
+            assert!(
+                hci.initialize_with_provider(&catalog, PlatformInputs::default())
+                    .is_err()
+            );
+            assert_eq!(trace.borrow().commands, commands);
+            assert!(hci.submit_command(&[3, 0x0c, 0]).is_err());
         }
     }
 }

@@ -4,7 +4,7 @@
 //! HCI synchronization, failure quarantine and owned observations are Stela glue.
 use super::{
     Attempt, Configuration, ConfigurationEvidence, ContainerVersion, DownloadResponse, Error,
-    Identity, LocalVersion, OwnedReport, Patch, Result, UsbIdentity,
+    Identity, LocalVersion, OwnedReport, Patch, Project, Result, UsbIdentity, V2Patch,
 };
 use crate::firmware::{ErrorKind as ResourceErrorKind, Provider, Requirement};
 use crate::usb::bluetooth::{FirmwareReceipt, Hci, Io, Packet, State};
@@ -174,7 +174,11 @@ impl<B: Io> Engine<'_, B> {
         let firmware = provider.load(Requirement {
             name: identity.firmware_name(),
             target,
-            minimum_bytes: 22,
+            minimum_bytes: if identity.project == Project::Rtl8852Bu {
+                28
+            } else {
+                22
+            },
         });
         let configuration = provider.load(Requirement {
             name: identity.configuration_name(),
@@ -204,9 +208,25 @@ impl<B: Io> Engine<'_, B> {
             }
             Err(error) => return Err(Error::Resource(error)),
         };
-        let patch = Patch::parse(firmware.bytes(), identity.project, identity.rom_version)?;
-        let firmware_version = patch.firmware_version;
-        let stage = patch.stage(config.as_ref());
+        let (container_version, stage) = if identity.project == Project::Rtl8852Bu {
+            let patch = V2Patch::parse(
+                firmware.bytes(),
+                identity.project,
+                identity.rom_version,
+                identity.security[0],
+            )?;
+            let version = ContainerVersion::V2(patch.metadata.version);
+            let stage = patch.stage(config.as_ref());
+            self.attempt.v2 = Some(patch.metadata);
+            (version, stage)
+        } else {
+            let patch = Patch::parse(firmware.bytes(), identity.project, identity.rom_version)?;
+            (
+                ContainerVersion::V1(patch.firmware_version),
+                patch.stage(config.as_ref()),
+            )
+        };
+        self.attempt.container_version = Some(container_version);
         for fragment in stage.fragments() {
             let mut p = Vec::with_capacity(fragment.data.len() + 1);
             p.push(fragment.index);
@@ -248,7 +268,8 @@ impl<B: Io> Engine<'_, B> {
             address,
             firmware: Box::new(firmware.into()),
             configuration,
-            container_version: ContainerVersion::V1(firmware_version),
+            container_version,
+            v2: self.attempt.v2.take(),
             download: core::mem::take(&mut self.attempt.download),
         })
     }
