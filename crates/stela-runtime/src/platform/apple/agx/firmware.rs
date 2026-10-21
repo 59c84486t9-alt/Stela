@@ -192,6 +192,19 @@ enum Job {
     Work(Pipe, u8),
 }
 
+// Every modeled interface's original firmware binds root+a8 to this 0x20-byte
+// shared status object. Startup clears ready/generation, publishes powered,
+// then publishes ready after native initialization (docs/research/agx.md).
+const STATUS_POWERED: u64 = 0x10;
+const STATUS_READY: u64 = 0x14;
+const STATUS_GENERATION: u64 = 0x1c;
+const STARTUP_STATUS: [(u64, u32); 4] = [
+    (STATUS_READY, 0),
+    (STATUS_GENERATION, 0),
+    (STATUS_POWERED, 1),
+    (STATUS_READY, 1),
+];
+
 /// The GFX firmware protocol state shared by its two endpoints.
 #[derive(Debug)]
 pub struct State {
@@ -200,10 +213,11 @@ pub struct State {
     /// The firmware VA of the initdata root, once the kext sends it, as the
     /// 44-bit field of the message.
     pub initdata_va: Option<u64>,
-    /// The root was read through the UAT and is the kext's.
+    /// The root was validated through the UAT and startup status committed.
     pub initdata_checked: bool,
-    /// The root, once checked.
+    /// The validated root, retained even if startup-status DMA later faults.
     pub root: Option<Root>,
+    startup_word: usize,
     /// Work doorbells received, in order, as (pipe, submission index).
     pub work: Vec<(Pipe, u8)>,
     /// Count of device-control doorbells received.
@@ -231,6 +245,7 @@ impl State {
             initdata_va: None,
             initdata_checked: false,
             root: None,
+            startup_word: 0,
             work: Vec::new(),
             fwctl: 0,
             power: Vec::new(),
@@ -308,12 +323,25 @@ impl State {
     /// Read the root, then run the queued doorbells in order.
     fn dma(&mut self, memory: &mut dyn Shared, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
         if let Some(va) = self.initdata_va.filter(|_| !self.initdata_checked) {
-            let magic = self
-                .family
-                .initdata_magic
-                .ok_or("the GPU family's initdata root magic is not recovered")?;
-            let root = Root::read(memory, uat::canonical_firmware_va(va), magic)?;
-            self.root = Some(root);
+            if self.root.is_none() {
+                let magic = self
+                    .family
+                    .initdata_magic
+                    .ok_or("the GPU family's initdata root magic is not recovered")?;
+                self.root = Some(Root::read(memory, uat::canonical_firmware_va(va), magic)?);
+            }
+            let status = self
+                .root
+                .as_ref()
+                .expect("validated initdata root")
+                .object_848;
+            status
+                .checked_add(0x20)
+                .ok_or("GFX firmware status range wraps")?;
+            while let Some(&(offset, value)) = STARTUP_STATUS.get(self.startup_word) {
+                memory.write(status + offset, &value.to_le_bytes())?;
+                self.startup_word += 1;
+            }
             self.initdata_checked = true;
         }
         while let Some(&job) = self.jobs.front() {
@@ -806,6 +834,7 @@ impl Endpoint for Message {
         state.initdata_va = None;
         state.initdata_checked = false;
         state.root = None;
+        state.startup_word = 0;
         // Historical counters/journals remain diagnostic evidence. Channel
         // addresses and validation are cold-reset session state.
         Ok(())
@@ -901,6 +930,136 @@ mod tests {
         entry[..4].copy_from_slice(&DEVICE_CONTROL_POWER.to_le_bytes());
         entry[4..8].copy_from_slice(&word.to_le_bytes());
         entry
+    }
+
+    /// Fail before a selected startup write; record only committed writes.
+    struct StartupMemory {
+        flat: Flat,
+        fail_at: Option<usize>,
+        writes: Vec<(u64, u32)>,
+        reads: usize,
+    }
+
+    impl Shared for StartupMemory {
+        fn read(&mut self, va: u64, data: &mut [u8]) -> Result<(), &'static str> {
+            self.reads += 1;
+            self.flat.read(va, data)
+        }
+        fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+            if self.fail_at == Some(self.writes.len()) {
+                return Err("startup status write fault");
+            }
+            self.flat.write(va, data)?;
+            self.writes
+                .push((va, u32::from_le_bytes(data.try_into().unwrap())));
+            Ok(())
+        }
+        fn gpu_read(
+            &mut self,
+            context: usize,
+            va: u64,
+            data: &mut [u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            self.flat.gpu_read(context, va, data)
+        }
+        fn gpu_write(
+            &mut self,
+            context: usize,
+            va: u64,
+            data: &[u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            self.flat.gpu_write(context, va, data)
+        }
+    }
+
+    #[test]
+    fn cold_start_status_owns_each_committed_word_across_faults_for_every_modeled_family() {
+        let status = BASE + 0x4000;
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for fault in 0..STARTUP_STATUS.len() {
+                let mut flat = Flat::new(BASE, 0x20000);
+                kext_root(&mut flat);
+                flat.put_u64(ROOT, family.initdata_magic.unwrap());
+                flat.put(status, &[0xa5; 0x20]);
+                let mut memory = StartupMemory {
+                    flat,
+                    fail_at: Some(fault),
+                    writes: Vec::new(),
+                    reads: 0,
+                };
+                let protocol = Protocol(Rc::new(RefCell::new(State::new(family, false))));
+                let mut endpoint = Message(protocol.clone());
+                let mut outbox = Vec::new();
+                endpoint
+                    .receive(
+                        MSG_INIT << TYPE_SHIFT | (ROOT & INIT_VA_BITS),
+                        &mut Vec::new(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    protocol.0.borrow_mut().dma(&mut memory, &mut outbox),
+                    Err("startup status write fault")
+                );
+                assert_eq!(memory.writes.len(), fault);
+                assert!(outbox.is_empty());
+                assert!(protocol.with(State::dma_pending));
+                assert!(!protocol.with(|state| state.initdata_checked));
+                assert!(endpoint.reset().is_err());
+                // An accepted root and committed prefix survive repeated faults.
+                let reads = memory.reads;
+                memory.flat.put_u64(ROOT, 0);
+                memory.flat.put_u64(ROOT + 0xa8, BASE + 0x8000);
+                assert!(
+                    protocol
+                        .0
+                        .borrow_mut()
+                        .dma(&mut memory, &mut outbox)
+                        .is_err()
+                );
+                assert_eq!(memory.reads, reads);
+                assert_eq!(memory.writes.len(), fault);
+                memory.fail_at = None;
+                protocol
+                    .0
+                    .borrow_mut()
+                    .dma(&mut memory, &mut outbox)
+                    .unwrap();
+                let expected = STARTUP_STATUS.map(|(offset, value)| (status + offset, value));
+                assert_eq!(memory.writes, expected);
+                assert_eq!(memory.reads, reads);
+                assert!(outbox.is_empty());
+                assert!(!protocol.with(State::dma_pending));
+                assert!(protocol.with(|state| state.initdata_checked));
+                assert_eq!(memory.flat.read_u32(status + STATUS_POWERED).unwrap(), 1);
+                assert_eq!(memory.flat.read_u32(status + STATUS_READY).unwrap(), 1);
+                assert_eq!(memory.flat.read_u32(status + STATUS_GENERATION).unwrap(), 0);
+                let mut untouched = [0; 0x10];
+                memory.flat.read(status, &mut untouched).unwrap();
+                assert_eq!(untouched, [0xa5; 0x10]);
+                assert_eq!(memory.flat.read_u32(status + 0x18).unwrap(), 0xa5a5_a5a5);
+                // Idle cold-reset starts root validation and publication again.
+                endpoint.reset().unwrap();
+                endpoint
+                    .receive(
+                        MSG_INIT << TYPE_SHIFT | (ROOT & INIT_VA_BITS),
+                        &mut Vec::new(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    protocol.0.borrow_mut().dma(&mut memory, &mut outbox),
+                    Err("GFX initdata root lacks its magic")
+                );
+                assert_eq!(memory.writes, expected);
+                kext_root(&mut memory.flat);
+                memory.flat.put_u64(ROOT, family.initdata_magic.unwrap());
+                protocol
+                    .0
+                    .borrow_mut()
+                    .dma(&mut memory, &mut outbox)
+                    .unwrap();
+                assert_eq!(&memory.writes[4..], &expected);
+            }
+        }
     }
 
     #[test]
@@ -1621,7 +1780,7 @@ mod tests {
         use uat::{Access as Ap, Agent, Flags, MemoryAttr, Uat};
         // TTBAT, PCE, PDE, PTE and the initdata page.
         let base = 0x8_0000_0000;
-        let mut ram = Ram::new(base, 0x4000 * 5);
+        let mut ram = Ram::new(base, 0x4000 * 6);
         let va = 0xffff_ffa0_0000_0000;
         let (_, idx) = uat::indices(va);
         let [ttbr0, ttbr1] = uat::encode_gptbat(0, 0, base + 0x4000);
@@ -1646,6 +1805,12 @@ mod tests {
         ram.put_u64(
             base + 0xc000 + idx[2] as u64 * 8,
             uat::encode_pte(base + 0x1_0000, &flags),
+        );
+        // The status object root+a8 names is a distinct mapped page.
+        let (_, status_idx) = uat::indices(va + 0x4000);
+        ram.put_u64(
+            base + 0xc000 + status_idx[2] as u64 * 8,
+            uat::encode_pte(base + 0x1_4000, &flags),
         );
         let mut table = Uat::new(40);
         table.configure(base).unwrap();
