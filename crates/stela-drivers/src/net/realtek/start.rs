@@ -96,6 +96,45 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                         r.write8(DEBUG, 0x20);
                     }
                     25 | 26 => self.latency()?,
+                    35 | 36 | 38 => {
+                        self.latency()?;
+                        self.eri_write(0xc0, 3, 0)?;
+                        self.eri_write(0xb8, 15, 0)?;
+                        self.eri_write(0xc8, 15, (0x10 << 16) | 2)?;
+                        self.eri_write(0xe8, 15, (0x10 << 16) | 6)?;
+                        self.eri_modify(0xdc, 1, 0)?;
+                        self.eri_modify(0xdc, 0, 1)?;
+                        self.eri_modify(0x1b0, 3, 1 << 4)?;
+                        self.eri_modify(0x1d0, 0, (1 << 4) | (1 << 1))?;
+                        self.eri_write(0xcc, 15, 0x50)?;
+                        self.eri_write(0xd0, 15, 0x60)?;
+                        r.write8(MCU, r.read8(MCU) & !(1 << 7));
+                        r.write8(DLL_POWER, r.read8(DLL_POWER) | (1 << 6));
+                        r.write32(MISC, r.read32(MISC) | (1 << 22));
+                        r.write8(CONFIG5, r.read8(CONFIG5) & !(1 << 3));
+                        if self.revision.version == 38 {
+                            r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 1));
+                            self.ephys(&[
+                                (6, 0xc0, 0x20),
+                                (0xf, 0xffff, 0x5200),
+                                (0x19, 0, 0x224),
+                                (0, 0, 8),
+                                (0xc, 0x3df0, 0x200),
+                            ])?;
+                            self.eri_modify(0xd4, 0, 0x0c00)?;
+                        } else {
+                            self.ephys(&[
+                                (6, 0xc0, 0x20),
+                                (8, 1, 2),
+                                (9, 0, 0x80),
+                                (0x19, 0, 0x224),
+                                (0, 0, 8),
+                                (0xc, 0x3df0, 0x200),
+                            ])?;
+                            r.write8(0x1b, r.read8(0x1b) & !7);
+                            self.eri_modify(0xd4, 0, 0x1f00)?;
+                        }
+                    }
                     34 => {
                         self.latency()?;
                         self.ephys(&[

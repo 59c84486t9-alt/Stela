@@ -10,6 +10,7 @@
 use super::{Error, Registers, Timer, firmware::Script, hardware::Hardware, registers::*};
 use crate::block::BlockError;
 mod d;
+mod f;
 
 const S: &[(u16, u16)] = &[
     (0x1f, 0x0001),
@@ -278,6 +279,11 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if !matches!(id, 0x001c_c800 | 0x001c_c912) {
             return Err(Error::UnsupportedPhy(id));
         }
+        if matches!(self.revision.version, 35 | 36 | 38) && id != 0x001c_c800 {
+            // This F/8411 slice implements the internal FE/GE analogue path;
+            // external PHY initialization remains outside these new revisions.
+            return Err(Error::UnsupportedPhy(id));
+        }
         if id == 0x001c_c912 {
             // rtl8211b_resume clears MII_MMD_DATA before genphy_resume:
             // rtl8211b_suspend may have left its bit 9 set.
@@ -331,6 +337,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.paged(1, 0x1d, 0xffff, 0x3d98)?;
                 }
                 25 | 26 => self.d(script.ok_or(Error::Script("RTL8168D requires firmware"))?)?,
+                35 | 36 | 38 => {
+                    self.f(script.ok_or(Error::Script("RTL8168F/8411 requires firmware"))?)?
+                }
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
