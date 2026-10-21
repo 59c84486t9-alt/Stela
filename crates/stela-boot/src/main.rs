@@ -181,6 +181,7 @@ fn main() -> Status {
     let log = log_file::open();
     firmware::connect_all();
     status::set_clock(firmware::tsc_hz());
+    firmware::start_ticker();
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     let held = system::held_at_start(&options);

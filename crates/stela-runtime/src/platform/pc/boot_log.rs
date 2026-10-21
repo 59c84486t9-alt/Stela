@@ -136,6 +136,35 @@ impl fmt::Display for FileError {
     }
 }
 
+/// Why the device does not hold what a flush stored ([`Writer::verify`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unkept {
+    Read(BlockError),
+    Header(HeaderError),
+    /// The stored header counts other bytes than the flush wrote.
+    Head {
+        stored: u64,
+        written: u64,
+    },
+}
+
+impl fmt::Display for Unkept {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(f, "the header cannot be read back: {error}"),
+            Self::Header(error) => {
+                write!(f, "the header read back is not the one written: {error}")
+            }
+            Self::Head { stored, written } => write!(
+                f,
+                "the header read back counts {stored:#x} bytes; {written:#x} were written"
+            ),
+        }
+    }
+}
+
+impl core::error::Error for Unkept {}
+
 /// The first block and the block count of `file`, a file of at least
 /// `needed` bytes on a partition of `block`-byte blocks: [`PARTITION_BYTES`]
 /// for a machine-state file, [`LOG_BYTES`] for a log file.
@@ -516,6 +545,22 @@ impl Writer {
         Ok(writer)
     }
 
+    /// Read the header back and check that it records the last flush: a
+    /// device that accepts writes and keeps none fails here.
+    pub fn verify(&self, device: &mut dyn BlockDevice) -> Result<(), Unkept> {
+        let mut block = vec![0; self.ring.block];
+        device.read(0, &mut block).map_err(Unkept::Read)?;
+        let stored = Header::decode(&block, self.ring.ring_bytes).map_err(Unkept::Header)?;
+        let written = self.durable.unwrap_or_default();
+        if stored.head != written || stored.boots != self.boots {
+            return Err(Unkept::Head {
+                stored: stored.head,
+                written,
+            });
+        }
+        Ok(())
+    }
+
     /// Why the log started fresh this boot, if it did.
     pub fn fresh(&self) -> Option<&HeaderError> {
         self.fresh.as_ref()
@@ -624,6 +669,8 @@ mod tests {
         events: Vec<Option<u64>>,
         reads: usize,
         writes_left: Option<usize>,
+        /// Accept writes and keep none, as a device that loses them.
+        dropping: bool,
     }
 
     impl Recorder {
@@ -633,6 +680,7 @@ mod tests {
                 events: Vec::new(),
                 reads: 0,
                 writes_left: None,
+                dropping: false,
             }
         }
 
@@ -659,6 +707,9 @@ mod tests {
                 *left -= 1;
             }
             self.events.push(Some(lba));
+            if self.dropping {
+                return Ok(());
+            }
             self.disk.write(lba, data)
         }
 
@@ -670,6 +721,32 @@ mod tests {
 
     fn text(log: &Log) -> String {
         String::from_utf8(log.stream.clone()).unwrap()
+    }
+
+    #[test]
+    fn a_device_that_keeps_no_writes_fails_the_check() {
+        let mut disk = Recorder::new(HEADER_BYTES + 4096, 512);
+        let mut writer = Writer::open(&mut disk).unwrap();
+        writer.flush(&mut disk).unwrap();
+        assert_eq!(writer.verify(&mut disk), Ok(()));
+        writer.append(b"more\n");
+        disk.dropping = true;
+        writer.flush(&mut disk).unwrap();
+        assert_eq!(
+            writer.verify(&mut disk),
+            Err(Unkept::Head {
+                stored: 0x15,
+                written: 0x1a
+            })
+        );
+        let mut blank = Recorder::new(HEADER_BYTES + 4096, 512);
+        blank.dropping = true;
+        let mut writer = Writer::open(&mut blank).unwrap();
+        writer.flush(&mut blank).unwrap();
+        assert_eq!(
+            writer.verify(&mut blank),
+            Err(Unkept::Header(HeaderError::Blank))
+        );
     }
 
     #[test]

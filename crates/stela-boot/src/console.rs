@@ -10,7 +10,10 @@
 mod font;
 
 use alloc::{vec, vec::Vec};
-use core::cell::UnsafeCell;
+use core::{
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 use font::Font;
 use stela_runtime::machine::apple::ScanoutMasks;
 use uefi::{
@@ -308,15 +311,25 @@ impl Text {
     }
 }
 
-/// The boot processor is the only writer, with interrupts disabled.
+/// The boot processor is the only writer. While boot services run, the
+/// firmware's timer may draw the running step from its callback, which
+/// interrupts the boot processor; [`BUSY`] makes such a nested draw skip.
 struct Console(UnsafeCell<Option<Text>>);
-// SAFETY: Stela runs on one CPU and never writes from an interrupt handler.
+// SAFETY: Stela runs on one CPU, and `BUSY` keeps accesses from nesting.
 unsafe impl Sync for Console {}
 static CONSOLE: Console = Console(UnsafeCell::new(None));
+/// The text [`release`] keeps, which [`reclaim`] shows again.
+static PARKED: Console = Console(UnsafeCell::new(None));
+static BUSY: AtomicBool = AtomicBool::new(false);
 
 fn with<R>(f: impl FnOnce(&mut Text) -> R) -> Option<R> {
-    // SAFETY: see `Console`; this is the only access, and it does not nest.
-    unsafe { &mut *CONSOLE.0.get() }.as_mut().map(f)
+    if BUSY.swap(true, Ordering::Acquire) {
+        return None;
+    }
+    // SAFETY: see `Console`; `BUSY` makes this the only live access.
+    let result = unsafe { &mut *CONSOLE.0.get() }.as_mut().map(f);
+    BUSY.store(false, Ordering::Release);
+    result
 }
 
 /// Clear the screen and send later text to it.
@@ -326,10 +339,27 @@ pub fn install(screen: Framebuffer) {
     unsafe { *CONSOLE.0.get() = Text::new(screen) };
 }
 
-/// Stop drawing text: the screen now shows something else.
+/// Stop drawing text: the screen now shows something else. The text is
+/// kept for [`reclaim`].
 pub fn release() {
     // SAFETY: see `Console`; no reference to the text is live here.
-    unsafe { *CONSOLE.0.get() = None };
+    unsafe { *PARKED.0.get() = (*CONSOLE.0.get()).take() };
+}
+
+/// Take the screen back after [`release`] and draw the kept text again, so
+/// a stop shows its reason instead of the guest's last frame.
+pub fn reclaim() {
+    // SAFETY: see `Console`; no reference to either text is live here.
+    unsafe {
+        if (*CONSOLE.0.get()).is_none()
+            && let Some(mut text) = (*PARKED.0.get()).take()
+        {
+            text.screen.clear();
+            text.shown.fill(BLANK);
+            text.present();
+            *CONSOLE.0.get() = Some(text);
+        }
+    }
 }
 
 /// Whether text reaches the screen.

@@ -16,8 +16,8 @@ use core::{
     fmt::{self, Write},
     sync::atomic::{AtomicBool, Ordering},
 };
-use stela_drivers::block::BlockDevice;
-use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Writer};
+use stela_drivers::block::{BlockDevice, BlockError};
+use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
 
 /// `isa-debug-exit` under QEMU; an unused port on a PC.
 const EXIT_PORT: u16 = 0xf4;
@@ -65,10 +65,11 @@ static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
 /// `--host-check` shows its report itself, so every line reaches the screen.
 static RAW_SCREEN: AtomicBool = AtomicBool::new(false);
 
-/// Store the logs and close those the firmware holds, then stop writing to
-/// the firmware's console: called just before boot services end, which
+/// Stop the marker's firmware timer, store the logs and close those the
+/// firmware holds, then stop writing to the firmware's console: called just before boot services end, which
 /// take both with them.
 pub fn leave_boot_services() {
+    crate::firmware::stop_ticker();
     flush_log();
     if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
         sinks.retain(|sink| sink.kind != Log::Firmware);
@@ -110,18 +111,52 @@ impl Write for Output {
     }
 }
 
+/// Why [`add_log`] did not keep a log.
+pub enum Unopened {
+    /// The device refused the first store.
+    Store(BlockError),
+    /// The device took the first store and does not hold it.
+    Unkept(Unkept),
+}
+
+impl fmt::Display for Unopened {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => write!(f, "{error}"),
+            Self::Unkept(unkept) => write!(f, "{unkept}"),
+        }
+    }
+}
+
 /// Keep the output in `writer`'s log on `device` from now on, starting with
-/// everything since the first line that the record still holds.
-pub fn add_log(writer: Writer, device: Box<dyn BlockDevice>, kind: Log) {
+/// everything since the first line that the record still holds. The first
+/// store is read back before the log counts as open.
+pub fn add_log(
+    mut writer: Writer,
+    mut device: Box<dyn BlockDevice>,
+    kind: Log,
+) -> Result<(), Unopened> {
+    let stored = match RECORD.0.try_borrow() {
+        Ok(record) => {
+            let Ok(reached) = record.copy_since(0, |bytes| {
+                writer.append(bytes);
+                Ok::<_, Infallible>(())
+            });
+            reached
+        }
+        Err(_) => 0,
+    };
+    writer.flush(&mut *device).map_err(Unopened::Store)?;
+    writer.verify(&mut *device).map_err(Unopened::Unkept)?;
     if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
         sinks.push(Sink {
             writer,
             device,
             kind,
-            stored: 0,
+            stored,
         });
     }
-    flush_log();
+    Ok(())
 }
 
 /// Store in every open log the output it does not hold yet. A USB log that
@@ -192,6 +227,7 @@ pub fn terminate(code: u32) -> ! {
 /// Show `message` as the reason the mount stopped: as a failed step on
 /// Stela's console, or on the firmware's before it exists.
 fn stopped(message: &str) {
+    console::reclaim();
     if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
         crate::status::fail(message);
         crate::status::info("Stela stopped. Turn the PC off to try again.");

@@ -1265,6 +1265,18 @@ pub(crate) fn report(event: &Event) {
 }
 
 /// Engine-phase entry, called by the loader on the window stack.
+/// How long a restart or power-off the guest asks for waits, so its reason
+/// can be read on the screen first.
+const STOP_HOLD_SECONDS: u64 = 10;
+
+/// Show why the machine stopped on Stela's own screen, which it takes back
+/// from the guest's last frame.
+fn show_stop(text: &str) {
+    crate::console::reclaim();
+    crate::status::info(text);
+    output::flush_log();
+}
+
 /// The boot bundle `--preboot` names, built from the installed system on
 /// `partition`: its macOS, its staged update or its recoveryOS.
 fn from_disk(
@@ -1315,6 +1327,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: the window heap is reserved for this allocator and still unused.
     unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
     crate::status::set_clock(handoff.tsc_hz);
+    stela_drivers::on_wait(crate::status::tick);
     crate::status::take_screen(
         handoff
             .screen
@@ -1411,10 +1424,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         if let Some(log) = log {
             crate::log_file::resume(log);
         }
+        let count = |count: usize, one: &str, many: &str| {
+            format!("{count} {}", if count == 1 { one } else { many })
+        };
         crate::status::done(&format!(
-            "{} partitions in use, {} more disks for macOS",
-            services.len() + usize::from(medium.is_some()),
-            usb_disks.len()
+            "{} in use, {} for macOS",
+            count(
+                services.len() + usize::from(medium.is_some()),
+                "partition",
+                "partitions"
+            ),
+            count(usb_disks.len(), "more disk", "more disks")
         ));
         if let Some(store) = store {
             translations::set_partition(store);
@@ -1565,7 +1585,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         None if recovery => output::fatal("recoveryOS needs the internal disk (--storage)"),
         backing => backing,
     };
-    let nor = nor.map(nor::HostNor::open);
+    let nor = nor.map(|device| {
+        crate::status::begin(&format!(
+            "Opening the machine state on {}",
+            device.identity().model
+        ));
+        let opened = nor::HostNor::open(device);
+        crate::status::done("");
+        opened
+    });
     let (mut host_nor, nor_image, nvram, sep_state) = match nor {
         Some((host_nor, image, nvram, sep_state)) => {
             (Some(host_nor), Some(image), Some(nvram), Some(sep_state))
@@ -1623,6 +1651,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
         read_only_region = loaded.read_only_region;
+        if let Some(display) = &display {
+            display.clear(&mut bare);
+        }
         (loaded.pc, loaded.x0)
     } else {
         // SAFETY: the guest image was left allocated by the loader.
@@ -2705,33 +2736,51 @@ fn finish(
             output::arguments(format_args!(
                 "STOP idle: every PE is off or waits with no wake source\n"
             ));
+            show_stop("macOS stopped: every processor is off or waits with nothing to wake it.");
             output::terminate(0x10)
         }
         Stop::Waiting => {
             output::arguments(format_args!(
                 "STOP waiting: every PE waits for an input from outside the board\n"
             ));
+            show_stop("macOS stopped: it waits for something from outside the Mac.");
             output::terminate(0x10)
         }
         Stop::Reset(reset) => {
             output::arguments(format_args!("STOP reset: {reset}\n"));
             translations::write();
             match reset.transition {
-                Transition::Restart => host_power.restart(),
-                Transition::PowerOff => host_power.power_off(),
-                Transition::Halt => output::terminate(power::RESTART_CODE),
+                Transition::Restart => {
+                    show_stop(&format!("macOS restarted the Mac ({reset})."));
+                    crate::status::countdown("Restarting the PC", STOP_HOLD_SECONDS);
+                    host_power.restart()
+                }
+                Transition::PowerOff => {
+                    show_stop(&format!("macOS turned the Mac off ({reset})."));
+                    crate::status::countdown("Turning the PC off", STOP_HOLD_SECONDS);
+                    host_power.power_off()
+                }
+                Transition::Halt => {
+                    show_stop(&format!("macOS halted the Mac ({reset})."));
+                    output::terminate(power::RESTART_CODE)
+                }
             }
         }
         Stop::Budget => {
             output::arguments(format_args!("STOP budget\n"));
+            show_stop("Stela stopped: the run reached its --budget.");
             output::terminate(0x14)
         }
         Stop::Unsupported(requirement) => {
             output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
+            show_stop(&format!(
+                "Stela stopped: macOS needs {requirement}, which Stela does not support yet."
+            ));
             output::terminate(0x13)
         }
         Stop::Breakpoint(pc) => {
             output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
+            show_stop(&format!("Stela stopped at its breakpoint ({pc:#x})."));
             output::terminate(0x16)
         }
     }

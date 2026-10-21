@@ -6,6 +6,7 @@
 use crate::{
     engine::{bundle::Bytes, translations},
     output::{self, Log},
+    status,
 };
 use alloc::{boxed::Box, format, string::String};
 use stela_drivers::block::{BlockDevice, BlockError, Identity, Shared, Transport};
@@ -34,32 +35,39 @@ const BLOCK: u32 = 512;
 /// Open the log on the volume Stela was loaded from, when it has one, and
 /// return that partition's GUID, which the system engine opens it by.
 pub fn open() -> Option<Guid> {
-    let (device, partition) = match firmware_file() {
-        Ok(opened) => opened,
-        Err(why) => {
-            output::arguments(format_args!("BOOT LOG FILE off: {why}\n"));
-            return None;
-        }
-    };
-    let mut device: Box<dyn BlockDevice> = Box::new(device);
-    match Writer::open(&mut *device) {
-        Ok(writer) => {
+    status::begin("Opening the boot log on the USB");
+    let opened = firmware_file()
+        .map_err(String::from)
+        .and_then(|(device, partition)| {
+            let mut device: Box<dyn BlockDevice> = Box::new(device);
+            let writer = Writer::open(&mut *device).map_err(|error| format!("{error}"))?;
             report(&writer, "firmware");
-            output::add_log(writer, device, Log::Firmware);
-            partition
-        }
-        Err(error) => {
-            output::arguments(format_args!("BOOT LOG FILE off: {error}\n"));
-            None
-        }
-    }
+            output::add_log(writer, device, Log::Firmware).map_err(|error| format!("{error}"))?;
+            Ok(partition)
+        });
+    finish(opened).flatten()
 }
 
 /// Write on to the loader's log in its file on `partition`, the volume
 /// [`open`] found it on.
 pub fn resume(partition: Box<dyn BlockDevice>) {
-    if let Err(why) = engine_file(partition) {
-        output::arguments(format_args!("BOOT LOG FILE off: {why}\n"));
+    status::begin("Opening the boot log on the USB again");
+    finish(engine_file(partition));
+}
+
+/// End the step: the log is kept, or why not, which the boot goes on
+/// without.
+fn finish<T>(opened: Result<T, String>) -> Option<T> {
+    match opened {
+        Ok(value) => {
+            status::done(BOOT_LOG_FILE);
+            Some(value)
+        }
+        Err(why) => {
+            output::arguments(format_args!("BOOT LOG FILE off: {why}\n"));
+            status::warn(&format!("not kept: {why}"));
+            None
+        }
     }
 }
 
@@ -145,8 +153,7 @@ fn engine_file(partition: Box<dyn BlockDevice>) -> Result<(), String> {
     );
     let writer = Writer::resume(&mut *device).map_err(|error| format!("{error}"))?;
     report(&writer, "USB driver");
-    output::add_log(writer, device, Log::Usb);
-    Ok(())
+    output::add_log(writer, device, Log::Usb).map_err(|error| format!("{error}"))
 }
 
 /// The log file as blocks, through the firmware's file system.

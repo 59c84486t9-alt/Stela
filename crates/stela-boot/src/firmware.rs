@@ -4,11 +4,16 @@
 use crate::console::Framebuffer;
 use crate::paging::{LARGE_PAGE, NX, PAGE, PRESENT, Tables, WRITABLE};
 use alloc::vec::Vec;
-use core::ptr::NonNull;
+use core::{
+    ffi::c_void,
+    ptr::NonNull,
+    sync::atomic::{AtomicPtr, Ordering},
+    time::Duration,
+};
 use stela_runtime::freestanding::BootArena;
 use uefi::{
-    CStr16,
-    boot::{self, AllocateType, MemoryType},
+    CStr16, Event,
+    boot::{self, AllocateType, EventType, MemoryType, TimerTrigger, Tpl},
     cstr16,
     fs::FileSystem,
     mem::memory_map::MemoryMap,
@@ -313,6 +318,50 @@ pub fn take_over(
         },
         tables,
     ))
+}
+
+/// The firmware timer that moves the running step's marker while boot
+/// services run, so a long firmware call (a file grown, a disk read) still
+/// shows motion: an `Event` pointer, null when none runs.
+static TICKER: AtomicPtr<c_void> = AtomicPtr::new(core::ptr::null_mut());
+/// Eight frames a second.
+const TICK_PERIOD: Duration = Duration::from_millis(125);
+
+/// Start the marker's timer. Its callback runs at `TPL_NOTIFY`, above the
+/// level the firmware's file and disk drivers hold their locks at, so it
+/// also runs while one of their calls takes long.
+pub(crate) fn start_ticker() {
+    unsafe extern "efiapi" fn tick(_: Event, _: Option<NonNull<c_void>>) {
+        crate::status::tick();
+    }
+    // SAFETY: the callback allocates nothing and skips a frame while the
+    // state or the console is in use; [`stop_ticker`] closes the event
+    // before boot services end.
+    let event = unsafe {
+        boot::create_event(
+            EventType::TIMER | EventType::NOTIFY_SIGNAL,
+            Tpl::NOTIFY,
+            Some(tick),
+            None,
+        )
+    };
+    let Ok(event) = event else {
+        return;
+    };
+    if boot::set_timer(&event, TimerTrigger::Periodic(TICK_PERIOD)).is_ok() {
+        TICKER.store(event.as_ptr(), Ordering::Relaxed);
+    } else {
+        let _ = boot::close_event(event);
+    }
+}
+
+/// Close the marker's timer, before boot services end.
+pub(crate) fn stop_ticker() {
+    let pointer = TICKER.swap(core::ptr::null_mut(), Ordering::Relaxed);
+    // SAFETY: `start_ticker` stored this event, which nothing else closes.
+    if let Some(event) = unsafe { Event::from_ptr(pointer) } {
+        let _ = boot::close_event(event);
+    }
 }
 
 /// The time-stamp counter's rate, measured against the firmware's stall.

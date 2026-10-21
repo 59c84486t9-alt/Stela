@@ -19,7 +19,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::ops::Range;
+use core::{
+    ops::Range,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 pub mod block;
 pub mod bus;
@@ -79,6 +82,25 @@ pub(crate) fn registers(
     Ok(unsafe { Mmio::new(start) })
 }
 
+/// What runs while a driver waits: the mount's boot screen moves its
+/// marker. A `fn()` pointer, null when none is set.
+static WAITING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Call `hook` while any driver waits, often and briefly; it must not
+/// drive a device.
+pub fn on_wait(hook: fn()) {
+    WAITING.store(hook as *mut (), Ordering::Relaxed);
+}
+
+pub(crate) fn waiting() {
+    let hook = WAITING.load(Ordering::Relaxed);
+    if !hook.is_null() {
+        // SAFETY: `on_wait` stored a `fn()`, the pointer's only source.
+        let hook: fn() = unsafe { core::mem::transmute(hook) };
+        hook();
+    }
+}
+
 /// Microsecond deadlines from the time-stamp counter.
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
@@ -108,6 +130,7 @@ impl Clock {
     pub fn delay(&self, microseconds: u64) {
         let deadline = self.deadline(microseconds);
         while !deadline.passed() {
+            waiting();
             core::hint::spin_loop();
         }
     }
@@ -122,6 +145,7 @@ impl Clock {
             if deadline.passed() {
                 return ready();
             }
+            waiting();
             core::hint::spin_loop();
         }
     }

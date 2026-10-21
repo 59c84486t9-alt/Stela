@@ -10,7 +10,7 @@
 //! layout in that partition's last bytes ([`machine_state`]) and gives the
 //! ANS2 model only the rest, so the guest never sees the machine state.
 use crate::output;
-use alloc::boxed::Box;
+use alloc::{boxed::Box, format};
 use stela_drivers::block::{BlockDevice, BlockError, Shared};
 use stela_runtime::{
     boot_bundle::Nvram,
@@ -141,6 +141,18 @@ pub(crate) fn open_log(disk: &Shared, block: u64, available: u64) -> bool {
         boot_log::LOG_BYTES,
         writer.head()
     ));
-    output::add_log(writer, device, output::Log::Machine);
-    true
+    match output::add_log(writer, device, output::Log::Machine) {
+        Ok(()) => true,
+        Err(error @ output::Unopened::Store(_)) => {
+            output::arguments(format_args!("BOOT LOG refusal: {error}\n"));
+            output::fatal("the boot log could not be stored")
+        }
+        // The disk took the writes and keeps none: NVRAM will not persist
+        // either. The boot goes on, so the screen shows how far it gets.
+        Err(error) => {
+            output::arguments(format_args!("BOOT LOG unkept: {error}\n"));
+            crate::status::warn(&format!("the disk does not keep its writes: {error}"));
+            false
+        }
+    }
 }

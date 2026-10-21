@@ -106,18 +106,34 @@ impl Display {
         self.guest
     }
 
-    /// Copy the guest framebuffer to the screen. The first copy takes the
-    /// screen from the mount's text console; once the DCP model presents
-    /// swaps, it owns the screen.
+    /// Clear the guest framebuffer, whose RAM held the host's data, so the
+    /// screen changes hands only once the guest draws.
+    pub fn clear(&self, host: &mut BareHost) {
+        let row = vec![0; self.guest.row_bytes as usize];
+        for y in 0..self.guest.height {
+            host.write_ram(self.guest.guest_pa + y * self.guest.row_bytes, &row);
+        }
+    }
+
+    /// Copy the guest framebuffer to the screen. The mount's text console
+    /// keeps the screen until the guest has drawn a pixel; once the DCP
+    /// model presents swaps, it owns the screen.
     pub fn show(&mut self, host: &mut BareHost) {
         if DCP_PRESENTED.load(Ordering::Relaxed) {
             return;
         }
+        let mut row = vec![0; self.guest.row_bytes as usize];
         if !self.shown {
+            let drawn = (0..self.guest.height).any(|y| {
+                host.read_ram(self.guest.guest_pa + y * self.guest.row_bytes, &mut row)
+                    && row.iter().any(|&byte| byte != 0)
+            });
+            if !drawn {
+                return;
+            }
             console::release();
             self.shown = true;
         }
-        let mut row = vec![0; self.guest.row_bytes as usize];
         for y in 0..self.guest.height {
             let address = self.guest.guest_pa + y * self.guest.row_bytes;
             if !host.read_ram(address, &mut row) {

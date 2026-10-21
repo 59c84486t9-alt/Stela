@@ -8,8 +8,9 @@
 //! [ ***  ] Getting a network address on Intel I226-V (3 s)
 //! ```
 //!
-//! [`tick`] moves the marker; anything that waits calls it, at most a few
-//! frames a second are drawn. Finished lines are kept as [`history`], which
+//! [`tick`] moves the marker, at most eight frames a second: the firmware's
+//! timer calls it while boot services run, and the host drivers' waits and
+//! the engine's slices after. Finished lines are kept as [`history`], which
 //! the loader hands to the system engine so its screen carries on from them
 //! ([`replay`]). Each step's start and end store the boot logs, so a log
 //! read after a hang ends at the step that hung.
@@ -18,13 +19,43 @@ use crate::{
     output,
 };
 use alloc::{format, string::String};
-use core::{arch::x86_64::_rdtsc, cell::RefCell};
+use core::{
+    arch::x86_64::_rdtsc,
+    cell::RefCell,
+    fmt::{self, Write as _},
+};
 
 /// Frames of the running marker: three cells moving across six and back.
 const FRAMES: usize = 14;
 const MARKER: usize = 6;
 /// The finished lines kept for the system engine's screen.
 pub const HISTORY_BYTES: usize = 4096;
+
+/// Text formatted on the stack: a tick may interrupt the heap's holder, so
+/// drawing the running step allocates nothing.
+#[derive(Default)]
+struct Short {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl Short {
+    fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.bytes[..self.len]).unwrap_or_default()
+    }
+}
+
+impl fmt::Write for Short {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self.len + text.len();
+        if end > self.bytes.len() {
+            return Err(fmt::Error);
+        }
+        self.bytes[self.len..end].copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
 
 struct Running {
     title: String,
@@ -108,8 +139,12 @@ impl Mark {
 }
 
 impl State {
+    /// Whole seconds since TSC `since`; none before the rate is known.
     fn seconds(&self, since: u64) -> u64 {
-        (now() - since) / self.tsc_hz.max(1)
+        match self.tsc_hz {
+            0 => 0,
+            hz => (now() - since) / hz,
+        }
     }
 
     fn draw_running(&mut self) {
@@ -130,10 +165,10 @@ impl State {
         }
         let marker = core::str::from_utf8(&marker).unwrap_or("      ");
         let seconds = self.seconds(running.started);
-        let elapsed = match seconds {
-            0 => String::new(),
-            seconds => format!(" ({seconds} s)"),
-        };
+        let mut elapsed = Short::default();
+        if seconds != 0 {
+            let _ = write!(elapsed, " ({seconds} s)");
+        }
         let gap = if running.detail.is_empty() { "" } else { "  " };
         console::rewrite(&[
             ("[", Color::Text),
@@ -142,13 +177,18 @@ impl State {
             (&running.title, Color::Text),
             (gap, Color::Text),
             (&running.detail, Color::Text),
-            (&elapsed, Color::Dim),
+            (elapsed.as_str(), Color::Dim),
         ]);
     }
 
     fn finish(&mut self, mark: Mark, result: &str) {
+        // A step a warning already ended has nothing left to end; a
+        // failure is shown on its own.
         let Some(running) = self.running.take() else {
-            return self.line(mark, result);
+            if matches!(mark, Mark::Failed) {
+                self.line(mark, result);
+            }
+            return;
         };
         let seconds = self.seconds(running.started);
         let mut text = running.title;
@@ -221,7 +261,9 @@ pub fn progress(detail: &str) {
     });
 }
 
-/// Move the running step's marker, at most eight frames a second.
+/// Move the running step's marker, at most eight frames a second. Safe
+/// from the firmware timer's callback: it allocates nothing and skips a
+/// frame while the state or the console is in use.
 pub fn tick() {
     with(|state| {
         let frame = state.tsc_hz / 8;
@@ -235,6 +277,25 @@ pub fn tick() {
         running.frame += 1;
         state.draw_running();
     });
+}
+
+/// Show `action` as a step counting down `seconds`, and wait them out.
+pub fn countdown(action: &str, seconds: u64) {
+    let mut hz = 0;
+    with(|state| hz = state.tsc_hz);
+    begin(action);
+    let start = now();
+    let mut left = u64::MAX;
+    while now() - start < seconds * hz {
+        let remaining = seconds - (now() - start) / hz.max(1);
+        if remaining != left {
+            left = remaining;
+            progress(&format!("in {left} s"));
+        }
+        tick();
+        core::hint::spin_loop();
+    }
+    done("");
 }
 
 /// End the running step with `result`, which may be empty.

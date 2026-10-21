@@ -663,6 +663,7 @@ impl Controller {
             if deadline.passed() {
                 return Err(BlockError::Timeout);
             }
+            crate::waiting();
             core::hint::spin_loop();
         }
     }
@@ -1076,6 +1077,7 @@ impl Controller {
                 self.recover(slot, dci)?;
                 return Err(BlockError::Timeout);
             }
+            crate::waiting();
             core::hint::spin_loop();
         }
     }
