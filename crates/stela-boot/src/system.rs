@@ -293,6 +293,7 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         "--install-source",
         "--nor",
         "--network-check",
+        "--audio-check",
         "--usb-storage",
     ]
     .iter()

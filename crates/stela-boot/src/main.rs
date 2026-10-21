@@ -32,6 +32,7 @@ use uefi::{
     boot::{AllocateType, MemoryType},
 };
 mod apic;
+mod audio_check;
 mod choice;
 mod console;
 mod cpu;

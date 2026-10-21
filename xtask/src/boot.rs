@@ -34,6 +34,7 @@ use stela_runtime::payload::{
     PayloadError, PayloadSource, ReadAt, copy_verified, gpt, staging::StagedSource,
 };
 
+mod audio_check;
 mod disks;
 mod host_firmware;
 mod lan;
@@ -206,6 +207,11 @@ pub struct Run {
     /// mount's hashes and every byte of the images.
     #[arg(long)]
     storage_check: bool,
+    /// Qualify native conventional HDA after ExitBootServices. Playback compares
+    /// actual WAV PCM; duplex checks both DMA engines with a silent null source.
+    #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "duplex",
+        conflicts_with_all = ["module", "usb_image", "payload", "storage_check"])]
+    audio_check: Option<audio_check::Mode>,
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
     /// from its removable-media boot loader; writes go to a temporary
     /// overlay.
@@ -512,11 +518,17 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if strict {
         options.push_str(" --strict");
     }
-    if arguments.network_self_check || arguments.network_check.is_some() {
+    if arguments.audio_check.is_some()
+        || arguments.network_self_check
+        || arguments.network_check.is_some()
+    {
         ensure!(
             options.split_whitespace().next() == Some("--system"),
-            "network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
+            "host audio/network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
         );
+    }
+    if let Some(mode) = arguments.audio_check {
+        options.push_str(&format!(" --audio-check {}", mode.option()));
     }
     let fixture = arguments
         .network_self_check
@@ -666,7 +678,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 .flatten(),
         )
         .args(["-m", &memory, "-nodefaults", "-no-reboot"])
-        .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"])
         .arg("-drive")
         .arg(format!(
             "if=pflash,format=raw,readonly=on,file={}",
@@ -695,6 +706,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             },
         })
         .args(["-device", "virtio-blk-pci,drive=volume"]);
+    if let Some(mode) = arguments.audio_check {
+        mode.attach(&mut command, &output);
+        // isa-debug-exit calls exit() before the audio backend finalizes its
+        // WAV. Quit through QMP after the mount stops so cleanup can finish.
+        command.args(["-qmp", "stdio"]);
+    } else {
+        command.args(["-device", "isa-debug-exit,iobase=0xf4,iosize=4"]);
+    }
     for (index, disk) in disks.iter().enumerate() {
         disk.attach(index, &mut command);
     }
@@ -855,7 +874,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let mut child = command
         .stdout(fs::File::create(output.join("stdout.txt"))?)
         .stderr(fs::File::create(output.join("stderr.txt"))?)
-        .stdin(Stdio::null())
+        .stdin(if arguments.audio_check.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .spawn()?;
     // The local launcher can be a shell wrapper. Observe its running image
     // after exec, keeping the launcher binding and QEMU version separately.
@@ -866,7 +889,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Some(_) => Duration::MAX,
         None => Duration::from_secs_f64(arguments.timeout).saturating_sub(started.elapsed()),
     };
-    let status = match wait(&mut child, limit) {
+    let waited = if arguments.audio_check.is_some() {
+        audio_check::wait_for_stop(&mut child, &serial, limit)
+    } else {
+        wait(&mut child, limit)
+    };
+    let status = match waited {
         Ok(status) => status,
         Err(error) => {
             stop(&mut child);
@@ -877,7 +905,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Some(status) => status.code().map_or(TIMEOUT_EXIT, |code| code as u8),
         None => TIMEOUT_EXIT,
     };
+    let qemu_returncode = code;
     let serial_text = fs::read_to_string(&serial).unwrap_or_default();
+    let mount_exit = arguments
+        .audio_check
+        .map(|_| audio_check::guest_exit(&serial_text));
+    if let Some(result) = &mount_exit {
+        code = result.as_ref().copied().unwrap_or(FAILED_EXIT);
+    }
     let unsupported = first_unsupported(&serial_text);
     // The installed-system scenario ends at the bundle's entry: what the
     // engine meets after it is reported but does not fail the run.
@@ -924,6 +959,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "stdout.txt",
         "stderr.txt",
         "network-check-peer.txt",
+        audio_check::WAV,
     ]
     .into_iter()
     .map(|name| output.join(name))
@@ -951,6 +987,20 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .as_ref()
         .map(|_| host_firmware::report(&volume, &serial_text))
         .transpose()?;
+    let audio = arguments.audio_check.map(|mode| {
+        if let Some(Err(error)) = &mount_exit {
+            bail!("invalid guest exit status: {error:#}");
+        }
+        audio_check::normal_exit(
+            qemu_returncode,
+            &fs::read_to_string(output.join("stdout.txt"))?,
+        )?;
+        let mut report = audio_check::verify(mode, &serial_text, &output)?;
+        report["qemu_shutdown"] = json!("acknowledged-qmp-quit");
+        report["mount_returncode"] =
+            json!(mount_exit.as_ref().and_then(|result| result.as_ref().ok()));
+        Ok::<_, anyhow::Error>(report)
+    });
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let report = json!({
         "command": command_line,
@@ -977,6 +1027,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "first_unsupported": unsupported,
         "first_guest_panic": first_guest_panic(&serial_text),
         "returncode": code,
+        "qemu_returncode": qemu_returncode,
         "payload": arguments.payload.map(|mode| {
             matches!(mode, PayloadMode::Stage | PayloadMode::StagePath)
         }),
@@ -984,6 +1035,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "timed_out": status.is_none(),
         "wall_seconds": started.elapsed().as_secs_f64(),
         "outputs": outputs,
+        "audio": audio.as_ref().map(|result| match result {
+            Ok(report) => report.clone(),
+            Err(error) => json!({ "passed": false, "reason": format!("{error:#}") }),
+        }),
         "storage": storage.as_ref().map(|result| match result {
             Ok(disks) => disks.clone(),
             Err(error) => json!({ "error": format!("{error:#}") }),
@@ -1018,6 +1073,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     );
     if let Some(Err(error)) = network {
         bail!("host network check failed: {error}");
+    }
+    if let Some(Err(error)) = audio {
+        return Err(error.context("native audio check failed"));
     }
     Ok(ExitCode::from(match (preboot.is_some(), entered) {
         (true, true) => 0,
@@ -1339,6 +1397,29 @@ mod tests {
             fs::canonicalize(process_image(std::process::id()).unwrap()).unwrap(),
             fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
         );
+    }
+
+    #[test]
+    fn audio_modes_select_explicit_evidence_backends() {
+        use clap::Parser;
+        for (extra, expected) in [
+            (vec!["--audio-check"], audio_check::Mode::Duplex),
+            (
+                vec!["--audio-check", "playback"],
+                audio_check::Mode::Playback,
+            ),
+            (vec!["--audio-check", "duplex"], audio_check::Mode::Duplex),
+        ] {
+            let args: Vec<_> = ["xtask", "boot", "run", "--output", "/tmp/run"]
+                .into_iter()
+                .chain(extra)
+                .collect();
+            let cli = crate::Cli::try_parse_from(args).unwrap();
+            let crate::Task::Boot(Command::Run(run)) = cli.task else {
+                panic!("boot run");
+            };
+            assert_eq!(run.audio_check, Some(expected));
+        }
     }
 
     #[test]

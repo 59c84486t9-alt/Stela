@@ -168,6 +168,8 @@ struct Options {
     /// POST once to this `http://` URL at start and report the reply
     /// (`--network-check URL`).
     network_check: Option<String>,
+    /// Qualify exclusively owned conventional HDA after ExitBootServices.
+    audio_check: Option<crate::audio_check::Mode>,
     /// Whole host disks, by serial, that the guest sees as USB mass
     /// storage behind the native hub (`--usb-storage SERIAL`, repeatable).
     usb_storage: Vec<String>,
@@ -287,6 +289,7 @@ impl Options {
             tss: false,
             ecid: None,
             network_check: None,
+            audio_check: None,
             usb_storage: Vec::new(),
             external_disks: false,
             guest_network: false,
@@ -396,6 +399,15 @@ impl Options {
             }
             if name == EXTERNAL_DISKS_OPTION {
                 options.external_disks = true;
+                continue;
+            }
+            if name == "--audio-check" {
+                if options.audio_check.is_some() {
+                    return Err("duplicate audio check");
+                }
+                options.audio_check = Some(crate::audio_check::Mode::parse(
+                    words.next().ok_or("missing audio check mode")?,
+                )?);
                 continue;
             }
             if name == "--network-check" {
@@ -1480,6 +1492,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         .chain(options.restore_source.iter())
         .chain(options.nor.iter().filter(|_| !state_in_storage))
         .collect();
+    if let Some(mode) = options.audio_check {
+        let audio_handoff = handoff
+            .storage
+            .handoff()
+            .unwrap_or_else(|| output::fatal("the loader found no host device handoff"));
+        // SAFETY: --audio-check explicitly grants sole conventional HDA ownership;
+        // before host::install, the retained identity root and DMA pages are live.
+        unsafe { crate::audio_check::run(&audio_handoff, mode) }.unwrap_or_else(|error| {
+            output::arguments(format_args!("AUDIO CHECK failed: {error}\n"));
+            output::fatal("the audio check failed")
+        });
+    }
     let wants_network = options.tss || options.network_check.is_some();
     let (services, medium, preboot, host_input, host_network, usb_disks, guest_network) = if targets
         .is_empty()
@@ -1499,6 +1523,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
         storage_handoff.firmware = host_firmware.clone();
+        if options.audio_check.is_some() {
+            // The audio check retains the final slice even after shutdown.
+            storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+        }
         crate::status::begin("Starting the PC's disks and USB devices");
         // SAFETY: before host::install, with sole ownership of DMA/controllers.
         let storage::Opened {
