@@ -14,17 +14,19 @@ const FRAGMENT: usize = 252;
 const EXTENSION_SIGNATURE: [u8; 4] = [0x51, 0x04, 0xfd, 0x77];
 
 /// Exact firmware project, selected only after independent controller identity.
-/// Other projects and RTBTCore/v2 are explicitly outside this parser's scope.
+/// V1 and V2 parsing remain separate: RTL8852BU uses RTBTCore through V2Patch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Project {
     Rtl8761Bu,
     Rtl8822B,
+    Rtl8852Bu,
 }
 impl Project {
     pub fn id(self) -> u8 {
         match self {
             Self::Rtl8761Bu => 14,
             Self::Rtl8822B => 8,
+            Self::Rtl8852Bu => 20,
         }
     }
 }
@@ -45,6 +47,9 @@ impl<'a> Patch<'a> {
         }
         if &bytes[..8] != b"Realtech" {
             return Err(FormatError::Signature);
+        }
+        if project == Project::Rtl8852Bu {
+            return Err(FormatError::Project);
         }
         // The supported real v1 inputs have exactly the donor's terminal
         // project instruction preceded by EOF. Unknown extension programs are
@@ -115,6 +120,9 @@ pub struct Configuration<'a> {
     pub entries: usize,
 }
 impl<'a> Configuration<'a> {
+    pub(super) fn bytes(&self) -> &[u8] {
+        self.bytes
+    }
     pub fn parse(bytes: &'a [u8]) -> Result<Self, FormatError> {
         if !(6..=MAX_CONFIG).contains(&bytes.len())
             || bytes[..4] != [0x55, 0xab, 0x23, 0x87]
@@ -151,6 +159,9 @@ pub struct Staged {
     bytes: Vec<u8>,
 }
 impl Staged {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes }
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

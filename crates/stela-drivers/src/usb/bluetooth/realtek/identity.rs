@@ -93,6 +93,11 @@ impl Identity {
         let (lmp, hci_rev, hci_ver) = match project {
             Project::Rtl8761Bu => (0x8761, 0xb, 0xa),
             Project::Rtl8822B => (0x8822, 0xb, 7),
+            Project::Rtl8852Bu => {
+                return Err(Error::Unsupported(
+                    "EPATCH v2 live admission not implemented",
+                ));
+            }
         };
         if version.manufacturer() != 0x005d
             || version.lmp_subversion() != lmp
@@ -150,12 +155,14 @@ impl Identity {
         match self.project {
             Project::Rtl8761Bu => "rtl_bt/rtl8761bu_fw.bin",
             Project::Rtl8822B => "rtl_bt/rtl8822b_fw.bin",
+            Project::Rtl8852Bu => "rtl_bt/rtl8852bu_fw.bin",
         }
     }
     pub fn configuration_name(&self) -> &'static str {
         match self.project {
             Project::Rtl8761Bu => "rtl_bt/rtl8761bu_config.bin",
             Project::Rtl8822B => "rtl_bt/rtl8822b_config.bin",
+            Project::Rtl8852Bu => "rtl_bt/rtl8852bu_config.bin",
         }
     }
     pub fn configuration_required(&self) -> bool {

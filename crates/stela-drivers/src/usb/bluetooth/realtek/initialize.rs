@@ -3,8 +3,8 @@
 //! Pinned btrtl USB register/ROM/security, exact-image download and version flow.
 //! HCI synchronization, failure quarantine and owned observations are Stela glue.
 use super::{
-    Attempt, Configuration, ConfigurationEvidence, DownloadResponse, Error, Identity, LocalVersion,
-    OwnedReport, Patch, Result, UsbIdentity,
+    Attempt, Configuration, ConfigurationEvidence, ContainerVersion, DownloadResponse, Error,
+    Identity, LocalVersion, OwnedReport, Patch, Result, UsbIdentity,
 };
 use crate::firmware::{ErrorKind as ResourceErrorKind, Provider, Requirement};
 use crate::usb::bluetooth::{FirmwareReceipt, Hci, Io, Packet, State};
@@ -248,7 +248,7 @@ impl<B: Io> Engine<'_, B> {
             address,
             firmware: Box::new(firmware.into()),
             configuration,
-            container_version: firmware_version,
+            container_version: ContainerVersion::V1(firmware_version),
             download: core::mem::take(&mut self.attempt.download),
         })
     }

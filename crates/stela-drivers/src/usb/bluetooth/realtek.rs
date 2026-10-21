@@ -9,8 +9,10 @@
 mod firmware;
 mod identity;
 mod initialize;
+mod v2;
 pub use firmware::{Configuration, Fragment, Patch, Project, Staged};
 pub use identity::{Identity, LocalVersion, UsbIdentity};
+pub use v2::{ExtensionRecord, SectionObservation, SubsectionObservation, V2Metadata, V2Patch};
 
 /// Malformed or explicitly unsupported Realtek input. Parsing never emits a
 /// partially selected download or silently substitutes another ROM/project.
@@ -28,6 +30,9 @@ pub enum FormatError {
     ConfigHeader,
     ConfigEntry,
     OverlappingConfig,
+    Section,
+    Subsection,
+    Security,
 }
 impl core::fmt::Display for FormatError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -69,6 +74,13 @@ pub struct Attempt {
     pub download: Vec<DownloadResponse>,
     pub after: Option<LocalVersion>,
 }
+/// Container versions have different wire layouts. V2 retains all eight raw
+/// bytes in their original order; no truncation or invented scalar endianness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerVersion {
+    V1(u32),
+    V2([u8; 8]),
+}
 /// Historical owned protocol/image evidence, not current transport/radio state
 /// or vendor-signature authentication. No Image/provider/firmware-byte borrow.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -78,7 +90,7 @@ pub struct OwnedReport {
     pub address: [u8; 6],
     pub firmware: Box<FirmwareReceipt>,
     pub configuration: ConfigurationEvidence,
-    pub container_version: u32,
+    pub container_version: ContainerVersion,
     pub download: Vec<DownloadResponse>,
 }
 #[derive(Debug)]
@@ -411,7 +423,7 @@ mod tests {
                 assert_eq!(r.before.security, [0, 0]);
                 assert_eq!(r.after.raw, version(project, true)[..]);
                 assert_eq!(r.address, [1, 2, 3, 4, 5, 6]);
-                assert_eq!(r.container_version, 0x12345678);
+                assert_eq!(r.container_version, ContainerVersion::V1(0x12345678));
                 assert_eq!(
                     r.download,
                     vec![DownloadResponse {
