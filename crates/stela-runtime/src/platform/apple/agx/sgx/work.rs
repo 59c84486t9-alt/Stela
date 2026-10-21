@@ -399,6 +399,26 @@ impl FirmwareWork {
             .work
             .write(self.policy, register, value)
     }
+    pub fn check_submitted(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+    ) -> Result<(), &'static str> {
+        self.available()?;
+        let native = self.power.native.borrow();
+        let run = native
+            .work
+            .run
+            .as_ref()
+            .ok_or("GFX CL post-trigger phase has no native owner")?;
+        if run.submission != *submission
+            || run.lease != lease
+            || run.backend.as_ref().and_then(Execution::outcome).is_none()
+        {
+            return Err("GFX CL post-trigger phase does not own its accepted native trigger");
+        }
+        Ok(())
+    }
     pub fn outcome(&self) -> Result<Option<ResultKind>, WorkError> {
         let native = self.power.native.borrow();
         let run = native.work.run.as_ref().ok_or(WorkError::Refused(
@@ -469,6 +489,9 @@ impl crate::platform::apple::agx::work_decode::cl::Access for ParameterAccess<'_
     }
     fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
         self.owner.begin(submission, lease)
+    }
+    fn check_submitted(&self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
+        self.owner.check_submitted(submission, lease)
     }
     fn read_native(&mut self, register: Register) -> Result<u64, &'static str> {
         self.owner.read(self.port, register)
@@ -728,6 +751,15 @@ mod tests {
                     owner.write(port, Register::Submit, 1)
                 })
                 .unwrap();
+                owner.check_submitted(&input, LEASE).unwrap();
+                let mut other = input.clone();
+                other.counter += 1;
+                assert!(owner.check_submitted(&other, LEASE).is_err());
+                assert!(
+                    owner
+                        .check_submitted(&input, Lease { slot: 1, ..LEASE })
+                        .is_err()
+                );
                 let outcome = owner.outcome();
                 assert_eq!(outcome.is_err(), fail);
                 if !fail {
@@ -879,6 +911,8 @@ mod tests {
             let mut setup = alloc::vec![0; 0x16c];
             setup[..4].copy_from_slice(&11u32.to_le_bytes());
             setup[0xc..0x14].copy_from_slice(&0x3000u64.to_le_bytes());
+            setup[0x14..0x1c].copy_from_slice(&0x3800u64.to_le_bytes());
+            setup[0x1c..0x24].copy_from_slice(&0x3900u64.to_le_bytes());
             setup[0x24..0x28].copy_from_slice(&5u32.to_le_bytes());
             setup[0x28..0x2c].copy_from_slice(&1u32.to_le_bytes());
             setup[0x2c..0x30].copy_from_slice(&3u32.to_le_bytes());
@@ -953,7 +987,39 @@ mod tests {
             })
             .unwrap();
             assert_eq!((memory.reads, memory.writes), counts);
-            // This parameter phase does not complete the original AP command.
+            // The post-trigger source slot publication owns each RAM write
+            // independently of both the native trigger and its prior stores.
+            let mut tail = crate::platform::apple::agx::work_decode::cl::slot::SetupTail::new(
+                &input, &frame, LEASE,
+            )
+            .unwrap();
+            memory.fail_write = Some(memory.writes + 1);
+            assert!(
+                io(&mut sgx, &mut memory, |port| tail
+                    .advance(&mut owner.parameter_access(port)))
+                .is_err()
+            );
+            let mut queue = [0; 8];
+            assert!(memory.ram.read(DATA + 0x3810, &mut queue));
+            assert_eq!(u64::from_le_bytes(queue), 0x3900);
+            let reads = memory.reads;
+            assert!(memory.ram.write(DATA + 0x2000, &u32::MAX.to_le_bytes()));
+            io(&mut sgx, &mut memory, |port| {
+                tail.advance(&mut owner.parameter_access(port))
+            })
+            .unwrap();
+            assert!(tail.completed());
+            assert_eq!(memory.reads, reads);
+            let mut flag = [0; 4];
+            assert!(memory.ram.read(DATA + 0x380c, &mut flag));
+            assert_eq!(u32::from_le_bytes(flag), 1);
+            let writes = memory.writes;
+            io(&mut sgx, &mut memory, |port| {
+                tail.advance(&mut owner.parameter_access(port))
+            })
+            .unwrap();
+            assert_eq!(memory.writes, writes);
+            // Neither source phase completes the original AP command.
             assert!(power.native.borrow().work.active());
         }
     }

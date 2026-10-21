@@ -5,6 +5,8 @@
 //! its two legacy writes. A later RAM/native fault must not hoist a read,
 //! repeat a completed RMW or redirect a captured native store.
 
+pub mod slot;
+
 use super::{
     Encoding, Frame, Submission,
     resources::{Lease, Policy},
@@ -24,6 +26,9 @@ pub trait Access {
     fn memory(&mut self) -> &mut dyn Shared;
     fn check_available(&self) -> Result<(), &'static str>;
     fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str>;
+    fn check_submitted(&self, _: &Submission, _: Lease) -> Result<(), &'static str> {
+        Err("GFX CL native trigger ownership is not available")
+    }
     fn read_native(&mut self, register: Register) -> Result<u64, &'static str>;
     fn write_native(&mut self, register: Register, value: u64) -> Result<(), &'static str>;
 }
@@ -279,7 +284,7 @@ mod tests {
             Ok(())
         }
     }
-    fn input() -> (Submission, Frame, Lease) {
+    pub(super) fn input() -> (Submission, Frame, Lease) {
         let submission = Submission {
             command: Command {
                 va: 0x3000,
