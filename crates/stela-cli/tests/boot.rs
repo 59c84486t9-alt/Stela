@@ -447,7 +447,12 @@ fn boot_prepare_writes_a_bundle_the_mount_can_copy_and_patch() {
         64
     );
     let regions = manifest["regions"].as_array().unwrap();
-    assert_eq!(regions[0]["name"], "TXM-ro");
+    assert_eq!(regions[0]["name"], "BootManifest");
+    assert_eq!(regions[1]["name"], "TXM-ro");
+    assert_eq!(
+        regions[0]["guest_pa"].as_u64().unwrap() + regions[0]["memory_bytes"].as_u64().unwrap(),
+        regions[1]["guest_pa"].as_u64().unwrap()
+    );
     assert_eq!(regions.last().unwrap()["name"], "BootArgs");
     assert_eq!(manifest["entry"]["image"], "SPTM");
     let sptm_rx = regions.iter().find(|r| r["name"] == "SPTM-rx").unwrap();
