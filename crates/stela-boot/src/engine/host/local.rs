@@ -20,6 +20,7 @@ pub(crate) struct Local {
     state: UnsafeCell<Option<State>>,
     interrupted: AtomicBool,
     doorbells: AtomicU64,
+    worker: UnsafeCell<Option<stela_runtime::machine::engine::publication::WorkerId>>,
 }
 
 impl Local {
@@ -31,6 +32,7 @@ impl Local {
             state: UnsafeCell::new(None),
             interrupted: AtomicBool::new(false),
             doorbells: AtomicU64::new(0),
+            worker: UnsafeCell::new(None),
         }
     }
 }
@@ -44,6 +46,61 @@ pub(crate) struct Owner {
 }
 
 impl Owner {
+    /// Adopt the existing canonical owner before a guest regime or frame is
+    /// live. This replaces metadata; it allocates/copies no guest RAM.
+    ///
+    /// # Safety
+    /// This is the source-qualified registered RAM for this executor. Its
+    /// all-writer contract is retained. Direct SystemModeV1 guest data writers
+    /// must never bypass this all-writer owner, including between checked calls.
+    /// Only the source-qualified checked service and registered host/table
+    /// publishers may touch data; returning to serial execution additionally
+    /// requires the canonical reservation/event ownership join.
+    pub(crate) unsafe fn register_system_ram(
+        &mut self,
+        ram: alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>,
+    ) -> Result<(), &'static str> {
+        if current() != self.local.as_ptr() {
+            return Err("native Host owner migrated");
+        }
+        let state = state();
+        if state.native || state.regime.is_some() || state.registered_ram.is_some() {
+            return Err("native RAM adoption requires pristine owner-local dispatch");
+        }
+        state.ram = ram
+            .placements()
+            .map(|(guest, host, bytes)| super::RamRange {
+                guest,
+                host,
+                bytes: bytes as u64,
+            })
+            .collect();
+        state.registered_ram = Some(ram);
+        Ok(())
+    }
+
+    /// Bind this actual selected physical core once, before runtime dispatch.
+    pub(crate) fn bind_worker(
+        &mut self,
+        worker: stela_runtime::machine::engine::publication::WorkerId,
+        expected_apic: u32,
+    ) -> Result<(), &'static str> {
+        if current() != self.local.as_ptr() {
+            return Err("native Host owner migrated");
+        }
+        if state().apic.id() != expected_apic {
+            return Err("native Host physical identity differs");
+        }
+        // SAFETY: this processor's unique owner, before any native dispatch;
+        // handler code never changes the immutable runtime worker binding.
+        let binding = unsafe { &mut *self.local.as_ref().worker.get() };
+        if binding.is_some() {
+            return Err("native Host worker already bound");
+        }
+        *binding = Some(worker);
+        Ok(())
+    }
+
     /// Borrow the sole host handle while retaining its processor-local owner.
     pub(crate) fn host(&mut self) -> super::BareHost<'_> {
         assert_eq!(current(), self.local.as_ptr(), "host state owner migrated");
@@ -167,4 +224,10 @@ impl Drop for Owner {
             slot.take();
         }
     }
+}
+
+pub(super) fn native_worker() -> Option<stela_runtime::machine::engine::publication::WorkerId> {
+    // SAFETY: callers retain this processor's live Owner/GS record. The worker
+    // binding is set once by that owner after checking its real local APIC ID.
+    unsafe { *(*current()).worker.get() }
 }

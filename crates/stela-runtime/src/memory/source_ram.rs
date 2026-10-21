@@ -13,6 +13,7 @@ use alloc::{string::String, string::ToString, vec::Vec};
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
 mod region;
+pub(crate) mod system;
 pub use region::InitializedRamRegion;
 
 mod publication;

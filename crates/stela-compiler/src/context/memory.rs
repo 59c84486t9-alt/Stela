@@ -185,6 +185,10 @@ pub mod profile_requirements {
     pub const M0_DEVICE_RAM_SCALAR_LOAD: u32 = 1 << 6;
     /// A staged scalar store to M0 RAM at its exact width.
     pub const M0_DEVICE_RAM_SCALAR_STORE: u32 = 1 << 7;
+    /// Canonical native-system RAM permits an unchanged-value CMPXCHG16B
+    /// read under the physical all-writer gate. The whole aligned host
+    /// footprint must be RW; this grants no guest write permission.
+    pub const SYSTEM_ATOMIC_READ_WRITEBACK: u32 = 1 << 8;
     pub const KNOWN: u32 = NATIVE_ACCESS
         | TAG_GRANULES
         | SCALABLE_TAG_CHECKS
@@ -192,7 +196,8 @@ pub mod profile_requirements {
         | M0_DEVICE_RAM_WRITE8_OR_PAIR
         | M0_DEVICE_RAM_READ64_PAIR_NO_LSE2
         | M0_DEVICE_RAM_SCALAR_LOAD
-        | M0_DEVICE_RAM_SCALAR_STORE;
+        | M0_DEVICE_RAM_SCALAR_STORE
+        | SYSTEM_ATOMIC_READ_WRITEBACK;
 }
 
 /// Memory-service outcomes; a load commits only on Success.

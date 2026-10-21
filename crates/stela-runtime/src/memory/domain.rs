@@ -27,6 +27,7 @@ pub(crate) mod m0_read;
 mod m0_scalar;
 pub(crate) mod m0_write;
 pub(crate) mod physical;
+mod read;
 mod shared;
 
 use crate::platform::sync::Mutex;
@@ -60,6 +61,48 @@ const HALF_SCA_BYTES: usize = SCA_BYTES / 2;
 pub struct MappingAttributes {
     pub tagged: bool,
     pub shareable: bool,
+}
+
+/// Architectural service category, retained even when typed staging is adapted
+/// to the ordinary all-writer transfer path. This is not a native wire value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataOperation {
+    Ordinary,
+    Exclusive,
+    Atomic,
+    Ordered,
+    AllocationTag,
+}
+
+/// Original reached request. Dynamic source policies need its full quantity
+/// and source PC before checking a smaller atomic part's translation/rights.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataRequest {
+    pub address: u64,
+    pub bytes: usize,
+    pub flags: u32,
+    pub pc: Option<u64>,
+    pub operation: DataOperation,
+}
+
+impl DataRequest {
+    fn native(request: &MemoryRequest, operation: DataOperation) -> Self {
+        Self {
+            address: request.address,
+            bytes: request.bytes as usize,
+            flags: request.flags,
+            pc: Some(request.pc),
+            operation,
+        }
+    }
+}
+
+/// One reached physical atomic quantity; no later part is authorized by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataPart {
+    pub address: u64,
+    pub bytes: usize,
+    pub kind: AccessKind,
 }
 
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
@@ -123,7 +166,35 @@ pub trait DataPolicy {
     ) -> Result<(), MemoryStatus> {
         Err(MemoryStatus::Unsupported)
     }
+    /// Address normalization for access decomposition only. Dynamic policies
+    /// must not perform table walks, permission checks or descriptor updates here.
     fn translate(&self, raw_address: u64) -> Result<u64, MemoryStatus>;
+    /// Check original-access constraints before any reached translation/effect.
+    /// The legacy fixed policy has no additional request-dependent controls.
+    fn validate_data_request(&mut self, _request: DataRequest) -> Result<(), MemoryStatus> {
+        Ok(())
+    }
+    /// Translate precisely this reached part with its actual read/write intent.
+    /// A dynamic policy may walk once when the entire part is inside the same
+    /// source leaf; it must establish every byte's rights and physical identity.
+    /// The default preserves legacy per-byte translation and exact fault address.
+    fn translate_part(
+        &mut self,
+        _request: DataRequest,
+        part: DataPart,
+    ) -> Result<u64, (MemoryStatus, u64)> {
+        let address = self
+            .translate(part.address)
+            .map_err(|status| (status, part.address))?;
+        for offset in 1..part.bytes {
+            let raw = part.address.wrapping_add(offset as u64);
+            let translated = self.translate(raw).map_err(|status| (status, raw))?;
+            if address.checked_add(offset as u64) != Some(translated) {
+                return Err((MemoryStatus::Translation, raw));
+            }
+        }
+        Ok(address)
+    }
     fn check(&mut self, access: DataAccess<'_>) -> Result<(), MemoryStatus>;
 }
 
@@ -212,6 +283,9 @@ impl MemorySystem {
 enum DomainRole {
     NormalWb,
     SourcePhysicalRam,
+    /// Only actual-CPL0 registration constructs this role. Native entry must
+    /// retain an actual per-worker target proof through checked finalization.
+    NativeSystemRam,
 }
 
 /// Canonical current mappings and invocation/service exclusion. The immutable
@@ -282,13 +356,42 @@ impl MemoryDomain {
     fn construct(
         address_space: Option<u64>,
         system: Arc<MemorySystem>,
-        mut views: Vec<(Arc<MemoryView>, MappingAttributes)>,
+        views: Vec<(Arc<MemoryView>, MappingAttributes)>,
         target: TargetCpu,
         role: DomainRole,
     ) -> Result<Arc<Self>, MemoryStatus> {
         if !crate::platform::cpu::admitted(target) {
             return Err(MemoryStatus::Unsupported);
         }
+        Self::construct_admitted(address_space, system, views, target, role)
+    }
+
+    /// Reserved system RAM has an actual-current-CPL0 target authority and
+    /// retained mapping owner, rather than the legacy identity-frame allocator.
+    pub(in crate::memory) fn new_native_system_ram(
+        system: Arc<MemorySystem>,
+        views: Vec<(Arc<MemoryView>, MappingAttributes)>,
+        authority: &crate::platform::cpu::system::NativeSystemTarget,
+    ) -> Result<Arc<Self>, MemoryStatus> {
+        authority
+            .revalidate()
+            .map_err(|_| MemoryStatus::Unsupported)?;
+        Self::construct_admitted(
+            None,
+            system,
+            views,
+            authority.target(),
+            DomainRole::NativeSystemRam,
+        )
+    }
+
+    fn construct_admitted(
+        address_space: Option<u64>,
+        system: Arc<MemorySystem>,
+        mut views: Vec<(Arc<MemoryView>, MappingAttributes)>,
+        target: TargetCpu,
+        role: DomainRole,
+    ) -> Result<Arc<Self>, MemoryStatus> {
         views.sort_unstable_by_key(|(view, _)| view.guest_base());
         for pair in views.windows(2) {
             let end = pair[0].0.guest_base() + pair[0].0.bytes() as u64;
@@ -353,6 +456,10 @@ impl MemoryDomain {
     }
 
     pub fn check_execution(&self) -> Result<(), MemoryStatus> {
+        if self.role != DomainRole::NativeSystemRam && !crate::platform::cpu::admitted(self.target)
+        {
+            return Err(MemoryStatus::Unsupported);
+        }
         if self.system.failed.load(Ordering::Acquire) {
             return Err(MemoryStatus::Domain);
         }
@@ -584,8 +691,44 @@ impl<P: DataPolicy> MemoryThread<P> {
         &mut self,
         requirements: MemoryRequirements,
     ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
+        if self.domain.role == DomainRole::NativeSystemRam {
+            return Err(MemoryStatus::Unsupported);
+        }
+        self.prepare_body(requirements)
+    }
+
+    /// The engine must borrow actual current-owner admission, rather than
+    /// laundering a system domain through the legacy identity-frame mount.
+    pub(crate) fn prepare_native_system<'a>(
+        &'a mut self,
+        requirements: MemoryRequirements,
+        authority: &'a crate::platform::cpu::system::NativeSystemTarget,
+    ) -> Result<CheckedMemoryEntry<'a, P>, MemoryStatus> {
+        if self.domain.role != DomainRole::NativeSystemRam
+            || !authority.target().supports(self.domain.target)
+        {
+            return Err(MemoryStatus::Unsupported);
+        }
+        authority
+            .revalidate()
+            .map_err(|_| MemoryStatus::Unsupported)?;
+        let mut entry = self.prepare_body(requirements)?;
+        entry.native_system = Some(authority);
+        Ok(entry)
+    }
+
+    fn prepare_body(
+        &mut self,
+        requirements: MemoryRequirements,
+    ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
         self.prepare_with(|owner| {
             owner.domain.check_execution()?;
+            if requirements.required_profile & profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK
+                != 0
+                && owner.domain.role != DomainRole::NativeSystemRam
+            {
+                return Err(MemoryStatus::Unsupported);
+            }
             owner
                 .domain
                 .profile()?
@@ -768,37 +911,47 @@ impl<P: DataPolicy> MemoryThread<P> {
             // SAFETY: category-specific staging contract is inherited from dispatch.
             return unsafe { self.transfer_exclusive(view, request) };
         }
+        // Preserve the source category through ordered payload adaptation.
+        unsafe { self.transfer_ordinary(view, request, DataOperation::Ordinary) }
+    }
+
+    /// # Safety
+    /// Same private ordinary staging and retained invocation as `transfer`.
+    pub(super) unsafe fn transfer_ordinary(
+        &mut self,
+        view: &mut MemoryContextView,
+        request: &MemoryRequest,
+        operation: DataOperation,
+    ) -> Result<(), (MemoryStatus, u64)> {
         self.validate_execution(request.flags)
             .map_err(|status| (status, request.address))?;
         if request.data.is_null() || !request.has_supported_ordinary_shape() {
             return Err((MemoryStatus::InvalidRequest, request.address));
         }
+        let intent = DataRequest::native(request, operation);
+        self.policy
+            .validate_data_request(intent)
+            .map_err(|status| (status, request.address))?;
         let translated = self
             .policy
             .translate(request.address)
             .map_err(|status| (status, request.address))?;
         for part in AccessParts::new(translated, request.bytes as usize, request.flags) {
             let raw = request.address.wrapping_add(part.offset as u64);
-            let address = self.policy.translate(raw).map_err(|status| (status, raw))?;
-            // Translation of an earlier part does not authorize this part, or
-            // bytes beyond a translation regime's address limit. Check only the
-            // reached atomic part before its mapping permissions.
-            for offset in 1..part.bytes {
-                let raw_byte = raw.wrapping_add(offset as u64);
-                let translated_byte = self
-                    .policy
-                    .translate(raw_byte)
-                    .map_err(|status| (status, raw_byte))?;
-                if address.checked_add(offset as u64) != Some(translated_byte) {
-                    return Err((MemoryStatus::Translation, raw_byte));
-                }
-            }
             let write = request.flags & flags::WRITE != 0;
             let kind = if write {
                 AccessKind::Write
             } else {
                 AccessKind::Read
             };
+            let address = self.policy.translate_part(
+                intent,
+                DataPart {
+                    address: raw,
+                    bytes: part.bytes,
+                    kind,
+                },
+            )?;
             let physical = self
                 .domain
                 .resolve(address, part.bytes, kind)
@@ -878,25 +1031,10 @@ impl<P: DataPolicy> MemoryThread<P> {
                 self.policy
                     .check(physical.data(raw, part.bytes, part.flags))
                     .map_err(|status| (status, raw))?;
-                let (host_address, footprint) =
-                    access::read_footprint(pointer as usize, part.bytes, self.domain.target)
-                        .map_err(|_| (MemoryStatus::Unsupported, raw))?;
-                let delta = pointer as usize - host_address;
-                let envelope_offset = first
-                    .backing_offset()
-                    .checked_sub(delta)
-                    .ok_or((MemoryStatus::Unsupported, raw))?;
-                // Extra snapshot bytes are a host requirement, not another
-                // guest access. Failure must not manufacture a guest abort.
-                first
-                    .view()
-                    .backing()
-                    .host_pointer(envelope_offset, footprint, AccessKind::Read)
-                    .map_err(|_| (MemoryStatus::Unsupported, raw))?;
-                // SAFETY: the requested parts and any read envelope are checked;
-                // backing construction supplies live stable coherent native RAM.
-                let value = unsafe { access::read_part(pointer, part.bytes, self.domain.target) }
-                    .map_err(|_| (MemoryStatus::Unsupported, raw))?;
+                let value = self
+                    .domain
+                    .read_part(first, part.bytes)
+                    .map_err(|status| (status, raw))?;
                 let bytes = value.to_le_bytes();
                 // SAFETY: destination is private staging, not architectural RAM.
                 unsafe {
@@ -3504,6 +3642,437 @@ mod tests {
             TargetCpu::detect(),
         )
         .unwrap()
+    }
+
+    mod system_reads {
+        use super::*;
+        use stela_compiler::context::memory::{
+            InstructionRequirements,
+            exclusive::{ExclusiveData, ExclusiveOperation},
+        };
+        #[derive(Default)]
+        struct ReadPolicy;
+        impl DataPolicy for ReadPolicy {
+            fn validate_execution(&self, _: u32) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn validate_operation_execution(
+                &self,
+                _: MemoryOperationClass,
+            ) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn validate_instructions(
+                &self,
+                _: InstructionRequirements,
+            ) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn translate(&self, raw: u64) -> Result<u64, MemoryStatus> {
+                Ok(raw)
+            }
+            fn check(&mut self, _: DataAccess<'_>) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+        }
+        fn physical_fixture() -> (Arc<MemoryBacking>, Arc<MemoryDomain>) {
+            // Synthetic software mapping authority tests actual native memory
+            // recipes only. CPL0/source-CPU entry is separately qualified.
+            assert!(TargetCpu::X86_64_V2.supported());
+            let backing = backing();
+            let readonly = AccessPermissions {
+                writable: false,
+                ..RIGHTS
+            };
+            let views = vec![
+                (
+                    MemoryView::new(Arc::clone(&backing), GUEST_BASE, 0, STORAGE_BYTES, readonly)
+                        .unwrap(),
+                    ATTRIBUTES,
+                ),
+                (
+                    MemoryView::new(
+                        Arc::clone(&backing),
+                        GUEST_BASE + 0x1000,
+                        0,
+                        STORAGE_BYTES,
+                        RIGHTS,
+                    )
+                    .unwrap(),
+                    ATTRIBUTES,
+                ),
+            ];
+            let domain = MemoryDomain::construct_admitted(
+                None,
+                MemorySystem::new(16, 4).unwrap(),
+                views,
+                TargetCpu::X86_64_V2,
+                DomainRole::NativeSystemRam,
+            )
+            .unwrap();
+            (backing, domain)
+        }
+        fn exclusive(
+            thread: &mut MemoryThread<ReadPolicy>,
+            data: &mut ExclusiveData,
+        ) -> (MemoryStatus, u64) {
+            let write = data.operation == ExclusiveOperation::Store as u32;
+            let request = MemoryRequest {
+                address: GUEST_BASE + 0x1000,
+                bytes: 16,
+                data: core::ptr::from_mut(data).cast(),
+                flags: flags::EXCLUSIVE | if write { flags::WRITE } else { 0 },
+                pc: TEST_PC,
+            };
+            // SAFETY: retained exact native-capable fixture/storage/events and
+            // initialized private staging. No production admission is asserted.
+            unsafe {
+                thread.with_checked_view(|view| {
+                    let status = (view.callback)(view, &request);
+                    (
+                        MemoryStatus::from_code(status).unwrap(),
+                        view.completed_bytes,
+                    )
+                })
+            }
+            .unwrap()
+        }
+        #[test]
+        fn cx16_source_read_only_alias_preserves_real_global_reservation() {
+            let (backing, domain) = physical_fixture();
+            assert!(matches!(
+                domain
+                    .thread(ReadPolicy)
+                    .prepare(MemoryRequirements::default()),
+                Err(MemoryStatus::Unsupported)
+            ));
+            let events = crate::system::events::EventDomain::new();
+            let endpoint = events.register(false, None).unwrap();
+            let mut writer = domain.thread(ReadPolicy);
+            writer.bind_events(&endpoint.producer()).unwrap();
+            let mut load = ExclusiveData {
+                operation: ExclusiveOperation::Load as u32,
+                shape: 1,
+                ..Default::default()
+            };
+            assert_eq!(
+                exclusive(&mut writer, &mut load),
+                (MemoryStatus::Success, 16)
+            );
+            let mut reader = domain.thread(ReadPolicy);
+            let mut bytes = [0xff; 16];
+            let request = MemoryRequest {
+                address: GUEST_BASE,
+                bytes: 16,
+                data: bytes.as_mut_ptr(),
+                flags: 0,
+                pc: TEST_PC,
+            };
+            // SAFETY: same retained real native fixture, read-only source view
+            // and private destination. Fallback host writeback stays gated.
+            let status =
+                unsafe { reader.with_checked_view(|view| (view.callback)(view, &request)) }
+                    .unwrap();
+            assert_eq!(status, MemoryStatus::Success as u32);
+            assert_eq!(bytes, [0; 16]);
+            assert_eq!(snapshot(&backing, STORAGE_BYTES), [0; STORAGE_BYTES]);
+            let mut store = ExclusiveData {
+                operation: ExclusiveOperation::Store as u32,
+                shape: 1,
+                value: [0x1234, 0x5678],
+                ..Default::default()
+            };
+            assert_eq!(
+                exclusive(&mut writer, &mut store),
+                (MemoryStatus::Success, 16)
+            );
+            assert_eq!(
+                store.status, 0,
+                "observer must not invalidate the source reservation"
+            );
+            let mut expected = [0; STORAGE_BYTES];
+            expected[..8].copy_from_slice(&0x1234u64.to_le_bytes());
+            expected[8..16].copy_from_slice(&0x5678u64.to_le_bytes());
+            assert_eq!(snapshot(&backing, STORAGE_BYTES), expected);
+        }
+        #[test]
+        fn real_alias_writer_aba_still_invalidates_after_observer_read() {
+            let (backing, domain) = physical_fixture();
+            let events = crate::system::events::EventDomain::new();
+            let endpoint = events.register(false, None).unwrap();
+            let mut writer = domain.thread(ReadPolicy);
+            writer.bind_events(&endpoint.producer()).unwrap();
+            let mut load = ExclusiveData {
+                operation: ExclusiveOperation::Load as u32,
+                shape: 1,
+                ..Default::default()
+            };
+            assert_eq!(exclusive(&mut writer, &mut load).0, MemoryStatus::Success);
+            // This real host writer uses exactly the same physical monitor,
+            // including the A->B->A case invisible to byte comparison.
+            unsafe {
+                domain.system.publish(&backing, 0, &[1; 16]).unwrap();
+                domain.system.publish(&backing, 0, &[0; 16]).unwrap();
+            }
+            let mut store = ExclusiveData {
+                operation: ExclusiveOperation::Store as u32,
+                shape: 1,
+                value: [7, 9],
+                ..Default::default()
+            };
+            assert_eq!(exclusive(&mut writer, &mut store).0, MemoryStatus::Success);
+            assert_eq!(store.status, 1);
+            assert_eq!(snapshot(&backing, STORAGE_BYTES), [0; STORAGE_BYTES]);
+        }
+    }
+
+    mod access_intent {
+        use super::*;
+        use stela_compiler::context::memory::{
+            FaultAccess, InstructionRequirements, MemoryOrder,
+            atomic::{AtomicData, AtomicOperation},
+            exclusive::{ExclusiveData, ExclusiveOperation},
+            ordered::{OrderedData, OrderedOperation},
+        };
+
+        #[derive(Default)]
+        struct Directed {
+            checked: Vec<DataRequest>,
+            parts: Vec<(DataRequest, DataPart)>,
+            deny_write: Option<u64>,
+        }
+        impl DataPolicy for Directed {
+            fn validate_execution(&self, _: u32) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn validate_operation_execution(
+                &self,
+                _: MemoryOperationClass,
+            ) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn validate_instructions(
+                &self,
+                _: InstructionRequirements,
+            ) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+            fn translate(&self, raw: u64) -> Result<u64, MemoryStatus> {
+                Ok(raw)
+            }
+            fn validate_data_request(&mut self, request: DataRequest) -> Result<(), MemoryStatus> {
+                self.checked.push(request);
+                Ok(())
+            }
+            fn translate_part(
+                &mut self,
+                request: DataRequest,
+                part: DataPart,
+            ) -> Result<u64, (MemoryStatus, u64)> {
+                self.parts.push((request, part));
+                if part.kind == AccessKind::Write && self.deny_write == Some(part.address) {
+                    Err((MemoryStatus::Permission, part.address))
+                } else {
+                    Ok(part.address)
+                }
+            }
+            fn check(&mut self, _: DataAccess<'_>) -> Result<(), MemoryStatus> {
+                Ok(())
+            }
+        }
+        fn callback(thread: &mut MemoryThread<Directed>, request: MemoryRequest) -> MemoryFault {
+            // SAFETY: every fixture retains initialized disjoint typed staging,
+            // canonical backing, private context and exact request for this call.
+            unsafe {
+                thread.with_checked_view(|view| {
+                    (view.callback)(view, &request);
+                    MemoryFault {
+                        status: MemoryStatus::from_code(view.fault_kind).unwrap(),
+                        access: FaultAccess::from_code(view.fault_access).unwrap(),
+                        address: view.fault_address,
+                        pc: view.fault_pc,
+                        completed_bytes: view.completed_bytes,
+                    }
+                })
+            }
+            .unwrap()
+        }
+        #[test]
+        fn dynamic_write_rights_preserve_original_request_and_exact_reached_prefix() {
+            let backing = backing();
+            let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
+            let mut thread = domain.thread(Directed {
+                deny_write: Some(GUEST_BASE + 16),
+                ..Default::default()
+            });
+            let before = snapshot(&backing, STORAGE_BYTES);
+            let mut bytes = [0x5a; 8];
+            let fault = callback(
+                &mut thread,
+                MemoryRequest {
+                    address: GUEST_BASE + 13,
+                    data: bytes.as_mut_ptr(),
+                    bytes: 8,
+                    flags: flags::WRITE,
+                    pc: TEST_PC,
+                },
+            );
+            assert_eq!(
+                (fault.status, fault.address, fault.pc, fault.completed_bytes),
+                (MemoryStatus::Permission, GUEST_BASE + 16, TEST_PC, 3)
+            );
+            let intent = DataRequest {
+                address: GUEST_BASE + 13,
+                bytes: 8,
+                flags: flags::WRITE,
+                pc: Some(TEST_PC),
+                operation: DataOperation::Ordinary,
+            };
+            assert_eq!(thread.policy.checked, [intent]);
+            assert_eq!(
+                thread.policy.parts,
+                (13..=16)
+                    .map(|offset| (
+                        intent,
+                        DataPart {
+                            address: GUEST_BASE + offset,
+                            bytes: 1,
+                            kind: AccessKind::Write,
+                        }
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            let mut expected = before;
+            expected[13..16].fill(0x5a);
+            assert_eq!(snapshot(&backing, STORAGE_BYTES), expected);
+        }
+        #[test]
+        fn cas_checks_dynamic_read_then_write_even_when_comparison_will_fail() {
+            let backing = backing();
+            let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
+            let mut thread = domain.thread(Directed {
+                deny_write: Some(GUEST_BASE),
+                ..Default::default()
+            });
+            let before = snapshot(&backing, STORAGE_BYTES);
+            let mut data = AtomicData {
+                operation: AtomicOperation::CompareExchange as u32,
+                compare: [1, 0],
+                operand: [7, 0],
+                ..Default::default()
+            };
+            let original = data;
+            let fault = callback(
+                &mut thread,
+                MemoryRequest {
+                    address: GUEST_BASE,
+                    data: core::ptr::from_mut(&mut data).cast(),
+                    bytes: 8,
+                    flags: flags::ATOMIC | flags::WRITE,
+                    pc: TEST_PC,
+                },
+            );
+            assert_eq!(
+                (fault.status, fault.access, fault.completed_bytes),
+                (MemoryStatus::Permission, FaultAccess::Write, 0)
+            );
+            assert_eq!(data, original);
+            assert_eq!(snapshot(&backing, STORAGE_BYTES), before);
+            assert_eq!(
+                thread
+                    .policy
+                    .parts
+                    .iter()
+                    .map(|(request, part)| (request.operation, part.kind))
+                    .collect::<Vec<_>>(),
+                [
+                    (DataOperation::Atomic, AccessKind::Read),
+                    (DataOperation::Atomic, AccessKind::Write)
+                ]
+            );
+        }
+        #[test]
+        fn ordered_adaptation_retains_source_category_and_exclusive_direction() {
+            let backing = backing();
+            let domain = domain(vec![view(&backing, 0, STORAGE_BYTES, RIGHTS)]);
+            let mut thread = domain.thread(Directed::default());
+            let events = crate::system::events::EventDomain::new();
+            let endpoint = events.register(false, None).unwrap();
+            thread.bind_events(&endpoint.producer()).unwrap();
+            thread.check_event_endpoint(&endpoint).unwrap();
+            let mut ordered = OrderedData {
+                operation: OrderedOperation::Store as u32,
+                order: MemoryOrder::Release as u32,
+                value: [0x12, 0],
+                ..Default::default()
+            };
+            let result = callback(
+                &mut thread,
+                MemoryRequest {
+                    address: GUEST_BASE,
+                    data: core::ptr::from_mut(&mut ordered).cast(),
+                    bytes: 8,
+                    flags: flags::ORDERED | flags::WRITE,
+                    pc: TEST_PC,
+                },
+            );
+            assert_eq!(result.status, MemoryStatus::Success);
+            let mut exclusive = ExclusiveData {
+                operation: ExclusiveOperation::Load as u32,
+                ..Default::default()
+            };
+            let result = callback(
+                &mut thread,
+                MemoryRequest {
+                    address: GUEST_BASE,
+                    data: core::ptr::from_mut(&mut exclusive).cast(),
+                    bytes: 8,
+                    flags: flags::EXCLUSIVE,
+                    pc: TEST_PC + 4,
+                },
+            );
+            assert_eq!(result.status, MemoryStatus::Success);
+            assert_eq!(exclusive.value, [0x12, 0]);
+            exclusive = ExclusiveData {
+                operation: ExclusiveOperation::Store as u32,
+                value: [0x34, 0],
+                ..Default::default()
+            };
+            let result = callback(
+                &mut thread,
+                MemoryRequest {
+                    address: GUEST_BASE,
+                    data: core::ptr::from_mut(&mut exclusive).cast(),
+                    bytes: 8,
+                    flags: flags::EXCLUSIVE | flags::WRITE,
+                    pc: TEST_PC + 8,
+                },
+            );
+            assert_eq!(result.status, MemoryStatus::Success);
+            assert_eq!(
+                thread
+                    .policy
+                    .parts
+                    .iter()
+                    .map(|(request, part)| (request.operation, part.kind))
+                    .collect::<Vec<_>>(),
+                [
+                    (DataOperation::Ordered, AccessKind::Write),
+                    (DataOperation::Exclusive, AccessKind::Read),
+                    (DataOperation::Exclusive, AccessKind::Write)
+                ]
+            );
+            assert_eq!(
+                thread
+                    .policy
+                    .checked
+                    .iter()
+                    .map(|request| request.pc)
+                    .collect::<Vec<_>>(),
+                [Some(TEST_PC), Some(TEST_PC + 4), Some(TEST_PC + 8)]
+            );
+            assert_eq!(&snapshot(&backing, 8), &0x34u64.to_le_bytes());
+        }
     }
 
     #[derive(Default)]

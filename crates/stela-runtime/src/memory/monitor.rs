@@ -697,6 +697,38 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         });
     }
 
+    /// Hold every physical writer gate for an observer with no architectural
+    /// store. A native atomic-read recipe may perform permitted unchanged-value
+    /// host writeback, but must not mutate data or retire a source reservation.
+    /// Source writes must continue to use `with_writer`/`store` instead.
+    pub(in crate::memory) fn with_observer<T, E>(
+        &self,
+        range: &WriteRange<B>,
+        read: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, AccessError<E>> {
+        let _failure = FailureBoundary(&self.failed);
+        let first = range.offset / self.erg_bytes;
+        let last = (range.offset + range.bytes - 1) / self.erg_bytes;
+        if first == last {
+            let key = Key::new(&range.backing, first);
+            let _gate = self.lock(self.stripe(key))?;
+            let _gate_failure = FailureBoundary(&self.failed);
+            let result = read().map_err(AccessError::Memory)?;
+            self.check_execution()?;
+            return Ok(result);
+        }
+        // Same stable order as writers, including aliases and shared ERGs.
+        let _gates: Vec<_> = self
+            .writer_stripes(range)
+            .into_iter()
+            .map(|stripe| self.lock(stripe))
+            .collect::<Result<_, _>>()?;
+        let _gate_failure = FailureBoundary(&self.failed);
+        let result = read().map_err(AccessError::Memory)?;
+        self.check_execution()?;
+        Ok(result)
+    }
+
     pub fn with_writer<T, E>(
         &self,
         range: &WriteRange<B>,

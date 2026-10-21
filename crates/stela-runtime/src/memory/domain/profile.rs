@@ -27,6 +27,7 @@ pub struct MemoryProfile {
     tag_fragments: bool,
     writable_host_readable: bool,
     read_envelopes: bool,
+    read_write_envelopes: bool,
     tag_ineligible: Vec<MappingAttributes>,
 }
 
@@ -47,6 +48,7 @@ impl MemoryProfile {
             tag_fragments: fragments_compatible(views, TAG_GRANULE_BYTES),
             writable_host_readable: true,
             read_envelopes: true,
+            read_write_envelopes: true,
             tag_ineligible: Vec::new(),
         };
         for (view, attributes) in views {
@@ -84,6 +86,14 @@ impl MemoryProfile {
                     .checked_add(view.bytes())
                     .and_then(|bytes| bytes.checked_add(SCA_BYTES - 1))
                     .map(|bytes| bytes & !(SCA_BYTES - 1));
+                profile.read_write_envelopes &=
+                    envelope_start
+                        .zip(envelope_bytes)
+                        .is_some_and(|(offset, bytes)| {
+                            backing
+                                .host_pointer(offset, bytes, AccessKind::Write)
+                                .is_ok()
+                        });
                 profile.read_envelopes &=
                     envelope_start
                         .zip(envelope_bytes)
@@ -130,11 +140,19 @@ impl MemoryProfile {
         if requirements.required_profile & SEPARATELY_OWNED_M0_PROFILES != 0 {
             return Err(MemoryStatus::Unsupported);
         }
-        if !crate::platform::cpu::admitted(target)
-            || requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
-                && !target.supports(TargetCpu::AtomicLoad16)
+        // Actual host admission belongs to the domain/prepared entry. This
+        // profile checks storage geometry and the retained target's recipes.
+        if requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
+            && !target.supports(TargetCpu::AtomicLoad16)
             || requirements.required_host_caps & host_caps::CX16 != 0
                 && !target.supports(TargetCpu::Cx16)
+        {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if requirements.required_profile & profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK != 0
+            && (!self.read_envelopes
+                || !self.read_write_envelopes
+                || !target.supports(TargetCpu::Cx16))
         {
             return Err(MemoryStatus::Unsupported);
         }
@@ -188,11 +206,15 @@ fn fragments_compatible(views: &[(Arc<MemoryView>, MappingAttributes)], quantity
 /// `thread_mut` then owns the contract to keep those controls stable.
 pub struct CheckedMemoryEntry<'a, P> {
     thread: &'a mut MemoryThread<P>,
+    pub(super) native_system: Option<&'a crate::platform::cpu::system::NativeSystemTarget>,
 }
 
 impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
     pub(super) fn new(thread: &'a mut MemoryThread<P>) -> Self {
-        Self { thread }
+        Self {
+            thread,
+            native_system: None,
+        }
     }
 
     /// Consume this entry when binding the checked native body's service view.
@@ -201,6 +223,10 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
     /// The callback must obey `MemoryThread::with_view`'s invocation contract,
     /// and its body must be bound to the requirements used to prepare this entry.
     pub unsafe fn with_view<R>(self, callback: impl FnOnce(&mut MemoryContextView) -> R) -> R {
+        assert!(
+            self.native_system.is_none(),
+            "native system entry requires checked finalization"
+        );
         // SAFETY: the caller binds the checked body's exact requirements and
         // inherits the low-level callback's staging and lifetime contract.
         unsafe { self.thread.with_view(callback) }
@@ -216,14 +242,30 @@ impl<'a, P: DataPolicy> CheckedMemoryEntry<'a, P> {
         self,
         callback: impl FnOnce(&mut MemoryContextView) -> R,
     ) -> Result<R, MemoryStatus> {
+        if let Some(authority) = self.native_system {
+            authority
+                .revalidate()
+                .map_err(|_| MemoryStatus::Unsupported)?;
+        }
         // SAFETY: the caller binds the checked body's exact requirements and
-        // inherits the low-level callback's staging and lifetime contract.
-        unsafe { self.thread.with_checked_view(callback) }
+        // inherits the low-level callback's staging and lifetime contract. The
+        // actual current-owner proof remains borrowed through finalization.
+        let result = unsafe { self.thread.with_checked_view(callback) };
+        if let Some(authority) = self.native_system {
+            authority
+                .revalidate()
+                .map_err(|_| MemoryStatus::Unsupported)?;
+        }
+        result
     }
 
     /// Consume entry for a dedicated service whose typed adapter owns the
     /// complete checked operation and does not mutate effective controls.
     pub fn thread_mut(self) -> &'a mut MemoryThread<P> {
+        assert!(
+            self.native_system.is_none(),
+            "native system target loan cannot escape"
+        );
         self.thread
     }
 }
@@ -237,6 +279,9 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
         requirements: MemoryRequirements,
         privileged: bool,
     ) -> Result<CheckedMemoryEntry<'_, P>, MemoryStatus> {
+        if self.domain.role == super::DomainRole::NativeSystemRam {
+            return Err(MemoryStatus::Unsupported);
+        }
         self.prepare_with(|owner| {
             // Dedicated allocation-tag admission cannot authorize another
             // typed service through its tag-storage-specific preflight rules.

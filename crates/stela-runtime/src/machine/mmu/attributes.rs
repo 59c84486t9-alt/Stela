@@ -99,7 +99,7 @@ pub fn encoded(attribute: u8, xs: bool, implemented: bool) -> u8 {
 }
 
 /// Normal memory Write-Back at both levels.
-fn write_back(attribute: u8) -> bool {
+pub(crate) fn write_back(attribute: u8) -> bool {
     device(attribute).is_none()
         && cacheability(attribute >> 4) == Cacheability::WriteBack
         && cacheability(attribute & 15) == Cacheability::WriteBack

@@ -148,6 +148,10 @@ pub struct EventEndpoint {
 }
 
 impl EventEndpoint {
+    pub(crate) fn same_domain(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.domain, &other.domain)
+    }
+
     pub fn producer(&self) -> EventProducer {
         EventProducer {
             event: Arc::downgrade(&self.event),

@@ -6,6 +6,7 @@ pub(crate) mod bootstrap;
 mod context_check;
 pub(crate) mod executor;
 pub(crate) mod firmware;
+pub(crate) mod kernel_check;
 pub(crate) mod memory_types;
 pub(crate) mod resources;
 pub(crate) mod topology;

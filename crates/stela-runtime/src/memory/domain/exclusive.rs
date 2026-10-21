@@ -1,6 +1,9 @@
 //! Exclusive accesses over the shared memory and monitor.
 
-use super::{AccessKind, Arc, DataPolicy, MemoryThread, SCA_BYTES, access, monitor};
+use super::{
+    AccessKind, Arc, DataOperation, DataPart, DataPolicy, DataRequest, MemoryThread, SCA_BYTES,
+    access, monitor,
+};
 use stela_compiler::{
     TargetCpu,
     context::memory::{
@@ -59,11 +62,16 @@ impl<P: DataPolicy> MemoryThread<P> {
         if operation == ExclusiveOperation::Clear {
             return self.clear_reservation().map_err(fail);
         }
+        let writeback_read = !write
+            && self.domain.role == super::DomainRole::NativeSystemRam
+            && !self.domain.target.supports(TargetCpu::AtomicLoad16);
         let requirements = MemoryRequirements {
             required_pointer_arithmetic: None,
             required_address_checks: Default::default(),
             required_flags: request.flags,
-            required_host_caps: if request.bytes as usize == SCA_BYTES {
+            required_host_caps: if writeback_read {
+                host_caps::CX16
+            } else if request.bytes as usize == SCA_BYTES {
                 if write {
                     host_caps::CX16
                 } else {
@@ -73,6 +81,11 @@ impl<P: DataPolicy> MemoryThread<P> {
                 0
             },
             required_profile: profile_requirements::NATIVE_ACCESS
+                | if writeback_read {
+                    profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK
+                } else {
+                    0
+                }
                 | if request.flags & flags::TAG_CHECKED != 0 {
                     profile_requirements::TAG_GRANULES
                 } else {
@@ -91,17 +104,21 @@ impl<P: DataPolicy> MemoryThread<P> {
         if raw & SCA_MASK > SCA_BYTES as u64 - u64::from(request.bytes) {
             return Err(fail(MemoryStatus::Alignment));
         }
-        let address = self.policy.translate(raw).map_err(fail)?;
-        for offset in 1..request.bytes {
-            let raw_byte = raw.wrapping_add(u64::from(offset));
-            let translated = self
-                .policy
-                .translate(raw_byte)
-                .map_err(|status| (status, raw_byte))?;
-            if address.checked_add(u64::from(offset)) != Some(translated) {
-                return Err((MemoryStatus::Translation, raw_byte));
-            }
-        }
+        let intent = DataRequest::native(request, DataOperation::Exclusive);
+        self.policy.validate_data_request(intent).map_err(fail)?;
+        let kind = if write {
+            AccessKind::Write
+        } else {
+            AccessKind::Read
+        };
+        let address = self.policy.translate_part(
+            intent,
+            DataPart {
+                address: raw,
+                bytes: request.bytes as usize,
+                kind,
+            },
+        )?;
         if address & SCA_MASK != raw & SCA_MASK {
             return Err(fail(MemoryStatus::Unsupported));
         }
@@ -149,20 +166,12 @@ impl<P: DataPolicy> MemoryThread<P> {
             if bytes == SCA_BYTES && !target.supports(TargetCpu::Cx16) {
                 return Err(fail(MemoryStatus::Unsupported));
             }
-        } else {
-            let (host_address, footprint) = access::read_footprint(pointer as usize, bytes, target)
-                .map_err(|_| fail(MemoryStatus::Unsupported))?;
-            let delta = pointer as usize - host_address;
-            let offset = first
-                .backing_offset()
-                .checked_sub(delta)
-                .ok_or_else(|| fail(MemoryStatus::Unsupported))?;
-            first
-                .view()
-                .backing()
-                .host_pointer(offset, footprint, AccessKind::Read)
-                .map_err(|_| fail(MemoryStatus::Unsupported))?;
         }
+        let read = if write {
+            None
+        } else {
+            Some(self.domain.prepare_read(first, bytes).map_err(fail)?)
+        };
         // Resolution already covered the whole quantity; this lookup returns
         // its first mapping without creating another monitor.
         let state = self
@@ -245,8 +254,14 @@ impl<P: DataPolicy> MemoryThread<P> {
                     // SAFETY: the requested part and read envelope are live, no
                     // Rust reference to the RAM exists, and the host features
                     // are checked.
-                    unsafe { access::read_part(pointer, bytes, target) }
-                        .map_err(|_| MemoryStatus::Unsupported)
+                    // ERGs are at least SCA16 and congruent with this source
+                    // quantity, so the held reservation gate covers the entire
+                    // aligned read/writeback envelope without invalidating it.
+                    unsafe {
+                        read.as_ref()
+                            .expect("load has a prepared read")
+                            .read_in_observer()
+                    }
                 })
                 .map_err(|error| fail(exclusive_error(error)))?;
             output.value = [value as u64, (value >> u64::BITS) as u64];

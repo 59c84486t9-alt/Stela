@@ -143,6 +143,7 @@ struct Recorded {
 
 pub struct State {
     ram: Vec<RamRange>,
+    registered_ram: Option<alloc::sync::Arc<stela_runtime::memory::RegisteredSystemRam>>,
     pool: Pool,
     /// Engine root without any guest mapping.
     host_root: u64,
@@ -278,6 +279,7 @@ pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     let owner = unsafe {
         local::install(State {
             ram: config.ram,
+            registered_ram: None,
             pool,
             host_root,
             roots,
@@ -466,11 +468,24 @@ struct GuestTables<'a>(&'a State);
 
 impl mmu::TableMemory for GuestTables<'_> {
     fn read_descriptor(&mut self, physical: u64) -> Option<u64> {
+        if let Some(ram) = &self.0.registered_ram {
+            if !physical.is_multiple_of(8) {
+                return None;
+            }
+            let mut bytes = [0; 8];
+            // SAFETY: private descriptor staging; the retained canonical owner
+            // supplies the all-writer mapping and exact native scalar read.
+            unsafe { ram.read_physical(physical, &mut bytes) }.ok()?;
+            return Some(u64::from_le_bytes(bytes));
+        }
         let host = self.0.host_physical(physical)?;
         // SAFETY: guest RAM through the physmap.
         Some(unsafe { (layout::physical(host) as *const u64).read_volatile() })
     }
     fn update_descriptor(&mut self, physical: u64, old: u64, new: u64) -> Option<bool> {
+        if let Some(ram) = &self.0.registered_ram {
+            return ram.update_descriptor(physical, old, new).ok();
+        }
         let host = self.0.host_physical(physical)?;
         let slot = layout::physical(host) as *mut u64;
         // SAFETY: guest RAM through the physmap; one PE, no concurrent walker.
@@ -757,9 +772,18 @@ fn code_unit_bytes(state: &State) -> u64 {
 }
 
 impl Host for BareHost<'_> {
+    fn native_worker(&self) -> Option<stela_runtime::machine::engine::publication::WorkerId> {
+        local::native_worker()
+    }
+
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         // The engine reads guest RAM only once its translation allowed it.
         super::speculation::fence();
+        if let Some(ram) = &state().registered_ram {
+            // SAFETY: the runtime passes private staging while the adopted
+            // canonical reservation/mapping and source controls remain live.
+            return unsafe { ram.read_physical(physical, buffer) }.is_ok();
+        }
         state().copy(physical, buffer.len(), |host, done, chunk| {
             // SAFETY: guest RAM through the physmap and a distinct buffer.
             unsafe {
@@ -773,6 +797,11 @@ impl Host for BareHost<'_> {
     }
 
     fn write_ram(&mut self, physical: u64, data: &[u8]) -> bool {
+        if let Some(ram) = &state().registered_ram {
+            // SAFETY: private copyout staging; the canonical owner performs
+            // every reached host write under the same physical writer gates.
+            return unsafe { ram.publish_physical(physical, data) }.is_ok();
+        }
         state().copy(physical, data.len(), |host, done, chunk| {
             // SAFETY: guest RAM through the physmap and a distinct buffer.
             unsafe {

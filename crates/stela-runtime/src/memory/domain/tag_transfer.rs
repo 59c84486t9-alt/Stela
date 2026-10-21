@@ -1,5 +1,7 @@
 //! Allocation-tag accesses through the physical memory domain.
-use super::{AllocationTagPolicy, MemoryThread, PhysicalAccess};
+use super::{
+    AllocationTagPolicy, DataOperation, DataPart, DataRequest, MemoryThread, PhysicalAccess,
+};
 use crate::memory::{
     access,
     backing::AccessKind,
@@ -63,7 +65,7 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
     }
 
     fn resolve_tag_transfer(
-        &self,
+        &mut self,
         descriptor: Access,
         expected: TransferAccessKind,
         kind: AccessKind,
@@ -81,7 +83,29 @@ impl<P: AllocationTagPolicy> MemoryThread<P> {
         }
         self.policy.validate_privilege(descriptor.privileged)?;
         self.domain.check_execution()?;
-        let translated = self.policy.translate(descriptor.address)?;
+        let intent = DataRequest {
+            address: descriptor.address,
+            bytes: TAG_GRANULE_BYTES,
+            flags: if kind == AccessKind::Write {
+                flags::WRITE
+            } else {
+                0
+            },
+            pc: None,
+            operation: DataOperation::AllocationTag,
+        };
+        self.policy.validate_data_request(intent)?;
+        let translated = self
+            .policy
+            .translate_part(
+                intent,
+                DataPart {
+                    address: descriptor.address,
+                    bytes: TAG_GRANULE_BYTES,
+                    kind,
+                },
+            )
+            .map_err(|(status, _)| status)?;
         self.domain.resolve(translated, TAG_GRANULE_BYTES, kind)
     }
 

@@ -163,6 +163,8 @@ struct Options {
     native_cores: Option<usize>,
     /// Qualify owned AP startup/host resources, then stop before guest entry.
     native_bootstrap_check: bool,
+    /// Bounded actual checked-memory kernel execution on the selected cores.
+    native_shared_check: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -295,6 +297,7 @@ impl Options {
             native_memory_check: false,
             native_cores: crate::native_smp::requested(text)?,
             native_bootstrap_check: false,
+            native_shared_check: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -315,6 +318,13 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--native-shared-check" {
+                if options.native_shared_check {
+                    return Err("duplicate native shared check");
+                }
+                options.native_shared_check = true;
+                continue;
+            }
             if name == "--native-bootstrap-check" {
                 if options.native_bootstrap_check {
                     return Err("duplicate native bootstrap check");
@@ -1607,10 +1617,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     // SAFETY: the loader handoff and all reservations stay pinned in the physmap.
     let native_processors = unsafe { crate::native_smp::validate(handoff, options.native_cores) }
         .unwrap_or_else(|error| output::fatal(error));
-    if options.native_bootstrap_check && options.native_cores.is_none() {
+    if (options.native_bootstrap_check || options.native_shared_check)
+        && options.native_cores.is_none()
+    {
         output::fatal("native bootstrap check needs an explicit physical-core count");
     }
-    if options.native_cores.is_some_and(|cores| cores > 1) && !options.native_bootstrap_check {
+    if options.native_cores.is_some_and(|cores| cores > 1)
+        && !options.native_bootstrap_check
+        && !options.native_shared_check
+    {
         output::fatal("parallel SystemMode shared-memory execution is not admitted yet");
     }
     if options.native_memory_check {
@@ -1908,7 +1923,8 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     )
     .unwrap_or_else(|error| output::fatal(error));
     let native_tsc_base = host::rdtsc();
-    let worker_ram = options.native_bootstrap_check.then(|| ram.clone());
+    let worker_ram =
+        (options.native_bootstrap_check || options.native_shared_check).then(|| ram.clone());
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
@@ -1928,7 +1944,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut host_owner =
         unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     let apic_hz = host::statistics().apic_hz;
-    if options.native_bootstrap_check {
+    if options.native_bootstrap_check || options.native_shared_check {
         // SAFETY: source-qualified physical roster and loader reservations,
         // interrupts disabled, BSP Host installed. Guest entry is excluded.
         let executors = unsafe {
@@ -1973,6 +1989,21 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 observed.pat,
                 doorbells,
             ));
+        }
+        if options.native_shared_check {
+            // SAFETY: the bounded fixture owns all source RAM and actual frame
+            // loans; all AP returns are acquired before any borrowed release.
+            unsafe {
+                crate::native_smp::kernel_check::check(
+                    handoff,
+                    native_processors.expect("validated native roster"),
+                    &executors,
+                    &mut host_owner,
+                    &sender,
+                )
+            }
+            .unwrap_or_else(|error| output::fatal(error));
+            output::terminate(0x10);
         }
         output::arguments(format_args!(
             "CHECK native-bootstrap PASS physical_cores={} owned_APs={}; guest SMP execution unqualified\n",

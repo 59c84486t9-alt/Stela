@@ -8,6 +8,7 @@ mod pointer;
 mod prepare;
 mod processors;
 mod scalable;
+mod shared_memory;
 mod stored;
 mod system;
 mod tags;
@@ -53,6 +54,10 @@ pub use processors::publication;
 pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
+};
+pub use shared_memory::{
+    NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation, ReturnedRun, SharedMemory,
+    SharedMemoryFailure, SharedMemoryRefusal, dispatch_native_run, recover_native_run,
 };
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -1309,6 +1314,8 @@ pub struct Machine<H: Host, D: Devices> {
     processor_power: Processors,
     /// Actual native-worker publication inventory; absent in the serial lane.
     native_publication: Option<processors::publication::WorkerPublications>,
+    /// Identity of this Machine's persistent checked PE memory/event owners.
+    native_memory_identity: Arc<()>,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
     /// Host trace points, ascending (`set_traces`), and the hits not yet
@@ -1449,6 +1456,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             peers: Vec::new(),
             processor_power,
             native_publication: None,
+            native_memory_identity: Arc::new(()),
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),

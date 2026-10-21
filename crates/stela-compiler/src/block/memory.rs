@@ -88,6 +88,20 @@ impl CheckedMemoryProfile {
             }
         }
     }
+    /// Immutable identity for the distinct all-writer full-system lane.
+    /// Preparation rejects other specializations before native emission.
+    pub const fn shared_system_abi(self) -> &'static str {
+        match self {
+            Self::SpAlignmentEnabled => {
+                "x86_64-sysv-guest-state-v3-context-block-exit-system-shared-normal-wb-sa-on-v1"
+            }
+            Self::SpAlignmentDisabled => {
+                "x86_64-sysv-guest-state-v3-context-block-exit-system-shared-normal-wb-sa-off-v1"
+            }
+            _ => "unadmitted-system-shared-memory-specialization-v1",
+        }
+    }
+
     pub const fn process_helpers_abi(self) -> &'static str {
         match self {
             Self::M0DeviceRamRead64Staged => {
@@ -162,8 +176,21 @@ impl CheckedPlan {
         instructions: &[crate::aarch64::Instruction],
         terminal: Option<&(GuestAddress, super::Terminator)>,
         profile: CheckedMemoryProfile,
-        process_helpers: bool,
+        outer: super::BlockProfile,
     ) -> Result<Self, CompileError> {
+        let process_helpers = outer.supports_checked_process_helpers();
+        let system_helpers = matches!(outer, super::BlockProfile::SystemModeSharedV1(_));
+        if system_helpers
+            && !matches!(
+                profile,
+                CheckedMemoryProfile::SpAlignmentEnabled
+                    | CheckedMemoryProfile::SpAlignmentDisabled
+            )
+        {
+            return Err(CompileError(
+                "shared system memory specialization is unqualified".into(),
+            ));
+        }
         if process_helpers && profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
             return Err(CompileError(
                 "M0 staged read excludes process helpers".into(),
@@ -182,6 +209,11 @@ impl CheckedPlan {
                 | super::Terminator::DirectCall(_)
                 | super::Terminator::Register { .. }
                 | super::Terminator::Trap(_) => {}
+                super::Terminator::System(_)
+                | super::Terminator::PointerAuthentication(_)
+                | super::Terminator::Amx(_)
+                | super::Terminator::FloatingPoint(_)
+                    if system_helpers => {}
                 super::Terminator::PointerAuthentication(instruction)
                     if process_helpers
                         && !matches!(

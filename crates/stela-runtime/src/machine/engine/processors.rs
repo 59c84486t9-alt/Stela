@@ -87,6 +87,12 @@ pub(super) fn boot(profile: &CpuProfile) -> Vec<Peer> {
 }
 
 impl Parked {
+    pub(super) fn native_ready(&self) -> bool {
+        self.waiting.is_none()
+    }
+    pub(super) fn cpu(&self) -> &Cpu {
+        &self.cpu
+    }
     pub(super) fn cpu_mut(&mut self) -> &mut Cpu {
         &mut self.cpu
     }

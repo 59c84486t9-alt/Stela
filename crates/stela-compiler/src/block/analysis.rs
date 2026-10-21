@@ -261,7 +261,7 @@ pub(super) fn parse(
         })?);
         source_bytes += 4;
         let word = u32::from_le_bytes(*bytes);
-        if profile == BlockProfile::SystemModeV1 {
+        if profile.supports_full_system() {
             // PAuth hints share the hint space, so they are matched first.
             if let Some(decoded) =
                 decode_pointer_authentication(pc, word).map_err(|error| BlockAnalysisError {
@@ -294,12 +294,18 @@ pub(super) fn parse(
                     }
                 })?
             {
-                terminal = Some((pc, Terminator::System(decoded)));
-                break;
+                // The shared lane executes these through the existing typed
+                // all-writer memory service, not the single-agent CPU monitor.
+                let checked = matches!(profile, BlockProfile::SystemModeSharedV1(_))
+                    && matches!(decoded.operation, system::SystemOperation::Exclusive(Ok(_)));
+                if !checked {
+                    terminal = Some((pc, Terminator::System(decoded)));
+                    break;
+                }
             }
         }
         if profile.supports_system()
-            && profile != BlockProfile::SystemModeV1
+            && !profile.supports_full_system()
             && let Some(decoded) = (if profile == BlockProfile::El1PlatformV1 {
                 system::decode_el1_system_instruction(pc, word)
             } else {
@@ -446,7 +452,7 @@ pub(super) fn parse(
             });
         }
         if profile.supports_system()
-            && profile != BlockProfile::SystemModeV1
+            && !profile.supports_full_system()
             && !crate::extended::ordinary_permitted(&instruction.operation)
         {
             return Err(BlockAnalysisError {
@@ -497,7 +503,7 @@ pub fn source_bytes_with_profile(
             &parsed.instructions,
             parsed.terminal.as_ref(),
             selected,
-            profile.supports_checked_process_helpers(),
+            profile,
         )?;
     }
     Ok(parsed.source_bytes)

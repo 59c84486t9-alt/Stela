@@ -97,6 +97,9 @@ pub enum BlockProfile {
     SystemRegistersV1,
     /// The system-mode engine's profile; see [`SYSTEM_MODE_BLOCK_ABI`].
     SystemModeV1,
+    /// All memory uses the checked all-writer service. Every full-system
+    /// terminal remains unexecuted until the BSP recovers the entire cohort.
+    SystemModeSharedV1(CheckedMemoryProfile),
     AppleArm64eSoftwarePauthV1,
     AppleArm64eSoftwarePauthClockV1,
     DarwinArm64ThreadV1,
@@ -117,6 +120,7 @@ impl BlockProfile {
             Self::SystemV1 => SYSTEM_BLOCK_ABI,
             Self::SystemRegistersV1 => SYSTEM_REGISTER_BLOCK_ABI,
             Self::SystemModeV1 => SYSTEM_MODE_BLOCK_ABI,
+            Self::SystemModeSharedV1(profile) => profile.shared_system_abi(),
             Self::AppleArm64eSoftwarePauthV1 => PAUTH_BLOCK_ABI,
             Self::AppleArm64eSoftwarePauthClockV1 => CLOCK_BLOCK_ABI,
             Self::DarwinArm64ThreadV1 => THREAD_BLOCK_ABI,
@@ -131,9 +135,9 @@ impl BlockProfile {
 
     pub const fn checked_memory(self) -> Option<CheckedMemoryProfile> {
         match self {
-            Self::CheckedMemory(profile) | Self::CheckedMemoryPauthClockThread(profile) => {
-                Some(profile)
-            }
+            Self::CheckedMemory(profile)
+            | Self::CheckedMemoryPauthClockThread(profile)
+            | Self::SystemModeSharedV1(profile) => Some(profile),
             _ => None,
         }
     }
@@ -142,17 +146,28 @@ impl BlockProfile {
         matches!(self, Self::CheckedMemoryPauthClockThread(_))
     }
 
+    pub const fn supports_full_system(self) -> bool {
+        matches!(self, Self::SystemModeV1 | Self::SystemModeSharedV1(_))
+    }
+
     pub const fn supports_system(self) -> bool {
         matches!(
             self,
-            Self::SystemV1 | Self::SystemRegistersV1 | Self::El1PlatformV1 | Self::SystemModeV1
+            Self::SystemV1
+                | Self::SystemRegistersV1
+                | Self::El1PlatformV1
+                | Self::SystemModeV1
+                | Self::SystemModeSharedV1(_)
         )
     }
 
     pub const fn supports_system_registers(self) -> bool {
         matches!(
             self,
-            Self::SystemRegistersV1 | Self::El1PlatformV1 | Self::SystemModeV1
+            Self::SystemRegistersV1
+                | Self::El1PlatformV1
+                | Self::SystemModeV1
+                | Self::SystemModeSharedV1(_)
         )
     }
 
@@ -165,6 +180,7 @@ impl BlockProfile {
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
                 | Self::CheckedMemoryPauthClockThread(_)
                 | Self::SystemModeV1
+                | Self::SystemModeSharedV1(_)
         )
     }
 
@@ -183,6 +199,7 @@ impl BlockProfile {
         matches!(
             self,
             Self::SystemModeV1
+                | Self::SystemModeSharedV1(_)
                 | Self::DarwinArm64ThreadV1
                 | Self::AppleArm64eSoftwarePauthThreadV1
                 | Self::AppleArm64eSoftwarePauthClockThreadV1
@@ -517,6 +534,15 @@ impl CompilationPlan {
             ..crate::x86_64::MemoryChecks::DEFAULT
         };
         for instruction in &parsed.instructions {
+            // The shared checked service has a separately required writable
+            // CX16 read footprint. This does not qualify a direct MOVDQA recipe
+            // or alter the legacy checked profile's read-only host contract.
+            if matches!(profile, BlockProfile::SystemModeSharedV1(_))
+                && matches!(instruction.operation, Operation::Ordered(_))
+                && target.supports(crate::TargetCpu::Cx16)
+            {
+                continue;
+            }
             if !matches!(
                 instruction.operation,
                 Operation::Exclusive(_) | Operation::CheckedPointer(_)
@@ -533,7 +559,7 @@ impl CompilationPlan {
                     &parsed.instructions,
                     parsed.terminal.as_ref(),
                     selected,
-                    profile.supports_checked_process_helpers(),
+                    profile,
                 )
             })
             .transpose()?;
@@ -668,7 +694,20 @@ impl CompilationPlan {
         if let Some(plan) = &self.el1_m0 {
             return plan.requirements();
         }
-        self.checked.as_ref().map(memory::CheckedPlan::requirements)
+        self.checked.as_ref().map(|plan| {
+            let mut requirements = plan.requirements();
+            use crate::context::memory::{host_caps, profile_requirements};
+            if matches!(self.profile, BlockProfile::SystemModeSharedV1(_))
+                && !self.target.supports(crate::TargetCpu::AtomicLoad16)
+                && self.target.supports(crate::TargetCpu::Cx16)
+                && requirements.required_host_caps & host_caps::ATOMIC_LOAD16 != 0
+            {
+                requirements.required_host_caps =
+                    requirements.required_host_caps & !host_caps::ATOMIC_LOAD16 | host_caps::CX16;
+                requirements.required_profile |= profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK;
+            }
+            requirements
+        })
     }
     /// Typed source intent for this profile; other profiles return None.
     pub fn el1_m0_intent(&self) -> Option<el1_m0::Intent> {
@@ -753,6 +792,140 @@ impl CompilationPlan {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_system_uses_checked_recipes_and_refuses_serial_native_specialization() {
+        use crate::TargetCpu;
+        let source: Vec<_> = [
+            0xf900_0001u32,
+            0xc85f_7c02,
+            0xc803_7c01,
+            0xf821_0002,
+            0xc8df_fc01,
+            0xd65f_03c0,
+        ]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+        for specialization in [
+            CheckedMemoryProfile::SpAlignmentEnabled,
+            CheckedMemoryProfile::SpAlignmentDisabled,
+        ] {
+            let shared = BlockProfile::SystemModeSharedV1(specialization);
+            let checked = BlockProfile::CheckedMemory(specialization);
+            assert_ne!(shared.abi(), checked.abi());
+            assert_ne!(shared.abi(), BlockProfile::SystemModeV1.abi());
+            let target = TargetCpu::X86_64_V2.with_atomic_load16();
+            let plan =
+                || CompilationPlan::new(&source, GuestAddress(0x4000), shared, target).unwrap();
+            assert!(!plan().checks.single_agent);
+            assert!(
+                plan()
+                    .with_memory_checks(crate::x86_64::MemoryChecks {
+                        single_agent: true,
+                        ..crate::x86_64::MemoryChecks::DEFAULT
+                    })
+                    .is_err()
+            );
+            let expected =
+                CompilationPlan::new(&source, GuestAddress(0x4000), checked, target).unwrap();
+            assert_eq!(plan().memory_requirements(), expected.memory_requirements());
+            let native = plan().compile().unwrap().native;
+            let expected = expected.compile().unwrap().native;
+            assert_eq!(native.x86_64_code, expected.x86_64_code);
+            assert_eq!(native.source_map, expected.source_map);
+        }
+        assert!(
+            CompilationPlan::new(
+                &0xf940_0000u32.to_le_bytes(),
+                GuestAddress(0x4000),
+                BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::M0DeviceRamRead64Staged),
+                TargetCpu::Baseline
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shared_system_no_avx_requires_the_distinct_cx16_rw_read_footprint() {
+        use crate::{
+            TargetCpu,
+            context::memory::{host_caps, profile_requirements},
+        };
+        let source: Vec<_> = [0xc85f_7c02u32, 0xc8df_fc01, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let profile = CheckedMemoryProfile::SpAlignmentDisabled;
+        let plan = |outer, target| {
+            CompilationPlan::new(&source, GuestAddress(0x4000), outer, target).unwrap()
+        };
+        let shared = plan(
+            BlockProfile::SystemModeSharedV1(profile),
+            TargetCpu::X86_64_V2,
+        );
+        let required = shared.memory_requirements().unwrap();
+        assert_eq!(required.required_host_caps, host_caps::CX16);
+        assert_ne!(
+            required.required_profile & profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK,
+            0
+        );
+        assert!(
+            CompilationPlan::new(
+                &source,
+                GuestAddress(0x4000),
+                BlockProfile::CheckedMemory(profile),
+                TargetCpu::X86_64_V2,
+            )
+            .is_err()
+        );
+        let legacy = plan(
+            BlockProfile::CheckedMemory(profile),
+            TargetCpu::X86_64_V2.with_atomic_load16(),
+        );
+        let required = legacy.memory_requirements().unwrap();
+        assert_eq!(required.required_host_caps, host_caps::ATOMIC_LOAD16);
+        assert_eq!(
+            required.required_profile & profile_requirements::SYSTEM_ATOMIC_READ_WRITEBACK,
+            0
+        );
+        let optional = plan(
+            BlockProfile::SystemModeSharedV1(profile),
+            TargetCpu::X86_64_V2.with_atomic_load16(),
+        );
+        assert_eq!(
+            shared.compile().unwrap().native.x86_64_code,
+            optional.compile().unwrap().native.x86_64_code
+        );
+    }
+
+    #[test]
+    fn shared_system_control_and_pauth_terminals_keep_the_exact_unexecuted_source_pc() {
+        use crate::TargetCpu;
+        let base = GuestAddress(0x4000);
+        let shared = BlockProfile::SystemModeSharedV1(CheckedMemoryProfile::SpAlignmentDisabled);
+        assert!(shared.supports_system_registers() && shared.supports_full_system());
+        assert!(!shared.supports_checked_process_helpers());
+        for terminal in [0xd53b_e040u32, 0xd503_3fdf, 0xd503_237f, 0xd400_0001] {
+            let source: Vec<_> = [0x9100_0400u32, terminal, 0xd65f_03c0]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let plan = CompilationPlan::new(&source, base, shared, TargetCpu::Baseline).unwrap();
+            assert_eq!(plan.source_bytes(), 8);
+            assert_eq!(
+                plan.parsed.terminal.as_ref().unwrap().0,
+                GuestAddress(base.0 + 4)
+            );
+            assert_eq!(plan.native, crate::x86_64::NativeSystem::NONE);
+            let body = plan.compile().unwrap();
+            assert_eq!(
+                body.native.source_map.last().unwrap().0,
+                GuestAddress(base.0 + 4)
+            );
+            assert_eq!(body.source_bytes, 8);
+        }
+    }
+
     use alloc::vec;
     use alloc::vec::Vec;
 

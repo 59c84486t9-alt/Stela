@@ -1,6 +1,8 @@
 //! Single-copy-atomic access parts within an aligned 16-byte quantity. Callers
 //! handle translation, permissions, mapping lifetime and reservations.
 
+pub(super) mod system;
+
 use stela_compiler::TargetCpu;
 
 const BYTE_BYTES: usize = 1;

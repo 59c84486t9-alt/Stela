@@ -28,6 +28,95 @@ impl core::fmt::Display for PublicationFault {
 impl core::error::Error for PublicationFault {}
 
 impl MemorySystem {
+    /// Conditionally update one aligned physical descriptor under its exact
+    /// all-writer reservation gate. A comparison miss performs no store and
+    /// does not invalidate reservations; a same-value successful write does.
+    ///
+    /// # Safety
+    /// The caller owns descriptor access and the whole aligned eight-byte
+    /// extent is pinned readable/writable coherent WB RAM. Every physical
+    /// writer, including source and host aliases, uses this same system.
+    /// No external DMA/direct writer is admitted; no Rust reference aliases
+    /// the bytes. Source/code publication is the outer lifecycle owner's.
+    pub(in crate::memory) unsafe fn compare_update_descriptor(
+        &self,
+        backing: &Arc<MemoryBacking>,
+        offset: usize,
+        expected: u64,
+        replacement: u64,
+    ) -> Result<bool, MemoryStatus> {
+        self.reservations
+            .check_execution()
+            .map_err(|_| MemoryStatus::Domain)?;
+        if self.failed.load(Ordering::Acquire) {
+            return Err(MemoryStatus::Domain);
+        }
+        backing
+            .bind_coherence(&self.identity)
+            .map_err(|_| MemoryStatus::Domain)?;
+        if !offset.is_multiple_of(HOST_QUANTITY_BYTES) {
+            return Err(MemoryStatus::InvalidRequest);
+        }
+        let pointer = backing
+            .host_pointer(offset, HOST_QUANTITY_BYTES, AccessKind::Read)
+            .map_err(|_| MemoryStatus::Translation)?;
+        backing
+            .host_pointer(offset, HOST_QUANTITY_BYTES, AccessKind::Write)
+            .map_err(|_| MemoryStatus::Permission)?;
+        if !(pointer.as_ptr() as usize).is_multiple_of(HOST_QUANTITY_BYTES) {
+            return Err(MemoryStatus::Unsupported);
+        }
+        access::read_footprint(
+            pointer.as_ptr() as usize,
+            HOST_QUANTITY_BYTES,
+            TargetCpu::Baseline,
+        )
+        .map_err(|_| MemoryStatus::Unsupported)?;
+        let range = monitor::WriteRange::new(
+            Arc::clone(backing),
+            offset as u64,
+            HOST_QUANTITY_BYTES as u64,
+        )
+        .map_err(|_| MemoryStatus::Domain)?;
+        let mut mutation = self.prepare_source_write(backing, offset, HOST_QUANTITY_BYTES)?;
+        enum Attempt {
+            Mismatch,
+            Native,
+        }
+        let result = self
+            .reservations
+            .with_writer(&range, monitor::Invalidation::OnCommit, || {
+                // SAFETY: exact aligned private read while the same physical gate
+                // excludes every source/host/alias writer. No AtomicLoad16 needed.
+                let observed = unsafe {
+                    access::read_part(pointer.as_ptr(), HOST_QUANTITY_BYTES, TargetCpu::Baseline)
+                }
+                .map_err(|_| Attempt::Native)? as u64;
+                if observed != expected {
+                    return Err(Attempt::Mismatch);
+                }
+                mutation.attempting();
+                // SAFETY: the same pinned exact extent; XCHG publishes one SCA
+                // write for ungated ordinary readers while our writer gate is held.
+                unsafe {
+                    access::write_part(
+                        pointer.as_ptr(),
+                        HOST_QUANTITY_BYTES,
+                        u128::from(replacement),
+                        TargetCpu::Baseline,
+                    )
+                }
+                .map_err(|_| Attempt::Native)?;
+                mutation.complete();
+                Ok(())
+            });
+        match result {
+            Ok(()) => Ok(true),
+            Err(monitor::AccessError::Memory(Attempt::Mismatch)) => Ok(false),
+            Err(_) => Err(MemoryStatus::Domain),
+        }
+    }
+
     /// Publish private host bytes to the backing, invalidating reservations.
     ///
     /// Guest permissions and whole-operation checks are the caller's, so a host
@@ -350,6 +439,130 @@ mod tests {
             monitor::Shape::Scalar,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn conditional_descriptor_miss_has_no_store_or_reservation_effect() {
+        let system = system();
+        let backing = backing(RIGHTS);
+        let domain = domain(&system, &backing, GUEST_BASE);
+        let access = reservation_access(&domain, 0);
+        let mut reservation = system.reservations.thread();
+        system
+            .reservations
+            .load(&mut reservation, &access, || Ok::<_, ()>(()))
+            .unwrap();
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&backing, 0, 1, 2) },
+            Ok(false)
+        );
+        assert_eq!(snapshot(&backing), vec![0; STORAGE_BYTES]);
+        assert_eq!(
+            system
+                .reservations
+                .store(&mut reservation, &access, || Ok::<_, ()>(()))
+                .unwrap(),
+            monitor::ConditionalWrite::Stored(())
+        );
+        system
+            .reservations
+            .load(&mut reservation, &access, || Ok::<_, ()>(()))
+            .unwrap();
+        // Successful same-value publication is still a physical writer event.
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&backing, 0, 0, 0) },
+            Ok(true)
+        );
+        assert_eq!(
+            system
+                .reservations
+                .store(&mut reservation, &access, || -> Result<(), ()> {
+                    panic!("same-value descriptor write must invalidate")
+                })
+                .unwrap(),
+            monitor::ConditionalWrite::Failed
+        );
+    }
+
+    #[test]
+    fn descriptor_updates_preflight_exact_rights_bounds_and_coherence() {
+        let system = system();
+        let backing = backing(RIGHTS);
+        publish(&system, &backing, 0, &[0x5a; STORAGE_BYTES]).unwrap();
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&backing, 1, 0, 1) },
+            Err(MemoryStatus::InvalidRequest)
+        );
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&backing, STORAGE_BYTES, 0, 1) },
+            Err(MemoryStatus::Translation)
+        );
+        let other = MemorySystem::new(16, 4).unwrap();
+        assert_eq!(
+            unsafe { other.compare_update_descriptor(&backing, 0, 0, 1) },
+            Err(MemoryStatus::Domain)
+        );
+        assert_eq!(snapshot(&backing), vec![0x5a; STORAGE_BYTES]);
+        let readonly = self::backing(READONLY);
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&readonly, 0, 0, 1) },
+            Err(MemoryStatus::Permission)
+        );
+        assert_eq!(snapshot(&readonly), vec![0; STORAGE_BYTES]);
+        assert_eq!(
+            unsafe { system.compare_update_descriptor(&backing, 8, 0x5a5a_5a5a_5a5a_5a5a, 0x1234) },
+            Ok(true)
+        );
+        let mut expected = vec![0x5a; STORAGE_BYTES];
+        expected[8..16].copy_from_slice(&0x1234u64.to_le_bytes());
+        assert_eq!(snapshot(&backing), expected);
+    }
+
+    #[test]
+    fn native_concurrent_descriptor_updates_share_the_same_alias_writer_gate() {
+        let system = system();
+        let backing = backing(RIGHTS);
+        let first = domain(&system, &backing, GUEST_BASE);
+        let alias = domain(&system, &backing, ALIAS_BASE);
+        let alias_access = reservation_access(&alias, 0);
+        let mut reservation = system.reservations.thread();
+        system
+            .reservations
+            .load(&mut reservation, &alias_access, || Ok::<_, ()>(()))
+            .unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    let pointer = backing.host_pointer(0, 8, AccessKind::Read).unwrap();
+                    for _ in 0..10_000 {
+                        loop {
+                            let old = unsafe {
+                                access::read_part(pointer.as_ptr(), 8, TargetCpu::Baseline)
+                            }
+                            .unwrap() as u64;
+                            if unsafe {
+                                system.compare_update_descriptor(&backing, 0, old, old + 1)
+                            }
+                            .unwrap()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(&snapshot(&backing)[..8], &20_000u64.to_le_bytes());
+        assert_eq!(
+            system
+                .reservations
+                .store(&mut reservation, &alias_access, || -> Result<(), ()> {
+                    panic!("concurrent aliased writer must invalidate")
+                })
+                .unwrap(),
+            monitor::ConditionalWrite::Failed
+        );
+        assert!(first.check_execution().is_ok());
     }
 
     #[test]

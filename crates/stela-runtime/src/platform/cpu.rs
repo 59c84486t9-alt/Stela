@@ -1,4 +1,5 @@
-//! Boot CPU feature admission (provided by the loader).
+//! Host CPU admission for each independently owned execution boundary.
+pub(crate) mod system;
 pub(crate) fn admitted(target: stela_compiler::TargetCpu) -> bool {
     #[cfg(feature = "std")]
     {

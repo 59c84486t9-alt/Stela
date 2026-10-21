@@ -1,7 +1,10 @@
 //! LSE and ordered operations over the same physical all-writer protocol as
 //! ordinary stores, exclusive stores and host publication. No direct/DMA writer
 //! may bypass it. Each typed request owns initialized disjoint private staging.
-use super::{AccessKind, Arc, DataPolicy, MemoryThread, SCA_BYTES, access, monitor};
+use super::{
+    AccessKind, Arc, DataOperation, DataPart, DataPolicy, DataRequest, MemoryThread, SCA_BYTES,
+    access, monitor,
+};
 use core::sync::atomic::{Ordering, fence};
 use stela_compiler::{
     TargetCpu,
@@ -85,7 +88,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 };
                 // SAFETY: exact value staging is private and the ordinary path
                 // shares the same checked writer and SCA-reader services.
-                unsafe { self.transfer(view, &transfer)? };
+                unsafe { self.transfer_ordinary(view, &transfer, DataOperation::Ordered)? };
                 if operation == OrderedOperation::Load {
                     // MOV reads are acquire on coherent x86 WB RAM; a compiler
                     // acquire fence is sufficient, with XCHG source releases.
@@ -111,18 +114,17 @@ impl<P: DataPolicy> MemoryThread<P> {
         if raw & (SCA_BYTES as u64 - 1) > SCA_BYTES as u64 - u64::from(request.bytes) {
             return Err(fail(MemoryStatus::Alignment));
         }
+        let intent = DataRequest::native(request, DataOperation::Atomic);
+        self.policy.validate_data_request(intent).map_err(fail)?;
         view.fault_access = FaultAccess::Read as u32;
-        let address = self.policy.translate(raw).map_err(fail)?;
-        for offset in 1..request.bytes {
-            let raw_byte = raw.wrapping_add(u64::from(offset));
-            let translated = self
-                .policy
-                .translate(raw_byte)
-                .map_err(|status| (status, raw_byte))?;
-            if address.checked_add(u64::from(offset)) != Some(translated) {
-                return Err((MemoryStatus::Translation, raw_byte));
-            }
-        }
+        let address = self.policy.translate_part(
+            intent,
+            DataPart {
+                address: raw,
+                bytes,
+                kind: AccessKind::Read,
+            },
+        )?;
         if address & (SCA_BYTES as u64 - 1) != raw & (SCA_BYTES as u64 - 1) {
             return Err(fail(MemoryStatus::Unsupported));
         }
@@ -131,6 +133,19 @@ impl<P: DataPolicy> MemoryThread<P> {
             .resolve(address, bytes, AccessKind::Read)
             .map_err(fail)?;
         view.fault_access = FaultAccess::Write as u32;
+        let write_address = self.policy.translate_part(
+            intent,
+            DataPart {
+                address: raw,
+                bytes,
+                kind: AccessKind::Write,
+            },
+        )?;
+        if write_address != address {
+            // No RMW may combine a read from one physical identity with a
+            // write to another if the dynamic source mapping changed.
+            return Err(fail(MemoryStatus::Unsupported));
+        }
         let write = self
             .domain
             .resolve(address, bytes, AccessKind::Write)

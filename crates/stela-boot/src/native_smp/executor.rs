@@ -16,6 +16,8 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
 };
 
+mod mailbox;
+
 const STARTING: u8 = 0;
 const READY: u8 = 1;
 const REFUSED: u8 = 2;
@@ -44,6 +46,7 @@ struct Argument {
     doorbells: UnsafeCell<Option<&'static core::sync::atomic::AtomicU64>>,
     refusal: UnsafeCell<Option<&'static str>>,
     status: AtomicU8,
+    mailbox: mailbox::Mailbox,
 }
 
 // SAFETY: the BSP initializes immutable identity/source fields before SIPI.
@@ -132,18 +135,6 @@ impl Executors {
     }
 }
 
-fn park() -> ! {
-    loop {
-        // No native frame is running here. A doorbell can wake this core, but
-        // only a generation-bound runtime command may give it work or release
-        // a stopped cohort. Its descriptors/GS/local HostOwner stay pinned.
-        // SAFETY: private IDT/IST/GS is installed before park is called.
-        unsafe {
-            asm!("sti", "hlt", "cli", options(nomem, nostack));
-        }
-    }
-}
-
 unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     // SAFETY: BSP supplied one pinned Argument to exactly this physical AP.
     let argument = unsafe { &*(argument as *const Argument) };
@@ -216,11 +207,19 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
         Ok(owner)
     })();
     match initialized {
-        Ok(_owner) => {
+        Ok(mut owner) => {
             argument.status.store(READY, Ordering::Release);
-            // The owner deliberately remains live across park; it must not be
-            // dropped while NMI/MCE or a later native command can reach it.
-            park()
+            let mut worker = None;
+            loop {
+                if argument.mailbox.poll(&mut owner, &mut worker) {
+                    continue;
+                }
+                // STI's interrupt shadow includes HLT: a pending 0x60 wakes
+                // this AP without a poll-to-sleep lost-notification window.
+                unsafe {
+                    asm!("sti", "hlt", "cli", options(nomem, nostack));
+                }
+            }
         }
         Err(reason) => {
             // SAFETY: only this AP writes the immutable reason before Release
@@ -334,6 +333,7 @@ pub(crate) unsafe fn start(
             doorbells: UnsafeCell::new(None),
             refusal: UnsafeCell::new(None),
             status: AtomicU8::new(STARTING),
+            mailbox: mailbox::Mailbox::new(),
         }));
         let physical = handoff.native_resources.sipi;
         crate::output::arguments(format_args!(

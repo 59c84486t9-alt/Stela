@@ -16,6 +16,9 @@ mod protection;
 mod published;
 mod service;
 pub(crate) mod source_ram;
+pub use source_ram::system::{
+    RegisteredSystemRam, RegistrationError as SystemRamRegistrationError, ReservedSystemRamRange,
+};
 pub mod stage1;
 mod storage;
 pub mod tag_execution;
