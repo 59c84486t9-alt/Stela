@@ -116,6 +116,9 @@ impl Domain {
         if inventory.upstream_port > max || inventory.adapters.len() != usize::from(max) {
             return Err(Error::Inventory);
         }
+        if inventory.path.depth()!=0 && (inventory.upstream_port==0 || !inventory.adapters.iter().any(|adapter|matches!(adapter,AdapterObservation::Present { port,header,.. } if *port==inventory.upstream_port && header.kind()==AdapterKind::Lane))) {
+            return Err(Error::Inventory);
+        }
         let mut seen = 0u64;
         for adapter in &inventory.adapters {
             let port = match adapter {
@@ -392,5 +395,39 @@ mod tests {
                 .usb4_version(),
             1
         );
+    }
+
+    #[test]
+    fn nonroot_upstream_requires_actual_present_lane_without_mutating_observations() {
+        let mut domain = Domain::new(identity(), 20).unwrap();
+        domain.observe(inventory(0, true)).unwrap();
+        let history = domain.history().to_vec();
+        let generation = domain.generation();
+        for case in 0..4 {
+            let mut child = inventory(1, true);
+            match case {
+                0 => child.upstream_port = 0,
+                1 => {
+                    child.adapters[1] = AdapterObservation::Unimplemented {
+                        port: 2,
+                        response_route: Route::new(1).unwrap(),
+                        response_port: 2,
+                        raw: 2,
+                    }
+                }
+                2 | 3 => {
+                    let AdapterObservation::Present { header, .. } = &mut child.adapters[1] else {
+                        panic!("fixture")
+                    };
+                    header.raw[2] = if case == 2 { 2 } else { 0xabcdef };
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(domain.observe(child), Err(Error::Inventory));
+            assert_eq!(domain.history(), history);
+            assert_eq!(domain.generation(), generation);
+        }
+        domain.observe(inventory(1, true)).unwrap();
+        assert_eq!(domain.generation(), generation + 1);
     }
 }
