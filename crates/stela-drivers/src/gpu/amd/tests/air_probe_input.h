@@ -65,8 +65,9 @@ read_raw_input(const char *path)
 }
 
 static bool
-input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
-              char input_hash[BLAKE3_HEX_LEN])
+input_receipt_options(LLVMMemoryBufferRef input, const char *entry, bool file,
+                      char input_hash[BLAKE3_HEX_LEN], const unsigned workgroup[3],
+                      unsigned instruction_budget)
 {
    blake3_hash hash;
    _mesa_blake3_compute(LLVMGetBufferStart(input), LLVMGetBufferSize(input), hash);
@@ -95,8 +96,8 @@ input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
    printf("STELA_AIR_INPUT {\"origin\":\"%s\",\"bytes\":%zu,\"blake3\":\"%s\",\"entry\":",
           file ? "raw_input_file" : "original_fixture", LLVMGetBufferSize(input), input_hash);
    json_string(entry);
-   printf(",\"workgroup_size\":[32,1,1],\"instruction_budget\":100,\"llvm_version\":[%u,%u,%u],\"target\":",
-          major, minor, patch);
+   printf(",\"workgroup_size\":[%u,%u,%u],\"instruction_budget\":%u,\"llvm_version\":[%u,%u,%u],\"target\":",
+          workgroup[0], workgroup[1], workgroup[2], instruction_budget, major, minor, patch);
    json_string(LLVMGetTarget(module));
    printf(",\"mesa_version\":");
    json_string(PACKAGE_VERSION);
@@ -129,6 +130,14 @@ input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
    LLVMDisposeModule(module);
    LLVMContextDispose(context);
    return true;
+}
+
+static bool
+input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
+              char input_hash[BLAKE3_HEX_LEN])
+{
+   const unsigned workgroup[3] = {32, 1, 1};
+   return input_receipt_options(input, entry, file, input_hash, workgroup, 100);
 }
 
 #endif
