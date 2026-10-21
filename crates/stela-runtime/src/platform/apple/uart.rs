@@ -18,7 +18,9 @@
 //! state is the 8N1, FIFO-enabled, polled console left by the boot firmware.
 //! Transmitted bytes go to the host [`ConsoleSink`] immediately; bytes it cannot
 //! take stay in the 16-byte TX FIFO and are reported as FIFO occupancy.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+};
 use super::interrupt::{AicInput, Wire};
 use alloc::collections::VecDeque;
 
@@ -100,6 +102,8 @@ const UFSTAT_RX_FULL: u32 = 1 << 8;
 const UFSTAT_TX_FULL: u32 = 1 << 9;
 
 const UBRDIV_FIELDS: u32 = 0xf_ffff;
+const CONFIGURATION: u16 = 0xf; // ULCON, UCON, UFCON, UMCON.
+const TRANSFER_CONFIGURATION: u16 = 0x7; // Framing, modes and FIFOs; CTS is always ready.
 
 /// The host side of the console: COM1 and the firmware framebuffer in
 /// `stela.efi`.
@@ -122,6 +126,8 @@ pub struct S5lUart<C> {
     status: u32,
     tx: VecDeque<u8>,
     rx: VecDeque<u8>,
+    lifecycle: LifecycleState,
+    configuration: u16,
 }
 impl<C: ConsoleSink> S5lUart<C> {
     /// `irq` is the node's DeviceTree `interrupts` AIC input, if it has one.
@@ -139,6 +145,14 @@ impl<C: ConsoleSink> S5lUart<C> {
             status: 0,
             tx: VecDeque::with_capacity(FIFO_BYTES),
             rx: VecDeque::with_capacity(FIFO_BYTES),
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
+            configuration: CONFIGURATION,
         }
     }
     pub fn console(&mut self) -> &mut C {
@@ -147,6 +161,9 @@ impl<C: ConsoleSink> S5lUart<C> {
     /// Delivers host input. Returns how many bytes fit in the RX FIFO; the
     /// caller keeps the rest. The end of the call is the end of the burst.
     pub fn receive(&mut self, bytes: &[u8], access: &mut Access<'_>) -> usize {
+        if !self.active() || self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
+            return 0;
+        }
         let accepted = bytes.len().min(FIFO_BYTES - self.rx.len());
         let trigger = [4, 8, 12, 16][field(self.ufcon, UFCON_RX_TRIGGER_SHIFT)];
         for &byte in &bytes[..accepted] {
@@ -169,6 +186,9 @@ impl<C: ConsoleSink> S5lUart<C> {
     }
 
     fn drain_tx(&mut self, peak: usize) {
+        if !self.active() || self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
+            return;
+        }
         while let Some(&byte) = self.tx.front() {
             if self.console.transmit(byte).is_err() {
                 break;
@@ -213,7 +233,7 @@ impl<C: ConsoleSink> S5lUart<C> {
         .fold(0, |mask, (_, status)| mask | status)
     }
     fn update_irq(&mut self, access: &mut Access<'_>) {
-        let level = self.status & self.enabled_status() != 0;
+        let level = self.active() && self.status & self.enabled_status() != 0;
         if level != self.irq_level {
             self.irq_level = level;
             if let Some(irq) = self.irq {
@@ -275,6 +295,11 @@ impl<C: ConsoleSink> S5lUart<C> {
                 self.status &= !(value & UTRSTAT_CLEARABLE);
             }
             UTXH => {
+                if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
+                    return Err(
+                        "UART framing/FIFO configuration after power loss or reset is unknown",
+                    );
+                }
                 if field(self.ucon, UCON_TRANSMIT_MODE_SHIFT)
                     != UCON_MODE_INTERRUPT_OR_POLLING as usize
                 {
@@ -299,9 +324,15 @@ impl<C: ConsoleSink> S5lUart<C> {
             UVER => return Err("UVER version value is not known"),
             _ => return Err("unknown S5L UART register"),
         }
+        if offset <= UMCON {
+            self.configuration |= 1 << (offset / 4);
+        }
         Ok(())
     }
     fn read_register(&mut self, offset: u64) -> Result<u32, &'static str> {
+        if offset <= UMCON && self.configuration & (1 << (offset / 4)) == 0 {
+            return Err("UART configuration reset value has not been qualified");
+        }
         Ok(match offset {
             ULCON => self.ulcon,
             UCON => self.ucon,
@@ -327,6 +358,46 @@ impl<C: ConsoleSink> S5lUart<C> {
             _ => return Err("unknown S5L UART register"),
         })
     }
+
+    fn mmio_ready(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("UART power domain is off");
+        }
+        if !self.lifecycle.clocked {
+            return Err("UART clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("UART physical reset is asserted");
+        }
+        Ok(())
+    }
+
+    fn active(&self) -> bool {
+        self.mmio_ready().is_ok() && !self.lifecycle.quiesced
+    }
+}
+
+impl<C: ConsoleSink> Lifecycle for S5lUart<C> {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        if self.lifecycle.powered && !proposed.powered && !proposed.retention
+            || !self.lifecycle.reset && proposed.reset
+        {
+            // The external console and already transmitted bytes survive.
+            // Configuration values after physical reset are not inferred
+            // from the boot firmware's deliberately configured handoff.
+            self.configuration = 0;
+            self.ubrdiv = None;
+            self.status = 0;
+            self.tx.clear();
+            self.rx.clear();
+        }
+        self.lifecycle = proposed;
+        self.flush(access);
+    }
 }
 
 fn field(register: u32, shift: u32) -> usize {
@@ -334,6 +405,9 @@ fn field(register: u32, shift: u32) -> usize {
 }
 
 impl<C: ConsoleSink + 'static> MmioDevice for S5lUart<C> {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -352,6 +426,8 @@ impl<C: ConsoleSink + 'static> MmioDevice for S5lUart<C> {
                 "S5L UART registers are 32-bit",
             ));
         }
+        self.mmio_ready()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
         let value = self
             .read_register(offset)
             .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
@@ -374,6 +450,8 @@ impl<C: ConsoleSink + 'static> MmioDevice for S5lUart<C> {
                 "S5L UART registers are 32-bit",
             ));
         }
+        self.mmio_ready()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
         self.write_register(offset, value as u32)
             .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
         self.update_irq(access);
@@ -410,6 +488,109 @@ mod tests {
     const IRQ: AicInput = AicInput::new(0, 739);
     fn uart() -> S5lUart<Console> {
         S5lUart::new(Console::default(), Some(IRQ))
+    }
+
+    fn lifecycle(uart: &mut S5lUart<Console>, state: LifecycleState, latch: &mut InterruptLatch) {
+        uart.check_lifecycle(state).unwrap();
+        uart.set_lifecycle(state, &mut Access::new(0, 0, latch));
+    }
+
+    #[test]
+    fn retained_pauses_preserve_fifo_and_irq_without_transmitting_while_gated() {
+        let mut uart = uart();
+        let mut latch = InterruptLatch::new();
+        write(&mut uart, &mut latch, UCON, 5 | UCON_TXTHRESH_ENABLE);
+        write(&mut uart, &mut latch, UTXH, u32::from(b'a'));
+        assert!(latch.is_asserted(Wire::Aic(IRQ)));
+        uart.console().busy = true;
+        write(&mut uart, &mut latch, UTXH, u32::from(b'b'));
+        let active = uart.lifecycle;
+        for paused in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+        ] {
+            lifecycle(&mut uart, paused, &mut latch);
+            uart.console().busy = false;
+            uart.flush(&mut Access::new(0, 0, &mut latch));
+            assert_eq!(uart.console().bytes, b"a");
+            assert_eq!(uart.tx.front(), Some(&b'b'));
+            assert!(!latch.is_asserted(Wire::Aic(IRQ)));
+            assert_eq!(uart.receive(b"rx", &mut Access::new(0, 0, &mut latch)), 0);
+            uart.console().busy = true;
+            lifecycle(&mut uart, active, &mut latch);
+            assert!(latch.is_asserted(Wire::Aic(IRQ)));
+        }
+        uart.console().busy = false;
+        uart.flush(&mut Access::new(0, 0, &mut latch));
+        assert_eq!(uart.console().bytes, b"ab");
+    }
+
+    #[test]
+    fn destructive_edges_keep_the_console_but_require_explicit_register_initialization() {
+        for reset in [false, true] {
+            let mut uart = uart();
+            let mut latch = InterruptLatch::new();
+            write(&mut uart, &mut latch, UTXH, u32::from(b'a'));
+            uart.console().busy = true;
+            write(&mut uart, &mut latch, UTXH, u32::from(b'b'));
+            assert_eq!(uart.receive(b"rx", &mut Access::new(0, 0, &mut latch)), 2);
+            let active = uart.lifecycle;
+            lifecycle(
+                &mut uart,
+                LifecycleState {
+                    powered: reset,
+                    reset,
+                    ..active
+                },
+                &mut latch,
+            );
+            assert!(
+                uart.read(UTRSTAT, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            lifecycle(&mut uart, active, &mut latch);
+            assert!(uart.tx.is_empty() && uart.rx.is_empty());
+            assert_eq!(uart.console().bytes, b"a");
+            assert!(
+                uart.read(UCON, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            assert!(
+                uart.write(
+                    UTXH,
+                    Width::Word,
+                    u64::from(b'c'),
+                    &mut Access::new(0, 0, &mut latch)
+                )
+                .is_err()
+            );
+            write(&mut uart, &mut latch, ULCON, 3);
+            write(&mut uart, &mut latch, UCON, 5);
+            write(&mut uart, &mut latch, UFCON, UFCON_FIFO_ENABLE);
+            uart.console().busy = false;
+            write(&mut uart, &mut latch, UTXH, u32::from(b'd'));
+            assert_eq!(uart.console().bytes, b"ad");
+            assert_eq!(read(&mut uart, &mut latch, UCON), 5);
+            assert!(
+                uart.read(UMCON, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            assert!(
+                uart.read(UBRDIV, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+        }
     }
     fn write(uart: &mut S5lUart<Console>, latch: &mut InterruptLatch, offset: u64, value: u32) {
         uart.write(

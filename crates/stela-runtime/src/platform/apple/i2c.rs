@@ -18,7 +18,7 @@
 //! fields and target operations refuse, including diagnostic XFSTA, whose
 //! encoding the available evidence does not establish.
 use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -54,6 +54,20 @@ const RX_RESET: u32 = 1 << 10;
 const UNJAM: u32 = 1 << 8;
 const DISABLE_TIMEOUT: u32 = 1 << 31;
 const CAPACITY: usize = 128;
+const CONFIGURATION: u8 = 0x3f;
+const TRANSFER_CONFIGURATION: u8 = 0xb; // CONTROL, TIMEOUT and RX_CONFIG.
+
+fn configuration_bit(offset: u64) -> u8 {
+    match offset {
+        CONTROL => 1,
+        TIMEOUT => 2,
+        MASK => 4,
+        RX_CONFIG => 8,
+        TIMING => 16,
+        FILTER => 32,
+        _ => 0,
+    }
+}
 
 /// A target NACK is a bus result; an undescribed operation stops the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,6 +117,8 @@ pub struct I2c {
     reading: bool,
     write: Vec<u8>,
     rx: VecDeque<u8>,
+    lifecycle: LifecycleState,
+    configuration: u8,
 }
 
 impl I2c {
@@ -121,6 +137,14 @@ impl I2c {
             reading: false,
             write: Vec::new(),
             rx: VecDeque::new(),
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
+            configuration: CONFIGURATION,
         }
     }
     /// Attach only explicitly placed targets; an unoccupied address NACKs.
@@ -149,9 +173,27 @@ impl I2c {
             }
     }
     fn interrupt(&self, access: &mut Access<'_>) {
-        access
-            .interrupts
-            .set_level(Wire::Aic(self.irq), self.status() & self.mask != 0);
+        access.interrupts.set_level(
+            Wire::Aic(self.irq),
+            self.active() && self.status() & self.mask != 0,
+        );
+    }
+
+    fn mmio_ready(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("I2C power domain is off");
+        }
+        if !self.lifecycle.clocked {
+            return Err("I2C clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("I2C physical reset is asserted");
+        }
+        Ok(())
+    }
+
+    fn active(&self) -> bool {
+        self.mmio_ready().is_ok() && !self.lifecycle.quiesced
     }
     fn exchange(
         &mut self,
@@ -247,7 +289,38 @@ impl I2c {
     }
 }
 
+impl Lifecycle for I2c {
+    fn check_lifecycle(&self, _: LifecycleState) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        if self.lifecycle.powered && !proposed.powered && !proposed.retention
+            || !self.lifecycle.reset && proposed.reset
+        {
+            // End controller framing without resetting independently powered
+            // target devices or undoing their already completed transfers.
+            for target in &mut self.targets {
+                target.device.abort();
+            }
+            self.address = None;
+            self.reading = false;
+            self.write.clear();
+            self.rx.clear();
+            self.status = 0;
+            self.mask = 0;
+            self.rx_config = 0;
+            self.configuration = 0;
+        }
+        self.lifecycle = proposed;
+        self.interrupt(access);
+    }
+}
+
 impl MmioDevice for I2c {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -260,6 +333,11 @@ impl MmioDevice for I2c {
         let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("I2C registers require aligned 32-bit accesses"));
+        }
+        self.mmio_ready().map_err(err)?;
+        let bit = configuration_bit(offset);
+        if bit != 0 && self.configuration & bit == 0 {
+            return Err(err("I2C configuration reset value has not been qualified"));
         }
         let value = match offset {
             RX => self.rx.pop_front().map_or(EMPTY, u32::from),
@@ -288,9 +366,20 @@ impl MmioDevice for I2c {
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("I2C registers require aligned 32-bit accesses"));
         }
+        self.mmio_ready().map_err(err)?;
         let value = value as u32;
         match offset {
-            TX => self.fifo(value).map_err(err)?,
+            TX => {
+                if !self.active() {
+                    return Err(err("I2C client is quiesced"));
+                }
+                if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
+                    return Err(err(
+                        "I2C divider, timeout and receive configuration require initialization",
+                    ));
+                }
+                self.fifo(value).map_err(err)?;
+            }
             STATUS => {
                 if value & !STATUS_KNOWN != 0 {
                     return Err(err("unknown I2C status acknowledgement bits"));
@@ -333,6 +422,7 @@ impl MmioDevice for I2c {
                 ));
             }
         }
+        self.configuration |= configuration_bit(offset);
         self.interrupt(access);
         Ok(())
     }
@@ -370,6 +460,133 @@ mod tests {
     }
     fn rd(c: &mut I2c, a: &mut Access<'_>, offset: u64) -> u64 {
         c.read(offset, Width::Word, a).unwrap()
+    }
+
+    #[test]
+    fn retained_pauses_preserve_split_transfers_and_irq_without_clocking_targets() {
+        let irq = AicInput::new(0, 761);
+        let mut c = I2c::new(irq);
+        c.attach(0x38, Box::new(Echo { cursor: 0 })).unwrap();
+        let mut latch = InterruptLatch::new();
+        wr(&mut c, &mut Access::new(0, 0, &mut latch), MASK, END);
+        wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, START | 0x70);
+        wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, 0x23);
+        wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, START | 0x71);
+        wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, READ | 1);
+        let active = c.lifecycle;
+        for paused in [
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            c.check_lifecycle(paused).unwrap();
+            c.set_lifecycle(paused, &mut Access::new(0, 0, &mut latch));
+            assert!(!latch.is_asserted(Wire::Aic(irq)));
+            assert!(
+                c.write(
+                    TX,
+                    Width::Word,
+                    u64::from(READ | 1),
+                    &mut Access::new(0, 0, &mut latch)
+                )
+                .is_err()
+            );
+            assert_eq!(c.rx.iter().copied().collect::<Vec<_>>(), [0x23]);
+            assert_eq!((c.address, c.reading), (Some(0x38), true));
+            c.set_lifecycle(active, &mut Access::new(0, 0, &mut latch));
+            assert!(latch.is_asserted(Wire::Aic(irq)));
+        }
+        assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), RX), 0x23);
+        wr(
+            &mut c,
+            &mut Access::new(0, 0, &mut latch),
+            TX,
+            READ | STOP | 2,
+        );
+        assert_eq!(
+            [
+                rd(&mut c, &mut Access::new(0, 0, &mut latch), RX),
+                rd(&mut c, &mut Access::new(0, 0, &mut latch), RX)
+            ],
+            [0x24, 0x25]
+        );
+    }
+
+    #[test]
+    fn destructive_edges_abort_controller_framing_but_keep_independent_target_state() {
+        for reset in [false, true] {
+            let irq = AicInput::new(0, 761);
+            let mut c = I2c::new(irq);
+            c.attach(0x38, Box::new(Echo { cursor: 0x41 })).unwrap();
+            let mut latch = InterruptLatch::new();
+            wr(&mut c, &mut Access::new(0, 0, &mut latch), MASK, END);
+            wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, START | 0x71);
+            wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, READ | 1);
+            let active = c.lifecycle;
+            let down = LifecycleState {
+                powered: reset,
+                reset,
+                ..active
+            };
+            c.check_lifecycle(down).unwrap();
+            c.set_lifecycle(down, &mut Access::new(0, 0, &mut latch));
+            assert!(!latch.is_asserted(Wire::Aic(irq)));
+            assert!(
+                c.read(STATUS, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            c.set_lifecycle(active, &mut Access::new(0, 0, &mut latch));
+            assert!(c.address.is_none() && c.write.is_empty() && c.rx.is_empty());
+            assert!(
+                c.read(CONTROL, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            assert!(
+                c.write(
+                    TX,
+                    Width::Word,
+                    u64::from(START | 0x71),
+                    &mut Access::new(0, 0, &mut latch)
+                )
+                .is_err()
+            );
+            wr(
+                &mut c,
+                &mut Access::new(0, 0, &mut latch),
+                CONTROL,
+                TX_RESET | RX_RESET | 4,
+            );
+            wr(
+                &mut c,
+                &mut Access::new(0, 0, &mut latch),
+                TIMEOUT,
+                DISABLE_TIMEOUT,
+            );
+            wr(&mut c, &mut Access::new(0, 0, &mut latch), RX_CONFIG, 0);
+            wr(&mut c, &mut Access::new(0, 0, &mut latch), TX, START | 0x71);
+            wr(
+                &mut c,
+                &mut Access::new(0, 0, &mut latch),
+                TX,
+                READ | STOP | 1,
+            );
+            assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), RX), 0x42);
+            assert_eq!(rd(&mut c, &mut Access::new(0, 0, &mut latch), CONTROL), 4);
+            assert!(
+                c.read(TIMING, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+        }
     }
     #[test]
     fn combined_split_read_counts_mask_ack_and_reset() {

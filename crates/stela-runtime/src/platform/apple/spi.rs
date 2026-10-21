@@ -21,7 +21,7 @@
 //! SHIFTCFG, and only while an external GPIO drives the chip select, since
 //! the internal CS output is then disconnected from the attached device.
 use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
     nor::{Image, Nor},
 };
@@ -59,6 +59,21 @@ const IE_THRESHOLD: u32 = 1 << 8;
 const IE_TX_COMPLETE: u32 = 1 << 21;
 const FIFO_THRESHOLD: u32 = 3 << 17;
 const CONFIG_MASK: u32 = 6 | MODE | IE_RX_COMPLETE | IE_THRESHOLD | IE_TX_COMPLETE | FIFO_THRESHOLD;
+const TRANSFER_CONFIGURATION: u8 = 3; // CTRL and CFG.
+
+fn configuration_bit(offset: u64) -> u8 {
+    match offset {
+        CTRL => 1,
+        CFG => 2,
+        PIN => 4,
+        CLKDIV => 8,
+        DELAY => 16,
+        SHIFTCFG => 32,
+        DELAY_PRE => 64,
+        DELAY_POST => 128,
+        _ => 0,
+    }
+}
 
 pub struct Spi {
     nor: Nor,
@@ -77,6 +92,8 @@ pub struct Spi {
     rx: VecDeque<u8>,
     /// External CS wiring disables the internal PIN output's connection.
     external_cs: bool,
+    lifecycle: LifecycleState,
+    configuration: u8,
 }
 impl Spi {
     pub fn new(image: Image, irq: AicInput, external_cs: bool) -> Self {
@@ -96,6 +113,14 @@ impl Spi {
             tx: VecDeque::new(),
             rx: VecDeque::new(),
             external_cs,
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
+            configuration: u8::MAX,
         }
     }
     pub fn image(&self) -> &Image {
@@ -135,7 +160,26 @@ impl Spi {
         let enabled = (status & RX_COMPLETE != 0 && self.config & IE_RX_COMPLETE != 0)
             || (status & THRESHOLD != 0 && self.config & IE_THRESHOLD != 0)
             || (status & TX_COMPLETE != 0 && self.config & IE_TX_COMPLETE != 0);
-        access.interrupts.set_level(Wire::Aic(self.irq), enabled);
+        access
+            .interrupts
+            .set_level(Wire::Aic(self.irq), self.active() && enabled);
+    }
+
+    fn mmio_ready(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("SPI power domain is off");
+        }
+        if !self.lifecycle.clocked {
+            return Err("SPI clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("SPI physical reset is asserted");
+        }
+        Ok(())
+    }
+
+    fn active(&self) -> bool {
+        self.mmio_ready().is_ok() && !self.lifecycle.quiesced
     }
     fn pump(&mut self) -> Result<(), &'static str> {
         let checkpoint = self.nor.checkpoint();
@@ -158,8 +202,11 @@ impl Spi {
         Ok(())
     }
     fn pump_inner(&mut self) -> Result<(), &'static str> {
-        if self.control & RUN == 0 {
+        if !self.active() || self.control & RUN == 0 {
             return Ok(());
+        }
+        if self.configuration & TRANSFER_CONFIGURATION != TRANSFER_CONFIGURATION {
+            return Err("SPI control and transfer configuration require initialization");
         }
         while self.tx_count != 0 || self.rx_count != 0 {
             if self.rx_count != 0 && self.rx.len() == FIFO_DEPTH {
@@ -192,7 +239,46 @@ impl Spi {
         Ok(())
     }
 }
+
+impl Lifecycle for Spi {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if (self.lifecycle.powered && !proposed.powered && !proposed.retention
+            || !self.lifecycle.reset && proposed.reset)
+            && !self.external_cs
+        {
+            self.nor.check_select(false)?;
+        }
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        if self.lifecycle.powered && !proposed.powered && !proposed.retention
+            || !self.lifecycle.reset && proposed.reset
+        {
+            if !self.external_cs {
+                // Actual internal CS rising may commit an accepted NOR
+                // program prefix. Its preflight ran before PMGR completion.
+                self.nor.select(false).expect("checked internal SPI CS");
+            }
+            // External GPIO CS and the flash die are separate hardware:
+            // retain their actual transaction, image, WEL and dirty sectors.
+            self.control = 0;
+            self.status = 0;
+            self.tx_count = 0;
+            self.rx_count = 0;
+            self.tx.clear();
+            self.rx.clear();
+            self.configuration = 0;
+        }
+        self.lifecycle = proposed;
+        self.interrupt(access);
+    }
+}
+
 impl MmioDevice for Spi {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -205,6 +291,13 @@ impl MmioDevice for Spi {
         let error = |reason| Self::error(offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(error("SPI registers require aligned 32-bit accesses"));
+        }
+        self.mmio_ready().map_err(error)?;
+        let bit = configuration_bit(offset);
+        if bit != 0 && self.configuration & bit == 0 {
+            return Err(error(
+                "SPI configuration reset value has not been qualified",
+            ));
         }
         let value = match offset {
             CTRL => self.control,
@@ -258,6 +351,7 @@ impl MmioDevice for Spi {
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(error("SPI registers require aligned 32-bit accesses"));
         }
+        self.mmio_ready().map_err(error)?;
         let value = value as u32;
         let saved = (
             self.control,
@@ -269,6 +363,7 @@ impl MmioDevice for Spi {
             self.delay,
             self.tx.clone(),
             self.rx.clone(),
+            self.configuration,
         );
         match offset {
             CTRL => {
@@ -345,6 +440,7 @@ impl MmioDevice for Spi {
             }
             _ => return Err(error("unmodeled or read-only SPI register")),
         }
+        self.configuration |= configuration_bit(offset);
         if matches!(offset, CTRL | TXDATA | TXCNT | RXCNT)
             && let Err(reason) = self.pump()
         {
@@ -358,11 +454,19 @@ impl MmioDevice for Spi {
                 self.delay,
                 self.tx,
                 self.rx,
+                self.configuration,
             ) = saved;
             return Err(error(reason));
         }
         self.interrupt(access);
         Ok(())
+    }
+
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        self.pump()
+            .map_err(|reason| Self::error(CTRL, Width::Word, Direction::Write, reason))?;
+        self.interrupt(access);
+        Ok(None)
     }
 }
 
@@ -373,6 +477,143 @@ mod tests {
     fn write(spi: &mut Spi, offset: u64, value: u32, access: &mut Access<'_>) {
         spi.write(offset, Width::Word, u64::from(value), access)
             .unwrap();
+    }
+
+    #[test]
+    fn retained_pauses_preserve_queued_shifts_and_pending_interrupts() {
+        let irq = AicInput::new(0, 749);
+        let mut spi = Spi::new(Image::fresh(), irq, false);
+        let mut latch = InterruptLatch::new();
+        write(&mut spi, PIN, 0, &mut Access::new(0, 0, &mut latch));
+        write(
+            &mut spi,
+            CFG,
+            IRQ_MODE | IE_TX_COMPLETE,
+            &mut Access::new(0, 0, &mut latch),
+        );
+        let active = spi.lifecycle;
+        let paused = LifecycleState {
+            quiesced: true,
+            ..active
+        };
+        spi.check_lifecycle(paused).unwrap();
+        spi.set_lifecycle(paused, &mut Access::new(0, 0, &mut latch));
+        write(&mut spi, TXCNT, 1, &mut Access::new(0, 0, &mut latch));
+        write(&mut spi, TXDATA, 0x06, &mut Access::new(0, 0, &mut latch));
+        write(&mut spi, CTRL, RUN, &mut Access::new(0, 0, &mut latch));
+        assert_eq!((spi.tx_count, spi.tx.front()), (1, Some(&0x06)));
+        assert_eq!(spi.status, 0);
+        spi.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
+        assert_eq!(spi.tx_count, 1);
+        spi.set_lifecycle(active, &mut Access::new(0, 0, &mut latch));
+        spi.advance(&mut Access::new(0, 0, &mut latch)).unwrap();
+        assert!(spi.tx.is_empty());
+        assert!(latch.is_asserted(Wire::Aic(irq)));
+        for paused in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            spi.check_lifecycle(paused).unwrap();
+            spi.set_lifecycle(paused, &mut Access::new(0, 0, &mut latch));
+            assert!(!latch.is_asserted(Wire::Aic(irq)));
+            assert!(
+                spi.read(STATUS, Width::Word, &mut Access::new(0, 0, &mut latch))
+                    .is_err()
+            );
+            spi.set_lifecycle(active, &mut Access::new(0, 0, &mut latch));
+            assert!(latch.is_asserted(Wire::Aic(irq)));
+        }
+        write(&mut spi, PIN, CS_HIGH, &mut Access::new(0, 0, &mut latch));
+        spi.nor.select(true).unwrap();
+        spi.nor.shift(0x05).unwrap();
+        assert_eq!(
+            spi.nor.shift(0xff).unwrap() & 2,
+            2,
+            "WREN committed at the actual CS edge"
+        );
+    }
+
+    #[test]
+    fn destructive_preflight_keeps_incomplete_internal_cs_transactions_unchanged() {
+        let irq = AicInput::new(0, 749);
+        let mut spi = Spi::new(Image::fresh(), irq, false);
+        spi.nor.select(true).unwrap();
+        spi.nor.shift(0x02).unwrap();
+        let active = spi.lifecycle;
+        for proposed in [
+            LifecycleState {
+                reset: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                ..active
+            },
+        ] {
+            assert_eq!(
+                spi.check_lifecycle(proposed),
+                Err("incomplete NOR command at CS rising")
+            );
+            assert_eq!(spi.lifecycle, active);
+            assert!(spi.nor.selected());
+            assert!(spi.take_dirty().is_empty());
+        }
+    }
+
+    #[test]
+    fn destructive_edges_preserve_the_die_and_only_actual_cs_edges_commit_programs() {
+        for external_cs in [false, true] {
+            for reset in [false, true] {
+                let irq = AicInput::new(0, 749);
+                let mut spi = Spi::new(Image::fresh(), irq, external_cs);
+                spi.nor.select(true).unwrap();
+                spi.nor.shift(0x06).unwrap();
+                spi.nor.select(false).unwrap();
+                spi.nor.select(true).unwrap();
+                for byte in [0x02, 0, 0, 0x20, 0xa5] {
+                    spi.nor.shift(byte).unwrap();
+                }
+                let mut latch = InterruptLatch::new();
+                let mut a = Access::new(0, 0, &mut latch);
+                let active = spi.lifecycle;
+                let down = LifecycleState {
+                    powered: reset,
+                    reset,
+                    ..active
+                };
+                spi.check_lifecycle(down).unwrap();
+                spi.set_lifecycle(down, &mut a);
+                assert_eq!(spi.nor.selected(), external_cs);
+                assert_eq!(
+                    spi.image().bytes()[0x20],
+                    if external_cs { 0xff } else { 0xa5 }
+                );
+                if external_cs {
+                    assert!(spi.take_dirty().is_empty());
+                    spi.set_cs(true).unwrap();
+                }
+                assert_eq!(spi.image().bytes()[0x20], 0xa5);
+                assert_eq!(spi.take_dirty().len(), 1);
+                spi.set_lifecycle(down, &mut a);
+                assert!(
+                    spi.take_dirty().is_empty(),
+                    "held reset cannot replay the CS edge"
+                );
+                assert!(spi.read(CTRL, Width::Word, &mut a).is_err());
+                spi.set_lifecycle(active, &mut a);
+                assert!(spi.read(CTRL, Width::Word, &mut a).is_err());
+                write(&mut spi, CTRL, 0, &mut a);
+                assert_eq!(spi.read(CTRL, Width::Word, &mut a), Ok(0));
+                assert!(spi.read(CFG, Width::Word, &mut a).is_err());
+            }
+        }
     }
     #[test]
     fn long_read_stalls_at_fifo_capacity_and_interrupt_clears_after_drain() {
