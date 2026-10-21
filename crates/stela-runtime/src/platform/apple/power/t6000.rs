@@ -18,6 +18,7 @@ use super::super::bus::{
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+pub mod identity;
 pub mod native;
 
 const NAME: &str = "t6000-power";
