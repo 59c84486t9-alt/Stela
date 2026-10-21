@@ -19,6 +19,7 @@ pub mod identification;
 pub mod impdef;
 pub mod mmu;
 pub mod pmu;
+pub mod pointer_keys;
 pub mod registers;
 pub mod soc;
 pub mod streaming;

@@ -1248,7 +1248,7 @@ mod tests {
             machine.tag_checks = [true, true];
             machine.prediction_context = None;
             machine.pointer.open(super::super::pointer::PointerInputs {
-                keys: [[1, 2]; 5],
+                keys: [Some([1, 2]); 5],
                 version: crate::pauth::Version::Classic,
                 tcr: 17,
             });

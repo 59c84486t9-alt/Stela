@@ -365,6 +365,7 @@ enum Apple {
     ApStatus,
     ApControl(usize),
     KernelKey(usize),
+    PointerKey(super::pointer_keys::Register),
     VmsaLock,
     VmTimerFiq,
     CountAlias,
@@ -428,6 +429,15 @@ impl Cpu {
                 Err(Outcome::Undefined)
             })
         };
+        if let Some(register) = super::pointer_keys::Register::decode(encoding) {
+            return Some(if at_el2 {
+                Ok(Apple::PointerKey(register))
+            } else {
+                Err(Outcome::Refused(Refusal::UnsupportedSetting(
+                    "Apple EL2 PAC key access below EL2 lacks permission qualification",
+                )))
+            });
+        }
         Some(Ok(match encoding {
             SPRR_CONFIG_EL1 => Apple::SprrConfig,
             SPRR_PERM_EL1 => Apple::SprrPerm(if at_el2 { PERM_EL2 } else { PERM_EL1 }),
@@ -658,6 +668,11 @@ impl Cpu {
     /// "Apple Silicon Hardware Secrets") and the counter alias, under the
     /// same enable as CNTVCT_EL0.
     fn apple_el0(&mut self, encoding: Encoding, read: bool, value: u64, physical: u64) -> Outcome {
+        if super::pointer_keys::Register::decode(encoding).is_some() {
+            return Outcome::Refused(Refusal::UnsupportedSetting(
+                "Apple EL2 PAC key access below EL2 lacks permission qualification",
+            ));
+        }
         let register = Apple::SprrPerm(if self.in_host() {
             PERM_EL0_20
         } else {
@@ -813,6 +828,11 @@ impl Apple {
             Self::ApStatus => APSTS_MKEYVLD,
             Self::ApControl(level) => apple.apctl[level],
             Self::KernelKey(index) => apple.kernel_key[index],
+            Self::PointerKey(_) => {
+                return Outcome::Refused(Refusal::UnsupportedSetting(
+                    "Apple EL2 PAC key read permission is unqualified",
+                ));
+            }
             Self::VmsaLock => apple.vmsa_lock,
             Self::VmTimerFiq => apple.vm_timer_fiq,
             Self::CountAlias | Self::PhysicalCountAlias => {
@@ -910,6 +930,7 @@ impl Apple {
             Self::TpidrGl(level) => apple.guarded[level].tpidr = value,
             Self::ApControl(level) => apple.apctl[level] = value,
             Self::KernelKey(index) => apple.kernel_key[index] = value,
+            Self::PointerKey(register) => apple.pointer_keys.write(register, value),
             Self::VmsaLock => {
                 if value & !VMSA_LOCK_KNOWN != 0 {
                     return refuse("VMSA_LOCK_EL1 bit without documented meaning");

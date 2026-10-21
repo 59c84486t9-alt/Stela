@@ -22,7 +22,7 @@ pub(super) const POINTER_INPUTS_SEEN: usize = 16;
 /// chip's PAC version and the regime's TCR (Arm `AddPAC`, `Auth`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct PointerInputs {
-    pub(super) keys: [[u64; 2]; 5],
+    pub(super) keys: [Option<[u64; 2]>; 5],
     pub(super) version: pauth::Version,
     pub(super) tcr: u64,
 }
@@ -143,13 +143,13 @@ impl PointerService {
             self.inputs = Some(inputs);
         }
         let [ia, ib, da, db, generic] = inputs.keys;
+        let mut keys = pauth::Keys::from_optional_words([ia, ib, da, db]);
+        if let Some(generic) = generic {
+            keys = keys.with_generic_words(generic);
+        }
         self.context = Some(
-            pauth::Context::new_with_version(
-                0,
-                pauth::Keys::from_words(ia, ib, da, db).with_generic_words(generic),
-                inputs.version,
-            )
-            .with_translation_regime(inputs.tcr),
+            pauth::Context::new_with_version(0, keys, inputs.version)
+                .with_translation_regime(inputs.tcr),
         );
     }
 
@@ -184,7 +184,9 @@ impl PointerService {
         pointer: u64,
         modifier: u64,
     ) -> Option<PointerResult> {
-        self.context.as_ref()?;
+        if !self.context.as_ref()?.has_key(key) {
+            return None;
+        }
         self.tags[usize::from(memo_key(key))] = pointer::tag(self.generation, memo_key(key), 0);
         if let Some(result) = self.remembered(operation, key, pointer, modifier) {
             return Some(result);
@@ -314,6 +316,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn absent_keys_never_open_native_tags_or_reuse_a_known_key_generation() {
+        let mut service = PointerService::new();
+        let mut input = inputs(pauth::Version::Classic, 25 | 25 << 16);
+        input.keys = [None; 5];
+        service.open(input);
+        assert!(
+            service
+                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .is_none()
+        );
+        assert_eq!(service.tags, [0; 4]);
+        let unknown_generation = service.generation;
+        input.keys[0] = Some([11, 21]);
+        service.close();
+        service.open(input);
+        assert!(
+            service
+                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .is_some()
+        );
+        assert_ne!(service.generation, unknown_generation);
+        assert_eq!(service.tags[1..], [0; 3]);
+        service.close();
+        input.keys[0] = None;
+        service.open(input);
+        assert_eq!(service.generation, unknown_generation);
+        assert!(
+            service
+                .result(PointerOperation::Sign, pauth::Key::Ia, 0x4000, 0x8000)
+                .is_none()
+        );
+        assert_eq!(service.tags, [0; 4]);
+    }
+
+    #[test]
     fn stripping_cells_match_the_authoritative_layout_and_close_without_keys() {
         let mut service = PointerService::new();
         for t0 in [0, 16, 17, 25, 39, 63] {
@@ -357,7 +394,7 @@ mod tests {
     fn inputs(version: pauth::Version, tcr: u64) -> PointerInputs {
         let key = |index: u64| [0x1122_3344_5566_7788 ^ index, 0x99aa_bbcc_ddee_ff00 + index];
         PointerInputs {
-            keys: [key(1), key(2), key(3), key(4), key(5)],
+            keys: [key(1), key(2), key(3), key(4), key(5)].map(Some),
             version,
             tcr,
         }

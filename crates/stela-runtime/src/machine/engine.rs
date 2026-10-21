@@ -3541,9 +3541,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 
     /// The PAC keys as (low, high) words in APIA, APIB, APDA, APDB, APGA order.
-    fn pointer_keys(&self) -> [[u64; 2]; 5] {
+    fn pointer_keys(&self) -> [Option<[u64; 2]>; 5] {
+        // The original T6000 LLB initializes C13/C14 keys and consumes them
+        // at EL2. They are not aliases of the architectural lower bank.
+        if self.cpu.pstate.el == 2 {
+            return self.cpu.apple.pointer_keys.pairs();
+        }
         use SystemRegister as R;
-        let pair = |low, high| [self.cpu.read(low), self.cpu.read(high)];
+        let pair = |low, high| Some([self.cpu.read(low), self.cpu.read(high)]);
         [
             pair(R::APIAKeyLo_EL1, R::APIAKeyHi_EL1),
             pair(R::APIBKeyLo_EL1, R::APIBKeyHi_EL1),
@@ -3577,13 +3582,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// The guest's PAC keys and the current regime's TCR layout, with the
     /// chip's PAC version.
     fn pointer_context(&self) -> Result<pauth::Context, Stop> {
-        let keys = self.pointer_keys();
-        Ok(pauth::Context::new_with_version(
-            0,
-            pauth::Keys::from_words(keys[0], keys[1], keys[2], keys[3]).with_generic_words(keys[4]),
-            self.pointer_version()?,
+        let [ia, ib, da, db, generic] = self.pointer_keys();
+        let mut keys = pauth::Keys::from_optional_words([ia, ib, da, db]);
+        if let Some(generic) = generic {
+            keys = keys.with_generic_words(generic);
+        }
+        Ok(
+            pauth::Context::new_with_version(0, keys, self.pointer_version()?)
+                .with_translation_regime(self.cpu.regime_tcr()),
         )
-        .with_translation_regime(self.cpu.regime_tcr()))
     }
 
     /// Whether HCR_EL2.API clear traps the use of an enabled key, or PACGA,
@@ -8363,6 +8370,125 @@ mod tests {
         machine
     }
 
+    #[test]
+    fn apple_el2_keys_feed_pac_without_aliasing_lower_keys_or_inventing_unknown_pairs() {
+        use crate::machine::system::key;
+        use stela_compiler::aarch64::system::registers::Encoding;
+        const PACIASP: u32 = 0xd503_233f;
+        let mut machine = pac_machine();
+        machine.cpu.pstate = Pstate::reset(2);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::TCR_EL2, 0, 25 | 25 << 16);
+        machine.cpu.registers.set(SystemRegister::SCTLR_EL2, 0, 0);
+        machine.derived_changed();
+        machine.cpu.state.x[30] = 0x4000;
+        machine.cpu.state.sp = 0x8000;
+        // Disabled PAC is still a NOP with no initialized host keys.
+        machine.pointer_authentication(PACIASP).unwrap();
+        assert_eq!(machine.cpu.state.x[30], 0x4000);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::SCTLR_EL2, 0, 1 << 31);
+        machine.derived_changed();
+        let before = machine.cpu.pc;
+        assert!(matches!(
+            machine.pointer_authentication(PACIASP),
+            Err(Stop::Unsupported(_))
+        ));
+        assert_eq!((machine.cpu.pc, machine.cpu.state.x[30]), (before, 0x4000));
+        assert_eq!(machine.pointer.tags, [0; 4]);
+        // Actual first LLB MSR encoding; the other half must stay unknown.
+        machine.cpu.state.x[1] = 11;
+        machine.system_instruction(0xd51e_fd01).unwrap();
+        assert_eq!(machine.pointer_keys(), [None; 5]);
+        assert!(matches!(
+            machine.pointer_authentication(PACIASP),
+            Err(Stop::Unsupported(_))
+        ));
+        machine.cpu.state.x[0] = 21;
+        machine.system_instruction(0xd51e_fd20).unwrap();
+        assert_eq!(
+            machine.pointer_keys(),
+            [Some([11, 21]), None, None, None, None]
+        );
+        let expected = machine
+            .pointer_context()
+            .unwrap()
+            .sign(pauth::Key::Ia, 0x4000, 0x8000)
+            .unwrap();
+        machine.pointer_authentication(PACIASP).unwrap();
+        assert_eq!(machine.cpu.state.x[30], expected);
+        let first_generation = machine.pointer.generation;
+        assert_ne!(machine.pointer.tags[0], 0);
+
+        // Every source-written pair owns separate halves; a real MSR closes
+        // native PAC tags before any further code can consume cached inputs.
+        for pair in 0..5 {
+            for half in 0..2 {
+                let index = pair * 2 + half;
+                let encoding = Encoding::new(3, 6, 15, 13 + (index / 8) as u8, (index % 8) as u8);
+                machine.cpu.state.x[0] = 100 + index as u64;
+                machine
+                    .system_instruction(0xd500_0000 | u32::from(key(encoding)) << 5)
+                    .unwrap();
+                assert_eq!(machine.pointer.tags, [0; 4]);
+            }
+        }
+        assert_eq!(
+            machine.pointer_keys(),
+            [
+                Some([100, 101]),
+                Some([102, 103]),
+                Some([104, 105]),
+                Some([106, 107]),
+                Some([108, 109])
+            ]
+        );
+        machine.cpu.state.x[30] = 0x4000;
+        machine.pointer_authentication(PACIASP).unwrap();
+        assert_ne!(machine.pointer.generation, first_generation);
+        assert_ne!(machine.cpu.state.x[30], expected);
+        assert!(
+            machine
+                .pointer_context()
+                .unwrap()
+                .generic_code(7, 9)
+                .is_ok()
+        );
+        // Standard EL1 slots are a distinct canonical bank, not C13 storage.
+        assert_eq!(
+            machine.cpu.read(SystemRegister::APIAKeyLo_EL1),
+            0x1111_2222_3333_4444
+        );
+        machine.cpu.pstate = Pstate::reset(1);
+        machine.derived_changed();
+        assert_eq!(
+            machine.pointer_keys()[0],
+            Some([0x1111_2222_3333_4444, 0x5555_6666_7777_8888])
+        );
+        assert_ne!(
+            machine
+                .pointer_context()
+                .unwrap()
+                .sign(pauth::Key::Ia, 0x4000, 0x8000)
+                .unwrap(),
+            expected
+        );
+        // A read or a lower-EL access has no source-qualified permissions.
+        assert!(matches!(
+            machine.system_instruction(0xd51e_fd01),
+            Err(Stop::Unsupported(_))
+        ));
+        machine.cpu.pstate = Pstate::reset(2);
+        assert!(matches!(
+            machine.system_instruction(0xd53e_fd01),
+            Err(Stop::Unsupported(_))
+        ));
+    }
+
     const PACM: u32 = 0xd503_24ff;
     /// HCRX_EL2.SCTLR2En and PACMEn, and SCTLR2_EL1.EnPACM.
     fn enable_pacm(machine: &mut Machine<FakeHost, NoDevices>) {
@@ -8552,6 +8678,16 @@ mod tests {
             .cpu
             .registers
             .set(SystemRegister::TCR_EL2, 0, 25 << 16 | 25);
+        // The source-qualified Apple host keys have an independent owner.
+        // Give this enable/layout fixture explicit inputs through real MSRs,
+        // rather than borrowing the lower bank or assuming reset zeroes.
+        machine.cpu.set_pstate(Pstate::reset(2));
+        for word in 0..8 {
+            machine.cpu.state.x[0] = 11 + word;
+            machine
+                .system_instruction(0xd51e_fd00 | (word as u32) << 5)
+                .unwrap();
+        }
         let sctlr2 = machine.cpu.read(SystemRegister::SCTLR_EL2);
         for (el, register, base) in [
             (1, SystemRegister::SCTLR_EL1, sctlr),

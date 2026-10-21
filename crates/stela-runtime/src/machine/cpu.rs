@@ -121,6 +121,8 @@ pub struct AppleState {
     pub apctl: [u64; 2],
     /// KERNELKEYLO/HI_EL1.
     pub kernel_key: [u64; 2],
+    /// Distinct source-qualified Apple EL2 PAC bank; unknown until written.
+    pub pointer_keys: super::pointer_keys::Bank,
     /// VMSA_LOCK_EL1 and the EL whose translation registers it locks.
     pub vmsa_lock: u64,
     pub vmsa_lock_el: u8,
@@ -155,6 +157,7 @@ impl Default for AppleState {
             guarded: [GuardedBank::default(), GuardedBank::default()],
             apctl: [0; 2],
             kernel_key: [0; 2],
+            pointer_keys: super::pointer_keys::Bank::default(),
             vmsa_lock: 0,
             vmsa_lock_el: 1,
             // Both EL1 timers signal FIQ until EL2 software says otherwise
