@@ -79,7 +79,7 @@ pub struct Install {
     #[arg(long)]
     pub ipsw: Option<PathBuf>,
     /// The Mac model whose identities the payload carries.
-    #[arg(long, default_value = "Mac14,3", requires = "ipsw")]
+    #[arg(long, default_value = crate::setup::PINNED_MODEL, requires = "ipsw")]
     pub model: String,
     /// The volume root for the payload; defaults to `--esp`.
     #[arg(long, requires = "ipsw")]

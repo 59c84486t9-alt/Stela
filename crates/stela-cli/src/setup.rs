@@ -79,7 +79,7 @@ use stela_loader::{
 
 /// The pinned system target.
 pub(crate) const PINNED_BUILD: &str = "26A434";
-pub(crate) const PINNED_MODEL: &str = "Mac14,3";
+pub(crate) const PINNED_MODEL: &str = "MacBookPro18,3";
 const RECORD: &str = "EFI/stela/setup.json";
 /// A margin so no volume is filled to its last byte.
 pub(super) const MARGIN: u64 = 64 * 1024 * 1024;
@@ -131,10 +131,9 @@ pub(crate) struct Setup {
     /// by default.
     #[arg(long)]
     efi: Option<PathBuf>,
-    /// The Mac model Stela presents (Mac14,3 by default), such as Mac14,2
-    /// (MacBook Air M2) or Mac14,9 (MacBook Pro M2 Pro); setup refuses one
-    /// whose SoC the engine does not model yet (the M2, M2 Pro and M2 Max
-    /// Macs are modeled). Every install of a setup presents the same model.
+    /// The Mac model Stela presents (MacBookPro18,3, M1 Pro, by default).
+    /// Preparation checks the selected board's platform requirements and
+    /// refuses unsupported ones. Every install of a setup presents the same model.
     #[arg(long)]
     model: Option<String>,
     /// The build `--fetch` downloads.
