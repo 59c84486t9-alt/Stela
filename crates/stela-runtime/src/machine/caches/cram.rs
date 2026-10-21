@@ -1324,6 +1324,14 @@ mod tests {
         #[test]
         #[ignore = "requires pinned J314s LLB; declared live CRAM is an emulated entry handoff, not Apple reset state"]
         fn unchanged_j314s_entry_fetches_from_live_canonical_aperture_before_original_consumers() {
+            live_entry(false);
+        }
+        #[test]
+        #[ignore = "requires pinned J314s LLB; whole-aperture zeroing is explicit Stela entry policy, not Apple BootROM state"]
+        fn unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy() {
+            live_entry(true);
+        }
+        fn live_entry(initialize_reservation: bool) {
             let _serial = ENTRY_EXECUTION.lock().unwrap();
             let _guard = EntryGuard::new();
             let bytes = original(J314S);
@@ -1361,14 +1369,41 @@ mod tests {
             // This is not a process SourceExecutor Execute-view admission; the
             // original RW physical backing contract remains unchanged.
             assert_eq!(before.active_bytes, CAPACITY as u64);
+            if initialize_reservation {
+                // Explicit deterministic Stela-owned RAM initialization. This
+                // is an ACTUAL full-view write before image copy/fetch, not an
+                // answer synthesized for a later read or Apple reset evidence.
+                assert!(entry.write(APERTURE, &vec![0; CAPACITY]));
+                assert!(entry.known.iter().all(|known| *known));
+                let mut first = [0xff; 8];
+                let mut last = [0xff; 8];
+                assert!(entry.read(APERTURE, &mut first));
+                assert!(entry.read(APERTURE + CAPACITY as u64 - 8, &mut last));
+                assert_eq!((first, last), ([0; 8], [0; 8]));
+                assert_eq!(entry.committed.len(), 1);
+                assert_eq!(entry.committed[0].0, APERTURE);
+                assert_eq!(entry.committed[0].1.len(), CAPACITY);
+            }
             assert!(entry.write(ENTRY_BASE, &bytes));
-            // Underlying fixture storage has an explicit synthetic pattern, but
-            // only original loaded bytes and subsequently committed stores may
-            // answer guest reads. Untouched bytes remain UNKNOWN in this run.
+            // Underlying allocation-pattern bytes never become readable merely
+            // by existing. Only actual full-reservation initialization (where
+            // declared), original loading and committed guest stores are known.
             let mut untouched = [0; 8];
-            assert!(!entry.read(APERTURE, &mut untouched));
+            assert_eq!(entry.read(APERTURE, &mut untouched), initialize_reservation);
+            if initialize_reservation {
+                assert_eq!(untouched, [0; 8]);
+            }
             entry.unknown.clear();
-            entry.committed.clear(); // source loading is separate from guest stores
+            let initialization = entry
+                .committed
+                .iter()
+                .map(|(address, bytes)| {
+                    use sha2::Digest as _;
+                    serde_json::json!({"address":address,"bytes":bytes.len(),
+                    "sha256":hex::encode(sha2::Sha256::digest(bytes))})
+                })
+                .collect::<Vec<_>>();
+            entry.committed.clear(); // actual initialization is separate from guest stores
             drop(bytes); // no parallel original-code RAM buffer survives
             let shared = std::rc::Rc::new(std::cell::RefCell::new(entry));
             let host = NativeHost {
@@ -1405,14 +1440,25 @@ mod tests {
             machine.set_strict(true);
             machine.set_watches(&[(APERTURE, APERTURE + GUARD_BYTES as u64 - 1)]);
             let mut watch = vec![];
+            let mut exceptions = vec![];
             let stop = (1..=32768).find_map(|budget| {
+                let old_pc = machine.cpu.pc;
+                let old_exceptions = machine.statistics.exceptions;
                 let stop = machine.run(budget);
+                if machine.statistics.exceptions != old_exceptions {
+                    use crate::machine::system::Register;
+                    exceptions.push(serde_json::json!({"previous_pc":old_pc,"vector_pc":machine.cpu.pc,
+                        "esr_el1":machine.cpu.read(Register::ESR_EL1),"elr_el1":machine.cpu.read(Register::ELR_EL1),
+                        "far_el1":machine.cpu.read(Register::FAR_EL1),"esr_el2":machine.cpu.read(Register::ESR_EL2),
+                        "elr_el2":machine.cpu.read(Register::ELR_EL2),"far_el2":machine.cpu.read(Register::FAR_EL2)}));
+                }
                 for hit in machine.take_watch_hits() {
                     assert_eq!(hit.dropped, 0);
                     watch.push(serde_json::json!({"pc":hit.pc,"physical":hit.physical,"bytes":hit.bytes,
                         "value":hit.value,"write":hit.write,"completed":hit.completed}));
                 }
-                (stop != Stop::Budget).then_some(stop)
+                (stop != Stop::Budget || (initialize_reservation && !exceptions.is_empty()))
+                    .then_some(stop)
             }).unwrap_or(Stop::Budget);
             let entry = shared.borrow();
             eprintln!(
@@ -1429,30 +1475,51 @@ mod tests {
             assert!(entry.registers.iter().any(|(encoding, value)| *encoding
                 == Encoding::new(3, 3, 15, 7, 0)
                 && value.is_none()));
-            let Stop::Unsupported(requirement) = &stop else {
-                panic!(
-                    "original entry did not reach its actual unknown storage boundary: {stop:?}"
-                );
-            };
-            assert_eq!(requirement.pc, ENTRY_BASE + 0xcf27c);
-            assert!(matches!(&requirement.kind, RequirementKind::Device {
-                physical: 0x1fc2c65e0, write: false, detail,
-            } if detail == "original entry physical input is unknown"));
-            assert_eq!(entry.unknown.last(), Some(&(0x1fc2c65e0, 1)));
-            assert_eq!(machine.statistics.exceptions, 0);
+            if initialize_reservation {
+                use crate::machine::system::Register;
+                // Stop at the first actual exception, before its handler needs
+                // the hosted adapter's currently unsupported vector RAM path.
+                // The original read remains UNDEFINED, never a fabricated tick.
+                assert_eq!(stop, Stop::Budget);
+                assert_eq!(exceptions.len(), 1);
+                assert_eq!(machine.cpu.pc, ENTRY_BASE + 0xf4a00);
+                assert_eq!(machine.cpu.read(Register::ELR_EL2), ENTRY_BASE + 0x438);
+                assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x02000000);
+                assert_eq!(machine.cpu.read(Register::FAR_EL2), 0);
+                assert!(entry.unknown.is_empty());
+            } else {
+                let Stop::Unsupported(requirement) = &stop else {
+                    panic!("original entry did not reach its unknown storage boundary: {stop:?}");
+                };
+                assert_eq!(requirement.pc, ENTRY_BASE + 0xcf27c);
+                assert!(matches!(&requirement.kind, RequirementKind::Device {
+                    physical: 0x1fc2c65e0, write: false, detail,
+                } if detail == "original entry physical input is unknown"));
+                assert_eq!(entry.unknown.last(), Some(&(0x1fc2c65e0, 1)));
+            }
+            if !initialize_reservation {
+                assert_eq!(machine.statistics.exceptions, 0);
+            }
             assert!(!entry.committed.is_empty());
-            if let Some(path) = std::env::var_os("STELA_TEST_CRAM_ENTRY_REPORT") {
+            if let Some(path) = std::env::var_os(if initialize_reservation {
+                "STELA_TEST_CRAM_ZEROED_ENTRY_REPORT"
+            } else {
+                "STELA_TEST_CRAM_ENTRY_REPORT"
+            }) {
                 use std::io::Write as _;
                 let report = serde_json::json!({"schema":1,"source_sha256":J314S.sha256,"entry":ENTRY_BASE,
                     "scope":"unchanged original entry; explicit emulated active canonical CRAM, not Apple initial state or completed PMGR handoff",
+                    "initialization": if initialize_reservation {"actual whole canonical reservation zeroed before original image copy; declared Stela-owned policy, not Apple BootROM observation"} else {"only original immutable image bytes initially known; untouched storage unknown"},
+                    "initialization_effects":initialization,
                     "aperture_base":APERTURE,"aperture_bytes":CAPACITY,"unit_exponent":16,"limit":60,"initial_units":60,
                     "initial_mapping":format!("{before:?}"),"final_mapping":format!("{:?}",entry.cram.backing().state()),
-                    "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),"pc":machine.cpu.pc,
-                    "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,
+                    "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),
+                    "boundary":if initialize_reservation {"first architectural exception before handler execution"} else {"unknown original storage input"},"pc":machine.cpu.pc,
+                    "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,"exception_events":exceptions,
                     "registers":machine.cpu.state.x,"sp":machine.cpu.state.sp,
                     "source_reads":entry.source_reads,"guest_stores":entry.committed,"unknown_reads":entry.unknown,
                     "system_accesses":entry.registers.iter().map(|(e,v)|(format!("{e:?}"),v)).collect::<Vec<_>>(),"watch":watch,
-                    "knownness":"only actual original image copy and successful guest stores initialize bytes; underlying synthetic pattern is never supplied as original input"});
+                    "knownness":"only actual declared initialization operations, original image copy and successful guest stores initialize bytes; underlying synthetic pattern is never supplied as original input"});
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
