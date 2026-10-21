@@ -22,6 +22,7 @@ const MAX_EVENTS: usize = 64;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Cause {
+    PendingTransmit,
     ClockUnavailable,
     Ring(ring::Error),
     Message(mcu::Error),
@@ -70,7 +71,11 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     /// They must be the chip's WM/FWDL TX and WM event RX queues, configured by
     /// the owning controller with engines enabled, device IRQ sources masked,
     /// no competing command/NAPI/reset owners, and the actual calibrated Clock.
-    /// This constructor neither admits PCI ownership nor starts/reset hardware.
+    /// Successful construction also requires an actual reset/fresh firmware
+    /// command-sequencing epoch: every old command-processing path, old RX
+    /// response, IRQ and deferred worker has drained, and no late response from
+    /// a previous epoch can arrive. Empty TX queues alone cannot prove this.
+    /// This constructor neither admits PCI ownership nor starts/resets hardware.
     pub unsafe fn from_rings(
         identity: Identity,
         wm: TxRing<W>,
@@ -78,6 +83,9 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         rx: RxRing<R>,
         clock: crate::Clock,
     ) -> Result<Self, Cause> {
+        if wm.pending() != 0 || fwdl.pending() != 0 {
+            return Err(Cause::PendingTransmit);
+        }
         if clock.ticks_per_microsecond == 0 {
             return Err(Cause::ClockUnavailable);
         }
@@ -629,6 +637,50 @@ mod tests {
             drop(wm);
             drop(fw);
             assert!(rx.lock().unwrap().syncs.iter().any(|v| v.0));
+        }
+    }
+    #[test]
+    fn pending_old_request_and_same_sequence_ack_refuse_new_mailbox_epoch() {
+        for old_fwdl in [false, true] {
+            let (m, wm_state, fwdl_state, rx_state) = setup(Chip::Mt7921, true, false, 0);
+            let Mailbox {
+                identity,
+                mut wm,
+                mut fwdl,
+                rx,
+                clock,
+                ..
+            } = m;
+            let old = Encoder::default()
+                .encode(Chip::Mt7921, Command::PatchSemaphore, &1u32.to_le_bytes())
+                .unwrap();
+            if old_fwdl {
+                fwdl.submit(1, &old.bytes).unwrap();
+            } else {
+                wm.submit(1, &old.bytes).unwrap();
+            }
+            // Simulate old RX sequence1 even when the pending queue is FWDL.
+            if old_fwdl {
+                let mut response = vec![0u8; 36];
+                response[..4].copy_from_slice(&(7u32 << 27).to_le_bytes());
+                response[29] = 1;
+                response[32] = 2;
+                device_receive(&rx_state, &response, true, 0);
+            }
+            // This constructor must reject known pending TX before assuming
+            // the caller's otherwise-required fresh firmware-epoch proof.
+            let result = unsafe { Mailbox::from_rings(identity, wm, fwdl, rx, clock) };
+            assert!(matches!(result, Err(Cause::PendingTransmit)));
+            assert_eq!(
+                wm_state.lock().unwrap().completed.len(),
+                usize::from(!old_fwdl)
+            );
+            assert_eq!(
+                fwdl_state.lock().unwrap().completed.len(),
+                usize::from(old_fwdl)
+            );
+            assert_eq!(wm_state.lock().unwrap().queue_drops, 0);
+            assert_eq!(rx_state.lock().unwrap().queue_drops, 0);
         }
     }
 }
