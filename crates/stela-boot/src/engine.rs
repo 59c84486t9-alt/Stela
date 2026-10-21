@@ -1935,9 +1935,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     output::arguments(format_args!(
         "UNSUPPORTED OPERATIONS {}\n",
         if strict {
-            "strict: the first one stops the machine"
+            "mode=strict response=stop"
         } else {
-            "graceful: each takes the SoC's error response and is reported once as UNMODELED"
+            "mode=graceful response=soc-error diagnostics=once"
         }
     ));
     if options.tss {
