@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Stream reset, format and BDL programming adapted from Linux
 //! sound/hda/core/stream.c; descriptor ownership is local Stela policy.
+//! AMD FIFO correction/start clamp adapts controllers/intel.c and
+//! common/controller.c at a804c5742bff224d4cb4d25dd383554d598be32b.
+//! Copyright(c) 2004 Intel Corporation
+//! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
+//!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::super::{Direction, Error, PcmFormat, Phase};
 use super::{CodecGraph, Controller, Registers, Verb, WidgetKind, registers::*};
 use crate::bus::{
@@ -27,25 +32,67 @@ impl StreamId {
     }
 }
 
+const AMD_FIFO_FRAMES: usize = 32;
+
+/// Select from the actual controller's source-backed identity policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PositionPolicy {
+    #[default]
+    Link,
+    /// AMD's fixed 32-PCM-frame FIFO consumer correction. The exact LPIB
+    /// transport value remains available and never includes this correction.
+    AmdFifo32,
+}
+impl PositionPolicy {
+    pub(super) fn fifo_frames(self) -> usize {
+        match self {
+            Self::Link => 0,
+            Self::AmdFifo32 => AMD_FIFO_FRAMES,
+        }
+    }
+}
+
+/// One position snapshot. Byte coordinates wrap modulo CBL; none is a monotonic
+/// transfer counter or a precise acoustic timestamp. FIFO metadata never proves
+/// that the device transferred additional bytes or completed another ring.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PositionInfo {
+    /// Exact LPIB value, including the permitted inclusive CBL endpoint.
+    pub raw_link_bytes: u32,
+    /// Actual normalized LPIB: CBL maps to 0, with no FIFO arithmetic.
+    pub transport_bytes: u32,
+    /// PCM consumer coordinate. AMD capture subtracts the effective FIFO delay
+    /// modulo CBL; playback and ordinary controllers retain transport_bytes.
+    pub pcm_bytes: u32,
+    /// Effective delay in bytes, initially clamped to observed link progress.
+    pub fifo_delay_bytes: u32,
+    /// Whole interleaved PCM frames in the delay (byte remainder truncated).
+    pub fifo_delay_frames: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamStatus {
     pub running: bool,
     /// At least one descriptor with IOC completed since the last poll. This
     /// coalesced bit is not a period count or an underrun/overrun detector.
     pub period_completed: bool,
+    /// Actual normalized transport coordinate, retained for DMA diagnostics.
     pub position_bytes: u32,
+    pub position: PositionInfo,
 }
 
 pub(super) struct Stream {
     id: StreamId,
     direction: Direction,
     format: PcmFormat,
+    frame_bytes: u32,
     payload_words: u16,
     buffer: DmaBuffer,
     // Kept for the boot even when stopped: the controller can prefetch it.
     _bdl: DmaBuffer,
     pub(super) running: bool,
     pub(super) poisoned: bool,
+    fifo_insufficient: bool,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -127,6 +174,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             || !bytes.is_multiple_of(format.packet_bytes()?)
             || bytes > 4 * 1024 * 1024
         {
+            return Err(Error::InvalidBuffer);
+        }
+        // A corrected consumer coordinate needs more than a FIFO's storage;
+        // smaller rings cannot represent the source policy without ambiguity.
+        let fifo_bytes = self.config.position_policy.fifo_frames() * frame;
+        if fifo_bytes != 0 && bytes <= fifo_bytes {
             return Err(Error::InvalidBuffer);
         }
         // Reserve peak packet demand even for fractional-rate cadence. All
@@ -244,11 +297,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             id,
             direction,
             format,
+            frame_bytes: frame as u32,
             payload_words,
             buffer,
             _bdl: bdl,
             running: false,
             poisoned: false,
+            fifo_insufficient: true,
         });
         Ok(id)
     }
@@ -360,6 +415,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .as_mut()
             .unwrap()
             .running = true;
+        // Linux resets the initial FIFO clamp on start, resume and unpause.
+        self.streams[usize::from(id.index)]
+            .as_mut()
+            .unwrap()
+            .fifo_insufficient = true;
         self.status(id).map(|_| ())
     }
 
@@ -387,29 +447,75 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             stream.poisoned = true;
             return Err(Error::StreamDma { status });
         }
-        let position_bytes = self.position(id)?;
+        let position = self.position_info(id)?;
         self.registers.write8(base + SD_STS, status & SD_COMPLETE);
         Ok(StreamStatus {
             running,
             period_completed: status & SD_COMPLETE != 0,
-            position_bytes,
+            position_bytes: position.transport_bytes,
+            position,
         })
     }
 
-    /// Link position, not a precise acoustic presentation timestamp. Vendor
-    /// FIFO delays, wall-clock correction and position-buffer quirks are not
-    /// inferred by this transport layer. The hardware's inclusive CBL endpoint
-    /// is reported as logical zero, per HDA1.0a §3.3.37.
+    /// Actual normalized link coordinate. CBL maps to zero, per HDA1.0a
+    /// §3.3.37. No FIFO correction is credited as physical DMA progress.
     pub fn position(&mut self, id: StreamId) -> Result<u32, Error> {
+        Ok(self.position_info(id)?.transport_bytes)
+    }
+
+    /// Exact LPIB readback, including CBL. Invalid values fail before arithmetic.
+    pub fn link_position(&mut self, id: StreamId) -> Result<u32, Error> {
         let bytes = self.stream(id)?.buffer.len();
         let position = self.registers.read32(stream_base(id.index) + SD_LPIB);
         if position as usize > bytes {
             return Err(Error::InvalidPosition(position));
         }
-        Ok(if position as usize == bytes {
-            0
+        Ok(position)
+    }
+
+    /// Read actual transport position and apply only the identity-selected PCM
+    /// consumer policy. AMD capture subtracts 32 frames modulo CBL, initially
+    /// clamped to actual observed progress; playback reports its delay without
+    /// changing position. A late first poll cannot infer missed complete wraps.
+    pub fn position_info(&mut self, id: StreamId) -> Result<PositionInfo, Error> {
+        let (bytes, frame_bytes, direction, insufficient) = {
+            let stream = self.stream(id)?;
+            (
+                stream.buffer.len() as u32,
+                stream.frame_bytes,
+                stream.direction,
+                stream.fifo_insufficient,
+            )
+        };
+        let raw = self.link_position(id)?;
+        let transport = if raw == bytes { 0 } else { raw };
+        let full_delay = self.config.position_policy.fifo_frames() as u32 * frame_bytes;
+        let delay = if full_delay != 0 && insufficient && raw < full_delay {
+            raw
         } else {
-            position
+            full_delay
+        };
+        if full_delay != 0 && raw >= full_delay {
+            self.streams[usize::from(id.index)]
+                .as_mut()
+                .unwrap()
+                .fifo_insufficient = false;
+        }
+        let pcm = if direction == Direction::Capture && delay != 0 {
+            if transport >= delay {
+                transport - delay
+            } else {
+                bytes - (delay - transport)
+            }
+        } else {
+            transport
+        };
+        Ok(PositionInfo {
+            raw_link_bytes: raw,
+            transport_bytes: transport,
+            pcm_bytes: pcm,
+            fifo_delay_bytes: delay,
+            fifo_delay_frames: delay / frame_bytes,
         })
     }
 

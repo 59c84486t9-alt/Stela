@@ -30,7 +30,7 @@ use registers::*;
 pub use registers::{MmioRegisters, Registers};
 pub use routing::{AnalogRoute, PinOptions, Vref};
 use stream::Stream;
-pub use stream::{StreamId, StreamStatus};
+pub use stream::{PositionInfo, PositionPolicy, StreamId, StreamStatus};
 
 /// Select from an actual controller identity/quirk table in platform glue.
 /// Intel/AMD standard reset uses the set-then-clear handshake; a self-clearing
@@ -47,6 +47,7 @@ pub struct Config {
     /// Identity/platform-selected DMA address ceiling, in addition to GCAP.
     /// This does not establish IOMMU reachability or coherency. Valid 32..=64.
     pub dma_address_bits: u8,
+    pub position_policy: PositionPolicy,
     pub transition_timeout_us: u32,
     pub verb_timeout_us: u32,
 }
@@ -56,6 +57,7 @@ impl Default for Config {
         Self {
             corb_reset: CorbReset::Handshake,
             dma_address_bits: 64,
+            position_policy: PositionPolicy::Link,
             transition_timeout_us: 100_000,
             verb_timeout_us: 100_000,
         }
@@ -2619,5 +2621,155 @@ mod tests {
             ));
             assert!(model.borrow().writes.is_empty());
         }
+    }
+    #[test]
+    fn amd_fifo_capture_correction_keeps_exact_transport_and_wrap_coordinates() {
+        let mut fixture = Fixture::new();
+        let model = Model::new(256);
+        let mut controller = create(
+            &model,
+            &mut fixture,
+            Config {
+                position_policy: PositionPolicy::AmdFifo32,
+                ..config()
+            },
+        )
+        .unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        let base = stream_base(capture.descriptor_index());
+        for (raw, pcm, delay, frames) in [
+            (0, 0, 0, 0),
+            (5, 0, 5, 1),
+            (127, 0, 127, 31),
+            (128, 0, 128, 32),
+            (200, 72, 128, 32),
+            (10, 138, 128, 32),
+            (256, 128, 128, 32),
+        ] {
+            model.borrow_mut().set(base + SD_LPIB, raw, 4);
+            let info = controller.position_info(capture).unwrap();
+            assert_eq!(
+                info,
+                PositionInfo {
+                    raw_link_bytes: raw,
+                    transport_bytes: if raw == 256 { 0 } else { raw },
+                    pcm_bytes: pcm,
+                    fifo_delay_bytes: delay,
+                    fifo_delay_frames: frames
+                }
+            );
+            assert_eq!(controller.link_position(capture).unwrap(), raw);
+            assert_eq!(controller.position(capture).unwrap(), info.transport_bytes);
+            let status = controller.status(capture).unwrap();
+            assert_eq!(status.position_bytes, info.transport_bytes);
+            assert_eq!(status.position.pcm_bytes, pcm);
+        }
+        model.borrow_mut().set(base + SD_LPIB, 257, 4);
+        assert_eq!(
+            controller.position_info(capture),
+            Err(Error::InvalidPosition(257))
+        );
+    }
+
+    #[test]
+    fn amd_fifo_playback_reports_delay_without_inventing_position_and_restart_clamps_again() {
+        let mut fixture = Fixture::new();
+        let model = Model::new(256);
+        let mut controller = create(
+            &model,
+            &mut fixture,
+            Config {
+                position_policy: PositionPolicy::AmdFifo32,
+                ..config()
+            },
+        )
+        .unwrap();
+        let playback = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        let pbase = stream_base(playback.descriptor_index());
+        let cbase = stream_base(capture.descriptor_index());
+        model.borrow_mut().set(pbase + SD_LPIB, 5, 4);
+        let info = controller.position_info(playback).unwrap();
+        assert_eq!(
+            (info.transport_bytes, info.pcm_bytes, info.fifo_delay_bytes),
+            (5, 5, 5)
+        );
+        model.borrow_mut().set(pbase + SD_LPIB, 128, 4);
+        let info = controller.position_info(playback).unwrap();
+        assert_eq!(
+            (info.transport_bytes, info.pcm_bytes, info.fifo_delay_frames),
+            (128, 128, 32)
+        );
+        controller.start(capture).unwrap();
+        model.borrow_mut().set(cbase + SD_LPIB, 200, 4);
+        assert_eq!(controller.position_info(capture).unwrap().pcm_bytes, 72);
+        controller.stop(capture).unwrap();
+        model.borrow_mut().set(cbase + SD_LPIB, 0, 4);
+        controller.start(capture).unwrap();
+        model.borrow_mut().set(cbase + SD_LPIB, 5, 4);
+        let info = controller.position_info(capture).unwrap();
+        assert_eq!(
+            (info.transport_bytes, info.pcm_bytes, info.fifo_delay_bytes),
+            (5, 0, 5)
+        );
+        controller.stop(capture).unwrap();
+    }
+
+    #[test]
+    fn amd_fifo_inclusive_first_endpoint_is_primed_and_small_rings_refuse_before_allocating() {
+        let mut fixture = Fixture::new();
+        let model = Model::new(256);
+        let mut controller = create(
+            &model,
+            &mut fixture,
+            Config {
+                position_policy: PositionPolicy::AmdFifo32,
+                ..config()
+            },
+        )
+        .unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        model
+            .borrow_mut()
+            .set(stream_base(capture.descriptor_index()) + SD_LPIB, 256, 4);
+        let info = controller.position_info(capture).unwrap();
+        assert_eq!(
+            (
+                info.raw_link_bytes,
+                info.transport_bytes,
+                info.pcm_bytes,
+                info.fifo_delay_bytes
+            ),
+            (256, 0, 128, 128)
+        );
+        let before = fixture.allocator.remaining();
+        let writes = model.borrow().writes.len();
+        let wide = PcmFormat {
+            channels: 16,
+            ..stereo()
+        };
+        assert_eq!(
+            controller.allocate_stream(Direction::Playback, wide, 512, 2, &mut fixture.allocator),
+            Err(Error::InvalidBuffer)
+        );
+        assert_eq!(fixture.allocator.remaining(), before);
+        assert_eq!(model.borrow().writes.len(), writes);
+        controller
+            .allocate_stream(Direction::Playback, wide, 640, 2, &mut fixture.allocator)
+            .unwrap();
     }
 }
