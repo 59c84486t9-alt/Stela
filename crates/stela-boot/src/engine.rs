@@ -36,7 +36,7 @@ use core::{
     },
     cell::RefCell,
     fmt,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use host::{BareHost, Config, RamRange};
 use stela_compiler::TargetCpu;
@@ -2646,10 +2646,21 @@ fn sep_observation_report(machine: &mut Machine<BareHost, AppleDevices>) {
 /// time since the last report: machine effects and device accesses, then
 /// coprocessor requests answered with their firmware's error reply.
 fn unmodeled_report(machine: &mut Machine<BareHost, AppleDevices>) {
-    for requirement in machine.take_unmodeled() {
+    static ORDER_NOTED: AtomicBool = AtomicBool::new(false);
+    let requirements = machine.take_unmodeled();
+    let requests = machine.devices.take_unmodeled();
+    if (!requirements.is_empty() || !requests.is_empty())
+        && !ORDER_NOTED.swap(true, Ordering::Relaxed)
+    {
+        output::arguments(format_args!(
+            "LOG ORDER these errors and trace/watch/device records are buffered; \
+             guest console is immediate. Timestamps mark printing, not cross-stream event order.\n"
+        ));
+    }
+    for requirement in requirements {
         output::arguments(format_args!("UNMODELED {requirement}\n"));
     }
-    for line in machine.devices.take_unmodeled() {
+    for line in requests {
         output::arguments(format_args!("UNMODELED {line}\n"));
     }
 }
