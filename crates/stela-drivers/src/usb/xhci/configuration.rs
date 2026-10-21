@@ -19,6 +19,7 @@ pub(super) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
     let mut setting_endpoints = Vec::new();
     let mut interface = None;
     let mut at = 9;
+    let mut preceding_endpoint = false;
     while at < bytes.len() {
         if at + 2 > bytes.len() {
             return Err("truncated USB descriptor");
@@ -70,8 +71,12 @@ pub(super) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
                     active_endpoints.push(d[2]);
                 }
             }
+            SS_ENDPOINT_COMPANION if length != 6 || !preceding_endpoint => {
+                return Err("short, orphan or duplicate USB SuperSpeed endpoint companion");
+            }
             _ => {}
         }
+        preceding_endpoint = d[1] == ENDPOINT_DESCRIPTOR;
         at += length;
     }
     if interface.is_some_and(|(_, expected)| expected != setting_endpoints.len())
@@ -194,6 +199,62 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+
+    #[test]
+    fn superspeed_companions_associate_only_with_immediately_preceding_endpoint() {
+        let mut bytes = vec![
+            9, 2, 0, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 4, 0, 6,
+            0x30, 7, 0, 0, 0, 7, 5, 2, 3, 64, 0, 4, 6, 0x30, 3, 0, 37, 0,
+        ];
+        let total = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&total.to_le_bytes());
+        validate(&bytes).unwrap();
+        let all = interfaces(&bytes);
+        assert_eq!(
+            all[0].endpoints[0].companion,
+            Some(SuperSpeedCompanion {
+                max_burst: 7,
+                attributes: 0,
+                bytes_per_interval: 0,
+            })
+        );
+        assert_eq!(
+            all[0].endpoints[1].companion,
+            Some(SuperSpeedCompanion {
+                max_burst: 3,
+                attributes: 0,
+                bytes_per_interval: 37,
+            })
+        );
+        assert_eq!(
+            all[0].extra,
+            [vec![6, 0x30, 7, 0, 0, 0], vec![6, 0x30, 3, 0, 37, 0]]
+        );
+        // Every short companion length is rejected, including a 2-byte header.
+        for length in 2..6 {
+            let mut bad = bytes.clone();
+            bad.splice(
+                25..31,
+                [length, 0x30, 7, 0, 0, 0][..usize::from(length)]
+                    .iter()
+                    .copied(),
+            );
+            let total = bad.len() as u16;
+            bad[2..4].copy_from_slice(&total.to_le_bytes());
+            assert!(validate(&bad).is_err());
+        }
+        for (at, addition) in [
+            (18, vec![6, 0x30, 0, 0, 0, 0]), // orphan
+            (31, vec![6, 0x30, 0, 0, 0, 0]), // duplicate
+            (25, vec![2, 0x25]),             // intervening class descriptor
+        ] {
+            let mut bad = bytes.clone();
+            bad.splice(at..at, addition);
+            let total = bad.len() as u16;
+            bad[2..4].copy_from_slice(&total.to_le_bytes());
+            assert!(validate(&bad).is_err());
+        }
+    }
 
     pub(crate) fn vendor(value: u8) -> Vec<u8> {
         vec![

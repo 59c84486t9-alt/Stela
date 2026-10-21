@@ -436,12 +436,14 @@ mod tests {
                 attributes: 2,
                 max_packet: 64,
                 interval: 0,
+                companion: None,
             };
             let output = Endpoint {
                 address: 0x02,
                 attributes: 2,
                 max_packet: 64,
                 interval: 0,
+                companion: None,
             };
             let mut net = UsbNet {
                 controller,

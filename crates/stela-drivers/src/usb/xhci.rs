@@ -49,6 +49,7 @@ use core::{
 };
 
 mod configuration;
+mod endpoint;
 
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 
@@ -163,6 +164,8 @@ pub const FULL_SPEED: u8 = 1;
 pub const LOW_SPEED: u8 = 2;
 pub const HIGH_SPEED: u8 = 3;
 pub const SUPER_SPEED: u8 = 4;
+pub const SUPER_SPEED_PLUS: u8 = 5;
+const SS_ENDPOINT_COMPANION: u8 = 0x30;
 
 const CONTROL_TYPE: u32 = 4;
 const MAX_SLOTS: usize = 32;
@@ -332,6 +335,14 @@ impl Ring {
     }
 }
 
+/// USB 3.x endpoint companion, retained with the endpoint it immediately follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SuperSpeedCompanion {
+    pub max_burst: u8,
+    pub attributes: u8,
+    pub bytes_per_interval: u16,
+}
+
 /// An endpoint as its descriptor describes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Endpoint {
@@ -339,6 +350,7 @@ pub struct Endpoint {
     pub attributes: u8,
     pub max_packet: u16,
     pub interval: u8,
+    pub companion: Option<SuperSpeedCompanion>,
 }
 
 impl Endpoint {
@@ -374,6 +386,7 @@ pub struct Interface {
 pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
     let mut interfaces: Vec<Interface> = Vec::new();
     let mut at = 0;
+    let mut preceding_endpoint = false;
     while at + 2 <= configuration.len() {
         let length = usize::from(configuration[at]);
         if length < 2 || at + length > configuration.len() {
@@ -397,15 +410,29 @@ pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
                         attributes: d[3],
                         max_packet: u16::from_le_bytes([d[4], d[5]]),
                         interval: d[6],
+                        companion: None,
                     });
                 }
             }
             _ => {
                 if let Some(interface) = interfaces.last_mut() {
+                    if d[1] == SS_ENDPOINT_COMPANION
+                        && length == 6
+                        && preceding_endpoint
+                        && let Some(endpoint) = interface.endpoints.last_mut()
+                    {
+                        endpoint.companion = Some(SuperSpeedCompanion {
+                            max_burst: d[2],
+                            attributes: d[3],
+                            bytes_per_interval: u16::from_le_bytes([d[4], d[5]]),
+                        });
+                    }
+                    // Preserve the original bytes, including recognized companions.
                     interface.extra.push(d.to_vec());
                 }
             }
         }
+        preceding_endpoint = d[1] == ENDPOINT_DESCRIPTOR && length >= 7;
         at += length;
     }
     interfaces
@@ -1144,6 +1171,8 @@ impl Controller {
         // Validate every endpoint and allocate every ring before publishing any
         // change. Existing rings may still be DMA-owned, even after a failure.
         let mut selected = 0u32;
+        let speed = self.slot(slot)?.speed;
+        let mut contexts = Vec::new();
         for endpoint in endpoints {
             let dci = endpoint.dci();
             if endpoint.address & 0x70 != 0
@@ -1163,6 +1192,7 @@ impl Controller {
                     "xHCI endpoint replacement requires teardown"
                 }));
             }
+            contexts.push(endpoint::Context::new(endpoint, speed)?);
             selected |= 1 << dci;
         }
         let mut rings = Vec::new();
@@ -1171,41 +1201,16 @@ impl Controller {
         }
         self.clear_input(slot)?;
         let context = self.context();
-        let speed = self.slot(slot)?.speed;
         let mut add = 1u32;
         let mut last = 1u8;
-        for (endpoint, ring) in endpoints.iter().zip(rings) {
+        for ((endpoint, ring), recipe) in endpoints.iter().zip(rings).zip(contexts) {
             let dci = endpoint.dci();
-            let kind = match (endpoint.kind(), endpoint.is_in()) {
-                (2, false) => 2,
-                (3, false) => 3,
-                (2, true) => 6,
-                (3, true) => 7,
-                _ => unreachable!("endpoint type validated before allocation"),
-            };
-            let max_packet = u32::from(endpoint.max_packet & 0x7ff);
-            let burst = u32::from(endpoint.max_packet >> 11 & 3);
-            let interval = match (endpoint.kind(), speed) {
-                (3, HIGH_SPEED | SUPER_SPEED) => u32::from(endpoint.interval.clamp(1, 16) - 1),
-                (3, _) => {
-                    // Frames to a 2^n microframe exponent, 3..=10 (6.2.3.6).
-                    let microframes = u32::from(endpoint.interval.max(1)) * 8;
-                    (31 - microframes.leading_zeros()).clamp(3, 10)
-                }
-                _ => 0,
-            };
-            let payload = max_packet * (burst + 1);
-            let average = if endpoint.kind() == 3 { payload } else { 3072 };
             let state = self.slot(slot)?;
             let at = (usize::from(dci) + 1) * context;
-            state.input.write(at, interval << 16);
-            state
-                .input
-                .write(at + 4, 3 << 1 | kind << 3 | burst << 8 | max_packet << 16);
+            state.input.write(at, recipe.info);
+            state.input.write(at + 4, recipe.info2);
             state.input.write(at + 8, ring.dequeue_pointer());
-            state
-                .input
-                .write(at + 16, average | (payload & 0xffff) << 16);
+            state.input.write(at + 16, recipe.tx_info);
             state.endpoints[usize::from(dci)] = Some(Transfer {
                 ring,
                 is_in: endpoint.is_in(),
@@ -1709,7 +1714,7 @@ impl Controller {
         devices: &mut Vec<Device>,
         failures: &mut Vec<(String, BlockError)>,
     ) -> Result<(), BlockError> {
-        if attachment.speed == SUPER_SPEED {
+        if matches!(attachment.speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
             return Err(BlockError::Unsupported("SuperSpeed hubs"));
         }
         if attachment.tier + 1 > MAX_TIERS {
@@ -2388,6 +2393,7 @@ pub(crate) mod tests {
     /// old address model: Stop accepts Running, Reset accepts Halted, Set Dequeue
     /// accepts Stopped. It can leave DMA active on command failure.
     struct CancelModel {
+        context_bytes: usize,
         commands: u64,
         command_index: usize,
         events: u64,
@@ -2423,12 +2429,17 @@ pub(crate) mod tests {
         fn state(&self, dci: usize) -> u32 {
             // SAFETY: output context is live aligned test DMA, exclusively
             // accessed by this model between controller operations.
-            unsafe { ((self.output + dci as u64 * 32) as *const u32).read_volatile() & 7 }
+            unsafe {
+                ((self.output + dci as u64 * self.context_bytes as u64) as *const u32)
+                    .read_volatile()
+                    & 7
+            }
         }
         fn set_state(&mut self, dci: usize, state: u32) {
             // SAFETY: same live context as state().
             unsafe {
-                ((self.output + dci as u64 * 32) as *mut u32).write_volatile(state);
+                ((self.output + dci as u64 * self.context_bytes as u64) as *mut u32)
+                    .write_volatile(state);
             }
         }
         fn event(&mut self, parameter: u64, code: u32, kind: u32, dci: u8, residual: usize) {
@@ -2501,7 +2512,9 @@ pub(crate) mod tests {
                         for index in 2..32 {
                             if flags & (1 << index) != 0 {
                                 self.rings[index] = unsafe {
-                                    ((parameter + (index as u64 + 1) * 32 + 8) as *const u64)
+                                    ((parameter
+                                        + (index as u64 + 1) * self.context_bytes as u64
+                                        + 8) as *const u64)
                                         .read_volatile()
                                         & !0xf
                                 };
@@ -2746,6 +2759,7 @@ pub(crate) mod tests {
         let mut rings = [0; 32];
         rings[1] = state.endpoints[1].as_ref().unwrap().ring.buffer.physical();
         let model = Rc::new(RefCell::new(CancelModel {
+            context_bytes: 32,
             commands: controller.commands.buffer.physical(),
             command_index: controller.commands.index,
             events: controller.events.physical(),
@@ -2795,18 +2809,21 @@ pub(crate) mod tests {
                 attributes: 3,
                 max_packet: 16,
                 interval: 1,
+                companion: None,
             },
             Endpoint {
                 address: 0x82,
                 attributes: 2,
                 max_packet: 64,
                 interval: 0,
+                companion: None,
             },
             Endpoint {
                 address: 0x02,
                 attributes: 2,
                 max_packet: 64,
                 interval: 0,
+                companion: None,
             },
         ];
         controller.configure(1, &endpoints, None, dma).unwrap();
@@ -2925,7 +2942,7 @@ pub(crate) mod tests {
         for index in 0..17 {
             let mut bytes = vendor(index + 1);
             while bytes.len() < CONTROL_BYTES {
-                bytes.extend_from_slice(&[2, 0x30]); // Preserved unknown class descriptors.
+                bytes.extend_from_slice(&[2, 0x25]); // Preserved unknown class descriptors.
             }
             bytes[2..4].copy_from_slice(&(CONTROL_BYTES as u16).to_le_bytes());
             model
@@ -3069,6 +3086,145 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn superspeed_companions_reach_real_32_and_64_byte_controller_contexts() {
+        for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
+            for context in [32, 64] {
+                let mut backing = vec![0u64; 128 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: backing outlives every model and controller DMA object.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                controller.set_configuration(1, 7).unwrap();
+                controller.context_bytes = context;
+                let slot = controller.slots[1].as_mut().unwrap();
+                slot.speed = speed;
+                slot.context[0] = slot.context[0] & !(15 << 20) | u32::from(speed) << 20;
+                slot.input = dma.allocate(33 * context, 64).unwrap();
+                slot._output = dma.allocate(32 * context, 64).unwrap();
+                model.borrow_mut().output = slot._output.physical();
+                model.borrow_mut().context_bytes = context;
+                model.borrow_mut().set_state(1, 1);
+                controller.dcbaa.write(8, slot._output.physical());
+                let endpoints = [
+                    Endpoint {
+                        address: 0x81,
+                        attributes: 2,
+                        max_packet: 1024,
+                        interval: 0,
+                        companion: Some(SuperSpeedCompanion {
+                            max_burst: 7,
+                            attributes: 0,
+                            bytes_per_interval: 0,
+                        }),
+                    },
+                    Endpoint {
+                        address: 0x02,
+                        attributes: 3,
+                        max_packet: 64,
+                        interval: 4,
+                        companion: Some(SuperSpeedCompanion {
+                            max_burst: 3,
+                            attributes: 0,
+                            bytes_per_interval: 37,
+                        }),
+                    },
+                ];
+                controller.configure(1, &endpoints, None, &mut dma).unwrap();
+                let slot = controller.slots[1].as_ref().unwrap();
+                for (ep, expected) in endpoints.iter().zip([
+                    [0, 1024 << 16 | 7 << 8 | 6 << 3 | 6, 3072],
+                    [3 << 16, 64 << 16 | 3 << 8 | 3 << 3 | 6, 37 << 16 | 37],
+                ]) {
+                    let dci = usize::from(ep.dci());
+                    let at = (dci + 1) * context;
+                    assert_eq!(slot.input.read::<u32>(at), expected[0]);
+                    assert_eq!(slot.input.read::<u32>(at + 4), expected[1]);
+                    assert_eq!(slot.input.read::<u32>(at + 16), expected[2]);
+                    let transfer = slot.endpoints[dci].as_ref().unwrap();
+                    assert!(transfer.enabled);
+                    assert_eq!(
+                        slot.input.read::<u64>(at + 8) & !15,
+                        model.borrow().rings[dci]
+                    );
+                    assert_eq!(model.borrow().state(dci), ENDPOINT_RUNNING);
+                    // All unused/reserved words stay zero at either CSZ.
+                    assert!(
+                        slot.input.bytes()[at + 20..at + context]
+                            .iter()
+                            .all(|b| *b == 0)
+                    );
+                }
+                assert_eq!(model.borrow().seen, [CONFIGURE_ENDPOINT]);
+                assert_eq!(model.borrow().configuration_seen_before_endpoints, [7]);
+                for ep in &endpoints {
+                    controller.cancel(1, ep.dci()).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_superspeed_companion_refuses_before_any_dma_publication() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing remains exclusive and live throughout model DMA use.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        controller.set_configuration(1, 7).unwrap();
+        controller.slots[1].as_mut().unwrap().speed = SUPER_SPEED;
+        let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
+        let commands = controller.commands.buffer.bytes().to_vec();
+        let good = Endpoint {
+            address: 0x81,
+            attributes: 2,
+            max_packet: 1024,
+            interval: 0,
+            companion: Some(SuperSpeedCompanion {
+                max_burst: 7,
+                attributes: 0,
+                bytes_per_interval: 0,
+            }),
+        };
+        for companion in [
+            None,
+            Some(SuperSpeedCompanion {
+                max_burst: 16,
+                attributes: 0,
+                bytes_per_interval: 0,
+            }),
+            Some(SuperSpeedCompanion {
+                max_burst: 7,
+                attributes: 1,
+                bytes_per_interval: 0,
+            }),
+            Some(SuperSpeedCompanion {
+                max_burst: 7,
+                attributes: 0,
+                bytes_per_interval: 1,
+            }),
+        ] {
+            let mut bad = good;
+            bad.address = 2;
+            bad.companion = companion;
+            // A valid endpoint first must not publish its ring before its invalid peer.
+            assert!(
+                controller
+                    .configure(1, &[good, bad], None, &mut dma)
+                    .is_err()
+            );
+            let slot = controller.slots[1].as_ref().unwrap();
+            assert_eq!(slot.input.bytes(), input);
+            assert_eq!(controller.commands.buffer.bytes(), commands);
+            assert!(slot.endpoints[3].is_none() && slot.endpoints[4].is_none());
+            assert!(model.borrow().seen.is_empty());
+        }
+        // The acknowledged EP0 lifecycle stays usable after descriptor refusal.
+        controller.set_configuration(1, 9).unwrap();
+        assert_eq!(controller.current_configuration(1), Ok(Some(9)));
+    }
+
+    #[test]
     fn cancellation_stops_running_resets_halted_and_clears_late_events() {
         for initial in [1, 2, 3] {
             let mut backing = vec![0u64; 64 * 1024];
@@ -3132,6 +3288,7 @@ pub(crate) mod tests {
                 attributes: 3,
                 max_packet: 16,
                 interval: 1,
+                companion: None,
             };
             assert!(controller.clear(1, &endpoint).is_err());
             assert!(
@@ -3200,12 +3357,14 @@ pub(crate) mod tests {
             // SAFETY: backing outlives every controller/device/model DMA object.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.slots[1].as_mut().unwrap().speed = HIGH_SPEED;
             model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(0x4c10));
             let configuration = vec![
                 9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
                 0, 7, 5, 0x02, 2, 0, 2, 0,
             ];
             let mut device = configuration::tests::device(vec![configuration]);
+            device.speed = HIGH_SPEED;
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
             controller.preflight_vendor_ethernet(&mut device).unwrap();
             assert_eq!(device.vendor_ethernet_revision, Some(0x4c10));
@@ -3542,6 +3701,7 @@ pub(crate) mod tests {
             attributes: 2,
             max_packet: 64,
             interval: 0,
+            companion: None,
         };
         assert!(
             controller
@@ -3744,6 +3904,7 @@ pub(crate) mod tests {
             attributes: if dci == 3 { 3 } else { 2 },
             max_packet: if dci == 3 { 16 } else { 64 },
             interval: u8::from(dci == 3),
+            companion: None,
         }
     }
 
