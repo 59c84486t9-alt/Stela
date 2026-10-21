@@ -16,7 +16,7 @@ use super::exec::render::{self, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
 use super::uat::CONTEXTS;
-use super::work_decode::Submission;
+use super::work_decode::{Frame, Submission, scene};
 use crate::platform::dma::DmaError;
 use alloc::boxed::Box;
 
@@ -68,12 +68,17 @@ pub enum ResultKind {
 pub struct GeometryProduct(Box<GeometryData>);
 
 struct GeometryData {
+    producer: Submission,
+    scene: Option<scene::Key>,
     pass: RenderPass,
     binned: render::geometry::Binned,
     stats: render::Stats,
 }
 
 impl GeometryProduct {
+    pub fn producer(&self) -> &Submission {
+        &self.0.producer
+    }
     fn matches(&self, pass: &RenderPass) -> bool {
         self.0.pass.vm_slot == pass.vm_slot
             && self.0.pass.usc_base == pass.usc_base
@@ -122,6 +127,7 @@ enum Phase {
 pub struct Execution {
     submission: Submission,
     job: JobKind,
+    scene: Option<scene::Key>,
     phase: Phase,
 }
 impl Execution {
@@ -135,6 +141,7 @@ impl Execution {
         Ok(Self {
             submission,
             job: JobKind::Compute(job),
+            scene: None,
             phase: Phase::Ready,
         })
     }
@@ -150,14 +157,67 @@ impl Execution {
         Ok(Self {
             submission,
             job: JobKind::Geometry(Box::new(pass)),
+            scene: None,
             phase: Phase::Ready,
         })
+    }
+
+    /// Bind actual TA geometry to its original accepted shared scene. This
+    /// proves association only; native setup/TVB/resource effects still belong
+    /// to the stock consumer before it invokes the backend.
+    pub fn geometry_for_setup(
+        submission: Submission,
+        frame: &Frame,
+        pass: RenderPass,
+    ) -> Result<Self, WorkError> {
+        let key = scene::Key::read(&submission, frame).map_err(WorkError::Refused)?;
+        let mut owner = Self::geometry(submission, pass)?;
+        owner.scene = Some(key);
+        Ok(owner)
+    }
+
+    /// Return the still-owned product on every pre-execution refusal. A
+    /// same-sized render pass or a caller-supplied helper product supplies no
+    /// proof that this distinct 3D setup belongs to the original TA scene.
+    pub fn fragment_for_setup(
+        submission: Submission,
+        frame: &Frame,
+        pass: RenderPass,
+        product: GeometryProduct,
+    ) -> Result<Self, (WorkError, GeometryProduct)> {
+        let key = match scene::Key::read(&submission, frame) {
+            Ok(key) => key,
+            Err(reason) => return Err((WorkError::Refused(reason), product)),
+        };
+        if product.0.scene != Some(key) {
+            return Err((
+                WorkError::Refused("GFX 3D setup does not own the source TA scene"),
+                product,
+            ));
+        }
+        let mut owner = Self::fragment_inner(submission, pass, product)?;
+        owner.scene = Some(key);
+        Ok(owner)
     }
 
     /// A refused 3D binding returns the still-owned TA product to its caller.
     /// Association to the original scene/queue must be established by the
     /// source-qualified firmware consumer before calling this constructor.
     pub fn fragment(
+        submission: Submission,
+        pass: RenderPass,
+        product: GeometryProduct,
+    ) -> Result<Self, (WorkError, GeometryProduct)> {
+        if product.0.scene.is_some() {
+            return Err((
+                WorkError::Refused("GFX source TA geometry requires its original 3D setup"),
+                product,
+            ));
+        }
+        Self::fragment_inner(submission, pass, product)
+    }
+
+    fn fragment_inner(
         submission: Submission,
         pass: RenderPass,
         product: GeometryProduct,
@@ -186,6 +246,7 @@ impl Execution {
                 pass: Box::new(pass),
                 product,
             },
+            scene: None,
             phase: Phase::Ready,
         })
     }
@@ -206,6 +267,8 @@ impl Execution {
                     let mut stats = render::Stats::default();
                     render::geometry::run(&mut view, pass, &mut stats).map(|binned| {
                         Output::Geometry(GeometryProduct(Box::new(GeometryData {
+                            producer: self.submission.clone(),
+                            scene: self.scene,
                             pass: **pass,
                             binned,
                             stats,
@@ -521,6 +584,103 @@ mod tests {
         assert_eq!(fragment.run(&mut memory), Ok(result));
         assert_eq!(memory.counts(), counts);
         assert_eq!(memory.flat.read_u32(BASE + 0x40), Ok(0));
+    }
+
+    fn scene_frame(submission: &Submission, buffer: u64) -> Frame {
+        let (record, at, context) = match submission.command.kind {
+            Kind::Ta => (
+                crate::platform::apple::agx::channel::Record::SetupTa,
+                0x1c,
+                0x3c,
+            ),
+            Kind::ThreeD => (
+                crate::platform::apple::agx::channel::Record::Setup3d,
+                0x14,
+                0x54,
+            ),
+            _ => unreachable!(),
+        };
+        let mut source = Flat::new(BASE, 0x8000);
+        source.put_u32(
+            submission.stream,
+            if submission.command.kind == Kind::Ta {
+                5
+            } else {
+                7
+            },
+        );
+        source.put_u64(submission.stream + at, buffer);
+        source.put_u32(submission.stream + context, submission.context);
+        let frame = submission.cursor().next(&mut source).unwrap().unwrap();
+        assert_eq!(frame.record, record);
+        frame
+    }
+    #[test]
+    fn source_scene_identity_returns_geometry_on_wrong_scene_and_retains_real_fragment_outcome() {
+        let (mut memory, pass) = render_memory();
+        let input = accepted(Kind::Ta);
+        let ta_frame = scene_frame(&input, BASE + 0x6000);
+        let mut ta = Execution::geometry_for_setup(input.clone(), &ta_frame, pass).unwrap();
+        ta.run(&mut memory).unwrap();
+        let product = ta.take_geometry().unwrap();
+        assert_eq!(product.producer(), &input);
+        let before = memory.counts();
+        let mut consumer = accepted(Kind::ThreeD);
+        consumer.counter += 1;
+        let wrong = scene_frame(&consumer, BASE + 0x6800);
+        let Err((error, product)) =
+            Execution::fragment_for_setup(consumer.clone(), &wrong, pass, product)
+        else {
+            panic!("equal dimensions exchanged different scenes")
+        };
+        assert_eq!(
+            error,
+            WorkError::Refused("GFX 3D setup does not own the source TA scene")
+        );
+        assert_eq!(memory.counts(), before);
+        assert_eq!(product.producer(), &input);
+        let Err((error, product)) = Execution::fragment(consumer.clone(), pass, product) else {
+            panic!("legacy helper bypassed the source scene binding")
+        };
+        assert_eq!(
+            error,
+            WorkError::Refused("GFX source TA geometry requires its original 3D setup")
+        );
+        assert_eq!(memory.counts(), before);
+        let correct = scene_frame(&consumer, BASE + 0x6000);
+        let mut fragment =
+            match Execution::fragment_for_setup(consumer.clone(), &correct, pass, product) {
+                Ok(owner) => owner,
+                Err(_) => panic!("matching source scene refused"),
+            };
+        let outcome = fragment.run(&mut memory).unwrap();
+        let counts = memory.counts();
+        memory.fail_firmware_write = true;
+        assert!(
+            memory
+                .write(consumer.stamp.firmware, &consumer.stamp.value.to_le_bytes())
+                .is_err()
+        );
+        memory.flat.put(BASE + 0x200, &[0xff; 16]);
+        assert_eq!(fragment.run(&mut memory), Ok(outcome));
+        assert_eq!(memory.counts(), counts);
+        assert_eq!(memory.flat.read_u32(consumer.stamp.firmware), Ok(0));
+    }
+    #[test]
+    fn caller_supplied_geometry_does_not_acquire_source_scene_authority() {
+        let (mut memory, pass) = render_memory();
+        let mut ta = Execution::geometry(accepted(Kind::Ta), pass).unwrap();
+        ta.run(&mut memory).unwrap();
+        let product = ta.take_geometry().unwrap();
+        let before = memory.counts();
+        let consumer = accepted(Kind::ThreeD);
+        let frame = scene_frame(&consumer, BASE + 0x6000);
+        let Err((_, product)) = Execution::fragment_for_setup(consumer, &frame, pass, product)
+        else {
+            panic!("helper product manufactured source authority")
+        };
+        assert_eq!(memory.counts(), before);
+        assert_eq!(product.producer().command.kind, Kind::Ta);
     }
 
     #[test]
