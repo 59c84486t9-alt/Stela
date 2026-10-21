@@ -1,0 +1,255 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2002 ShuChen <shuchen@realtek.com.tw>
+// Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
+// Copyright (c) a lot of people too. Please respect their work.
+// Copyright (c) 2026 Stela contributors
+//! Fallible, bounded register protocols adapted from Linux r8169_main.c.
+use super::{Registers, Revision, Timer, firmware::ScriptIo, registers::*};
+use crate::block::BlockError;
+use core::cell::Cell;
+
+pub(super) struct Hardware<'a, R, T> {
+    pub registers: &'a R,
+    pub timer: &'a T,
+    pub revision: Revision,
+    pub function: u8,
+    ocp_base: Cell<u16>,
+}
+impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
+    pub fn new(registers: &'a R, timer: &'a T, revision: Revision, function: u8) -> Self {
+        Self {
+            registers,
+            timer,
+            revision,
+            function,
+            ocp_base: Cell::new(OCP_PHY_BASE),
+        }
+    }
+    pub fn poll32(
+        &self,
+        reg: usize,
+        mask: u32,
+        high: bool,
+        delay: u64,
+        tries: usize,
+    ) -> Result<(), BlockError> {
+        for _ in 0..tries {
+            self.timer.delay(delay);
+            let value = self.registers.read32(reg);
+            if value == u32::MAX {
+                return Err(BlockError::Device { status: value });
+            }
+            if (value & mask != 0) == high {
+                return Ok(());
+            }
+        }
+        Err(BlockError::Timeout)
+    }
+    pub fn reset(&self) -> Result<(), BlockError> {
+        self.registers.write16(INTERRUPT_MASK, 0);
+        self.registers.write16(INTERRUPT_STATUS, u16::MAX);
+        self.registers.write8(COMMAND, RESET);
+        for _ in 0..100 {
+            self.timer.delay(100);
+            let cmd = self.registers.read8(COMMAND);
+            if cmd == u8::MAX {
+                return Err(BlockError::Device { status: 255 });
+            }
+            if cmd & RESET == 0 {
+                return Ok(());
+            }
+        }
+        Err(BlockError::Timeout)
+    }
+    pub fn phy_read(&self, reg: u16) -> Result<u16, BlockError> {
+        if reg > 0x1f {
+            return Err(BlockError::Unsupported(
+                "Realtek MDIO register outside clause 22",
+            ));
+        }
+        if self.revision.modern_phy() {
+            if reg == PHY_PAGE {
+                return Ok(if self.ocp_base.get() == OCP_PHY_BASE {
+                    0
+                } else {
+                    self.ocp_base.get() >> 4
+                });
+            }
+            let address = self.phy_address(reg)?;
+            self.registers.write32(PHY_OCP, u32::from(address) << 15);
+            self.poll32(PHY_OCP, ACCESS, true, 25, 10)?;
+            Ok(self.registers.read32(PHY_OCP) as u16)
+        } else {
+            self.registers.write32(PHY_ACCESS, u32::from(reg) << 16);
+            let done = self.poll32(PHY_ACCESS, ACCESS, true, 25, 20);
+            self.timer.delay(20); // Required after command completion, including failure.
+            done?;
+            Ok(self.registers.read32(PHY_ACCESS) as u16)
+        }
+    }
+    pub fn phy_write(&self, reg: u16, value: u16) -> Result<(), BlockError> {
+        if reg > 0x1f {
+            return Err(BlockError::Unsupported(
+                "Realtek MDIO register outside clause 22",
+            ));
+        }
+        if self.revision.modern_phy() {
+            if reg == PHY_PAGE {
+                self.ocp_base.set(if value == 0 {
+                    OCP_PHY_BASE
+                } else {
+                    value
+                        .checked_mul(16)
+                        .ok_or(BlockError::Unsupported("Realtek OCP page overflow"))?
+                });
+                return Ok(());
+            }
+            let address = self.phy_address(reg)?;
+            self.registers.write32(
+                PHY_OCP,
+                ACCESS | (u32::from(address) << 15) | u32::from(value),
+            );
+            self.poll32(PHY_OCP, ACCESS, false, 25, 10)
+        } else {
+            self.registers.write32(
+                PHY_ACCESS,
+                ACCESS | (u32::from(reg) << 16) | u32::from(value),
+            );
+            let done = self.poll32(PHY_ACCESS, ACCESS, false, 25, 20);
+            self.timer.delay(20);
+            done
+        }
+    }
+    fn phy_address(&self, reg: u16) -> Result<u16, BlockError> {
+        let reg = if self.ocp_base.get() == OCP_PHY_BASE {
+            reg
+        } else {
+            reg.checked_sub(0x10).ok_or(BlockError::Unsupported(
+                "Realtek OCP paged register below 0x10",
+            ))?
+        };
+        self.ocp_base
+            .get()
+            .checked_add(reg * 2)
+            .ok_or(BlockError::Unsupported("Realtek OCP address overflow"))
+    }
+    pub fn phy_modify(&self, reg: u16, clear: u16, set: u16) -> Result<(), BlockError> {
+        self.phy_write(reg, (self.phy_read(reg)? & !clear) | set)
+    }
+    pub fn paged(&self, page: u16, reg: u16, clear: u16, set: u16) -> Result<(), BlockError> {
+        let old = self.phy_read(PHY_PAGE)?;
+        self.phy_write(PHY_PAGE, page)?;
+        let result = self.phy_modify(reg, clear, set);
+        let restored = self.phy_write(PHY_PAGE, old);
+        result.and(restored)
+    }
+    pub fn phy_reset(&self) -> Result<(), BlockError> {
+        self.phy_write(PHY_PAGE, 0)?;
+        self.phy_modify(PHY_CONTROL, 0, PHY_RESET)?;
+        self.timer.delay(50_000);
+        for _ in 0..12 {
+            if self.phy_read(PHY_CONTROL)? & PHY_RESET == 0 {
+                return Ok(());
+            }
+            self.timer.delay(50_000);
+        }
+        Err(BlockError::Timeout)
+    }
+    pub fn ephy(&self, reg: u8, clear: u16, set: u16) -> Result<(), BlockError> {
+        if reg > 31 {
+            return Err(BlockError::Unsupported(
+                "Realtek EPHY register outside range",
+            ));
+        }
+        self.registers.write32(EPHY_ACCESS, u32::from(reg) << 16);
+        self.poll32(EPHY_ACCESS, ACCESS, true, 10, 100)?;
+        let value = (self.registers.read32(EPHY_ACCESS) as u16 & !clear) | set;
+        self.timer.delay(10);
+        self.registers.write32(
+            EPHY_ACCESS,
+            ACCESS | (u32::from(reg) << 16) | u32::from(value),
+        );
+        let result = self.poll32(EPHY_ACCESS, ACCESS, false, 10, 100);
+        self.timer.delay(10);
+        result
+    }
+    pub fn eri_read(&self, reg: u16) -> Result<u32, BlockError> {
+        if reg & 3 != 0 {
+            return Err(BlockError::Unsupported("unaligned Realtek ERI register"));
+        }
+        self.registers.write32(ERI_ADDRESS, 0xf000 | u32::from(reg));
+        self.poll32(ERI_ADDRESS, ACCESS, true, 100, 100)?;
+        Ok(self.registers.read32(ERI_DATA))
+    }
+    pub fn eri_write(&self, reg: u16, mask: u8, value: u32) -> Result<(), BlockError> {
+        if reg & 3 != 0 || mask == 0 || mask > 15 {
+            return Err(BlockError::Unsupported(
+                "invalid Realtek ERI address or byte mask",
+            ));
+        }
+        self.registers.write32(ERI_DATA, value);
+        self.registers.write32(
+            ERI_ADDRESS,
+            ACCESS | (u32::from(mask) << 12) | u32::from(reg),
+        );
+        self.poll32(ERI_ADDRESS, ACCESS, false, 100, 100)
+    }
+    pub fn eri_modify(&self, reg: u16, clear: u32, set: u32) -> Result<(), BlockError> {
+        self.eri_write(reg, 15, (self.eri_read(reg)? & !clear) | set)
+    }
+    /// The CSI fallback supported by Linux for config dword 0x70c. Stela uses
+    /// this documented controller protocol directly; it does not guess ECAM size.
+    pub fn latency(&self) -> Result<(), BlockError> {
+        let cmd = 0x70c | 0xf000 | (u32::from(self.function) << 16);
+        self.registers.write32(CSI_ADDRESS, cmd);
+        self.poll32(CSI_ADDRESS, ACCESS, true, 10, 100)?;
+        let value = (self.registers.read32(CSI_DATA) & 0x00ff_ffff) | 0x2700_0000;
+        self.registers.write32(CSI_DATA, value);
+        self.registers.write32(CSI_ADDRESS, ACCESS | cmd);
+        self.poll32(CSI_ADDRESS, ACCESS, false, 10, 100)
+    }
+    fn mac_address(&self, reg: u16) -> Result<u16, BlockError> {
+        let address = self
+            .ocp_base
+            .get()
+            .checked_add(reg)
+            .ok_or(BlockError::Unsupported("Realtek MCU OCP address overflow"))?;
+        if address & 1 != 0 {
+            return Err(BlockError::Unsupported("unaligned Realtek MCU OCP address"));
+        }
+        Ok(address)
+    }
+}
+impl<R: Registers, T: Timer> ScriptIo for Hardware<'_, R, T> {
+    fn read(&mut self, mac: bool, reg: u16) -> Result<u16, BlockError> {
+        if !mac {
+            return self.phy_read(reg);
+        }
+        let address = self.mac_address(reg)?;
+        self.registers.write32(MAC_OCP, u32::from(address) << 15);
+        // MAC OCP is synchronous and has no completion flag (unlike PHY OCP).
+        Ok(self.registers.read32(MAC_OCP) as u16)
+    }
+    fn write(&mut self, mac: bool, reg: u16, value: u16) -> Result<(), BlockError> {
+        if !mac {
+            return self.phy_write(reg, value);
+        }
+        if reg == PHY_PAGE {
+            self.ocp_base.set(
+                value
+                    .checked_mul(16)
+                    .ok_or(BlockError::Unsupported("Realtek MCU page overflow"))?,
+            );
+            return Ok(());
+        }
+        let address = self.mac_address(reg)?;
+        self.registers.write32(
+            MAC_OCP,
+            ACCESS | (u32::from(address) << 15) | u32::from(value),
+        );
+        Ok(())
+    }
+    fn restore(&mut self) {
+        self.ocp_base.set(OCP_PHY_BASE);
+    }
+}

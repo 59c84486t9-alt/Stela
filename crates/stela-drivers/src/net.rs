@@ -7,6 +7,7 @@ use core::fmt;
 pub mod e1000e;
 pub mod igb;
 pub mod igc;
+pub mod realtek;
 pub mod virtio;
 
 /// The shortest frame without FCS; shorter frames are padded (IEEE 802.3).
