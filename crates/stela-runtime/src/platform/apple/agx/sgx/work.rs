@@ -443,6 +443,41 @@ impl FirmwareWork {
     }
 }
 
+/// Original setup parameter phase over the actual firmware DMA port.
+/// Shared memory remains RAM-only; native operations use the SGX owner.
+pub struct ParameterAccess<'a, 'b, 'c> {
+    owner: &'a FirmwareWork,
+    port: &'a mut Port<'b, 'c>,
+}
+impl FirmwareWork {
+    pub fn parameter_access<'a, 'b, 'c>(
+        &'a self,
+        port: &'a mut Port<'b, 'c>,
+    ) -> ParameterAccess<'a, 'b, 'c> {
+        ParameterAccess { owner: self, port }
+    }
+}
+impl crate::platform::apple::agx::work_decode::cl::Access for ParameterAccess<'_, '_, '_> {
+    fn policy(&self) -> Policy {
+        self.owner.policy
+    }
+    fn memory(&mut self) -> &mut dyn crate::platform::apple::agx::ring::Shared {
+        self.port
+    }
+    fn check_available(&self) -> Result<(), &'static str> {
+        self.owner.available()
+    }
+    fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
+        self.owner.begin(submission, lease)
+    }
+    fn read_native(&mut self, register: Register) -> Result<u64, &'static str> {
+        self.owner.read(self.port, register)
+    }
+    fn write_native(&mut self, register: Register, value: u64) -> Result<(), &'static str> {
+        self.owner.write(self.port, register, value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +861,100 @@ mod tests {
                 assert!(matches!(owner.outcome(), Ok(Some(ResultKind::Compute(_)))));
             }
             assert_eq!(power.native.borrow().work.parameters[1], 0x2000);
+        }
+    }
+
+    #[test]
+    fn original_parameter_phase_reaches_real_native_trigger_after_a_retained_uat_fault() {
+        use crate::platform::apple::agx::work_decode::cl::Parameters;
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            let mut sgx = gpu(family);
+            let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+            let mcc = cache();
+            let owner = power
+                .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+                .unwrap();
+            let input = submission();
+            let mut memory = ram();
+            let mut setup = alloc::vec![0; 0x16c];
+            setup[..4].copy_from_slice(&11u32.to_le_bytes());
+            setup[0xc..0x14].copy_from_slice(&0x3000u64.to_le_bytes());
+            setup[0x24..0x28].copy_from_slice(&5u32.to_le_bytes());
+            setup[0x28..0x2c].copy_from_slice(&1u32.to_le_bytes());
+            setup[0x2c..0x30].copy_from_slice(&3u32.to_le_bytes());
+            assert!(memory.ram.write(DATA + input.stream, &setup));
+            for (index, value) in [0u64, 0x2000, 0, 0, 0, 0, 0, 0x8c60, 0, 0, 0, 1, 0]
+                .into_iter()
+                .enumerate()
+            {
+                memory.ram.put_u64(DATA + 0x3000 + index as u64 * 8, value);
+            }
+            let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                .unwrap()
+                .unwrap();
+            let mut program = Parameters::new(&input, &frame, LEASE, owner.policy).unwrap();
+            mapping(&mut memory.ram, VA + 0x14000, SGX + 0x24000, true);
+            assert_eq!(
+                io(&mut sgx, &mut memory, |port| program
+                    .advance(&mut owner.parameter_access(port))),
+                Err("GFX CL PIO translation disagrees with its actual SGX bank")
+            );
+            assert_eq!(power.native.borrow().work.control, 1);
+            assert_eq!(power.native.borrow().work.context, 0x503);
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .run
+                    .as_ref()
+                    .unwrap()
+                    .parameter_mask,
+                0
+            );
+            assert_eq!(memory.writes, 0);
+            assert!(power.check_reset().is_err());
+            mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
+            // A retry owns the accepted SKU fields, even if AP memory changes.
+            assert!(
+                memory
+                    .ram
+                    .write(DATA + input.stream + 0x24, &9u32.to_le_bytes())
+            );
+            io(&mut sgx, &mut memory, |port| {
+                program.advance(&mut owner.parameter_access(port))
+            })
+            .unwrap();
+            assert!(program.completed());
+            assert_eq!(owner.outcome(), Ok(None));
+            io(&mut sgx, &mut memory, |port| {
+                owner.write(port, Register::Resource, 0)
+            })
+            .unwrap();
+            let before = memory.writes;
+            io(&mut sgx, &mut memory, |port| {
+                owner.write(port, Register::Submit, 1)
+            })
+            .unwrap();
+            assert!(matches!(owner.outcome(), Ok(Some(ResultKind::Compute(_)))));
+            assert_eq!(memory.writes - before, 4);
+            for index in 0..4 {
+                let mut word = [0; 4];
+                assert!(memory.ram.read(DATA + 0x1000 + index * 4, &mut word));
+                assert_eq!(u32::from_le_bytes(word), index as u32);
+            }
+            let counts = (memory.reads, memory.writes);
+            io(&mut sgx, &mut memory, |port| {
+                program.advance(&mut owner.parameter_access(port))
+            })
+            .unwrap();
+            io(&mut sgx, &mut memory, |port| {
+                owner.write(port, Register::Submit, 1)
+            })
+            .unwrap();
+            assert_eq!((memory.reads, memory.writes), counts);
+            // This parameter phase does not complete the original AP command.
+            assert!(power.native.borrow().work.active());
         }
     }
 

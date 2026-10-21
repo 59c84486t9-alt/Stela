@@ -14,6 +14,7 @@
 //! after the complete record has been read; retrying a failed read has no
 //! architectural effect.
 
+pub mod cl;
 pub mod registers;
 pub mod resources;
 
