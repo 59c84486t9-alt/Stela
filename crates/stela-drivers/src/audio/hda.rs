@@ -289,11 +289,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.registers.write8(CORBSTS, CORB_MEMORY);
         self.registers.write8(RIRBSTS, RIRB_RESPONSE | RIRB_OVERRUN);
         fence(Ordering::SeqCst);
-        // RIRB must be running before any CORB command can produce a reply.
-        self.registers.write8(RIRBCTL, COMMAND_RUN);
+        // Local response/overrun events feed the polled status and response
+        // counter handshake. INTCTL stays zero, so these local enables cannot
+        // request CPU interrupts. Start RIRB before CORB can produce a reply.
+        self.registers.write8(RIRBCTL, RIRB_RUN_STATUS);
         self.registers.write8(CORBCTL, COMMAND_RUN);
         self.wait(Phase::CommandStart, |r| {
-            r.read8(CORBCTL) & COMMAND_RUN != 0 && r.read8(RIRBCTL) & COMMAND_RUN != 0
+            r.read8(CORBCTL) & COMMAND_RUN != 0
+                && r.read8(RIRBCTL) & RIRB_RUN_STATUS == RIRB_RUN_STATUS
         })
     }
 
@@ -497,6 +500,8 @@ mod tests {
         inject_unsolicited: bool,
         duplicate_reply: bool,
         rirb_reset_stuck: bool,
+        response_backpressure: bool,
+        response_count: u16,
         commands: Vec<u32>,
         constant_reply: Option<u32>,
         parameters: BTreeMap<(u8, u8), u32>,
@@ -544,6 +549,8 @@ mod tests {
                 inject_unsolicited: false,
                 duplicate_reply: false,
                 rirb_reset_stuck: false,
+                response_backpressure: false,
+                response_count: 0,
                 commands: Vec::new(),
                 constant_reply: Some(0x1234_abcd),
                 parameters: BTreeMap::new(),
@@ -618,7 +625,14 @@ mod tests {
                     self.set(STATESTS, 1, 2);
                 }
             }
-            if self.bytes[CORBCTL] & COMMAND_RUN != 0 && now >= self.next_consume {
+            let response_limit = match self.get(RINTCNT, 2) as u16 {
+                0 => 256,
+                value => value,
+            };
+            if self.bytes[CORBCTL] & COMMAND_RUN != 0
+                && now >= self.next_consume
+                && (!self.response_backpressure || self.response_count < response_limit)
+            {
                 let rp = self.get(CORBRP, 2) as u16;
                 let wp = self.get(CORBWP, 2) as u16;
                 if rp < self.size(CORBSIZE) && rp != wp {
@@ -691,7 +705,10 @@ mod tests {
                     .write_volatile(extra.to_le());
             }
             self.set(RIRBWP, u32::from(next), 2);
-            self.bytes[RIRBSTS] |= RIRB_RESPONSE;
+            self.response_count += 1;
+            if self.bytes[RIRBCTL] & RIRB_RESPONSE_ENABLE != 0 {
+                self.bytes[RIRBSTS] |= RIRB_RESPONSE;
+            }
         }
 
         fn reply_for(&mut self, command: u32) -> u32 {
@@ -789,6 +806,9 @@ mod tests {
                 || (offset >= 0x80 && (offset - 0x80) % 0x20 == SD_STS)
             {
                 let old = self.get(offset, bytes);
+                if offset == RIRBSTS && old & value & u32::from(RIRB_RESPONSE) != 0 {
+                    self.response_count = 0;
+                }
                 self.set(offset, old & !value, bytes);
                 return;
             }
@@ -2200,6 +2220,31 @@ mod tests {
             );
             assert_eq!(model.borrow().commands.len(), commands);
             assert_eq!(model.borrow().writes.len(), writes);
+        }
+    }
+    #[test]
+    fn local_rirb_status_acknowledgement_releases_response_counter_backpressure() {
+        for enable_status in [true, false] {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            model.borrow_mut().response_backpressure = true;
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            assert_eq!(model.borrow().get(INTCTL, 4), 0);
+            assert_eq!(model.borrow().bytes[RIRBCTL], RIRB_RUN_STATUS);
+            if !enable_status {
+                model.borrow_mut().bytes[RIRBCTL] = COMMAND_RUN;
+            }
+            assert_eq!(controller.verb(verb()).unwrap(), 0x1234_abcd);
+            let result = controller.verb(verb());
+            if enable_status {
+                assert_eq!(result, Ok(0x1234_abcd));
+                assert_eq!(controller.verb(verb()), Ok(0x1234_abcd));
+                assert_eq!(model.borrow().response_count, 0);
+                assert_eq!(model.borrow().commands.len(), 3);
+            } else {
+                assert_eq!(result, Err(Error::Timeout(Phase::Verb)));
+                assert_eq!(model.borrow().commands.len(), 1);
+            }
         }
     }
 }
