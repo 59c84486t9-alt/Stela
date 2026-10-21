@@ -26,7 +26,7 @@ const EXIT_PORT: u16 = 0xf4;
 /// only print; every access is a `try_borrow`, so output that arrives while
 /// the value is in use (a line printed during a flush) is skipped instead of
 /// re-entering it.
-struct Global<T>(RefCell<T>);
+pub(crate) struct Global<T>(pub(crate) RefCell<T>);
 // SAFETY: one processor runs the mount, and no access blocks or assumes
 // the value is free.
 unsafe impl<T> Sync for Global<T> {}

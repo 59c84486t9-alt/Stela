@@ -33,6 +33,7 @@ use core::{
         asm,
         x86_64::{__cpuid, __cpuid_count},
     },
+    cell::RefCell,
     fmt,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -736,10 +737,18 @@ struct GuestConsole(Vec<u8>);
 impl ConsoleSink for GuestConsole {
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
         if byte == b'\n' || self.0.len() == 200 {
-            output::arguments(format_args!(
-                "GUEST| {}\n",
-                String::from_utf8_lossy(&self.0)
-            ));
+            let line = String::from_utf8_lossy(&self.0);
+            output::arguments(format_args!("GUEST| {line}\n"));
+            // `panic(cpu N caller ADDRESS): MESSAGE`
+            if let Some((_, message)) = line
+                .strip_prefix("panic(")
+                .and_then(|rest| rest.split_once("): "))
+                && let Ok(mut first) = GUEST_PANIC.0.try_borrow_mut()
+                && first.is_none()
+            {
+                // Its parts are quoted strings: `"Unhandled error: " "STS=0"`.
+                *first = Some(message.replace("\" \"", "").replace('"', "").trim().into());
+            }
             self.0.clear();
         } else if byte != b'\r' {
             self.0.push(byte);
@@ -1269,11 +1278,35 @@ pub(crate) fn report(event: &Event) {
 const STOP_HOLD_SECONDS: u64 = 10;
 
 /// Show why the machine stopped on Stela's own screen, which it takes back
-/// from the guest's last frame.
+/// from the guest's last frame: the running step fails with `text`.
 fn show_stop(text: &str) {
     crate::console::reclaim();
-    crate::status::info(text);
-    output::flush_log();
+    crate::status::fail(text);
+}
+
+/// [`show_stop`], then halt until the PC is turned off.
+fn stop_here(text: &str, code: u32) -> ! {
+    show_stop(text);
+    crate::status::info("Stela stopped. Turn the PC off to try again.");
+    output::terminate(code)
+}
+
+/// The first kernel panic line the guest printed, which names a stop
+/// better than how the machine went down after it.
+static GUEST_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
+
+/// How the guest went down: its kernel panic's message when it printed
+/// one, else `otherwise`.
+fn guest_down(otherwise: String) -> String {
+    let panic = GUEST_PANIC
+        .0
+        .try_borrow()
+        .ok()
+        .and_then(|panic| panic.clone());
+    match panic {
+        Some(message) => format!("macOS crashed: {message}"),
+        None => otherwise,
+    }
 }
 
 /// The boot bundle `--preboot` names, built from the installed system on
@@ -2746,52 +2779,58 @@ fn finish(
             output::arguments(format_args!(
                 "STOP idle: every PE is off or waits with no wake source\n"
             ));
-            show_stop("macOS stopped: every processor is off or waits with nothing to wake it.");
-            output::terminate(0x10)
+            stop_here(
+                &guest_down(String::from(
+                    "macOS stopped: every processor is off or waits with nothing to wake it",
+                )),
+                0x10,
+            )
         }
         Stop::Waiting => {
             output::arguments(format_args!(
                 "STOP waiting: every PE waits for an input from outside the board\n"
             ));
-            show_stop("macOS stopped: it waits for something from outside the Mac.");
-            output::terminate(0x10)
+            stop_here(
+                &guest_down(String::from(
+                    "macOS stopped: it waits for something from outside the Mac",
+                )),
+                0x10,
+            )
         }
         Stop::Reset(reset) => {
             output::arguments(format_args!("STOP reset: {reset}\n"));
             translations::write();
             match reset.transition {
                 Transition::Restart => {
-                    show_stop(&format!("macOS restarted the Mac ({reset})."));
+                    show_stop(&guest_down(String::from("macOS restarted the Mac")));
                     crate::status::countdown("Restarting the PC", STOP_HOLD_SECONDS);
                     host_power.restart()
                 }
                 Transition::PowerOff => {
-                    show_stop(&format!("macOS turned the Mac off ({reset})."));
+                    show_stop(&guest_down(String::from("macOS turned the Mac off")));
                     crate::status::countdown("Turning the PC off", STOP_HOLD_SECONDS);
                     host_power.power_off()
                 }
-                Transition::Halt => {
-                    show_stop(&format!("macOS halted the Mac ({reset})."));
-                    output::terminate(power::RESTART_CODE)
-                }
+                Transition::Halt => stop_here(
+                    &guest_down(format!("macOS halted the Mac: {}", reset.reason)),
+                    power::RESTART_CODE,
+                ),
             }
         }
         Stop::Budget => {
             output::arguments(format_args!("STOP budget\n"));
-            show_stop("Stela stopped: the run reached its --budget.");
-            output::terminate(0x14)
+            stop_here("the run reached its --budget", 0x14)
         }
         Stop::Unsupported(requirement) => {
             output::arguments(format_args!("STOP UNSUPPORTED {requirement}\n"));
-            show_stop(&format!(
-                "Stela stopped: macOS needs {requirement}, which Stela does not support yet."
-            ));
-            output::terminate(0x13)
+            stop_here(
+                &format!("macOS needs {requirement}, which Stela does not support yet"),
+                0x13,
+            )
         }
         Stop::Breakpoint(pc) => {
             output::arguments(format_args!("STOP breakpoint pc={pc:#x}\n"));
-            show_stop(&format!("Stela stopped at its breakpoint ({pc:#x})."));
-            output::terminate(0x16)
+            stop_here(&format!("Stela's breakpoint at {pc:#x}"), 0x16)
         }
     }
 }
