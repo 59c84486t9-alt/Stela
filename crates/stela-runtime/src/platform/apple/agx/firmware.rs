@@ -296,10 +296,41 @@ struct ActiveControl {
     next_read: u32,
     kind: u32,
     power: Option<PowerNotice>,
+    dsid_priority: Option<ControlPriority>,
     writes: Vec<ControlWrite>,
     count: Option<ControlCount>,
     next: usize,
     local_committed: bool,
+}
+
+/// Preserve the original priority store -> matching-word read -> optional
+/// clear. A read fault observes the already committed priority store; a
+/// later clear/write fault never repeats that store or rediscovers the match.
+#[derive(Debug)]
+struct ControlPriority {
+    slot: u64,
+    priority: u32,
+    matched: Option<u32>,
+    phase: u8,
+}
+impl ControlPriority {
+    fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        if self.phase == 0 {
+            memory.write(self.slot, &self.priority.to_le_bytes())?;
+            self.phase = 1;
+        }
+        if self.phase == 1 {
+            self.matched = Some(memory.read_u32(self.slot + 4)?);
+            self.phase = 2;
+        }
+        if self.phase == 2 {
+            if self.matched == Some(self.priority) && self.priority != 0 {
+                memory.write(self.slot, &[0; 8])?;
+            }
+            self.phase = 3;
+        }
+        Ok(())
+    }
 }
 
 /// The original common-tail RMW follows the command's writes. Capture its
@@ -343,6 +374,7 @@ impl ActiveControl {
         let kind = u32::from_le_bytes(entry[..4].try_into().unwrap());
         let mut writes = Vec::new();
         let mut power = None;
+        let mut dsid_priority = None;
         let mut put = |address: u64, bytes: &[u8]| -> Result<(), &'static str> {
             writes.push(ControlWrite::new(address, bytes)?);
             Ok(())
@@ -361,11 +393,13 @@ impl ActiveControl {
                 value,
             } => {
                 let slot = dsid_slot(memory, root, layout, dsid)?;
-                let matched = memory.read_u32(slot + 4)?;
-                put(slot, &priority.to_le_bytes())?;
-                if matched == priority && priority != 0 {
-                    put(slot, &[0; 8])?;
-                }
+                ring::scalar_range(slot, 8)?;
+                dsid_priority = Some(ControlPriority {
+                    slot,
+                    priority,
+                    matched: None,
+                    phase: 0,
+                });
                 put(pointer, &value.to_le_bytes())?;
             }
             Command::DsidDeprioritize {
@@ -430,6 +464,7 @@ impl ActiveControl {
             next_read: ring::next(read),
             kind,
             power,
+            dsid_priority,
             writes,
             count,
             next: 0,
@@ -620,6 +655,9 @@ impl State {
                 )?);
             }
             let active = self.active_control.as_mut().unwrap();
+            if let Some(priority) = active.dsid_priority.as_mut() {
+                priority.commit(memory)?;
+            }
             while let Some(write) = active.writes.get(active.next) {
                 memory.write(write.address, &write.bytes)?;
                 active.next += 1;
@@ -2300,13 +2338,90 @@ mod tests {
     }
 
     #[test]
-    fn a_device_control_acceptance_fault_has_no_partial_effects_or_accepted_entry() {
-        let (mut state, flat, _) = owned_control(&G14G, 0xe);
-        let slot = BASE + 0x1e000 + 3 * layout().dsid_slot_bytes;
+    fn dsid_priority_read_fault_preserves_the_source_ordered_store_and_accepted_identity() {
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            let (mut state, flat, _) = owned_control(family, 0xe);
+            let slot = BASE + 0x1e000 + 3 * family.model().unwrap().layout.dsid_slot_bytes;
+            let mut memory = WorkMemory {
+                flat,
+                fail_write: None,
+                fail_read: Some(slot + 4),
+                writes: Vec::new(),
+            };
+            assert_eq!(
+                state.dma(&mut memory, &mut Vec::new()),
+                Err("injected work input read fault")
+            );
+            assert_eq!(memory.writes, [(slot, 5u32.to_le_bytes().to_vec())]);
+            assert_eq!(memory.flat.read_u32(slot), Ok(5));
+            assert!(state.active_control.is_some() && state.dma_pending());
+            memory.flat.put_u32(CONTROL_ENTRIES + 0xc, 0x800);
+            memory.flat.put_u32(CONTROL_ENTRIES + 0x10, 99);
+            memory.flat.put_u32(slot, 42); // must not replay the priority store
+            state.dma(&mut memory, &mut Vec::new()).unwrap();
+            assert_eq!(memory.flat.read_u64(slot), Ok(0));
+            assert_eq!(memory.flat.read_u32(BASE + 0x1f000), Ok(0x700));
+            assert_eq!(
+                memory
+                    .writes
+                    .iter()
+                    .filter(|(at, bytes)| *at == slot && bytes.len() == 4)
+                    .count(),
+                1
+            );
+            assert_eq!(state.device_control.get(&0xe), Some(&1));
+        }
+    }
+
+    #[test]
+    fn dsid_priority_captured_match_survives_faults_with_overlapping_completion_targets() {
+        for matched in [4u32, 5] {
+            let (mut state, flat, _) = owned_control(&G14G, 0xe);
+            let slot = BASE + 0x1e000 + 3 * layout().dsid_slot_bytes;
+            let mut memory = WorkMemory {
+                flat,
+                fail_write: Some(1),
+                fail_read: None,
+                writes: Vec::new(),
+            };
+            memory.flat.put_u32(slot + 4, matched);
+            // Completion overwrites the matching word. Its value must not
+            // be observed as a new match while retrying a later phase.
+            memory.flat.put_u64(CONTROL_ENTRIES + 4, slot + 4);
+            memory.flat.put_u32(CONTROL_ENTRIES + 0xc, 0x900);
+            assert_eq!(
+                state.dma(&mut memory, &mut Vec::new()),
+                Err("injected work publication write fault")
+            );
+            memory
+                .flat
+                .put_u32(slot + 4, if matched == 4 { 5 } else { 4 });
+            state.dma(&mut memory, &mut Vec::new()).unwrap();
+            assert_eq!(
+                memory.flat.read_u32(slot),
+                Ok(if matched == 5 { 0 } else { 5 })
+            );
+            assert_eq!(memory.flat.read_u32(slot + 4), Ok(0x900));
+            let expected = if matched == 5 {
+                alloc::vec![slot, slot, slot + 4, CONTROL_STATE]
+            } else {
+                alloc::vec![slot, slot + 4, CONTROL_STATE]
+            };
+            assert_eq!(
+                memory.writes.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_control_pre_effect_input_fault_accepts_no_entry() {
+        let (mut state, flat, _) = owned_control(&G14G, 0x1a);
+        let enables = RINGS + layout().histogram_enables;
         let mut memory = WorkMemory {
             flat,
             fail_write: None,
-            fail_read: Some(slot + 4),
+            fail_read: Some(enables),
             writes: Vec::new(),
         };
         assert_eq!(
@@ -2315,13 +2430,8 @@ mod tests {
         );
         assert!(memory.writes.is_empty() && state.active_control.is_none());
         assert!(state.device_control.is_empty());
-        // The failed acceptance owns no entry or effect. A corrected input
-        // is accepted afresh, unlike a retry after effects have begun.
-        memory.flat.put_u32(CONTROL_ENTRIES + 0xc, 0x800);
         state.dma(&mut memory, &mut Vec::new()).unwrap();
-        assert_eq!(memory.flat.read_u32(BASE + 0x1f000), Ok(0x800));
-        assert_eq!(memory.flat.read_u64(slot), Ok(0));
-        assert_eq!(state.device_control.get(&0xe), Some(&1));
+        assert_eq!(state.device_control.get(&0x1a), Some(&1));
     }
 
     #[test]
