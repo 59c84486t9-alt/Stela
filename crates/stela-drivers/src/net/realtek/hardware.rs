@@ -61,6 +61,21 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         }
         Err(BlockError::Timeout)
     }
+    pub fn efuse_read(&self, address: u16) -> Result<u8, BlockError> {
+        if address > 0x03ff {
+            return Err(BlockError::Unsupported(
+                "Realtek efuse address outside hardware range",
+            ));
+        }
+        self.registers
+            .write32(EFUSE_ACCESS, u32::from(address) << 8);
+        self.poll32(EFUSE_ACCESS, ACCESS, true, 100, 300)?;
+        let value = self.registers.read32(EFUSE_ACCESS);
+        if value == u32::MAX {
+            return Err(BlockError::Device { status: value });
+        }
+        Ok(value as u8)
+    }
     pub fn phy_read(&self, reg: u16) -> Result<u16, BlockError> {
         if reg > 0x1f {
             return Err(BlockError::Unsupported(

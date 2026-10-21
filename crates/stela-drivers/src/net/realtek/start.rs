@@ -95,6 +95,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                         r.write8(CONFIG3, r.read8(CONFIG3) & !1);
                         r.write8(DEBUG, 0x20);
                     }
+                    25 | 26 => self.latency()?,
                     34 => {
                         self.latency()?;
                         self.ephys(&[
@@ -130,7 +131,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 if self.revision.version == 17 {
                     r.write8(CONFIG4, r.read8(CONFIG4) & !1);
                 }
-                if (18..=24).contains(&self.revision.version) {
+                if (18..=26).contains(&self.revision.version) {
                     r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 2));
                     r.write8(CONFIG4, r.read8(CONFIG4) & !(1 << 1));
                 }

@@ -31,6 +31,7 @@ pub(super) const EPHY_ACCESS: usize = 0x80;
 pub(super) const MAC_OCP: usize = 0xb0;
 pub(super) const PHY_OCP: usize = 0xb8;
 pub(super) const DLL_POWER: usize = 0xd0;
+pub(super) const EFUSE_ACCESS: usize = 0xdc;
 pub(super) const DEBUG: usize = 0xd1;
 pub(super) const MCU: usize = 0xd3;
 pub(super) const RX_MAXIMUM: usize = 0xda;

@@ -9,6 +9,8 @@
 //! Revision-specific analogue PHY programming from the pinned Linux source.
 use super::{Error, Registers, Timer, firmware::Script, hardware::Hardware, registers::*};
 use crate::block::BlockError;
+mod d;
+
 const S: &[(u16, u16)] = &[
     (0x1f, 0x0001),
     (0x06, 0x006e),
@@ -218,7 +220,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let restore = self.phy_write(PHY_PAGE, old);
         result.and(restore)
     }
-    fn evl(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    fn apply_firmware(&mut self, script: &Script<'_>) -> Result<(), Error> {
         let timer = self.timer;
         script.execute(self, timer)?;
         // Linux r8169_apply_firmware restores the shared OCP base and then
@@ -235,6 +237,10 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if !ready {
             return Err(BlockError::Timeout.into());
         }
+        Ok(())
+    }
+    fn evl(&mut self, script: &Script<'_>) -> Result<(), Error> {
+        self.apply_firmware(script)?;
         self.extended_page(0xac, 0x18, 0xffff, 6)?;
         self.paged(3, 9, 0xffff, 0xa20f)?;
         self.parameter(0x8b5b, 0xffff, 0x9222)?;
@@ -324,6 +330,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.phy_modify(0x0d, 0, 1 << 5)?;
                     self.paged(1, 0x1d, 0xffff, 0x3d98)?;
                 }
+                25 | 26 => self.d(script.ok_or(Error::Script("RTL8168D requires firmware"))?)?,
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }

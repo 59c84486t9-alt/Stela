@@ -11,10 +11,12 @@
 //! See `crates/stela-drivers/THIRD_PARTY.md` and `LICENSES/GPL-2.0-only.txt`.
 //!
 //! This slice implements MAC versions 02..06 (8169S/SB/SC, 8110S/SB/SC),
-//! 17..24 (8168B/C/CP, 8111B/C/CP) and 34 (8168E-VL/8111E-VL). PHY IDs
+//! 17..26 (8168B/C/CP/D, 8111B/C/CP/D) and 34 (8168E-VL/8111E-VL). PHY IDs
 //! `001c:c800` (internal FE/GE) and `001c:c912` (RTL8211B) are accepted only
-//! with actual copper-gigabit capabilities. Version 34 requires the exact
-//! `rtl_nic/rtl8168e-3.fw` resource. No firmware bytes are embedded or copied.
+//! with actual copper-gigabit capabilities. Versions 25/26 require their exact
+//! `rtl_nic/rtl8168d-1.fw`/`rtl_nic/rtl8168d-2.fw` resource and matching PHY
+//! firmware-readiness sentinel; 34 requires `rtl_nic/rtl8168e-3.fw`.
+//! No firmware bytes are embedded or copied.
 //!
 //! Later 8168/8111, 8125 and 8126 MAC versions are identified for diagnostics
 //! but **refused** until their complete MAC/PHY initialization is implemented.
@@ -370,10 +372,10 @@ fn publish<R: Registers, T: Timer>(
     r.read8(COMMAND);
     fence(Ordering::SeqCst);
     r.write8(COMMAND, ENABLE);
-    let rxconfig = if revision.version <= 17 {
-        (7 << 13) | (7 << 8)
-    } else {
-        (1 << 15) | (1 << 14) | (7 << 8)
+    let rxconfig = match revision.version {
+        2..=17 => (7 << 13) | (7 << 8),
+        25 | 26 => (1 << 15) | (7 << 8),
+        _ => (1 << 15) | (1 << 14) | (7 << 8),
     };
     // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
     r.write32(RX_CONFIG, rxconfig | 0x0e);
@@ -453,6 +455,9 @@ mod tests {
         eri: BTreeMap<u16, u32>,
         mac: BTreeMap<u16, u16>,
         page: u16,
+        parameter: u16,
+        parameters: BTreeMap<u16, u16>,
+        efuse: u8,
         pending: Option<(usize, u32, u64)>,
         reset_phy_at: Option<u64>,
         reset_mac_at: Option<u64>,
@@ -463,6 +468,7 @@ mod tests {
         state: RefCell<State>,
         time: Time,
         fault: Option<usize>,
+        failed_read: Option<usize>,
         fail_phy_at: usize,
         stuck_reset: bool,
         stuck_phy_reset: bool,
@@ -488,6 +494,7 @@ mod tests {
                 state: RefCell::new(state),
                 time: time.clone(),
                 fault: None,
+                failed_read: None,
                 fail_phy_at: usize::MAX,
                 stuck_reset: false,
                 stuck_phy_reset: false,
@@ -528,6 +535,11 @@ mod tests {
                             s.page = command as u16;
                         } else {
                             s.phy.insert((s.page, reg), command as u16);
+                            if s.page == 5 && reg == 5 {
+                                s.parameter = command as u16;
+                            } else if s.page == 5 && reg == 6 {
+                                s.parameters.insert(s.parameter, command as u16);
+                            }
                             if s.page == 0 && reg == 0 && command as u16 & PHY_RESET != 0 {
                                 s.reset_phy_at = Some(self.time.now() + 100);
                             }
@@ -536,12 +548,15 @@ mod tests {
                     } else {
                         let value = if reg == PHY_PAGE {
                             s.page
+                        } else if s.page == 5 && reg == 6 {
+                            *s.parameters.get(&s.parameter).unwrap_or(&0)
                         } else {
                             *s.phy.get(&(s.page, reg)).unwrap_or(&0)
                         };
                         (command & !0xffff) | ACCESS | u32::from(value)
                     }
                 }
+                EFUSE_ACCESS => command | ACCESS | u32::from(s.efuse),
                 EPHY_ACCESS => {
                     let reg = ((command >> 16) & 31) as usize;
                     if write {
@@ -607,6 +622,9 @@ mod tests {
             u16::from_le_bytes(s.bytes[o..o + 2].try_into().unwrap())
         }
         fn read32(&self, o: usize) -> u32 {
+            if self.failed_read == Some(o) {
+                return u32::MAX;
+            }
             let mut s = self.state.borrow_mut();
             self.complete(&mut s);
             Self::raw32(&s, o)
@@ -632,7 +650,7 @@ mod tests {
             s.writes.push((o, v, 4));
             if matches!(
                 o,
-                PHY_ACCESS | EPHY_ACCESS | ERI_ADDRESS | CSI_ADDRESS | PHY_OCP
+                PHY_ACCESS | EPHY_ACCESS | ERI_ADDRESS | CSI_ADDRESS | PHY_OCP | EFUSE_ACCESS
             ) {
                 if o == PHY_ACCESS {
                     s.mdio_commands += 1;
@@ -667,6 +685,8 @@ mod tests {
             22 => 0x3c4,
             23 => 0x3c9,
             24 => 0x3ca,
+            25 => 0x281,
+            26 => 0x280,
             34 => 0x2c8,
             _ => panic!("fixture revision"),
         };
@@ -683,6 +703,8 @@ mod tests {
             (0x3c2, 20, None),
             (0x3c3, 21, None),
             (0x3c4, 22, None),
+            (0x281, 25, Some("rtl_nic/rtl8168d-1.fw")),
+            (0x280, 26, Some("rtl_nic/rtl8168d-2.fw")),
             (0x2c1, 32, Some("rtl_nic/rtl8168e-1.fw")),
             (0x2c0, 33, Some("rtl_nic/rtl8168e-2.fw")),
             (0x2c8, 34, Some("rtl_nic/rtl8168e-3.fw")),
@@ -1125,6 +1147,185 @@ mod tests {
                 }
                 assert_eq!(s.phy[&(0, PHY_CONTROL)], 0x1200);
             }
+        }
+    }
+
+    #[test]
+    fn d_revisions_apply_exact_efuse_tuning_and_firmware_only_after_readiness() {
+        for (version, sentinel) in [(25, 0xbf00), (26, 0xb300)] {
+            for efuse in [0xb1, 0] {
+                for low in [0x006c, 0x0070] {
+                    let time = Time::default();
+                    let model = Model::ready(&time);
+                    {
+                        let mut s = model.state.borrow_mut();
+                        s.efuse = efuse;
+                        s.parameters.insert(0x001b, sentinel);
+                        s.phy.insert((2, 0x0d), 0x5000 | low);
+                        s.phy.insert((2, 2), 0xffff);
+                        s.phy.insert((2, 3), 0xffff);
+                        s.phy.insert((2, 0x0b), 0xffff);
+                        s.phy.insert((2, 0x0c), 0xffff);
+                    }
+                    // Independent script writes a distinctive page-zero marker.
+                    let bytes = 0x8016_a55au32.to_le_bytes();
+                    let script = Script::parse(&bytes).unwrap();
+                    let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                    hw.configure_phy(Some(&script), false).unwrap();
+                    let s = model.state.borrow();
+                    assert_eq!(s.page, 0);
+                    assert_eq!(s.phy[&(1, 6)], 0x4064);
+                    assert_eq!(s.phy[&(3, 0x12)], 0xf49f);
+                    assert_eq!(s.parameters[&0x8332], 0x5561);
+                    let tune = if efuse == 0xb1 {
+                        0x669a
+                    } else if version == 25 {
+                        0x6662
+                    } else {
+                        0x2642
+                    };
+                    assert_eq!(s.phy[&(2, 5)], tune);
+                    assert_eq!(s.parameters[&0x8330], tune);
+                    assert_eq!(s.phy[&(2, 2)], 0xf9ff);
+                    assert_eq!(s.phy[&(2, 3)], 0x1fff);
+                    if version == 25 {
+                        assert_eq!(s.phy[&(2, 0x0b)], 0xff10);
+                        assert_eq!(s.phy[&(2, 0x0c)], 0xa2ff);
+                        assert_eq!(s.phy[&(2, 0x0f)] & 0x10, 0x10);
+                    } else {
+                        assert_eq!(s.phy[&(2, 0x0b)], 0xffff);
+                        assert_eq!(s.phy[&(2, 0x0c)], 0xffff);
+                        assert_eq!(s.phy[&(2, 0x0f)] & 0x17, 0x17);
+                    }
+                    assert_eq!(s.phy[&(0, 0x16)], 0xa55a);
+                    assert_eq!(s.phy[&(0, 0)], 0x1200);
+                    let ramp: Vec<_> = s
+                        .writes
+                        .iter()
+                        .filter(|(r, v, _)| *r == PHY_ACCESS && *v & 0xffff_ff00 == 0x800d_5000)
+                        .map(|(_, v, _)| *v as u16)
+                        .collect();
+                    if efuse == 0xb1 && low != 0x6c {
+                        assert!(ramp.starts_with(&[
+                            0x5065, 0x5066, 0x5067, 0x5068, 0x5069, 0x506a, 0x506b, 0x506c
+                        ]));
+                    } else {
+                        assert!(!ramp.contains(&0x5065));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn d_revisions_refuse_unready_phy_missing_firmware_and_efuse_faults() {
+        for version in [25, 26] {
+            let bytes = 0x8016_a55au32.to_le_bytes();
+            let script = Script::parse(&bytes).unwrap();
+            for fault in [false, true] {
+                let time = Time::default();
+                let mut model = Model::ready(&time);
+                if fault {
+                    model.fault = Some(EFUSE_ACCESS);
+                }
+                let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                let error = hw.configure_phy(Some(&script), false).unwrap_err();
+                if fault {
+                    assert_eq!(error, Error::Device(BlockError::Timeout));
+                } else {
+                    assert_eq!(
+                        error,
+                        Error::Script("RTL8168D PHY is not ready for firmware")
+                    );
+                }
+                let s = model.state.borrow();
+                assert_eq!(s.page, 0);
+                assert!(!s.phy.contains_key(&(0, 0x16)));
+                assert_ne!(s.phy[&(0, 0)], 0x1200);
+                assert!(
+                    !s.writes
+                        .iter()
+                        .any(|(r, v, _)| *r == COMMAND && *v == u32::from(ENABLE))
+                );
+            }
+            let time = Time::default();
+            let model = Model::ready(&time);
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.configure_phy(None, false),
+                Err(Error::Script("RTL8168D requires firmware"))
+            );
+        }
+        let time = Time::default();
+        let model = Model::ready(&time);
+        let hw = Hardware::new(&model, &time, revision(25), 0);
+        assert!(hw.efuse_read(0x400).is_err());
+        assert!(model.state.borrow().writes.is_empty());
+    }
+
+    #[test]
+    fn d_mac_start_clears_stale_jumbo_state_and_uses_single_fetch_receive_configuration() {
+        use crate::bus::dma::RegionAllocator;
+        for version in [25, 26] {
+            let mut backing = vec![0u64; 40_000];
+            let base = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all descriptor use and has no other accesses.
+            let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+            let mut rx = Ring::new(&mut dma, true).unwrap();
+            let mut tx = Ring::new(&mut dma, true).unwrap();
+            rx.initialize(true);
+            tx.initialize(false);
+            let time = Time::default();
+            let model = Model::ready(&time);
+            model.state.borrow_mut().bytes[CONFIG3] = 0xff;
+            model.state.borrow_mut().bytes[CONFIG4] = 0xff;
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.configure_mac().unwrap();
+            assert_eq!(model.read8(CONFIG3) & 4, 0);
+            assert_eq!(model.read8(CONFIG4) & 2, 0);
+            assert_eq!(model.read8(CONFIG_LOCK), 0);
+            publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])).unwrap();
+            assert_eq!(model.read32(RX_CONFIG), (1 << 15) | (7 << 8) | 0x0e);
+        }
+        for xid in [
+            0x28a, 0x28b, 0x2c1, 0x2c0, 0x480, 0x481, 0x488, 0x609, 0x64a,
+        ] {
+            assert!(!revision::detect(xid << 20).unwrap().implemented());
+        }
+    }
+    #[test]
+    fn d_revision_mdio_and_failed_efuse_reads_propagate_for_each_accepted_phy() {
+        let bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&bytes).unwrap();
+        for (version, sentinel) in [(25, 0xbf00), (26, 0xb300)] {
+            for id in [0xc800, 0xc912] {
+                for nth in [20, 45, 70] {
+                    let time = Time::default();
+                    let mut model = Model::ready(&time);
+                    {
+                        let mut s = model.state.borrow_mut();
+                        s.phy.insert((0, 3), id);
+                        s.parameters.insert(0x001b, sentinel);
+                        s.efuse = 0xb1;
+                    }
+                    model.fail_phy_at = nth;
+                    let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                    assert_eq!(
+                        hw.configure_phy(Some(&script), false),
+                        Err(Error::Device(BlockError::Timeout))
+                    );
+                    assert_ne!(model.state.borrow().phy[&(0, 0)], 0x1200);
+                }
+            }
+            let time = Time::default();
+            let mut model = Model::ready(&time);
+            model.failed_read = Some(EFUSE_ACCESS);
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.configure_phy(Some(&script), false),
+                Err(Error::Device(BlockError::Device { status: u32::MAX }))
+            );
+            assert_eq!(model.state.borrow().page, 0);
         }
     }
 }
