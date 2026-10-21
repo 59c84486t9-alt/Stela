@@ -152,6 +152,16 @@ fn read_notices(source: &Path, manifest: &Manifest<'_>) -> Result<Vec<(String, V
         if !storage_path(&relative) {
             return Err(fail("firmware notice index path exceeds its budget"));
         }
+        if manifest.images.iter().any(|image| image.path == relative) {
+            if required {
+                return Err(fail(
+                    "required firmware notice index conflicts with an image",
+                ));
+            }
+            // The legacy directory shape is not reserved. An explicitly
+            // declared firmware image keeps its meaning in unmarked packages.
+            continue;
+        }
         let found = resolve_optional(source, &relative)?;
         if let Some(found) = found {
             if selected.is_some() {
@@ -159,14 +169,14 @@ fn read_notices(source: &Path, manifest: &Manifest<'_>) -> Result<Vec<(String, V
                     "multiple firmware notice indexes cannot be imported losslessly",
                 ));
             }
-            selected = Some((parent, found));
+            selected = Some((parent, found, generated));
         } else if required {
             return Err(fail(
                 "generated firmware package is missing required notices",
             ));
         }
     }
-    let Some((parent, path)) = selected else {
+    let Some((parent, path, generated)) = selected else {
         return Ok(Vec::new());
     };
     let bytes = read_bounded(&path, None, MAX_MANIFEST_BYTES)?;
@@ -201,7 +211,16 @@ fn read_notices(source: &Path, manifest: &Manifest<'_>) -> Result<Vec<(String, V
             .ok_or_else(|| fail("firmware notices exceed 1 MiB"))?;
     }
     for image in &manifest.images {
-        if let Some(member) = image.provenance.license.strip_prefix(NOTICE_MARKER)
+        let member = image
+            .provenance
+            .license
+            .strip_prefix(NOTICE_MARKER)
+            .or_else(|| {
+                (generated
+                    && image.path.rsplit_once('/').map_or("", |(parent, _)| parent) == parent)
+                    .then_some(image.provenance.license)
+            });
+        if let Some(member) = member
             && !index.notices.iter().any(|notice| {
                 notice.member == member
                     && notice.source == image.provenance.source
@@ -454,23 +473,104 @@ fn sync_directory(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn ordinary_firmware_named_like_a_notice_index_keeps_its_original_meaning() {
+    fn ordinary_package(path: &str, license: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("provenance.json"), b"abc").unwrap();
-        let manifest = serde_json::json!({"schema":1,"images":[{"name":"vendor/config.json","path":"provenance.json","length":3,
+        let image = dir.path().join(path);
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(image, b"abc").unwrap();
+        let manifest = serde_json::json!({"schema":1,"images":[{"name":"vendor/config.json","path":path,"length":3,
             "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "target":{"driver":"fixture","hardware":"synthetic","revision":"v1","board":null},
-            "provenance":{"source":"synthetic","revision":"v1","member":"fixtures/abc.bin","license":"CC0-1.0"}}]});
+            "provenance":{"source":"synthetic","revision":"v1","member":"fixtures/abc.bin","license":license}}]});
         std::fs::write(
             dir.path().join("manifest.json"),
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let package = Package::read(dir.path()).unwrap();
+        dir
+    }
+
+    fn assert_ordinary_roundtrip(dir: &Path) {
+        let package = Package::read(dir).unwrap();
         assert_eq!(package.inventory(), (1, 3));
+        let output = dir.join("output");
+        package.publish(&output).unwrap();
+        let imported = Package::read(&output).unwrap();
+        assert_eq!(imported.inventory(), (1, 3));
+        assert_eq!(imported.files, vec![b"abc".to_vec()]);
+        assert!(imported.notices.is_empty());
+    }
+
+    #[test]
+    fn ordinary_firmware_named_like_a_notice_index_keeps_its_original_meaning() {
+        let dir = ordinary_package("provenance.json", "CC0-1.0");
+        assert_ordinary_roundtrip(dir.path());
+    }
+
+    #[test]
+    fn ordinary_firmware_in_a_legacy_notice_directory_keeps_its_original_meaning() {
+        let path = format!("objects/{}/provenance.json", "a".repeat(64));
+        let dir = ordinary_package(&path, "CC0-1.0");
+        assert_ordinary_roundtrip(dir.path());
+    }
+
+    #[test]
+    fn required_notice_index_cannot_also_be_a_firmware_image() {
+        let path = format!("objects/{}/provenance.json", "a".repeat(64));
+        let dir = ordinary_package(&path, "stela-notice-v1:LICENSE.fixture");
+        let error = Package::read(dir.path()).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "required firmware notice index conflicts with an image"
+        );
+    }
+
+    #[test]
+    fn legacy_generated_index_preserves_notices_and_requires_exact_associations() {
+        let parent = format!("objects/{}", "a".repeat(64));
+        let dir = ordinary_package(&format!("{parent}/0.bin"), "LICENSE.fixture");
+        let notice = b"original notice";
+        let index = serde_json::json!({"schema":1,"notices":[{
+            "path":"license-0.txt","source":"synthetic","revision":"v1",
+            "member":"LICENSE.fixture","length":notice.len(),
+            "sha256":hex::encode(Sha256::digest(notice))}]});
+        let index_bytes = serde_json::to_vec(&index).unwrap();
+        let objects = dir.path().join(parent);
+        std::fs::write(objects.join("license-0.txt"), notice).unwrap();
+        std::fs::write(objects.join(NOTICE_INDEX), &index_bytes).unwrap();
+        let package = Package::read(dir.path()).unwrap();
         let output = dir.path().join("output");
         package.publish(&output).unwrap();
-        assert_eq!(Package::read(&output).unwrap().inventory(), (1, 3));
+        let imported = Package::read(&output).unwrap();
+        assert_eq!(imported.files, vec![b"abc".to_vec()]);
+        assert_eq!(imported.notices, package.notices);
+        assert_eq!(imported.notices[0].1, notice);
+        assert_eq!(imported.notices[1].1, index_bytes);
+        let imported_manifest = Manifest::parse(&imported.manifest).unwrap();
+        assert_eq!(
+            imported_manifest.images[0].provenance.license,
+            "LICENSE.fixture"
+        );
+
+        let mut mutations = vec![
+            serde_json::json!({"schema":1,"notices":[]}),
+            serde_json::json!({"schema":1}),
+        ];
+        for key in ["source", "revision", "member"] {
+            let mut changed = index.clone();
+            changed["notices"][0][key] = serde_json::json!("wrong");
+            mutations.push(changed);
+        }
+        for changed in mutations {
+            std::fs::write(
+                objects.join(NOTICE_INDEX),
+                serde_json::to_vec(&changed).unwrap(),
+            )
+            .unwrap();
+            assert!(Package::read(dir.path()).is_err(), "{changed}");
+        }
+        std::fs::write(objects.join(NOTICE_INDEX), &index_bytes).unwrap();
+        std::fs::remove_file(objects.join("license-0.txt")).unwrap();
+        assert!(Package::read(dir.path()).is_err());
     }
 }
