@@ -162,8 +162,9 @@ pub struct Run {
     #[arg(long, requires = "bundle")]
     directory_volume: bool,
     /// Attach a raw GPT disk over NVMe, preserving writes; repeat for more
-    /// disks. Select a partition with --storage SERIAL:GUID in --append.
-    #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
+    /// disks. Select a partition with --storage SERIAL:GUID in --append, or
+    /// give a USB image's entries the PC disk they name by its serial.
+    #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk"])]
     storage_disk: Vec<PathBuf>,
     /// NVMe serial of the --storage-disk at the same position. One disk
     /// defaults to STELAANS; several disks need distinct serials each.
