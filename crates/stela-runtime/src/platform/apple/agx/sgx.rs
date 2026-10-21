@@ -313,6 +313,13 @@ impl FirmwarePower {
         self.asc_wrapper
     }
 
+    /// The complete eight-byte native control word qualified by
+    /// `with_asc_wrapper`. The mount must also check its final bus route.
+    pub fn native_asc_control(&self) -> Option<u64> {
+        self.asc_wrapper
+            .map(|physical| physical + ASC_NATIVE_CONTROL)
+    }
+
     pub(super) fn family(&self) -> &'static Family {
         self.family
     }
@@ -945,8 +952,10 @@ mod tests {
         write(&mut sgx, GATING_CONTROL, 4).unwrap();
         let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
         assert_eq!(power.asc_wrapper(), None);
+        assert_eq!(power.native_asc_control(), None);
         let bound = power.clone().with_asc_wrapper(0x206400000).unwrap();
         assert_eq!(bound.asc_wrapper(), Some(0x206400000));
+        assert_eq!(bound.native_asc_control(), Some(0x206540120));
         assert_eq!(bound.logical(0x206540120), Ok(0x2540120));
         assert!(bound.clone().with_asc_wrapper(0x206400000).is_ok());
         assert!(bound.clone().with_asc_wrapper(0x206500000).is_err());
