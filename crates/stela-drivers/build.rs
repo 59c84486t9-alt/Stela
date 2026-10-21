@@ -16,9 +16,19 @@ fn main() {
     {
         let mut build = native::configure();
         build.file("src/gpu/amd/stela/vm_cpu.c").std("c11");
+        // Build the pure C ABI/original-value test helper separately. Only the
+        // cfg(test) Rust link attribute selects it; production links the port.
+        let mut model = native::configure();
+        model
+            .file("src/gpu/amd/tests/vm_ram_test.c")
+            .std("c11")
+            .cargo_metadata(false)
+            .compile("stela-amd-vm-test");
         for path in [
             "src/gpu/amd/stela",
             "src/gpu/amd/amdgpu/amdgpu_vm_cpu_entries.h",
+            "src/gpu/amd/amdgpu/amdgpu_gmc_pte.h",
+            "src/gpu/amd/tests/vm_ram_test.c",
         ] {
             println!("cargo:rerun-if-changed={path}");
         }

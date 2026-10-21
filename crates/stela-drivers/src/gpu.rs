@@ -12,7 +12,7 @@ pub mod intel;
 #[cfg(feature = "metal")]
 pub mod metal;
 
-#[cfg(feature = "amd-commands")]
+#[cfg(any(feature = "amd-commands", feature = "amd-port"))]
 pub mod amd;
 
 /// PCI base class for VGA, 3D and other display controllers.

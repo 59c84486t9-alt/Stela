@@ -22,7 +22,7 @@ $(TEST_OUT)/commands_fixture.o: $(TEST_SOURCE)/commands_fixture.c | $(TEST_OUT)
 	  -I"$(MESA_SOURCE)/include" -I"$(MESA_SOURCE)/src" \
 	  -I"$(MESA_BUILD)/src" -I"$(MESA_BUILD)/src/amd/common" -c "$<" -o "$@"
 
-$(TEST_OUT)/facade: $(TEST_SOURCE)/facade.rs $(TEST_SOURCE)/../../amd.rs \
+$(TEST_OUT)/facade: $(TEST_SOURCE)/facade.rs $(TEST_SOURCE)/../commands.rs \
   $(TEST_OUT)/commands_fixture.o $(MESA_BUILD)/src/stela/libstela_amd_commands.a \
   $(MESA_BUILD)/src/amd/common/libamd_command_support.a
 	$(RUSTC) $(RUSTFLAGS) --edition=2024 --test "$<" --crate-name stela_amd_facade -D warnings \

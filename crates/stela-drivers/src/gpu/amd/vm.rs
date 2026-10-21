@@ -519,6 +519,7 @@ mod tests {
                 .write_volatile(value)
         };
     }
+    #[link(name = "stela-amd-vm-test", kind = "static")]
     unsafe extern "C" {
         fn stela_amd_test_gmc_pte_value(address: u64, mask: u64, flags: u64) -> u64;
     }

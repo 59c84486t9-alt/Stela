@@ -1,5 +1,5 @@
 #![no_std]
-#[path = "../../amd.rs"]
+#[path = "../commands.rs"]
 pub mod amd;
 use amd::*;
 use core::ffi::c_void;
