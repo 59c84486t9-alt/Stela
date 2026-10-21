@@ -111,12 +111,25 @@ impl Domain {
             .checked_add(1)
             .ok_or(Error::GenerationExhausted)
     }
+    fn present_lane(inventory: &Inventory, port: u8) -> bool {
+        inventory.adapters.iter().any(|adapter| match adapter {
+            AdapterObservation::Present {
+                port: number,
+                header,
+                ..
+            } => *number == port && header.kind() == AdapterKind::Lane,
+            AdapterObservation::Unimplemented { .. } => false,
+        })
+    }
     fn validate(inventory: &Inventory) -> Result<(), Error> {
         let max = inventory.header.max_port();
         if inventory.upstream_port > max || inventory.adapters.len() != usize::from(max) {
             return Err(Error::Inventory);
         }
-        if inventory.path.depth()!=0 && (inventory.upstream_port==0 || !inventory.adapters.iter().any(|adapter|matches!(adapter,AdapterObservation::Present { port,header,.. } if *port==inventory.upstream_port && header.kind()==AdapterKind::Lane))) {
+        if inventory.path.depth() != 0
+            && (inventory.upstream_port == 0
+                || !Self::present_lane(inventory, inventory.upstream_port))
+        {
             return Err(Error::Inventory);
         }
         let mut seen = 0u64;
@@ -151,7 +164,9 @@ impl Domain {
         if port == record.inventory.upstream_port {
             return Err(Error::Upstream);
         }
-        if !record.inventory.adapters.iter().any(|adapter|matches!(adapter,AdapterObservation::Present { port:number,header,.. } if *number==port && header.kind()==AdapterKind::Lane)) { return Err(Error::NotLane); }
+        if !Self::present_lane(&record.inventory, port) {
+            return Err(Error::NotLane);
+        }
         Ok(())
     }
     fn invalidate(&mut self, path: Path, generation: u64) -> Vec<Path> {
@@ -215,15 +230,35 @@ impl Domain {
             return Err(Error::UnknownPort);
         }
         let generation = self.next_generation()?;
-        let result=if event.port==0 { Hotplug::ControlAdapter { generation } }
-        else if event.port==record.inventory.upstream_port { Hotplug::UpstreamIgnored { generation } }
-        else if !record.inventory.adapters.iter().any(|adapter|matches!(adapter,AdapterObservation::Present { port,header,.. } if *port==event.port && header.kind()==AdapterKind::Lane)) { Hotplug::AdapterChanged { generation,router:event.route,port:event.port } }
-        else {
-            let root=self.current(Route::new(0).map_err(|_|Error::Inventory)?).ok_or(Error::RootRequired)?;
-            let path=record.inventory.path.downstream(event.port,root.inventory.header.usb4_version()>0).map_err(|_|Error::Depth)?;
-            if event.unplug { Hotplug::Removed(Change { generation,invalidated:self.invalidate(path,generation) }) }
-            else if self.current(path.route()).is_some() { Hotplug::AlreadyObserved { generation,path } }
-            else { Hotplug::Rescan { generation,path } }
+        let result = if event.port == 0 {
+            Hotplug::ControlAdapter { generation }
+        } else if event.port == record.inventory.upstream_port {
+            Hotplug::UpstreamIgnored { generation }
+        } else if !Self::present_lane(&record.inventory, event.port) {
+            Hotplug::AdapterChanged {
+                generation,
+                router: event.route,
+                port: event.port,
+            }
+        } else {
+            let root = self
+                .current(Route::new(0).map_err(|_| Error::Inventory)?)
+                .ok_or(Error::RootRequired)?;
+            let path = record
+                .inventory
+                .path
+                .downstream(event.port, root.inventory.header.usb4_version() > 0)
+                .map_err(|_| Error::Depth)?;
+            if event.unplug {
+                Hotplug::Removed(Change {
+                    generation,
+                    invalidated: self.invalidate(path, generation),
+                })
+            } else if self.current(path.route()).is_some() {
+                Hotplug::AlreadyObserved { generation, path }
+            } else {
+                Hotplug::Rescan { generation, path }
+            }
         };
         self.generation = generation;
         Ok(result)
