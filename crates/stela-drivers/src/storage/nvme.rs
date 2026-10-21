@@ -150,7 +150,10 @@ impl Controller {
         // completion must not authorize reuse or acknowledge an unknown CQE.
         if tail_word as u16 != id
             || submission >> 16 != u32::from(queue.id)
-            || submission as u16 >= ENTRIES
+            // With exactly one outstanding command, consuming its SQE must
+            // advance SQHD to our tail, including the modulo-ENTRIES wrap.
+            // NVMe Base 2.1: SQHD reports the head when this CQE was created.
+            || submission as u16 != queue.tail
         {
             return Err(self.poison(BlockError::Device { status: 0xffff }));
         }
@@ -528,7 +531,13 @@ mod tests {
 
     #[test]
     fn unrelated_or_malformed_completions_do_not_retire_our_command() {
-        for (cid, sqid, head) in [(2u32, 1u32, 1u32), (1, 2, 1), (1, 1, 16)] {
+        for (cid, sqid, head) in [
+            (2u32, 1u32, 1u32),
+            (1, 2, 1),
+            (1, 1, 16),
+            (1, 1, 0),
+            (1, 1, 2),
+        ] {
             let mut fixture = Fixture::new();
             {
                 let mut c = fixture.disk.controller.borrow_mut();
@@ -542,6 +551,49 @@ mod tests {
             assert_eq!(c.io.head, 0);
             assert_eq!(c.registers.read32(DOORBELLS + 12), 0);
             assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[test]
+    fn sq_head_validation_preserves_wrap_and_rejects_stale_or_ahead_heads() {
+        for invalid_head in [None, Some(15u32), Some(1)] {
+            let mut fixture = Fixture::new();
+            for next in 1..ENTRIES {
+                {
+                    let mut c = fixture.disk.controller.borrow_mut();
+                    let offset = usize::from(next - 1) * 16;
+                    c.io.completions
+                        .write(offset + 8, 1u32 << 16 | u32::from(next));
+                    c.io.completions
+                        .write(offset + 12, 1u32 << 16 | u32::from(next));
+                }
+                fixture.disk.flush().unwrap();
+            }
+            {
+                let mut c = fixture.disk.controller.borrow_mut();
+                c.io.completions
+                    .write(15 * 16 + 8, 1u32 << 16 | invalid_head.unwrap_or(0));
+                c.io.completions.write(15 * 16 + 12, 1u32 << 16 | 16);
+            }
+            let result = fixture.disk.flush();
+            let mut c = fixture.disk.controller.borrow_mut();
+            assert_eq!(c.io.tail, 0);
+            match invalid_head {
+                Some(_) => {
+                    assert_eq!(result, Err(BlockError::Device { status: 0xffff }));
+                    assert_eq!(c.io.head, 15);
+                    assert!(c.io.phase);
+                }
+                None => {
+                    assert_eq!(result, Ok(()));
+                    assert_eq!(c.io.head, 0);
+                    assert!(!c.io.phase);
+                    c.io.completions.write(8, 1u32 << 16 | 1);
+                    c.io.completions.write(12, 17u32); // New phase is zero.
+                    drop(c);
+                    fixture.disk.flush().unwrap();
+                }
+            }
         }
     }
 
