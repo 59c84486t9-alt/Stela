@@ -46,6 +46,10 @@ pub const DESCRIPTOR_BYTES: usize = 0x20;
 
 /// The firmware's view of shared memory: firmware virtual addresses reached
 /// through the UAT. [`Port`] is the machine's; tests use flat memory.
+/// Writes reach RAM only, never MMIO. A multi-page error may leave earlier
+/// pages committed. Retained publications may replay the identical bytes in
+/// an unpublished, firmware-owned body; scalar publications must fit one UAT
+/// page (whose Memory::write failure transfers nothing).
 pub trait Shared {
     fn read(&mut self, va: u64, buffer: &mut [u8]) -> Result<(), &'static str>;
     fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str>;
@@ -66,6 +70,18 @@ pub trait Shared {
     fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError>;
     /// A GPU-unit write in UAT `context`.
     fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError>;
+}
+
+/// Qualify a retained scalar store's indivisible RAM transfer. Cross-page
+/// scalars require an explicit partial-store protocol, which is not modeled.
+pub(crate) fn scalar_range(address: u64, bytes: u64) -> Result<(), &'static str> {
+    let last = address
+        .checked_add(bytes - 1)
+        .ok_or("GFX scalar store range wraps")?;
+    if address / uat::PAGE_BYTES != last / uat::PAGE_BYTES {
+        return Err("GFX scalar publication crosses a UAT page");
+    }
+    Ok(())
 }
 
 fn reason(error: DmaError) -> &'static str {
@@ -208,6 +224,7 @@ impl Descriptor {
         if read >= ENTRIES {
             return Err("GFX ring read_index out-of-bounds");
         }
+        scalar_range(self.state + READ, 4)?;
         memory.write(self.state + READ, &read.to_le_bytes())
     }
 }

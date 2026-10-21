@@ -258,7 +258,7 @@ struct ActiveWork {
     descriptor: ring::Descriptor,
     next_read: u32,
     channel_state: u64,
-    queue: channel::Queue,
+    submission: channel::Submission,
     command: Option<ActiveCommand>,
     retiring: bool,
 }
@@ -507,7 +507,7 @@ impl State {
     /// Run a data-master ring's pending entries. Each names a channel; the
     /// channel's pending commands run in order, each retired from the
     /// channel's command ring once complete, and the entry is retired once
-    /// its channel has nothing pending. A command the model does not execute
+    /// the entry's captured command tail is reached. A command the model does not execute
     /// refuses by name and stays pending, as does its entry.
     fn work_ring(
         &mut self,
@@ -531,11 +531,14 @@ impl State {
                 }
                 let channel_state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
                 let queue = channel::Queue::read(memory, channel_state)?;
+                let target = u16::from_le_bytes(entry[0x14..0x16].try_into().unwrap());
+                let submission = queue.submission(memory, channel_state, target)?;
+                ring::scalar_range(descriptor.state + ring::READ, 4)?;
                 self.active_work = Some(ActiveWork {
                     descriptor,
                     next_read: ring::next(read),
                     channel_state,
-                    queue,
+                    submission,
                     command: None,
                     retiring: false,
                 });
@@ -546,10 +549,15 @@ impl State {
                 self.active_work = None;
                 continue;
             }
+            self.active_work
+                .as_mut()
+                .unwrap()
+                .submission
+                .publish(memory)?;
             loop {
                 let active = self.active_work.as_ref().unwrap();
                 if active.command.is_none() {
-                    let Some(va) = active.queue.next(memory)? else {
+                    let Some(va) = active.submission.next(memory)? else {
                         // The target is retained even if this final DMA
                         // fails. It cannot retire a later entry on retry.
                         self.active_work.as_mut().unwrap().retiring = true;
@@ -572,7 +580,7 @@ impl State {
                             "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler",
                         );
                     }
-                    let retirement = active.queue.retirement(memory)?;
+                    let retirement = active.submission.retirement();
                     let actions = signal::prepare(memory, &command)?;
                     self.active_work.as_mut().unwrap().command = Some(ActiveCommand {
                         actions,
@@ -591,6 +599,7 @@ impl State {
                     return Ok(false);
                 }
                 active.command = None;
+                active.submission.consumed();
                 self.commands += 1;
             }
         }
@@ -1841,6 +1850,7 @@ mod tests {
         let (ring_state, entries) = (BASE + 0x9000, BASE + 0xc000);
         memory.put_descriptor(RINGS + 0x20 + 0x20, ring_state, entries);
         memory.put_u32(entries + 0x10, 1);
+        memory.put(entries + 0x14, &1u16.to_le_bytes());
         memory.put_u32(ring_state + WRITE, 1);
         if channel_state != 0 {
             crate::platform::apple::agx::channel::tests::one_command(
@@ -2048,7 +2058,7 @@ mod tests {
     fn accepted_signal_actions_survive_every_publication_fault_without_replay() {
         use event::tests::{EVENT_ENTRIES, EVENT_STATE, entry};
         for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
-            for failed_write in 0..9 {
+            for failed_write in 0..11 {
                 let (mut state, flat, master) = owned_signal(family);
                 let mut memory = WorkMemory {
                     flat,
@@ -2066,14 +2076,20 @@ mod tests {
                 // The accepted command owns these original values. Altering
                 // source memory during recovery cannot redispatch it, lose
                 // its event, or change the target completion identity.
-                memory.flat.put_u64(OWNED_STREAM + 0x10, 0xdead);
-                memory.flat.put_u64(OWNED_STREAM + 0x18, 77);
-                memory
-                    .flat
-                    .put_u64(OWNED_STREAM + 0x30, OWNED_COMMAND + 0xa00);
-                memory.flat.put_u32(OWNED_COMMAND + 0x40, 0xbeef);
-                memory.flat.put_u32(OWNED_COMMAND + 0x50, 9);
-                if failed_write == 8 {
+                // The entry is already accepted even if its tail publication
+                // faults. The signal itself is accepted only after both words.
+                memory.flat.put(BASE + 0xc014, &2u16.to_le_bytes());
+                memory.flat.put_u32(OWNED_CHANNEL + 0x1040, 2);
+                if failed_write >= 2 {
+                    memory.flat.put_u64(OWNED_STREAM + 0x10, 0xdead);
+                    memory.flat.put_u64(OWNED_STREAM + 0x18, 77);
+                    memory
+                        .flat
+                        .put_u64(OWNED_STREAM + 0x30, OWNED_COMMAND + 0xa00);
+                    memory.flat.put_u32(OWNED_COMMAND + 0x40, 0xbeef);
+                    memory.flat.put_u32(OWNED_COMMAND + 0x50, 9);
+                }
+                if failed_write == 10 {
                     // Final master retirement has already been accepted;
                     // it must not reopen the channel before publishing it.
                     memory.fail_read = Some(OWNED_CHANNEL + 0x1000);
@@ -2085,6 +2101,8 @@ mod tests {
                 assert_eq!(
                     memory.writes.iter().map(|(va, _)| *va).collect::<Vec<_>>(),
                     [
+                        OWNED_CHANNEL + 0x28,
+                        OWNED_CHANNEL + 0x1030,
                         OWNED_SHARED,
                         EVENT_ENTRIES,
                         EVENT_STATE + WRITE,
@@ -2116,14 +2134,154 @@ mod tests {
                 assert_eq!(memory.flat.read_u32(EVENT_STATE + WRITE), Ok(2));
                 assert_eq!(memory.flat.read_u32(OWNED_CHANNEL + 0x1000), Ok(1));
                 assert_eq!(memory.flat.read_u32(master), Ok(1));
-                if failed_write == 8 {
+                if failed_write == 10 {
                     assert_eq!(memory.fail_read, Some(OWNED_CHANNEL + 0x1000));
                 }
                 // An idle later poll cannot replay the completed command.
                 state.dma(&mut memory, &mut outbox).unwrap();
-                assert_eq!((memory.writes.len(), outbox.len()), (9, 2));
+                assert_eq!((memory.writes.len(), outbox.len()), (11, 2));
             }
         }
+    }
+
+    #[test]
+    fn submitted_tail_stops_before_later_commands_including_wrap_and_empty_intervals() {
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for wrapping in [false, true] {
+                let (mut state, mut memory, master) = owned_signal(family);
+                let queue = OWNED_CHANNEL + 0x1000;
+                let pointers = OWNED_CHANNEL + 0x2000;
+                let entries = BASE + 0xc000;
+                let (read, target, write) = if wrapping {
+                    (127, 0u16, 1)
+                } else {
+                    (0, 1u16, 2)
+                };
+                memory.put_u32(queue, read);
+                memory.put_u32(queue + 0x40, write);
+                memory.put(entries + 0x14, &target.to_le_bytes());
+                memory.put_u64(pointers + u64::from(read) * 8, OWNED_COMMAND);
+                // A second AP command is already published in the channel,
+                // but belongs to the next data-master entry. It must not be
+                // executed or block completion of the accepted interval.
+                let later = OWNED_COMMAND + 0xb00;
+                memory.put_u32(later, 1); // source-qualified but unexecuted 3D
+                memory.put_u64(pointers + u64::from(target) * 8, later);
+                let mut outbox = Vec::new();
+                state.dma(&mut memory, &mut outbox).unwrap();
+                assert_eq!((state.commands, state.events), (1, 2));
+                assert_eq!(memory.read_u32(queue), Ok(u32::from(target)));
+                assert_eq!(memory.read_u32(OWNED_CHANNEL + 0x28), Ok(u32::from(target)));
+                assert_eq!(memory.read_u32(queue + 0x30), Ok(u32::from(target)));
+                assert_eq!(memory.read_u32(master), Ok(1));
+
+                // Repeated empty intervals cannot drain a live WRITE either.
+                let second = entries + Kind::DataMaster.entry_bytes() as u64;
+                memory.put_u64(second + 8, OWNED_CHANNEL);
+                memory.put_u32(second + 0x10, 1);
+                memory.put(second + 0x14, &target.to_le_bytes());
+                memory.put_u32(master + WRITE, 2);
+                state.doorbell(work(1, 0)).unwrap();
+                state.dma(&mut memory, &mut outbox).unwrap();
+                assert_eq!(memory.read_u32(master), Ok(2));
+                assert_eq!((state.commands, outbox.len()), (1, 2));
+
+                // Only the next entry carrying the new tail can acquire it.
+                let third = second + Kind::DataMaster.entry_bytes() as u64;
+                memory.put_u64(third + 8, OWNED_CHANNEL);
+                memory.put_u32(third + 0x10, 1);
+                memory.put(third + 0x14, &(write as u16).to_le_bytes());
+                memory.put_u32(master + WRITE, 3);
+                state.doorbell(work(1, 0)).unwrap();
+                assert_eq!(
+                    state.dma(&mut memory, &mut outbox),
+                    Err("GFX 3D command (type 1) is not executed")
+                );
+                assert_eq!(memory.read_u32(master), Ok(2));
+                assert_eq!(memory.read_u32(queue), Ok(u32::from(target)));
+                assert_eq!((state.commands, outbox.len()), (1, 2));
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_submission_keeps_its_tail_after_final_retirement_fault_and_late_append() {
+        let (mut state, flat, master) = owned_signal(&G14G);
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: Some(10),
+            fail_read: None,
+            writes: Vec::new(),
+        };
+        let queue = OWNED_CHANNEL + 0x1000;
+        memory.flat.put_u32(queue, 127);
+        memory.flat.put_u32(queue + 0x40, 0);
+        memory
+            .flat
+            .put_u64(OWNED_CHANNEL + 0x2000 + 127 * 8, OWNED_COMMAND);
+        memory.flat.put(BASE + 0xc014, &0u16.to_le_bytes());
+        let mut outbox = Vec::new();
+        assert_eq!(
+            state.dma(&mut memory, &mut outbox),
+            Err("injected work publication write fault")
+        );
+        assert_eq!(memory.flat.read_u32(queue), Ok(0));
+        assert_eq!(memory.flat.read_u32(master), Ok(0));
+        let later = OWNED_COMMAND + 0xb00;
+        memory.flat.put_u32(later, 1);
+        memory.flat.put_u64(OWNED_CHANNEL + 0x2000, later);
+        memory.flat.put_u32(queue + 0x40, 1);
+        memory.flat.put(BASE + 0xc014, &1u16.to_le_bytes());
+        memory.fail_read = Some(queue);
+        state.dma(&mut memory, &mut outbox).unwrap();
+        assert_eq!(memory.fail_read, Some(queue));
+        assert_eq!(memory.flat.read_u32(queue), Ok(0));
+        assert_eq!(memory.flat.read_u32(master), Ok(1));
+        assert_eq!(
+            (state.commands, outbox.len(), memory.writes.len()),
+            (1, 2, 11)
+        );
+    }
+
+    #[test]
+    fn submitted_tail_refuses_unpublished_or_out_of_range_pointers_before_effects() {
+        for target in [2u16, 128] {
+            let (mut state, flat, master) = owned_signal(&G14G);
+            let mut memory = WorkMemory {
+                flat,
+                fail_write: None,
+                fail_read: None,
+                writes: Vec::new(),
+            };
+            memory.flat.put(BASE + 0xc014, &target.to_le_bytes());
+            assert!(
+                state
+                    .dma(&mut memory, &mut Vec::new())
+                    .unwrap_err()
+                    .contains("submitted command tail")
+            );
+            assert!(memory.writes.is_empty());
+            assert_eq!(memory.flat.read_u32(master), Ok(0));
+            assert_eq!((state.commands, state.events), (0, 0));
+        }
+    }
+
+    #[test]
+    fn signal_scalar_crossing_a_uat_page_refuses_before_signal_effects() {
+        let (mut state, flat, _) = owned_signal(&G14G);
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: None,
+            fail_read: None,
+            writes: Vec::new(),
+        };
+        memory.flat.put_u64(OWNED_STREAM + 0x28, BASE + 0x1bffc);
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("GFX scalar publication crosses a UAT page")
+        );
+        assert_eq!(memory.writes.len(), 2); // accepted master tail only
+        assert_eq!((state.commands, state.events), (0, 0));
     }
 
     #[test]
@@ -2139,7 +2297,7 @@ mod tests {
         memory.flat.put_u32(EVENT_STATE + WRITE, 0xff);
         let mut outbox = Vec::new();
         state.dma(&mut memory, &mut outbox).unwrap();
-        assert_eq!(memory.writes.len(), 1);
+        assert_eq!(memory.writes.len(), 3);
         assert_eq!(memory.flat.read_u64(OWNED_SHARED), Ok(1));
         assert_eq!(memory.flat.read_u32(OWNED_FIRMWARE), Ok(0));
         assert_eq!(memory.flat.read_u32(OWNED_DRIVER), Ok(0));
@@ -2192,7 +2350,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_signal_acceptance_has_no_architectural_prefix() {
+    fn failed_signal_acceptance_keeps_only_the_accepted_master_tail() {
         let (mut state, flat, _) = owned_signal(&G14G);
         let mut memory = WorkMemory {
             flat,
@@ -2205,7 +2363,8 @@ mod tests {
             state.dma(&mut memory, &mut outbox),
             Err("injected work input read fault")
         );
-        assert!(memory.writes.is_empty() && outbox.is_empty());
+        assert_eq!(memory.writes.len(), 2);
+        assert!(outbox.is_empty());
         assert_eq!(memory.flat.read_u64(OWNED_SHARED), Ok(0));
         memory.flat.put_u64(OWNED_STREAM + 0x20, 1 << 3);
         assert!(
@@ -2214,7 +2373,8 @@ mod tests {
                 .unwrap_err()
                 .contains("mask bit 3")
         );
-        assert!(memory.writes.is_empty() && outbox.is_empty());
+        assert_eq!(memory.writes.len(), 2);
+        assert!(outbox.is_empty());
         memory.flat.put_u64(OWNED_STREAM + 0x20, 0);
         state.dma(&mut memory, &mut outbox).unwrap();
         assert_eq!((state.commands, state.events), (1, 2));

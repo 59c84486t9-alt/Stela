@@ -133,6 +133,40 @@ impl Queue {
         Ok(Some(command))
     }
 
+    /// Capture the boundary carried by one data-master entry (+0x14),
+    /// independently of any pointers the AP appends afterwards.
+    pub fn submission(
+        self,
+        memory: &mut dyn Shared,
+        state: u64,
+        target: u16,
+    ) -> Result<Submission, &'static str> {
+        let (cursor, write, length) = self.indices(memory)?;
+        let target = u32::from(target);
+        if target >= length {
+            return Err("GFX submitted command tail is outside the ring");
+        }
+        let distance =
+            |end: u32| (u64::from(end) + u64::from(length) - u64::from(cursor)) % u64::from(length);
+        if distance(target) > distance(write) {
+            return Err("GFX submitted command tail includes unpublished pointers");
+        }
+        state
+            .checked_add(0x2b)
+            .ok_or("GFX submitted channel state range wraps")?;
+        super::ring::scalar_range(state + 0x28, 4)?;
+        super::ring::scalar_range(self.ring + 0x30, 4)?;
+        super::ring::scalar_range(self.ring, 4)?;
+        Ok(Submission {
+            queue: self,
+            state,
+            cursor,
+            target,
+            length,
+            published: 0,
+        })
+    }
+
     /// Retire the command at the read index: the firmware's consume, which
     /// frees the slot `writeChannelCommandPointer` waits on.
     pub fn retire(&self, memory: &mut dyn Shared) -> Result<(), &'static str> {
@@ -151,6 +185,65 @@ impl Queue {
             next: (read + 1) % length,
             committed: false,
         })
+    }
+}
+
+/// The accepted command-pointer interval of one data-master entry. The
+/// original receiver writes the tail to channel state +0x28 and ring +0x30
+/// before its scheduler consumes pointers up to that tail, never live WRITE.
+#[derive(Debug)]
+pub struct Submission {
+    queue: Queue,
+    state: u64,
+    cursor: u32,
+    target: u32,
+    length: u32,
+    published: u8,
+}
+
+impl Submission {
+    pub fn publish(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        if self.published == 0 {
+            memory.write(self.state + 0x28, &self.target.to_le_bytes())?;
+            self.published = 1;
+        }
+        if self.published == 1 {
+            memory.write(self.queue.ring + 0x30, &self.target.to_le_bytes())?;
+            self.published = 2;
+        }
+        Ok(())
+    }
+
+    pub fn next(&self, memory: &mut dyn Shared) -> Result<Option<u64>, &'static str> {
+        if self.cursor == self.target {
+            return Ok(None);
+        }
+        let pointer = self
+            .queue
+            .commands
+            .checked_add(u64::from(self.cursor) * 8)
+            .ok_or("GFX command pointer array range wraps")?;
+        pointer
+            .checked_add(7)
+            .ok_or("GFX command pointer array range wraps")?;
+        let command = memory.read_u64(pointer)?;
+        if command == 0 {
+            return Err("GFX channel command pointer is empty");
+        }
+        Ok(Some(command))
+    }
+
+    pub fn retirement(&self) -> Retirement {
+        Retirement {
+            word: self.queue.ring,
+            next: (self.cursor + 1) % self.length,
+            committed: false,
+        }
+    }
+
+    /// Only after the accepted command's effects and consumer publication.
+    pub fn consumed(&mut self) {
+        self.cursor = (self.cursor + 1) % self.length;
     }
 }
 

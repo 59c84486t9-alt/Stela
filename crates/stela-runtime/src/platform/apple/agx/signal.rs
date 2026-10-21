@@ -159,6 +159,13 @@ pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>
         value: stamp.value,
     });
     actions.push(Action::Event(Event::Flag(1 << stamp.index)));
+    for action in &actions {
+        match *action {
+            Action::Write32 { address, .. } => super::ring::scalar_range(address, 4)?,
+            Action::Write64 { address, .. } => super::ring::scalar_range(address, 8)?,
+            Action::Event(_) => {}
+        }
+    }
     Ok(actions)
 }
 

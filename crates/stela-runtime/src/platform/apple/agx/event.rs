@@ -106,6 +106,7 @@ impl Publication {
             .checked_add(WRITE + 3)
             .ok_or("GFX event ring state range wraps")?
             - 3;
+        ring::scalar_range(write_word, 4)?;
         let read = memory.read_u32(state + READ)?;
         let write = memory.read_u32(write_word)?;
         if read >= ring::ENTRIES || write >= ring::ENTRIES {
@@ -174,6 +175,93 @@ pub(crate) mod tests {
             .read(EVENT_ENTRIES + n * ENTRY_BYTES as u64, &mut bytes)
             .unwrap();
         bytes
+    }
+
+    #[test]
+    fn a_real_port_prefix_fault_never_publishes_or_replays_a_published_body() {
+        use super::super::uat::PAGE_BYTES;
+        use crate::platform::apple::{bus::Access, interrupt::InterruptLatch};
+        use crate::platform::dma::{DmaError, Iommu, Memory, Port, tests::Ram};
+
+        struct FaultOnce(Option<u64>);
+        impl Iommu for FaultOnce {
+            fn page(&self) -> u64 {
+                PAGE_BYTES
+            }
+            fn translate(
+                &mut self,
+                _: &mut dyn Memory,
+                _: usize,
+                iova: u64,
+                _: u64,
+                _: bool,
+                _: &mut Access<'_>,
+            ) -> Result<u64, DmaError> {
+                if self.0 == Some(iova) {
+                    self.0 = None;
+                    return Err(DmaError::Fault(1));
+                }
+                Ok(iova)
+            }
+        }
+        let mut flat = Flat::new(BASE, 0x20000);
+        kext_root(&mut flat);
+        event_ring(&mut flat);
+        // An event body straddles two real UAT-sized pages; the producer
+        // word is a separate, single-page RAM transfer.
+        let entries = BASE + 0x17fe0;
+        flat.put_u64(RINGS + 0x1c8, entries);
+        flat.put(entries, &[0xaa; ENTRY_BYTES]);
+        let root = Root::read(&mut flat, ROOT, MAGIC).unwrap();
+        let mut ram = Ram::new(BASE, 0x20000);
+        flat.read(BASE, &mut ram.bytes).unwrap();
+        let mut iommu = FaultOnce(Some(BASE + 0x18000));
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let event = Event::SharedSignal {
+            id: 7,
+            value: 9,
+            flag: 1,
+        };
+        let mut body = [0xff; ENTRY_BYTES];
+        let mut publication = {
+            let mut port = Port {
+                iommu: &mut iommu,
+                stream: 0,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            let mut publication = Publication::reserve(&mut port, &root, event)
+                .unwrap()
+                .unwrap();
+            assert!(publication.commit(&mut port).is_err());
+            assert_eq!(port.read_u32(EVENT_STATE + WRITE), Ok(0));
+            Shared::read(&mut port, entries, &mut body).unwrap();
+            assert_eq!(body[..32], event.encode()[..32]);
+            assert!(body[32..].iter().all(|&byte| byte == 0xaa));
+            publication
+        };
+        iommu.0 = Some(EVENT_STATE + WRITE);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        assert!(publication.commit(&mut port).is_err());
+        assert_eq!(port.read_u32(EVENT_STATE + WRITE), Ok(0));
+        Shared::read(&mut port, entries, &mut body).unwrap();
+        assert_eq!(body, event.encode());
+        // After the body succeeds, a producer-word retry must not copy it
+        // again. This marker detects an accidental body rewrite.
+        Shared::write(&mut port, entries + 40, &[0x99]).unwrap();
+        publication.commit(&mut port).unwrap();
+        assert_eq!(port.read_u32(EVENT_STATE + WRITE), Ok(1));
+        Shared::read(&mut port, entries, &mut body).unwrap();
+        assert_eq!(body[40], 0x99);
+        Shared::write(&mut port, EVENT_STATE + WRITE, &7u32.to_le_bytes()).unwrap();
+        publication.commit(&mut port).unwrap();
+        assert_eq!(port.read_u32(EVENT_STATE + WRITE), Ok(7));
     }
 
     #[test]
