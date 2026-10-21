@@ -1,0 +1,856 @@
+//! Legacy Apple DART t8020/t6000 register and page-entry formats.
+//!
+//! Linux v6.17 apple-dart.c and io-pgtable-dart.c define the separate old
+//! register layout and APPLE_DART/APPLE_DART2 entries. m1n1's dart8020.py
+//! independently identifies the stream remap bytes and CONFIG lock. Original
+//! 26A434 T8103 SPTM verifies the identity remap words (file 0xd851c) and
+//! gates CONFIG lock15 on PARAMS2 bit1 (0xd8454); the original mac13g kernel
+//! checks page shift and region/bypass capabilities at VA9dc20b4, and decodes
+//! a fault's SID from bits27:24 at VA9dc09e8 (full VAs start fffffe000).
+//!
+//! Non-identity stream remap is retained for readback but refuses DMA until
+//! its position relative to the bus master's mapper SID is established.
+//! Unsupported SMMU context selection (TCR23:16), APF filtering, auxiliary
+//! fault/capture and the different 64-SID USB4 interface refuse explicitly.
+//! This module does not qualify those board configurations by constructing a
+//! successful-looking superset. Translation is cacheless and DMA synchronous.
+use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::super::interrupt::{AicInput, Wire};
+use super::Profile;
+use crate::platform::dma::{DmaError, Iommu, Memory};
+use alloc::{rc::Rc, vec, vec::Vec};
+use core::cell::RefCell;
+
+const PARAMS1: u64 = 0;
+const PARAMS2: u64 = 4;
+const REGION: u32 = 1 << 31;
+const SUPPORT_BYPASS: u32 = 1;
+const SUPPORT_LOCK: u32 = 1 << 1;
+const COMMAND: u64 = 0x20;
+const INVALIDATE: u32 = 1 << 20;
+const SELECT: u64 = 0x34;
+const ERROR: u64 = 0x40;
+const ERROR_ADDRESS: [u64; 2] = [0x50, 0x54];
+const CONFIG: u64 = 0x60;
+const LOCK: u32 = 1 << 15;
+const REMAP: u64 = 0x80;
+const ENABLED: u64 = 0xfc;
+const TCR: u64 = 0x100;
+const TTBR: u64 = 0x200;
+const TRANSLATE: u32 = 1 << 7;
+const BYPASS: u32 = 1 << 8;
+const BYPASS_APF: u32 = 1 << 12;
+const SMMU_CONTEXT: u32 = 0xff << 16;
+const TCR_KNOWN: u32 = TRANSLATE | BYPASS | BYPASS_APF;
+const TTBR_VALID: u32 = 1 << 31;
+const TTBR_ADDRESS: u32 = !TTBR_VALID;
+const TTBR_SHIFT: u32 = 12;
+const TABLES: usize = 4;
+const IOVA_BITS: u32 = 32;
+const T8020_PA_BITS: u32 = 36;
+const T6000_PA_BITS: u32 = 42;
+const T8020_ADDRESS: u64 = 0x0000_00ff_ffff_c000;
+const T6000_ADDRESS: u64 = 0x0000_003f_ffff_fc00;
+const VALID: u64 = 1;
+const SUBPAGE_DISABLE: u64 = 1 << 1;
+const SUBPAGE_UNIT: u64 = 4;
+const FLAG: u32 = 1 << 31;
+const WRITE_ACCESS: u32 = 1 << 10;
+const SID_SHIFT: u32 = 24;
+const NO_TTBR: u32 = 1;
+const NO_PMD: u32 = 1 << 1;
+const NO_PTE: u32 = 1 << 2;
+const WRITE_FAULT: u32 = 1 << 3;
+const READ_FAULT: u32 = 1 << 4;
+const REGION_FAULT: u32 = 1 << 7;
+
+pub(super) struct Dart {
+    profile: Profile,
+    streams: usize,
+    page_shift: u32,
+    powered: bool,
+    clock_enabled: bool,
+    quiesced: bool,
+    reset: bool,
+    apf: bool,
+    select: u32,
+    enabled: u32,
+    locked: bool,
+    remap: [u8; 16],
+    tcr: Vec<u32>,
+    ttbr: Vec<[u32; TABLES]>,
+    error: u32,
+    error_address: u64,
+    irq: Option<AicInput>,
+    level: bool,
+    shared_fault: Option<(Rc<RefCell<Vec<bool>>>, usize)>,
+}
+
+impl Dart {
+    pub(super) fn new(profile: Profile, streams: usize, irq: Option<AicInput>) -> Self {
+        Self {
+            profile,
+            streams,
+            page_shift: 14,
+            powered: true,
+            clock_enabled: true,
+            quiesced: false,
+            reset: false,
+            apf: false,
+            select: 0,
+            enabled: 0,
+            locked: false,
+            remap: core::array::from_fn(|sid| sid as u8),
+            tcr: vec![0; streams],
+            ttbr: vec![[0; TABLES]; streams],
+            error: 0,
+            error_address: 0,
+            irq,
+            level: false,
+            shared_fault: None,
+        }
+    }
+
+    pub(super) fn group(
+        profile: Profile,
+        streams: usize,
+        irq: Option<AicInput>,
+        count: usize,
+    ) -> Vec<Self> {
+        let levels = Rc::new(RefCell::new(vec![false; count]));
+        (0..count)
+            .map(|index| {
+                let mut dart = Self::new(profile, streams, irq);
+                dart.shared_fault = Some((levels.clone(), index));
+                dart
+            })
+            .collect()
+    }
+
+    pub(super) fn with_apf(mut self, slices: usize) -> Self {
+        self.apf = slices != 0;
+        self
+    }
+
+    pub(super) fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
+        if self.powered && !powered && !retention {
+            self.clear(access);
+        }
+        self.powered = powered;
+    }
+
+    pub(super) fn set_quiesced(&mut self, quiesced: bool) {
+        self.quiesced = quiesced;
+    }
+
+    pub(super) fn set_clock(&mut self, enabled: bool) {
+        self.clock_enabled = enabled;
+    }
+
+    pub(super) fn set_reset(&mut self, asserted: bool, access: &mut Access<'_>) {
+        if asserted && !self.reset {
+            self.clear(access);
+        }
+        self.reset = asserted;
+    }
+
+    fn clear(&mut self, access: &mut Access<'_>) {
+        self.select = 0;
+        self.enabled = 0;
+        self.locked = false;
+        self.remap = core::array::from_fn(|sid| sid as u8);
+        self.tcr.fill(0);
+        self.ttbr.fill([0; TABLES]);
+        self.error = 0;
+        self.error_address = 0;
+        self.signal(access);
+    }
+
+    fn unavailable(&self) -> Option<&'static str> {
+        if !self.powered {
+            Some("DART power domain is off")
+        } else if !self.clock_enabled {
+            Some("DART functional clock is gated")
+        } else if self.reset {
+            Some("DART reset is asserted")
+        } else {
+            None
+        }
+    }
+
+    fn mask(&self) -> u32 {
+        (1 << self.streams) - 1
+    }
+
+    fn sid_register(&self, offset: u64, base: u64, stride: u64) -> Option<usize> {
+        let offset = offset.checked_sub(base)?;
+        let sid = usize::try_from(offset / stride).ok()?;
+        (offset.is_multiple_of(4) && sid < self.streams).then_some(sid)
+    }
+
+    fn target(&self, entry: u64) -> Result<u64, DmaError> {
+        let (address, bits) = match self.profile {
+            Profile::T8020 => (entry & T8020_ADDRESS, T8020_PA_BITS),
+            Profile::T6000 => ((entry & T6000_ADDRESS) << 4, T6000_PA_BITS),
+            Profile::T8110 => unreachable!("legacy format"),
+        };
+        if address >> bits != 0 {
+            return Err(DmaError::Unsupported(
+                "DART output address exceeds its native profile",
+            ));
+        }
+        Ok(address)
+    }
+
+    fn entry(&self, memory: &mut dyn Memory, table: u64, index: u64) -> Result<u64, DmaError> {
+        let mut bytes = [0; 8];
+        let bits = self.page_shift - 3;
+        if !memory.read(table + (index & ((1 << bits) - 1)) * 8, &mut bytes) {
+            return Err(DmaError::Memory);
+        }
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn walk(
+        &self,
+        memory: &mut dyn Memory,
+        input_sid: usize,
+        iova: u64,
+        last: u64,
+        write: bool,
+    ) -> Result<u64, DmaError> {
+        if let Some(reason) = self.unavailable() {
+            return Err(DmaError::Unsupported(reason));
+        }
+        if self.quiesced {
+            return Err(DmaError::Unsupported("DART DMA is quiesced"));
+        }
+        let Some(&sid) = self.remap.get(input_sid) else {
+            return Err(DmaError::Unsupported(
+                "DART incoming stream is outside the native profile",
+            ));
+        };
+        if usize::from(sid) != input_sid {
+            return Err(DmaError::Unsupported("legacy DART stream remapping"));
+        }
+        let sid = usize::from(sid);
+        if sid >= self.streams {
+            return Err(DmaError::Unsupported(
+                "DART remap target is outside the native profile",
+            ));
+        }
+        if self.enabled & (1 << sid) == 0 {
+            return Err(DmaError::Fault(NO_TTBR));
+        }
+        let tcr = self.tcr[sid];
+        if tcr & (TRANSLATE | BYPASS) == TRANSLATE | BYPASS {
+            return Err(DmaError::Unsupported(
+                "DART simultaneous translation and bypass",
+            ));
+        }
+        if self.apf && tcr & BYPASS_APF == 0 {
+            return Err(DmaError::Unsupported(
+                "legacy DART address permission filtering",
+            ));
+        }
+        if tcr & BYPASS != 0 {
+            return Ok(iova);
+        }
+        if tcr & TRANSLATE == 0 || iova >> IOVA_BITS != 0 {
+            return Err(DmaError::Fault(NO_TTBR));
+        }
+        let bits = self.page_shift - 3;
+        let ttbr_index = (iova >> (self.page_shift + 2 * bits)) as usize;
+        let ttbr = self.ttbr[sid][ttbr_index];
+        if ttbr & TTBR_VALID == 0 {
+            return Err(DmaError::Fault(NO_TTBR));
+        }
+        let root = u64::from(ttbr & TTBR_ADDRESS) << TTBR_SHIFT;
+        let pa_bits = if self.profile == Profile::T8020 {
+            T8020_PA_BITS
+        } else {
+            T6000_PA_BITS
+        };
+        if root >> pa_bits != 0 {
+            return Err(DmaError::Unsupported(
+                "DART root address exceeds its native profile",
+            ));
+        }
+        if root & (self.page() - 1) != 0 {
+            return Err(DmaError::Unsupported("unaligned legacy DART root table"));
+        }
+        let first = self.entry(memory, root, iova >> (self.page_shift + bits))?;
+        if first & VALID == 0 {
+            return Err(DmaError::Fault(NO_PMD));
+        }
+        let page = self.entry(memory, self.target(first)?, iova >> self.page_shift)?;
+        if page & VALID == 0 {
+            return Err(DmaError::Fault(NO_PTE));
+        }
+        let (no_read, no_write) = if self.profile == Profile::T8020 {
+            (1 << 8, 1 << 7)
+        } else {
+            (1 << 3, 1 << 2)
+        };
+        if write && page & no_write != 0 {
+            return Err(DmaError::Fault(WRITE_FAULT));
+        }
+        if !write && page & no_read != 0 {
+            return Err(DmaError::Fault(READ_FAULT));
+        }
+        let offset = iova & (self.page() - 1);
+        let subpage_disabled = self.profile == Profile::T8020 && page & SUBPAGE_DISABLE != 0;
+        if !subpage_disabled {
+            let first = page >> 52 & 0xfff;
+            let end = page >> 40 & 0xfff;
+            if offset / SUBPAGE_UNIT < first || (last & (self.page() - 1)) / SUBPAGE_UNIT > end {
+                return Err(DmaError::Fault(REGION_FAULT));
+            }
+        }
+        Ok(self.target(page)? + offset)
+    }
+
+    fn signal(&mut self, access: &mut Access<'_>) {
+        let level = self.error & FLAG != 0;
+        if self.level == level {
+            return;
+        }
+        self.level = level;
+        let level = if let Some((levels, index)) = &self.shared_fault {
+            let mut levels = levels.borrow_mut();
+            levels[*index] = level;
+            levels.iter().any(|&level| level)
+        } else {
+            level
+        };
+        if let Some(irq) = self.irq {
+            access.interrupts.set_level(Wire::Aic(irq), level);
+        }
+    }
+}
+
+impl Iommu for Dart {
+    fn page(&self) -> u64 {
+        1 << self.page_shift
+    }
+
+    fn translate(
+        &mut self,
+        memory: &mut dyn Memory,
+        stream: usize,
+        iova: u64,
+        last: u64,
+        write: bool,
+        access: &mut Access<'_>,
+    ) -> Result<u64, DmaError> {
+        debug_assert!(last >= iova && last / self.page() == iova / self.page());
+        let result = self.walk(memory, stream, iova, last, write);
+        if let Err(DmaError::Fault(code)) = result {
+            if self.error & FLAG == 0 {
+                self.error = FLAG
+                    | (stream as u32 & 0xf) << SID_SHIFT
+                    | if write { WRITE_ACCESS } else { 0 }
+                    | code;
+                self.error_address = iova;
+            }
+            self.signal(access);
+        }
+        result
+    }
+}
+
+impl MmioDevice for Dart {
+    fn name(&self) -> &'static str {
+        if self.profile == Profile::T8020 {
+            "dart-t8020"
+        } else {
+            "dart-t6000"
+        }
+    }
+
+    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        let fail = |reason| refuse(self.name(), offset, width, Direction::Read, reason);
+        if width != Width::Word || !offset.is_multiple_of(4) {
+            return Err(fail("legacy DART registers are aligned 32-bit words"));
+        }
+        if let Some(reason) = self.unavailable() {
+            return Err(fail(reason));
+        }
+        let value = match offset {
+            PARAMS1 => REGION | self.page_shift << 24,
+            PARAMS2 => SUPPORT_BYPASS | SUPPORT_LOCK,
+            COMMAND => 0,
+            SELECT => self.select,
+            ERROR => self.error,
+            CONFIG => {
+                if self.locked {
+                    LOCK
+                } else {
+                    0
+                }
+            }
+            ENABLED => self.enabled,
+            _ if ERROR_ADDRESS.contains(&offset) => {
+                (self.error_address >> (32 * usize::from(offset == ERROR_ADDRESS[1]))) as u32
+            }
+            _ if (REMAP..REMAP + 16).contains(&offset) => {
+                let sid = (offset - REMAP) as usize;
+                u32::from_le_bytes(
+                    self.remap[sid..sid + 4]
+                        .try_into()
+                        .expect("four remap bytes"),
+                )
+            }
+            _ if (TCR..TCR + 16 * 4).contains(&offset) => {
+                let sid = self
+                    .sid_register(offset, TCR, 4)
+                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                self.tcr[sid]
+            }
+            _ if (TTBR..TTBR + 16 * 16).contains(&offset) => {
+                let sid = self
+                    .sid_register(offset, TTBR, 16)
+                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                self.ttbr[sid][((offset - TTBR) % 16 / 4) as usize]
+            }
+            _ => {
+                return Err(fail(
+                    "unknown legacy DART register or unsupported capture/filter view",
+                ));
+            }
+        };
+        Ok(u64::from(value))
+    }
+
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        access: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        let name = self.name();
+        let fail = |reason| refuse(name, offset, width, Direction::Write, reason);
+        if width != Width::Word || !offset.is_multiple_of(4) {
+            return Err(fail("legacy DART registers are aligned 32-bit words"));
+        }
+        if let Some(reason) = self.unavailable() {
+            return Err(fail(reason));
+        }
+        let value = value as u32;
+        match offset {
+            COMMAND if value == INVALIDATE => {}
+            COMMAND => return Err(fail("unknown legacy DART stream command")),
+            SELECT => self.select = value & self.mask(),
+            ERROR => {
+                if value != 0 && value & FLAG == 0 {
+                    return Err(fail(
+                        "legacy DART code-only fault acknowledgement is not specified",
+                    ));
+                }
+                if value & FLAG != 0 {
+                    self.error = 0;
+                }
+            }
+            CONFIG => {
+                if value & !LOCK != 0 {
+                    return Err(fail("unknown legacy DART CONFIG bits"));
+                }
+                self.locked |= value & LOCK != 0;
+            }
+            ENABLED => {
+                if self.locked {
+                    return Err(fail(
+                        "legacy DART enabled-stream lock coverage is not specified",
+                    ));
+                }
+                self.enabled = value & self.mask();
+            }
+            _ if (REMAP..REMAP + 16).contains(&offset) => {
+                if self.locked {
+                    return Err(fail("legacy DART remap lock coverage is not specified"));
+                }
+                let sid = (offset - REMAP) as usize;
+                self.remap[sid..sid + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            _ if (TCR..TCR + 16 * 4).contains(&offset) => {
+                let sid = self
+                    .sid_register(offset, TCR, 4)
+                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                if value & SMMU_CONTEXT != 0 {
+                    return Err(fail("legacy DART SMMU stream context selection"));
+                }
+                if value & !TCR_KNOWN != 0 {
+                    return Err(fail("unknown legacy DART TCR bits"));
+                }
+                if !self.locked {
+                    self.tcr[sid] = value;
+                }
+            }
+            _ if (TTBR..TTBR + 16 * 16).contains(&offset) => {
+                let sid = self
+                    .sid_register(offset, TTBR, 16)
+                    .ok_or_else(|| fail("legacy DART stream is outside the native profile"))?;
+                if !self.locked {
+                    self.ttbr[sid][((offset - TTBR) % 16 / 4) as usize] = value;
+                }
+            }
+            _ => {
+                return Err(fail(
+                    "unknown legacy DART register or unsupported capture/filter view",
+                ));
+            }
+        }
+        self.signal(access);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{
+        apple::interrupt::InterruptLatch,
+        dma::{Port, tests::Ram},
+    };
+
+    const ROOT: u64 = 0x8_0000_0000;
+    const PAGE: u64 = 0x4000;
+    const LEAF: u64 = ROOT + PAGE;
+    const FRAME: u64 = ROOT + 2 * PAGE;
+    const IOVA: u64 = 0x0200_4000;
+
+    fn pte(profile: Profile, physical: u64) -> u64 {
+        let address = if profile == Profile::T8020 {
+            physical
+        } else {
+            physical >> 4
+        };
+        address | VALID
+    }
+
+    fn setup(profile: Profile) -> (Dart, Ram, InterruptLatch) {
+        let mut model = Dart::new(profile, 16, Some(AicInput::new(0, 7)));
+        let mut ram = Ram::new(ROOT, (4 * PAGE) as usize);
+        ram.put_u64(ROOT + 8, pte(profile, LEAF));
+        ram.put_u64(LEAF + 8, pte(profile, FRAME) | 0xfff << 40);
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        for (offset, value) in [
+            (ENABLED, 3),
+            (TCR + 4, TRANSLATE),
+            (TTBR + 16, TTBR_VALID | (ROOT >> TTBR_SHIFT) as u32),
+        ] {
+            model
+                .write(offset, Width::Word, u64::from(value), &mut a)
+                .unwrap();
+        }
+        (model, ram, sink)
+    }
+
+    #[test]
+    fn both_legacy_formats_walk_and_transfer_through_the_public_dma_boundary() {
+        for profile in [Profile::T8020, Profile::T6000] {
+            let (mut model, mut ram, mut sink) = setup(profile);
+            let mut a = Access::new(0, 0, &mut sink);
+            let mut port = Port {
+                iommu: &mut model,
+                stream: 1,
+                memory: &mut ram,
+                access: &mut a,
+            };
+            port.write(IOVA + 7, &[0xde, 0xad, 0xbe, 0xef]).unwrap();
+            let mut actual = [0; 4];
+            assert!(ram.read(FRAME + 7, &mut actual));
+            assert_eq!(actual, [0xde, 0xad, 0xbe, 0xef]);
+            assert_eq!(
+                model.read(PARAMS1, Width::Word, &mut a),
+                Ok(u64::from(REGION | 14 << 24))
+            );
+            assert_eq!(model.read(PARAMS2, Width::Word, &mut a), Ok(3));
+        }
+    }
+
+    #[test]
+    fn permissions_and_subpage_disable_have_generation_specific_effects() {
+        for profile in [Profile::T8020, Profile::T6000] {
+            let (mut model, mut ram, mut sink) = setup(profile);
+            let mut a = Access::new(0, 0, &mut sink);
+            let (read, write) = if profile == Profile::T8020 {
+                (1 << 8, 1 << 7)
+            } else {
+                (1 << 3, 1 << 2)
+            };
+            for (bits, is_write, fault) in [(read, false, READ_FAULT), (write, true, WRITE_FAULT)] {
+                ram.put_u64(LEAF + 8, pte(profile, FRAME) | 0xfff << 40 | bits);
+                assert_eq!(
+                    model.translate(&mut ram, 1, IOVA, IOVA, is_write, &mut a),
+                    Err(DmaError::Fault(fault))
+                );
+                model
+                    .write(ERROR, Width::Word, u64::from(FLAG), &mut a)
+                    .unwrap();
+            }
+            // Only bytes0x10..0x1f are accessible. t8020 bit1 disables this
+            // bound; t6000 bit1 means uncached and cannot bypass protection.
+            ram.put_u64(
+                LEAF + 8,
+                pte(profile, FRAME) | 4 << 52 | 7 << 40 | SUBPAGE_DISABLE,
+            );
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA + 0x10, IOVA + 0x1f, false, &mut a),
+                Ok(FRAME + 0x10)
+            );
+            let result = model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a);
+            assert_eq!(
+                result,
+                if profile == Profile::T8020 {
+                    Ok(FRAME)
+                } else {
+                    Err(DmaError::Fault(REGION_FAULT))
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn missing_tables_disabled_streams_and_out_of_range_iovas_fault() {
+        for profile in [Profile::T8020, Profile::T6000] {
+            let (mut model, mut ram, mut sink) = setup(profile);
+            let mut a = Access::new(0, 0, &mut sink);
+            for (sid, iova, fault) in [
+                (2, IOVA, NO_TTBR),
+                (1, 1 << 32, NO_TTBR),
+                (1, 0x400_0000, NO_PMD),
+                (1, IOVA + PAGE, NO_PTE),
+            ] {
+                assert_eq!(
+                    model.translate(&mut ram, sid, iova, iova, false, &mut a),
+                    Err(DmaError::Fault(fault))
+                );
+                model
+                    .write(ERROR, Width::Word, u64::from(FLAG), &mut a)
+                    .unwrap();
+            }
+            model.write(TTBR + 16, Width::Word, 0, &mut a).unwrap();
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Fault(NO_TTBR))
+            );
+        }
+    }
+
+    #[test]
+    fn fault_capture_preserves_direction_and_address_until_acknowledged() {
+        let (mut model, mut ram, mut sink) = setup(Profile::T8020);
+        {
+            let mut a = Access::new(0, 0, &mut sink);
+            ram.put_u64(LEAF + 8, pte(Profile::T8020, FRAME) | 0xfff << 40 | 1 << 7);
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, true, &mut a),
+                Err(DmaError::Fault(WRITE_FAULT))
+            );
+            assert_eq!(
+                model.read(ERROR, Width::Word, &mut a),
+                Ok(u64::from(
+                    FLAG | WRITE_ACCESS | 1 << SID_SHIFT | WRITE_FAULT
+                ))
+            );
+            assert!(model.translate(&mut ram, 0, 0, 0, false, &mut a).is_err());
+            assert_eq!(model.read(ERROR_ADDRESS[0], Width::Word, &mut a), Ok(IOVA));
+        }
+        assert!(sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+        {
+            let mut a = Access::new(0, 0, &mut sink);
+            model
+                .write(ERROR, Width::Word, u64::from(FLAG | WRITE_FAULT), &mut a)
+                .unwrap();
+        }
+        assert!(!sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+    }
+
+    #[test]
+    fn stream_bypass_and_cacheless_invalidation_do_not_skip_other_controls() {
+        let (mut model, mut ram, mut sink) = setup(Profile::T6000);
+        let mut a = Access::new(0, 0, &mut sink);
+        model
+            .write(TCR, Width::Word, u64::from(BYPASS | BYPASS_APF), &mut a)
+            .unwrap();
+        assert_eq!(
+            model.translate(&mut ram, 0, FRAME, FRAME, true, &mut a),
+            Ok(FRAME)
+        );
+        model
+            .write(TCR, Width::Word, u64::from(TRANSLATE | BYPASS), &mut a)
+            .unwrap();
+        assert!(matches!(
+            model.translate(&mut ram, 0, FRAME, FRAME, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
+        ram.put_u64(LEAF + 8, pte(Profile::T6000, FRAME + PAGE) | 0xfff << 40);
+        model.write(SELECT, Width::Word, 2, &mut a).unwrap();
+        model
+            .write(COMMAND, Width::Word, u64::from(INVALIDATE), &mut a)
+            .unwrap();
+        assert_eq!(model.read(COMMAND, Width::Word, &mut a), Ok(0));
+        assert_eq!(
+            model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+            Ok(FRAME + PAGE)
+        );
+        ram.put_u64(LEAF + 8, 0);
+        assert_eq!(
+            model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+            Err(DmaError::Fault(NO_PTE))
+        );
+    }
+
+    #[test]
+    fn dma_fault_on_a_later_page_preserves_completed_bytes_and_first_fault() {
+        for profile in [Profile::T8020, Profile::T6000] {
+            let (mut model, mut ram, mut sink) = setup(profile);
+            let mut a = Access::new(0, 0, &mut sink);
+            let mut port = Port {
+                iommu: &mut model,
+                stream: 1,
+                memory: &mut ram,
+                access: &mut a,
+            };
+            assert_eq!(
+                port.write(IOVA + PAGE - 2, &[0x12, 0x34, 0x56, 0x78]),
+                Err(DmaError::Fault(NO_PTE))
+            );
+            let mut actual = [0; 2];
+            assert!(ram.read(FRAME + PAGE - 2, &mut actual));
+            assert_eq!(actual, [0x12, 0x34]);
+            assert!(ram.read(FRAME + PAGE, &mut actual));
+            assert_eq!(actual, [0, 0]);
+            assert_eq!(
+                model.read(ERROR_ADDRESS[0], Width::Word, &mut a),
+                Ok(IOVA + PAGE)
+            );
+            assert_eq!(
+                model.read(ERROR, Width::Word, &mut a),
+                Ok(u64::from(FLAG | WRITE_ACCESS | 1 << SID_SHIFT | NO_PTE))
+            );
+        }
+    }
+
+    #[test]
+    fn inaccessible_tables_and_unrepresentable_roots_do_not_fabricate_a_translation() {
+        for profile in [Profile::T8020, Profile::T6000] {
+            let (mut model, mut ram, mut sink) = setup(profile);
+            let mut a = Access::new(0, 0, &mut sink);
+            // A valid root within the profile but outside backing RAM is
+            // an actual memory failure, with no guessed hardware AXI code.
+            model
+                .write(
+                    TTBR + 16,
+                    Width::Word,
+                    u64::from(TTBR_VALID) | (ROOT + 4 * PAGE) >> TTBR_SHIFT,
+                    &mut a,
+                )
+                .unwrap();
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Memory)
+            );
+            assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
+            let pa_bits = if profile == Profile::T8020 {
+                T8020_PA_BITS
+            } else {
+                T6000_PA_BITS
+            };
+            model
+                .write(
+                    TTBR + 16,
+                    Width::Word,
+                    u64::from(TTBR_VALID) | 1 << (pa_bits - TTBR_SHIFT),
+                    &mut a,
+                )
+                .unwrap();
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Unsupported(
+                    "DART root address exceeds its native profile"
+                ))
+            );
+            assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
+        }
+    }
+
+    #[test]
+    fn lifecycle_and_configuration_lock_preserve_isolation() {
+        for retention in [false, true] {
+            let (mut model, mut ram, mut sink) = setup(Profile::T8020);
+            let mut a = Access::new(0, 0, &mut sink);
+            model
+                .write(CONFIG, Width::Word, u64::from(LOCK), &mut a)
+                .unwrap();
+            model
+                .write(TCR + 4, Width::Word, u64::from(BYPASS), &mut a)
+                .unwrap();
+            assert_eq!(
+                model.read(TCR + 4, Width::Word, &mut a),
+                Ok(u64::from(TRANSLATE))
+            );
+            model.set_quiesced(true);
+            assert!(matches!(
+                model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Unsupported(_))
+            ));
+            model.set_power(false, retention, &mut a);
+            assert!(model.read(PARAMS1, Width::Word, &mut a).is_err());
+            model.set_power(true, retention, &mut a);
+            assert_eq!(
+                model.read(TCR + 4, Width::Word, &mut a),
+                Ok(if retention { u64::from(TRANSLATE) } else { 0 })
+            );
+            model.set_reset(true, &mut a);
+            assert!(model.read(PARAMS1, Width::Word, &mut a).is_err());
+            model.set_reset(false, &mut a);
+            assert_eq!(model.read(CONFIG, Width::Word, &mut a), Ok(0));
+            assert_eq!(model.read(ENABLED, Width::Word, &mut a), Ok(0));
+        }
+    }
+
+    #[test]
+    fn unknown_contexts_capture_and_nonidentity_routing_refuse_without_fabricating_effects() {
+        let (mut model, mut ram, mut sink) = setup(Profile::T8020);
+        let mut a = Access::new(0, 0, &mut sink);
+        assert!(
+            model
+                .write(TCR + 4, Width::Word, u64::from(TRANSLATE | 1 << 16), &mut a)
+                .is_err()
+        );
+        assert_eq!(
+            model.read(TCR + 4, Width::Word, &mut a),
+            Ok(u64::from(TRANSLATE))
+        );
+        for (offset, width) in [
+            (0x44, Width::Word),
+            (0x2000, Width::Word),
+            (TCR + 1, Width::Word),
+            (PARAMS1, Width::Double),
+        ] {
+            assert!(model.read(offset, width, &mut a).is_err());
+        }
+        model
+            .write(REMAP, Width::Word, 0x0302_0000, &mut a)
+            .unwrap();
+        assert_eq!(
+            model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+            Err(DmaError::Unsupported("legacy DART stream remapping"))
+        );
+        let mut filtered = Dart::new(Profile::T6000, 16, None).with_apf(1);
+        filtered.write(ENABLED, Width::Word, 1, &mut a).unwrap();
+        filtered
+            .write(TCR, Width::Word, u64::from(BYPASS), &mut a)
+            .unwrap();
+        assert_eq!(
+            filtered.translate(&mut ram, 0, FRAME, FRAME, false, &mut a),
+            Err(DmaError::Unsupported(
+                "legacy DART address permission filtering"
+            ))
+        );
+    }
+}
