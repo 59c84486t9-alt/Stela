@@ -23,8 +23,8 @@
 //! - [`modes`]: the one advertised mode (EDID, IOAV timing and color records
 //!   and their `TimingElements`/`ColorElements` properties).
 //! - [`swap`]: `swap_submit_dcp`'s record and surfaces.
-//! - [`afk`]: the AFK ring transport of the EPIC endpoints, up with no
-//!   service announced.
+//! - [`afk`]: AFKEPV2 publication and command transport. Endpoint0x24
+//!   publishes the real [`avipc`] controller for the connected monitor.
 //!
 //! Every call, callback, refusal and AFK message is recorded in a bounded
 //! display [`Log`] the boot engine prints, so a boot shows what the guest
@@ -267,11 +267,20 @@ impl Coprocessor {
     }
 
     fn with_methods(methods: iomfb::Methods, window: Option<u64>) -> Result<Self, &'static str> {
+        let display = methods.display_state();
         let link = Rc::new(RefCell::new(rpc::Link::new(methods, window)));
         let afk: Vec<_> = AFK_ENDPOINTS
             .iter()
             .map(|&(endpoint, name)| Rc::new(RefCell::new(afk::Afk::new(endpoint, name, window))))
             .collect();
+        afk.iter()
+            .find(|afk| afk.borrow().endpoint == avipc::ENDPOINT)
+            .ok_or("DCPAVIPC controller transport is not provided")?
+            .borrow_mut()
+            .register(
+                avipc::descriptor(),
+                Box::new(avipc::Controller::new(display)),
+            )?;
         let mut endpoints: Vec<(u8, Box<dyn Endpoint>)> = afk
             .iter()
             .map(|afk| {
@@ -758,12 +767,200 @@ mod tests {
         assert!(!coprocessor.dma_pending());
     }
 
+    const AV_BUFFER: usize = 0x4000 + link::REGION_BYTES as usize + 0x4000;
+
+    fn word(ram: &Ram, at: usize) -> u32 {
+        u32::from_le_bytes(ram.bytes[at..at + 4].try_into().unwrap())
+    }
+
+    fn take_controller_packet(ram: &mut Ram) -> Option<Vec<u8>> {
+        let ring = AV_BUFFER + 0x2000;
+        let read = word(ram, ring + 0x80) as usize;
+        if read == word(ram, ring + 0x100) as usize {
+            return None;
+        }
+        let at = ring + 0x180 + read;
+        assert_eq!(word(ram, at), 0x2050_4f49);
+        let length = word(ram, at + 4) as usize;
+        let block = (length + 16).next_multiple_of(0x80);
+        assert!(read + block <= 0x1e80); // Bounded fixture never wraps.
+        assert_eq!(
+            &ram.bytes[at + 18..at + 20],
+            &avipc::INTERFACE.to_le_bytes()
+        );
+        let packet = ram.bytes[at + 24..at + 16 + length].to_vec();
+        let next = if read + block == 0x1e80 {
+            0
+        } else {
+            read + block
+        };
+        ram.bytes[ring + 0x80..ring + 0x84].copy_from_slice(&(next as u32).to_le_bytes());
+        Some(packet)
+    }
+
+    fn controller_start(coprocessor: &mut Coprocessor, ram: &mut Ram) -> Vec<u8> {
+        let transport = coprocessor
+            .afk
+            .iter()
+            .find(|endpoint| endpoint.borrow().endpoint == avipc::ENDPOINT)
+            .unwrap()
+            .clone();
+        transport.borrow_mut().start();
+        transport
+            .borrow_mut()
+            .receive(afk::INIT << 48 | 0x100, &mut Vec::new())
+            .unwrap();
+        transport
+            .borrow_mut()
+            .receive(afk::GETBUF_ACK << 48 | AV_BUFFER as u64, &mut Vec::new())
+            .unwrap();
+        dma(coprocessor, ram).unwrap();
+        transport
+            .borrow_mut()
+            .receive(afk::START << 48, &mut Vec::new())
+            .unwrap();
+        dma(coprocessor, ram).unwrap();
+        take_controller_packet(ram).expect("controller publication")
+    }
+
+    fn controller_exchange(
+        coprocessor: &mut Coprocessor,
+        ram: &mut Ram,
+        logical: &[u8],
+    ) -> Option<Vec<u8>> {
+        let read = word(ram, AV_BUFFER + 0x100) as usize;
+        let size = logical.len() + 8;
+        let block = (size + 16).next_multiple_of(0x80);
+        assert!(read + block < 0x1e80);
+        let mut entry = alloc::vec![0; block];
+        entry[..4].copy_from_slice(&0x2050_4f49u32.to_le_bytes());
+        entry[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+        entry[18..20].copy_from_slice(&avipc::INTERFACE.to_le_bytes());
+        entry[20..24].copy_from_slice(&(logical.len() as u32).to_le_bytes());
+        entry[24..24 + logical.len()].copy_from_slice(logical);
+        let at = AV_BUFFER + 0x180 + read;
+        ram.bytes[at..at + block].copy_from_slice(&entry);
+        ram.bytes[AV_BUFFER + 0x100..AV_BUFFER + 0x104]
+            .copy_from_slice(&((read + block) as u32).to_le_bytes());
+        let transport = coprocessor
+            .afk
+            .iter()
+            .find(|endpoint| endpoint.borrow().endpoint == avipc::ENDPOINT)
+            .unwrap()
+            .clone();
+        transport
+            .borrow_mut()
+            .receive(afk::RECV << 48, &mut Vec::new())
+            .unwrap();
+        dma(coprocessor, ram).unwrap();
+        take_controller_packet(ram)
+    }
+
+    fn controller_call(
+        coprocessor: &mut Coprocessor,
+        ram: &mut Ram,
+        command: u32,
+        value: Option<u64>,
+    ) -> Vec<u8> {
+        let size: usize = if value.is_some() { 0x20 } else { 0x10 };
+        let mut packet = alloc::vec![0; 24 + 0x40 + size];
+        packet[8] = 0xc0;
+        packet[9] = 1;
+        packet[17] = command as u8 + 0x70;
+        packet[20..24].copy_from_slice(&0x100u32.to_le_bytes());
+        packet[28..32].copy_from_slice(&command.to_le_bytes());
+        packet[32..36].copy_from_slice(&(size as u32).to_le_bytes());
+        packet[36..40].copy_from_slice(&0x6970_6378u32.to_le_bytes());
+        if let Some(value) = value {
+            packet[24 + 0x50..24 + 0x58].copy_from_slice(&value.to_le_bytes());
+        }
+        let reply = controller_exchange(coprocessor, ram, &packet).expect("controller reply");
+        assert_eq!(&reply[8..10], &[0xc0, 2]);
+        assert_eq!(reply[17], packet[17]);
+        assert_eq!(&reply[20..24], &[0; 4]);
+        assert_eq!(&reply[24..24 + 0x40], &packet[24..24 + 0x40]);
+        reply[24..].to_vec()
+    }
+
+    #[test]
+    fn the_published_controller_owns_real_commands_shared_power_and_transport_lifetime() {
+        let (scanout, _) = screen(4, 2);
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
+        let published = controller_start(&mut coprocessor, &mut ram);
+        assert_eq!(&published[8..11], &[0x11, 0, 1]);
+        assert_eq!(&published[16..47], b"dispextE:dcpav-controller-epic:");
+        assert_eq!(published[47], 0);
+        let properties = core::str::from_utf8(&published[48..published.len() - 1]).unwrap();
+        assert_eq!(published.last(), Some(&0));
+        for expected in [
+            "<key>EPICName</key><string>dcpav-controller-epic</string>",
+            "<key>EPICLocation</key><string>External</string>",
+            "<key>EPICUnit</key><integer size=\"32\">0</integer>",
+            "<key>EPICProviderClass</key><string>AppleDCPDPTXController</string>",
+            "<string>dispextE:dcpav-controller-epic:0</string>",
+            "<key>interface-id</key><integer size=\"32\">1</integer>",
+        ] {
+            assert!(properties.contains(expected));
+        }
+        assert!(!properties.contains("RequiresCommandDelegate"));
+        let mut open = alloc::vec![0; 16];
+        open[8] = 0x12;
+        open[10] = 1;
+        assert!(controller_exchange(&mut coprocessor, &mut ram, &open).is_none());
+        for (command, expected) in [(12, 1u64), (13, 1), (14, 0), (4, 1)] {
+            let reply = controller_call(&mut coprocessor, &mut ram, command, Some(0));
+            assert_eq!(&reply[0x40..0x44], &[0; 4]);
+            assert_eq!(&reply[0x50..0x58], &expected.to_le_bytes());
+        }
+        controller_call(&mut coprocessor, &mut ram, 6, Some(0));
+        assert_eq!(coprocessor.link.borrow().service().powered(), Some(false));
+        // The same fixed monitor state is reached through ordinary IOMFB RPC.
+        let mut endpoint = up(&mut coprocessor, &mut ram);
+        let mut power = [0; 0x10];
+        power[..8].copy_from_slice(&1u64.to_le_bytes());
+        call(&mut endpoint, &mut ram, 0, b"A484", &power, 8, true);
+        dma(&mut coprocessor, &mut ram).unwrap();
+        let reply = controller_call(&mut coprocessor, &mut ram, 7, Some(0));
+        assert_eq!(&reply[0x50..0x58], &1u64.to_le_bytes());
+        controller_call(&mut coprocessor, &mut ram, 6, Some(0));
+        assert_eq!(
+            iop_power(&mut coprocessor, 0x201).unwrap()[0].payload,
+            7 << 52 | 0x201
+        );
+        assert_eq!(
+            iop_power(&mut coprocessor, 0x220).unwrap()[0].payload,
+            7 << 52 | 0x220
+        );
+        let reply = controller_call(&mut coprocessor, &mut ram, 7, Some(0));
+        assert_eq!(&reply[0x50..0x58], &[0; 8]); // Retained IOP wake preserves the monitor.
+        controller_call(&mut coprocessor, &mut ram, 5, None);
+        open[8] = 0x13;
+        assert!(controller_exchange(&mut coprocessor, &mut ram, &open).is_none());
+        let transport = coprocessor
+            .afk
+            .iter()
+            .find(|ep| ep.borrow().endpoint == avipc::ENDPOINT)
+            .unwrap()
+            .clone();
+        let mut sent = Vec::new();
+        transport
+            .borrow_mut()
+            .receive(afk::SHUTDOWN << 48, &mut sent)
+            .unwrap();
+        assert_eq!(sent, [afk::SHUTDOWN_ACK << 48]);
+        assert_eq!(controller_start(&mut coprocessor, &mut ram), published);
+        let reply = controller_call(&mut coprocessor, &mut ram, 7, Some(0));
+        assert_eq!(&reply[0x50..0x58], &[0; 8]); // Close/restart never invent power-on.
+    }
+
     #[test]
     fn a_presented_swap_completes_on_a_coprocessor_stream() {
         let (scanout, presented) = screen(4, 2);
         let methods = iomfb::Methods::new(scanout);
         let mut coprocessor = Coprocessor::with_methods(methods, Some(RAM)).unwrap();
-        let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize + 0x4000);
+        let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
+        controller_start(&mut coprocessor, &mut ram);
         let mut endpoint = up(&mut coprocessor, &mut ram);
         let start = abi::Packed::new()
             .u32(0)
@@ -779,6 +976,16 @@ mod tests {
         call(&mut endpoint, &mut ram, 0, b"A407", &submit, 0xc, true);
         dma(&mut coprocessor, &mut ram).unwrap();
         assert!(coprocessor.frame_pending() && !coprocessor.dma_pending());
+        controller_call(&mut coprocessor, &mut ram, 6, Some(0));
+        with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
+        assert_eq!(*presented.borrow(), 0);
+        assert!(coprocessor.frame_pending() && !coprocessor.dma_pending());
+        controller_call(&mut coprocessor, &mut ram, 6, Some(1));
+        controller_call(&mut coprocessor, &mut ram, 9, None);
+        with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
+        assert_eq!(*presented.borrow(), 0);
+        assert!(coprocessor.frame_pending());
+        controller_call(&mut coprocessor, &mut ram, 8, None);
         with_port(&mut ram, |port| coprocessor.present(port)).unwrap();
         assert_eq!(*presented.borrow(), 1);
         // The completion opens a coprocessor stream.

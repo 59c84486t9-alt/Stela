@@ -57,10 +57,8 @@
 //! (`' POI'` magic, size, channel, type) and an EPIC header, aligned to the
 //! layout's 0x80 bytes.
 //!
-//! EPIC services are announced by the coprocessor (an `EPIC_SUBTYPE_ANNOUNCE`
-//! report on a new channel, `afk_recv_handle_init`); the AP only talks to an
-//! announced channel. This model brings the transport up and announces no
-//! service by default. A real implemented service must be registered before
+//! AFKEPV2 services are published by report0x11 on a nonzero interface.
+//! A real implemented service must be registered before
 //! initialization; its publication, commands and session lifetime then share
 //! this transport. Service metadata never substitutes for its implementation.
 //! AFKEPV2 also has interface-zero lifecycle packets independent of those

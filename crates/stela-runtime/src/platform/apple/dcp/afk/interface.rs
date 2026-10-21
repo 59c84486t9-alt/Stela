@@ -137,7 +137,7 @@ impl Interfaces {
         descriptor: Descriptor,
         service: Box<dyn Service>,
     ) -> Result<(), &'static str> {
-        if descriptor.number == 0 || descriptor.name.len() >= 32 || descriptor.name.contains('\0') {
+        if descriptor.number == 0 || descriptor.name.contains('\0') {
             return Err("DCP AFKEPV2 publication has an invalid interface or name");
         }
         if self.services.contains_key(&descriptor.number) {
@@ -164,8 +164,11 @@ impl Interfaces {
             interface.terminated = false;
             interface.peer_open = false;
             let mut payload = alloc::vec![0; 32];
-            payload[..interface.descriptor.name.len()]
-                .copy_from_slice(interface.descriptor.name.as_bytes());
+            // Original35f6c calls strlcpy32 (1e034):31 bytes plus NUL.
+            // The complete interface-name remains in the property dictionary.
+            let name = interface.descriptor.name.as_bytes();
+            let count = name.len().min(31);
+            payload[..count].copy_from_slice(&name[..count]);
             payload.extend_from_slice(&interface.descriptor.properties);
             reports.push((number, report(PUBLISH, &payload)));
         }

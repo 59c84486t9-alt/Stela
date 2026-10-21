@@ -192,6 +192,10 @@ impl Methods {
         }
     }
 
+    pub(super) fn display_state(&self) -> Rc<RefCell<DisplayState>> {
+        self.display.clone()
+    }
+
     /// The fixed mode the one connected display runs.
     pub fn mode(&self) -> Mode {
         self.scanout.mode()

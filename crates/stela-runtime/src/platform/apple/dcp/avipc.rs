@@ -20,6 +20,34 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 pub const SERVICE_NAME: &str = "dcpav-controller-epic";
+/// Original named endpoint config2ff148..2ff1cc and mailbox mask20e8c.
+pub(super) const ENDPOINT: u8 = 0x24;
+/// The sole native publisher uses the original odd allocator's first free ID.
+pub(super) const INTERFACE: u16 = 1;
+/// Configured single external controller index0 and unit0, not a captured
+/// original platform byte. Original102bf0 constructs this interface identity.
+const INTERFACE_NAME: &str = "dispextE:dcpav-controller-epic:0";
+
+pub(super) fn descriptor() -> super::afk::interface::Descriptor {
+    super::afk::interface::Descriptor {
+        number: INTERFACE,
+        name: INTERFACE_NAME,
+        //102bf0's four EPIC fields and interface-name, plus AFK publication's
+        // interface-id at36008. SupportsCRC=false omits RequiresCommandDelegate
+        // (93930); the command family explicitly refuses CRC acquisition.
+        properties: b"<dict><key>EPICName</key><string>dcpav-controller-epic</string><key>EPICUnit</key><integer size=\"32\">0</integer><key>EPICLocation</key><string>External</string><key>EPICProviderClass</key><string>AppleDCPDPTXController</string><key>interface-name</key><string>dispextE:dcpav-controller-epic:0</string><key>interface-id</key><integer size=\"32\">1</integer></dict>\0".to_vec(),
+    }
+}
+
+impl super::afk::interface::Service for Controller {
+    fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+        Controller::handle(self, packet_type, payload)
+    }
+    fn transport_closed(&mut self) {
+        Controller::transport_closed(self);
+    }
+}
+
 /// Firmware 0x10423c dispatches this AFK command type to DCPAVIPC.
 pub const COMMAND_PACKET_TYPE: u8 = 0xc0;
 const HEADER_BYTES: usize = 0x40;
