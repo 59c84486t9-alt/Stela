@@ -6,6 +6,9 @@ use super::mmio::Mmio;
 use alloc::vec::Vec;
 use core::{fmt, ops::Range};
 
+mod aspm;
+pub use aspm::disable_aspm_link;
+
 const VENDOR: u16 = 0x00;
 const COMMAND: u16 = 0x04;
 const STATUS: u16 = 0x06;
@@ -59,7 +62,9 @@ impl fmt::Display for Address {
     }
 }
 
-/// 32-bit access to one function's configuration space.
+/// Access to one function's configuration space. Real configuration-space
+/// implementations must override `write16` with a narrow store: a 32-bit
+/// read/modify/write can acknowledge unrelated write-one-to-clear status.
 pub trait ConfigSpace {
     fn read32(&self, offset: u16) -> u32;
     fn write32(&mut self, offset: u16, value: u32);
@@ -91,6 +96,10 @@ impl ConfigSpace for EcamConfig {
 
     fn write32(&mut self, offset: u16, value: u32) {
         self.registers.write32(usize::from(offset), value)
+    }
+
+    fn write16(&mut self, offset: u16, value: u16) {
+        self.registers.write16(usize::from(offset), value)
     }
 }
 
