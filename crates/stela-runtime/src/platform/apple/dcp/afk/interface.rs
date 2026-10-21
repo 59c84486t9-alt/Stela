@@ -313,6 +313,13 @@ impl Interfaces {
         let interface = services.get_mut(&number);
         match header[9] {
             REPORT => {
+                if packet_type == PUBLISH {
+                    // Original unknown-interface publication creates an
+                    // importer (AP94aca68). This native peer has no client
+                    // owner for an AP-published service; do not drop its
+                    // creation effect through the unmatched-report path.
+                    return Err("DCP AFKEPV2 peer service publication has no importer owner");
+                }
                 let Some(interface) = interface else {
                     return Ok(None);
                 };
@@ -851,6 +858,25 @@ mod tests {
         assert_eq!(&response[20..24], &OVERRUN.to_le_bytes());
         memory.read(0x8000_0300, &mut data).unwrap();
         assert_eq!(&data, b"---");
+    }
+
+    #[test]
+    fn peer_publication_refuses_without_inventing_an_importer_or_service_effect() {
+        let (mut interfaces, effects) = interfaces();
+        let mut memory = Memory::default();
+        let mut payload = alloc::vec![0; 32];
+        payload[..4].copy_from_slice(b"peer");
+        payload.extend_from_slice(b"<dict/>\0");
+        let publication = report(PUBLISH, &payload);
+        for number in [1, 99] {
+            assert_eq!(
+                receive(&mut interfaces, number, &publication, &mut memory),
+                Err("DCP AFKEPV2 peer service publication has no importer owner")
+            );
+        }
+        assert_eq!(interfaces.services.len(), 2);
+        assert_eq!((effects.borrow().calls, effects.borrow().closes), (0, 0));
+        assert!(!interfaces.services[&1].peer_open);
     }
 
     #[test]
