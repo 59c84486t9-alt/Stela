@@ -1,12 +1,14 @@
 //! SMBus host transactions for batteries, touchpads and other peripherals.
 //!
-//! [`i801`] implements Intel's PIO host controller. Peripheral discovery,
+//! [`i801`] implements Intel's I801 PIO host; [`piix4`] implements the
+//! PIIX4-compatible hosts used by AMD SB/FCH and older chipsets. Peripheral discovery,
 //! firmware ownership, battery policy and touchpad protocols are separate.
 //! SMBus block transfers carry an on-wire count; they are not interchangeable
 //! with arbitrary I²C block transfers.
 use core::fmt;
 
 pub mod i801;
+pub mod piix4;
 
 pub const MAX_BLOCK: usize = 32;
 
@@ -115,12 +117,13 @@ pub enum ErrorKind {
     FirmwareSmi,
     WrongProtocolMode,
     UnsupportedPec,
+    UnsupportedTransaction,
     /// The controller was busy before this driver started a transaction;
     /// another owner's operation is never killed to acquire the bus.
     Busy,
     StatusStuck,
     BufferModeRejected,
-    /// I801 DEV_ERR: NACK, invalid command or controller communication timeout.
+    /// Controller DEV_ERR: NACK, invalid command or communication timeout.
     Device,
     ArbitrationLost,
     Failed,
