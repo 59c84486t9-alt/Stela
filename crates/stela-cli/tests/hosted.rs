@@ -591,6 +591,7 @@ fn guest_tools_run_on_each_chosen_mac() {
         eprintln!("skipped: no 26A434 guest roots (see this test's documentation)");
         return;
     };
+    let work = tempfile::tempdir().unwrap();
     let run = |model: Option<&str>, environment: Option<&str>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_stela"));
         command.arg("run");
@@ -606,7 +607,10 @@ fn guest_tools_run_on_each_chosen_mac() {
             "hw.model",
             "machdep.cpu.brand_string",
         ]);
-        command.env("STELA_STRICT", "1").env_remove("STELA_MODEL");
+        command
+            .env("HOME", work.path())
+            .env("STELA_STRICT", "1")
+            .env_remove("STELA_MODEL");
         if let Some(model) = environment {
             command.env("STELA_MODEL", model);
         }
@@ -615,7 +619,7 @@ fn guest_tools_run_on_each_chosen_mac() {
     // The default, an explicit model, the environment's, and an explicit
     // model over the environment's.
     for (model, environment, expected) in [
-        (None, None, "Mac14,3\nApple M2\n"),
+        (None, None, "MacBookPro18,3\nApple M1 Pro\n"),
         (Some("Macmini9,1"), None, "Macmini9,1\nApple M1\n"),
         (None, Some("Mac15,10"), "Mac15,10\nApple M3 Max\n"),
         (Some("Mac16,10"), Some("Mac15,10"), "Mac16,10\nApple M4\n"),

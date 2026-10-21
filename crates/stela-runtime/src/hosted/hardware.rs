@@ -359,9 +359,8 @@ pub struct Hardware {
 }
 
 /// The board a hosted run models unless one is chosen (`stela run
-/// --model`): the M2 Mac mini, until performance and translation evidence
-/// choose the default.
-pub const DEFAULT_MODEL: &str = "Mac14,3";
+/// --model`): the primary M1 Pro MacBook Pro reference profile.
+pub const DEFAULT_MODEL: &str = "MacBookPro18,3";
 
 /// The hosted boards' product types (`hw.model`), in table order.
 pub fn models() -> impl Iterator<Item = &'static str> {
