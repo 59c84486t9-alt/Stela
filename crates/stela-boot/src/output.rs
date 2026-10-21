@@ -14,7 +14,7 @@ use core::{
     cell::RefCell,
     convert::Infallible,
     fmt::{self, Write},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_runtime::pc::boot_log::{PENDING_BYTES, Pending, Unkept, Writer};
@@ -64,6 +64,50 @@ static FLUSHING: AtomicBool = AtomicBool::new(false);
 static FIRMWARE_CONSOLE: AtomicBool = AtomicBool::new(true);
 /// `--host-check` shows its report itself, so every line reaches the screen.
 static RAW_SCREEN: AtomicBool = AtomicBool::new(false);
+/// The time-stamp counter's rate, once known, which stamps each line the
+/// logs keep with the seconds since the PC started.
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+/// The record's next byte starts a line.
+static LINE_START: AtomicBool = AtomicBool::new(true);
+
+/// Stamp the logs' lines from now on with the time from the counter running
+/// at `tsc_hz`.
+pub fn set_clock(tsc_hz: u64) {
+    TSC_HZ.store(tsc_hz, Ordering::Relaxed);
+}
+
+/// `[  12.345] `: the seconds since the PC started, as the kernel's own
+/// lines show them; nothing before the counter's rate is known.
+fn stamp(record: &mut Pending<[u8; PENDING_BYTES]>) {
+    let hz = TSC_HZ.load(Ordering::Relaxed);
+    if hz == 0 {
+        return;
+    }
+    // SAFETY: RDTSC has no memory effects.
+    let millis = unsafe { core::arch::x86_64::_rdtsc() } / (hz / 1000).max(1);
+    let mut text = Stamp::default();
+    let _ = write!(text, "[{:5}.{:03}] ", millis / 1000, millis % 1000);
+    record.push(&text.bytes[..text.length]);
+}
+
+/// A line's stamp, formatted without the heap.
+#[derive(Default)]
+struct Stamp {
+    bytes: [u8; 24],
+    length: usize,
+}
+
+impl Write for Stamp {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self.length + value.len();
+        self.bytes
+            .get_mut(self.length..end)
+            .ok_or(fmt::Error)?
+            .copy_from_slice(value.as_bytes());
+        self.length = end;
+        Ok(())
+    }
+}
 
 /// Stop the marker's firmware timer, store the logs and close those the
 /// firmware holds, then stop writing to the firmware's console: called just before boot services end, which
@@ -105,7 +149,13 @@ impl Write for Output {
             console::write(&[(value, console::Color::Text)]);
         }
         if let Ok(mut record) = RECORD.0.try_borrow_mut() {
-            record.push(value.as_bytes());
+            for line in value.split_inclusive('\n') {
+                if LINE_START.load(Ordering::Relaxed) {
+                    stamp(&mut record);
+                }
+                record.push(line.as_bytes());
+                LINE_START.store(line.ends_with('\n'), Ordering::Relaxed);
+            }
         }
         Ok(())
     }

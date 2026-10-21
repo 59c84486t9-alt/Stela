@@ -229,6 +229,7 @@ fn with(f: impl FnOnce(&mut State)) {
 /// The time-stamp counter's rate, for the times steps show.
 pub fn set_clock(tsc_hz: u64) {
     with(|state| state.tsc_hz = tsc_hz);
+    output::set_clock(tsc_hz);
 }
 
 /// Start a step; one still running ends first, as done.
