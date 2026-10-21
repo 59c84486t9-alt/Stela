@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Bounded conventional HDA PCI attachment. Quirks and exact Intel IDs adapt
+//! Bounded conventional HDA PCI attachment. Quirks and exact controller IDs adapt
 //! Linux sound/hda/controllers/intel.c, include/linux/pci_ids.h, capability
 //! layouts in include/uapi/linux/pci_regs.h, and PCI D0 transition sequencing
 //! from drivers/pci/pci.c at
@@ -22,6 +22,8 @@ use crate::bus::{
 
 pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
 const INTEL: u16 = 0x8086;
+const ATI: u16 = 0x1002;
+const AMD: u16 = 0x1022;
 const PCI_ID: u16 = 0;
 const PCI_COMMAND: u16 = 4;
 const PCI_STATUS: u16 = 6;
@@ -44,6 +46,24 @@ const PM_PME_STATUS: u16 = 1 << 15;
 const PM_NO_SOFT_RESET: u16 = 1 << 3;
 const TCSEL: u16 = 0x44;
 const TCSEL_MASK: u8 = 7;
+const ATI_SNOOP_CONTROL: u16 = 0x42;
+const ATI_SNOOP_MASK: u8 = 7;
+const ATI_SNOOP_ENABLE: u8 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setup {
+    IntelIch,
+    AtiAzalia,
+}
+
+impl Setup {
+    fn control(self) -> (u16, u8, u8) {
+        match self {
+            Self::IntelIch => (TCSEL, TCSEL_MASK, 0),
+            Self::AtiAzalia => (ATI_SNOOP_CONTROL, ATI_SNOOP_MASK, ATI_SNOOP_ENABLE),
+        }
+    }
+}
 
 /// Actual identity selected by the bounded table, never by a failed handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,6 +71,10 @@ pub struct Identity {
     pub vendor: u16,
     pub device: u16,
     pub corb_reset: CorbReset,
+    /// Explicit platform ceiling, independent of GCAP. ATI uses a conservative
+    /// 32-bit policy without companion-SMBus stepping evidence; AMD uses 40 bits.
+    pub dma_address_bits: u8,
+    setup: Setup,
 }
 
 /// A platform decision made before touching the PCI function. An identity
@@ -75,26 +99,35 @@ pub enum AttachError {
 }
 
 /// Match the enumerated identity only; `prepare` rechecks actual config space.
-/// Match only ICH6/ESB2/ICH7–10 conventional host controllers. Newer Intel
-/// DSP-capable devices and GPU HDA functions do not inherit these quirks.
+/// Match ICH6/ESB2/ICH7–10 and the exact legacy ATI/AMD Azalia hosts below.
+/// Newer AMD FIFO/retry quirks, Intel DSP and GPU HDA functions remain separate.
 pub fn identify<C: ConfigSpace>(function: &Function<C>) -> Result<Identity, AttachError> {
     identity(function.vendor, function.device, function.class)
 }
 
 fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, AttachError> {
-    if class != CLASS
-        || vendor != INTEL
-        || !matches!(
-            device,
-            0x2668 | 0x269a | 0x27d8 | 0x284b | 0x293e | 0x293f | 0x3a3e | 0x3a6e
-        )
-    {
+    if class != CLASS {
         return Err(AttachError::UnsupportedController);
     }
+    let (setup, dma_address_bits) = match (vendor, device) {
+        (INTEL, 0x2668 | 0x269a | 0x27d8 | 0x284b | 0x293e | 0x293f | 0x3a3e | 0x3a6e) => {
+            (Setup::IntelIch, 64)
+        }
+        // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
+        // before 0x30 additionally require 32 bits. Without companion evidence,
+        // retain the supported conservative 32-bit mode on every ATI stepping.
+        (ATI, 0x437b | 0x4383) => (Setup::AtiAzalia, 32),
+        // Exact legacy AMD hosts use ATI snoop and LPIB, not the later AMD
+        // FIFO-position/retry-probe quirk family. Linux limits DMA to 40 bits.
+        (AMD, 0x780d | 0x157a) => (Setup::AtiAzalia, 40),
+        _ => return Err(AttachError::UnsupportedController),
+    };
     Ok(Identity {
         vendor,
         device,
         corb_reset: CorbReset::Handshake,
+        dma_address_bits,
+        setup,
     })
 }
 
@@ -115,6 +148,7 @@ impl Prepared {
     pub fn config(&self) -> Config {
         Config {
             corb_reset: self.identity.corb_reset,
+            dma_address_bits: self.identity.dma_address_bits,
             ..Config::default()
         }
     }
@@ -139,14 +173,17 @@ struct Capabilities {
     msix: Option<u16>,
 }
 
-fn capabilities<C: ConfigSpace>(config: &C) -> Result<Capabilities, AttachError> {
+fn capabilities<C: ConfigSpace>(
+    config: &C,
+    vendor_control: u16,
+) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
     if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
         return Ok(found);
     }
     let mut occupied = [false; 256];
-    // TCSEL belongs to the exact ICH identity, never to a standard capability.
-    occupied[usize::from(TCSEL)] = true;
+    // The identity's vendor-control byte cannot alias a standard capability.
+    occupied[usize::from(vendor_control)] = true;
     let mut offset = config.read8(PCI_CAPABILITIES);
     while offset != 0 {
         if offset < 0x40 || offset & 3 != 0 {
@@ -276,7 +313,8 @@ pub unsafe fn prepare<C: ConfigSpace>(
     if !bar_matches(config, base, wide) {
         return Err(AttachError::InvalidBar);
     }
-    let caps = capabilities(config)?;
+    let (vendor_control, vendor_mask, vendor_bits) = selected.setup.control();
+    let caps = capabilities(config, vendor_control)?;
     let pmcsr = caps.pm.map(|pm| {
         let version = config.read16(pm + 2) & 7;
         (pm + 4, version, config.read16(pm + 4))
@@ -289,7 +327,11 @@ pub unsafe fn prepare<C: ConfigSpace>(
     // Save resources before a D3hot exit can reset them. Disable decode/mastering
     // before restoring any BAR; PCI status is never written by command updates.
     let bars: [u32; 6] = core::array::from_fn(|i| config.read32(PCI_BAR0 + i as u16 * 4));
-    let command = config.read16(PCI_COMMAND) & !(COMMAND_MEMORY | COMMAND_MASTER);
+    let command = config.read16(PCI_COMMAND);
+    if command == u16::MAX {
+        return Err(AttachError::ConfigurationRejected);
+    }
+    let command = command & !(COMMAND_MEMORY | COMMAND_MASTER);
     config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
     let result = (|| {
         if config.read16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER) != 0 {
@@ -320,11 +362,15 @@ pub unsafe fn prepare<C: ConfigSpace>(
         if !bar_matches(config, base, wide) {
             return Err(AttachError::InvalidBar);
         }
-        // ICH uses coherent system memory without SCH/ATI/NVIDIA snoop bits.
-        // Never touch another family's vendor register under an ICH identity.
-        let tcsel = config.read8(TCSEL) & !TCSEL_MASK;
-        config.write8(TCSEL, tcsel);
-        if config.read8(TCSEL) != tcsel {
+        // The exact identity selects either ICH TCSEL or ATI/AMD snoop.
+        // These bytes are not interchangeable; never touch Intel TCSEL on AMD.
+        let previous = config.read8(vendor_control);
+        if previous == u8::MAX {
+            return Err(AttachError::ConfigurationRejected);
+        }
+        let value = previous & !vendor_mask | vendor_bits;
+        config.write8(vendor_control, value);
+        if config.read8(vendor_control) != value {
             return Err(AttachError::ConfigurationRejected);
         }
         if let Some(offset) = caps.msi {
@@ -386,7 +432,7 @@ mod tests {
         previous_state: u16,
         reject_power: bool,
         reject_command: bool,
-        reject_tcsel: bool,
+        reject_vendor_control: bool,
         fail_after_enable: bool,
         writes: Vec<(u16, u8, u32, u64)>,
     }
@@ -429,10 +475,14 @@ mod tests {
             self.words[usize::from(offset / 4)] = value;
         }
         fn write8(&mut self, offset: u16, value: u8) {
-            assert_eq!(offset, TCSEL);
+            assert!(matches!(offset, TCSEL | ATI_SNOOP_CONTROL));
+            assert_eq!(
+                self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                0
+            );
             self.writes
                 .push((offset, 1, u32::from(value), self.now.get()));
-            if self.reject_tcsel {
+            if self.reject_vendor_control {
                 return;
             }
             let shift = (offset & 3) * 8;
@@ -483,7 +533,7 @@ mod tests {
             previous_state: state,
             reject_power: false,
             reject_command: false,
-            reject_tcsel: false,
+            reject_vendor_control: false,
             fail_after_enable: false,
             writes: Vec::new(),
         };
@@ -520,6 +570,12 @@ mod tests {
         )
     }
 
+    fn set_identity(function: &mut Function<Model>, vendor: u16, device: u16) {
+        function.vendor = vendor;
+        function.device = device;
+        function.config().words[0] = u32::from(vendor) | (u32::from(device) << 16);
+    }
+
     fn prepare_model(
         function: &mut Function<Model>,
         timer: &Clock,
@@ -544,7 +600,7 @@ mod tests {
             (INTEL, 0x9dc8, CLASS),
             (INTEL, 0x0a0c, CLASS),
             (INTEL, 0xffff, CLASS),
-            (0x1022, 0x780d, CLASS),
+            (AMD, 0x1487, CLASS),
             (INTEL, 0x2668, [4, 1, 0]),
         ] {
             assert_eq!(
@@ -560,6 +616,7 @@ mod tests {
         let prepared = prepare_model(&mut function, &timer, bar).unwrap();
         assert_eq!(prepared.bar_range(), 0xfebf_0000..0xfebf_4000);
         assert_eq!(prepared.config().corb_reset, CorbReset::Handshake);
+        assert_eq!(prepared.config().dma_address_bits, 64);
         let config = function.config();
         assert_eq!(timer.now_us(), 10_000);
         assert_eq!(config.words[4], 0xfebf_0000);
@@ -793,7 +850,7 @@ mod tests {
             let (mut function, timer, bar) = fixture(3);
             match failure {
                 0 => function.config().reject_power = true,
-                1 => function.config().reject_tcsel = true,
+                1 => function.config().reject_vendor_control = true,
                 _ => {
                     function.config().set16(PCI_COMMAND, COMMAND_INTX_DISABLE);
                     function.config().reject_command = true;
@@ -812,6 +869,122 @@ mod tests {
                 function.config().get16(PCI_COMMAND) & (COMMAND_MASTER | COMMAND_MEMORY),
                 0
             );
+        }
+    }
+    #[test]
+    fn legacy_ati_amd_snoop_uses_exact_identity_and_preserves_neighbor_and_tcsel() {
+        for (vendor, device, bits) in [
+            (ATI, 0x437b, 32),
+            (ATI, 0x4383, 32),
+            (AMD, 0x780d, 40),
+            (AMD, 0x157a, 40),
+        ] {
+            let (mut function, timer, bar) = fixture(3);
+            set_identity(&mut function, vendor, device);
+            function.config().words[16] = 0x5aa5_1234; //0x42snoop=a5, adjacent43=5a.
+            let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+            assert_eq!(prepared.identity().dma_address_bits, bits);
+            assert_eq!(prepared.config().dma_address_bits, bits);
+            assert_eq!(prepared.config().corb_reset, CorbReset::Handshake);
+            let config = function.config();
+            assert_eq!(config.words[16], 0x5aa2_1234);
+            assert_eq!(config.words[17], 0x5ac3_a5f7); // IntelTCSEL untouched.
+            assert!(
+                !config
+                    .writes
+                    .iter()
+                    .any(|(offset, _, _, _)| *offset == TCSEL)
+            );
+            assert!(
+                config
+                    .writes
+                    .iter()
+                    .any(|(offset, width, _, time)| *offset == ATI_SNOOP_CONTROL
+                        && *width == 1
+                        && *time >= 10_000)
+            );
+        }
+    }
+
+    #[test]
+    fn new_amd_fifo_dsp_and_gpu_id_families_do_not_inherit_legacy_snoop_policy() {
+        for (vendor, device) in [
+            (AMD, 0x1457),
+            (AMD, 0x1487),
+            (AMD, 0x15e3),
+            (ATI, 0x157a),
+            (ATI, 0x0002),
+            (0x10de, 0x0be3),
+            (INTEL, 0xa170),
+        ] {
+            let (mut function, timer, bar) = fixture(0);
+            set_identity(&mut function, vendor, device);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::UnsupportedController
+            );
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn amd_vendor_control_overlap_and_snoop_rejection_refuse_without_bus_mastering() {
+        for variant in 0..3 {
+            let (mut function, timer, bar) = fixture(0);
+            set_identity(&mut function, AMD, 0x780d);
+            match variant {
+                0 => {
+                    function.config().words[13] = 0x40;
+                    function.config().words[16] = 0x0003_0001;
+                }
+                1 => function.config().reject_vendor_control = true,
+                _ => function.config().words[16] = 0x00ff_0000,
+            }
+            let result = prepare_model(&mut function, &timer, bar).unwrap_err();
+            if variant == 0 {
+                assert_eq!(result, AttachError::InvalidCapabilities);
+                assert!(function.config().writes.is_empty());
+            } else {
+                assert_eq!(result, AttachError::ConfigurationRejected);
+                assert_eq!(
+                    function.config().get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                    0
+                );
+            }
+            assert!(
+                !function
+                    .config()
+                    .writes
+                    .iter()
+                    .any(|(offset, _, _, _)| *offset == TCSEL)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_initial_pci_or_vendor_controls_are_not_used_for_read_modify_write() {
+        for vendor_fault in [false, true] {
+            let (mut function, timer, bar) = fixture(0);
+            if vendor_fault {
+                function.config().words[17] |= 0xff;
+            } else {
+                function.config().set16(PCI_COMMAND, u16::MAX);
+            }
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::ConfigurationRejected
+            );
+            if vendor_fault {
+                assert!(
+                    !function
+                        .config()
+                        .writes
+                        .iter()
+                        .any(|(offset, _, _, _)| *offset == TCSEL)
+                );
+            } else {
+                assert!(function.config().writes.is_empty());
+            }
         }
     }
 }

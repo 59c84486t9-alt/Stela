@@ -4,7 +4,7 @@
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //!
 //! This is the conventional HDA MMIO core. The `pci` module prepares a bounded
-//! legacy Intel subset. Intel DSP/firmware ownership, other vendor quirks, ACPI
+//! legacy Intel/ATI/AMD subset. Intel DSP/firmware ownership, other vendor quirks, ACPI
 //! power resources, HDMI GPU coordination, OEM amplifier/pin policy, suspend and
 //! guest audio bridging remain platform responsibilities. An ID match alone
 //! does not establish exclusive controller ownership.
