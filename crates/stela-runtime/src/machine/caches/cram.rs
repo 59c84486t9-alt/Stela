@@ -1670,7 +1670,6 @@ mod tests {
                     .any(|event| event.encoding == Encoding::new(3, 3, 15, 7, 0) && !event.write)
             );
             if mount_sep {
-                use crate::machine::system::Register;
                 assert_eq!(machine.devices.entropy_calls.get(), 4);
                 assert_eq!(machine.devices.effects.len(), 24);
                 assert!(
@@ -1680,12 +1679,18 @@ mod tests {
                         .iter()
                         .all(|effect| effect["result"] == "Ok(())")
                 );
-                assert_eq!(stop, Stop::Budget); // first actual exception, before handler execution
-                assert_eq!(exceptions.len(), 1);
-                assert_eq!(machine.cpu.read(Register::ELR_EL2), ENTRY_BASE + 0x22858);
-                assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x02000000);
-                assert_eq!(machine.cpu.read(Register::FAR_EL2), 0);
-                assert_eq!(machine.cpu.pc, ENTRY_BASE + 0xf4a00);
+                let Stop::Unsupported(requirement) = &stop else {
+                    panic!(
+                        "original keyed entry did not reach its next qualified boundary: {stop:?}"
+                    );
+                };
+                assert_eq!(requirement.pc, ENTRY_BASE + 0x2e750);
+                assert!(matches!(&requirement.kind, RequirementKind::Device {
+                    physical: 0x2922dc22c, write: false, detail,
+                } if detail == "original entry physical input is unknown"));
+                assert_eq!(entry.unknown.last(), Some(&(0x2922dc22c, 4)));
+                assert!(exceptions.is_empty());
+                assert_eq!(machine.statistics.exceptions, 0);
                 assert!(entry.committed.is_empty(), "no runtime values logged");
                 let sep = machine
                     .devices
@@ -1740,7 +1745,7 @@ mod tests {
                     "aperture_base":APERTURE,"aperture_bytes":CAPACITY,"unit_exponent":16,"limit":60,"initial_units":60,
                     "initial_mapping":format!("{before:?}"),"final_mapping":format!("{:?}",entry.cram.backing().state()),
                     "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),
-                    "boundary":if mount_sep {"first architectural exception after actual native SEP mailbox transactions"} else if initialize_reservation {"next original physical peripheral input; no provider mounted"} else {"unknown original storage input"},"pc":machine.cpu.pc,
+                    "boundary":if mount_sep {"actual chip-identity physical input after native SEP mailbox transactions and canonical EL2 key writes"} else if initialize_reservation {"next original physical peripheral input; no provider mounted"} else {"unknown original storage input"},"pc":machine.cpu.pc,
                     "physical_counter":"full entry uses actual monotonic host elapsed time in the declared24MHz domain, never poll-driven ticks",
                     "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,"exception_events":exceptions,
                     "registers":if mount_sep {None} else {Some(machine.cpu.state.x)},"sp":machine.cpu.state.sp,
@@ -1748,6 +1753,7 @@ mod tests {
                     "guest_store_parts":entry.committed.len()+entry.redacted_stores.len(),"unknown_reads":entry.unknown,
                     "peripheral_effects":machine.devices.effects,"peripheral_irqs":machine.devices.irq_changes,
                     "entropy_requests":machine.devices.entropy_calls.get(),
+                    "el2_key_pairs_initialized":if mount_sep {Some(machine.cpu.apple.pointer_keys.pairs().map(|pair|pair.is_some()))} else {None},
                     "sep_handoff":if mount_sep {"explicit Stela running ROM/enabled actual mailboxes; real host entropy; declared test ECID5354454c41544553, unknownsecurityNone, volatile state; AIC input transitions recorded, CPU delivery unmounted"} else {"no peripheral provider"},
                     "system_accesses":entry.registers.iter().map(|event|serde_json::json!({"encoding":format!("{:?}",event.encoding),"write":event.write,"value":event.value})).collect::<Vec<_>>(),"watch":watch,
                     "redaction":if mount_sep {"all runtime registers/store bytes/mailbox values/watch values omitted at collection; only coordinates, sizes, directions and counts retained"} else {"no native entropy/key provider in this scenario"},
