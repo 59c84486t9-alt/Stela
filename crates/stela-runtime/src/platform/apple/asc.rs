@@ -43,7 +43,9 @@
 //!   must admit retained stop/resume explicitly; unsupported reset and
 //!   power-loss flows still refuse. Mailbox controls, staged payload and
 //!   queued responses survive a retained halt.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
+use super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Transition, Width, refuse,
+};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
@@ -97,6 +99,15 @@ pub struct TransitionRequest {
 
 /// The coprocessor's software, emulated natively.
 pub trait Firmware: Any {
+    /// Validate loss of native volatile firmware state. Physical reset is
+    /// distinct from an RTKit sleep request: no mailbox ACK is generated.
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Err("coprocessor volatile-state reset is not modeled")
+    }
+    /// Cold reset after `check_reset` succeeded, without starting execution.
+    fn reset(&mut self) -> Result<(), &'static str> {
+        Err("coprocessor volatile-state reset is not modeled")
+    }
     /// The coprocessor starts running; messages it sends go to `outbox`.
     /// Start/resume/receive output is provisional until Ok; a refusal must
     /// retain retryable native state and must not commit its success ACK.
@@ -172,6 +183,7 @@ impl Lines {
 
 pub struct Asc {
     firmware: Box<dyn Firmware>,
+    lifecycle: LifecycleState,
     running: bool,
     /// RUN was cleared after firmware admitted a retained CPU halt.
     halted: bool,
@@ -208,6 +220,13 @@ impl Asc {
         }
         Ok(Self {
             firmware,
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
             running,
             halted: false,
             cpu_control: if running { RUN } else { 0 },
@@ -268,14 +287,14 @@ impl Asc {
 
     /// Whether the coprocessor has bus-master work to run this step.
     pub fn dma_pending(&self) -> bool {
-        self.running && self.firmware.dma_pending()
+        self.execution_enabled() && self.firmware.dma_pending()
     }
 
     /// Run the coprocessor's queued DMA through `port`; any messages it
     /// produces enter the outbox and raise the mailbox interrupt, exactly as
     /// a received message's replies do.
     pub fn service_dma(&mut self, port: &mut Port<'_, '_>) -> Result<(), &'static str> {
-        if !self.running {
+        if !self.execution_enabled() {
             return Err("mailbox DMA on a stopped coprocessor");
         }
         let mut produced = Vec::new();
@@ -296,6 +315,29 @@ impl Asc {
 
     fn visible(&self) -> bool {
         self.outbox_enabled && !self.outbox.is_empty()
+    }
+
+    /// CPU-driven work, including display scanout outside mailbox DMA,
+    /// may run only while every physical execution gate is released.
+    pub fn execution_enabled(&self) -> bool {
+        self.running
+            && self.lifecycle.powered
+            && self.lifecycle.clocked
+            && !self.lifecycle.quiesced
+            && !self.lifecycle.reset
+    }
+
+    fn accessible(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("ASC power is gated");
+        }
+        if !self.lifecycle.clocked {
+            return Err("ASC clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("ASC reset is asserted");
+        }
+        Ok(())
     }
 
     fn update_lines(&mut self, access: &mut Access<'_>) {
@@ -322,6 +364,9 @@ impl Asc {
     }
 
     fn send(&mut self, endpoint_word: u64) -> Result<(), &'static str> {
+        if self.lifecycle.quiesced {
+            return Err("ASC inbox submission while PMGR quiesced");
+        }
         if !self.running {
             return Err("mailbox send to a stopped coprocessor");
         }
@@ -362,6 +407,9 @@ impl Asc {
             return Err("ASC CPU control bit is not modeled");
         }
         let run = value & RUN != 0;
+        if run && !self.running && self.lifecycle.quiesced {
+            return Err("ASC CPU start while PMGR quiesced");
+        }
         if self.running && !run {
             self.firmware.stop()?;
             self.running = false;
@@ -384,7 +432,43 @@ impl Asc {
     }
 }
 
+impl Lifecycle for Asc {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        let destructive = proposed.reset && !self.lifecycle.reset
+            || !proposed.powered && self.lifecycle.powered && !proposed.retention;
+        if destructive {
+            // A posted word or committed notification still belongs to its
+            // sender. Do not erase it or complete the PMGR request first.
+            if self.send0.is_some() || !self.outbox.is_empty() {
+                return Err("ASC reset or power loss with owned mailbox messages");
+            }
+            self.firmware.check_reset()?;
+        }
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        let destructive = proposed.reset && !self.lifecycle.reset
+            || !proposed.powered && self.lifecycle.powered && !proposed.retention;
+        if destructive {
+            self.firmware.reset().expect("ASC reset was preflighted");
+            self.running = false;
+            self.halted = false;
+            self.cpu_control = 0;
+            self.a2i_control = 0;
+            self.outbox_enabled = false;
+        }
+        self.lifecycle = proposed;
+        // Retained gates freeze execution; neither they nor gate release
+        // synthesize a firmware sleep/wake message or alter FIFO ownership.
+        self.update_lines(access);
+    }
+}
+
 impl MmioDevice for Asc {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -396,6 +480,7 @@ impl MmioDevice for Asc {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        self.accessible().map_err(fail)?;
         let value = match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.cpu_control,
             // AppleASCWrapV4::_isIdle (kernel file 0x1bad724) consumes
@@ -436,6 +521,7 @@ impl MmioDevice for Asc {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        self.accessible().map_err(fail)?;
         match (offset, width) {
             (CPU_CONTROL, Width::Word) => self.write_cpu_control(value).map_err(fail)?,
             (A2I_CONTROL, Width::Word) if value & !(CONTROL_ENABLE | CONTROL_STATUS) == 0 => {
@@ -462,7 +548,7 @@ impl MmioDevice for Asc {
         Ok(())
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
-        if self.running {
+        if self.execution_enabled() {
             let mut sent = Vec::new();
             let result = self.firmware.poll(&mut sent);
             self.outbox.extend(sent);
@@ -478,6 +564,112 @@ impl MmioDevice for Asc {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+
+    #[test]
+    fn physical_retention_freezes_work_and_preserves_mailbox_irq_ownership() {
+        struct Active {
+            polls: u32,
+            resets: u32,
+        }
+        impl Firmware for Active {
+            fn check_reset(&self) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn reset(&mut self) -> Result<(), &'static str> {
+                self.resets += 1;
+                Ok(())
+            }
+            fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn dma_pending(&self) -> bool {
+                true
+            }
+            fn poll(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+                self.polls += 1;
+                out.push(Message {
+                    endpoint: 0x20,
+                    payload: u64::from(self.polls),
+                });
+                Ok(())
+            }
+        }
+        let mut asc = Asc::booted(
+            Box::new(Active {
+                polls: 0,
+                resets: 0,
+            }),
+            Lines::from_interrupts(LINES),
+        )
+        .unwrap();
+        let active = asc.lifecycle;
+        let mut latch = InterruptLatch::new();
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            asc.advance(&mut access).unwrap();
+            asc.write(A2I_SEND0, Width::Double, 0x123, &mut access)
+                .unwrap();
+        }
+        assert!(latch.is_asserted(Wire::Aic(LINES[2])));
+        for gated in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                clocked: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            let mut access = Access::new(0, 1, &mut latch);
+            asc.check_lifecycle(gated).unwrap();
+            asc.set_lifecycle(gated, &mut access);
+            asc.advance(&mut access).unwrap();
+            assert!(!asc.dma_pending());
+            assert_eq!(asc.send0, Some(0x123));
+            assert_eq!(asc.outbox.len(), 1);
+            assert_eq!(asc.firmware::<Active>().unwrap().polls, 1);
+            assert!(
+                asc.check_lifecycle(LifecycleState {
+                    reset: true,
+                    ..active
+                })
+                .is_err()
+            );
+            asc.set_lifecycle(active, &mut access);
+            assert!(asc.dma_pending());
+        }
+        assert!(latch.is_asserted(Wire::Aic(LINES[2])));
+        let mut access = Access::new(0, 2, &mut latch);
+        assert_eq!(receive(&mut asc, &mut access).0, 1);
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        let reset = LifecycleState {
+            reset: true,
+            ..active
+        };
+        asc.check_lifecycle(reset).unwrap();
+        asc.set_lifecycle(reset, &mut access);
+        assert!(!asc.running && !asc.halted && asc.outbox.is_empty());
+        assert_eq!(asc.firmware::<Active>().unwrap().resets, 1);
+        assert!(asc.read(CPU_CONTROL, Width::Word, &mut access).is_err());
+        asc.set_lifecycle(active, &mut access);
+        assert_eq!(asc.read(CPU_CONTROL, Width::Word, &mut access), Ok(0));
+        assert!(!asc.execution_enabled());
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
+        assert!(asc.execution_enabled());
+        assert_eq!(asc.firmware::<Active>().unwrap().resets, 1);
+    }
 
     /// Echoes every message back on endpoint + 1 and says hello at start.
     struct Echo;

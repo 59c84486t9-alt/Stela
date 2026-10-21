@@ -64,7 +64,9 @@
 //! - The model has one performance state (0), no GPC power transitions and
 //!   so no GPC host interrupts; none of the `sgx` interrupt lines is raised.
 //!   Enables and dynamic gating are held as written.
-use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+};
 use super::generation::{Family, Gpu, Identification, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
 use alloc::vec;
@@ -170,6 +172,7 @@ impl Identity {
 
 /// The `sgx` registers and the UAT they configure.
 pub struct Sgx {
+    lifecycle: LifecycleState,
     identity: Identity,
     family: &'static Family,
     model: &'static Model,
@@ -188,6 +191,13 @@ impl Sgx {
         let identity = gpu.admitted()?;
         let model = gpu.family.model()?;
         Ok(Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
             identity,
             family: gpu.family,
             model,
@@ -231,6 +241,19 @@ impl Sgx {
 
     fn mmu(&self) -> &'static Mmu {
         &self.family.mmu
+    }
+
+    fn accessible(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("SGX power is gated");
+        }
+        if !self.lifecycle.clocked {
+            return Err("SGX clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("SGX reset is asserted");
+        }
+        Ok(())
     }
 
     fn configuration_slot(&self, offset: u64) -> Option<(usize, u32)> {
@@ -342,7 +365,29 @@ impl Sgx {
     }
 }
 
+impl Lifecycle for Sgx {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if proposed.reset && !self.lifecycle.reset
+            || !proposed.powered && self.lifecycle.powered && !proposed.retention
+        {
+            return Err(
+                "SGX physical reset or nonretained power loss requires protected UAT and firmware restore semantics",
+            );
+        }
+        Ok(())
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, _access: &mut Access<'_>) {
+        self.lifecycle = proposed;
+        self.uat.set_available(
+            proposed.powered && proposed.clocked && !proposed.quiesced && !proposed.reset,
+        );
+    }
+}
+
 impl MmioDevice for Sgx {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -353,6 +398,8 @@ impl MmioDevice for Sgx {
         width: Width,
         _access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
+        self.accessible()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
         if width != Width::Word {
             return Err(refuse(
                 NAME,
@@ -375,6 +422,7 @@ impl MmioDevice for Sgx {
         _access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        self.accessible().map_err(fail)?;
         if width != Width::Word {
             return Err(fail("sgx registers are 32-bit"));
         }
@@ -407,6 +455,58 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         sgx.write(offset, Width::Word, u64::from(value), &mut access)
+    }
+
+    #[test]
+    fn physical_gates_inhibit_the_mmu_and_preserve_boot_roots_until_released() {
+        use crate::platform::dma::{Iommu, tests::Ram};
+        let mut sgx = Sgx::handed_off(t8112(), 0x8_0000_0000, 0x8_0000_4000).unwrap();
+        let active = sgx.lifecycle;
+        let mut ram = Ram::new(0, 0x1000);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for gated in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            sgx.check_lifecycle(gated).unwrap();
+            sgx.set_lifecycle(gated, &mut access);
+            assert!(matches!(
+                sgx.uat().agent(uat::Agent::Firmware).translate(
+                    &mut ram,
+                    0,
+                    0x4000,
+                    0x4007,
+                    false,
+                    &mut access
+                ),
+                Err(crate::platform::dma::DmaError::Unsupported(
+                    "SGX DMA while PMGR inhibits execution"
+                ))
+            ));
+            assert_eq!(sgx.uat().ttbat(), Some(0x8_0000_0000));
+            assert_eq!(sgx.uat().shared_l2(), Some(0x8_0000_4000));
+            assert!(
+                sgx.check_lifecycle(LifecycleState {
+                    reset: true,
+                    ..active
+                })
+                .is_err()
+            );
+            sgx.set_lifecycle(active, &mut access);
+            assert_eq!(sgx.read(MMU_ENABLE, Width::Word, &mut access), Ok(1));
+        }
     }
 
     #[test]

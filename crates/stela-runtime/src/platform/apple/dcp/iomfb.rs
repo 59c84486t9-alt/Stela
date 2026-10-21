@@ -152,6 +152,30 @@ pub struct Methods {
 }
 
 impl Methods {
+    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+        if self.open_swap.is_some()
+            || !self.frames.is_empty()
+            || !self.outgoing.is_empty()
+            || !self.completed.is_empty()
+            || self.in_flight
+            || self.display.borrow().hotplug_pending()
+        {
+            return Err("DCP physical reset with owned scanout or callback work");
+        }
+        Ok(())
+    }
+    pub(super) fn reset(&mut self) {
+        // The fixed physical monitor and host scanout survive a coprocessor
+        // reset. Native clients/mode/layer state are volatile. The caller
+        // preflights all frame and callback ownership before reaching here.
+        self.clients = 0;
+        self.digital_out = None;
+        self.config_frame = (0, 0);
+        self.next_swap = 1;
+        self.open_swap = None;
+        self.planes = [None; swap::LAYERS];
+        self.shut_down = false;
+    }
     /// Resume the retained link after the coprocessor's sleep-to-wake edge.
     /// Firmware 0x187658 clears its quiescence byte and releases stopped
     /// streams; the shared region, mode and client state remain allocated.

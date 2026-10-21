@@ -33,7 +33,7 @@ mod prp;
 mod tunables;
 
 use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
 use crate::platform::{apple::sart::Sart, dma::Port};
@@ -130,6 +130,12 @@ pub const RTKIT_ENDPOINT: u8 = 0x20;
 pub struct Endpoint;
 
 impl super::rtkit::Endpoint for Endpoint {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn start(&mut self, _outbox: &mut alloc::vec::Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -190,6 +196,7 @@ pub struct Submission {
 }
 
 pub struct Ans {
+    lifecycle: LifecycleState,
     medium: Medium,
     config: u32,
     status: u32,
@@ -237,6 +244,13 @@ impl Ans {
     ) -> Result<Self, &'static str> {
         let medium = Medium::new(backing, namespaces)?;
         Ok(Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
             medium,
             config: 0,
             status: 0,
@@ -282,7 +296,27 @@ impl Ans {
     }
 
     pub fn pending(&self) -> bool {
-        self.shutdown || !self.pending.is_empty()
+        self.executing() && (self.shutdown || !self.pending.is_empty())
+    }
+
+    fn executing(&self) -> bool {
+        self.lifecycle.powered
+            && self.lifecycle.clocked
+            && !self.lifecycle.quiesced
+            && !self.lifecycle.reset
+    }
+
+    fn accessible(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("ANS power is gated");
+        }
+        if !self.lifecycle.clocked {
+            return Err("ANS clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("ANS reset is asserted");
+        }
+        Ok(())
     }
 
     /// Logical blocks a namespace re-creation erased that still hold stale
@@ -454,6 +488,15 @@ impl Ans {
     /// must be zero until those engines are modeled, apart from the
     /// CDW14/CDW15 copy the CG v2 driver places at TCB 0x38.
     pub fn run(&mut self, port: &mut Port<'_, '_>, sart: &mut Sart) -> Result<(), MmioError> {
+        if !self.executing() {
+            return Err(refuse(
+                NAME,
+                ADMIN_SUBMIT,
+                Width::Word,
+                Direction::Write,
+                "ANS DMA while PMGR inhibits execution",
+            ));
+        }
         while let Some(&(queue, tag)) = self.pending.front() {
             self.last_submission = None;
             let error = |reason| {
@@ -581,11 +624,37 @@ impl Ans {
     }
 }
 
+impl Lifecycle for Ans {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if proposed.reset && !self.lifecycle.reset
+            || !proposed.powered && self.lifecycle.powered && !proposed.retention
+        {
+            // CC.EN reset is modeled separately in configure(). The PMGR
+            // bank includes the protected linear/NVMMU handoff, loader and
+            // NAND firmware state: CC reset does not prove their rail/reset
+            // persistence. Keep all commands/completions owned on refusal.
+            return Err(
+                "ANS physical reset or nonretained power loss requires protected register and NAND firmware restore semantics",
+            );
+        }
+        Ok(())
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        self.lifecycle = proposed;
+        self.update_irq(access);
+    }
+}
+
 impl MmioDevice for Ans {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        self.accessible()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
         if let Some(base) = self.base(offset & !7) {
             return match (offset % 8, width) {
                 (0, Width::Double) => Ok(base),
@@ -677,6 +746,17 @@ impl MmioDevice for Ans {
         value: u64,
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        self.accessible()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
+        if self.lifecycle.quiesced && matches!(offset, ADMIN_SUBMIT | IO_SUBMIT) {
+            return Err(refuse(
+                NAME,
+                offset,
+                width,
+                Direction::Write,
+                "ANS submission while PMGR quiesced",
+            ));
+        }
         let error = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         if let Some(old) = self.base(offset & !7) {
             let base = offset & !7;
@@ -1034,6 +1114,58 @@ mod tests {
         assert_eq!(rig.bytes(DATA, commands::IDENTIFY_BYTES), sentinel);
         let status = u16::from_le_bytes(rig.bytes(CQ + 14, 2).try_into().unwrap()) >> 1;
         assert_eq!(status, commands::INVALID_NAMESPACE);
+    }
+
+    #[test]
+    fn pmgr_gates_preserve_completed_irq_and_queued_dma_until_execution_resumes() {
+        let mut rig = Rig::new();
+        rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
+        assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
+        let completion = rig.bytes(CQ, 16);
+        // Queue another accepted request without running its DMA yet.
+        rig.write(ADMIN_SUBMIT, 1).unwrap();
+        let active = rig.ans.lifecycle;
+        for gated in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                clocked: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            rig.ans.check_lifecycle(gated).unwrap();
+            rig.ans
+                .set_lifecycle(gated, &mut Access::new(0, 0, &mut rig.latch));
+            assert!(!rig.ans.pending());
+            assert!(rig.run().is_err());
+            assert_eq!(rig.ans.pending.len(), 1);
+            assert_eq!(rig.bytes(CQ, 16), completion);
+            assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
+            assert!(
+                rig.ans
+                    .check_lifecycle(LifecycleState {
+                        reset: true,
+                        ..active
+                    })
+                    .is_err()
+            );
+            rig.ans
+                .set_lifecycle(active, &mut Access::new(0, 0, &mut rig.latch));
+            assert!(rig.ans.pending());
+        }
+        // A malformed not-yet-filled SQE remains owned rather than being
+        // silently completed by gate release.
+        assert!(rig.run().is_err());
+        assert_eq!(rig.ans.pending.len(), 1);
+        assert_eq!(rig.bytes(CQ, 16), completion);
     }
 
     #[test]

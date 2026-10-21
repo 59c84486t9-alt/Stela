@@ -62,6 +62,14 @@ impl Pmp {
 }
 
 impl Endpoint for Pmp {
+    // This endpoint owns no AP allocation, queued callback or DMA. `pings`
+    // is a lifetime diagnostic counter, not volatile protocol state.
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        Ok(())
+    }
     fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }

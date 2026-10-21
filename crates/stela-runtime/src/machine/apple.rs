@@ -2832,6 +2832,7 @@ impl Devices for AppleDevices {
             let presenting = self
                 .bus
                 .device_mut::<Asc>(master.asc)
+                .filter(|asc| asc.execution_enabled())
                 .and_then(Asc::firmware_mut::<dcp::Coprocessor>)
                 .is_some_and(|coprocessor| coprocessor.frame_pending());
             if presenting {

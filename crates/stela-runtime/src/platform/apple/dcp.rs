@@ -206,6 +206,20 @@ type Shared = Rc<RefCell<rpc::Link<iomfb::Methods>>>;
 struct Iomfb(Shared);
 
 impl Endpoint for Iomfb {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        let link = self.0.borrow();
+        if !link.retained_idle() {
+            return Err("DCP physical reset with unfinished RPC or scanout ownership");
+        }
+        link.service().check_reset()
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.check_reset()?;
+        let mut link = self.0.borrow_mut();
+        link.reset()?;
+        link.service_mut().reset();
+        Ok(())
+    }
     fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         outbox.push(self.0.borrow_mut().start()?);
         Ok(())
@@ -222,6 +236,12 @@ impl Endpoint for Iomfb {
 struct AfkEndpoint(Rc<RefCell<afk::Afk>>);
 
 impl Endpoint for AfkEndpoint {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        self.0.borrow().check_reset()
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.0.borrow_mut().reset()
+    }
     fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         self.0.borrow_mut().start();
         Ok(())
@@ -345,6 +365,12 @@ impl Coprocessor {
 }
 
 impl Firmware for Coprocessor {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        self.rtkit.check_reset()
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.rtkit.reset()
+    }
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         self.rtkit.start(outbox)
     }
@@ -535,6 +561,37 @@ mod tests {
             .receive(link::Word::Rpc(rpc).encode(), &mut Vec::new())
             .unwrap();
         rpc
+    }
+
+    #[test]
+    fn physical_reset_refuses_accepted_work_then_releases_only_an_idle_session() {
+        let (scanout, presented) = screen(1920, 1080);
+        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+        let mut endpoint = up(&mut coprocessor, &mut ram);
+        let heap = coprocessor.link.borrow().heap();
+        let request = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
+        assert!(coprocessor.check_reset().is_err());
+        assert!(coprocessor.reset().is_err());
+        assert_eq!(coprocessor.link.borrow().heap(), heap);
+        let reply = dma(&mut coprocessor, &mut ram).unwrap();
+        assert_eq!(reply[0].payload, link::Word::Rpc(request.answer()).encode());
+        coprocessor.check_reset().unwrap();
+        coprocessor.reset().unwrap();
+        assert!(!coprocessor.link.borrow().is_up());
+        assert_eq!(coprocessor.link.borrow().heap(), None);
+        assert!(!coprocessor.dma_pending());
+        assert_eq!(*presented.borrow(), 0);
+        assert_eq!(coprocessor.mode().width, 1920);
+        // Physical reset itself emits nothing. A separate CPU start begins
+        // cold enumeration, preserving the implemented controller descriptor.
+        let mut output = Vec::new();
+        coprocessor.start(&mut output).unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].payload >> 52, 1);
+        let mut endpoint = up(&mut coprocessor, &mut ram);
+        call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
+        assert_eq!(dma(&mut coprocessor, &mut ram).unwrap().len(), 1);
     }
 
     #[test]

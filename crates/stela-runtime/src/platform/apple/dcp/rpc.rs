@@ -235,6 +235,22 @@ impl<S: Service> Link<S> {
             && !self.service.callback_pending()
     }
 
+    /// Lose a cold-reset link session only after every accepted input,
+    /// continuation and callback has relinquished ownership. Guest RAM is
+    /// not erased and no completion word is synthesized.
+    pub(super) fn reset(&mut self) -> Result<(), &'static str> {
+        if !self.retained_idle() {
+            return Err("DCP physical reset with unfinished RPC ownership");
+        }
+        self.phase = Phase::Hello;
+        self.heap = None;
+        self.pending_input = false;
+        for lane in &mut self.lanes {
+            lane.cursor = 0;
+        }
+        Ok(())
+    }
+
     /// A word from the AP, served at the next DMA step.
     pub fn receive(&mut self, word: u64) {
         self.incoming.push_back(word);

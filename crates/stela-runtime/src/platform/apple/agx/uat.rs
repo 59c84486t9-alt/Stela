@@ -472,6 +472,7 @@ const FAULT_PERMISSION: u32 = 2;
 /// physical base the AP programs.
 #[derive(Debug)]
 pub struct Uat {
+    available: bool,
     /// The address field of an entry ([`output_mask`]).
     output: u64,
     ttbat: Option<u64>,
@@ -485,11 +486,18 @@ impl Uat {
     /// ([`super::generation::Model::uat_output_bits`]).
     pub fn new(output_bits: u32) -> Self {
         Self {
+            available: true,
             output: output_mask(output_bits),
             ttbat: None,
             shared_l2: None,
             last_fault: None,
         }
+    }
+
+    /// Physical SGX lifecycle gates every firmware and GPU agent view,
+    /// independently of its retained translation roots and mappings.
+    pub(super) fn set_available(&mut self, available: bool) {
+        self.available = available;
     }
 
     /// Whether `address` is a 16 KiB-aligned output address.
@@ -659,6 +667,11 @@ impl Iommu for AgentView<'_> {
         write: bool,
         _access: &mut BusAccess<'_>,
     ) -> Result<u64, DmaError> {
+        if !self.uat.available {
+            return Err(DmaError::Unsupported(
+                "SGX DMA while PMGR inhibits execution",
+            ));
+        }
         debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
         // A GPU stream is the GPU's units in that context, whichever view
         // carries it.
@@ -952,6 +965,30 @@ mod tests {
         );
         assert!(uat.share_kernel_window(0).is_err());
         assert!(uat.share_kernel_window(1 << 40).is_err());
+    }
+
+    #[test]
+    fn physical_gate_prevents_a_real_agent_walk_and_retains_the_mapping() {
+        let (mut ram, mut uat, va, page) = firmware_space(shared(Access::FirmwareGpu, true, true));
+        ram.put_u64(page, 0x12345678);
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, FIRMWARE_CONTEXT, va),
+            Ok(0x12345678)
+        );
+        uat.set_available(false);
+        for agent in [Agent::Firmware, Agent::Gpu] {
+            assert_eq!(
+                port_read(&mut uat, agent, &mut ram, FIRMWARE_CONTEXT, va),
+                Err(DmaError::Unsupported(
+                    "SGX DMA while PMGR inhibits execution"
+                ))
+            );
+        }
+        uat.set_available(true);
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, FIRMWARE_CONTEXT, va),
+            Ok(0x12345678)
+        );
     }
 
     #[test]

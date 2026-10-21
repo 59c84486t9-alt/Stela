@@ -291,6 +291,25 @@ impl Afk {
             && !self.pause_completion
     }
 
+    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+        if !self.retained_idle() || !self.interfaces.idle() || self.interfaces.pending() {
+            return Err("DCP physical reset with owned AFKEPV2 work or fragments");
+        }
+        Ok(())
+    }
+
+    pub(super) fn reset(&mut self) -> Result<(), &'static str> {
+        self.check_reset()?;
+        self.interfaces.reset()?;
+        self.state = State::Ready;
+        self.peer = lifecycle::PeerState::default();
+        self.sequence = 0;
+        self.transmit_full = false;
+        self.receive_full = false;
+        self.pause_completion = false;
+        Ok(())
+    }
+
     /// The AP sent `word`; what needs no memory is answered at once.
     pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         self.seen.push_back(Event::Received(word));
@@ -1279,6 +1298,7 @@ mod tests {
             if pointer == 0 {
                 assert_eq!(calls.get(), 0);
                 assert!(afk.retained_idle());
+                assert!(afk.check_reset().is_err());
                 enqueue_internal(&mut memory, 0x80, 2);
                 afk.receive(message(RECV, 0), &mut out).unwrap();
                 afk.dma(&mut memory, &mut out).unwrap();

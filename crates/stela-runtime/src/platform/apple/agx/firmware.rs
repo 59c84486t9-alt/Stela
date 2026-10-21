@@ -761,10 +761,23 @@ impl Coprocessor {
 }
 
 impl Firmware for Coprocessor {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        self.rtkit.check_reset()
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.rtkit.reset()
+    }
     fn start(&mut self, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
         self.rtkit.start(outbox)
     }
     fn receive(&mut self, message: Mail, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
+        if message.endpoint == 0
+            && message.payload >> 52 & 0xf == 6
+            && matches!(message.payload & !(0xf << 52), 0x201 | 0x202 | 0)
+            && self.protocol.with(State::dma_pending)
+        {
+            return Err("GFX IOP sleep with owned initdata or queued channel work");
+        }
         self.rtkit.receive(message, outbox)
     }
     fn dma_pending(&self) -> bool {
@@ -781,6 +794,22 @@ struct Message(Protocol);
 struct Doorbell(Protocol);
 
 impl Endpoint for Message {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        if self.0.with(State::dma_pending) {
+            return Err("GFX physical reset with owned initdata or queued channel work");
+        }
+        Ok(())
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.check_reset()?;
+        let mut state = self.0.0.borrow_mut();
+        state.initdata_va = None;
+        state.initdata_checked = false;
+        state.root = None;
+        // Historical counters/journals remain diagnostic evidence. Channel
+        // addresses and validation are cold-reset session state.
+        Ok(())
+    }
     fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -790,6 +819,12 @@ impl Endpoint for Message {
 }
 
 impl Endpoint for Doorbell {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Message(self.0.clone()).check_reset()
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        Message(self.0.clone()).reset()
+    }
     fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -866,6 +901,39 @@ mod tests {
         entry[..4].copy_from_slice(&DEVICE_CONTROL_POWER.to_le_bytes());
         entry[4..8].copy_from_slice(&word.to_le_bytes());
         entry
+    }
+
+    #[test]
+    fn physical_reset_preserves_unprocessed_channel_ownership() {
+        let (state, mut memory) = with_device_control(&[power(0)]);
+        let protocol = Protocol(Rc::new(RefCell::new(state)));
+        let mut endpoint = Message(protocol.clone());
+        protocol
+            .0
+            .borrow_mut()
+            .doorbell((0x84 << TYPE_SHIFT) | 0x11)
+            .unwrap();
+        assert!(endpoint.check_reset().is_err());
+        assert!(endpoint.reset().is_err());
+        assert!(protocol.with(|state| state.initdata_checked));
+        protocol
+            .0
+            .borrow_mut()
+            .dma(&mut memory, &mut Vec::new())
+            .unwrap();
+        assert_eq!(protocol.with(|state| state.power.len()), 1);
+        endpoint.check_reset().unwrap();
+        endpoint.reset().unwrap();
+        assert_eq!(protocol.with(|state| state.initdata_va), None);
+        // History remains inspectable; a new initdata session is accepted.
+        assert_eq!(protocol.with(|state| state.power.len()), 1);
+        endpoint
+            .receive(
+                MSG_INIT << TYPE_SHIFT | (ROOT & INIT_VA_BITS),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        assert!(protocol.with(State::dma_pending));
     }
 
     #[test]

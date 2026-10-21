@@ -16,7 +16,9 @@
 //! `sart-power-reg-offset`. This is an idle request, not a DMA bypass.
 //! Stela hands off with no allowed regions and no idle request, a boot-chain
 //! choice: it has no RTKit firmware buffers to preserve.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 
 const NAME: &str = "sart";
@@ -66,6 +68,7 @@ pub enum Bounds {
 }
 
 pub struct Sart {
+    lifecycle: LifecycleState,
     entries: [Entry; ENTRIES],
     bounds: Bounds,
     idle: bool,
@@ -75,6 +78,13 @@ pub struct Sart {
 impl Sart {
     pub fn new(bounds: Bounds) -> Self {
         Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
             entries: [Entry::default(); ENTRIES],
             bounds,
             idle: false,
@@ -85,13 +95,34 @@ impl Sart {
     /// Both directions use the same allow-list. Every byte must be inside
     /// one enabled entry; arithmetic must not wrap the physical address.
     pub fn allows(&self, first: u64, last: u64) -> bool {
-        first <= last
+        self.executing()
+            && first <= last
             && self.entries.iter().any(|entry| {
                 let pages = u64::from(entry.pages) + u64::from(self.bounds == Bounds::Inclusive);
                 let base = u64::from(entry.base) * PAGE;
                 let end = base + pages * PAGE;
                 entry.flags == ALLOW && first >= base && last < end
             })
+    }
+
+    fn executing(&self) -> bool {
+        self.lifecycle.powered
+            && self.lifecycle.clocked
+            && !self.lifecycle.quiesced
+            && !self.lifecycle.reset
+    }
+
+    fn accessible(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("SART power is gated");
+        }
+        if !self.lifecycle.clocked {
+            return Err("SART clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("SART reset is asserted");
+        }
+        Ok(())
     }
 
     fn register(&self, offset: u64) -> Option<u32> {
@@ -122,6 +153,11 @@ impl Iommu for Sart {
         _write: bool,
         _access: &mut Access<'_>,
     ) -> Result<u64, DmaError> {
+        if !self.executing() {
+            return Err(DmaError::Unsupported(
+                "SART DMA while PMGR inhibits execution",
+            ));
+        }
         if stream != 0 {
             return Err(DmaError::Unsupported("SART has no stream selector"));
         }
@@ -138,12 +174,36 @@ impl Iommu for Sart {
     }
 }
 
+impl Lifecycle for Sart {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        // The protected SPTM mapper's allow-list and throttle restoration
+        // around a physical ANS rail/reset are distinct from its documented
+        // idle protocol. Do not infer their reset values from CC.EN reset.
+        if proposed.reset && !self.lifecycle.reset
+            || !proposed.powered && self.lifecycle.powered && !proposed.retention
+        {
+            return Err(
+                "SART physical reset or nonretained power loss requires protected mapper restore semantics",
+            );
+        }
+        Ok(())
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, _access: &mut Access<'_>) {
+        self.lifecycle = proposed;
+    }
+}
+
 impl MmioDevice for Sart {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        self.accessible()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
         if width == Width::Word {
             if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
                 return Ok(u64::from(self.throttles[channel]));
@@ -174,6 +234,8 @@ impl MmioDevice for Sart {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        self.accessible()
+            .map_err(|reason| refuse(NAME, offset, width, Direction::Write, reason))?;
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         if width != Width::Word || value > u64::from(u32::MAX) {
             return Err(fail("SART requires a 32-bit word"));
@@ -217,6 +279,53 @@ mod tests {
         apple::interrupt::InterruptLatch,
         dma::{Port, tests::Ram},
     };
+
+    #[test]
+    fn retained_physical_gates_revoke_both_allow_queries_and_actual_translation() {
+        let mut sart = Sart::new(Bounds::Exclusive);
+        let active = sart.lifecycle;
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (offset, value) in [(BASE, 1), (SIZE, 1), (0, u64::from(ALLOW))] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        let mut memory = Ram::new(0, 0x3000);
+        for gated in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            sart.check_lifecycle(gated).unwrap();
+            sart.set_lifecycle(gated, &mut access);
+            assert!(!sart.allows(0x1000, 0x1fff));
+            assert!(
+                sart.translate(&mut memory, 0, 0x1000, 0x1fff, false, &mut access)
+                    .is_err()
+            );
+            assert!(
+                sart.check_lifecycle(LifecycleState {
+                    reset: true,
+                    ..active
+                })
+                .is_err()
+            );
+            sart.set_lifecycle(active, &mut access);
+            assert_eq!(
+                sart.translate(&mut memory, 0, 0x1000, 0x1fff, true, &mut access),
+                Ok(0x1000)
+            );
+        }
+    }
 
     #[test]
     fn throttle_words_hold_the_boot_value_or_zero_and_never_grant_dma() {

@@ -145,6 +145,14 @@ pub const FIRST_APPLICATION: u8 = 0x20;
 
 /// An application endpoint of the coprocessor.
 pub trait Endpoint: Any {
+    /// A physical reset loses the endpoint session without replying to the
+    /// AP. Every endpoint must qualify its own native ownership first.
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Err("RTKit endpoint volatile-state reset is not modeled")
+    }
+    fn reset(&mut self) -> Result<(), &'static str> {
+        Err("RTKit endpoint volatile-state reset is not modeled")
+    }
     /// The AP enabled the endpoint; messages it sends go to `outbox` as
     /// payloads on this endpoint.
     fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
@@ -402,6 +410,33 @@ impl RtKit {
 }
 
 impl Firmware for RtKit {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        for (endpoint, _) in self.endpoints.values() {
+            endpoint.check_reset()?;
+        }
+        Ok(())
+    }
+
+    fn reset(&mut self) -> Result<(), &'static str> {
+        self.check_reset()?;
+        for (endpoint, enabled) in self.endpoints.values_mut() {
+            endpoint
+                .reset()
+                .expect("RTKit endpoint reset was preflighted");
+            *enabled = false;
+        }
+        self.crashlog = false;
+        self.stage = Stage::Hello;
+        // `quiesced` describes a boot-chain handoff, not subsequent cold
+        // reset. A new RUN must begin a fresh HELLO and enumeration.
+        self.quiesced = false;
+        self.wake = None;
+        self.iop_power = POWER_ON;
+        self.cpu_stopped = false;
+        self.ap_power = 0;
+        self.power_nap = false;
+        Ok(())
+    }
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         if self.cpu_stopped {
             return Err("RTKit cold start cannot replace a retained CPU resume");
@@ -497,6 +532,33 @@ impl Firmware for RtKit {
 mod tests {
     use super::*;
     use alloc::vec;
+
+    #[test]
+    fn a_physical_reset_clears_enumeration_without_reusing_boot_quiescence() {
+        let mut kit = RtKit::new(
+            vec![(0x20, Box::new(super::super::pmp::Pmp::default()))],
+            Management::Ordinary,
+        )
+        .unwrap()
+        .quiesced();
+        let mut output = Vec::new();
+        kit.start(&mut output).unwrap();
+        assert!(output.is_empty());
+        kit.check_reset().unwrap();
+        kit.reset().unwrap();
+        assert!(output.is_empty());
+        kit.start(&mut output).unwrap();
+        assert_eq!(output, [management(HELLO, VERSION | VERSION << 16)]);
+        assert!(step(&mut kit, 0x20, 2 << 52).is_err());
+        mgmt(&mut kit, HELLO_REPLY, VERSION | VERSION << 16).unwrap();
+        mgmt(&mut kit, ROLL_CALL, 1).unwrap();
+        mgmt(&mut kit, ROLL_CALL, ROLL_CALL_LAST | 1 << 32).unwrap();
+        mgmt(&mut kit, ENDPOINT_CONTROL, 0x20 << 32 | ENABLE).unwrap();
+        assert_eq!(
+            step(&mut kit, 0x20, 2 << 52 | 123).unwrap()[0].payload,
+            0x21 << 48 | 123
+        );
+    }
 
     /// Answers every payload with its complement.
     struct Complement;
