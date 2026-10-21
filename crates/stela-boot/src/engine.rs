@@ -1142,27 +1142,6 @@ fn devices<'f>(
             blocks.len()
         ));
     }
-    if let Some(board) = board {
-        if let Some(states) = board.power_states.as_ref() {
-            let retention = board
-                .darts
-                .iter()
-                .map(|dart| dart.retention)
-                .collect::<Vec<_>>();
-            devices.connect_power_resources(states, &darts, &retention)?;
-            output::arguments(format_args!(
-                "DEVICES pmgr lifecycle-refusals={} resources={}\n",
-                devices.power_refusals().len(),
-                states.resources.len()
-            ));
-        } else if board
-            .darts
-            .iter()
-            .any(|dart| !dart.clock_gates.is_empty() || !dart.power_gates.is_empty())
-        {
-            return Err("DART resource gates require a modeled PMGR".into());
-        }
-    }
     for bank in board.map_or(&[][..], |b| &b.bridges) {
         devices.add_bridge(
             bank.physical,
@@ -1255,6 +1234,29 @@ fn devices<'f>(
     // bridge) and owns only the bytes they leave.
     if let Some(gfx) = board.and_then(|b| b.gfx.as_ref()) {
         devices.add_gfx(gfx, agx_observe)?;
+    }
+    // Finalize only after every native constructor, including SGX's final
+    // overlapping-window placement, has registered its actual banks.
+    if let Some(board) = board {
+        if let Some(states) = board.power_states.as_ref() {
+            let retention = board
+                .darts
+                .iter()
+                .map(|dart| dart.retention)
+                .collect::<Vec<_>>();
+            devices.connect_power_resources(states, &darts, &retention)?;
+            output::arguments(format_args!(
+                "DEVICES pmgr lifecycle-refusals={} resources={}\n",
+                devices.power_refusals().len(),
+                states.resources.len()
+            ));
+        } else if board
+            .darts
+            .iter()
+            .any(|dart| !dart.clock_gates.is_empty() || !dart.power_gates.is_empty())
+        {
+            return Err("DART resource gates require a modeled PMGR".into());
+        }
     }
     if cables.restore && restore_usb.is_none() {
         return Err("restore study requires a DT-placed USB device".into());
