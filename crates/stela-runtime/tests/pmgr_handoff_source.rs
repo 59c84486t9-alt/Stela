@@ -17,6 +17,222 @@ fn word(bytes: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
 }
 
+fn quad(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+fn branch_target(bytes: &[u8], offset: usize) -> usize {
+    let opcode = word(bytes, offset);
+    assert!(matches!(opcode >> 26, 0b000101 | 0b100101));
+    let displacement = ((opcode << 6) as i32 >> 4) as isize;
+    offset.wrapping_add_signed(displacement)
+}
+
+#[test]
+#[ignore = "requires pinned original J473 iBoot and ADT; no Apple images are committed"]
+fn original_policy_covers_every_physical_domain_without_encoding_initial_values() {
+    use std::collections::BTreeSet;
+    let bytes = iboot();
+    let path = std::env::var("STELA_TEST_PMGR_ADT").expect("pinned original J473 ADT path");
+    let adt = std::fs::read(path).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&adt)),
+        "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
+    );
+    // The restore DT's /chosen chip-id is unprovisioned (zero), so do not
+    // patch it or mount a fabricated board to inspect its original records.
+    // Replay the pinned v1 placement fields only, using the public ADT reader.
+    let root = stela_runtime::machine::adt::Node::root(&adt).unwrap();
+    let io = root.child("arm-io").unwrap();
+    let pmgr = io.child("pmgr").unwrap();
+    assert!(pmgr.property("ps-groups").is_none());
+    let records = pmgr.property("devices").unwrap();
+    assert_eq!(records.len(), 303 * 48);
+    let placements = pmgr.cells32("ps-regs").unwrap();
+    let registers = pmgr.pairs("reg").unwrap();
+    let ranges = io.ranges().unwrap();
+    let mut physical = BTreeSet::new();
+    for record in records.as_chunks::<48>().0 {
+        if record[0] & 0x10 != 0 {
+            continue;
+        }
+        let placement = &placements[usize::from(record[11]) * 3..][..3];
+        let (base, size) = registers[placement[0] as usize];
+        let offset = u64::from(placement[1]) + u64::from(record[10]) * 8;
+        assert!(offset + 8 <= size);
+        let address = base + offset;
+        let (child, parent, _) = ranges
+            .iter()
+            .find(|&&(child, _, size)| address >= child && address - child < size)
+            .unwrap();
+        physical.insert(parent + address - child);
+    }
+    assert_eq!(physical.len(), 153);
+    assert_eq!(word(&bytes, 0x1b70f8), 254);
+    let mut matched = BTreeSet::new();
+    for index in 0..254 {
+        let offset = 0x1b6118 + 16 * index;
+        let packed = quad(&bytes, offset);
+        let address = packed & ((1 << 51) - 1);
+        if physical.contains(&address) {
+            assert!(matched.insert(address), "duplicate physical policy row");
+            assert_eq!((packed >> 51) & 63, 0, "revision minimum");
+            assert_eq!((packed >> 57) & 63, 0, "revision span");
+            assert_eq!(
+                quad(&bytes, offset + 8),
+                0,
+                "no auxiliary initial-state payload"
+            );
+        }
+    }
+    assert_eq!(
+        matched, physical,
+        "full original physical register inventory"
+    );
+}
+
+#[test]
+#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+fn original_eight_fixups_edit_distinct_dt_fields() {
+    let bytes = iboot();
+    for (index, expected) in [
+        0x14210, 0x14720, 0x143a8, 0x14488, 0x14358, 0x147d0, 0x148f0, 0x14628,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let relative = word(&bytes, 0x14a6c + index * 4) as i32;
+        assert_eq!(
+            0x14204usize.checked_add_signed(relative as isize),
+            Some(expected)
+        );
+    }
+    // Preserve byte-level distinctions rather than assigning unrecovered
+    // hardware meaning to bytes 1, 2, 8, 15 or the requested operation.
+    for (offset, opcode) in [
+        (0x143a0, 0x79000909), // operation 4: first u16 parent at +4
+        (0x14440, 0x39003d09), // operation 2: low nibble at +15
+        (0x1453c, 0x3900611f), // operation 3: clock count at +24
+        (0x145f8, 0x38296917), // operation 3: clock indices at +28..31
+        (0x14760, 0x3900012a), // operation 1: NO_PS flags
+        (0x14894, 0x3900294b), // operation 5: v1 PS index at +10
+        (0x149a4, 0x39002109), // operation 6: byte +8
+        (0x146f0, 0x39000509), // operation 7: byte +1
+        (0x14710, 0x3900091f), // operation 7: clear +2 for zero data
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "fixup at {offset:#x}");
+    }
+    let calls: Vec<_> = (0..0x16f000)
+        .step_by(4)
+        .filter(|&offset| {
+            matches!(word(&bytes, offset) >> 26, 0b000101 | 0b100101)
+                && branch_target(&bytes, offset) == 0x1414c
+        })
+        .collect();
+    assert_eq!(
+        calls,
+        [0x11730],
+        "direct calls in the bounded original code region"
+    );
+    assert_eq!(
+        word(&bytes, 0x1172c),
+        0x52800007,
+        "only recovered caller chooses operation 0"
+    );
+}
+
+#[test]
+#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+fn original_address_selectors_and_display_fuse_gate_are_exact() {
+    let bytes = iboot();
+    // The callback receives a selector object, not a physical-state value:
+    // a nonzero first field compares PA; a zero first field compares ID.
+    for (offset, opcode) in [
+        (0x11708, 0xa93c23a8),  // build selector from selected table PA
+        (0x11590, 0xeb13011f),  // compare selector PA against current PA
+        (0x1166c, 0x6b15011f),  // zero-PA selector compares original domain ID
+        (0x5d0a4, 0x370003e0),  // feature11 true skips display fixups
+        (0x40084, 0x52a00608),  // feature11 mask 0x00300000
+        (0x400f4, 0x6a29011f),  // (~fuseword & mask) != 0
+        (0x124c94, 0x52800000), // extra display predicate is constant false
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "selector/fuse at {offset:#x}");
+    }
+    let selectors = [
+        (0x5d078, 0x5d080, 0x41),
+        (0x5d084, 0x5d08c, 0x23),
+        (0x5d090, 0x5d098, 0x24),
+        (0x5d0a8, 0x5d0b0, 0xa3),
+        (0x5d0b4, 0x5d0bc, 0xa4),
+        (0x5d0c0, 0x5d0c8, 0xa6),
+        (0x5d0cc, 0x5d0d4, 0xa7),
+        (0x5d0d8, 0x5d0e0, 0xb0),
+        (0x5d0e4, 0x5d0ec, 0xa5),
+        (0x5d0f0, 0x5d0f8, 0xb1),
+        (0x5d0fc, 0x5d104, 0xb2),
+        (0x5d108, 0x5d110, 0xb3),
+        (0x5d114, 0x5d11c, 0xd3),
+        (0x5d154, 0x5d15c, 0xa4),
+        (0x5d160, 0x5d168, 0x5c),
+        (0x5d16c, 0x5d174, 0x5d),
+        (0x5d178, 0x5d180, 0x5e),
+        (0x5d184, 0x5d18c, 0x5f),
+        (0x5d190, 0x5d1bc, 0x60),
+    ];
+    for (load, call, index) in selectors {
+        assert_eq!(word(&bytes, load), 0x52800000 | index << 5);
+        assert_eq!(branch_target(&bytes, call), 0x116c0);
+        assert_ne!(index, 188, "ISP_SYS is not an address-selector fixup");
+    }
+    assert_eq!(branch_target(&bytes, 0x39bc8), 0x5cf68);
+    assert_eq!(quad(&bytes, 0x1ed420), 0x23b700000);
+    // The named SoC-PS finalizer lists each contain exactly one write to
+    // a controller-global offset, not a 153-register initial-state table.
+    assert_eq!(quad(&bytes, 0x191730), 0x900183dd0);
+    assert_eq!(quad(&bytes, 0x191738), 0);
+    assert_eq!(quad(&bytes, 0x183dd0), 0x40017ffc);
+    assert_eq!(quad(&bytes, 0x191740), 0x900191720);
+    assert_eq!(quad(&bytes, 0x191748), 0);
+    assert_eq!(quad(&bytes, 0x191720), 0x40017ff8);
+}
+
+#[test]
+#[ignore = "requires pinned original J473 iBoot; no Apple image is committed"]
+fn original_active_masks_choose_writes_without_defining_clear_bits_as_off() {
+    let bytes = iboot();
+    for (offset, opcode) in [
+        (0x10e58, 0xb9400908), // auxiliary word compared with filter argument
+        (0x10e5c, 0x71000a7f),
+        (0x10e7c, 0xf8686aa8), // load selected bitmap word
+        (0x10e80, 0x9ad62508), // select bit by static-table index
+        (0x10e84, 0x36000228), // clear bit skips this register entirely
+        (0x10ec0, 0x528001e2), // selected bit requests active, not bitmap value
+        (0x110b0, 0xb9400109), // physical current/control read
+        (0x110c4, 0x12037929), // clear auto enable
+        (0x110d0, 0x121c6d29), // preserve all fields outside target
+        (0x110d4, 0x2a130129),
+        (0x110d8, 0xb9000109), // actual physical write
+    ] {
+        assert_eq!(
+            word(&bytes, offset),
+            opcode,
+            "active mask/writer at {offset:#x}"
+        );
+    }
+    for base in [0x1b7100, 0x1b7150] {
+        assert_eq!(
+            bytes[base + 188 / 8] & (1 << (188 % 8)),
+            0,
+            "ISP_SYS skipped, not initialized off"
+        );
+        assert_ne!(
+            bytes[base + 86 / 8] & (1 << (86 % 8)),
+            0,
+            "AIC selected for an active write"
+        );
+    }
+}
+
 #[test]
 #[ignore = "requires pinned original J473 26A434 iBoot; no Apple image is committed"]
 fn original_policy_filters_physical_addresses_by_chip_revision() {
