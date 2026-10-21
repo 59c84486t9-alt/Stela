@@ -8,6 +8,7 @@
 //! system's partition that probe opened.
 
 pub(crate) mod bundle;
+mod console_lines;
 mod display;
 mod erase;
 mod host;
@@ -764,7 +765,7 @@ fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation
 /// The guest's console UART, shown line by line as `GUEST| ...`.
 #[derive(Default)]
 struct GuestConsole {
-    line: Vec<u8>,
+    lines: console_lines::Lines,
     /// The last line was `Nested panic string:`: this one is the message
     /// of the panic the nested one interrupted.
     nested: bool,
@@ -772,16 +773,22 @@ struct GuestConsole {
 
 impl ConsoleSink for GuestConsole {
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
-        if byte == b'\n' || self.line.len() == 200 {
-            let line = String::from_utf8_lossy(&self.line);
+        if let Some(fragment) = self.lines.push(byte) {
+            let line = fragment.text;
             output::arguments(format_args!("GUEST| {line}\n"));
+            if !fragment.complete {
+                output::arguments(format_args!(
+                    "GUEST-FRAGMENT bytes={} continues=1\n",
+                    fragment.bytes
+                ));
+            }
             if !line.trim().is_empty()
                 && let Ok(mut lines) = GUEST_LINES.0.try_borrow_mut()
             {
                 if lines.len() == crate::status::STREAM_LINES {
                     lines.remove(0);
                 }
-                lines.push(line.clone().into_owned());
+                lines.push(line.clone());
             }
             // `panic(cpu N caller ADDRESS): MESSAGE`
             if let Some((_, message)) = line
@@ -797,13 +804,12 @@ impl ConsoleSink for GuestConsole {
                 && let Ok(mut first) = GUEST_NESTED_PANIC.0.try_borrow_mut()
                 && first.is_none()
             {
-                let message = line.split_once(" (saved state").map_or(&*line, |(m, _)| m);
+                let message = line
+                    .split_once(" (saved state")
+                    .map_or(line.as_str(), |(m, _)| m);
                 *first = Some(panic_message(message));
             }
             self.nested = line.trim() == "Nested panic string:";
-            self.line.clear();
-        } else if byte != b'\r' {
-            self.line.push(byte);
         }
         Ok(())
     }
