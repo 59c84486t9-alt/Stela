@@ -102,7 +102,8 @@ store_case(uint64_t offset, uint32_t size, bool valid)
    char body[512];
    snprintf(body, sizeof(body),
       "%%address = getelementptr i8, ptr addrspace(1) %%out, i64 %llu\n"
-      "store i32 123, ptr addrspace(1) %%address, align 1\nret void\n",
+      "%%alias = bitcast ptr addrspace(1) %%address to ptr addrspace(1)\n"
+      "store i32 123, ptr addrspace(1) %%alias, align 1\nret void\n",
       (unsigned long long)offset);
    nir_shader *nir = translate(body, 2);
    set_size(nir, size);

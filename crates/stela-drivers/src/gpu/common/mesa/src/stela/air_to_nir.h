@@ -85,6 +85,17 @@ struct stela_air_ssbo_view {
 bool stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
                                unsigned ssbo_count);
 
+enum stela_air_fp_profile {
+   /* Ordinary LLVM environment; private AIR denorm options are not inferred. */
+   STELA_AIR_FP_IEEE_DEFAULT = 0,
+   /* Reverse-engineered AIR 2.9 / MSL 4.1 compiler 32023.922 profile: arithmetic
+    * FP32 FTZ inputs/results and RTE, target air64_v29-apple-macosx27.2.0.
+    * The caller must retain independently verified compiler/build provenance;
+    * matching llvm.ident is consistency
+    * metadata, not authentication. This is not a universal AIR declaration. */
+   STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41 = 1,
+};
+
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
@@ -98,6 +109,7 @@ struct stela_air_options {
     * Every runtime view must pass stela_air_ssbo_view_valid before dispatch. */
    stela_air_bind_ssbo bind_ssbo;
    unsigned ssbo_count;
+   enum stela_air_fp_profile fp_profile;
 };
 
 /* Input is the hash-checked raw AIR bitcode selected by the archive reader.
@@ -106,7 +118,7 @@ struct stela_air_options {
  * The caller retains input bytes/digest/build ID and records the exact selected
  * target, workgroup specialization and argument mapping alongside vendor output.
  * Conditional support is bounded acyclic structured diamonds/triangles with
- * exact two-edge integer/vector PHIs, one final return, <=128 blocks/merge PHIs
+ * exact two-edge integer/FP32 scalar/vector PHIs, one final return, <=128 blocks/merge PHIs
  * and <=32 nested conditionals. Loops, pointer PHIs and general CFGs are refused.
  * LLVM is a native compiler library, not a hostile-input sandbox.
  */

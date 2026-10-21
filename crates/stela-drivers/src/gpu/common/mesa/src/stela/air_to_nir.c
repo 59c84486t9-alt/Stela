@@ -55,7 +55,12 @@ struct translator {
    const struct stela_air_options *options;
    struct stela_air_error *error;
    unsigned air_minor;
+   unsigned language_major, language_minor;
    unsigned max_device_buffers;
+   bool denorms_disable;
+   bool fast_math;
+   bool fp_checked;
+   LLVMValueRef entry;
    struct air_block blocks[AIR_MAX_BLOCKS];
    unsigned block_count;
 };
@@ -154,6 +159,10 @@ version_metadata(struct translator *t, const char *name, bool language)
       return fail(t, STELA_AIR_METADATA, "unsupported %s %u.%u.%u", name, major, minor, patch);
    if (!language)
       t->air_minor = minor;
+   else {
+      t->language_major = major;
+      t->language_minor = minor;
+   }
    return true;
 }
 
@@ -191,7 +200,7 @@ module_flags(struct translator *t)
          t->max_device_buffers = value;
    }
    /* No linking, CPU frame operations or source wchar operations occur in the
-    * implemented integer compute subset. Other resource kinds remain refused.
+    * implemented compute subset. Other resource kinds remain refused.
     * Device-buffer location bounds are enforced below, never advertised as the
     * hardware's actual Metal capability or silently removed from the input. */
    return true;
@@ -221,6 +230,7 @@ module_metadata(struct translator *t)
    unsigned count;
    if (!named_md(t, "air.compile_options", nodes, &count))
       return false;
+   unsigned seen = 0;
    for (unsigned i = 0; i < count; i++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count;
@@ -230,9 +240,16 @@ module_metadata(struct translator *t)
             md_string(fields[0], "air.compile.framebuffer_fetch_enable") ||
             md_string(fields[0], "air.compile.framebuffer_fetch_disable")))
          return fail(t, STELA_AIR_METADATA, "unsupported AIR compile option");
+      unsigned bit = md_string(fields[0], "air.compile.denorms_disable") ? 1 :
+                     md_string(fields[0], "air.compile.fast_math_enable") ? 2 : 4;
+      if (seen & bit)
+         return fail(t, STELA_AIR_METADATA, "duplicate/conflicting AIR compile option");
+      seen |= bit;
    }
-   /* These options do not change the integer/buffer-only subset implemented
-    * below. Floating point, images and framebuffer access remain refused. */
+   t->denorms_disable = seen & 1;
+   t->fast_math = seen & 2;
+   /* This private AIR option has not yet been qualified for arithmetic. Exact
+    * storage/selection and integer operations do not depend on FP denorm mode. */
    return true;
 }
 
@@ -250,6 +267,84 @@ shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
       return false;
    *bits = LLVMGetIntTypeWidth(type);
    return *bits == 1 || *bits == 8 || *bits == 16 || *bits == 32 || *bits == 64;
+}
+
+static bool
+float_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
+{
+   *components = 1;
+   if (LLVMGetTypeKind(type) == LLVMVectorTypeKind) {
+      *components = LLVMGetVectorSize(type);
+      if (*components < 2 || *components > 4)
+         return false;
+      type = LLVMGetElementType(type);
+   }
+   *bits = 32;
+   return LLVMGetTypeKind(type) == LLVMFloatTypeKind;
+}
+
+static bool
+value_shape(LLVMTypeRef type, unsigned *components, unsigned *bits)
+{
+   return shape(type, components, bits) || float_shape(type, components, bits);
+}
+
+static bool
+fp_environment(struct translator *t)
+{
+   if (t->fp_checked)
+      return true;
+   bool ftz = t->options->fp_profile == STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41;
+   if (ftz) {
+      LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned count, fields_count;
+      if (t->air_minor != 9 || t->language_major != 4 || t->language_minor != 1 ||
+          strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") ||
+          !t->denorms_disable || !t->fast_math ||
+          !named_md(t, "llvm.ident", nodes, &count) || count != 1 ||
+          !md_node(t, nodes[0], fields, &fields_count) || fields_count != 1 ||
+          !md_string(fields[0], "Apple metal version 32023.922 (metalfe-32023.922.4)"))
+         return fail(t, STELA_AIR_METADATA, "AIR/compiler metadata differs from selected FP32 profile");
+   } else if (t->denorms_disable) {
+      return fail(t, STELA_AIR_METADATA, "AIR denorms_disable arithmetic requires qualified FP profile");
+   }
+   const char *special[] = {"strictfp", "denormal_fpenv"};
+   for (unsigned i = 0; i < ARRAY_SIZE(special); i++) {
+      unsigned kind = LLVMGetEnumAttributeKindForName(special[i], strlen(special[i]));
+      if (kind && LLVMGetEnumAttributeAtIndex(t->entry, LLVMAttributeFunctionIndex, kind))
+         return fail(t, STELA_AIR_TYPE, "unsupported FP environment attribute: %s", special[i]);
+   }
+   const char *strings[] = {"denormal-fp-math", "denormal-fp-math-f32", "rounding-math"};
+   for (unsigned i = 0; i < ARRAY_SIZE(strings); i++) {
+      if (LLVMGetStringAttributeAtIndex(t->entry, LLVMAttributeFunctionIndex,
+                                       strings[i], strlen(strings[i])))
+         return fail(t, STELA_AIR_TYPE, "unsupported FP environment attribute: %s", strings[i]);
+   }
+   t->b.shader->info.float_controls_execution_mode =
+      (ftz ? FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32 : FLOAT_CONTROLS_DENORM_PRESERVE_FP32) |
+      FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32;
+   t->fp_checked = true;
+   return true;
+}
+
+static unsigned
+fp_math_control(LLVMValueRef inst)
+{
+   unsigned control = nir_fp_no_fast_math;
+   LLVMFastMathFlags flags = LLVMCanValueUseFastMathFlags(inst) ? LLVMGetFastMathFlags(inst) : 0;
+   if (flags & LLVMFastMathNoNaNs)
+      control &= ~nir_fp_preserve_nan;
+   if (flags & LLVMFastMathNoInfs)
+      control &= ~nir_fp_preserve_inf;
+   /* LLVM 23 nsz permits changing zero input signs; NIR's corresponding bit
+    * also relaxes output signs. Keeping it set is a conservative refinement. */
+   if (flags & LLVMFastMathAllowContract)
+      control &= ~nir_fp_no_contract;
+   if (flags & LLVMFastMathAllowReassoc)
+      control &= ~nir_fp_no_reassoc;
+   /* Keep NIR's broader real-number transform restriction. LLVM arcp/afn are
+    * permissions, not required approximations; division/functions are refused. */
+   return control;
 }
 
 static bool
@@ -278,7 +373,7 @@ get_value(struct translator *t, LLVMValueRef llvm)
    if (value)
       return value->def;
    unsigned components, bits;
-   if (!shape(LLVMTypeOf(llvm), &components, &bits)) {
+   if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
       return NULL;
    }
@@ -286,6 +381,13 @@ get_value(struct translator *t, LLVMValueRef llvm)
       return nir_imm_zero(&t->b, components, bits);
    if (components == 1 && LLVMIsAConstantInt(llvm))
       return nir_imm_intN_t(&t->b, LLVMConstIntGetZExtValue(llvm), bits);
+   if (components == 1 && LLVMIsAConstantFP(llvm)) {
+      /* Let LLVM serialize its APFloat bits; a host float/double conversion
+       * could change a NaN's payload or signed zero before NIR sees it. */
+      LLVMValueRef encoded = LLVMConstBitCast(llvm, LLVMInt32TypeInContext(t->context));
+      if (LLVMIsAConstantInt(encoded))
+         return nir_imm_intN_t(&t->b, LLVMConstIntGetZExtValue(encoded), 32);
+   }
    if (components > 1 && (LLVMIsAConstantVector(llvm) ||
                          LLVMIsAConstantDataVector(llvm))) {
       nir_def *elements[4];
@@ -653,11 +755,12 @@ static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
    LLVMOpcode op = LLVMGetInstructionOpcode(inst);
+   t->b.fp_math_ctrl = fp_math_control(inst);
    unsigned components = 0, bits = 0;
    if (op == LLVMRet)
       return LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
-   if (op != LLVMStore && op != LLVMGetElementPtr &&
-       !shape(LLVMTypeOf(inst), &components, &bits))
+   if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast &&
+       !value_shape(LLVMTypeOf(inst), &components, &bits))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
       const struct value *origin;
@@ -668,6 +771,106 @@ instruction(struct translator *t, LLVMValueRef inst)
       value->ssbo = origin->ssbo;
       value->ssbo_slot = origin->ssbo_slot;
       return true;
+   }
+   if (op == LLVMBitCast) {
+      unsigned src_components, src_bits;
+      LLVMTypeRef source = LLVMTypeOf(LLVMGetOperand(inst, 0));
+      if (LLVMGetTypeKind(source) == LLVMPointerTypeKind &&
+          LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind &&
+          LLVMGetPointerAddressSpace(source) == 1 && LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) == 1) {
+         const struct value *origin = find_value(t, LLVMGetOperand(inst, 0));
+         if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
+            return fail(t, STELA_AIR_MEMORY, "pointer identity cast lacks buffer provenance");
+         struct value *value = find_value(t, inst);
+         value->ssbo = origin->ssbo;
+         value->ssbo_slot = origin->ssbo_slot;
+         return true;
+      }
+      bool fp_pair = (float_shape(source, &src_components, &src_bits) &&
+                      shape(LLVMTypeOf(inst), &components, &bits)) ||
+                     (shape(source, &src_components, &src_bits) &&
+                      float_shape(LLVMTypeOf(inst), &components, &bits));
+      if (!fp_pair || src_components != components || src_bits != 32 || bits != 32)
+         return fail(t, STELA_AIR_TYPE, "only component-preserving FP32/i32 bitcast supported");
+      nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
+      return value && put_value(t, inst, value, 0);
+   }
+   if (op == LLVMCall) {
+      LLVMValueRef callee = LLVMGetCalledValue(inst);
+      size_t name_length = 0;
+      const char *name = LLVMGetValueName2(callee, &name_length);
+      const char *signed_name = "air.convert.f.f32.s.i32";
+      const char *unsigned_name = "air.convert.f.f32.u.i32";
+      bool signed_conversion = name_length == strlen(signed_name) && !memcmp(name, signed_name, name_length);
+      bool unsigned_conversion = name_length == strlen(unsigned_name) && !memcmp(name, unsigned_name, name_length);
+      if (!signed_conversion && !unsigned_conversion)
+         return fail(t, STELA_AIR_INSTRUCTION, "unsupported AIR function/intrinsic call");
+      if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+          LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+          LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 1 ||
+          LLVMCountParams(callee) != 1 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
+          LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMFloatTypeKind ||
+          LLVMGetTypeKind(LLVMTypeOf(LLVMGetOperand(inst, 0))) != LLVMIntegerTypeKind ||
+          LLVMGetIntTypeWidth(LLVMTypeOf(LLVMGetOperand(inst, 0))) != 32)
+         return fail(t, STELA_AIR_TYPE, "unsupported AIR integer-to-FP conversion signature");
+      if (t->options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41)
+         return fail(t, STELA_AIR_METADATA, "AIR conversion intrinsic requires qualified compiler profile");
+      if (!fp_environment(t))
+         return false;
+      nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+      return a && put_value(t, inst, signed_conversion ? nir_i2f32(&t->b, a) : nir_u2f32(&t->b, a), 0);
+   }
+   if (op == LLVMFNeg) {
+      nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
+      /* LLVM fneg changes only the sign bit, even for NaNs/subnormals. Do not
+       * route this through a target arithmetic negate that can canonicalize. */
+      return value && put_value(t, inst, nir_ixor(&t->b, value, nir_imm_int(&t->b, INT32_MIN)), 0);
+   }
+   if (op == LLVMFAdd || op == LLVMFSub || op == LLVMFMul || op == LLVMFCmp ||
+       op == LLVMSIToFP || op == LLVMUIToFP) {
+      if (!fp_environment(t))
+         return false;
+      nir_def *a = get_value(t, LLVMGetOperand(inst, 0));
+      if (!a)
+         return false;
+      if (op == LLVMSIToFP || op == LLVMUIToFP) {
+         unsigned src_components, src_bits;
+         if (!shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &src_components, &src_bits) || src_bits != 32)
+            return fail(t, STELA_AIR_TYPE, "only i32/u32 to FP32 conversion supported");
+         return put_value(t, inst, op == LLVMSIToFP ? nir_i2f32(&t->b, a) : nir_u2f32(&t->b, a), 0);
+      }
+      nir_def *b = get_value(t, LLVMGetOperand(inst, 1));
+      if (!b || !float_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
+         return fail(t, STELA_AIR_TYPE, "only FP32 arithmetic/comparison supported");
+      nir_def *value = NULL;
+      if (op == LLVMFAdd)
+         value = nir_fadd(&t->b, a, b);
+      else if (op == LLVMFSub)
+         value = nir_fsub(&t->b, a, b);
+      else if (op == LLVMFMul)
+         value = nir_fmul(&t->b, a, b);
+      else {
+         switch (LLVMGetFCmpPredicate(inst)) {
+         case LLVMRealPredicateFalse: value = nir_imm_zero(&t->b, components, 1); break;
+         case LLVMRealPredicateTrue: value = nir_inot(&t->b, nir_imm_zero(&t->b, components, 1)); break;
+         case LLVMRealOEQ: value = nir_feq(&t->b, a, b); break;
+         case LLVMRealOGT: value = nir_flt(&t->b, b, a); break;
+         case LLVMRealOGE: value = nir_fge(&t->b, a, b); break;
+         case LLVMRealOLT: value = nir_flt(&t->b, a, b); break;
+         case LLVMRealOLE: value = nir_fge(&t->b, b, a); break;
+         case LLVMRealONE: value = nir_fneo(&t->b, a, b); break;
+         case LLVMRealORD: value = nir_ford(&t->b, a, b); break;
+         case LLVMRealUNO: value = nir_funord(&t->b, a, b); break;
+         case LLVMRealUEQ: value = nir_fequ(&t->b, a, b); break;
+         case LLVMRealUGT: value = nir_fltu(&t->b, b, a); break;
+         case LLVMRealUGE: value = nir_fgeu(&t->b, a, b); break;
+         case LLVMRealULT: value = nir_fltu(&t->b, a, b); break;
+         case LLVMRealULE: value = nir_fgeu(&t->b, b, a); break;
+         case LLVMRealUNE: value = nir_fneu(&t->b, a, b); break;
+         default: return fail(t, STELA_AIR_INSTRUCTION, "unknown floating comparison");
+         }
+      }
+      return put_value(t, inst, value, 0);
    }
    if (bits == 1 && (op == LLVMAdd || op == LLVMSub || op == LLVMMul ||
                     op == LLVMShl || op == LLVMLShr || op == LLVMAShr))
@@ -681,7 +884,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
           LLVMGetOrdering(inst) != LLVMAtomicOrderingNotAtomic)
          return fail(t, STELA_AIR_MEMORY, "unsupported volatile/atomic/unbound/disallowed memory access");
-      if (op == LLVMStore && !shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
+      if (op == LLVMStore && !value_shape(LLVMTypeOf(LLVMGetOperand(inst, 0)), &components, &bits))
          return fail(t, STELA_AIR_TYPE, "unsupported store type");
       if (bits == 1)
          return fail(t, STELA_AIR_MEMORY, "sub-byte memory access unsupported");
@@ -703,7 +906,7 @@ instruction(struct translator *t, LLVMValueRef inst)
       return put_value(t, inst, nir_load_global(&t->b, components, bits,
                        address->def, .align_mul = alignment), 0);
    }
-   /* The implemented arithmetic is integer-only. Flags restricting defined
+   /* The remaining arithmetic is integer-only. Flags restricting defined
     * LLVM inputs (nuw/nsw/exact) need no extra NIR operation on those inputs;
     * poison, freeze, FP, division and all helper calls are explicitly refused. */
    nir_def *a = NULL, *b = NULL, *def = NULL;
@@ -864,8 +1067,8 @@ phi_edge_value(struct translator *t, LLVMValueRef phi, LLVMBasicBlockRef predece
                unsigned incoming_count, nir_def **value)
 {
    unsigned components, bits;
-   if (!shape(LLVMTypeOf(phi), &components, &bits))
-      return fail(t, STELA_AIR_TYPE, "only integer/vector PHI values supported");
+   if (!value_shape(LLVMTypeOf(phi), &components, &bits))
+      return fail(t, STELA_AIR_TYPE, "only integer/FP32 scalar/vector PHI values supported");
    if (LLVMCountIncoming(phi) != incoming_count)
       return fail(t, STELA_AIR_CONTROL_FLOW, "PHI predecessor count differs from structured merge");
    LLVMValueRef incoming = NULL;
@@ -1010,6 +1213,11 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_INPUT, "invalid/mixed global and SSBO binding ABI");
       return NULL;
    }
+   if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
+       options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) {
+      fail(&t, STELA_AIR_INPUT, "unknown AIR floating-point profile");
+      return NULL;
+   }
    unsigned major, minor, patch;
    LLVMGetVersion(&major, &minor, &patch);
    if (major != 23) {
@@ -1059,7 +1267,11 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    }
    if (!cfg_prepare(&t, fn))
       goto done;
+   t.entry = fn;
    t.b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, nir_options, "%s", entry);
+   t.b.fp_math_ctrl = nir_fp_no_fast_math;
+   if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT && !fp_environment(&t))
+      goto done;
    for (unsigned i = 0; i < 3; i++)
       t.b.shader->info.workgroup_size[i] = options->workgroup_size[i];
    t.b.shader->info.num_ssbos = options->ssbo_count;
@@ -1081,7 +1293,7 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
          goto done;
       }
    }
-   nir_validate_shader(t.b.shader, "AIR integer compute translation");
+   nir_validate_shader(t.b.shader, "AIR bounded compute translation");
    result = t.b.shader;
    t.b.shader = NULL;
    error->instruction = 0;
