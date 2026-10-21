@@ -484,7 +484,15 @@ pub(super) fn power_states(
             }
             Some(physical)
         };
+        let raw_name = &entry[32..48];
+        let end = raw_name
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(raw_name.len());
+        let name = core::str::from_utf8(&raw_name[..end])
+            .map_err(|_| format!("{PATH} domain {device:#x} has a non-UTF-8 name"))?;
         domains.push(Domain {
+            name: name.into(),
             id: domain_id(device),
             address,
             parents,
@@ -1067,6 +1075,14 @@ mod tests {
         let states = power_states(&root, &translate, 0x8112).unwrap().unwrap();
         assert_eq!(states.domains.len(), 303);
         assert_eq!(states.resources.len(), 330);
+        assert!(states.domains.iter().all(|domain| !domain.name.is_empty()));
+        let isp = states
+            .domains
+            .iter()
+            .find(|domain| domain.id == domain_id(0x7a))
+            .unwrap();
+        assert_eq!(isp.name, "ISP_SYS");
+        assert_eq!(isp.address, Some(0x2_3b70_0438));
         for (number, id) in [(0, 0x210), (1, 0x211)] {
             let path = format!("/arm-io/dart-usb{number}");
             let resource = states

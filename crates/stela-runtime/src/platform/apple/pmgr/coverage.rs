@@ -25,8 +25,10 @@ pub struct DomainId {
 
 /// An original PMGR device record. Virtual domains have no register;
 /// both parents remain dependencies even when this domain is physical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
+    /// Original firmware identity; aliases retain their separate names.
+    pub name: String,
     pub id: DomainId,
     pub address: Option<u64>,
     pub parents: [Option<DomainId>; 2],
@@ -117,7 +119,7 @@ enum Key {
 }
 
 impl Domain {
-    fn key(self) -> Key {
+    fn key(&self) -> Key {
         self.address.map_or(Key::Virtual(self.id), Key::Physical)
     }
 }
@@ -131,7 +133,7 @@ pub fn analyze(
     consumers: &[Consumer<'_>],
 ) -> Result<Vec<DomainCoverage>, CoverageError> {
     let mut ids = BTreeMap::new();
-    for &domain in domains {
+    for domain in domains {
         if let Some(address) = domain.address
             && !address.is_multiple_of(4)
         {
@@ -160,7 +162,7 @@ pub fn analyze(
     // Normalize physical aliases before computing any reverse closure.
     let mut graph: BTreeMap<Key, BTreeSet<Key>> = BTreeMap::new();
     let mut coverage: BTreeMap<u64, BTreeMap<String, ConsumerCoverage>> = BTreeMap::new();
-    for &domain in domains {
+    for domain in domains {
         let key = domain.key();
         let parents = graph.entry(key).or_default();
         for parent in domain.parents.into_iter().flatten() {
@@ -281,6 +283,7 @@ mod tests {
     }
     fn domain(device: u16, address: Option<u64>, parents: &[u16]) -> Domain {
         let mut result = Domain {
+            name: String::new(),
             id: id(device),
             address,
             parents: [None; 2],
@@ -410,8 +413,8 @@ mod tests {
     fn die_qualified_ids_never_merge_without_a_shared_physical_address() {
         let mut second = domain(1, Some(0x200), &[]);
         second.id.die = 1;
-        let domains = [domain(1, Some(0x100), &[]), second];
         let requirements = [second.id];
+        let domains = [domain(1, Some(0x100), &[]), second];
         let result = analyze(
             &domains,
             &[consumer("die1-dart", &[], &requirements, COMPLETE)],
@@ -424,6 +427,7 @@ mod tests {
     fn deep_firmware_graphs_use_bounded_call_stack_and_keep_every_ancestor() {
         let domains = (0..4096)
             .map(|device| Domain {
+                name: String::new(),
                 id: id(device),
                 address: Some(0x1000 + u64::from(device) * 4),
                 parents: [
@@ -450,7 +454,7 @@ mod tests {
     fn missing_cycles_duplicates_and_unaccounted_resources_refuse() {
         let base = domain(1, Some(0x100), &[]);
         assert_eq!(
-            analyze(&[base, base], &[]),
+            analyze(&[base.clone(), base.clone()], &[]),
             Err(CoverageError::DuplicateDomain(id(1)))
         );
         assert_eq!(
@@ -480,11 +484,17 @@ mod tests {
         ));
         let unknown = [id(2)];
         assert!(matches!(
-            analyze(&[base], &[consumer("dart", &unknown, &[], COMPLETE)]),
+            analyze(
+                core::slice::from_ref(&base),
+                &[consumer("dart", &unknown, &[], COMPLETE)]
+            ),
             Err(CoverageError::UnknownRequirement { .. })
         ));
         assert_eq!(
-            analyze(&[base], &[consumer("", &[], &[], COMPLETE)]),
+            analyze(
+                core::slice::from_ref(&base),
+                &[consumer("", &[], &[], COMPLETE)]
+            ),
             Err(CoverageError::EmptyConsumer)
         );
         assert_eq!(

@@ -1968,14 +1968,24 @@ impl AppleDevices {
                     })
                     .map(|consumer| consumer.name.as_str())
                     .collect::<Vec<_>>();
-                (
-                    record.address,
-                    if names.is_empty() {
-                        "no resource has registered lifecycle sinks".into()
-                    } else {
-                        format!("lifecycle sinks missing for {}", names.join(", "))
-                    },
-                )
+                let identities = states
+                    .domains
+                    .iter()
+                    .filter(|domain| domain.address == Some(record.address))
+                    .map(|domain| {
+                        format!(
+                            "{:?} (die {} ID {:#x})",
+                            domain.name, domain.id.die, domain.id.device
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let reason = if record.consumers.is_empty() {
+                    "no explicit gate consumers; implicit hardware ownership is unqualified".into()
+                } else {
+                    format!("lifecycle sinks missing for {}", names.join(", "))
+                };
+                (record.address, format!("{identities}: {reason}"))
             })
             .collect();
         let pmgr = self
@@ -3135,6 +3145,7 @@ mod tests {
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![coverage::Domain {
+                name: String::new(),
                 id: gate,
                 address: Some(supply),
                 parents: [None; 2],
@@ -3191,6 +3202,7 @@ mod tests {
                 .iter()
                 .zip(&ids)
                 .map(|(&address, &id)| Domain {
+                    name: String::new(),
                     id,
                     address: Some(address),
                     parents: [None; 2],
@@ -3240,6 +3252,7 @@ mod tests {
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![Domain {
+                name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 2],
@@ -3410,6 +3423,7 @@ mod tests {
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![Domain {
+                name: String::new(),
                 id: gate,
                 address: Some(supply),
                 parents: [None; 2],
@@ -3715,6 +3729,7 @@ mod tests {
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![coverage::Domain {
+                name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 2],
@@ -3786,6 +3801,7 @@ mod tests {
         let (mut d, _, supply, base) = powered_dart_with(false, 3, |states| {
             states.domains[1].parents = [Some(id(1)), None];
             states.domains.push(Domain {
+                name: String::new(),
                 id: id(4),
                 address: states.domains[1].address,
                 parents: [Some(id(3)), None],
@@ -5256,6 +5272,7 @@ mod tests {
             registers: vec![supply],
             blocks: vec![(supply, 4)],
             domains: vec![Domain {
+                name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 2],
@@ -5344,6 +5361,7 @@ mod tests {
             registers: vec![supply],
             blocks: vec![(supply, 4)],
             domains: vec![Domain {
+                name: String::new(),
                 id,
                 address: Some(supply),
                 parents: [None; 2],
@@ -5443,16 +5461,19 @@ mod tests {
             blocks: vec![(supply, 12)],
             domains: vec![
                 Domain {
+                    name: String::new(),
                     id: id(0x210),
                     address: None,
                     parents: [Some(id(0x108)), None],
                 },
                 Domain {
+                    name: String::new(),
                     id: id(0x108),
                     address: Some(supply),
                     parents: [Some(id(2)), None],
                 },
                 Domain {
+                    name: String::new(),
                     id: id(2),
                     address: Some(supply + 8),
                     parents: [None; 2],
