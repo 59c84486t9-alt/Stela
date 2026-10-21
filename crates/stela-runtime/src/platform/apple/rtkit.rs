@@ -64,9 +64,18 @@
 //! `0xfffffe000b669488` admits only states below 3. RTBuddy waits for the
 //! sleep ACK, disables outbox delivery, then calls `stopCPU(false, ...)`
 //! (`0xfffffe000b661328..0xfffffe000b6615f4`). The ASC RUN edge retains
-//! protocol and endpoint state; resume emits no HELLO and leaves IOP power
-//! asleep until the AP sends 0x220. Unenumerated, awake and memory-loss
-//! CPU-stop paths explicitly refuse rather than substituting a retained halt.
+//! protocol and endpoint state. On retained CPU resume, ordinary management
+//! announces running (type7/0x20) without a new HELLO or roll call. The AP
+//! sets status4 before RUN and invokes wakeQuiesced only for prior status3
+//! (`0xfffffe000b6617a0..0xfffffe000b661884`); sleep ACKs set status2,
+//! so a retained CPU wake does not depend on another IOP power request.
+//! Original DCP transition `0x230c0` runs its low-power helper `0x235bc`,
+//! announces sleep through `0x236ec`, and blocks in `0xf824`. After hardware
+//! return, `0x232fc..0x23330` invokes callbacks back to the saved running
+//! state0x21 and announces it through the same notifier: `0x25704` and
+//! `0x2fbb28` map it to wire0x20, `0x2374c` adds type7. Unenumerated, awake,
+//! memory-loss and enumeration-only/rail-gated CPU-stop paths explicitly
+//! refuse rather than substituting an ordinary retained wake.
 //!
 //! The roll call lists exactly the endpoints the model provides. Of RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
@@ -237,7 +246,7 @@ impl RtKit {
         self
     }
 
-    /// The last accepted IOP power state, for retained device-state hooks.
+    /// The reached IOP power state, for retained device-state hooks.
     /// A rejected management message does not change this value.
     pub fn iop_power(&self) -> u64 {
         self.iop_power
@@ -404,6 +413,9 @@ impl Firmware for RtKit {
     }
 
     fn stop(&mut self) -> Result<(), &'static str> {
+        if self.management != Management::Ordinary {
+            return Err("RTKit retained CPU stop for enumeration-only management is not modeled");
+        }
         if self.stage != Stage::Ready || !matches!(self.iop_power, 0x201 | 0x202) {
             return Err("RTKit CPU stop requires a completed retained-sleep handshake");
         }
@@ -411,11 +423,13 @@ impl Firmware for RtKit {
         Ok(())
     }
 
-    fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         if !self.cpu_stopped {
             return Err("RTKit CPU resume without a retained halt");
         }
         self.cpu_stopped = false;
+        self.iop_power = POWER_ON;
+        outbox.push(management(IOP_POWER_ACK, POWER_ON));
         Ok(())
     }
 
@@ -652,9 +666,11 @@ mod tests {
             assert!(rtkit.start(&mut Vec::new()).is_err());
             let mut out = Vec::new();
             rtkit.resume(&mut out).unwrap();
-            assert!(out.is_empty());
+            assert_eq!(out, [management(IOP_POWER_ACK, POWER_ON)]);
+            assert_eq!(rtkit.iop_power(), POWER_ON);
             assert_eq!(rtkit.stage, Stage::Ready);
             assert!(rtkit.resume(&mut out).is_err());
+            assert_eq!(out, [management(IOP_POWER_ACK, POWER_ON)]);
             assert_eq!(
                 mgmt(&mut rtkit, IOP_POWER, WAKE).unwrap(),
                 vec![management(IOP_POWER_ACK, WAKE)]
@@ -663,6 +679,29 @@ mod tests {
             // another request without a new endpoint control or roll call.
             assert_eq!(step(&mut rtkit, 0x20, 7).unwrap()[0].payload, !7u64);
         }
+    }
+
+    #[test]
+    fn enumeration_only_retained_cpu_wake_is_not_substituted_by_ordinary_running() {
+        let mut rtkit = booted(Management::Enumeration);
+        mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
+        mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
+        mgmt(&mut rtkit, IOP_POWER, 0x201).unwrap();
+        assert_eq!(
+            rtkit.stop(),
+            Err("RTKit retained CPU stop for enumeration-only management is not modeled")
+        );
+        let mut out = Vec::new();
+        assert!(rtkit.resume(&mut out).is_err());
+        assert!(out.is_empty());
+        assert_eq!(rtkit.iop_power(), 0x201);
+        assert!(!rtkit.cpu_stopped);
+        assert_eq!(
+            mgmt(&mut rtkit, PING, 91).unwrap(),
+            [management(PING_ACK, 91)]
+        );
     }
 
     #[test]

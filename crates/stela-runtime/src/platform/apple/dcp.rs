@@ -343,9 +343,15 @@ impl Firmware for Coprocessor {
         self.rtkit.stop()
     }
     fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
-        // CPU RUN alone resumes execution; the later IOP wake message
-        // releases the retained RPC link through receive's power edge.
-        self.rtkit.resume(outbox)
+        let previous = self.rtkit.iop_power();
+        self.rtkit.resume(outbox)?;
+        // Firmware 0x232fc restores the saved running state after its
+        // hardware sleep primitive returns, invoking the same 8 -> 0x21
+        // retained-link callback as an explicit IOP wake request.
+        if matches!(previous, 0x201 | 0x202) {
+            self.link.borrow_mut().service_mut().resume();
+        }
+        Ok(())
     }
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         let previous = self.rtkit.iop_power();
@@ -626,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn asc_cpu_halt_and_restart_preserve_the_dcp_link_until_iop_wake() {
+    fn asc_cpu_halt_and_restart_resume_the_retained_dcp_link_without_an_iop_request() {
         use super::super::asc::{Asc, Lines};
         use super::super::bus::{Access, MmioDevice, Width};
         use super::super::interrupt::InterruptLatch;
@@ -695,11 +701,14 @@ mod tests {
         assert!(!asc.dma_pending());
         assert!(with_port(&mut ram, |port| asc.service_dma(port)).is_err());
         asc.write(0x44, Width::Word, 0x10, &mut access).unwrap();
-        asc.write(0x8114, Width::Word, 1, &mut access).unwrap();
+        // The running notification waits behind I2A delivery, preserving the
+        // AP's ordering. Repeated RUN is a no-op, not another wake or Hello.
+        assert!(!quiesced(&shared));
         assert!(asc.read(0x8830, Width::Double, &mut access).is_err());
-        assert!(quiesced(&shared)); // CPU resume alone does not wake the link.
-        send(&mut asc, &mut access, 0, 6 << 52 | 0x220);
-        assert_eq!(take(&mut asc, &mut access), 7 << 52 | 0x220);
+        asc.write(0x44, Width::Word, 0x10, &mut access).unwrap();
+        asc.write(0x8114, Width::Word, 1, &mut access).unwrap();
+        assert_eq!(take(&mut asc, &mut access), 7 << 52 | 0x20);
+        assert!(asc.read(0x8830, Width::Double, &mut access).is_err());
         assert_eq!(shared.borrow().heap(), heap);
         let request = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
         with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
