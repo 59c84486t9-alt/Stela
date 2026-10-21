@@ -51,7 +51,7 @@ pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};
 pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
-    ProcessorTarget, Processors,
+    ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
@@ -450,6 +450,21 @@ pub trait Devices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError>;
+    /// Complete a device write with exclusive access to the actual CPU and
+    /// native owners. CPU-affecting controllers must preflight every owner,
+    /// consume one whole processor batch, then commit infallibly before ACK.
+    /// A CPU/lifecycle refusal is a non-substitutable native service failure.
+    fn write_with_processors(
+        &mut self,
+        cpu: usize,
+        physical: u64,
+        bytes: u8,
+        value: u64,
+        now: u64,
+        _processors: ProcessorWrite<'_>,
+    ) -> Result<(), DeviceError> {
+        self.write(cpu, physical, bytes, value, now)
+    }
     /// Bring time-driven state up to `now` and report the interrupt lines
     /// the devices drive into PE `cpu`.
     fn lines(&mut self, cpu: usize, now: u64) -> Lines;
@@ -1691,9 +1706,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
-        let result = self
-            .devices
-            .write(self.current, physical, bytes, value, now);
+        let current = self.current;
+        let (devices, processors) = self.processor_write_parts();
+        let result = devices.write_with_processors(current, physical, bytes, value, now, processors);
         self.watch(physical, bytes, result.is_ok().then_some(value), true);
         result
     }
