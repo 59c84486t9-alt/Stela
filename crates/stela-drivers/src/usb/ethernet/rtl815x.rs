@@ -7,6 +7,7 @@ use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
 mod rtl8153a;
 mod rtl8153b;
+mod rtl8153c;
 mod upload;
 #[cfg(test)]
 pub(crate) use upload::tests::Hardware as FirmwareModel;
@@ -50,7 +51,7 @@ impl Revision {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a() || self.is_8153b()
+        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a() || self.is_8153b() || self.is_8153c()
     }
 
     pub fn is_8153a(self) -> bool {
@@ -59,6 +60,10 @@ impl Revision {
 
     pub fn is_8153b(self) -> bool {
         matches!(self.0, 0x6000 | 0x6010)
+    }
+
+    pub fn is_8153c(self) -> bool {
+        self.0 == 0x6400
     }
 
     /// Exact Linux firmware request for audited RTL8153/8156 revisions. None
@@ -139,6 +144,8 @@ impl<C: Control> Chip<C> {
             chip.initialize_8153a(firmware)?;
         } else if chip.revision.is_8153b() {
             chip.initialize_8153b(firmware)?;
+        } else if chip.revision.is_8153c() {
+            chip.initialize_8153c(firmware)?;
         } else {
             chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
         }
@@ -178,6 +185,7 @@ impl<C: Control> Chip<C> {
 
     pub fn receive_bytes(&self) -> usize {
         if self.revision.is_8153b()
+            || self.revision.is_8153c()
             || (self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED)
         {
             32 * 1024
@@ -271,7 +279,7 @@ impl<C: Control> Chip<C> {
     }
 
     fn aldps(&mut self, enable: bool) -> Result<(), BlockError> {
-        if self.revision.is_8153a() || self.revision.is_8153b() {
+        if self.revision.is_8153a() || self.revision.is_8153b() || self.revision.is_8153c() {
             return self.aldps_8153(enable);
         }
         self.phy_write(
@@ -449,13 +457,13 @@ impl<C: Control> Chip<C> {
             )?;
             if self.revision.is_8153a() {
                 self.enable_8153a(status)?;
-            } else if self.revision.is_8153b() {
+            } else if self.revision.is_8153b() || self.revision.is_8153c() {
                 self.enable_8153b(status)?;
             }
             self.modify(PLA, PLA_FMC, 2, FMC_FCR_MCU_EN, 0)?;
             self.modify(PLA, PLA_FMC, 2, 0, FMC_FCR_MCU_EN)?;
             self.modify(PLA, PLA_CR, 1, 0, CR_RE | CR_TE)?;
-            if self.revision.is_8153b() {
+            if self.revision.is_8153b() || self.revision.is_8153c() {
                 self.write(USB, USB_UPT_RXDMA_OWN, 1, OWN_UPDATE | OWN_CLEAR)?;
             }
             self.modify(PLA, PLA_MISC_1, 2, RXDY_GATED_EN, 0)?;
@@ -478,7 +486,7 @@ impl<C: Control> Chip<C> {
         self.poll(PLA, PLA_OOB_CTRL, 1, 0x30, 0x30, (1000, 1000))?;
         self.poll(PLA, PLA_TCR0, 2, TCR0_TX_EMPTY, TCR0_TX_EMPTY, (1000, 1000))?;
         self.nic_reset()?;
-        if self.revision.is_8153a() || self.revision.is_8153b() {
+        if self.revision.is_8153a() || self.revision.is_8153b() || self.revision.is_8153c() {
             self.reset_bmu()?;
         }
         self.aldps(true)

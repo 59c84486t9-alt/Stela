@@ -269,3 +269,6 @@ pub(super) const USB_RX_EXTRA_AGGR_TMR: u32 = 0xd432;
 pub(super) const USB_UPT_RXDMA_OWN: u32 = 0xd437;
 pub(super) const OWN_UPDATE: u32 = 1 << 0;
 pub(super) const OWN_CLEAR: u32 = 1 << 1;
+pub(super) const PLA_RXFIFO_FULL: u32 = 0xc0a2;
+pub(super) const PLA_TXFIFO_FULL: u32 = 0xe61a;
+pub(super) const PLA_CONFIG5: u32 = 0xe822;

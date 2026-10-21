@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Realtek Semiconductor Corp. All rights reserved.
 //! RTL8153B 08/09: independent r8153b_init/hw_phy_cfg/up, efuse calibration
-//! and bank-specific upload/PHY power-cut handling. C/8156 never use this path.
+//! and bank-specific upload/PHY power-cut handling. C explicitly shares the
+//! PHY routine; its initialization/up remains separate. 8156 never enters here.
 use super::super::firmware::Firmware;
 use super::*;
 
 impl<C: Control> Chip<C> {
-    fn u1u2_8153b(&mut self, enable: bool) -> Result<(), BlockError> {
+    pub(super) fn u1u2_8153b(&mut self, enable: bool) -> Result<(), BlockError> {
         self.modify(
             USB,
             USB_LPM_CONFIG,
@@ -16,7 +17,10 @@ impl<C: Control> Chip<C> {
         )
     }
 
-    fn hardware_phy_8153b(&mut self, firmware: Option<&Firmware<'_>>) -> Result<(), BlockError> {
+    pub(super) fn hardware_phy_8153b(
+        &mut self,
+        firmware: Option<&Firmware<'_>>,
+    ) -> Result<(), BlockError> {
         let misc = self.read(USB, USB_MISC_0, 2)?;
         if misc & PCUT_STATUS != 0 {
             self.write(USB, USB_MISC_0, 2, misc & !PCUT_STATUS)?;
@@ -186,7 +190,7 @@ impl<C: Control> Chip<C> {
             TX10MIDLE_EN,
             if half { 0 } else { TX10MIDLE_EN },
         )?;
-        if self.revision.0 == 0x6010 {
+        if matches!(self.revision.0, 0x6010 | 0x6400) {
             self.modify(USB, USB_FW_TASK, 2, FC_PATCH_TASK, 0)?;
             self.io.delay_us(1000);
             self.modify(USB, USB_FW_TASK, 2, 0, FC_PATCH_TASK)?;

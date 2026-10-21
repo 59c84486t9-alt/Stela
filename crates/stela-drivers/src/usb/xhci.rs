@@ -3785,7 +3785,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
-        for revision in [0x5c10, 0x5c20, 0x5c30, 0x6010] {
+        for revision in [0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing remains exclusive/live through all controller DMA.
@@ -3843,7 +3843,7 @@ pub(crate) mod tests {
                 self.catalog.load(requirement)
             }
         }
-        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010]
+        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010, 0x6400]
             .into_iter()
             .flat_map(|revision| {
                 [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
