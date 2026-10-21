@@ -3,12 +3,16 @@
 use anyhow::Result;
 use clap::Subcommand;
 
+mod macos;
 mod mesa;
 mod nvidia;
 mod support;
 
 #[derive(Subcommand)]
 pub enum Command {
+    /// Compile the IOKit allocation adapter against macOS kernel headers for
+    /// arm64e, arm64 and x86-64; inspect its remaining IOKit service imports.
+    Macos,
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
     /// without Vulkan/OpenGL frontends, and run the native codegen probes.
     Compilers {
@@ -31,6 +35,7 @@ pub enum Command {
 
 pub fn run(command: Command) -> Result<()> {
     match command {
+        Command::Macos => macos::build(),
         Command::Compilers {
             jobs,
             require_all_targets,
