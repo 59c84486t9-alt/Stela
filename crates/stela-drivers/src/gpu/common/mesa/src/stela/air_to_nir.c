@@ -785,7 +785,13 @@ shared_global(struct translator *t, LLVMValueRef global)
    if (!shared_global_info(t, global, &size, &alignment))
       return NULL;
    nir_variable *var = shared_resource(t, size, alignment);
-   if (!var || !put_value(t, global, nir_imm_int64(&t->b, 0), STELA_AIR_READ_WRITE))
+   if (!var)
+      return NULL;
+   /* A global's logical base dominates every use, even if its first reference
+    * occurs inside conditional/loop code. Only this pure offset is inserted at
+    * entry; storage is still undef and memory effects keep their source cursor. */
+   nir_builder entry = nir_builder_at(nir_before_impl(t->b.impl));
+   if (!put_value(t, global, nir_imm_int64(&entry, 0), STELA_AIR_READ_WRITE))
       return NULL;
    struct value *value = find_value(t, global);
    value->shared = var;

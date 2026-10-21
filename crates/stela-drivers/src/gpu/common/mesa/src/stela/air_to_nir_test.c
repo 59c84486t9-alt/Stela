@@ -971,6 +971,72 @@ shared_refusal(const char *body, const char *extra, enum stela_air_error_kind ex
 }
 
 static void
+shared_global_dominance(void)
+{
+   const char *bodies[] = {
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\nstore i32 13, ptr addrspace(3) @s, align 4\nbr label %join\n"
+      "right:\nstore i32 17, ptr addrspace(3) @s, align 4\nbr label %join\n"
+      "join:\n%v = load i32, ptr addrspace(3) @s, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n",
+      "entry:\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%c = icmp ult i32 %i, %tid\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nstore i32 %i, ptr addrspace(3) @s, align 4\n"
+      "%next = add i32 %i, 1\nbr label %header\n"
+      "exit:\n%v = load i32, ptr addrspace(3) @s, align 4\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n",
+   };
+   for (unsigned body = 0; body < ARRAY_SIZE(bodies); body++) {
+      LLVMMemoryBufferRef input = shared_bitcode(bodies[body], false,
+         "@s = internal addrspace(3) global i32 undef, align 4\n");
+      for (unsigned tid = 0; tid < 4; tid++) {
+         struct shared_bindings bindings = {0};
+         struct stela_air_error error;
+         nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 4, &error);
+         CHECK(nir && nir->info.shared_size == 4);
+         /* First use is inside a branch/latch, with later sibling/exit uses.
+          * Original validation checks dominance before any specialization. */
+         nir_validate_shader(nir, "shared global branch/loop first-use dominance");
+         specialize_loop(nir, tid);
+         unsigned stores = 0, loads = 0, outputs = 0;
+         nir_def *loaded = NULL;
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic == nir_intrinsic_store_shared) {
+                     unsigned expected = body ? stores : (tid ? 17 : 13);
+                     CHECK(!loads && nir_src_is_const(intr->src[0]) &&
+                           nir_src_as_uint(intr->src[0]) == expected &&
+                           nir_src_is_const(intr->src[1]) && !nir_src_as_uint(intr->src[1]) &&
+                           !nir_intrinsic_base(intr));
+                     stores++;
+                  } else if (intr->intrinsic == nir_intrinsic_load_shared) {
+                     CHECK(nir_src_is_const(intr->src[0]) && !nir_src_as_uint(intr->src[0]) &&
+                           !nir_intrinsic_base(intr));
+                     loaded = &intr->def;
+                     loads++;
+                  } else if (intr->intrinsic == nir_intrinsic_store_global) {
+                     CHECK(loaded && intr->src[0].ssa == loaded && nir_src_is_const(intr->src[1]) &&
+                           nir_src_as_uint(intr->src[1]) == 0x100000);
+                     outputs++;
+                  }
+               }
+            }
+         }
+         /* Zero-trip retains an undefined shared read, never an invented
+          * initialization. Nonzero paths retain exactly their original stores. */
+         CHECK(stores == (body ? tid : 1) && loads == 1 && outputs == 1);
+         ralloc_free(nir);
+      }
+      LLVMDisposeMemoryBuffer(input);
+   }
+}
+
+static void
 shared_contracts(void)
 {
    const char *flags[] = {"i32 0, i32 5, i32 1", "i32 1, i32 5, i32 1",
@@ -1522,6 +1588,7 @@ tests(void)
    floating_contracts();
    qualified_floating_semantics();
    shared_semantics();
+   shared_global_dominance();
    shared_contracts();
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_TARGET);
