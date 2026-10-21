@@ -20,6 +20,7 @@ const LIBRARIES: &[&str] = &[
     "src/nouveau/compiler/libnak_rs.a",
     "src/nouveau/nil/libnil.a",
     "src/stela/libstela_nv_compute.a",
+    "src/stela/libstela_nv_image.a",
     "src/amd/compiler/libaco.a",
     "src/amd/common/libamd_compiler_support.a",
     "src/amd/common/libamd_command_support.a",
@@ -377,6 +378,9 @@ pub fn build(
             "metal/compiler/apple_source.c",
             "metal/compiler/apple_source.h",
             "metal/compiler/apple_source_test.c",
+            "nvidia/stela/hosted/image.c",
+            "nvidia/stela/hosted/image.h",
+            "nvidia/stela/tests/image.c",
             "amd/stela/buffer.c",
             "amd/stela/buffer.h",
             "amd/tests/buffer_test.c",
@@ -550,6 +554,7 @@ pub fn build(
         .args(PROBES.iter().map(|(_, binary)| binary));
     compile.args([
         "src/stela/stela_apple_source_test",
+        "src/stela/stela_nv_image_probe",
         "src/stela/stela_amd_commands_probe",
         "src/stela/stela_amd_buffer_probe",
         "src/stela/stela_amd_sampler_probe",
@@ -603,6 +608,7 @@ pub fn build(
     });
     let mut resource_probes = Vec::new();
     let mut resource_stages = vec![
+        "nv_image",
         "amd_buffer",
         "amd_sampler",
         "amd_surface",

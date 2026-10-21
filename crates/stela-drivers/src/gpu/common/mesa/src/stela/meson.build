@@ -152,6 +152,22 @@ if stela_air_llvm != ''
 endif
 
 if with_stela_nvidia
+  stela_nv_image = static_library(
+    'stela_nv_image',
+    '../../../../nvidia/stela/hosted/image.c',
+    include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+    dependencies : [idep_nil, idep_mesautil],
+    c_args : ['-Werror'],
+  )
+  stela_nv_image_probe = executable(
+    'stela_nv_image_probe',
+    '../../../../nvidia/stela/tests/image.c',
+    include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+    dependencies : [idep_nil, idep_mesautil],
+    link_with : [stela_nv_image],
+    c_args : ['-Werror'],
+  )
+  test('stela_nv_image', stela_nv_image_probe, suite : 'stela')
   stela_nv_compute = static_library(
     'stela_nv_compute',
     ['nvidia_compute.c', stela_nv_compute_headers],
