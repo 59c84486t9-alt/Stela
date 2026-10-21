@@ -274,7 +274,22 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         gigabyte_sc: bool,
     ) -> Result<Option<Warning>, Error> {
         self.phy_write(PHY_PAGE, 0)?;
-        let id = (u32::from(self.phy_read(2)?) << 16) | u32::from(self.phy_read(3)?);
+        let reported = (u32::from(self.phy_read(2)?) << 16) | u32::from(self.phy_read(3)?);
+        // Upstream erratum 62bdc8fd1c21: these exact MACs integrate RTL8211B
+        // but can report the generic FE/GE ID. Preserve actual reads and make
+        // the narrower, documented classification correction observable.
+        let (id, mut warning) =
+            if matches!(self.revision.version, 28 | 31) && reported == 0x001c_c800 {
+                (
+                    0x001c_c912,
+                    Some(Warning::DpPhyIdentityCorrected {
+                        reported,
+                        selected: 0x001c_c912,
+                    }),
+                )
+            } else {
+                (reported, None)
+            };
         // This slice implements the internal FE/GE path and RTL8211B's
         // ID-specific resume quirk, followed by generic reset/autonegotiation.
         // Other external PHY IDs need their own realtek_main.c quirks.
@@ -312,7 +327,6 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             return Err(Error::Script("Realtek PHY lacks copper gigabit capability"));
         }
         let result = (|| {
-            let mut warning = None;
             match self.revision.version {
                 2 | 3 => self.batch(S)?,
                 4 => self.paged(2, 1, 0xffff, 0x90d0)?,
@@ -342,6 +356,12 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.paged(1, 0x1d, 0xffff, 0x3d98)?;
                 }
                 25 | 26 => self.d(script.ok_or(Error::Script("RTL8168D requires firmware"))?)?,
+                28 => {
+                    self.paged(1, 0x17, 0xffff, 0x0cc0)?;
+                    self.extended_page(0x2d, 0x18, 0xffff, 0x0040)?;
+                    self.phy_modify(0x0d, 0, 1 << 5)?;
+                }
+                31 => {} // Pinned donor's MAC31 PHY dispatch is NULL: generic resume/reset/aneg only.
                 32 | 33 => {
                     warning =
                         Some(self.e(script.ok_or(Error::Script("RTL8168E requires firmware"))?)?)

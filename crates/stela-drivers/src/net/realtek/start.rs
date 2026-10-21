@@ -25,9 +25,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let r = self.registers;
         r.write8(CONFIG_LOCK, 0xc0);
         let result = (|| {
-            // Keep ASPM/CLKREQ disabled in this polled driver. The endpoint
-            // and upstream PCIe link were disabled before enable; rev34 also
-            // requires these MAC bits clear before EPHY access.
+            // Keep ASPM disabled. CLKREQ is disabled before initialization;
+            // MAC28's exact DP4 branch re-enables it in PCIe Link Control
+            // after EPHY setup. MAC32+ clears these MAC-local bits first.
             if self.revision.version >= 32 {
                 r.write8(CONFIG2, r.read8(CONFIG2) & !(1 << 7));
                 r.write8(CONFIG5, r.read8(CONFIG5) & !1);
@@ -96,7 +96,16 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                         r.write8(CONFIG3, r.read8(CONFIG3) & !1);
                         r.write8(DEBUG, 0x20);
                     }
-                    25 | 26 => self.latency()?,
+                    25 | 26 | 31 => self.latency()?,
+                    28 => {
+                        self.latency()?;
+                        self.ephys(&[
+                            (0xb, 0, 0x48),
+                            (0x19, 0x20, 0x50),
+                            (0xc, 0x100, 0x20),
+                            (0x10, 4, 0),
+                        ])?;
+                    }
                     32 | 33 => {
                         self.latency()?;
                         self.ephys(&[
@@ -193,10 +202,13 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 if self.revision.version == 17 {
                     r.write8(CONFIG4, r.read8(CONFIG4) & !1);
                 }
-                if matches!(self.revision.version, 32 | 33) {
+                if matches!(self.revision.version, 31..=33) {
                     r.write8(EARLY_TX, 0x3f);
                     r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 2));
                     r.write8(CONFIG4, r.read8(CONFIG4) & !1);
+                }
+                if self.revision.version == 28 {
+                    r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 2));
                 }
                 if (18..=26).contains(&self.revision.version) {
                     r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 2));

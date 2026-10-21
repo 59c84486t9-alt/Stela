@@ -7,6 +7,7 @@
 use super::{Registers, Revision, Timer, firmware::ScriptIo, registers::*};
 use crate::block::BlockError;
 use core::cell::Cell;
+mod dp;
 mod ocp;
 
 pub(super) struct Hardware<'a, R, T> {
@@ -15,6 +16,7 @@ pub(super) struct Hardware<'a, R, T> {
     pub revision: Revision,
     pub function: u8,
     ocp_base: Cell<u16>,
+    dp_mdio_failed: Cell<bool>,
 }
 impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
     pub fn new(registers: &'a R, timer: &'a T, revision: Revision, function: u8) -> Self {
@@ -24,6 +26,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             revision,
             function,
             ocp_base: Cell::new(OCP_PHY_BASE),
+            dp_mdio_failed: Cell::new(false),
         }
     }
     pub fn poll32(
@@ -94,11 +97,13 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             let address = self.phy_address(reg)?;
             self.phy_ocp_read(address)
         } else {
-            self.registers.write32(PHY_ACCESS, u32::from(reg) << 16);
-            let done = self.poll32(PHY_ACCESS, ACCESS, true, 25, 20);
-            self.timer.delay(20); // Required after command completion, including failure.
-            done?;
-            Ok(self.registers.read32(PHY_ACCESS) as u16)
+            self.dp_mdio(|| {
+                self.registers.write32(PHY_ACCESS, u32::from(reg) << 16);
+                let done = self.poll32(PHY_ACCESS, ACCESS, true, 25, 20);
+                self.timer.delay(20); // Required after completion, including failure.
+                done?;
+                Ok(self.registers.read32(PHY_ACCESS) as u16)
+            })
         }
     }
     pub fn phy_write(&self, reg: u16, value: u16) -> Result<(), BlockError> {
@@ -130,13 +135,15 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             }
             self.phy_ocp_write(address, value)
         } else {
-            self.registers.write32(
-                PHY_ACCESS,
-                ACCESS | (u32::from(reg) << 16) | u32::from(value),
-            );
-            let done = self.poll32(PHY_ACCESS, ACCESS, false, 25, 20);
-            self.timer.delay(20);
-            done
+            self.dp_mdio(|| {
+                self.registers.write32(
+                    PHY_ACCESS,
+                    ACCESS | (u32::from(reg) << 16) | u32::from(value),
+                );
+                let done = self.poll32(PHY_ACCESS, ACCESS, false, 25, 20);
+                self.timer.delay(20);
+                done
+            })
         }
     }
     fn phy_address(&self, reg: u16) -> Result<u16, BlockError> {
