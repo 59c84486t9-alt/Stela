@@ -3,6 +3,8 @@
 //! module; see `docs/design/gpu.md` for their platform and language boundary.
 use crate::bus::pci::{Address, ConfigSpace, Function};
 
+pub mod protocol;
+
 #[cfg(feature = "nvidia-port")]
 pub mod nvidia;
 
