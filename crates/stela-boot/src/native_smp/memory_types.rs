@@ -61,8 +61,8 @@ impl Image {
         if snapshot.cr0 & ((1 << 29) | (1 << 30)) != 0 {
             return Err("BSP cache-disable controls do not permit WB sharing");
         }
-        if !intel(snapshot) && !amd::supported(snapshot) {
-            return Err("native initial MTRR recipe has no qualified vendor/family controls");
+        if !intel(snapshot) && !amd::architectural(snapshot) {
+            return Err("native initial MTRR recipe has no qualified vendor/capability controls");
         }
         let cap = register(snapshot, CAP)?;
         let variables = (cap & 0xff) as usize;
@@ -74,7 +74,7 @@ impl Image {
             .map(|leaf| leaf.eax as u8)
             .filter(|bits| (36..=52).contains(bits))
             .ok_or("native MTRRs need source physical-address width")?;
-        let amd = if amd::supported(snapshot) {
+        let amd = if amd::architectural(snapshot) {
             Some(amd::State::from_snapshot(snapshot, physical_bits)?)
         } else {
             None
@@ -250,10 +250,16 @@ mod tests {
         snapshot.records[0].ecx = amd::VENDOR[2];
         snapshot.records[2] = Cpuid {
             leaf: 1,
-            eax: amd::SIGNATURE,
+            eax: 0x00b4_0f40,
+            edx: (1 << 5) | (1 << 12) | (1 << 16),
             ..Cpuid::default()
         };
-        snapshot.count = 3;
+        snapshot.records[3] = Cpuid {
+            leaf: 0x8000_0001,
+            edx: 1 << 29,
+            ..Cpuid::default()
+        };
+        snapshot.count = 4;
         snapshot.amd_fixed_raw = true;
         for msr in &mut snapshot.msrs[..snapshot.msr_count as usize] {
             if FIXED.contains(&msr.index) {

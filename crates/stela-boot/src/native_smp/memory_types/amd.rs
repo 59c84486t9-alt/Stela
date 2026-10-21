@@ -1,9 +1,8 @@
 //! AMD APM 24593 rev3.44 §§3.2.1,7.9: routing controls beyond common MTRRs.
-//! The initial family binding is the actual Family1Ah Model44h B0 host;
-//! unrelated AMD models and active encryption/SNP remain unqualified.
+//! Common AMD64 controls are selected by actual vendor/capability observations;
+//! family names do not grant additional model-specific or encryption authority.
 use crate::native_smp::topology::Snapshot;
 
-pub(crate) const SIGNATURE: u32 = 0x00b4_0f40;
 pub(crate) const SYSCFG: u32 = 0xc001_0010;
 pub(crate) const IORR_BASE: u32 = 0xc001_0016;
 pub(crate) const TOP_MEM: u32 = 0xc001_001a;
@@ -29,7 +28,7 @@ pub(crate) const VENDOR: [u32; 3] = [
     u32::from_le_bytes(*b"cAMD"),
 ];
 
-pub(crate) fn supported(snapshot: &Snapshot) -> bool {
+pub(crate) fn architectural(snapshot: &Snapshot) -> bool {
     let Some(vendor) = snapshot.get(0, 0) else {
         return false;
     };
@@ -39,9 +38,13 @@ pub(crate) fn supported(snapshot: &Snapshot) -> bool {
     let Some(leaf) = snapshot.get(1, 0) else {
         return false;
     };
-    let family = ((leaf.eax >> 8) & 15) + ((leaf.eax >> 20) & 255);
-    let model = ((leaf.eax >> 4) & 15) | ((leaf.eax >> 12) & 0xf0);
-    family == 0x1a && model == 0x44 && leaf.eax & 15 == 0
+    // AMD APM common AMD64 system MSRs; model-specific fields remain opaque.
+    // Fixed registers are additionally enumerated through actual MTRRcap.FIX.
+    const SYSTEM: u32 = (1 << 5) | (1 << 12) | (1 << 16); // MSR/MTRR/PAT
+    leaf.edx & SYSTEM == SYSTEM
+        && snapshot
+            .get(0x8000_0001, 0)
+            .is_some_and(|extended| extended.edx & (1 << 29) != 0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,8 +60,8 @@ impl State {
         snapshot: &Snapshot,
         physical_bits: u8,
     ) -> Result<Self, &'static str> {
-        if !supported(snapshot) || !snapshot.amd_fixed_raw {
-            return Err("AMD family or full fixed-DRAM observation is unqualified");
+        if !architectural(snapshot) || !snapshot.amd_fixed_raw {
+            return Err("AMD64 controls or full fixed-DRAM observation is unqualified");
         }
         let register = |index| super::register(snapshot, index);
         let state = Self {
@@ -132,6 +135,7 @@ pub(crate) fn fixed_type(value: u8, cap: u64) -> bool {
 mod tests {
     use super::*;
     use crate::native_smp::topology::{Cpuid, Msr};
+    const SIGNATURE: u32 = 0x00b4_0f40;
     fn snapshot() -> Snapshot {
         let mut snapshot = Snapshot::default();
         snapshot.records[0] = Cpuid {
@@ -144,9 +148,15 @@ mod tests {
         snapshot.records[1] = Cpuid {
             leaf: 1,
             eax: SIGNATURE,
+            edx: (1 << 5) | (1 << 12) | (1 << 16),
             ..Cpuid::default()
         };
-        snapshot.count = 2;
+        snapshot.records[2] = Cpuid {
+            leaf: 0x8000_0001,
+            edx: 1 << 29,
+            ..Cpuid::default()
+        };
+        snapshot.count = 3;
         snapshot.amd_fixed_raw = true;
         for (slot, index) in REGISTERS.into_iter().enumerate() {
             snapshot.msrs[slot] = Msr { index, value: 0 };
@@ -155,13 +165,35 @@ mod tests {
         snapshot
     }
     #[test]
-    fn exact_family_hidden_attributes_and_encryption_controls_are_required() {
+    fn actual_amd64_controls_hidden_attributes_and_encryption_are_required() {
         let source = snapshot();
-        assert!(supported(&source));
+        assert!(architectural(&source));
         assert!(State::from_snapshot(&source, 52).is_ok());
         let mut changed = source;
-        changed.records[1].eax += 1;
-        assert!(!supported(&changed));
+        // Other AMD families/models/steppings use these same documented
+        // architectural fields; marketing names cannot grant/deny authority.
+        for signature in [
+            0x0010_0f20,
+            0x0060_0f20,
+            0x0080_0f10,
+            0x00a2_0f10,
+            SIGNATURE + 1,
+        ] {
+            changed.records[1].eax = signature;
+            assert!(architectural(&changed));
+            assert!(State::from_snapshot(&changed, 48).is_ok());
+        }
+        for bit in [5, 12, 16] {
+            changed = source;
+            changed.records[1].edx &= !(1 << bit);
+            assert!(!architectural(&changed));
+        }
+        changed = source;
+        changed.records[2].edx = 0;
+        assert!(!architectural(&changed));
+        changed = source;
+        changed.records[0].ebx ^= 1;
+        assert!(!architectural(&changed));
         changed = source;
         changed.amd_fixed_raw = false;
         assert!(State::from_snapshot(&changed, 52).is_err());

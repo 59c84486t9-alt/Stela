@@ -56,7 +56,7 @@ global_asm!(
     "cmp (stela_ap_mtrr_cap - stela_ap_start + 4)(%ebp), %edx",
     "jne 90f",
     // AMD's fixed attribute visibility is separate from effective routing.
-    // Recheck the actual family signature before touching its additional MSRs.
+    // Recheck this AP's captured identity before touching AMD64 control MSRs.
     "cmpl $0, (stela_ap_amd - stela_ap_start)(%ebp)",
     "je 6f",
     "xor %eax, %eax",
@@ -80,6 +80,8 @@ global_asm!(
     "jnz 90f",
     "cmp (stela_ap_syscfg - stela_ap_start + 4)(%ebp), %edx",
     "jne 90f",
+    "testl $0x100, (stela_ap_mtrr_cap - stela_ap_start)(%ebp)",
+    "jz 6f", // no fixed attributes to expose without MTRRcap.FIX
     "mov %esi, %eax",
     "or ${amd_fixed_modify}, %eax", // MFDM: expose actual RdMem/WrMem for writes
     "wrmsr", // preserve every effective routing/non-memory control for now
@@ -252,6 +254,9 @@ pub(crate) struct Entry<'a> {
     /// the permanently pinned high-window entry/stack/argument mappings.
     pub root: u64,
     pub five_level: bool,
+    /// This selected physical AP's own immutable firmware CPUID1 EAX, not
+    /// the BSP's signature or a model name selected by the ARM guest profile.
+    pub processor_signature: u32,
     /// The BSP's installed PAT, qualified against each AP's memory-type state.
     pub pat: u64,
     pub memory_types: &'a Image,
@@ -324,12 +329,7 @@ pub(crate) unsafe fn prepare(
             &raw const stela_ap_amd,
             u32::from(entry.memory_types.amd.is_some()),
         );
-        // The qualified AMD family1Ah/model44h B0 signature is an actual
-        // hardware-profile bound, independent of the selected ARM guest.
-        put32(
-            &raw const stela_ap_signature,
-            super::memory_types::amd::SIGNATURE,
-        );
+        put32(&raw const stela_ap_signature, entry.processor_signature);
         put64(
             &raw const stela_ap_syscfg,
             entry.memory_types.amd.map_or(0, |amd| amd.syscfg),

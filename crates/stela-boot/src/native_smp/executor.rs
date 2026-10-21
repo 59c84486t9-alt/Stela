@@ -335,6 +335,10 @@ pub(crate) unsafe fn start(
                 layout::physical(physical) as *mut u8,
                 physical,
                 bootstrap::Entry {
+                    processor_signature: capture.snapshots[slot]
+                        .get(1, 0)
+                        .ok_or(StartupFailure::Resources)?
+                        .eax,
                     root: handoff.root,
                     five_level: matches!(
                         handoff.placement,

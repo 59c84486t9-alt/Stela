@@ -112,9 +112,9 @@ struct FixedVisibility {
 }
 impl FixedVisibility {
     /// # Safety
-    /// Actual CPL0 AMD family1Ah/model44h B0, no concurrent control writer on
+    /// Actual CPL0 AMD64 with observed MSR/MTRR/PAT controls, no concurrent writer on
     /// this processor. No SNP/encryption owner may lock the visibility control.
-    unsafe fn open() -> Result<Self, Error> {
+    unsafe fn open(fixed: bool) -> Result<Self, Error> {
         let flags: u64;
         unsafe {
             asm!("pushfq", "pop {}", "cli", out(reg) flags);
@@ -128,7 +128,7 @@ impl FixedVisibility {
         if original & amd::ENCRYPTION != 0 {
             return Err(Error::AmdMemoryControls);
         }
-        if original & amd::FIXED_MODIFY == 0 {
+        if fixed && original & amd::FIXED_MODIFY == 0 {
             guard.changed = true;
             unsafe {
                 write_msr(amd::SYSCFG, original | amd::FIXED_MODIFY);
@@ -274,9 +274,9 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
             }
             push_msr(&mut snapshot, MTRR_CAP, cap)?;
             push_msr(&mut snapshot, MTRR_DEFAULT, read_msr(MTRR_DEFAULT))?;
-            let amd_family = amd::supported(&snapshot);
-            let visibility = if amd_family {
-                Some(FixedVisibility::open()?)
+            let amd_controls = amd::architectural(&snapshot);
+            let visibility = if amd_controls {
+                Some(FixedVisibility::open(cap & (1 << 8) != 0)?)
             } else {
                 None
             };
