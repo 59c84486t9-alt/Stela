@@ -40,7 +40,7 @@ static bool xe_pt_next(pgoff_t *offset, u64 *addr, u64 next, u64 end,
 
 	/* Shared pt walk skips to the last pagetable */
 	if (unlikely(walk->shared_pt_mode)) {
-		unsigned int shift = walk->shifts[level];
+		unsigned int shift = (unsigned int)walk->shifts[level];
 		u64 skip_to = round_down(end, 1ull << shift);
 
 		if (skip_to > next) {

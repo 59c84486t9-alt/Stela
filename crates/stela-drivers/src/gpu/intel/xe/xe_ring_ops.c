@@ -19,6 +19,7 @@
 #include "xe_vm_types.h"
 #include "xe_vm.h"
 #include "xe_wa.h"
+#include "xe_ring_emit.h"
 
 /*
  * 3D-related flags that can't be set on _engines_ that lack access to the 3D
@@ -92,31 +93,12 @@ static int emit_aux_table_inv(struct xe_hw_engine *hwe, u32 *dw, int i)
 		return i;
 }
 
-static int emit_user_interrupt(u32 *dw, int i)
-{
-	dw[i++] = MI_USER_INTERRUPT;
-	dw[i++] = MI_ARB_ON_OFF | MI_ARB_ENABLE;
-	dw[i++] = MI_ARB_CHECK;
-
-	return i;
-}
-
 static int emit_store_imm_ggtt(u32 addr, u32 value, u32 *dw, int i)
 {
 	dw[i++] = MI_STORE_DATA_IMM | MI_SDI_GGTT | MI_SDI_NUM_DW(1);
 	dw[i++] = addr;
 	dw[i++] = 0;
 	dw[i++] = value;
-
-	return i;
-}
-
-static int emit_flush_dw(u32 *dw, int i)
-{
-	dw[i++] = MI_FLUSH_DW | MI_FLUSH_IMM_DW;
-	dw[i++] = 0;
-	dw[i++] = 0;
-	dw[i++] = 0;
 
 	return i;
 }
@@ -128,15 +110,6 @@ static int emit_flush_imm_ggtt(u32 addr, u32 value, u32 flags, u32 *dw, int i)
 	dw[i++] = addr | MI_FLUSH_DW_USE_GTT;
 	dw[i++] = 0;
 	dw[i++] = value;
-
-	return i;
-}
-
-static int emit_bb_start(u64 batch_addr, u32 ppgtt_flag, u32 *dw, int i)
-{
-	dw[i++] = MI_BATCH_BUFFER_START | ppgtt_flag | XE_INSTR_NUM_DW(3);
-	dw[i++] = lower_32_bits(batch_addr);
-	dw[i++] = upper_32_bits(batch_addr);
 
 	return i;
 }
@@ -194,18 +167,6 @@ static int emit_pipe_invalidate(struct xe_exec_queue *q, u32 mask_flags,
 
 	return emit_pipe_control(dw, i, flags0, flags1,
 				 LRC_PPHWSP_FLUSH_INVAL_SCRATCH_ADDR, 0);
-}
-
-static int emit_store_imm_ppgtt_posted(u64 addr, u64 value,
-				       u32 *dw, int i)
-{
-	dw[i++] = MI_STORE_DATA_IMM | MI_SDI_NUM_QW(1);
-	dw[i++] = lower_32_bits(addr);
-	dw[i++] = upper_32_bits(addr);
-	dw[i++] = lower_32_bits(value);
-	dw[i++] = upper_32_bits(value);
-
-	return i;
 }
 
 static int emit_render_cache_flush(struct xe_sched_job *job, u32 *dw, int i)

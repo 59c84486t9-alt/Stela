@@ -6,7 +6,11 @@
 #ifndef _XE_INSTR_DEFS_H_
 #define _XE_INSTR_DEFS_H_
 
+#ifdef STELA_NATIVE
+#include "../../stela/command_bits.h"
+#else
 #include "regs/xe_reg_defs.h"
+#endif
 
 /*
  * The first dword of any GPU instruction is the "instruction header."  Bits

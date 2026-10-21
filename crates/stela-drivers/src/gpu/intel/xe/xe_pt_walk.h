@@ -5,8 +5,12 @@
 #ifndef _XE_PT_WALK_H_
 #define _XE_PT_WALK_H_
 
+#ifdef STELA_NATIVE
+#include "../stela/pt_walk_platform.h"
+#else
 #include <linux/pagewalk.h>
 #include <linux/types.h>
+#endif
 
 /**
  * struct xe_ptw - base class for driver pagetable subclassing.
