@@ -198,6 +198,12 @@ impl Pmgr {
             .map(DomainState::decode)
     }
 
+    /// Retained control word for diagnostics, without an MMIO read or effect.
+    /// This reports the model's state, not proof of a firmware handoff value.
+    pub fn control_word(&self, address: u64) -> Option<u32> {
+        self.registers.get(&address).copied()
+    }
+
     /// The completed hardware state of a described domain register.
     pub fn state(&self, address: u64) -> Option<u8> {
         self.registers

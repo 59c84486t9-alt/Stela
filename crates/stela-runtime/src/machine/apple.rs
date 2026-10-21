@@ -1782,8 +1782,8 @@ impl AppleDevices {
     }
 
     /// The PMGR power-state registers at `registers`, in `blocks` of guest
-    /// PA. The boot firmware's states are not handed off, so each starts
-    /// active.
+    /// PA. Each starts active under the existing boot assumption; this is
+    /// not a qualified transfer of the original firmware's control words.
     pub fn add_power_states(&mut self, blocks: &[Range], registers: &[u64]) -> Result<(), String> {
         let states = registers.iter().map(|&address| PowerState {
             address,
@@ -2349,7 +2349,10 @@ impl AppleDevices {
                 .find(|(address, _)| *address == physical)
                 .map(|(_, resources)| resources.as_str())
                 .unwrap_or("request validation");
-            DeviceError::Refused(format!("PMGR domain {physical:#x} ({resources}): {reason}"))
+            let control = pmgr.control_word(physical).expect("described PMGR domain");
+            DeviceError::Refused(format!(
+                "PMGR domain {physical:#x} ({resources}): {reason}; current control {control:#010x}, requested {value:#010x}"
+            ))
         })?;
         if transition.before == transition.after {
             return Ok(());
@@ -3913,7 +3916,10 @@ mod tests {
         for (address, consumer) in [(supply, "controller"), (supply + 16, "firmware-endpoint")] {
             for value in [0, 4, 0x40f, 0x8000_040f] {
                 let error = d.write(0, address, 4, value, 0).unwrap_err();
-                assert!(format!("{error:?}").contains(consumer));
+                let message = format!("{error:?}");
+                assert!(message.contains(consumer));
+                assert!(message.contains("current control 0x000000ff"));
+                assert!(message.contains(&format!("requested {value:#010x}")));
                 assert_eq!(d.read(0, address, 4, 0), Ok(0xff));
                 assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
             }
