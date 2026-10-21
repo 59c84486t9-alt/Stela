@@ -1456,15 +1456,18 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         let count = |count: usize, one: &str, many: &str| {
             format!("{count} {}", if count == 1 { one } else { many })
         };
-        crate::status::done(&format!(
-            "{} in use, {} for macOS",
-            count(
-                services.len() + usize::from(medium.is_some()),
-                "partition",
-                "partitions"
+        let partitions = count(
+            services.len() + usize::from(medium.is_some()),
+            "partition",
+            "partitions",
+        );
+        crate::status::done(&match usb_disks.len() {
+            0 => partitions,
+            disks => format!(
+                "{partitions}, and {} macOS sees as USB drives",
+                count(disks, "disk", "disks")
             ),
-            count(usb_disks.len(), "more disk", "more disks")
-        ));
+        });
         if let Some(log) = log {
             crate::log_file::resume(log);
         }

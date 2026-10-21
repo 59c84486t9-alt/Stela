@@ -361,11 +361,12 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
         return None;
     }
     crate::status::begin("Checking the internal SSD and NVRAM");
-    let held = match crate::selection::peek(options.to_vec()) {
-        Err(refusal @ (Refusal::BlankDisk | Refusal::RecoveryMode)) => Some(held(refusal)),
-        _ => None,
+    let (held, found) = match crate::selection::peek(options.to_vec()) {
+        Err(refusal @ Refusal::BlankDisk) => (Some(held(refusal)), "no macOS installed yet"),
+        Err(refusal @ Refusal::RecoveryMode) => (Some(held(refusal)), "an install did not finish"),
+        _ => (None, ""),
     };
-    crate::status::done(held.unwrap_or(""));
+    crate::status::done(found);
     held
 }
 
@@ -377,7 +378,7 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem, log: Option<Guid>) -> 
     // NVRAM holds in recovery mode waits at the startup choices, as LLB
     // waits for a restore host, until one that boots is chosen.
     let options = loop {
-        crate::status::begin("Choosing what to start, as NVRAM says");
+        crate::status::begin("Reading the startup request in NVRAM");
         let routed = crate::selection::route(options);
         crate::status::done("");
         match routed {
