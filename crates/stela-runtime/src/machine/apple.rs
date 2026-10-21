@@ -3582,16 +3582,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recv(&mut devices).opcode, 106, "SEP accepted IMG4");
-        // The AP maps shared memory; sepOS reports OS active on the control EP.
+        // The AP maps a real, separate directory through dart-sep. This
+        // fixture advertises no channels, so its first entry is the required
+        // terminator. OS active follows successful directory DMA.
+        ram.bytes[0x4000..0x4004].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
         send(
             &mut devices,
             &mut ram,
             Frame {
                 service: message::BOOT,
                 tag: 0,
-                opcode: 0x20,
+                opcode: 4,
                 parameter: 0,
-                data: 0x5_0000,
+                data: ((RAM + 0x4000) >> 12) as u32,
             },
         )
         .unwrap();
