@@ -140,6 +140,16 @@
 //! the kernel's SMC clients and the restore ramdisk use, with the reason
 //! each absent key stays absent, is in docs/research/desktop-requirements.md
 //! (SMC key census).
+//!
+//! A source-declared primary RTC helper can additionally bind CLKM to the
+//! actual PMU oscillator. Its recovered six-byte hex_ / attributes0x94 key
+//! profile and original/native evidence are in docs/research/smc-rtc-t6000.md.
+//! Missing counter publication refuses before SRAM/reply effects; this path
+//! owns no second calendar offset and makes no Apple reset-epoch assumption.
+mod rtc;
+use rtc::RtcBinding;
+pub use rtc::RtcKeyProfile;
+
 use super::asc::TransitionRequest;
 use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::rtkit::Endpoint;
@@ -350,6 +360,7 @@ pub struct Smc {
     sram: Sram,
     sram_address: u64,
     keys: BTreeMap<u32, Key>,
+    rtc: Option<RtcBinding>,
     /// Board events waiting for the AP to enable notifications.
     events: VecDeque<u32>,
     /// The last notice `MBSE` received.
@@ -392,6 +403,7 @@ impl Smc {
             sram,
             sram_address,
             keys: table,
+            rtc: None,
             events: VecDeque::new(),
             notice: None,
             transition: None,
@@ -424,6 +436,55 @@ impl Smc {
         self.sleep == Sleep::Asleep
     }
 
+    /// Bind the actual primary PMU oscillator. No key/value exists before this
+    /// join, and a missing counter publication cannot return an initial zero.
+    pub fn bind_rtc(
+        &mut self,
+        clock: super::pmu::RtcClock,
+        profile: RtcKeyProfile,
+    ) -> Result<(), &'static str> {
+        self.check_bind_rtc()?;
+        let count = u32::try_from(self.keys.len() + 1).map_err(|_| "too many SMC keys")?;
+        self.keys
+            .get_mut(&KEY_COUNT)
+            .expect("key count owner")
+            .value = count.to_be_bytes().to_vec();
+        self.rtc = Some(RtcBinding { clock, profile });
+        Ok(())
+    }
+
+    /// Board construction preflight, before publishing a PMU/controller owner.
+    pub fn check_bind_rtc(&self) -> Result<(), &'static str> {
+        if self.rtc.is_some() || self.keys.contains_key(&rtc::KEY) {
+            return Err("SMC RTC key has duplicate or conflicting ownership");
+        }
+        u32::try_from(self.keys.len() + 1).map_err(|_| "too many SMC keys")?;
+        Ok(())
+    }
+
+    fn key_info(&self, name: u32) -> Option<(usize, u32, u8)> {
+        if name == rtc::KEY
+            && let Some(rtc) = &self.rtc
+        {
+            return Some(rtc.info());
+        }
+        self.keys
+            .get(&name)
+            .map(|key| (key.value.len(), key.kind, key.flags))
+    }
+    fn key_by_index(&self, index: usize) -> Option<u32> {
+        let index = if self.rtc.is_some() {
+            let position = self.keys.range(..rtc::KEY).count();
+            if index == position {
+                return Some(rtc::KEY);
+            }
+            if index > position { index - 1 } else { index }
+        } else {
+            index
+        };
+        self.keys.keys().nth(index).copied()
+    }
+
     /// The SoC wakes from `source`, which `MBSW` then reports.
     pub fn wake(&mut self, source: WakeSource) {
         debug_assert_eq!(self.sleep, Sleep::Asleep);
@@ -447,7 +508,8 @@ impl Smc {
         self.value(NOTIFICATIONS) == Some(&[1])
     }
 
-    /// Key `name`'s current value.
+    /// A stored key's current bytes. Dynamic RTC values are available only
+    /// through the checked key protocol, never as a stale borrowed buffer.
     pub fn value(&self, name: u32) -> Option<&[u8]> {
         self.keys.get(&name).map(|key| key.value.as_slice())
     }
@@ -495,24 +557,40 @@ impl Smc {
     }
 
     /// The reply to a read of `size` bytes of `name`.
-    fn read(&self, request: u64, name: u32, size: usize) -> u64 {
+    fn read(&self, request: u64, name: u32, size: usize) -> Result<u64, &'static str> {
+        if name == rtc::KEY
+            && let Some(rtc) = &self.rtc
+        {
+            let (bytes, _, _) = rtc.info();
+            if size < bytes {
+                return Ok(Self::reply(request, SIZE_MISMATCH, 0, 0));
+            }
+            let value = rtc.value()?;
+            self.sram.put(&value);
+            return Ok(Self::reply(request, SUCCESS, bytes, 0));
+        }
         let Some(key) = self.keys.get(&name) else {
-            return Self::reply(request, KEY_NOT_FOUND, 0, 0);
+            return Ok(Self::reply(request, KEY_NOT_FOUND, 0, 0));
         };
         if key.flags & READABLE == 0 {
-            return Self::reply(request, NOT_READABLE, 0, 0);
+            return Ok(Self::reply(request, NOT_READABLE, 0, 0));
         }
         if size < key.value.len() {
-            return Self::reply(request, SIZE_MISMATCH, 0, 0);
+            return Ok(Self::reply(request, SIZE_MISMATCH, 0, 0));
         }
         let length = key.value.len();
         if length <= 4 {
             let mut inline = [0u8; 4];
             inline[..length].copy_from_slice(&key.value);
-            Self::reply(request, SUCCESS, length, u32::from_le_bytes(inline))
+            Ok(Self::reply(
+                request,
+                SUCCESS,
+                length,
+                u32::from_le_bytes(inline),
+            ))
         } else {
             self.sram.put(&key.value);
-            Self::reply(request, SUCCESS, length, 0)
+            Ok(Self::reply(request, SUCCESS, length, 0))
         }
     }
 
@@ -525,6 +603,9 @@ impl Smc {
         size: usize,
         answers: &mut Vec<u64>,
     ) -> Result<u8, &'static str> {
+        if name == rtc::KEY && self.rtc.is_some() {
+            return Ok(NOT_WRITABLE);
+        }
         let Some(key) = self.keys.get_mut(&name) else {
             return Ok(KEY_NOT_FOUND);
         };
@@ -619,27 +700,27 @@ impl Endpoint for Smc {
         let result = (|| {
             let reply = match kind {
                 INITIALIZE => self.sram_address,
-                READ if (1..=MAX_VALUE).contains(&size) => self.read(payload, name, size),
+                READ if (1..=MAX_VALUE).contains(&size) => self.read(payload, name, size)?,
                 WRITE if (1..=MAX_VALUE).contains(&size) => {
                     Self::reply(payload, self.write(name, size, &mut answers)?, 0, 0)
                 }
                 READ_WRITE if (1..=MAX_VALUE).contains(&write_size) => {
                     match self.write(name, write_size, &mut answers)? {
-                        SUCCESS => self.read(payload, name, size),
+                        SUCCESS => self.read(payload, name, size)?,
                         result => Self::reply(payload, result, 0, 0),
                     }
                 }
                 READ | WRITE | READ_WRITE => Self::reply(payload, BAD_ARGUMENT, 0, 0),
-                KEY_BY_INDEX => match self.keys.keys().nth(name as usize) {
-                    Some(&key) => Self::reply(payload, SUCCESS, 4, key),
+                KEY_BY_INDEX => match self.key_by_index(name as usize) {
+                    Some(key) => Self::reply(payload, SUCCESS, 4, key),
                     None => Self::reply(payload, INDEX_RANGE, 0, 0),
                 },
-                KEY_INFO => match self.keys.get(&name) {
-                    Some(key) => {
+                KEY_INFO => match self.key_info(name) {
+                    Some((bytes, kind, flags)) => {
                         let mut info = [0u8; 6];
-                        info[0] = key.value.len() as u8;
-                        info[1..5].copy_from_slice(&key.kind.to_le_bytes());
-                        info[5] = key.flags;
+                        info[0] = bytes as u8;
+                        info[1..5].copy_from_slice(&kind.to_le_bytes());
+                        info[5] = flags;
                         self.sram.put(&info);
                         Self::reply(payload, SUCCESS, info.len(), 0)
                     }
@@ -808,6 +889,156 @@ mod tests {
         smc.receive(payload, &mut outbox).unwrap();
         assert_eq!(outbox.len(), 1);
         outbox[0]
+    }
+
+    #[test]
+    fn rtc_key_requires_actual_owner_and_publication_without_reply_or_sram_fabrication() {
+        use crate::platform::apple::pmu::{RtcClock, RtcEpoch};
+        let (mut smc, sram) = smc();
+        let clock = RtcClock::new(RtcEpoch {
+            counter: 100,
+            ticks: 12345,
+        })
+        .unwrap();
+        let key = rtc::KEY;
+        let before = smc.keys.get(&KEY_COUNT).unwrap().value.clone();
+        assert_eq!(
+            send(&mut smc, request(READ, 1, 6, 0, key)) as u8,
+            KEY_NOT_FOUND
+        );
+        smc.bind_rtc(clock.clone(), RtcKeyProfile::Hex48Little)
+            .unwrap();
+        assert!(
+            smc.bind_rtc(clock.clone(), RtcKeyProfile::Hex48Little)
+                .is_err()
+        );
+        assert_eq!(
+            u32::from_be_bytes(
+                smc.keys.get(&KEY_COUNT).unwrap().value[..]
+                    .try_into()
+                    .unwrap()
+            ),
+            u32::from_be_bytes(before[..].try_into().unwrap()) + 1
+        );
+        let names: Vec<_> = (0..smc.keys.len() + 1)
+            .map(|index| smc.key_by_index(index).unwrap())
+            .collect();
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(names.iter().filter(|&&name| name == key).count(), 1);
+        assert_eq!(smc.key_by_index(names.len()), None);
+        assert_eq!(send(&mut smc, request(KEY_INFO, 2, 0, 0, key)) & 0xff, 0);
+        assert_eq!(sram.get(6), [6, b'_', b'x', b'e', b'h', 0x94]);
+        sram.put(&[0xa5; 16]);
+        let mut output = Vec::new();
+        assert!(
+            smc.receive(request(READ, 3, 6, 0, key), &mut output)
+                .is_err()
+        );
+        assert!(output.is_empty());
+        assert_eq!(sram.get(16), [0xa5; 16]);
+        assert_eq!(
+            send(&mut smc, request(READ, 4, 5, 0, key)) as u8,
+            SIZE_MISMATCH
+        );
+        assert_eq!(
+            send(&mut smc, request(WRITE, 5, 6, 0, key)) as u8,
+            NOT_WRITABLE
+        );
+        assert_eq!(
+            send(&mut smc, request(READ_WRITE, 6, 6, 6, key)) as u8,
+            NOT_WRITABLE
+        );
+        assert_eq!(sram.get(16), [0xa5; 16]);
+        clock.publish(100).unwrap();
+        let reply = send(&mut smc, request(READ, 7, 8, 0, key));
+        assert_eq!((reply as u8, (reply >> 16) & 0xff), (SUCCESS, 6));
+        let mut expected = [0u8; 8];
+        expected.copy_from_slice(&12345u64.to_le_bytes());
+        assert_eq!(sram.get(6), expected[..6]);
+        assert_eq!(sram.get(8)[6..], [0xa5; 2]);
+        assert!(clock.publish(99).is_err());
+        assert_eq!(clock.published_ticks(), Ok(12345));
+        let mut conflict = Smc::new(
+            Sram::default(),
+            BASE,
+            vec![(key, Key::new(b"hex_", READABLE, 6))],
+        )
+        .unwrap();
+        let count = conflict.value(KEY_COUNT).unwrap().to_vec();
+        assert!(
+            conflict
+                .bind_rtc(clock, RtcKeyProfile::Hex48Little)
+                .is_err()
+        );
+        assert_eq!(conflict.value(KEY_COUNT).unwrap(), count);
+    }
+
+    #[test]
+    fn original_rtc_helper_profile_requires_full_keyr_clkm_and_resolved_provider() {
+        let cells = [0xb6, code(b"keyR"), code(b"CLKM")];
+        assert_eq!(
+            RtcKeyProfile::from_function(&cells, 0xb6),
+            Ok(RtcKeyProfile::Hex48Little)
+        );
+        assert!(RtcKeyProfile::from_function(&cells, 0).is_err());
+        assert!(RtcKeyProfile::from_function(&cells, 0xb7).is_err());
+        assert!(RtcKeyProfile::from_function(&cells[..2], 0xb6).is_err());
+        assert!(RtcKeyProfile::from_function(&[0xb6, code(b"keyW"), code(b"CLKM")], 0xb6).is_err());
+        assert!(RtcKeyProfile::from_function(&[0xb6, code(b"keyR"), code(b"CLKH")], 0xb6).is_err());
+    }
+
+    #[test]
+    fn smc_and_spmi_sample_one_epoch_while_calendar_offset_has_one_pmu_owner() {
+        use crate::platform::apple::{
+            counter::FREQUENCY_HZ,
+            pmu::{Configuration, Pmu, RTC_HZ, Rtc, RtcClock, RtcEpoch, WallClock},
+            spmi::SpmiSlave,
+        };
+        let rtc = Rtc {
+            upcount: 0x1406,
+            clock_offset: 0x1411,
+            alarm_control: 0x1401,
+            alarm_enable: 0x40,
+            alarm_offset: 0x140c,
+            alarm_event: 0x14c0,
+            irq_mask: 0x14c2,
+            event_mask: 1,
+            interrupt_mask: 1,
+        };
+        let clock = RtcClock::new(RtcEpoch {
+            counter: 100,
+            ticks: 987654321,
+        })
+        .unwrap();
+        let config = Configuration::new(Vec::new(), Some(rtc), 1).unwrap();
+        let mut pmu = Pmu::with_clock(
+            config,
+            clock.clone(),
+            Some(WallClock {
+                unix_seconds: 1_792_000_000,
+                counter: 100,
+            }),
+        )
+        .unwrap();
+        let (mut smc, sram) = smc();
+        smc.bind_rtc(pmu.rtc_clock().unwrap(), RtcKeyProfile::Hex48Little)
+            .unwrap();
+        let now = 100 + 3 * FREQUENCY_HZ;
+        clock.publish(now).unwrap(); // same actual service boundary as the root adapter
+        send(&mut smc, request(READ, 0, 6, 0, rtc::KEY));
+        let mut raw = [0; 8];
+        raw[..6].copy_from_slice(&sram.get(6));
+        let logical = u64::from_le_bytes(raw);
+        assert_eq!(logical, 987654321 + 3 * RTC_HZ);
+        pmu.read(rtc.upcount, &mut raw[..6], now).unwrap();
+        assert_eq!(u64::from_le_bytes(raw) >> 1, logical);
+        pmu.write(rtc.clock_offset, &[9, 8, 7, 6, 5, 4], now)
+            .unwrap();
+        send(&mut smc, request(READ, 1, 6, 0, rtc::KEY));
+        raw[..6].copy_from_slice(&sram.get(6));
+        assert_eq!(u64::from_le_bytes(raw), logical);
+        assert!(pmu.read(rtc.upcount, &mut raw[..6], now - 1).is_err());
+        assert_eq!(clock.published_ticks(), Ok(logical));
     }
 
     #[test]

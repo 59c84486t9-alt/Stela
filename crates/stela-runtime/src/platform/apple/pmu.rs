@@ -50,10 +50,13 @@
 //! write-one-to-clear. The PMU's interrupt output ([`Interrupt`]) is
 //! asserted while the event is latched and the IRQ mask leaves it
 //! unmasked; where it leads is the board's. Every other address NACKs.
+mod clock;
 mod config;
+pub use clock::{RtcClock, RtcEpoch};
 pub use config::Configuration;
 
 use super::spmi::{SlaveError, SpmiSlave};
+#[cfg(test)]
 use crate::platform::apple::counter::FREQUENCY_HZ;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::Cell;
@@ -132,6 +135,7 @@ pub struct Pmu {
     /// Storage windows, including the RTC's storage registers.
     windows: Vec<Window>,
     rtc: Option<Rtc>,
+    clock: RtcClock,
     monitor: u8,
     identity: Option<Window>,
     /// Bytes of every storage window, in window order.
@@ -158,6 +162,23 @@ impl Pmu {
         config: Configuration,
         wall: Option<WallClock>,
     ) -> Result<Self, &'static str> {
+        Self::with_clock(
+            config,
+            RtcClock::new(RtcEpoch {
+                counter: 0,
+                ticks: 0,
+            })?,
+            wall,
+        )
+    }
+
+    /// Bind a declared oscillator owner; the primary's SMC helper must retain
+    /// this same handle, never derive a second epoch from its own uptime.
+    pub fn with_clock(
+        config: Configuration,
+        clock: RtcClock,
+        wall: Option<WallClock>,
+    ) -> Result<Self, &'static str> {
         let Configuration {
             mut windows,
             rtc,
@@ -180,6 +201,7 @@ impl Pmu {
         let mut pmu = Self {
             windows,
             rtc,
+            clock,
             monitor,
             identity,
             storage,
@@ -189,11 +211,9 @@ impl Pmu {
             interrupt: Interrupt::default(),
         };
         if let (Some(rtc), Some(wall)) = (rtc, wall) {
-            if ticks(wall.counter) >= 1 << 47 {
-                return Err("PMU initial counter exceeds qualified RTC epoch");
-            }
+            let upcount = pmu.clock.check(wall.counter)?;
             let target = i128::from(wall.unix_seconds) * i128::from(RTC_HZ);
-            let offset = target - i128::from(ticks(wall.counter));
+            let offset = target - i128::from(upcount);
             if !(-(1i128 << 47)..(1i128 << 47)).contains(&offset) {
                 return Err("PMU initial RTC offset exceeds signed 48-bit resource");
             }
@@ -202,6 +222,11 @@ impl Pmu {
             pmu.store(rtc.clock_offset, &bytes[..OFFSET_BYTES.into()]);
         }
         Ok(pmu)
+    }
+
+    /// The actual retained oscillator owner, when this PMU has RTC resources.
+    pub fn rtc_clock(&self) -> Option<RtcClock> {
+        self.rtc.map(|_| self.clock.clone())
     }
 
     /// The PMU's interrupt output.
@@ -284,9 +309,8 @@ impl Pmu {
         for (i, byte) in time.iter_mut().enumerate() {
             *byte = *self.byte(rtc.alarm_offset + i as u16);
         }
-        let upcount = u128::from(u32::from_le_bytes(time)) << SECOND_SHIFT;
-        // The first count whose RTC ticks reach the alarm's (`ticks`).
-        Some((upcount * u128::from(FREQUENCY_HZ)).div_ceil(u128::from(RTC_HZ)) as u64)
+        let upcount = u64::from(u32::from_le_bytes(time)) << SECOND_SHIFT;
+        self.clock.counter_for(upcount)
     }
 
     /// Latch the alarm's event once its time is reached, and drive the
@@ -309,11 +333,6 @@ impl Pmu {
     }
 }
 
-/// System counter ticks as RTC ticks.
-fn ticks(counter: u64) -> u64 {
-    (u128::from(counter) * u128::from(RTC_HZ) / u128::from(FREQUENCY_HZ)) as u64
-}
-
 impl SpmiSlave for Pmu {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
         self.check_identity(address, data.len())?;
@@ -322,9 +341,21 @@ impl SpmiSlave for Pmu {
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
         self.check_time(now)?;
+        if self.rtc.is_some() {
+            self.clock.publish(now).map_err(SlaveError::Unsupported)?;
+        }
         self.update(now);
         // One sample serves every upcount byte of the access.
-        let raw = (ticks(now) << 1).to_le_bytes();
+        let raw = if self.rtc.is_some() {
+            (self
+                .clock
+                .published_ticks()
+                .map_err(SlaveError::Unsupported)?
+                << 1)
+                .to_le_bytes()
+        } else {
+            [0; 8]
+        };
         for ((at, cell), out) in cells.into_iter().zip(data.iter_mut()) {
             *out = match cell {
                 Byte::Storage | Byte::IrqMask => *self.byte(at),
@@ -366,6 +397,9 @@ impl SpmiSlave for Pmu {
             }
         }
         self.check_time(now)?;
+        if self.rtc.is_some() {
+            self.clock.publish(now).map_err(SlaveError::Unsupported)?;
+        }
         self.update(now);
         let alarm = self
             .rtc
@@ -392,12 +426,14 @@ impl SpmiSlave for Pmu {
         Ok(())
     }
     fn check_time(&self, now: u64) -> Result<(), SlaveError> {
-        if self.rtc.is_some() && ticks(now) >= 1 << 47 {
-            return Err(SlaveError::Unsupported(
-                "PMU RTC upcount/alarm wrap behavior is unqualified",
-            ));
+        if self.rtc.is_some() {
+            self.clock
+                .check(now)
+                .map(|_| ())
+                .map_err(SlaveError::Unsupported)
+        } else {
+            Ok(())
         }
-        Ok(())
     }
     fn interrupt_level(&self) -> Option<bool> {
         self.rtc.map(|_| self.interrupt.asserted())
@@ -406,6 +442,11 @@ impl SpmiSlave for Pmu {
         self.armed || self.interrupt.asserted()
     }
     fn advance(&mut self, now: u64) -> Option<u64> {
+        if self.rtc.is_some() {
+            self.clock
+                .publish(now)
+                .expect("SPMI autonomous time preflight completed");
+        }
         self.update(now);
         self.alarm_deadline()
     }
@@ -800,19 +841,19 @@ mod tests {
             .unwrap();
         assert_eq!(event, [0]);
         // A masked alarm still latches its event, without interrupting.
-        program(&mut pmu, 40, 39 * FREQUENCY_HZ);
-        pmu.write(RTC.irq_mask, &[RTC.interrupt_mask], 39 * FREQUENCY_HZ)
+        program(&mut pmu, 50, 49 * FREQUENCY_HZ);
+        pmu.write(RTC.irq_mask, &[RTC.interrupt_mask], 49 * FREQUENCY_HZ)
             .unwrap();
-        assert_eq!(pmu.advance(40 * FREQUENCY_HZ), None);
-        pmu.read(RTC.alarm_event, &mut event, 40 * FREQUENCY_HZ)
+        assert_eq!(pmu.advance(50 * FREQUENCY_HZ), None);
+        pmu.read(RTC.alarm_event, &mut event, 50 * FREQUENCY_HZ)
             .unwrap();
         assert_eq!(event, [RTC.event_mask]);
         assert!(!interrupt.asserted());
         // Cleared, a fired alarm stays quiet until it is programmed again.
-        pmu.write(RTC.alarm_event, &[RTC.event_mask], 41 * FREQUENCY_HZ)
+        pmu.write(RTC.alarm_event, &[RTC.event_mask], 51 * FREQUENCY_HZ)
             .unwrap();
-        assert_eq!(pmu.advance(41 * FREQUENCY_HZ), None);
-        pmu.read(RTC.alarm_event, &mut event, 41 * FREQUENCY_HZ)
+        assert_eq!(pmu.advance(51 * FREQUENCY_HZ), None);
+        pmu.read(RTC.alarm_event, &mut event, 51 * FREQUENCY_HZ)
             .unwrap();
         assert_eq!(event, [0]);
         // A PMU without an RTC has no RTC registers.
