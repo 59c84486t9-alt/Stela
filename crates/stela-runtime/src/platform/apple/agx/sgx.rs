@@ -95,6 +95,10 @@ const FENDER_WAKE: u64 = 0xd0_6020;
 const GIFAF_IDLE_STATUS_G13_G14: u64 = 0xd6_1090;
 const GIFAF_IDLE_STATUS_G15: u64 = 0xd0_d090;
 const GIFAF_SLEEP_COMPLETE: u32 = 0x204;
+/// GXF ASC-native control restored by the original global callback. This
+/// belongs to the configured wrapper's four-MiB native device mapping, not
+/// the AP mailbox aperture's offset 0x120.
+const ASC_NATIVE_CONTROL: u64 = 0x14_0120;
 
 fn fender_sleep_supported(family: &Family) -> bool {
     matches!(family.name, "G13G" | "G14G" | "G15G")
@@ -276,10 +280,39 @@ impl Native {
 pub struct FirmwarePower {
     family: &'static Family,
     banks: Vec<(u64, u64, u64)>,
+    asc_wrapper: Option<u64>,
     native: Rc<RefCell<Native>>,
 }
 
 impl FirmwarePower {
+    /// Bind the ASC's actual configured wrapper physical base. RTBuddy writes
+    /// it into the WrAd firmware patch; native GXF callbacks address +140120
+    /// through a private CPU mapping, independently of AP-authored GPU PIO.
+    /// This qualifies ownership only; it does not model control-field effects.
+    pub fn with_asc_wrapper(mut self, physical: u64) -> Result<Self, &'static str> {
+        if self.asc_wrapper.is_some_and(|held| held != physical) {
+            return Err("GFX native power owner cannot be rebound to a different ASC wrapper");
+        }
+        let control = physical
+            .checked_add(ASC_NATIVE_CONTROL)
+            .ok_or("GFX native ASC control physical address wraps")?;
+        if !self.banks.iter().any(|&(base, bytes, _)| {
+            control
+                .checked_sub(base)
+                .and_then(|at| at.checked_add(8))
+                .is_some_and(|end| end <= bytes)
+        }) {
+            return Err("GFX native ASC control is not wholly inside a qualified SGX bank");
+        }
+        self.asc_wrapper = Some(physical);
+        Ok(self)
+    }
+
+    /// The declared physical ASC wrapper used by the original native mapping.
+    pub fn asc_wrapper(&self) -> Option<u64> {
+        self.asc_wrapper
+    }
+
     pub(super) fn family(&self) -> &'static Family {
         self.family
     }
@@ -465,6 +498,7 @@ impl Sgx {
         Ok(FirmwarePower {
             family: self.family,
             banks: banks.to_vec(),
+            asc_wrapper: None,
             native: Rc::clone(&self.native),
         })
     }
@@ -903,6 +937,25 @@ mod tests {
             assert_eq!(native_status(&mut sgx, &mut ram, &mut access), Ok(0));
             assert_eq!(power.check_reset(), Ok(()));
         }
+    }
+
+    #[test]
+    fn native_asc_binding_uses_declared_placement_and_qualifies_the_whole_private_word() {
+        let mut sgx = Sgx::new(t8112()).unwrap();
+        write(&mut sgx, GATING_CONTROL, 4).unwrap();
+        let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
+        assert_eq!(power.asc_wrapper(), None);
+        let bound = power.clone().with_asc_wrapper(0x206400000).unwrap();
+        assert_eq!(bound.asc_wrapper(), Some(0x206400000));
+        assert_eq!(bound.logical(0x206540120), Ok(0x2540120));
+        assert!(bound.clone().with_asc_wrapper(0x206400000).is_ok());
+        assert!(bound.clone().with_asc_wrapper(0x206500000).is_err());
+        assert!(power.clone().with_asc_wrapper(0x304000000).is_err());
+        assert!(power.with_asc_wrapper(u64::MAX).is_err());
+        // The first byte alone cannot qualify an eight-byte native register.
+        let short = sgx.firmware_power(&[(0x204000000, 0x2540124, 0)]).unwrap();
+        assert!(short.with_asc_wrapper(0x206400000).is_err());
+        assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
     }
 
     #[test]
