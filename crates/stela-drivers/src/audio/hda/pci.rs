@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Bounded conventional HDA PCI attachment. Quirks and exact Intel IDs adapt
-//! Linux sound/hda/controllers/intel.c, include/linux/pci_ids.h and PCI D0
-//! transition sequencing from drivers/pci/pci.c at
+//! Linux sound/hda/controllers/intel.c, include/linux/pci_ids.h, capability
+//! layouts in include/uapi/linux/pci_regs.h, and PCI D0 transition sequencing
+//! from drivers/pci/pci.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b.
 //!
 //! Copyright(c) 2004 Intel Corporation
@@ -35,6 +36,8 @@ const STATUS_CAPABILITIES: u16 = 1 << 4;
 const CAP_PM: u8 = 1;
 const CAP_MSI: u8 = 5;
 const CAP_MSIX: u8 = 0x11;
+const MSI_ADDRESS_64: u16 = 1 << 7;
+const MSI_VECTOR_MASK: u16 = 1 << 8;
 const PM_STATE: u16 = 3;
 const PM_PME_ENABLE: u16 = 1 << 8;
 const PM_PME_STATUS: u16 = 1 << 15;
@@ -141,26 +144,48 @@ fn capabilities<C: ConfigSpace>(config: &C) -> Result<Capabilities, AttachError>
     if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
         return Ok(found);
     }
-    let mut seen = [false; 64];
+    let mut occupied = [false; 256];
+    // TCSEL belongs to the exact ICH identity, never to a standard capability.
+    occupied[usize::from(TCSEL)] = true;
     let mut offset = config.read8(PCI_CAPABILITIES);
     while offset != 0 {
-        if offset < 0x40 || offset & 3 != 0 || seen[usize::from(offset / 4)] {
+        if offset < 0x40 || offset & 3 != 0 {
             return Err(AttachError::InvalidCapabilities);
         }
-        seen[usize::from(offset / 4)] = true;
         let offset16 = u16::from(offset);
         let id = config.read8(offset16);
-        let slot = match id {
-            CAP_PM => Some((&mut found.pm, 8)),
-            CAP_MSI => Some((&mut found.msi, 4)),
-            CAP_MSIX => Some((&mut found.msix, 12)),
-            _ => None,
+        let (slot, bytes) = match id {
+            CAP_PM => (Some(&mut found.pm), 8),
+            CAP_MSI => {
+                // Control must fit before reading the length-dependent body.
+                if offset16 + 4 > 0x100 {
+                    return Err(AttachError::InvalidCapabilities);
+                }
+                let control = config.read16(offset16 + 2);
+                let bytes = match (
+                    control & MSI_ADDRESS_64 != 0,
+                    control & MSI_VECTOR_MASK != 0,
+                ) {
+                    (false, false) => 10,
+                    (true, false) => 14,
+                    (false, true) => 20,
+                    (true, true) => 24,
+                };
+                (Some(&mut found.msi), bytes)
+            }
+            CAP_MSIX => (Some(&mut found.msix), 12),
+            // Unknown bodies are not touched or sized. Reserve their headers
+            // so a known body cannot alias them or loop through them later.
+            _ => (None, 2),
         };
-        if let Some((slot, bytes)) = slot {
-            if slot.is_some()
-                || offset16 + bytes > 0x100
-                || (offset16..offset16 + bytes).contains(&TCSEL)
-            {
+        let end = usize::from(offset16 + bytes);
+        let start = usize::from(offset);
+        if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
+            return Err(AttachError::InvalidCapabilities);
+        }
+        occupied[start..end].fill(true);
+        if let Some(slot) = slot {
+            if slot.is_some() {
                 return Err(AttachError::InvalidCapabilities);
             }
             *slot = Some(offset16);
@@ -318,8 +343,10 @@ pub unsafe fn prepare<C: ConfigSpace>(
         }
         let enabled = command | COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE;
         config.write16(PCI_COMMAND, enabled);
-        if config.read16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE)
-            != COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE
+        let readback = config.read16(PCI_COMMAND);
+        if readback == u16::MAX
+            || readback & (COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE)
+                != COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE
         {
             return Err(AttachError::ConfigurationRejected);
         }
@@ -360,6 +387,7 @@ mod tests {
         reject_power: bool,
         reject_command: bool,
         reject_tcsel: bool,
+        fail_after_enable: bool,
         writes: Vec<(u16, u8, u32, u64)>,
     }
     impl Model {
@@ -375,6 +403,14 @@ mod tests {
     impl ConfigSpace for Model {
         fn read32(&self, offset: u16) -> u32 {
             let value = self.words[usize::from(offset / 4)];
+            if offset == PCI_COMMAND
+                && self.fail_after_enable
+                && self.writes.iter().any(|(off, _, value, _)| {
+                    *off == PCI_COMMAND && *value & u32::from(COMMAND_MASTER) != 0
+                })
+            {
+                return u32::MAX;
+            }
             if offset == 0x54 && (self.reject_power || self.now.get() < self.ready_at) {
                 value & !3 | u32::from(self.previous_state)
             } else {
@@ -448,6 +484,7 @@ mod tests {
             reject_power: false,
             reject_command: false,
             reject_tcsel: false,
+            fail_after_enable: false,
             writes: Vec::new(),
         };
         model.words[0] = 0x2668_8086;
@@ -652,6 +689,73 @@ mod tests {
             );
             assert!(function.config().writes.is_empty());
         }
+    }
+
+    #[test]
+    fn overlapping_capability_bodies_and_vendor_tcsel_refuse_before_writes() {
+        for variant in 0..5 {
+            let (mut function, timer, bar) = fixture(0);
+            match variant {
+                // PM50's PMCSR becomes an aliased MSI54 header/control pair.
+                0 => {
+                    function.config().words[20] = 0x0003_5401;
+                    function.config().words[21] = 5;
+                }
+                // Even an unknown header must not occupy the vendor TCSEL byte.
+                1 => {
+                    function.config().words[13] = 0x44;
+                    function.config().words[17] = 0xfe;
+                }
+                // 32-bit MSI with masks occupies 0x60..0x74, overlapping MSI-X70.
+                2 => function.config().words[24] |= u32::from(MSI_VECTOR_MASK) << 16,
+                // 64-bit MSI with masks occupies 0x60..0x78, also overlapping70.
+                3 => {
+                    function.config().words[24] |= u32::from(MSI_VECTOR_MASK | MSI_ADDRESS_64) << 16
+                }
+                // A known PM body cannot cover a previously encountered unknown header.
+                _ => {
+                    function.config().words[13] = 0x54;
+                    function.config().words[21] = 0x50fe;
+                    function.config().words[20] = 0x0003_0001;
+                }
+            }
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::InvalidCapabilities
+            );
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn all_msi_layouts_are_bounded_and_disjoint_when_well_formed() {
+        for flags in [
+            0,
+            MSI_ADDRESS_64,
+            MSI_VECTOR_MASK,
+            MSI_ADDRESS_64 | MSI_VECTOR_MASK,
+        ] {
+            let (mut function, timer, bar) = fixture(0);
+            function.config().words[24] = (u32::from(flags | 1) << 16) | 5; // MSI ends list.
+            prepare_model(&mut function, &timer, bar).unwrap();
+        }
+    }
+
+    #[test]
+    fn config_failure_beginning_after_final_enable_is_rejected_and_cleanup_attempted() {
+        let (mut function, timer, bar) = fixture(0);
+        function.config().fail_after_enable = true;
+        assert_eq!(
+            prepare_model(&mut function, &timer, bar).unwrap_err(),
+            AttachError::ConfigurationRejected
+        );
+        let config = function.config();
+        assert!(config.writes.iter().any(
+            |(off, _, value, _)| *off == PCI_COMMAND && *value & u32::from(COMMAND_MASTER) != 0
+        ));
+        let (offset, width, value, _) = config.writes.last().unwrap();
+        assert_eq!((*offset, *width), (PCI_COMMAND, 2));
+        assert_eq!(*value & u32::from(COMMAND_MASTER | COMMAND_MEMORY), 0);
     }
 
     #[test]
