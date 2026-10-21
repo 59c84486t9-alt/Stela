@@ -2162,9 +2162,11 @@ fn run(
                 statistics.interrupts,
                 statistics.waits,
             );
+            let heap = crate::ALLOCATOR.usage();
             output::arguments(format_args!(
                 "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-                 compiled={} discards={} chained={}% exceptions={} interrupts={} waits={}\n",
+                 compiled={} discards={} chained={}% exceptions={} interrupts={} waits={} \
+                 heap={}M/{}M peak={}M largest={}M\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
@@ -2177,6 +2179,10 @@ fn run(
                 events.0 - beat.5.0,
                 events.1 - beat.5.1,
                 events.2 - beat.5.2,
+                heap.carved >> 20,
+                heap.total >> 20,
+                heap.peak >> 20,
+                heap.largest >> 20,
             ));
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);

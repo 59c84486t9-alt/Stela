@@ -40,6 +40,21 @@ struct State {
     first: *mut Free,
     small: [*mut Small; CLASSES],
     ready: bool,
+    total: usize,
+    /// Bytes carved from the free list and not released: live blocks and
+    /// the size-class blocks kept for reuse.
+    carved: usize,
+    peak: usize,
+}
+
+/// How full the heap is, in bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct Usage {
+    pub total: usize,
+    pub carved: usize,
+    pub peak: usize,
+    /// The largest free extent: the most one allocation can get.
+    pub largest: usize,
 }
 pub struct Heap {
     held: AtomicBool,
@@ -56,6 +71,9 @@ impl Heap {
                 first: ptr::null_mut(),
                 small: [ptr::null_mut(); CLASSES],
                 ready: false,
+                total: 0,
+                carved: 0,
+                peak: 0,
             }),
         }
     }
@@ -87,6 +105,28 @@ impl Heap {
         }
         state.first = node;
         state.ready = true;
+        state.total = bytes;
+    }
+
+    /// The heap's usage, walking the free list for its largest extent.
+    pub fn usage(&self) -> Usage {
+        let _guard = self.lock();
+        let state = unsafe { &*self.state.get() };
+        let mut largest = 0;
+        let mut node = state.first;
+        while !node.is_null() {
+            // SAFETY: a free-list node, read with the lock held.
+            unsafe {
+                largest = largest.max((*node).bytes);
+                node = (*node).next;
+            }
+        }
+        Usage {
+            total: state.total,
+            carved: state.carved,
+            peak: state.peak,
+            largest,
+        }
     }
 }
 struct Guard<'a>(&'a Heap);
@@ -207,6 +247,8 @@ unsafe fn carve(state: &mut State, size: usize, alignment: usize) -> *mut u8 {
                 bytes: used_end - allocated_base,
             });
         }
+        state.carved += used_end - allocated_base;
+        state.peak = state.peak.max(state.carved);
         return user as *mut u8;
     }
 }
@@ -222,6 +264,7 @@ unsafe fn release(state: &mut State, pointer: *mut u8) {
     let header = unsafe { (pointer.sub(core::mem::size_of::<Header>()) as *const Header).read() };
     let base = header.base;
     let end = base + header.bytes;
+    state.carved -= header.bytes;
     let mut previous: *mut Free = ptr::null_mut();
     let mut next = state.first;
     while !next.is_null() && (next as usize) < base {
