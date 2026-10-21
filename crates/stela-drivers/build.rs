@@ -53,6 +53,7 @@ fn nvidia() {
     build
         .define("NV_STELA", None)
         .file(format!("{source}/stela/pci.c"))
+        .file(format!("{source}/stela/memory.c"))
         .include(format!("{source}/stela"))
         .include(format!("{source}/src/common/sdk/nvidia/inc"))
         .include(format!("{source}/src/nvidia/arch/nvalloc/unix/include"))

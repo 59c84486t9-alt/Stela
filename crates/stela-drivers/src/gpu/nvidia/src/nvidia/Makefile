@@ -22,7 +22,7 @@ GET_COMPILER_TYPE = \
 ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
 ifeq ($(TARGET_OS),Stela)
-ALL_SRCS += ../../stela/pci.c
+ALL_SRCS += ../../stela/pci.c ../../stela/memory.c
 CFLAGS += -I ../../stela
 endif
 
