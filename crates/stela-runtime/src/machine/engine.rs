@@ -6663,6 +6663,10 @@ mod tests {
             const MRS_X4_HCR_EL2: u32 = 0xd53c_1104;
             const MRS_X5_PMC1: u32 = 0xd53a_f105;
             const MRS_X7_PMCR0: u32 = 0xd539_f007;
+            const MSR_PMESR1_X9: u32 = 0xd519_f609;
+            const MRS_X8_PMC7: u32 = 0xd53a_f708;
+            const MSR_PMC7_X6: u32 = 0xd51a_f706;
+            const MRS_X8_PMSR: u32 = 0xd539_fd08;
             const ADD: u32 = 0x9100_0400;
             const B_NEXT: u32 = 0x1400_0001;
             const SVC: u32 = 0xd400_0001;
@@ -6692,9 +6696,21 @@ mod tests {
                 .cpu
                 .registers
                 .set(SystemRegister::VBAR_EL1, 0, BASE + 0x800);
-            // XNU's PMCR1_INIT and PMCR0_INIT: PMC0 and PMC1 with their PMIs.
-            machine.cpu.state.x[1] = 0x30300;
-            machine.cpu.state.x[2] = 0x3 | 0x3000 | 0x400;
+            let programmable = matches!(
+                chip,
+                crate::machine::Chip::AppleM1 | crate::machine::Chip::AppleM2
+            );
+            if programmable {
+                machine.cpu.state.x[9] = 0x8c00; // INST_ALL on PMC7 only.
+                machine.system_instruction(MSR_PMESR1_X9).unwrap();
+                // Configuration precedes this scripted retirement trace.
+                machine.cpu.pc = BASE;
+            }
+            // Fixed counters on all chips; the source-qualified M1/M2
+            // programmable instruction event counts the same retirements.
+            machine.cpu.state.x[1] = 0x30300 | if programmable { 1 << 15 | 1 << 23 } else { 0 };
+            let controls = 0x3 | 0x3000 | 0x400 | if programmable { 1 << 7 | 1 << 19 } else { 0 };
+            machine.cpu.state.x[2] = controls;
             let run = |machine: &mut Machine<FakeHost, NoDevices>, next_pc, kind: ExitKind| {
                 machine.host.exits.push(NativeExit::Exit {
                     next_pc,
@@ -6718,6 +6734,10 @@ mod tests {
             run(&mut machine, BASE + 0xa04, ExitKind::System);
             run(&mut machine, BASE + 0xa00, ExitKind::System);
             assert_eq!(machine.cpu.state.x[5], 7);
+            if programmable {
+                machine.system_instruction(MRS_X8_PMC7).unwrap();
+                assert_eq!(machine.cpu.state.x[8], 7);
+            }
             // Two instructions short of overflow, the PMI asserts as FIQ once
             // they retire, and PMAI reports it.
             machine.cpu.state.x[6] = overflow - 2;
@@ -6726,7 +6746,18 @@ mod tests {
             machine.cpu.retired += 2;
             assert!(machine.lines().fiq);
             machine.system_instruction(MRS_X7_PMCR0).unwrap();
-            assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
+            assert_eq!(machine.cpu.state.x[7], controls | 1 << 11);
+            if programmable {
+                machine.cpu.state.x[6] = 0;
+                machine.system_instruction(MSR_PMC1_X6).unwrap();
+                machine.cpu.state.x[6] = overflow - 1;
+                machine.system_instruction(MSR_PMC7_X6).unwrap();
+                assert!(!machine.lines().fiq);
+                machine.cpu.retired += 1;
+                assert!(machine.lines().fiq);
+                machine.system_instruction(MRS_X8_PMSR).unwrap();
+                assert_eq!(machine.cpu.state.x[8], 1 << 7);
+            }
         }
     }
 

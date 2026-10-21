@@ -4,8 +4,10 @@
 //! original 26A434 mac18g supplies M6's distinct 15-counter mapping.
 //! See `docs/research/core-pmu.md` for source hashes and qualification limits.
 //!
-//! - PMC0 counts cycles and PMC1 retired instructions. All other counters
-//!   preserve writes but refuse counting enables without qualified events.
+//! - PMC0 counts cycles and PMC1 retired instructions. M1/M2 also count
+//!   source-qualified programmable events (`events`): NONE and active
+//!   cycles on PMC2–9, retired instructions on PMC7. Other enabled pairs
+//!   refuse; raw counter writes are independent of event selection.
 //!   Counters wrap at their configured width, with bit47 (M1) or bit63
 //!   (M2–M6) as overflow; PMSR uses the selected layout's slot mapping.
 //! - PMCR0 enables counting (bits 0-7, 32-33 for PMC8 and PMC9), selects the
@@ -31,15 +33,17 @@
 //! counters). The reset values are not documented; they are taken as 0,
 //! under which nothing counts before software programs the monitor.
 //!
-//! Programmable event counting, PC capture, EL0 access, other PMI modes,
+//! Unqualified programmable events, PC capture, EL0 access, other PMI modes,
 //! instruction matching (OPMAT, OPMSK) and the PMCR2-4 controls are not
-//! modelled: a write that enables one stops. PMESR0 and PMESR1 store their
-//! selectors within the layout's qualified field masks, which no counter
-//! here uses. M6's new controls refuse every access until their effects
+//! modelled: a write that enables one stops. PMESR0 and PMESR1 store
+//! selectors within the layout's field masks. An enabled event/slot must
+//! have qualified semantics; unsupported reconfiguration refuses atomically. M6's new controls refuse every access until their effects
 //! are independently qualified.
 use super::Chip;
 
+mod events;
 mod layout;
+use events::Event;
 use layout::Layout;
 use stela_compiler::aarch64::system::registers::Encoding;
 
@@ -129,7 +133,6 @@ const PMCR0_USER_ACCESS: u64 = 1 << 30;
 const PMCR0_KNOWN: u64 =
     PMCR0_COUNT | PMCR0_INTGEN | PMCR0_PMAI | PMCR0_PMI | PMCR0_PC_CAPTURE | PMCR0_USER_ACCESS;
 /// The counters this machine counts for: PMC0 and PMC1.
-const PMCR0_FIXED: u64 = 0b11;
 const PMCR1_KNOWN: u64 = 0xff << 8 | 0xff << 16 | 0b11 << 40 | 0b11 << 48;
 
 /// Bit `n` of a PMCR0 or PMCR1 field whose PMC8 and PMC9 bits sit at
@@ -165,8 +168,8 @@ pub struct Pmu {
     counters: [u64; layout::MAX_COUNTERS],
     synced_count: u64,
     synced_retired: u64,
-    /// Cycles short of the next one, in 1/`frequency` cycle units.
-    remainder: u64,
+    /// Each cycle counter's fraction, in 1/`frequency` cycle units.
+    remainder: [u64; layout::MAX_COUNTERS],
     context: Context,
     /// The system count and retired instruction count at which the PMI
     /// asserts, while the context and controls hold.
@@ -206,7 +209,7 @@ impl Pmu {
             counters: [0; layout::MAX_COUNTERS],
             synced_count: 0,
             synced_retired: 0,
-            remainder: 0,
+            remainder: [0; layout::MAX_COUNTERS],
             context: Context {
                 el: 2,
                 waiting: false,
@@ -263,6 +266,31 @@ impl Pmu {
         }
     }
 
+    fn event_with(&self, n: usize, selectors: &[Option<u64>; 2]) -> Option<Event> {
+        match n {
+            CYCLES => Some(Event::Cycles),
+            INSTRUCTIONS => Some(Event::Instructions),
+            _ => self.layout.events.programmable(n, selectors),
+        }
+    }
+
+    fn event(&self, n: usize) -> Option<Event> {
+        self.event_with(n, &self.pmesr)
+    }
+
+    fn validate_events(
+        &self,
+        control: u64,
+        selectors: &[Option<u64>; 2],
+    ) -> Result<(), &'static str> {
+        for n in 2..COUNTERS {
+            if control & counter_bit(0, 32, n) != 0 && self.event_with(n, selectors).is_none() {
+                return Err("programmable CPMU event/slot pair is not source-qualified");
+            }
+        }
+        Ok(())
+    }
+
     /// Whether counter `n` counts in `context`.
     fn counts(&self, n: usize, context: Context) -> bool {
         let filter = if context.el == 0 {
@@ -272,12 +300,14 @@ impl Pmu {
         };
         self.pmcr0 & counter_bit(0, 32, n) != 0
             && self.pmcr1 & filter != 0
-            && !(n == CYCLES && context.waiting)
+            && !(self.event(n) == Some(Event::Cycles) && context.waiting)
     }
 
-    /// Whether the counts depend on the time: PMC0 is enabled.
+    /// Whether an enabled event depends on the core clock.
     pub fn timed(&self) -> bool {
-        self.pmcr0 & counter_bit(0, 32, CYCLES) != 0
+        (0..COUNTERS).any(|n| {
+            self.pmcr0 & counter_bit(0, 32, n) != 0 && self.event(n) == Some(Event::Cycles)
+        })
     }
 
     /// Count up to the system count `now` and `retired` instructions in the
@@ -285,16 +315,22 @@ impl Pmu {
     fn advance(&mut self, now: u64, retired: u64) {
         let ticks = now.saturating_sub(self.synced_count);
         let instructions = retired.wrapping_sub(self.synced_retired);
-        if self.counts(CYCLES, self.context) {
-            let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
-            let frequency = u128::from(self.frequency);
-            self.counters[CYCLES] = self.counters[CYCLES].wrapping_add((scaled / frequency) as u64)
-                & self.layout.width.mask();
-            self.remainder = (scaled % frequency) as u64;
-        }
-        if self.counts(INSTRUCTIONS, self.context) {
-            self.counters[INSTRUCTIONS] =
-                self.counters[INSTRUCTIONS].wrapping_add(instructions) & self.layout.width.mask();
+        for n in 0..COUNTERS {
+            if !self.counts(n, self.context) {
+                continue;
+            }
+            let increment = match self.event(n) {
+                Some(Event::Cycles) => {
+                    let scaled =
+                        u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder[n]);
+                    let frequency = u128::from(self.frequency);
+                    self.remainder[n] = (scaled % frequency) as u64;
+                    (scaled / frequency) as u64
+                }
+                Some(Event::Instructions) => instructions,
+                Some(Event::None) | None => 0,
+            };
+            self.counters[n] = self.counters[n].wrapping_add(increment) & self.layout.width.mask();
         }
         self.synced_count = self.synced_count.max(now);
         self.synced_retired = retired;
@@ -313,35 +349,40 @@ impl Pmu {
         let armed = |n: usize| n < COUNTERS && fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
         self.asserted = (0..self.counter_count())
             .any(|n| armed(n) && self.counters[n] & self.layout.width.overflow() != 0);
-        self.cycle_deadline = (armed(CYCLES) && self.counts(CYCLES, self.context))
-            .then(|| {
-                let needed = u128::from(
-                    self.layout
-                        .width
-                        .overflow()
-                        .wrapping_sub(self.counters[CYCLES])
-                        & self.layout.width.mask(),
-                );
-                let scaled = (needed * u128::from(self.frequency))
-                    .saturating_sub(u128::from(self.remainder));
-                let ticks = scaled.div_ceil(u128::from(self.clock));
-                u64::try_from(ticks)
-                    .ok()
-                    .and_then(|ticks| self.synced_count.checked_add(ticks))
-            })
-            .flatten();
-        self.instruction_deadline = (armed(INSTRUCTIONS)
-            && self.counts(INSTRUCTIONS, self.context))
-        .then(|| {
-            self.synced_retired.checked_add(
-                self.layout
-                    .width
-                    .overflow()
-                    .wrapping_sub(self.counters[INSTRUCTIONS])
-                    & self.layout.width.mask(),
-            )
-        })
-        .flatten();
+        self.cycle_deadline = None;
+        self.instruction_deadline = None;
+        for n in 0..COUNTERS {
+            if !armed(n) || !self.counts(n, self.context) {
+                continue;
+            }
+            let needed = self.layout.width.overflow().wrapping_sub(self.counters[n])
+                & self.layout.width.mask();
+            match self.event(n) {
+                Some(Event::Cycles) => {
+                    let scaled = (u128::from(needed) * u128::from(self.frequency))
+                        .saturating_sub(u128::from(self.remainder[n]));
+                    let ticks = scaled.div_ceil(u128::from(self.clock));
+                    let deadline = u64::try_from(ticks)
+                        .ok()
+                        .and_then(|ticks| self.synced_count.checked_add(ticks));
+                    if let Some(deadline) = deadline {
+                        self.cycle_deadline = Some(
+                            self.cycle_deadline
+                                .map_or(deadline, |old| old.min(deadline)),
+                        );
+                    }
+                }
+                Some(Event::Instructions) => {
+                    if let Some(deadline) = self.synced_retired.checked_add(needed) {
+                        self.instruction_deadline = Some(
+                            self.instruction_deadline
+                                .map_or(deadline, |old| old.min(deadline)),
+                        );
+                    }
+                }
+                Some(Event::None) | None => {}
+            }
+        }
     }
 
     /// Whether the PMI is asserted at system count `now` with `retired`
@@ -367,14 +408,15 @@ impl Pmu {
                 return false;
             }
             let increment = if self.counts(n, self.context) {
-                match n {
-                    CYCLES => {
+                match self.event(n) {
+                    Some(Event::Cycles) => {
                         let ticks = now.saturating_sub(self.synced_count);
-                        ((u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder))
+                        ((u128::from(ticks) * u128::from(self.clock)
+                            + u128::from(self.remainder[n]))
                             / u128::from(self.frequency)) as u64
                     }
-                    INSTRUCTIONS => retired.wrapping_sub(self.synced_retired),
-                    _ => 0,
+                    Some(Event::Instructions) => retired.wrapping_sub(self.synced_retired),
+                    Some(Event::None) | None => 0,
                 }
             } else {
                 0
@@ -447,11 +489,7 @@ impl Pmu {
                 if value & !PMCR0_KNOWN != 0 {
                     return Err("PMCR0 bit without public description");
                 }
-                if value & PMCR0_COUNT & !PMCR0_FIXED != 0 {
-                    return Err(
-                        "PMCR0 enables a programmable counter; event counting is not modelled",
-                    );
-                }
+                self.validate_events(value, &self.pmesr)?;
                 if !matches!(value & PMCR0_INTGEN, 0 | PMCR0_INTGEN_FIQ) {
                     return Err("PMCR0 PMI generation other than FIQ");
                 }
@@ -486,7 +524,10 @@ impl Pmu {
                         "CPMU event selector field is not source-qualified for this layout",
                     );
                 }
-                self.pmesr[usize::from(encoding == PMESR1)] = Some(value);
+                let mut selectors = self.pmesr;
+                selectors[usize::from(encoding == PMESR1)] = Some(value);
+                self.validate_events(self.pmcr0, &selectors)?;
+                self.pmesr = selectors;
             }
             PMSR | PC_CAPTURE => return Err("write of a performance monitor status register"),
             _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
@@ -803,6 +844,200 @@ mod tests {
         assert_eq!(pmu.read(PMC[1], 200, 100, USER), Ok(0));
         pmu.sync(200, 100, KERNEL);
         assert_eq!(pmu.read(PMC[1], 200, 103, KERNEL), Ok(3));
+    }
+
+    fn programmed(chip: Chip, clock: u64, selectors: [u64; 2], control: u64, filter: u64) -> Pmu {
+        let mut pmu = Pmu::for_chip(chip, clock, FREQUENCY).unwrap();
+        pmu.write(PMCR1, filter, 0, 0, KERNEL).unwrap();
+        pmu.write(PMCR1_ALTERNATE, filter, 0, 0, KERNEL).unwrap();
+        pmu.write(PMESR0, selectors[0], 0, 0, KERNEL).unwrap();
+        pmu.write(PMESR1, selectors[1], 0, 0, KERNEL).unwrap();
+        pmu.write(PMCR0, control, 0, 0, KERNEL).unwrap();
+        pmu
+    }
+
+    #[test]
+    fn programmed_cycles_cover_every_qualified_slot_and_none_is_explicit() {
+        // Original counter fields: all ten counts, EL0 and kernel filters.
+        const COUNTS: u64 = 0xff | 3 << 32;
+        const FILTERS: u64 = 0xffff00 | 3 << 40 | 3 << 48;
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let mut pmu = programmed(chip, 10_000_000, [0x02020202; 2], COUNTS, FILTERS);
+            assert!(pmu.timed());
+            for (slot, encoding) in PMC.iter().copied().enumerate() {
+                assert_eq!(
+                    pmu.read(encoding, 24, 7, KERNEL),
+                    Ok(if slot == 1 { 7 } else { 10 })
+                );
+            }
+            // Only PMC2 changes to the explicitly named NONE event.
+            pmu.write(PMESR0, 0x02020200, 24, 7, KERNEL).unwrap();
+            assert_eq!(pmu.read(PMC[2], 48, 10, KERNEL), Ok(10));
+            assert_eq!(pmu.read(PMC[3], 48, 10, KERNEL), Ok(20));
+            assert_eq!(pmu.read(PMC[8], 48, 10, KERNEL), Ok(20));
+            assert_eq!(pmu.read(PMC[9], 48, 10, KERNEL), Ok(20));
+            pmu.write(PMESR0, 0, 48, 10, KERNEL).unwrap();
+            pmu.write(PMESR1, 0, 48, 10, KERNEL).unwrap();
+            pmu.write(PMCR0, COUNTS & !3, 48, 10, KERNEL).unwrap();
+            assert!(!pmu.timed(), "NONE is not a clock event");
+            let before: Vec<_> = PMC
+                .iter()
+                .map(|&e| pmu.read(e, 48, 10, KERNEL).unwrap())
+                .collect();
+            for (slot, encoding) in PMC.iter().copied().enumerate() {
+                assert_eq!(pmu.read(encoding, 240, 100, KERNEL), Ok(before[slot]));
+            }
+        }
+    }
+
+    #[test]
+    fn programmed_instruction_event_counts_only_on_its_source_affinity() {
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let overflow = if chip == Chip::AppleM1 {
+                1 << 47
+            } else {
+                1 << 63
+            };
+            // PMC7's selector is PMESR1[15:8], its EL0 filter bit15,
+            // counting bit7 and PMI bit19; PMC0/1 remain disabled.
+            let mut pmu = programmed(chip, CLOCK, [0, 0x8c00], 0x80 | 1 << 19 | 0x400, 1 << 15);
+            assert!(!pmu.timed());
+            pmu.sync(0, 0, USER);
+            assert_eq!(pmu.read(PMC[7], 24, 12, USER), Ok(12));
+            assert_eq!(pmu.read(PMC[1], 24, 12, USER), Ok(0));
+            pmu.sync(24, 12, KERNEL);
+            assert_eq!(pmu.read(PMC[7], 48, 20, KERNEL), Ok(12));
+            pmu.write(PMC[7], overflow - 2, 48, 20, KERNEL).unwrap();
+            pmu.sync(48, 20, USER);
+            assert_eq!(pmu.deadline(), None);
+            assert!(!pmu.asserted(48, 21));
+            assert!(pmu.asserted(48, 22));
+            assert_eq!(pmu.read(PMSR, 48, 22, USER), Ok(1 << 7));
+            assert_eq!(pmu.read(PMC[7], 48, 22, USER), Ok(overflow));
+        }
+    }
+
+    #[test]
+    fn programmed_cycle_fractions_and_deadlines_follow_each_slots_mode() {
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let overflow = if chip == Chip::AppleM1 {
+                1 << 47
+            } else {
+                1 << 63
+            };
+            let mut pmu = programmed(
+                chip,
+                10_000_000,
+                [2, 2 << 16],
+                4 | 1 << 32 | 1 << 14 | 1 << 44 | 0x400,
+                1 << 10 | 1 << 48,
+            );
+            pmu.write(PMC[2], overflow - 1, 0, 0, KERNEL).unwrap();
+            pmu.write(PMC[8], overflow - 2, 0, 0, KERNEL).unwrap();
+            assert_eq!(pmu.deadline(), Some(5));
+            pmu.sync(2, 0, USER);
+            assert_eq!(pmu.deadline(), Some(5));
+            assert_eq!(pmu.read(PMSR, 4, 0, USER), Ok(0));
+            assert!(!pmu.asserted(4, 0));
+            assert!(pmu.asserted(5, 0));
+            pmu.sync(5, 0, KERNEL);
+            assert_eq!(pmu.read(PMC[2], 5, 0, KERNEL), Ok(overflow));
+            assert_eq!(pmu.read(PMC[8], 5, 0, KERNEL), Ok(overflow - 2));
+            pmu.write(PMC[2], 0, 5, 0, KERNEL).unwrap();
+            assert_eq!(pmu.deadline(), Some(8));
+            assert!(!pmu.asserted(7, 0));
+            assert!(pmu.asserted(8, 0));
+            assert_eq!(pmu.read(PMC[8], 8, 0, KERNEL), Ok(overflow));
+            assert_eq!(pmu.read(PMC[2], 8, 0, KERNEL), Ok(0));
+            // Every cycle event stops in a clock-gated wait.
+            pmu.write(PMC[8], 0, 8, 0, KERNEL).unwrap();
+            pmu.sync(
+                8,
+                0,
+                Context {
+                    el: 2,
+                    waiting: true,
+                },
+            );
+            assert_eq!(pmu.deadline(), None);
+            assert_eq!(pmu.read(PMC[8], 100, 0, KERNEL), Ok(0));
+        }
+    }
+
+    #[test]
+    fn programmed_cycle_pmis_cover_all_enable_fields_and_clear_after_full_wrap() {
+        // Slot, count-enable bit, kernel-filter bit, PMI-enable bit. High
+        // fields for PMC8/9 are explicit source coordinates, not loop-derived.
+        let slots = [
+            (2, 4, 1 << 18, 1 << 14),
+            (3, 8, 1 << 19, 1 << 15),
+            (4, 16, 1 << 20, 1 << 16),
+            (5, 32, 1 << 21, 1 << 17),
+            (6, 64, 1 << 22, 1 << 18),
+            (7, 128, 1 << 23, 1 << 19),
+            (8, 1 << 32, 1 << 48, 1 << 44),
+            (9, 1 << 33, 1 << 49, 1 << 45),
+        ];
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let overflow = if chip == Chip::AppleM1 {
+                1 << 47
+            } else {
+                1 << 63
+            };
+            let mask = if chip == Chip::AppleM1 {
+                (1 << 48) - 1
+            } else {
+                u64::MAX
+            };
+            for (slot, count, filter, pmi) in slots {
+                let mut pmu = programmed(
+                    chip,
+                    10_000_000,
+                    [0x02020202; 2],
+                    count | pmi | 0x400,
+                    filter,
+                );
+                pmu.write(PMC[slot], overflow - 1, 0, 0, KERNEL).unwrap();
+                assert_eq!(pmu.deadline(), Some(3));
+                assert!(!pmu.asserted(2, 0));
+                assert!(pmu.asserted(3, 0));
+                assert_eq!(pmu.read(PMSR, 3, 0, KERNEL), Ok(1 << slot));
+                assert_eq!(pmu.read(PMC[slot], 3, 0, KERNEL), Ok(overflow));
+                pmu.write(PMC[slot], mask, 3, 0, KERNEL).unwrap();
+                assert!(!pmu.asserted(6, 0));
+                assert_eq!(pmu.read(PMC[slot], 6, 0, KERNEL), Ok(0));
+                assert_eq!(pmu.read(PMSR, 6, 0, KERNEL), Ok(0));
+            }
+        }
+    }
+
+    #[test]
+    fn enabled_selector_and_affinity_refusals_are_atomic_and_never_inherit_generations() {
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let mut pmu = programmed(chip, CLOCK, [2, 0], 4, 1 << 18);
+            // Unsupported INST_ALL on PMC2 cannot replace active cycles.
+            assert!(pmu.write(PMESR0, 0x8c, 0, 0, KERNEL).is_err());
+            assert_eq!(pmu.read(PMESR0, 0, 0, KERNEL), Ok(2));
+            // Disabled fields may be staged, but enabling an unknown event
+            // refuses without changing the previous count enables.
+            pmu.write(PMESR0, 0xff02, 0, 0, KERNEL).unwrap();
+            assert!(pmu.write(PMCR0, 12, 0, 0, KERNEL).is_err());
+            assert_eq!(pmu.read(PMCR0, 0, 0, KERNEL), Ok(4));
+            assert_eq!(pmu.read(PMESR0, 0, 0, KERNEL), Ok(0xff02));
+        }
+        for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            let selector = match chip {
+                Chip::AppleM3 => 2,
+                Chip::AppleM4 | Chip::AppleM5 => 0x11,
+                _ => 0,
+            };
+            let mut pmu = Pmu::for_chip(chip, CLOCK, FREQUENCY).unwrap();
+            pmu.write(PMESR0, selector, 0, 0, KERNEL).unwrap();
+            pmu.write(PMCR1, 1 << 18, 0, 0, KERNEL).unwrap();
+            pmu.write(PMCR1_ALTERNATE, 1 << 18, 0, 0, KERNEL).unwrap();
+            assert!(pmu.write(PMCR0, 4, 0, 0, KERNEL).is_err());
+            assert_eq!(pmu.read(PMCR0, 0, 0, KERNEL), Ok(0));
+        }
     }
 
     #[test]

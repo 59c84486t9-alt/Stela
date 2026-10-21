@@ -1,7 +1,7 @@
 //! Source-qualified CPMU coordinates, independent of PE clocks and events.
 //! H13–H17 definitions and original 26A434 consumers are pinned in
 //! `docs/research/core-pmu.md`; M6 uses its own original accessor tables.
-use super::{Chip, Encoding, Width, monitor};
+use super::{Chip, Encoding, Width, events, monitor};
 
 pub(super) const MAX_COUNTERS: usize = 15;
 
@@ -10,6 +10,7 @@ pub(super) struct Layout {
     pub width: Width,
     pub counters: &'static [Encoding],
     pub selectors: u64,
+    pub events: events::Set,
     pub unqualified_controls: &'static [Encoding],
 }
 
@@ -54,18 +55,21 @@ impl Layout {
                 width: Width::Bits48,
                 counters: &super::PMC,
                 selectors: u32::MAX as u64,
+                events: events::Set::M1M2,
                 unqualified_controls: &[],
             },
             Chip::AppleM2 => Self {
                 width: Width::Bits64,
                 counters: &super::PMC,
                 selectors: u32::MAX as u64,
+                events: events::Set::M1M2,
                 unqualified_controls: &[],
             },
             Chip::AppleM3 | Chip::AppleM4 | Chip::AppleM5 => Self {
                 width: Width::Bits64,
                 counters: &super::PMC,
                 selectors: u64::MAX,
+                events: events::Set::Unqualified,
                 unqualified_controls: &[],
             },
             Chip::AppleM6 => Self {
@@ -74,6 +78,7 @@ impl Layout {
                 // Original mac18g's PMESR writer writes zero to both
                 // registers. No programmable event selector is qualified.
                 selectors: 0,
+                events: events::Set::Unqualified,
                 unqualified_controls: &M6_UNQUALIFIED,
             },
         }
