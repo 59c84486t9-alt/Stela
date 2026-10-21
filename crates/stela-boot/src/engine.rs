@@ -1013,8 +1013,14 @@ fn devices<'f>(
             .collect();
         let irq = AicInput::new(0, dart.irq as u16);
         let placed = devices
-            .add_dart_group(&ranges, usize::from(dart.streams), Some(irq), dart.apf)
-            .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
+            .add_dart_group_for_profile(
+                dart.profile,
+                &ranges,
+                usize::from(dart.streams),
+                Some(irq),
+                dart.apf,
+            )
+            .map_err(|error| alloc::format!("DART placement: {error}"))?;
         if let Some((physical, bytes)) = dart.smmu {
             devices
                 .add_dart_smmu(placed[0], Range { physical, bytes })

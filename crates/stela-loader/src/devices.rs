@@ -12,16 +12,16 @@
 //! runs. darwin-vm `dt_fixup.py` (MIT, commit `edfc1943`) boots the same
 //! SPTM kernels to a shell in QEMU after removing `compatible` the same way.
 //!
-//! A modeled DART (`dart,t8110`) presents only the streams visible devices
+//! A modeled native DART presents only the streams visible devices
 //! use: an `iommu-mapper` child stays only while a device that keeps its
 //! `compatible` names it as `iommu-parent`, and the DART itself only while
 //! one of its mappers stays. SPTM initializes every DART the tree shows, and
 //! XNU starts an IODARTMapper per mapper; a DART no visible device reaches
 //! would only be programmed for clients the machine does not have.
 //! A modeled device whose `iommu-parent` names a mapper of a DART the
-//! machine does not model (`dart,t8020` on J274AP, `dart,t6000` on the M1
-//! Pro and Max) goes too, before its streams are counted: its DMA would have
-//! no translation to reach RAM through, so its driver must not bind.
+//! machine does not model (including unqualified legacy filter, remap or
+//! routing variants) goes too, before its streams are counted: its DMA would
+//! have no translation to reach RAM through, so its driver must not bind.
 //!
 //! A selection of a hidden device goes with it: XNU `pe_serial.c` (`xnu-12377`)
 //! takes `/defaults` `serial-device`, a phandle, as its console and panics
@@ -129,6 +129,29 @@ fn named(node: &Node, model: &str) -> bool {
     compatibles(node).any(|name| name == model)
 }
 
+fn is_dart(node: &Node) -> bool {
+    compatibles(node).any(|name| name.starts_with("dart,"))
+}
+
+fn modeled_dart(node: &Node) -> bool {
+    use stela_runtime::platform::apple::dart::Profile;
+    let Some(profile) = node.property(COMPATIBLE)
+        .and_then(|property| Profile::from_compatible(&property.value))
+    else {
+        return false;
+    };
+    // Properties alone do not select which legacy translation instance a
+    // mapper masters. Keep the same explicit routing gate as SoC placement.
+    if profile != Profile::T8110
+        && node.property("instance").is_some_and(|property| property.value.len() > 12)
+        && node.children.iter().any(|child| named(child, soc::IOMMU_MAPPER))
+    {
+        return false;
+    }
+    compatibles(node)
+        .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
+}
+
 /// A modeled device that is not part of an IOMMU.
 fn modeled_client(node: &Node) -> bool {
     // Only NOR-backed controllers have a modeled SPI slave. Other SPI
@@ -136,7 +159,7 @@ fn modeled_client(node: &Node) -> bool {
     if named(node, soc::SPI) && !node.children.iter().any(|child| named(child, soc::NOR)) {
         return false;
     }
-    !named(node, soc::DART)
+    !is_dart(node)
         && !named(node, soc::IOMMU_MAPPER)
         && compatibles(node)
             .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
@@ -183,8 +206,8 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
         node.property(PHANDLE)
             .and_then(|p| p.as_u32())
             .is_some_and(|p| parents.contains(&p))
-    } else if named(node, soc::DART) {
-        node.children
+    } else if is_dart(node) {
+        modeled_dart(node) && node.children
             .iter()
             .any(|child| kept_mapper(child, parents))
     } else if named(node, soc::SART) {
@@ -202,7 +225,7 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
 /// machine does not model.
 fn unmodeled_mappers(node: &Node, mappers: &mut Vec<u32>) {
     for child in &node.children {
-        if !named(node, soc::DART)
+        if !modeled_dart(node)
             && named(child, soc::IOMMU_MAPPER)
             && let Some(phandle) = child.property(PHANDLE).and_then(|p| p.as_u32())
         {
@@ -1407,8 +1430,56 @@ mod tests {
         assert!(tree.root.property(SECURE_ROOT_PREFIX).is_some());
     }
 
-    /// J274AP's AES engine names `mapper-aes` (0x8a) of a `dart,t8020`,
-    /// a DART the machine does not model: the engine goes with it.
+    #[test]
+    fn native_legacy_dart_preparation_preserves_qualified_mapper_dependencies_only() {
+        for compatible in [b"dart,t8020\0".as_slice(), b"dart,t6000\0"] {
+            let mut engine = aes(b"aes,s8000\0");
+            engine.set_property(IOMMU_PARENT, 0x8au32.to_le_bytes().to_vec()).unwrap();
+            let mut stream = mapper("mapper-aes", 0x8a);
+            stream.set_property("reg", 0u32.to_le_bytes().to_vec()).unwrap();
+            let mut dart = node("dart-sio", Some(compatible), vec![stream]);
+            for (key, bytes) in [
+                ("instance", b"TRADDART\0\0\0\0".to_vec()),
+                ("reg", [0x235004000u64, 0x4000].into_iter().flat_map(u64::to_le_bytes).collect()),
+                ("page-size", 0x4000u32.to_le_bytes().to_vec()),
+                ("sids", 1u32.to_le_bytes().to_vec()),
+                ("vm-base", 0u32.to_le_bytes().to_vec()),
+            ] {
+                dart.set_property(key, bytes).unwrap();
+            }
+            let original = DeviceTree {
+                root: secure_root(node("device-tree", None, vec![
+                    node("arm-io", None, vec![dart, engine]),
+                ])),
+            };
+            let mut prepared = original.clone();
+            hide_unmodeled(&mut prepared);
+            for path in ["/arm-io/dart-sio", "/arm-io/dart-sio/mapper-aes", "/arm-io/aes"] {
+                assert!(prepared.property(path, COMPATIBLE).is_some(), "{path}");
+            }
+            for key in ["instance", "reg", "sids", "vm-base"] {
+                assert_eq!(prepared.property("/arm-io/dart-sio", key), original.property("/arm-io/dart-sio", key));
+            }
+            for unsupported in ["remap", "routing"] {
+                let mut prepared = original.clone();
+                let dart = prepared.node_mut("/arm-io/dart-sio").unwrap();
+                if unsupported == "remap" {
+                    dart.set_property("remap", vec![0, 1, 0, 0]).unwrap();
+                } else {
+                    dart.set_property("instance", [b"TRADDART\0\0\0\0".as_slice(), b"TRADDARTBLK\0"].concat()).unwrap();
+                    dart.set_property("reg", [0x235004000u64, 0x4000, 0x235008000, 0x4000].into_iter().flat_map(u64::to_le_bytes).collect()).unwrap();
+                }
+                hide_unmodeled(&mut prepared);
+                for path in ["/arm-io/dart-sio", "/arm-io/dart-sio/mapper-aes", "/arm-io/aes"] {
+                    assert!(prepared.property(path, COMPATIBLE).is_none(), "{unsupported}: {path}");
+                }
+                assert!(prepared.property("/arm-io/dart-sio", "instance").is_some());
+            }
+        }
+    }
+
+    /// A legacy family without the required native topology/page contract
+    /// remains unmodeled, and its DMA clients go with it.
     #[test]
     fn a_device_behind_an_unmodeled_dart_is_hidden_with_it() {
         let mut engine = aes(b"aes,s8000\0");

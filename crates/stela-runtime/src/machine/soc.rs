@@ -26,6 +26,11 @@ use crate::platform::apple::{
 };
 use alloc::{format, string::String, vec::Vec};
 
+mod dart_topology;
+use dart_topology::iommus;
+#[cfg(test)]
+use dart_topology::iommu;
+
 mod handoff;
 mod power_resources;
 mod topology;
@@ -925,7 +930,8 @@ pub const UART: &str = "uart-1,samsung";
 pub const WATCHDOG: &str = "wdt,s5l8960x";
 /// The AIC versions the engine models (`platform::apple::aic1` and `aic`).
 const AICS: [&str; 3] = ["aic,1", "aic,2", "aic,3"];
-/// The `compatible` of the DART the engine models (`platform::apple::dart`).
+/// The modern DART compatible; native legacy families are selected through
+/// [`dart::Profile::from_compatible`], with separate optional-feature gates.
 pub const DART: &str = "dart,t8110";
 /// The `compatible` of a DART child naming one client's stream (its `reg`),
 /// which XNU's IODARTMapper binds and clients name as `iommu-parent`.
@@ -1234,7 +1240,6 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
     [
         UART,
         WATCHDOG,
-        DART,
         IOMMU_MAPPER,
         AES,
         MCC,
@@ -1254,6 +1259,12 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         DISPEXT,
     ]
     .contains(&name)
+        || dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
+            property("compatible").is_none_or(|bytes| {
+                dart::Profile::from_compatible(bytes) == Some(profile)
+            }) && (profile == dart::Profile::T8110
+                || dart_topology::legacy_requirements(profile, &property).is_ok())
+        })
         || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
         || ATC_PHY_LAYOUTS.iter().any(|&(layout, _)| layout == name)
@@ -1414,7 +1425,7 @@ pub struct Board {
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
     pub memory_controller: Option<MemoryController>,
-    /// Every `/arm-io` `dart,t8110`.
+    /// Every supported native DART group, preserving DT traversal order.
     pub darts: Vec<Iommu>,
     /// `/arm-io/aes`, an `aes,s8000`, when the DeviceTree keeps it.
     pub aes: Option<AesEngine>,
@@ -2184,26 +2195,29 @@ pub struct PtdBank {
 /// 16-byte name.
 const PTD_RANGE: usize = 32;
 
-/// One numbered TRAD instance. Owners are retained as the DT's eight bytes,
-/// not used as application or stream-selection keys. `AppleT8110DART::
-/// _dartSetupInstance` (26A434 KC file 0x2f12884..0x2f12918) checks the
-/// instance number and maps that numbered `reg` entry.
+/// One translation instance, retaining its native logical number and the
+/// physical `reg` ordinal. Legacy 12-byte descriptors contain kind+owner;
+/// their logical number counts translation occurrences. Modern 16-byte
+/// descriptors additionally encode the logical number. Owner bytes never
+/// select application behavior or DMA routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DartInstance {
     pub physical: u64,
     pub bytes: u64,
     pub number: u32,
+    pub reg_index: usize,
     pub owner: [u8; 8],
 }
 
 /// A DT DART group, its independently programmed TRAD windows, mapper stream
-/// IDs and optional APF. `sid` is a list of u32 SIDs, not one stream per
-/// instance or a bitmap (`_dartSetup`, KC 0x2f11e20..0x2f11e38). `remap`
+/// IDs and optional APF. Modern `sid` is a list of u32 SIDs; legacy `sids`
+/// is a bitmap. Neither selects a translation instance. Modern `remap`
 /// contains byte source/destination pairs, with 0/0 padding ignored
 /// (0x2f11864..0x2f11938). They describe routing, not permission to bypass
 /// the DART. Per-instance DMA selection remains the bus master's contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Iommu {
+    pub profile: dart::Profile,
     pub instances: Vec<DartInstance>,
     pub streams: u16,
     pub irq: u32,
@@ -2992,205 +3006,6 @@ fn name_of(node: &Node<'_>) -> String {
     node.property("name")
         .and_then(|name| core::str::from_utf8(name).ok())
         .map_or_else(|| "?".into(), |name| name.trim_end_matches('\0').into())
-}
-
-/// Every visible DART group. Multiple numbered TRAD ranges retain separate
-/// register state; SMMU and mixed multi-TRAD/APF layouts remain unsupported.
-fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Vec<Iommu>, String> {
-    let mut found = Vec::new();
-    let mut failure = None;
-    io.visit(&mut |node| {
-        if failure.is_some() || !node.compatible(DART) {
-            return;
-        }
-        match iommu(node, translate) {
-            Ok(iommu) => found.push(iommu),
-            Err(error) => failure = Some(error),
-        }
-    })
-    .ok_or("DeviceTree walk failed")?;
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(found),
-    }
-}
-
-fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iommu, String> {
-    let path = format!("/arm-io/{}", name_of(node));
-    let reg = node.pairs("reg").unwrap_or_default();
-    if node
-        .property("reg")
-        .is_none_or(|bytes| bytes.len() != reg.len() * 16)
-    {
-        return Err(format!("{path} has incomplete reg pairs"));
-    }
-    let descriptors = node.property("instance").unwrap_or_default();
-    if descriptors.is_empty()
-        || !descriptors.len().is_multiple_of(16)
-        || descriptors.len() / 16 != reg.len()
-    {
-        return Err(format!(
-            "{path} instance descriptors do not match its reg entries"
-        ));
-    }
-    let mut instances = Vec::new();
-    let mut apf = None;
-    let mut smmu = None;
-    for (descriptor, &(offset, bytes)) in descriptors.as_chunks::<16>().0.iter().zip(&reg) {
-        let number = u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number"));
-        match &descriptor[..4] {
-            b"TRAD" if apf.is_none() && number as usize == instances.len() => {
-                let physical = translate(offset)
-                    .filter(|at| {
-                        at.is_multiple_of(dart::DAPF_BYTES)
-                            && bytes == dart::DAPF_BYTES
-                            && offset.checked_add(bytes - 1).and_then(translate)
-                                == at.checked_add(bytes - 1)
-                    })
-                    .ok_or_else(|| {
-                        format!("{path} DART instance is not one translated aligned 16 KiB block")
-                    })?;
-                if instances
-                    .iter()
-                    .any(|i: &DartInstance| i.physical == physical)
-                {
-                    return Err(format!("{path} has duplicate DART register windows"));
-                }
-                instances.push(DartInstance {
-                    physical,
-                    bytes,
-                    number,
-                    owner: descriptor[8..16].try_into().expect("eight-byte owner"),
-                });
-            }
-            b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() && smmu.is_none() => {
-                apf = Some((offset, bytes))
-            }
-            b"UMMS" if !instances.is_empty() && number == 0 && apf.is_none() && smmu.is_none() => {
-                let physical = translate(offset)
-                    .filter(|at| {
-                        at.is_multiple_of(dart::DAPF_BYTES)
-                            && bytes == dart::DAPF_BYTES
-                            && offset.checked_add(bytes - 1).and_then(translate)
-                                == at.checked_add(bytes - 1)
-                    })
-                    .ok_or_else(|| {
-                        format!("{path} SMMU instance is not one translated aligned 16 KiB block")
-                    })?;
-                smmu = Some((physical, bytes));
-            }
-            _ => {
-                return Err(format!(
-                    "{path} has unsupported instance kinds, numbering or APF topology"
-                ));
-            }
-        }
-    }
-    if instances.is_empty() {
-        return Err(format!("{path} has no TRAD instance"));
-    }
-    let apf = match apf {
-        None => None,
-        Some((filter, filter_bytes)) => {
-            let at = translate(filter)
-                .filter(|at| {
-                    at.is_multiple_of(dart::DAPF_BYTES) && filter_bytes == dart::DAPF_BYTES
-                })
-                .ok_or_else(|| format!("{path} APF is not one aligned 16 KiB block"))?;
-            let slices = node
-                .first_u32("n-apfs-instance-0")
-                .and_then(|count| usize::try_from(count).ok())
-                .filter(|&count| count > 0 && count as u64 * 0x40 <= dart::DAPF_BYTES)
-                .ok_or_else(|| format!("{path} has no n-apfs-instance-0 slice count"))?;
-            Some((at, slices))
-        }
-    };
-    let streams = node
-        .first_u32("sid-count")
-        .and_then(|count| u16::try_from(count).ok())
-        .filter(|&count| count > 0 && count <= 256)
-        .ok_or_else(|| format!("{path} has no sid-count of at most 256"))?;
-    let irq = node
-        .first_u32("interrupts")
-        .ok_or_else(|| format!("{path} has no interrupts"))?;
-    let clock_gates = power_resources::gate_ids(node, &path, "clock-gates")?;
-    let power_gates = power_resources::gate_ids(node, &path, "power-gates")?;
-    let retention = node.property("retention").is_some();
-    if retention && node.property("no-sleep").is_some() {
-        return Err(format!(
-            "{path} retention and no-sleep are mutually exclusive"
-        ));
-    }
-    let mut mappers = Vec::new();
-    node.visit(&mut |child| {
-        if child.compatible(IOMMU_MAPPER)
-            && let (Some(phandle), Some(stream)) =
-                (child.first_u32("AAPL,phandle"), child.first_u32("reg"))
-        {
-            mappers.push((phandle, stream));
-        }
-    })
-    .ok_or("DeviceTree walk failed")?;
-    let sids = match node.property("sid") {
-        None => Vec::new(),
-        Some(bytes) if bytes.len().is_multiple_of(4) => node
-            .cells32("sid")
-            .filter(|sids| sids.iter().all(|sid| *sid < u32::from(streams)))
-            .ok_or_else(|| format!("{path} has malformed or out-of-range sid entries"))?,
-        Some(_) => return Err(format!("{path} has incomplete sid cells")),
-    };
-    if sids
-        .iter()
-        .enumerate()
-        .any(|(index, sid)| sids[..index].contains(sid))
-    {
-        return Err(format!("{path} has duplicate sid entries"));
-    }
-    let remap_bytes = node.property("remap").unwrap_or_default();
-    if !remap_bytes.len().is_multiple_of(4) {
-        return Err(format!("{path} remap is not padded byte pairs"));
-    }
-    let mut remap = Vec::new();
-    for pair in remap_bytes.as_chunks::<2>().0 {
-        let (source, target) = (pair[0], pair[1]);
-        if source == 0 && target == 0 {
-            continue;
-        }
-        if u16::from(source) >= streams
-            || u16::from(target) >= streams
-            || source == target
-            || remap
-                .iter()
-                .any(|&(s, t)| [source, target].contains(&s) || [source, target].contains(&t))
-        {
-            return Err(format!(
-                "{path} has overlapping or out-of-range remap entries"
-            ));
-        }
-        remap.push((source, target));
-    }
-    let vm_base = match node.property("vm-base") {
-        None => 0,
-        Some(bytes) => u64::from_le_bytes(
-            bytes
-                .try_into()
-                .map_err(|_| format!("{path} vm-base is not one 64-bit address"))?,
-        ),
-    };
-    Ok(Iommu {
-        instances,
-        sids,
-        remap,
-        vm_base,
-        smmu,
-        streams,
-        irq,
-        mappers,
-        apf,
-        clock_gates,
-        power_gates,
-        retention,
-    })
 }
 
 /// The watchdog's side registers, each one aligned word outside its timer
@@ -5914,10 +5729,12 @@ mod tests {
         assert_eq!(
             found.darts,
             [Iommu {
+                profile: dart::Profile::T8110,
                 instances: vec![DartInstance {
                     physical: 0x2_3500_4000,
                     bytes: 0x4000,
                     number: 0,
+                    reg_index: 0,
                     owner: *b"DART\0\0\0\0"
                 }],
                 sids: vec![],
@@ -6236,12 +6053,14 @@ mod tests {
                     physical: 0x382f00000,
                     bytes: 0x4000,
                     number: 0,
+                    reg_index: 0,
                     owner: *b"DARTLLT\0"
                 },
                 DartInstance {
                     physical: 0x382f80000,
                     bytes: 0x4000,
                     number: 1,
+                    reg_index: 1,
                     owner: *b"DARTBLK\0"
                 },
             ]

@@ -1301,11 +1301,52 @@ impl AppleDevices {
         if ranges.is_empty() {
             return Err(MapError::Empty);
         }
+        self.place_dart_group(Dart::group(streams, irq, ranges.len()), ranges, apf)
+    }
+
+    /// Select the actual DT register/table family before publishing windows.
+    /// Legacy filter and capture variants need their own native contracts.
+    pub fn add_dart_group_for_profile(
+        &mut self,
+        profile: dart::Profile,
+        ranges: &[Range],
+        streams: usize,
+        irq: Option<AicInput>,
+        apf: Option<(u64, usize)>,
+    ) -> Result<Vec<DartId>, String> {
+        if profile != dart::Profile::T8110 && apf.is_some() {
+            return Err("legacy DART APF topology and filtering are unsupported".into());
+        }
+        if profile != dart::Profile::T8110 && ranges.len() > 5 {
+            return Err("legacy DART topology exceeds the recovered five-instance placement".into());
+        }
+        if apf.is_some_and(|(physical, slices)| {
+            !physical.is_multiple_of(dart::DAPF_BYTES)
+                || slices == 0
+                || slices as u64 > dart::DAPF_BYTES / 0x40
+        }) {
+            return Err("DART APF requires one aligned window with a native slice count".into());
+        }
+        if ranges.iter().any(|range| {
+            range.bytes != dart::DAPF_BYTES
+                || !range.physical.is_multiple_of(dart::DAPF_BYTES)
+                || range.physical.checked_add(range.bytes).is_none()
+        }) {
+            return Err("DART translation ranges must be aligned native 16 KiB windows".into());
+        }
+        let models = Dart::group_for_profile(profile, streams, irq, ranges.len())?;
+        self.place_dart_group(models, ranges, apf)
+            .map_err(|error| format!("DART native placement: {error:?}"))
+    }
+
+    fn place_dart_group(
+        &mut self,
+        models: Vec<Dart>,
+        ranges: &[Range],
+        apf: Option<(u64, usize)>,
+    ) -> Result<Vec<DartId>, MapError> {
         let mut ids = Vec::new();
-        for (index, (mut dart, range)) in Dart::group(streams, irq, ranges.len())
-            .into_iter()
-            .zip(ranges)
-            .enumerate()
+        for (index, (mut dart, range)) in models.into_iter().zip(ranges).enumerate()
         {
             if index == 0
                 && let Some((_, slices)) = apf
@@ -2699,6 +2740,75 @@ mod tests {
     };
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
+
+    #[test]
+    fn native_dart_mounts_program_the_selected_register_bank_and_transfer_real_dma_bytes() {
+        use crate::platform::dma::{Memory as _, Port, tests::Ram};
+        const ROOT: u64 = 0x8_0000_0000;
+        const PAGE: u64 = 0x4000;
+        for profile in [dart::Profile::T8020, dart::Profile::T6000, dart::Profile::T8110] {
+            let mut d = AppleDevices::new();
+            let ranges = [
+                Range { physical: 0x2_7000_0000, bytes: PAGE },
+                Range { physical: 0x2_7008_0000, bytes: PAGE },
+            ];
+            let ids = d.add_dart_group_for_profile(profile, &ranges, 16, None, None).unwrap();
+            let mut ram = Ram::new(ROOT, (4 * PAGE) as usize);
+            let descriptor = |physical| if profile == dart::Profile::T8020 {
+                physical | 1
+            } else {
+                physical >> 4 | 1
+            };
+            ram.put_u64(ROOT + 8, descriptor(ROOT + PAGE));
+            ram.put_u64(ROOT + PAGE + 8, descriptor(ROOT + 2 * PAGE) | 0xfff << 40);
+            let (enabled, tcr, ttbr, ttbr_value, translate) = if profile == dart::Profile::T8110 {
+                (0xc00, 0x1004, 0x1404, ROOT >> 12 | 1, 1)
+            } else {
+                (0xfc, 0x104, 0x210, ROOT >> 12 | 1 << 31, 1 << 7)
+            };
+            for (offset, value) in [(enabled, 2), (tcr, translate), (ttbr, ttbr_value)] {
+                d.write(0, ranges[0].physical + offset, 4, value, 0).unwrap();
+            }
+            assert_eq!(d.read(0, ranges[0].physical + tcr, 4, 0), Ok(translate));
+            assert_eq!(d.read(0, ranges[1].physical + tcr, 4, 0), Ok(0));
+            let mut a = Access::new(0, 0, &mut d.latch);
+            let mut port = Port {
+                iommu: d.bus.device_mut::<Dart>(ids[0].0).unwrap(),
+                stream: 1,
+                memory: &mut ram,
+                access: &mut a,
+            };
+            port.write(0x0200_4007, &[2, 4, 6, 8]).unwrap();
+            let mut actual = [0; 4];
+            assert!(ram.read(ROOT + 2 * PAGE + 7, &mut actual));
+            assert_eq!(actual, [2, 4, 6, 8]);
+        }
+    }
+
+    #[test]
+    fn unsupported_legacy_mount_features_refuse_before_any_aperture_is_published() {
+        let mut d = AppleDevices::new();
+        let range = Range { physical: 0x2_7000_0000, bytes: 0x4000 };
+        for (streams, apf) in [(64, None), (16, Some((0x2_7010_0000, 1)))] {
+            assert!(d.add_dart_group_for_profile(dart::Profile::T8020, &[range], streams, None, apf).is_err());
+            assert!(d.read(0, range.physical, 4, 0).is_err());
+        }
+        for invalid in [
+            Range { physical: range.physical, bytes: 0 },
+            Range { physical: range.physical, bytes: 0x8000 },
+            Range { physical: range.physical + 4, bytes: 0x4000 },
+            Range { physical: u64::MAX & !0x3fff, bytes: 0x4000 },
+        ] {
+            assert!(d.add_dart_group_for_profile(dart::Profile::T6000, &[invalid], 16, None, None).is_err());
+            assert!(d.read(0, range.physical, 4, 0).is_err());
+        }
+        assert!(d.add_dart_group_for_profile(dart::Profile::T8020, &[range], 0, None, None).is_err());
+        assert!(d.add_dart_group_for_profile(dart::Profile::T8020, &[], 16, None, None).is_err());
+        let ids = d.add_dart_group_for_profile(dart::Profile::T8020, &[range], 16, None, None).unwrap();
+        let smmu = Range { physical: 0x2_7020_0000, bytes: 0x4000 };
+        assert!(d.add_dart_smmu(ids[0], smmu).is_err());
+        assert!(d.read(0, smmu.physical, 4, 0).is_err());
+    }
 
     #[test]
     fn coresight_components_keep_independent_locks_and_do_not_claim_debug_controls() {
