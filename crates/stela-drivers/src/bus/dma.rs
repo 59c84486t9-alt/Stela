@@ -2,6 +2,9 @@
 use crate::block::BlockError;
 use core::ops::Range;
 
+pub mod mapping;
+pub mod memory;
+
 /// Zeroed, physically contiguous memory a device may access, at the same
 /// address in Stela's identity tables. It lives for the rest of the boot.
 #[derive(Debug)]

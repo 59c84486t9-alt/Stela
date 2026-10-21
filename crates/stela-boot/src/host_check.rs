@@ -339,6 +339,14 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     output::arguments(format_args!("STELA HOST CHECK\n"));
     // SAFETY: interrupts are disabled and nothing else uses the tables.
     unsafe { interrupts::install(interrupt) };
+    match crate::native_memory::verify() {
+        Ok(()) => machine.record(
+            "native-memory",
+            Verdict::Pass,
+            String::from("WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal"),
+        ),
+        Err(error) => machine.record("native-memory", Verdict::Fail, format!("{error:?}")),
+    }
     let mut keyboards = match machine.storage.take() {
         Some(handoff) => disks(machine, &handoff),
         None => Vec::new(),

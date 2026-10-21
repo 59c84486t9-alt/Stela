@@ -157,6 +157,8 @@ struct Options {
     /// Cable the native USB keyboard and pointer to the last USB-C
     /// controller and feed it the host's virtio-input devices (`--input`).
     input: bool,
+    /// Opt-in diagnostic of actual native pinned RAM in the shared window.
+    native_memory_check: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -286,6 +288,7 @@ impl Options {
             survey: false,
             idle_skip: false,
             input: false,
+            native_memory_check: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -306,6 +309,10 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--native-memory-check" {
+                options.native_memory_check = true;
+                continue;
+            }
             if name == "--restore-study" {
                 options.restore = true;
                 continue;
@@ -1438,6 +1445,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     layout::set(handoff.placement);
     // SAFETY: the window heap is reserved for this allocator and still unused.
     unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
+    // SAFETY: this phase owns the reserved heap and its shared-window WB map.
+    unsafe {
+        crate::native_memory::initialize(
+            layout::heap() as usize,
+            handoff.heap.physical,
+            handoff.heap.bytes as usize,
+            layout::physical(0),
+        )
+    };
     // SAFETY: loader-reserved immutable pages, retained in every shared-window
     // physmap; metadata and Arc are created in this active engine allocator.
     let host_firmware =
@@ -1476,6 +1492,17 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Ok(options) => options,
         Err(error) => output::fatal(error),
     };
+    if options.native_memory_check {
+        match crate::native_memory::verify() {
+            Ok(()) => output::arguments(format_args!(
+                "CHECK native-memory PASS WB native pages: zero/read/write, CPU pin lifetime/reclaim, cache/alignment/bounds refusal\n"
+            )),
+            Err(error) => {
+                output::arguments(format_args!("CHECK native-memory FAIL {error:?}\n"));
+                output::fatal("native pinned RAM verification failed");
+            }
+        }
+    }
     // The translation store the loader read, and its partition when the
     // pack can be rewritten.
     let translation_store = handoff.files[..handoff.file_count]

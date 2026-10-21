@@ -45,6 +45,7 @@ mod host_firmware;
 mod la57;
 mod layout;
 mod log_file;
+pub mod native_memory;
 mod output;
 mod paging;
 mod payload;
@@ -185,6 +186,10 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
+    // SAFETY: the registered heap is the exact reserved WB identity extent.
+    unsafe {
+        native_memory::initialize(heap.as_ptr() as usize, heap.as_ptr() as u64, HEAP_BYTES, 0)
+    };
     status::set_clock(firmware::tsc_hz());
     firmware::start_ticker();
     let log = log_file::open();
