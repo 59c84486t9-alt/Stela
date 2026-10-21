@@ -177,6 +177,15 @@ fn original_isp_has_actual_camera_dart_sensor_and_performance_requirements() {
         [(0x184000000, 0x4000000), (0x8e584000, 0x44)]
     );
     assert_eq!(dart.pairs("reg").unwrap().len(), 6);
+    for index in 0..3 {
+        let name = format!("function-conf_isp_ref{index}_clk_freq");
+        let property = isp.property(&name).unwrap();
+        assert_eq!(property.len(), 20);
+        assert_eq!(word(property, 0), 0x99);
+        assert_eq!(word(property, 4), 0x49535043); // ISPC
+        assert_eq!(word(property, 8), index);
+    }
+    assert!(isp.property("function-conf_isp_ref3_clk_freq").is_none());
     assert_eq!(
         isp.property("function-device_reset"),
         Some(&[0x99, 0, 0, 0, b'T', b'S', b'R', b'A', 0x25, 1, 0, 0][..])
@@ -237,4 +246,98 @@ fn original_m1_restore_sweep_and_cio_geometry_are_separate_from_t8112() {
     assert_eq!(word(&bytes, 0x2f0a768), 0x72a00036); // offset high16 1
     assert_eq!(branch_target(&bytes, 0x2f0a778), 0x2f25784);
     assert_eq!(word(&bytes, 0x2f0a724), 0x34000522); // false path returns
+}
+
+#[test]
+#[ignore = "requires original M1 Pro kernelcache and J314s LLB; no Apple images are committed"]
+fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
+    let bytes = kernelcache();
+    for (start, end, digest) in [
+        (
+            0x2ef6954,
+            0x2ef6ae0,
+            "5f78fe102ed3256745654d36f194cf75101c3a81a7e6d900cbec23559d5f219e",
+        ),
+        (
+            0x2f08414,
+            0x2f084bc,
+            "a02cc8402b357f4c14642862ea91cc3304b0952210044a3a4260c555ca374ace",
+        ),
+        (
+            0x2f0a498,
+            0x2f0a550,
+            "ed4326f6f931af2ac085e1a7750354633865e01d65394cd5cd63d3a3e8f3cad2",
+        ),
+        (
+            0x2f0a8e0,
+            0x2f0a9d4,
+            "e8b00c80b50ac68b8b12a72c84138339f3deab8e915c166fbaf5619869ef391a",
+        ),
+        (
+            0x2b2e458,
+            0x2b2e538,
+            "8b30327f842f642218e0a6e986f4c7d455f9476c68fec3a137435eb391767678",
+        ),
+        (
+            0x2b4affc,
+            0x2b4b1ec,
+            "8cded4ff1c9695ad0cf835cb88ceb3326bb33e11e7ab3d52f3c5bb8271cbfdf5",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    // Resolve actual original call stubs through their pinned chained-fixup
+    // metadata. This is source identity, not a fabricated authenticated pointer
+    // installed in the executing guest.
+    assert_eq!(quad(&bytes, 0x133dee0), 0x8011000002b2e458); // readPMGRReg
+    assert_eq!(quad(&bytes, 0x133df08), 0x8011000002b2e4c8); // writePMGRReg
+    assert_eq!(quad(&bytes, 0x133dfe8), 0x8011000002b4affc); // CIO wait callback
+    assert_eq!(quad(&bytes, 0x133df98), 0x8011000002b2e978); // readPMGRClkGenSOCReg
+    assert_eq!(word(&bytes, 0x2b2e9bc), 0x52800b61); // clock-gen RegMap5b
+    for (offset, opcode) in [
+        (0x2ef6abc, 0x52800003), // GPCE waits mask10 == zero, only target-on path
+        (0x2f08458, 0x52981815), // CPM first control1c0c0
+        (0x2f0848c, 0x110022b5), // three writes advance by8
+        (0x2f0a4dc, 0x121a6008), // ISP divider/enable replacement
+        (0x2f0a4e0, 0x12067508), // ISP source selection replacement
+        (0x2f0a4e8, 0x33080689), // source bits25:24, divider bits5:0
+        (0x2f0a50c, 0x52a80002), // poll ISP bit30 clear
+    ] {
+        assert_eq!(word(&bytes, offset), opcode);
+    }
+    assert_eq!(branch_target(&bytes, 0x2f0a500), 0x2f25904);
+    assert_eq!(branch_target(&bytes, 0x2f0a53c), 0x2f258b4);
+    // VDD_CIO is a feature-qualified provider transaction, not another direct
+    // MMIO completion. Its persistent enableMask and callback must remain owned.
+    assert_eq!(word(&bytes, 0x2f0a908), 0x52800941); // feature4a
+    assert_eq!(word(&bytes, 0x2f0a974), 0xb905c92a); // retain enableMask
+    assert_eq!(word(&bytes, 0x2f0a9ac), 0xd73f0910); // actual provider call
+    let llb = original(
+        "STELA_TEST_PMGR_M1_LLB",
+        "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
+    );
+    for (start, end, digest) in [
+        (
+            0x236b38,
+            0x236bb0,
+            "20493a0b686596ab76aa37de99ec6550c90fada2ed44c386ef20d03f15dfce3d",
+        ),
+        (
+            0x23f250,
+            0x23f298,
+            "d2fa93419cccf9b8a2fcd60f89cd2b0cbb1c4ba6bed2b67c042b7b776ddc95ec",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&llb[start..end])), digest);
+    }
+    // Native source performs f -> poll20 -> 2f; a later program polls40
+    // before its first auxiliary51 write. None selects a PC from an AP request.
+    assert_eq!(quad(&llb, 0x236b40), 0x28e098000);
+    assert_eq!(quad(&llb, 0x236b48), 15);
+    assert_eq!(quad(&llb, 0x236b70), 0x20);
+    assert_eq!(quad(&llb, 0x236b78), 0x20);
+    assert_eq!(quad(&llb, 0x236b90), 0x2f);
+    assert_eq!(quad(&llb, 0x23f270), 0x40);
+    assert_eq!(quad(&llb, 0x23f288), 0x28e09a000);
+    assert_eq!(quad(&llb, 0x23f290), 0x51);
 }

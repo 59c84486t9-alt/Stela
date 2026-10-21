@@ -38,6 +38,8 @@
 //! word; no zero marker, unlocked channel, disabled request or healthy status
 //! is inferred from firmware/DT absence. Supplied snapshots grant register
 //! observations only, not native execution, functional ownership or PS values.
+pub mod t6000;
+
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
