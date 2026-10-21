@@ -173,11 +173,14 @@ vectors!(
     40 none, 41 none, 42 none, 43 none, 44 none, 45 none, 46 none, 47 none,
     48 none, 49 none, 50 none, 51 none, 52 none, 53 none, 54 none, 55 none,
     56 none, 57 none, 58 none, 59 none, 60 none, 61 none, 62 none, 63 none,
-    64 none, 255 none,
+    64 none,
+    80 none, 81 none, 82 none, 83 none, 84 none, 85 none, 86 none, 87 none,
+    88 none, 89 none, 90 none, 91 none, 92 none, 93 none, 94 none, 95 none,
+    255 none,
 );
 
 unsafe extern "C" {
-    static stela_vector_table: [usize; 66];
+    static stela_vector_table: [usize; 82];
 }
 
 fn gate(handler: usize, ist: u8) -> [u64; 2] {
@@ -253,7 +256,11 @@ pub(crate) unsafe fn install_on(
         let idt = &raw mut tables.idt;
         let table = &stela_vector_table;
         for (index, &handler) in table.iter().enumerate() {
-            let vector = if index == 65 { 255 } else { index };
+            let vector = match index {
+                65..=80 => index + 15,
+                81 => 255,
+                _ => index,
+            };
             // Double fault, NMI and machine check use their own stack.
             let ist = if matches!(vector, 2 | 8 | 18) { 2 } else { 1 };
             (*idt)[vector] = gate(handler, ist);
@@ -274,6 +281,9 @@ fn cr2() -> u64 {
 }
 
 pub extern "sysv64" fn interrupt(frame: &mut Frame) {
+    if crate::native_irq::dispatch(frame.vector as u8) {
+        return;
+    }
     match frame.vector as u8 {
         14 => host::page_fault(frame, cr2()),
         13 | 6 => host::native_exception(frame),

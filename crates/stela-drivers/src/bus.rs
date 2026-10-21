@@ -1,9 +1,10 @@
 //! How the drivers reach their devices: PCI configuration space through
 //! ECAM ([`pci`]), uncached register windows (`mmio`), DMA memory
-//! ([`dma`]), I²C ([`i2c`]), SMBus ([`smbus`]) and the virtio PCI transport
+//! ([`dma`]), owned IRQ registrations ([`irq`]), I²C ([`i2c`]), SMBus ([`smbus`]) and the virtio PCI transport
 //! ([`virtio`]).
 pub mod dma;
 pub mod i2c;
+pub mod irq;
 pub(crate) mod mmio;
 pub mod pci;
 pub mod smbus;

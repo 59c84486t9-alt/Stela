@@ -1033,6 +1033,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
         })
     });
+    let native_irq = arguments.native_dma_check.then(|| {
+        json!({
+            "passed": serial_text.lines().any(|line| line.starts_with("CHECK native-irq PASS "))
+                && !serial_text.lines().any(|line| line.starts_with("CHECK native-irq FAIL "))
+                && status.is_some() && code == IDLE_EXIT
+                && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
+        })
+    });
     let report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
@@ -1044,6 +1052,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "usb_image": arguments.usb_image,
         "no_la57": arguments.no_la57,
         "native_dma": native_dma,
+        "native_irq": native_irq,
         "options": options,
         "scenario": verification,
         "bundle": arguments.bundle,
@@ -1112,6 +1121,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     ensure!(
         !arguments.native_dma_check || report["native_dma"]["passed"] == true,
         "native DMA fixture did not verify actual device traffic, fault and teardown"
+    );
+    ensure!(
+        !arguments.native_dma_check || report["native_irq"]["passed"] == true,
+        "native IRQ fixture did not verify actual MSI delivery, ACK and drained removal"
     );
     if arguments.native_dma_check {
         return Ok(ExitCode::SUCCESS);

@@ -304,7 +304,7 @@ impl Prepared {
     /// Only after EBS on the prepared UC mappings, with interrupts off. Any
     /// error must stop the host check; normal probing cannot resume into an
     /// uncertain translation state. Unit/lease Drop retains uncertain resources.
-    pub(crate) fn run(mut self) -> Result<String, String> {
+    pub(crate) fn run(mut self) -> Result<(String, String), String> {
         // QEMU v11.1.2 i8257.c: write-all-mask stops each channel, including
         // controller two's cascade. Its single-threaded device callbacks are
         // synchronous; the next run sees all masks before any channel handler.
@@ -513,11 +513,15 @@ impl Prepared {
         // IOTLB acknowledgements, no other DMA requester or IRQ work can start.
         unsafe { unit.shut_down() }
             .map_err(|error| format!("VT-d TE-off acknowledgement failed: {error:?}"))?;
-        Ok(format!(
+        let dma = format!(
             "QEMU EDU rid={requester:#06x} bytes={BYTES} table_walk_coherent={table_walk_coherent} send_iova={send_iova:#x} send_pa={:#x} receive_iova={receive_iova:#x} receive_pa={:#x} roundtrip=verified stale_fault_reason={:#x} retained_ram=unchanged teardown=IOTLB+TE-off-ack",
             send.physical_pages()[0],
             receive.physical_pages()[0],
             fault.reason
-        ))
+        );
+        let function = self.functions.swap_remove(self.edu);
+        let irq =
+            crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
+        Ok((dma, irq))
     }
 }

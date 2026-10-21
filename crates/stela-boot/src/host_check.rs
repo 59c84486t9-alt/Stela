@@ -368,9 +368,13 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     output::arguments(format_args!("STELA HOST CHECK\n"));
     // SAFETY: interrupts are disabled and nothing else uses the tables.
     unsafe { interrupts::install(interrupt) };
+    APIC_BASE.store(machine.apic_base, Ordering::Relaxed);
     if let Some(prepared) = machine.native_dma.take() {
         match prepared.run() {
-            Ok(detail) => machine.record("native-dma", Verdict::Pass, detail),
+            Ok((dma, irq)) => {
+                machine.record("native-dma", Verdict::Pass, dma);
+                machine.record("native-irq", Verdict::Pass, irq);
+            }
             Err(error) => {
                 machine.record("native-dma", Verdict::Fail, error);
                 // The unit/requester may be in an uncertain DMA state. Unit
@@ -626,6 +630,9 @@ fn enabled(ticks: u64, mut done: impl FnMut() -> bool) -> u64 {
 }
 
 extern "sysv64" fn interrupt(frame: &mut Frame) {
+    if crate::native_irq::dispatch(frame.vector as u8) {
+        return;
+    }
     let eoi = || {
         let base = APIC_BASE.load(Ordering::Relaxed);
         Apic::new(base, base & apic::BASE_ADDRESS).eoi();

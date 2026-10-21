@@ -46,6 +46,7 @@ mod la57;
 mod layout;
 mod log_file;
 pub mod native_dma;
+pub mod native_irq;
 pub mod native_memory;
 mod output;
 mod paging;
