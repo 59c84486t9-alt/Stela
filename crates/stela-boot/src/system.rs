@@ -29,7 +29,7 @@ use uefi::{
     proto::loaded_image::LoadedImage,
 };
 
-const HEAP_BYTES: u64 = 512 * 1024 * 1024;
+const HEAP_BYTES: u64 = 1024 * 1024 * 1024;
 const STACK_BYTES: u64 = 2 * 1024 * 1024;
 const CODE_BYTES: u64 = 128 * 1024 * 1024;
 const POOL_BYTES: u64 = 256 * 1024 * 1024;

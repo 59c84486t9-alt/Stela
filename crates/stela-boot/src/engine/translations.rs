@@ -53,7 +53,7 @@ const SPARE: &str = "spare.bin";
 const PROGRESS_STEP: usize = 16 << 20;
 /// The largest pack the boot holds in memory and writes: the bound of
 /// `store.cfg` is cut to it.
-const MAX_PACK_BYTES: u64 = 512 << 20;
+const MAX_PACK_BYTES: u64 = 1 << 30;
 /// The placement record at the start of the handoff file: magic, bound,
 /// partition GUID, flags, pack bytes; the pack follows.
 const PLACEMENT_MAGIC: [u8; 8] = *b"STLTSTOR";
