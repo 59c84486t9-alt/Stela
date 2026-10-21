@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* Original AIR fixture -> shared AIR/NIR frontend -> retained AMD ACO backend.
+/* Original AIR input -> shared AIR/NIR frontend -> retained AMD ACO backend.
  * CPU compilation only: no initialized GPU, mappings or submission are claimed.
  */
 #include "air_to_nir.h"
@@ -11,6 +11,9 @@
 #include "amd/common/ac_shader_args.h"
 #include "amd/common/nir/ac_nir.h"
 #include "util/ralloc.h"
+#include "util/mesa-blake3.h"
+#include "llvm-c/BitReader.h"
+#include <inttypes.h>
 
 #define CHECK(condition) do { if (!(condition)) { \
    fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #condition); exit(1); \
@@ -20,21 +23,25 @@ struct binding {
    struct ac_shader_args args;
    struct ac_arg buffer;
    unsigned count;
+   unsigned argument;
 };
 
 struct binary {
    unsigned code_dw;
    unsigned exec_size;
    struct ac_shader_config config;
+   char code_blake3[BLAKE3_HEX_LEN];
+   char executable_blake3[BLAKE3_HEX_LEN];
 };
 
 static nir_def *
 bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 {
    struct binding *binding = data;
-   CHECK(buffer->argument == 1 && buffer->index == 7 && buffer->address_space == 1);
+   CHECK(buffer->index == 7 && buffer->address_space == 1);
    CHECK(buffer->access == STELA_AIR_READ_WRITE && buffer->type_size == 4 && buffer->type_alignment == 4);
    binding->count++;
+   binding->argument = buffer->argument;
    /* Explicit native fixture ABI: device buffer VA in user SGPRs 0:1. Never
     * replace an AIR resource with a fixed address or a fabricated thread ID. */
    return nir_pack_64_2x32(b, ac_nir_load_arg(b, &binding->args, binding->buffer));
@@ -54,6 +61,12 @@ capture_binary(void **private, const struct ac_shader_config *config,
    binary->code_dw = code_dw;
    binary->exec_size = exec_size;
    binary->config = *config;
+   blake3_hash hash;
+   _mesa_blake3_compute(code, (size_t)code_dw * sizeof(*code), hash);
+   _mesa_blake3_format(binary->code_blake3, hash);
+   _mesa_blake3_compute(code, exec_size, hash);
+   _mesa_blake3_format(binary->executable_blake3, hash);
+
    if (assembly && assembly_size) {
       if (!assembly[assembly_size - 1])
          assembly_size--;
@@ -84,8 +97,126 @@ compute_args(struct binding *binding, const struct radeon_info *gpu)
    }
 }
 
+/* Receipt strings come from verified-but-untrusted IR/CLI bytes. Encode them
+ * without allowing metadata or entry names to inject extra JSON records. */
+static void
+json_string(const char *text)
+{
+   putchar('"');
+   for (const unsigned char *c = (const unsigned char *)text; *c; c++) {
+      if (*c == '"' || *c == '\\')
+         printf("\\%c", *c);
+      else if (*c < 32 || *c >= 127)
+         printf("\\u%04x", *c);
+      else
+         putchar(*c);
+   }
+   putchar('"');
+}
+
+static LLVMMemoryBufferRef
+read_raw_input(const char *path)
+{
+   FILE *file = fopen(path, "rb");
+   if (!file) {
+      fprintf(stderr, "cannot open AIR input\n");
+      return NULL;
+   }
+   long size = -1;
+   if (!fseek(file, 0, SEEK_END))
+      size = ftell(file);
+   if (size < 4 || size > 64 * 1024 * 1024 || fseek(file, 0, SEEK_SET)) {
+      fprintf(stderr, "AIR input must contain 4..64MiB of raw bitcode\n");
+      fclose(file);
+      return NULL;
+   }
+   char *bytes = malloc(size);
+   if (!bytes) {
+      fclose(file);
+      return NULL;
+   }
+   const bool read = fread(bytes, 1, size, file) == (size_t)size &&
+                     fgetc(file) == EOF && !ferror(file);
+   const bool closed = fclose(file) == 0;
+   LLVMMemoryBufferRef result = NULL;
+   if (read && closed && !memcmp(bytes, "BC\xc0\xde", 4))
+      result = LLVMCreateMemoryBufferWithMemoryRangeCopy(bytes, size, "raw-air-input");
+   else
+      fprintf(stderr, "AIR input changed, could not be read, or is not raw bitcode\n");
+   free(bytes);
+   return result;
+}
+
 static bool
-compile_target(LLVMMemoryBufferRef input, enum radeon_family family, bool graphics, unsigned wave)
+input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
+              char input_hash[BLAKE3_HEX_LEN])
+{
+   blake3_hash hash;
+   _mesa_blake3_compute(LLVMGetBufferStart(input), LLVMGetBufferSize(input), hash);
+   _mesa_blake3_format(input_hash, hash);
+   LLVMContextRef context = LLVMContextCreate();
+   LLVMModuleRef module = NULL;
+   if (LLVMParseBitcodeInContext2(context, input, &module)) {
+      fprintf(stderr, "LLVM refused AIR input while reading provenance\n");
+      if (module)
+         LLVMDisposeModule(module);
+      LLVMContextDispose(context);
+      return false;
+   }
+   const char *metadata[] = {"air.version", "air.language_version", "air.compile_options",
+                             "llvm.ident", "llvm.module.flags"};
+   for (unsigned i = 0; i < ARRAY_SIZE(metadata); i++) {
+      if (LLVMGetNamedMetadataNumOperands(module, metadata[i]) > 256) {
+         fprintf(stderr, "AIR input metadata receipt budget exceeded\n");
+         LLVMDisposeModule(module);
+         LLVMContextDispose(context);
+         return false;
+      }
+   }
+   unsigned major, minor, patch;
+   LLVMGetVersion(&major, &minor, &patch);
+   printf("STELA_AIR_INPUT {\"origin\":\"%s\",\"bytes\":%zu,\"blake3\":\"%s\",\"entry\":",
+          file ? "raw_input_file" : "original_fixture", LLVMGetBufferSize(input), input_hash);
+   json_string(entry);
+   printf(",\"workgroup_size\":[32,1,1],\"instruction_budget\":100,\"llvm_version\":[%u,%u,%u],\"target\":",
+          major, minor, patch);
+   json_string(LLVMGetTarget(module));
+   printf(",\"mesa_version\":");
+   json_string(PACKAGE_VERSION);
+   for (unsigned i = 0; i < ARRAY_SIZE(metadata); i++) {
+      putchar(',');
+      json_string(metadata[i]);
+      printf(":[");
+      LLVMValueRef nodes[256];
+      unsigned count = LLVMGetNamedMetadataNumOperands(module, metadata[i]);
+      LLVMGetNamedMetadataOperands(module, metadata[i], nodes);
+      for (unsigned n = 0; n < count; n++) {
+         char *text = LLVMPrintValueToString(nodes[n]);
+         if (n)
+            putchar(',');
+         /* LLVM's standalone metadata printer prefixes its process-local
+          * object address. Keep the complete metadata expression, excluding
+          * that diagnostic decoration so receipts reproduce across runs. */
+         const char *expression = text;
+         if (!strncmp(text, "<0x", 3)) {
+            const char *end = strchr(text, '>');
+            if (end && !strncmp(end, "> = ", 4))
+               expression = end + 4;
+         }
+         json_string(expression);
+         LLVMDisposeMessage(text);
+      }
+      putchar(']');
+   }
+   printf("}\n");
+   LLVMDisposeModule(module);
+   LLVMContextDispose(context);
+   return true;
+}
+
+static bool
+compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
+               enum radeon_family family, bool graphics, unsigned wave)
 {
    struct radeon_info gpu = {
       .gfx_level = ac_get_gfx_level(family), .family = family, .has_graphics = graphics,
@@ -107,7 +238,7 @@ compile_target(LLVMMemoryBufferRef input, enum radeon_family family, bool graphi
    };
    struct stela_air_error error;
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
-                                        "kernel", &nir_options, &air_options, &error);
+                                        entry, &nir_options, &air_options, &error);
    if (!shader) {
       fprintf(stderr, "%s AIR refused: %u %s\n", target, error.kind, error.detail);
       return false;
@@ -171,11 +302,22 @@ compile_target(LLVMMemoryBufferRef input, enum radeon_family family, bool graphi
           target, binary.config.num_sgprs, binary.config.num_vgprs,
           binary.config.scratch_bytes_per_wave, binary.exec_size);
    probe_compiled("air-aco", target, binary.exec_size);
+   printf("STELA_AIR_BINARY {\"backend\":\"aco\",\"input_blake3\":\"%s\",\"entry\":", input_hash);
+   json_string(entry);
+   printf(",\"target\":\"%s\",\"wave_size\":%u,\"workgroup_size\":[32,1,1],"
+          "\"code_bytes\":%zu,\"executable_bytes\":%u,\"code_blake3\":\"%s\","
+          "\"executable_blake3\":\"%s\",\"buffer_argument\":%u,\"metal_buffer_index\":7,"
+          "\"buffer_abi\":\"device_va_user_sgpr0_1\",\"aco_codegen_flags\":%" PRIu64 ","
+          "\"aco_optimisations_disabled_option\":%s,\"scratch_bytes_per_wave\":%u}\n",
+          target, wave, (size_t)binary.code_dw * 4, binary.exec_size, binary.code_blake3,
+          binary.executable_blake3, binding.argument, aco_get_codegen_flags(),
+          options.optimisations_disabled ? "true" : "false", binary.config.scratch_bytes_per_wave);
+
    return true;
 }
 
 int
-main(void)
+main(int argc, char **argv)
 {
    const struct { enum radeon_family family; bool graphics; } targets[] = {
       {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_CARRIZO, true},
@@ -184,13 +326,34 @@ main(void)
       {CHIP_GFX1201, true}, {CHIP_GFX1210, true},
       {CHIP_MI100, false}, {CHIP_MI200, false}, {CHIP_GFX940, false},
    };
+   const char *entry = "kernel";
+   bool file = false;
+   LLVMMemoryBufferRef input;
+   if (argc == 1) {
+      input = stela_air_test_bitcode(stela_air_test_store_body, "");
+   } else if (argc == 5 && !strcmp(argv[1], "--input") && !strcmp(argv[3], "--entry") &&
+              *argv[4] && strlen(argv[4]) <= 256) {
+      input = read_raw_input(argv[2]);
+      entry = argv[4];
+      file = true;
+      if (!input)
+         return 1;
+   } else {
+      fprintf(stderr, "usage: %s [--input raw.bc --entry kernel_name]\n", argv[0]);
+      return 1;
+   }
+   char input_hash[BLAKE3_HEX_LEN];
+   if (!input_receipt(input, entry, file, input_hash)) {
+      LLVMDisposeMemoryBuffer(input);
+      return 1;
+   }
    glsl_type_singleton_init_or_ref();
-   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
+
    bool ok = true;
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      ok &= compile_target(input, targets[i].family, targets[i].graphics, 64);
+      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64);
       if (ac_get_gfx_level(targets[i].family) >= GFX10)
-         ok &= compile_target(input, targets[i].family, targets[i].graphics, 32);
+         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32);
    }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
