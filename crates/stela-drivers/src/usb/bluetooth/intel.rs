@@ -27,10 +27,12 @@
 mod firmware;
 mod identity;
 mod platform;
+mod report;
 mod stages;
 mod tlv;
 pub use identity::{BootParameters, Identity};
 pub use platform::{DsbrInput, DsbrReport, PlatformInputs};
+pub use report::{OwnedFirmwareEvidence, OwnedReport};
 pub use tlv::{InheritedField, TlvIdentity};
 
 use super::{Hci, Io, Packet, State};
@@ -204,6 +206,12 @@ pub struct Report<'a> {
     pub address: [u8; 6],
     pub dsbr: DsbrReport,
     pub stages: Vec<StageObservation>,
+}
+
+/// Share the exact USB candidate table with the native consumer. Matching USB
+/// descriptors still requires independent live silicon/firmware validation.
+pub(super) fn is_candidate(device: &crate::usb::xhci::Device) -> bool {
+    Identity::usb(device).is_ok()
 }
 
 /// Initialize one exclusively owned raw controller. Any failure after USB
@@ -634,6 +642,7 @@ pub(crate) mod tests {
         quiesced: usize,
         fail_reset: bool,
         fail_quiesce: bool,
+        fail_close: bool,
         submitted: usize,
     }
     impl Model {
@@ -677,7 +686,11 @@ pub(crate) mod tests {
         }
         fn close(&mut self) -> core::result::Result<(), BlockError> {
             self.closed.set(self.closed.get() + 1);
-            Ok(())
+            if self.fail_close {
+                Err(BlockError::Timeout)
+            } else {
+                Ok(())
+            }
         }
         fn now_us(&self) -> u64 {
             let now = self.time.get();
@@ -699,6 +712,7 @@ pub(crate) mod tests {
                 quiesced: 0,
                 fail_reset: false,
                 fail_quiesce: false,
+                fail_close: false,
                 submitted: 0,
             },
         )
@@ -1284,6 +1298,293 @@ pub(crate) mod tests {
             assert_eq!(hci.state(), State::Closed);
         }
     }
+
+    mod native_tests {
+        use super::super::super::{FirmwareStatus, InitializationError, InitializationReport};
+        use super::*;
+        use alloc::string::String;
+        use core::cell::RefCell;
+        struct Recording<'a> {
+            catalog: &'a Catalog,
+            calls: RefCell<Vec<String>>,
+        }
+        impl Provider for Recording<'_> {
+            fn load(
+                &self,
+                r: Requirement<'_>,
+            ) -> core::result::Result<Image<'_>, crate::firmware::Error> {
+                self.calls.borrow_mut().push(r.name.into());
+                self.catalog.load(r)
+            }
+        }
+        #[test]
+        fn native_owned_upload_evidence_outlives_provider_and_never_reinitializes() {
+            for path in 0..3 {
+                let (device, _, script) = match path {
+                    0 => fixture(),
+                    1 => tlv_fixture(1),
+                    _ => super::iml_tests::fixture_iml(0x1e, 1, true),
+                };
+                let mut hci = transport(device, script);
+                assert!(hci.initialization().is_none());
+                let retained;
+                {
+                    let (_, catalog, _) = match path {
+                        0 => fixture(),
+                        1 => tlv_fixture(1),
+                        _ => super::iml_tests::fixture_iml(0x1e, 1, true),
+                    };
+                    retained = hci
+                        .initialize_with_provider(&catalog, PlatformInputs::default())
+                        .unwrap();
+                }
+                // This borrow of the result crosses the Catalog's destruction:
+                // the public method's returned lifetime belongs only to Hci.
+                let InitializationReport::Intel(report) = retained;
+                assert!(report.after.is_operational());
+                match (&report.evidence, path) {
+                    (
+                        OwnedFirmwareEvidence::Uploaded {
+                            firmware,
+                            configuration,
+                        },
+                        0 | 1,
+                    ) => {
+                        assert!(firmware.name.ends_with(".sfi"));
+                        assert!(configuration.name.ends_with(".ddc"));
+                        assert_eq!(firmware.target_revision, configuration.target_revision);
+                        assert!(firmware.source.starts_with("Stela synthetic"));
+                    }
+                    (
+                        OwnedFirmwareEvidence::MultiStage {
+                            firmware,
+                            configuration,
+                        },
+                        2,
+                    ) => {
+                        assert_eq!(firmware.len(), 2);
+                        assert_eq!(firmware[0].name, "intel/ibt-0190-0041-iml.sfi");
+                        assert_eq!(firmware[1].target_revision, configuration.target_revision);
+                        assert_eq!(report.stages.len(), 2);
+                    }
+                    _ => panic!("exact uploaded evidence required"),
+                }
+                let submitted = hci.io.submitted;
+                let empty = Catalog::from_handoff(vec![]).unwrap();
+                let provider = Recording {
+                    catalog: &empty,
+                    calls: RefCell::new(Vec::new()),
+                };
+                assert!(
+                    hci.initialize_with_provider(
+                        &provider,
+                        PlatformInputs {
+                            dsbr: DsbrInput::Present {
+                                revision: 9,
+                                raw: 0xb1
+                            }
+                        }
+                    )
+                    .is_ok()
+                );
+                assert!(provider.calls.borrow().is_empty());
+                assert_eq!(hci.io.submitted, submitted);
+                assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+                // The retained observation does not reopen a later closed HCI.
+                hci.close().unwrap();
+                assert!(hci.initialization().unwrap().is_ok());
+                assert!(
+                    hci.submit_command(&command_bytes(READ_VERSION, &[0xff]))
+                        .is_err()
+                );
+                assert_eq!(hci.io.submitted, submitted);
+            }
+        }
+        #[test]
+        fn native_running_unknown_has_no_uploaded_provenance_and_no_resource_requests() {
+            for modern in [false, true] {
+                let (mut device, _, _) = fixture();
+                if modern {
+                    device.descriptor[10] = 0x32;
+                }
+                let version = if modern {
+                    tlv_version(true, 1)
+                } else {
+                    version(true)
+                };
+                let mut steps = VecDeque::new();
+                super::iml_tests::add_command(&mut steps, READ_VERSION, &[0xff], &version);
+                super::iml_tests::add_command(
+                    &mut steps,
+                    READ_BD_ADDR,
+                    &[],
+                    &[0, 1, 2, 3, 4, 5, 6],
+                );
+                super::iml_tests::add_command(
+                    &mut steps,
+                    READ_VERSION,
+                    if modern { &[0xff] } else { &[] },
+                    &version,
+                );
+                let mut hci = transport(device, Script { steps });
+                {
+                    let empty = Catalog::from_handoff(vec![]).unwrap();
+                    let provider = Recording {
+                        catalog: &empty,
+                        calls: RefCell::new(Vec::new()),
+                    };
+                    let InitializationReport::Intel(report) = hci
+                        .initialize_with_provider(&provider, PlatformInputs::default())
+                        .unwrap();
+                    assert!(matches!(
+                        report.evidence,
+                        OwnedFirmwareEvidence::RunningUnknown
+                    ));
+                    assert!(report.boot_notification.is_none());
+                    assert!(report.stages.is_empty());
+                    assert!(provider.calls.borrow().is_empty());
+                }
+                let InitializationReport::Intel(report) = hci.initialization().unwrap().unwrap();
+                assert!(report.after.is_operational());
+                assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+                assert!(hci.io.script.steps.is_empty());
+            }
+        }
+        #[test]
+        fn native_missing_resources_remain_exact_typed_and_cannot_retry_closed_candidate() {
+            let (device, catalog, script) = fixture();
+            let mut hci = transport(device, script);
+            {
+                let empty = Catalog::from_handoff(vec![]).unwrap();
+                let provider = Recording {
+                    catalog: &empty,
+                    calls: RefCell::new(Vec::new()),
+                };
+                let error = hci
+                    .initialize_with_provider(&provider, PlatformInputs::default())
+                    .unwrap_err();
+                assert!(
+                    matches!(error,InitializationError::Intel(Error::Resource(e)) if e.name=="intel/ibt-20-1-3.sfi" && matches!(e.kind,crate::firmware::ErrorKind::Missing))
+                );
+                assert_eq!(
+                    *provider.calls.borrow(),
+                    ["intel/ibt-20-1-3.sfi", "intel/ibt-20-1-3.ddc"]
+                );
+            }
+            assert_eq!(hci.state(), State::Closed);
+            assert_eq!(hci.io.submitted, 2);
+            let provider = Recording {
+                catalog: &catalog,
+                calls: RefCell::new(Vec::new()),
+            };
+            assert!(
+                hci.initialize_with_provider(&provider, PlatformInputs::default())
+                    .is_err()
+            );
+            assert!(provider.calls.borrow().is_empty());
+            assert!(
+                hci.submit_command(&command_bytes(READ_VERSION, &[0xff]))
+                    .is_err()
+            );
+            assert_eq!(hci.io.submitted, 2);
+        }
+        #[test]
+        fn native_unknown_usb_device_stays_unverified_raw_without_vendor_commands() {
+            for intel_vendor in [false, true] {
+                let (mut device, catalog, script) = fixture();
+                if intel_vendor {
+                    device.descriptor[10..12].copy_from_slice(&0xffffu16.to_le_bytes());
+                } else {
+                    device.descriptor[8..10].copy_from_slice(&0x1234u16.to_le_bytes());
+                }
+                let mut hci = transport(device, script);
+                let provider = Recording {
+                    catalog: &catalog,
+                    calls: RefCell::new(Vec::new()),
+                };
+                let error = hci
+                    .initialize_with_provider(&provider, PlatformInputs::default())
+                    .unwrap_err();
+                assert!(
+                    matches!(error,InitializationError::UnsupportedDevice {vendor,product,revision:0x100}
+                    if *vendor==if intel_vendor {0x8087} else {0x1234} && *product==if intel_vendor {0xffff} else {0x29})
+                );
+                assert_eq!(hci.io.submitted, 0);
+                assert!(provider.calls.borrow().is_empty());
+                assert_eq!(hci.state(), State::Open);
+                assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+            }
+        }
+        #[test]
+        fn native_hci_usb_cleanup_and_partial_stage_failures_keep_typed_evidence() {
+            for case in 0..4 {
+                let (device, catalog, mut script) = if case == 3 {
+                    super::iml_tests::fixture_iml(0x1e, 1, false)
+                } else {
+                    fixture()
+                };
+                if case == 0 || case == 2 {
+                    script.steps[2].events[0].1[5] = 0x0c;
+                }
+                let mut hci = transport(device, script);
+                hci.io.fail_reset = case == 1;
+                hci.io.fail_close = case == 2;
+                let error = hci
+                    .initialize_with_provider(&catalog, PlatformInputs::default())
+                    .unwrap_err();
+                match (case, error) {
+                    (
+                        0,
+                        InitializationError::Intel(Error::Controller {
+                            opcode: SECURE_SEND,
+                            status: 0x0c,
+                        }),
+                    ) => {}
+                    (1, InitializationError::Intel(Error::Transport(e))) => assert!(matches!(
+                        e.kind,
+                        super::super::super::ErrorKind::Usb(BlockError::Unsupported(_))
+                    )),
+                    (2, InitializationError::Intel(Error::Cleanup { cause, cleanup })) => {
+                        assert!(matches!(
+                            **cause,
+                            Error::Controller {
+                                opcode: SECURE_SEND,
+                                status: 0x0c
+                            }
+                        ));
+                        assert!(matches!(
+                            cleanup.kind,
+                            super::super::super::ErrorKind::Usb(BlockError::Timeout)
+                        ));
+                    }
+                    (
+                        3,
+                        InitializationError::Intel(Error::Stages {
+                            cause,
+                            completed,
+                            pending,
+                        }),
+                    ) => {
+                        assert_eq!(completed.len(), 1);
+                        assert_eq!(**pending, completed[0].after);
+                        assert!(
+                            matches!(**cause,Error::Resource(ref e) if e.name.ends_with("-usb.sfi"))
+                        );
+                    }
+                    _ => panic!("typed native error lost"),
+                }
+                let submitted = hci.io.submitted;
+                assert_ne!(hci.state(), State::Open);
+                assert!(
+                    hci.initialize_with_provider(&catalog, PlatformInputs::default())
+                        .is_err()
+                );
+                assert!(hci.submit_acl(&[1, 0, 0, 0]).is_err());
+                assert_eq!(hci.io.submitted, submitted);
+            }
+        }
+    }
+
     mod iml_tests {
         use super::*;
         use alloc::{format, string::String};
@@ -1358,7 +1659,12 @@ pub(crate) mod tests {
                 events: vec![(Pipe::Acl, vec![0xff, 7, 2, 0, 1, 0, 0, 0, 0])],
             });
         }
-        fn add_command(steps: &mut VecDeque<Step>, opcode: u16, params: &[u8], payload: &[u8]) {
+        pub(super) fn add_command(
+            steps: &mut VecDeque<Step>,
+            opcode: u16,
+            params: &[u8],
+            payload: &[u8],
+        ) {
             steps.push_back(Step {
                 command: command_bytes(opcode, params),
                 bulk: false,
@@ -1400,7 +1706,11 @@ pub(crate) mod tests {
             }
             Catalog::from_handoff(entries).unwrap()
         }
-        fn fixture_iml(variant: u8, engine: u8, include_stage2: bool) -> (Device, Catalog, Script) {
+        pub(super) fn fixture_iml(
+            variant: u8,
+            engine: u8,
+            include_stage2: bool,
+        ) -> (Device, Catalog, Script) {
             let (mut device, _, _) = fixture();
             device.descriptor[10] = 0x35;
             let initial = observation(variant, engine, 1, true);

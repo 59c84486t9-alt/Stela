@@ -12,7 +12,9 @@
 //! load firmware, pair, advertise, manage HCI credits or provide profiles.
 //! The explicit [`intel::initialize`] path adds identified Intel legacy-RSA
 //! bootloader bulk framing and returns a controller-specific firmware report.
-//! Other vendor initialization remains unsupported. A Bluetooth host stack must
+//! The explicit native [`Hci::initialize_with_provider`] consumer retains owned
+//! device-specific evidence/errors after the provider is released. Raw attachment
+//! itself never initializes a controller. Other vendor initialization remains unsupported. A Bluetooth host stack must
 //! independently establish radio services after controller initialization.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! SCO, USB isochronous/ISO traffic, bulk serialization, hotplug reattachment,
@@ -24,13 +26,15 @@
 //! reuse. There is deliberately no generic method to mark firmware "ready".
 mod binding;
 mod host;
+mod initialization;
 pub mod intel;
 
 pub use binding::{Binding, CLASS};
 pub use host::Host;
+pub use initialization::{InitializationError, InitializationReport};
 
 use crate::block::BlockError;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
 
 /// Explicit per-packet transport budget. Larger legal HCI packets are rejected;
@@ -143,6 +147,7 @@ pub struct Hci<B: Io> {
     events: Assembler,
     acl: Assembler,
     intel_bootloader: bool,
+    initialization: Option<Box<Result<InitializationReport, InitializationError>>>,
 }
 pub type UsbHci = Hci<Host>;
 
@@ -157,6 +162,7 @@ impl<B: Io> Hci<B> {
             events: Assembler::new(Pipe::Event),
             acl: Assembler::new(Pipe::Acl),
             intel_bootloader: false,
+            initialization: None,
         }
     }
     pub fn binding(&self) -> &Binding {
