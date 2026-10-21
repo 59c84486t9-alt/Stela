@@ -6,11 +6,12 @@
 //! `iommu_bootstrap_register_io_range` refuses a managed page, an unaligned
 //! or empty range, or one of 64K pages or more.
 //!
-//! The table is iBoot's own: 26A434 `iBoot.j473.RELEASE` holds 64-byte
-//! records at file offset `0x1d6288` (base `~0` until placed, the size at
-//! +0x10, the region ID at +0x18), of which the fixed-size ones are listed
-//! here. iBoot sizes the rest at run time (size `~0`) or leaves them empty;
-//! those stay absent, except the panic region below. iBoot's placement policy
+//! The tables come from original 26A434 iBoot: J473 at file offset
+//! `0x1d6288`, J314s at `0x1ffce8`. Their records are 64 bytes (base `~0`
+//! until placed, size at +0x10, region ID at +0x18). Only source-qualified
+//! ordinary fixed-size records are listed here. Run-time sizes, empty entries,
+//! special attributes and absolute original ranges stay absent, except the
+//! panic region below. iBoot's placement policy
 //! is not established, so Stela places carveouts back to back from the DRAM
 //! base and starts the managed range at the next 32 MiB boundary, the block
 //! size of XNU's physical aperture.
@@ -98,6 +99,35 @@ const T8112: [Carveout; 18] = [
     carveout(0x61, 0x34000),
 ];
 
+/// J314s T6000's ordinary fixed-size records in original table order.
+/// 26A434 iBoot SHA-256 20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03,
+/// table 0x1ffce8, 112 records of 64 bytes. Only unplaced, nonempty fixed
+/// records with upper attributes 0x80000009 are qualified here; special and
+/// absolute records require separate ownership. See docs/research/j314s-handoff.md.
+const T6000: [Carveout; 21] = [
+    carveout(0x51, 0x40000),
+    carveout(0x07, 0x4000),
+    carveout(0x08, 0x4000),
+    carveout(0x34, 0x40000),
+    carveout(0xd9, 0x4000),
+    carveout(0x38, 0x4000),
+    carveout(0x37, 0x4000),
+    carveout(0x5a, 0x4000),
+    carveout(0x4c, 0xc000),
+    carveout(0x50, 0x18000),
+    carveout(0x10, 0x20000),
+    carveout(0x12, 0x20000),
+    carveout(0x11, 0x8000),
+    carveout(0x44, 0x4000),
+    carveout(0x46, 0x10000),
+    carveout(0x45, 0x4000),
+    carveout(0x53, 0x4000),
+    carveout(0x55, 0x10000),
+    carveout(0x54, 0x4000),
+    carveout(0x60, 0x40000),
+    carveout(0x61, 0x34000),
+];
+
 /// The regions iBoot names in `/arm-io/sgx`, as `<prefix>-base` and
 /// `<prefix>-size`.
 const SGX_REGIONS: [(u16, &str); 4] = [
@@ -111,6 +141,7 @@ const SGX_REGIONS: [(u16, &str); 4] = [
 /// whose iBoot has not been read.
 pub fn table(chip_id: u32) -> Option<&'static [Carveout]> {
     match chip_id {
+        0x6000 => Some(&T6000),
         0x8112 => Some(&T8112),
         _ => None,
     }
@@ -207,6 +238,12 @@ pub fn publish(tree: &mut DeviceTree, placed: &[Placed]) -> Result<()> {
 /// What the bundle leaves out of iBoot's carveout setup.
 pub fn gaps(tree: &DeviceTree, chip_id: Option<u32>) -> Vec<String> {
     let mut gaps = Vec::new();
+    if chip_id == Some(0x6000) {
+        gaps.push(format!(
+            "{MEMORY_MAP}: T6000 special-attribute and absolute original carveouts, \
+             including region 0x108, have no qualified placement or resource ownership"
+        ));
+    }
     match chip_id.and_then(table) {
         Some(_) => gaps.push(format!(
             "{MEMORY_MAP}: the carveouts iBoot sizes at run time, other than the panic region, \
@@ -253,14 +290,16 @@ mod tests {
 
     #[test]
     fn every_region_meets_sptm_io_range_rules_and_sgx_names_one_page_l2() {
-        for c in T8112 {
-            assert!(c.bytes > 0 && c.bytes % PAGE_BYTES == 0);
-            assert!(c.bytes / PAGE_BYTES < 0x10000);
-        }
-        let l2 = T8112.iter().find(|c| c.id == 0xd9).unwrap();
-        assert_eq!(l2.bytes, PAGE_BYTES);
-        for (id, _) in SGX_REGIONS {
-            assert!(T8112.iter().any(|c| c.id == id));
+        for table in [&T8112[..], &T6000[..]] {
+            for c in table {
+                assert!(c.bytes > 0 && c.bytes % PAGE_BYTES == 0);
+                assert!(c.bytes / PAGE_BYTES < 0x10000);
+            }
+            let l2 = table.iter().find(|c| c.id == 0xd9).unwrap();
+            assert_eq!(l2.bytes, PAGE_BYTES);
+            for (id, _) in SGX_REGIONS {
+                assert!(table.iter().any(|c| c.id == id));
+            }
         }
     }
 
@@ -300,7 +339,7 @@ mod tests {
         assert_eq!(t8112[T8112.len()..], [PANIC]);
         assert_eq!(PANIC, carveout(98, 0x18_8000));
         // A SoC without a read table still gets it; an unknown SoC none.
-        for chip_id in [0x8103, 0x6000, 0x8122, 0x6041, 0x8152] {
+        for chip_id in [0x8103, 0x8122, 0x6041, 0x8152] {
             assert_eq!(for_chip(chip_id), [PANIC]);
         }
         assert!(for_chip(0x6050).is_empty());
@@ -310,6 +349,68 @@ mod tests {
         assert_eq!(managed_floor(&placed, 0x8_0000_0000), 0x8_0200_0000);
         let alone = place(&[PANIC], 0x10_0000_0000);
         assert_eq!(managed_floor(&alone, 0x10_0000_0000), 0x10_0200_0000);
+    }
+
+    #[test]
+    fn t6000_places_and_publishes_reserved_nonoverlapping_regions() -> Result<()> {
+        let dram = 0x100_0000_0000;
+        let table = for_chip(0x6000);
+        assert_eq!(table.last(), Some(&PANIC));
+        let placed = place(&table, dram);
+        let managed = managed_floor(&placed, dram);
+        for (index, region) in placed.iter().enumerate() {
+            assert!(region.base.is_multiple_of(PAGE_BYTES));
+            assert!(region.base >= dram && region.base + region.bytes <= managed);
+            assert!(placed[..index].iter().all(|before| {
+                before.id != region.id && before.base + before.bytes <= region.base
+            }));
+        }
+        let mut tree = tree_with(&["chosen", "pram", "arm-io"])?;
+        tree.ensure_child("/arm-io", "sgx")?;
+        publish(&mut tree, &placed)?;
+        for (id, name) in SGX_REGIONS {
+            let region = placed.iter().find(|region| region.id == id).unwrap();
+            assert_eq!(
+                tree.property(SGX, &format!("{name}-base"))
+                    .unwrap()
+                    .as_u64(),
+                Some(region.base)
+            );
+            assert_eq!(
+                tree.property(SGX, &format!("{name}-size"))
+                    .unwrap()
+                    .as_u64(),
+                Some(region.bytes)
+            );
+        }
+        assert!(!placed.iter().any(|region| region.id == 0x108));
+        assert!(
+            gaps(&tree, Some(0x6000))
+                .iter()
+                .any(|gap| gap.contains("0x108"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the original 26A434 J314s iBoot in STELA_TEST_J314S_IBOOT"]
+    fn t6000_fixed_subset_matches_the_exact_original_iboot_table() {
+        let path = std::env::var_os("STELA_TEST_J314S_IBOOT").unwrap();
+        let input = std::fs::read(path).unwrap();
+        assert_eq!(
+            stela_runtime::sha256(&input),
+            "20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03"
+        );
+        let mut original = Vec::new();
+        for record in input[0x1ffce8..0x1ffce8 + 112 * 64].chunks_exact(64) {
+            let word = |offset| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
+            let (base, bytes, attributes) = (word(0), word(16), word(24));
+            if base == u64::MAX && bytes > 0 && bytes != u64::MAX && attributes >> 16 == 0x80000009
+            {
+                original.push(carveout(attributes as u16, bytes));
+            }
+        }
+        assert_eq!(table(0x6000).unwrap(), original);
     }
 
     fn tree_with(nodes: &[&str]) -> Result<DeviceTree> {

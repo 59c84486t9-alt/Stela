@@ -54,7 +54,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Revision 7: retire unavailable physical display service identities.
 /// Revision 8: preserve qualified native legacy DART families and their
 /// mapper/client dependencies with generation-aware admission and mounting.
-pub const REVISION: u32 = 8;
+/// Revision 9: reserve and publish T6000's source-qualified ordinary fixed
+/// carveouts, including the four SGX bootstrap ranges.
+pub const REVISION: u32 = 9;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
