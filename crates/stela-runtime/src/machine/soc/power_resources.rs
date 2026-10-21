@@ -5,7 +5,10 @@
 //! controller part of the DART's physical supply. Hardware resources inherit
 //! their ADT ancestors' gates, including nubs and firmware endpoints.
 use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
-use crate::platform::apple::{dart::Profile, pmgr::coverage::{self, Consumer, Domain, DomainId, LifecycleSinks}};
+use crate::platform::apple::{
+    dart::Profile,
+    pmgr::coverage::{self, Consumer, Domain, DomainId, LifecycleSinks},
+};
 use alloc::{format, string::String, vec::Vec};
 
 /// Bytes of one m1n1 `struct pmgr_device` record.
@@ -123,7 +126,9 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         clocks.dedup();
         power.sort_unstable();
         power.dedup();
-        let profile = node.property("compatible").and_then(Profile::from_compatible);
+        let profile = node
+            .property("compatible")
+            .and_then(Profile::from_compatible);
         let owner = if path.starts_with("/arm-io/") && profile.is_some() {
             let index = darts;
             darts += 1;
@@ -137,20 +142,29 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
             let index = usbs;
             usbs += 1;
             Some(PowerOwner::Usb(index))
-        } else if path.starts_with("/arm-io/") && ATC_PHY_LAYOUTS.iter().any(|(layout, _)| node.compatible(layout)) {
-            let index = phys; phys += 1;
+        } else if path.starts_with("/arm-io/")
+            && ATC_PHY_LAYOUTS
+                .iter()
+                .any(|(layout, _)| node.compatible(layout))
+        {
+            let index = phys;
+            phys += 1;
             Some(PowerOwner::Phy(index))
         } else if node.compatible(IOMMU_MAPPER)
             && node.first_u32("AAPL,phandle").is_some()
             && owner.is_some_and(|owner| match owner {
-                PowerOwner::Dart(index) => node.first_u32("reg").is_some_and(|stream| stream < dart_streams[index]),
+                PowerOwner::Dart(index) => node
+                    .first_u32("reg")
+                    .is_some_and(|stream| stream < dart_streams[index]),
                 PowerOwner::Usb(_) | PowerOwner::Phy(_) => false,
             })
             || node.property("reg").is_none()
                 && node.property("compatible").is_none()
                 && node.property("clock-gates").is_none()
                 && node.property("power-gates").is_none()
-                && node.first_u32("usb-port-number").is_some_and(|number| (1..=2).contains(&number))
+                && node
+                    .first_u32("usb-port-number")
+                    .is_some_and(|number| (1..=2).contains(&number))
                 && matches!(owner, Some(PowerOwner::Usb(_)))
         {
             owner
@@ -232,7 +246,9 @@ pub(super) fn power_states(
                 .checked_add(u64::from(cells[1]))
                 .and_then(translate)
                 .ok_or_else(|| format!("{PATH} ps-regs block is outside arm-io ranges"))?;
-            let end = physical.checked_add(4).filter(|_| base.checked_add(index * 8) == Some(physical))
+            let end = physical
+                .checked_add(4)
+                .filter(|_| base.checked_add(index * 8) == Some(physical))
                 .ok_or_else(|| format!("{PATH} ps-regs block is not one contiguous range"))?;
             let span = spans[block].get_or_insert((base, 0));
             span.1 = span.1.max(end - base);
@@ -380,16 +396,53 @@ mod tests {
 
     #[test]
     fn inventory_uses_exact_admitted_dart_profiles_and_legacy_mapper_default() {
-        let mapper = encode(&[("name", b"mapper"), ("compatible", IOMMU_MAPPER.as_bytes()), ("AAPL,phandle", &words(&[7])), ("reg", &words(&[15]))], &[]);
-        let dart = |name: &[u8], compatible: &[u8]| encode(&[("name", name), ("compatible", compatible), ("clock-gates", &words(&[1]))], core::slice::from_ref(&mapper));
-        let phy = encode(&[("name", b"phy"), ("compatible", b"atc-phy,t8112"), ("clock-gates", &words(&[1]))], &[]);
-        let bytes = tree(&[(1, Some(0), [0, 0])], &[
-            dart(b"legacy", b"dart,t8020"),
-            dart(b"unknown", b"dart,t8110\0dart,gen3"),
-            dart(b"modern", b"dart,t8110"), phy,
-        ]);
-        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112).unwrap().unwrap();
-        let owner = |name| states.resources.iter().find(|resource| resource.name == name).unwrap().owner;
+        let mapper = encode(
+            &[
+                ("name", b"mapper"),
+                ("compatible", IOMMU_MAPPER.as_bytes()),
+                ("AAPL,phandle", &words(&[7])),
+                ("reg", &words(&[15])),
+            ],
+            &[],
+        );
+        let dart = |name: &[u8], compatible: &[u8]| {
+            encode(
+                &[
+                    ("name", name),
+                    ("compatible", compatible),
+                    ("clock-gates", &words(&[1])),
+                ],
+                core::slice::from_ref(&mapper),
+            )
+        };
+        let phy = encode(
+            &[
+                ("name", b"phy"),
+                ("compatible", b"atc-phy,t8112"),
+                ("clock-gates", &words(&[1])),
+            ],
+            &[],
+        );
+        let bytes = tree(
+            &[(1, Some(0), [0, 0])],
+            &[
+                dart(b"legacy", b"dart,t8020"),
+                dart(b"unknown", b"dart,t8110\0dart,gen3"),
+                dart(b"modern", b"dart,t8110"),
+                phy,
+            ],
+        );
+        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
+            .unwrap()
+            .unwrap();
+        let owner = |name| {
+            states
+                .resources
+                .iter()
+                .find(|resource| resource.name == name)
+                .unwrap()
+                .owner
+        };
         assert_eq!(owner("/arm-io/legacy"), Some(PowerOwner::Dart(0)));
         assert_eq!(owner("/arm-io/legacy/mapper"), Some(PowerOwner::Dart(0)));
         assert_eq!(owner("/arm-io/unknown"), None);
@@ -403,16 +456,43 @@ mod tests {
     fn usb_root_port_views_share_the_controller_and_unknown_children_keep_their_requirements() {
         let port = |number: u32, register: bool| {
             let number = words(&[number]);
-            let mut properties = alloc::vec![("name", b"port".as_slice()), ("usb-port-number", number.as_slice())];
-            if register { properties.push(("reg", b"\0\0\0\0".as_slice())); }
+            let mut properties = alloc::vec![
+                ("name", b"port".as_slice()),
+                ("usb-port-number", number.as_slice())
+            ];
+            if register {
+                properties.push(("reg", b"\0\0\0\0".as_slice()));
+            }
             encode(&properties, &[])
         };
-        for (number, register, owned) in [(1, false, true), (2, false, true), (3, false, false), (1, true, false)] {
-            let controller = encode(&[("name", b"usb"), ("compatible", USB_DRD.as_bytes()), ("clock-gates", &words(&[1]))], &[port(number, register)]);
+        for (number, register, owned) in [
+            (1, false, true),
+            (2, false, true),
+            (3, false, false),
+            (1, true, false),
+        ] {
+            let controller = encode(
+                &[
+                    ("name", b"usb"),
+                    ("compatible", USB_DRD.as_bytes()),
+                    ("clock-gates", &words(&[1])),
+                ],
+                &[port(number, register)],
+            );
             let bytes = tree(&[(1, Some(0), [0, 0])], &[controller]);
-            let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112).unwrap().unwrap();
-            let controller = states.resources.iter().find(|resource| resource.name == "/arm-io/usb").unwrap();
-            let port = states.resources.iter().find(|resource| resource.name == "/arm-io/usb/port").unwrap();
+            let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
+                .unwrap()
+                .unwrap();
+            let controller = states
+                .resources
+                .iter()
+                .find(|resource| resource.name == "/arm-io/usb")
+                .unwrap();
+            let port = states
+                .resources
+                .iter()
+                .find(|resource| resource.name == "/arm-io/usb/port")
+                .unwrap();
             assert_eq!(controller.owner, Some(PowerOwner::Usb(0)));
             assert_eq!(port.owner, owned.then_some(PowerOwner::Usb(0)));
             assert_eq!(port.clocks, [domain_id(1)]);
@@ -520,11 +600,31 @@ mod tests {
         let coverage = coverage::analyze(&states.domains, &consumers).unwrap();
         assert_eq!(coverage.len(), 153);
         for device in [0x108, 0x109] {
-            let address = states.domains.iter().find(|domain| domain.id == domain_id(device)).unwrap().address.unwrap();
-            let leaf = coverage.iter().find(|record| record.address == address).unwrap();
-            assert!(leaf.bindable(), "USB leaf {device:#x} has both hardware sinks");
-            assert!(leaf.consumers.iter().any(|consumer| consumer.name.contains("/dart-usb")));
-            assert!(leaf.consumers.iter().any(|consumer| consumer.name.contains("/usb-drd")));
+            let address = states
+                .domains
+                .iter()
+                .find(|domain| domain.id == domain_id(device))
+                .unwrap()
+                .address
+                .unwrap();
+            let leaf = coverage
+                .iter()
+                .find(|record| record.address == address)
+                .unwrap();
+            assert!(
+                leaf.bindable(),
+                "USB leaf {device:#x} has both hardware sinks"
+            );
+            assert!(
+                leaf.consumers
+                    .iter()
+                    .any(|consumer| consumer.name.contains("/dart-usb"))
+            );
+            assert!(
+                leaf.consumers
+                    .iter()
+                    .any(|consumer| consumer.name.contains("/usb-drd"))
+            );
         }
         let sio_busif = states
             .domains

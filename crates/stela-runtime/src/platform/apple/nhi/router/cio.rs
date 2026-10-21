@@ -274,7 +274,10 @@ mod tests {
         h.write(UUID_ALIAS, &[0xabcd_ef98, 0xabcd_ef99], |_| panic!())
             .unwrap();
         assert_eq!(h.read(7, 2).unwrap(), vec![0xabcd_ef98, 0xabcd_ef99]);
-        assert_eq!(h.read(UUID_ALIAS, 2).unwrap(), vec![0xabcd_ef98, 0xabcd_ef99]);
+        assert_eq!(
+            h.read(UUID_ALIAS, 2).unwrap(),
+            vec![0xabcd_ef98, 0xabcd_ef99]
+        );
         h.write(7, &[0, 0], |_| panic!()).unwrap();
         assert_eq!(h.read(7, 2).unwrap(), h.read(UUID_ALIAS, 2).unwrap());
     }
@@ -348,7 +351,11 @@ mod tests {
         .unwrap();
         assert_eq!(events.last(), Some(&Event::Sleep));
         assert_eq!(
-            [Event::Route.id(), Event::AdapterChange.id(), Event::Sleep.id()],
+            [
+                Event::Route.id(),
+                Event::AdapterChange.id(),
+                Event::Sleep.id()
+            ],
             [0xba, 0xbc, 0x37]
         );
         assert_eq!(Event::Route.task(), Task::Controller);
@@ -377,7 +384,10 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(accepted, vec![Event::Route, Event::AdapterChange, Event::Sleep]);
+        assert_eq!(
+            accepted,
+            vec![Event::Route, Event::AdapterChange, Event::Sleep]
+        );
         assert_eq!(h.state().header[2], data[0]);
         assert_eq!(h.state().pending_route.low, data[0]);
         assert_eq!(h.state().adapter_count, 0xff);

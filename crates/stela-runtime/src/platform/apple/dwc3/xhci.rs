@@ -1141,7 +1141,9 @@ pub(crate) mod tests {
         x.attach(Some(Usb2Speed::High)).unwrap();
         x.ports[0].portsc &= !PORT_CHANGES;
         x.pending.clear();
-        for _ in 0..MAX_PENDING_EVENTS { x.post(0, Xhci::port_status_change(0)).unwrap(); }
+        for _ in 0..MAX_PENDING_EVENTS {
+            x.post(0, Xhci::port_status_change(0)).unwrap();
+        }
         let before = x.ports[0];
         let status = x.usbsts;
         assert!(x.attach(None).is_err());

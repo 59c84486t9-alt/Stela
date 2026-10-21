@@ -140,8 +140,14 @@ enum Phase {
 
 /// Native method/callback ownership survives retryable transport DMA.
 enum Pending<S> {
-    Method { stream: Stream, step: Step<S> },
-    Callback { stream: Stream, callback: Callback<S> },
+    Method {
+        stream: Stream,
+        step: Step<S>,
+    },
+    Callback {
+        stream: Stream,
+        callback: Callback<S>,
+    },
 }
 
 /// The coprocessor end of one link.
@@ -207,18 +213,24 @@ impl<S: Service> Link<S> {
 
     /// The endpoint started: the coprocessor says hello.
     pub fn start(&mut self) -> Result<u64, &'static str> {
-        if !self.incoming.is_empty() || self.pending.is_some()
+        if !self.incoming.is_empty()
+            || self.pending.is_some()
             || self.lanes.iter().any(|lane| !lane.frames.is_empty())
-            || self.is_up() && self.service.callback_pending() {
+            || self.is_up() && self.service.callback_pending()
+        {
             return Err("DCP link restart with unfinished RPC ownership");
         }
         self.phase = Phase::Hello;
         self.heap = None;
-        Ok(Word::Hello { version: u64::from(link::VERSION) }.encode())
+        Ok(Word::Hello {
+            version: u64::from(link::VERSION),
+        }
+        .encode())
     }
 
     pub fn retained_idle(&self) -> bool {
-        self.incoming.is_empty() && self.pending.is_none()
+        self.incoming.is_empty()
+            && self.pending.is_none()
             && self.lanes.iter().all(|lane| lane.frames.is_empty())
             && !self.service.callback_pending()
     }
@@ -230,7 +242,8 @@ impl<S: Service> Link<S> {
 
     /// Whether the DMA step has work.
     pub fn pending(&self) -> bool {
-        self.pending.is_some() || !self.incoming.is_empty()
+        self.pending.is_some()
+            || !self.incoming.is_empty()
             || self.is_up() && self.free_stream().is_some() && self.service.callback_pending()
     }
 
@@ -245,7 +258,9 @@ impl<S: Service> Link<S> {
     /// Serve every waiting word and start any callback the service has,
     /// pushing the words the coprocessor sends to `outbox`.
     pub fn dma(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
-        if self.pending.is_some() { self.flush_pending(bus, outbox)?; }
+        if self.pending.is_some() {
+            self.flush_pending(bus, outbox)?;
+        }
         while let Some(word) = self.incoming.front().copied() {
             self.serve(bus, word, outbox)?;
             if self.pending.is_some() {
@@ -255,16 +270,28 @@ impl<S: Service> Link<S> {
                 self.incoming.pop_front();
             }
         }
-        while self.is_up() && let Some(index) = self.free_stream()
-            && let Some(callback) = self.service.take_callback() {
-            self.pending = Some(Pending::Callback { stream: Stream { owner: Owner::Dcp, index }, callback });
+        while self.is_up()
+            && let Some(index) = self.free_stream()
+            && let Some(callback) = self.service.take_callback()
+        {
+            self.pending = Some(Pending::Callback {
+                stream: Stream {
+                    owner: Owner::Dcp,
+                    index,
+                },
+                callback,
+            });
             self.pending_input = false;
             self.flush_pending(bus, outbox)?;
         }
         Ok(())
     }
 
-    fn flush_pending(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn flush_pending(
+        &mut self,
+        bus: &mut dyn Bus,
+        outbox: &mut Vec<u64>,
+    ) -> Result<(), &'static str> {
         self.commit_pending(bus, outbox)?;
         if self.pending_input {
             self.incoming.pop_front().expect("accepted RPC input");
@@ -329,11 +356,7 @@ impl<S: Service> Link<S> {
     }
 
     /// The AP called a method.
-    fn called(
-        &mut self,
-        bus: &mut dyn Bus,
-        call: Rpc,
-    ) -> Result<(), &'static str> {
+    fn called(&mut self, bus: &mut dyn Bus, call: Rpc) -> Result<(), &'static str> {
         let region = self.region()?;
         let lane = &self.lanes[lane_index(call.stream)];
         let fresh = call.stream.owner == Owner::Ap && lane.frames.is_empty();
@@ -374,24 +397,42 @@ impl<S: Service> Link<S> {
                 return Err(error);
             }
         };
-        self.pending = Some(Pending::Method { stream: call.stream, step });
+        self.pending = Some(Pending::Method {
+            stream: call.stream,
+            step,
+        });
         Ok(())
     }
 
     /// Validate and publish a retained native result. All fallible checks
     /// and DMA precede stream-stack changes and the corresponding mailbox word.
-    fn commit_pending(&mut self, bus: &mut dyn Bus, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+    fn commit_pending(
+        &mut self,
+        bus: &mut dyn Bus,
+        outbox: &mut Vec<u64>,
+    ) -> Result<(), &'static str> {
         let region = self.region()?;
         let pending = self.pending.as_ref().expect("pending RPC work");
-        if let Pending::Method { stream, step: Step::Return(output) } = pending {
+        if let Pending::Method {
+            stream,
+            step: Step::Return(output),
+        } = pending
+        {
             let lane = &self.lanes[lane_index(*stream)];
-            let Some(Frame::Serving { call, header, waiting: None }) = lane.frames.last() else {
+            let Some(Frame::Serving {
+                call,
+                header,
+                waiting: None,
+            }) = lane.frames.last()
+            else {
                 return Err("DCP link method continued outside the call it serves");
             };
             if output.len() != header.output as usize {
                 return Err("DCP method output size differs from the AP's header");
             }
-            let at = region + stream.buffer_of(Owner::Ap) + u64::from(call.offset)
+            let at = region
+                + stream.buffer_of(Owner::Ap)
+                + u64::from(call.offset)
                 + u64::from(HEADER_BYTES + header.input);
             bus.write(at, output)?;
             let (stream, answer) = (*stream, call.answer());
@@ -401,16 +442,35 @@ impl<S: Service> Link<S> {
             return Ok(());
         }
         let (stream, opens, tag, input, output) = match pending {
-            Pending::Method { stream, step: Step::Call { tag, input, output, .. } } => (*stream, false, *tag, input, *output),
-            Pending::Callback { stream, callback } => (*stream, true, callback.tag, &callback.input, callback.output),
+            Pending::Method {
+                stream,
+                step: Step::Call {
+                    tag, input, output, ..
+                },
+            } => (*stream, false, *tag, input, *output),
+            Pending::Callback { stream, callback } => (
+                *stream,
+                true,
+                callback.tag,
+                &callback.input,
+                callback.output,
+            ),
             _ => unreachable!("return handled above"),
         };
-        let header = Header { tag, input: u32::try_from(input.len()).map_err(|_| "DCP callback input exceeds a stream")?, output };
-        let length = header.length().ok_or("DCP callback exceeds a message length")?;
+        let header = Header {
+            tag,
+            input: u32::try_from(input.len()).map_err(|_| "DCP callback input exceeds a stream")?,
+            output,
+        };
+        let length = header
+            .length()
+            .ok_or("DCP callback exceeds a message length")?;
         let slot = align(u32::from(length)).ok_or("DCP callback exceeds a stream")?;
         let lane = &self.lanes[lane_index(stream)];
         let offset = lane.cursor;
-        if offset + slot > STREAM_BYTES { return Err("DCP callback overflows its stream buffer"); }
+        if offset + slot > STREAM_BYTES {
+            return Err("DCP callback overflows its stream buffer");
+        }
         match lane.frames.last() {
             Some(Frame::Serving { waiting: None, .. }) if !opens => (),
             None if opens => (),
@@ -420,11 +480,19 @@ impl<S: Service> Link<S> {
         bus.write(at, &header.bytes())?;
         bus.write(at + u64::from(HEADER_BYTES), input)?;
         let resume = match self.pending.take().expect("published RPC callback") {
-            Pending::Method { step: Step::Call { then, .. }, .. } => Resume::Method(then),
+            Pending::Method {
+                step: Step::Call { then, .. },
+                ..
+            } => Resume::Method(then),
             Pending::Callback { callback, .. } => Resume::Callback(callback.then),
             _ => unreachable!("callback publication"),
         };
-        let outgoing = Outgoing { offset, header, slot, resume };
+        let outgoing = Outgoing {
+            offset,
+            header,
+            slot,
+            resume,
+        };
         let lane = &mut self.lanes[lane_index(stream)];
         lane.cursor += slot;
         if opens {
@@ -432,29 +500,42 @@ impl<S: Service> Link<S> {
         } else if let Some(Frame::Serving { waiting, .. }) = lane.frames.last_mut() {
             *waiting = Some(outgoing);
         }
-        outbox.push(Word::Rpc(Rpc { answer: false, stream, opens, offset: offset as u16, length, token: 0 }).encode());
+        outbox.push(
+            Word::Rpc(Rpc {
+                answer: false,
+                stream,
+                opens,
+                offset: offset as u16,
+                length,
+                token: 0,
+            })
+            .encode(),
+        );
         Ok(())
     }
 
     /// The AP answered a callback.
-    fn answered(
-        &mut self,
-        bus: &mut dyn Bus,
-        answer: Rpc,
-    ) -> Result<(), &'static str> {
+    fn answered(&mut self, bus: &mut dyn Bus, answer: Rpc) -> Result<(), &'static str> {
         let region = self.region()?;
         if answer.offset != 0 || answer.length != 0 {
             return Err("DCP link answer carries a payload");
         }
         let lane = &self.lanes[lane_index(answer.stream)];
         let outgoing = match lane.frames.last() {
-            Some(Frame::Serving { waiting: Some(outgoing), .. }) => outgoing,
+            Some(Frame::Serving {
+                waiting: Some(outgoing),
+                ..
+            }) => outgoing,
             Some(Frame::Calling(outgoing)) => outgoing,
             _ => return Err("DCP link answer on a stream that waits for none"),
         };
-        if let Resume::Refused(reason) = outgoing.resume { return Err(reason); }
+        if let Resume::Refused(reason) = outgoing.resume {
+            return Err(reason);
+        }
         let mut output = vec![0; outgoing.header.output as usize];
-        let at = region + answer.stream.buffer_of(Owner::Dcp) + u64::from(outgoing.offset)
+        let at = region
+            + answer.stream.buffer_of(Owner::Dcp)
+            + u64::from(outgoing.offset)
             + u64::from(HEADER_BYTES + outgoing.header.input);
         bus.read(at, &mut output)?;
         // Read the complete AP reply before consuming any one-shot owner.
@@ -462,11 +543,17 @@ impl<S: Service> Link<S> {
         // succeeds, including a terminal native refusal after invocation.
         let lane = &mut self.lanes[lane_index(answer.stream)];
         let outgoing = match lane.frames.last_mut() {
-            Some(Frame::Serving { waiting: Some(outgoing), .. }) => outgoing,
+            Some(Frame::Serving {
+                waiting: Some(outgoing),
+                ..
+            }) => outgoing,
             Some(Frame::Calling(outgoing)) => outgoing,
             _ => unreachable!("validated callback owner"),
         };
-        let resume = core::mem::replace(&mut outgoing.resume, Resume::Refused("DCP callback native continuation did not complete"));
+        let resume = core::mem::replace(
+            &mut outgoing.resume,
+            Resume::Refused("DCP callback native continuation did not complete"),
+        );
         let result = match resume {
             Resume::Method(then) => then(&mut self.service, &output).map(Some),
             Resume::Callback(then) => then(&mut self.service, &output).map(|()| None),
@@ -476,18 +563,31 @@ impl<S: Service> Link<S> {
             Ok(step) => {
                 let lane = &mut self.lanes[lane_index(answer.stream)];
                 let outgoing = match lane.frames.last_mut() {
-                    Some(Frame::Serving { waiting, .. }) => waiting.take().expect("waiting callback"),
-                    Some(Frame::Calling(_)) => match lane.frames.pop().expect("calling frame") { Frame::Calling(outgoing) => outgoing, _ => unreachable!() },
+                    Some(Frame::Serving { waiting, .. }) => {
+                        waiting.take().expect("waiting callback")
+                    }
+                    Some(Frame::Calling(_)) => match lane.frames.pop().expect("calling frame") {
+                        Frame::Calling(outgoing) => outgoing,
+                        _ => unreachable!(),
+                    },
                     _ => unreachable!("validated reply owner"),
                 };
                 lane.cursor -= outgoing.slot;
-                if let Some(step) = step { self.pending = Some(Pending::Method { stream: answer.stream, step }); }
+                if let Some(step) = step {
+                    self.pending = Some(Pending::Method {
+                        stream: answer.stream,
+                        step,
+                    });
+                }
                 Ok(())
             }
             Err(reason) => {
                 let lane = &mut self.lanes[lane_index(answer.stream)];
                 let outgoing = match lane.frames.last_mut() {
-                    Some(Frame::Serving { waiting: Some(outgoing), .. }) => outgoing,
+                    Some(Frame::Serving {
+                        waiting: Some(outgoing),
+                        ..
+                    }) => outgoing,
                     Some(Frame::Calling(outgoing)) => outgoing,
                     _ => unreachable!("retained refused callback"),
                 };
@@ -638,45 +738,87 @@ mod tests {
         index: 0,
     };
 
-    struct Fault<'a> { memory: &'a mut Memory, read: Option<u64>, write: Option<u64> }
+    struct Fault<'a> {
+        memory: &'a mut Memory,
+        read: Option<u64>,
+        write: Option<u64>,
+    }
     impl Bus for Fault<'_> {
         fn read(&mut self, at: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
-            if self.read == Some(at) { return Err("injected read fault"); }
+            if self.read == Some(at) {
+                return Err("injected read fault");
+            }
             self.memory.read(at, bytes)
         }
         fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), &'static str> {
-            if self.write == Some(at) { return Err("injected write fault"); }
+            if self.write == Some(at) {
+                return Err("injected write fault");
+            }
             self.memory.write(at, bytes)
         }
     }
 
     #[derive(Default)]
-    struct Effects { calls: usize, continues: usize, takes: usize, finishes: usize, callbacks: usize, refuse_finish: bool }
+    struct Effects {
+        calls: usize,
+        continues: usize,
+        takes: usize,
+        finishes: usize,
+        callbacks: usize,
+        refuse_finish: bool,
+    }
     impl Service for Effects {
-        fn call(&mut self, tag: [u8; 4], input: &[u8], output: u32) -> Result<Step<Self>, &'static str> {
+        fn call(
+            &mut self,
+            tag: [u8; 4],
+            input: &[u8],
+            output: u32,
+        ) -> Result<Step<Self>, &'static str> {
             match &tag {
-                b"RETN" => { self.calls += 1; Ok(Step::Return(input.iter().rev().copied().collect())) }
+                b"RETN" => {
+                    self.calls += 1;
+                    Ok(Step::Return(input.iter().rev().copied().collect()))
+                }
                 b"NEST" | b"FAIL" | b"SIZE" => {
                     self.calls += 1;
-                    Ok(Step::Call { tag: *b"BACK", input: vec![4; 4], output: if &tag == b"SIZE" { 0x1_0000 } else { output }, then: Box::new(move |service, reply| {
-                        service.continues += 1;
-                        if &tag == b"FAIL" { return Err("native continuation refused"); }
-                        Ok(Step::Return(reply.iter().rev().copied().collect()))
-                    }) })
+                    Ok(Step::Call {
+                        tag: *b"BACK",
+                        input: vec![4; 4],
+                        output: if &tag == b"SIZE" { 0x1_0000 } else { output },
+                        then: Box::new(move |service, reply| {
+                            service.continues += 1;
+                            if &tag == b"FAIL" {
+                                return Err("native continuation refused");
+                            }
+                            Ok(Step::Return(reply.iter().rev().copied().collect()))
+                        }),
+                    })
                 }
                 _ => Err("unsupported effect"),
             }
         }
-        fn callback_pending(&self) -> bool { self.callbacks != 0 }
+        fn callback_pending(&self) -> bool {
+            self.callbacks != 0
+        }
         fn take_callback(&mut self) -> Option<Callback<Self>> {
-            if self.callbacks == 0 { return None; }
-            self.callbacks -= 1; self.takes += 1;
-            Some(Callback { tag: *b"EVNT", input: vec![6, 7, 8, 9], output: 4, then: Box::new(|service, reply| {
-                assert_eq!(reply, &[1, 2, 3, 4]);
-                service.finishes += 1;
-                if service.refuse_finish { return Err("native finish refused"); }
-                Ok(())
-            }) })
+            if self.callbacks == 0 {
+                return None;
+            }
+            self.callbacks -= 1;
+            self.takes += 1;
+            Some(Callback {
+                tag: *b"EVNT",
+                input: vec![6, 7, 8, 9],
+                output: 4,
+                then: Box::new(|service, reply| {
+                    assert_eq!(reply, &[1, 2, 3, 4]);
+                    service.finishes += 1;
+                    if service.refuse_finish {
+                        return Err("native finish refused");
+                    }
+                    Ok(())
+                }),
+            })
         }
     }
     fn effects_up(memory: &mut Memory) -> Link<Effects> {
@@ -692,15 +834,34 @@ mod tests {
         for address in [REGION + 0x40, REGION + 0x40 + 12] {
             let mut memory = Memory::mapped();
             let mut link = effects_up(&mut memory);
-            link.receive(ap_call(&mut memory, AP0, 0x40, b"RETN", &[1, 2, 3, 4], 4, true));
+            link.receive(ap_call(
+                &mut memory,
+                AP0,
+                0x40,
+                b"RETN",
+                &[1, 2, 3, 4],
+                4,
+                true,
+            ));
             let mut out = Vec::new();
-            assert_eq!(link.dma(&mut Fault { memory: &mut memory, read: Some(address), write: None }, &mut out), Err("injected read fault"));
+            assert_eq!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: Some(address),
+                        write: None
+                    },
+                    &mut out
+                ),
+                Err("injected read fault")
+            );
             assert_eq!(link.service().calls, 0);
             assert!(link.pending() && !link.retained_idle() && out.is_empty());
             link.dma(&mut memory, &mut out).unwrap();
             assert_eq!(link.service().calls, 1);
             assert_eq!(out.len(), 1);
-            let mut result = [0; 4]; memory.read(REGION + 0x40 + 16, &mut result).unwrap();
+            let mut result = [0; 4];
+            memory.read(REGION + 0x40 + 16, &mut result).unwrap();
             assert_eq!(result, [4, 3, 2, 1]);
             assert!(link.retained_idle());
         }
@@ -708,57 +869,143 @@ mod tests {
         let mut link = Link::new(Effects::default(), Some(WINDOW));
         link.start().unwrap();
         link.receive(Word::Region { dva: REGION_DVA }.encode());
-        assert!(link.dma(&mut Fault { memory: &mut memory, read: Some(REGION), write: None }, &mut Vec::new()).is_err());
+        assert!(
+            link.dma(
+                &mut Fault {
+                    memory: &mut memory,
+                    read: Some(REGION),
+                    write: None
+                },
+                &mut Vec::new()
+            )
+            .is_err()
+        );
         assert!(link.heap().is_none() && !link.is_up());
-        let mut out = Vec::new(); link.dma(&mut memory, &mut out).unwrap();
-        assert!(link.heap().is_some() && link.is_up()); assert_eq!(out.len(), 1);
+        let mut out = Vec::new();
+        link.dma(&mut memory, &mut out).unwrap();
+        assert!(link.heap().is_some() && link.is_up());
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
     fn return_dma_fault_and_restart_refusal_preserve_the_accepted_service_result() {
-        let mut memory = Memory::mapped(); let mut link = effects_up(&mut memory);
+        let mut memory = Memory::mapped();
+        let mut link = effects_up(&mut memory);
         let heap = link.heap();
-        let mut request = rpc(ap_call(&mut memory, AP0, 0x40, b"RETN", &[1, 2, 3, 4], 4, true));
+        let mut request = rpc(ap_call(
+            &mut memory,
+            AP0,
+            0x40,
+            b"RETN",
+            &[1, 2, 3, 4],
+            4,
+            true,
+        ));
         request.token = 0xa5b3;
         link.receive(Word::Rpc(request).encode());
         let mut out = Vec::new();
         for _ in 0..2 {
-            assert_eq!(link.dma(&mut Fault { memory: &mut memory, read: None, write: Some(REGION + 0x50) }, &mut out), Err("injected write fault"));
-            assert_eq!(link.service().calls, 1); assert!(out.is_empty());
-            assert_eq!(link.start(), Err("DCP link restart with unfinished RPC ownership"));
-            assert_eq!(link.heap(), heap); assert!(link.is_up() && !link.retained_idle());
+            assert_eq!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: None,
+                        write: Some(REGION + 0x50)
+                    },
+                    &mut out
+                ),
+                Err("injected write fault")
+            );
+            assert_eq!(link.service().calls, 1);
+            assert!(out.is_empty());
+            assert_eq!(
+                link.start(),
+                Err("DCP link restart with unfinished RPC ownership")
+            );
+            assert_eq!(link.heap(), heap);
+            assert!(link.is_up() && !link.retained_idle());
         }
         link.dma(&mut memory, &mut out).unwrap();
         assert_eq!(out, [Word::Rpc(request.answer()).encode()]);
-        assert_eq!(link.service().calls, 1); assert!(link.retained_idle());
-        out.clear(); link.dma(&mut memory, &mut out).unwrap(); assert!(out.is_empty());
-        link.start().unwrap(); assert!(link.heap().is_none());
+        assert_eq!(link.service().calls, 1);
+        assert!(link.retained_idle());
+        out.clear();
+        link.dma(&mut memory, &mut out).unwrap();
+        assert!(out.is_empty());
+        link.start().unwrap();
+        assert!(link.heap().is_none());
     }
 
     #[test]
     fn nested_callback_write_read_and_continued_return_faults_never_replay_native_effects() {
         for callback_write in [REGION + 0x60000, REGION + 0x60000 + 12] {
-            let mut memory = Memory::mapped(); let mut link = effects_up(&mut memory);
-            link.receive(ap_call(&mut memory, AP0, 0x40, b"NEST", &[1, 2, 3, 4], 4, true));
+            let mut memory = Memory::mapped();
+            let mut link = effects_up(&mut memory);
+            link.receive(ap_call(
+                &mut memory,
+                AP0,
+                0x40,
+                b"NEST",
+                &[1, 2, 3, 4],
+                4,
+                true,
+            ));
             let mut out = Vec::new();
-            assert!(link.dma(&mut Fault { memory: &mut memory, read: None, write: Some(callback_write) }, &mut out).is_err());
+            assert!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: None,
+                        write: Some(callback_write)
+                    },
+                    &mut out
+                )
+                .is_err()
+            );
             assert_eq!((link.service().calls, link.service().continues), (1, 0));
-            assert_eq!(link.lanes[0].cursor, 0); assert!(out.is_empty());
+            assert_eq!(link.lanes[0].cursor, 0);
+            assert!(out.is_empty());
             link.dma(&mut memory, &mut out).unwrap();
-            let callback = rpc(out.pop().unwrap()); assert!(!callback.opens);
-            assert_eq!(link.lanes[0].cursor, 0x40); assert!(!link.retained_idle());
+            let callback = rpc(out.pop().unwrap());
+            assert!(!callback.opens);
+            assert_eq!(link.lanes[0].cursor, 0x40);
+            assert!(!link.retained_idle());
             assert!(link.start().is_err());
             memory.write(REGION + 0x60000 + 16, &[1, 2, 3, 4]).unwrap();
             link.receive(Word::Rpc(callback.answer()).encode());
-            assert!(link.dma(&mut Fault { memory: &mut memory, read: Some(REGION + 0x60000 + 16), write: None }, &mut out).is_err());
-            assert_eq!(link.service().continues, 0); assert_eq!(link.lanes[0].cursor, 0x40);
+            assert!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: Some(REGION + 0x60000 + 16),
+                        write: None
+                    },
+                    &mut out
+                )
+                .is_err()
+            );
+            assert_eq!(link.service().continues, 0);
+            assert_eq!(link.lanes[0].cursor, 0x40);
             for _ in 0..2 {
-                assert!(link.dma(&mut Fault { memory: &mut memory, read: None, write: Some(REGION + 0x50) }, &mut out).is_err());
-                assert_eq!(link.service().continues, 1); assert_eq!(link.service().calls, 1);
-                assert_eq!(link.lanes[0].cursor, 0); assert!(out.is_empty());
+                assert!(
+                    link.dma(
+                        &mut Fault {
+                            memory: &mut memory,
+                            read: None,
+                            write: Some(REGION + 0x50)
+                        },
+                        &mut out
+                    )
+                    .is_err()
+                );
+                assert_eq!(link.service().continues, 1);
+                assert_eq!(link.service().calls, 1);
+                assert_eq!(link.lanes[0].cursor, 0);
+                assert!(out.is_empty());
             }
             link.dma(&mut memory, &mut out).unwrap();
-            assert_eq!(out.len(), 1); assert!(rpc(out[0]).answer && rpc(out[0]).opens);
+            assert_eq!(out.len(), 1);
+            assert!(rpc(out[0]).answer && rpc(out[0]).opens);
             assert_eq!((link.service().calls, link.service().continues), (1, 1));
             assert!(link.retained_idle());
         }
@@ -766,65 +1013,169 @@ mod tests {
 
     #[test]
     fn unsolicited_callback_identity_survives_both_write_phases_and_reply_read_failure() {
-        let stream = Stream { owner: Owner::Dcp, index: 0 };
+        let stream = Stream {
+            owner: Owner::Dcp,
+            index: 0,
+        };
         for write in [REGION + 0x40000, REGION + 0x40000 + 12] {
-            let mut memory = Memory::mapped(); let mut link = effects_up(&mut memory);
+            let mut memory = Memory::mapped();
+            let mut link = effects_up(&mut memory);
             link.service_mut().callbacks = 1;
             let mut out = Vec::new();
-            assert!(link.dma(&mut Fault { memory: &mut memory, read: None, write: Some(write) }, &mut out).is_err());
-            assert_eq!(link.service().takes, 1); assert_eq!(link.service().callbacks, 0); assert!(out.is_empty());
-            assert!(!link.retained_idle() && link.pending()); assert!(link.start().is_err());
+            assert!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: None,
+                        write: Some(write)
+                    },
+                    &mut out
+                )
+                .is_err()
+            );
+            assert_eq!(link.service().takes, 1);
+            assert_eq!(link.service().callbacks, 0);
+            assert!(out.is_empty());
+            assert!(!link.retained_idle() && link.pending());
+            assert!(link.start().is_err());
             link.dma(&mut memory, &mut out).unwrap();
-            let callback = rpc(out.pop().unwrap()); assert_eq!(callback.stream, stream); assert!(callback.opens);
-            assert_eq!(link.service().takes, 1); assert!(!link.pending() && !link.retained_idle());
+            let callback = rpc(out.pop().unwrap());
+            assert_eq!(callback.stream, stream);
+            assert!(callback.opens);
+            assert_eq!(link.service().takes, 1);
+            assert!(!link.pending() && !link.retained_idle());
             memory.write(REGION + 0x40000 + 16, &[1, 2, 3, 4]).unwrap();
             link.receive(Word::Rpc(callback.answer()).encode());
-            assert!(link.dma(&mut Fault { memory: &mut memory, read: Some(REGION + 0x40000 + 16), write: None }, &mut out).is_err());
-            assert_eq!(link.service().finishes, 0); assert_eq!(link.lanes[lane_index(stream)].cursor, 0x40);
+            assert!(
+                link.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        read: Some(REGION + 0x40000 + 16),
+                        write: None
+                    },
+                    &mut out
+                )
+                .is_err()
+            );
+            assert_eq!(link.service().finishes, 0);
+            assert_eq!(link.lanes[lane_index(stream)].cursor, 0x40);
             link.dma(&mut memory, &mut out).unwrap();
-            assert_eq!(link.service().finishes, 1); assert!(link.retained_idle()); assert!(out.is_empty());
-            link.dma(&mut memory, &mut out).unwrap(); assert_eq!(link.service().takes, 1);
+            assert_eq!(link.service().finishes, 1);
+            assert!(link.retained_idle());
+            assert!(out.is_empty());
+            link.dma(&mut memory, &mut out).unwrap();
+            assert_eq!(link.service().takes, 1);
         }
     }
 
     #[test]
     fn native_continuation_refusals_retain_identity_without_false_completion_or_reexecution() {
         for top_level in [false, true] {
-            let mut memory = Memory::mapped(); let mut link = effects_up(&mut memory);
+            let mut memory = Memory::mapped();
+            let mut link = effects_up(&mut memory);
             let mut out = Vec::new();
             let reply_at = if top_level {
-                link.service_mut().callbacks = 1; link.service_mut().refuse_finish = true;
+                link.service_mut().callbacks = 1;
+                link.service_mut().refuse_finish = true;
                 REGION + 0x40000 + 16
             } else {
-                link.receive(ap_call(&mut memory, AP0, 0x40, b"FAIL", &[1, 2, 3, 4], 4, true));
+                link.receive(ap_call(
+                    &mut memory,
+                    AP0,
+                    0x40,
+                    b"FAIL",
+                    &[1, 2, 3, 4],
+                    4,
+                    true,
+                ));
                 REGION + 0x60000 + 16
             };
-            link.dma(&mut memory, &mut out).unwrap(); let callback = rpc(out.pop().unwrap());
-            memory.write(reply_at, &[1, 2, 3, 4]).unwrap(); link.receive(Word::Rpc(callback.answer()).encode());
+            link.dma(&mut memory, &mut out).unwrap();
+            let callback = rpc(out.pop().unwrap());
+            memory.write(reply_at, &[1, 2, 3, 4]).unwrap();
+            link.receive(Word::Rpc(callback.answer()).encode());
             for _ in 0..2 {
-                assert_eq!(link.dma(&mut memory, &mut out), Err(if top_level { "native finish refused" } else { "native continuation refused" }));
+                assert_eq!(
+                    link.dma(&mut memory, &mut out),
+                    Err(if top_level {
+                        "native finish refused"
+                    } else {
+                        "native continuation refused"
+                    })
+                );
                 assert_eq!(link.service().finishes + link.service().continues, 1);
-                assert!(!link.retained_idle() && out.is_empty()); assert!(link.start().is_err());
+                assert!(!link.retained_idle() && out.is_empty());
+                assert!(link.start().is_err());
                 assert_eq!(link.lanes[lane_index(callback.stream)].cursor, 0x40);
             }
         }
     }
 
     #[test]
-    fn earlier_ack_stays_committed_when_a_later_input_faults_and_invalid_native_size_keeps_ownership() {
-        let mut memory = Memory::mapped(); let mut link = effects_up(&mut memory);
-        let ap1 = Stream { owner: Owner::Ap, index: 1 };
-        link.receive(ap_call(&mut memory, AP0, 0x40, b"RETN", &[1, 2, 3, 4], 4, true));
-        link.receive(ap_call(&mut memory, ap1, 0x40, b"RETN", &[5, 6, 7, 8], 4, true));
+    fn earlier_ack_stays_committed_when_a_later_input_faults_and_invalid_native_size_keeps_ownership()
+     {
+        let mut memory = Memory::mapped();
+        let mut link = effects_up(&mut memory);
+        let ap1 = Stream {
+            owner: Owner::Ap,
+            index: 1,
+        };
+        link.receive(ap_call(
+            &mut memory,
+            AP0,
+            0x40,
+            b"RETN",
+            &[1, 2, 3, 4],
+            4,
+            true,
+        ));
+        link.receive(ap_call(
+            &mut memory,
+            ap1,
+            0x40,
+            b"RETN",
+            &[5, 6, 7, 8],
+            4,
+            true,
+        ));
         let mut out = Vec::new();
-        assert!(link.dma(&mut Fault { memory: &mut memory, read: Some(REGION + ap1.buffer_of(Owner::Ap) + 0x40), write: None }, &mut out).is_err());
-        assert_eq!(out.len(), 1); assert_eq!(rpc(out[0]).stream, AP0); assert_eq!(link.service().calls, 1);
-        out.clear(); link.dma(&mut memory, &mut out).unwrap();
-        assert_eq!(out.len(), 1); assert_eq!(rpc(out[0]).stream, ap1); assert_eq!(link.service().calls, 2);
-        out.clear(); link.receive(ap_call(&mut memory, AP0, 0x40, b"SIZE", &[1, 2, 3, 4], 4, true));
+        assert!(
+            link.dma(
+                &mut Fault {
+                    memory: &mut memory,
+                    read: Some(REGION + ap1.buffer_of(Owner::Ap) + 0x40),
+                    write: None
+                },
+                &mut out
+            )
+            .is_err()
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(rpc(out[0]).stream, AP0);
+        assert_eq!(link.service().calls, 1);
+        out.clear();
+        link.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(rpc(out[0]).stream, ap1);
+        assert_eq!(link.service().calls, 2);
+        out.clear();
+        link.receive(ap_call(
+            &mut memory,
+            AP0,
+            0x40,
+            b"SIZE",
+            &[1, 2, 3, 4],
+            4,
+            true,
+        ));
         for _ in 0..2 {
-            assert_eq!(link.dma(&mut memory, &mut out), Err("DCP callback exceeds a message length"));
-            assert_eq!(link.service().calls, 3); assert!(out.is_empty()); assert!(link.start().is_err());
+            assert_eq!(
+                link.dma(&mut memory, &mut out),
+                Err("DCP callback exceeds a message length")
+            );
+            assert_eq!(link.service().calls, 3);
+            assert!(out.is_empty());
+            assert!(link.start().is_err());
         }
     }
 
@@ -929,14 +1280,23 @@ mod tests {
             let mut link = up(&mut memory);
             let word = match case {
                 0 => ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, false),
-                1 => Word::Rpc(rpc(ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, true)).answer()).encode(),
-                2 => { let mut bad = rpc(ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, true)); bad.length += 1; Word::Rpc(bad).encode() }
+                1 => {
+                    Word::Rpc(rpc(ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, true)).answer())
+                        .encode()
+                }
+                2 => {
+                    let mut bad = rpc(ap_call(&mut memory, AP0, 0x40, b"A100", &[0], 1, true));
+                    bad.length += 1;
+                    Word::Rpc(bad).encode()
+                }
                 _ => ap_call(&mut memory, AP0, 0x40, b"A999", &[], 0, true),
             };
             link.receive(word);
             let result = link.dma(&mut memory, &mut out);
             assert!(result.is_err());
-            if case == 3 { assert_eq!(result, Err("refused")); }
+            if case == 3 {
+                assert_eq!(result, Err("refused"));
+            }
             assert_eq!(link.incoming.front(), Some(&word));
             assert!(out.is_empty());
         }

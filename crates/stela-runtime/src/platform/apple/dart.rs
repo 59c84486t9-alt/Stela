@@ -46,7 +46,10 @@ impl Profile {
     /// entry in the list. Selection alone does not qualify optional features.
     pub fn from_compatible(compatible: &[u8]) -> Option<Self> {
         let mut selected = None;
-        for name in compatible.split(|&byte| byte == 0).filter(|name| !name.is_empty()) {
+        for name in compatible
+            .split(|&byte| byte == 0)
+            .filter(|name| !name.is_empty())
+        {
             let profile = match name {
                 b"dart,t8020" => Self::T8020,
                 b"dart,t6000" => Self::T6000,

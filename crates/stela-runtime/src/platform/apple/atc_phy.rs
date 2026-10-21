@@ -124,31 +124,50 @@ impl AtcPhy {
         held.set(AON, u64::from(FORCE_CLAMP));
         held.set(MUX, u64::from(MUX_DUMMY));
         Self {
-            powered: true, clocked: true, quiesced: false, reset: false,
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
             held,
             utmi_clock_event: false,
         }
     }
     fn mmio_ready(&self) -> Result<(), &'static str> {
-        if !self.powered { return Err("ATC PHY power domain is off"); }
-        if !self.clocked { return Err("ATC PHY clock is gated"); }
-        if self.reset { return Err("ATC PHY reset is asserted"); }
+        if !self.powered {
+            return Err("ATC PHY power domain is off");
+        }
+        if !self.clocked {
+            return Err("ATC PHY clock is gated");
+        }
+        if self.reset {
+            return Err("ATC PHY reset is asserted");
+        }
         Ok(())
     }
-    fn active(&self) -> bool { self.mmio_ready().is_ok() && !self.quiesced }
+    fn active(&self) -> bool {
+        self.mmio_ready().is_ok() && !self.quiesced
+    }
     fn clear_ordinary(&mut self) {
         let controls = (self.powered, self.clocked, self.quiesced, self.reset);
         *self = Self::new();
         (self.powered, self.clocked, self.quiesced, self.reset) = controls;
     }
     pub fn set_power(&mut self, powered: bool, retention: bool) {
-        if self.powered && !powered && !retention { self.clear_ordinary(); }
+        if self.powered && !powered && !retention {
+            self.clear_ordinary();
+        }
         self.powered = powered;
     }
-    pub fn set_clock(&mut self, clocked: bool) { self.clocked = clocked; }
-    pub fn set_quiesced(&mut self, quiesced: bool) { self.quiesced = quiesced; }
+    pub fn set_clock(&mut self, clocked: bool) {
+        self.clocked = clocked;
+    }
+    pub fn set_quiesced(&mut self, quiesced: bool) {
+        self.quiesced = quiesced;
+    }
     pub fn set_reset(&mut self, reset: bool) {
-        if reset && !self.reset { self.clear_ordinary(); }
+        if reset && !self.reset {
+            self.clear_ordinary();
+        }
         self.reset = reset;
     }
 
@@ -157,7 +176,8 @@ impl AtcPhy {
     /// ordinary bank in reset; clock/quiesce pauses do not assert that line.
     pub fn usb2_state(&self) -> Usb2State {
         Usb2State {
-            ready: self.electrical_usb2_ready() && self.core_ready()
+            ready: self.electrical_usb2_ready()
+                && self.core_ready()
                 && self.word(POWER_CTRL) & (CLAMP | CORE_PHY_N) == CORE_PHY_N
                 && self.controller_released(),
             clocked: self.powered && self.clocked && !self.reset,
@@ -359,23 +379,53 @@ mod tests {
         let mut p = AtcPhy::new();
         let mut latch = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut latch);
-        for (offset, value) in [(USBCTL, RUN), (CTL, APB_RESET_N),
+        for (offset, value) in [
+            (USBCTL, RUN),
+            (CTL, APB_RESET_N),
             (POWER_CTRL, SMALL | BIG | CORE_APB_N | CORE_PHY_N),
-            (MISC, MISC_RESET_N), (AON, RESET_N)] {
+            (MISC, MISC_RESET_N),
+            (AON, RESET_N),
+        ] {
             wr(&mut p, &mut a, offset, value);
         }
         let released = p.usb2_state();
-        assert_eq!(released, Usb2State { ready: true, clocked: true, quiesced: false, controller_reset: false });
+        assert_eq!(
+            released,
+            Usb2State {
+                ready: true,
+                clocked: true,
+                quiesced: false,
+                controller_reset: false
+            }
+        );
         p.set_quiesced(true);
-        assert_eq!(p.usb2_state(), Usb2State { quiesced: true, ..released });
+        assert_eq!(
+            p.usb2_state(),
+            Usb2State {
+                quiesced: true,
+                ..released
+            }
+        );
         assert_eq!(rd(&mut p, &mut a, USBCTL), u64::from(RUN));
         p.set_quiesced(false);
         p.set_clock(false);
-        assert_eq!(p.usb2_state(), Usb2State { clocked: false, ..released });
+        assert_eq!(
+            p.usb2_state(),
+            Usb2State {
+                clocked: false,
+                ..released
+            }
+        );
         assert!(p.read(USBCTL, Width::Word, &mut a).is_err());
         p.set_clock(true);
         p.set_power(false, true);
-        assert_eq!(p.usb2_state(), Usb2State { clocked: false, ..released });
+        assert_eq!(
+            p.usb2_state(),
+            Usb2State {
+                clocked: false,
+                ..released
+            }
+        );
         p.set_power(true, true);
         assert_eq!(p.usb2_state(), released);
         wr(&mut p, &mut a, MISCTUNE, REFCLK_GATE_OFF);

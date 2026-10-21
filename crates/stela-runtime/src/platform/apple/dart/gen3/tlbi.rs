@@ -114,7 +114,10 @@ mod tests {
             ([header(0, 15, 255), 0], Operation::All),
             ([header(1, 15, 255), 0], Operation::Stream),
             (
-                [header(3, 15, 255) | 7 << PAGE_SHIFT, PAGE_FIELD << PAGE_SHIFT],
+                [
+                    header(3, 15, 255) | 7 << PAGE_SHIFT,
+                    PAGE_FIELD << PAGE_SHIFT,
+                ],
                 Operation::Range {
                     start_page: 7,
                     end_page: PAGE_FIELD as u32,

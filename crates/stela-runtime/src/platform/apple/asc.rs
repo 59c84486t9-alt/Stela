@@ -846,19 +846,40 @@ mod tests {
     }
     impl Firmware for AtomicCommand {
         fn start(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
-            out.push(Message { endpoint: 0, payload: 0x11 });
-            if self.refuse_start { return Err("start refused"); }
+            out.push(Message {
+                endpoint: 0,
+                payload: 0x11,
+            });
+            if self.refuse_start {
+                return Err("start refused");
+            }
             Ok(())
         }
-        fn stop(&mut self) -> Result<(), &'static str> { Ok(()) }
+        fn stop(&mut self) -> Result<(), &'static str> {
+            Ok(())
+        }
         fn resume(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
-            out.push(Message { endpoint: 0, payload: 7 << 52 | 0x20 });
-            if self.refuse_resume { return Err("resume refused"); }
+            out.push(Message {
+                endpoint: 0,
+                payload: 7 << 52 | 0x20,
+            });
+            if self.refuse_resume {
+                return Err("resume refused");
+            }
             Ok(())
         }
-        fn receive(&mut self, message: Message, out: &mut Vec<Message>) -> Result<(), &'static str> {
-            out.push(Message { endpoint: message.endpoint, payload: self.value + message.payload });
-            if self.refuse_receive { return Err("command refused"); }
+        fn receive(
+            &mut self,
+            message: Message,
+            out: &mut Vec<Message>,
+        ) -> Result<(), &'static str> {
+            out.push(Message {
+                endpoint: message.endpoint,
+                payload: self.value + message.payload,
+            });
+            if self.refuse_receive {
+                return Err("command refused");
+            }
             self.value += message.payload;
             Ok(())
         }
@@ -868,33 +889,55 @@ mod tests {
     fn atomic_command_refusals_discard_tentative_acks_and_preserve_input_for_retry() {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
-        let mut asc = Asc::new(Box::new(AtomicCommand { refuse_start: true, refuse_resume: true, refuse_receive: true, value: 0 }), false, Lines::from_interrupts(LINES)).unwrap();
+        let mut asc = Asc::new(
+            Box::new(AtomicCommand {
+                refuse_start: true,
+                refuse_resume: true,
+                refuse_receive: true,
+                value: 0,
+            }),
+            false,
+            Lines::from_interrupts(LINES),
+        )
+        .unwrap();
         asc.write(I2A_CONTROL, Width::Word, 1, &mut access).unwrap();
-        assert!(asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).is_err());
+        assert!(
+            asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+                .is_err()
+        );
         assert!(!asc.running && !asc.halted && asc.cpu_control == 0);
         assert!(asc.outbox.is_empty());
         assert_eq!(asc.levels[2], Some(false));
         asc.firmware_mut::<AtomicCommand>().unwrap().refuse_start = false;
-        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).unwrap();
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
         assert_eq!(receive(&mut asc, &mut access).0, 0x11);
         asc.write(A2I_SEND0, Width::Double, 5, &mut access).unwrap();
-        assert!(asc.write(A2I_SEND1, Width::Double, 0x20, &mut access).is_err());
+        assert!(
+            asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+                .is_err()
+        );
         assert_eq!(asc.send0, Some(5));
         assert_eq!(asc.firmware::<AtomicCommand>().unwrap().value, 0);
         assert!(asc.outbox.is_empty());
         assert_eq!(asc.levels[2], Some(false));
         asc.firmware_mut::<AtomicCommand>().unwrap().refuse_receive = false;
         // Retry only SEND1: its staged payload was not consumed by refusal.
-        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access).unwrap();
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
         assert_eq!(asc.send0, None);
         assert_eq!(asc.firmware::<AtomicCommand>().unwrap().value, 5);
         assert_eq!(receive(&mut asc, &mut access).0, 5);
         asc.write(CPU_CONTROL, Width::Word, 0, &mut access).unwrap();
-        assert!(asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).is_err());
+        assert!(
+            asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+                .is_err()
+        );
         assert!(!asc.running && asc.halted && asc.cpu_control == 0);
         assert!(asc.outbox.is_empty());
         asc.firmware_mut::<AtomicCommand>().unwrap().refuse_resume = false;
-        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).unwrap();
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
         assert_eq!(receive(&mut asc, &mut access).0, 7 << 52 | 0x20);
         assert!(asc.outbox.is_empty());
     }
@@ -906,12 +949,21 @@ mod tests {
         polls: u32,
     }
     impl super::super::rtkit::Endpoint for AsyncEndpoint {
-        fn start(&mut self, _: &mut Vec<u64>) -> Result<(), &'static str> { Ok(()) }
-        fn receive(&mut self, _: u64, _: &mut Vec<u64>) -> Result<(), &'static str> { Err("no command contract") }
+        fn start(&mut self, _: &mut Vec<u64>) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn receive(&mut self, _: u64, _: &mut Vec<u64>) -> Result<(), &'static str> {
+            Err("no command contract")
+        }
         fn poll(&mut self, out: &mut Vec<u64>) -> Result<(), &'static str> {
             self.polls += 1;
-            if !self.issued { self.issued = true; out.push(self.value); }
-            if self.fail { return Err("later async operation failed"); }
+            if !self.issued {
+                self.issued = true;
+                out.push(self.value);
+            }
+            if self.fail {
+                return Err("later async operation failed");
+            }
             Ok(())
         }
     }
@@ -919,13 +971,26 @@ mod tests {
     #[test]
     fn rtkit_poll_preserves_both_prior_and_failing_endpoint_events_and_irqs() {
         use super::super::rtkit::{Endpoint, Management, RtKit};
-        let endpoints = (0x20..=0x22).map(|number| (number, Box::new(AsyncEndpoint { value: u64::from(number) + 100, issued: false, fail: number == 0x21, polls: 0 }) as Box<dyn Endpoint>)).collect();
+        let endpoints = (0x20..=0x22)
+            .map(|number| {
+                (
+                    number,
+                    Box::new(AsyncEndpoint {
+                        value: u64::from(number) + 100,
+                        issued: false,
+                        fail: number == 0x21,
+                        polls: 0,
+                    }) as Box<dyn Endpoint>,
+                )
+            })
+            .collect();
         let rtkit = RtKit::new(endpoints, Management::Ordinary).unwrap();
         let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let send = |asc: &mut Asc, payload, access: &mut Access<'_>| {
-            asc.write(A2I_SEND0, Width::Double, payload, access).unwrap();
+            asc.write(A2I_SEND0, Width::Double, payload, access)
+                .unwrap();
             asc.write(A2I_SEND1, Width::Double, 0, access).unwrap();
         };
         receive(&mut asc, &mut access); // Hello.
@@ -935,7 +1000,9 @@ mod tests {
         receive(&mut asc, &mut access); // Roll call1.
         send(&mut asc, 8 << 52 | 1 << 51 | 1 << 32, &mut access);
         assert_eq!(receive(&mut asc, &mut access).0, 7 << 52 | 0x20);
-        for number in 0x20..=0x22 { send(&mut asc, 5 << 52 | number << 32 | 2, &mut access); }
+        for number in 0x20..=0x22 {
+            send(&mut asc, 5 << 52 | number << 32 | 2, &mut access);
+        }
         asc.write(I2A_CONTROL, Width::Word, 0, &mut access).unwrap();
         assert!(asc.advance(&mut access).is_err());
         assert_eq!(asc.outbox.len(), 2);

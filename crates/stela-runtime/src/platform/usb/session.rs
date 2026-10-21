@@ -250,7 +250,10 @@ mod tests {
         let mut session = Session::test_mux(mux);
         session.attach(7).unwrap();
         assert_eq!(session.state(stream), Ok(StreamState::Open));
-        assert_eq!(session.detach_reset(|_| Err("injected reset refusal")), Err("injected reset refusal"));
+        assert_eq!(
+            session.detach_reset(|_| Err("injected reset refusal")),
+            Err("injected reset refusal")
+        );
         assert_eq!(session.generation, Some(7));
         assert_eq!(session.state(stream), Ok(StreamState::Open));
         session.detach().unwrap();

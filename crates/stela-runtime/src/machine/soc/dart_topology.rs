@@ -1,12 +1,15 @@
 //! Generation-specific original DART topology and native placement gates.
-use super::{DartInstance, Iommu, IOMMU_MAPPER, Node, name_of, power_resources};
+use super::{DartInstance, IOMMU_MAPPER, Iommu, Node, name_of, power_resources};
 use crate::platform::apple::dart::{self, Profile};
 use alloc::{format, string::String, vec::Vec};
 
 /// Every visible DART requirement, preserving separate translation windows.
 /// Modern t8110 paired capture retains its cacheless model; legacy UMMS,
 /// FPAD and unqualified DMA routing remain explicit requirements.
-pub(super) fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Vec<Iommu>, String> {
+pub(super) fn iommus(
+    io: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Vec<Iommu>, String> {
     let mut found = Vec::new();
     let mut failure = None;
     io.visit(&mut |node| {
@@ -26,7 +29,9 @@ pub(super) fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> R
             for bank in &found {
                 for &(handle, _) in &bank.mappers {
                     if handles.contains(&handle) {
-                        return Err(format!("DART mapper phandle {handle:#x} has ambiguous native DMA routing"));
+                        return Err(format!(
+                            "DART mapper phandle {handle:#x} has ambiguous native DMA routing"
+                        ));
                     }
                     handles.push(handle);
                 }
@@ -36,10 +41,17 @@ pub(super) fn iommus(io: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> R
     }
 }
 
-pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iommu, String> {
+pub(super) fn iommu(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<Iommu, String> {
     let path = format!("/arm-io/{}", name_of(node));
-    let profile = node.property("compatible").and_then(Profile::from_compatible)
-        .ok_or_else(|| format!("{path} requires an unsupported or conflicting native DART generation"))?;
+    let profile = node
+        .property("compatible")
+        .and_then(Profile::from_compatible)
+        .ok_or_else(|| {
+            format!("{path} requires an unsupported or conflicting native DART generation")
+        })?;
     if profile != Profile::T8110 {
         legacy_requirements(profile, |key| node.property(key))
             .map_err(|reason| format!("{path} {reason}"))?;
@@ -64,9 +76,16 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
     let mut instances = Vec::new();
     let mut apf = None;
     let mut smmu = None;
-    for (reg_index, (descriptor, &(offset, bytes))) in descriptors.chunks_exact(descriptor_bytes).zip(&reg).enumerate() {
+    for (reg_index, (descriptor, &(offset, bytes))) in descriptors
+        .chunks_exact(descriptor_bytes)
+        .zip(&reg)
+        .enumerate()
+    {
         let (number, owner_start) = if profile == Profile::T8110 {
-            (u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number")), 8)
+            (
+                u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number")),
+                8,
+            )
         } else {
             (instances.len() as u32, 4)
         };
@@ -93,7 +112,9 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
                     bytes,
                     number,
                     reg_index,
-                    owner: descriptor[owner_start..owner_start + 8].try_into().expect("eight-byte owner"),
+                    owner: descriptor[owner_start..owner_start + 8]
+                        .try_into()
+                        .expect("eight-byte owner"),
                 });
             }
             b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() && smmu.is_none() => {
@@ -138,7 +159,8 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
             Some((at, slices))
         }
     };
-    let streams = node.first_u32("sid-count")
+    let streams = node
+        .first_u32("sid-count")
         .or_else(|| (profile != Profile::T8110).then_some(16))
         .and_then(|count| u16::try_from(count).ok())
         .filter(|&count| count > 0 && usize::from(count) <= profile.stream_limit())
@@ -146,7 +168,9 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
     let irq = node
         .first_u32("interrupts")
         .filter(|irq| u16::try_from(*irq).is_ok())
-        .ok_or_else(|| format!("{path} requires an interrupt within the native AIC input encoding"))?;
+        .ok_or_else(|| {
+            format!("{path} requires an interrupt within the native AIC input encoding")
+        })?;
     let clock_gates = power_resources::gate_ids(node, &path, "clock-gates")?;
     let power_gates = power_resources::gate_ids(node, &path, "power-gates")?;
     let retention = node.property("retention").is_some();
@@ -159,12 +183,18 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
     let mut mapper_failure = None;
     node.visit(&mut |child| {
         if child.compatible(IOMMU_MAPPER) {
-            let word = |key| child.property(key).and_then(|bytes| {
-                <[u8; 4]>::try_from(bytes).ok().map(u32::from_le_bytes)
-            });
+            let word = |key| {
+                child
+                    .property(key)
+                    .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok().map(u32::from_le_bytes))
+            };
             match (word("AAPL,phandle"), word("reg")) {
                 (Some(handle), Some(sid)) => mappers.push((handle, sid)),
-                _ => mapper_failure = Some(format!("{path} mapper requires one native phandle and SID word")),
+                _ => {
+                    mapper_failure = Some(format!(
+                        "{path} mapper requires one native phandle and SID word"
+                    ))
+                }
             }
         }
     })
@@ -175,7 +205,8 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
     let sids = if profile == Profile::T8110 {
         match node.property("sid") {
             None => Vec::new(),
-            Some(bytes) if bytes.len().is_multiple_of(4) => node.cells32("sid")
+            Some(bytes) if bytes.len().is_multiple_of(4) => node
+                .cells32("sid")
                 .filter(|sids| sids.iter().all(|sid| *sid < u32::from(streams)))
                 .ok_or_else(|| format!("{path} has malformed or out-of-range sid entries"))?,
             Some(_) => return Err(format!("{path} has incomplete sid cells")),
@@ -184,8 +215,11 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
         match node.property("sids") {
             None => Vec::new(),
             Some(bytes) => {
-                let bitmap = u32::from_le_bytes(bytes.try_into().expect("validated legacy SID bitmap"));
-                (0..u32::from(streams)).filter(|sid| bitmap & (1 << sid) != 0).collect()
+                let bitmap =
+                    u32::from_le_bytes(bytes.try_into().expect("validated legacy SID bitmap"));
+                (0..u32::from(streams))
+                    .filter(|sid| bitmap & (1 << sid) != 0)
+                    .collect()
             }
         }
     };
@@ -225,14 +259,18 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
             bytes.try_into().expect("validated legacy vm-base"),
         )),
         Some(bytes) => u64::from_le_bytes(
-            bytes.try_into().map_err(|_| format!("{path} vm-base is not one 64-bit address"))?,
+            bytes
+                .try_into()
+                .map_err(|_| format!("{path} vm-base is not one 64-bit address"))?,
         ),
     };
     if mappers.iter().any(|&(_, sid)| sid >= u32::from(streams)) {
         return Err(format!("{path} mapper SID exceeds its native DART profile"));
     }
     if profile != Profile::T8110 && instances.len() > 1 && !mappers.is_empty() {
-        return Err(format!("{path} requires explicit legacy multi-instance DMA routing"));
+        return Err(format!(
+            "{path} requires explicit legacy multi-instance DMA routing"
+        ));
     }
     Ok(Iommu {
         profile,
@@ -251,12 +289,13 @@ pub(super) fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> 
     })
 }
 
-
 /// Recognize DART requirements even when a generation cannot be admitted.
 /// Unknown families must produce a named requirement instead of disappearing.
 fn is_dart(node: &Node<'_>) -> bool {
     node.property("compatible").is_some_and(|bytes| {
-        bytes.split(|&byte| byte == 0).any(|name| name.starts_with(b"dart,"))
+        bytes
+            .split(|&byte| byte == 0)
+            .any(|name| name.starts_with(b"dart,"))
     })
 }
 
@@ -272,10 +311,16 @@ pub(super) fn legacy_requirements<'a>(
     }
     let streams = match property("sid-count") {
         None => 16,
-        Some(bytes) => u32::from_le_bytes(bytes.try_into().map_err(|_| "has an incomplete legacy sid-count")?),
+        Some(bytes) => u32::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| "has an incomplete legacy sid-count")?,
+        ),
     };
     if streams > 16 {
-        return Err("requires a legacy stream layout beyond the supported 16-SID profile (including USB4's 64-SID layout)");
+        return Err(
+            "requires a legacy stream layout beyond the supported 16-SID profile (including USB4's 64-SID layout)",
+        );
     }
     if streams == 0 {
         return Err("has an empty native DART stream set");
@@ -288,12 +333,18 @@ pub(super) fn legacy_requirements<'a>(
         return Err("has incomplete legacy 12-byte instance descriptors");
     }
     if descriptors.len() / 12 > 5 {
-        return Err("requires a legacy descriptor count beyond the recovered five-instance topology");
+        return Err(
+            "requires a legacy descriptor count beyond the recovered five-instance topology",
+        );
     }
     for descriptor in descriptors.chunks_exact(12) {
         match &descriptor[..4] {
             b"TRAD" => (),
-            b"FPAD" => return Err("requires unsupported legacy FPAD translation and appended-filter semantics"),
+            b"FPAD" => {
+                return Err(
+                    "requires unsupported legacy FPAD translation and appended-filter semantics",
+                );
+            }
             b"UMMS" => return Err("requires unsupported legacy UMMS capture semantics"),
             _ => return Err("requires an unknown legacy DART instance kind"),
         }
@@ -318,7 +369,11 @@ pub(super) fn legacy_requirements<'a>(
         return Err("requires legacy sids bitmap semantics, not a modern sid list");
     }
     if let Some(bytes) = property("sids") {
-        let bitmap = u32::from_le_bytes(bytes.try_into().map_err(|_| "requires the unsupported legacy wide SID bitmap")?);
+        let bitmap = u32::from_le_bytes(
+            bytes
+                .try_into()
+                .map_err(|_| "requires the unsupported legacy wide SID bitmap")?,
+        );
         if bitmap >> streams != 0 {
             return Err("has legacy sids bits outside the native stream set");
         }
@@ -343,10 +398,19 @@ mod tests {
     use alloc::vec;
 
     fn bytes64(values: &[u64]) -> Vec<u8> {
-        values.iter().flat_map(|value| value.to_le_bytes()).collect()
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
     }
 
-    fn legacy(compatible: &[u8], descriptors: &[u8], registers: &[u64], extra: &[(&str, &[u8])], children: &[Vec<u8>]) -> Vec<u8> {
+    fn legacy(
+        compatible: &[u8],
+        descriptors: &[u8],
+        registers: &[u64],
+        extra: &[(&str, &[u8])],
+        children: &[Vec<u8>],
+    ) -> Vec<u8> {
         let registers = bytes64(registers);
         let page = 0x4000u32.to_le_bytes();
         let irq = 1035u32.to_le_bytes();
@@ -379,21 +443,36 @@ mod tests {
             (b"dart,t8020\0".as_slice(), Profile::T8020, 0x382f00000),
             (b"dart,t6000\0".as_slice(), Profile::T6000, 0x702f00000),
         ] {
-            let tree = legacy(compatible, &descriptors, &[base, 0x4000, base + 0x80000, 0x4000], &[
-                ("sids", &0xbu32.to_le_bytes()),
-                ("vm-base", &0x80000000u32.to_le_bytes()),
-            ], &[]);
+            let tree = legacy(
+                compatible,
+                &descriptors,
+                &[base, 0x4000, base + 0x80000, 0x4000],
+                &[
+                    ("sids", &0xbu32.to_le_bytes()),
+                    ("vm-base", &0x80000000u32.to_le_bytes()),
+                ],
+                &[],
+            );
             let node = Node::root(&tree).unwrap();
             let bank = iommu(&node, &|offset| offset.checked_add(0x200000000)).unwrap();
             assert_eq!(bank.profile, profile);
             assert_eq!(bank.streams, 16);
             assert_eq!(bank.vm_base, 0x80000000);
             assert_eq!(bank.sids, [0, 1, 3]);
-            assert_eq!(bank.instances.iter().map(|instance| (instance.number, instance.reg_index)).collect::<Vec<_>>(), [(0, 0), (1, 1)]);
+            assert_eq!(
+                bank.instances
+                    .iter()
+                    .map(|instance| (instance.number, instance.reg_index))
+                    .collect::<Vec<_>>(),
+                [(0, 0), (1, 1)]
+            );
             assert_eq!(bank.instances[0].owner, *b"DARTLLT\0");
             assert_eq!(bank.instances[1].owner, *b"DARTBLK\0");
             assert_eq!(bank.instances[1].physical, base + 0x80000 + 0x200000000);
-            assert!(super::super::models(core::str::from_utf8(&compatible[..compatible.len() - 1]).unwrap(), |key| node.property(key)));
+            assert!(super::super::models(
+                core::str::from_utf8(&compatible[..compatible.len() - 1]).unwrap(),
+                |key| node.property(key)
+            ));
         }
     }
 
@@ -402,69 +481,174 @@ mod tests {
         let descriptor = b"TRADDART\0\0\0\0";
         for (extra, requirement) in [
             (vec![("sid-count", 64u32.to_le_bytes().to_vec())], "16-SID"),
-            (vec![("page-size", 0x1000u32.to_le_bytes().to_vec())], "16 KiB page-size"),
-            (vec![("reg", bytes64(&[0x382f00000, 0x8000]))], "register geometry"),
+            (
+                vec![("page-size", 0x1000u32.to_le_bytes().to_vec())],
+                "16 KiB page-size",
+            ),
+            (
+                vec![("reg", bytes64(&[0x382f00000, 0x8000]))],
+                "register geometry",
+            ),
             (vec![("remap", vec![0, 1, 0, 0])], "SID remap routing"),
-            (vec![("remap", vec![0, 0])], "incomplete padded legacy remap"),
-            (vec![("filter-data-instance-0", vec![0; 0x40])], "address-permission filter"),
-            (vec![("sids", 0x10000u32.to_le_bytes().to_vec())], "outside the native"),
-            (vec![("sids", 1u64.to_le_bytes().to_vec())], "wide SID bitmap"),
-            (vec![("sid", 0u32.to_le_bytes().to_vec())], "not a modern sid list"),
-            (vec![("vm-base", 0u64.to_le_bytes().to_vec())], "32-bit vm-base"),
-            (vec![("instance", b"FPADDARTLLT\0".to_vec())], "FPAD translation and appended-filter"),
-            (vec![("instance", b"UMMSSMMURT\0\0".to_vec())], "UMMS capture"),
+            (
+                vec![("remap", vec![0, 0])],
+                "incomplete padded legacy remap",
+            ),
+            (
+                vec![("filter-data-instance-0", vec![0; 0x40])],
+                "address-permission filter",
+            ),
+            (
+                vec![("sids", 0x10000u32.to_le_bytes().to_vec())],
+                "outside the native",
+            ),
+            (
+                vec![("sids", 1u64.to_le_bytes().to_vec())],
+                "wide SID bitmap",
+            ),
+            (
+                vec![("sid", 0u32.to_le_bytes().to_vec())],
+                "not a modern sid list",
+            ),
+            (
+                vec![("vm-base", 0u64.to_le_bytes().to_vec())],
+                "32-bit vm-base",
+            ),
+            (
+                vec![("instance", b"FPADDARTLLT\0".to_vec())],
+                "FPAD translation and appended-filter",
+            ),
+            (
+                vec![("instance", b"UMMSSMMURT\0\0".to_vec())],
+                "UMMS capture",
+            ),
         ] {
-            let extra = extra.iter().map(|(key, value)| (*key, value.as_slice())).collect::<Vec<_>>();
-            let tree = legacy(b"dart,t8020\0", descriptor, &[0x382f00000, 0x4000], &extra, &[]);
+            let extra = extra
+                .iter()
+                .map(|(key, value)| (*key, value.as_slice()))
+                .collect::<Vec<_>>();
+            let tree = legacy(
+                b"dart,t8020\0",
+                descriptor,
+                &[0x382f00000, 0x4000],
+                &extra,
+                &[],
+            );
             let node = Node::root(&tree).unwrap();
-            assert!(iommu(&node, &Some).unwrap_err().contains(requirement), "{requirement}");
+            assert!(
+                iommu(&node, &Some).unwrap_err().contains(requirement),
+                "{requirement}"
+            );
             assert!(!super::super::models("dart,t8020", |key| node.property(key)));
         }
     }
 
     #[test]
     fn mapper_sid_and_multi_instance_dma_require_actual_native_routing() {
-        let mapper = |sid: u32| encode(&[
-            ("name", b"mapper\0"),
-            ("compatible", b"iommu-mapper\0"),
-            ("AAPL,phandle", &7u32.to_le_bytes()),
-            ("reg", &sid.to_le_bytes()),
-        ], &[]);
+        let mapper = |sid: u32| {
+            encode(
+                &[
+                    ("name", b"mapper\0"),
+                    ("compatible", b"iommu-mapper\0"),
+                    ("AAPL,phandle", &7u32.to_le_bytes()),
+                    ("reg", &sid.to_le_bytes()),
+                ],
+                &[],
+            )
+        };
         let one = b"TRADDART\0\0\0\0";
-        let tree = legacy(b"dart,t6000\0", one, &[0x702f00000, 0x4000], &[], &[mapper(15)]);
-        assert_eq!(iommu(&Node::root(&tree).unwrap(), &Some).unwrap().mappers, [(7, 15)]);
-        let tree = legacy(b"dart,t6000\0", one, &[0x702f00000, 0x4000], &[], &[mapper(16)]);
-        assert!(iommu(&Node::root(&tree).unwrap(), &Some).unwrap_err().contains("mapper SID"));
-        let first = legacy(b"dart,t6000\0", one, &[0x702f00000, 0x4000], &[], &[mapper(1)]);
-        let second = legacy(b"dart,t6000\0", one, &[0x702f80000, 0x4000], &[], &[mapper(2)]);
+        let tree = legacy(
+            b"dart,t6000\0",
+            one,
+            &[0x702f00000, 0x4000],
+            &[],
+            &[mapper(15)],
+        );
+        assert_eq!(
+            iommu(&Node::root(&tree).unwrap(), &Some).unwrap().mappers,
+            [(7, 15)]
+        );
+        let tree = legacy(
+            b"dart,t6000\0",
+            one,
+            &[0x702f00000, 0x4000],
+            &[],
+            &[mapper(16)],
+        );
+        assert!(
+            iommu(&Node::root(&tree).unwrap(), &Some)
+                .unwrap_err()
+                .contains("mapper SID")
+        );
+        let first = legacy(
+            b"dart,t6000\0",
+            one,
+            &[0x702f00000, 0x4000],
+            &[],
+            &[mapper(1)],
+        );
+        let second = legacy(
+            b"dart,t6000\0",
+            one,
+            &[0x702f80000, 0x4000],
+            &[],
+            &[mapper(2)],
+        );
         let tree = encode(&[("name", b"arm-io\0")], &[first, second]);
-        assert!(iommus(&Node::root(&tree).unwrap(), &Some).unwrap_err().contains("ambiguous native DMA routing"));
+        assert!(
+            iommus(&Node::root(&tree).unwrap(), &Some)
+                .unwrap_err()
+                .contains("ambiguous native DMA routing")
+        );
         let two = [one.as_slice(), one].concat();
-        let tree = legacy(b"dart,t6000\0", &two, &[0x702f00000, 0x4000, 0x702f80000, 0x4000], &[], &[mapper(1)]);
-        assert!(iommu(&Node::root(&tree).unwrap(), &Some).unwrap_err().contains("multi-instance DMA routing"));
+        let tree = legacy(
+            b"dart,t6000\0",
+            &two,
+            &[0x702f00000, 0x4000, 0x702f80000, 0x4000],
+            &[],
+            &[mapper(1)],
+        );
+        assert!(
+            iommu(&Node::root(&tree).unwrap(), &Some)
+                .unwrap_err()
+                .contains("multi-instance DMA routing")
+        );
     }
 
     #[test]
     fn native_family_traversal_keeps_mixed_groups_and_refuses_unknown_generations() {
         let one = b"TRADDART\0\0\0\0";
         let legacy = legacy(b"dart,t6000\0", one, &[0x702f00000, 0x4000], &[], &[]);
-        let modern = encode(&[
-            ("name", b"dart-modern\0"),
-            ("compatible", b"dart,t8110\0"),
-            ("instance", &[b"TRAD".as_slice(), &[0; 4], b"DART\0\0\0\0"].concat()),
-            ("reg", &bytes64(&[0x703000000, 0x4000])),
-            ("sid-count", &64u32.to_le_bytes()),
-            ("sid", &15u32.to_le_bytes()),
-            ("interrupts", &1u32.to_le_bytes()),
-            ("vm-base", &0x100000000u64.to_le_bytes()),
-        ], &[]);
+        let modern = encode(
+            &[
+                ("name", b"dart-modern\0"),
+                ("compatible", b"dart,t8110\0"),
+                (
+                    "instance",
+                    &[b"TRAD".as_slice(), &[0; 4], b"DART\0\0\0\0"].concat(),
+                ),
+                ("reg", &bytes64(&[0x703000000, 0x4000])),
+                ("sid-count", &64u32.to_le_bytes()),
+                ("sid", &15u32.to_le_bytes()),
+                ("interrupts", &1u32.to_le_bytes()),
+                ("vm-base", &0x100000000u64.to_le_bytes()),
+            ],
+            &[],
+        );
         let tree = encode(&[("name", b"arm-io\0")], &[legacy, modern]);
         let banks = iommus(&Node::root(&tree).unwrap(), &Some).unwrap();
-        assert_eq!(banks.iter().map(|bank| bank.profile).collect::<Vec<_>>(), [Profile::T6000, Profile::T8110]);
+        assert_eq!(
+            banks.iter().map(|bank| bank.profile).collect::<Vec<_>>(),
+            [Profile::T6000, Profile::T8110]
+        );
         assert_eq!(banks[1].sids, [15]);
         assert_eq!(banks[1].vm_base, 0x100000000);
         let unknown = encode(&[("compatible", b"dart,gen3\0dart,t8110\0")], &[]);
-        assert!(iommus(&Node::root(&unknown).unwrap(), &Some).unwrap_err().contains("unsupported or conflicting"));
+        assert!(
+            iommus(&Node::root(&unknown).unwrap(), &Some)
+                .unwrap_err()
+                .contains("unsupported or conflicting")
+        );
         assert!(!super::super::models("dart,gen3", |_| None));
         let node = Node::root(&unknown).unwrap();
         assert!(!super::super::models("dart,t8110", |key| node.property(key)));

@@ -2296,10 +2296,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .dma_deadline()
             .is_some_and(|deadline| now >= deadline)
         {
-            self.device_transfer(now)
-                .map_err(|error| {
-                    self.unsupported(RequirementKind::DeviceAdvance(format!("{error:?}")))
-                })?;
+            self.device_transfer(now).map_err(|error| {
+                self.unsupported(RequirementKind::DeviceAdvance(format!("{error:?}")))
+            })?;
             self.device_lines = None;
         }
         Ok(())
@@ -4570,9 +4569,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 MemoryTransfer::Store => {
                     let values = data.map(|register| self.read_register(register));
                     for (element, value) in elements.into_iter().zip(values) {
-                        let written =
-                            self.device_write(element, bytes, value, now)
-                                .and_then(|()| self.device_transfer(now));
+                        let written = self
+                            .device_write(element, bytes, value, now)
+                            .and_then(|()| self.device_transfer(now));
                         match written {
                             Ok(()) => {}
                             Err(error) if self.surveyed(element, bytes, Some(value), &error) => {}
@@ -5890,14 +5889,26 @@ mod tests {
             }
             Ok(physical)
         }
-        fn write(&mut self, _: usize, physical: u64, _: u8, value: u64, _: u64) -> Result<(), DeviceError> {
+        fn write(
+            &mut self,
+            _: usize,
+            physical: u64,
+            _: u8,
+            value: u64,
+            _: u64,
+        ) -> Result<(), DeviceError> {
             if self.refused == Some(physical) {
                 return Err(DeviceError::Refused("injected register refusal".into()));
             }
             self.stores.push((physical, value));
             Ok(())
         }
-        fn transfer(&mut self, _: usize, memory: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
+        fn transfer(
+            &mut self,
+            _: usize,
+            memory: &mut dyn Memory,
+            _: u64,
+        ) -> Result<(), DeviceError> {
             let index = self.transfers;
             self.transfers += 1;
             let (_, value) = self.stores[index];
@@ -5942,12 +5953,16 @@ mod tests {
                 machine.write_register(Register::X(2), 0x1234);
                 machine.write_register(Register::X(3), 0x5678);
                 // stp x2, x3, [x1, #16]!
-                let Err(Stop::Unsupported(requirement)) = machine.device_access(0xa981_0c22, DEVICE, DEVICE, true) else {
+                let Err(Stop::Unsupported(requirement)) =
+                    machine.device_access(0xa981_0c22, DEVICE, DEVICE, true)
+                else {
                     panic!("the pair must expose its original failure");
                 };
                 let failed_address = DEVICE + failed_element as u64 * 8;
                 assert_eq!(requirement.address, Some(failed_address));
-                assert!(matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address));
+                assert!(
+                    matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address)
+                );
                 assert_eq!(machine.cpu.pc, BASE);
                 assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
                 let committed = failed_element + usize::from(service_failure);
@@ -5971,7 +5986,8 @@ mod tests {
     #[test]
     fn survey_never_substitutes_a_failed_service_after_an_accepted_scalar_or_pair_store() {
         const DEVICE: u64 = 0x2_3b3c_0a00;
-        for word in [0xb900_0022, 0xa900_0c22] { // str w2 / stp x2, x3, [x1]
+        for word in [0xb900_0022, 0xa900_0c22] {
+            // str w2 / stp x2, x3, [x1]
             let mut devices = pair_fault_device();
             devices.failed_transfer = Some(0);
             let mut machine = board(&[], devices, Vec::new());
@@ -6007,7 +6023,9 @@ mod tests {
             machine.write_register(Register::X(2), 0x1234);
             machine.write_register(Register::X(3), 0x5678);
             // ldp x2, x3, [x1, #16]!
-            machine.device_access(0xa9c1_0c22, DEVICE, DEVICE, false).unwrap();
+            machine
+                .device_access(0xa9c1_0c22, DEVICE, DEVICE, false)
+                .unwrap();
             assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
             assert_eq!(machine.read_register(Register::X(2)), 0x1234);
             assert_eq!(machine.read_register(Register::X(3)), 0x5678);

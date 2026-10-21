@@ -135,18 +135,23 @@ impl MmioDevice for Capture {
             return Err(fail("gen3 DART fault registers are aligned 32-bit words"));
         }
         if let Some(word) = offset.checked_sub(PENDING).filter(|offset| *offset < 32) {
-            return self.pending((word / 4) as usize).map(u64::from).map_err(fail);
+            return self
+                .pending((word / 4) as usize)
+                .map(u64::from)
+                .map_err(fail);
         }
         if let Some(relative) = offset.checked_sub(RECORDS) {
             let sid = usize::try_from(relative / RECORD_BYTES)
                 .map_err(|_| fail("gen3 DART fault SID is outside its native bounds"))?;
             let record = self.record(sid).map_err(fail)?;
-            let record = record
-                .ok_or_else(|| fail("gen3 DART historical fault readback is unqualified"))?;
+            let record =
+                record.ok_or_else(|| fail("gen3 DART historical fault readback is unqualified"))?;
             return match relative % RECORD_BYTES {
                 ADDRESS_LOW => Ok(u64::from(record.address as u32)),
                 ADDRESS_HIGH => Ok(record.address >> 32),
-                0 => Err(fail("gen3 DART complete fault access-type header is unsupported")),
+                0 => Err(fail(
+                    "gen3 DART complete fault access-type header is unsupported",
+                )),
                 _ => Err(fail("gen3 DART auxiliary fault data is unsupported")),
             };
         }
@@ -169,7 +174,9 @@ impl MmioDevice for Capture {
                 .acknowledge((word / 4) as usize, value as u32)
                 .map_err(fail);
         }
-        Err(fail("unknown gen3 DART fault write or unrecovered acknowledgement"))
+        Err(fail(
+            "unknown gen3 DART fault write or unrecovered acknowledgement",
+        ))
     }
 }
 
@@ -247,7 +254,11 @@ mod tests {
         assert_eq!(capture.pending(1), Ok(2));
         capture.write(PENDING + 4, Width::Word, 2, &mut a).unwrap();
         assert_eq!(capture.read(PENDING + 4, Width::Word, &mut a), Ok(0));
-        assert!(capture.read(record + ADDRESS_LOW, Width::Word, &mut a).is_err());
+        assert!(
+            capture
+                .read(record + ADDRESS_LOW, Width::Word, &mut a)
+                .is_err()
+        );
     }
 
     #[test]

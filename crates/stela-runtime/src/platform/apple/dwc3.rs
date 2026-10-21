@@ -206,7 +206,10 @@ impl Dwc3 {
                 quiesced: false,
                 reset: false,
             },
-            phy_reset: false, phy_ready: false, phy_quiesced: false, phy_clocked: true,
+            phy_reset: false,
+            phy_ready: false,
+            phy_quiesced: false,
+            phy_clocked: true,
             pending_phy_disconnect: false,
             session_reset: false,
             irqs,
@@ -250,7 +253,9 @@ impl Dwc3 {
         // initialization. They do not establish which AP registers remain
         // accessible while it is held. This is an unsupported capability,
         // not a claim that physical reset makes all MMIO inaccessible.
-        if self.phy_reset { return Err("DWC3 MMIO while physical ATC PHY reset is held is unqualified"); }
+        if self.phy_reset {
+            return Err("DWC3 MMIO while physical ATC PHY reset is held is unqualified");
+        }
         Ok(())
     }
 
@@ -259,8 +264,12 @@ impl Dwc3 {
         if self.lifecycle.quiesced {
             return Err("DWC3 DMA is quiesced");
         }
-        if !self.phy_clocked { return Err("ATC PHY clock is gated"); }
-        if self.phy_quiesced { return Err("ATC PHY DMA is quiesced"); }
+        if !self.phy_clocked {
+            return Err("ATC PHY clock is gated");
+        }
+        if self.phy_quiesced {
+            return Err("ATC PHY DMA is quiesced");
+        }
         Ok(())
     }
 
@@ -269,7 +278,11 @@ impl Dwc3 {
     }
 
     fn clock_running(&self) -> bool {
-        self.lifecycle.powered && self.lifecycle.clocked && !self.lifecycle.reset && !self.phy_reset && self.phy_clocked
+        self.lifecycle.powered
+            && self.lifecycle.clocked
+            && !self.lifecycle.reset
+            && !self.phy_reset
+            && self.phy_clocked
     }
 
     /// Inhibit both personalities without losing their rings or configuration.
@@ -277,7 +290,9 @@ impl Dwc3 {
         let before = self.clock_running();
         self.lifecycle.clocked = enabled;
         let after = self.clock_running();
-        if before != after { self.host.set_clock(after, access.now); }
+        if before != after {
+            self.host.set_clock(after, access.now);
+        }
     }
 
     /// No DMA work runs concurrently with a machine boundary. Non-retained
@@ -285,10 +300,14 @@ impl Dwc3 {
     /// already committed guest RAM bytes are never undone or completed again.
     pub fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
         let before = self.clock_running();
-        if self.lifecycle.powered && !powered && !retention { self.reset(access); }
+        if self.lifecycle.powered && !powered && !retention {
+            self.reset(access);
+        }
         self.lifecycle.powered = powered;
         let after = self.clock_running();
-        if before != after { self.host.set_clock(after, access.now); }
+        if before != after {
+            self.host.set_clock(after, access.now);
+        }
     }
 
     pub fn set_quiesced(&mut self, quiesced: bool) {
@@ -299,15 +318,31 @@ impl Dwc3 {
         let before = self.clock_running();
         let reset_before = self.lifecycle.reset || self.phy_reset;
         self.lifecycle.reset = asserted;
-        if !reset_before && (self.lifecycle.reset || self.phy_reset) { self.reset(access); }
+        if !reset_before && (self.lifecycle.reset || self.phy_reset) {
+            self.reset(access);
+        }
         let after = self.clock_running();
-        if before != after { self.host.set_clock(after, access.now); }
+        if before != after {
+            self.host.set_clock(after, access.now);
+        }
     }
 
     /// Independent physical outputs from the actual PHY. Reset sources are
     /// ORed; neither a PMGR release nor a PHY release can clear the other.
-    pub fn set_phy_state(&mut self, reset: bool, ready: bool, clocked: bool, quiesced: bool, access: &mut Access<'_>) -> bool {
-        let changed = (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced) != (reset, ready, clocked, quiesced);
+    pub fn set_phy_state(
+        &mut self,
+        reset: bool,
+        ready: bool,
+        clocked: bool,
+        quiesced: bool,
+        access: &mut Access<'_>,
+    ) -> bool {
+        let changed = (
+            self.phy_reset,
+            self.phy_ready,
+            self.phy_clocked,
+            self.phy_quiesced,
+        ) != (reset, ready, clocked, quiesced);
         let before = self.clock_running();
         let reset_before = self.lifecycle.reset || self.phy_reset;
         if self.phy_ready && !ready {
@@ -320,13 +355,19 @@ impl Dwc3 {
         self.phy_ready = ready;
         self.phy_clocked = clocked;
         self.phy_quiesced = quiesced;
-        if !reset_before && (self.lifecycle.reset || self.phy_reset) { self.reset(access); }
+        if !reset_before && (self.lifecycle.reset || self.phy_reset) {
+            self.reset(access);
+        }
         let after = self.clock_running();
-        if before != after { self.host.set_clock(after, access.now); }
+        if before != after {
+            self.host.set_clock(after, access.now);
+        }
         changed
     }
 
-    pub fn phy_ready(&self) -> bool { self.phy_ready }
+    pub fn phy_ready(&self) -> bool {
+        self.phy_ready
+    }
 
     /// The adapter cancels its external peer session before further service.
     /// It retains its own retry flag if that cancellation reports failure.
@@ -393,7 +434,9 @@ impl Dwc3 {
         }
         let ready = state.high_speed_device_ready();
         if self.port_generation != state.generation() || self.port_ready != ready {
-            if self.connected { self.device_event(0)?; }
+            if self.connected {
+                self.device_event(0)?;
+            }
             self.bus_event();
             self.connected = false;
             self.port_generation = state.generation();
@@ -445,7 +488,11 @@ impl Dwc3 {
     /// The system count at which the host personality next has work of
     /// its own: an event to post, or `function`'s endpoint to poll.
     pub fn host_deadline(&self, function: Option<&(dyn Function + '_)>) -> Option<u64> {
-        if self.lifecycle_active() { self.host.deadline(function) } else { None }
+        if self.lifecycle_active() {
+            self.host.deadline(function)
+        } else {
+            None
+        }
     }
 
     /// Cables a USB2 function of `speed` to the host personality's root
@@ -488,12 +535,22 @@ impl Dwc3 {
         let generation = self.port_generation;
         let ready = self.port_ready;
         let lifecycle = self.lifecycle;
-        let phy = (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced);
+        let phy = (
+            self.phy_reset,
+            self.phy_ready,
+            self.phy_clocked,
+            self.phy_quiesced,
+        );
         *self = Self::new(self.irqs);
         self.port_generation = generation;
         self.port_ready = ready;
         self.lifecycle = lifecycle;
-        (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced) = phy;
+        (
+            self.phy_reset,
+            self.phy_ready,
+            self.phy_clocked,
+            self.phy_quiesced,
+        ) = phy;
         self.session_reset = true;
     }
 
@@ -985,7 +1042,9 @@ impl MmioDevice for Dwc3 {
             let result = self.host.write(offset, width.bytes(), value, access.now);
             // This register bank has its own clock. Software RUN/STOP while
             // the PHY clock is off cannot restart the external bus clock.
-            if !self.clock_running() { self.host.set_clock(false, access.now); }
+            if !self.clock_running() {
+                self.host.set_clock(false, access.now);
+            }
             result.map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
             self.interrupts(access);
             return Ok(());
@@ -1317,18 +1376,34 @@ mod tests {
             trb(&mut ram, TRB, 1024, HWO | LST | IOC | 1 << 4);
             start(&mut dwc, 2, TRB, &mut access);
             let mut packet = [0x5a; 512];
-            let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
-            assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+            let mut port = Port {
+                iommu: &mut dart,
+                stream: SID,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            assert_eq!(
+                dwc.peer(&mut port).packet(1, Token::Out, &mut packet),
+                Ok(Reply::Ack(512))
+            );
             assert_eq!(dwc.endpoints[2].active.unwrap().done, 512);
             dwc.set_clock(false, port.access);
             assert!(dwc.read(DCTL, Width::Word, port.access).is_err());
-            assert!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet).is_err());
+            assert!(
+                dwc.peer(&mut port)
+                    .packet(1, Token::Out, &mut packet)
+                    .is_err()
+            );
             assert!(dwc.flush(&mut port).is_err());
             assert_eq!(dwc.endpoints[2].active.unwrap().done, 512);
             dwc.set_clock(true, port.access);
             dwc.set_quiesced(true);
             assert_eq!(dwc.read(DCTL, Width::Word, port.access), Ok(RUN.into()));
-            assert!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet).is_err());
+            assert!(
+                dwc.peer(&mut port)
+                    .packet(1, Token::Out, &mut packet)
+                    .is_err()
+            );
             dwc.set_quiesced(false);
             dwc.set_power(false, retention, port.access);
             assert!(dwc.flush(&mut port).is_err());
@@ -1339,7 +1414,10 @@ mod tests {
             if retention {
                 assert_eq!(dwc.endpoints[2].active.unwrap().done, 512);
                 packet.fill(0xa5);
-                assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+                assert_eq!(
+                    dwc.peer(&mut port).packet(1, Token::Out, &mut packet),
+                    Ok(Reply::Ack(512))
+                );
                 dwc.flush(&mut port).unwrap();
                 assert_eq!(dwc.rings[0].count, 4);
                 assert!(port.memory.read(PAYLOAD + 512, &mut committed));
@@ -1347,12 +1425,24 @@ mod tests {
                 // Another real, still-owned transfer is canceled by reset,
                 // regardless of retention. Its committed prefix stays RAM.
                 trb(&mut ram, TRB, 1024, HWO | LST | IOC | 1 << 4);
-                let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
+                let mut port = Port {
+                    iommu: &mut dart,
+                    stream: SID,
+                    memory: &mut ram,
+                    access: &mut access,
+                };
                 start(&mut dwc, 2, TRB, port.access);
-                assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+                assert_eq!(
+                    dwc.peer(&mut port).packet(1, Token::Out, &mut packet),
+                    Ok(Reply::Ack(512))
+                );
                 dwc.set_reset(true, port.access);
                 assert!(dwc.read(DCTL, Width::Word, port.access).is_err());
-                assert!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet).is_err());
+                assert!(
+                    dwc.peer(&mut port)
+                        .packet(1, Token::Out, &mut packet)
+                        .is_err()
+                );
                 dwc.set_reset(false, port.access);
                 assert!(dwc.endpoints[2].active.is_none());
                 assert!(dwc.pending.is_empty());
@@ -1382,7 +1472,10 @@ mod tests {
         let gctl = dwc.gctl;
         write(&mut dwc, GCTL, gctl | CORE_RESET, &mut access);
         assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
-        assert_eq!(dwc.read(GCTL, Width::Word, &mut access), Ok((gctl | CORE_RESET).into()));
+        assert_eq!(
+            dwc.read(GCTL, Width::Word, &mut access),
+            Ok((gctl | CORE_RESET).into())
+        );
         write(&mut dwc, GUID, 0x1234, &mut access);
         assert_eq!(dwc.read(GUID, Width::Word, &mut access), Ok(0x1234));
         write(&mut dwc, GCTL, gctl, &mut access);
@@ -1391,8 +1484,10 @@ mod tests {
             assert!(matches!(dwc.read(offset, Width::Word, &mut access),
                 Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
         }
-        assert!(matches!(dwc.write(GCTL, Width::Word, gctl.into(), &mut access),
-            Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
+        assert!(
+            matches!(dwc.write(GCTL, Width::Word, gctl.into(), &mut access),
+            Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified"))
+        );
         dwc.set_phy_state(false, true, true, false, &mut access);
         assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
     }
@@ -1404,10 +1499,18 @@ mod tests {
         configure(&mut dwc, 2, 0, &mut access);
         trb(&mut ram, TRB, 1024, HWO | LST | IOC | 1 << 4);
         start(&mut dwc, 2, TRB, &mut access);
-        let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
+        let mut port = Port {
+            iommu: &mut dart,
+            stream: SID,
+            memory: &mut ram,
+            access: &mut access,
+        };
         dwc.peer(&mut port).reset().unwrap();
         let mut packet = [0x37; 512];
-        assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+        assert_eq!(
+            dwc.peer(&mut port).packet(1, Token::Out, &mut packet),
+            Ok(Reply::Ack(512))
+        );
         dwc.pending.clear();
         dwc.devten = 1; // Disconnect event enabled.
         dwc.set_phy_state(false, false, true, false, port.access);
@@ -1415,7 +1518,9 @@ mod tests {
         assert!(!dwc.available()); // Final-ready must not swallow the edge.
         assert!(dwc.take_session_reset());
         // Backpressure preserves both the connection and its pending edge.
-        for _ in 0..MAX_PENDING_EVENTS { dwc.queue(0, 7).unwrap(); }
+        for _ in 0..MAX_PENDING_EVENTS {
+            dwc.queue(0, 7).unwrap();
+        }
         assert!(dwc.sync_port(&Attached(1, true)).is_err());
         assert!(dwc.connected);
         assert!(dwc.pending_phy_disconnect);
@@ -1428,7 +1533,10 @@ mod tests {
         assert_eq!(dwc.endpoints[2].active.unwrap().done, 512);
         dwc.peer(&mut port).reset().unwrap();
         packet.fill(0x73);
-        assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+        assert_eq!(
+            dwc.peer(&mut port).packet(1, Token::Out, &mut packet),
+            Ok(Reply::Ack(512))
+        );
         dwc.set_phy_state(true, false, true, false, port.access);
         dwc.set_reset(true, port.access);
         dwc.set_phy_state(false, true, true, false, port.access);
@@ -1479,7 +1587,12 @@ mod tests {
         dwc.set_phy_state(false, true, true, true, &mut access);
         access.now = 915_000;
         assert_eq!(dwc.read(0x440, Width::Word, &mut access), Ok(10));
-        let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
+        let mut port = Port {
+            iommu: &mut dart,
+            stream: SID,
+            memory: &mut ram,
+            access: &mut access,
+        };
         assert!(dwc.service_host(&mut port, None).is_err());
         dwc.set_phy_state(false, true, true, false, port.access);
         dwc.set_clock(false, port.access);
@@ -1492,7 +1605,10 @@ mod tests {
         assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(10));
         dwc.service_host(&mut port, None).unwrap();
         assert!(port.memory.read(ring, &mut event));
-        assert_eq!(u32::from_le_bytes(event[8..12].try_into().unwrap()) >> 24, 1);
+        assert_eq!(
+            u32::from_le_bytes(event[8..12].try_into().unwrap()) >> 24,
+            1
+        );
         dwc.set_power(false, true, port.access);
         assert!(dwc.read(0x440, Width::Word, port.access).is_err());
         port.access.now = 1_999_000;
@@ -1500,7 +1616,10 @@ mod tests {
         assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(10));
         // Queue another actual command; reset cancels it while preserving
         // the previous event already committed to guest RAM.
-        assert!(port.memory.write(commands + 24, &((23u64 << 42) | 1 << 32).to_le_bytes()));
+        assert!(
+            port.memory
+                .write(commands + 24, &((23u64 << 42) | 1 << 32).to_le_bytes())
+        );
         write(&mut dwc, 0x4e0, 0, port.access);
         assert!(dwc.host_pending());
         dwc.set_reset(true, port.access);
