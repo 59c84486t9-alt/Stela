@@ -788,17 +788,27 @@ fn dsid_slot(
 ) -> Result<u64, &'static str> {
     let pointer = root
         .rings
-        .checked_add(DSID_TABLE + 7)
-        .ok_or("GFX HWDSID table pointer wraps")?
-        - 7;
+        .checked_add(DSID_TABLE)
+        .ok_or("GFX HWDSID table pointer wraps")?;
+    pointer
+        .checked_add(7)
+        .ok_or("GFX HWDSID table pointer wraps")?;
     let table = memory.read_u64(pointer)?;
     if table == 0 {
         return Err("GFX ring directory names no HWDSID table");
     }
+    let offset = u64::from(dsid)
+        .checked_mul(layout.dsid_slot_bytes)
+        .ok_or("GFX HWDSID table slot offset wraps")?;
     let slot = table
-        .checked_add(u64::from(dsid) * layout.dsid_slot_bytes)
+        .checked_add(offset)
         .ok_or("GFX HWDSID table slot wraps")?;
-    slot.checked_add(7).ok_or("GFX HWDSID table slot wraps")?;
+    let extent = layout
+        .dsid_slot_bytes
+        .checked_sub(1)
+        .ok_or("GFX HWDSID table has zero-sized slots")?;
+    slot.checked_add(extent)
+        .ok_or("GFX HWDSID table slot extent wraps")?;
     Ok(slot)
 }
 
@@ -2370,6 +2380,52 @@ mod tests {
                 1
             );
             assert_eq!(state.device_control.get(&0xe), Some(&1));
+        }
+    }
+
+    #[test]
+    fn dsid_control_refuses_wrapped_table_pointers_and_complete_slot_extents_without_effects() {
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            let layout = &family.model().unwrap().layout;
+            for kind in [0xe, 0x14] {
+                let (state, flat, _) = owned_control(family, kind);
+                let mut memory = WorkMemory {
+                    flat,
+                    fail_write: None,
+                    fail_read: None,
+                    writes: Vec::new(),
+                };
+                let descriptor = ring::Descriptor {
+                    state: CONTROL_STATE,
+                    entries: CONTROL_ENTRIES,
+                };
+                let mut entry = [0; 0x40];
+                memory.read(CONTROL_ENTRIES, &mut entry).unwrap();
+                let original = state.root.as_ref().unwrap();
+                for rings in [u64::MAX - DSID_TABLE + 1, u64::MAX - DSID_TABLE - 3] {
+                    let mut root = original.clone();
+                    root.rings = rings;
+                    assert_eq!(
+                        ActiveControl::accept(&mut memory, &root, layout, descriptor, 0, &entry)
+                            .unwrap_err(),
+                        "GFX HWDSID table pointer wraps"
+                    );
+                    assert!(memory.writes.is_empty());
+                }
+                let offset = 3 * layout.dsid_slot_bytes;
+                for table in [
+                    u64::MAX - offset + 1,
+                    u64::MAX - offset - layout.dsid_slot_bytes + 2,
+                ] {
+                    memory.flat.put_u64(RINGS + DSID_TABLE, table);
+                    assert!(
+                        ActiveControl::accept(&mut memory, original, layout, descriptor, 0, &entry)
+                            .unwrap_err()
+                            .contains("table slot")
+                    );
+                    assert!(memory.writes.is_empty());
+                }
+            }
         }
     }
 
