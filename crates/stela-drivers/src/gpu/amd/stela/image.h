@@ -18,6 +18,7 @@ enum stela_amd_image_status {
    STELA_AMD_IMAGE_UNSUPPORTED,
    STELA_AMD_IMAGE_DEVICE_INFO_UNAVAILABLE,
    STELA_AMD_IMAGE_LAYOUT_FAILED,
+   STELA_AMD_IMAGE_COPY_FAILED,
 };
 
 /* Hosted internal enums, not Metal numeric values or a guest ABI. */

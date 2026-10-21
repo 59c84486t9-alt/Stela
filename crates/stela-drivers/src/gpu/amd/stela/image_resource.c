@@ -80,7 +80,8 @@ stela_amd_prepare_image_layout(const struct radeon_info *info, struct ac_addrlib
        description->levels > RADEON_SURF_MAX_LEVELS || description->layers > layer_limit(info->gfx_level))
       return STELA_AMD_IMAGE_UNSUPPORTED;
    if ((unsigned)description->kind > STELA_AMD_IMAGE_2D_ARRAY ||
-       (unsigned)description->tiling > STELA_AMD_IMAGE_TILED)
+       (unsigned)description->tiling > STELA_AMD_IMAGE_TILED ||
+       (unsigned)description->cpu_transfer > STELA_AMD_IMAGE_CPU_COPY)
       return STELA_AMD_IMAGE_UNSUPPORTED;
    if (description->kind == STELA_AMD_IMAGE_2D && description->layers != 1)
       return STELA_AMD_IMAGE_INVALID;
@@ -93,7 +94,7 @@ stela_amd_prepare_image_layout(const struct radeon_info *info, struct ac_addrlib
        info->num_tile_pipes != 8 && info->num_tile_pipes != 16)
       return STELA_AMD_IMAGE_DEVICE_INFO_UNAVAILABLE;
 
-   struct stela_amd_image_layout_state result = {.device = info, .description = *description};
+   struct stela_amd_image_layout_state result = {.device = info, .addrlib = addrlib, .description = *description};
    switch (description->format) {
    case STELA_AMD_IMAGE_RGBA8_UNORM: result.format = PIPE_FORMAT_R8G8B8A8_UNORM; break;
    case STELA_AMD_IMAGE_RGBA8_UINT: result.format = PIPE_FORMAT_R8G8B8A8_UINT; break;
@@ -118,6 +119,12 @@ stela_amd_prepare_image_layout(const struct radeon_info *info, struct ac_addrlib
       .surf_flags = RADEON_SURF_DISABLE_DCC | RADEON_SURF_NO_RENDER_TARGET,
       .modifier = DRM_FORMAT_MOD_INVALID,
    };
+   /* Original radv_image.c HOST_TRANSFER creation policy. In particular this
+    * prevents randomized tile-swizzle and original unsupported GFX11 256KiB
+    * copy layouts. It grants no mapping/access/visibility rights. */
+   if (description->cpu_transfer == STELA_AMD_IMAGE_CPU_COPY)
+      result.config.surf_flags |= RADEON_SURF_HOST_TRANSFER | RADEON_SURF_NO_FMASK |
+                                  RADEON_SURF_NO_HTILE | RADEON_SURF_DISABLE_DCC;
    struct radeon_surf *surf = &result.surface;
    if (ac_compute_surface(addrlib, info, &result.config,
                           description->tiling == STELA_AMD_IMAGE_LINEAR ? RADEON_SURF_MODE_LINEAR_ALIGNED :
@@ -190,16 +197,33 @@ stela_amd_bind_image_resource(const struct stela_amd_image_layout_state *layout,
 }
 
 enum stela_amd_image_status
+stela_amd_validate_image_resource(const struct radeon_info *info,
+                                  const struct stela_amd_image_resource *resource,
+                                  const struct stela_amd_buffer_view *owner_view)
+{
+   if (!info || !resource || !resource->layout || !owner_view ||
+       resource->device != info || resource->layout->device != info || resource->owner_view != owner_view ||
+       !same_view(&resource->bound_view, owner_view))
+      return STELA_AMD_IMAGE_INVALID;
+   struct stela_amd_image_resource checked;
+   enum stela_amd_image_status status = stela_amd_bind_image_resource(resource->layout, owner_view, &checked);
+   if (status != STELA_AMD_IMAGE_OK)
+      return status;
+   return checked.address == resource->address ? STELA_AMD_IMAGE_OK : STELA_AMD_IMAGE_INVALID;
+}
+
+enum stela_amd_image_status
 stela_amd_build_image_view(const struct radeon_info *info,
                            const struct stela_amd_image_resource *resource,
                            const struct stela_amd_buffer_view *owner_view,
                            const struct stela_amd_image_view *view,
                            uint32_t descriptor[8])
 {
-   if (!info || !resource || !resource->layout || !owner_view || !view || !descriptor ||
-       resource->device != info || resource->layout->device != info || resource->owner_view != owner_view ||
-       !same_view(&resource->bound_view, owner_view))
+   if (!view || !descriptor)
       return STELA_AMD_IMAGE_INVALID;
+   enum stela_amd_image_status status = stela_amd_validate_image_resource(info, resource, owner_view);
+   if (status != STELA_AMD_IMAGE_OK)
+      return status;
    const struct stela_amd_image_layout_state *layout = resource->layout;
    const struct stela_amd_image_description *description = &layout->description;
    if (!view->level_count || view->first_level >= description->levels ||
@@ -209,13 +233,6 @@ stela_amd_build_image_view(const struct radeon_info *info,
       return STELA_AMD_IMAGE_INVALID;
    if (view->kind != description->kind)
       return STELA_AMD_IMAGE_UNSUPPORTED;
-   /* Recheck actual immutable owner/device facts; this never recomputes layout. */
-   struct stela_amd_image_resource checked;
-   enum stela_amd_image_status status = stela_amd_bind_image_resource(layout, owner_view, &checked);
-   if (status != STELA_AMD_IMAGE_OK)
-      return status;
-   if (checked.address != resource->address)
-      return STELA_AMD_IMAGE_INVALID;
    const uint32_t last_layer = view->first_layer + view->layer_count - 1;
    const struct radeon_surf *surf = &layout->surface;
    const struct ac_texture_state texture = {
@@ -230,7 +247,7 @@ stela_amd_build_image_view(const struct radeon_info *info,
       .aniso_single_level = true,
    };
    const struct ac_mutable_tex_state mutable = {
-      .surf = surf, .va = checked.address,
+      .surf = surf, .va = resource->address,
       /* Sampled uncompressed RGBA views keep original mip0 address/pitch on
        * GFX6-8. BASE_LEVEL selects the requested mip; don't minify/rebase it as
        * original storage/compressed/depth-view special cases would require. */

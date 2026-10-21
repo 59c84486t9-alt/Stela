@@ -19,6 +19,13 @@ enum stela_amd_image_tiling {
    STELA_AMD_IMAGE_TILED,
 };
 
+/* Requested creation usage, never proof of CPU mapping/permissions or GPU
+ * quiescence. The default preserves the normal original GPU layout policy. */
+enum stela_amd_image_cpu_transfer {
+   STELA_AMD_IMAGE_GPU_ONLY,
+   STELA_AMD_IMAGE_CPU_COPY,
+};
+
 struct stela_amd_image_description {
    uint32_t width;
    uint32_t height;
@@ -27,6 +34,7 @@ struct stela_amd_image_description {
    enum stela_amd_image_format format;
    enum stela_amd_image_kind kind;
    enum stela_amd_image_tiling tiling;
+   enum stela_amd_image_cpu_transfer cpu_transfer;
 };
 
 struct stela_amd_image_view {
@@ -51,6 +59,9 @@ struct stela_amd_image_view {
  * GFX6-9 layout code but no aux offset/storage is bound or enabled here. */
 struct stela_amd_image_layout_state {
    const struct radeon_info *device;
+   /* Borrowed creation identity; descriptor-only use does not dereference it.
+    * CPU copy requires this exact Addrlib instance to remain alive. */
+   struct ac_addrlib *addrlib;
    struct stela_amd_image_description description;
    struct ac_surf_config config;
    struct radeon_surf surface;
@@ -84,6 +95,13 @@ enum stela_amd_image_status
 stela_amd_bind_image_resource(const struct stela_amd_image_layout_state *layout,
                               const struct stela_amd_buffer_view *owner_view,
                               struct stela_amd_image_resource *resource);
+
+/* Shared device/owner identity and current bounds validation, without creating
+ * any GPU state, registration or ownership proof. */
+enum stela_amd_image_status
+stela_amd_validate_image_resource(const struct radeon_info *info,
+                                  const struct stela_amd_image_resource *resource,
+                                  const struct stela_amd_buffer_view *owner_view);
 
 /* State creation uses the cached original layout; no layout/allocator call is
  * made here. The actual device and owner-view identity and its retained bounds
