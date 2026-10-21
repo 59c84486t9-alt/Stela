@@ -550,7 +550,7 @@ fn audit(
                 } else if !listed(mnemonic) {
                     unlisted.insert(mnemonic.to_owned());
                 }
-                if indexed_operand(operands) {
+                if indexed_memory(mnemonic, operands) {
                     indexed += 1;
                 }
             }
@@ -706,6 +706,12 @@ fn listed(mnemonic: &str) -> bool {
 
 /// A memory operand whose address adds a scaled or second register: a lookup
 /// indexed by a computed value.
+fn indexed_memory(mnemonic: &str, operands: &str) -> bool {
+    // LEA uses memory-address syntax for arithmetic, without accessing
+    // memory. Flag packing uses its scaled register form to combine bits.
+    mnemonic != "lea" && indexed_operand(operands)
+}
+
 fn indexed_operand(operands: &str) -> bool {
     operands.split('[').skip(1).any(|memory| {
         let memory = memory.split(']').next().unwrap_or_default();
@@ -772,6 +778,9 @@ mod tests {
         assert!(indexed_operand("eax, dword ptr [r14 + rax]"));
         assert!(!indexed_operand("eax, dword ptr [rip + 0x10]"));
         assert!(!indexed_operand("rax, qword ptr [rbp + 0x108]"));
+        assert!(!indexed_memory("lea", "eax, [rax + 4*rdx]"));
+        assert!(indexed_memory("mov", "eax, dword ptr [rax + 4*rdx]"));
+        assert!(indexed_memory("add", "eax, dword ptr [rax + rdx]"));
     }
 
     #[test]
