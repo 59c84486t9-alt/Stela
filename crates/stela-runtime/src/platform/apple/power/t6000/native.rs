@@ -8,7 +8,9 @@
 use super::{Controller, RequestKind};
 use crate::platform::apple::{
     bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
-    pmgr::install::t6000::{CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE},
+    pmgr::install::t6000::{
+        CODE_BASE, SRAM_BASE, SRAM_LIMIT, TABLE_BASE, activation::PRE_ACTIVATION_BASE,
+    },
 };
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
@@ -22,10 +24,10 @@ const ACTIVATION_WORDS: [(u64, u32); 8] = [
     (GPCE + 0x74, 1),
     (0x292000200, 0x1c000000),
     (0x292000204, 1),
-    (0x292dc21c, 1),
-    (0x292dc220, 1),
-    (0x292dc224, 1),
-    (0x292dc228, 1),
+    (PRE_ACTIVATION_BASE, 1),
+    (PRE_ACTIVATION_BASE + 4, 1),
+    (PRE_ACTIVATION_BASE + 8, 1),
+    (PRE_ACTIVATION_BASE + 12, 1),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -9,6 +9,8 @@ use super::super::{Error, History, Installation, Step, write};
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub const PRE_ACTIVATION_BASE: u64 = 0x2922dc21c;
+
 /// T6000 first-die effects only. The caller supplies actual stage/kind inputs
 /// and exclusively owns the controller across this retained transaction.
 /// `None` is the source's no-access branch, not controller readiness.
@@ -21,7 +23,7 @@ pub fn sequence(stage: u32, kind: u32) -> Result<Option<Installation>, Error> {
     }
     let mut steps = Vec::new();
     if stage == 3 {
-        for address in (0x292dc21c..=0x292dc228).step_by(4) {
+        for address in (PRE_ACTIVATION_BASE..=PRE_ACTIVATION_BASE + 12).step_by(4) {
             write(&mut steps, address, Width::Word, 1);
         }
     }
@@ -130,7 +132,7 @@ mod tests {
         };
         let mut actions = Vec::new();
         if stage == 3 {
-            for address in (0x292dc21c..=0x292dc228).step_by(4) {
+            for address in (PRE_ACTIVATION_BASE..=PRE_ACTIVATION_BASE + 12).step_by(4) {
                 actions.push(store(address, 1));
             }
         }
@@ -326,6 +328,18 @@ mod tests {
         }
         let quad = |offset: usize| u64::from_le_bytes(llb[offset..offset + 8].try_into().unwrap());
         let word = |offset: usize| u32::from_le_bytes(llb[offset..offset + 4].try_into().unwrap());
+        // Decode the actual MOVZ/MOVK address producer. Window hashes alone
+        // must not let a model/test pair repeat the same transcription error.
+        let mut address = 0;
+        for (offset, opcode, shift) in [
+            (0x4b064, 0xd2800009, 0),
+            (0x4b068, 0xf2a00009, 16),
+            (0x4b06c, 0xf2c00009, 32),
+        ] {
+            assert_eq!(word(offset) & 0xffe0001f, opcode);
+            address |= u64::from((word(offset) >> 5) & 0xffff) << shift;
+        }
+        assert_eq!(PRE_ACTIVATION_BASE, address);
         const LINKED: u64 = 0x1fc058000;
         assert_eq!(&llb[0x1ae7c4..0x1ae7c6], &[1, 1]); // indirect payload/row
         assert_eq!(quad(0x17ce98), LINKED + 0x17cde4);
