@@ -732,12 +732,17 @@ fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation
 
 /// The guest's console UART, shown line by line as `GUEST| ...`.
 #[derive(Default)]
-struct GuestConsole(Vec<u8>);
+struct GuestConsole {
+    line: Vec<u8>,
+    /// The last line was `Nested panic string:`: this one is the message
+    /// of the panic the nested one interrupted.
+    nested: bool,
+}
 
 impl ConsoleSink for GuestConsole {
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
-        if byte == b'\n' || self.0.len() == 200 {
-            let line = String::from_utf8_lossy(&self.0);
+        if byte == b'\n' || self.line.len() == 200 {
+            let line = String::from_utf8_lossy(&self.line);
             output::arguments(format_args!("GUEST| {line}\n"));
             if !line.trim().is_empty()
                 && let Ok(mut lines) = GUEST_LINES.0.try_borrow_mut()
@@ -754,12 +759,20 @@ impl ConsoleSink for GuestConsole {
                 && let Ok(mut first) = GUEST_PANIC.0.try_borrow_mut()
                 && first.is_none()
             {
-                // Its parts are quoted strings: `"Unhandled error: " "STS=0"`.
-                *first = Some(message.replace("\" \"", "").replace('"', "").trim().into());
+                *first = Some(panic_message(message));
             }
-            self.0.clear();
+            // `Kernel data abort. at pc ADDRESS, lr ADDRESS (saved state: ...)`
+            if core::mem::take(&mut self.nested)
+                && let Ok(mut first) = GUEST_NESTED_PANIC.0.try_borrow_mut()
+                && first.is_none()
+            {
+                let message = line.split_once(" (saved state").map_or(&*line, |(m, _)| m);
+                *first = Some(panic_message(message));
+            }
+            self.nested = line.trim() == "Nested panic string:";
+            self.line.clear();
         } else if byte != b'\r' {
-            self.0.push(byte);
+            self.line.push(byte);
         }
         Ok(())
     }
@@ -1314,15 +1327,23 @@ fn installer_step(line: &str) -> Option<String> {
 /// The first kernel panic line the guest printed, which names a stop
 /// better than how the machine went down after it.
 static GUEST_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
+/// The first panic another one interrupted, as the nested one reports it:
+/// the stop's cause, which a panic in the panic's own flow hides.
+static GUEST_NESTED_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
 
-/// How the guest went down: its kernel panic's message when it printed
-/// one, else `otherwise`.
+/// A panic's message, one line: its parts are quoted strings, as in
+/// `"Unhandled error: " "STS=0"`.
+fn panic_message(message: &str) -> String {
+    message.replace("\" \"", "").replace('"', "").trim().into()
+}
+
+/// How the guest went down: its first kernel panic's message when it
+/// printed one, else `otherwise`.
 fn guest_down(otherwise: String) -> String {
-    let panic = GUEST_PANIC
-        .0
-        .try_borrow()
-        .ok()
-        .and_then(|panic| panic.clone());
+    let first = |panic: &output::Global<Option<String>>| {
+        panic.0.try_borrow().ok().and_then(|panic| panic.clone())
+    };
+    let panic = first(&GUEST_NESTED_PANIC).or_else(|| first(&GUEST_PANIC));
     match panic {
         Some(message) => format!("macOS crashed: {message}"),
         None => otherwise,
