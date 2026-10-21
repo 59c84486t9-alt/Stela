@@ -8,6 +8,7 @@
 //! access permissions, reset values, tuning, power state or command completion.
 //! A caller must still use an actual device owner for every physical effect.
 
+pub mod reconfiguration;
 pub mod tunables;
 
 pub const COMPLEXES: usize = 3;
