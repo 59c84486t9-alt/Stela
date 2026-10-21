@@ -879,6 +879,41 @@ mod tests {
         );
         for (offset, bytes, digest) in [
             (
+                0x2d53a24usize,
+                184usize,
+                "39f5200f3b2267cdae8f5e29ec5d4293b8e4c2957625cee6a2394b388c2e8469",
+            ), // configuration-required-legacy
+            (
+                0x2d549acusize,
+                40usize,
+                "27e91094d85bd53f6ca5bb1df7fea2f5d6600c66522fcea9a1e9e8902ca09608",
+            ), // configuration-return
+            (
+                0x2d51480usize,
+                3632usize,
+                "dbc14082608594c40cd85664786a97447e03b3c6453605450af9070c3b83a636",
+            ), // start
+            (
+                0x2d55b4cusize,
+                424usize,
+                "2cf8402d36132ecec69eb4e2fdb17acf52827f5bb9b8363d2969351859261541",
+            ), // boot-key
+            (
+                0x2d552f8usize,
+                1216usize,
+                "f6a80ac867c834d37f1e75c71a9f4b0d908ef3bac3193b1f0490019ae4c990fe",
+            ), // memory
+            (
+                0x2d5a504usize,
+                12usize,
+                "185b69410ba1e6bd9bbd267500bfbd9aaf87eb4672710113c02ff2e99c98a9da",
+            ), // handle-start
+            (
+                0x1c86618usize,
+                1632usize,
+                "a0c1723a9e9570b8d979edbf58c64a4b085de86afba8e66c1f5c2a9858ebd18b",
+            ), // user-client
+            (
                 0x2d53b00usize,
                 96usize,
                 "ae72f04d836556710cd8623bf9b2363ef48d1cab10996e739e0062175178d32c",
@@ -950,6 +985,21 @@ mod tests {
                 "source span {offset:#x}"
             );
         }
+        // A missing legacy descriptor branches directly to the false return,
+        // before the later ID-descriptor retention and register initialization.
+        let required = u32::from_le_bytes(data[0x2d53a9c..0x2d53aa0].try_into().unwrap());
+        assert_eq!(required & 0xff00_001f, 0xb400_0000); // CBZ X0
+        let displacement = (((required >> 5) & 0x7ffff) as i32) << 13 >> 11;
+        assert_eq!(0x2d53a9c_i64 + i64::from(displacement), 0x2d549ac);
+        let handle_start = u64::from_le_bytes(data[0x12a8260..0x12a8268].try_into().unwrap());
+        assert_eq!(
+            0xfffffe0007004000 + (handle_start & 0x3fffffff),
+            0xfffffe0009d5e504
+        );
+        assert_eq!(
+            &data[0x2d5a508..0x2d5a510],
+            &[0x20, 0, 0x80, 0x52, 0xc0, 3, 0x5f, 0xd6] // MOV W0, #1; RET
+        );
         let edge = u64::from_le_bytes(data[0x12a6e18..0x12a6e20].try_into().unwrap());
         assert_eq!(0xfffffe0007004000 + (edge & 0x3fffffff), 0xfffffe000c4861a4);
         assert_eq!(
@@ -986,6 +1036,21 @@ mod tests {
                 }
                 pmus += 1;
                 assert_eq!(node.cells32("info-id").unwrap(), [0, 10]); // address/length, not ID bytes
+                // The original AP driver requires legacy scratch before retaining
+                // this descriptor. Monaco remains a provider without that service;
+                // neither property grants identity-byte readback semantics.
+                if node.compatible("pmu,maverick") {
+                    assert_eq!(node.first_u32("info-leg_scrpad"), Some(0x6000));
+                    assert_eq!(
+                        node.cells32("info-fw-sram").unwrap(),
+                        [0xc830, 0xc831, 0xc833, 0x3000, 16]
+                    );
+                    assert!(node.property("has-socd-fw-sram").is_none());
+                } else {
+                    assert!(node.compatible("pmu,monaco"));
+                    assert!(node.property("info-leg_scrpad").is_none());
+                    assert!(node.property("info-fw-sram").is_none());
+                }
                 let mut windows = Vec::new();
                 for key in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
                     if let Some(pair) = node.cells32(key) {
