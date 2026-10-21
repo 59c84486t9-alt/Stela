@@ -88,6 +88,9 @@ impl Queue {
         if state == 0 {
             return Err("GFX data-master entry names no channel state");
         }
+        state
+            .checked_add(STATE_COMMANDS + 7)
+            .ok_or("GFX channel state range wraps")?;
         let ring = memory.read_u64(state + STATE_RING)?;
         let commands = memory.read_u64(state + STATE_COMMANDS)?;
         if ring == 0 || commands == 0 {
@@ -98,6 +101,9 @@ impl Queue {
 
     /// The (read, length) of the command ring, with the write index checked.
     fn indices(&self, memory: &mut dyn Shared) -> Result<(u32, u32, u32), &'static str> {
+        self.ring
+            .checked_add(RING_LENGTH + 3)
+            .ok_or("GFX command ring state range wraps")?;
         let read = memory.read_u32(self.ring + RING_READ)?;
         let write = memory.read_u32(self.ring + RING_WRITE)?;
         let length = memory.read_u32(self.ring + RING_LENGTH)?;
@@ -113,7 +119,14 @@ impl Queue {
         if read == write {
             return Ok(None);
         }
-        let command = memory.read_u64(self.commands + u64::from(read) * 8)?;
+        let pointer = self
+            .commands
+            .checked_add(u64::from(read) * 8)
+            .ok_or("GFX command pointer array range wraps")?;
+        pointer
+            .checked_add(7)
+            .ok_or("GFX command pointer array range wraps")?;
+        let command = memory.read_u64(pointer)?;
         if command == 0 {
             return Err("GFX channel command pointer is empty");
         }
@@ -123,11 +136,39 @@ impl Queue {
     /// Retire the command at the read index: the firmware's consume, which
     /// frees the slot `writeChannelCommandPointer` waits on.
     pub fn retire(&self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        self.retirement(memory)?.commit(memory)
+    }
+
+    /// Accept the exact consumer-index update before the command can have
+    /// effects; retrying a later fault must not discover the next command.
+    pub fn retirement(&self, memory: &mut dyn Shared) -> Result<Retirement, &'static str> {
         let (read, write, length) = self.indices(memory)?;
         if read == write {
             return Err("GFX channel command ring has no command to retire");
         }
-        memory.write(self.ring + RING_READ, &((read + 1) % length).to_le_bytes())
+        Ok(Retirement {
+            word: self.ring + RING_READ,
+            next: (read + 1) % length,
+            committed: false,
+        })
+    }
+}
+
+/// The publication owned by one accepted channel command.
+#[derive(Debug)]
+pub struct Retirement {
+    word: u64,
+    next: u32,
+    committed: bool,
+}
+
+impl Retirement {
+    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        if !self.committed {
+            memory.write(self.word, &self.next.to_le_bytes())?;
+            self.committed = true;
+        }
+        Ok(())
     }
 }
 
@@ -394,6 +435,25 @@ pub(crate) mod tests {
         memory.put_u32(ring + 0x50, 0x80);
         memory.put_u32(ring + 0x40, 1);
         memory.put_u64(commands, command);
+    }
+
+    #[test]
+    fn queue_metadata_cannot_wrap_or_rewind_an_already_committed_retirement() {
+        let mut memory = Flat::new(BASE, 0x4000);
+        one_command(&mut memory, BASE, BASE + 0x3000);
+        assert!(Queue::read(&mut memory, u64::MAX - 7).is_err());
+        let mut queue = Queue::read(&mut memory, BASE).unwrap();
+        let mut retire = queue.retirement(&mut memory).unwrap();
+        retire.commit(&mut memory).unwrap();
+        memory.put_u32(BASE + 0x1000, 2);
+        retire.commit(&mut memory).unwrap();
+        assert_eq!(memory.read_u32(BASE + 0x1000), Ok(2));
+        queue.ring = u64::MAX - 8;
+        assert!(queue.next(&mut memory).is_err());
+        queue.ring = BASE + 0x1000;
+        memory.put_u32(queue.ring, 0);
+        queue.commands = u64::MAX - 4;
+        assert!(queue.next(&mut memory).is_err());
     }
 
     #[test]

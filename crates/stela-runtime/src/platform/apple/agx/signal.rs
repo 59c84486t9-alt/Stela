@@ -81,51 +81,101 @@ const REMOTE_STAMP_VA: u64 = 0x10;
 const REMOTE_STAMP_VALUE: u64 = 0x18;
 const REMOTE_ZERO: core::ops::Range<u64> = 0x1c..0x2c;
 
-/// Run a signal command's stream to completion, returning the events it
-/// posts in order.
-pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
+/// A source-ordered action of an accepted signal command. Reads and
+/// validation complete before the first action can have an effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Write32 { address: u64, value: u32 },
+    Write64 { address: u64, value: u64 },
+    Event(Event),
+}
+
+impl Action {
+    pub fn write(self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        match self {
+            Self::Write32 { address, value } => memory.write(address, &value.to_le_bytes()),
+            Self::Write64 { address, value } => memory.write(address, &value.to_le_bytes()),
+            Self::Event(_) => Err("GFX signal event requires retained publication ownership"),
+        }
+    }
+}
+
+/// Accept the whole signal command without effects. The caller retains this
+/// action sequence and advances its cursor only after each action commits.
+/// Shared/CLPC events precede the firmware stamp, exactly as the original
+/// record handlers do; the driver's stamp and Flag follow at stream end.
+pub fn prepare(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Action>, &'static str> {
     let expected = match command.kind {
         Kind::RemoteNode => Record::RemoteNode,
         Kind::SharedEventSignal => Record::SharedEventSignal,
         Kind::DashboardSignal => Record::DashboardSignal,
         other => return Err(other.unexecuted()),
     };
+    command
+        .va
+        .checked_add(COMMAND_FLAG + 3)
+        .ok_or("GFX signal command range wraps")?;
     let stamp = command.stamp(memory)?;
     let stream = command.stream(memory)?;
+    stream
+        .checked_add(expected.bytes() + 3)
+        .ok_or("GFX signal stream range wraps")?;
     if Record::read(memory, stream)? != expected {
         return Err("GFX signal command's stream does not start with its signal record");
     }
     if Record::read(memory, stream + expected.bytes())? != Record::End {
         return Err("GFX signal command's stream continues past its signal record");
     }
-    let mut events = Vec::new();
+    let mut actions = Vec::new();
     let (stamp_va, stamp_value) = match expected {
         Record::RemoteNode => {
             remote_node(memory, stream)?;
             (REMOTE_STAMP_VA, REMOTE_STAMP_VALUE)
         }
         Record::SharedEventSignal => {
-            shared_event(memory, command, stream, &mut events)?;
+            shared_event(memory, command, stream, &mut actions)?;
             (STAMP_VA, STAMP_VALUE)
         }
         _ => {
-            dashboard(memory, stream, &mut events)?;
+            dashboard(memory, stream, &mut actions)?;
             (STAMP_VA, STAMP_VALUE)
         }
     };
-    // The firmware stamp every record writes.
     let firmware = memory.read_u64(stream + stamp_va)?;
     let value = memory.read_u32(stream + stamp_value)?;
-    memory.write(firmware, &value.to_le_bytes())?;
-    // Completion: the driver stamp, then its Flag.
-    memory.write(stamp.driver, &stamp.value.to_le_bytes())?;
-    events.push(Event::Flag(1 << stamp.index));
+    firmware
+        .checked_add(3)
+        .ok_or("GFX firmware stamp range wraps")?;
+    stamp
+        .driver
+        .checked_add(3)
+        .ok_or("GFX driver stamp range wraps")?;
+    actions.push(Action::Write32 {
+        address: firmware,
+        value,
+    });
+    actions.push(Action::Write32 {
+        address: stamp.driver,
+        value: stamp.value,
+    });
+    actions.push(Action::Event(Event::Flag(1 << stamp.index)));
+    Ok(actions)
+}
+
+/// Synchronous component helper. The production firmware retains each
+/// prepared action and event publication across DMA faults instead.
+pub fn execute(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
+    let actions = prepare(memory, command)?;
+    let mut events = Vec::new();
+    for action in actions {
+        match action {
+            Action::Event(event) => events.push(event),
+            write => write.write(memory)?,
+        }
+    }
     Ok(events)
 }
 
-/// Check a remote-node record against the form its writer gives it: the
-/// handler acts on nothing but the stamp, so a nonzero tail is a record the
-/// model has no reading of.
 fn remote_node(memory: &mut dyn Shared, record: u64) -> Result<(), &'static str> {
     let mut tail = [0; (REMOTE_ZERO.end - REMOTE_ZERO.start) as usize];
     memory.read(record + REMOTE_ZERO.start, &mut tail)?;
@@ -139,9 +189,12 @@ fn shared_event(
     memory: &mut dyn Shared,
     command: &Command,
     record: u64,
-    events: &mut Vec<Event>,
+    actions: &mut Vec<Action>,
 ) -> Result<(), &'static str> {
     let event = memory.read_u64(record + SHARED_EVENT)?;
+    event
+        .checked_add(7)
+        .ok_or("GFX shared-event value range wraps")?;
     let value = memory.read_u64(record + SHARED_VALUE)?;
     if memory.read_u64(event)? >= value {
         return Ok(());
@@ -151,19 +204,20 @@ fn shared_event(
             "GFX shared-event signal rings doorbells (mask bit 3) whose targets are not recovered",
         );
     }
-    memory.write(event, &value.to_le_bytes())?;
-    events.push(Event::SharedSignal {
-        id: memory.read_u64(record + SHARED_ID)?,
+    let id = memory.read_u64(record + SHARED_ID)?;
+    let flag = memory.read_u32(command.va + COMMAND_FLAG)?;
+    actions.push(Action::Write64 {
+        address: event,
         value,
-        flag: memory.read_u32(command.va + COMMAND_FLAG)?,
     });
+    actions.push(Action::Event(Event::SharedSignal { id, value, flag }));
     Ok(())
 }
 
 fn dashboard(
     memory: &mut dyn Shared,
     record: u64,
-    events: &mut Vec<Event>,
+    actions: &mut Vec<Action>,
 ) -> Result<(), &'static str> {
     for n in 0..4 {
         let mut slot = [0; 2];
@@ -176,7 +230,7 @@ fn dashboard(
     }
     let argument = memory.read_u64(record + DASHBOARD_CLPC)?;
     if argument != 0 {
-        events.push(Event::ClpcIoPerf(argument));
+        actions.push(Action::Event(Event::ClpcIoPerf(argument)));
     }
     Ok(())
 }

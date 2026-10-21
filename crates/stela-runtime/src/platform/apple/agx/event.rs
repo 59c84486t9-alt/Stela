@@ -82,25 +82,74 @@ impl Event {
     }
 }
 
-/// Post `event` on the root's firmware event ring. The caller sends the
-/// 0x42 message for it.
+/// One reserved event slot, with its body and producer-index publication
+/// phases. A later fault never discovers a different slot for this event.
+#[derive(Debug)]
+pub struct Publication {
+    entry: u64,
+    write_word: u64,
+    next: u32,
+    body: [u8; ENTRY_BYTES],
+    body_written: bool,
+    published: bool,
+}
+
+impl Publication {
+    /// `None` is genuine backpressure: no slot or output has been acquired.
+    pub fn reserve(
+        memory: &mut dyn Shared,
+        root: &Root,
+        event: Event,
+    ) -> Result<Option<Self>, &'static str> {
+        let (state, entries) = root.event_ring(memory)?;
+        let write_word = state
+            .checked_add(WRITE + 3)
+            .ok_or("GFX event ring state range wraps")?
+            - 3;
+        let read = memory.read_u32(state + READ)?;
+        let write = memory.read_u32(write_word)?;
+        if read >= ring::ENTRIES || write >= ring::ENTRIES {
+            return Err("GFX firmware event ring index out-of-bounds");
+        }
+        if ring::next(write) == read {
+            return Ok(None);
+        }
+        let entry = entries
+            .checked_add(u64::from(write) * ENTRY_BYTES as u64)
+            .ok_or("GFX event ring entry range wraps")?;
+        entry
+            .checked_add(ENTRY_BYTES as u64 - 1)
+            .ok_or("GFX event ring entry range wraps")?;
+        Ok(Some(Self {
+            entry,
+            write_word,
+            next: ring::next(write),
+            body: event.encode(),
+            body_written: false,
+            published: false,
+        }))
+    }
+
+    pub fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        if self.published {
+            return Ok(());
+        }
+        if !self.body_written {
+            memory.write(self.entry, &self.body)?;
+            self.body_written = true;
+        }
+        memory.write(self.write_word, &self.next.to_le_bytes())?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+/// Synchronous component helper; production retains a `Publication` and
+/// waits for space without re-executing the command that produced the event.
 pub fn post(memory: &mut dyn Shared, root: &Root, event: Event) -> Result<(), &'static str> {
-    let (state, entries) = root.event_ring(memory)?;
-    let read = memory.read_u32(state + READ)?;
-    let write = memory.read_u32(state + WRITE)?;
-    if read >= ring::ENTRIES || write >= ring::ENTRIES {
-        return Err("GFX firmware event ring index out-of-bounds");
-    }
-    if ring::next(write) == read {
-        // The firmware spins until the kext drains; the model has no later
-        // step to resume from.
-        return Err("GFX firmware event ring is full");
-    }
-    memory.write(
-        entries + u64::from(write) * ENTRY_BYTES as u64,
-        &event.encode(),
-    )?;
-    memory.write(state + WRITE, &ring::next(write).to_le_bytes())
+    Publication::reserve(memory, root, event)?
+        .ok_or("GFX firmware event ring is full")?
+        .commit(memory)
 }
 
 #[cfg(test)]

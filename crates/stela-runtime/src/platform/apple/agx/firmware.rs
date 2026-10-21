@@ -205,6 +205,64 @@ const STARTUP_STATUS: [(u64, u32); 4] = [
     (STATUS_READY, 1),
 ];
 
+/// One accepted channel command, including ordered effects and its exact
+/// ring retirement. The owner survives every fallible DMA boundary.
+#[derive(Debug)]
+struct ActiveCommand {
+    actions: Vec<signal::Action>,
+    next: usize,
+    publication: Option<event::Publication>,
+    retirement: channel::Retirement,
+}
+
+impl ActiveCommand {
+    fn advance(
+        &mut self,
+        memory: &mut dyn Shared,
+        root: &Root,
+        outbox: &mut Vec<Mail>,
+        events: &mut u64,
+    ) -> Result<bool, &'static str> {
+        while let Some(&action) = self.actions.get(self.next) {
+            match action {
+                signal::Action::Event(event) => {
+                    if self.publication.is_none() {
+                        self.publication = event::Publication::reserve(memory, root, event)?;
+                        if self.publication.is_none() {
+                            // The AP owns the consumer index. Keep the whole
+                            // command until it makes room; do not re-execute.
+                            return Ok(false);
+                        }
+                    }
+                    self.publication.as_mut().unwrap().commit(memory)?;
+                    self.publication = None;
+                    outbox.push(Mail {
+                        endpoint: MESSAGE_ENDPOINT,
+                        payload: EVENT_TYPE << TYPE_SHIFT,
+                    });
+                    *events += 1;
+                }
+                write => write.write(memory)?,
+            }
+            self.next += 1;
+        }
+        self.retirement.commit(memory)?;
+        Ok(true)
+    }
+}
+
+/// A data-master entry retains the descriptor, channel and final read-index
+/// publication until the channel's accepted commands have all completed.
+#[derive(Debug)]
+struct ActiveWork {
+    descriptor: ring::Descriptor,
+    next_read: u32,
+    channel_state: u64,
+    queue: channel::Queue,
+    command: Option<ActiveCommand>,
+    retiring: bool,
+}
+
 /// The GFX firmware protocol state shared by its two endpoints.
 #[derive(Debug)]
 pub struct State {
@@ -231,6 +289,7 @@ pub struct State {
     /// Firmware events posted.
     pub events: u64,
     jobs: VecDeque<Job>,
+    active_work: Option<ActiveWork>,
     /// When observing (`--agx-observe`), the record of each work command a
     /// doorbell ran. Each is still refused by name.
     observe: Option<Journal>,
@@ -253,6 +312,7 @@ impl State {
             commands: 0,
             events: 0,
             jobs: VecDeque::new(),
+            active_work: None,
             observe: observe.then(Journal::default),
         }
     }
@@ -317,7 +377,9 @@ impl State {
 
     /// The firmware has a bus-master access to make.
     fn dma_pending(&self) -> bool {
-        (self.initdata_va.is_some() && !self.initdata_checked) || !self.jobs.is_empty()
+        (self.initdata_va.is_some() && !self.initdata_checked)
+            || !self.jobs.is_empty()
+            || self.active_work.is_some()
     }
 
     /// Read the root, then run the queued doorbells in order.
@@ -349,9 +411,15 @@ impl State {
                 .root
                 .clone()
                 .ok_or("GFX doorbell before the initdata root")?;
-            match job {
-                Job::DeviceControl => self.device_control(memory, &root)?,
+            let complete = match job {
+                Job::DeviceControl => {
+                    self.device_control(memory, &root)?;
+                    true
+                }
                 Job::Work(pipe, index) => self.work_ring(memory, &root, pipe, index, outbox)?,
+            };
+            if !complete {
+                return Ok(());
             }
             self.jobs.pop_front();
         }
@@ -448,54 +516,84 @@ impl State {
         pipe: Pipe,
         index: u8,
         outbox: &mut Vec<Mail>,
-    ) -> Result<(), &'static str> {
-        let work = root.work(memory, pipe, index)?;
-        let (mut read, write) = work.indices(memory)?;
-        while read != write {
-            let entry = work.entry(memory, Kind::DataMaster, read)?;
-            let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
-            if command != pipe as u32 {
-                return Err("GFX data-master entry's command type is not its ring's pipe");
+    ) -> Result<bool, &'static str> {
+        loop {
+            if self.active_work.is_none() {
+                let descriptor = root.work(memory, pipe, index)?;
+                let (read, write) = descriptor.indices(memory)?;
+                if read == write {
+                    return Ok(true);
+                }
+                let entry = descriptor.entry(memory, Kind::DataMaster, read)?;
+                let command = u32::from_le_bytes(entry[0x10..0x14].try_into().unwrap());
+                if command != pipe as u32 {
+                    return Err("GFX data-master entry's command type is not its ring's pipe");
+                }
+                let channel_state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
+                let queue = channel::Queue::read(memory, channel_state)?;
+                self.active_work = Some(ActiveWork {
+                    descriptor,
+                    next_read: ring::next(read),
+                    channel_state,
+                    queue,
+                    command: None,
+                    retiring: false,
+                });
             }
-            let state = u64::from_le_bytes(entry[0x08..0x10].try_into().unwrap());
-            let queue = channel::Queue::read(memory, state)?;
-            while let Some(va) = queue.next(memory)? {
-                let command = channel::Command::read(memory, va)?;
-                // Observe (`--agx-observe`): record the command and the
-                // fields observation confirms, then run it as usual — a work
-                // command still refuses by name below, with its record logged.
-                // Observation never changes the outcome: a record that cannot
-                // be read is logged as such.
-                if let Some(journal) = self.observe.as_mut() {
-                    match observe::Observation::record(memory, pipe as u8, index, state, va) {
-                        Ok(observation) => journal.record(&observation),
-                        Err(reason) => journal.note(format!(
-                            "AGX OBSERVE pipe={} index={index} command={va:#x} unrecorded: {reason}",
-                            pipe as u8
-                        )),
+            if self.active_work.as_ref().unwrap().retiring {
+                let active = self.active_work.as_ref().unwrap();
+                active.descriptor.retire(memory, active.next_read)?;
+                self.active_work = None;
+                continue;
+            }
+            loop {
+                let active = self.active_work.as_ref().unwrap();
+                if active.command.is_none() {
+                    let Some(va) = active.queue.next(memory)? else {
+                        // The target is retained even if this final DMA
+                        // fails. It cannot retire a later entry on retry.
+                        self.active_work.as_mut().unwrap().retiring = true;
+                        break;
+                    };
+                    let command = channel::Command::read(memory, va)?;
+                    if let Some(journal) = self.observe.as_mut() {
+                        match observe::Observation::record(memory, pipe as u8, index, active.channel_state, va) {
+                            Ok(observation) => journal.record(&observation),
+                            Err(reason) => journal.note(format!(
+                                "AGX OBSERVE pipe={} index={index} command={va:#x} unrecorded: {reason}",
+                                pipe as u8
+                            )),
+                        }
                     }
-                }
-                if command.kind == channel::Kind::DashboardSignal && !self.family.dashboard_signals
-                {
-                    return Err(
-                        "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler",
-                    );
-                }
-                for event in signal::execute(memory, &command)? {
-                    event::post(memory, root, event)?;
-                    outbox.push(Mail {
-                        endpoint: MESSAGE_ENDPOINT,
-                        payload: EVENT_TYPE << TYPE_SHIFT,
+                    if command.kind == channel::Kind::DashboardSignal
+                        && !self.family.dashboard_signals
+                    {
+                        return Err(
+                            "GFX dashboard signal command: this GPU family's firmware has no dashboard-signal handler",
+                        );
+                    }
+                    let retirement = active.queue.retirement(memory)?;
+                    let actions = signal::prepare(memory, &command)?;
+                    self.active_work.as_mut().unwrap().command = Some(ActiveCommand {
+                        actions,
+                        next: 0,
+                        publication: None,
+                        retirement,
                     });
-                    self.events += 1;
                 }
-                queue.retire(memory)?;
+                let active = self.active_work.as_mut().unwrap();
+                if !active.command.as_mut().unwrap().advance(
+                    memory,
+                    root,
+                    outbox,
+                    &mut self.events,
+                )? {
+                    return Ok(false);
+                }
+                active.command = None;
                 self.commands += 1;
             }
-            read = ring::next(read);
-            work.retire(memory, read)?;
         }
-        Ok(())
     }
 }
 
@@ -1874,6 +1972,252 @@ mod tests {
         assert_eq!(bits, [0]);
         // 0x32, 0x34 and 0x35 are counted at G14X's offset; 0x1a is not.
         assert_eq!(memory.read_u32(OBJECT_928 + 0xedc8), Ok(3));
+    }
+
+    const OWNED_CHANNEL: u64 = BASE + 0xd000;
+    const OWNED_COMMAND: u64 = BASE + 0x10000;
+    const OWNED_STREAM: u64 = OWNED_COMMAND + 0x400;
+    const OWNED_SHARED: u64 = OWNED_COMMAND + 0x800;
+    const OWNED_DRIVER: u64 = OWNED_COMMAND + 0x900;
+    const OWNED_FIRMWARE: u64 = OWNED_COMMAND + 0x908;
+
+    fn owned_signal(family: &'static Family) -> (State, Flat, u64) {
+        let (mut state, mut memory) = with_device_control_on(family, &[]).unwrap();
+        event::tests::event_ring(&mut memory);
+        let (master, _) = one_3d_entry(&mut memory, OWNED_CHANNEL, OWNED_COMMAND);
+        memory.put_u32(OWNED_COMMAND, 9);
+        memory.put_u64(OWNED_COMMAND + 0x1c, OWNED_STREAM);
+        memory.put_u64(OWNED_COMMAND + 0x30, OWNED_DRIVER);
+        memory.put_u64(OWNED_COMMAND + 0x38, OWNED_FIRMWARE);
+        memory.put_u32(OWNED_COMMAND + 0x40, 0x100);
+        memory.put_u32(OWNED_COMMAND + 0x44, 2);
+        memory.put_u32(OWNED_STREAM, 0xe);
+        memory.put_u64(OWNED_STREAM + 0x10, 0x55);
+        memory.put_u64(OWNED_STREAM + 0x18, 1);
+        memory.put_u64(OWNED_STREAM + 0x28, OWNED_SHARED);
+        memory.put_u64(OWNED_STREAM + 0x30, OWNED_FIRMWARE);
+        memory.put_u32(OWNED_STREAM + 0x38, 0x100);
+        memory.put_u32(OWNED_STREAM + 0x4c, 0x4000_0002);
+        state.doorbell(work(1, 0)).unwrap();
+        (state, memory, master)
+    }
+
+    struct WorkMemory {
+        flat: Flat,
+        fail_write: Option<usize>,
+        fail_read: Option<u64>,
+        writes: Vec<(u64, Vec<u8>)>,
+    }
+
+    impl Shared for WorkMemory {
+        fn read(&mut self, va: u64, out: &mut [u8]) -> Result<(), &'static str> {
+            if self.fail_read == Some(va) {
+                self.fail_read = None;
+                return Err("injected work input read fault");
+            }
+            self.flat.read(va, out)
+        }
+        fn write(&mut self, va: u64, data: &[u8]) -> Result<(), &'static str> {
+            if self.fail_write == Some(self.writes.len()) {
+                self.fail_write = None;
+                return Err("injected work publication write fault");
+            }
+            self.flat.write(va, data)?;
+            self.writes.push((va, data.to_vec()));
+            Ok(())
+        }
+        fn gpu_read(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: &mut [u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            panic!("a signal command cannot execute GPU reads");
+        }
+        fn gpu_write(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: &[u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            panic!("a signal command cannot execute GPU writes");
+        }
+    }
+
+    #[test]
+    fn accepted_signal_actions_survive_every_publication_fault_without_replay() {
+        use event::tests::{EVENT_ENTRIES, EVENT_STATE, entry};
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for failed_write in 0..9 {
+                let (mut state, flat, master) = owned_signal(family);
+                let mut memory = WorkMemory {
+                    flat,
+                    fail_write: Some(failed_write),
+                    fail_read: None,
+                    writes: Vec::new(),
+                };
+                let mut outbox = Vec::new();
+                assert_eq!(
+                    state.dma(&mut memory, &mut outbox),
+                    Err("injected work publication write fault")
+                );
+                assert_eq!(memory.writes.len(), failed_write);
+                assert!(state.dma_pending());
+                // The accepted command owns these original values. Altering
+                // source memory during recovery cannot redispatch it, lose
+                // its event, or change the target completion identity.
+                memory.flat.put_u64(OWNED_STREAM + 0x10, 0xdead);
+                memory.flat.put_u64(OWNED_STREAM + 0x18, 77);
+                memory
+                    .flat
+                    .put_u64(OWNED_STREAM + 0x30, OWNED_COMMAND + 0xa00);
+                memory.flat.put_u32(OWNED_COMMAND + 0x40, 0xbeef);
+                memory.flat.put_u32(OWNED_COMMAND + 0x50, 9);
+                if failed_write == 8 {
+                    // Final master retirement has already been accepted;
+                    // it must not reopen the channel before publishing it.
+                    memory.fail_read = Some(OWNED_CHANNEL + 0x1000);
+                }
+                state.dma(&mut memory, &mut outbox).unwrap();
+                assert!(!state.dma_pending());
+                assert_eq!((state.commands, state.events), (1, 2));
+                assert_eq!(outbox.len(), 2);
+                assert_eq!(
+                    memory.writes.iter().map(|(va, _)| *va).collect::<Vec<_>>(),
+                    [
+                        OWNED_SHARED,
+                        EVENT_ENTRIES,
+                        EVENT_STATE + WRITE,
+                        OWNED_FIRMWARE,
+                        OWNED_DRIVER,
+                        EVENT_ENTRIES + event::ENTRY_BYTES as u64,
+                        EVENT_STATE + WRITE,
+                        OWNED_CHANNEL + 0x1000,
+                        master,
+                    ]
+                );
+                assert_eq!(memory.flat.read_u64(OWNED_SHARED), Ok(1));
+                assert_eq!(memory.flat.read_u32(OWNED_FIRMWARE), Ok(0x100));
+                assert_eq!(memory.flat.read_u32(OWNED_DRIVER), Ok(0x100));
+                assert_eq!(memory.flat.read_u32(OWNED_COMMAND + 0xa00), Ok(0));
+                assert_eq!(
+                    entry(&mut memory.flat, 0),
+                    event::Event::SharedSignal {
+                        id: 0x55,
+                        value: 1,
+                        flag: 0
+                    }
+                    .encode()
+                );
+                assert_eq!(
+                    entry(&mut memory.flat, 1),
+                    event::Event::Flag(1 << 2).encode()
+                );
+                assert_eq!(memory.flat.read_u32(EVENT_STATE + WRITE), Ok(2));
+                assert_eq!(memory.flat.read_u32(OWNED_CHANNEL + 0x1000), Ok(1));
+                assert_eq!(memory.flat.read_u32(master), Ok(1));
+                if failed_write == 8 {
+                    assert_eq!(memory.fail_read, Some(OWNED_CHANNEL + 0x1000));
+                }
+                // An idle later poll cannot replay the completed command.
+                state.dma(&mut memory, &mut outbox).unwrap();
+                assert_eq!((memory.writes.len(), outbox.len()), (9, 2));
+            }
+        }
+    }
+
+    #[test]
+    fn full_event_ring_retains_work_between_shared_signal_and_completion() {
+        use event::tests::{EVENT_STATE, entry};
+        let (mut state, flat, master) = owned_signal(&G14G);
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: None,
+            fail_read: None,
+            writes: Vec::new(),
+        };
+        memory.flat.put_u32(EVENT_STATE + WRITE, 0xff);
+        let mut outbox = Vec::new();
+        state.dma(&mut memory, &mut outbox).unwrap();
+        assert_eq!(memory.writes.len(), 1);
+        assert_eq!(memory.flat.read_u64(OWNED_SHARED), Ok(1));
+        assert_eq!(memory.flat.read_u32(OWNED_FIRMWARE), Ok(0));
+        assert_eq!(memory.flat.read_u32(OWNED_DRIVER), Ok(0));
+        assert!(outbox.is_empty() && state.dma_pending());
+        // The existing reset contract observes the still-owned work.
+        let protocol = Protocol(Rc::new(RefCell::new(state)));
+        assert!(Message(protocol.clone()).check_reset().is_err());
+        memory.flat.put_u32(EVENT_STATE + READ, 1);
+        protocol
+            .0
+            .borrow_mut()
+            .dma(&mut memory, &mut outbox)
+            .unwrap();
+        assert_eq!(outbox.len(), 1);
+        assert_eq!(memory.flat.read_u32(OWNED_FIRMWARE), Ok(0x100));
+        assert_eq!(memory.flat.read_u32(OWNED_DRIVER), Ok(0x100));
+        assert_eq!(memory.flat.read_u32(OWNED_CHANNEL + 0x1000), Ok(0));
+        assert_eq!(
+            entry(&mut memory.flat, 0xff),
+            event::Event::SharedSignal {
+                id: 0x55,
+                value: 1,
+                flag: 0
+            }
+            .encode()
+        );
+        assert!(Message(protocol.clone()).check_reset().is_err());
+        memory.flat.put_u32(EVENT_STATE + READ, 2);
+        protocol
+            .0
+            .borrow_mut()
+            .dma(&mut memory, &mut outbox)
+            .unwrap();
+        assert_eq!(
+            entry(&mut memory.flat, 0),
+            event::Event::Flag(1 << 2).encode()
+        );
+        assert_eq!(outbox.len(), 2);
+        assert_eq!(memory.flat.read_u32(master), Ok(1));
+        assert_eq!(
+            memory
+                .writes
+                .iter()
+                .filter(|(va, _)| *va == OWNED_SHARED)
+                .count(),
+            1
+        );
+        assert!(!protocol.with(State::dma_pending));
+        Message(protocol).check_reset().unwrap();
+    }
+
+    #[test]
+    fn failed_signal_acceptance_has_no_architectural_prefix() {
+        let (mut state, flat, _) = owned_signal(&G14G);
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: None,
+            fail_read: Some(OWNED_COMMAND + 0x50),
+            writes: Vec::new(),
+        };
+        let mut outbox = Vec::new();
+        assert_eq!(
+            state.dma(&mut memory, &mut outbox),
+            Err("injected work input read fault")
+        );
+        assert!(memory.writes.is_empty() && outbox.is_empty());
+        assert_eq!(memory.flat.read_u64(OWNED_SHARED), Ok(0));
+        memory.flat.put_u64(OWNED_STREAM + 0x20, 1 << 3);
+        assert!(
+            state
+                .dma(&mut memory, &mut outbox)
+                .unwrap_err()
+                .contains("mask bit 3")
+        );
+        assert!(memory.writes.is_empty() && outbox.is_empty());
+        memory.flat.put_u64(OWNED_STREAM + 0x20, 0);
+        state.dma(&mut memory, &mut outbox).unwrap();
+        assert_eq!((state.commands, state.events), (1, 2));
     }
 
     #[test]

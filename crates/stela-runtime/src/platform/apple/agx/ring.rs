@@ -192,10 +192,14 @@ impl Descriptor {
             return Err("GFX ring entry index out-of-bounds");
         }
         let mut entry = alloc::vec![0; kind.entry_bytes()];
-        memory.read(
-            self.entries + u64::from(index) * kind.entry_bytes() as u64,
-            &mut entry,
-        )?;
+        let address = self
+            .entries
+            .checked_add(u64::from(index) * kind.entry_bytes() as u64)
+            .ok_or("GFX ring entry range wraps")?;
+        address
+            .checked_add(kind.entry_bytes() as u64 - 1)
+            .ok_or("GFX ring entry range wraps")?;
+        memory.read(address, &mut entry)?;
         Ok(entry)
     }
 
