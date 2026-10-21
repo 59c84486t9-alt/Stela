@@ -7,8 +7,9 @@ use crate::platform::apple::agx::{
     channel::Kind,
     exec::render::{GeometryInputs, SamplerHeap, Zls, ZlsPair},
     work_decode::{
-        Submission,
+        Frame, Submission,
         resources::{Lease, Outcome},
+        scene,
         ta::{self, Word},
     },
 };
@@ -19,6 +20,7 @@ use alloc::vec::Vec;
 struct Run {
     submission: Submission,
     lease: Lease,
+    frame: Frame,
     next: usize,
     words: Vec<Word>,
 }
@@ -232,7 +234,12 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
     fn memory(&mut self) -> &mut dyn crate::platform::apple::agx::ring::Shared {
         self.port
     }
-    fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
+    fn begin(
+        &mut self,
+        submission: &Submission,
+        lease: Lease,
+        frame: &Frame,
+    ) -> Result<(), &'static str> {
         self.owner.available()?;
         let pipe = match self.pipeline {
             Kind::Ta => 0,
@@ -248,13 +255,14 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
                 "GFX render native parameters require their accepted pipeline lease/context",
             );
         }
+        scene::Key::read(submission, frame)?;
         let mut native = self.owner.power.native.borrow_mut();
         if native.work.run.is_some() {
             return Err("GFX native parameter bank still belongs to accepted CL work");
         }
         let registers = &mut native.work.render;
         if let Some(run) = &registers.run {
-            return if run.submission == *submission && run.lease == lease {
+            return if run.submission == *submission && run.lease == lease && run.frame == *frame {
                 Ok(())
             } else {
                 Err("GFX render native parameters still belong to another command")
@@ -263,6 +271,7 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
         registers.run = Some(Run {
             submission: submission.clone(),
             lease,
+            frame: frame.clone(),
             next: 0,
             words: match self.pipeline {
                 Kind::Ta => ta::words(self.owner.policy),

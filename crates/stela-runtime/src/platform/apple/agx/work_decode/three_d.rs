@@ -228,6 +228,7 @@ pub struct Parameters {
     submission: Submission,
     lease: Lease,
     policy: Policy,
+    frame: Frame,
     scene: u64,
     first: u64,
     second: u64,
@@ -264,6 +265,7 @@ impl Parameters {
             submission: submission.clone(),
             lease,
             policy,
+            frame: frame.clone(),
             scene,
             first,
             second,
@@ -281,7 +283,7 @@ impl Parameters {
         if self.completed() {
             return Ok(());
         }
-        access.begin(&self.submission, self.lease)?;
+        access.begin(&self.submission, self.lease, &self.frame)?;
         let words = words(self.policy);
         while let Some(&word) = words.get(self.next) {
             if self.held.is_none() {

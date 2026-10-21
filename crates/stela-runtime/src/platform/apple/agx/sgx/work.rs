@@ -906,6 +906,26 @@ mod tests {
                 .is_err()
             );
             assert_eq!(power.native.borrow().work.render.writes, 0);
+            // Same command/counter/lease and scene, but a different accepted
+            // source block: a second phase may not steal the pending owner.
+            let foreign_frame = io(&mut sgx, &mut memory, |port| {
+                port.write(input.stream + 4, &0x6000u64.to_le_bytes())
+                    .unwrap();
+                let foreign = input.cursor().next(port).unwrap().unwrap();
+                port.write(input.stream + 4, &0x3ffcu64.to_le_bytes())
+                    .unwrap();
+                foreign
+            });
+            let mut foreign =
+                three_d::Parameters::new(&input, &foreign_frame, lease, owner.policy).unwrap();
+            let counts = (memory.reads, memory.writes);
+            assert!(
+                io(&mut sgx, &mut memory, |port| foreign
+                    .advance(&mut owner.three_d_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(power.native.borrow().work.render.writes, 0);
             assert!(owner.three_d_zls_bindings(&input, lease).is_err());
             memory.ram.put_u64(DATA + 0x2518, 0x999f);
             mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
@@ -940,7 +960,7 @@ mod tests {
             assert!(
                 io(&mut sgx, &mut memory, |port| owner
                     .ta_parameter_access(port)
-                    .begin(&other, Lease { pipe: 0, slot: 1 }))
+                    .begin(&other, Lease { pipe: 0, slot: 1 }, &frame))
                 .is_err()
             );
             mapping(&mut memory.ram, 0x4000, DATA + 0x4000, false);
@@ -1128,6 +1148,24 @@ mod tests {
                     .advance(&mut owner.ta_parameter_access(port)))
                 .is_err()
             );
+            assert_eq!(power.native.borrow().work.render.writes, 12);
+            let foreign_frame = io(&mut sgx, &mut memory, |port| {
+                port.write(input.stream + 0xc, &0x7000u64.to_le_bytes())
+                    .unwrap();
+                let foreign = input.cursor().next(port).unwrap().unwrap();
+                port.write(input.stream + 0xc, &0x3ff8u64.to_le_bytes())
+                    .unwrap();
+                foreign
+            });
+            let mut foreign =
+                ta::Parameters::new(&input, &foreign_frame, lease, owner.policy).unwrap();
+            let counts = (memory.reads, memory.writes);
+            assert!(
+                io(&mut sgx, &mut memory, |port| foreign
+                    .advance(&mut owner.ta_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(power.native.borrow().work.render.writes, 12);
             assert!(owner.ta_geometry_inputs(&input, lease, None).is_err());
             assert!(power.check_reset().is_err());

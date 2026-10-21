@@ -121,7 +121,12 @@ pub(crate) fn words(policy: Policy) -> Vec<Word> {
 pub trait Access {
     fn policy(&self) -> Policy;
     fn memory(&mut self) -> &mut dyn Shared;
-    fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str>;
+    fn begin(
+        &mut self,
+        submission: &Submission,
+        lease: Lease,
+        frame: &Frame,
+    ) -> Result<(), &'static str>;
     fn write_native(&mut self, word: Word, value: u64) -> Result<(), &'static str>;
 }
 
@@ -130,6 +135,7 @@ pub struct Parameters {
     submission: Submission,
     lease: Lease,
     policy: Policy,
+    frame: Frame,
     tiling: u64,
     parameters: u64,
     stores: Vec<Store>,
@@ -165,6 +171,7 @@ impl Parameters {
             submission: submission.clone(),
             lease,
             policy,
+            frame: frame.clone(),
             tiling,
             parameters,
             stores: stores(policy),
@@ -182,7 +189,7 @@ impl Parameters {
         if self.completed() {
             return Ok(());
         }
-        access.begin(&self.submission, self.lease)?;
+        access.begin(&self.submission, self.lease, &self.frame)?;
         while let Some(store) = self.stores.get(self.next) {
             if self.held.is_none() {
                 self.held = Some(match store.source {
@@ -264,7 +271,7 @@ pub(crate) mod tests {
         fn memory(&mut self) -> &mut dyn Shared {
             self
         }
-        fn begin(&mut self, _: &Submission, _: Lease) -> Result<(), &'static str> {
+        fn begin(&mut self, _: &Submission, _: Lease, _: &Frame) -> Result<(), &'static str> {
             Ok(())
         }
         fn write_native(&mut self, word: Word, value: u64) -> Result<(), &'static str> {
