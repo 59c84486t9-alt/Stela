@@ -66,6 +66,14 @@ impl Offer {
     }
 }
 
+/// The fetch pages kept for their blocks at most: a page let go is read,
+/// hashed and looked up again for its next block, which only a block not
+/// yet installed needs.
+#[cfg(not(test))]
+const KEPT_PAGES: usize = 4096;
+#[cfg(test)]
+const KEPT_PAGES: usize = 2;
+
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
     pub(super) key: Digest,
@@ -115,6 +123,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
+            if self.pages.len() == KEPT_PAGES {
+                self.pages.pop_first();
+            }
             self.pages.insert(frame, StoredPage { key, bytes, record });
         }
         self.pages.get(&frame)
@@ -142,7 +153,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 #[cfg(test)]
 pub(super) mod tests {
-    use super::super::{FIRST_WINDOW_BYTES, Fetched, INSTRUCTION, tests::BASE, tests::machine};
+    use super::super::{
+        FETCH_PAGE, FIRST_WINDOW_BYTES, Fetched, INSTRUCTION, tests::BASE, tests::machine,
+    };
     use super::*;
     use crate::translations;
     use alloc::collections::BTreeMap;
@@ -333,5 +346,25 @@ pub(super) mod tests {
         assert!(machine.pages.is_empty());
         assert!(machine.fetch_block(BASE, false).is_ok());
         assert_ne!(machine.pages[&BASE].key, key);
+    }
+
+    #[test]
+    fn only_the_latest_pages_are_kept() {
+        // A block in each of three pages: add x0, x0, #1; svc #0.
+        const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
+        let mut words = vec![0; 2 * PAGE_WORDS + 2];
+        for page in 0..3 {
+            words[page * PAGE_WORDS..page * PAGE_WORDS + 2]
+                .copy_from_slice(&[0x9100_0400, 0xd400_0001]);
+        }
+        let mut machine = machine(&words);
+        machine.host.store = Some(MemoryStore::default());
+        for page in 0..3 {
+            assert!(machine.fetch_block(BASE + page * FETCH_PAGE, false).is_ok());
+        }
+        assert_eq!(
+            machine.pages.keys().copied().collect::<Vec<_>>(),
+            [BASE + FETCH_PAGE, BASE + 2 * FETCH_PAGE]
+        );
     }
 }

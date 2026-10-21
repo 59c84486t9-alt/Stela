@@ -350,7 +350,10 @@ struct Pending {
 pub struct Store<'a> {
     translator: Digest,
     pack: Option<Pack<'a>>,
-    loaded: BTreeMap<Digest, Option<Arc<Record>>>,
+    /// The keys looked up, and whether the pack held a valid record for
+    /// each. The records themselves are the engine's to keep: decoded, they
+    /// take several times the pack's bytes.
+    loaded: BTreeMap<Digest, bool>,
     pending: Vec<Pending>,
     pending_bytes: usize,
     pub counters: Counters,
@@ -455,8 +458,8 @@ impl<'a> Store<'a> {
             candidates.push((*key, Piece::New(record.encode())));
         }
         if let Some(pack) = self.pack {
-            for (key, record) in &self.loaded {
-                if record.is_some()
+            for (key, valid) in &self.loaded {
+                if *valid
                     && !proven.contains_key(key)
                     && let Some(bytes) = pack.get(key)
                 {
@@ -491,30 +494,21 @@ impl<'a> Store<'a> {
 
 impl Translations for Store<'_> {
     fn record(&mut self, key: &Digest) -> Option<Arc<Record>> {
-        if let Some(record) = self.loaded.get(key) {
-            return record.clone();
+        let looked_up = self.loaded.get(key).copied();
+        if looked_up == Some(false) {
+            return None;
         }
-        let record = self.pack.and_then(|pack| pack.get(key)).map(|bytes| {
-            Record::decode(bytes, &self.translator, key)
-                .map(Arc::new)
-                .ok()
-        });
-        let record = match record {
-            Some(Some(record)) => {
-                self.counters.loaded += 1;
-                Some(record)
+        let bytes = self.pack.and_then(|pack| pack.get(key));
+        let record = bytes.and_then(|bytes| Record::decode(bytes, &self.translator, key).ok());
+        if looked_up.is_none() {
+            match (bytes, &record) {
+                (Some(_), Some(_)) => self.counters.loaded += 1,
+                (Some(_), None) => self.counters.invalid += 1,
+                (None, _) => self.counters.absent += 1,
             }
-            Some(None) => {
-                self.counters.invalid += 1;
-                None
-            }
-            None => {
-                self.counters.absent += 1;
-                None
-            }
-        };
-        self.loaded.insert(*key, record.clone());
-        record
+            self.loaded.insert(*key, record.is_some());
+        }
+        record.map(Arc::new)
     }
 
     fn offer(&mut self, offer: Offer) {
