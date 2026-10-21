@@ -16,10 +16,12 @@
 //!   install medium) at the new schema and revision, from `--ipsw` or
 //!   `--fetch`, beside the old ones, which its rollback boots again; this
 //!   makes it an update even with the same `stela.efi`.
-//!   Bundles of a generation that no kept version boots are removed. Stela
-//!   keeps no translation cache on disk (translations live in memory for
-//!   one boot, and the Cache partition is unused), so an update invalidates
-//!   none.
+//!   Bundles of a generation that no kept version boots are removed. The
+//!   cache store's spare is prepared before activating an EFI version:
+//!   its new translator takes that spare, while previous translators'
+//!   packs remain bound to their own identities for rollback. Repeating
+//!   an already-installed update replenishes a consumed spare without
+//!   replacing EFI, boot configuration or update history.
 //! - macOS: an installed macOS updates itself: Software Update stages the
 //!   new system on the container's Update volume and sets `boot-command
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
@@ -284,6 +286,19 @@ pub(super) fn update_stela(
     writeln!(text, "Stela update on {}:", esp.display())?;
     if from == to && record.pending.is_none() && from_generation == to_generation {
         writeln!(text, "  stela.efi      version {to} is already installed")?;
+        if let Some(store) = &record.translations
+            && (!store.config_intact() || !store.spare_ready())
+        {
+            writeln!(
+                text,
+                "  translations   prepare the cache configuration and spare"
+            )?;
+            if dry_run {
+                text.push_str("Dry run: nothing was changed.\n");
+            } else {
+                store.publish()?;
+            }
+        }
         return Ok(text);
     }
     if from == to {
@@ -405,6 +420,11 @@ pub(super) fn update_stela(
     copy_bundles(&mut record, &prepared)?;
     write_record(&esp, &record)?;
     store_version(&esp, &image)?;
+    // A new translator must have its bounded spare before its EFI becomes
+    // active. Failure leaves the old loader active and the update pending.
+    if let Some(store) = &record.translations {
+        store.publish()?;
+    }
     activate_stela(&esp, &to)?;
     publish(&mut record)?;
     record.stela_version = Some(to.clone());
@@ -417,8 +437,6 @@ pub(super) fn update_stela(
     prune(&mut record)?;
     if let Some(store) = &record.translations {
         store.prune()?;
-        // The new translator's first boot takes the spare.
-        store.publish()?;
     }
     write_record(&esp, &record)?;
     text.push_str("Done. Undo with: stela setup --rollback\n");
@@ -594,6 +612,11 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
     match &change {
         Change::Stela { from, to, .. } => {
             let (from_generation, _) = change.generations().expect("a Stela update");
+            // The older translator may need a cold pack too. Preserve its
+            // existing pack, and prepare only the spare/configuration.
+            if let Some(store) = &record.translations {
+                store.publish()?;
+            }
             activate_stela(&esp, from)?;
             record.stela_version = Some(from.clone());
             record.bundle_schema = from_generation.schema;

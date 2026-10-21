@@ -88,17 +88,20 @@ impl Store {
         let directory = self.directory();
         fs::create_dir_all(&directory)
             .with_context(|| format!("cannot create {}", directory.display()))?;
+        // A failed allocation leaves the previous configuration and every
+        // translator's pack untouched; publishing the bound comes last.
+        self.prepare_spare()?;
         efi::write_atomic(
             &directory.join(CONFIG),
             self.config_text().as_bytes(),
             false,
-        )?;
-        self.prepare_spare()
+        )
     }
 
     /// Whether the spare holds the bound's bytes.
     pub(super) fn spare_ready(&self) -> bool {
-        fs::metadata(self.directory().join(SPARE)).is_ok_and(|m| m.len() >= self.pack_bytes)
+        fs::metadata(self.directory().join(SPARE))
+            .is_ok_and(|m| m.is_file() && m.len() >= self.pack_bytes)
     }
 
     /// Allocate the spare at the bound: FAT32 has no sparse files, so the
@@ -477,6 +480,37 @@ pub(super) mod tests {
         assert_eq!(store.used_bytes(), 300);
         fs::remove_dir_all(checked_directory(&store).unwrap()).unwrap();
         assert!(!store.directory().exists());
+    }
+
+    #[test]
+    fn spare_preparation_failure_preserves_configuration_and_existing_packs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store {
+            volume: dir.path().to_path_buf(),
+            pack_bytes: 4096,
+        };
+        fs::create_dir_all(store.directory()).unwrap();
+        let config = store.directory().join(CONFIG);
+        let previous = b"bytes 2048\n";
+        fs::write(&config, previous).unwrap();
+        let pack = write_pack(&store.directory(), [3; 32], 100);
+        let bytes = fs::read(&pack).unwrap();
+        let spare = store.directory().join(SPARE);
+        fs::create_dir(&spare).unwrap();
+        assert!(
+            !store.spare_ready(),
+            "a directory is not a preallocated file"
+        );
+        assert!(store.publish().is_err());
+        assert_eq!(fs::read(&config).unwrap(), previous);
+        assert_eq!(fs::read(&pack).unwrap(), bytes);
+        fs::remove_dir(&spare).unwrap();
+        // A partial file left by interrupted preparation is completed on retry.
+        fs::write(&spare, [0; 100]).unwrap();
+        store.publish().unwrap();
+        assert_eq!(fs::metadata(&spare).unwrap().len(), store.pack_bytes);
+        assert!(store.config_intact());
+        assert_eq!(fs::read(&pack).unwrap(), bytes);
     }
 
     #[test]

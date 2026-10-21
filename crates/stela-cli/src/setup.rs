@@ -3560,6 +3560,128 @@ mod tests {
     }
 
     #[test]
+    fn same_stela_update_replenishes_only_the_cache_and_preserves_custom_options() {
+        let f = fixture(64 * GIB, false);
+        let mut first = command(&f, &f.esp);
+        first.translation_store_bytes = Some(translations::MIN_PACK_BYTES);
+        setup(&environment(&f.host), first).unwrap();
+        let store = record(&f).translations.unwrap();
+        let spare = store.directory().join(translations::SPARE);
+        fs::remove_file(&spare).unwrap();
+        let pack = translations::tests::write_pack(&store.directory(), [4; 32], 100);
+        let pack_bytes = fs::read(&pack).unwrap();
+        let options = f.esp.join(efi::OPTIONS);
+        let custom = b"--system --watch 0x1000,0x10\n";
+        fs::write(&options, custom).unwrap();
+        let before_record = fs::read(f.esp.join(RECORD)).unwrap();
+        let before_efi = fs::read(f.esp.join(efi::LOADER)).unwrap();
+        let update = |dry_run| {
+            rerun(&f, |c| {
+                c.update_stela = true;
+                c.dry_run = dry_run;
+            })
+        };
+        assert!(update(true).unwrap().contains("Dry run"));
+        assert!(!spare.exists());
+        assert_eq!(fs::read(&options).unwrap(), custom);
+        assert!(update(false).unwrap().contains("prepare the cache"));
+        assert_eq!(fs::metadata(&spare).unwrap().len(), store.pack_bytes);
+        assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
+        assert_eq!(fs::read(&options).unwrap(), custom);
+        assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_record);
+        assert_eq!(fs::read(f.esp.join(efi::LOADER)).unwrap(), before_efi);
+        // Retry after a partial allocation repairs the spare without an update.
+        fs::write(&spare, [0; 64]).unwrap();
+        fs::remove_file(store.directory().join(translations::CONFIG)).unwrap();
+        update(false).unwrap();
+        assert!(store.config_intact() && store.spare_ready());
+        assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
+        assert_eq!(fs::read(&options).unwrap(), custom);
+        assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_record);
+        assert!(update(false).unwrap().contains("already installed"));
+    }
+
+    #[test]
+    fn cache_spare_failure_blocks_efi_activation_and_update_or_rollback_can_retry() {
+        let f = fixture(64 * GIB, false);
+        let mut first = command(&f, &f.esp);
+        first.translation_store_bytes = Some(translations::MIN_PACK_BYTES);
+        setup(&environment(&f.host), first).unwrap();
+        let store = record(&f).translations.unwrap();
+        let spare = store.directory().join(translations::SPARE);
+        let pack = translations::tests::write_pack(&store.directory(), [4; 32], 100);
+        let pack_bytes = fs::read(&pack).unwrap();
+        let active = f.esp.join(efi::LOADER);
+        let old_efi = fs::read(&active).unwrap();
+        let config = fs::read(f.esp.join(efi::OPTIONS)).unwrap();
+        let new = f._dir.path().join("new.efi");
+        let new_efi = efi_image(b"stela-2");
+        fs::write(&new, &new_efi).unwrap();
+        let update = || {
+            rerun(&f, |c| {
+                c.update_stela = true;
+                c.efi = Some(new.clone());
+            })
+        };
+        fs::remove_file(&spare).unwrap();
+        fs::create_dir(&spare).unwrap();
+        assert!(update().unwrap_err().to_string().contains("cannot create"));
+        assert_eq!(fs::read(&active).unwrap(), old_efi);
+        assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
+        assert!(record(&f).pending.is_some());
+        assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
+        fs::remove_dir(&spare).unwrap();
+        update().unwrap();
+        assert_eq!(fs::read(&active).unwrap(), new_efi);
+        assert!(record(&f).pending.is_none() && store.spare_ready());
+        assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
+        // A rollback also prepares its cold-cache destination before activation.
+        fs::remove_file(&spare).unwrap();
+        fs::create_dir(&spare).unwrap();
+        let before_rollback = fs::read(f.esp.join(RECORD)).unwrap();
+        assert!(
+            rerun(&f, |c| {
+                c.rollback = true;
+                c.dry_run = true;
+            })
+            .unwrap()
+            .contains("Dry run")
+        );
+        assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
+        assert!(rerun(&f, |c| c.rollback = true).is_err());
+        assert_eq!(fs::read(&active).unwrap(), new_efi);
+        assert_eq!(fs::read(f.esp.join(RECORD)).unwrap(), before_rollback);
+        fs::remove_dir(&spare).unwrap();
+        rerun(&f, |c| c.rollback = true).unwrap();
+        assert_eq!(fs::read(&active).unwrap(), old_efi);
+        assert!(store.spare_ready());
+        assert_eq!(fs::read(&pack).unwrap(), pack_bytes);
+    }
+
+    #[test]
+    fn stela_update_and_rollback_with_disabled_cache_create_no_store() {
+        let f = fixture(64 * GIB, false);
+        let mut first = command(&f, &f.esp);
+        first.translation_store_bytes = Some(0);
+        setup(&environment(&f.host), first).unwrap();
+        assert!(record(&f).translations.is_none());
+        let new = f._dir.path().join("new.efi");
+        fs::write(&new, efi_image(b"stela-2")).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(new.clone());
+        })
+        .unwrap();
+        rerun(&f, |c| c.rollback = true).unwrap();
+        assert!(!f.esp.join(translations::DIRECTORY).exists());
+        assert!(record(&f).translations.is_none());
+        assert_eq!(
+            fs::read(f.esp.join(efi::LOADER)).unwrap(),
+            fs::read(&f.efi).unwrap()
+        );
+    }
+
+    #[test]
     fn stela_updates_keep_the_old_version_and_roll_back() {
         let f = fixture(64 * GIB, false);
         let before = snapshot(&f.esp);
