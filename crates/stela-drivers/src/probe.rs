@@ -167,8 +167,27 @@ pub struct Disks {
 /// with its ranges mapped as it says, and nothing else may drive these
 /// controllers afterwards.
 pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
-    let mut disks = Disks::default();
     let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
+    // SAFETY: the caller granted the complete machine/controller contract.
+    unsafe { probe_with_provider(handoff, dma, &firmware) }
+}
+
+/// Enumerate and attach devices using an explicit exact firmware provider.
+/// A loader can observe consumer requirements while delegating the original
+/// lookup result, without reconstructing device identities outside drivers.
+/// This performs the same hardware operations and reports the same failures as
+/// [`probe`]; a missing resource still refuses that controller's initialization.
+///
+/// # Safety
+/// The machine, mappings, DMA and exclusive post-ExitBootServices ownership
+/// requirements of [`probe`] apply. The provider must preserve its documented
+/// exact identity and integrity contract for every resource it returns.
+pub unsafe fn probe_with_provider(
+    handoff: &Handoff,
+    dma: &mut dyn DmaAllocator,
+    firmware: &dyn crate::firmware::Provider,
+) -> Disks {
+    let mut disks = Disks::default();
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             disks.unmapped.push(*window);
@@ -253,7 +272,7 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
             } else if realtek::matches(&function) {
                 // SAFETY: the caller granted exclusive post-EBS ownership of
                 // mapped PCI/MMIO and DMA, including upstream ASPM configuration.
-                match unsafe { Realtek::new(&mut function, handoff, dma, &firmware) } {
+                match unsafe { Realtek::new(&mut function, handoff, dma, firmware) } {
                     Ok(device) => {
                         if let Some(warning) = device.warning() {
                             let message = match warning {
