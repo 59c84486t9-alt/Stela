@@ -155,7 +155,32 @@ pub struct Teardown<R: Registers> {
     before: Option<Words>,
 }
 impl<R: Registers> Teardown<R> {
-    pub fn new(channel: Channel<R>, owner: Arc<dyn Owner>, now_ms: u64) -> Result<Self, Error> {
+    /// Transfer this exact native CM hop reservation into teardown.
+    ///
+    /// # Safety
+    /// `owner` and `channel` refer to the exact same live physical NHI/requester
+    /// and platform ownership/reset epoch. The owner's target route, adapter,
+    /// HopID and observed USB4/lane metadata belong to that channel's actual
+    /// topology and have not been recycled or changed since reservation. The
+    /// channel is exclusively idle; no other engine owns a pending request.
+    /// The caller retains all independent endpoint/DMA/IOMMU ownership until
+    /// its own actual teardown, regardless of this local hop's receipt.
+    ///
+    /// Safe code cannot pair two independently obtained physical capabilities:
+    /// ```compile_fail
+    /// use std::sync::Arc;
+    /// use stela_drivers::bus::thunderbolt::{
+    ///     channel::Channel, hop::{Owner, Teardown}, ring::Registers,
+    /// };
+    /// fn pair<R: Registers>(channel: Channel<R>, owner: Arc<dyn Owner>) {
+    ///     let _teardown = Teardown::new(channel, owner, 0);
+    /// }
+    /// ```
+    pub unsafe fn new(
+        channel: Channel<R>,
+        owner: Arc<dyn Owner>,
+        now_ms: u64,
+    ) -> Result<Self, Error> {
         let target = owner.target();
         let result = target
             .validate()

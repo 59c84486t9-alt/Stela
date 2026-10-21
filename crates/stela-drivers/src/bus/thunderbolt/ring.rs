@@ -1953,7 +1953,10 @@ mod tests {
                     target,
                     dropped: dropped.clone(),
                 });
-                let mut teardown = Teardown::new(channel, owner.clone(), 0).unwrap();
+                // SAFETY: this exact synthetic Owner and Channel share the same
+                // exclusive NHI/model requester, reservation and reset epoch;
+                // its observed adapter metadata is unchanged and channel idle.
+                let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
                 assert_eq!(teardown.poll(0).unwrap(), None);
                 let initial = [0x81012345, 0x1f5abcde];
                 let disabled = [initial[0] & !(1 << 31), initial[1]];
@@ -2043,7 +2046,10 @@ mod tests {
                 dropped: dropped.clone(),
             });
             let before = super::super::hop::quarantined_hops();
-            let mut teardown = Teardown::new(channel, owner.clone(), 0).unwrap();
+            // SAFETY: this exact synthetic Owner and Channel share the same
+            // exclusive NHI/model requester, reservation and reset epoch;
+            // its observed adapter metadata is unchanged and channel idle.
+            let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
             teardown.poll(0).unwrap();
             let initial = [1 << 31, 0x1f000000];
             for index in 0..2 {
@@ -2104,7 +2110,10 @@ mod tests {
             target,
             dropped: dropped.clone(),
         });
-        let mut teardown = Teardown::new(channel, owner.clone(), 0).unwrap();
+        // SAFETY: this exact synthetic Owner and Channel share the same
+        // exclusive NHI/model requester, reservation and reset epoch;
+        // its observed adapter metadata is unchanged and channel idle.
+        let mut teardown = unsafe { Teardown::new(channel, owner.clone(), 0) }.unwrap();
         teardown.poll(0).unwrap();
         let words = [0x12345, 0x0f0abcde];
         let reply = hop_response(&domain, &model, 0, &words);
