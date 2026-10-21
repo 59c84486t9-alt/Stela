@@ -6,6 +6,9 @@ edition.workspace = true
 # GPL notices and the Intel shared initialization also retains BSD terms.
 license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later"
 
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+
 [lints]
 workspace = true
 
