@@ -14,6 +14,8 @@ pub const PARAMETER_BYTES: usize = 28;
 pub const MIN_BLOCK: usize = 2048;
 /// `bmNtbFormatsSupported` bit 0: NTB16.
 const NTB16: u16 = 1;
+/// `bmNtbFormatsSupported` bit 1: NTB32 can also be selected.
+const NTB32: u16 = 1 << 1;
 /// `"NCMH"`, the NTH16 signature.
 const NTH16: u32 = u32::from_le_bytes(*b"NCMH");
 const NTH16_BYTES: usize = 12;
@@ -33,6 +35,7 @@ const MAX_TABLES: usize = 32;
 /// block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parameters {
+    pub supports_ntb32: bool,
     pub in_max: usize,
     pub out_max: usize,
     out_divisor: usize,
@@ -78,6 +81,7 @@ impl Parameters {
             return Err("NTB divisor or alignment not a power of two");
         }
         Ok(Self {
+            supports_ntb32: formats & NTB32 != 0,
             in_max,
             out_max,
             out_divisor,
@@ -201,6 +205,10 @@ mod tests {
     fn parameters_need_ntb16_and_the_minimum_sizes() {
         let p = Parameters::parse(&parameters(4, 2, 4)).unwrap();
         assert_eq!((p.in_max, p.out_max), (16384, 8192));
+        assert!(!p.supports_ntb32);
+        let mut both = parameters(4, 2, 4);
+        both[2] = 3;
+        assert!(Parameters::parse(&both).unwrap().supports_ntb32);
         let mut no16 = parameters(4, 2, 4);
         no16[2] = 2;
         assert!(Parameters::parse(&no16).is_err());

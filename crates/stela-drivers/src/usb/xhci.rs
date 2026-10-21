@@ -2423,6 +2423,8 @@ pub(crate) mod tests {
         configuration_seen_before_endpoints: Vec<u8>,
         short_control_out: bool,
         control_replies: alloc::collections::VecDeque<([u8; 8], Vec<u8>)>,
+        stall_control: Option<u8>,
+        silence_control: Option<u8>,
         short_bulk_out: bool,
         ethernet: Option<ethernet::rtl815x::tests::Model>,
         ethernet_upload: Option<ethernet::rtl815x::FirmwareModel>,
@@ -2688,7 +2690,13 @@ pub(crate) mod tests {
                 }
                 self.setup.push((request, data));
                 let trbs = if length == 0 { 2 } else { 3 };
-                if self.silence_transfer == Some(dci) {
+                if self.stall_control == Some(request[1]) {
+                    self.set_state(dci, ENDPOINT_HALTED);
+                    self.active[dci] = Some((at, 0, length));
+                    self.event(at, STALL, TRANSFER_EVENT, dci as u8, 0);
+                    return;
+                }
+                if self.silence_transfer == Some(dci) || self.silence_control == Some(request[1]) {
                     self.active[dci] = Some((at, 0, length));
                 } else {
                     if received < length {
@@ -2813,6 +2821,8 @@ pub(crate) mod tests {
             configuration_seen_before_endpoints: Vec::new(),
             short_control_out: false,
             control_replies: Default::default(),
+            stall_control: None,
+            silence_control: None,
             short_bulk_out: false,
             ethernet: None,
             ethernet_upload: None,
@@ -2943,17 +2953,29 @@ pub(crate) mod tests {
     #[test]
     fn ncm_binding_negotiates_before_alt_setting_and_moves_real_transfer_blocks() {
         use crate::net::{Link, Mac};
-        for capabilities in [0, 1, 0x20, 0x21] {
+        let cases = [0, 1, 0x10, 0x11, 0x20, 0x21, 0x30, 0x31]
+            .into_iter()
+            .flat_map(|capabilities| {
+                [1u16, 3].into_iter().flat_map(move |formats| {
+                    [16384u32, 32768]
+                        .into_iter()
+                        .map(move |in_max| (capabilities, formats, in_max))
+                })
+            });
+        for (capabilities, formats, in_max) in cases {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives all modeled controller/class DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (controller, model) = unconfigured_cancellation_controller(&mut dma);
             model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            let mut parameters = ncm_parameters();
+            parameters[2..4].copy_from_slice(&formats.to_le_bytes());
+            parameters[4..8].copy_from_slice(&in_max.to_le_bytes());
             model
                 .borrow_mut()
                 .control_replies
-                .push_back((setup(0xa1, 0x80, 0, 0, 28), ncm_parameters()));
+                .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
             bind(
@@ -2968,15 +2990,23 @@ pub(crate) mod tests {
                 setup(0, SET_CONFIGURATION, 42, 0, 0),
                 setup(0x80, GET_DESCRIPTOR, 0x301, LANGUAGE_EN_US, 255),
                 setup(0xa1, 0x80, 0, 0, 28),
-                setup(
+            ];
+            if capabilities & 0x10 != 0 {
+                expected.push(setup(0x21, 0x8a, 0, 0, 0));
+            }
+            if formats & 2 != 0 {
+                expected.push(setup(0x21, 0x84, 0, 0, 0));
+            }
+            if in_max > 16384 {
+                expected.push(setup(
                     0x21,
                     0x86,
                     0,
                     0,
                     if capabilities & 0x20 != 0 { 8 } else { 4 },
-                ),
-                setup(1, SET_INTERFACE, 3, 1, 0),
-            ];
+                ));
+            }
+            expected.push(setup(1, SET_INTERFACE, 3, 1, 0));
             if capabilities & 1 != 0 {
                 expected.push(setup(0x21, 0x43, 0x0e, 0, 0));
             }
@@ -2994,7 +3024,17 @@ pub(crate) mod tests {
             if capabilities & 0x20 != 0 {
                 size.extend_from_slice(&[0; 4]);
             }
-            assert_eq!(model.borrow().setup[3].1, size);
+            let model_ref = model.borrow();
+            let size_command = model_ref
+                .setup
+                .iter()
+                .find(|(request, _)| request[1] == 0x86);
+            if in_max > 16384 {
+                assert_eq!(size_command.unwrap().1, size);
+            } else {
+                assert!(size_command.is_none());
+            }
+            drop(model_ref);
             let link = &mut found.links[0];
             assert_eq!(link.mac(), Mac([2, 0x53, 0x54, 0, 0, 1]));
             let frame: Vec<_> = (0..30).collect();
@@ -3020,6 +3060,53 @@ pub(crate) mod tests {
                     0,
                 ]);
                 assert_eq!(link.carrier(), connected);
+            }
+        }
+    }
+
+    #[test]
+    fn ncm_mode_changes_require_real_status_acknowledgements_before_data_activation() {
+        for request in [0x8a, 0x84] {
+            for stall in [false, true] {
+                let mut backing = vec![0u64; 128 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: backing outlives all modeled controller/class DMA.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+                model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+                let mut parameters = ncm_parameters();
+                parameters[2] = 3;
+                model
+                    .borrow_mut()
+                    .control_replies
+                    .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
+                if stall {
+                    model.borrow_mut().stall_control = Some(request);
+                } else {
+                    model.borrow_mut().silence_control = Some(request);
+                }
+                let shared = Rc::new(RefCell::new(controller));
+                let mut found = Found::default();
+                bind(&shared, cdc_device(Some(0x31)), &mut dma, &mut found);
+                assert!(found.links.is_empty());
+                assert_eq!(found.failures.len(), 1);
+                assert!(match &found.failures[0].1 {
+                    BlockError::Device { status } => stall && *status == STALL,
+                    BlockError::Timeout => !stall,
+                    _ => false,
+                });
+                let model = model.borrow();
+                assert_eq!(model.setup.last().unwrap().0, setup(0x21, request, 0, 0, 0));
+                assert!(
+                    !model
+                        .setup
+                        .iter()
+                        .any(|(setup, _)| matches!(setup[1], SET_INTERFACE | 0x43 | 0x86))
+                );
+                assert!(model.outgoing.is_empty());
+                assert!(model.active[1].is_none(), "failed EP0 TD must be cancelled");
+                assert!(model.seen.contains(&SET_DEQUEUE));
             }
         }
     }

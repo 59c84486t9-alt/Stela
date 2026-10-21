@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT AND GPL-2.0-only
+// NCM mode negotiation adapted from Linux cdc_ncm.c:
+// Copyright (C) ST-Ericsson 2010-2012
+// Original author: Hans Petter Selasky <hans.petter.selasky@stericsson.com>
 //! USB CDC Ethernet adapters as host network links: the Ethernet Control
 //! Model (CDC ECM 1.2) and the Network Control Model (CDC NCM 1.0), the two
 //! standard USB Ethernet classes.
@@ -14,7 +18,8 @@
 //! IN transfer ended by a short packet (3.3.1); each sent frame is one bulk
 //! OUT transfer. NCM moves transfer blocks ([`ntb`]): while the data
 //! interface is still at alternate setting 0, attach reads the function's
-//! NTB parameters (GetNtbParameters) and caps its IN blocks at
+//! NTB parameters (GetNtbParameters), selects CRC-off and NTB16 when those
+//! controls are supported, and caps its IN blocks at
 //! [`NCM_IN_BLOCK`] bytes (SetNtbInputSize); each IN block may carry several
 //! frames, and each sent frame is one OUT block. Either way a transfer that
 //! is a multiple of the endpoint's packet size is followed by a zero-length
@@ -45,12 +50,18 @@ const ETHERNET: u8 = 0x0f;
 const NCM_FUNCTIONAL: u8 = 0x1a;
 /// bmNetworkCapabilities: SetEthernetPacketFilter is supported.
 const NCM_PACKET_FILTER: u8 = 1 << 0;
+/// bmNetworkCapabilities: CRC mode can be selected.
+const NCM_CRC_MODE: u8 = 1 << 4;
 /// bmNetworkCapabilities: SetNtbInputSize takes 8 bytes, the size and
 /// wNtbInMaxDatagrams.
 const NCM_INPUT_SIZE_8: u8 = 1 << 5;
 const SET_ETHERNET_PACKET_FILTER: u8 = 0x43;
 const GET_NTB_PARAMETERS: u8 = 0x80;
+const SET_NTB_FORMAT: u8 = 0x84;
 const SET_NTB_INPUT_SIZE: u8 = 0x86;
+const SET_CRC_MODE: u8 = 0x8a;
+const NTB16_FORMAT: u16 = 0;
+const CRC_NOT_APPENDED: u16 = 0;
 /// Directed, broadcast and all-multicast frames.
 const FILTER: u16 = 0x04 | 0x08 | 0x02;
 const NETWORK_CONNECTION: u8 = 0x00;
@@ -196,7 +207,7 @@ impl UsbNet {
             let mac = parse_mac(&text)
                 .ok_or(BlockError::Unsupported("CDC Ethernet MAC address string"))?;
             let control = u16::from(binding.control);
-            // NCM's NTB size requests precede the data setting.
+            // NCM's mode and size requests precede the data setting.
             let framing = match binding.model {
                 Model::Ecm => Framing::Ecm,
                 Model::Ncm(capabilities) => {
@@ -210,6 +221,16 @@ impl UsbNet {
                     let reply = c.control(device.slot, request, &[])?;
                     let mut parameters =
                         ntb::Parameters::parse(&reply).map_err(BlockError::Unsupported)?;
+                    if capabilities & NCM_CRC_MODE != 0 {
+                        let request = setup(0x21, SET_CRC_MODE, CRC_NOT_APPENDED, control, 0);
+                        c.control(device.slot, request, &[])?;
+                    }
+                    // NTB16 is the reset default. Like Linux cdc_ncm_init,
+                    // explicitly select it when both formats are offered.
+                    if parameters.supports_ntb32 {
+                        let request = setup(0x21, SET_NTB_FORMAT, NTB16_FORMAT, control, 0);
+                        c.control(device.slot, request, &[])?;
+                    }
                     if parameters.in_max > NCM_IN_BLOCK {
                         parameters.in_max = NCM_IN_BLOCK;
                         let mut size = (NCM_IN_BLOCK as u32).to_le_bytes().to_vec();
