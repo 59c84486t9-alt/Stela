@@ -2903,7 +2903,7 @@ mod tests {
                 bytes: 0x4000,
             },
             Range {
-                physical: u64::MAX & !0x3fff,
+                physical: !0x3fff,
                 bytes: 0x4000,
             },
         ] {

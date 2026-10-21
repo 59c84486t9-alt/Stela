@@ -337,7 +337,7 @@ pub(super) fn legacy_requirements<'a>(
             "requires a legacy descriptor count beyond the recovered five-instance topology",
         );
     }
-    for descriptor in descriptors.chunks_exact(12) {
+    for descriptor in descriptors.as_chunks::<12>().0 {
         match &descriptor[..4] {
             b"TRAD" => (),
             b"FPAD" => {
@@ -360,7 +360,7 @@ pub(super) fn legacy_requirements<'a>(
     if reg.len() != descriptors.len() / 12 * 16 {
         return Err("legacy translation descriptors do not match their physical reg ordinals");
     }
-    if reg.chunks_exact(16).any(|pair| {
+    if reg.as_chunks::<16>().0.iter().any(|pair| {
         u64::from_le_bytes(pair[8..16].try_into().expect("complete reg size")) != dart::DAPF_BYTES
     }) {
         return Err("requires unsupported legacy DART register geometry");

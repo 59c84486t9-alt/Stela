@@ -129,10 +129,12 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         let profile = node
             .property("compatible")
             .and_then(Profile::from_compatible);
-        let owner = if path.starts_with("/arm-io/") && profile.is_some() {
+        let owner = if let Some(profile) = profile
+            && path.starts_with("/arm-io/")
+        {
             let index = darts;
             darts += 1;
-            let default = match profile.expect("selected DART") {
+            let default = match profile {
                 Profile::T8020 | Profile::T6000 => 16,
                 Profile::T8110 => 0,
             };
