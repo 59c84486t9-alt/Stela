@@ -362,6 +362,48 @@ impl Dart {
         Ok(target + offset)
     }
 
+    pub(super) fn context_route_geometry(&self) -> bool {
+        self.profile == Profile::T6000 && self.streams == 16 && self.page_shift == 14 && !self.apf
+    }
+
+    /// Check every current incoming preimage without producing a fault.
+    /// Successful walks have no cache, counter, descriptor or IRQ effects.
+    pub(super) fn checked_context_translation(
+        &self,
+        memory: &mut dyn Memory,
+        context: usize,
+        iova: u64,
+        last: u64,
+        write: bool,
+    ) -> Result<u64, DmaError> {
+        let mut physical = None;
+        for input in 0..self.streams {
+            if usize::from(self.remap[input]) != context {
+                continue;
+            }
+            let candidate =
+                self.walk(memory, input, iova, last, write)
+                    .map_err(|error| match error {
+                        DmaError::Fault(_) => DmaError::Unsupported(
+                            "T6000 context route has a faulting incoming SID alternative",
+                        ),
+                        DmaError::Memory => DmaError::Unsupported(
+                            "T6000 context route has an inaccessible table alternative",
+                        ),
+                        other => other,
+                    })?;
+            if physical.is_some_and(|previous| previous != candidate) {
+                return Err(DmaError::Unsupported(
+                    "T6000 context route incoming SID alternatives diverge",
+                ));
+            }
+            physical = Some(candidate);
+        }
+        physical.ok_or(DmaError::Unsupported(
+            "T6000 context route has no current incoming SID preimage",
+        ))
+    }
+
     fn signal(&mut self, access: &mut Access<'_>) {
         let level = self.error & FLAG != 0;
         if self.level == level {

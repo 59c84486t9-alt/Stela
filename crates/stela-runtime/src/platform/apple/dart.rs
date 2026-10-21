@@ -2,6 +2,7 @@
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
+pub mod context_route;
 mod descriptor;
 pub mod gen3;
 mod irq;
