@@ -236,7 +236,7 @@ impl<C: Control> Chip<C> {
         self.modify(PLA, PLA_OOB_CTRL, 1, NOW_IS_OOB, 0)?;
         self.modify(PLA, PLA_SFF_STS_7, 2, MCU_BORW_EN, 0)?;
         // Unlike8153 first_init,8156_up has no link-list reinitialization.
-        self.modify(PLA, PLA_CPCR, 2, CPCR_RX_VLAN, 0)?;
+        self.modify(PLA, PLA_RCR1, 2, OUTER_VLAN | INNER_VLAN, 0)?;
         self.write(PLA, PLA_RMS, 2, 1522)?;
         self.write(PLA, PLA_MTPS, 1, MTPS_JUMBO)?;
         self.flow_control_8156()?;
@@ -335,6 +335,8 @@ mod tests {
         model.core.set(PLA, 0xbd5c, 2, 0x3344);
         model.core.set(PLA, 0xbc18, 2, 0x5566);
         model.core.set(PLA, 0xbc1a, 2, 0x7788);
+        model.core.set(PLA, PLA_RCR1, 2, 0xa5ff);
+        model.core.set(PLA, PLA_CPCR, 2, CPCR_RX_VLAN);
         model.core.set(PLA, OCP_EEE_ADV2, 2, 0xffff);
         model.core.set(PLA, OCP_10GBT_CTRL, 2, 0xffff);
         model.core.set(PLA, PLA_RXFIFO_CTRL0, 4, 0xaaaa_5555);
@@ -371,6 +373,8 @@ mod tests {
                             if speed >= 4 { MDIO_ADV_2500 } else { 0 }
                         );
                         assert_eq!(hw.core.get(PLA, OCP_EEE_ADV2, 2), 0xfffc);
+                        assert_eq!(hw.core.get(PLA, PLA_RCR1, 2), 0xa53f);
+                        assert_eq!(hw.core.get(PLA, PLA_CPCR, 2) & CPCR_RX_VLAN, CPCR_RX_VLAN);
                         assert_eq!(hw.core.get(PLA, PLA_RXFIFO_CTRL0, 4), 0xa008_5555);
                         assert_eq!(hw.core.get(PLA, PLA_TXFIFO_CTRL, 4), 0x0080_0008);
                         assert_eq!(hw.core.get(PLA, PLA_TXFIFO_CTRL + 4, 4), 0x1234_abcd);

@@ -312,3 +312,6 @@ pub(super) const PHYSTATUS_FLOW: u32 = (1 << 6) | (1 << 5);
 pub(super) const MDIO_ADV_2500: u32 = 0x0080;
 pub(super) const MDIO_ADV_MULTIGIG_MASK: u32 = 0x0080 | 0x0100 | 0x1000;
 pub(super) const MDIO_EEE_2500_5000: u32 = 0x0003;
+pub(super) const PLA_RCR1: u32 = 0xc012;
+pub(super) const OUTER_VLAN: u32 = 1 << 7;
+pub(super) const INNER_VLAN: u32 = 1 << 6;
