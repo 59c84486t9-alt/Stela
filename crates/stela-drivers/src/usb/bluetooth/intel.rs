@@ -5,11 +5,12 @@
 //!
 //! Supported: the exact USB IDs in identity.rs, platform 0x37 and legacy
 //! variants 0x0b/0x0c/0x11–0x14 with secure boot and per-fragment completions.
-//! TLV variants 0x17/0x18/0x19/0x1b use combined RSA/ECDSA SFI headers and
+//! TLV variants 0x17/0x18/0x19/0x1b/0x1c/0x1d use combined RSA/ECDSA SFI headers and
 //! the identified secure boot engine. SFI command streams must be complete,
 //! aligned and contain explicit boot parameters. TLV 0x11–0x14 re-read the legacy
 //! version instead of guessing a legacy filename from TLV fields. DSBR-dependent
-//! uploads, hybrid/IML, ROM patching and running-image upgrades are separate work.
+//! uploads retain explicit captured/default platform input and real command
+//! acceptance. Hybrid/IML, ROM patching and running-image upgrades are separate work.
 //! Both exact-target SFI and DDC must be in the supplied Catalog before upload.
 //! For Uploaded evidence, enabled controller secure ROM authenticates signatures;
 //! no host trust-store proof is claimed. Real secure-send/boot events and matching
@@ -23,8 +24,10 @@
 //! No automatic hard-reset/retry loop is attempted over a stale USB slot.
 mod firmware;
 mod identity;
+mod platform;
 mod tlv;
 pub use identity::{BootParameters, Identity};
+pub use platform::{DsbrInput, DsbrReport, PlatformInputs};
 pub use tlv::TlvIdentity;
 
 use super::{Hci, Io, Packet, State};
@@ -37,6 +40,7 @@ const READ_VERSION: u16 = 0xfc05;
 const READ_BOOT_PARAMS: u16 = 0xfc0d;
 const INTEL_RESET: u16 = 0xfc01;
 const WRITE_DDC: u16 = 0xfc8b;
+const SET_DSBR: u16 = 0xfc0a;
 const READ_BD_ADDR: u16 = 0x1009;
 const COMMAND_US: u64 = 10_000_000;
 const VENDOR_US: u64 = 5_000_000;
@@ -129,6 +133,7 @@ pub struct Report<'a> {
     pub evidence: FirmwareEvidence<'a>,
     pub boot_notification: Option<[u8; 6]>,
     pub address: [u8; 6],
+    pub dsbr: DsbrReport,
 }
 
 /// Initialize one exclusively owned raw controller. Any failure after USB
@@ -136,8 +141,18 @@ pub struct Report<'a> {
 /// retry. Success leaves ordinary command/event/ACL transport open. The raw
 /// transport's generic firmware_status remains Unverified; retain this report.
 pub fn initialize<'a, B: Io>(hci: &mut Hci<B>, provider: &'a dyn Provider) -> Result<Report<'a>> {
+    initialize_with_platform(hci, provider, PlatformInputs::default())
+}
+
+/// Supply an observed pre-EBS platform capture. Default initialize explicitly
+/// records Unavailable; it never impersonates an absent/present UEFI variable.
+pub fn initialize_with_platform<'a, B: Io>(
+    hci: &mut Hci<B>,
+    provider: &'a dyn Provider,
+    platform: PlatformInputs,
+) -> Result<Report<'a>> {
     Identity::usb(hci.binding.device())?;
-    match Engine::new(hci).run(provider) {
+    match Engine::new(hci, platform.dsbr).run(provider) {
         Ok(report) => Ok(report),
         Err(cause) => {
             if hci.state() == State::Open
@@ -160,9 +175,10 @@ struct Engine<'a, B: Io> {
     boot: Option<[u8; 6]>,
     allow_secure: bool,
     allow_boot: bool,
+    dsbr: DsbrInput,
 }
 impl<'a, B: Io> Engine<'a, B> {
-    fn new(hci: &'a mut Hci<B>) -> Self {
+    fn new(hci: &'a mut Hci<B>, dsbr: DsbrInput) -> Self {
         Self {
             hci,
             events: VecDeque::new(),
@@ -170,6 +186,7 @@ impl<'a, B: Io> Engine<'a, B> {
             boot: None,
             allow_secure: false,
             allow_boot: false,
+            dsbr,
         }
     }
     fn now(&self) -> u64 {
@@ -337,18 +354,13 @@ impl<'a, B: Io> Engine<'a, B> {
             evidence: FirmwareEvidence::RunningUnknown,
             boot_notification: None,
             address,
+            dsbr: DsbrReport::new(self.dsbr),
         })
     }
     fn run<'p>(&mut self, provider: &'p dyn Provider) -> Result<Report<'p>> {
         let before = self.identity(&[0xff])?;
         if before.is_operational() {
             return self.observe_running(before);
-        }
-        if matches!(&before,ControllerIdentity::Tlv(i) if matches!(i.hardware_variant(),0x1c|0x1d))
-        {
-            return Err(Error::Unsupported(
-                "USB DSBR platform input/default reporting required",
-            ));
         }
         self.hci.intel_mode(true)?;
         let (hardware, revision, sfi_name, ddc_name, minimum, expected_address, engine) =
@@ -428,7 +440,9 @@ impl<'a, B: Io> Engine<'a, B> {
         self.submit(INTEL_RESET, &reset)?;
         self.vendor(true)?;
         self.allow_boot = false;
-        self.hci.intel_mode(false)?;
+        if matches!(before, ControllerIdentity::Legacy(_)) {
+            self.hci.intel_mode(false)?;
+        }
         let after = self.identity(before.parameters())?;
         if !before.same_hardware(&after)
             || !after.is_operational()
@@ -437,6 +451,17 @@ impl<'a, B: Io> Engine<'a, B> {
                 && after.build() != Some(sfi.build)
         {
             return Err(Error::Protocol("postboot identity/version mismatch"));
+        }
+        let mut dsbr = DsbrReport::new(self.dsbr);
+        if matches!(&after,ControllerIdentity::Tlv(i) if matches!(i.hardware_variant(),0x1c|0x1d)) {
+            let parameters = self.dsbr.parameters();
+            if self.command(SET_DSBR, &parameters)?.len() != 1 {
+                return Err(Error::Protocol("DSBR command completion length"));
+            }
+            dsbr.applied = Some(parameters);
+        }
+        if matches!(before, ControllerIdentity::Tlv(_)) {
+            self.hci.intel_mode(false)?;
         }
         let address = self.address()?;
         if address != expected_address {
@@ -465,6 +490,7 @@ impl<'a, B: Io> Engine<'a, B> {
             },
             boot_notification: self.boot,
             address,
+            dsbr,
         })
     }
 }
@@ -857,6 +883,9 @@ pub(crate) mod tests {
         }
     }
     fn tlv_version(operational: bool, engine: u8) -> Vec<u8> {
+        tlv_version_variant(operational, engine, 0x18)
+    }
+    fn tlv_version_variant(operational: bool, engine: u8, variant: u8) -> Vec<u8> {
         let mut reply = vec![0];
         let mut add = |kind: u8, value: &[u8]| {
             reply.extend_from_slice(&[kind, value.len() as u8]);
@@ -865,8 +894,8 @@ pub(crate) mod tests {
         for (kind, value) in [
             (0x10, 0x410u32),
             (0x11, 0x410),
-            (0x12, 0x183700),
-            (0x13, 0x183700),
+            (0x12, (u32::from(variant) << 16) | 0x3700),
+            (0x13, (u32::from(variant) << 16) | 0x3700),
         ] {
             add(kind, &value.to_le_bytes());
         }
@@ -915,10 +944,13 @@ pub(crate) mod tests {
         bytes
     }
     fn tlv_fixture(engine: u8) -> (Device, Catalog, Script) {
+        tlv_fixture_variant(engine, 0x18)
+    }
+    fn tlv_fixture_variant(engine: u8, variant: u8) -> (Device, Catalog, Script) {
         let (mut device, _, _) = fixture();
         device.descriptor[10] = 0x32;
-        let before = tlv_version(false, engine);
-        let after = tlv_version(true, engine);
+        let before = tlv_version_variant(false, engine, variant);
+        let after = tlv_version_variant(true, engine, variant);
         let identity = TlvIdentity::parse(&device, &before).unwrap();
         assert_eq!(identity.filename("sfi"), "intel/ibt-0041-0041.sfi");
         let bytes = combined_image();
@@ -968,6 +1000,13 @@ pub(crate) mod tests {
             (WRITE_DDC, vec![3, 1, 2, 0xaa], vec![0]),
             (READ_VERSION, vec![0xff], after),
         ] {
+            if opcode == READ_BD_ADDR && matches!(variant, 0x1c | 0x1d) {
+                steps.push_back(Step {
+                    command: command_bytes(0xfc0a, &[0, 0]),
+                    bulk: false,
+                    events: vec![(Pipe::Event, complete(0xfc0a, &[0]))],
+                });
+            }
             steps.push_back(Step {
                 command: command_bytes(opcode, &parameters),
                 bulk: false,
@@ -1063,7 +1102,19 @@ pub(crate) mod tests {
             });
             let mut hci = transport(device, Script { steps });
             let empty = Catalog::from_handoff(vec![]).unwrap();
-            let report = initialize(&mut hci, &empty).unwrap();
+            let input = DsbrInput::Present {
+                revision: 7,
+                raw: 0xb1,
+            };
+            let report =
+                initialize_with_platform(&mut hci, &empty, PlatformInputs { dsbr: input }).unwrap();
+            assert_eq!(
+                report.dsbr,
+                DsbrReport {
+                    input,
+                    applied: None
+                }
+            );
             assert!(matches!(report.evidence, FirmwareEvidence::RunningUnknown));
             assert!(report.boot_notification.is_none());
             assert!(report.after.is_operational());
@@ -1208,6 +1259,92 @@ pub(crate) mod tests {
                 matches!(error,Error::Resource(ref e) if e.name==calls[0].0 && matches!(e.kind,crate::firmware::ErrorKind::Missing))
             );
             assert_eq!(hci.io.submitted, if modern { 1 } else { 2 });
+            assert_eq!(hci.state(), State::Closed);
+        }
+    }
+    #[test]
+    fn dsbr_uploaded_variants_preserve_override_and_distinguish_documented_defaults() {
+        for variant in [0x1c, 0x1d] {
+            for input in [
+                DsbrInput::Absent,
+                DsbrInput::Unavailable,
+                DsbrInput::Present {
+                    revision: 1,
+                    raw: 0xb1,
+                },
+                DsbrInput::Present {
+                    revision: 2,
+                    raw: 0xf1,
+                },
+                DsbrInput::Present {
+                    revision: 7,
+                    raw: 0xffff_ffff,
+                },
+            ] {
+                let (device, catalog, mut script) = tlv_fixture_variant(1, variant);
+                let step = script
+                    .steps
+                    .iter_mut()
+                    .find(|s| s.command[..2] == [0x0a, 0xfc])
+                    .unwrap();
+                step.command = command_bytes(0xfc0a, &input.parameters());
+                let mut hci = transport(device, script);
+                let report =
+                    initialize_with_platform(&mut hci, &catalog, PlatformInputs { dsbr: input })
+                        .unwrap();
+                assert_eq!(
+                    report.dsbr,
+                    DsbrReport {
+                        input,
+                        applied: Some(input.parameters())
+                    }
+                );
+                assert!(hci.io.script.steps.is_empty());
+                assert_eq!(hci.state(), State::Open);
+            }
+        }
+        let input = DsbrInput::Present {
+            revision: 3,
+            raw: 0xf1,
+        };
+        let (device, catalog, script) = tlv_fixture(1);
+        let mut hci = transport(device, script);
+        let report =
+            initialize_with_platform(&mut hci, &catalog, PlatformInputs { dsbr: input }).unwrap();
+        assert_eq!(
+            report.dsbr,
+            DsbrReport {
+                input,
+                applied: None
+            }
+        );
+    }
+    #[test]
+    fn dsbr_requires_real_matching_successful_command_completion() {
+        for case in 0..4 {
+            let (device, catalog, mut script) = tlv_fixture_variant(1, 0x1c);
+            let step = script
+                .steps
+                .iter_mut()
+                .find(|s| s.command[..2] == [0x0a, 0xfc])
+                .unwrap();
+            match case {
+                0 => step.events.clear(),
+                1 => step.events[0].1[5] = 0x0c,
+                2 => step.events[0].1[3] ^= 1,
+                _ => step.events[0].1 = complete(0xfc0a, &[0, 0]),
+            }
+            let mut hci = transport(device, script);
+            assert!(
+                initialize_with_platform(
+                    &mut hci,
+                    &catalog,
+                    PlatformInputs {
+                        dsbr: DsbrInput::Absent
+                    }
+                )
+                .is_err()
+            );
             assert_eq!(hci.state(), State::Closed);
         }
     }
