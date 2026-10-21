@@ -143,6 +143,13 @@ pub unsafe fn open(
     for (location, error) in disks.bluetooth_failures() {
         output::arguments(format_args!("BLUETOOTH FAILED {location}: {error}\n"));
     }
+    output::arguments(format_args!(
+        "BLUETOOTH PLATFORM {:?}\n",
+        disks.bluetooth_platform.observation
+    ));
+    for (location, error) in &disks.usb_vendor_failures {
+        output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
+    }
     for (location, error) in &disks.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",

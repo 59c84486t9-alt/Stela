@@ -169,6 +169,8 @@ pub struct Disks {
     /// USB HCI transports with retained device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
+    /// Exact pre-EBS board-variable observation, including unavailable diagnostics.
+    pub bluetooth_platform: crate::usb::bluetooth::intel::DsbrCapture,
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, Error)>,
@@ -176,6 +178,8 @@ pub struct Disks {
     pub warnings: Vec<(Address, Warning)>,
     /// USB devices that failed to enumerate or bind, by location.
     pub usb_failures: Vec<(String, BlockError)>,
+    /// Vendor initialization failures, preserving exact firmware requests.
+    pub usb_vendor_failures: Vec<(String, crate::usb::ethernet::Error)>,
     /// USB interfaces no driver here takes, and why.
     pub usb_unused: Vec<(String, &'static str)>,
     /// ECAM windows that were not mapped, and so not scanned.
@@ -236,7 +240,10 @@ pub unsafe fn probe_with_provider(
     dma: &mut dyn DmaAllocator,
     firmware: &dyn crate::firmware::Provider,
 ) -> Disks {
-    let mut disks = Disks::default();
+    let mut disks = Disks {
+        bluetooth_platform: handoff.bluetooth_platform,
+        ..Disks::default()
+    };
     for window in &handoff.ecam {
         if !handoff.is_mapped(&window.range()) {
             disks.unmapped.push(*window);
@@ -257,7 +264,7 @@ pub unsafe fn probe_with_provider(
                         .collect()
                 })
             } else if function.class == xhci::CLASS {
-                match xhci::attach(&mut function, handoff, dma) {
+                match xhci::attach_with_provider(&mut function, handoff, dma, firmware) {
                     Ok(found) => {
                         disks.devices.extend(
                             found
@@ -272,7 +279,7 @@ pub unsafe fn probe_with_provider(
                             // no catalog borrow or firmware bytes escape.
                             let _ = device.initialize_with_provider(
                                 firmware,
-                                crate::usb::bluetooth::intel::PlatformInputs::default(),
+                                disks.bluetooth_platform.platform_inputs(),
                             );
                             disks.bluetooth.push(device);
                         }
@@ -283,6 +290,7 @@ pub unsafe fn probe_with_provider(
                             .links
                             .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
                         disks.usb_failures.extend(found.failures);
+                        disks.usb_vendor_failures.extend(found.vendor_failures);
                         disks.usb_unused.extend(found.unused);
                     }
                     Err(error) => disks.failures.push((address, error.into())),

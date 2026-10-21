@@ -221,6 +221,7 @@ mod tests {
                 ticks_per_microsecond: 1,
             },
             firmware: Some(catalog.clone()),
+            bluetooth_platform: Default::default(),
         };
         let cloned = handoff.clone();
         assert!(Arc::ptr_eq(cloned.firmware.as_ref().unwrap(), &catalog));
