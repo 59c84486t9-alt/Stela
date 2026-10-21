@@ -34,6 +34,76 @@ pub struct MsiMessage {
     pub data: u32,
 }
 
+/// Physical fixed-delivery target, qualified by the owning CPU adapter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Target {
+    pub destination: u8,
+    pub vector: u8,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Polarity {
+    High,
+    Low,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Trigger {
+    Edge,
+    Level,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LineRoute {
+    pub gsi: u32,
+    pub polarity: Polarity,
+    pub trigger: Trigger,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RouteRequest {
+    Msi,
+    Line(LineRoute),
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Route {
+    Msi(MsiMessage),
+    Line { target: Target, line: LineRoute },
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Disposition {
+    NotMine,
+    Handled,
+}
+
+/// Immutable, pre-bound sharing group. Every member remains retained until
+/// the entire physical source group is masked, stopped and drained. Joining
+/// or removing a member requires complete group retirement and re-registration;
+/// dynamic sharing is deliberately unavailable. Dispatch invokes every member
+/// without cloning, allocating or releasing references in interrupt context.
+pub struct SharedHandlers(Box<[Arc<dyn Handler>]>);
+impl SharedHandlers {
+    pub fn new(members: alloc::vec::Vec<Arc<dyn Handler>>) -> Result<Self, IrqError> {
+        if members.is_empty()
+            || members.len() > 32
+            || members
+                .iter()
+                .enumerate()
+                .any(|(i, h)| members[..i].iter().any(|old| Arc::ptr_eq(old, h)))
+        {
+            return Err(IrqError::Unsupported);
+        }
+        Ok(Self(members.into_boxed_slice()))
+    }
+}
+impl Handler for SharedHandlers {
+    fn handle(&self) -> Disposition {
+        let mut result = Disposition::NotMine;
+        for handler in &self.0 {
+            if handler.handle() == Disposition::Handled {
+                result = Disposition::Handled;
+            }
+        }
+        result
+    }
+}
+
 /// Object-safe mount service for driver consumers, independent of CPU type.
 /// The actual platform initializes and permanently retains the controller.
 pub trait IrqController: Sync {
@@ -53,11 +123,13 @@ pub trait IrqRegistration {
     fn retire(&mut self) -> Result<(), IrqError>;
 }
 
-/// Fast hard-IRQ callback. Acknowledge the real device before returning; the
-/// platform emits EOI afterwards. No blocking, allocation or final heap/Arc
+/// Fast hard-IRQ callback. Acknowledge owned real causes before returning, or
+/// actually mask a deferred source under its retained work owner. The platform
+/// emits EOI afterwards. A bounded diagnostic may deliberately leave a level
+/// asserted once to observe actual EOI/retrigger behavior. No blocking, allocation or final heap/Arc
 /// release is permitted. Defer work through the device's retained work owner.
 pub trait Handler: Send + Sync {
-    fn handle(&self);
+    fn handle(&self) -> Disposition;
 }
 
 /// Exclusive real device/interrupt source retained by its registration.
@@ -73,14 +145,28 @@ pub trait Handler: Send + Sync {
 /// callback-reachable context, BO, reservation, pin and CPU/DMA lease until
 /// registration retirement finishes; quiescence alone never authorizes their
 /// release or skips an actual hardware fence/IOTLB acknowledgement.
-/// `program` installs exactly the supplied physical MSI message while masked;
+/// `program` installs exactly the supplied typed route while masked;
 /// `unmask` enables only this route. Errors must never free hardware-reachable
 /// state. These process/deferred methods and final Drop are never ISR-safe.
 pub unsafe trait Source: Send {
     fn mask(&mut self) -> Result<(), IrqError>;
     fn quiesce(&mut self) -> Result<(), IrqError>;
-    fn program(&mut self, message: MsiMessage) -> Result<(), IrqError>;
-    fn unmask(&mut self) -> Result<(), IrqError>;
+    fn route(&self) -> RouteRequest;
+    /// # Safety
+    /// The route is owned by the registry on its qualified CPU, matches this
+    /// source's request, and its retained callback is published before unmask.
+    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError>;
+    /// # Safety
+    /// A live registry retains the programmed route and every callback owner.
+    unsafe fn unmask(&mut self) -> Result<(), IrqError>;
+    /// Called after source quiescence, CPU IRR/ISR drain and callback EOI.
+    /// Check actual route-controller completion (including level Remote IRR)
+    /// and drain work queued by any formerly in-flight callback. An error
+    /// retains the complete registration; it never authorizes route reuse.
+    /// # Safety
+    /// The owned source is stopped, CPU IRR/ISR and all in-flight callbacks
+    /// have drained. No future callback can begin while synchronization runs.
+    unsafe fn synchronize(&mut self) -> Result<(), IrqError>;
 }
 
 /// Existing CPU/interrupt controller adapter, never a second IDT/APIC owner.
@@ -99,7 +185,7 @@ pub unsafe trait Platform: Send + Sync {
     /// # Safety
     /// `saved` is this CPU's immediately enclosing save/disable state.
     unsafe fn restore(&self, saved: u64);
-    fn message(&self, vector: u8) -> Result<MsiMessage, IrqError>;
+    fn target(&self, vector: u8) -> Result<Target, IrqError>;
     fn pending(&self, vector: u8) -> Result<bool, IrqError>;
     fn eoi(&self);
     fn ticks(&self) -> u64;
@@ -185,7 +271,17 @@ impl<P: Platform> Registry<P> {
             .position(|slot| slot.load(Ordering::Relaxed).is_null())
             .ok_or(IrqError::Exhausted)?;
         let vector = FIRST_VECTOR + index as u8;
-        let message = self.platform.message(vector)?;
+        let target = self.platform.target(vector)?;
+        if target.vector != vector || target.destination == 255 {
+            return Err(IrqError::Route);
+        }
+        let route = match source.route() {
+            RouteRequest::Msi => Route::Msi(MsiMessage {
+                address: 0xfee00000 | u64::from(target.destination) << 12,
+                data: u32::from(vector),
+            }),
+            RouteRequest::Line(line) => Route::Line { target, line },
+        };
         let slot = NonNull::from(Box::leak(Box::new(Slot {
             handler,
             source: core::cell::UnsafeCell::new(source),
@@ -200,7 +296,10 @@ impl<P: Platform> Registry<P> {
         let armed = source
             .mask()
             .and_then(|()| source.quiesce())
-            .and_then(|()| source.program(message));
+            .and_then(|()| {
+                // SAFETY: qualified target, retained ARMING slot, actual mask and stop.
+                unsafe { source.program(route) }
+            });
         if let Err(error) = armed {
             self.quarantine(slot);
             return Err(error);
@@ -210,7 +309,8 @@ impl<P: Platform> Registry<P> {
         unsafe { slot.as_ref() }
             .state
             .store(LIVE, Ordering::Release);
-        if let Err(error) = source.unmask() {
+        // SAFETY: the complete owned route and LIVE callback are published.
+        if let Err(error) = unsafe { source.unmask() } {
             self.quarantine(slot);
             let _ = source.mask();
             return Err(error);
@@ -261,8 +361,7 @@ impl<P: Platform> Registry<P> {
         slot.inflight.fetch_add(1, Ordering::AcqRel);
         let live = slot.state.load(Ordering::Acquire) == LIVE;
         drop(guard);
-        if live {
-            slot.handler.handle();
+        if live && slot.handler.handle() == Disposition::Handled {
             slot.handled.fetch_add(1, Ordering::Relaxed);
         }
         self.platform.eoi();
@@ -350,7 +449,8 @@ impl<P: Platform> Registration<'_, P> {
         // A callback that was already in flight when closing began may have
         // queued work before its final EOI. Drain/cancel that work only after
         // the callback lifetime has ended as well as before hardware draining.
-        source.quiesce()?;
+        // SAFETY: actual source stop, CPU pending and in-flight callbacks have drained.
+        unsafe { source.synchronize() }?;
         let guard = self.registry.lock();
         if slot.inflight.load(Ordering::Acquire) != 0
             || self.registry.platform.pending(self.vector)?
@@ -437,11 +537,11 @@ mod tests {
         unsafe fn restore(&self, saved: u64) {
             assert_eq!(saved, 0);
         }
-        fn message(&self, vector: u8) -> Result<MsiMessage, IrqError> {
+        fn target(&self, vector: u8) -> Result<Target, IrqError> {
             self.0.vector.store(vector, Ordering::Relaxed);
-            Ok(MsiMessage {
-                address: 0xfee00000,
-                data: u32::from(vector),
+            Ok(Target {
+                destination: 0,
+                vector,
             })
         }
         fn pending(&self, _: u8) -> Result<bool, IrqError> {
@@ -485,7 +585,13 @@ mod tests {
             self.0.quiesces.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
-        fn program(&mut self, message: MsiMessage) -> Result<(), IrqError> {
+        fn route(&self) -> RouteRequest {
+            RouteRequest::Msi
+        }
+        unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+            let Route::Msi(message) = route else {
+                return Err(IrqError::Route);
+            };
             assert_eq!(message.address, 0xfee00000);
             assert_eq!(
                 message.data,
@@ -493,8 +599,16 @@ mod tests {
             );
             Ok(())
         }
-        fn unmask(&mut self) -> Result<(), IrqError> {
+        unsafe fn unmask(&mut self) -> Result<(), IrqError> {
             Ok(())
+        }
+        unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+            self.synchronized()
+        }
+    }
+    impl ModelSource {
+        fn synchronized(&mut self) -> Result<(), IrqError> {
+            self.quiesce()
         }
     }
     impl Drop for ModelSource {
@@ -504,8 +618,9 @@ mod tests {
     }
     struct ModelHandler(Arc<Model>);
     impl Handler for ModelHandler {
-        fn handle(&self) {
+        fn handle(&self) -> Disposition {
             self.0.callbacks.fetch_add(1, Ordering::Relaxed);
+            Disposition::Handled
         }
     }
     impl Drop for ModelHandler {
@@ -528,6 +643,39 @@ mod tests {
                 Arc::new(ModelHandler(model.clone())),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn immutable_sharing_invokes_all_members_and_preserves_unclaimed_status() {
+        struct Member(Arc<AtomicUsize>, Disposition);
+        impl Handler for Member {
+            fn handle(&self) -> Disposition {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                self.1
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let a: Arc<dyn Handler> = Arc::new(Member(count.clone(), Disposition::NotMine));
+        let b: Arc<dyn Handler> = Arc::new(Member(count.clone(), Disposition::Handled));
+        assert!(matches!(
+            SharedHandlers::new(alloc::vec![]),
+            Err(IrqError::Unsupported)
+        ));
+        assert!(matches!(
+            SharedHandlers::new(alloc::vec![a.clone(), a.clone()]),
+            Err(IrqError::Unsupported)
+        ));
+        let group = SharedHandlers::new(alloc::vec![a.clone(), b.clone()]).unwrap();
+        assert_eq!(group.handle(), Disposition::Handled);
+        assert_eq!(count.load(Ordering::Relaxed), 2);
+        assert_eq!(Arc::strong_count(&a), 2);
+        let model = Model::new();
+        let r = registry(model.clone());
+        let mut registration = r.request(Box::new(ModelSource(model.clone())), a).unwrap();
+        assert!(r.dispatch(registration.vector()));
+        assert_eq!(registration.handled(), Ok(0));
+        assert_eq!(model.eois.load(Ordering::Relaxed), 1);
+        registration.retire().unwrap();
     }
 
     #[test]
@@ -614,9 +762,10 @@ mod tests {
             model: Arc<Model>,
         }
         impl Handler for BlockedHandler {
-            fn handle(&self) {
+            fn handle(&self) -> Disposition {
                 self.entered.wait();
                 self.release.wait();
+                Disposition::Handled
             }
         }
         impl Drop for BlockedHandler {

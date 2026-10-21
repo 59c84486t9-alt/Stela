@@ -1034,8 +1034,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         })
     });
     let native_irq = arguments.native_dma_check.then(|| {
+        let level_passed = native_level_verified(&serial_text);
         json!({
-            "passed": serial_text.lines().any(|line| line.starts_with("CHECK native-irq PASS "))
+            "level_passed": level_passed,
+            "passed": level_passed && serial_text.lines().any(|line| line.starts_with("CHECK native-irq PASS "))
                 && !serial_text.lines().any(|line| line.starts_with("CHECK native-irq FAIL "))
                 && status.is_some() && code == IDLE_EXIT
                 && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
@@ -1124,7 +1126,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     );
     ensure!(
         !arguments.native_dma_check || report["native_irq"]["passed"] == true,
-        "native IRQ fixture did not verify actual MSI delivery, ACK and drained removal"
+        "native IRQ fixture did not verify MSI and shared level delivery, ACK and drained removal"
     );
     if arguments.native_dma_check {
         return Ok(ExitCode::SUCCESS);
@@ -1338,6 +1340,26 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
     Ok(output.join("volume.cdr"))
 }
 
+/// An older MSI-only EFI cannot satisfy the extended level-IRQ fixture.
+fn native_level_verified(serial: &str) -> bool {
+    serial.lines().any(|line| {
+        line.starts_with("CHECK native-irq PASS ")
+            && [
+                "INTx gsi=22 high+shared+level",
+                "first=2 second=1",
+                "hold→EOI→retrigger=verified",
+                "RemoteIRR=observed/drained",
+                "group_refs=released",
+                "late_delivery=absent",
+                "DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
+            ]
+            .iter()
+            .all(|marker| line.contains(marker))
+    }) && !serial.lines().any(|line| {
+        line.starts_with("CHECK native-irq FAIL ") || line.starts_with("CHECK native-dma FAIL ")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1391,6 +1413,22 @@ mod tests {
             first_guest_panic("GUEST| panic handlers ready\nGUEST| panic flow initialized\n"),
             None
         );
+    }
+
+    #[test]
+    fn extended_irq_fixture_never_relabels_msi_only_or_partial_evidence() {
+        let old = "CHECK native-irq PASS EDU vector=0x50 actual_cause=0x1 device_ACK+EOI=verified late_delivery=absent";
+        assert!(!native_level_verified(old));
+        let full = format!(
+            "{old}; INTx gsi=22 high+shared+level first=2 second=1 hold→EOI→retrigger=verified RemoteIRR=observed/drained group_refs=released DSDT=ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d"
+        );
+        assert!(native_level_verified(&full));
+        assert!(!native_level_verified(
+            &full.replace("RemoteIRR=observed/drained", "RemoteIRR=unknown")
+        ));
+        assert!(!native_level_verified(&format!(
+            "{full}\nCHECK native-dma FAIL stop uncertain"
+        )));
     }
 
     #[test]

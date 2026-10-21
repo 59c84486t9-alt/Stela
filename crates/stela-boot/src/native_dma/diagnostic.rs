@@ -42,6 +42,7 @@ pub(crate) struct Prepared {
     edu_registers: Range<u64>,
     virtio_status: u64,
     clock: Clock,
+    level: crate::native_irq::level_diagnostic::Prepared,
 }
 
 fn memory_bar(bar: Option<Bar>) -> Result<Range<u64>, String> {
@@ -219,7 +220,9 @@ impl Prepared {
                 return Err(String::from("duplicate virtio common capability"));
             }
         }
+        let level = crate::native_irq::level_diagnostic::Prepared::prepare(handoff, rsdp, fadt)?;
         Ok(Self {
+            level,
             hardware,
             functions,
             edu,
@@ -231,11 +234,12 @@ impl Prepared {
         })
     }
 
-    pub(crate) fn mappings(&self) -> [Range<u64>; 3] {
+    pub(crate) fn mappings(&self) -> [Range<u64>; 4] {
         [
             self.hardware.base..self.hardware.base + self.hardware.bytes as u64,
             self.edu_registers.clone(),
             self.virtio_status & !4095..(self.virtio_status & !4095) + 4096,
+            self.level.mapping(),
         ]
     }
 
@@ -522,6 +526,10 @@ impl Prepared {
         let function = self.functions.swap_remove(self.edu);
         let irq =
             crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
-        Ok((dma, irq))
+        // Release every remaining configuration-space owner before the next
+        // fixture phase exclusively re-enumerates the stopped native bus.
+        drop(self.functions);
+        let level = self.level.run(self.edu_registers.start, self.clock)?;
+        Ok((dma, format!("{irq}; {level}")))
     }
 }

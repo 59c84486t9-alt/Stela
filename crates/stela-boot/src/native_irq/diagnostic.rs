@@ -7,7 +7,7 @@ use core::{
 use stela_drivers::{
     Clock,
     bus::{
-        irq::{Handler, IrqError, MsiMessage, Source},
+        irq::{Disposition, Handler, IrqError, Route, RouteRequest, Source},
         pci::{ConfigSpace, Function, Msi},
     },
 };
@@ -34,7 +34,7 @@ impl Edu {
     }
 }
 impl Handler for Edu {
-    fn handle(&self) {
+    fn handle(&self) -> Disposition {
         let cause = self.read(0x24);
         self.observed.fetch_or(cause, Ordering::Relaxed);
         self.write(0x64, cause);
@@ -43,6 +43,11 @@ impl Handler for Edu {
         }
         // Release publishes actual cause/ACK observation to the waiting owner.
         self.received.fetch_add(1, Ordering::Release);
+        if cause == 0 {
+            Disposition::NotMine
+        } else {
+            Disposition::Handled
+        }
     }
 }
 
@@ -108,7 +113,16 @@ unsafe impl Source for EduSource {
         }
         Ok(())
     }
-    fn program(&mut self, message: MsiMessage) -> Result<(), IrqError> {
+    fn route(&self) -> RouteRequest {
+        RouteRequest::Msi
+    }
+    unsafe fn synchronize(&mut self) -> Result<(), IrqError> {
+        self.quiesce()
+    }
+    unsafe fn program(&mut self, route: Route) -> Result<(), IrqError> {
+        let Route::Msi(message) = route else {
+            return Err(IrqError::Route);
+        };
         if self.control() & 1 != 0
             || message.address > u64::from(u32::MAX)
             || message.data > u32::from(u16::MAX)
@@ -135,7 +149,7 @@ unsafe impl Source for EduSource {
         }
         Ok(())
     }
-    fn unmask(&mut self) -> Result<(), IrqError> {
+    unsafe fn unmask(&mut self) -> Result<(), IrqError> {
         let control = self.control();
         if control == u16::MAX {
             return Err(IrqError::FailedRead);

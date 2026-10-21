@@ -1,13 +1,18 @@
-//! BSP physical MSI routes through the existing native IDT and local APIC.
-//! This supplies no IOAPIC/INTx/MSI-X or interrupt-remapping implementation.
+//! BSP physical MSI and owned IOAPIC line routes through the existing IDT/APIC.
+//! Production attachment, AP ownership and interrupt remapping remain explicit.
 use crate::apic::{self, Apic};
 use core::{
     arch::asm,
     sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
 };
-use stela_drivers::bus::irq::{IrqController, IrqError, MsiMessage, Platform, Registry};
+use stela_drivers::bus::irq::{IrqController, IrqError, Platform, Registry, Target};
 
 pub(crate) mod diagnostic;
+#[allow(dead_code)]
+pub mod ioapic;
+pub(crate) mod level_diagnostic;
+#[allow(dead_code)]
+pub mod madt;
 
 static READY: AtomicBool = AtomicBool::new(false);
 static BASE: AtomicU64 = AtomicU64::new(0);
@@ -114,12 +119,12 @@ unsafe impl Platform for NativePlatform {
             }
         }
     }
-    fn message(&self, vector: u8) -> Result<MsiMessage, IrqError> {
+    fn target(&self, vector: u8) -> Result<Target, IrqError> {
         self.check_cpu()?;
         // Physical destination, fixed delivery, edge trigger, one vector.
-        Ok(MsiMessage {
-            address: 0xfee00000 | u64::from(BSP.load(Ordering::Relaxed)) << 12,
-            data: u32::from(vector),
+        Ok(Target {
+            destination: BSP.load(Ordering::Relaxed) as u8,
+            vector,
         })
     }
     fn pending(&self, vector: u8) -> Result<bool, IrqError> {

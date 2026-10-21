@@ -23,6 +23,15 @@ mod boot_ram;
 #[allow(dead_code)]
 mod boot_vtd;
 
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_irq/ioapic.rs"]
+#[allow(dead_code)]
+mod boot_ioapic;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_irq/madt.rs"]
+#[allow(dead_code)]
+mod boot_madt;
+
 mod agx_isa;
 mod agx_observe;
 mod amx;
