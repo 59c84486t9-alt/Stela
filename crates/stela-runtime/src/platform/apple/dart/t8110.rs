@@ -291,7 +291,10 @@ impl Dart {
     /// A DART of `streams` streams (`sid-count`, at most 256), every stream
     /// disabled and untranslated, signalling faults on `irq`.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {
-        assert!(streams <= 256, "the T8110 layout addresses 256 streams");
+        assert!(
+            (1..=256).contains(&streams),
+            "the T8110 layout addresses 1..256 streams"
+        );
         Self {
             streams,
             powered: true,
@@ -340,12 +343,6 @@ impl Dart {
             "APF slices exceed the filter's registers"
         );
         self.apf = Some(vec![Slice::default(); slices]);
-        self
-    }
-
-    /// Pair this cacheless TRAD with its revision-1 SMMU capture view.
-    pub fn with_smmu(mut self) -> Self {
-        self.enable_smmu();
         self
     }
 
@@ -1308,7 +1305,8 @@ mod tests {
         assert!(plain.read(SMMU_OFFSET, Width::Word, &mut a).is_err());
         assert!(plain.enable_smmu());
         assert!(!plain.enable_smmu());
-        let mut dart = Dart::new(16, None).with_smmu();
+        let mut dart = Dart::new(16, None);
+        assert!(dart.enable_smmu());
         for model in [&mut plain, &mut dart] {
             assert_eq!(model.read(SMMU_OFFSET, Width::Word, &mut a), Ok(0));
             assert!(

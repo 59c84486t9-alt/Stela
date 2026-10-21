@@ -77,6 +77,7 @@ impl Dart {
 
     /// Independent TRAD windows sharing one level-sensitive fault wire.
     pub fn group(streams: usize, irq: Option<AicInput>, count: usize) -> Vec<Self> {
+        assert!(count != 0, "a DART group needs a translation instance");
         t8110::Dart::group(streams, irq, count)
             .into_iter()
             .map(|model| Self {
@@ -91,6 +92,9 @@ impl Dart {
         irq: Option<AicInput>,
         count: usize,
     ) -> Result<Vec<Self>, &'static str> {
+        if count == 0 {
+            return Err("a DART group needs a translation instance");
+        }
         Self::for_profile(profile, streams, irq)?;
         Ok(match profile {
             Profile::T8110 => Self::group(streams, irq, count),
@@ -111,20 +115,34 @@ impl Dart {
         self
     }
 
-    pub fn with_smmu(mut self) -> Self {
-        self.model = match self.model {
-            Model::T8110(model) => Model::T8110(model.with_smmu()),
-            Model::Legacy(model) => Model::Legacy(model),
-        };
-        self
+    pub fn with_smmu(mut self) -> Result<Self, &'static str> {
+        self.enable_smmu()?;
+        Ok(self)
     }
 
-    /// True only when a newly attached view is fully supported. Legacy capture
-    /// formats remain unsupported and cannot acquire a t8110 UMMS view.
-    pub fn enable_smmu(&mut self) -> bool {
+    /// Whether this generation implements the paired capture format. This
+    /// query never attaches a view or changes a device's state.
+    pub fn supports_smmu(&self) -> bool {
+        matches!(self.model, Model::T8110(_))
+    }
+
+    /// Validate support and uniqueness before placing any physical window.
+    pub fn can_attach_smmu(&self) -> bool {
+        self.supports_smmu() && !self.has_smmu()
+    }
+
+    /// Attach only a supported, unique view. A refused attachment leaves the
+    /// model unchanged; machine placement must validate before mapping MMIO.
+    pub fn enable_smmu(&mut self) -> Result<(), &'static str> {
         match &mut self.model {
-            Model::T8110(model) => model.enable_smmu(),
-            Model::Legacy(_) => false,
+            Model::T8110(model) => {
+                if model.enable_smmu() {
+                    Ok(())
+                } else {
+                    Err("DART already has a paired SMMU instance")
+                }
+            }
+            Model::Legacy(_) => Err("legacy DART paired SMMU capture format is unsupported"),
         }
     }
 
@@ -320,9 +338,37 @@ mod tests {
         for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
             let mut model = Dart::for_profile(profile, 16, None).unwrap();
             assert!(!model.has_smmu());
-            assert_eq!(model.enable_smmu(), profile == Profile::T8110);
-            assert_eq!(model.has_smmu(), profile == Profile::T8110);
-            assert!(!model.enable_smmu());
+            let supported = profile == Profile::T8110;
+            assert_eq!(model.supports_smmu(), supported);
+            assert_eq!(model.can_attach_smmu(), supported);
+            // Capability queries have no attachment side effect.
+            assert!(!model.has_smmu());
+            if supported {
+                model.enable_smmu().unwrap();
+                assert_eq!(
+                    model.enable_smmu(),
+                    Err("DART already has a paired SMMU instance")
+                );
+            } else {
+                assert_eq!(
+                    model.enable_smmu(),
+                    Err("legacy DART paired SMMU capture format is unsupported")
+                );
+            }
+            assert_eq!(model.has_smmu(), supported);
+            assert!(!model.can_attach_smmu());
+            let constructed = Dart::for_profile(profile, 16, None).unwrap().with_smmu();
+            assert_eq!(constructed.is_ok(), supported);
+        }
+    }
+
+    #[test]
+    fn grouped_profile_requires_an_actual_translation_instance() {
+        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+            assert!(matches!(
+                Dart::group_for_profile(profile, 16, None, 0),
+                Err("a DART group needs a translation instance")
+            ));
         }
     }
 
