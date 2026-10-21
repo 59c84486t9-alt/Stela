@@ -3,10 +3,11 @@
 //! `sound/hda/core/{controller,stream,device}.c` at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //!
-//! This is the conventional HDA MMIO core. PCI/D0/decode/snoop setup, Intel
-//! DSP/firmware ownership, AMD vendor quirks, ACPI power resources, HDMI GPU
-//! coordination, OEM amplifier/pin policy, suspend and guest audio bridging
-//! are separate platform responsibilities. Passing a PCI ID is not an attach.
+//! This is the conventional HDA MMIO core. The `pci` module prepares a bounded
+//! legacy Intel subset. Intel DSP/firmware ownership, other vendor quirks, ACPI
+//! power resources, HDMI GPU coordination, OEM amplifier/pin policy, suspend and
+//! guest audio bridging remain platform responsibilities. An ID match alone
+//! does not establish exclusive controller ownership.
 //! All DMA allocations live for the boot, even after an error or drop. Do not
 //! unmap memory or release controller ownership until shutdown succeeds (or
 //! the platform independently resets and quiesces the device).
@@ -20,6 +21,7 @@ use crate::bus::{
 };
 
 mod codec;
+pub mod pci;
 mod registers;
 mod stream;
 pub use codec::{CodecGraph, FunctionGroup, PcmCapabilities, Verb, Widget, WidgetKind};

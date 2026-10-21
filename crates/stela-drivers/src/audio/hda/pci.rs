@@ -1,0 +1,713 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Bounded conventional HDA PCI attachment. Quirks and exact Intel IDs adapt
+//! Linux sound/hda/controllers/intel.c, include/linux/pci_ids.h and PCI D0
+//! transition sequencing from drivers/pci/pci.c at
+//! a804c5742bff224d4cb4d25dd383554d598be32b.
+//!
+//! Copyright(c) 2004 Intel Corporation
+//! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
+//!                     PeiSen Hou <pshou@realtek.com.tw>
+//! Copyright 1993 -- 1997 Drew Eckhardt, Frederic Potter, David Mosberger-Tang
+//! Copyright 1997 -- 2000 Martin Mares <mj@ucw.cz>
+//!
+//! Platform ACPI power resources, firmware/AML/SMM arbitration and coherent DMA
+//! mappings remain prerequisites. DSP/GPU controllers require additional owners
+//! and are deliberately absent from this attachment table.
+use super::{Config, CorbReset, MmioRegisters};
+use crate::bus::{
+    i2c::Timer,
+    pci::{Bar, ConfigSpace, Function},
+};
+
+pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
+const INTEL: u16 = 0x8086;
+const PCI_ID: u16 = 0;
+const PCI_COMMAND: u16 = 4;
+const PCI_STATUS: u16 = 6;
+const PCI_CLASS: u16 = 8;
+const PCI_HEADER: u16 = 0x0e;
+const PCI_BAR0: u16 = 0x10;
+const PCI_CAPABILITIES: u16 = 0x34;
+const COMMAND_MEMORY: u16 = 1 << 1;
+const COMMAND_MASTER: u16 = 1 << 2;
+const COMMAND_INTX_DISABLE: u16 = 1 << 10;
+const STATUS_CAPABILITIES: u16 = 1 << 4;
+const CAP_PM: u8 = 1;
+const CAP_MSI: u8 = 5;
+const CAP_MSIX: u8 = 0x11;
+const PM_STATE: u16 = 3;
+const PM_PME_ENABLE: u16 = 1 << 8;
+const PM_PME_STATUS: u16 = 1 << 15;
+const PM_NO_SOFT_RESET: u16 = 1 << 3;
+const TCSEL: u16 = 0x44;
+const TCSEL_MASK: u8 = 7;
+
+/// Actual identity selected by the bounded table, never by a failed handshake.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    pub vendor: u16,
+    pub device: u16,
+    pub corb_reset: CorbReset,
+}
+
+/// A platform decision made before touching the PCI function. An identity
+/// match alone cannot establish exclusive controller ownership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ownership {
+    ExclusiveLegacy,
+    Dsp,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachError {
+    UnsupportedController,
+    Ownership,
+    IdentityChanged,
+    InvalidBar,
+    InvalidCapabilities,
+    UnsupportedPowerManagement,
+    PowerTransition,
+    ConfigurationRejected,
+}
+
+/// Match the enumerated identity only; `prepare` rechecks actual config space.
+/// Match only ICH6/ESB2/ICH7–10 conventional host controllers. Newer Intel
+/// DSP-capable devices and GPU HDA functions do not inherit these quirks.
+pub fn identify<C: ConfigSpace>(function: &Function<C>) -> Result<Identity, AttachError> {
+    identity(function.vendor, function.device, function.class)
+}
+
+fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, AttachError> {
+    if class != CLASS
+        || vendor != INTEL
+        || !matches!(
+            device,
+            0x2668 | 0x269a | 0x27d8 | 0x284b | 0x293e | 0x293f | 0x3a3e | 0x3a6e
+        )
+    {
+        return Err(AttachError::UnsupportedController);
+    }
+    Ok(Identity {
+        vendor,
+        device,
+        corb_reset: CorbReset::Handshake,
+    })
+}
+
+/// Successful PCI preparation. Keep the function and mapping exclusively owned
+/// throughout controller lifetime; no automatic detach/restore runs on drop.
+#[derive(Debug)]
+pub struct Prepared {
+    identity: Identity,
+    base: u64,
+    bytes: u64,
+}
+
+impl Prepared {
+    pub fn identity(&self) -> Identity {
+        self.identity
+    }
+
+    pub fn config(&self) -> Config {
+        Config {
+            corb_reset: self.identity.corb_reset,
+            ..Config::default()
+        }
+    }
+
+    pub fn bar_range(&self) -> core::ops::Range<u64> {
+        self.base..self.base + self.bytes
+    }
+
+    /// # Safety
+    /// The prepared BAR range must be identity mapped uncached, exclusively
+    /// owned and remain mapped until controller shutdown succeeds. Retain PCI
+    /// ownership, power and decode established by `prepare` for that lifetime.
+    pub unsafe fn claim_mmio(self) -> Result<MmioRegisters, super::super::Error> {
+        unsafe { MmioRegisters::claim(self.base, self.bytes) }
+    }
+}
+
+#[derive(Default)]
+struct Capabilities {
+    pm: Option<u16>,
+    msi: Option<u16>,
+    msix: Option<u16>,
+}
+
+fn capabilities<C: ConfigSpace>(config: &C) -> Result<Capabilities, AttachError> {
+    let mut found = Capabilities::default();
+    if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
+        return Ok(found);
+    }
+    let mut seen = [false; 64];
+    let mut offset = config.read8(PCI_CAPABILITIES);
+    while offset != 0 {
+        if offset < 0x40 || offset & 3 != 0 || seen[usize::from(offset / 4)] {
+            return Err(AttachError::InvalidCapabilities);
+        }
+        seen[usize::from(offset / 4)] = true;
+        let offset16 = u16::from(offset);
+        let id = config.read8(offset16);
+        let slot = match id {
+            CAP_PM => Some((&mut found.pm, 8)),
+            CAP_MSI => Some((&mut found.msi, 4)),
+            CAP_MSIX => Some((&mut found.msix, 12)),
+            _ => None,
+        };
+        if let Some((slot, bytes)) = slot {
+            if slot.is_some()
+                || offset16 + bytes > 0x100
+                || (offset16..offset16 + bytes).contains(&TCSEL)
+            {
+                return Err(AttachError::InvalidCapabilities);
+            }
+            *slot = Some(offset16);
+        }
+        offset = config.read8(offset16 + 1);
+    }
+    Ok(found)
+}
+
+fn delay(timer: &impl Timer, us: u64) {
+    let start = timer.now_us();
+    while timer.now_us().wrapping_sub(start) < us {
+        timer.relax();
+    }
+}
+
+fn bar_matches<C: ConfigSpace>(config: &C, base: u64, wide: bool) -> bool {
+    let low = config.read32(PCI_BAR0);
+    let expected_type = if wide { 4 } else { 0 };
+    if low & 15 != expected_type {
+        return false;
+    }
+    let actual = u64::from(low & !15)
+        | if wide {
+            u64::from(config.read32(PCI_BAR0 + 4)) << 32
+        } else {
+            0
+        };
+    actual == base
+}
+
+/// Enter PCI D0, select the identity's conventional coherent DMA behavior,
+/// enable memory/mastering, and disable all PCI interrupt delivery.
+///
+/// `bar0` must be the actual BAR0 sized by the platform while the function is
+/// exclusively owned. It must be nonprefetchable memory, at least 0x440 bytes.
+/// This function never sizes BARs or guesses addresses. Failure after a config
+/// write leaves ownership with the caller, with decoding/mastering disabled
+/// where possible; the caller must not free DMA or mapping resources blindly.
+///
+/// # Safety
+/// The platform has made main power/clocks available (including D3cold/ACPI
+/// resources), quiesced every prior DMA engine, and established exclusive
+/// ownership against firmware, AML, SMM, DSP and other CPUs. `ExclusiveLegacy`
+/// certifies that decision; the enum cannot discover it. Configuration space
+/// must use native byte/word stores. No-PM-capability functions must already be
+/// configuration-ready in D0. The supplied allocator used subsequently
+/// must provide coherent, controller-reachable DMA through the actual IOMMU.
+/// No later agent may change power, decode, snoop or controller ownership.
+pub unsafe fn prepare<C: ConfigSpace>(
+    function: &mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
+) -> Result<Prepared, AttachError> {
+    if ownership != Ownership::ExclusiveLegacy {
+        return Err(AttachError::Ownership);
+    }
+    let selected = identify(function)?;
+    let config = function.config();
+    let id = config.read32(PCI_ID);
+    let class = config.read32(PCI_CLASS);
+    let actual = identity(
+        id as u16,
+        (id >> 16) as u16,
+        [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
+    )?;
+    if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
+        return Err(AttachError::IdentityChanged);
+    }
+    let (base, bytes, wide) = match bar0 {
+        Bar::Memory {
+            address,
+            size,
+            prefetchable: false,
+            wide,
+        } if address != 0
+            && address & 0x7f == 0
+            && size >= 0x440
+            && size.is_power_of_two()
+            && address & (size - 1) == 0
+            && address.checked_add(size).is_some() =>
+        {
+            (address, size, wide)
+        }
+        _ => return Err(AttachError::InvalidBar),
+    };
+    if !bar_matches(config, base, wide) {
+        return Err(AttachError::InvalidBar);
+    }
+    let caps = capabilities(config)?;
+    let pmcsr = caps.pm.map(|pm| {
+        let version = config.read16(pm + 2) & 7;
+        (pm + 4, version, config.read16(pm + 4))
+    });
+    if let Some((_, version, value)) = pmcsr
+        && (!(1..=3).contains(&version) || value == u16::MAX)
+    {
+        return Err(AttachError::UnsupportedPowerManagement);
+    }
+    // Save resources before a D3hot exit can reset them. Disable decode/mastering
+    // before restoring any BAR; PCI status is never written by command updates.
+    let bars: [u32; 6] = core::array::from_fn(|i| config.read32(PCI_BAR0 + i as u16 * 4));
+    let command = config.read16(PCI_COMMAND) & !(COMMAND_MEMORY | COMMAND_MASTER);
+    config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+    let result = (|| {
+        if config.read16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER) != 0 {
+            return Err(AttachError::ConfigurationRejected);
+        }
+        if let Some((offset, _, value)) = pmcsr {
+            let state = value & PM_STATE;
+            // PME_Status is W1C: write zero to preserve pending wake evidence.
+            config.write16(offset, value & !(PM_STATE | PM_PME_ENABLE | PM_PME_STATUS));
+            delay(
+                timer,
+                match state {
+                    3 => 10_000,
+                    2 => 200,
+                    _ => 0,
+                },
+            );
+            if config.read16(offset) & PM_STATE != 0 {
+                return Err(AttachError::PowerTransition);
+            }
+            if state == 3 && value & PM_NO_SOFT_RESET == 0 {
+                config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+                for (index, value) in bars.iter().enumerate() {
+                    config.write32(PCI_BAR0 + index as u16 * 4, *value);
+                }
+            }
+        }
+        if !bar_matches(config, base, wide) {
+            return Err(AttachError::InvalidBar);
+        }
+        // ICH uses coherent system memory without SCH/ATI/NVIDIA snoop bits.
+        // Never touch another family's vendor register under an ICH identity.
+        let tcsel = config.read8(TCSEL) & !TCSEL_MASK;
+        config.write8(TCSEL, tcsel);
+        if config.read8(TCSEL) != tcsel {
+            return Err(AttachError::ConfigurationRejected);
+        }
+        if let Some(offset) = caps.msi {
+            let control = config.read16(offset + 2) & !1;
+            config.write16(offset + 2, control);
+            if config.read16(offset + 2) & 1 != 0 {
+                return Err(AttachError::ConfigurationRejected);
+            }
+        }
+        if let Some(offset) = caps.msix {
+            let control = config.read16(offset + 2) & !(1 << 15);
+            config.write16(offset + 2, control);
+            if config.read16(offset + 2) & (1 << 15) != 0 {
+                return Err(AttachError::ConfigurationRejected);
+            }
+        }
+        let enabled = command | COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE;
+        config.write16(PCI_COMMAND, enabled);
+        if config.read16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE)
+            != COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE
+        {
+            return Err(AttachError::ConfigurationRejected);
+        }
+        Ok(Prepared {
+            identity: selected,
+            base,
+            bytes,
+        })
+    })();
+    if result.is_err() {
+        config.write16(PCI_COMMAND, command | COMMAND_INTX_DISABLE);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::pci::Address;
+    use alloc::{rc::Rc, vec::Vec};
+    use core::cell::Cell;
+
+    struct Clock(Rc<Cell<u64>>);
+    impl Timer for Clock {
+        fn now_us(&self) -> u64 {
+            self.0.get()
+        }
+        fn relax(&self) {
+            self.0.set(self.0.get() + 10);
+        }
+    }
+
+    struct Model {
+        words: [u32; 64],
+        now: Rc<Cell<u64>>,
+        ready_at: u64,
+        previous_state: u16,
+        reject_power: bool,
+        reject_command: bool,
+        reject_tcsel: bool,
+        writes: Vec<(u16, u8, u32, u64)>,
+    }
+    impl Model {
+        fn get16(&self, offset: u16) -> u16 {
+            (self.words[usize::from(offset / 4)] >> ((offset & 2) * 8)) as u16
+        }
+        fn set16(&mut self, offset: u16, value: u16) {
+            let shift = (offset & 2) * 8;
+            let index = usize::from(offset / 4);
+            self.words[index] = self.words[index] & !(0xffff << shift) | u32::from(value) << shift;
+        }
+    }
+    impl ConfigSpace for Model {
+        fn read32(&self, offset: u16) -> u32 {
+            let value = self.words[usize::from(offset / 4)];
+            if offset == 0x54 && (self.reject_power || self.now.get() < self.ready_at) {
+                value & !3 | u32::from(self.previous_state)
+            } else {
+                value
+            }
+        }
+        fn write32(&mut self, offset: u16, value: u32) {
+            // The only dword writes attachment needs are saved BAR restores.
+            assert!((PCI_BAR0..PCI_BAR0 + 24).contains(&offset));
+            assert!(self.now.get() >= self.ready_at);
+            assert_eq!(
+                self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                0
+            );
+            self.writes.push((offset, 4, value, self.now.get()));
+            self.words[usize::from(offset / 4)] = value;
+        }
+        fn write8(&mut self, offset: u16, value: u8) {
+            assert_eq!(offset, TCSEL);
+            self.writes
+                .push((offset, 1, u32::from(value), self.now.get()));
+            if self.reject_tcsel {
+                return;
+            }
+            let shift = (offset & 3) * 8;
+            let index = usize::from(offset / 4);
+            self.words[index] = self.words[index] & !(0xff << shift) | u32::from(value) << shift;
+        }
+        fn write16(&mut self, offset: u16, value: u16) {
+            assert!(matches!(offset, PCI_COMMAND | 0x54 | 0x62 | 0x72));
+            self.writes
+                .push((offset, 2, u32::from(value), self.now.get()));
+            if offset == PCI_COMMAND {
+                if self.reject_command {
+                    return;
+                }
+                if value & COMMAND_MASTER != 0 {
+                    assert!(self.now.get() >= self.ready_at);
+                }
+            }
+            if offset == 0x54 {
+                let old = self.get16(offset);
+                self.previous_state = old & PM_STATE;
+                self.ready_at = self.now.get()
+                    + match self.previous_state {
+                        3 => 10_000,
+                        2 => 200,
+                        _ => 0,
+                    };
+                if old & PM_STATE == 3 && old & PM_NO_SOFT_RESET == 0 {
+                    self.words[4..10].fill(0);
+                }
+                // Pending PME is W1C, not an ordinary stored bit.
+                self.set16(
+                    offset,
+                    (value & !PM_PME_STATUS) | (old & !value & PM_PME_STATUS),
+                );
+                return;
+            }
+            self.set16(offset, value);
+        }
+    }
+
+    fn fixture(state: u16) -> (Function<Model>, Clock, Bar) {
+        let now = Rc::new(Cell::new(0));
+        let mut model = Model {
+            words: [0; 64],
+            now: now.clone(),
+            ready_at: 0,
+            previous_state: state,
+            reject_power: false,
+            reject_command: false,
+            reject_tcsel: false,
+            writes: Vec::new(),
+        };
+        model.words[0] = 0x2668_8086;
+        model.words[1] = 0xf910_0406; // W1C status, capabilities, decode/master.
+        model.words[2] = 0x0403_0001;
+        model.words[4] = 0xfebf_0000;
+        model.words[5] = 0x1234_0000; // Exercise restoration of every BAR.
+        model.words[13] = 0x50;
+        model.words[17] = 0x5ac3_a5f7; // TCSEL byte plus adjacent vendor state.
+        model.words[20] = 0x0003_6001; // PCI PMv3 -> MSI.
+        model.words[21] = u32::from(state | PM_PME_ENABLE | PM_PME_STATUS);
+        model.words[24] = 0x0001_7005; // Enabled MSI -> MSI-X.
+        model.words[28] = 0x8000_0011; // Enabled MSI-X.
+        let function = Function::new(
+            Address {
+                segment: 0,
+                bus: 0,
+                device: 27,
+                function: 0,
+            },
+            model,
+        )
+        .unwrap();
+        (
+            function,
+            Clock(now),
+            Bar::Memory {
+                address: 0xfebf_0000,
+                size: 0x4000,
+                prefetchable: false,
+                wide: false,
+            },
+        )
+    }
+
+    fn prepare_model(
+        function: &mut Function<Model>,
+        timer: &Clock,
+        bar: Bar,
+    ) -> Result<Prepared, AttachError> {
+        // SAFETY: the isolated stateful model has no real hardware/firmware owner.
+        unsafe { prepare(function, bar, timer, Ownership::ExclusiveLegacy) }
+    }
+
+    #[test]
+    fn exact_legacy_ids_refuse_modern_dsp_gpu_and_wrong_classes() {
+        for device in [
+            0x2668, 0x269a, 0x27d8, 0x284b, 0x293e, 0x293f, 0x3a3e, 0x3a6e,
+        ] {
+            assert_eq!(
+                identity(INTEL, device, CLASS).unwrap().corb_reset,
+                CorbReset::Handshake
+            );
+        }
+        for (vendor, device, class) in [
+            (INTEL, 0xa170, CLASS),
+            (INTEL, 0x9dc8, CLASS),
+            (INTEL, 0x0a0c, CLASS),
+            (INTEL, 0xffff, CLASS),
+            (0x1022, 0x780d, CLASS),
+            (INTEL, 0x2668, [4, 1, 0]),
+        ] {
+            assert_eq!(
+                identity(vendor, device, class),
+                Err(AttachError::UnsupportedController)
+            );
+        }
+    }
+
+    #[test]
+    fn d3hot_restores_bars_after_delay_and_preserves_wake_status_and_vendor_bytes() {
+        let (mut function, timer, bar) = fixture(3);
+        let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+        assert_eq!(prepared.bar_range(), 0xfebf_0000..0xfebf_4000);
+        assert_eq!(prepared.config().corb_reset, CorbReset::Handshake);
+        let config = function.config();
+        assert_eq!(timer.now_us(), 10_000);
+        assert_eq!(config.words[4], 0xfebf_0000);
+        assert_eq!(config.words[5], 0x1234_0000);
+        assert_eq!(config.words[17], 0x5ac3_a5f0);
+        assert_eq!(config.get16(0x54), PM_PME_STATUS);
+        assert_eq!(config.get16(PCI_STATUS), 0xf910);
+        assert_eq!(config.get16(PCI_COMMAND) & 0x406, 0x406);
+        assert_eq!(config.get16(0x62) & 1, 0);
+        assert_eq!(config.get16(0x72) & 0x8000, 0);
+        assert_eq!(
+            config
+                .writes
+                .iter()
+                .filter(|(_, width, _, _)| *width == 4)
+                .count(),
+            6
+        );
+        assert_eq!(
+            config
+                .writes
+                .iter()
+                .filter(|(off, _, _, _)| *off == TCSEL)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn d2_delay_and_d3_no_soft_reset_do_not_rewrite_bars() {
+        for (state, delay_us) in [(2, 200), (3 | PM_NO_SOFT_RESET, 10_000), (0, 0)] {
+            let (mut function, timer, bar) = fixture(state);
+            prepare_model(&mut function, &timer, bar).unwrap();
+            assert_eq!(timer.now_us(), delay_us);
+            assert!(
+                !function
+                    .config()
+                    .writes
+                    .iter()
+                    .any(|(_, width, _, _)| *width == 4)
+            );
+        }
+    }
+
+    #[test]
+    fn absent_pci_pm_is_configuration_ready_and_wide_bar_is_preserved() {
+        let (mut function, timer, _) = fixture(0);
+        function.config().words[13] = 0x60; // No PM capability.
+        function.config().words[4] = 0x0000_0004;
+        function.config().words[5] = 1;
+        let bar = Bar::Memory {
+            address: 1 << 32,
+            size: 0x4000,
+            prefetchable: false,
+            wide: true,
+        };
+        assert_eq!(
+            prepare_model(&mut function, &timer, bar)
+                .unwrap()
+                .bar_range(),
+            (1 << 32)..(1 << 32) + 0x4000
+        );
+        assert!(
+            !function
+                .config()
+                .writes
+                .iter()
+                .any(|(offset, _, _, _)| *offset == 0x54)
+        );
+    }
+
+    #[test]
+    fn ownership_unknown_or_dsp_causes_no_configuration_writes() {
+        for ownership in [Ownership::Unknown, Ownership::Dsp] {
+            let (mut function, timer, bar) = fixture(0);
+            // SAFETY: isolated model; refusal must occur before any mutation.
+            assert_eq!(
+                unsafe { prepare(&mut function, bar, &timer, ownership) }.unwrap_err(),
+                AttachError::Ownership
+            );
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn malformed_capability_lists_and_invalid_bars_refuse_before_mutation() {
+        for change in [0, 1, 2, 3, 4, 5] {
+            let (mut function, timer, bar) = fixture(0);
+            match change {
+                0 => function.config().words[13] = 0x51,
+                1 => function.config().words[28] |= 0x50 << 8, // Loop.
+                2 => function.config().words[28] = 1,          // Second PM.
+                3 => function.config().words[20] &= !(7 << 16), // PMv0.
+                _ => function.config().words[4] += 0x4000,     // Stale supplied BAR.
+            }
+            assert!(prepare_model(&mut function, &timer, bar).is_err());
+            assert!(function.config().writes.is_empty());
+        }
+        for bar in [
+            Bar::Io {
+                port: 0x1000,
+                size: 0x1000,
+            },
+            Bar::Memory {
+                address: 0xfebf_0000,
+                size: 0x400,
+                prefetchable: false,
+                wide: false,
+            },
+            Bar::Memory {
+                address: 0xfebf_0000,
+                size: 0x4000,
+                prefetchable: true,
+                wide: false,
+            },
+            Bar::Memory {
+                address: 0xfebf_0000,
+                size: 0x4000,
+                prefetchable: false,
+                wide: true,
+            },
+        ] {
+            let (mut function, timer, _) = fixture(0);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::InvalidBar
+            );
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn actual_identity_is_checked_against_enumerated_identity_before_writes() {
+        let (mut function, timer, bar) = fixture(0);
+        function.config().words[0] = 0x27d8_8086; // Still supported, but a different function.
+        assert_eq!(
+            prepare_model(&mut function, &timer, bar).unwrap_err(),
+            AttachError::IdentityChanged
+        );
+        assert!(function.config().writes.is_empty());
+    }
+
+    #[test]
+    fn rejected_decode_disable_stops_before_power_or_vendor_writes() {
+        let (mut function, timer, bar) = fixture(3);
+        function.config().reject_command = true;
+        assert_eq!(
+            prepare_model(&mut function, &timer, bar).unwrap_err(),
+            AttachError::ConfigurationRejected
+        );
+        assert!(
+            function
+                .config()
+                .writes
+                .iter()
+                .all(|(offset, width, _, _)| *offset == PCI_COMMAND && *width == 2)
+        );
+        assert_eq!(timer.now_us(), 0);
+    }
+
+    #[test]
+    fn power_tcsel_or_command_rejections_fail_and_leave_mastering_disabled() {
+        for failure in 0..3 {
+            let (mut function, timer, bar) = fixture(3);
+            match failure {
+                0 => function.config().reject_power = true,
+                1 => function.config().reject_tcsel = true,
+                _ => {
+                    function.config().set16(PCI_COMMAND, COMMAND_INTX_DISABLE);
+                    function.config().reject_command = true;
+                }
+            }
+            let result = prepare_model(&mut function, &timer, bar).unwrap_err();
+            assert_eq!(
+                result,
+                if failure == 0 {
+                    AttachError::PowerTransition
+                } else {
+                    AttachError::ConfigurationRejected
+                }
+            );
+            assert_eq!(
+                function.config().get16(PCI_COMMAND) & (COMMAND_MASTER | COMMAND_MEMORY),
+                0
+            );
+        }
+    }
+}
