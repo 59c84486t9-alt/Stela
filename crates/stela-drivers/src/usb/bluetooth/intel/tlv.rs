@@ -34,7 +34,7 @@ pub struct TlvIdentity {
     pub cnvi_bt: u32,
     pub cnvr_bt: u32,
     pub device_revision: u16,
-    /// 1 is secure bootloader, 3 is an operational image; IML is unsupported.
+    /// 1 is secure bootloader, 2 is IML, 3 is operational firmware.
     pub image_type: u8,
     pub build: Option<[u8; 3]>,
     pub build_number: Option<u32>,
@@ -42,6 +42,7 @@ pub struct TlvIdentity {
     pub minimum_build: Option<[u8; 3]>,
     pub secure_engine: Option<u8>,
     pub address: Option<[u8; 6]>,
+    pub firmware_id: Option<String>,
     fields: Vec<(u8, Vec<u8>)>,
 }
 impl TlvIdentity {
@@ -131,13 +132,13 @@ impl TlvIdentity {
         }
         let variant = ((cnvi_bt >> 16) & 0x3f) as u8;
         // 0x11–14 are parsed only to trigger the legacy-version fallback.
-        if !matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x1d) {
+        if !matches!(variant,0x11..=0x14|0x17..=0x19|0x1b..=0x1f|0x22) {
             return Err(Error::Unsupported(
-                "Intel TLV hardware; IML/hybrid is separate",
+                "Intel TLV hardware/hybrid engine unsupported",
             ));
         }
         let image_type = req(IMAGE_TYPE)?[0];
-        if !matches!(image_type, 1 | 3) {
+        if !matches!(image_type, 1 | 3) && !(image_type == 2 && variant >= 0x1e) {
             return Err(Error::Unsupported("Intel intermediate/unknown image type"));
         }
         let build_number = get(BUILD).map(|v| u32::from_le_bytes(v.try_into().unwrap()));
@@ -165,7 +166,7 @@ impl TlvIdentity {
             }
             valid_address(address.unwrap())?;
         }
-        if image_type == 3 && build.is_none() {
+        if matches!(image_type, 2 | 3) && build.is_none() {
             return Err(Error::Protocol("operational TLV build/timestamp missing"));
         }
         for (kind, observed) in [(0x17, usb_vendor), (0x18, usb_product)] {
@@ -175,6 +176,29 @@ impl TlvIdentity {
                 return Err(Error::Protocol("TLV USB ID differs from descriptor"));
             }
         }
+        let firmware_id = if variant >= 0x1e && image_type != 1 {
+            match get(0x50) {
+                Some(raw) => {
+                    let end = raw.iter().position(|b| *b == 0).unwrap_or(raw.len());
+                    if end >= 64
+                        || raw[end..].iter().any(|b| *b != 0)
+                        || !raw[..end]
+                            .iter()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'-' | b'_'))
+                    {
+                        return Err(Error::Unsupported("unsafe/oversized Intel FW_ID"));
+                    }
+                    if end == 0 {
+                        None
+                    } else {
+                        Some(core::str::from_utf8(&raw[..end]).unwrap().into())
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let device_revision = u16::from_le_bytes(req(DEVICE_REV)?.try_into().unwrap());
         Ok(Self {
             usb_vendor,
@@ -192,6 +216,7 @@ impl TlvIdentity {
             minimum_build,
             secure_engine,
             address,
+            firmware_id,
             fields,
         })
     }
@@ -224,11 +249,122 @@ impl TlvIdentity {
     }
     pub fn filename(&self, suffix: &str) -> String {
         let pack = |v: u32| ((((v & 0xfff) << 4) | ((v >> 24) & 0xf)) as u16).swap_bytes();
-        format!(
-            "intel/ibt-{:04x}-{:04x}.{suffix}",
+        let base = format!(
+            "intel/ibt-{:04x}-{:04x}",
             pack(self.cnvi_top),
             pack(self.cnvr_top)
-        )
+        );
+        if self.hardware_variant() >= 0x1e {
+            if self.image_type == 1 {
+                return format!("{base}-iml.{suffix}");
+            }
+            if let Some(id) = &self.firmware_id {
+                return format!("{base}-{id}.{suffix}");
+            }
+        }
+        format!("{base}.{suffix}")
+    }
+    /// Source-linked IML selector: exact domain, then u32 LE length + complete
+    /// sorted TLVs for initial boot and current IML respectively. This binds
+    /// inherited observed security data without rewriting the current response.
+    pub fn iml_revision_label(&self, initial: &Self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"stela.intel-usb.iml-target\0v1\0");
+        for bytes in [initial.canonical_tlvs(), self.canonical_tlvs()] {
+            hash.update((bytes.len() as u32).to_le_bytes());
+            hash.update(bytes);
+        }
+        let mut label = String::from("tlv-iml-v1:sha256:");
+        for byte in hash.finalize() {
+            write!(&mut label, "{byte:02x}").unwrap();
+        }
+        label
+    }
+    pub(super) fn validate_security(&self, prior: &Self) -> Result<()> {
+        for kind in [
+            SECURE_BOOT,
+            LIMITED_CCE,
+            SBE,
+            MINIMUM,
+            OTP_ADDRESS,
+            0x2a,
+            0x2b,
+            0x2c,
+        ] {
+            if let (Some(a), Some(b)) = (self.field(kind), prior.field(kind))
+                && a != b
+            {
+                return Err(Error::Protocol(
+                    "contradictory Intel stage security observations",
+                ));
+            }
+        }
+        Ok(())
+    }
+    fn field(&self, id: u8) -> Option<&[u8]> {
+        self.fields
+            .iter()
+            .find(|(kind, _)| *kind == id)
+            .map(|(_, value)| value.as_slice())
+    }
+    pub(super) fn boot_requirements<'a>(
+        &'a self,
+        initial: Option<&'a Self>,
+    ) -> Result<BootRequirements> {
+        if let Some(old) = initial
+            && !self.same_hardware(old)
+        {
+            return Err(Error::Protocol("inherited Intel hardware identity changed"));
+        }
+        let mut inherited = Vec::new();
+        let mut required = |kind, name| -> Result<&[u8]> {
+            let current = self.field(kind);
+            let prior = initial.and_then(|i| i.field(kind));
+            if let (Some(a), Some(b)) = (current, prior)
+                && a != b
+            {
+                return Err(Error::Protocol(
+                    "contradictory Intel stage security observations",
+                ));
+            }
+            if current.is_none() && prior.is_some() {
+                inherited.push(name);
+            }
+            current.or(prior).ok_or(Error::Unsupported(
+                "fresh IML missing observed security/OTP/minimum parameters",
+            ))
+        };
+        if required(SECURE_BOOT, InheritedField::SecureBoot)? != [1]
+            || required(LIMITED_CCE, InheritedField::IndividualCompletions)? != [0]
+        {
+            return Err(Error::Unsupported(
+                "IML secure boot/individual completions required",
+            ));
+        }
+        let engine = required(SBE, InheritedField::SecureEngine)?[0];
+        if engine > 1 {
+            return Err(Error::Unsupported("IML hybrid secure engine unsupported"));
+        }
+        let minimum = required(MINIMUM, InheritedField::MinimumBuild)?
+            .try_into()
+            .unwrap();
+        let address = required(OTP_ADDRESS, InheritedField::OtpAddress)?
+            .try_into()
+            .unwrap();
+        valid_address(address)?;
+        for (kind, name) in [
+            (0x2a, InheritedField::OtpLock),
+            (0x2b, InheritedField::ApiLock),
+            (0x2c, InheritedField::DebugLock),
+        ] {
+            required(kind, name)?;
+        }
+        Ok(BootRequirements {
+            engine,
+            minimum,
+            address,
+            inherited,
+        })
     }
     pub fn target<'a>(&self, hardware: &'a str, revision: &'a str) -> Target<'a> {
         Target {
@@ -259,4 +395,23 @@ impl TlvIdentity {
             other.device_revision,
         )
     }
+}
+
+/// Named fields reused only from prior actual observations after verified IML boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InheritedField {
+    SecureBoot,
+    IndividualCompletions,
+    SecureEngine,
+    MinimumBuild,
+    OtpAddress,
+    OtpLock,
+    ApiLock,
+    DebugLock,
+}
+pub(super) struct BootRequirements {
+    pub engine: u8,
+    pub minimum: [u8; 3],
+    pub address: [u8; 6],
+    pub inherited: Vec<InheritedField>,
 }
