@@ -96,11 +96,14 @@ impl Port<'_, '_> {
                 .checked_add(done as u64)
                 .ok_or(DmaError::Unsupported("DMA past the end of the I/O space"))?;
             let chunk = (page - address % page).min((bytes - done) as u64) as usize;
+            let last = address
+                .checked_add(chunk as u64 - 1)
+                .ok_or(DmaError::Unsupported("DMA past the end of the I/O space"))?;
             let physical = self.iommu.translate(
                 self.memory,
                 self.stream,
                 address,
-                address + chunk as u64 - 1,
+                last,
                 write,
                 self.access,
             )?;
@@ -211,5 +214,114 @@ pub(crate) mod tests {
         assert_eq!(port.write(0x48, &data), Err(DmaError::Fault(1)));
         assert_eq!(port.read(0x200, &mut back), Err(DmaError::Memory));
         assert_eq!(ram.bytes[0x08..0x30], data[..]);
+    }
+
+    #[test]
+    fn final_iova_byte_reaches_the_named_iommu_requirement_without_wrapping() {
+        struct Refusing {
+            calls: usize,
+        }
+        impl Iommu for Refusing {
+            fn page(&self) -> u64 {
+                0x1000
+            }
+
+            fn translate(
+                &mut self,
+                _: &mut dyn Memory,
+                _: usize,
+                iova: u64,
+                last: u64,
+                _: bool,
+                _: &mut Access<'_>,
+            ) -> Result<u64, DmaError> {
+                assert_eq!((iova, last), (u64::MAX, u64::MAX));
+                self.calls += 1;
+                Err(DmaError::Unsupported("test IOMMU boundary requirement"))
+            }
+        }
+        let mut iommu = Refusing { calls: 0 };
+        let mut ram = Ram::new(u64::MAX, 1);
+        ram.bytes[0] = 0x5a;
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        let refused = Err(DmaError::Unsupported("test IOMMU boundary requirement"));
+        assert_eq!(port.write(u64::MAX, &[0xa5]), refused);
+        let mut buffer = [0x99];
+        assert_eq!(port.read(u64::MAX, &mut buffer), refused);
+        assert_eq!(buffer, [0x99]);
+        assert_eq!(ram.bytes, [0x5a]);
+        assert_eq!(iommu.calls, 2);
+    }
+
+    #[test]
+    fn overflowing_dma_ranges_preserve_completed_chunks_at_the_iova_end() {
+        let mut physical = Physical;
+        let mut ram = Ram::new(u64::MAX - 1, 2);
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        let mut port = Port {
+            iommu: &mut physical,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        let refused = Err(DmaError::Unsupported("DMA past the end of the I/O space"));
+        assert_eq!(port.write(u64::MAX - 1, &[0xa5, 0x5a, 0xff]), refused);
+        let mut buffer = [0x99; 3];
+        assert_eq!(port.read(u64::MAX - 1, &mut buffer), refused);
+        assert_eq!(buffer, [0xa5, 0x5a, 0x99]);
+        assert_eq!(ram.bytes, [0xa5, 0x5a]);
+    }
+
+    #[test]
+    fn overflowing_chunk_end_refuses_before_translation_or_payload_bytes() {
+        // The generic Iommu contract does not require power-of-two pages.
+        // Its last page can therefore extend beyond the I/O address space.
+        struct ThreeBytePage {
+            calls: usize,
+        }
+        impl Iommu for ThreeBytePage {
+            fn page(&self) -> u64 {
+                3
+            }
+
+            fn translate(
+                &mut self,
+                _: &mut dyn Memory,
+                _: usize,
+                iova: u64,
+                _: u64,
+                _: bool,
+                _: &mut Access<'_>,
+            ) -> Result<u64, DmaError> {
+                self.calls += 1;
+                Ok(iova)
+            }
+        }
+        let mut iommu = ThreeBytePage { calls: 0 };
+        let mut ram = Ram::new(u64::MAX, 1);
+        ram.bytes[0] = 0x5a;
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        let mut port = Port {
+            iommu: &mut iommu,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        let refused = Err(DmaError::Unsupported("DMA past the end of the I/O space"));
+        assert_eq!(port.write(u64::MAX, &[0xa5, 0xff]), refused);
+        let mut buffer = [0x99; 2];
+        assert_eq!(port.read(u64::MAX, &mut buffer), refused);
+        assert_eq!(buffer, [0x99; 2]);
+        assert_eq!(ram.bytes, [0x5a]);
+        assert_eq!(iommu.calls, 0);
     }
 }
