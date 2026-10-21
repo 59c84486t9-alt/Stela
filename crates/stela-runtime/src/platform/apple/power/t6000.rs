@@ -18,6 +18,8 @@ use super::super::bus::{
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+pub mod native;
+
 const NAME: &str = "t6000-power";
 const GPCE_BASE: u64 = 0x18000;
 const GPCE_SELECTORS: u8 = 6;
@@ -95,6 +97,7 @@ pub enum Error {
     UnknownRegister,
     DuplicateObservation,
     MissingObservation,
+    Native(native::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +126,7 @@ struct State {
     requests: Vec<Request>,
     captured_pending: Vec<Observation>,
     serial: u64,
+    native: Option<native::State>,
 }
 impl State {
     fn accessible(&self) -> Result<(), &'static str> {
@@ -175,6 +179,7 @@ impl Controller {
             requests: Vec::new(),
             captured_pending: Vec::new(),
             serial: 0,
+            native: None,
         };
         for observation in observations {
             let Some(instance) = state.geometry.get(usize::from(observation.instance)) else {
@@ -220,6 +225,22 @@ impl Controller {
             }
         }
         Ok(Self(Rc::new(RefCell::new(state))))
+    }
+    /// One first-die T6000 owner for actual request, configuration and SRAM
+    /// views. Existing constructors retain unknown/unmounted native resources.
+    pub fn with_native(
+        geometry: Vec<Instance>,
+        lifecycle: LifecycleState,
+        observations: impl IntoIterator<Item = Observation>,
+        handoff: native::Handoff,
+    ) -> Result<Self, Error> {
+        if geometry.len() != 1 {
+            return Err(Error::Native(native::Error::Profile));
+        }
+        let native = native::State::new(handoff).map_err(Error::Native)?;
+        let owner = Self::from_observations(geometry, lifecycle, observations)?;
+        owner.0.borrow_mut().native = Some(native);
+        Ok(owner)
     }
     pub fn view(&self, instance: u8) -> Result<View, Error> {
         self.bank_view(instance, Bank::Pmgr)
