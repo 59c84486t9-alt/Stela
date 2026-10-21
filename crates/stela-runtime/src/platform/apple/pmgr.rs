@@ -22,6 +22,7 @@
 pub mod coverage;
 pub mod install;
 pub mod sequencer;
+pub mod t6000;
 
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::collections::{BTreeMap, BTreeSet};
