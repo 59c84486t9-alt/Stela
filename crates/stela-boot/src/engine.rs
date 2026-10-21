@@ -1466,6 +1466,7 @@ fn from_disk(
 }
 
 pub extern "sysv64" fn entry(handoff: u64) -> ! {
+    output::disable_firmware_console();
     // SAFETY: the first engine code; interrupts are off and nothing else runs.
     unsafe { interrupts::install(interrupts::interrupt) };
     // SAFETY: the loader wrote the handoff page and passed its physmap address.

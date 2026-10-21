@@ -118,6 +118,14 @@ pub fn leave_boot_services() {
     if let Ok(mut sinks) = SINKS.0.try_borrow_mut() {
         sinks.retain(|sink| sink.kind != Log::Firmware);
     }
+    disable_firmware_console();
+}
+
+/// The relocated engine has its own statics, not the loader image's updated
+/// console flag. Revoke this image's firmware access before any engine error
+/// can consult the expired system table. This makes no firmware calls and
+/// needs neither the engine heap nor a valid handoff.
+pub fn disable_firmware_console() {
     FIRMWARE_CONSOLE.store(false, Ordering::Relaxed);
 }
 
@@ -281,7 +289,7 @@ fn stopped(message: &str) {
     if console::active() && !RAW_SCREEN.load(Ordering::Relaxed) {
         crate::status::fail(message);
         crate::status::info("Stela stopped. Turn the PC off to try again.");
-    } else {
+    } else if FIRMWARE_CONSOLE.load(Ordering::Relaxed) {
         firmware_console(&alloc::format!("\nStela stopped: {message}\n"));
     }
 }
