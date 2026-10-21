@@ -29,6 +29,9 @@ use crate::hosted::{
 };
 use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+mod namespace;
 
 /// `CTL_MAXNAME`.
 const MAX_NAME: u64 = 12;
@@ -42,6 +45,7 @@ const META_NAME: i32 = 1;
 const META_NEXT: i32 = 2;
 const META_NAME_TO_OID: i32 = 3;
 const META_FORMAT: i32 = 4;
+const META_DESCRIPTION: i32 = 5;
 /// The second component of a synthetic number: above every `OID_AUTO`
 /// number the host can assign.
 const SYNTHETIC: i32 = 0x4000_0000;
@@ -190,13 +194,17 @@ enum Value {
     QuadBytes(Vec<u8>),
     /// The arm64 kernel's handler fails with this errno.
     Fails(u64),
+    /// A failing handler still declares a quad in oidfmt.
+    FailsQuad(u64),
 }
 
 impl Value {
     fn kind(&self) -> u32 {
         match self {
             Self::Int(_) | Self::Fails(_) => CTLTYPE_INT,
-            Self::Quad(_) | Self::Number(_) | Self::QuadBytes(_) => CTLTYPE_QUAD,
+            Self::Quad(_) | Self::Number(_) | Self::QuadBytes(_) | Self::FailsQuad(_) => {
+                CTLTYPE_QUAD
+            }
             Self::String(_) => CTLTYPE_STRING,
             Self::Opaque(_) => CTLTYPE_OPAQUE,
         }
@@ -205,7 +213,11 @@ impl Value {
     fn format(&self) -> &'static str {
         match self {
             Self::Int(_) | Self::Fails(_) => "I",
-            Self::Quad(_) | Self::Number(_) | Self::Opaque(_) | Self::QuadBytes(_) => "Q",
+            Self::Quad(_)
+            | Self::Number(_)
+            | Self::Opaque(_)
+            | Self::QuadBytes(_)
+            | Self::FailsQuad(_) => "Q",
             Self::String(_) => "A",
         }
     }
@@ -226,7 +238,7 @@ impl Value {
                 bytes
             }
             Self::Opaque(bytes) | Self::QuadBytes(bytes) => bytes.clone(),
-            Self::Fails(errno) => return Err(*errno),
+            Self::Fails(errno) | Self::FailsQuad(errno) => return Err(*errno),
         })
     }
 }
@@ -235,6 +247,7 @@ impl Value {
 #[derive(Debug, Clone)]
 pub(crate) struct Model {
     entries: Vec<(String, Value)>,
+    namespace: OnceLock<namespace::Namespace>,
 }
 
 /// One performance level's cores and caches (`ml_cpu_get_info_type`).
@@ -312,7 +325,14 @@ impl Model {
             "hw.cpufrequency_compat",
         ] {
             // Release arm64 kernels publish no bus or CPU frequency.
-            add(name, Value::Fails(ENOENT));
+            add(
+                name,
+                if name.ends_with("_compat") {
+                    Value::Fails(ENOENT)
+                } else {
+                    Value::FailsQuad(ENOENT)
+                },
+            );
         }
         let line = i64::from(hardware.cache_line);
         add("hw.cachelinesize", Value::Quad(line));
@@ -324,7 +344,7 @@ impl Model {
         add("hw.l2cachesize", Value::Quad(lowest.l2));
         add("hw.l2cachesize_compat", Value::Int(lowest.l2 as i32));
         // Apple SoCs report no L3 (`l3_cache_size == UINT32_MAX`).
-        add("hw.l3cachesize", Value::Fails(EINVAL));
+        add("hw.l3cachesize", Value::FailsQuad(EINVAL));
         add("hw.l3cachesize_compat", Value::Fails(EINVAL));
         let timebase = crate::hosted::host::COUNTER_HZ as i64;
         add("hw.tbfrequency", Value::Number(timebase));
@@ -440,7 +460,10 @@ impl Model {
                 add(name, Value::String(value.clone()));
             }
         }
-        Self { entries }
+        Self {
+            entries,
+            namespace: OnceLock::new(),
+        }
     }
 
     fn index(&self, name: &str) -> Option<usize> {
@@ -451,7 +474,7 @@ impl Model {
         match oid {
             [_, number] if *number >= SYNTHETIC => {
                 let index = (*number - SYNTHETIC) as usize;
-                (index < self.entries.len()).then_some(index)
+                (index < self.entries.len() && oid == self.synthetic_oid(index)).then_some(index)
             }
             _ => None,
         }
@@ -460,6 +483,8 @@ impl Model {
     fn synthetic_oid(&self, index: usize) -> [i32; 2] {
         let top = if self.entries[index].0.starts_with("machdep.") {
             CTL_MACHDEP
+        } else if self.entries[index].0.starts_with("kern.") {
+            CTL_KERN
         } else {
             CTL_HW
         };
@@ -530,6 +555,9 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
 
 pub(super) const CALLS: &[&str] = &["sysctl", "sys_sysctlbyname"];
 
+pub(super) const LIMIT: &str = "some machine subtree metadata and unmodeled ARM variables are refused; \
+    installed-system identity is read-only, including for privileged writers";
+
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
         "sysctl" => by_number(kernel, call)?,
@@ -563,10 +591,9 @@ impl Request {
         let buffer = if self.old_length == 0 {
             None
         } else {
-            match memory::read_u64(self.old_length) {
-                Some(length) => Some(length),
-                None => return Outcome::Error(EFAULT),
-            }
+            // XNU's fuulong returns -1 for an unreadable oldlenp; the
+            // syscall reports EFAULT when it later publishes the length.
+            Some(memory::read_u64(self.old_length).unwrap_or(u64::MAX))
         };
         let offered = if self.old == 0 { None } else { buffer };
         let bytes = match value.bytes(offered) {
@@ -577,23 +604,34 @@ impl Request {
     }
 
     fn out(&self, bytes: &[u8]) -> Outcome {
-        let total = bytes.len() as u64;
+        self.out_parts(&[bytes])
+    }
+
+    /// `sysctl_old_user` copies one complete SYSCTL_OUT at a time. A
+    /// short part is not copied or counted; earlier complete parts remain.
+    fn out_parts(&self, parts: &[&[u8]]) -> Outcome {
+        let capacity = if self.old_length == 0 {
+            0
+        } else {
+            memory::read_u64(self.old_length).unwrap_or(u64::MAX)
+        };
+        let mut reported = 0u64;
         let mut error = None;
-        let mut reported = total;
-        if self.old != 0 {
-            let capacity = if self.old_length == 0 {
-                0
-            } else {
-                memory::read_u64(self.old_length).unwrap_or(0)
-            };
-            let copied = total.min(capacity);
-            if !memory::write(self.old, &bytes[..copied as usize]) {
-                return Outcome::Error(EFAULT);
+        for part in parts {
+            let length = part.len() as u64;
+            if self.old != 0 {
+                if length > capacity.saturating_sub(reported) {
+                    error = Some(ENOMEM);
+                    break;
+                }
+                let Some(address) = self.old.checked_add(reported) else {
+                    return Outcome::Error(EFAULT);
+                };
+                if !part.is_empty() && !memory::write(address, part) {
+                    return Outcome::Error(EFAULT);
+                }
             }
-            if copied != total {
-                error = Some(ENOMEM);
-                reported = capacity;
-            }
+            reported += length;
         }
         if self.old_length != 0 && !memory::write_u64(self.old_length, reported) {
             return Outcome::Error(EFAULT);
@@ -604,12 +642,13 @@ impl Request {
 
 fn by_name(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     let (pointer, length) = (call.argument(0), call.argument(1));
+    if length >= crate::hosted::darwin::MAX_PATH as u64 {
+        return Ok(Outcome::Error(namespace::ENAMETOOLONG));
+    }
     let Some(bytes) = memory::read(pointer, length as usize) else {
         return Ok(Outcome::Error(EFAULT));
     };
-    let name = String::from_utf8_lossy(&bytes)
-        .trim_end_matches('\0')
-        .to_owned();
+    let name = namespace::c_name(&bytes);
     Ok(match lookup(&kernel.process.sysctl, &name)? {
         Lookup::Modeled(index) => Request::of(call).answer(&kernel.process.sysctl.entries[index].1),
         Lookup::Host => forward(kernel, call)?,
@@ -687,64 +726,11 @@ fn catalog_number(name: &str) -> Result<u16> {
         .with_context(|| format!("{name} is not in the BSD catalog"))
 }
 
-/// The `CTL_UNSPEC` names: `oid2name`, `name2oid` and `oidfmt` answer
-/// synthetic numbers and modeled names; enumeration would walk the host's
-/// machine namespaces and is refused.
+/// Metadata is resolved through the same owned namespace as value reads.
 fn meta(kernel: &mut Kernel, call: &Call, oid: &[i32], request: &Request) -> Result<Outcome> {
-    let model = &kernel.process.sysctl;
-    match oid[1] {
-        META_NAME => {
-            if let Some(index) = model.synthetic(&oid[2..]) {
-                let mut name = model.entries[index].0.clone().into_bytes();
-                name.push(0);
-                return Ok(request.out(&name));
-            }
-            forward(kernel, call)
-        }
-        META_NEXT => crate::hosted::unsupported::refuse!(
-            ENOENT,
-            "sysctl enumeration (CTL_UNSPEC.2) over the modeled machine namespaces is not \
-             implemented"
-        ),
-        META_NAME_TO_OID => {
-            let Some(bytes) = memory::read(call.argument(4), call.argument(5) as usize) else {
-                return Ok(Outcome::Error(EFAULT));
-            };
-            let name = String::from_utf8_lossy(&bytes)
-                .trim_end_matches('\0')
-                .to_owned();
-            match lookup(model, &name)? {
-                Lookup::Host => forward(kernel, call),
-                Lookup::Absent => Ok(Outcome::Error(ENOENT)),
-                Lookup::Modeled(index) => {
-                    let outcome = forward(kernel, call)?;
-                    if outcome != Outcome::Error(ENOENT) {
-                        return Ok(outcome);
-                    }
-                    let oid = kernel.process.sysctl.synthetic_oid(index);
-                    let bytes: Vec<u8> = oid.iter().flat_map(|part| part.to_le_bytes()).collect();
-                    let reply = Request {
-                        old: call.argument(2),
-                        old_length: call.argument(3),
-                        new: 0,
-                    };
-                    Ok(reply.out(&bytes))
-                }
-            }
-        }
-        META_FORMAT => {
-            if let Some(index) = model.synthetic(&oid[2..]) {
-                let value = &model.entries[index].1;
-                let mut bytes = (value.kind() | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED)
-                    .to_le_bytes()
-                    .to_vec();
-                bytes.extend(value.format().as_bytes());
-                bytes.push(0);
-                return Ok(request.out(&bytes));
-            }
-            forward(kernel, call)
-        }
-        _ => forward(kernel, call),
+    match namespace::answer(&kernel.process.sysctl, call, oid, request)? {
+        Some(answer) => Ok(answer),
+        None => forward(kernel, call),
     }
 }
 

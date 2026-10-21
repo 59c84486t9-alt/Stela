@@ -325,6 +325,8 @@ pub(crate) fn overlay(name: &str) -> Option<&'static str> {
 /// Calls serviced with a named limit: what of the arm64 kernel's contract
 /// the hosted kernel does not provide.
 pub(crate) const LIMITS: &[(&str, &str)] = &[
+    ("sysctl", sysctl::LIMIT),
+    ("sys_sysctlbyname", sysctl::LIMIT),
     (
         "mmap",
         "a host-forwarded call writing into an RWX MAP_JIT page meets the view of the thread \
