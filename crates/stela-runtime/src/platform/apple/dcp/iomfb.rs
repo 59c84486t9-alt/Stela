@@ -930,6 +930,25 @@ mod tests {
     }
 
     #[test]
+    fn answers_fill_their_whole_output_past_a_callbacks_stale_bytes() {
+        // A callback's output room keeps whatever the stream held before
+        // (the firmware's rpc_caller_gated writes only the header and
+        // input), and the AP writes just its bool. A401's answer, built
+        // from that bool, still zeroes the rest of its own output.
+        let mut methods = methods();
+        let Step::Call { then, .. } = methods.call(*b"A401", &[], 4).unwrap() else {
+            panic!("A401 must nest D120");
+        };
+        assert_eq!(
+            returned(then(&mut methods, &[1, 0x3e, 0x49, 0x44])),
+            [1, 0, 0, 0]
+        );
+        let made = drain(&mut methods, &[1, 0x6b, 0x65, 0x79]);
+        assert_eq!(made.last().unwrap().0, HOTPLUG);
+        assert!(methods.last_refusal().is_none());
+    }
+
+    #[test]
     fn link_shutdown_stops_the_pipe_and_hibernation_refuses() {
         // Hibernation (first byte 1) refuses and leaves the link up.
         let mut hibernating = methods();
