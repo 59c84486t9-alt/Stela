@@ -20,6 +20,8 @@
 //! CCSIDR_EL1 reads 0 for a selection without a cache, one of the UNKNOWN
 //! values the architecture permits.
 
+pub mod cram;
+
 /// CLIDR_EL1.Ctype values.
 const SEPARATE: u64 = 0b011;
 const UNIFIED: u64 = 0b100;
