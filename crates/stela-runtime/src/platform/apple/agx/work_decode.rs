@@ -19,6 +19,7 @@ pub mod registers;
 pub mod resources;
 pub mod scene;
 pub mod ta;
+pub mod three_d;
 
 use super::channel::{Command, Kind, Record, STAMPS, Stamp};
 use super::generation::{self, Family};

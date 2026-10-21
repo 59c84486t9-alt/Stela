@@ -22,7 +22,7 @@ use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 use core::fmt;
 
-pub mod ta;
+pub mod render;
 
 const PARAMETER_REGISTERS: [u32; 13] = [
     0x10080, 0x1a420, 0x1a4d0, 0x1a4d8, 0x1a4e0, 0x1a4e8, 0x10070, 0x1a458, 0x11840, 0x11848,
@@ -98,7 +98,7 @@ pub(super) struct Registers {
     resource: u64,
     parameters: [u64; 13],
     run: Option<Run>,
-    ta: ta::Registers,
+    render: render::Registers,
 }
 impl fmt::Debug for Registers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -114,12 +114,12 @@ impl fmt::Debug for Registers {
 }
 impl Registers {
     pub(super) fn active(&self) -> bool {
-        self.run.is_some() || self.ta.active()
+        self.run.is_some() || self.render.active()
     }
 
     fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
-        if self.ta.active() {
-            return Err("GFX native parameter bank still belongs to accepted TA work");
+        if self.render.active() {
+            return Err("GFX native parameter bank still belongs to accepted render work");
         }
         if submission.command.kind != CommandKind::Cl || lease.pipe != 2 || lease.slot >= 6 {
             return Err("GFX CL native ownership requires its compute lease");
@@ -305,6 +305,11 @@ impl FirmwarePower {
         }
         words.extend(
             crate::platform::apple::agx::work_decode::ta::words(policy)
+                .into_iter()
+                .map(|word| word.range()),
+        );
+        words.extend(
+            crate::platform::apple::agx::work_decode::three_d::words(policy)
                 .into_iter()
                 .map(|word| word.range()),
         );
@@ -858,6 +863,133 @@ mod tests {
         native.work.context_mask = Some(1 << 9);
     }
     #[test]
+    fn actual_3d_parameter_owner_retains_scene_store_then_ram_fault_and_excludes_ta() {
+        use crate::platform::apple::agx::work_decode::three_d;
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            let mut sgx = gpu(family);
+            let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+            let mcc = cache();
+            let owner = power
+                .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+                .unwrap();
+            let mut input = submission();
+            input.command.kind = CommandKind::ThreeD;
+            let lease = Lease { pipe: 1, slot: 2 };
+            let mut memory = ram();
+            let frame = io(&mut sgx, &mut memory, |port| {
+                port.write(input.stream, &7u32.to_le_bytes()).unwrap();
+                port.write(input.stream + 4, &0x3ffcu64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0xc, &0x5000u64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0x14, &0x2500u64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0x54, &input.context.to_le_bytes())
+                    .unwrap();
+                port.write(0x2518, &0x131fu64.to_le_bytes()).unwrap();
+                for index in 0..18 {
+                    port.write(0x3ffc + index * 4, &(0x100 + index as u32).to_le_bytes())
+                        .unwrap();
+                }
+                for index in 0..51 {
+                    port.write(0x5000 + index * 8, &(0x8000 + index).to_le_bytes())
+                        .unwrap();
+                }
+                input.cursor().next(port).unwrap().unwrap()
+            });
+            let mut parameters =
+                three_d::Parameters::new(&input, &frame, lease, owner.policy).unwrap();
+            mapping(&mut memory.ram, VA + 0x14000, 0, true);
+            assert!(
+                io(&mut sgx, &mut memory, |port| parameters
+                    .advance(&mut owner.three_d_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!(power.native.borrow().work.render.writes, 0);
+            memory.ram.put_u64(DATA + 0x2518, 0x999f);
+            mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
+            mapping(&mut memory.ram, 0x4000, 0, false);
+            assert!(
+                io(&mut sgx, &mut memory, |port| parameters
+                    .advance(&mut owner.three_d_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!(power.native.borrow().work.render.writes, 2);
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .render
+                    .value(three_d::words(owner.policy)[0]),
+                Some(0x1310)
+            );
+            assert!(power.check_reset().is_err());
+            assert!(owner.begin(&submission(), LEASE).is_err());
+            let mut other = input.clone();
+            other.command.kind = CommandKind::Ta;
+            use crate::platform::apple::agx::work_decode::ta::Access as _;
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner
+                    .ta_parameter_access(port)
+                    .write_native(three_d::words(owner.policy)[2], 0x101))
+                .is_err()
+            );
+            assert_eq!(power.native.borrow().work.render.writes, 2);
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner
+                    .ta_parameter_access(port)
+                    .begin(&other, Lease { pipe: 0, slot: 1 }))
+                .is_err()
+            );
+            mapping(&mut memory.ram, 0x4000, DATA + 0x4000, false);
+            io(&mut sgx, &mut memory, |port| {
+                parameters.advance(&mut owner.three_d_parameter_access(port))
+            })
+            .unwrap();
+            assert!(parameters.completed());
+            let expected = match owner.policy {
+                Policy::G13G => 61,
+                Policy::G13X => 60,
+                Policy::G14G => 67,
+            };
+            assert_eq!(power.native.borrow().work.render.writes, expected);
+            let counts = (memory.reads, memory.writes);
+            io(&mut sgx, &mut memory, |port| {
+                parameters.advance(&mut owner.three_d_parameter_access(port))
+            })
+            .unwrap();
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(power.native.borrow().work.control, None);
+            assert!(
+                owner
+                    .cancel_ta_parameters(
+                        &input,
+                        lease,
+                        &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted
+                    )
+                    .is_err()
+            );
+            owner
+                .cancel_three_d_parameters(
+                    &input,
+                    lease,
+                    &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted,
+                )
+                .unwrap();
+            assert!(!power.native.borrow().work.active());
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .render
+                    .value(three_d::words(owner.policy)[0]),
+                Some(0x1310)
+            );
+        }
+    }
+    #[test]
     fn ta_native_parameters_retain_captured_store_and_committed_prefix_across_real_uat_faults() {
         use crate::platform::apple::agx::work_decode::ta;
         for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
@@ -898,7 +1030,7 @@ mod tests {
                     .native
                     .borrow()
                     .work
-                    .ta
+                    .render
                     .value(ta::words(owner.policy)[0]),
                 None
             );
@@ -910,7 +1042,7 @@ mod tests {
                     .advance(&mut owner.ta_parameter_access(port)))
                 .is_err()
             );
-            assert_eq!(power.native.borrow().work.ta.writes, 12);
+            assert_eq!(power.native.borrow().work.render.writes, 12);
             assert!(power.check_reset().is_err());
             assert!(owner.begin(&submission(), LEASE).is_err());
             let mut other = input.clone();
@@ -945,7 +1077,7 @@ mod tests {
                 .is_err()
             );
             assert_eq!((memory.reads, memory.writes), counts);
-            assert_eq!(power.native.borrow().work.ta.writes, 12);
+            assert_eq!(power.native.borrow().work.render.writes, 12);
             sgx.check_lifecycle(active).unwrap();
             sgx.set_lifecycle(active, &mut access);
             memory.ram.put_u64(DATA + 0x2230, 0xdeadbeef);
@@ -958,13 +1090,13 @@ mod tests {
                     .advance(&mut owner.ta_parameter_access(port)))
                 .is_err()
             );
-            assert_eq!(power.native.borrow().work.ta.writes, 14);
+            assert_eq!(power.native.borrow().work.render.writes, 14);
             assert_eq!(
                 power
                     .native
                     .borrow()
                     .work
-                    .ta
+                    .render
                     .value(ta::words(owner.policy)[12]),
                 Some(0x10c)
             );
@@ -975,14 +1107,14 @@ mod tests {
             .unwrap();
             assert!(parameters.completed());
             let expected = if owner.policy == Policy::G13X { 49 } else { 41 };
-            assert_eq!(power.native.borrow().work.ta.writes, expected);
+            assert_eq!(power.native.borrow().work.render.writes, expected);
             let counts = (memory.reads, memory.writes);
             io(&mut sgx, &mut memory, |port| {
                 parameters.advance(&mut owner.ta_parameter_access(port))
             })
             .unwrap();
             assert_eq!((memory.reads, memory.writes), counts);
-            assert_eq!(power.native.borrow().work.ta.writes, expected);
+            assert_eq!(power.native.borrow().work.render.writes, expected);
             // No common control/mask initialization, GPU execution or command
             // completion authority is manufactured by parameter storage.
             assert_eq!(power.native.borrow().work.control, None);
@@ -992,7 +1124,7 @@ mod tests {
                     .native
                     .borrow()
                     .work
-                    .ta
+                    .render
                     .value(ta::words(owner.policy)[14]),
                 Some(0x4001)
             );
@@ -1018,7 +1150,7 @@ mod tests {
                     .native
                     .borrow()
                     .work
-                    .ta
+                    .render
                     .value(ta::words(owner.policy)[12]),
                 Some(0x10c)
             );

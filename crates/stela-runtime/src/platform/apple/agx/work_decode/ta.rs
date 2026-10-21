@@ -47,6 +47,9 @@ pub struct Word {
     width: u32,
 }
 impl Word {
+    pub(crate) const fn new(offset: u32, width: u32) -> Self {
+        Self { offset, width }
+    }
     pub(crate) fn range(self) -> (u32, u32) {
         (self.offset, self.width)
     }
@@ -113,7 +116,7 @@ pub(crate) fn words(policy: Policy) -> Vec<Word> {
     stores(policy).into_iter().map(|store| store.word).collect()
 }
 
-/// The actual SGX adapter binds one accepted TA/lease and commits each native
+/// The actual SGX adapter binds one accepted render submission/lease and commits each native
 /// store atomically on success. An error commits no part of that operation.
 pub trait Access {
     fn policy(&self) -> Policy;
@@ -201,7 +204,7 @@ impl Parameters {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::platform::apple::agx::{
         channel::{Command, Kind, Record, Stamp},
@@ -209,17 +212,17 @@ mod tests {
         work_decode::Encoding,
     };
     #[derive(Debug, Clone, PartialEq, Eq)]
-    struct Read {
-        address: u64,
-        width: usize,
+    pub(crate) struct Read {
+        pub(crate) address: u64,
+        pub(crate) width: usize,
     }
-    struct Memory {
-        flat: Flat,
-        policy: Policy,
-        reads: Vec<Read>,
-        writes: Vec<(Word, u64)>,
-        read_fault: Option<usize>,
-        write_fault: Option<usize>,
+    pub(crate) struct Memory {
+        pub(crate) flat: Flat,
+        pub(crate) policy: Policy,
+        pub(crate) reads: Vec<Read>,
+        pub(crate) writes: Vec<(Word, u64)>,
+        pub(crate) read_fault: Option<usize>,
+        pub(crate) write_fault: Option<usize>,
     }
     impl Shared for Memory {
         fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
@@ -273,7 +276,7 @@ mod tests {
             Ok(())
         }
     }
-    fn fixture(policy: Policy) -> (Memory, Submission, Frame) {
+    pub(crate) fn fixture(policy: Policy) -> (Memory, Submission, Frame) {
         let submission = Submission {
             command: Command {
                 va: 0x2000,
