@@ -35,6 +35,7 @@ use stela_runtime::payload::{
 };
 
 mod disks;
+mod host_firmware;
 mod lan;
 mod network_check;
 mod preboot;
@@ -945,17 +946,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let network = network_check_url.map(|_| {
         network_check::verify(&serial_text, fixture.as_ref(), expected_driver, &peer_text)
     });
-    let host_firmware = arguments.host_firmware.as_ref().map(|_| -> Result<Value> {
-        let path = volume.join(stela_loader::host_firmware::MANIFEST_PATH);
-        let data = fs::read(&path)?;
-        let parsed = stela_loader::host_firmware::Manifest::parse(&data)?;
-        let images = parsed.images.len();
-        let bytes = parsed.total_bytes();
-        let passed = ["before-ebs", "after-ebs"].iter().all(|phase| serial_text.lines().any(|line|
-            line.trim_end() == format!("HOST FIRMWARE phase={phase} images={images} bytes={bytes}")));
-        let resources = parsed.images.iter().map(|image| binding(&volume.join(stela_loader::host_firmware::DIRECTORY).join(image.path))).collect::<Result<Vec<_>>>()?;
-        Ok(json!({"manifest":binding(&path)?, "resources":resources,"images":images,"bytes":bytes,"passed":passed}))
-    }).transpose()?;
+    let host_firmware = arguments
+        .host_firmware
+        .as_ref()
+        .map(|_| host_firmware::report(&volume, &serial_text))
+        .transpose()?;
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let report = json!({
         "command": command_line,

@@ -3,7 +3,7 @@
 //! relocation. Only immutable bytes in reserved LOADER_DATA pages cross it.
 use crate::{firmware, handoff::Region, layout, output, paging::PAGE};
 use alloc::{format, string::ToString, sync::Arc, vec::Vec};
-use stela_drivers::firmware::Catalog;
+use stela_drivers::firmware::{Catalog, Provider, Requirement, Target};
 use stela_loader::host_firmware::{self as manifest, MAX_IMAGES, MAX_MANIFEST_BYTES, Manifest};
 use uefi::{
     CString16,
@@ -48,6 +48,7 @@ impl Resources {
     unsafe fn catalog(
         &self,
         map: impl Fn(u64) -> u64,
+        phase: Option<&'static str>,
     ) -> Result<Option<Arc<Catalog>>, &'static str> {
         if !self.present {
             return Ok(None);
@@ -77,7 +78,8 @@ impl Resources {
                 )
             })
         };
-        let parsed = Manifest::parse(view(self.manifest)?).map_err(report)?;
+        let manifest_bytes = view(self.manifest)?;
+        let parsed = Manifest::parse(manifest_bytes).map_err(report)?;
         if parsed.images.len() != self.count {
             return Err("host firmware wire count mismatch");
         }
@@ -88,15 +90,20 @@ impl Resources {
             }
             bytes.push(view(*region)?);
         }
-        Ok(Some(Arc::new(parsed.catalog(&bytes).map_err(report)?)))
+        let catalog = Arc::new(parsed.catalog(&bytes).map_err(report)?);
+        if let Some(phase) = phase {
+            record(phase, manifest_bytes, &parsed, &catalog)?;
+        }
+        Ok(Some(catalog))
     }
 
     /// # Safety
     /// This loader still owns every immutable reserved page and its identity
     /// alias remains mapped for the resulting catalog's lifetime.
+    /// The standalone caller runs before EBS, so this emits no phase receipt.
     pub unsafe fn identity_catalog(&self) -> Result<Option<Arc<Catalog>>, &'static str> {
         // SAFETY: caller supplied the permanent identity mapping contract.
-        unsafe { self.catalog(|physical| physical) }
+        unsafe { self.catalog(|physical| physical, None) }
     }
 
     /// # Safety
@@ -104,7 +111,7 @@ impl Resources {
     /// are reserved, and the engine maps them in its permanent shared physmap.
     pub unsafe fn after_ebs(&self) -> Result<Option<Arc<Catalog>>, &'static str> {
         // SAFETY: the caller's validated loader handoff and permanent physmap.
-        let catalog = unsafe { self.catalog(layout::physical) }?;
+        let catalog = unsafe { self.catalog(layout::physical, Some("after-ebs")) }?;
         if let Some(catalog) = &catalog {
             let (images, bytes) = catalog.inventory();
             output::arguments(format_args!(
@@ -113,6 +120,54 @@ impl Resources {
         }
         Ok(catalog)
     }
+}
+
+/// JSON escaping makes literal quotes/backslashes in bounded identity labels
+/// unambiguous. Records come from the actual validated catalog in this phase,
+/// including an exact provider lookup for each manifest-selected requirement.
+fn record(
+    phase: &str,
+    manifest_bytes: &[u8],
+    manifest: &Manifest<'_>,
+    catalog: &Catalog,
+) -> Result<(), &'static str> {
+    let (images, bytes) = catalog.inventory();
+    let record = serde_json::json!({
+        "kind": "manifest", "phase": phase, "images": images, "bytes": bytes,
+        "sha256": stela_runtime::sha256(manifest_bytes),
+    });
+    output::arguments(format_args!("HOST FIRMWARE RECORD {record}\n"));
+    for (index, expected) in manifest.images.iter().enumerate() {
+        let image = catalog
+            .load(Requirement {
+                name: expected.name,
+                target: Target {
+                    driver: expected.target.driver,
+                    hardware: expected.target.hardware,
+                    revision: expected.target.revision,
+                    board: expected.target.board,
+                },
+                minimum_bytes: expected.length,
+            })
+            .map_err(|_| "cannot record verified host firmware requirement")?;
+        let target = image.target();
+        let source = image.provenance();
+        let digest: alloc::string::String = image
+            .sha256()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let record = serde_json::json!({
+            "kind": "resource", "phase": phase, "index": index,
+            "name": image.name(), "bytes": image.bytes().len(), "sha256": digest,
+            "target": {"driver": target.driver, "hardware": target.hardware,
+                "revision": target.revision, "board": target.board},
+            "provenance": {"source": source.source, "revision": source.revision,
+                "member": source.member, "license": source.license},
+        });
+        output::arguments(format_args!("HOST FIRMWARE RECORD {record}\n"));
+    }
+    Ok(())
 }
 
 fn report(error: manifest::Error) -> &'static str {
@@ -247,7 +302,7 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
     }
     // SAFETY: only this loader owns these permanent pages; identity alias is
     // currently mapped by firmware. Drop metadata before engine relocation.
-    let catalog = unsafe { resources.catalog(|physical| physical) }?
+    let catalog = unsafe { resources.catalog(|physical| physical, Some("before-ebs")) }?
         .ok_or("missing host firmware catalog")?;
     let (images, total) = catalog.inventory();
     output::arguments(format_args!(
