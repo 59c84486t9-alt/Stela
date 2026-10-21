@@ -54,6 +54,10 @@ pub(super) const QUANTUM: u64 = 1 << 14;
 /// 2 ms, so the seven other PEs of an eight-PE board hold a preempted
 /// spinlock holder off for at most 14 ms.
 pub(super) const QUANTUM_HZ: u64 = 500;
+/// XNU xnu-12377.121.6 machine_routines.c:108,1251 groups the original
+/// DeviceTree `reg` by Aff1 (proc_reg.h:1059-1061). Aff2 is a core type,
+/// not part of the physical cluster, including the M6's mixed P/M cluster.
+const PHYSICAL_CLUSTER_MASK: u64 = 0xff00;
 
 pub(super) enum Peer {
     /// The PE on [`Machine::cpu`].
@@ -589,14 +593,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // Every PE has the registers of PE 0, the profile's missing ones
         // included.
         system::identify(&self.profile, pe, &mut cpu, &mut Vec::new());
-        // The PEs of a cluster (MPIDR_EL1 Aff2 and Aff1) share its CTRR
+        // The PEs of a physical cluster (MPIDR_EL1 Aff1) share its CTRR
         // registers while one of them is powered; the memory controller's
         // lock binds every PE.
         let cluster = |other: usize| {
             self.profile
                 .processors
                 .get(other)
-                .map(|identity| identity.mpidr & 0x00ff_ff00)
+                .map(|identity| identity.mpidr & PHYSICAL_CLUSTER_MASK)
         };
         let shared = (0..self.peers.len())
             .filter(|&other| other != pe && cluster(other) == cluster(pe))
@@ -1070,6 +1074,121 @@ mod tests {
         machine.schedule().unwrap();
         assert_eq!((machine.processor(), machine.cpu.pc), (1, START));
         assert_eq!(machine.devices.power, [(1, true)]);
+    }
+
+    /// Original J873GAP decoded ADT SHA-256
+    /// 3252a3f13dc025ffa8551c7a5da6a71501f76ea6c5d38aa35390f9268a6dc378:
+    /// CPU6/7 P and CPU8..11 M share physical cluster 1. Only these affinity
+    /// coordinates are qualified: MIDR=0 is an explicit synthetic fixture,
+    /// and using a modeled cluster register does not admit that register or
+    /// any complete M6 hardware profile.
+    #[test]
+    fn original_m6_mixed_cluster_shares_live_or_parked_owners_in_either_start_order() {
+        use super::super::tests::board_on;
+        use crate::machine::{Chip, ctrr::Field, impdef};
+        const MPIDRS: [u64; 12] = [
+            0x8000_0000,
+            0x8000_0001,
+            0x8000_0002,
+            0x8000_0003,
+            0x8000_0004,
+            0x8000_0005,
+            0x8001_0100,
+            0x8001_0101,
+            0x8004_0102,
+            0x8004_0103,
+            0x8004_0104,
+            0x8004_0105,
+        ];
+        let counter = impdef::lookup(impdef::CLUSTER_COUNTER_C0, Chip::AppleM2).unwrap();
+        for order in [[6, 7, 8, 9, 10, 11], [8, 9, 10, 11, 6, 7]] {
+            for live in [false, true] {
+                let identities = MPIDRS
+                    .into_iter()
+                    .map(|mpidr| Identity {
+                        midr: 0,
+                        mpidr,
+                        clock: None,
+                        caches: None,
+                    })
+                    .collect();
+                let mut machine = board_on(Chip::AppleM6, &[], super::super::NoDevices, identities);
+                let first = order[0];
+                machine
+                    .start(Start {
+                        cpu: first,
+                        address: START,
+                    })
+                    .unwrap();
+                let Peer::Parked(owner) = &mut machine.peers[first] else {
+                    panic!("the first owner is parked")
+                };
+                owner
+                    .cpu
+                    .ctrr
+                    .borrow_mut()
+                    .write(0, Field::Lower, BASE)
+                    .unwrap();
+                owner
+                    .cpu
+                    .ctrr
+                    .borrow_mut()
+                    .write(0, Field::Lock, 1)
+                    .unwrap();
+                owner.cpu.apple.impdef.write(counter, 17).unwrap();
+                let shared = owner.cpu.ctrr.clone();
+                if live {
+                    machine.switch_to(first);
+                }
+                for &pe in &order[1..] {
+                    machine
+                        .start(Start {
+                            cpu: pe,
+                            address: START + pe as u64 * 4,
+                        })
+                        .unwrap();
+                    let Peer::Parked(target) = &mut machine.peers[pe] else {
+                        panic!("a new PE is parked")
+                    };
+                    assert!(alloc::rc::Rc::ptr_eq(&shared, &target.cpu.ctrr));
+                    assert_eq!(target.cpu.ctrr.borrow().read(0, Field::Lower), BASE);
+                    assert!(
+                        target
+                            .cpu
+                            .ctrr
+                            .borrow_mut()
+                            .write(0, Field::Lower, 0)
+                            .is_err()
+                    );
+                    assert_eq!(target.cpu.apple.impdef.read(counter), Ok(17));
+                    target.cpu.apple.impdef.write(counter, 19).unwrap();
+                    if live {
+                        assert_eq!(machine.cpu.apple.impdef.read(counter), Ok(19));
+                        machine.cpu.apple.impdef.write(counter, 17).unwrap();
+                    } else {
+                        let Peer::Parked(owner) = &mut machine.peers[first] else {
+                            panic!("the original owner is parked")
+                        };
+                        assert_eq!(owner.cpu.apple.impdef.read(counter), Ok(19));
+                        owner.cpu.apple.impdef.write(counter, 17).unwrap();
+                    }
+                }
+                // E cores are a different physical cluster even though all
+                // P/M owners above now share one underlying register bank.
+                machine
+                    .start(Start {
+                        cpu: 1,
+                        address: START,
+                    })
+                    .unwrap();
+                let Peer::Parked(other) = &mut machine.peers[1] else {
+                    panic!("the E core is parked")
+                };
+                assert!(!alloc::rc::Rc::ptr_eq(&shared, &other.cpu.ctrr));
+                assert_eq!(other.cpu.ctrr.borrow().read(0, Field::Lock), 0);
+                assert_eq!(other.cpu.apple.impdef.read(counter), Ok(0));
+            }
+        }
     }
 
     #[test]
