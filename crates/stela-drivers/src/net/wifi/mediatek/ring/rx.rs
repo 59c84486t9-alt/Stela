@@ -236,6 +236,10 @@ impl Assembly {
         if self.poisoned {
             return Err(Error::Poisoned);
         }
+        if fragment.bytes.is_empty() || fragment.bytes.len() > BUFFER_BYTES {
+            self.poisoned = true;
+            return Err(Error::InvalidDeviceLength);
+        }
         if self.descriptors.len() == 8 || self.bytes.len() + fragment.bytes.len() > 16 * 1024 {
             self.poisoned = true;
             return Err(Error::ReceiveChainLimit);
@@ -263,7 +267,7 @@ impl Assembly {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::net::wifi::mediatek) mod tests {
     extern crate std;
     use super::super::tests::{Domain, Io, Source, State};
     use super::*;
@@ -275,7 +279,12 @@ mod tests {
         let ring = unsafe { RxRing::install(Io(state.clone()), &Source, domain, count) }.unwrap();
         (ring, state)
     }
-    fn device_receive(state: &Arc<Mutex<State>>, bytes: &[u8], last: bool, flags: u32) {
+    pub(in crate::net::wifi::mediatek) fn device_receive(
+        state: &Arc<Mutex<State>>,
+        bytes: &[u8],
+        last: bool,
+        flags: u32,
+    ) {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
         let descriptor = s.mappings[&s.base].1 + s.index as usize * DESC_BYTES;

@@ -9,5 +9,6 @@
 pub mod download;
 pub mod firmware;
 pub mod identity;
+pub mod mailbox;
 pub mod mcu;
 pub mod ring;

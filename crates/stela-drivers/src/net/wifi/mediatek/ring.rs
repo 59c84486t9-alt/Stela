@@ -409,7 +409,7 @@ impl<Q: QueueIo> Drop for TxRing<Q> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::net::wifi::mediatek) mod tests {
     extern crate std;
     use super::*;
     use crate::bus::dma::{
@@ -454,7 +454,7 @@ mod tests {
             unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
         }
     }
-    pub(super) struct Source;
+    pub(in crate::net::wifi::mediatek) struct Source;
     impl PageSource for Source {
         fn allocate(
             &self,
@@ -474,25 +474,27 @@ mod tests {
         }
     }
     #[derive(Default)]
-    pub(super) struct State {
-        pub(super) next: u64,
-        pub(super) mappings: BTreeMap<u64, (PinnedPages, usize)>,
-        pub(super) base: u64,
-        pub(super) count: u16,
-        pub(super) head: u16,
-        pub(super) index: u16,
-        pub(super) queue_drops: usize,
-        pub(super) fail_publish: bool,
-        pub(super) fail_configure: bool,
-        pub(super) invalid_index: bool,
-        pub(super) fail_unmap: bool,
-        pub(super) fail_unmap_at: Option<usize>,
-        pub(super) unmaps: usize,
-        pub(super) fail_sync_at: Option<usize>,
-        pub(super) completed: Vec<Vec<u8>>,
-        pub(super) syncs: Vec<(bool, u64, Range<usize>)>,
+    pub(in crate::net::wifi::mediatek) struct State {
+        pub(in crate::net::wifi::mediatek) next: u64,
+        pub(in crate::net::wifi::mediatek) mappings: BTreeMap<u64, (PinnedPages, usize)>,
+        pub(in crate::net::wifi::mediatek) base: u64,
+        pub(in crate::net::wifi::mediatek) count: u16,
+        pub(in crate::net::wifi::mediatek) head: u16,
+        pub(in crate::net::wifi::mediatek) index: u16,
+        pub(in crate::net::wifi::mediatek) queue_drops: usize,
+        pub(in crate::net::wifi::mediatek) fail_publish: bool,
+        pub(in crate::net::wifi::mediatek) fail_configure: bool,
+        pub(in crate::net::wifi::mediatek) invalid_index: bool,
+        pub(in crate::net::wifi::mediatek) fail_unmap: bool,
+        pub(in crate::net::wifi::mediatek) fail_unmap_at: Option<usize>,
+        pub(in crate::net::wifi::mediatek) unmaps: usize,
+        pub(in crate::net::wifi::mediatek) fail_sync_at: Option<usize>,
+        pub(in crate::net::wifi::mediatek) completed: Vec<Vec<u8>>,
+        pub(in crate::net::wifi::mediatek) syncs: Vec<(bool, u64, Range<usize>)>,
     }
-    pub(super) struct Domain(pub(super) Arc<Mutex<State>>);
+    pub(in crate::net::wifi::mediatek) struct Domain(
+        pub(in crate::net::wifi::mediatek) Arc<Mutex<State>>,
+    );
     // SAFETY: this domain is a stateful test IOVA/page-pin map, not a claim of
     // privileged IOMMU effects. It retains pins and serializes every access.
     unsafe impl DmaDomain for Domain {
@@ -557,7 +559,9 @@ mod tests {
             Ok(())
         }
     }
-    pub(super) struct Io(pub(super) Arc<Mutex<State>>);
+    pub(in crate::net::wifi::mediatek) struct Io(
+        pub(in crate::net::wifi::mediatek) Arc<Mutex<State>>,
+    );
     impl Drop for Io {
         fn drop(&mut self) {
             self.0.lock().unwrap().queue_drops += 1;
@@ -597,7 +601,7 @@ mod tests {
         let ring = unsafe { TxRing::install(Io(state.clone()), &Source, domain, count) }.unwrap();
         (ring, state)
     }
-    fn device_complete_one(state: &Arc<Mutex<State>>) {
+    pub(in crate::net::wifi::mediatek) fn device_complete_one(state: &Arc<Mutex<State>>) {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
         let ptr = s.mappings[&s.base].1 + s.index as usize * DESC_BYTES;

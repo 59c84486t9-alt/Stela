@@ -29,6 +29,7 @@ pub enum PortState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailureKind {
+    FirmwareTarget,
     Timeout,
     Disconnected,
     TransportUnavailable,
@@ -55,12 +56,16 @@ pub struct TransportFailure {
 /// will not attempt cleanup through an unresolved command port. A successful
 /// enqueue alone never permits that transport to release DMA ownership.
 pub trait Transport {
+    /// Pure exact-target validation against this owned transport's actually
+    /// observed device identity. No MMIO, DMA publication or commands occur.
+    fn validate_firmware(&self, prepared: &Prepared<'_>) -> Result<(), TransportFailure>;
     fn command(&mut self, command: u8, payload: &[u8]) -> Result<u32, TransportFailure>;
     fn scatter(&mut self, payload: &[u8]) -> Result<(), TransportFailure>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Stage {
+    FirmwareTarget,
     AcquirePatch,
     PatchStart(usize),
     PatchData(usize),
@@ -167,8 +172,23 @@ impl<T: Transport> Downloader<T> {
     pub fn report(&self) -> &Report {
         &self.report
     }
+    /// Inspect retained transport diagnostics without issuing another command.
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+    /// Return the still-owned transport to its controller for continuation or
+    /// acknowledged teardown. This never clears its poisoned epoch, releases
+    /// DMA, resets hardware or changes the historical download result.
+    pub fn into_transport(self) -> T {
+        self.transport
+    }
 
     pub fn download(&mut self, prepared: &Prepared<'_>) -> Result<&Report, Error> {
+        if self.state == State::Fresh {
+            self.transport
+                .validate_firmware(prepared)
+                .map_err(|failure| self.fail(Stage::FirmwareTarget, failure))?;
+        }
         self.download_parts(prepared.requests.chip, &prepared.patch, &prepared.ram)
     }
 
@@ -365,6 +385,11 @@ mod tests {
         release_status: Option<u32>,
     }
     impl Transport for Rc<RefCell<Model>> {
+        fn validate_firmware(&self, _prepared: &Prepared<'_>) -> Result<(), TransportFailure> {
+            // This synthetic command oracle has no claimed physical device;
+            // its exact-target Provider binding is tested independently.
+            Ok(())
+        }
         fn command(&mut self, command: u8, payload: &[u8]) -> Result<u32, TransportFailure> {
             let mut m = self.borrow_mut();
             m.operations.push((command, payload.to_vec()));

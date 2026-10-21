@@ -412,7 +412,7 @@ impl core::error::Error for LoadError {}
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    pub(super) fn patch_bytes() -> Vec<u8> {
+    pub(crate) fn patch_bytes() -> Vec<u8> {
         let mut bytes = vec![0u8; PATCH_HEADER + PATCH_SECTION + 17];
         bytes[44..48].copy_from_slice(&1u32.to_be_bytes());
         for (offset, value) in [
@@ -428,7 +428,7 @@ pub(crate) mod tests {
         bytes[160..].fill(0x57);
         bytes
     }
-    pub(super) fn ram_bytes() -> Vec<u8> {
+    pub(crate) fn ram_bytes() -> Vec<u8> {
         let mut bytes = vec![0u8; 11 + 7 + 2 * RAM_REGION + RAM_TRAILER];
         bytes[..11].fill(0x61);
         bytes[11..18].fill(0x72);
