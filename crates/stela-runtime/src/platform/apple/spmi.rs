@@ -33,11 +33,17 @@
 //!
 //! Stela handoff: idle, empty FIFOs, every vector masked and clear, no
 //! faults. The model executes a command when its last payload word arrives.
-//! It has no faults to latch or count, so those registers read zero. The
-//! debug queue windows (A+0xb0..0xb8), command types other than the four
+//! It has no faults to latch or count, so those registers read zero.
+//!
+//! Retained lifecycle pauses require no partial request and every vector
+//! masked. Masked responses/pending latches and attached PMIC state remain
+//! owned; physical reset/rail loss and armed-source wake behavior refuse.
+//! Quiesce permits nonmutating reads, while a clock-stop MMIO access remains
+//! unqualified. Slave autonomous time is independent of controller gating.
+//! The debug queue windows (A+0xb0..0xb8), command types other than the four
 //! extended forms and request or response overflow refuse.
 use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
 use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
@@ -134,6 +140,7 @@ impl Chunk {
 }
 
 pub struct Spmi {
+    lifecycle: LifecycleState,
     irq: AicInput,
     slaves: Vec<(u8, Box<dyn SpmiSlave>)>,
     enable: [u32; GROUPS],
@@ -147,6 +154,13 @@ pub struct Spmi {
 impl Spmi {
     pub fn new(irq: AicInput) -> Self {
         Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: true,
+            },
             irq,
             slaves: Vec::new(),
             enable: [0; GROUPS],
@@ -266,7 +280,36 @@ impl Spmi {
     }
 }
 
+impl Lifecycle for Spmi {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if !proposed.powered || proposed.reset {
+            return Err(
+                "SPMI physical reset/supply retention is unqualified; queue reset is a separate software operation",
+            );
+        }
+        if !proposed.clocked || proposed.quiesced {
+            if self.partial.is_some() {
+                return Err(
+                    "SPMI pause while a partial request owns the transaction is unqualified",
+                );
+            }
+            if self.enable.iter().any(|&enabled| enabled != 0) {
+                return Err(
+                    "SPMI pause with an armed interrupt has unqualified wake/capture semantics",
+                );
+            }
+        }
+        Ok(())
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, _: &mut Access<'_>) {
+        self.lifecycle = proposed;
+    }
+}
+
 impl MmioDevice for Spmi {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -277,6 +320,14 @@ impl MmioDevice for Spmi {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        if !self.lifecycle.clocked {
+            return Err(err(
+                "SPMI MMIO while the physical clock is stopped is unqualified",
+            ));
+        }
+        if self.lifecycle.quiesced && offset == RESPONSE {
+            return Err(err("SPMI response ownership cannot advance while quiesced"));
+        }
         if width != Width::Word {
             return Err(err("SPMI registers are 32-bit"));
         }
@@ -317,6 +368,9 @@ impl MmioDevice for Spmi {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        if !self.lifecycle.clocked || self.lifecycle.quiesced {
+            return Err(err("SPMI controller transactions are paused"));
+        }
         if width != Width::Word {
             return Err(err("SPMI registers are 32-bit"));
         }
@@ -349,6 +403,8 @@ impl MmioDevice for Spmi {
         Ok(())
     }
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        // Slaves such as the PMIC own independent clocks, rails and timers.
+        // Gating the SPMI master cannot suspend their autonomous time.
         Ok(self
             .slaves
             .iter_mut()
@@ -486,5 +542,266 @@ mod tests {
         assert_eq!(rd(&mut c, &mut a, BANK_B + 0x274), 0);
         assert!(c.read(0xb0, Width::Word, &mut a).is_err());
         assert!(c.read(STATUS, Width::Byte, &mut a).is_err());
+    }
+    #[test]
+    fn retained_pauses_keep_masked_response_ownership_and_independent_inputs() {
+        let mut c = controller();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let command = 0x10 << 16 | LAST | 0xe << 8 | 0x33;
+        wr(&mut c, &mut a, REQUEST, command);
+        wr(&mut c, &mut a, REQUEST, 0x4433_2211);
+        let responses = c.responses.clone();
+        let pending = c.pending;
+        let running = c.lifecycle;
+        let paused = LifecycleState {
+            clocked: false,
+            quiesced: true,
+            ..running
+        };
+        c.check_lifecycle(paused).unwrap();
+        c.set_lifecycle(paused, &mut a);
+        assert!(c.read(RESPONSE, Width::Word, &mut a).is_err());
+        assert!(c.write(QUEUE_RESET, Width::Word, 1, &mut a).is_err());
+        assert_eq!(c.responses, responses);
+        assert_eq!(c.pending, pending);
+        // Clock restart cannot clear an independent quiesce input or pop a reply.
+        let quiesced = LifecycleState {
+            clocked: true,
+            ..paused
+        };
+        c.check_lifecycle(quiesced).unwrap();
+        c.set_lifecycle(quiesced, &mut a);
+        assert_eq!(rd(&mut c, &mut a, STATUS), REQUEST_EMPTY);
+        assert!(c.read(RESPONSE, Width::Word, &mut a).is_err());
+        assert!(c.write(REQUEST, Width::Word, 0, &mut a).is_err());
+        assert_eq!(c.responses, responses);
+        c.check_lifecycle(running).unwrap();
+        c.set_lifecycle(running, &mut a);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), responses[0]);
+        assert_eq!(c.pending, pending); // FIFO pop does not acknowledge the vector.
+        assert!(c.read(RESPONSE, Width::Word, &mut a).is_err());
+        wr(&mut c, &mut a, REQUEST, 0x10 << 16 | LAST | 0xe << 8 | 0x3b);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE) >> 16, 0xf);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x4433_2211);
+    }
+    #[test]
+    fn partial_requests_armed_vectors_and_destructive_edges_refuse_before_effects() {
+        let mut c = controller();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let running = c.lifecycle;
+        wr(&mut c, &mut a, REQUEST, 0x10 << 16 | LAST | 0xe << 8 | 0x37);
+        wr(&mut c, &mut a, REQUEST, 0x4433_2211);
+        for proposed in [
+            LifecycleState {
+                clocked: false,
+                ..running
+            },
+            LifecycleState {
+                quiesced: true,
+                ..running
+            },
+            LifecycleState {
+                reset: true,
+                ..running
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..running
+            },
+            LifecycleState {
+                powered: false,
+                retention: false,
+                ..running
+            },
+        ] {
+            assert!(c.check_lifecycle(proposed).is_err());
+            assert_eq!(c.lifecycle, running);
+            assert_eq!(c.partial.as_ref().unwrap().1, [0x4433_2211]);
+            assert!(c.responses.is_empty());
+        }
+        wr(&mut c, &mut a, REQUEST, 0x8877_6655);
+        assert_eq!(c.responses.len(), 1);
+        wr(&mut c, &mut a, ENABLE + 4 * 8, 1);
+        assert!(
+            c.check_lifecycle(LifecycleState {
+                clocked: false,
+                ..running
+            })
+            .is_err()
+        );
+        assert!(
+            c.check_lifecycle(LifecycleState {
+                quiesced: true,
+                ..running
+            })
+            .is_err()
+        );
+        assert!(asserted(&c));
+        assert_eq!(c.responses.len(), 1);
+        assert!(latch.is_asserted(Wire::Aic(AicInput::new(0, 0x180))));
+    }
+    #[test]
+    fn actual_pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
+        use crate::platform::apple::{
+            counter::FREQUENCY_HZ,
+            pmu::{Pmu, Rtc},
+        };
+        let rtc = Rtc {
+            upcount: 0xf802,
+            clock_offset: 0xf900,
+            alarm_control: 0xf800,
+            alarm_enable: 0x40,
+            alarm_offset: 0xf808,
+            alarm_event: 0xf80c,
+            irq_mask: 0xf80e,
+            event_mask: 1,
+            interrupt_mask: 1,
+        };
+        let pmu = Pmu::new(Vec::new(), Some(rtc), None);
+        let alarm = pmu.interrupt();
+        let mut c = Spmi::new(AicInput::new(0, 0x180));
+        c.attach(0xe, Box::new(pmu)).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        for (address, opcode, value) in [
+            (rtc.alarm_offset, 0x33, 30),
+            (rtc.alarm_control, 0x30, 0x41),
+        ] {
+            wr(
+                &mut c,
+                &mut a,
+                REQUEST,
+                u32::from(address) << 16 | LAST | 0xe << 8 | opcode,
+            );
+            wr(&mut c, &mut a, REQUEST, value);
+            assert_ne!(rd(&mut c, &mut a, RESPONSE) & ACK, 0);
+        }
+        assert_eq!(c.advance(&mut a), Ok(Some(30 * FREQUENCY_HZ)));
+        let running = c.lifecycle;
+        let paused = LifecycleState {
+            clocked: false,
+            quiesced: true,
+            ..running
+        };
+        c.check_lifecycle(paused).unwrap();
+        c.set_lifecycle(paused, &mut a);
+        a.now = 30 * FREQUENCY_HZ;
+        assert_eq!(c.advance(&mut a), Ok(None));
+        assert!(alarm.asserted()); // PMIC's external output is not the SPMI response IRQ.
+        assert!(c.read(RESPONSE, Width::Word, &mut a).is_err());
+        assert!(
+            c.check_lifecycle(LifecycleState {
+                reset: true,
+                ..running
+            })
+            .is_err()
+        );
+        assert!(alarm.asserted());
+        c.check_lifecycle(running).unwrap();
+        c.set_lifecycle(running, &mut a);
+        wr(
+            &mut c,
+            &mut a,
+            REQUEST,
+            u32::from(rtc.alarm_event) << 16 | LAST | 0xe << 8 | 0x38,
+        );
+        assert_eq!(rd(&mut c, &mut a, RESPONSE) >> 16, 1);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 1);
+        assert!(alarm.asserted()); // Reading does not acknowledge the PMIC event.
+    }
+    #[test]
+    fn mounted_spmi_aliases_share_one_checked_controller_capability() {
+        use crate::platform::apple::bus::Bus;
+        let mut bus = Bus::new();
+        let device = bus.add(Box::new(controller()));
+        bus.map(device, 0x10000, BANK_BYTES, 0).unwrap();
+        bus.map(device, 0x20000, BANK_BYTES, BANK_B).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        let paused = LifecycleState {
+            powered: true,
+            clocked: false,
+            quiesced: false,
+            reset: false,
+            retention: true,
+        };
+        let lifecycle = bus.lifecycle(device).unwrap();
+        lifecycle.check_lifecycle(paused).unwrap();
+        lifecycle.set_lifecycle(paused, &mut a);
+        assert!(bus.read(0x10000 + STATUS, Width::Word, &mut a).is_err());
+        assert!(bus.read(0x20000 + 0x110, Width::Word, &mut a).is_err());
+        let running = LifecycleState {
+            clocked: true,
+            ..paused
+        };
+        let lifecycle = bus.lifecycle(device).unwrap();
+        lifecycle.check_lifecycle(running).unwrap();
+        lifecycle.set_lifecycle(running, &mut a);
+        assert_eq!(
+            bus.read(0x10000 + STATUS, Width::Word, &mut a),
+            Ok(u64::from(REQUEST_EMPTY | RESPONSE_EMPTY))
+        );
+        assert_eq!(bus.read(0x20000 + 0x110, Width::Word, &mut a), Ok(0));
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "requires STELA_TEST_PMGR_KERNELCACHE naming the pinned original 26A434 Mach-O"]
+    fn original_gen2_fifo_reset_is_separate_from_physical_controller_lifecycle() {
+        use sha2::{Digest, Sha256};
+        let path =
+            std::env::var_os("STELA_TEST_PMGR_KERNELCACHE").expect("original KernelCache path");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d"
+        );
+        for (offset, opcode) in [
+            (0x2dc35fc, 0x91029048u32),
+            (0x2dc3668, 0xf9406408u32),
+            (0x2dc366c, 0xb9400114u32),
+            (0x2dc3670, 0xb900011fu32),
+            (0x2dc3678, 0x94001d36u32),
+            (0x2dc3680, 0xb9000114u32),
+            (0x2dcabe8, 0x710006b5u32),
+            (0x2dcac00, 0x2a080128u32),
+        ] {
+            assert_eq!(
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+                opcode,
+                "original opcode at {offset:#x}"
+            );
+        }
+    }
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "requires STELA_TEST_PMGR_M1_KERNELCACHE naming the pinned original mac13j 26A434 Mach-O"]
+    fn original_m1_gen2_queue_reset_preserves_separate_controller_control() {
+        use sha2::{Digest, Sha256};
+        let path = std::env::var_os("STELA_TEST_PMGR_M1_KERNELCACHE")
+            .expect("original M1 Pro KernelCache path");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
+        );
+        // Original Gen2 init records the software queue-reset word at A+a4;
+        // resetQueue saves control, zeros it, resets the queue, then restores it.
+        for (offset, opcode) in [
+            (0x2d4600c, 0x91029048u32),
+            (0x2d46078, 0xf9406408u32),
+            (0x2d4607c, 0xb9400114u32),
+            (0x2d46080, 0xb900011fu32),
+            (0x2d46088, 0x94001d36u32),
+            (0x2d46090, 0xb9000114u32),
+        ] {
+            assert_eq!(
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+                opcode,
+                "original M1 opcode at {offset:#x}"
+            );
+        }
     }
 }
