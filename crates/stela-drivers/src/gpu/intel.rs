@@ -2,6 +2,8 @@
 //! does not initialize a device, map GPU memory, submit jobs or expose Metal.
 use core::marker::PhantomData;
 
+pub mod ct_storage;
+
 /// The actual VM's supported width, supplied by the device/VM owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
