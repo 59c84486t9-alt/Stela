@@ -3034,7 +3034,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.compiled += 1;
         self.statistics.compiled_instructions += (compiled.source_bytes as u64) / INSTRUCTION;
         self.statistics.compile_ticks += self.host.counter().wrapping_sub(started);
+        // An offer is kept until the store proves it; with memory low the
+        // block is only compiled, as one the store cannot hold.
         if let (Some((key, _)), Some(context)) = (stored, context)
+            && !self.host.memory_low()
             && let Some(translations) = self.host.translations()
         {
             translations.offer(Offer {

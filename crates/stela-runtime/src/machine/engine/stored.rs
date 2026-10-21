@@ -66,9 +66,10 @@ impl Offer {
     }
 }
 
-/// The fetch pages kept for their blocks at most; when full, the least
-/// recently used quarter is let go. A page let go is read, hashed and looked
-/// up again for its next block, which only a block not yet installed needs.
+/// The fetch pages kept for their blocks at most; when full, or when the
+/// host's memory runs low, the least recently used quarter is let go. A
+/// page let go is read, hashed and looked up again for its next block,
+/// which only a block not yet installed needs.
 #[cfg(not(test))]
 const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
@@ -125,7 +126,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
-            if self.pages.len() == KEPT_PAGES {
+            if self.pages.len() == KEPT_PAGES || (!self.pages.is_empty() && self.host.memory_low())
+            {
                 self.forget_least_used_pages();
             }
             self.pages.insert(
@@ -144,10 +146,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Some(page)
     }
 
-    /// Let the least recently used quarter of the kept pages go.
+    /// Let the least recently used quarter of the kept pages go, at least
+    /// one.
     fn forget_least_used_pages(&mut self) {
         let mut uses: Vec<u64> = self.pages.values().map(|page| page.used).collect();
-        let quarter = uses.len() / 4;
+        let quarter = (uses.len() / 4).max(1);
+        if quarter == uses.len() {
+            self.pages.clear();
+            return;
+        }
         let (_, &mut least_kept, _) = uses.select_nth_unstable(quarter);
         self.pages.retain(|_, page| page.used >= least_kept);
     }
@@ -392,5 +399,30 @@ pub(super) mod tests {
             machine.pages.keys().copied().collect::<Vec<_>>(),
             [page(0), page(2), page(3), page(4)]
         );
+    }
+
+    #[test]
+    fn with_memory_low_pages_are_let_go_and_nothing_is_offered() {
+        // A block in each of two pages: add x0, x0, #1; svc #0.
+        const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
+        let mut words = vec![0; PAGE_WORDS + 2];
+        for page in 0..2 {
+            words[page * PAGE_WORDS..page * PAGE_WORDS + 2]
+                .copy_from_slice(&[0x9100_0400, 0xd400_0001]);
+        }
+        let mut machine = machine(&words);
+        machine.host.store = Some(MemoryStore::default());
+        // A ring arena, whose reclaim leaves the first part's block alone.
+        machine.host.ring = Some(4);
+        assert!(machine.fetch_block(BASE, false).is_ok());
+        assert_eq!(machine.statistics.offered, 1);
+        machine.host.memory_low = true;
+        assert!(machine.fetch_block(BASE + FETCH_PAGE, false).is_ok());
+        assert_eq!(
+            machine.pages.keys().copied().collect::<Vec<_>>(),
+            [BASE + FETCH_PAGE]
+        );
+        assert_eq!(machine.statistics.offered, 1);
+        assert_eq!(machine.host.store.as_ref().unwrap().offers.len(), 1);
     }
 }
