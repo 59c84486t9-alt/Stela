@@ -404,7 +404,7 @@ impl E1000e {
         // the mapped ECAM handoff. Do this before enabling device decoding.
         unsafe { pci::disable_aspm_link(function, handoff)? };
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
-        function.enable();
+        function.enable_polled();
         reset(&device, &handoff.clock)?;
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(
             BlockError::Unsupported("82574L without a valid NVM MAC address"),

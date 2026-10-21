@@ -252,7 +252,7 @@ impl Realtek {
             .flatten()
             .find(|b| matches!(b, pci::Bar::Memory { .. }));
         let device = map_registers(handoff, bar, 0, 256)?;
-        function.enable();
+        function.enable_polled();
         let txconfig = device.read32(TX_CONFIG);
         let revision = revision::detect(txconfig).ok_or(Error::UnknownMac(txconfig))?;
         if !revision::pci_family(function.device, revision) || !revision.implemented() {

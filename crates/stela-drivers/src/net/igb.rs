@@ -191,7 +191,7 @@ impl Igb {
         let bytes = if chip.modern() { 0x2_0000 } else { 0x1_0000 };
         let device = mapped_registers(handoff, function.bars()[0], 0, bytes)?;
         let capabilities = PciCapabilities::read(function);
-        function.enable();
+        function.enable_polled();
         let mut hardware = Hardware::new(&device, &handoff.clock, chip);
         let (mac, warnings) = hardware.initialize(function.config(), capabilities)?;
         let mut net = Self {
