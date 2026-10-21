@@ -39,6 +39,9 @@ const STATUS_CAPABILITIES: u16 = 1 << 4;
 const CAP_PM: u8 = 1;
 const CAP_MSI: u8 = 5;
 const CAP_MSIX: u8 = 0x11;
+const CAP_PCIE: u8 = 0x10;
+const SCH_HDA_DEVC: u16 = 0x78;
+const SCH_NOSNOOP: u16 = 1 << 11;
 const MSI_ADDRESS_64: u16 = 1 << 7;
 const MSI_VECTOR_MASK: u16 = 1 << 8;
 const PM_STATE: u16 = 3;
@@ -54,14 +57,91 @@ const ATI_SNOOP_ENABLE: u8 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Setup {
     IntelIch,
+    IntelPch,
     AtiAzalia,
 }
 
-impl Setup {
-    fn control(self) -> (u16, u8, u8) {
+/// Exact identity-selected accesses. Native widths preserve adjacent PCI
+/// status/vendor fields; in particular Device Status next to DEVC is W1C.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Control {
+    Byte { offset: u16, mask: u8, value: u8 },
+    Word { offset: u16, mask: u16, value: u16 },
+}
+const PCH_SNOOP: Control = Control::Word {
+    offset: SCH_HDA_DEVC,
+    mask: SCH_NOSNOOP,
+    value: 0,
+};
+impl Control {
+    fn extent(self) -> core::ops::Range<usize> {
+        let (offset, bytes) = match self {
+            Self::Byte { offset, .. } => (offset, 1),
+            Self::Word { offset, .. } => (offset, 2),
+        };
+        usize::from(offset)..usize::from(offset + bytes)
+    }
+    fn apply(self, config: &mut impl ConfigSpace) -> Result<(), AttachError> {
         match self {
-            Self::IntelIch => (TCSEL, TCSEL_MASK, 0),
-            Self::AtiAzalia => (ATI_SNOOP_CONTROL, ATI_SNOOP_MASK, ATI_SNOOP_ENABLE),
+            Self::Byte {
+                offset,
+                mask,
+                value,
+            } => {
+                let previous = config.read8(offset);
+                if previous == u8::MAX {
+                    return Err(AttachError::ConfigurationRejected);
+                }
+                let next = previous & !mask | value;
+                config.write8(offset, next);
+                if config.read8(offset) != next {
+                    return Err(AttachError::ConfigurationRejected);
+                }
+            }
+            Self::Word {
+                offset,
+                mask,
+                value,
+            } => {
+                let previous = config.read16(offset);
+                if previous == u16::MAX {
+                    return Err(AttachError::ConfigurationRejected);
+                }
+                let next = previous & !mask | value;
+                if next == previous {
+                    return Ok(());
+                }
+                config.write16(offset, next);
+                let observed = config.read16(offset);
+                if observed == u16::MAX || observed != next {
+                    return Err(AttachError::ConfigurationRejected);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+impl Setup {
+    fn controls(self) -> &'static [Control] {
+        match self {
+            Self::IntelIch => &[Control::Byte {
+                offset: TCSEL,
+                mask: TCSEL_MASK,
+                value: 0,
+            }],
+            Self::IntelPch => &[
+                Control::Byte {
+                    offset: TCSEL,
+                    mask: TCSEL_MASK,
+                    value: 0,
+                },
+                PCH_SNOOP,
+            ],
+            Self::AtiAzalia => &[Control::Byte {
+                offset: ATI_SNOOP_CONTROL,
+                mask: ATI_SNOOP_MASK,
+                value: ATI_SNOOP_ENABLE,
+            }],
         }
     }
 }
@@ -119,6 +199,11 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
     let (setup, dma_address_bits) = match (vendor, device) {
         (INTEL, 0x2668 | 0x269a | 0x27d8 | 0x284b | 0x293e | 0x293f | 0x3a3e | 0x3a6e) => {
             (Setup::IntelIch, 64)
+        }
+        // Haswell/Broadwell analog PCH, without I915_COMPONENT. GPU HDMI
+        // identities and Skylake+ reset/multilink/DSP paths stay refused.
+        (INTEL, 0x8c20 | 0x8ca0 | 0x8d20 | 0x8d21 | 0x9c20 | 0x9c21 | 0x9ca0) => {
+            (Setup::IntelPch, 64)
         }
         // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
         // before 0x30 additionally require 32 bits. Without companion evidence,
@@ -242,19 +327,24 @@ struct Capabilities {
     pm: Option<u16>,
     msi: Option<u16>,
     msix: Option<u16>,
+    pcie: Option<u16>,
 }
 
 fn capabilities<C: ConfigSpace>(
     config: &C,
-    vendor_control: u16,
+    controls: &[Control],
 ) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
     if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
-        return Ok(found);
+        return if controls.contains(&PCH_SNOOP) {
+            Err(AttachError::InvalidCapabilities)
+        } else {
+            Ok(found)
+        };
     }
     let mut occupied = [false; 256];
-    // The identity's vendor-control byte cannot alias a standard capability.
-    occupied[usize::from(vendor_control)] = true;
+    // Capability bodies and controls are checked separately so the one owned
+    // PCIe Device Control field is allowed without allowing body/body aliases.
     let mut offset = config.read8(PCI_CAPABILITIES);
     while offset != 0 {
         if offset < 0x40 || offset & 3 != 0 {
@@ -262,6 +352,7 @@ fn capabilities<C: ConfigSpace>(
         }
         let offset16 = u16::from(offset);
         let id = config.read8(offset16);
+        let mut owned_pcie_device_control = false;
         let (slot, bytes) = match id {
             CAP_PM => (Some(&mut found.pm), 8),
             CAP_MSI => {
@@ -282,6 +373,28 @@ fn capabilities<C: ConfigSpace>(
                 (Some(&mut found.msi), bytes)
             }
             CAP_MSIX => (Some(&mut found.msix), 12),
+            CAP_PCIE => {
+                if offset16 + 4 > 0x100 {
+                    return Err(AttachError::InvalidCapabilities);
+                }
+                let flags = config.read16(offset16 + 2);
+                let version = flags & 15;
+                let kind = (flags >> 4) & 15;
+                owned_pcie_device_control =
+                    offset16 + 8 == SCH_HDA_DEVC && matches!(kind, 0 | 1 | 9);
+                // pci_regs.h's endpoint extents distinguish an integrated
+                // endpoint (no link) from a linked endpoint and bridge/port.
+                let bytes = match (version, kind) {
+                    (1, 9 | 10) => 12,
+                    (1, 0 | 1) => 20,
+                    (1, 4..=8) => 36,
+                    (2, 9 | 10) => 0x2c,
+                    (2, 0 | 1) => 0x34,
+                    (2, 4..=8) => 0x3c,
+                    _ => return Err(AttachError::InvalidCapabilities),
+                };
+                (Some(&mut found.pcie), bytes)
+            }
             // Unknown bodies are not touched or sized. Reserve their headers
             // so a known body cannot alias them or loop through them later.
             _ => (None, 2),
@@ -291,6 +404,15 @@ fn capabilities<C: ConfigSpace>(
         if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
             return Err(AttachError::InvalidCapabilities);
         }
+        for control in controls {
+            let range = control.extent();
+            if range.start < end
+                && start < range.end
+                && !(owned_pcie_device_control && *control == PCH_SNOOP)
+            {
+                return Err(AttachError::InvalidCapabilities);
+            }
+        }
         occupied[start..end].fill(true);
         if let Some(slot) = slot {
             if slot.is_some() {
@@ -299,6 +421,11 @@ fn capabilities<C: ConfigSpace>(
             *slot = Some(offset16);
         }
         offset = config.read8(offset16 + 1);
+    }
+    // PCH78 is Device Control, so require its actual known endpoint owner.
+    // Missing/unknown capabilities do not authorize writing an ambiguous body.
+    if controls.contains(&PCH_SNOOP) && found.pcie != Some(SCH_HDA_DEVC - 8) {
+        return Err(AttachError::InvalidCapabilities);
     }
     Ok(found)
 }
@@ -402,8 +529,8 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     if !bar_matches(config, base, wide) {
         return Err(AttachError::InvalidBar);
     }
-    let (vendor_control, vendor_mask, vendor_bits) = selected.setup.control();
-    let caps = capabilities(config, vendor_control)?;
+    let controls = selected.setup.controls();
+    let caps = capabilities(config, controls)?;
     let pmcsr = caps.pm.map(|pm| {
         let version = config.read16(pm + 2) & 7;
         (pm + 4, version, config.read16(pm + 4))
@@ -451,16 +578,10 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
         if !bar_matches(config, base, wide) {
             return Err(AttachError::InvalidBar);
         }
-        // The exact identity selects either ICH TCSEL or ATI/AMD snoop.
-        // These bytes are not interchangeable; never touch Intel TCSEL on AMD.
-        let previous = config.read8(vendor_control);
-        if previous == u8::MAX {
-            return Err(AttachError::ConfigurationRejected);
-        }
-        let value = previous & !vendor_mask | vendor_bits;
-        config.write8(vendor_control, value);
-        if config.read8(vendor_control) != value {
-            return Err(AttachError::ConfigurationRejected);
+        // The exact identity selects ICH TCSEL, PCH TCSEL+word snoop, or
+        // ATI/AMD byte snoop. These fields and access widths are not interchangeable.
+        for control in controls {
+            control.apply(config)?;
         }
         if let Some(offset) = caps.msi {
             let control = config.read16(offset + 2) & !1;
@@ -523,6 +644,8 @@ mod tests {
         reject_command: bool,
         reject_vendor_control: bool,
         fail_after_enable: bool,
+        reject_snoop: bool,
+        failed_snoop_read: bool,
         writes: Vec<(u16, u8, u32, u64)>,
     }
     impl Model {
@@ -538,6 +661,15 @@ mod tests {
     impl ConfigSpace for Model {
         fn read32(&self, offset: u16) -> u32 {
             let value = self.words[usize::from(offset / 4)];
+            if offset == SCH_HDA_DEVC
+                && self.failed_snoop_read
+                && self
+                    .writes
+                    .iter()
+                    .any(|(off, _, _, _)| *off == SCH_HDA_DEVC)
+            {
+                return u32::MAX;
+            }
             if offset == PCI_COMMAND
                 && self.fail_after_enable
                 && self.writes.iter().any(|(off, _, value, _)| {
@@ -579,9 +711,21 @@ mod tests {
             self.words[index] = self.words[index] & !(0xff << shift) | u32::from(value) << shift;
         }
         fn write16(&mut self, offset: u16, value: u16) {
-            assert!(matches!(offset, PCI_COMMAND | 0x54 | 0x62 | 0x72));
+            assert!(matches!(
+                offset,
+                PCI_COMMAND | 0x54 | 0x62 | 0x72 | 0xb2 | SCH_HDA_DEVC
+            ));
             self.writes
                 .push((offset, 2, u32::from(value), self.now.get()));
+            if offset == SCH_HDA_DEVC {
+                assert_eq!(
+                    self.get16(PCI_COMMAND) & (COMMAND_MEMORY | COMMAND_MASTER),
+                    0
+                );
+                if self.reject_snoop {
+                    return;
+                }
+            }
             if offset == PCI_COMMAND {
                 if self.reject_command {
                     return;
@@ -624,6 +768,8 @@ mod tests {
             reject_command: false,
             reject_vendor_control: false,
             fail_after_enable: false,
+            reject_snoop: false,
+            failed_snoop_read: false,
             writes: Vec::new(),
         };
         model.words[0] = 0x2668_8086;
@@ -991,6 +1137,199 @@ mod tests {
                     .any(|(offset, width, _, time)| *offset == ATI_SNOOP_CONTROL
                         && *width == 1
                         && *time >= 10_000)
+            );
+        }
+    }
+
+    fn pch_fixture(device: u16, version: u16, kind: u16) -> (Function<Model>, Clock, Bar) {
+        let (mut function, timer, bar) = fixture(3);
+        set_identity(&mut function, INTEL, device);
+        // PM50 -> MSI60 -> PCIe70 -> MSI-Xb0. DEVC78 and Device Status7a
+        // share a dword; the latter holds pending W1C evidence.
+        function.config().words[28] = (u32::from(version | (kind << 4)) << 16) | 0xb010;
+        function.config().words[30] = 0xf91f_7a55;
+        function.config().words[44] = 0x8000_0011;
+        (function, timer, bar)
+    }
+
+    #[test]
+    fn hsw_bdw_pch_word_snoop_preserves_device_status_and_tcsel_neighbors_after_d3hot() {
+        for device in [0x8c20, 0x8ca0, 0x8d20, 0x8d21, 0x9c20, 0x9c21, 0x9ca0] {
+            for (version, kind) in [(1, 9), (2, 9), (1, 0), (2, 0)] {
+                let (mut function, timer, bar) = pch_fixture(device, version, kind);
+                let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+                assert_eq!(prepared.config().probe_policy, ProbePolicy::Once);
+                assert_eq!(prepared.config().position_policy, PositionPolicy::Link);
+                assert_eq!(prepared.config().dma_address_bits, 64);
+                assert_eq!(function.config().words[30], 0xf91f_7255);
+                assert_eq!(function.config().words[17], 0x5ac3_a5f0);
+                assert_eq!(function.config().get16(0xb2) & (1 << 15), 0);
+                let writes = &function.config().writes;
+                assert!(
+                    writes
+                        .iter()
+                        .any(|(offset, width, value, time)| *offset == SCH_HDA_DEVC
+                            && *width == 2
+                            && *value == 0x7255
+                            && *time >= 10_000)
+                );
+                assert!(
+                    !writes
+                        .iter()
+                        .any(|(offset, _, _, _)| matches!(*offset, 0x7a | ATI_SNOOP_CONTROL))
+                );
+                let written = writes.len();
+                // Already coherent: the donor avoids rewriting Device Control.
+                prepare_model(&mut function, &timer, bar).unwrap();
+                assert!(
+                    !function.config().writes[written..]
+                        .iter()
+                        .any(|(offset, _, _, _)| *offset == SCH_HDA_DEVC)
+                );
+                assert_eq!(function.config().words[30], 0xf91f_7255);
+            }
+        }
+    }
+
+    #[test]
+    fn pch_snoop_capability_ownership_rejects_unrelated_headers_bodies_and_wrong_pcie_layout() {
+        for variant in 0..11 {
+            let (mut function, timer, bar) = pch_fixture(0x8c20, 2, 9);
+            match variant {
+                0 => {
+                    // Unknown header directly aliases DEVC78.
+                    function.config().words[24] = 0x0001_7805;
+                    function.config().words[30] = 0xfe;
+                }
+                1 => {
+                    // PM74 body aliases DEVC; list contains no PCIe owner.
+                    function.config().words[24] = 0x0001_7405;
+                    function.config().words[29] = 0x0003_0001;
+                }
+                2 => {
+                    // MSI-X70 body aliases the owned field.
+                    function.config().words[28] = 0x8000_0011;
+                }
+                3 => {
+                    // A PCIe cap74 makes78 Device Capability, not Control.
+                    function.config().words[24] = 0x0001_7405;
+                    function.config().words[29] = 0x0092_0010;
+                }
+                4 => {
+                    // Unknown PCIe version.
+                    function.config().words[28] = 0x0090_b010;
+                }
+                5 => {
+                    // Root event collector lacks endpoint Device Control.
+                    function.config().words[28] = 0x00a2_b010;
+                }
+                6 => {
+                    // A second header in the owned PCIe body.
+                    function.config().words[28] = 0x0092_8010;
+                    function.config().words[32] = 0xfe;
+                }
+                7 => {
+                    // A reverse alias: earlier MSI body contains PCIe header.
+                    function.config().words[24] = 0x0101_6c05;
+                    function.config().words[27] = 0x0092_0010;
+                }
+                8 => {
+                    // Failed PCIe flags read cannot select a layout.
+                    function.config().words[28] = 0xffff_b010;
+                }
+                9 => {
+                    // Unknown body70 cannot prove ownership of78.
+                    function.config().words[28] = 0xb0fe;
+                }
+                _ => {
+                    // Absent capabilities cannot establish Device Control.
+                    function.config().words[1] &= !(u32::from(STATUS_CAPABILITIES) << 16);
+                }
+            }
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::InvalidCapabilities
+            );
+            assert!(function.config().writes.is_empty(), "variant {variant}");
+        }
+    }
+
+    #[test]
+    fn pch_snoop_control_failures_refuse_and_attempt_cleanup_after_the_failed_word_access() {
+        for variant in 0..3 {
+            let (mut function, timer, bar) = pch_fixture(0x9ca0, 2, 9);
+            match variant {
+                0 => function.config().set16(SCH_HDA_DEVC, u16::MAX),
+                1 => function.config().reject_snoop = true,
+                _ => function.config().failed_snoop_read = true,
+            }
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::ConfigurationRejected
+            );
+            let config = function.config();
+            assert_eq!(
+                config.get16(PCI_COMMAND) & (COMMAND_MASTER | COMMAND_MEMORY),
+                0
+            );
+            if variant == 0 {
+                assert!(
+                    !config
+                        .writes
+                        .iter()
+                        .any(|(offset, _, _, _)| *offset == SCH_HDA_DEVC)
+                );
+            } else {
+                let failed_access = config
+                    .writes
+                    .iter()
+                    .rposition(|(offset, _, _, _)| *offset == SCH_HDA_DEVC)
+                    .unwrap();
+                assert!(config.writes[failed_access + 1..].iter().any(
+                    |(offset, width, value, _)| *offset == PCI_COMMAND
+                        && *width == 2
+                        && *value & u32::from(COMMAND_MASTER | COMMAND_MEMORY) == 0
+                ));
+            }
+            assert!(
+                !config
+                    .writes
+                    .iter()
+                    .any(|(offset, _, value, _)| *offset == PCI_COMMAND
+                        && *value & u32::from(COMMAND_MASTER) != 0)
+            );
+            assert_eq!(config.words[30] >> 16, 0xf91f);
+        }
+    }
+
+    #[test]
+    fn pch_dsp_and_selectable_classes_refuse_before_writes_and_unimplemented_intel_stays_unknown() {
+        for (class, stale_enumeration) in [
+            ([4, 1, 0], false),
+            ([4, 3, 0x80], false),
+            ([4, 1, 0], true),
+            ([4, 3, 0x80], true),
+        ] {
+            let (mut function, timer, bar) = pch_fixture(0x8c20, 2, 9);
+            if !stale_enumeration {
+                function.class = class;
+            }
+            function.config().words[2] = (u32::from(class[0]) << 24)
+                | (u32::from(class[1]) << 16)
+                | (u32::from(class[2]) << 8);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::UnsupportedController
+            );
+            assert!(function.config().writes.is_empty());
+        }
+        for device in [
+            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0xa170, 0x9d70, 0xa171, 0xa348, 0x9dc8, 0x34c8, 0xa0c8,
+            0x51c8, 0x7e28,
+        ] {
+            assert_eq!(
+                identity(INTEL, device, CLASS),
+                Err(AttachError::UnsupportedController)
             );
         }
     }
