@@ -515,6 +515,36 @@ fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
     Ok(())
 }
 
+/// `SPTM-rm` describes one complete loaded image, including its link-edit
+/// split beyond the ordered-region table. SPTM consumes its start/end at
+/// raw 0xe076c..0xe0790 and 0xe09f8..0xe0a2c during memory setup.
+fn sptm_image_span(regions: &[Region]) -> Result<core::ops::Range<u64>> {
+    let mut span = None;
+    for name in ["SPTM-ro", "SPTM-rx", "SPTM-rw", "SPTM-le"] {
+        let region = regions
+            .iter()
+            .find(|region| region.name == name)
+            .with_context(|| format!("SPTM image span: missing region {name}"))?;
+        let end = region
+            .guest_pa
+            .checked_add(region.memory_bytes)
+            .with_context(|| format!("SPTM image span: {name} range overflows"))?;
+        match &mut span {
+            None => span = Some(region.guest_pa..end),
+            Some(span) => {
+                ensure!(
+                    region.guest_pa == span.end,
+                    "SPTM image span: {name} starts at {:#x}, expected {:#x}",
+                    region.guest_pa,
+                    span.end
+                );
+                span.end = end;
+            }
+        }
+    }
+    span.context("SPTM image span is empty")
+}
+
 /// The secure kernel's entries, unset: the board has no exclave image
 /// (its identity lists no CL4 component). SPTM 26A434 requires `CL4-entry`,
 /// `CL4-rx` and `CL4-virt` (`init_get_image_region`) and starts the secure
@@ -1138,11 +1168,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             )
         })
         .transpose()?;
-    let sptm_ro = region("SPTM-ro")?;
-    let sptm_total: u64 = ["SPTM-ro", "SPTM-rx", "SPTM-rw", "SPTM-le"]
-        .iter()
-        .map(|name| region(name).map(|r| r.memory_bytes))
-        .sum::<Result<_>>()?;
+    let sptm_span = sptm_image_span(&regions)?;
     for (name, value) in [
         (
             "slide",
@@ -1155,7 +1181,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             range_value(kernel.collection.entry_offset(), 0),
         ),
         ("BootKC-virt", range_value(0, 0)),
-        ("SPTM-rm", range_value(sptm_ro.guest_pa, sptm_total)),
+        (
+            "SPTM-rm",
+            range_value(sptm_span.start, sptm_span.end - sptm_span.start),
+        ),
     ]
     .into_iter()
     .chain(ABSENT_SECURE_KERNEL.map(|name| (name, range_value(u64::MAX, u64::MAX))))
@@ -1794,6 +1823,48 @@ mod tests {
             regions[0].memory_bytes = length;
             assert!(validate_sptm_region_order(&regions).is_err());
         }
+    }
+
+    #[test]
+    fn sptm_image_span_includes_link_edit_and_rejects_an_intervening_payload() -> Result<()> {
+        let mut regions = ordered_region_fixture(false);
+        let last = regions.last().unwrap();
+        let mut link_edit = last.clone();
+        link_edit.name = "SPTM-le".into();
+        link_edit.guest_pa += link_edit.memory_bytes;
+        regions.push(link_edit);
+        let span = sptm_image_span(&regions)?;
+        assert_eq!(span.end - span.start, 4 * PAGE);
+        assert_eq!(span.end, regions.last().unwrap().guest_pa + PAGE);
+
+        // The original 16-record table ends at SPTM-rw. A later payload
+        // before link-edit passes that check but invalidates SPTM-rm.
+        for adjustment in [PAGE, 0_u64.wrapping_sub(PAGE)] {
+            let mut bad = regions.clone();
+            let link_edit = bad.last_mut().unwrap();
+            link_edit.guest_pa = link_edit.guest_pa.wrapping_add(adjustment);
+            validate_sptm_region_order(&bad)?;
+            let error = sptm_image_span(&bad).unwrap_err().to_string();
+            assert!(error.contains("SPTM-le"), "{error}");
+        }
+        regions.pop();
+        assert!(
+            sptm_image_span(&regions)
+                .unwrap_err()
+                .to_string()
+                .contains("missing region SPTM-le")
+        );
+        let mut link_edit = regions.last().unwrap().clone();
+        link_edit.name = "SPTM-le".into();
+        link_edit.guest_pa = u64::MAX - PAGE + 1;
+        regions.push(link_edit);
+        assert!(
+            sptm_image_span(&regions)
+                .unwrap_err()
+                .to_string()
+                .contains("range overflows")
+        );
+        Ok(())
     }
 
     fn source(component: &str) -> Source {
