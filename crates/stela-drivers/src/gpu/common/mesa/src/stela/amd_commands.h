@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,31 @@ struct stela_amd_compute_dispatch {
    /* Enable only when the native queue owner has allowed tunneling. */
    bool tunnel;
 };
+
+/* The Rust native facade checks these same layouts. This is a native x86-64
+ * interface; it is never used as the translated ARM guest's wire format. */
+#ifdef __cplusplus
+#define STELA_AMD_STATIC_ASSERT static_assert
+#else
+#define STELA_AMD_STATIC_ASSERT _Static_assert
+#endif
+STELA_AMD_STATIC_ASSERT(sizeof(enum stela_amd_command_status) == 4, "status ABI");
+STELA_AMD_STATIC_ASSERT(sizeof(struct stela_amd_compute_pipeline) == 112, "pipeline ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_pipeline, block_size) == 24, "block ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_pipeline, wave_size) == 36, "wave ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_pipeline, user_sgprs) == 44, "SGPR ABI");
+STELA_AMD_STATIC_ASSERT(sizeof(struct stela_amd_compute_dispatch) == 16, "dispatch ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_dispatch, threads) == 12, "threads ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_dispatch, ordered) == 13, "ordered ABI");
+STELA_AMD_STATIC_ASSERT(offsetof(struct stela_amd_compute_dispatch, tunnel) == 14, "tunnel ABI");
+#undef STELA_AMD_STATIC_ASSERT
+
+/* Scalar native preamble interface avoids reproducing Mesa-private structure
+ * layouts in Rust. This has exactly the same validation/output contract. */
+enum stela_amd_command_status
+stela_amd_compute_preamble_native(const struct radeon_info *info,
+                                 uint64_t border_color_va, uint32_t dispatch_interleave,
+                                 uint32_t *output, uint32_t capacity, uint32_t *written);
 
 /* Output is unchanged on errors. BUFFER_TOO_SMALL reports the required dword
  * count through written; NULL output with zero capacity is a size query.

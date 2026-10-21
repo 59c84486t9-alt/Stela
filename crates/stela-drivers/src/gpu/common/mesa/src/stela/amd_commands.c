@@ -218,3 +218,15 @@ stela_amd_compute_dispatch(const struct radeon_info *info,
    ac_pm4_finalize(&pm4);
    return copy_commands(&pm4, output, capacity, written);
 }
+
+enum stela_amd_command_status
+stela_amd_compute_preamble_native(const struct radeon_info *info,
+                                 uint64_t border_color_va, uint32_t dispatch_interleave,
+                                 uint32_t *output, uint32_t capacity, uint32_t *written)
+{
+   const struct ac_preamble_state state = {
+      .border_color_va = border_color_va,
+      .gfx11.compute_dispatch_interleave = dispatch_interleave,
+   };
+   return stela_amd_compute_preamble(info, &state, output, capacity, written);
+}
