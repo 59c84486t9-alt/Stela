@@ -903,30 +903,7 @@ impl Controller {
     /// Recovers a halted endpoint: Reset Endpoint, then its dequeue pointer
     /// moved past the failed TD (4.6.8, 4.6.10).
     fn recover(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
-        self.ready()?;
-        if self
-            .slot(slot)?
-            .endpoints
-            .get(usize::from(dci))
-            .and_then(Option::as_ref)
-            .is_some_and(|endpoint| endpoint.poisoned)
-        {
-            return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
-        }
-        let target = u32::from(slot) << 24 | u32::from(dci) << 16;
-        self.command(0, 0, RESET_ENDPOINT << 10 | target)?;
-        let pointer = self
-            .slot(slot)?
-            .endpoints
-            .get(usize::from(dci))
-            .and_then(Option::as_ref)
-            .map(|transfer| transfer.ring.dequeue_pointer())
-            .ok_or(BlockError::Unsupported("xHCI endpoint not configured"))?;
-        self.command(pointer, 0, SET_DEQUEUE << 10 | target)?;
-        // Transfer events still pending for the abandoned TD.
-        self.pending
-            .retain(|e| !(e.kind() == TRANSFER_EVENT && e.slot() == slot && e.endpoint() == dci));
-        Ok(())
+        self.cancel(slot, dci)
     }
 
     /// Check controller/endpoint poison before modifying a buffer used by a
@@ -1869,6 +1846,8 @@ pub(crate) mod tests {
         events: u64,
         event_index: usize,
         control_ring: u64,
+        dcbaa: u64,
+        output: u64,
         ready_at: u64,
         recovery_ticks: u64,
         address_code: u32,
@@ -1914,6 +1893,9 @@ pub(crate) mod tests {
                 model.command_index += 1;
                 model.commands_seen.push(kind);
                 let code = if kind == ADDRESS_DEVICE {
+                    // SAFETY: the live DCBAA slot points to the output context
+                    // allocated by address() before publishing this command.
+                    model.output = unsafe { ((model.dcbaa + 8) as *const u64).read_volatile() };
                     // SAFETY: EP0's dequeue pointer in the 32-byte input
                     // context points to this test controller's control ring.
                     model.control_ring =
@@ -1921,6 +1903,15 @@ pub(crate) mod tests {
                     model.ready_at = Clock::ticks() + model.recovery_ticks;
                     model.address_code
                 } else {
+                    if matches!(kind, RESET_ENDPOINT | STOP_ENDPOINT) {
+                        // SAFETY: EP0 state in the live 32-byte output context.
+                        unsafe {
+                            ((model.output + 32) as *mut u32).write_volatile(ENDPOINT_STOPPED);
+                        }
+                    }
+                    if kind == SET_DEQUEUE {
+                        model.control_ring = parameter & !0xf;
+                    }
                     SUCCESS
                 };
                 model.event(address, code, COMMAND_COMPLETION, 0);
@@ -1933,6 +1924,10 @@ pub(crate) mod tests {
                 model.setup_seen.push(request);
                 model.early_setup = Clock::ticks() < model.ready_at;
                 let (parameter, code) = if model.early_setup {
+                    // SAFETY: failed transfer halts EP0 in the live context.
+                    unsafe {
+                        ((model.output + 32) as *mut u32).write_volatile(ENDPOINT_HALTED);
+                    }
                     (ring, 4)
                 } else {
                     (ring + 2 * TRB as u64, SUCCESS)
@@ -1957,6 +1952,8 @@ pub(crate) mod tests {
             events: events.physical(),
             event_index: 0,
             control_ring: 0,
+            dcbaa: 0,
+            output: 0,
             ready_at: 0,
             recovery_ticks: ADDRESS_RECOVERY_US * clock.ticks_per_microsecond,
             address_code,
@@ -1988,6 +1985,7 @@ pub(crate) mod tests {
             command_poisoned: false,
             location: String::from("test xhci"),
         };
+        model.borrow_mut().dcbaa = controller.dcbaa.physical();
         (controller, model)
     }
 
@@ -2180,6 +2178,7 @@ pub(crate) mod tests {
         fatal_status: u32,
         fatal_on_command: Option<u32>,
         silence_transfer: Option<usize>,
+        halt_transfer: Option<usize>,
     }
     impl CancelModel {
         fn state(&self, dci: usize) -> u32 {
@@ -2320,6 +2319,15 @@ pub(crate) mod tests {
                 )
             };
             self.set_state(dci, 1);
+            if self.halt_transfer == Some(dci) {
+                // A STALL leaves the failed TD at the hardware dequeue pointer.
+                // Reset stops it, but only Set Dequeue abandons it; another
+                // doorbell could otherwise resume this same TD.
+                self.set_state(dci, ENDPOINT_HALTED);
+                self.active[dci] = Some((at, parameter, length));
+                self.event(at, STALL, TRANSFER_EVENT, dci as u8, 0);
+                return;
+            }
             if dci == 1 {
                 let request = parameter.to_le_bytes();
                 let length = usize::from(u16::from_le_bytes([request[6], request[7]]));
@@ -2423,6 +2431,7 @@ pub(crate) mod tests {
             fatal_status: 0,
             fatal_on_command: None,
             silence_transfer: None,
+            halt_transfer: None,
         }));
         model.borrow_mut().set_state(1, 1);
         controller.registers = Box::new(CancelRegisters(model.clone()));
@@ -2849,14 +2858,133 @@ pub(crate) mod tests {
         }
     }
 
-    /// Shared class-driver regression fixture: a real submitted TD whose Stop
-    /// was acknowledged as Context State Error while the endpoint stayed Running.
+    fn failed_stall_recovery(
+        dma: &mut dyn DmaAllocator,
+        buffer: u64,
+        length: usize,
+        dci: u8,
+    ) -> (Controller, Rc<RefCell<CancelModel>>) {
+        let (mut controller, model) = cancellation_controller(dma);
+        model.borrow_mut().halt_transfer = Some(usize::from(dci));
+        model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+        let result = if dci == 1 {
+            controller
+                .control(1, setup(0x20, 0, 0, 0, 3), &[3, 0x0c, 0])
+                .map(|_| ())
+        } else {
+            let trb = controller.submit(1, dci, buffer, length).unwrap();
+            assert_eq!(
+                controller.completed(1, dci, trb, length),
+                Some(Err(BlockError::Device { status: STALL }))
+            );
+            controller.clear(1, &fixture_endpoint(dci))
+        };
+        assert_eq!(
+            result,
+            Err(BlockError::Device {
+                status: CONTEXT_STATE_ERROR
+            })
+        );
+        assert_eq!(model.borrow().seen, vec![RESET_ENDPOINT, SET_DEQUEUE]);
+        assert_eq!(model.borrow().state(usize::from(dci)), ENDPOINT_STOPPED);
+        assert_eq!(model.borrow().indices[usize::from(dci)], 0);
+        assert!(model.borrow().dequeues.is_empty());
+        assert!(!controller.command_poisoned);
+        (controller, model)
+    }
+
+    fn fixture_endpoint(dci: u8) -> Endpoint {
+        Endpoint {
+            address: (dci / 2) | if dci & 1 != 0 { 0x80 } else { 0 },
+            attributes: if dci == 3 { 3 } else { 2 },
+            max_packet: if dci == 3 { 16 } else { 64 },
+            interval: u8::from(dci == 3),
+        }
+    }
+
+    #[test]
+    fn halted_reset_with_failed_dequeue_refuses_endpoint_and_dma_reuse() {
+        for dci in [1, 3, 4, 5] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives controller/model and every DMA buffer.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let buffer = dma.allocate(512, 512).unwrap();
+            let (mut controller, model) =
+                failed_stall_recovery(&mut dma, buffer.physical(), buffer.len(), dci);
+            let slot = controller.slots[1].as_ref().unwrap();
+            let control = slot.control.bytes().to_vec();
+            let input = slot.input.bytes().to_vec();
+            let transfer = slot.endpoints[usize::from(dci)].as_ref().unwrap();
+            assert!(transfer.poisoned);
+            let ring = transfer.ring.buffer.bytes().to_vec();
+            let commands = controller.commands.buffer.bytes().to_vec();
+            let seen = model.borrow().seen.len();
+            let setup_count = model.borrow().setup.len();
+            let old_index = model.borrow().indices[usize::from(dci)];
+            assert!(controller.endpoint_ready(1, dci).is_err());
+            assert!(controller.submit(1, dci, buffer.physical(), 512).is_err());
+            assert!(
+                controller
+                    .completed(1, dci, buffer.physical(), 512)
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(controller.cancel(1, dci).is_err());
+            if dci == 1 {
+                assert!(
+                    controller
+                        .control(1, setup(0x20, 0, 0, 0, 3), &[0; 3])
+                        .is_err()
+                );
+                assert!(controller.recover(1, dci).is_err());
+            } else {
+                let endpoint = fixture_endpoint(dci);
+                assert!(controller.clear(1, &endpoint).is_err());
+                assert!(
+                    controller
+                        .configure(1, &[endpoint], None, &mut dma)
+                        .is_err()
+                );
+            }
+            let slot = controller.slots[1].as_ref().unwrap();
+            assert_eq!(slot.control.bytes(), control);
+            assert_eq!(slot.input.bytes(), input);
+            assert_eq!(
+                slot.endpoints[usize::from(dci)]
+                    .as_ref()
+                    .unwrap()
+                    .ring
+                    .buffer
+                    .bytes(),
+                ring
+            );
+            assert_eq!(controller.commands.buffer.bytes(), commands);
+            assert_eq!(model.borrow().seen.len(), seen);
+            assert_eq!(model.borrow().setup.len(), setup_count);
+            assert_eq!(model.borrow().indices[usize::from(dci)], old_index);
+            // An acknowledged Set Dequeue error poisons only its endpoint.
+            let healthy = if dci == 5 { 3 } else { 5 };
+            assert!(controller.endpoint_ready(1, healthy).is_ok());
+            model.borrow_mut().fail = None;
+            assert!(controller.command(0, 0, ENABLE_SLOT << 10).is_ok());
+            assert!(!controller.command_poisoned);
+        }
+    }
+
+    /// Shared class-driver regression fixture: a real submitted TD left
+    /// unresolved by failed Running Stop or Halted Set Dequeue recovery.
     pub(crate) fn controller_with_unresolved_td(
         dma: &mut dyn DmaAllocator,
         buffer: u64,
         length: usize,
         dci: u8,
+        halted: bool,
     ) -> Shared {
+        if halted {
+            let (controller, _) = failed_stall_recovery(dma, buffer, length, dci);
+            return Rc::new(RefCell::new(controller));
+        }
         let (mut controller, model) = cancellation_controller(dma);
         model.borrow_mut().silence_transfer = Some(usize::from(dci));
         model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));

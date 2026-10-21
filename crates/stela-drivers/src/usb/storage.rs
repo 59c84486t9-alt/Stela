@@ -336,7 +336,10 @@ mod tests {
 
     #[test]
     fn poisoned_input_output_or_reset_pipe_prevents_cbw_and_data_buffer_reuse() {
-        for dci in [1, 4, 5] {
+        for (dci, halted) in [1, 4, 5]
+            .into_iter()
+            .flat_map(|dci| [false, true].map(|halted| (dci, halted)))
+        {
             let mut backing = vec![0u64; 64 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives the controller/model and all DMA buffers.
@@ -350,6 +353,7 @@ mod tests {
                 wrapper.physical(),
                 wrapper.len(),
                 dci,
+                halted,
             );
             let mut disk = UsbDisk {
                 controller,
