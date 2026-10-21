@@ -1,9 +1,10 @@
 //! Network adapters as raw Ethernet II links ([`Link`]): Intel I225/I226
 //! ([`igc`]) and virtio-net ([`virtio`]). USB Ethernet adapters are in
-//! [`usb::cdc`](crate::usb::cdc).
+//! [`usb::cdc`](crate::usb::cdc). The Intel 82574L is in [`e1000e`].
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+pub mod e1000e;
 pub mod igc;
 pub mod virtio;
 
