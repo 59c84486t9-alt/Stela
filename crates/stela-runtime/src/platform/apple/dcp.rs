@@ -177,6 +177,22 @@ impl core::fmt::Display for Log {
                 f,
                 "DCP AFK ep={endpoint:#x} {name} lifecycle packet={packet:02x?}"
             ),
+            Log::Afk {
+                endpoint,
+                name,
+                event:
+                    afk::Event::Sent {
+                        interface,
+                        bytes,
+                        packet_type,
+                        category,
+                        command_sequence,
+                        status,
+                    },
+            } => write!(
+                f,
+                "DCP AFK ep={endpoint:#x} {name} sent interface={interface:#x} bytes={bytes:#x} type={packet_type:#x} category={category} command_sequence={command_sequence:x?} status={status:x?}"
+            ),
             Log::Dropped(count) => write!(f, "DCP log dropped {count} entries"),
         }
     }

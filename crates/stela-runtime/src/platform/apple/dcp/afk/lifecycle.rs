@@ -27,9 +27,6 @@ impl Command {
     pub fn decode(packet: &[u8; PACKET_BYTES]) -> Result<Self, &'static str> {
         // AFKEPV2::processSendMessage prepends sequence, flags, interface
         // number and payload length (kernel 0x94c3b6c..0x94c3b84).
-        if packet[1] != 0 {
-            return Err("DCP AFKEPV2 split packet flags are unsupported");
-        }
         if packet[2..4] != [0, 0] {
             return Err("DCP AFKEPV2 AP message targets an unpublished interface");
         }
@@ -101,14 +98,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_interfaces_flags_lengths_and_commands_refuse() {
+    fn unknown_interfaces_lengths_and_commands_refuse() {
         let packet = Command::Pause.packet(0);
-        for (offset, value) in [(1, 1), (2, 1), (4, 8), (8, 1)] {
+        for (offset, value) in [(2, 1), (4, 8), (8, 1)] {
             let mut bad = packet;
             bad[offset] = value;
             assert!(Command::decode(&bad).is_err());
         }
         let mut reserved = packet;
+        reserved[1] = 0xa5; // Original AFKEPV2 receiver ignores this byte.
         reserved[9..].fill(0xa5);
         assert_eq!(Command::decode(&reserved), Ok(Command::Pause));
     }
