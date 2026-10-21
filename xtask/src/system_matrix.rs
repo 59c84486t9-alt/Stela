@@ -1,6 +1,6 @@
 //! The system platform requirement matrix: every architectural AArch64 System
 //! register, field, System instruction, exception class, feature and
-//! system-semantic instruction form that the declared Mac14,3 profile
+//! system-semantic instruction form that the declared Apple CPU profiles
 //! requires, derived from Arm's machine-readable specification (AARCHMRS).
 //!
 //! `cargo xtask system-matrix --archive PATH` regenerates the facts from the
@@ -85,8 +85,30 @@ pub const CHIPS: [Chip; 6] = [
     },
 ];
 
-/// The default CPU: the Mac14,3 (J473AP) M2 Mac mini.
-pub const DEFAULT_CHIP: &str = "apple-m2";
+/// The primary CPU family; the platform variant is M1 Pro J314sAP.
+pub const DEFAULT_CHIP: &str = "apple-m1";
+/// Historical no-chip registry entries were qualified on M2. Changing the
+/// primary platform must never transfer that evidence to another family.
+pub const REGISTRY_BASE_CHIP: &str = "apple-m2";
+
+fn set_primary_profile(profile: &mut Value) -> Result<()> {
+    let profile = profile
+        .as_object_mut()
+        .context("profile is not an object")?;
+    profile.insert("default".into(), DEFAULT_CHIP.into());
+    profile.insert("registry_base_chip".into(), REGISTRY_BASE_CHIP.into());
+    profile.insert(
+        "primary_platform".into(),
+        json!({
+            "model": "MacBookPro18,3",
+            "board": "J314sAP",
+            "soc": "T6000",
+            "variant": "M1 Pro",
+            "cpu_family": DEFAULT_CHIP,
+        }),
+    );
+    Ok(())
+}
 
 /// The exception levels and granules every Apple CPU profile has.
 const BASE: [(&str, &str); 10] = [
@@ -592,7 +614,7 @@ fn profiles(features: &Value) -> Result<(Profiles, Value)> {
             .map(|(name, reason)| json!({"feature": name, "reason": reason}))
             .collect()
     };
-    let decisions = json!({
+    let mut decisions = json!({
         "default": DEFAULT_CHIP,
         "exception_levels": "EL0, EL1 and EL2 with VHE; no EL3, no Secure state",
         "base": named(&BASE),
@@ -600,6 +622,7 @@ fn profiles(features: &Value) -> Result<(Profiles, Value)> {
         "varying": union.varying.iter().collect::<Vec<_>>(),
         "chips": decisions,
     });
+    set_primary_profile(&mut decisions)?;
     Ok((Profiles { union, chips, caps }, decisions))
 }
 

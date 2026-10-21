@@ -1,13 +1,13 @@
 //! Per-chip runs of the runtime's unit tests. `cargo xtask progress` runs
-//! `cargo test -p stela-runtime --lib` once for each chip but the default,
-//! with `STELA_TEST_CHIP` naming it, and records in [`LEDGER`] the tests
+//! `cargo test -p stela-runtime --lib` once for each chip but the historical
+//! M2 registry baseline, with `STELA_TEST_CHIP` naming it, and records in [`LEDGER`] the tests
 //! that passed after building their CPU or machine for that chip: the
 //! runtime's `machine::test_chip` logs each caller's test name to
 //! `STELA_TEST_CHIP_LOG`. A test that fixes its chip, or builds no machine,
 //! is never credited. A test of [`CHIP_INDEPENDENT`] code holds on every
 //! chip. The ledger names the digest of the sources it ran, and a stale
 //! ledger is refused.
-use super::{CHIPS, DEFAULT_CHIP};
+use super::{CHIPS, REGISTRY_BASE_CHIP};
 use crate::tools::{cargo, root};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -119,12 +119,17 @@ fn digest_trees(source_root: &Path, trees: &[&str]) -> Result<String> {
     Ok(sha256(listing.as_bytes()))
 }
 
-/// Run the runtime's tests on every chip but the default and render the
+/// Runtime tests without an override retain their historical M2 scope.
+fn rerun_chips() -> impl Iterator<Item = &'static super::Chip> {
+    CHIPS.iter().filter(|chip| chip.name != REGISTRY_BASE_CHIP)
+}
+
+/// Run the runtime's tests on every chip but the registry baseline and render the
 /// ledger.
 pub fn run() -> Result<String> {
     let directory = tempfile::tempdir()?;
     let mut chips = serde_json::Map::new();
-    for chip in CHIPS.iter().filter(|chip| chip.name != DEFAULT_CHIP) {
+    for chip in rerun_chips() {
         let log = directory.path().join(chip.name);
         let output = cargo()
             .args([
@@ -238,6 +243,17 @@ mod tests {
         fs::write(driver.join("shader.c"), "unsigned shader = 1;\n")?;
         assert_ne!(before, digest_trees(temporary.path(), &["drivers"])?);
         Ok(())
+    }
+
+    #[test]
+    fn primary_m1_gets_a_real_rerun_without_relabeling_the_m2_baseline() {
+        let names: Vec<_> = rerun_chips().map(|chip| chip.name).collect();
+        assert_eq!(
+            names,
+            ["apple-m1", "apple-m3", "apple-m4", "apple-m5", "apple-m6"]
+        );
+        assert!(names.contains(&super::super::DEFAULT_CHIP));
+        assert!(!names.contains(&REGISTRY_BASE_CHIP));
     }
 
     #[test]

@@ -1,12 +1,13 @@
 //! Merge the status registry into the system requirement matrix and render
 //! the README line. Registry entries apply in order, the last matching entry
 //! winning on each chip it names. An entry that names no chips holds on the
-//! default M2, and on another chip for the rows the M2 shares when every test
-//! it cites passed there after consulting that chip (`runs`). A row no entry
+//! historical M2 baseline, and on another chip for the rows the M2 shares
+//! when every cited test passed there after consulting that chip (`runs`). A row no entry
 //! matches on a chip is `open` there and owned by the system engine.
 use super::{
-    CHIPS, DEFAULT_CHIP, MATRIX, Matrix, REGISTRY,
+    CHIPS, DEFAULT_CHIP, MATRIX, Matrix, REGISTRY, REGISTRY_BASE_CHIP,
     runs::{self, LEDGER, Runs},
+    set_primary_profile,
 };
 use crate::tools::root;
 use anyhow::{Context, Result, bail, ensure};
@@ -112,7 +113,7 @@ pub fn registry() -> Result<Vec<Entry>> {
                         Ok(chip.to_owned())
                     })
                     .collect::<Result<_>>()?,
-                None => vec![DEFAULT_CHIP.to_owned()],
+                None => vec![REGISTRY_BASE_CHIP.to_owned()],
             },
             status: status.to_owned(),
             owner: entry["owner"].as_str().unwrap_or(DEFAULT_OWNER).to_owned(),
@@ -187,7 +188,7 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
             CHIPS
                 .iter()
                 .map(|chip| chip.name)
-                .filter(|chip| *chip != DEFAULT_CHIP && !entry.explicit)
+                .filter(|chip| *chip != REGISTRY_BASE_CHIP && !entry.explicit)
                 .map(|chip| {
                     let holds = !entry.tests.is_empty()
                         && entry.tests.iter().all(|test| runs.credits(chip, test));
@@ -224,7 +225,7 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
             // chip, as the last match: an implemented one only where its
             // tests were credited, leaving the row open elsewhere, and any
             // other status, which claims nothing, everywhere.
-            if chips.contains_key(DEFAULT_CHIP) {
+            if chips.contains_key(REGISTRY_BASE_CHIP) {
                 for (chip, holds) in credited {
                     if let Some(winner) = chips.get_mut(*chip) {
                         *winner = (*holds || entry.status != "implemented").then_some(entry);
@@ -258,9 +259,14 @@ pub fn render(matrix: &Matrix, registry: &[Entry], runs: &Runs, _previous: &str)
                 .map(|(chip, entry)| (chip.clone(), status(entry).into()))
                 .collect();
             row["statuses"] = Value::Object(statuses);
+        } else {
+            row.as_object_mut()
+                .context("row is not an object")?
+                .remove("statuses");
         }
     }
     let mut header = matrix.header.clone();
+    set_primary_profile(header.get_mut("profile").context("no profile header")?)?;
     header.insert("assessment".into(), assessment(&rows));
     header.insert(
         "registry".into(),
@@ -460,7 +466,7 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
         let total = count("total") - excluded;
         let name = chip.name.replace("apple-m", "Apple M");
         let marker = if chip.name == DEFAULT_CHIP {
-            " (Mac14,3, above)"
+            " (M1 Pro MacBookPro18,3, above)"
         } else {
             ""
         };
@@ -472,8 +478,8 @@ fn render_readme(readme: &str, matrix: &Value) -> Result<String> {
     }
     table.push_str(&format!(
         "\nRows are the AArch64 requirements of each Apple CPU profile in Arm AARCHMRS \
-         {}; the first table is the Mac14,3 (M2) profile. A row counts on a chip only \
-         when its tests have run on that chip: the M2's tests rerun on every chip \
+         {}; the first table uses the M1 CPU family for M1 Pro MacBookPro18,3 (J314sAP). A row counts on a chip only \
+         when its tests have run on that chip: the historical M2 registry baseline's tests rerun on every other chip \
          ([runs]({LEDGER})) and a chip's own rows need tests of their own. Partial \
          rows earn no credit. Excluded rows are outside the chip's \
          requirements: the feature their condition names is absent from its \
@@ -544,6 +550,76 @@ mod tests {
     }
 
     #[test]
+    fn primary_target_does_not_reassign_historical_registry_evidence() -> Result<()> {
+        assert_ne!(DEFAULT_CHIP, REGISTRY_BASE_CHIP);
+        let entries = registry()?;
+        let implicit: Vec<_> = entries.iter().filter(|entry| !entry.explicit).collect();
+        assert!(!implicit.is_empty());
+        for entry in implicit {
+            assert_eq!(entry.chips, [REGISTRY_BASE_CHIP]);
+        }
+        let text = fs::read_to_string(root().join(MATRIX))?;
+        let mut matrix = parse(&text)?;
+        matrix.rows.retain(|id, _| id == "register:HCR_EL2");
+        let mut implicit = entry("register:*", &[REGISTRY_BASE_CHIP], "implemented");
+        implicit.explicit = false;
+        implicit.tests = vec![TEST.into()];
+        // An uncredited primary family remains open even for an implicit entry.
+        let uncredited: Value = serde_json::from_str(&render(
+            &matrix,
+            std::slice::from_ref(&implicit),
+            &m3_runs()?,
+            "",
+        )?)?;
+        assert_eq!(uncredited["rows"][0]["status"], "open");
+        assert_eq!(uncredited["assessment"]["total"]["open"], 1);
+        assert_eq!(uncredited["profile"]["default"], DEFAULT_CHIP);
+        assert_eq!(
+            uncredited["profile"]["registry_base_chip"],
+            REGISTRY_BASE_CHIP
+        );
+        assert_eq!(
+            uncredited["profile"]["primary_platform"]["variant"],
+            "M1 Pro"
+        );
+        assert_eq!(
+            uncredited["profile"]["primary_platform"]["cpu_family"],
+            "apple-m1"
+        );
+        let m1 = runs::parse(
+            r#"{"sources":{"sha256":"d"},"chips":{"apple-m1":{"credited":
+                ["machine::engine::tests::compiles_blocks_through_the_page_and_reports_unsupported_words"]}}}"#,
+            "d",
+        )?;
+        let qualified: Value = serde_json::from_str(&render(&matrix, &[implicit], &m1, "")?)?;
+        assert_eq!(qualified["rows"][0]["status"], "implemented");
+        assert_eq!(
+            qualified["rows"][0]["statuses"][REGISTRY_BASE_CHIP],
+            "implemented"
+        );
+        assert_eq!(qualified["rows"][0]["statuses"]["apple-m3"], "open");
+        let readme = render_readme(INSTRUCTION_END, &qualified)?;
+        assert!(readme.contains("M1 Pro MacBookPro18,3"));
+        assert!(readme.contains("historical M2 registry baseline"));
+        Ok(())
+    }
+
+    #[test]
+    fn uniform_reassessment_discards_historical_per_chip_statuses() -> Result<()> {
+        let text = fs::read_to_string(root().join(MATRIX))?;
+        let mut matrix = parse(&text)?;
+        matrix.rows.retain(|id, _| id == "register:HCR_EL2");
+        let row = matrix.rows.get_mut("register:HCR_EL2").context("HCR row")?;
+        row["statuses"] = serde_json::json!({"apple-m1":"implemented", "apple-m2":"partial"});
+        let rendered: Value = serde_json::from_str(&render(&matrix, &[], &m3_runs()?, "")?)?;
+        assert!(rendered["rows"][0]["statuses"].is_null());
+        for chip in &CHIPS {
+            assert_eq!(rendered["assessment"]["chips"][chip.name]["open"], 1);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn an_entry_holds_only_on_the_chips_it_names() -> Result<()> {
         let text = fs::read_to_string(root().join(MATRIX))?;
         let mut matrix = parse(&text)?;
@@ -551,7 +627,7 @@ mod tests {
             .rows
             .retain(|id, _| id == "register:HCR_EL2" || id == "register:HCRX_EL2");
         let registry = [
-            entry("register:*", &[DEFAULT_CHIP], "implemented"),
+            entry("register:*", &[REGISTRY_BASE_CHIP], "implemented"),
             entry("register:HCR_EL2", &["apple-m1"], "partial"),
         ];
         let rendered: Value = serde_json::from_str(&render(&matrix, &registry, &m3_runs()?, "")?)?;
@@ -560,7 +636,8 @@ mod tests {
         // HCR_EL2 is on every chip: implemented on the M2, partial on the M1
         // and open on the chips no entry names.
         let hcr = row("register:HCR_EL2");
-        assert_eq!(hcr["status"], "implemented");
+        assert_eq!(hcr["status"], "partial");
+        assert_eq!(hcr["statuses"]["apple-m2"], "implemented");
         assert_eq!(hcr["statuses"]["apple-m1"], "partial");
         assert_eq!(hcr["statuses"]["apple-m3"], "open");
         // HCRX_EL2 needs FEAT_HCX (M3 on): the M2 entry cannot reach it.
@@ -580,7 +657,7 @@ mod tests {
         matrix
             .rows
             .retain(|id, _| id == "register:HCR_EL2" || id == "register:HCRX_EL2");
-        let mut implicit = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        let mut implicit = entry("register:*", &[REGISTRY_BASE_CHIP], "implemented");
         implicit.explicit = false;
         implicit.tests = vec![TEST.into()];
         let rendered: Value =
@@ -604,10 +681,10 @@ mod tests {
         let text = fs::read_to_string(root().join(MATRIX))?;
         let mut matrix = parse(&text)?;
         matrix.rows.retain(|id, _| id == "register:HCR_EL2");
-        let mut implemented = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        let mut implemented = entry("register:*", &[REGISTRY_BASE_CHIP], "implemented");
         implemented.explicit = false;
         implemented.tests = vec![TEST.into()];
-        let mut refused = entry("register:HCR_EL2", &[DEFAULT_CHIP], "refused");
+        let mut refused = entry("register:HCR_EL2", &[REGISTRY_BASE_CHIP], "refused");
         refused.explicit = false;
         let render = |registry: &[Entry]| -> Result<Value> {
             Ok(serde_json::from_str(&render(
@@ -619,7 +696,7 @@ mod tests {
         };
         // A refusal for the M2 holds on every chip, though an earlier entry
         // was credited on the M3.
-        let mut first = entry("register:*", &[DEFAULT_CHIP], "implemented");
+        let mut first = entry("register:*", &[REGISTRY_BASE_CHIP], "implemented");
         first.explicit = false;
         first.tests = vec![TEST.into()];
         let rendered = render(&[first, refused])?;
@@ -627,7 +704,7 @@ mod tests {
         assert!(rendered["rows"][0]["statuses"].is_null());
         // An uncredited implemented entry leaves the row open on the M3
         // instead of falling back to an earlier credited one.
-        let mut later = entry("register:HCR_EL2", &[DEFAULT_CHIP], "implemented");
+        let mut later = entry("register:HCR_EL2", &[REGISTRY_BASE_CHIP], "implemented");
         later.explicit = false;
         later.tests = vec!["crates/stela-runtime/src/machine/engine.rs#illegal_returns_set_il_and_the_next_instruction_takes_ec_0x0e".into()];
         let rendered = render(&[implemented, later])?;
