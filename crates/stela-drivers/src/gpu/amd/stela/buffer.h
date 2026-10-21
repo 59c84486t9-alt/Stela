@@ -57,6 +57,15 @@ enum stela_amd_buffer_status
 stela_amd_query_raw_buffer_facts(const struct radeon_info *info,
                                 struct stela_amd_raw_buffer_facts *facts);
 
+/* The same device/view/address validation used by the RAW builder, without its
+ * UINT32 NUM_RECORDS restriction. Returns the owner's complete GPU VA, preserving
+ * its canonical form; no descriptor, allocation or residency claim is created.
+ * The current shared address encoding remains bounded to 48 bits. */
+enum stela_amd_buffer_status
+stela_amd_buffer_view_address(const struct radeon_info *info,
+                              const struct stela_amd_buffer_view *view,
+                              uint64_t *address);
+
 /* Builds exactly the retained RAW descriptor (R32_FLOAT carrier, not a Metal
  * float-format capability). The output stays unchanged on errors. Empty/nil
  * views are refused; unbinding needs its own explicit frontend operation.

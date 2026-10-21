@@ -144,9 +144,29 @@ test_errors(void)
    assert(!memcmp(&facts, &before, sizeof(facts)));
 }
 
+static void
+test_view_address(void)
+{
+   const struct radeon_info info = device(GFX11, CHIP_NAVI31, true);
+   struct stela_amd_buffer_view request = view();
+   request.range = UINT64_C(0x100000000);
+   uint64_t address = UINT64_C(0xa5a5a5a5a5a5a5a5);
+   assert(stela_amd_buffer_view_address(&info, &request, &address) == STELA_AMD_BUFFER_OK);
+   assert(address == request.allocation_va + request.offset);
+   uint32_t descriptor[4];
+   assert(stela_amd_build_raw_buffer(&info, &request, descriptor) == STELA_AMD_BUFFER_UNSUPPORTED);
+   assert(stela_amd_build_raw_buffer(&info, &request, NULL) == STELA_AMD_BUFFER_INVALID);
+   const uint64_t before = address;
+   request.offset++;
+   assert(stela_amd_buffer_view_address(&info, &request, &address) == STELA_AMD_BUFFER_INVALID);
+   assert(address == before);
+   assert(stela_amd_buffer_view_address(&info, &request, NULL) == STELA_AMD_BUFFER_INVALID);
+}
+
 int main(void)
 {
    test_targets();
    test_errors();
+   test_view_address();
    return 0;
 }

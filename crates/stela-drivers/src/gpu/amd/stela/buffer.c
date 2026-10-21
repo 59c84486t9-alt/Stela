@@ -87,22 +87,22 @@ allocation_in_vm(const struct radeon_info *info, uint64_t address, uint64_t byte
    return false;
 }
 
-enum stela_amd_buffer_status
-stela_amd_build_raw_buffer(const struct radeon_info *info,
-                           const struct stela_amd_buffer_view *view,
-                           uint32_t descriptor[4])
+static enum stela_amd_buffer_status
+validate_view(const struct radeon_info *info,
+               const struct stela_amd_buffer_view *view,
+               uint64_t max_range, uint64_t *result)
 {
    enum stela_amd_buffer_status status = validate_device(info);
    if (status != STELA_AMD_BUFFER_OK)
       return status;
-   if (!view || !descriptor || !view->allocation_va || !view->allocation_bytes ||
+   if (!view || !result || !view->allocation_va || !view->allocation_bytes ||
        !view->range || !power_of_two(view->required_alignment) ||
        (view->allocation_va & (info->virtual_address_alignment - 1)) ||
        view->offset > view->allocation_bytes || view->range > view->allocation_bytes - view->offset ||
        view->offset > UINT64_MAX - view->allocation_va ||
        !allocation_in_vm(info, view->allocation_va, view->allocation_bytes))
       return STELA_AMD_BUFFER_INVALID;
-   if (view->range > UINT32_MAX)
+   if (view->range > max_range)
       return STELA_AMD_BUFFER_UNSUPPORTED;
    const uint64_t address = view->allocation_va + view->offset;
    if ((address & (view->required_alignment - 1)) || !raw_address(address))
@@ -111,6 +111,28 @@ stela_amd_build_raw_buffer(const struct radeon_info *info,
    const uint64_t low = address & RAW_ADDRESS_MASK;
    if (view->range - 1 > RAW_ADDRESS_MASK - low)
       return STELA_AMD_BUFFER_UNSUPPORTED;
+   *result = address;
+   return STELA_AMD_BUFFER_OK;
+}
+
+enum stela_amd_buffer_status
+stela_amd_buffer_view_address(const struct radeon_info *info,
+                              const struct stela_amd_buffer_view *view,
+                              uint64_t *address)
+{
+   return validate_view(info, view, UINT64_MAX, address);
+}
+
+enum stela_amd_buffer_status
+stela_amd_build_raw_buffer(const struct radeon_info *info,
+                           const struct stela_amd_buffer_view *view,
+                           uint32_t descriptor[4])
+{
+   uint64_t address;
+   enum stela_amd_buffer_status status =
+      validate_view(info, view, UINT32_MAX, descriptor ? &address : NULL);
+   if (status != STELA_AMD_BUFFER_OK)
+      return status;
    uint32_t result[4];
    ac_build_raw_buffer_descriptor(info->gfx_level, info->compiler_info.has_desc_resource_level,
                                   address, (uint32_t)view->range, result);
