@@ -793,3 +793,135 @@ fn original_llb_controller_bindings_cover_every_sequence_and_preserve_field_geom
     assert_eq!(branch_target(&bytes, 0x4d648), 0x4e244);
     assert_eq!(branch_target(&bytes, 0x4d654), 0x4e28c);
 }
+
+fn kernelcache() -> Vec<u8> {
+    let path = std::env::var("STELA_TEST_PMGR_KERNELCACHE")
+        .expect("pinned original 26A434 J473 kernelcache path");
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d"
+    );
+    bytes
+}
+
+#[test]
+#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+fn original_kernel_restore_orders_gpce_readiness_before_the_complete_ps_sweep() {
+    let bytes = kernelcache();
+    for (start, end, digest) in [
+        (
+            0x2fa3c80,
+            0x2fa3e18,
+            "8bb99f1c33ae6f42df0db6937a58460a61646296fc52dab7bffa166e8920d1ea",
+        ),
+        (
+            0x2f9cb9c,
+            0x2f9cf8c,
+            "a5b2ec3856fb14903ebc4d403351955835917808b92e102cdbb458670f5090d3",
+        ),
+        (
+            0x2b87598,
+            0x2b879d4,
+            "640e72e8fc67dd0a81fce49007c94df1f507dbb54f66440767b6b1f499747ccd",
+        ),
+        (
+            0x2b879d4,
+            0x2b87dfc,
+            "05c51bdfe2b2b51e09572bf8410c2ba7751c1e72db81d9420c977ea6bebe913e",
+        ),
+        (
+            0x2f9cab4,
+            0x2f9cb9c,
+            "65983b228a6b30df77b909cb30b147958bcd7811676c4b43ab72e8adc38edbb8",
+        ),
+        (
+            0x2ba060c,
+            0x2ba0a2c,
+            "8ba63d6ef699b74bfe9b2a38429022c957796ca6f13615a09b4ef5d5958d44ad",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    // Static superclass tables include the two metadata words; instance
+    // dispatch slots start after those words. Keep that distinction exact.
+    assert_eq!(quad(&bytes, 0x134e3e8 + 0x8e0), 0x80115f0802f9cb9c);
+    assert_eq!(quad(&bytes, 0x1266ef8 + 0x8e0), 0x80115f0802b87598);
+    assert_eq!(quad(&bytes, 0x134f6e8 + 16 + 0xd30), 0x8011abb302b89d28);
+    assert_eq!(quad(&bytes, 0x134f6e8 + 16 + 0xd28), 0x8011dc0802fa768c);
+    assert_eq!(quad(&bytes, 0x134e3e8 + 0xd38), 0x8011dc0802f9cab4);
+    for (offset, opcode) in [
+        (0x2f9cbe8, 0x52800001), // enableCPUComplex(0,true)
+        (0x2f9cbec, 0x52800022),
+        (0x2f9cc28, 0x52800021), // enableCPUComplex(1,true)
+        (0x2f9cc2c, 0x52800022),
+        (0x2f9cb10, 0x528001e9), // low4 enable request f
+        (0x2f9cb40, 0x121c6c08), // preserve all bits outside low4
+        (0x2f9cb74, 0x52800202), // wait uses mask bit4
+        (0x2f9cb78, 0x52800003), // expected masked value0
+    ] {
+        assert_eq!(
+            word(&bytes, offset),
+            opcode,
+            "kernel restore at {offset:#x}"
+        );
+    }
+    assert_eq!(branch_target(&bytes, 0x2b87674), 0x2b879d4);
+    assert_eq!(branch_target(&bytes, 0x2b87c10), 0x2ba060c);
+    // The readback contract is not a native instruction-retirement oracle,
+    // and the later sweep's writes cannot supply earlier physical state.
+}
+
+#[test]
+#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary() {
+    let bytes = kernelcache();
+    for (start, end, digest) in [
+        (
+            0x2bb7188,
+            0x2bb7224,
+            "7dd0ae8590ddf759cb3f968e32642943d9529cb66ac9822465dd3b2393dc7769",
+        ),
+        (
+            0x2fa5a44,
+            0x2fa5b3c,
+            "6a05ae9c464202826e4fa7f62fa5e55e7b6a31986531a1508232faedea06c034",
+        ),
+        (
+            0x2ba6f4c,
+            0x2ba6fd4,
+            "aa69da33d41d23899cfbaed4514b7d1422f5f2f243d57791b454440421f29433",
+        ),
+        (
+            0x2ba6fd4,
+            0x2ba713c,
+            "eed89f813082e4f44c25b6092f868fd5f7872a70bd339f5ae99e50ff31b0d788",
+        ),
+        (
+            0x2fa31bc,
+            0x2fa3620,
+            "33e30d4cf0b5bb05b04e723778217f3a9075b778267755532b6bba8503658d10",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    assert_eq!(quad(&bytes, 0x134f6e8 + 16 + 0xa78), 0x8011233a02fa5a44);
+    assert_eq!(quad(&bytes, 0x1351a98), 0x8011000002ba6f4c);
+    for (offset, opcode) in [
+        (0x2fa5a60, 0x52900008), // nonzero index offset8000
+        (0x2fa5a64, 0x52880009), // index0 offset4000
+        (0x2fa5a8c, 0x52800c61), // original RegMap63
+        (0x2fa5ad0, 0x32000003), // preserve original control, set bit0
+        (0x2fa5b10, 0x52800042), // wait mask2
+        (0x2ba704c, 0x6a15001f), // test actual physical read against mask
+        (0x2fa35ac, 0x52800c61), // initRegMaps63 -> original reg41
+        (0x2fa35b0, 0x52800522),
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "CIO trigger at {offset:#x}");
+    }
+    assert_eq!(branch_target(&bytes, 0x2fa5b34), 0x2fb2380);
+    assert_eq!(branch_target(&bytes, 0x2ba7048), 0x2bcd7ec);
+    // Mask clearance, timeout and workloop wake behavior are actual driver
+    // requirements. None identifies a completed native sequence or its final
+    // PS values without physical trigger-to-sequence and retirement evidence.
+}
