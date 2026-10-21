@@ -115,6 +115,7 @@ amd_common_files = files(
   'ac_guardband.h',
   'ac_gather_context_rolls.c',
   'ac_gpu_info.c',
+  'ac_gpu_info_compute.c',
   'ac_gpu_info.h',
   'ac_surface.c',
   'ac_surface.h',
@@ -236,11 +237,12 @@ if with_stela_amd
   libamd_compiler_support = static_library(
     'amd_compiler_support',
     files('ac_compiler_info.c', 'ac_shader_args.c', 'ac_shader_util.c', 'amd_family.c',
+          'ac_gpu_info_compute.c', 'ac_binary.c',
           'ac_descriptors.c', 'ac_formats.c', 'nir/ac_nir.c',
           'nir/ac_nir_lower_global_access.c', 'nir/ac_nir_lower_intrinsics_to_args.c',
           'nir/ac_nir_opt_shared_append.c') +
       [gfx10_format_table_c] +
-      (with_stela_amd_llvm ? files('ac_binary.c', 'nir/ac_nir_assign_io_locations.c') : []),
+      (with_stela_amd_llvm ? files('nir/ac_nir_assign_io_locations.c') : []),
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_nir_headers, idep_amd_generated_headers,
                     dep_llvm.partial_dependency(compile_args : true, includes : true)],

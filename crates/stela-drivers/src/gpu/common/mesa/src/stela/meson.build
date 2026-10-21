@@ -297,6 +297,25 @@ if with_stela_amd
     link_with : [libamd_command_support],
   )
 
+  stela_amd_compute = static_library(
+    'stela_amd_compute',
+    ['../../../../amd/stela/compute.c', '../../../../amd/stela/compute_policy.c'],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_nir_headers, idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_buffer, stela_amd_commands, libamd_compiler_support],
+    c_args : ['-Werror'],
+  )
+  stela_amd_compute_probe = executable(
+    'stela_amd_compute_probe',
+    '../../../../amd/tests/compute_test.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
+                   (with_stela_amd_llvm ? [dep_llvm] : []),
+    link_with : [stela_amd_compute],
+    c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=' + (with_stela_amd_llvm ? '1' : '0')],
+  )
+  test('stela_amd_compute', stela_amd_compute_probe, suite : 'stela')
+
   stela_amd_commands_probe = executable(
     'stela_amd_commands_probe',
     'amd_commands_probe.c',
