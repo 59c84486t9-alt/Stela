@@ -313,6 +313,15 @@ impl FirmwarePower {
                 .into_iter()
                 .map(|word| word.range()),
         );
+        for pipe in [0, 1] {
+            words.extend(
+                crate::platform::apple::agx::work_decode::render_context::native_words(
+                    policy, pipe,
+                )
+                .into_iter()
+                .map(|word| word.range()),
+            );
+        }
         let mut targets = Vec::new();
         for (offset, width) in words {
             let physical = self
@@ -784,11 +793,17 @@ mod tests {
         reads: usize,
         writes: usize,
         fail_write: Option<usize>,
+        fail_read: Option<usize>,
     }
     impl Memory for TraceRam {
         fn read(&mut self, pa: u64, out: &mut [u8]) -> bool {
             if (DATA..DATA + 0x8000).contains(&pa) {
+                let at = self.reads;
                 self.reads += 1;
+                if self.fail_read == Some(at) {
+                    self.fail_read = None;
+                    return false;
+                }
             }
             self.ram.read(pa, out)
         }
@@ -844,6 +859,7 @@ mod tests {
             reads: 0,
             writes: 0,
             fail_write: None,
+            fail_read: None,
         }
     }
     fn io<R>(sgx: &mut Sgx, memory: &mut TraceRam, f: impl FnOnce(&mut Port<'_, '_>) -> R) -> R {
@@ -862,6 +878,419 @@ mod tests {
         native.work.control = Some(0);
         native.work.context_mask = Some(1 << 9);
     }
+    struct FailMask<T> {
+        inner: T,
+        fail: bool,
+        target: u32,
+    }
+    impl<T: crate::platform::apple::agx::work_decode::render_context::Access>
+        crate::platform::apple::agx::work_decode::render_context::Access for FailMask<T>
+    {
+        fn program(&self) -> crate::platform::apple::agx::work_decode::render_context::Program {
+            self.inner.program()
+        }
+        fn memory(&mut self) -> &mut dyn crate::platform::apple::agx::ring::Shared {
+            self.inner.memory()
+        }
+        fn begin(
+            &mut self,
+            s: &Submission,
+            f: &crate::platform::apple::agx::work_decode::Frame,
+            l: Lease,
+            id: &crate::platform::apple::agx::work_decode::render_context::Identity,
+            c: u8,
+        ) -> Result<(), &'static str> {
+            self.inner.begin(s, f, l, id, c)
+        }
+        fn read_epoch(&mut self, p: u8) -> Result<u8, &'static str> {
+            self.inner.read_epoch(p)
+        }
+        fn write_epoch(&mut self, p: u8, v: u8) -> Result<(), &'static str> {
+            self.inner.write_epoch(p, v)
+        }
+        fn read_mask(&mut self) -> Result<u64, &'static str> {
+            self.inner.read_mask()
+        }
+        fn read_mirror(&mut self) -> Result<u64, &'static str> {
+            self.inner.read_mirror()
+        }
+        fn write_native(
+            &mut self,
+            w: crate::platform::apple::agx::work_decode::ta::Word,
+            v: u64,
+        ) -> Result<(), &'static str> {
+            if self.fail
+                && w == crate::platform::apple::agx::work_decode::ta::Word::new(self.target, 8)
+            {
+                self.fail = false;
+                return Err("context mask native fault before effect");
+            }
+            self.inner.write_native(w, v)
+        }
+        fn write_slot_status(&mut self, l: Lease, v: u32) -> Result<(), &'static str> {
+            self.inner.write_slot_status(l, v)
+        }
+    }
+    #[test]
+    fn actual_render_context_retains_epoch_context_and_original_mask_read_across_faults() {
+        use crate::platform::apple::agx::{
+            channel::Record,
+            work_decode::{
+                render_context::{Context, G13XVariant, Program},
+                resources::Outcome,
+                ta, three_d,
+            },
+        };
+        for (family, variant, mode) in [
+            (&generation::G13G, None, 0u32),
+            (&generation::G13X, Some(G13XVariant::A000), 3),
+            (&generation::G13X, Some(G13XVariant::A000), 2),
+            (&generation::G13X, Some(G13XVariant::B000), 3),
+            (&generation::G13X, Some(G13XVariant::C000), 3),
+            (&generation::G14G, None, 0),
+        ] {
+            for kind in [CommandKind::Ta, CommandKind::ThreeD] {
+                for clear in [false, true] {
+                    let mut sgx = gpu(family);
+                    let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                    let mcc = cache();
+                    let owner = power
+                        .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+                        .unwrap();
+                    let mut memory = ram();
+                    mapping(&mut memory.ram, VA + 0x1c000, SGX + 0x1c000, true);
+                    let mut input = submission();
+                    input.command.kind = kind;
+                    let pipe = u8::from(kind == CommandKind::ThreeD);
+                    let lease = Lease { pipe, slot: 2 };
+                    let (record, scene_at, ctx_at, epoch_at, flag_at, select_at, status_at) =
+                        if pipe == 0 {
+                            (Record::SetupTa, 0x1c, 0x3c, 0x2c, 0x40, 0x44, 0x48)
+                        } else {
+                            (Record::Setup3d, 0x14, 0x54, 0x44, 0x58, 0x5c, 0x60)
+                        };
+                    let mut bytes = alloc::vec![0;record.bytes() as usize];
+                    bytes[..4].copy_from_slice(&(if pipe == 0 { 5u32 } else { 7 }).to_le_bytes());
+                    bytes[4..0xc].copy_from_slice(&0x2800u64.to_le_bytes());
+                    bytes[0xc..0x14].copy_from_slice(&0x2a00u64.to_le_bytes());
+                    bytes[scene_at..scene_at + 8].copy_from_slice(&0x2500u64.to_le_bytes());
+                    bytes[ctx_at..ctx_at + 4].copy_from_slice(&input.context.to_le_bytes());
+                    bytes[epoch_at..epoch_at + 8].copy_from_slice(&0x2400u64.to_le_bytes());
+                    bytes[flag_at..flag_at + 4].copy_from_slice(&u32::from(!clear).to_le_bytes());
+                    bytes[select_at..select_at + 4].copy_from_slice(&0x39u32.to_le_bytes());
+                    bytes[status_at..status_at + 4].copy_from_slice(&0x12345678u32.to_le_bytes());
+                    assert!(memory.ram.write(DATA + input.stream, &bytes));
+                    memory.ram.put_u64(DATA + 0x2430, 1);
+                    let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                        .unwrap()
+                        .unwrap();
+                    let program = if let Some(variant) = variant {
+                        let root = crate::platform::apple::agx::initdata::Root {
+                            rings: 0x2100,
+                            page_1660: 1,
+                            object_358: 2,
+                            object_848: 3,
+                            object_928: 4,
+                            object_930: 5,
+                            object_368: 6,
+                            config: [0xff; 0x68],
+                        };
+                        memory.ram.put_u64(DATA + 0x2100, 0x4000);
+                        assert!(memory.ram.write(DATA + 0x50d4, &mode.to_le_bytes()));
+                        let program = io(&mut sgx, &mut memory, |port| {
+                            Program::g13x(variant, &root, port)
+                        })
+                        .unwrap();
+                        memory.ram.put_u64(DATA + 0x2100, 0x6000);
+                        assert!(memory.ram.write(DATA + 0x50d4, &0u32.to_le_bytes()));
+                        program
+                    } else {
+                        Program::fixed(
+                            owner.policy,
+                            if owner.policy == Policy::G13G {
+                                *b"b100"
+                            } else {
+                                *b"b000"
+                            },
+                        )
+                        .unwrap()
+                    };
+                    let mut prefix = Context::new(&input, &frame, lease, program).unwrap();
+                    memory.fail_read = Some(memory.reads);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| prefix
+                            .advance(&mut owner.render_context_access(port, program)))
+                        .is_err()
+                    );
+                    assert_eq!(power.native.borrow().work.render.epoch(pipe as usize), 0);
+                    let counts = (memory.reads, memory.writes);
+                    let mut duplicate = Context::new(&input, &frame, lease, program).unwrap();
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| duplicate
+                            .advance(&mut owner.render_context_access(port, program)))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    // Zero-store cancellation still invalidates the original
+                    // pending reader. A fresh helper must reserve anew.
+                    if pipe == 0 {
+                        owner.cancel_ta_parameters(&input, lease, &Outcome::Aborted)
+                    } else {
+                        owner.cancel_three_d_parameters(&input, lease, &Outcome::Aborted)
+                    }
+                    .unwrap();
+                    assert_eq!(
+                        io(&mut sgx, &mut memory, |port| prefix
+                            .advance(&mut owner.render_context_access(port, program))),
+                        Err("GFX render context was canceled by its native owner")
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    let mut prefix = Context::new(&input, &frame, lease, program).unwrap();
+                    // Actual PIO translation faults after the private epoch
+                    // store, while the context register still remains unknown.
+                    mapping(&mut memory.ram, VA + 0x10000, SGX + 0x18000, true);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| prefix
+                            .advance(&mut owner.render_context_access(port, program)))
+                        .is_err()
+                    );
+                    let context_word = ta::Word::new(if pipe == 0 { 0x10208 } else { 0x10210 }, 4);
+                    assert_eq!(power.native.borrow().work.render.epoch(pipe as usize), 4);
+                    assert_eq!(power.native.borrow().work.render.value(context_word), None);
+                    memory.ram.put_u64(DATA + 0x2430, 2); // cannot redirect captured index
+                    mapping(&mut memory.ram, VA + 0x10000, SGX + 0x10000, true);
+                    let error = io(&mut sgx, &mut memory, |port| {
+                        prefix.advance(&mut owner.render_context_access(port, program))
+                    })
+                    .unwrap_err();
+                    assert_eq!(
+                        error,
+                        "GFX render native context-mask initial value is not qualified"
+                    );
+                    let low = if owner.policy == Policy::G13X {
+                        u32::from(lease.slot) | (u32::from(pipe) << 4)
+                    } else {
+                        0x39
+                    };
+                    assert_eq!(
+                        power.native.borrow().work.render.value(context_word),
+                        Some(u64::from(low | (input.context << 8)))
+                    );
+                    assert_eq!(power.native.borrow().work.render.epoch(pipe as usize), 4);
+                    let counts = (memory.reads, memory.writes);
+                    let mut duplicate = Context::new(&input, &frame, lease, program).unwrap();
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| duplicate
+                            .advance(&mut owner.render_context_access(port, program)))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    let foreign_program = if owner.policy == Policy::G13X {
+                        let variant = if variant == Some(G13XVariant::B000) {
+                            G13XVariant::C000
+                        } else {
+                            G13XVariant::B000
+                        };
+                        let root = crate::platform::apple::agx::initdata::Root {
+                            rings: 0,
+                            page_1660: 1,
+                            object_358: 2,
+                            object_848: 3,
+                            object_928: 4,
+                            object_930: 5,
+                            object_368: 6,
+                            config: [0; 0x68],
+                        };
+                        io(&mut sgx, &mut memory, |port| {
+                            Program::g13x(variant, &root, port)
+                        })
+                        .unwrap()
+                    } else {
+                        Program::fixed(
+                            if owner.policy == Policy::G13G {
+                                Policy::G14G
+                            } else {
+                                Policy::G13G
+                            },
+                            if owner.policy == Policy::G13G {
+                                *b"b000"
+                            } else {
+                                *b"b100"
+                            },
+                        )
+                        .unwrap()
+                    };
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| prefix.advance(
+                            &mut owner.render_context_access(port, foreign_program)
+                        ))
+                        .is_err()
+                    );
+                    let mut foreign = Context::new(&input, &frame, lease, foreign_program).unwrap();
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| foreign.advance(
+                            &mut owner.render_context_access(port, foreign_program)
+                        ))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    let active = LifecycleState {
+                        powered: true,
+                        clocked: true,
+                        quiesced: false,
+                        reset: false,
+                        retention: false,
+                    };
+                    let gated = LifecycleState {
+                        clocked: false,
+                        ..active
+                    };
+                    let mut latch = InterruptLatch::new();
+                    let mut access = Access::new(0, 0, &mut latch);
+                    sgx.check_lifecycle(gated).unwrap();
+                    sgx.set_lifecycle(gated, &mut access);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| prefix
+                            .advance(&mut owner.render_context_access(port, program)))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    sgx.check_lifecycle(active).unwrap();
+                    sgx.set_lifecycle(active, &mut access);
+                    let original =
+                        (1u64 << 55) | (1 << 9) | if clear { 1 << input.context } else { 0 };
+                    power.native.borrow_mut().work.context_mask = Some(original); // captured test fixture, not reset authority
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| prefix.advance(
+                            &mut FailMask {
+                                inner: owner.render_context_access(port, program),
+                                fail: true,
+                                target: 0x17610
+                            }
+                        ))
+                        .is_err()
+                    );
+                    power.native.borrow_mut().work.context_mask = Some(u64::MAX);
+                    let expected = if clear {
+                        original & !(1 << input.context)
+                    } else {
+                        original | (1 << input.context)
+                    };
+                    let old_mirror = 1 << 52;
+                    if program.merge_mirror() {
+                        // a000 mode 3 reads the legacy mask only AFTER the
+                        // primary store, through its distinct physical page.
+                        mapping(&mut memory.ram, VA + 0x4000, SGX + 0x8000, true);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| prefix
+                                .advance(&mut owner.render_context_access(port, program)))
+                            .is_err()
+                        );
+                        assert_eq!(power.native.borrow().work.context_mask, Some(expected));
+                        mapping(&mut memory.ram, VA + 0x4000, SGX + 0x4000, true);
+                        assert_eq!(
+                            io(&mut sgx, &mut memory, |port| prefix
+                                .advance(&mut owner.render_context_access(port, program))),
+                            Err("GFX render native mirror-mask initial value is not qualified")
+                        );
+                        power.native.borrow_mut().work.legacy_mask = Some(old_mirror);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| prefix.advance(
+                                &mut FailMask {
+                                    inner: owner.render_context_access(port, program),
+                                    fail: true,
+                                    target: 0x7610
+                                }
+                            ))
+                            .is_err()
+                        );
+                        power.native.borrow_mut().work.legacy_mask = Some(u64::MAX);
+                        power.native.borrow_mut().work.context_mask = Some(0x1234); // already committed primary must not replay
+                    }
+                    io(&mut sgx, &mut memory, |port| {
+                        prefix.advance(&mut owner.render_context_access(port, program))
+                    })
+                    .unwrap();
+                    let expected = if clear {
+                        original & !(1 << input.context)
+                    } else {
+                        original | (1 << input.context)
+                    };
+                    assert!(prefix.completed());
+                    assert_eq!(
+                        power.native.borrow().work.context_mask,
+                        Some(if program.merge_mirror() {
+                            0x1234
+                        } else {
+                            expected
+                        })
+                    );
+                    assert_eq!(
+                        power.native.borrow().work.legacy_setup,
+                        if owner.policy == Policy::G13X {
+                            Some(0x100)
+                        } else {
+                            None
+                        }
+                    );
+                    assert_eq!(
+                        power.native.borrow().work.legacy_mask,
+                        if owner.policy == Policy::G13X {
+                            Some(if program.merge_mirror() {
+                                expected | old_mirror | (1 << input.context)
+                            } else {
+                                expected
+                            })
+                        } else {
+                            None
+                        }
+                    );
+                    assert_eq!(power.native.borrow().work.render.epoch(pipe as usize), 4);
+                    assert_eq!(
+                        power
+                            .native
+                            .borrow()
+                            .work
+                            .render
+                            .status(usize::from(lease.slot) + usize::from(pipe) * 3),
+                        Some(0x12345678)
+                    );
+                    let counts = (memory.reads, memory.writes);
+                    io(&mut sgx, &mut memory, |port| {
+                        prefix.advance(&mut owner.render_context_access(port, program))
+                    })
+                    .unwrap();
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    // Complete parameters use the same full snapshot; the
+                    // common prefix grants no trigger/completion/abort ACK.
+                    io(&mut sgx, &mut memory, |port| {
+                        if pipe == 0 {
+                            ta::Parameters::new(&input, &frame, lease, owner.policy)
+                                .unwrap()
+                                .advance(&mut owner.ta_parameter_access(port))
+                        } else {
+                            three_d::Parameters::new(&input, &frame, lease, owner.policy)
+                                .unwrap()
+                                .advance(&mut owner.three_d_parameter_access(port))
+                        }
+                    })
+                    .unwrap();
+                    let cancel = if pipe == 0 {
+                        owner.cancel_ta_parameters(&input, lease, &Outcome::Aborted)
+                    } else {
+                        owner.cancel_three_d_parameters(&input, lease, &Outcome::Aborted)
+                    };
+                    assert_eq!(
+                        cancel,
+                        Err("GFX render context abort effects are not qualified")
+                    );
+                    assert!(power.check_reset().is_err());
+                    assert_eq!(power.native.borrow().work.control, None);
+                }
+            }
+        }
+    }
+
     #[test]
     fn actual_3d_parameter_owner_retains_scene_store_then_ram_fault_and_excludes_ta() {
         use crate::platform::apple::agx::work_decode::three_d;

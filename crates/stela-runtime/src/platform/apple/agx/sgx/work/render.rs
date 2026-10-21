@@ -3,6 +3,7 @@
 //! No trigger or backend invocation is provided by this configuration phase.
 
 mod binding;
+mod context;
 pub use binding::TaGeometryBinding;
 
 use super::FirmwareWork;
@@ -29,6 +30,7 @@ struct Run {
     words: Vec<Word>,
     valid: Rc<Cell<bool>>,
     binding_issued: Cell<bool>,
+    prefix: Option<context::Owner>,
 }
 impl Drop for Run {
     fn drop(&mut self) {
@@ -41,6 +43,7 @@ pub(super) struct Registers {
     // An absent word remains unknown. This is native configuration, not a
     // RAM substitute or readable register image.
     stored: Vec<(Word, u64)>,
+    context: context::Book,
     #[cfg(test)]
     pub(super) writes: usize,
 }
@@ -53,6 +56,14 @@ impl Registers {
             .iter()
             .find(|(stored, _)| *stored == word)
             .map(|(_, value)| *value)
+    }
+    #[cfg(test)]
+    pub(super) fn epoch(&self, pipe: usize) -> u8 {
+        self.context.epochs[pipe]
+    }
+    #[cfg(test)]
+    pub(super) fn status(&self, index: usize) -> Option<u32> {
+        self.context.status[index]
     }
     #[cfg(test)]
     pub(super) fn value(&self, word: Word) -> Option<u64> {
@@ -262,6 +273,13 @@ impl FirmwareWork {
         if run.submission != *submission || run.lease != lease {
             return Err("GFX render cancellation differs from its accepted native owner");
         }
+        if run
+            .prefix
+            .as_ref()
+            .is_some_and(|prefix| prefix.committed != 0)
+        {
+            return Err("GFX render context abort effects are not qualified");
+        }
         native.work.render.run = None;
         Ok(())
     }
@@ -330,6 +348,17 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
         let registers = &mut native.work.render;
         if let Some(run) = &registers.run {
             return if run.submission == *submission && run.lease == lease && run.frame == *frame {
+                if run.prefix.as_ref().is_some_and(|prefix| {
+                    prefix.committed
+                        != crate::platform::apple::agx::work_decode::render_context::native_words(
+                            self.owner.policy,
+                            lease.pipe,
+                        )
+                        .len() as u8
+                            + 2
+                }) {
+                    return Err("GFX native render parameters precede complete common context");
+                }
                 Ok(())
             } else {
                 Err("GFX render native parameters still belong to another command")
@@ -342,6 +371,7 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
             next: 0,
             valid: Rc::new(Cell::new(true)),
             binding_issued: Cell::new(false),
+            prefix: None,
             words: match self.pipeline {
                 Kind::Ta => ta::words(self.owner.policy),
                 Kind::ThreeD => {
@@ -354,6 +384,33 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
     }
     fn write_native(&mut self, word: Word, value: u64) -> Result<(), &'static str> {
         let (offset, width) = word.range();
+        {
+            let native = self.owner.power.native.borrow();
+            let run = native
+                .work
+                .render
+                .run
+                .as_ref()
+                .ok_or("GFX render native parameter store has no accepted owner")?;
+            if run.submission.command.kind != self.pipeline
+                || run.words.get(run.next) != Some(&word)
+                || (width == 4 && value > u64::from(u32::MAX))
+                || (offset == 0x11000 && value != 0x100)
+                || run.prefix.as_ref().is_some_and(|prefix| {
+                    prefix.committed
+                        != crate::platform::apple::agx::work_decode::render_context::native_words(
+                            self.owner.policy,
+                            run.lease.pipe,
+                        )
+                        .len() as u8
+                            + 2
+                })
+            {
+                return Err(
+                    "GFX render native parameter store differs from its source order/width",
+                );
+            }
+        }
         self.owner.target_word(self.port, offset, width, true)?;
         let mut native = self.owner.power.native.borrow_mut();
         let registers = &mut native.work.render;

@@ -17,6 +17,7 @@
 pub mod cache_input;
 pub mod cl;
 pub mod registers;
+pub mod render_context;
 pub mod render_resources;
 pub mod resources;
 pub mod scene;
