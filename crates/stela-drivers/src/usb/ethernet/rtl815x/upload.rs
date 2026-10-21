@@ -408,6 +408,9 @@ pub(crate) mod tests {
     pub(crate) struct Hardware {
         pub(crate) core: Model,
         pub(crate) sram: BTreeMap<u16, u16>,
+        pub(crate) sram2: BTreeMap<u16, u16>,
+        pointer2: u16,
+        pub(crate) mdi: [u16; 4],
         pointer: u16,
         patch_pending: Option<(bool, usize)>,
         speed_expected: Vec<u8>,
@@ -428,6 +431,9 @@ pub(crate) mod tests {
             let mut hardware = Self {
                 core: Model::new(revision),
                 sram: BTreeMap::new(),
+                sram2: BTreeMap::new(),
+                pointer2: 0,
+                mdi: [0; 4],
                 pointer: 0,
                 patch_pending: None,
                 speed_expected: Vec::new(),
@@ -486,6 +492,20 @@ pub(crate) mod tests {
                 };
             let read = request[0] == 0xc0;
             if read && bank == PLA {
+                // SRAM2 data is the upper half of the aligned four-byte read.
+                if mapped == OCP_SRAM2_ADDR {
+                    self.core.set(
+                        PLA,
+                        OCP_SRAM2_DATA,
+                        2,
+                        u32::from(*self.sram2.get(&self.pointer2).unwrap_or(&0)),
+                    );
+                }
+                if mapped == 0xd068 {
+                    let port = (self.core.get(PLA, 0xd068, 2) >> 3 & 3) as usize;
+                    self.core.set(PLA, 0xd06a, 2, u32::from(self.mdi[port]));
+                }
+
                 if target == OCP_PHY_STATUS
                     && let Some(state) = self.phy_states.pop_front()
                 {
@@ -548,6 +568,19 @@ pub(crate) mod tests {
                 self.core.set(USB, USB_MISC_0, 2, PCUT_STATUS);
             }
             if !read && bank == PLA {
+                if target == OCP_SRAM2_ADDR {
+                    self.pointer2 = self.core.get(PLA, OCP_SRAM2_ADDR, 2) as u16;
+                }
+                if target == OCP_SRAM2_DATA {
+                    self.sram2
+                        .insert(self.pointer2, self.core.get(PLA, OCP_SRAM2_DATA, 2) as u16);
+                    self.pointer2 = self.pointer2.wrapping_add(2);
+                }
+                if target == 0xd06a {
+                    let port = (self.core.get(PLA, 0xd068, 2) >> 3 & 3) as usize;
+                    self.mdi[port] = self.core.get(PLA, 0xd06a, 2) as u16;
+                }
+
                 if target == OCP_SRAM_ADDR {
                     self.pointer = self.core.get(PLA, OCP_SRAM_ADDR, 2) as u16;
                 }

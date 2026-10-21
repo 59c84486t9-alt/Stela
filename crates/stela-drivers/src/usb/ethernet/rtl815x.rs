@@ -8,6 +8,8 @@ use alloc::vec::Vec;
 mod rtl8153a;
 mod rtl8153b;
 mod rtl8153c;
+mod rtl8156;
+mod rtl8156a_tuning;
 mod upload;
 #[cfg(test)]
 pub(crate) use upload::tests::Hardware as FirmwareModel;
@@ -51,7 +53,11 @@ impl Revision {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a() || self.is_8153b() || self.is_8153c()
+        matches!(self.0, 0x4c10 | 0x4800)
+            || self.is_8153a()
+            || self.is_8153b()
+            || self.is_8153c()
+            || self.is_8156a()
     }
 
     pub fn is_8153a(self) -> bool {
@@ -64,6 +70,10 @@ impl Revision {
 
     pub fn is_8153c(self) -> bool {
         self.0 == 0x6400
+    }
+
+    pub fn is_8156a(self) -> bool {
+        matches!(self.0, 0x7020 | 0x7030)
     }
 
     /// Exact Linux firmware request for audited RTL8153/8156 revisions. None
@@ -146,6 +156,8 @@ impl<C: Control> Chip<C> {
             chip.initialize_8153b(firmware)?;
         } else if chip.revision.is_8153c() {
             chip.initialize_8153c(firmware)?;
+        } else if chip.revision.is_8156a() {
+            chip.initialize_8156a(firmware)?;
         } else {
             chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
         }
@@ -184,6 +196,9 @@ impl<C: Control> Chip<C> {
     }
 
     pub fn receive_bytes(&self) -> usize {
+        if self.revision.is_8156a() {
+            return 48 * 1024;
+        }
         if self.revision.is_8153b()
             || self.revision.is_8153c()
             || (self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED)
@@ -279,7 +294,11 @@ impl<C: Control> Chip<C> {
     }
 
     fn aldps(&mut self, enable: bool) -> Result<(), BlockError> {
-        if self.revision.is_8153a() || self.revision.is_8153b() || self.revision.is_8153c() {
+        if self.revision.is_8153a()
+            || self.revision.is_8153b()
+            || self.revision.is_8153c()
+            || self.revision.is_8156a()
+        {
             return self.aldps_8153(enable);
         }
         self.phy_write(
@@ -444,6 +463,9 @@ impl<C: Control> Chip<C> {
             return Ok(false);
         }
         if !self.enabled {
+            if self.revision.is_8156a() {
+                self.flow_control_8156()?;
+            }
             self.modify(
                 PLA,
                 PLA_EEEP_CR,
@@ -459,11 +481,13 @@ impl<C: Control> Chip<C> {
                 self.enable_8153a(status)?;
             } else if self.revision.is_8153b() || self.revision.is_8153c() {
                 self.enable_8153b(status)?;
+            } else if self.revision.is_8156a() {
+                self.enable_8156a(status)?;
             }
             self.modify(PLA, PLA_FMC, 2, FMC_FCR_MCU_EN, 0)?;
             self.modify(PLA, PLA_FMC, 2, 0, FMC_FCR_MCU_EN)?;
             self.modify(PLA, PLA_CR, 1, 0, CR_RE | CR_TE)?;
-            if self.revision.is_8153b() || self.revision.is_8153c() {
+            if self.revision.is_8153b() || self.revision.is_8153c() || self.revision.is_8156a() {
                 self.write(USB, USB_UPT_RXDMA_OWN, 1, OWN_UPDATE | OWN_CLEAR)?;
             }
             self.modify(PLA, PLA_MISC_1, 2, RXDY_GATED_EN, 0)?;
@@ -480,13 +504,21 @@ impl<C: Control> Chip<C> {
     /// and resets the MAC. Suspend/OOB and whole USB device reset are separate.
     pub fn stop(&mut self) -> Result<(), BlockError> {
         self.enabled = false;
+        if self.revision.is_8156a() {
+            self.write(PLA, PLA_RX_FIFO_FULL, 2, 0)?;
+            self.write(PLA, PLA_RX_FIFO_EMPTY, 2, 0)?;
+        }
         self.aldps(false)?;
         self.modify(PLA, PLA_RCR, 4, RCR_ACPT_ALL, 0)?;
         self.modify(PLA, PLA_MISC_1, 2, 0, RXDY_GATED_EN)?;
         self.poll(PLA, PLA_OOB_CTRL, 1, 0x30, 0x30, (1000, 1000))?;
         self.poll(PLA, PLA_TCR0, 2, TCR0_TX_EMPTY, TCR0_TX_EMPTY, (1000, 1000))?;
         self.nic_reset()?;
-        if self.revision.is_8153a() || self.revision.is_8153b() || self.revision.is_8153c() {
+        if self.revision.is_8153a()
+            || self.revision.is_8153b()
+            || self.revision.is_8153c()
+            || self.revision.is_8156a()
+        {
             self.reset_bmu()?;
         }
         self.aldps(true)
@@ -736,7 +768,7 @@ pub(crate) mod tests {
                 Err(BlockError::Timeout)
             ));
         }
-        for revision in [0x4c00, 0x5c10, 0x6010, 0x7020, 0x7030, 0x7410, 0xffff] {
+        for revision in [0x4c00, 0x5c10, 0x6010, 0x7030, 0x7410, 0xffff] {
             let model = Rc::new(RefCell::new(Model::new(revision)));
             assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
             assert_eq!(model.borrow().trace.len(), 1);

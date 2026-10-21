@@ -3785,7 +3785,7 @@ pub(crate) mod tests {
 
     #[test]
     fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
-        for revision in [0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400] {
+        for revision in [0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing remains exclusive/live through all controller DMA.
@@ -3798,7 +3798,15 @@ pub(crate) mod tests {
             ];
             let mut dev = configuration::tests::device(vec![config]);
             dev.speed = HIGH_SPEED;
-            dev.descriptor[8..14].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81, 0x00, 0x30]);
+            let is_8156 = ethernet::rtl815x::Revision(revision).is_8156a();
+            dev.descriptor[8..14].copy_from_slice(&[
+                0xda,
+                0x0b,
+                if is_8156 { 0x56 } else { 0x53 },
+                0x81,
+                0x00,
+                0x30,
+            ]);
             dev.vendor_ethernet_revision = Some(revision);
             configuration::select(&mut dev).unwrap();
             let shared = Rc::new(RefCell::new(controller));
@@ -3813,7 +3821,14 @@ pub(crate) mod tests {
                 request.name,
                 ethernet::rtl815x::Revision(revision).firmware().unwrap()
             );
-            assert_eq!(request.hardware, "usb:0bda:8153:3000");
+            assert_eq!(
+                request.hardware,
+                if is_8156 {
+                    "usb:0bda:8156:3000"
+                } else {
+                    "usb:0bda:8153:3000"
+                }
+            );
             assert_eq!(request.revision, format!("tcr-{revision:04x}"));
             assert!(model.borrow().active[3].is_none() && model.borrow().outgoing.is_empty());
         }
@@ -3843,16 +3858,23 @@ pub(crate) mod tests {
                 self.catalog.load(requirement)
             }
         }
-        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010, 0x6400]
-            .into_iter()
-            .flat_map(|revision| {
-                [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
-            })
-        {
-            let image = if revision == 0x5c00 {
+        for (revision, speed) in [
+            0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010, 0x6400, 0x7020, 0x7030,
+        ]
+        .into_iter()
+        .flat_map(|revision| {
+            [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
+        }) {
+            let image = if matches!(revision, 0x5c00 | 0x6000 | 0x7020) {
                 Vec::new()
             } else {
                 ethernet::firmware::tests::synthetic_upload(revision)
+            };
+            let is_8156 = ethernet::rtl815x::Revision(revision).is_8156a();
+            let hardware_label = if is_8156 {
+                "usb:0bda:8156:3000"
+            } else {
+                "usb:0bda:8153:3000"
             };
             let name = ethernet::rtl815x::Revision(revision).firmware();
             let revision_label = format!("tcr-{revision:04x}");
@@ -3862,7 +3884,7 @@ pub(crate) mod tests {
                     name,
                     target: Target {
                         driver: "usb-rtl815x",
-                        hardware: "usb:0bda:8153:3000",
+                        hardware: hardware_label,
                         revision: &revision_label,
                         board: None,
                     },
@@ -3946,7 +3968,14 @@ pub(crate) mod tests {
             }
             let mut device = configuration::tests::device(vec![configuration]);
             device.speed = speed;
-            device.descriptor[8..14].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81, 0x00, 0x30]);
+            device.descriptor[8..14].copy_from_slice(&[
+                0xda,
+                0x0b,
+                if is_8156 { 0x56 } else { 0x53 },
+                0x81,
+                0x00,
+                0x30,
+            ]);
             controller.preflight_vendor_ethernet(&mut device).unwrap();
             configuration::select(&mut device).unwrap();
             let shared = Rc::new(RefCell::new(controller));
@@ -3967,7 +3996,7 @@ pub(crate) mod tests {
             if let Some(name) = name {
                 let receipt = link.firmware.as_ref().unwrap();
                 assert_eq!(receipt.request.name, name);
-                assert_eq!(receipt.request.hardware, "usb:0bda:8153:3000");
+                assert_eq!(receipt.request.hardware, hardware_label);
                 assert_eq!(receipt.request.revision, revision_label);
                 assert_eq!(receipt.sha256, digest);
                 assert_eq!(receipt.length, image.len());
@@ -3980,8 +4009,20 @@ pub(crate) mod tests {
             link.transmit(&[0x5a; 1514]).unwrap();
             assert_eq!(model.borrow().outgoing[0].len(), 1522);
             assert_eq!(link.receive().unwrap(), None);
-            let frames = if speed >= SUPER_SPEED { 21 } else { 1 };
-            let frame_size = if frames == 21 { 1500 } else { 60 };
+            if is_8156 {
+                let hw = model.borrow();
+                let (_, address, length) = hw.active[3].unwrap();
+                assert_eq!(address & 0xffff, 0);
+                assert_eq!(length, 49152);
+            }
+            let frames = if is_8156 {
+                32
+            } else if speed >= SUPER_SPEED {
+                21
+            } else {
+                1
+            };
+            let frame_size = if frames >= 21 { 1500 } else { 60 };
             let mut aggregate = Vec::new();
             for value in 0..frames {
                 let mut packet = vec![0; 24 + frame_size + 4];
@@ -3990,7 +4031,7 @@ pub(crate) mod tests {
                 aggregate.extend(packet);
                 aggregate.resize(aggregate.len().next_multiple_of(8), 0);
             }
-            if frames == 21 {
+            if frames >= 21 {
                 assert!(aggregate.len() > 16384);
             }
             model.borrow_mut().incoming_events.push_back(aggregate);
