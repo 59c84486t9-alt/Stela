@@ -48,7 +48,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// and `/chosen/handoff`, independently of the OS environment.
 /// Revision 4: restrict name-matched peripherals with unavailable required
 /// platform-function providers through `AAPL,ignore`.
-pub const REVISION: u32 = 4;
+/// Revision 5: keep retained manifests before SPTM's contiguous image run
+/// and validate the complete image-adjacency contract before output.
+pub const REVISION: u32 = 5;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -436,6 +438,8 @@ const TXM_SPLITS: &[Split] = &[
 /// The physical order SPTM requires (m1n1: "Required by SPTM in this order"),
 /// as `(image, split)` or a standalone region name.
 const REGION_ORDER: &[&str] = &[
+    // Outside SPTM's contiguous image sequence, inside the CTRR-A run.
+    "BootManifest",
     "TXM-ro",
     "TXM-rx",
     "TXM-bx",
@@ -444,7 +448,6 @@ const REGION_ORDER: &[&str] = &[
     "BootKC-bx",
     "BootKC-ro",
     "BootKC-rs",
-    "BootManifest",
     "DeviceTree",
     "SPTM-ro",
     "SPTM-rx",
@@ -458,6 +461,59 @@ const REGION_ORDER: &[&str] = &[
     "SEPFW",
     "BootArgs",
 ];
+
+/// Independent handoff contract: SPTM's validate_region_order table, raw
+/// 0x18728 (16 records), consumed at 0xb9a80..0xb9b74. The boolean marks an
+/// optional image. Standalone payloads must not interrupt this sequence.
+const SPTM_REGION_ORDER: &[(&str, bool)] = &[
+    ("TXM-ro", false),
+    ("TXM-rx", false),
+    ("TXM-bx", false),
+    ("TrustCache", false),
+    ("AuxKC-ro", true),
+    ("AuxKC-rx", true),
+    ("BootKC-rx", false),
+    ("BootKC-bx", false),
+    ("BootKC-ro", false),
+    ("BootKC-rs", false),
+    ("CL4-rx", true),
+    ("CL4-ro", true),
+    ("DeviceTree", false),
+    ("SPTM-ro", false),
+    ("SPTM-rx", false),
+    ("SPTM-rw", false),
+];
+
+fn validate_sptm_region_order(regions: &[Region]) -> Result<()> {
+    let mut previous: Option<(&str, u64)> = None;
+    for &(name, optional) in SPTM_REGION_ORDER {
+        let Some(region) = regions.iter().find(|region| region.name == name) else {
+            ensure!(
+                optional,
+                "SPTM region order: missing required region {name}"
+            );
+            continue;
+        };
+        let start = region.guest_pa;
+        let end = start
+            .checked_add(region.memory_bytes)
+            .with_context(|| format!("SPTM region order: {name} range overflows"))?;
+        // The original CMN/CCMN checks reject null/sentinel endpoints.
+        ensure!(
+            start > 0 && start < u64::MAX - 1 && end > 0 && end < u64::MAX,
+            "SPTM region order: {name} has invalid range {start:#x}..{end:#x}"
+        );
+        if let Some((previous_name, previous_end)) = previous {
+            ensure!(
+                start == previous_end,
+                "SPTM region order: {name} starts at {start:#x}, not immediately after \
+                 {previous_name} ending at {previous_end:#x}"
+            );
+        }
+        previous = Some((name, end));
+    }
+    Ok(())
+}
 
 /// The secure kernel's entries, unset: the board has no exclave image
 /// (its identity lists no CL4 component). SPTM 26A434 requires `CL4-entry`,
@@ -1051,6 +1107,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         });
         cursor += page_round(content.memory_bytes);
     }
+    validate_sptm_region_order(&regions)?;
     let top_of_kernel_data = cursor;
     let dram_end = options.dram_base + options.dram_size;
     ensure!(
@@ -1641,6 +1698,103 @@ mod tests {
     use object::macho;
 
     const PAGE: u64 = PAGE_BYTES;
+
+    fn ordered_region_fixture(optional_images: bool) -> Vec<Region> {
+        // Spell the ABI fixture independently of the preparer's placement list.
+        let names = [
+            "TXM-ro",
+            "TXM-rx",
+            "TXM-bx",
+            "TrustCache",
+            "AuxKC-ro",
+            "AuxKC-rx",
+            "BootKC-rx",
+            "BootKC-bx",
+            "BootKC-ro",
+            "BootKC-rs",
+            "CL4-rx",
+            "CL4-ro",
+            "DeviceTree",
+            "SPTM-ro",
+            "SPTM-rx",
+            "SPTM-rw",
+        ];
+        names
+            .into_iter()
+            .filter(|name| {
+                optional_images || !(name.starts_with("AuxKC") || name.starts_with("CL4"))
+            })
+            .enumerate()
+            .map(|(index, name)| Region {
+                name: name.into(),
+                file: "fixture".into(),
+                file_offset: 0,
+                bytes: PAGE,
+                guest_pa: 0x8_0000_0000 + index as u64 * PAGE,
+                memory_bytes: PAGE,
+                sha256: String::new(),
+                virtual_address: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn sptm_order_accepts_optional_images_and_an_arbitrary_prefix() -> Result<()> {
+        for optional_images in [false, true] {
+            let mut regions = ordered_region_fixture(optional_images);
+            validate_sptm_region_order(&regions)?;
+            // A retained manifest precedes the first constrained image. SPTM
+            // constrains adjacency, not the first image's absolute address.
+            for region in &mut regions {
+                region.guest_pa += 7 * PAGE;
+            }
+            let mut prefix = regions[0].clone();
+            prefix.name = "BootManifest".into();
+            prefix.guest_pa -= PAGE;
+            regions.insert(0, prefix);
+            validate_sptm_region_order(&regions)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sptm_order_rejects_a_payload_inserted_inside_the_image_sequence() {
+        let mut regions = ordered_region_fixture(false);
+        let index = regions.iter().position(|r| r.name == "DeviceTree").unwrap();
+        let mut inserted = regions[index].clone();
+        inserted.name = "BootManifest".into();
+        for region in &mut regions[index..] {
+            region.guest_pa += PAGE;
+        }
+        regions.insert(index, inserted);
+        let error = validate_sptm_region_order(&regions)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("DeviceTree"), "{error}");
+        assert!(error.contains("BootKC-rs"), "{error}");
+        assert!(error.contains("not immediately after"), "{error}");
+    }
+
+    #[test]
+    fn sptm_order_rejects_missing_images_overlap_and_invalid_endpoints() {
+        let mut regions = ordered_region_fixture(false);
+        regions.retain(|r| r.name != "TrustCache");
+        assert!(
+            validate_sptm_region_order(&regions)
+                .unwrap_err()
+                .to_string()
+                .contains("missing required region TrustCache")
+        );
+        let mut regions = ordered_region_fixture(true);
+        regions[1].guest_pa -= PAGE;
+        assert!(validate_sptm_region_order(&regions).is_err());
+        for (start, length) in [(0, PAGE), (u64::MAX, 0), (u64::MAX - 2, PAGE)] {
+            let mut regions = ordered_region_fixture(false);
+            regions[0].guest_pa = start;
+            regions[0].memory_bytes = length;
+            assert!(validate_sptm_region_order(&regions).is_err());
+        }
+    }
 
     fn source(component: &str) -> Source {
         Source {
