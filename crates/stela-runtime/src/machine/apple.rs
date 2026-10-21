@@ -8,7 +8,7 @@ use super::{
     registers::Lines,
     soc::PowerOwner,
 };
-pub use crate::platform::apple::pmu::WallClock;
+pub use crate::platform::apple::pmu::{RtcEpoch, WallClock};
 use crate::platform::apple::{
     aes::{self, Aes},
     agx::{
@@ -156,6 +156,7 @@ pub struct AppleDevices {
     power_configured: bool,
     /// The SoC's sleep and wake (`sleep`).
     sleep: sleep::SocSleep,
+    rtc_clock: Option<pmu::RtcClock>,
 }
 
 const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
@@ -482,6 +483,7 @@ impl AppleDevices {
             power_refusals: Vec::new(),
             power_configured: false,
             sleep: sleep::SocSleep::default(),
+            rtc_clock: None,
         }
     }
 
@@ -1258,11 +1260,71 @@ impl AppleDevices {
         placement: &super::soc::SpmiController,
         wall: Option<pmu::WallClock>,
     ) -> Result<(), String> {
+        if placement.pmus.iter().any(|pmu| pmu.rtc_helper.is_some()) {
+            return Err("SMC RTC helper requires an explicit virtual RTC epoch authority".into());
+        }
+        self.add_spmi_with_epoch(
+            placement,
+            wall,
+            pmu::RtcEpoch {
+                counter: 0,
+                ticks: 0,
+            },
+        )
+    }
+
+    /// The boot resource owner explicitly declares this virtual oscillator
+    /// origin; it is not an Apple persisted/reset-state measurement.
+    pub fn add_spmi_with_epoch(
+        &mut self,
+        placement: &super::soc::SpmiController,
+        wall: Option<pmu::WallClock>,
+        epoch: pmu::RtcEpoch,
+    ) -> Result<(), String> {
+        self.add_spmi_with_resources(placement, wall, epoch, &[])
+    }
+
+    /// Every outside-scratch log requires explicitly declared initial history.
+    /// SIDs are local to this controller; entries are complete and unique.
+    pub fn add_spmi_with_resources(
+        &mut self,
+        placement: &super::soc::SpmiController,
+        wall: Option<pmu::WallClock>,
+        epoch: pmu::RtcEpoch,
+        fault_history: &[(u8, Vec<u8>)],
+    ) -> Result<(), String> {
+        for (index, (sid, bytes)) in fault_history.iter().enumerate() {
+            if fault_history[..index]
+                .iter()
+                .any(|(previous, _)| previous == sid)
+            {
+                return Err("duplicate PMU fault-history owner".into());
+            }
+            let log = placement
+                .pmus
+                .iter()
+                .find(|pmu| pmu.sid == *sid)
+                .and_then(|pmu| pmu.fault_log)
+                .ok_or("fault history has no matching outside-scratch PMU log")?;
+            if bytes.len() != usize::from(log.bytes) {
+                return Err("PMU initial fault history is incomplete".into());
+            }
+        }
+        if placement
+            .pmus
+            .iter()
+            .filter(|pmu| pmu.fault_log.is_some())
+            .count()
+            != fault_history.len()
+        {
+            return Err("PMU outside-scratch logs require explicit initial history".into());
+        }
         let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
         let mut controller =
             Spmi::with_configuration(AicInput::new(0, irq), placement.configuration);
         // Construct/preflight every slave and global service before publishing any owner.
         let mut primary = None;
+        let mut primary_clock = None;
         for pmu in &placement.pmus {
             if (pmu.primary || pmu.interrupt.is_some()) && pmu.rtc.is_none() {
                 return Err("PMU global service/output requires a qualified RTC owner".into());
@@ -1270,13 +1332,39 @@ impl AppleDevices {
             let mut configuration =
                 pmu::Configuration::new(pmu.windows.clone(), pmu.rtc, pmu.alarm_monitor)
                     .map_err(String::from)?;
+            if let Some(log) = pmu.fault_log {
+                let history = &fault_history
+                    .iter()
+                    .find(|(sid, _)| *sid == pmu.sid)
+                    .expect("all fault owners preflighted")
+                    .1;
+                configuration = configuration
+                    .with_fault_history(log, history.clone())
+                    .map_err(String::from)?;
+            }
             if let Some(identity) = pmu.identity {
                 configuration = configuration
                     .with_unqualified_identity(identity)
                     .map_err(String::from)?;
             }
-            let model = Pmu::configured(configuration, wall.filter(|_| pmu.rtc.is_some()))
+            let clock = pmu::RtcClock::new(epoch).map_err(String::from)?;
+            let model = Pmu::with_clock(configuration, clock, wall.filter(|_| pmu.rtc.is_some()))
                 .map_err(String::from)?;
+            if let Some(profile) = pmu.rtc_helper {
+                if !pmu.primary || self.rtc_clock.is_some() || primary_clock.is_some() {
+                    return Err("RTC helper has no unique primary oscillator owner".into());
+                }
+                self.smc()
+                    .map_err(String::from)?
+                    .check_bind_rtc()
+                    .map_err(String::from)?;
+                primary_clock = Some((
+                    model
+                        .rtc_clock()
+                        .ok_or("RTC helper has no actual PMU oscillator")?,
+                    profile,
+                ));
+            }
             if pmu.primary {
                 if self.sleep.pmu.is_some() || primary.is_some() {
                     return Err("multiple primary PMU system-service owners".into());
@@ -1300,6 +1388,13 @@ impl AppleDevices {
             self.bus
                 .map(id, base, bytes, spmi::COUNTERS)
                 .map_err(|e| format!("SPMI counter placement: {e:?}"))?;
+        }
+        if let Some((clock, profile)) = primary_clock {
+            self.smc()
+                .map_err(String::from)?
+                .bind_rtc(clock.clone(), profile)
+                .map_err(String::from)?;
+            self.rtc_clock = Some(clock);
         }
         if let Some(primary) = primary {
             self.sleep.pmu = Some(primary);
@@ -1777,6 +1872,28 @@ impl AppleDevices {
             self.wake(smc::WakeSource::PowerButton);
         }
         Ok(())
+    }
+
+    fn publish_rtc_time(&self, now: u64) -> Result<(), DeviceError> {
+        if let Some(clock) = &self.rtc_clock {
+            clock
+                .publish(now)
+                .map_err(|reason| DeviceError::Refused(reason.into()))?;
+        }
+        Ok(())
+    }
+    fn publish_rtc_time_or_halt(&mut self, now: u64) -> bool {
+        if let Err(error) = self.publish_rtc_time(now) {
+            if self.reset.is_none() {
+                self.reset = Some(Reset {
+                    transition: Transition::Halt,
+                    reason: format!("RTC service time refused: {error:?}"),
+                });
+            }
+            false
+        } else {
+            true
+        }
     }
 
     /// The SMC's native key endpoint.
@@ -2687,6 +2804,7 @@ impl Devices for AppleDevices {
     }
 
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         let width = width(bytes)?;
         let mut access = Access::new(cpu, now, &mut self.latch);
@@ -2707,6 +2825,7 @@ impl Devices for AppleDevices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         let width = width(bytes)?;
         // Validate the NOR CS edge before the GPIO word changes. This keeps
@@ -2762,6 +2881,9 @@ impl Devices for AppleDevices {
         write: Option<u64>,
         now: u64,
     ) -> Option<Result<u64, &'static str>> {
+        if !self.publish_rtc_time_or_halt(now) {
+            return Some(Err("RTC counter publication refused; board halted"));
+        }
         if let Some(device) = self.core_counters.get(cpu).copied().flatten()
             && let Some(value) = self
                 .bus
@@ -2786,6 +2908,9 @@ impl Devices for AppleDevices {
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+        if !self.publish_rtc_time_or_halt(now) {
+            return Lines::default();
+        }
         self.settle_lifecycle(cpu, now);
         if let Some(ipi) = self.ipi.as_mut() {
             ipi.advance(now, &mut self.latch);
@@ -2817,6 +2942,9 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
+        if !self.publish_rtc_time_or_halt(now) {
+            return None;
+        }
         self.settle_lifecycle(0, now);
         // Time-driven state is the board's, not a PE's: the access names
         // cpu0.
@@ -2825,7 +2953,18 @@ impl Devices for AppleDevices {
             .as_mut()
             .and_then(|ipi| ipi.advance(now, &mut self.latch));
         let mut access = Access::new(0, now, &mut self.latch);
-        let device = self.bus.advance(&mut access).ok().flatten();
+        let device = match self.bus.advance(&mut access) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                if self.reset.is_none() {
+                    self.reset = Some(Reset {
+                        transition: Transition::Halt,
+                        reason: format!("device deadline advance refused: {error:?}"),
+                    });
+                }
+                return None;
+            }
+        };
         self.watch_pmu();
         let usb = self
             .usb_masters
@@ -2904,6 +3043,7 @@ impl Devices for AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         for master in &self.masters {
             let (aes, dart) = self
@@ -4836,6 +4976,68 @@ mod tests {
         assert_eq!(devices.read(0, WATCHDOG + 0xc, 4, 0), Ok(0));
         devices.write(0, WATCHDOG + 0xc, 4, 0, 0).unwrap();
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn rtc_publication_precedes_every_timed_service_and_refuses_stale_effects() {
+        let epoch = pmu::RtcEpoch {
+            counter: 100,
+            ticks: 1234,
+        };
+        let clock = pmu::RtcClock::new(epoch).unwrap();
+        let mut devices = AppleDevices::new();
+        devices.rtc_clock = Some(clock.clone());
+        let timer = 0x2_922b_0000;
+        devices
+            .add_watchdog(
+                &[Range {
+                    physical: timer,
+                    bytes: 0x4000,
+                }],
+                None,
+                epoch.counter,
+            )
+            .unwrap();
+        assert!(clock.published_ticks().is_err());
+        devices.write(0, timer + 4, 4, 50, epoch.counter).unwrap();
+        assert_eq!(clock.published_ticks(), Ok(epoch.ticks));
+        let hz = crate::platform::apple::counter::FREQUENCY_HZ;
+        let ticks = |seconds| epoch.ticks + seconds * pmu::RTC_HZ;
+        devices.read(0, timer + 4, 4, epoch.counter + hz).unwrap();
+        assert_eq!(clock.published_ticks(), Ok(ticks(1)));
+        let mut ram = Ram::new(0x800000000, 0x4000);
+        devices
+            .transfer(0, &mut ram, epoch.counter + 2 * hz)
+            .unwrap();
+        assert_eq!(clock.published_ticks(), Ok(ticks(2)));
+        assert_eq!(
+            devices.system_register(
+                0,
+                Encoding::new(3, 0, 0, 0, 0),
+                None,
+                epoch.counter + 3 * hz
+            ),
+            None
+        );
+        assert_eq!(clock.published_ticks(), Ok(ticks(3)));
+        devices.lines(0, epoch.counter + 4 * hz);
+        assert_eq!(clock.published_ticks(), Ok(ticks(4)));
+        devices.deadline(epoch.counter + 5 * hz);
+        assert_eq!(clock.published_ticks(), Ok(ticks(5)));
+        // An old counter cannot change the timer or replace the last sample.
+        assert!(devices.write(0, timer + 4, 4, 99, epoch.counter).is_err());
+        assert_eq!(clock.published_ticks(), Ok(ticks(5)));
+        assert_eq!(
+            devices.read(0, timer + 4, 4, epoch.counter + 5 * hz),
+            Ok(50)
+        );
+        // Lines/deadline cannot return Result; they retain an explicit halt.
+        devices.lines(0, epoch.counter);
+        let reset = devices.reset.take().unwrap();
+        assert_eq!(reset.transition, Transition::Halt);
+        assert!(reset.reason.contains("RTC"));
+        devices.deadline(epoch.counter);
+        assert_eq!(devices.reset.take().unwrap().transition, Transition::Halt);
     }
 
     #[test]

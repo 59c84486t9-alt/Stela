@@ -46,7 +46,7 @@ use stela_loader::{
     handoff::BootCommand as FirmwareBootCommand,
     installed, recovery,
 };
-use stela_runtime::machine::apple::WallClock;
+use stela_runtime::machine::apple::{RtcEpoch, WallClock};
 use stela_runtime::machine::{
     Chip, Cpu, CpuProfile, Event, Machine, PeerState, Stop, Transition,
     apple::{AicInput, AicLayout, AppleDevices, ConsoleBusy, ConsoleSink, Range},
@@ -978,7 +978,27 @@ fn devices<'f>(
         devices.add_pmp(pmp)?;
     }
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
-        devices.add_spmi(spmi, clock.wall)?;
+        // A newly created Stela PMIC starts with its own oscillator origin
+        // and no pending native fault events. These are explicit cold
+        // resource inputs, not Apple persistent/reset-state measurements.
+        // Retained PMIC resources must instead supply their actual history.
+        let history = spmi
+            .pmus
+            .iter()
+            .filter_map(|pmu| {
+                pmu.fault_log
+                    .map(|log| (pmu.sid, alloc::vec![0; usize::from(log.bytes)]))
+            })
+            .collect::<alloc::vec::Vec<_>>();
+        devices.add_spmi_with_resources(
+            spmi,
+            clock.wall,
+            RtcEpoch {
+                counter: clock.now,
+                ticks: 0,
+            },
+            &history,
+        )?;
     }
     for component in board.map_or(&[][..], |board| &board.coresight) {
         devices

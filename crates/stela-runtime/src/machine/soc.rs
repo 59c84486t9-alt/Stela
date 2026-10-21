@@ -1639,7 +1639,10 @@ pub struct SpmiPmu {
     /// PMU output's local edge vector, independently of the response vector.
     pub interrupt: Option<u16>,
     pub alarm_monitor: u8,
+    pub rtc_helper: Option<smc::RtcKeyProfile>,
     pub identity: Option<pmu::Window>,
+    /// Outside-scratch log, requiring explicit cold/retained history at placement.
+    pub fault_log: Option<pmu::Window>,
     pub windows: Vec<pmu::Window>,
     pub rtc: Option<pmu::Rtc>,
 }
@@ -2895,7 +2898,7 @@ fn spmi_controllers(
         let mut pmus = Vec::new();
         for child in node.children().ok_or("SPMI children are malformed")? {
             if child.compatible(PMU) {
-                let pmu = spmi_pmu(&child)?;
+                let pmu = spmi_pmu(&child, io)?;
                 if pmu.interrupt.is_some()
                     && (child
                         .property("interrupt-parent")
@@ -2929,7 +2932,7 @@ fn spmi_controllers(
 
 /// A PMU's slave ID (`reg` cell 0) and its `info-*` windows: pairs are
 /// `<base bytes>`, single cells one byte, except the legacy scratchpad.
-fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
+fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     let sid = node
         .first_u32("reg")
         .and_then(|sid| u8::try_from(sid).ok())
@@ -2976,10 +2979,36 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
             .transpose()
             .map_err(String::from)
     };
+    let scratch = pair("info-scrpad")?;
     let mut windows = Vec::new();
-    for name in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
-        windows.extend(pair(name)?);
-    }
+    windows.extend(scratch);
+    windows.extend(pair("info-fault_shadow")?);
+    let fault_log = match pair("info-fault_log")? {
+        None => None,
+        Some(log) => {
+            let end = u32::from(log.base) + u32::from(log.bytes);
+            if log.bytes == 0 || log.bytes > u16::from(u8::MAX) || end > 0x10000 {
+                return Err(
+                    "PMU fault-log count or extent exceeds the qualified byte-count resource"
+                        .into(),
+                );
+            }
+            if let Some(scratch) = scratch {
+                let scratch_end = u32::from(scratch.base) + u32::from(scratch.bytes);
+                let overlaps = u32::from(log.base) < scratch_end && u32::from(scratch.base) < end;
+                if overlaps {
+                    if log.base < scratch.base || end > scratch_end {
+                        return Err("PMU fault log partially aliases scratch storage".into());
+                    }
+                    None // Same canonical scratch owner; original zero-clear form.
+                } else {
+                    Some(log)
+                }
+            } else {
+                Some(log)
+            }
+        }
+    };
     if let Some(base) = single("info-leg_scrpad")? {
         windows.push(pmu::Window {
             base,
@@ -3061,9 +3090,49 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
     if (primary || interrupt.is_some()) && rtc.is_none() {
         return Err("PMU global service/output requires a qualified RTC owner".into());
     }
+    let rtc_helper = match node.property("function-rtc_read_helper") {
+        None => None,
+        Some(bytes) => {
+            if !primary || rtc.is_none() || bytes.len() != 12 {
+                return Err(
+                    "RTC helper requires a primary RTC and complete three-cell descriptor".into(),
+                );
+            }
+            let source = io
+                .child("smc")
+                .filter(|node| {
+                    node.compatible(ASC) && node.property("role") == Some(b"SMC\0".as_slice())
+                })
+                .ok_or("RTC helper has no qualified visible SMC provider")?;
+            let nub = rtbuddy_nub(&source, "SMC")?;
+            let provider = nub
+                .child("smc-pmu")
+                .ok_or("RTC helper has no SMC PMU provider")?;
+            if provider
+                .property("AAPL,phandle")
+                .is_none_or(|bytes| bytes.len() != 4)
+            {
+                return Err("SMC PMU provider phandle is not one full32 word".into());
+            }
+            let provider = provider
+                .first_u32("AAPL,phandle")
+                .ok_or("SMC PMU has no phandle")?;
+            let cells = node
+                .cells32("function-rtc_read_helper")
+                .ok_or("RTC helper has no cells")?;
+            Some(smc::RtcKeyProfile::from_function(&cells, provider).map_err(String::from)?)
+        }
+    };
     let identity = pair("info-id")?;
-    let configuration =
+    let mut configuration =
         pmu::Configuration::new(windows.clone(), rtc, alarm_monitor).map_err(String::from)?;
+    if let Some(log) = fault_log {
+        // Validate geometry only. This temporary value never becomes a PMU;
+        // actual placement separately requires explicit resource history.
+        configuration = configuration
+            .with_fault_history(log, alloc::vec![0; usize::from(log.bytes)])
+            .map_err(String::from)?;
+    }
     if let Some(identity) = identity {
         configuration
             .with_unqualified_identity(identity)
@@ -3074,7 +3143,9 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
         primary,
         interrupt,
         alarm_monitor,
+        rtc_helper,
         identity,
+        fault_log,
         windows,
         rtc,
     })
@@ -5935,6 +6006,7 @@ mod tests {
     #[test]
     #[ignore = "requires original 26A434 J314s DT through STELA_TEST_SPMI_DT"]
     fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
+        use crate::machine::Devices;
         let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
         assert_eq!(
             crate::sha256(&data),
@@ -5968,9 +6040,52 @@ mod tests {
             2
         );
         let mut devices = crate::machine::apple::AppleDevices::new();
+        let smc = smc_controller(&root, &io, &translate).unwrap().unwrap();
+        devices.add_smc(&smc).unwrap();
+        let epoch = pmu::RtcEpoch {
+            counter: 100,
+            ticks: 0,
+        };
         for controller in &controllers {
-            devices.add_spmi(controller, None).unwrap();
+            if controller
+                .pmus
+                .iter()
+                .any(|pmu| pmu.rtc_helper.is_some() || pmu.fault_log.is_some())
+            {
+                assert!(
+                    devices.add_spmi(controller, None).is_err(),
+                    "no implicit resource inputs"
+                );
+            }
+            let history = controller
+                .pmus
+                .iter()
+                .filter_map(|pmu| {
+                    pmu.fault_log
+                        .map(|log| (pmu.sid, vec![0; usize::from(log.bytes)]))
+                })
+                .collect::<Vec<_>>();
+            devices
+                .add_spmi_with_resources(controller, None, epoch, &history)
+                .unwrap();
         }
+        assert_eq!(
+            controllers
+                .iter()
+                .flat_map(|c| &c.pmus)
+                .filter(|pmu| pmu.rtc_helper.is_some())
+                .count(),
+            1
+        );
+        assert!(
+            devices
+                .read(0, smc.wrapper.0 + 0x44, 4, epoch.counter - 1)
+                .is_err()
+        );
+        assert_eq!(
+            devices.read(0, smc.wrapper.0 + 0x44, 4, epoch.counter),
+            Ok(1 << 4)
+        );
         let mut bases = Vec::new();
         for controller in controllers {
             assert_eq!(controller.configuration.profile(), spmi::Profile::Gen1);
@@ -5987,8 +6102,10 @@ mod tests {
             bases.push(base);
         }
         // Both original RTC register banks mount while the single primary
-        // service owns the global alarm output. This does not qualify the
-        // SMC CLKM helper, autonomous sleep/wake, or whole-board admission.
+        // service owns the global alarm output and the resolved SMC helper
+        // shares its actual oscillator. Epoch/fault history are explicitly
+        // created native inputs, not observed physical reset/persistent data.
+        // Autonomous sleep/wake and whole-board admission remain separate.
     }
 
     #[test]
@@ -6077,11 +6194,12 @@ mod tests {
             pmu.windows,
             [
                 window(0x8000, 0x2800),
-                window(0xfa00, 5),
                 window(0xf700, pmu::LEGACY_SCRATCH_BYTES),
                 window(0xf801, 1),
             ]
         );
+        assert_eq!(pmu.fault_log, Some(window(0xfa00, 5)));
+        assert_eq!(pmu.rtc_helper, None);
         let rtc = pmu.rtc.unwrap();
         assert_eq!(
             (rtc.upcount, rtc.clock_offset, rtc.alarm_enable),
