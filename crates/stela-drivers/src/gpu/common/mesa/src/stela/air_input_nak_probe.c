@@ -57,7 +57,7 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm)
    CHECK(nir && bindings == 1);
    nir_validate_shader(nir, "original AIR input");
    nak_preprocess_nir(nir, compiler);
-   nak_postprocess_nir(nir, compiler, 0, NULL, false);
+   /* nak_compile_shader runs the retained postprocessing itself. */
    struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
    CHECK(bin && bin->code && bin->code_size && bin->info.num_instrs > 2 &&
          bin->info.sm == sm && bin->info.stage == MESA_SHADER_COMPUTE);

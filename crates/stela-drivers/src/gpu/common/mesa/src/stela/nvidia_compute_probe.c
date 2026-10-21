@@ -243,7 +243,7 @@ compile_and_encode(LLVMMemoryBufferRef bitcode, unsigned sm, unsigned cls)
       "kernel", nak_nir_options(compiler), &options, &air_error);
    CHECK(nir);
    nak_preprocess_nir(nir, compiler);
-   nak_postprocess_nir(nir, compiler, 0, NULL, false);
+   /* nak_compile_shader runs the retained postprocessing itself. */
    struct nak_shader_bin *shader = nak_compile_shader(nir, true, compiler, 0, NULL, false);
    CHECK(shader && shader->code && shader->code_size && shader->info.num_instrs > 2);
    struct stela_nv_compute_dispatch dispatch = {

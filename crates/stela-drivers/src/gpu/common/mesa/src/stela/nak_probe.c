@@ -46,7 +46,7 @@ compile_store(unsigned sm)
    };
    nir_lower_compute_system_values(b.shader, &system_values);
    nak_preprocess_nir(b.shader, nak);
-   nak_postprocess_nir(b.shader, nak, 0, NULL, false);
+   /* nak_compile_shader runs the retained postprocessing itself. */
    struct nak_shader_bin *bin =
       nak_compile_shader(b.shader, true, nak, 0, NULL, false);
    int result = 0;
