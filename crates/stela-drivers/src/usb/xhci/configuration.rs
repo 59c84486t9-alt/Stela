@@ -122,16 +122,19 @@ fn active_settings(all: &[Interface], selected: &[(u8, u8)]) -> Result<(), &'sta
 }
 
 /// Choose the unique configuration offering the greatest number of supported
-/// functions. No supported function leaves the first descriptor selected only
+/// functions. At equal coverage, an implemented observed vendor Ethernet mode
+/// wins over its generic CDC alternative, as r8152's cfgselector requires.
+/// No supported function leaves the first descriptor selected only
 /// for unused-interface diagnostics; bind will issue no configuration request.
 pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
     let mut best = None;
-    let mut maximum = 0;
+    let mut maximum = (0, false);
     let mut ambiguous = false;
     for index in 0..device.configurations.len() {
         device.configuration = device.configurations[index].clone();
         let all = interfaces(&device.configuration);
         let mut count = 0;
+        let mut vendor_ethernet = false;
         let mut endpoints = Vec::new();
         let mut claimed = Vec::new();
         for interface in all.iter().filter(|i| i.alternate == 0 && i.class != 10) {
@@ -143,6 +146,7 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
                     count += 1;
                 }
             } else if let Ok(binding) = plan(device, interface, &all) {
+                vendor_ethernet |= matches!(&binding, Plan::VendorEthernet(_));
                 let mut settings = vec![(interface.number, 0)];
                 if let Plan::Ethernet(binding) = &binding {
                     settings.push(binding.data_setting());
@@ -163,11 +167,12 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
             }
         }
         active_settings(&all, &claimed)?;
-        if count > maximum {
-            maximum = count;
+        let priority = (count, vendor_ethernet);
+        if priority > maximum {
+            maximum = priority;
             best = Some(index);
             ambiguous = false;
-        } else if count != 0 && count == maximum {
+        } else if count != 0 && priority == maximum {
             ambiguous = true;
         }
     }
@@ -175,7 +180,7 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
         device.configuration.clear();
         return Err("ambiguous equally supported USB configurations");
     }
-    if maximum == 0 && device.descriptor[4] == HUB_CLASS {
+    if maximum.0 == 0 && device.descriptor[4] == HUB_CLASS {
         return Err("USB hub has no supported configuration");
     }
     device.configuration = device
@@ -321,6 +326,30 @@ pub(super) mod tests {
             plan(&device, &all[0], &all),
             Ok(Plan::VendorEthernet(_))
         ));
+    }
+
+    #[test]
+    fn implemented_realtek_vendor_mode_wins_equal_cdc_coverage_independent_of_order() {
+        let mut vendor = storage(7);
+        vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
+        for revision in [0x4c10, 0x4800] {
+            for configurations in [vec![vendor.clone(), ecm(42)], vec![ecm(42), vendor.clone()]] {
+                let mut device = device(configurations);
+                device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
+                device.vendor_ethernet_revision = Some(revision);
+                select(&mut device).unwrap();
+                assert_eq!(device.configuration_value(), 7);
+            }
+        }
+        let mut other = vendor.clone();
+        other[5] = 9;
+        let mut device = device(vec![vendor, other, ecm(42)]);
+        device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
+        device.vendor_ethernet_revision = Some(0x4c10);
+        assert_eq!(
+            select(&mut device),
+            Err("ambiguous equally supported USB configurations")
+        );
     }
 
     #[test]
