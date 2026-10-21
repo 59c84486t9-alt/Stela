@@ -544,3 +544,104 @@ fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
     assert_eq!(quad(&llb, 0x1a1628), 0x811400008110); // original transport offsets
     assert_eq!(word(&llb, 0x15654), 0xb940014a); // actual 32-bit physical read
 }
+
+#[test]
+#[ignore = "requires original J314s LLB; complete native SEP command table and mailbox phases"]
+fn original_j314s_sep_transport_and_complete_rom_table_are_distinct_from_ready_state() {
+    let bytes = original(
+        "STELA_TEST_PMGR_M1_LLB",
+        "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
+    );
+    for (start, end, digest) in [
+        (
+            0x15174,
+            0x151e4,
+            "e7ebb6f773c4885a4e3c19d702d3ef8864cf67c72fbe1f42269665ee6157d2a1",
+        ),
+        (
+            0x15208,
+            0x15358,
+            "d108cd6204717ad823a1d20442d25f600fe0c1074c7e8a9be8ade058ca6c50b8",
+        ),
+        (
+            0x15420,
+            0x15560,
+            "fd8bcd0d52209300efa99d219c9b4dcc36f09107ebf48618e9dcb5484766ef46",
+        ),
+        (
+            0x15648,
+            0x15664,
+            "eafd268e57b84351cd52b3299ecdbd9e5b7c4fb6d08e517dc2ff204dc9ce05e4",
+        ),
+        (
+            0x1a1628,
+            0x1a1640,
+            "433a2ae43fc1eb2b16f31768ebff8c300a664cd20c2cb8a7f2d244a1e3478eb1",
+        ),
+        (
+            0x1554b8,
+            0x155e20,
+            "422c052e9009f7410abec94d74a1fb564775baecbc1017d5f6fc3fb21ccc15cd",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    let table = &bytes[0x1554b8..0x155e20];
+    assert_eq!(table.len(), 43 * 56);
+    let present = table
+        .as_chunks::<56>()
+        .0
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            row.iter()
+                .any(|byte| *byte != 0)
+                .then_some((index, row[0], row[1]))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        present,
+        [
+            (0, 1, 101),
+            (1, 2, 102),
+            (2, 3, 103),
+            (3, 4, 104),
+            (4, 10, 110),
+            (5, 15, 115),
+            (6, 16, 116),
+            (17, 5, 105),
+            (18, 6, 106),
+            (19, 20, 120),
+            (20, 18, 118),
+            (21, 19, 119),
+            (22, 21, 121),
+            (23, 32, 132),
+            (24, 22, 122),
+            (25, 25, 125),
+            (26, 26, 126),
+            (27, 27, 127),
+            (28, 17, 117),
+            (29, 23, 123),
+            (30, 24, 124),
+            (31, 28, 128),
+            (32, 29, 129),
+            (33, 30, 130),
+            (34, 31, 131),
+            (35, 35, 135),
+            (40, 48, 148),
+            (41, 49, 149),
+            (42, 46, 146),
+        ]
+    );
+    assert_eq!(table[6 * 56], 16); // initial native request = actual ROM entropy
+    assert_eq!(table[6 * 56 + 1], 116);
+    assert_eq!(word(&bytes, 0x155608 + 4), 2_000_000);
+    assert_eq!(quad(&bytes, 0x1a1628), 0x811400008110);
+    assert_eq!(quad(&bytes, 0x1a1630), 0x883000008800);
+    assert_eq!(quad(&bytes, 0x1a1638), 0x810400008100);
+    assert_eq!(word(&bytes, 0x154bc), 0x3680010a); // actual FULL poll
+    assert_eq!(word(&bytes, 0x15514), 0x3688012a); // actual EMPTY poll
+    assert_eq!(word(&bytes, 0x154f0), 0xa9002909); // full frame send (two64bit stores)
+    assert_eq!(word(&bytes, 0x15544), 0xa9402508); // full frame receive (two64bit loads)
+    assert_eq!(word(&bytes, 0x15654), 0xb940014a); // actual32bit control read
+}

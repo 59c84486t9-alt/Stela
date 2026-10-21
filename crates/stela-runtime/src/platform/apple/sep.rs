@@ -32,7 +32,7 @@ pub mod xart;
 
 use super::{
     asc::{Asc, Lines},
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, MmioDevice, MmioError, Width, refuse},
 };
 use crate::platform::dma::Port;
 use alloc::boxed::Box;
@@ -87,6 +87,30 @@ impl Sep {
                     entropy, security, ecid, observe, state,
                 )),
                 true,
+                lines,
+            )?,
+        })
+    }
+
+    /// Explicit Stela entry policy: the native ROM is already running and
+    /// both actual ASC mailboxes are enabled. Original early firmware polls
+    /// and sends without enabling them first. This is not an observation of
+    /// Apple's BootROM cold state, an authenticated sepOS, or a ready-bit shim.
+    /// Entropy, identity, security qualification and persistence remain the
+    /// caller's actual inputs, exactly as for `new`.
+    pub fn booted_rom(
+        entropy: Box<dyn Entropy>,
+        lines: Lines,
+        security: Option<SecurityMode>,
+        ecid: u64,
+        observe: bool,
+        state: state::Location,
+    ) -> Result<Self, &'static str> {
+        Ok(Self {
+            mailbox: Asc::booted(
+                Box::new(firmware::SepFirmware::new(
+                    entropy, security, ecid, observe, state,
+                )),
                 lines,
             )?,
         })
@@ -162,6 +186,11 @@ fn named(error: MmioError) -> MmioError {
 }
 
 impl MmioDevice for Sep {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        // Same actual mailbox/firmware owner checks every proposed edge.
+        // In particular, delegation does not qualify SEP security-state loss.
+        self.mailbox.lifecycle()
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -202,6 +231,9 @@ impl MmioDevice for Sep {
             .write(offset, width, value, access)
             .map_err(named)
     }
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        self.mailbox.advance(access).map_err(named)
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +241,229 @@ mod tests {
     use super::message::{Frame, ROM};
     use super::*;
     use crate::platform::apple::interrupt::{AicInput, InterruptLatch, Wire};
+
+    const PHYSICAL: u64 = 0x396400000;
+    const ACTIVE: super::super::bus::LifecycleState = super::super::bus::LifecycleState {
+        powered: true,
+        clocked: true,
+        quiesced: false,
+        reset: false,
+        retention: true,
+    };
+    struct Mounted {
+        bus: super::super::bus::Bus,
+        device: super::super::bus::DeviceId,
+        latch: InterruptLatch,
+        irqs: [AicInput; 4],
+    }
+    impl Mounted {
+        fn new(entropy: Box<dyn Entropy>) -> Self {
+            let irqs = [0x222, 0x221, 0x224, 0x223].map(|irq| AicInput::new(0, irq));
+            let sep = Sep::booted_rom(
+                entropy,
+                Lines::from_interrupts(irqs),
+                None,
+                0x5354454c41544553,
+                false,
+                state::Location::Volatile,
+            )
+            .unwrap();
+            let mut bus = super::super::bus::Bus::new();
+            let device = bus.add(Box::new(sep));
+            bus.map(device, PHYSICAL, 0x6c000, 0).unwrap();
+            Self {
+                bus,
+                device,
+                latch: InterruptLatch::new(),
+                irqs,
+            }
+        }
+        fn read(&mut self, offset: u64, width: Width) -> Result<u64, MmioError> {
+            self.bus.read(
+                PHYSICAL + offset,
+                width,
+                &mut Access::new(0, 1, &mut self.latch),
+            )
+        }
+        fn write(&mut self, offset: u64, width: Width, value: u64) -> Result<(), MmioError> {
+            self.bus.write(
+                PHYSICAL + offset,
+                width,
+                value,
+                &mut Access::new(0, 1, &mut self.latch),
+            )
+        }
+        fn set(&mut self, state: super::super::bus::LifecycleState) {
+            let lifecycle = self.bus.lifecycle(self.device).expect("actual SEP owner");
+            lifecycle.check_lifecycle(state).unwrap();
+            lifecycle.set_lifecycle(state, &mut Access::new(0, 1, &mut self.latch));
+        }
+        fn advance(&mut self) {
+            assert_eq!(
+                self.bus.advance(&mut Access::new(0, 1, &mut self.latch)),
+                Ok(None)
+            );
+        }
+    }
+    fn random_request() -> u64 {
+        Frame {
+            service: ROM,
+            tag: 0,
+            opcode: 16,
+            parameter: 0,
+            data: 0,
+        }
+        .mailbox()
+        .payload
+    }
+
+    #[test]
+    fn actual_mounted_rom_random_requires_entropy_and_full_mailbox_commit_before_reply() {
+        use std::{cell::Cell, rc::Rc};
+        let calls = Rc::new(Cell::new(0));
+        let observed = calls.clone();
+        let mut mounted = Mounted::new(Box::new(move |bytes: &mut [u8]| {
+            assert_eq!(bytes.len(), 4);
+            let call = observed.get();
+            observed.set(call + 1);
+            bytes.copy_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+            if call == 0 {
+                Err("injected real entropy-source failure")
+            } else {
+                Ok(())
+            }
+        }));
+        assert_eq!(mounted.read(0x44, Width::Word), Ok(1 << 4));
+        assert_eq!(mounted.read(0x8114, Width::Word), Ok(1 | 1 << 17));
+        mounted
+            .write(0x8800, Width::Double, random_request())
+            .unwrap();
+        assert_eq!(calls.get(), 0, "staged first word cannot consume entropy");
+        assert!(mounted.write(0x8808, Width::Double, 1 << 8).is_err());
+        assert_eq!(
+            calls.get(),
+            0,
+            "unqualified raw extension cannot be dropped"
+        );
+        assert!(mounted.write(0x8808, Width::Double, 0).is_err());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(mounted.read(0x8114, Width::Word), Ok(1 | 1 << 17));
+        assert!(!mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
+        // Retry only the refused commit; the original first word is retained.
+        mounted.write(0x8808, Width::Double, 0).unwrap();
+        assert_eq!(calls.get(), 2);
+        assert!(mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
+        let reply = 0x78563412_007400ff;
+        assert_eq!(mounted.read(0x8830, Width::Double), Ok(reply));
+        assert_eq!(mounted.read(0x8830, Width::Double), Ok(reply));
+        assert_eq!(mounted.read(0x8838, Width::Double), Ok(1 << 52));
+        assert!(!mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])));
+        assert!(mounted.read(0x8838, Width::Double).is_err());
+        assert!(mounted.write(0x8808, Width::Double, 0).is_err());
+        assert_eq!(calls.get(), 2, "consumed transaction cannot be replayed");
+        let sep = mounted.bus.device_mut::<Sep>(mounted.device).unwrap();
+        assert!(sep.evidence().is_none());
+        assert!(!sep.booted());
+    }
+
+    #[test]
+    fn actual_mounted_sep_retains_staged_and_committed_work_across_checked_gates() {
+        use std::{cell::Cell, rc::Rc};
+        let calls = Rc::new(Cell::new(0));
+        let observed = calls.clone();
+        let mut mounted = Mounted::new(Box::new(move |bytes: &mut [u8]| {
+            observed.set(observed.get() + 1);
+            bytes.copy_from_slice(&[1, 2, 3, 4]);
+            Ok(())
+        }));
+        mounted
+            .write(0x8800, Width::Double, random_request())
+            .unwrap();
+        for paused in [
+            super::super::bus::LifecycleState {
+                clocked: false,
+                ..ACTIVE
+            },
+            super::super::bus::LifecycleState {
+                powered: false,
+                ..ACTIVE
+            },
+            super::super::bus::LifecycleState {
+                quiesced: true,
+                ..ACTIVE
+            },
+        ] {
+            mounted.set(paused);
+            mounted.advance();
+            assert!(mounted.write(0x8808, Width::Double, 0).is_err());
+            assert_eq!(calls.get(), 0);
+            mounted.set(ACTIVE);
+        }
+        mounted.write(0x8808, Width::Double, 0).unwrap();
+        assert_eq!(calls.get(), 1);
+        let reset = super::super::bus::LifecycleState {
+            reset: true,
+            ..ACTIVE
+        };
+        assert_eq!(
+            mounted
+                .bus
+                .lifecycle(mounted.device)
+                .unwrap()
+                .check_lifecycle(reset),
+            Err("ASC reset or power loss with owned mailbox messages")
+        );
+        mounted.set(super::super::bus::LifecycleState {
+            powered: false,
+            ..ACTIVE
+        });
+        assert!(mounted.read(0x8830, Width::Double).is_err());
+        assert!(
+            mounted.latch.is_asserted(Wire::Aic(mounted.irqs[2])),
+            "owned IRQ level survives retained rail pause"
+        );
+        mounted.set(ACTIVE);
+        assert_eq!(mounted.read(0x8830, Width::Double), Ok(0x04030201_007400ff));
+        mounted.read(0x8838, Width::Double).unwrap();
+        let lifecycle = mounted.bus.lifecycle(mounted.device).unwrap();
+        assert_eq!(
+            lifecycle.check_lifecycle(reset),
+            Err("SEP physical reset and nonretained security-state restoration are not qualified")
+        );
+        assert_eq!(
+            lifecycle.check_lifecycle(super::super::bus::LifecycleState {
+                powered: false,
+                retention: false,
+                ..ACTIVE
+            }),
+            Err("SEP physical reset and nonretained security-state restoration are not qualified")
+        );
+        assert_eq!(mounted.read(0x44, Width::Word), Ok(1 << 4));
+        assert!(
+            mounted.read(0x10000, Width::Word).is_err(),
+            "unknown bank cannot become a zero image"
+        );
+        mounted
+            .write(
+                0x8800,
+                Width::Double,
+                Frame {
+                    service: ROM,
+                    tag: 0,
+                    opcode: 37,
+                    parameter: 0,
+                    data: 0,
+                }
+                .mailbox()
+                .payload,
+            )
+            .unwrap();
+        assert!(
+            mounted.write(0x8808, Width::Double, 0).is_err(),
+            "unqualified security opcode cannot ACK"
+        );
+        assert_eq!(mounted.read(0x8114, Width::Word), Ok(1 | 1 << 17));
+    }
 
     #[test]
     fn rom_response_uses_the_common_mailbox_and_level_interrupts() {

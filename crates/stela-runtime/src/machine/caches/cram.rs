@@ -771,7 +771,10 @@ mod tests {
         impl Host for NativeHost {
             fn read_ram(&mut self, physical: u64, out: &mut [u8]) -> bool {
                 if let Some(entry) = &self.entry {
-                    return entry.borrow_mut().read(physical, out);
+                    let mut entry = entry.borrow_mut();
+                    // A failed RAM probe outside the actual reservation may
+                    // belong to a real peripheral provider, not unknown RAM.
+                    return entry.range(physical, out.len()).is_some() && entry.read(physical, out);
                 }
                 let Some(start) = physical
                     .checked_sub(BASE)
@@ -1174,13 +1177,20 @@ mod tests {
                 }
             }
         }
+        struct RegisterEvent {
+            encoding: Encoding,
+            write: bool,
+            value: Option<u64>,
+        }
         struct EntryRam {
             cram: Cram<Owned>,
             known: Vec<bool>,
             source_reads: usize,
             committed: Vec<(u64, Vec<u8>)>,
+            redacted_stores: Vec<(u64, usize)>,
+            redact: bool,
             unknown: Vec<(u64, usize)>,
-            registers: Vec<(Encoding, Option<u64>)>,
+            registers: Vec<RegisterEvent>,
         }
         impl EntryRam {
             fn range(&self, address: u64, count: usize) -> Option<core::ops::Range<usize>> {
@@ -1235,7 +1245,11 @@ mod tests {
                     );
                 }
                 self.known[range].fill(true);
-                self.committed.push((address, bytes.to_vec()));
+                if self.redact {
+                    self.redacted_stores.push((address, bytes.len()));
+                } else {
+                    self.committed.push((address, bytes.to_vec()));
+                }
                 true
             }
         }
@@ -1258,21 +1272,126 @@ mod tests {
                     .then_some(true)
             }
         }
-        struct EntryBus(std::rc::Rc<std::cell::RefCell<EntryRam>>);
+        struct EntryBus {
+            ram: std::rc::Rc<std::cell::RefCell<EntryRam>>,
+            peripherals: crate::platform::apple::bus::Bus,
+            interrupts: crate::platform::apple::interrupt::InterruptLatch,
+            sep: Option<crate::platform::apple::bus::DeviceId>,
+            effects: Vec<serde_json::Value>,
+            irq_changes: Vec<serde_json::Value>,
+            entropy_calls: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl EntryBus {
+            fn new(ram: std::rc::Rc<std::cell::RefCell<EntryRam>>, mount_sep: bool) -> Self {
+                use crate::platform::apple::{
+                    asc, bus,
+                    interrupt::{AicInput, InterruptLatch},
+                    sep::{self, Sep},
+                };
+                let mut peripherals = bus::Bus::new();
+                let entropy_calls = std::rc::Rc::new(std::cell::Cell::new(0));
+                let sep = mount_sep.then(|| {
+                    let supplied = entropy_calls.clone();
+                    use sha2::Digest as _;
+                    use std::io::Read as _;
+                    let adt = std::fs::read(
+                        std::env::var("STELA_TEST_PMGR_M1_ADT")
+                            .expect("matching original J314s ADT"),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        hex::encode(sha2::Sha256::digest(&adt)),
+                        "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+                    );
+                    let root = crate::machine::adt::Node::root(&adt).unwrap();
+                    let io = root.child("arm-io").unwrap();
+                    let node = io.child("sep").unwrap();
+                    assert_eq!(
+                        node.property("compatible"),
+                        Some(&b"iop-sep,ascwrap-v4\0"[..])
+                    );
+                    let irqs: [u32; 4] = node.cells32("interrupts").unwrap().try_into().unwrap();
+                    let lines = asc::Lines::from_interrupts(
+                        irqs.map(|irq| AicInput::new(0, u16::try_from(irq).unwrap())),
+                    );
+                    let mut random = std::fs::File::open("/dev/urandom").unwrap();
+                    let model = Sep::booted_rom(
+                        Box::new(move |bytes: &mut [u8]| {
+                            random
+                                .read_exact(bytes)
+                                .map_err(|_| "actual host entropy source failed")?;
+                            supplied.set(supplied.get() + 1);
+                            Ok(())
+                        }),
+                        lines,
+                        None,
+                        0x5354454c41544553,
+                        false,
+                        sep::state::Location::Volatile,
+                    )
+                    .unwrap();
+                    let device = peripherals.add(Box::new(model));
+                    let ranges = io.ranges().unwrap();
+                    let registers = node.pairs("reg").unwrap();
+                    assert_eq!(registers.len(), 2);
+                    for (index, (address, bytes)) in registers.into_iter().enumerate() {
+                        let &(child, parent, _) = ranges
+                            .iter()
+                            .find(|&&(child, _, length)| {
+                                address >= child && address - child < length
+                            })
+                            .unwrap();
+                        let offset = if index == 0 { 0 } else { sep::AUXILIARY_OFFSET };
+                        peripherals
+                            .map(device, parent + address - child, bytes, offset)
+                            .unwrap();
+                    }
+                    device
+                });
+                Self {
+                    ram,
+                    peripherals,
+                    interrupts: InterruptLatch::new(),
+                    sep,
+                    effects: vec![],
+                    irq_changes: vec![],
+                    entropy_calls,
+                }
+            }
+            fn collect_irqs(&mut self) {
+                self.irq_changes.extend(self.interrupts.take_aic_inputs().into_iter().map(|(input, level)|
+                    serde_json::json!({"die":input.die,"irq":input.irq,"asserted":level})));
+            }
+        }
         impl Devices for EntryBus {
             fn read(
                 &mut self,
-                _: usize,
+                cpu: usize,
                 address: u64,
                 bytes: u8,
-                _: u64,
+                now: u64,
             ) -> Result<u64, DeviceError> {
+                use crate::platform::apple::bus::{Access, MmioError, Width};
+                let width = Width::from_bytes(u64::from(bytes)).ok_or_else(|| {
+                    DeviceError::Refused("original entry unsupported access width".into())
+                })?;
+                let result = self.peripherals.read(
+                    address,
+                    width,
+                    &mut Access::new(cpu, now, &mut self.interrupts),
+                );
+                if !matches!(result, Err(MmioError::Unmapped { .. })) {
+                    self.effects
+                        .push(serde_json::json!({"address":address,"bytes":bytes,
+                        "write":false,"result":format!("{:?}", result.as_ref().map(|_| ()))}));
+                    self.collect_irqs();
+                    return result.map_err(|error| DeviceError::Refused(format!("{error:?}")));
+                }
                 let mut value = [0; 8];
-                if bytes > 8
-                    || !self
-                        .0
-                        .borrow_mut()
-                        .read(address, &mut value[..usize::from(bytes)])
+                if !self
+                    .ram
+                    .borrow_mut()
+                    .read(address, &mut value[..usize::from(bytes)])
                 {
                     return Err(DeviceError::Refused(
                         "original entry physical input is unknown".into(),
@@ -1282,17 +1401,33 @@ mod tests {
             }
             fn write(
                 &mut self,
-                _: usize,
+                cpu: usize,
                 address: u64,
                 bytes: u8,
                 value: u64,
-                _: u64,
+                now: u64,
             ) -> Result<(), DeviceError> {
-                if bytes > 8
-                    || !self
-                        .0
-                        .borrow_mut()
-                        .write(address, &value.to_le_bytes()[..usize::from(bytes)])
+                use crate::platform::apple::bus::{Access, MmioError, Width};
+                let width = Width::from_bytes(u64::from(bytes)).ok_or_else(|| {
+                    DeviceError::Refused("original entry unsupported access width".into())
+                })?;
+                let result = self.peripherals.write(
+                    address,
+                    width,
+                    value,
+                    &mut Access::new(cpu, now, &mut self.interrupts),
+                );
+                if !matches!(result, Err(MmioError::Unmapped { .. })) {
+                    self.effects
+                        .push(serde_json::json!({"address":address,"bytes":bytes,
+                        "write":true,"result":format!("{result:?}")}));
+                    self.collect_irqs();
+                    return result.map_err(|error| DeviceError::Refused(format!("{error:?}")));
+                }
+                if !self
+                    .ram
+                    .borrow_mut()
+                    .write(address, &value.to_le_bytes()[..usize::from(bytes)])
                 {
                     return Err(DeviceError::Refused(
                         "original entry target has no live qualified RAM/MMIO owner".into(),
@@ -1303,6 +1438,28 @@ mod tests {
             fn lines(&mut self, _: usize, _: u64) -> Lines {
                 Lines::default()
             }
+            fn transfer(
+                &mut self,
+                cpu: usize,
+                _: &mut dyn crate::platform::dma::Memory,
+                now: u64,
+            ) -> Result<(), DeviceError> {
+                use crate::platform::apple::{bus::Access, sep::Sep};
+                self.peripherals
+                    .advance(&mut Access::new(cpu, now, &mut self.interrupts))
+                    .map_err(|error| DeviceError::TransferRefused(format!("{error:?}")))?;
+                self.collect_irqs();
+                if self
+                    .sep
+                    .and_then(|device| self.peripherals.device::<Sep>(device))
+                    .is_some_and(Sep::pending)
+                {
+                    return Err(DeviceError::TransferRefused(
+                        "original SEP DMA requires actual DART and shared backing provider".into(),
+                    ));
+                }
+                Ok(())
+            }
             fn system_register(
                 &mut self,
                 _: usize,
@@ -1310,8 +1467,13 @@ mod tests {
                 written: Option<u64>,
                 _: u64,
             ) -> Option<Result<u64, &'static str>> {
-                let mut entry = self.0.borrow_mut();
-                entry.registers.push((encoding, written));
+                let mut entry = self.ram.borrow_mut();
+                let value = if entry.redact { None } else { written };
+                entry.registers.push(RegisterEvent {
+                    encoding,
+                    write: written.is_some(),
+                    value,
+                });
                 if encoding != Encoding::new(3, 3, 15, 7, 0) {
                     return None;
                 }
@@ -1320,25 +1482,43 @@ mod tests {
                         .cram
                         .read()
                         .map_err(|_| "actual canonical CRAM owner refused read"),
-                    Some(value) => entry
+                    Some(word) => entry
                         .cram
-                        .write(value)
+                        .write(word)
                         .map(|()| 0)
                         .map_err(|_| "actual canonical CRAM owner refused write"),
                 })
             }
         }
+        enum EntryPolicy {
+            ImageOnly,
+            Initialized,
+            InitializedWithSep,
+        }
         #[test]
         #[ignore = "requires pinned J314s LLB; declared live CRAM is an emulated entry handoff, not Apple reset state"]
         fn unchanged_j314s_entry_fetches_from_live_canonical_aperture_before_original_consumers() {
-            live_entry(false);
+            live_entry(EntryPolicy::ImageOnly);
         }
         #[test]
         #[ignore = "requires pinned J314s LLB; whole-aperture zeroing is explicit Stela entry policy, not Apple BootROM state"]
         fn unchanged_j314s_entry_uses_actual_whole_reservation_initialization_before_image_copy() {
-            live_entry(true);
+            live_entry(EntryPolicy::Initialized);
         }
-        fn live_entry(initialize_reservation: bool) {
+        #[test]
+        #[ignore = "requires pinned J314s LLB/ADT and actual host entropy; declared Stela ROM handoff, not Apple cold state"]
+        fn unchanged_j314s_entry_exchanges_full_mailbox_frames_with_native_sep_rom() {
+            live_entry(EntryPolicy::InitializedWithSep);
+        }
+        fn live_entry(policy: EntryPolicy) {
+            let initialize_reservation = !matches!(policy, EntryPolicy::ImageOnly);
+            let mount_sep = matches!(policy, EntryPolicy::InitializedWithSep);
+            if mount_sep {
+                assert!(
+                    std::env::var_os("STELA_TEST_CRAM_OUTPUT").is_none(),
+                    "native entropy/key runs retain coordinates only, never native-code dumps"
+                );
+            }
             let _serial = ENTRY_EXECUTION.lock().unwrap();
             let _guard = EntryGuard::new();
             let bytes = original(J314S);
@@ -1364,6 +1544,8 @@ mod tests {
                 known: vec![false; CAPACITY],
                 source_reads: 0,
                 committed: vec![],
+                redacted_stores: vec![],
+                redact: false,
                 unknown: vec![],
                 registers: vec![],
             };
@@ -1411,6 +1593,7 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             entry.committed.clear(); // actual initialization is separate from guest stores
+            entry.redact = mount_sep; // no runtime entropy/key bytes enter evidence logs
             drop(bytes); // no parallel original-code RAM buffer survives
             let shared = std::rc::Rc::new(std::cell::RefCell::new(entry));
             let host = NativeHost {
@@ -1441,7 +1624,7 @@ mod tests {
             let mut machine = Machine::new(
                 Cpu::of(Chip::AppleM1, ENTRY_BASE, Pstate::reset(2)),
                 host,
-                EntryBus(shared.clone()),
+                EntryBus::new(shared.clone(), mount_sep),
                 profile,
                 target,
             );
@@ -1463,7 +1646,7 @@ mod tests {
                 for hit in machine.take_watch_hits() {
                     assert_eq!(hit.dropped, 0);
                     watch.push(serde_json::json!({"pc":hit.pc,"physical":hit.physical,"bytes":hit.bytes,
-                        "value":hit.value,"write":hit.write,"completed":hit.completed}));
+                        "value":if mount_sep {None} else {Some(hit.value)},"write":hit.write,"completed":hit.completed}));
                 }
                 (stop != Stop::Budget || (initialize_reservation && !exceptions.is_empty()))
                     .then_some(stop)
@@ -1473,17 +1656,46 @@ mod tests {
                 "original J314s live entry stop {stop:?}, pc={:#x}, blocks={}, writes={}",
                 machine.cpu.pc,
                 machine.statistics.blocks,
-                entry.committed.len()
+                entry.committed.len() + entry.redacted_stores.len()
             );
             assert_ne!(machine.cpu.pc, ENTRY_BASE + J314S.allocation);
             assert_eq!(entry.cram.backing().state(), before);
             assert_eq!(entry.cram.backing().commits, 0);
             assert!(view.is_current());
             assert!(entry.source_reads > 0);
-            assert!(entry.registers.iter().any(|(encoding, value)| *encoding
-                == Encoding::new(3, 3, 15, 7, 0)
-                && value.is_none()));
-            if initialize_reservation {
+            assert!(
+                entry
+                    .registers
+                    .iter()
+                    .any(|event| event.encoding == Encoding::new(3, 3, 15, 7, 0) && !event.write)
+            );
+            if mount_sep {
+                use crate::machine::system::Register;
+                assert_eq!(machine.devices.entropy_calls.get(), 4);
+                assert_eq!(machine.devices.effects.len(), 24);
+                assert!(
+                    machine
+                        .devices
+                        .effects
+                        .iter()
+                        .all(|effect| effect["result"] == "Ok(())")
+                );
+                assert_eq!(stop, Stop::Budget); // first actual exception, before handler execution
+                assert_eq!(exceptions.len(), 1);
+                assert_eq!(machine.cpu.read(Register::ELR_EL2), ENTRY_BASE + 0x22858);
+                assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x02000000);
+                assert_eq!(machine.cpu.read(Register::FAR_EL2), 0);
+                assert_eq!(machine.cpu.pc, ENTRY_BASE + 0xf4a00);
+                assert!(entry.committed.is_empty(), "no runtime values logged");
+                let sep = machine
+                    .devices
+                    .peripherals
+                    .device::<crate::platform::apple::sep::Sep>(machine.devices.sep.unwrap())
+                    .unwrap();
+                assert!(sep.evidence().is_none());
+                assert!(!sep.booted());
+                assert!(!sep.pending());
+            } else if initialize_reservation {
                 // Continue the qualified physical alias using actual shared
                 // host time. The next input is the original SEP outbox/control
                 // bank; this bounded fixture has no physical device provider.
@@ -1496,9 +1708,9 @@ mod tests {
                 } if detail == "original entry physical input is unknown"));
                 assert_eq!(entry.unknown.last(), Some(&(0x396408114, 4)));
                 assert_eq!(machine.statistics.exceptions, 0);
-                assert!(entry.registers.iter().any(|(encoding, value)| *encoding
+                assert!(entry.registers.iter().any(|event| event.encoding
                     == crate::machine::registers::encodings::ACNTPCT_EL0
-                    && value.is_none()));
+                    && !event.write));
             } else {
                 let Stop::Unsupported(requirement) = &stop else {
                     panic!("original entry did not reach its unknown storage boundary: {stop:?}");
@@ -1512,8 +1724,10 @@ mod tests {
             if !initialize_reservation {
                 assert_eq!(machine.statistics.exceptions, 0);
             }
-            assert!(!entry.committed.is_empty());
-            if let Some(path) = std::env::var_os(if initialize_reservation {
+            assert!(!entry.committed.is_empty() || !entry.redacted_stores.is_empty());
+            if let Some(path) = std::env::var_os(if mount_sep {
+                "STELA_TEST_CRAM_SEP_ENTRY_REPORT"
+            } else if initialize_reservation {
                 "STELA_TEST_CRAM_ZEROED_ENTRY_REPORT"
             } else {
                 "STELA_TEST_CRAM_ENTRY_REPORT"
@@ -1526,12 +1740,17 @@ mod tests {
                     "aperture_base":APERTURE,"aperture_bytes":CAPACITY,"unit_exponent":16,"limit":60,"initial_units":60,
                     "initial_mapping":format!("{before:?}"),"final_mapping":format!("{:?}",entry.cram.backing().state()),
                     "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),
-                    "boundary":if initialize_reservation {"next original physical peripheral input; no provider mounted"} else {"unknown original storage input"},"pc":machine.cpu.pc,
+                    "boundary":if mount_sep {"first architectural exception after actual native SEP mailbox transactions"} else if initialize_reservation {"next original physical peripheral input; no provider mounted"} else {"unknown original storage input"},"pc":machine.cpu.pc,
                     "physical_counter":"full entry uses actual monotonic host elapsed time in the declared24MHz domain, never poll-driven ticks",
                     "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,"exception_events":exceptions,
-                    "registers":machine.cpu.state.x,"sp":machine.cpu.state.sp,
-                    "source_reads":entry.source_reads,"guest_stores":entry.committed,"unknown_reads":entry.unknown,
-                    "system_accesses":entry.registers.iter().map(|(e,v)|(format!("{e:?}"),v)).collect::<Vec<_>>(),"watch":watch,
+                    "registers":if mount_sep {None} else {Some(machine.cpu.state.x)},"sp":machine.cpu.state.sp,
+                    "source_reads":entry.source_reads,"guest_stores":if mount_sep {serde_json::to_value(&entry.redacted_stores).unwrap()} else {serde_json::to_value(&entry.committed).unwrap()},
+                    "guest_store_parts":entry.committed.len()+entry.redacted_stores.len(),"unknown_reads":entry.unknown,
+                    "peripheral_effects":machine.devices.effects,"peripheral_irqs":machine.devices.irq_changes,
+                    "entropy_requests":machine.devices.entropy_calls.get(),
+                    "sep_handoff":if mount_sep {"explicit Stela running ROM/enabled actual mailboxes; real host entropy; declared test ECID5354454c41544553, unknownsecurityNone, volatile state; AIC input transitions recorded, CPU delivery unmounted"} else {"no peripheral provider"},
+                    "system_accesses":entry.registers.iter().map(|event|serde_json::json!({"encoding":format!("{:?}",event.encoding),"write":event.write,"value":event.value})).collect::<Vec<_>>(),"watch":watch,
+                    "redaction":if mount_sep {"all runtime registers/store bytes/mailbox values/watch values omitted at collection; only coordinates, sizes, directions and counts retained"} else {"no native entropy/key provider in this scenario"},
                     "knownness":"only actual declared initialization operations, original image copy and successful guest stores initialize bytes; underlying synthetic pattern is never supplied as original input"});
                 let mut file = std::fs::OpenOptions::new()
                     .write(true)

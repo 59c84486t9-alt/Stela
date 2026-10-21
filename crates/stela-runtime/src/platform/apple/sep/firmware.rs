@@ -162,6 +162,9 @@ fn dma_refusal(error: DmaError) -> &'static str {
 }
 
 impl Firmware for SepFirmware {
+    fn check_reset(&self) -> Result<(), &'static str> {
+        Err("SEP physical reset and nonretained security-state restoration are not qualified")
+    }
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         self.rom.start(outbox)
     }
