@@ -81,7 +81,7 @@ impl<C: Control> Chip<C> {
         self.phy_write(OCP_SRAM_DATA, u32::from(value))
     }
 
-    fn sram_read(&mut self, address: u16) -> Result<u16, BlockError> {
+    pub(super) fn sram_read(&mut self, address: u16) -> Result<u16, BlockError> {
         self.phy_write(OCP_SRAM_ADDR, u32::from(address))?;
         let mapped = self.phy_address(OCP_SRAM_DATA)?;
         Ok(self.read(PLA, mapped, 2)? as u16)
@@ -95,7 +95,7 @@ impl<C: Control> Chip<C> {
         Ok(())
     }
 
-    fn patch_request(&mut self, request: bool, wait: bool) -> Result<(), BlockError> {
+    pub(super) fn patch_request(&mut self, request: bool, wait: bool) -> Result<(), BlockError> {
         self.phy_modify(
             OCP_PHY_PATCH_CMD,
             PATCH_REQUEST,
@@ -415,9 +415,12 @@ pub(crate) mod tests {
         speed_version: u16,
         staged: usize,
         speed_pending: usize,
-        stuck_patch: bool,
+        pub(crate) stuck_patch: bool,
         stuck_speed: bool,
         wrong_version: bool,
+        pub(crate) efuse: u32,
+        pub(crate) phy_states: alloc::collections::VecDeque<u32>,
+        pub(crate) ups_exit_power_cut: bool,
     }
 
     impl Hardware {
@@ -435,6 +438,9 @@ pub(crate) mod tests {
                 stuck_patch: false,
                 stuck_speed: false,
                 wrong_version: false,
+                efuse: 0x1ffff,
+                phy_states: Default::default(),
+                ups_exit_power_cut: false,
             };
             // Independent raw wire inventory of a speed-up block: do not read
             // expectations back from the production parser/uploader objects.
@@ -471,9 +477,35 @@ pub(crate) mod tests {
                 address
             };
             let lanes = request[4] & 0xf;
-            let target = mapped + if lanes == 12 { 2 } else { 0 };
+            let target = mapped
+                + match lanes {
+                    2 => 1,
+                    4 | 12 => 2,
+                    8 => 3,
+                    _ => 0,
+                };
             let read = request[0] == 0xc0;
             if read && bank == PLA {
+                if target == OCP_PHY_STATUS
+                    && let Some(state) = self.phy_states.pop_front()
+                {
+                    self.core.set(PLA, OCP_PHY_STATUS, 2, state);
+                }
+                if address == PLA_EFUSE_DATA {
+                    let command = self.core.get(PLA, PLA_EFUSE_CMD, 2);
+                    self.core.set(PLA, PLA_EFUSE_DATA, 2, self.efuse & 0xffff);
+                    self.core.set(
+                        PLA,
+                        PLA_EFUSE_CMD,
+                        2,
+                        (command & !EFUSE_DATA_BIT16)
+                            | if self.efuse & 0x10000 != 0 {
+                                EFUSE_DATA_BIT16
+                            } else {
+                                0
+                            },
+                    );
+                }
                 if target == OCP_SRAM_DATA {
                     self.core.set(
                         PLA,
@@ -511,6 +543,10 @@ pub(crate) mod tests {
                 }
             }
             let reply = self.core.request(request, output)?;
+            if !read && bank == USB && target == USB_MISC_2 && self.ups_exit_power_cut {
+                self.ups_exit_power_cut = false;
+                self.core.set(USB, USB_MISC_0, 2, PCUT_STATUS);
+            }
             if !read && bank == PLA {
                 if target == OCP_SRAM_ADDR {
                     self.pointer = self.core.get(PLA, OCP_SRAM_ADDR, 2) as u16;

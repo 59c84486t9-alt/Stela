@@ -3555,8 +3555,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rtl8153a_missing_exact_firmware_never_creates_a_native_link() {
-        for revision in [0x5c10, 0x5c20, 0x5c30] {
+    fn rtl8153_missing_exact_firmware_never_creates_a_native_link() {
+        for revision in [0x5c10, 0x5c20, 0x5c30, 0x6010] {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing remains exclusive/live through all controller DMA.
@@ -3591,7 +3591,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn rtl8153a_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
+    fn rtl8153_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
         use crate::{
             firmware::{Catalog, Provenance, Provider, Resource, Target},
             net::Link,
@@ -3614,7 +3614,7 @@ pub(crate) mod tests {
                 self.catalog.load(requirement)
             }
         }
-        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30]
+        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010]
             .into_iter()
             .flat_map(|revision| {
                 [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))

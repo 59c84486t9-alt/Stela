@@ -1,7 +1,7 @@
 //! Vendor USB Ethernet backends. Candidate interfaces become usable links only
 //! after exact chip identification and revision-specific initialization.
-//! RTL8152B 02/07 and RTL8153A 03/04/05/06 have distinct implementations;
-//! RTL8153B/C and RTL8156 remain explicit startup gaps.
+//! RTL8152B 02/07, RTL8153A 03/04/05/06 and RTL8153B 08/09 have distinct
+//! implementations; RTL8153C and RTL8156 remain explicit startup gaps.
 pub mod firmware;
 mod framing;
 mod registers;
@@ -133,6 +133,8 @@ impl UsbEthernet {
         let receive_bytes = chip.receive_bytes();
         let family = if binding.revision.is_8153a() {
             "RTL8153A"
+        } else if binding.revision.is_8153b() {
+            "RTL8153B"
         } else {
             "RTL8152B"
         };

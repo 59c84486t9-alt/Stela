@@ -12,7 +12,7 @@ impl<C: Control> Chip<C> {
         self.write(USB, USB_TOLERANCE + 4, 2, value & 0xffff)
     }
 
-    fn u2p3(&mut self, enable: bool) -> Result<(), BlockError> {
+    pub(super) fn u2p3(&mut self, enable: bool) -> Result<(), BlockError> {
         self.modify(
             USB,
             USB_U2P3_CTRL,
@@ -22,7 +22,7 @@ impl<C: Control> Chip<C> {
         )
     }
 
-    pub(super) fn aldps_8153a(&mut self, enable: bool) -> Result<(), BlockError> {
+    pub(super) fn aldps_8153(&mut self, enable: bool) -> Result<(), BlockError> {
         self.phy_modify(OCP_POWER_CFG, EN_ALDPS, if enable { EN_ALDPS } else { 0 })?;
         if !enable {
             self.io.delay_us(1000);
@@ -31,7 +31,7 @@ impl<C: Control> Chip<C> {
         Ok(())
     }
 
-    fn phy_state(&mut self, desired: Option<u32>) -> Result<u32, BlockError> {
+    pub(super) fn phy_state(&mut self, desired: Option<u32>) -> Result<u32, BlockError> {
         let mapped = self.phy_address(OCP_PHY_STATUS)?;
         for _ in 0..500 {
             let state = self.read(PLA, mapped, 2)? & PHY_STAT_MASK;
@@ -46,7 +46,7 @@ impl<C: Control> Chip<C> {
         Err(BlockError::Timeout)
     }
 
-    fn queue_wake_off(&mut self) -> Result<(), BlockError> {
+    pub(super) fn queue_wake_off(&mut self) -> Result<(), BlockError> {
         self.modify(PLA, PLA_INDICATE_FALG, 1, UPCOMING_RUNTIME_D3, 0)?;
         self.modify(PLA, PLA_SUSPEND_FLAG, 1, LINK_CHG_EVENT, 0)?;
         self.modify(PLA, PLA_EXTRA_STATUS, 2, LINK_CHANGE_FLAG, 0)
@@ -184,6 +184,20 @@ impl<C: Control> Chip<C> {
         self.tolerance(false)?;
         self.u2p3(false)?;
         self.aldps(false)?;
+        self.first_init_8153()?;
+        self.modify(PLA, PLA_CONFIG6, 1, 0, LANWAKE_CLR_EN)?;
+        self.modify(PLA, PLA_LWAKE_CTRL_REG, 1, LANWAKE_PIN, 0)?;
+        self.modify(USB, USB_SSPHYLINK1, 2, DELAY_PHY_PWR_CHG, 0)?;
+        self.aldps(true)?;
+        if matches!(self.revision.0, 0x5c20 | 0x5c30) {
+            self.u2p3(true)?;
+        }
+        self.tolerance(true)
+    }
+
+    /// r8153_first_init is shared by A and B in the donor. C/8156 have
+    /// different FIFO/MTU paths and must never enter this helper.
+    pub(super) fn first_init_8153(&mut self) -> Result<(), BlockError> {
         self.modify(PLA, PLA_MISC_1, 2, 0, RXDY_GATED_EN)?;
         self.modify(
             PLA,
@@ -225,15 +239,7 @@ impl<C: Control> Chip<C> {
         self.write(PLA, PLA_RXFIFO_CTRL0, 4, RXFIFO_THR1_NORMAL)?;
         self.write(PLA, PLA_RXFIFO_CTRL1, 2, RXFIFO_THR2_NORMAL)?;
         self.write(PLA, PLA_RXFIFO_CTRL2, 2, RXFIFO_THR3_NORMAL)?;
-        self.write(PLA, PLA_TXFIFO_CTRL, 4, TXFIFO_THR_NORMAL2)?;
-        self.modify(PLA, PLA_CONFIG6, 1, 0, LANWAKE_CLR_EN)?;
-        self.modify(PLA, PLA_LWAKE_CTRL_REG, 1, LANWAKE_PIN, 0)?;
-        self.modify(USB, USB_SSPHYLINK1, 2, DELAY_PHY_PWR_CHG, 0)?;
-        self.aldps(true)?;
-        if matches!(self.revision.0, 0x5c20 | 0x5c30) {
-            self.u2p3(true)?;
-        }
-        self.tolerance(true)
+        self.write(PLA, PLA_TXFIFO_CTRL, 4, TXFIFO_THR_NORMAL2)
     }
 
     pub(super) fn enable_8153a(&mut self, status: u32) -> Result<(), BlockError> {

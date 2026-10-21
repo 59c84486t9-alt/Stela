@@ -6,6 +6,7 @@ use super::registers::*;
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
 mod rtl8153a;
+mod rtl8153b;
 mod upload;
 #[cfg(test)]
 pub(crate) use upload::tests::Hardware as FirmwareModel;
@@ -49,11 +50,15 @@ impl Revision {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a()
+        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a() || self.is_8153b()
     }
 
     pub fn is_8153a(self) -> bool {
         matches!(self.0, 0x5c00 | 0x5c10 | 0x5c20 | 0x5c30)
+    }
+
+    pub fn is_8153b(self) -> bool {
+        matches!(self.0, 0x6000 | 0x6010)
     }
 
     /// Exact Linux firmware request for audited RTL8153/8156 revisions. None
@@ -132,6 +137,8 @@ impl<C: Control> Chip<C> {
         }
         if chip.revision.is_8153a() {
             chip.initialize_8153a(firmware)?;
+        } else if chip.revision.is_8153b() {
+            chip.initialize_8153b(firmware)?;
         } else {
             chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
         }
@@ -170,7 +177,9 @@ impl<C: Control> Chip<C> {
     }
 
     pub fn receive_bytes(&self) -> usize {
-        if self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED {
+        if self.revision.is_8153b()
+            || (self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED)
+        {
             32 * 1024
         } else {
             16 * 1024
@@ -262,8 +271,8 @@ impl<C: Control> Chip<C> {
     }
 
     fn aldps(&mut self, enable: bool) -> Result<(), BlockError> {
-        if self.revision.is_8153a() {
-            return self.aldps_8153a(enable);
+        if self.revision.is_8153a() || self.revision.is_8153b() {
+            return self.aldps_8153(enable);
         }
         self.phy_write(
             OCP_ALDPS_CONFIG,
@@ -440,10 +449,15 @@ impl<C: Control> Chip<C> {
             )?;
             if self.revision.is_8153a() {
                 self.enable_8153a(status)?;
+            } else if self.revision.is_8153b() {
+                self.enable_8153b(status)?;
             }
             self.modify(PLA, PLA_FMC, 2, FMC_FCR_MCU_EN, 0)?;
             self.modify(PLA, PLA_FMC, 2, 0, FMC_FCR_MCU_EN)?;
             self.modify(PLA, PLA_CR, 1, 0, CR_RE | CR_TE)?;
+            if self.revision.is_8153b() {
+                self.write(USB, USB_UPT_RXDMA_OWN, 1, OWN_UPDATE | OWN_CLEAR)?;
+            }
             self.modify(PLA, PLA_MISC_1, 2, RXDY_GATED_EN, 0)?;
             // Directed, broadcast, all multicast. No VLAN/checksum offload.
             self.write(PLA, 0xcd00, 4, u32::MAX)?;
@@ -464,7 +478,7 @@ impl<C: Control> Chip<C> {
         self.poll(PLA, PLA_OOB_CTRL, 1, 0x30, 0x30, (1000, 1000))?;
         self.poll(PLA, PLA_TCR0, 2, TCR0_TX_EMPTY, TCR0_TX_EMPTY, (1000, 1000))?;
         self.nic_reset()?;
-        if self.revision.is_8153a() {
+        if self.revision.is_8153a() || self.revision.is_8153b() {
             self.reset_bmu()?;
         }
         self.aldps(true)
@@ -701,9 +715,7 @@ pub(crate) mod tests {
                 Err(BlockError::Timeout)
             ));
         }
-        for revision in [
-            0x4c00, 0x5c10, 0x6000, 0x6010, 0x7020, 0x7030, 0x7410, 0xffff,
-        ] {
+        for revision in [0x4c00, 0x5c10, 0x6010, 0x7020, 0x7030, 0x7410, 0xffff] {
             let model = Rc::new(RefCell::new(Model::new(revision)));
             assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
             assert_eq!(model.borrow().trace.len(), 1);

@@ -10,7 +10,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-source, out = map(Path, sys.argv[1:])
+source, out = map(Path, sys.argv[1:3])
+b_mode = len(sys.argv) == 4 and sys.argv[3] == "--rtl8153b"
 assert hashlib.sha256(source.read_bytes()).hexdigest() == "9d766f203c7fdabe6449e8dd2b9e5dd4fccfa20a62aa5dbf00d64c0c475c5a9f"
 text = source.read_text()
 out.mkdir(parents=True, exist_ok=True)
@@ -68,6 +69,8 @@ int main(void){
   }return 0;
 }
 '''
+if b_mode:
+    main = main.replace("r<4", "r<2").replace("RTL_VER_03+r", "RTL_VER_08+r").replace("speed>=4?COALESCE_SUPER:(speed==3?COALESCE_HIGH:COALESCE_SLOW)", "15000").replace("speed>=4?32768:16384", "32768").replace("0x5c00+r*0x10", "0x6000+r*0x10")
 unit = out / "linux-rtl8153a-link.c"
 unit.write_text(prelude + "\n" + "\n".join(defines) + "\n" + version + "\n" + "\n".join(function(n) for n in names) + main)
 exe = out / "linux-rtl8153a-link"
