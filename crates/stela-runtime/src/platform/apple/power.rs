@@ -17,6 +17,13 @@
 //! until native controller progress is qualified. They never clear BUSY or
 //! claim a native sequence/CPU lifecycle completed.
 //!
+//! CIO (reg[41], `enableCioReconfig` 0x2fa5a44) reads offsets0x4000/0x8000,
+//! sets request bit0 and waits for actual mask2 clearance. The false path
+//! performs no access. Both port requests preserve unrelated captured fields,
+//! including a same-value request, without selecting an invented native PC.
+//! Captured GPCE/CIO unready observations remain explicit even before a new
+//! request; a snapshot must not turn prior native work into an empty idle queue.
+//!
 //! Power-gate enables (reg[32], restoreHW 0x2f9cc3c and
 //! `_enableCPMPowerDomainGating` 0x2f9fd88) retain bit31 and other RMW fields.
 //! They permit automatic gating without inventing an electrical idle event.
@@ -40,6 +47,8 @@ const MASK: u64 = 0x3f8;
 const FINAL: u64 = 0x3fc;
 const REQUEST: u64 = 0xf;
 const BUSY: u64 = 1 << 4;
+const CIO_REQUEST: u32 = 1;
+const CIO_WAIT: u32 = 2;
 pub const MARKER: u64 = 0x17ffc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +56,8 @@ pub enum Kind {
     Volman,
     Marker,
     Gpce,
+    /// T8112 original RegMap0x63/reg41: both CIO reconfiguration words.
+    Cio,
     /// Exact T8112 native sequence/table configuration words, placed at their
     /// physical-address offsets. No status, trigger or SRAM aperture is implied.
     NubBindings,
@@ -64,6 +75,7 @@ impl Kind {
             .concat(),
             Self::Marker => alloc::vec![MARKER],
             Self::Gpce => alloc::vec![0, 4],
+            Self::Cio => alloc::vec![0x4000, 0x8000],
             Self::NubBindings => {
                 let mut offsets = alloc::vec![
                     0x23d2d0200,
@@ -103,6 +115,22 @@ pub struct GpceRequest {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CioRequest {
+    pub offset: u64,
+    pub previous: u32,
+    pub written: u32,
+}
+
+/// A captured driver wait condition was not ready. The observation alone
+/// does not reconstruct the native work/PC that must eventually satisfy it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnresolvedReadiness {
+    pub offset: u64,
+    pub observed: u32,
+    pub mask: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfigurationRequest {
     pub offset: u64,
     pub previous: u32,
@@ -128,6 +156,8 @@ pub struct Power {
     kind: Kind,
     registers: BTreeMap<u64, Word>,
     gpce: Vec<GpceRequest>,
+    cio: Vec<CioRequest>,
+    unresolved_readiness: Vec<UnresolvedReadiness>,
     pending_configuration: Vec<ConfigurationRequest>,
 }
 impl Power {
@@ -136,6 +166,8 @@ impl Power {
             kind,
             registers: BTreeMap::new(),
             gpce: Vec::new(),
+            cio: Vec::new(),
+            unresolved_readiness: Vec::new(),
             pending_configuration: Vec::new(),
         }
     }
@@ -161,11 +193,30 @@ impl Power {
             if !model.registers.contains_key(&offset) {
                 return Err(SnapshotError::Missing(offset));
             }
+            let mask = match kind {
+                Kind::Gpce => BUSY as u32,
+                Kind::Cio => CIO_WAIT,
+                _ => 0,
+            };
+            let observed = model.registers[&offset].value;
+            if observed & mask != 0 {
+                model.unresolved_readiness.push(UnresolvedReadiness {
+                    offset,
+                    observed,
+                    mask,
+                });
+            }
         }
         Ok(model)
     }
     pub fn pending_gpce(&self) -> impl Iterator<Item = GpceRequest> + '_ {
         self.gpce.iter().copied()
+    }
+    pub fn pending_cio(&self) -> impl Iterator<Item = CioRequest> + '_ {
+        self.cio.iter().copied()
+    }
+    pub fn unresolved_readiness(&self) -> impl Iterator<Item = UnresolvedReadiness> + '_ {
+        self.unresolved_readiness.iter().copied()
     }
     pub fn pending_configuration(&self) -> impl Iterator<Item = ConfigurationRequest> + '_ {
         self.pending_configuration.iter().copied()
@@ -314,6 +365,29 @@ impl MmioDevice for Power {
                 });
                 return Ok(());
             }
+            Kind::Cio => {
+                // enableCioReconfig(false) returns without touching a bank.
+                // Its true path always writes read32 | 1, even if bit0 was
+                // already set; equal data is not evidence of no trigger.
+                if value != old | CIO_REQUEST {
+                    return Err(fail(
+                        "CIO reconfiguration only qualifies preserving fields and setting request bit0",
+                    ));
+                }
+                self.registers.insert(
+                    offset,
+                    Word {
+                        value,
+                        known: !CIO_WAIT,
+                    },
+                );
+                self.cio.push(CioRequest {
+                    offset,
+                    previous: old,
+                    written: value,
+                });
+                return Ok(());
+            }
             _ => {}
         }
         self.registers.insert(offset, Word::captured(value));
@@ -339,7 +413,11 @@ impl MmioDevice for Power {
         Ok(())
     }
     fn advance(&mut self, _: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
-        if !self.gpce.is_empty() || !self.pending_configuration.is_empty() {
+        if !self.gpce.is_empty()
+            || !self.cio.is_empty()
+            || !self.pending_configuration.is_empty()
+            || !self.unresolved_readiness.is_empty()
+        {
             return Err(refuse(
                 NAME,
                 0,
@@ -385,6 +463,7 @@ mod tests {
             Kind::Volman,
             Kind::Marker,
             Kind::Gpce,
+            Kind::Cio,
             Kind::NubBindings,
             Kind::Gating,
             Kind::Tvm,
@@ -448,6 +527,93 @@ mod tests {
         assert!(model.write(4, Width::Word, 0x82f, &mut access).is_err());
         assert!(model.write(4, Width::Word, 0x833, &mut access).is_err());
         assert_eq!(model.read(4, Width::Word, &mut access), Ok(0x830));
+    }
+
+    #[test]
+    fn mounted_cio_preserves_both_ports_and_request_ownership_before_unknown_pc_selection() {
+        let mut bus = Bus::new();
+        let id = bus.add(Box::new(
+            Power::from_snapshot(Kind::Cio, [(0x4000, 0xa0), (0x8000, 0xb1)]).unwrap(),
+        ));
+        bus.map(id, 0x23b78c000, 0x9000, 0).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        // Refuse a made-up disable and unrelated field changes before effects.
+        assert!(
+            bus.write(0x23b794000, Width::Word, 0xb0, &mut access)
+                .is_err()
+        );
+        assert!(
+            bus.write(0x23b790000, Width::Word, 0x81, &mut access)
+                .is_err()
+        );
+        assert_eq!(bus.read(0x23b794000, Width::Word, &mut access), Ok(0xb1));
+        // A same-value bit0 request is still an owned original write. Never
+        // mark it idempotent or use it to claim an already completed program.
+        bus.write(0x23b794000, Width::Word, 0xb1, &mut access)
+            .unwrap();
+        assert!(bus.read(0x23b794000, Width::Word, &mut access).is_err());
+        assert!(
+            bus.write(0x23b794000, Width::Word, 0xb1, &mut access)
+                .is_err()
+        );
+        assert_eq!(bus.read(0x23b790000, Width::Word, &mut access), Ok(0xa0));
+        bus.write(0x23b790000, Width::Word, 0xa1, &mut access)
+            .unwrap();
+        let model = bus.device_mut::<Power>(id).unwrap();
+        assert_eq!(
+            model.pending_cio().collect::<Vec<_>>(),
+            [
+                CioRequest {
+                    offset: 0x8000,
+                    previous: 0xb1,
+                    written: 0xb1
+                },
+                CioRequest {
+                    offset: 0x4000,
+                    previous: 0xa0,
+                    written: 0xa1
+                },
+            ]
+        );
+        assert!(model.advance(&mut access).is_err());
+        assert_eq!(model.pending_cio().count(), 2);
+        assert!(model.read(0, Width::Word, &mut access).is_err());
+        assert!(model.read(0x4000, Width::Double, &mut access).is_err());
+    }
+
+    #[test]
+    fn captured_unready_gpce_and_cio_work_cannot_become_an_empty_idle_queue() {
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        for (kind, entries, mask) in [
+            (Kind::Gpce, [(0, 0x10), (4, 0x2f)], 0x10),
+            (Kind::Cio, [(0x4000, 0xa2), (0x8000, 0xb1)], 2),
+        ] {
+            let mut model = Power::from_snapshot(kind, entries).unwrap();
+            assert_eq!(
+                model.pending_gpce().count() + model.pending_cio().count(),
+                0
+            );
+            assert_eq!(
+                model.unresolved_readiness().collect::<Vec<_>>(),
+                [UnresolvedReadiness {
+                    offset: entries[0].0,
+                    observed: entries[0].1,
+                    mask
+                }]
+            );
+            assert_eq!(
+                model.read(entries[0].0, Width::Word, &mut access),
+                Ok(u64::from(entries[0].1))
+            );
+            assert!(model.advance(&mut access).is_err());
+            assert_eq!(model.unresolved_readiness().count(), 1);
+            assert_eq!(
+                model.read(entries[0].0, Width::Word, &mut access),
+                Ok(u64::from(entries[0].1))
+            );
+        }
     }
     #[test]
     fn tvm_retains_config_and_other_domains_without_claiming_idle_progress() {

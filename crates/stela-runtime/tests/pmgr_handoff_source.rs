@@ -988,11 +988,13 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
     assert_eq!(quad(&bytes, 0x134f6e8 + 16 + 0xa78), 0x8011233a02fa5a44);
     assert_eq!(quad(&bytes, 0x1351a98), 0x8011000002ba6f4c);
     for (offset, opcode) in [
+        (0x2fa5a48, 0x34000782), // false returns without a bank access
         (0x2fa5a60, 0x52900008), // nonzero index offset8000
         (0x2fa5a64, 0x52880009), // index0 offset4000
         (0x2fa5a8c, 0x52800c61), // original RegMap63
         (0x2fa5ad0, 0x32000003), // preserve original control, set bit0
         (0x2fa5b10, 0x52800042), // wait mask2
+        (0x2fa5b38, 0xd65f03c0), // no invented disable command
         (0x2ba704c, 0x6a15001f), // test actual physical read against mask
         (0x2fa35ac, 0x52800c61), // initRegMaps63 -> original reg41
         (0x2fa35b0, 0x52800522),
@@ -1004,6 +1006,83 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
     // Mask clearance, timeout and workloop wake behavior are actual driver
     // requirements. None identifies a completed native sequence or its final
     // PS values without physical trigger-to-sequence and retirement evidence.
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_gpce_producers_and_live_bindings_exclude_a_low_four_only_retirement_model() {
+    let bytes = llb();
+    for (start, end, digest) in [
+        (
+            0x233898,
+            0x233a78,
+            "18587d62244cf317b8b51ba689b248c4af215d5bd2eff33fe9abcc77c93a25c1",
+        ),
+        (
+            0x2475f0,
+            0x247b90,
+            "ea440df41f177ff3108b1d2e178b2790c64811f64eaf44bc88f80b27955cc485",
+        ),
+        (
+            0x22ca10,
+            0x22ca88,
+            "c081a290295d83f4d0aed4076fe8ee46764ec458335142803324475b034939ea",
+        ),
+        (
+            0x217db8,
+            0x217e48,
+            "1d5d2d9fadf7000b8a35e6659a6498b22c0976422339d74572d9975d20fe0dc3",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    for (offset, mask, address) in [
+        (0x233898, 0x1000000, 0x23b780000),
+        (0x233988, 0x2000000, 0x23b780004),
+    ] {
+        assert_eq!(quad(&bytes, offset), 0xab0017); // conditional source feature mask
+        assert_eq!(quad(&bytes, offset + 8), mask);
+        for (delta, opcode, a, b) in [
+            (24, 0, address, 0xf),
+            (48, 3, address, 0x10fff00),
+            (72, 3, 0x20, 0x20), // consumed poll operand row, not a new instruction
+            (96, 0, address, 0x2f),
+            (120, 0, 0x23b7002f0, 0x0f0000ff), // MCC PS, not an initial-state claim
+        ] {
+            assert_eq!(quad(&bytes, offset + delta), 23 | (opcode << 16));
+            assert_eq!(quad(&bytes, offset + delta + 8), a);
+            assert_eq!(quad(&bytes, offset + delta + 16), b);
+        }
+    }
+    // Late native programs include additional status/control effects. Their
+    // existence does not assign a kernel request to any one of these slots.
+    for (offset, sequence, address) in [(0x247830, 25, 0x23b780000), (0x2479f8, 27, 0x23b780004)] {
+        assert_eq!(quad(&bytes, offset), sequence | (3 << 16));
+        assert_eq!(quad(&bytes, offset + 8), address);
+        assert_eq!(quad(&bytes, offset + 24 + 8), 0x40);
+        assert_eq!(quad(&bytes, offset + 24 + 16), 0x40);
+        let writes = (offset + 48..offset + 48 + 15 * 24)
+            .step_by(24)
+            .filter(|row| quad(&bytes, *row) == sequence)
+            .map(|row| (quad(&bytes, row + 8), quad(&bytes, row + 16)))
+            .filter(|(target, _)| *target == address + 0x2000)
+            .map(|(_, value)| value)
+            .collect::<Vec<_>>();
+        assert_eq!(writes, [0x51, 0x53, 0x5b, 0x1b, 0x1a]);
+    }
+    // The apparent source-row B constants are not a reset snapshot. Callback
+    // B overwrites its w2 argument with the actual AP read before emission.
+    assert_eq!(word(&bytes, 0x124ec), 0xb9400022);
+    assert_eq!(word(&bytes, 0x124f0), 0x52800003);
+    assert_eq!(branch_target(&bytes, 0x124f4), 0x10810);
+    for (offset, address, raw_b) in [
+        (0x22ca10, 0x23b781000, 0x23df3f0),
+        (0x217db8, 0x23b78d000, 0x23df000),
+    ] {
+        assert_eq!((quad(&bytes, offset) >> 16) & 0xffff, 0xb);
+        assert_eq!(quad(&bytes, offset + 8), address);
+        assert_eq!(quad(&bytes, offset + 16), raw_b);
+    }
 }
 
 #[test]
