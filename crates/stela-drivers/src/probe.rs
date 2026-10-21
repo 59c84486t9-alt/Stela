@@ -311,7 +311,9 @@ pub unsafe fn probe_with_provider(
                 }
                 continue;
             } else if net::igc::matches(&function) {
-                match Igc::new(&mut function, handoff, dma) {
+                // SAFETY: the caller grants exclusive post-EBS controller,
+                // segment configuration and firmware/ASPM policy ownership.
+                match unsafe { Igc::new(&mut function, handoff, dma) } {
                     Ok(device) => disks.links.push(Adapter::Igc(device)),
                     Err(error) => disks.failures.push((address, error.into())),
                 }

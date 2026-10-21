@@ -15,7 +15,7 @@ use crate::{
     bus::{
         dma::{DmaAllocator, DmaBuffer},
         mmio::Mmio,
-        pci::Function,
+        pci::{self, Function},
     },
     registers,
 };
@@ -96,6 +96,18 @@ const TRANSMIT_WAIT_US: u64 = 100_000;
 
 pub fn matches(function: &Function) -> bool {
     function.vendor == VENDOR && DEVICES.contains(&function.device) && function.class == [2, 0, 0]
+}
+
+fn prepare_link(
+    device: u16,
+    disable: impl FnOnce() -> Result<(), BlockError>,
+) -> Result<(), BlockError> {
+    // Pinned igc_base.c::igc_is_device_id_i226. LMVP5503 is deliberately not
+    // guessed into this exact donor erratum predicate.
+    if matches!(device, 0x125b | 0x125c | 0x125d | 0x3102) {
+        disable()?;
+    }
+    Ok(())
 }
 
 /// The station address in receive address register 0, which the NVM
@@ -184,7 +196,14 @@ pub struct Igc {
 }
 
 impl Igc {
-    pub fn new(
+    /// Attach a physical integrated copper controller after ExitBootServices.
+    ///
+    /// # Safety
+    /// The caller exclusively owns the controller, PCI segment configuration
+    /// and firmware/ACPI ASPM policy. The handoff describes actual mapped ECAM,
+    /// MMIO and boot-lifetime DMA ranges. No firmware or other driver may
+    /// access these resources or restore disabled link states.
+    pub unsafe fn new(
         function: &mut Function,
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
@@ -194,6 +213,11 @@ impl Igc {
                 "not an Intel I225/I226 copper candidate",
             ));
         }
+        prepare_link(function.device, || {
+            // SAFETY: the caller grants exclusive segment/ASPM ownership;
+            // apply the erratum before BAR probing, decode or bus mastering.
+            unsafe { pci::disable_aspm_l1_2_link(function, handoff) }
+        })?;
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
         let clock = handoff.clock;
@@ -416,6 +440,28 @@ mod tests {
         assert!(DEVICES.contains(&0x125c));
         assert!(!DEVICES.contains(&0x125f));
         assert!(!DEVICES.contains(&0x15fd));
+    }
+
+    #[test]
+    fn source_exact_i226_link_erratum_runs_before_attachment_and_propagates_failure() {
+        use core::cell::Cell;
+        for device in DEVICES {
+            let called = Cell::new(false);
+            let result = prepare_link(device, || {
+                called.set(true);
+                Err(BlockError::Timeout)
+            });
+            let required = [0x125b, 0x125c, 0x125d, 0x3102].contains(&device);
+            assert_eq!(called.get(), required);
+            assert_eq!(
+                result,
+                if required {
+                    Err(BlockError::Timeout)
+                } else {
+                    Ok(())
+                }
+            );
+        }
     }
 
     #[test]
