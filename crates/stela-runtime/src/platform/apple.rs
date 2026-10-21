@@ -39,6 +39,7 @@ pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
 pub mod mxwrap;
+pub mod nhi;
 pub mod nor;
 pub mod perf;
 pub mod pmgr;
