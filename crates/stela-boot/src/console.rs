@@ -2,8 +2,8 @@
 //! still shows the mount's progress, from the startup choice until the
 //! guest's display takes the screen.
 //!
-//! Glyphs come from bitmap fonts drawn at their own resolution, in the size
-//! the Linux console would choose for the screen ([`font::choose`]). The
+//! Glyphs come from one 8x16 bitmap font drawn at its own resolution on any
+//! screen, so a larger display shows smaller, sharper text. The
 //! text is a grid of cells kept in memory, and drawing writes only the cells
 //! that changed: video memory is uncached and slow to read back, so
 //! scrolling redraws from the grid instead of moving pixels.
@@ -236,7 +236,7 @@ struct Text {
 impl Text {
     fn new(screen: Framebuffer) -> Option<Self> {
         let (width, height) = screen.resolution();
-        let font = font::choose(width, height)?;
+        let font = font::console()?;
         // A one-cell margin all round.
         let columns = (width / font.width).checked_sub(2)?;
         let rows = (height / font.height).checked_sub(2)?;

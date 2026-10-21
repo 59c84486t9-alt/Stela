@@ -1,6 +1,6 @@
-//! The console's bitmap fonts: Spleen 2.1.0 by Frederic Cambus
-//! (BSD-2-Clause, `LICENSES/spleen.txt`), in the Linux console's PSF1 and
-//! PSF2 formats. Each glyph is `height` rows of `width` bits, MSB first,
+//! The console's bitmap font: Spleen 2.1.0 8x16 by Frederic Cambus
+//! (BSD-2-Clause, `LICENSES/spleen.txt`), in the Linux console's PSF1 or
+//! PSF2 format. Each glyph is `height` rows of `width` bits, MSB first,
 //! each row padded to whole bytes. Spleen's first 256 glyphs are in code
 //! point order, so ASCII indexes them directly.
 
@@ -73,24 +73,10 @@ impl Font {
     }
 }
 
-pub static SMALL: &[u8] = include_bytes!("spleen-8x16.psfu");
-pub static MEDIUM: &[u8] = include_bytes!("spleen-12x24.psfu");
-pub static LARGE: &[u8] = include_bytes!("spleen-16x32.psfu");
+/// The one font, at its own resolution on every screen: a larger display
+/// shows more, sharper text rather than larger glyphs.
+static SPLEEN: &[u8] = include_bytes!("spleen-8x16.psfu");
 
-/// The font for a `width` by `height` screen, as the Linux console chooses
-/// (`lib/fonts/fonts.c`): the smallest whose grid holds at most 20,000
-/// characters, so text keeps about the same size on any screen, drawn at
-/// the font's own resolution; the largest when none fits.
-pub fn choose(width: usize, height: usize) -> Option<Font> {
-    let fonts = [SMALL, MEDIUM, LARGE].map(Font::parse);
-    let cells = |font: &Font| (width / font.width) * (height / font.height);
-    let mut fonts = fonts.into_iter().flatten();
-    let mut last = None;
-    for font in &mut fonts {
-        if cells(&font) <= 20_000 {
-            return Some(font);
-        }
-        last = Some(font);
-    }
-    last
+pub fn console() -> Option<Font> {
+    Font::parse(SPLEEN)
 }
