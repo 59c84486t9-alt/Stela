@@ -226,6 +226,7 @@ pub(super) mod tests {
         let count = configurations.len() as u8;
         Device {
             vendor_ethernet_revision: None,
+            vendor_ethernet_tcr: None,
             slot: 1,
             speed: FULL_SPEED,
             location: "configuration model".into(),

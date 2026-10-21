@@ -14,6 +14,7 @@ use crate::{
 };
 use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
+pub use firmware::Error;
 use rtl815x::{Chip, Control, Revision};
 
 /// The exact Realtek vendor-mode IDs audited in the donor. OEM IDs are not
@@ -114,7 +115,13 @@ impl UsbEthernet {
         device: &Device,
         binding: Binding,
         dma: &mut dyn DmaAllocator,
-    ) -> Result<Self, BlockError> {
+        provider: &dyn crate::firmware::Provider,
+    ) -> Result<Self, Error> {
+        if firmware::load(provider, &device.descriptor, binding.revision)?.is_some() {
+            // Validation alone never substitutes for a revision's full power,
+            // PHY and firmware upload sequence. Those revisions stay refused.
+            return Err(Error::UnsupportedRevision(binding.revision));
+        }
         let io = HostControl {
             controller: controller.clone(),
             slot: device.slot,

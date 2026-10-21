@@ -528,6 +528,7 @@ pub(crate) mod tests {
     pub(crate) fn fixture() -> (Device, Catalog, Script) {
         let mut device = Device {
             vendor_ethernet_revision: None,
+            vendor_ethernet_tcr: None,
             slot: 1,
             speed: FULL_SPEED,
             location: "Intel model".into(),

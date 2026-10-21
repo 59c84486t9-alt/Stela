@@ -8,7 +8,9 @@
 //! Setup's independently pinned manifest and exact resource target are still
 //! required. Unknown block effects are refused instead of silently skipped.
 use super::rtl815x::Revision;
-use alloc::vec::Vec;
+use crate::{block::BlockError, firmware as resources};
+use alloc::{boxed::Box, format, string::String, vec::Vec};
+use core::fmt;
 use sha2::{Digest, Sha256};
 
 const HEADER: usize = 64;
@@ -33,6 +35,98 @@ const UNION_UC: u32 = 11;
 const UNION_MISC: u32 = 12;
 const SPEED_UP: u32 = 13;
 const VERSION: u32 = 14;
+
+/// Owned exact target, preserved when a catalog lookup or image parse fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub name: String,
+    pub hardware: String,
+    pub revision: String,
+}
+
+impl Request {
+    pub fn new(descriptor: &[u8; 18], revision: Revision) -> Option<Self> {
+        Some(Self {
+            name: String::from(revision.firmware()?),
+            hardware: format!(
+                "usb:{:04x}:{:04x}:{:04x}",
+                u16::from_le_bytes([descriptor[8], descriptor[9]]),
+                u16::from_le_bytes([descriptor[10], descriptor[11]]),
+                u16::from_le_bytes([descriptor[12], descriptor[13]])
+            ),
+            revision: format!("tcr-{:04x}", revision.0),
+        })
+    }
+
+    fn requirement(&self) -> resources::Requirement<'_> {
+        resources::Requirement {
+            name: &self.name,
+            target: resources::Target {
+                driver: "usb-rtl815x",
+                hardware: &self.hardware,
+                revision: &self.revision,
+                board: None,
+            },
+            minimum_bytes: HEADER + 8,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Error {
+    Device(BlockError),
+    Firmware {
+        request: Request,
+        error: Box<resources::Error>,
+    },
+    Image {
+        request: Request,
+        reason: &'static str,
+    },
+    UnsupportedRevision(Revision),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Device(error) => error.fmt(f),
+            Self::Firmware { request, error } => write!(f, "USB RTL815x {request:?}: {error}"),
+            Self::Image { request, reason } => write!(f, "USB RTL815x {request:?}: {reason}"),
+            Self::UnsupportedRevision(revision) => write!(
+                f,
+                "USB RTL815x revision {:04x} initialization/upload is not implemented",
+                revision.0
+            ),
+        }
+    }
+}
+impl core::error::Error for Error {}
+impl From<BlockError> for Error {
+    fn from(error: BlockError) -> Self {
+        Self::Device(error)
+    }
+}
+
+/// Borrow exactly the resource selected by the observed hardware. The image
+/// and parsed blocks cannot outlive the Provider. No image bytes are cloned.
+pub fn load<'a>(
+    provider: &'a dyn resources::Provider,
+    descriptor: &[u8; 18],
+    revision: Revision,
+) -> Result<Option<(resources::Image<'a>, Firmware<'a>)>, Error> {
+    let Some(request) = Request::new(descriptor, revision) else {
+        return Ok(None);
+    };
+    let image = provider
+        .load(request.requirement())
+        .map_err(|error| Error::Firmware {
+            request: request.clone(),
+            error: Box::new(error),
+        })?;
+    let parsed = Firmware::parse(image.bytes(), revision)
+        .map_err(|reason| Error::Image { request, reason })?;
+    Ok(Some((image, parsed)))
+}
 
 fn word(bytes: &[u8], at: usize) -> u16 {
     u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
@@ -613,6 +707,106 @@ mod tests {
                 Firmware::parse(&image(&[start(), bad, block(STOP, 8)]), Revision(0x7030)).is_err()
             );
         }
+    }
+
+    #[test]
+    fn provider_boundary_preserves_exact_target_errors_and_borrowed_image_storage() {
+        use crate::firmware::{
+            Catalog, ErrorKind, HandoffProvider, Provenance, Provider, Resource, Target,
+        };
+        use core::cell::RefCell;
+        struct Recording {
+            catalog: Catalog,
+            requests: RefCell<Vec<(String, String, String)>>,
+        }
+        impl Provider for Recording {
+            fn load(
+                &self,
+                requirement: resources::Requirement<'_>,
+            ) -> Result<resources::Image<'_>, resources::Error> {
+                assert_eq!(requirement.target.driver, "usb-rtl815x");
+                assert_eq!(requirement.target.board, None);
+                self.requests.borrow_mut().push((
+                    requirement.name.into(),
+                    requirement.target.hardware.into(),
+                    requirement.target.revision.into(),
+                ));
+                self.catalog.load(requirement)
+            }
+        }
+        fn catalog(bytes: Vec<u8>, hardware: &str) -> Catalog {
+            let hash = Sha256::digest(&bytes).into();
+            Catalog::from_handoff(vec![Resource {
+                name: "rtl_nic/rtl8153a-2.fw",
+                target: Target {
+                    driver: "usb-rtl815x",
+                    hardware,
+                    revision: "tcr-5c10",
+                    board: None,
+                },
+                provenance: Provenance {
+                    source: "linux-firmware-test",
+                    revision: "immutable-fixture",
+                    member: "rtl_nic/rtl8153a-2.fw",
+                    license: "LICENCE.rtlwifi_firmware.txt",
+                },
+                expected_length: bytes.len(),
+                expected_sha256: hash,
+                bytes,
+            }])
+            .unwrap()
+        }
+        let mut descriptor = [0; 18];
+        descriptor[8..14].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81, 0x00, 0x30]);
+        let bytes = image(&[mac(true, true)]);
+        let original = bytes.as_ptr();
+        let provider = Recording {
+            catalog: catalog(bytes, "usb:0bda:8153:3000"),
+            requests: RefCell::new(Vec::new()),
+        };
+        assert!(
+            load(&provider, &descriptor, Revision(0x4c10))
+                .unwrap()
+                .is_none()
+        );
+        assert!(provider.requests.borrow().is_empty());
+        let (resource, parsed) = load(&provider, &descriptor, Revision(0x5c10))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.bytes().as_ptr(), original);
+        assert_eq!(parsed.blocks().len(), 1);
+        assert_eq!(
+            provider.requests.borrow()[0],
+            (
+                "rtl_nic/rtl8153a-2.fw".into(),
+                "usb:0bda:8153:3000".into(),
+                "tcr-5c10".into()
+            )
+        );
+        descriptor[12] = 1;
+        let Err(Error::Firmware { request, error }) =
+            load(&provider, &descriptor, Revision(0x5c10))
+        else {
+            panic!()
+        };
+        assert_eq!(error.kind, ErrorKind::WrongTarget);
+        assert_eq!(request.hardware, "usb:0bda:8153:3001");
+        let empty = HandoffProvider::new(None);
+        let Err(Error::Firmware { request, error }) = load(&empty, &descriptor, Revision(0x5c10))
+        else {
+            panic!()
+        };
+        assert_eq!(request.name, "rtl_nic/rtl8153a-2.fw");
+        assert_eq!(request.revision, "tcr-5c10");
+        assert_eq!(error.kind, ErrorKind::Missing);
+        descriptor[12] = 0;
+        let mut bytes = image(&[mac(true, true)]);
+        bytes[32] ^= 1; // Catalog-valid image, invalid vendor checksum.
+        let invalid = catalog(bytes, "usb:0bda:8153:3000");
+        assert!(matches!(
+            load(&invalid, &descriptor, Revision(0x5c10)),
+            Err(Error::Image { .. })
+        ));
     }
 
     #[test]

@@ -414,6 +414,9 @@ pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
 /// A device the controller addressed, with what it said about itself.
 #[derive(Clone, Debug)]
 pub struct Device {
+    /// Complete original PLA_TCR0 read; matching uses the donor's normalized
+    /// version mask below while diagnostics retain every observed register bit.
+    pub vendor_ethernet_tcr: Option<u32>,
     /// Read-only vendor Ethernet chip identity observed before configuration
     /// selection, matching Linux r8152's cfgselector preflight. None means no
     /// verified identity; product IDs alone never select a vendor backend.
@@ -1493,16 +1496,8 @@ impl Controller {
     ) {
         match self.identify(attachment, location.clone(), dma) {
             Ok(mut device) => {
-                if ethernet::matches(&device.descriptor) {
-                    use ethernet::rtl815x::Revision;
-                    match self
-                        .control(device.slot, Revision::request(), &[])
-                        .and_then(|bytes| Revision::from_register(&bytes))
-                    {
-                        Ok(revision) => device.vendor_ethernet_revision = Some(revision.0),
-                        Err(error) => failures
-                            .push((format!("{location} RTL815x configuration preflight"), error)),
-                    }
+                if let Err(error) = self.preflight_vendor_ethernet(&mut device) {
+                    failures.push((format!("{location} RTL815x configuration preflight"), error));
                 }
                 if let Err(why) = configuration::select(&mut device) {
                     device.configuration.clear();
@@ -1531,6 +1526,17 @@ impl Controller {
                 ));
             }
         }
+    }
+
+    fn preflight_vendor_ethernet(&mut self, device: &mut Device) -> Result<(), BlockError> {
+        if ethernet::matches(&device.descriptor) {
+            use ethernet::rtl815x::Revision;
+            let bytes = self.control(device.slot, Revision::request(), &[])?;
+            let revision = Revision::from_register(&bytes)?;
+            device.vendor_ethernet_revision = Some(revision.0);
+            device.vendor_ethernet_tcr = Some(u32::from_le_bytes(bytes.try_into().unwrap()));
+        }
+        Ok(())
     }
 
     fn identify(
@@ -1588,6 +1594,7 @@ impl Controller {
         let serial = self.string(slot, descriptor[16]);
         let device = Device {
             vendor_ethernet_revision: None,
+            vendor_ethernet_tcr: None,
             slot,
             speed: attachment.speed,
             location,
@@ -1854,6 +1861,9 @@ fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
 #[derive(Default)]
 pub struct Found {
     pub vendor_links: Vec<ethernet::UsbEthernet>,
+    /// Exact firmware request/target, format and device errors from vendor
+    /// network attachment; never flattened to a generic unsupported status.
+    pub vendor_failures: Vec<(String, ethernet::Error)>,
     pub disks: Vec<storage::UsbDisk>,
     pub inputs: Vec<hid::UsbInput>,
     pub links: Vec<cdc::UsbNet>,
@@ -1874,6 +1884,17 @@ pub fn attach(
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
 ) -> Result<Found, BlockError> {
+    let firmware = crate::firmware::HandoffProvider::new(handoff.firmware.as_deref());
+    attach_with_provider(function, handoff, dma, &firmware)
+}
+
+/// Attach while preserving the caller's firmware lookup/recording boundary.
+pub fn attach_with_provider(
+    function: &mut Function,
+    handoff: &Handoff,
+    dma: &mut dyn DmaAllocator,
+    firmware: &dyn crate::firmware::Provider,
+) -> Result<Found, BlockError> {
     let bars = function.bars();
     // The capability, operational, runtime and doorbell registers all lie
     // in BAR 0, whatever its size (5.2.1): QEMU's is 16 KiB, a PC's 64 KiB
@@ -1888,7 +1909,7 @@ pub fn attach(
         "xhci {:04x}:{:02x}:{:02x}.{}",
         address.segment, address.bus, address.device, address.function
     );
-    start(Box::new(registers), handoff.clock, dma, location)
+    start_with_provider(Box::new(registers), handoff.clock, dma, location, firmware)
 }
 
 /// Starts the controller behind `registers`, enumerates its devices and
@@ -1899,12 +1920,30 @@ pub fn start(
     dma: &mut dyn DmaAllocator,
     location: String,
 ) -> Result<Found, BlockError> {
+    start_with_provider(
+        registers,
+        clock,
+        dma,
+        location,
+        &crate::firmware::HandoffProvider::new(None),
+    )
+}
+
+/// Start with synchronously borrowed firmware. Class drivers retain only owned
+/// evidence metadata after upload; no borrowed image escapes this call.
+pub fn start_with_provider(
+    registers: Box<dyn Registers>,
+    clock: Clock,
+    dma: &mut dyn DmaAllocator,
+    location: String,
+    firmware: &dyn crate::firmware::Provider,
+) -> Result<Found, BlockError> {
     let mut controller = Controller::new(registers, clock, dma, location)?;
     let mut found = Found::default();
     let devices = controller.enumerate(dma, &mut found.failures);
     let shared: Shared = Rc::new(RefCell::new(controller));
     for device in &devices {
-        bind(&shared, device.clone(), dma, &mut found);
+        bind_with_provider(&shared, device.clone(), dma, &mut found, firmware);
     }
     found.devices = devices;
     Ok(found)
@@ -1912,7 +1951,24 @@ pub fn start(
 
 /// Binds every interface of `device` a driver here takes: one
 /// configuration, its endpoints configured together.
+#[cfg(test)]
 fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut Found) {
+    bind_with_provider(
+        shared,
+        device,
+        dma,
+        found,
+        &crate::firmware::HandoffProvider::new(None),
+    );
+}
+
+fn bind_with_provider(
+    shared: &Shared,
+    device: Device,
+    dma: &mut dyn DmaAllocator,
+    found: &mut Found,
+    firmware: &dyn crate::firmware::Provider,
+) {
     let all = interfaces(&device.configuration);
     let mut endpoints = Vec::new();
     let mut plans = Vec::new();
@@ -1980,8 +2036,11 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
             Plan::Ethernet(plan) => cdc::UsbNet::new(shared.clone(), &device, plan, dma)
                 .map(|link| found.links.push(link)),
             Plan::VendorEthernet(binding) => {
-                ethernet::UsbEthernet::new(shared.clone(), &device, binding, dma)
-                    .map(|link| found.vendor_links.push(link))
+                match ethernet::UsbEthernet::new(shared.clone(), &device, binding, dma, firmware) {
+                    Ok(link) => found.vendor_links.push(link),
+                    Err(error) => found.vendor_failures.push((location.clone(), error)),
+                }
+                Ok(())
             }
             Plan::Bluetooth(binding) => {
                 bluetooth::UsbHci::attach(shared.clone(), &device, binding, dma)
@@ -3138,11 +3197,9 @@ pub(crate) mod tests {
             ];
             let mut device = configuration::tests::device(vec![configuration]);
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
-            let bytes = controller
-                .control(1, setup(0xc0, 5, 0xe610, 0x100, 4), &[])
-                .unwrap();
-            device.vendor_ethernet_revision =
-                Some(((u32::from_le_bytes(bytes.try_into().unwrap()) >> 16) & 0x7cf0) as u16);
+            controller.preflight_vendor_ethernet(&mut device).unwrap();
+            assert_eq!(device.vendor_ethernet_revision, Some(0x4c10));
+            assert_eq!(device.vendor_ethernet_tcr, Some(0x4c10_0800));
             configuration::select(&mut device).unwrap();
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();
@@ -3237,6 +3294,7 @@ pub(crate) mod tests {
             let shared: Shared = Rc::new(RefCell::new(controller));
             let mut device = Device {
                 vendor_ethernet_revision: None,
+                vendor_ethernet_tcr: None,
                 slot: 1,
                 speed: FULL_SPEED,
                 location: "modeled physical HCI".into(),
