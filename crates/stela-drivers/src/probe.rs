@@ -18,7 +18,7 @@ use crate::{
         virtio::VirtioNet,
     },
     storage::{ahci, nvme, virtio},
-    usb::{bluetooth::UsbHci, cdc::UsbNet, hid::UsbInput, xhci},
+    usb::{bluetooth::UsbHci, cdc::UsbNet, ethernet::UsbEthernet, hid::UsbInput, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::fmt;
@@ -77,6 +77,7 @@ pub enum Adapter {
     Igb(Igb),
     Realtek(Realtek),
     Usb(UsbNet),
+    UsbVendor(UsbEthernet),
 }
 
 impl Adapter {
@@ -89,6 +90,7 @@ impl Adapter {
             Self::Igb(_) => "igb",
             Self::Realtek(_) => "realtek",
             Self::Usb(_) => "usb-cdc",
+            Self::UsbVendor(_) => "usb-rtl815x",
         }
     }
 
@@ -101,6 +103,7 @@ impl Adapter {
             Self::Igb(device) => &device.location,
             Self::Realtek(device) => &device.location,
             Self::Usb(device) => &device.location,
+            Self::UsbVendor(device) => &device.location,
         }
     }
 }
@@ -114,6 +117,7 @@ impl Link for Adapter {
             Self::Igb(device) => device.mac(),
             Self::Realtek(device) => device.mac(),
             Self::Usb(device) => device.mac(),
+            Self::UsbVendor(device) => device.mac(),
         }
     }
     fn carrier(&mut self) -> bool {
@@ -124,6 +128,7 @@ impl Link for Adapter {
             Self::Igb(device) => device.carrier(),
             Self::Realtek(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
+            Self::UsbVendor(device) => device.carrier(),
         }
     }
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
@@ -134,6 +139,7 @@ impl Link for Adapter {
             Self::Igb(device) => device.transmit(frame),
             Self::Realtek(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
+            Self::UsbVendor(device) => device.transmit(frame),
         }
     }
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
@@ -144,6 +150,7 @@ impl Link for Adapter {
             Self::Igb(device) => device.receive(),
             Self::Realtek(device) => device.receive(),
             Self::Usb(device) => device.receive(),
+            Self::UsbVendor(device) => device.receive(),
         }
     }
 }
@@ -241,6 +248,9 @@ pub unsafe fn probe_with_provider(
                         disks
                             .links
                             .extend(found.links.into_iter().map(Adapter::Usb));
+                        disks
+                            .links
+                            .extend(found.vendor_links.into_iter().map(Adapter::UsbVendor));
                         disks.usb_failures.extend(found.failures);
                         disks.usb_unused.extend(found.unused);
                     }
