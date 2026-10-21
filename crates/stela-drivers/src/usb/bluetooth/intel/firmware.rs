@@ -22,48 +22,70 @@ pub(super) struct Sfi<'a> {
 }
 impl<'a> Sfi<'a> {
     pub fn parse(bytes: &'a [u8], minimum: [u8; 3]) -> Result<Self> {
-        if bytes.len() <= RSA_BYTES || bytes.len() > MAX_IMAGE {
-            return Err(Error::FirmwareFormat("RSA SFI size"));
+        Self::parse_format(bytes, minimum, None)
+    }
+    pub fn parse_tlv(bytes: &'a [u8], minimum: [u8; 3], engine: u8) -> Result<Self> {
+        Self::parse_format(bytes, minimum, Some(engine))
+    }
+    fn parse_format(bytes: &'a [u8], minimum: [u8; 3], engine: Option<u8>) -> Result<Self> {
+        const ECDSA_BYTES: usize = 320;
+        let payload = RSA_BYTES + if engine.is_some() { ECDSA_BYTES } else { 0 };
+        if bytes.len() <= payload || bytes.len() > MAX_IMAGE {
+            return Err(Error::FirmwareFormat("SFI size"));
         }
-        if u32::from_le_bytes(bytes[..4].try_into().unwrap()) != 6
-            || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != 0x0001_0000
-        {
-            return Err(Error::FirmwareFormat("RSA CSS type/version"));
-        }
-        // Strict full-length RSA CSS subset: all component lengths and the
-        // complete-image length must match, rather than trusting fixed offsets
-        // after a superficially valid version. Truncated CSS variants, ECDSA
-        // and alternate exponents are explicit unsupported image formats.
         let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
-        if word(4) != RSA_BYTES as u32 / 4
+        let rsa_image = bytes.len() - if engine.is_some() { ECDSA_BYTES } else { 0 };
+        if word(0) != 6
+            || word(4) != RSA_BYTES as u32 / 4
+            || word(8) != 0x0001_0000
             || word(16) != INTEL_VENDOR
-            || word(24) as usize * 4 != bytes.len()
+            || u64::from(word(24)) * 4 != rsa_image as u64
             || word(28) != RSA_DWORDS
             || word(32) != RSA_DWORDS
             || word(36) != 1
             || bytes[KEY_END..SIGNATURE_START] != RSA_EXPONENT
         {
-            return Err(Error::FirmwareFormat(
-                "RSA CSS component/image lengths, vendor or exponent",
-            ));
+            return Err(Error::FirmwareFormat("RSA CSS layout/vendor/exponent"));
         }
-        // Bounds and nonempty signature/key material are host checks, not an
-        // authentication proof. The secure ROM validates their actual contents.
-        for section in [
+        for region in [
             &bytes[CSS_BYTES..KEY_END],
-            &bytes[KEY_END..SIGNATURE_START],
             &bytes[SIGNATURE_START..RSA_BYTES],
         ] {
-            if section.iter().all(|byte| *byte == 0) || section.iter().all(|byte| *byte == 0xff) {
-                return Err(Error::FirmwareFormat("empty RSA key/exponent/signature"));
+            if empty(region) {
+                return Err(Error::FirmwareFormat("empty RSA key/signature"));
             }
         }
-        let mut sections = vec![
-            (0, &bytes[..CSS_BYTES]),
-            (3, &bytes[CSS_BYTES..KEY_END]),
-            (2, &bytes[SIGNATURE_START..RSA_BYTES]),
-        ];
-        let mut at = RSA_BYTES;
+        if engine.is_some() {
+            let at = RSA_BYTES;
+            if word(at) != 6
+                || word(at + 4) != ECDSA_BYTES as u32 / 4
+                || word(at + 8) != 0x0002_0000
+                || word(at + 16) != INTEL_VENDOR
+                || u64::from(word(at + 24)) * 4 != (bytes.len() - RSA_BYTES) as u64
+                || word(at + 28) != 24
+                || word(at + 32) != 12
+                || word(at + 36) != 12
+            {
+                return Err(Error::FirmwareFormat("ECDSA CSS layout/vendor/lengths"));
+            }
+            if empty(&bytes[at + 128..at + 224]) || empty(&bytes[at + 224..at + 320]) {
+                return Err(Error::FirmwareFormat("empty ECDSA key/signature"));
+            }
+        }
+        let mut sections = match engine {
+            None | Some(0) => vec![
+                (0, &bytes[..CSS_BYTES]),
+                (3, &bytes[CSS_BYTES..KEY_END]),
+                (2, &bytes[SIGNATURE_START..RSA_BYTES]),
+            ],
+            Some(1) => vec![
+                (0, &bytes[RSA_BYTES..RSA_BYTES + 128]),
+                (3, &bytes[RSA_BYTES + 128..RSA_BYTES + 224]),
+                (2, &bytes[RSA_BYTES + 224..payload]),
+            ],
+            _ => return Err(Error::Unsupported("SFI secure boot engine")),
+        };
+        let mut at = payload;
         let mut group = at;
         let mut boot = None;
         while at < bytes.len() {
@@ -108,6 +130,10 @@ impl<'a> Sfi<'a> {
         })
     }
 }
+fn empty(bytes: &[u8]) -> bool {
+    bytes.iter().all(|b| *b == 0) || bytes.iter().all(|b| *b == 0xff)
+}
+
 pub(super) fn ddc(bytes: &[u8]) -> Result<Vec<&[u8]>> {
     if bytes.is_empty() || bytes.len() > 64 * 1024 {
         return Err(Error::FirmwareFormat("DDC size"));

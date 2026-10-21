@@ -23,19 +23,34 @@ impl Identity {
         let d = &device.descriptor;
         let vendor = u16::from_le_bytes([d[8], d[9]]);
         let product = u16::from_le_bytes([d[10], d[11]]);
-        // Linux's exact Intel combined-ID table. Legacy ROM/CSR and newer
-        // integrated products are deliberately excluded from this RSA subset.
-        if vendor != 0x8087 || !matches!(product, 0x0a2b | 0x0aaa | 0x0025 | 0x0026 | 0x0029) {
-            return Err(Error::Unsupported("Intel legacy RSA USB identity"));
+        // Exact pinned combined USB IDs; HCI identity and platform requirements
+        // independently decide which initialization path is supported.
+        if vendor != 0x8087
+            || !matches!(
+                product,
+                0x0a2b
+                    | 0x0aaa
+                    | 0x0025
+                    | 0x0026
+                    | 0x0029
+                    | 0x0032
+                    | 0x0033
+                    | 0x0035
+                    | 0x0036
+                    | 0x0037
+                    | 0x0038
+                    | 0x0039
+                    | 0x0040
+            )
+        {
+            return Err(Error::Unsupported("Intel combined USB identity"));
         }
         Ok((vendor, product, u16::from_le_bytes([d[12], d[13]])))
     }
     pub(super) fn parse(device: &Device, p: &[u8]) -> Result<Self> {
         let (usb_vendor, usb_product, usb_revision) = Self::usb(device)?;
         if p.len() != 10 || p[0] != 0 || p[1] != 0x37 {
-            return Err(Error::Unsupported(
-                "legacy Intel version required; TLV is unsupported",
-            ));
+            return Err(Error::Unsupported("legacy Intel version required"));
         }
         if !matches!(p[2], 0x0b | 0x0c | 0x11..=0x14) || !matches!(p[4], 0x06 | 0x23) {
             return Err(Error::Unsupported("Intel hardware/firmware variant"));

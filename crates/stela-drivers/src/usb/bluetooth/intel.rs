@@ -1,25 +1,31 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2015 Intel Corporation
-//! Intel USB legacy RSA initializer, adapted from Linux btintel.c/btusb.c at
+//! Intel USB legacy RSA and TLV RSA/ECDSA initializer, adapted from Linux btintel.c/btusb.c at
 //! a804c5742bff224d4cb4d25dd383554d598be32b. See THIRD_PARTY.md.
 //!
 //! Supported: the exact USB IDs in identity.rs, platform 0x37 and legacy
 //! variants 0x0b/0x0c/0x11–0x14 with secure boot and per-fragment completions.
-//! Only RSA SFI files with a complete aligned command stream and explicit boot
-//! parameters are accepted. TLV/ECDSA/hybrid/IML, legacy ROM patching and firmware
-//! upgrades from an already operational image remain explicit unsupported paths.
+//! TLV variants 0x17/0x18/0x19/0x1b use combined RSA/ECDSA SFI headers and
+//! the identified secure boot engine. SFI command streams must be complete,
+//! aligned and contain explicit boot parameters. TLV 0x11–0x14 re-read the legacy
+//! version instead of guessing a legacy filename from TLV fields. DSBR-dependent
+//! uploads, hybrid/IML, ROM patching and running-image upgrades are separate work.
 //! Both exact-target SFI and DDC must be in the supplied Catalog before upload.
-//! Signatures are authenticated by the controller's secure boot ROM, not by a
-//! host trust store; a real secure-send result, boot notification, operational
-//! identity/version and OTP address must all agree before this returns a report.
-//! This report is firmware evidence, not physical/radio/profile qualification.
+//! For Uploaded evidence, enabled controller secure ROM authenticates signatures;
+//! no host trust-store proof is claimed. Real secure-send/boot events and matching
+//! operational identity/version/OTP address are required for that upload report.
+//! Already-operational firmware is observed through identity/address checks and
+//! reported as RunningUnknown, with no invented image provenance/authentication.
+//! Reports do not establish physical/radio/profile qualification.
 //!
 //! Reset is never given a synthetic Command Complete. A disconnect fails closed;
 //! controller re-enumeration/rebind requires future generic USB lifecycle work.
 //! No automatic hard-reset/retry loop is attempted over a stale USB slot.
 mod firmware;
 mod identity;
+mod tlv;
 pub use identity::{BootParameters, Identity};
+pub use tlv::TlvIdentity;
 
 use super::{Hci, Io, Packet, State};
 use crate::firmware::{Image, Provider, Requirement};
@@ -72,15 +78,57 @@ impl From<crate::firmware::Error> for Error {
     }
 }
 
-/// Verified catalog inputs remain borrowed, keeping their hash/source/license
-/// attached to the observed operational controller identity.
+/// Observed controller identity. Legacy and TLV wire schemas stay distinct.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControllerIdentity {
+    Legacy(Identity),
+    Tlv(TlvIdentity),
+}
+impl ControllerIdentity {
+    pub fn is_operational(&self) -> bool {
+        match self {
+            Self::Legacy(i) => i.firmware_variant == 0x23,
+            Self::Tlv(i) => i.image_type == 3,
+        }
+    }
+    pub fn build(&self) -> Option<[u8; 3]> {
+        match self {
+            Self::Legacy(i) => Some(i.build),
+            Self::Tlv(i) => i.build,
+        }
+    }
+    fn same_hardware(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Legacy(a), Self::Legacy(b)) => a.same_hardware(b),
+            (Self::Tlv(a), Self::Tlv(b)) => a.same_hardware(b),
+            _ => false,
+        }
+    }
+    fn parameters(&self) -> &'static [u8] {
+        match self {
+            Self::Legacy(_) => &[],
+            Self::Tlv(_) => &[0xff],
+        }
+    }
+}
+/// Uploaded evidence retains exact Catalog inputs and real secure-ROM/boot
+/// observations. A version/address response from preexisting running firmware
+/// supplies no image hash, source provenance or authentication proof.
+#[derive(Debug)]
+pub enum FirmwareEvidence<'a> {
+    Uploaded {
+        firmware: Image<'a>,
+        configuration: Image<'a>,
+    },
+    RunningUnknown,
+}
 #[derive(Debug)]
 pub struct Report<'a> {
-    pub before: Identity,
-    pub after: Identity,
-    pub firmware: Image<'a>,
-    pub configuration: Image<'a>,
-    pub boot_notification: [u8; 6],
+    pub before: ControllerIdentity,
+    pub after: ControllerIdentity,
+    pub evidence: FirmwareEvidence<'a>,
+    pub boot_notification: Option<[u8; 6]>,
+    pub address: [u8; 6],
 }
 
 /// Initialize one exclusively owned raw controller. Any failure after USB
@@ -247,33 +295,108 @@ impl<'a, B: Io> Engine<'a, B> {
             core::hint::spin_loop();
         }
     }
+    fn identity(&mut self, parameters: &[u8]) -> Result<ControllerIdentity> {
+        let payload = self.command(READ_VERSION, parameters)?;
+        if payload.len() == 10 && payload[1] == 0x37 {
+            return Ok(ControllerIdentity::Legacy(Identity::parse(
+                self.hci.binding.device(),
+                &payload,
+            )?));
+        }
+        if let Some(variant) = TlvIdentity::legacy_fallback(&payload)? {
+            let payload = self.command(READ_VERSION, &[])?;
+            let identity = Identity::parse(self.hci.binding.device(), &payload)?;
+            if identity.hardware_variant != variant {
+                return Err(Error::Protocol("legacy/TLV hardware variant mismatch"));
+            }
+            return Ok(ControllerIdentity::Legacy(identity));
+        }
+        Ok(ControllerIdentity::Tlv(TlvIdentity::parse(
+            self.hci.binding.device(),
+            &payload,
+        )?))
+    }
+    fn address(&mut self) -> Result<[u8; 6]> {
+        let payload = self.command(READ_BD_ADDR, &[])?;
+        if payload.len() != 7 {
+            return Err(Error::Protocol("Read BD_ADDR length"));
+        }
+        let address = payload[1..].try_into().unwrap();
+        identity::valid_address(address)?;
+        Ok(address)
+    }
+    fn observe_running<'p>(&mut self, before: ControllerIdentity) -> Result<Report<'p>> {
+        let address = self.address()?;
+        let after = self.identity(before.parameters())?;
+        if before != after || !self.events.is_empty() {
+            return Err(Error::Protocol("running firmware identity changed"));
+        }
+        Ok(Report {
+            before,
+            after,
+            evidence: FirmwareEvidence::RunningUnknown,
+            boot_notification: None,
+            address,
+        })
+    }
     fn run<'p>(&mut self, provider: &'p dyn Provider) -> Result<Report<'p>> {
-        let version = self.command(READ_VERSION, &[0xff])?;
-        let before = Identity::parse(self.hci.binding.device(), &version)?;
-        if before.firmware_variant != 6 {
+        let before = self.identity(&[0xff])?;
+        if before.is_operational() {
+            return self.observe_running(before);
+        }
+        if matches!(&before,ControllerIdentity::Tlv(i) if matches!(i.hardware_variant(),0x1c|0x1d))
+        {
             return Err(Error::Unsupported(
-                "controller is already operational; upgrade/reset/rebind is separate",
+                "USB DSBR platform input/default reporting required",
             ));
         }
         self.hci.intel_mode(true)?;
-        let boot = BootParameters::parse(&self.command(READ_BOOT_PARAMS, &[])?)?;
-        let hardware = before.hardware_label();
-        let revision = before.revision_label(&boot);
-        let sfi_name = before.filename(&boot, "sfi");
-        let ddc_name = before.filename(&boot, "ddc");
-        let target = before.target(&hardware, &revision);
-        let firmware = provider.load(Requirement {
+        let (hardware, revision, sfi_name, ddc_name, minimum, expected_address, engine) =
+            match &before {
+                ControllerIdentity::Legacy(i) => {
+                    let boot = BootParameters::parse(&self.command(READ_BOOT_PARAMS, &[])?)?;
+                    (
+                        i.hardware_label(),
+                        i.revision_label(&boot),
+                        i.filename(&boot, "sfi"),
+                        i.filename(&boot, "ddc"),
+                        boot.minimum_build,
+                        boot.address,
+                        None,
+                    )
+                }
+                ControllerIdentity::Tlv(i) => (
+                    i.hardware_label(),
+                    i.revision_label(),
+                    i.filename("sfi"),
+                    i.filename("ddc"),
+                    i.minimum_build.unwrap(),
+                    i.address.unwrap(),
+                    Some(i.secure_engine.unwrap()),
+                ),
+            };
+        let target = match &before {
+            ControllerIdentity::Legacy(i) => i.target(&hardware, &revision),
+            ControllerIdentity::Tlv(i) => i.target(&hardware, &revision),
+        };
+        // Observe both exact immutable companion requirements before returning
+        // the first resource failure; setup can provision them without guessing.
+        let firmware_result = provider.load(Requirement {
             name: &sfi_name,
             target,
-            minimum_bytes: firmware::RSA_BYTES + 1,
-        })?;
-        let configuration = provider.load(Requirement {
+            minimum_bytes: firmware::RSA_BYTES + if engine.is_some() { 321 } else { 1 },
+        });
+        let configuration_result = provider.load(Requirement {
             name: &ddc_name,
             target,
             minimum_bytes: 3,
-        })?;
-        // Fully parse both immutable images before mutating the secure loader.
-        let sfi = firmware::Sfi::parse(firmware.bytes(), boot.minimum_build)?;
+        });
+        let firmware = firmware_result?;
+        let configuration = configuration_result?;
+        let sfi = match engine {
+            None => firmware::Sfi::parse(firmware.bytes(), minimum)?,
+            Some(sbe) => firmware::Sfi::parse_tlv(firmware.bytes(), minimum, sbe)?,
+        };
         let ddc = firmware::ddc(configuration.bytes())?;
         let deadline = self.now().saturating_add(UPLOAD_US);
         for (section_index, (kind, bytes)) in sfi.sections.iter().enumerate() {
@@ -306,21 +429,17 @@ impl<'a, B: Io> Engine<'a, B> {
         self.vendor(true)?;
         self.allow_boot = false;
         self.hci.intel_mode(false)?;
-        let operational_version = self.command(READ_VERSION, &[])?;
-        let after = Identity::parse(self.hci.binding.device(), &operational_version)?;
+        let after = self.identity(before.parameters())?;
         if !before.same_hardware(&after)
-            || after.firmware_variant != 0x23
-            || (before.hardware_variant >= 0x11 && after.build != sfi.build)
+            || !after.is_operational()
+            || (matches!(&before, ControllerIdentity::Tlv(_))
+                || matches!(&before,ControllerIdentity::Legacy(i) if i.hardware_variant>=0x11))
+                && after.build() != Some(sfi.build)
         {
             return Err(Error::Protocol("postboot identity/version mismatch"));
         }
-        let address = self.command(READ_BD_ADDR, &[])?;
-        if address.len() != 7 {
-            return Err(Error::Protocol("Read BD_ADDR length"));
-        }
-        let address: [u8; 6] = address[1..].try_into().unwrap();
-        identity::valid_address(address)?;
-        if address != boot.address {
+        let address = self.address()?;
+        if address != expected_address {
             return Err(Error::Protocol("postboot address differs from OTP"));
         }
         let deadline = self.now().saturating_add(COMMAND_US);
@@ -332,21 +451,20 @@ impl<'a, B: Io> Engine<'a, B> {
                 return Err(Error::Protocol("DDC completion length"));
             }
         }
-        let final_version = self.command(READ_VERSION, &[])?;
-        if Identity::parse(self.hci.binding.device(), &final_version)? != after {
-            return Err(Error::Protocol("identity changed during DDC configuration"));
-        }
-        if !self.events.is_empty() {
+        if self.identity(after.parameters())? != after || !self.events.is_empty() {
             return Err(Error::Protocol(
-                "surplus command completions after initialization",
+                "identity changed/surplus completions during DDC configuration",
             ));
         }
         Ok(Report {
             before,
             after,
-            firmware,
-            configuration,
-            boot_notification: self.boot.unwrap(),
+            evidence: FirmwareEvidence::Uploaded {
+                firmware,
+                configuration,
+            },
+            boot_notification: self.boot,
+            address,
         })
     }
 }
@@ -628,11 +746,18 @@ pub(crate) mod tests {
         let (device, catalog, script) = fixture();
         let mut hci = transport(device, script);
         let report = initialize(&mut hci, &catalog).unwrap();
-        assert_eq!(report.after.firmware_variant, 0x23);
-        assert_eq!(report.after.build, [9, 30, 26]);
-        assert_eq!(report.firmware.sha256(), Sha256::digest(image())[..]);
+        assert!(report.after.is_operational());
+        assert_eq!(report.after.build(), Some([9, 30, 26]));
+        let FirmwareEvidence::Uploaded {
+            firmware,
+            configuration,
+        } = report.evidence
+        else {
+            panic!("expected upload evidence")
+        };
+        assert_eq!(firmware.sha256(), Sha256::digest(image())[..]);
         assert_eq!(
-            report.configuration.provenance().source,
+            configuration.provenance().source,
             "Stela synthetic protocol model"
         );
         assert!(hci.io.script.steps.is_empty());
@@ -729,6 +854,361 @@ pub(crate) mod tests {
             assert!(initialize(&mut hci, provider).is_err());
             assert_ne!(hci.state(), State::Open);
             assert_eq!(hci.io.closed.get(), 1);
+        }
+    }
+    fn tlv_version(operational: bool, engine: u8) -> Vec<u8> {
+        let mut reply = vec![0];
+        let mut add = |kind: u8, value: &[u8]| {
+            reply.extend_from_slice(&[kind, value.len() as u8]);
+            reply.extend_from_slice(value);
+        };
+        for (kind, value) in [
+            (0x10, 0x410u32),
+            (0x11, 0x410),
+            (0x12, 0x183700),
+            (0x13, 0x183700),
+        ] {
+            add(kind, &value.to_le_bytes());
+        }
+        add(0x16, &1u16.to_le_bytes());
+        add(0x1c, &[if operational { 3 } else { 1 }]);
+        add(0x1d, &[30, 26]);
+        add(0x1f, &if operational { 9u32 } else { 1 }.to_le_bytes());
+        if !operational {
+            for (kind, value) in [
+                (0x28, 1),
+                (0x29, 0),
+                (0x2a, 0),
+                (0x2b, 0),
+                (0x2c, 0),
+                (0x2e, 0),
+                (0x2f, engine),
+            ] {
+                add(kind, &[value]);
+            }
+            add(0x2d, &[1, 1, 25]);
+            add(0x30, &[1, 2, 3, 4, 5, 6]);
+        }
+        add(0x90, &[0xa5, 0x5a]);
+        reply
+    }
+    fn combined_image() -> Vec<u8> {
+        let legacy = image();
+        let mut bytes = legacy[..644].to_vec();
+        let mut ecdsa = vec![0; 320];
+        for (at, value) in [
+            (0, 6u32),
+            (4, 80),
+            (8, 0x20000),
+            (16, 0x8086),
+            (24, 84),
+            (28, 24),
+            (32, 12),
+            (36, 12),
+        ] {
+            ecdsa[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        ecdsa[128..224].fill(0x77);
+        ecdsa[224..320].fill(0x88);
+        bytes.extend_from_slice(&ecdsa);
+        bytes.extend_from_slice(&legacy[644..]);
+        bytes
+    }
+    fn tlv_fixture(engine: u8) -> (Device, Catalog, Script) {
+        let (mut device, _, _) = fixture();
+        device.descriptor[10] = 0x32;
+        let before = tlv_version(false, engine);
+        let after = tlv_version(true, engine);
+        let identity = TlvIdentity::parse(&device, &before).unwrap();
+        assert_eq!(identity.filename("sfi"), "intel/ibt-0041-0041.sfi");
+        let bytes = combined_image();
+        let mut steps = VecDeque::new();
+        steps.push_back(Step {
+            command: command_bytes(READ_VERSION, &[0xff]),
+            bulk: false,
+            events: vec![(Pipe::Event, complete(READ_VERSION, &before))],
+        });
+        let sections: Vec<(u8, &[u8])> = if engine == 0 {
+            vec![
+                (0, &bytes[..128]),
+                (3, &bytes[128..380]),
+                (3, &bytes[380..384]),
+                (2, &bytes[388..640]),
+                (2, &bytes[640..644]),
+                (1, &bytes[964..]),
+            ]
+        } else {
+            vec![
+                (0, &bytes[644..772]),
+                (3, &bytes[772..868]),
+                (2, &bytes[868..964]),
+                (1, &bytes[964..]),
+            ]
+        };
+        for (kind, section) in sections {
+            let mut p = vec![kind];
+            p.extend_from_slice(section);
+            steps.push_back(Step {
+                command: command_bytes(SECURE_SEND, &p),
+                bulk: true,
+                events: vec![(Pipe::Acl, complete(SECURE_SEND, &[0]))],
+            });
+        }
+        steps.back_mut().unwrap().events[0]
+            .1
+            .extend_from_slice(&[0xff, 5, 6, 0, 9, 0xfc, 0]);
+        steps.push_back(Step {
+            command: command_bytes(INTEL_RESET, &[0, 1, 0, 1, 0, 0, 0x20, 0]),
+            bulk: false,
+            events: vec![(Pipe::Acl, vec![0xff, 7, 2, 0, 1, 0, 0, 0, 0])],
+        });
+        for (opcode, parameters, payload) in [
+            (READ_VERSION, vec![0xff], after.clone()),
+            (READ_BD_ADDR, vec![], vec![0, 1, 2, 3, 4, 5, 6]),
+            (WRITE_DDC, vec![3, 1, 2, 0xaa], vec![0]),
+            (READ_VERSION, vec![0xff], after),
+        ] {
+            steps.push_back(Step {
+                command: command_bytes(opcode, &parameters),
+                bulk: false,
+                events: vec![(Pipe::Event, complete(opcode, &payload))],
+            });
+        }
+        let hardware = identity.hardware_label();
+        let revision = identity.revision_label();
+        let target = identity.target(&hardware, &revision);
+        let provenance = Provenance {
+            source: "Stela synthetic TLV model",
+            revision: "1",
+            member: "synthetic/tlv",
+            license: "MIT",
+        };
+        let ddc = vec![3, 1, 2, 0xaa];
+        let catalog = Catalog::from_handoff(vec![
+            Resource {
+                name: "intel/ibt-0041-0041.sfi",
+                target,
+                provenance,
+                expected_length: bytes.len(),
+                expected_sha256: Sha256::digest(&bytes).into(),
+                bytes,
+            },
+            Resource {
+                name: "intel/ibt-0041-0041.ddc",
+                target,
+                provenance,
+                expected_length: ddc.len(),
+                expected_sha256: Sha256::digest(&ddc).into(),
+                bytes: ddc,
+            },
+        ])
+        .unwrap();
+        (device, catalog, Script { steps })
+    }
+    #[test]
+    fn tlv_rsa_and_ecdsa_use_identified_engine_and_exact_cnvi_cnvr_files() {
+        for engine in [0, 1] {
+            let (device, catalog, script) = tlv_fixture(engine);
+            let mut hci = transport(device, script);
+            let report = initialize(&mut hci, &catalog).unwrap();
+            assert!(matches!(report.after,ControllerIdentity::Tlv(ref i) if i.image_type==3));
+            assert!(matches!(report.evidence, FirmwareEvidence::Uploaded { .. }));
+            assert!(report.boot_notification.is_some());
+            assert_eq!(report.address, [1, 2, 3, 4, 5, 6]);
+            assert!(hci.io.script.steps.is_empty());
+            assert_eq!(hci.io.quiesced, 2);
+            assert_eq!(hci.state(), State::Open);
+        }
+    }
+    #[test]
+    fn already_running_legacy_tlv_and_legacy_fallback_have_unknown_provenance() {
+        for kind in 0..3 {
+            let (mut device, _, _) = fixture();
+            if kind == 1 {
+                device.descriptor[10] = 0x32;
+            }
+            let initial = if kind == 1 {
+                tlv_version(true, 1)
+            } else if kind == 2 {
+                vec![0, 0x12, 4, 0, 0x37, 0x14, 0]
+            } else {
+                version(true)
+            };
+            let final_version = if kind == 1 {
+                tlv_version(true, 1)
+            } else {
+                version(true)
+            };
+            let mut steps = VecDeque::from([Step {
+                command: command_bytes(READ_VERSION, &[0xff]),
+                bulk: false,
+                events: vec![(Pipe::Event, complete(READ_VERSION, &initial))],
+            }]);
+            if kind == 2 {
+                steps.push_back(Step {
+                    command: command_bytes(READ_VERSION, &[]),
+                    bulk: false,
+                    events: vec![(Pipe::Event, complete(READ_VERSION, &version(true)))],
+                });
+            }
+            steps.push_back(Step {
+                command: command_bytes(READ_BD_ADDR, &[]),
+                bulk: false,
+                events: vec![(Pipe::Event, complete(READ_BD_ADDR, &[0, 1, 2, 3, 4, 5, 6]))],
+            });
+            steps.push_back(Step {
+                command: command_bytes(READ_VERSION, if kind == 1 { &[0xff] } else { &[] }),
+                bulk: false,
+                events: vec![(Pipe::Event, complete(READ_VERSION, &final_version))],
+            });
+            let mut hci = transport(device, Script { steps });
+            let empty = Catalog::from_handoff(vec![]).unwrap();
+            let report = initialize(&mut hci, &empty).unwrap();
+            assert!(matches!(report.evidence, FirmwareEvidence::RunningUnknown));
+            assert!(report.boot_notification.is_none());
+            assert!(report.after.is_operational());
+            assert_eq!(hci.io.quiesced, 0);
+            assert!(hci.io.script.steps.is_empty());
+            assert_eq!(
+                hci.firmware_status(),
+                super::super::FirmwareStatus::Unverified
+            );
+        }
+    }
+    #[test]
+    fn tlv_identity_canonicalization_and_malformed_fields_fail_closed() {
+        let (mut device, _, _) = fixture();
+        device.descriptor[10] = 0x32;
+        let valid = tlv_version(false, 1);
+        let identity = TlvIdentity::parse(&device, &valid).unwrap();
+        let mut chunks = Vec::new();
+        let mut at = 1;
+        while at < valid.len() {
+            let end = at + 2 + usize::from(valid[at + 1]);
+            chunks.push(valid[at..end].to_vec());
+            at = end;
+        }
+        let mut reversed = vec![0];
+        for chunk in chunks.iter().rev() {
+            reversed.extend_from_slice(chunk);
+        }
+        assert_eq!(
+            TlvIdentity::parse(&device, &reversed)
+                .unwrap()
+                .revision_label(),
+            identity.revision_label()
+        );
+        assert_eq!(identity.revision_label().len(), 78);
+        assert_eq!(identity.canonical_tlvs().len() + 1, valid.len());
+        let mut extended = valid.clone();
+        extended.extend_from_slice(&[0x91, 100]);
+        extended.extend_from_slice(&[0xa5; 100]);
+        let extended = TlvIdentity::parse(&device, &extended).unwrap();
+        assert_eq!(extended.revision_label().len(), 78);
+        assert_ne!(extended.revision_label(), identity.revision_label());
+        assert_eq!(
+            extended.canonical_tlvs().len(),
+            identity.canonical_tlvs().len() + 102
+        );
+        for chunk in &chunks {
+            let mut duplicate = valid.clone();
+            duplicate.extend_from_slice(chunk);
+            assert!(TlvIdentity::parse(&device, &duplicate).is_err());
+        }
+        for index in 0..chunks.len() {
+            let mut missing = vec![0];
+            for (i, c) in chunks.iter().enumerate() {
+                if i != index {
+                    missing.extend_from_slice(c);
+                }
+            }
+            if matches!(chunks[index][0],0x10..=0x13|0x16|0x1c|0x28|0x2a..=0x30) {
+                assert!(
+                    TlvIdentity::parse(&device, &missing).is_err(),
+                    "missing {:x}",
+                    chunks[index][0]
+                );
+            }
+            let mut malformed = chunks.clone();
+            malformed[index][1] = 255;
+            let mut p = vec![0];
+            for c in malformed {
+                p.extend(c);
+            }
+            assert!(TlvIdentity::parse(&device, &p).is_err());
+        }
+        for at in [644, 648, 652, 660, 668, 672, 676, 680] {
+            let mut bytes = combined_image();
+            bytes[at] ^= 1;
+            assert!(firmware::Sfi::parse_tlv(&bytes, [0; 3], 1).is_err());
+        }
+        assert!(firmware::Sfi::parse_tlv(&combined_image(), [0; 3], 2).is_err());
+    }
+    #[test]
+    fn missing_sfi_still_records_exact_ddc_companion_without_upload() {
+        use alloc::string::String;
+        use core::cell::RefCell;
+        struct Recording<'a> {
+            catalog: &'a Catalog,
+            calls: RefCell<Vec<(String, String, String, String)>>,
+        }
+        impl Provider for Recording<'_> {
+            fn load(
+                &self,
+                r: Requirement<'_>,
+            ) -> core::result::Result<Image<'_>, crate::firmware::Error> {
+                self.calls.borrow_mut().push((
+                    r.name.into(),
+                    r.target.driver.into(),
+                    r.target.hardware.into(),
+                    r.target.revision.into(),
+                ));
+                self.catalog.load(r)
+            }
+        }
+        for modern in [false, true] {
+            let (device, _, script) = if modern { tlv_fixture(1) } else { fixture() };
+            let mut hci = transport(device, script);
+            let empty = Catalog::from_handoff(vec![]).unwrap();
+            let provider = Recording {
+                catalog: &empty,
+                calls: RefCell::new(Vec::new()),
+            };
+            let error = initialize(&mut hci, &provider).unwrap_err();
+            let calls = provider.calls.borrow();
+            assert_eq!(calls.len(), 2);
+            let stem = if modern {
+                "intel/ibt-0041-0041"
+            } else {
+                "intel/ibt-20-1-3"
+            };
+            assert_eq!(calls[0].0, format!("{stem}.sfi"));
+            assert_eq!(calls[1].0, format!("{stem}.ddc"));
+            assert_eq!(
+                calls[0].1,
+                if modern {
+                    "intel-bluetooth-usb-tlv"
+                } else {
+                    "intel-bluetooth-usb-rsa"
+                }
+            );
+            assert_eq!(
+                calls[0].2,
+                if modern {
+                    "usb:8087:0032:0100"
+                } else {
+                    "usb:8087:0029:0100"
+                }
+            );
+            assert_eq!(
+                (&calls[0].1, &calls[0].2, &calls[0].3),
+                (&calls[1].1, &calls[1].2, &calls[1].3)
+            );
+            assert!(
+                matches!(error,Error::Resource(ref e) if e.name==calls[0].0 && matches!(e.kind,crate::firmware::ErrorKind::Missing))
+            );
+            assert_eq!(hci.io.submitted, if modern { 1 } else { 2 });
+            assert_eq!(hci.state(), State::Closed);
         }
     }
 }

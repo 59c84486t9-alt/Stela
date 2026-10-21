@@ -3141,7 +3141,7 @@ pub(crate) mod tests {
         let mut hci = found.bluetooth.pop().unwrap();
         model.borrow_mut().script = Some(script);
         let report = intel::initialize(&mut hci, &catalog).unwrap();
-        assert_eq!(report.after.firmware_variant, 0x23);
+        assert!(report.after.is_operational());
         assert!(model.borrow().script.as_ref().unwrap().steps.is_empty());
         assert_eq!(model.borrow().outgoing.len(), 6);
         assert!(model.borrow().outgoing.iter().all(|p| p[..2] == [9, 0xfc]));
