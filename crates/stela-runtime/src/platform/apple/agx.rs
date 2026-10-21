@@ -52,6 +52,7 @@ pub mod generation;
 pub mod initdata;
 pub mod isa;
 pub mod observe;
+pub mod pio;
 pub mod raster;
 pub mod ring;
 pub mod sgx;

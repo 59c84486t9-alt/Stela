@@ -766,6 +766,7 @@ impl Protocol {
 pub struct Coprocessor {
     rtkit: RtKit,
     protocol: Protocol,
+    power: Option<super::sgx::FirmwarePower>,
 }
 
 impl Coprocessor {
@@ -775,7 +776,26 @@ impl Coprocessor {
     pub fn with_observe(family: &'static Family, observe: bool) -> Result<Self, &'static str> {
         let (endpoints, protocol) = endpoints(family, observe);
         let rtkit = RtKit::new(endpoints, super::super::rtkit::Management::Ordinary)?;
-        Ok(Self { rtkit, protocol })
+        Ok(Self {
+            rtkit,
+            protocol,
+            power: None,
+        })
+    }
+
+    /// Attach the native power/register owner of the mounted SGX instance.
+    /// A qualified physical binding does not make unknown callbacks successful.
+    pub fn with_power(
+        family: &'static Family,
+        observe: bool,
+        power: super::sgx::FirmwarePower,
+    ) -> Result<Self, &'static str> {
+        if family != power.family() {
+            return Err("GFX firmware power owner belongs to a different GPU family");
+        }
+        let mut coprocessor = Self::with_observe(family, observe)?;
+        coprocessor.power = Some(power);
+        Ok(coprocessor)
     }
 
     pub fn protocol(&self) -> &Protocol {
@@ -810,9 +830,11 @@ impl Firmware for Coprocessor {
                 // Original native power callbacks depend on the AP hardware
                 // config, update shared powered/generation words and restore
                 // GPU registers. A bare management ACK cannot stand for them.
-                return Err(
-                    "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics",
-                );
+                return Err(if self.power.is_some() {
+                    "GFX initialized IOP sleep requires complete config-derived native callbacks"
+                } else {
+                    "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics"
+                });
             }
         }
         if matches!(message.endpoint, MESSAGE_ENDPOINT | DOORBELL_ENDPOINT)
@@ -940,6 +962,50 @@ mod tests {
                 .unwrap();
         }
         firmware
+    }
+
+    #[test]
+    fn native_power_constructor_keeps_the_concrete_family_and_callback_refusal() {
+        use crate::platform::apple::agx::{generation::GPUS, sgx::Sgx};
+        for family in [&G13G, &G13X, &G14G, &G14X] {
+            let gpu = GPUS
+                .iter()
+                .find(|gpu| gpu.family == family && gpu.admitted().is_ok())
+                .unwrap();
+            let sgx = Sgx::new(gpu).unwrap();
+            let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
+            let mut firmware = Coprocessor::with_power(family, false, power.clone()).unwrap();
+            let other = if family == &G14G { &G13G } else { &G14G };
+            assert!(Coprocessor::with_power(other, false, power.clone()).is_err());
+            // A truthful target binding alone is not enough to acknowledge
+            // unimplemented config-dependent callback effects.
+            firmware.protocol.0.borrow_mut().initdata_va = Some(ROOT);
+            let mut outbox = Vec::new();
+            assert!(
+                firmware
+                    .receive(
+                        Mail {
+                            endpoint: 0,
+                            payload: 6 << 52 | 0x201
+                        },
+                        &mut outbox
+                    )
+                    .unwrap_err()
+                    .contains("owned initdata")
+            );
+            firmware.protocol.0.borrow_mut().initdata_checked = true;
+            assert_eq!(
+                firmware.receive(
+                    Mail {
+                        endpoint: 0,
+                        payload: 6 << 52 | 0x201
+                    },
+                    &mut outbox
+                ),
+                Err("GFX initialized IOP sleep requires complete config-derived native callbacks")
+            );
+            assert!(outbox.is_empty());
+        }
     }
 
     #[test]

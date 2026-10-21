@@ -69,8 +69,10 @@ use super::super::bus::{
 };
 use super::generation::{Family, Gpu, Identification, MMU_ENABLE, Mmu, Model};
 use super::uat::{self, Uat};
+use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 const NAME: &str = "agx-sgx";
 
@@ -170,6 +172,110 @@ impl Identity {
     }
 }
 
+/// Registers shared by the AP aperture and the native firmware callbacks.
+#[derive(Debug)]
+struct Native {
+    gating: u32,
+    available: bool,
+}
+impl Default for Native {
+    fn default() -> Self {
+        Self {
+            gating: 0,
+            available: true,
+        }
+    }
+}
+
+/// Firmware access to the actual SGX instance, qualified by its physical banks.
+/// This is not an independent shadow register bank. Unsupported target registers
+/// remain refusals, including all protected reset and rail-loss operations.
+#[derive(Clone)]
+pub struct FirmwarePower {
+    family: &'static Family,
+    banks: Vec<(u64, u64, u64)>,
+    native: Rc<RefCell<Native>>,
+}
+
+impl FirmwarePower {
+    pub(super) fn family(&self) -> &'static Family {
+        self.family
+    }
+
+    fn logical(&self, physical: u64) -> Result<u64, &'static str> {
+        for &(base, bytes, offset) in &self.banks {
+            if let Some(at) = physical.checked_sub(base)
+                && at.checked_add(4).is_some_and(|end| end <= bytes)
+            {
+                return Ok(offset + at);
+            }
+        }
+        Err("GFX firmware PIO does not target a mounted SGX bank")
+    }
+
+    /// Resolve a PIO word through the firmware's UAT permissions before any
+    /// device effect. The AP descriptor's physical base is checked against the
+    /// translation and then the concrete device geometry, never trusted as DMA.
+    fn target(
+        &self,
+        port: &mut crate::platform::dma::Port<'_, '_>,
+        region: &super::pio::Region,
+        offset: u32,
+        write: bool,
+    ) -> Result<u64, &'static str> {
+        if !self.native.borrow().available {
+            return Err("GFX firmware PIO while PMGR inhibits SGX execution");
+        }
+        if region.kind != super::pio::Kind::GFender {
+            return Err("GFX native callback PIO region is not modeled");
+        }
+        let (va, expected) = region.word(offset, write)?;
+        let physical = port
+            .iommu
+            .translate(port.memory, port.stream, va, va + 3, write, port.access)
+            .map_err(|error| match error {
+                crate::platform::dma::DmaError::Fault(_) => "GFX firmware PIO faults in the UAT",
+                crate::platform::dma::DmaError::Memory => "GFX firmware PIO page table is not RAM",
+                crate::platform::dma::DmaError::Unsupported(reason) => reason,
+            })?;
+        if physical != expected {
+            return Err("GFX firmware PIO translation disagrees with its AP physical descriptor");
+        }
+        self.logical(physical)
+    }
+
+    /// Read a source-qualified native callback register. Unknown registers
+    /// refuse; the RAM DMA port is used only for the UAT table walk.
+    pub fn read(
+        &self,
+        port: &mut crate::platform::dma::Port<'_, '_>,
+        region: &super::pio::Region,
+        offset: u32,
+    ) -> Result<u32, &'static str> {
+        match self.target(port, region, offset, false)? {
+            GATING_CONTROL => Ok(self.native.borrow().gating),
+            _ => Err("GFX native callback register read is not modeled"),
+        }
+    }
+
+    pub fn write(
+        &self,
+        port: &mut crate::platform::dma::Port<'_, '_>,
+        region: &super::pio::Region,
+        offset: u32,
+        value: u32,
+    ) -> Result<(), &'static str> {
+        match self.target(port, region, offset, true)? {
+            GATING_CONTROL if value & !GATING_BITS == 0 => {
+                self.native.borrow_mut().gating = value;
+                Ok(())
+            }
+            GATING_CONTROL => Err("GPU gating control bit is not modeled"),
+            _ => Err("GFX native callback register write is not modeled"),
+        }
+    }
+}
+
 /// The `sgx` registers and the UAT they configure.
 pub struct Sgx {
     lifecycle: LifecycleState,
@@ -177,7 +283,7 @@ pub struct Sgx {
     family: &'static Family,
     model: &'static Model,
     interrupt_enable: u32,
-    gating: u32,
+    native: Rc<RefCell<Native>>,
     mmu_enabled: bool,
     ttbat_page: u32,
     configuration: Vec<u32>,
@@ -202,7 +308,7 @@ impl Sgx {
             family: gpu.family,
             model,
             interrupt_enable: 0,
-            gating: 0,
+            native: Rc::new(RefCell::new(Native::default())),
             mmu_enabled: false,
             ttbat_page: 0,
             configuration: vec![0; gpu.family.mmu.configuration.len()],
@@ -237,6 +343,32 @@ impl Sgx {
     /// The GPU address translator, for the GFX firmware's and the GPU's DMA.
     pub fn uat(&mut self) -> &mut Uat {
         &mut self.uat
+    }
+
+    /// Bind firmware PIO to this exact GPU instance and its mounted banks.
+    /// The geometry alone grants no additional register semantics.
+    pub fn firmware_power(&self, banks: &[(u64, u64, u64)]) -> Result<FirmwarePower, &'static str> {
+        for (index, &(physical, bytes, offset)) in banks.iter().enumerate() {
+            if bytes == 0
+                || physical.checked_add(bytes).is_none()
+                || offset.checked_add(bytes).is_none()
+            {
+                return Err("GFX firmware PIO bank has an empty or wrapping range");
+            }
+            for &(other, length, logical) in &banks[..index] {
+                if physical < other + length && other < physical + bytes
+                    || offset < logical + length && logical < offset + bytes
+                {
+                    return Err("GFX firmware PIO banks overlap");
+                }
+            }
+        }
+        covers(self.family, banks)?;
+        Ok(FirmwarePower {
+            family: self.family,
+            banks: banks.to_vec(),
+            native: Rc::clone(&self.native),
+        })
     }
 
     fn mmu(&self) -> &'static Mmu {
@@ -295,7 +427,7 @@ impl Sgx {
             ID_COUNTS_2 => id.counts_2(),
             ID_UNK18 => 0,
             ID_CLUSTERS => id.clusters(identification),
-            GATING_CONTROL => self.gating,
+            GATING_CONTROL => self.native.borrow().gating,
             MMU_ENABLE => u32::from(self.mmu_enabled),
             _ if offset == mmu.ttbat => self.ttbat_page,
             _ if offset == mmu.invalidate => self.last_invalidate,
@@ -326,7 +458,7 @@ impl Sgx {
                 if value & !GATING_BITS != 0 {
                     return Err("GPU gating control bit is not modeled");
                 }
-                self.gating = value;
+                self.native.borrow_mut().gating = value;
             }
             _ if offset == mmu.invalidate => self.last_invalidate = value,
             _ if self.mmu_enabled && mmu_register => {
@@ -378,6 +510,8 @@ impl Lifecycle for Sgx {
     }
     fn set_lifecycle(&mut self, proposed: LifecycleState, _access: &mut Access<'_>) {
         self.lifecycle = proposed;
+        self.native.borrow_mut().available =
+            proposed.powered && proposed.clocked && !proposed.quiesced && !proposed.reset;
         self.uat.set_available(
             proposed.powered && proposed.clocked && !proposed.quiesced && !proposed.reset,
         );
@@ -455,6 +589,137 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         sgx.write(offset, Width::Word, u64::from(value), &mut access)
+    }
+
+    fn firmware_region(physical: u64, va: u64) -> super::super::pio::Region {
+        use super::super::pio::{Kind, Region};
+        use super::super::ring::tests::Flat;
+        let mut flat = Flat::new(0x1000, 0x2000);
+        let descriptor = 0x1000 + 0x640 + Kind::GFender as u64 * 0x28;
+        flat.put_u64(descriptor, physical);
+        flat.put_u64(descriptor + 8, va);
+        flat.put_u32(descriptor + 0x10, 0xc000);
+        flat.put_u32(descriptor + 0x14, 0xc000);
+        flat.put_u32(descriptor + 0x20, 2);
+        Region::read(&mut flat, 0x1000, Kind::GFender).unwrap()
+    }
+
+    #[test]
+    fn native_firmware_pio_walks_the_uat_and_shares_the_actual_ap_register() {
+        use super::super::generation::{G13G, G13X, G14G, G14X, G15G};
+        use crate::platform::dma::{Port, tests::Ram};
+        let physical = 0x204000000;
+        let base = 0x800000000;
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            let gpu = if family == &G15G {
+                // G15G's interface is recovered, but its real identity is not
+                // admitted. Exercise that layout on an explicit test fixture.
+                t8112()
+            } else {
+                GPUS.iter()
+                    .find(|gpu| gpu.family == family && gpu.admitted().is_ok())
+                    .unwrap()
+            };
+            let mut sgx = Sgx::handed_off(gpu, base, base + 0x8000).unwrap();
+            sgx.family = family;
+            sgx.model = family.model().unwrap();
+            let power = sgx.firmware_power(&[(physical, 0x4000000, 0)]).unwrap();
+            let region = firmware_region(physical + 0xd04000, 0x10000);
+            let mut ram = Ram::new(base, 0x10000);
+            let [ttbr0, ttbr1] = uat::encode_gptbat(0, base + 0x4000, 0);
+            ram.put_u64(base, ttbr0);
+            ram.put_u64(base + 8, ttbr1);
+            ram.put_u64(base + 0x4000, uat::encode_table(base + 0x8000));
+            ram.put_u64(base + 0x8000, uat::encode_table(base + 0xc000));
+            let pte = base + 0xc000 + 4 * 8;
+            let flags = uat::Flags {
+                access: uat::Access::Firmware,
+                memory: uat::MemoryAttr::Device,
+                global: true,
+                pxn: true,
+                uxn: true,
+                gpu_access: true,
+            };
+            // RAM holds only page tables. A successful native MMIO access
+            // therefore proves the target was not sent through DMA Memory.
+            ram.put_u64(pte, uat::encode_pte(physical + 0xd04000, &flags));
+            write(&mut sgx, GATING_CONTROL, 2).unwrap();
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let mut access_native = |sgx: &mut Sgx, ram: &mut Ram, value| {
+                let mut view = sgx.uat().agent(uat::Agent::Firmware);
+                let mut port = Port {
+                    iommu: &mut view,
+                    stream: 0,
+                    memory: ram,
+                    access: &mut access,
+                };
+                if let Some(value) = value {
+                    power.write(&mut port, &region, 0x2030, value)
+                } else {
+                    assert_eq!(power.read(&mut port, &region, 0x2030), Ok(2));
+                    Ok(())
+                }
+            };
+            access_native(&mut sgx, &mut ram, None).unwrap();
+            // Missing PTE: no register effect; retry after fixing the table
+            // succeeds without re-authoring or weakening the descriptor.
+            ram.put_u64(pte, 0);
+            assert!(
+                access_native(&mut sgx, &mut ram, Some(4))
+                    .unwrap_err()
+                    .contains("UAT")
+            );
+            assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(2));
+            ram.put_u64(pte, uat::encode_pte(physical + 0xd08000, &flags));
+            assert!(
+                access_native(&mut sgx, &mut ram, Some(4))
+                    .unwrap_err()
+                    .contains("disagrees")
+            );
+            assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(2));
+            ram.put_u64(pte, uat::encode_pte(physical + 0xd04000, &flags));
+            access_native(&mut sgx, &mut ram, Some(4)).unwrap();
+            assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
+            assert!(access_native(&mut sgx, &mut ram, Some(8)).is_err());
+            assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
+            // Retained PMGR gating inhibits this physical owner too.
+            let paused = LifecycleState {
+                clocked: false,
+                retention: true,
+                ..sgx.lifecycle
+            };
+            sgx.check_lifecycle(paused).unwrap();
+            let mut latch = InterruptLatch::new();
+            sgx.set_lifecycle(paused, &mut Access::new(0, 0, &mut latch));
+            assert!(
+                access_native(&mut sgx, &mut ram, Some(0))
+                    .unwrap_err()
+                    .contains("PMGR")
+            );
+            let running = LifecycleState {
+                clocked: true,
+                ..paused
+            };
+            sgx.set_lifecycle(running, &mut Access::new(0, 0, &mut latch));
+            assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
+        }
+    }
+
+    #[test]
+    fn firmware_power_owner_requires_complete_unambiguous_physical_geometry() {
+        let sgx = Sgx::new(t8112()).unwrap();
+        for banks in [
+            vec![],
+            vec![(0x204000000, 0x1000, 0)],
+            vec![(0x204000000, 0x4000000, 0), (0x204000004, 4, 0x5000000)],
+            vec![(0x204000000, 0x4000000, 0), (0x304000000, 4, 4)],
+            vec![(0x204000000, 0x4000000, 0), (u64::MAX, 2, 0x5000000)],
+        ] {
+            assert!(sgx.firmware_power(&banks).is_err());
+        }
+        let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
+        assert!(power.logical(0x304d06030).is_err());
     }
 
     #[test]
