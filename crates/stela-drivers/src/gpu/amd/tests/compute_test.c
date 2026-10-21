@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 #if STELA_AMD_TEST_LLVM
+#include "../stela/llvm_float.h"
 #include "amd/llvm/ac_llvm_build.h"
 #include "amd/llvm/ac_nir_to_llvm.h"
 #include "amd/llvm/ac_shader_abi.h"
@@ -140,6 +141,8 @@ compile_llvm(nir_shader *shader, const struct ac_shader_args *args,
                                                "compute_model", llvm.voidt, llvm.module);
    ac_llvm_set_workgroup_size(main.value, 32);
    ac_llvm_set_target_features(main.value, &llvm, false);
+   assert(stela_amd_llvm_apply_float_controls(llvm.context, main.value, shader) ==
+          STELA_AMD_LLVM_FLOAT_OK);
    assert(ac_nir_translate(&llvm, &abi, args, shader));
    LLVMBuildRetVoid(llvm.builder);
    assert(!LLVMVerifyModule(llvm.module, LLVMReturnStatusAction, NULL));
@@ -167,6 +170,8 @@ compile_llvm(nir_shader *shader, const struct ac_shader_args *args,
          assert(!config_found && data && size && size <= elf_size && size % 8 == 0 &&
                 (uintptr_t)data % _Alignof(uint32_t) == 0);
          ac_parse_llvm_binary_config(data, size, 64, &info->compiler_info, &result->config);
+         assert(stela_amd_llvm_restore_float_controls(shader, &result->config) ==
+                STELA_AMD_LLVM_FLOAT_OK);
          config_found = true;
       }
    }
@@ -203,7 +208,8 @@ register_word(const uint32_t *words, unsigned count, unsigned reg)
 }
 
 static void
-test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend, unsigned shared_bytes)
+test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend,
+                      unsigned shared_bytes, unsigned float_controls)
 {
    struct radeon_info info = model(family, !llvm_backend);
    nir_shader_compiler_options options;
@@ -230,6 +236,7 @@ test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend
    b.shader->info.workgroup_size[0] = 32;
    b.shader->info.workgroup_size[1] = b.shader->info.workgroup_size[2] = 1;
    b.shader->info.shared_size = shared_bytes;
+   b.shader->info.float_controls_execution_mode = float_controls;
    nir_def *tid = nir_iadd(&b, nir_imul_imm(&b, nir_channel(&b, nir_load_workgroup_id(&b), 0), 32),
                           nir_channel(&b, nir_load_local_invocation_id(&b), 0));
    nir_def *base = nir_pack_64_2x32(&b, ac_nir_load_arg(&b, &args, buffer));
@@ -240,7 +247,13 @@ test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend
       nir_store_shared(&b, value, offset, .align_mul = 4);
       value = nir_load_shared(&b, 1, 32, offset, .align_mul = 4);
    }
-   nir_store_global(&b, nir_iadd_imm(&b, nir_imul_imm(&b, value, 2), 1), address, .align_mul = 4);
+   if (float_controls) {
+      nir_def *product = nir_fmul(&b, value, nir_i2f32(&b, tid));
+      value = nir_fadd(&b, nir_fsub(&b, product, value), nir_u2f32(&b, tid));
+   } else {
+      value = nir_iadd_imm(&b, nir_imul_imm(&b, value, 2), 1);
+   }
+   nir_store_global(&b, value, address, .align_mul = 4);
    const ac_nir_lower_intrinsics_to_args_options arg_options = {
       .gfx_level = info.gfx_level, .hw_stage = AC_HW_COMPUTE_SHADER,
       .wave_size = wave, .workgroup_size = 32, .use_llvm = llvm_backend,
@@ -299,6 +312,12 @@ test_compiled_target(enum radeon_family family, unsigned wave, bool llvm_backend
               args.num_sgprs_used, compiled.config.num_vgprs, args.num_vgprs_used,
               compiled.config.lds_size, b.shader->info.shared_size);
    assert(status == STELA_AMD_COMPUTE_OK);
+   assert(G_00B848_FLOAT_MODE(result.rsrc1) == compiled.config.float_mode);
+   if (float_controls && llvm_backend) {
+      const unsigned expected = V_00B028_FP_16_64_DENORMS |
+         (float_controls & FLOAT_CONTROLS_DENORM_PRESERVE_FP32 ? V_00B028_FP_32_DENORMS : 0);
+      assert(compiled.config.float_mode == expected);
+   }
    assert(G_00B84C_USER_SGPR(result.rsrc2) == 2);
    assert(G_00B84C_TGID_X_EN(result.rsrc2) && G_00B84C_TGID_Y_EN(result.rsrc2) &&
           G_00B84C_TGID_Z_EN(result.rsrc2) && G_00B84C_TIDIG_COMP_CNT(result.rsrc2) == 2);
@@ -375,24 +394,38 @@ main(void)
    };
    unsigned compiled = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      test_compiled_target(targets[i], 64, false, 0);
+      test_compiled_target(targets[i], 64, false, 0, 0);
       compiled++;
       if (ac_get_gfx_level(targets[i]) >= GFX10) {
-         test_compiled_target(targets[i], 32, false, 0);
+         test_compiled_target(targets[i], 32, false, 0, 0);
          compiled++;
       }
    }
-   test_compiled_target(CHIP_TAHITI, 64, false, 128);
-   test_compiled_target(CHIP_REMBRANDT, 32, false, 128);
-   test_compiled_target(CHIP_NAVI31, 64, false, 128);
-   test_compiled_target(CHIP_GFX1201, 32, false, 128);
+   test_compiled_target(CHIP_TAHITI, 64, false, 128, 0);
+   test_compiled_target(CHIP_REMBRANDT, 32, false, 128, 0);
+   test_compiled_target(CHIP_NAVI31, 64, false, 128, 0);
+   test_compiled_target(CHIP_GFX1201, 32, false, 128, 0);
    compiled += 4;
+   const unsigned float_modes[] = {
+      FLOAT_CONTROLS_DENORM_PRESERVE_FP32 | FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32,
+      FLOAT_CONTROLS_DENORM_FLUSH_TO_ZERO_FP32 | FLOAT_CONTROLS_ROUNDING_MODE_RTE_FP32,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(float_modes); i++) {
+      test_compiled_target(CHIP_NAVI31, 32, false, 0, float_modes[i]);
+      compiled++;
+   }
 #if STELA_AMD_TEST_LLVM
    ac_init_llvm_once();
-   test_compiled_target(CHIP_MI100, 64, true, 0);
-   test_compiled_target(CHIP_MI200, 64, true, 0);
-   test_compiled_target(CHIP_GFX940, 64, true, 0);
+   test_compiled_target(CHIP_MI100, 64, true, 0, 0);
+   test_compiled_target(CHIP_MI200, 64, true, 0, 0);
+   test_compiled_target(CHIP_GFX940, 64, true, 0, 0);
    compiled += 3;
+   for (unsigned i = 0; i < ARRAY_SIZE(float_modes); i++) {
+      test_compiled_target(CHIP_MI100, 64, true, 0, float_modes[i]);
+      test_compiled_target(CHIP_MI200, 64, true, 0, float_modes[i]);
+      test_compiled_target(CHIP_GFX940, 64, true, 0, float_modes[i]);
+      compiled += 3;
+   }
 #endif
    glsl_type_singleton_decref();
    printf("AMD compute: %u real compiler config -> retained policy -> decoded PM4 cases passed; synthetic VM/topology only\n", compiled);

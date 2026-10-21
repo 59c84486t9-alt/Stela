@@ -12,6 +12,8 @@
 #include "amd/common/ac_binary.h"
 #include "amd/common/ac_shader_args.h"
 #include "amd/common/nir/ac_nir.h"
+#include "amd/common/sid.h"
+#include "../stela/llvm_float.h"
 #include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include <llvm-c/Analysis.h>
@@ -80,7 +82,7 @@ static bool
 inspect_binary(const char *elf, size_t size, const char *target,
                 const char *processor, const char *input_hash, const char *entry,
                 unsigned argument, const struct ac_compiler_info *info,
-                const char *triple)
+                const char *triple, const nir_shader *shader)
 {
    /* Validate the emitted container independently of target-machine creation.
     * e_machine=224 is the ELF AMDGPU identifier, not an instruction encoding. */
@@ -145,6 +147,8 @@ inspect_binary(const char *elf, size_t size, const char *target,
       LLVMMoveToNextSection(section);
    }
    CHECK(text_size && config_found && config.num_sgprs && config.num_vgprs);
+   const unsigned parsed_float_mode = config.float_mode;
+   CHECK(stela_amd_llvm_restore_float_controls(shader, &config) == STELA_AMD_LLVM_FLOAT_OK);
    if (section)
       LLVMDisposeSectionIterator(section);
    hash_bytes(elf, size, elf_hash);
@@ -161,11 +165,14 @@ inspect_binary(const char *elf, size_t size, const char *target,
           "\"dispatch_config_finalized\":false,"
           "\"config_parser\":\"ac_parse_llvm_binary_config\",\"sgprs\":%u,\"vgprs\":%u,"
           "\"scratch_bytes_per_wave\":%u,\"spilled_sgprs\":%u,\"spilled_vgprs\":%u,"
-          "\"rsrc1\":%u,\"rsrc2\":%u,\"rsrc3\":%u,\"float_mode\":%u}\n",
+          "\"rsrc1\":%u,\"rsrc2\":%u,\"rsrc3\":%u,\"float_mode\":%u,"
+          "\"nir_float_controls\":%u,\"raw_float_mode\":%u,\"parsed_float_mode\":%u,"
+          "\"float_controls_finalizer\":\"stela_amd_llvm_restore_float_controls\"}\n",
           target, processor, input_hash, size, elf_hash, text_size, code_hash, flags, argument,
           config.num_sgprs, config.num_vgprs, config.scratch_bytes_per_wave,
           config.spilled_sgprs, config.spilled_vgprs, config.rsrc1, config.rsrc2,
-          config.rsrc3, config.float_mode);
+          config.rsrc3, config.float_mode, shader->info.float_controls_execution_mode,
+          G_00B848_FLOAT_MODE(config.rsrc1), parsed_float_mode);
    LLVMDisposeBinary(binary);
    LLVMDisposeMemoryBuffer(memory);
    return true;
@@ -261,8 +268,12 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
                                                "stela_compute", llvm.voidt, llvm.module);
    ac_llvm_set_workgroup_size(main.value, 32);
    ac_llvm_set_target_features(main.value, &llvm, false);
-   bool ok = ac_nir_translate(&llvm, &abi, &binding.args, shader);
-   ralloc_free(shader);
+   enum stela_amd_llvm_float_status fp_status =
+      stela_amd_llvm_apply_float_controls(llvm.context, main.value, shader);
+   bool ok = fp_status == STELA_AMD_LLVM_FLOAT_OK &&
+             ac_nir_translate(&llvm, &abi, &binding.args, shader);
+   if (fp_status != STELA_AMD_LLVM_FLOAT_OK)
+      fprintf(stderr, "%s NIR float controls refused: %u\n", target, fp_status);
    if (ok) {
       LLVMBuildRetVoid(llvm.builder);
       ok = verify_module(llvm.module) && ac_llvm_optimize_module(compiler.meo, llvm.module) &&
@@ -274,9 +285,10 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       compiler.beo = ac_create_backend_optimizer(compiler.tm);
       ok = ac_compile_module_to_elf(compiler.beo, llvm.module, &elf, &elf_size) &&
            inspect_binary(elf, elf_size, target, processor, input_hash, entry,
-                           binding.argument, &gpu.compiler_info, LLVMGetTarget(llvm.module));
+                           binding.argument, &gpu.compiler_info, LLVMGetTarget(llvm.module), shader);
    }
    free(elf);
+   ralloc_free(shader);
    ac_llvm_context_dispose(&llvm);
    LLVMDisposeModule(llvm.module);
    LLVMContextDispose(llvm.context);
