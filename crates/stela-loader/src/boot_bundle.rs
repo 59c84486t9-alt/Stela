@@ -13,6 +13,7 @@
 use crate::aic;
 use crate::apple_device_tree::{DeviceTree, Placeholder};
 use crate::boot_args::{self, BootArgs, Video};
+use crate::boot_manifests;
 use crate::boot_policy::{self, Decision, SealedVolume, SecurityPolicy};
 use crate::carveouts::{self, Placed};
 use crate::darts;
@@ -41,8 +42,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// the bundles of every loader before revisions were recorded; a
 /// `bundle.json` without `revision` is one. Revision 1: `/pram` `reg` and
 /// `/chosen` `embedded-panic-log-size` give XNU its panic buffer
-/// (`carveouts`).
-pub const REVISION: u32 = 1;
+/// (`carveouts`). Revision 2: retain the original boot IM4M in the
+/// read-only boot run and publish its object range and secure hash.
+pub const REVISION: u32 = 2;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -434,6 +436,7 @@ const REGION_ORDER: &[&str] = &[
     "BootKC-bx",
     "BootKC-ro",
     "BootKC-rs",
+    "BootManifest",
     "DeviceTree",
     "SPTM-ro",
     "SPTM-rx",
@@ -462,6 +465,7 @@ const TXM_FILE: &str = "txm.img";
 /// The bundle file holding the prepared DeviceTree.
 pub const DEVICE_TREE_FILE: &str = "devicetree.adt";
 const TRUST_CACHE_FILE: &str = "trustcache.bin";
+const BOOT_MANIFEST_FILE: &str = "boot-manifest.im4m";
 const SEP_FILE: &str = "sepfw.im4p";
 const RAMDISK_FILE: &str = "ramdisk.img";
 /// The engine handoff's file-name capacity (`stela-boot` `handoff::MAX_NAME`).
@@ -862,6 +866,28 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     apply_overlay(&mut tree, &options.overlay)?;
     unresolved.extend(platform_gaps(&tree, inputs));
 
+    // Preserve the actual IM4M selected by boot policy. The payload tag
+    // belongs to the source input, not a guessed iBoot identity or name.
+    let boot_manifest_object = inputs
+        .boot_manifest
+        .as_ref()
+        .map(|manifest| {
+            boot_manifests::Object::new(
+                &tree,
+                &inputs.kernel_collection.source.payload_type,
+                manifest.bytes,
+            )
+        })
+        .transpose()?;
+    if let Some(object) = &boot_manifest_object {
+        object.reserve(&mut tree)?;
+        unresolved.push(
+            "/chosen/secure-boot-hashes state: iBoot's loaded-object authentication flags are \
+             not reproduced; only the supplied original kernel manifest is forwarded"
+                .into(),
+        );
+    }
+
     // Lay the memory map out with zero values first: its size is fixed by
     // the entry count, so the DeviceTree size is known before placement.
     let mut contents = vec![];
@@ -874,6 +900,17 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
                 bytes: trust_cache.len() as u64,
                 memory_bytes: page_round(trust_cache.len() as u64),
                 virtual_address: None,
+            },
+            "BootManifest" => match &inputs.boot_manifest {
+                Some(manifest) => Content {
+                    name: (*name).into(),
+                    file: BOOT_MANIFEST_FILE.into(),
+                    file_offset: 0,
+                    bytes: manifest.bytes.len() as u64,
+                    memory_bytes: page_round(manifest.bytes.len() as u64),
+                    virtual_address: None,
+                },
+                None => continue,
             },
             "DeviceTree" => Content {
                 name: (*name).into(),
@@ -1068,6 +1105,18 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             image.bytes,
         )?);
     }
+    if let Some(object) = &boot_manifest_object {
+        let manifest = region("BootManifest")?;
+        let protected = read_only_region
+            .as_ref()
+            .context("boot manifest publication requires a read-only boot region")?;
+        ensure!(
+            manifest.guest_pa >= protected.base
+                && manifest.guest_pa + manifest.memory_bytes <= protected.base + protected.bytes,
+            "boot manifest lies outside the read-only boot region"
+        );
+        security.extend(object.place(&mut tree, manifest.guest_pa)?);
+    }
     let device_tree = tree.serialize();
     ensure!(
         device_tree.len() as u64 == device_tree_bytes,
@@ -1139,6 +1188,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         (TRUST_CACHE_FILE.to_owned(), trust_cache),
         (BOOT_ARGS_FILE.to_owned(), boot_args_bytes),
     ];
+    if let Some(manifest) = &inputs.boot_manifest {
+        files.push((BOOT_MANIFEST_FILE.to_owned(), manifest.bytes.to_vec()));
+    }
     if let Some(sep) = &inputs.sep_firmware {
         files.push((SEP_FILE.to_owned(), sep.bytes.to_vec()));
     }
@@ -1329,7 +1381,8 @@ fn shape_device_tree(
             .into(),
     );
     unresolved.push(
-        "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects"
+        "/chosen/boot-object-manifests: no signed LocalPolicy or personalized manifest objects; \
+         a supplied original global boot manifest is forwarded separately"
             .into(),
     );
     unresolved.push("preoslog: iBoot log region omitted".into());
@@ -1707,7 +1760,7 @@ mod tests {
                 entry("CSEC", &der(&[0x01], &[0xff])),
                 entry("SDOM", &der(&[0x02], &[1])),
             ],
-            &[],
+            &[entry("test", &der(&[0x31], &[]))],
         )
     }
 
@@ -1827,6 +1880,51 @@ mod tests {
             .filter(|n| *n != "SEPFW")
             .collect();
         assert_eq!(names, expected);
+        // The original input manifest is retained byte for byte in the
+        // read-only boot run, with an exact (not page-rounded) guest length.
+        let manifest_region = manifest
+            .regions
+            .iter()
+            .find(|r| r.name == "BootManifest")
+            .unwrap();
+        let original_manifest = inputs.boot_manifest.as_ref().unwrap().bytes;
+        assert_eq!(
+            bundle
+                .files
+                .iter()
+                .find(|(n, _)| n == BOOT_MANIFEST_FILE)
+                .unwrap()
+                .1,
+            original_manifest
+        );
+        let prepared_tree = DeviceTree::parse(
+            &bundle
+                .files
+                .iter()
+                .find(|(n, _)| n == DEVICE_TREE_FILE)
+                .unwrap()
+                .1,
+        )?;
+        assert_eq!(
+            prepared_tree
+                .property("/chosen/boot-object-manifests", "test")
+                .unwrap()
+                .value,
+            range_value(manifest_region.guest_pa, original_manifest.len() as u64),
+        );
+        assert_eq!(
+            prepared_tree
+                .property("/chosen/secure-boot-hashes", "test")
+                .unwrap()
+                .value,
+            im4m::sha384(original_manifest),
+        );
+        let protected = manifest.read_only_region.as_ref().unwrap();
+        assert!(manifest_region.guest_pa >= protected.base);
+        assert!(
+            manifest_region.guest_pa + manifest_region.memory_bytes
+                <= protected.base + protected.bytes
+        );
         // Regions are page-aligned, ascending and non-overlapping.
         for pair in manifest.regions.windows(2) {
             assert!(pair[0].guest_pa + pair[0].memory_bytes <= pair[1].guest_pa);

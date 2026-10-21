@@ -11,6 +11,7 @@ pub mod aic;
 pub mod apple_device_tree;
 pub mod boot_args;
 pub mod boot_bundle;
+pub mod boot_manifests;
 pub mod boot_policy;
 pub mod boot_selection;
 pub mod carveouts;
