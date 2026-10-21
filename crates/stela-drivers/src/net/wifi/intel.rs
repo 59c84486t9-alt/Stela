@@ -8,5 +8,6 @@
 //! DMA, ALIVE/NVM/calibration, station association and key installation must
 //! complete before a native Wi-Fi backend can provide an Ethernet link.
 pub mod context;
+pub mod dma;
 pub mod firmware;
 pub mod identity;
