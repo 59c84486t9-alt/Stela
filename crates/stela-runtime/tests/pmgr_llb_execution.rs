@@ -20,11 +20,93 @@ use stela_runtime::{
 const BASE: u64 = 0x1fc050000;
 const SOURCE_SHA: &str = "d6c695d26e5d816a2ecd523c0be20a15307af24c404b1603d74a970b53e75e77";
 const ARENA: usize = 16 << 20;
+// The fixed guest guard and native signal runner belong to one entry probe.
+static EXECUTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 const GUARD_BASE: u64 = 0x1fc000000;
-// Reserve source SRAM and the T8112 physical-I/O interval without mapping
+// Reserve source SRAM and the T8112/T6000 physical-I/O interval without mapping
 // their contents. Every actual access must leave native code for qualification.
-const GUARD_BYTES: usize = (0x300000000 - GUARD_BASE) as usize;
-const FIRST_INPUT: u64 = BASE + 0x29470;
+const GUARD_BYTES: usize = (0x400000000 - GUARD_BASE) as usize;
+struct Original {
+    base: u64,
+    sha: &'static str,
+    chip: Chip,
+    chip_id: u32,
+    ram_end: u64,
+    first_input: usize,
+    image_env: &'static str,
+    observations_env: &'static str,
+    report_env: &'static str,
+    name: &'static str,
+    windows: &'static [(usize, usize, &'static str)],
+}
+const M2: Original = Original {
+    base: BASE,
+    sha: SOURCE_SHA,
+    chip: Chip::AppleM2,
+    chip_id: 0x8112,
+    ram_end: 0x1fc2fadd0,
+    first_input: 0x29470,
+    image_env: "STELA_TEST_PMGR_LLB",
+    observations_env: "STELA_TEST_PMGR_LLB_OBSERVATIONS",
+    report_env: "STELA_TEST_PMGR_LLB_REPORT",
+    name: "original T8112 LLB bounded cold-entry exploration",
+    windows: &[
+        (
+            0,
+            0x1bc,
+            "f445367bef64acfe63a7504a87b01304dc3d99fcf20d7265797f57429168e68a",
+        ),
+        (
+            0x380,
+            0x420,
+            "765e861d2c3b37b54f531a5989e6181eb7401f32790b20a8ae9b9137c376be62",
+        ),
+        (
+            0x29470,
+            0x29510,
+            "f221891930541fb53913c51685cd7e5762e06b1cf7158132557e138e06dabcac",
+        ),
+        (
+            0x23418,
+            0x23520,
+            "0bad24bbbeb2ae1f0582046862d4ae674016a3035dc26ff3b4f56901e0c22d85",
+        ),
+        (
+            0x2d860,
+            0x2d878,
+            "e6e464ca98ae2a783ee7b647f7bc172ea881b458fbb4caf4eb87d69d5753aba1",
+        ),
+    ],
+};
+const M1_PRO: Original = Original {
+    base: 0x1fc058000,
+    sha: "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
+    chip: Chip::AppleM1,
+    chip_id: 0x6000,
+    ram_end: 0x1fc2d1dd0,
+    first_input: 0x282c0,
+    image_env: "STELA_TEST_PMGR_M1_LLB",
+    observations_env: "STELA_TEST_PMGR_M1_LLB_OBSERVATIONS",
+    report_env: "STELA_TEST_PMGR_M1_LLB_REPORT",
+    name: "original T6000 J314s LLB bounded cold-entry exploration",
+    windows: &[
+        (
+            0,
+            0x1bc,
+            "84da23dc0681899fc5b564a70c12e1b830ab8580ed309d9546b845efdb6e8d24",
+        ),
+        (
+            0x380,
+            0x420,
+            "287f2cb6840eaf5b2fcabde3b460472186b872277ec7e8fe592d50b8cbe730e9",
+        ),
+        (
+            0x282c0,
+            0x28370,
+            "915a5f295a595c78927762170b7c184634a7cfd4cf403f26598873b29fb8b38b",
+        ),
+    ],
+};
 
 #[derive(Debug, serde::Serialize)]
 struct Access {
@@ -60,13 +142,13 @@ enum Observation {
     Physical { address: u64, bytes: u8, value: u64 },
 }
 impl Observations {
-    fn load() -> Option<Self> {
-        let path = std::env::var_os("STELA_TEST_PMGR_LLB_OBSERVATIONS")?;
+    fn load(original: &Original) -> Option<Self> {
+        let path = std::env::var_os(original.observations_env)?;
         let trace: Self = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(trace.schema, 1);
-        assert_eq!(trace.image_sha256, SOURCE_SHA);
-        assert_eq!(trace.chip_id, 0x8112);
-        assert_eq!(trace.entry, BASE);
+        assert_eq!(trace.image_sha256, original.sha);
+        assert_eq!(trace.chip_id, original.chip_id);
+        assert_eq!(trace.entry, original.base);
         assert!(!trace.provenance.trim().is_empty());
         for row in &trace.rows {
             match row {
@@ -138,14 +220,14 @@ struct Ram {
     writes: Vec<RamWrite>,
 }
 impl Ram {
-    fn from_original(bytes: &[u8]) -> Self {
+    fn from_original(bytes: &[u8], original: &Original) -> Self {
         let q = |offset| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
         // These are original literal addresses, not a Mach-O load command.
         // File bytes are known; the source's other RAM extents are UNKNOWN
         // until actual executed stores initialize them.
-        assert_eq!(q(0x380), BASE);
+        assert_eq!(q(0x380), original.base);
         assert_eq!(q(0x3a8), GUARD_BASE);
-        assert_eq!(q(0x3c0), 0x1fc2fadd0);
+        assert_eq!(q(0x3c0), original.ram_end);
         assert_eq!(q(0x418), 0); // source relocation context, not a fabricated pointer
         let mut ram = Self {
             start: GUARD_BASE,
@@ -157,7 +239,7 @@ impl Ram {
             replayed: Vec::new(),
             writes: Vec::new(),
         };
-        let offset = (BASE - ram.start) as usize;
+        let offset = (original.base - ram.start) as usize;
         ram.bytes[offset..offset + bytes.len()].copy_from_slice(bytes);
         ram.known[offset..offset + bytes.len()].fill(true);
         ram
@@ -462,52 +544,36 @@ impl mmu::TableMemory for Tables {
 #[test]
 #[ignore = "requires original J473 LLB; executes bounded original entry on x86 macOS"]
 fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_write_ledger() {
+    execute_original(&M2);
+}
+
+#[test]
+#[ignore = "requires original J314s LLB; executes bounded original entry on x86 macOS"]
+fn original_m1_pro_llb_entry_retains_its_own_link_profile_and_unknown_input() {
+    execute_original(&M1_PRO);
+}
+
+fn execute_original(original: &Original) {
+    let _execution = EXECUTION.lock().unwrap();
     let bytes =
-        std::fs::read(std::env::var("STELA_TEST_PMGR_LLB").expect("original J473 LLB path"))
-            .unwrap();
-    assert_eq!(hex::encode(Sha256::digest(&bytes)), SOURCE_SHA);
-    for (start, end, digest) in [
-        (
-            0,
-            0x1bc,
-            "f445367bef64acfe63a7504a87b01304dc3d99fcf20d7265797f57429168e68a",
-        ),
-        (
-            0x380,
-            0x420,
-            "765e861d2c3b37b54f531a5989e6181eb7401f32790b20a8ae9b9137c376be62",
-        ),
-        (
-            0x29470,
-            0x29510,
-            "f221891930541fb53913c51685cd7e5762e06b1cf7158132557e138e06dabcac",
-        ),
-        (
-            0x23418,
-            0x23520,
-            "0bad24bbbeb2ae1f0582046862d4ae674016a3035dc26ff3b4f56901e0c22d85",
-        ),
-        (
-            0x2d860,
-            0x2d878,
-            "e6e464ca98ae2a783ee7b647f7bc172ea881b458fbb4caf4eb87d69d5753aba1",
-        ),
-    ] {
+        std::fs::read(std::env::var(original.image_env).expect("original LLB path")).unwrap();
+    assert_eq!(hex::encode(Sha256::digest(&bytes)), original.sha);
+    for &(start, end, digest) in original.windows {
         assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
     }
     // EL2 is required by the unchanged first instruction, MSR VTTBR_EL2.
     // This is an explicitly cold-reset MODEL scenario, not proof of the
-    // BootROM's entry HCR or an actual T8112 hardware handoff snapshot.
-    let cpu = Cpu::of(Chip::AppleM2, BASE, Pstate::reset(2));
-    let ram = Rc::new(RefCell::new(Ram::from_original(&bytes)));
-    ram.borrow_mut().observations = Observations::load();
+    // BootROM's entry HCR or an actual hardware handoff snapshot.
+    let cpu = Cpu::of(original.chip, original.base, Pstate::reset(2));
+    let ram = Rc::new(RefCell::new(Ram::from_original(&bytes, original)));
+    ram.borrow_mut().observations = Observations::load(original);
     let replay = ram.borrow().observations.is_some();
     let target = TargetCpu::detect();
-    let mut fixed = identification::derive(Chip::AppleM2, target, true, Speculation::NONE);
+    let mut fixed = identification::derive(original.chip, target, true, Speculation::NONE);
     fixed.push((MPIDR_EL1, 0x80000000));
     let profile = CpuProfile {
-        name: "original T8112 LLB bounded cold-entry exploration",
-        chip: Chip::AppleM2,
+        name: original.name,
+        chip: original.chip,
         counter_frequency: 24_000_000,
         fixed,
         processors: Vec::new(),
@@ -550,13 +616,13 @@ fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_writ
         "unknown Apple system inputs: {:?}",
         ram.borrow().system_inputs
     );
-    if let Some(path) = std::env::var_os("STELA_TEST_PMGR_LLB_REPORT") {
+    if let Some(path) = std::env::var_os(original.report_env) {
         let ram = ram.borrow();
         let report = serde_json::json!({
             "schema": 1,
-            "image_sha256": SOURCE_SHA,
-            "entry": BASE,
-            "chip_id": 0x8112,
+            "image_sha256": original.sha,
+            "entry": original.base,
+            "chip_id": original.chip_id,
             "initial_core": "Cpu::of cold-reset MODEL scenario; actual BootROM entry state remains unqualified",
             "ram": "Only source image bytes initially known; other source-header RAM unknown until committed stores",
             "stop": format!("{stopped:?}"),
@@ -592,7 +658,10 @@ fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_writ
     let Stop::Unsupported(requirement) = stopped else {
         panic!("missing original input must refuse before budget")
     };
-    assert_eq!((requirement.pc, requirement.el), (FIRST_INPUT, 2));
+    assert_eq!(
+        (requirement.pc, requirement.el),
+        (original.base + original.first_input as u64, 2)
+    );
     let ram = ram.borrow();
     assert_eq!(ram.system_inputs, [(Encoding::new(3, 3, 15, 7, 0), None)]);
     assert_eq!(ram.accesses.len(), 1);
@@ -604,13 +673,13 @@ fn original_llb_entry_executes_with_an_explicit_unknown_input_and_committed_writ
             access.written,
             access.observed
         ),
-        (BASE + 0x380, 8, None, Some(BASE))
+        (original.base + 0x380, 8, None, Some(original.base))
     );
-    assert_eq!(machine.cpu.state.x[30], BASE + 0x2c);
+    assert_eq!(machine.cpu.state.x[30], original.base + 0x2c);
     assert_eq!(machine.statistics.exceptions, 0);
     assert!(ram.writes.is_empty());
     assert_eq!(watch.len(), 1);
-    assert_eq!(watch[0]["pc"], BASE + 0x24);
+    assert_eq!(watch[0]["pc"], original.base + 0x24);
     // No PMGR/GPCE/SRAM store or controller completion occurred. A capture
     // of this cache-controller input and its progress is the next dependency;
     // taking its READY bit from desired firmware polling would fake it.
