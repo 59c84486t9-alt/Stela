@@ -26,6 +26,8 @@ const LIBRARIES: &[&str] = &[
     "src/stela/libstela_amd_commands.a",
     "src/stela/libstela_amd_buffer.a",
     "src/stela/libstela_intel_surface.a",
+    "src/stela/libstela_intel_compute_native.a",
+    "src/stela/libstela_intel_compute_policy.a",
     "src/intel/dev/libintel_dev.a",
     "src/intel/compiler/gen/libintel_compiler_gen.a",
     "src/intel/compiler/brw/libintel_compiler.a",
@@ -294,6 +296,21 @@ pub fn build(
             "intel/stela/hosted/surface.c",
             "intel/stela/hosted/surface.h",
             "intel/stela/tests/surface.c",
+            "intel/stela/commands.h",
+            "intel/stela/compute_dispatch.c",
+            "intel/stela/compute_dispatch.h",
+            "intel/stela/compute_dispatch_internal.h",
+            "intel/stela/genxml_native.h",
+            "intel/stela/dispatch/compute_pack.h",
+            "intel/stela/dispatch/compute125.c",
+            "intel/stela/dispatch/compute200.c",
+            "intel/stela/dispatch/compute300.c",
+            "intel/stela/dispatch/compute350.c",
+            "intel/stela/hosted/compute.c",
+            "intel/stela/hosted/compute.h",
+            "intel/stela/tests/compute_dispatch.c",
+            "intel/stela/tests/compute_dispatch_mesa.c",
+            "intel/stela/tests/compute_program.c",
         ];
         if llvm_library.is_some() {
             paths.extend([
@@ -399,6 +416,12 @@ pub fn build(
         "src/stela/stela_amd_commands_probe",
         "src/stela/stela_amd_buffer_probe",
         "src/stela/stela_intel_surface_probe",
+        "src/stela/stela_intel_compute_program_probe",
+        "src/stela/stela_intel_compute_packet_probe",
+        "src/stela/stela_intel_compute_packer_125_probe",
+        "src/stela/stela_intel_compute_packer_200_probe",
+        "src/stela/stela_intel_compute_packer_300_probe",
+        "src/stela/stela_intel_compute_packer_350_probe",
     ]);
     if llvm_library.is_some() {
         compile.args([
@@ -434,7 +457,16 @@ pub fn build(
         "private_compiler_executed": false, "hardware_executed": false,
     });
     let mut resource_probes = Vec::new();
-    for stage in ["amd_buffer", "intel_surface"] {
+    for stage in [
+        "amd_buffer",
+        "intel_surface",
+        "intel_compute_program",
+        "intel_compute_packet",
+        "intel_compute_packer_125",
+        "intel_compute_packer_200",
+        "intel_compute_packer_300",
+        "intel_compute_packer_350",
+    ] {
         let binary = build.join(format!("src/stela/stela_{stage}_probe"));
         run(&mut Command::new(&binary), &evidence, stage)?;
         resource_probes.push(json!({

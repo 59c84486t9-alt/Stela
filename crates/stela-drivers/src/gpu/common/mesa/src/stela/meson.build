@@ -181,6 +181,78 @@ if with_stela_intel
     c_args : ['-Werror'],
   )
   test('stela_intel_surface', stela_intel_surface_probe, suite : 'stela')
+
+  # The native integer encoders use the same retained XML generator as the
+  # hosted packers. Explicit struct dependencies keep the narrow prologue free
+  # of unrelated floating-point state, without replacing packing algorithms.
+  stela_intel_compute_headers = []
+  foreach generation : [['125', 'gen125'], ['200', 'xe2'], ['300', 'xe3'], ['350', 'xe3p']]
+    stela_intel_compute_headers += custom_target(
+      'stela_intel_compute_@0@_pack'.format(generation[0]),
+      input : ['../intel/genxml/gen_pack_header.py',
+               '../intel/genxml/@0@.xml'.format(generation[1])],
+      output : 'gen@0@_compute_pack.h'.format(generation[0]),
+      command : [prog_python, '@INPUT@', '--include-symbols',
+                 'COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE',
+                 '--helpers-include', 'genxml_native.h'],
+      capture : true,
+      depend_files : gen_pack_header_deps,
+    )
+  endforeach
+  stela_intel_compute_native = static_library(
+    'stela_intel_compute_native',
+    ['../../../../intel/stela/compute_dispatch.c',
+     '../../../../intel/stela/dispatch/compute125.c',
+     '../../../../intel/stela/dispatch/compute200.c',
+     '../../../../intel/stela/dispatch/compute300.c',
+     '../../../../intel/stela/dispatch/compute350.c', stela_intel_compute_headers],
+    include_directories : [inc_src, inc_intel,
+                           include_directories('../../../../intel/stela', '../intel/genxml')],
+    c_args : ['-Werror'],
+  )
+  # Keep these original policy TUs intact. Function-section dead stripping
+  # removes unused device-query entry points; no Linux OS stubs are supplied.
+  stela_intel_policy_sections = cc.get_supported_arguments(['-ffunction-sections', '/Gy'])
+  stela_intel_policy_gc = cpp.get_supported_link_arguments(
+    ['-Wl,-dead_strip', '-Wl,--gc-sections', '/OPT:REF'])
+  stela_intel_compute_policy = static_library(
+    'stela_intel_compute_policy',
+    ['../../../../intel/stela/hosted/compute.c',
+     '../intel/common/intel_common.c', '../intel/common/intel_compute_slm.c'],
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [idep_intel_compiler_brw, idep_intel_dev, idep_mesautil],
+    link_with : [libisl],
+    c_args : ['-Werror'] + stela_intel_policy_sections,
+  )
+  stela_intel_compute_program_probe = executable(
+    'stela_intel_compute_program_probe',
+    '../../../../intel/stela/tests/compute_program.c',
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [idep_intel_compiler_brw, idep_intel_dev, idep_mesautil],
+    link_with : [stela_intel_compute_policy, stela_intel_compute_native, libisl],
+    c_args : ['-Werror'],
+    link_args : stela_intel_policy_gc,
+  )
+  test('stela_intel_compute_program', stela_intel_compute_program_probe, suite : 'stela')
+  stela_intel_compute_packet_probe = executable(
+    'stela_intel_compute_packet_probe',
+    '../../../../intel/stela/tests/compute_dispatch.c',
+    link_with : [stela_intel_compute_native],
+    c_args : ['-Werror'],
+  )
+  test('stela_intel_compute_packet', stela_intel_compute_packet_probe, suite : 'stela')
+  foreach generation : ['125', '200', '300', '350']
+    stela_intel_compute_packer_probe = executable(
+      'stela_intel_compute_packer_@0@_probe'.format(generation),
+      '../../../../intel/stela/tests/compute_dispatch_mesa.c',
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [dep_m, idep_genxml, idep_mesautil],
+      link_with : [stela_intel_compute_native],
+      c_args : ['-Werror', '-DGFX_VERx10=@0@'.format(generation)],
+    )
+    test('stela_intel_compute_packer_@0@'.format(generation),
+         stela_intel_compute_packer_probe, suite : 'stela')
+  endforeach
   stela_elk_probe = executable(
     'stela_elk_probe',
     'elk_probe.c',
