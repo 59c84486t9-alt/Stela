@@ -14,8 +14,10 @@ use alloc::vec::Vec;
 
 const ENTRY_BYTES: usize = 12;
 /// The original producer puts the self pointer at array +0x700 and the
-/// u16 count at +0x708. Entries cannot overlap those metadata fields.
+/// u16 count at +0x708. The firmware reserves +0x600..+0x700 for its separate
+/// 16-byte attachment packets; register entries cannot occupy that region.
 const SELF_POINTER: u64 = 0x700;
+const ATTACHMENT_PACKETS: usize = 0x600;
 const COUNT: usize = 8;
 
 /// A whole original entry. Repeated addresses remain separate ordered
@@ -79,8 +81,8 @@ impl Program {
         if pointer != base {
             return Err("GFX KRCE program does not name its command's original array");
         }
-        if usize::from(count) * ENTRY_BYTES > SELF_POINTER as usize {
-            return Err("GFX KRCE entries overlap the program's own metadata");
+        if usize::from(count) * ENTRY_BYTES > ATTACHMENT_PACKETS {
+            return Err("GFX KRCE entries overlap firmware attachment storage");
         }
         let mut entries = Vec::with_capacity(usize::from(count));
         for index in 0..count {
@@ -233,6 +235,27 @@ mod tests {
     }
 
     #[test]
+    fn the_original_program_cannot_occupy_the_firmware_attachment_partition() {
+        for encoding in [Encoding::G14X, Encoding::G15G] {
+            let mut memory = Flat::new(BASE, 0x3000);
+            let command = submission(encoding, Kind::Cl);
+            memory.put_u64(BASE + 0x720, BASE + 0x20);
+            memory.put(BASE + 0x728, &128_u16.to_le_bytes());
+            let program = Program::read(&mut memory, &command).unwrap();
+            assert_eq!(program.entries().len(), 128);
+            // 129 entries fit below the self pointer at +0x700, but the
+            // last one occupies bytes of the native attachment packet area.
+            memory.put(BASE + 0x728, &129_u16.to_le_bytes());
+            assert_eq!(
+                Program::read(&mut memory, &command),
+                Err("GFX KRCE entries overlap firmware attachment storage")
+            );
+            // Accepting an input program does not grant room for the extra
+            // register entries the firmware appends before physical launch.
+        }
+    }
+
+    #[test]
     fn foreign_arrays_and_metadata_overlaps_are_not_command_bindings() {
         let mut memory = Flat::new(BASE, 0x3000);
         let command = submission(Encoding::G15G, Kind::Cl);
@@ -242,7 +265,7 @@ mod tests {
         memory.put(BASE + 0x728, &150_u16.to_le_bytes());
         assert_eq!(
             Program::read(&mut memory, &command),
-            Err("GFX KRCE entries overlap the program's own metadata")
+            Err("GFX KRCE entries overlap firmware attachment storage")
         );
         assert!(Program::read(&mut memory, &submission(Encoding::Fixed, Kind::Cl)).is_err());
         assert!(Program::read(&mut memory, &submission(Encoding::G14X, Kind::Barrier)).is_err());
