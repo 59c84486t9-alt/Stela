@@ -1253,7 +1253,8 @@ impl AppleDevices {
         wall: Option<pmu::WallClock>,
     ) -> Result<(), String> {
         let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
-        let mut controller = Spmi::new(AicInput::new(0, irq));
+        let mut controller =
+            Spmi::with_configuration(AicInput::new(0, irq), placement.configuration);
         for pmu in &placement.pmus {
             let model = Pmu::new(
                 pmu.windows.clone(),
@@ -1276,6 +1277,11 @@ impl AppleDevices {
             self.bus
                 .map(id, base, bytes, bank as u64 * spmi::BANK_B)
                 .map_err(|e| format!("SPMI bank placement: {e:?}"))?;
+        }
+        if let Some((base, bytes)) = placement.fault_counters {
+            self.bus
+                .map(id, base, bytes, spmi::COUNTERS)
+                .map_err(|e| format!("SPMI counter placement: {e:?}"))?;
         }
         Ok(())
     }

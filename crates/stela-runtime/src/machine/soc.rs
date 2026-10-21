@@ -1551,10 +1551,14 @@ pub struct SpmiPmu {
     pub rtc: Option<pmu::Rtc>,
 }
 
-/// An SPMI Gen2 controller: bank A (`reg[0]`), bank B (`reg[1]`), its AIC
-/// line and its visible PMUs.
+pub type SpmiConfiguration = spmi::Configuration;
+
+/// A source-qualified SPMI controller with independent FIFO/vector geometry
+/// and an optional Gen1 fault-counter view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpmiController {
+    pub configuration: SpmiConfiguration,
+    pub fault_counters: Option<(u64, u64)>,
     pub banks: [(u64, u64); 2],
     pub irq: u32,
     pub pmus: Vec<SpmiPmu>,
@@ -2695,19 +2699,34 @@ fn spmi_controllers(
         if !node.compatible(SPMI) {
             continue;
         }
-        if node.first_u32("gen") != Some(2) {
-            return Err("SPMI controller generation other than 2".into());
+        if node.property("gen").is_none_or(|bytes| bytes.len() != 4) {
+            return Err("SPMI generation is not one full32 word".into());
         }
+        let profile = match node.first_u32("gen") {
+            Some(1) => spmi::Profile::Gen1,
+            Some(2) => spmi::Profile::Gen2,
+            _ => return Err("SPMI controller generation is unqualified".into()),
+        };
         let regs = node.pairs("reg").ok_or("SPMI controller has no reg")?;
+        if node
+            .property("reg")
+            .is_none_or(|bytes| bytes.len() != regs.len() * 16)
+        {
+            return Err("SPMI controller has partial reg pairs".into());
+        }
         let bank = |index: usize| -> Result<(u64, u64), String> {
             let &(offset, bytes) = regs
                 .get(index)
-                .filter(|(_, bytes)| *bytes == spmi::BANK_BYTES)
-                .ok_or("SPMI controller needs two 16 KiB banks")?;
-            Ok((
-                translate(offset).ok_or("SPMI bank outside arm-io ranges")?,
-                bytes,
-            ))
+                .filter(|(_, bytes)| *bytes == profile.bank_bytes())
+                .ok_or("SPMI controller banks do not match the qualified handler geometry")?;
+            let physical = translate(offset).ok_or("SPMI bank outside arm-io ranges")?;
+            if !physical.is_multiple_of(4)
+                || offset.checked_add(bytes - 1).and_then(translate)
+                    != physical.checked_add(bytes - 1)
+            {
+                return Err("SPMI bank is unaligned or crosses arm-io ranges".into());
+            }
+            Ok((physical, bytes))
         };
         let parents = node
             .cells32("interrupt-parent")
@@ -2720,6 +2739,66 @@ fn spmi_controllers(
             .position(|&parent| parent == aic)
             .and_then(|index| cells.get(index).copied())
             .ok_or("SPMI controller has no AIC line")?;
+        let local = node
+            .first_u32("AAPL,phandle")
+            .ok_or("SPMI has no phandle")?;
+        if node
+            .property("AAPL,phandle")
+            .is_none_or(|bytes| bytes.len() != 4)
+            || node
+                .property("interrupt-parent")
+                .is_none_or(|bytes| bytes.len() != 12)
+            || node
+                .property("interrupts")
+                .is_none_or(|bytes| !bytes.len().is_multiple_of(4))
+            || parents.as_slice() != [local, aic, local]
+            || cells.len() < 2
+            || cells
+                .iter()
+                .enumerate()
+                .any(|(index, &vector)| index != 1 && vector >= 288)
+        {
+            return Err("SPMI interrupt-parent/vector routing is unqualified".into());
+        }
+        let queue_bytes: [u32; 2] = node
+            .cells32("queue-depth")
+            .filter(|_| {
+                node.property("queue-depth")
+                    .is_some_and(|bytes| bytes.len() == 8)
+            })
+            .and_then(|cells| cells.try_into().ok())
+            .ok_or("SPMI has no two FIFO byte depths")?;
+        let configuration =
+            spmi::Configuration::new(profile, cells[0], queue_bytes).map_err(String::from)?;
+        let counters = match node.property("fault-counters-enabled") {
+            None => false,
+            Some(bytes) if bytes.len() == 4 => match node.first_u32("fault-counters-enabled") {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err("SPMI fault-counter enable encoding is unqualified".into()),
+            },
+            _ => return Err("SPMI fault-counter enable is not one full32 word".into()),
+        };
+        let fault_counters = if counters && profile == spmi::Profile::Gen1 {
+            let &(offset, bytes) = regs
+                .get(2)
+                .filter(|(_, bytes)| Some(*bytes) == profile.counter_bytes())
+                .ok_or("SPMI Gen1 needs its separate fault-counter bank")?;
+            let physical = translate(offset).ok_or("SPMI fault counters outside arm-io ranges")?;
+            if !physical.is_multiple_of(4)
+                || offset.checked_add(bytes - 1).and_then(translate)
+                    != physical.checked_add(bytes - 1)
+            {
+                return Err("SPMI fault counters are unaligned or cross arm-io ranges".into());
+            }
+            Some((physical, bytes))
+        } else {
+            None
+        };
+        let expected = if fault_counters.is_some() { 3 } else { 2 };
+        if regs.len() != expected {
+            return Err("SPMI has an unqualified extra register view".into());
+        }
         let mut pmus = Vec::new();
         for child in node.children().ok_or("SPMI children are malformed")? {
             if child.compatible(PMU) {
@@ -2727,6 +2806,8 @@ fn spmi_controllers(
             }
         }
         controllers.push(SpmiController {
+            configuration,
+            fault_counters,
             banks: [bank(0)?, bank(1)?],
             irq,
             pmus,
@@ -5542,6 +5623,44 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_SPMI_DT"]
+    fn original_j314s_spmi_parent_qualifies_all_seven_independent_resource_owners() {
+        let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset| {
+            ranges
+                .iter()
+                .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
+                .map(|(child, parent, _)| parent + (offset - child))
+        };
+        let controllers = spmi_controllers(&io, &translate, 130).unwrap();
+        assert_eq!(controllers.len(), 7);
+        let mut bases = Vec::new();
+        for controller in controllers {
+            assert_eq!(controller.configuration.profile(), spmi::Profile::Gen1);
+            assert_eq!(controller.configuration.response_vector(), 192);
+            assert_eq!(controller.configuration.queue_bytes(), [256, 256]);
+            for (base, bytes) in controller.banks {
+                assert_eq!(bytes, 0x100);
+                assert!(!bases.contains(&base));
+                bases.push(base);
+            }
+            let (base, bytes) = controller.fault_counters.unwrap();
+            assert_eq!(bytes, 0x78);
+            assert!(!bases.contains(&base));
+            bases.push(base);
+        }
+        // This validates placement, not autonomous PMU IRQ/RTC service
+        // ownership or a whole-board admission claim.
+    }
+
+    #[test]
     fn spmi_placement_reads_banks_aic_line_and_pmu_windows() {
         use crate::machine::adt::encode;
         let z = |text: &str| [text.as_bytes(), &[0]].concat();
@@ -5589,6 +5708,8 @@ mod tests {
                     ("name", &z("nub-spmi0")),
                     ("compatible", &z(SPMI)),
                     ("gen", &cells(&[2])),
+                    ("queue-depth", &cells(&[256, 256])),
+                    ("AAPL,phandle", &cells(&[0xae])),
                     (
                         "reg",
                         &pairs(&[(0x3d71_4000, 0x4000), (0x3d70_4000, 0x4000)]),
