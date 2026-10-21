@@ -6648,11 +6648,13 @@ mod tests {
     }
 
     #[test]
-    fn the_m1_and_m2_performance_monitors_count_retirement_and_signal_their_overflow_fiq() {
-        for (chip, overflow) in [
-            (crate::machine::Chip::AppleM1, 1u64 << 47),
-            (crate::machine::Chip::AppleM2, 1u64 << 63),
-        ] {
+    fn all_chip_performance_monitors_count_retirement_and_signal_their_overflow_fiq() {
+        for chip in crate::machine::Chip::ALL {
+            let overflow = if chip == crate::machine::Chip::AppleM1 {
+                1u64 << 47
+            } else {
+                1u64 << 63
+            };
             const MSR_PMCR1_X1: u32 = 0xd519_f101;
             const MSR_PMCR1_COPY_X1: u32 = 0xd519_f741;
             const MSR_PMCR0_X2: u32 = 0xd519_f002;
@@ -6678,11 +6680,8 @@ mod tests {
             words.resize(0xa00 / 4, 0);
             words.extend([MRS_X5_PMC1, SVC]);
             let identity = registers::Identity {
-                midr: if chip == crate::machine::Chip::AppleM1 {
-                    0x611f_0230
-                } else {
-                    0x611f_0330
-                },
+                // No hardware identity is claimed by this synthetic PMU fixture.
+                midr: 0,
                 mpidr: 0x8001_0000,
                 // Synthetic fixture clock: no board clock is inferred.
                 clock: Some(1_000_000_000),

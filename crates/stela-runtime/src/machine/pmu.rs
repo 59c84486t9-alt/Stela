@@ -1,13 +1,13 @@
-//! Apple's core performance monitor (CPMU) of the M1 (H13) and M2 (H14),
-//! as XNU `xnu-12377.121.6` programs it: `osfmk/arm64/cpc_arm64.c`,
-//! `cpc_arm64.h` and `pexpert/arm64/H13.h` / `H14.h` (10 counters,
-//! 48-bit on H13, `CPMU_64BIT_PMCS` on H14, no `CPMU_AIC_PMI`).
-//! See `docs/research/core-pmu.md` for the source and qualification limits.
+//! Apple's per-PE CPMU fixed cycle and retired-instruction counters, with
+//! separately qualified M1–M6 layouts (`layout`). XNU xnu-12377.121.6 H13
+//! supplies M1's 48-bit width, H14–H17 supply M2–M5's 64-bit width, and
+//! original 26A434 mac18g supplies M6's distinct 15-counter mapping.
+//! See `docs/research/core-pmu.md` for source hashes and qualification limits.
 //!
-//! - PMC0 counts cycles and PMC1 retired instructions; PMC2 to PMC9 count
-//!   the events PMESR0 and PMESR1 select. The counters wrap at their
-//!   configured width: bit 47 (M1) or bit 63 (M2) is the overflow bit
-//!   (`CPC_CPMU_MAX_COUNT`); PMSR reports each counter's overflow.
+//! - PMC0 counts cycles and PMC1 retired instructions. All other counters
+//!   preserve writes but refuse counting enables without qualified events.
+//!   Counters wrap at their configured width, with bit47 (M1) or bit63
+//!   (M2–M6) as overflow; PMSR uses the selected layout's slot mapping.
 //! - PMCR0 enables counting (bits 0-7, 32-33 for PMC8 and PMC9), selects the
 //!   PMI (bits 8-10, 4 for FIQ), reports it (bit 11, PMAI), enables each
 //!   counter's PMI (bits 12-19, 44-45), PC capture for PMC5-7 (bits 24-26)
@@ -31,11 +31,16 @@
 //! counters). The reset values are not documented; they are taken as 0,
 //! under which nothing counts before software programs the monitor.
 //!
-//! Event counting (PMC2-9), PC capture, EL0 access, other PMI modes,
+//! Programmable event counting, PC capture, EL0 access, other PMI modes,
 //! instruction matching (OPMAT, OPMSK) and the PMCR2-4 controls are not
 //! modelled: a write that enables one stops. PMESR0 and PMESR1 store their
-//! selectors, which no counter here uses.
+//! selectors within the layout's qualified field masks, which no counter
+//! here uses. M6's new controls refuse every access until their effects
+//! are independently qualified.
 use super::Chip;
+
+mod layout;
+use layout::Layout;
 use stela_compiler::aarch64::system::registers::Encoding;
 
 const fn monitor(op1: u8, crm: u8, op2: u8) -> Encoding {
@@ -147,7 +152,7 @@ pub struct Context {
 /// One PE's CPMU.
 #[derive(Debug, Clone)]
 pub struct Pmu {
-    width: Width,
+    layout: Layout,
     /// The core clock, in Hz, and the system counter frequency.
     clock: u64,
     frequency: u64,
@@ -157,7 +162,7 @@ pub struct Pmu {
     pmesr: [Option<u64>; 2],
     extension: [Option<u64>; EXTENSIONS],
     /// The counts as of `synced_count` and `synced_retired`.
-    counters: [u64; COUNTERS],
+    counters: [u64; layout::MAX_COUNTERS],
     synced_count: u64,
     synced_retired: u64,
     /// Cycles short of the next one, in 1/`frequency` cycle units.
@@ -174,24 +179,23 @@ pub struct Pmu {
 impl Pmu {
     /// Preserve the original M2 monitor API.
     pub fn new(clock: u64, frequency: u64) -> Self {
-        Self::with_width(Width::Bits64, clock, frequency)
+        Self::with_layout(Layout::on(Chip::AppleM2), clock, frequency)
     }
 
     /// Construct only a source-qualified core monitor, with a core clock
     /// supplied by its PE profile. A generation name supplies no clock or
-    /// later-generation counter/event layout.
+    /// event layout. A zero clock or system frequency cannot construct a
+    /// monitor.
     pub fn for_chip(chip: Chip, clock: u64, frequency: u64) -> Option<Self> {
-        let width = match chip {
-            Chip::AppleM1 => Width::Bits48,
-            Chip::AppleM2 => Width::Bits64,
-            _ => return None,
-        };
-        Some(Self::with_width(width, clock, frequency))
+        if clock == 0 || frequency == 0 {
+            return None;
+        }
+        Some(Self::with_layout(Layout::on(chip), clock, frequency))
     }
 
-    fn with_width(width: Width, clock: u64, frequency: u64) -> Self {
+    fn with_layout(layout: Layout, clock: u64, frequency: u64) -> Self {
         Self {
-            width,
+            layout,
             clock,
             frequency,
             pmcr0: 0,
@@ -199,7 +203,7 @@ impl Pmu {
             alternate: None,
             pmesr: [None; 2],
             extension: [None; EXTENSIONS],
-            counters: [0; COUNTERS],
+            counters: [0; layout::MAX_COUNTERS],
             synced_count: 0,
             synced_retired: 0,
             remainder: 0,
@@ -213,17 +217,50 @@ impl Pmu {
         }
     }
 
-    /// Whether `chip`'s fixed CPMU layout is qualified (H13/H14).
+    /// All declared chips have a separately qualified fixed CPMU layout.
+    /// This says nothing about events, extra controls or a board's clocks.
     pub fn on(chip: Chip) -> bool {
-        matches!(chip, Chip::AppleM1 | Chip::AppleM2)
+        let _ = Layout::on(chip);
+        true
     }
 
+    /// Preserve the original ten-counter allocation query (M1/M2).
     pub fn owns(encoding: Encoding) -> bool {
+        Self::owns_on(Chip::AppleM2, encoding)
+    }
+
+    /// The selected chip's allocation, including explicitly unqualified
+    /// controls whose effects must refuse, and its exact counter aliases.
+    pub fn owns_on(chip: Chip, encoding: Encoding) -> bool {
+        let layout = Layout::on(chip);
+        Self::common(encoding)
+            || layout.counters.contains(&encoding)
+            || layout.unqualified_controls.contains(&encoding)
+    }
+
+    pub fn counter_count(&self) -> usize {
+        self.layout.counters.len()
+    }
+
+    pub fn counter_encoding(&self, slot: usize) -> Option<Encoding> {
+        self.layout.counters.get(slot).copied()
+    }
+
+    fn common(encoding: Encoding) -> bool {
         matches!(
             encoding,
             PMCR0 | PMCR1 | PMESR0 | PMESR1 | PMCR1_ALTERNATE | PMSR | PC_CAPTURE
         ) || EXTENSION.contains(&encoding)
-            || PMC.contains(&encoding)
+    }
+
+    fn check_access(&self, encoding: Encoding) -> Result<(), &'static str> {
+        if self.layout.unqualified_controls.contains(&encoding) {
+            Err("M6 CPMU control effects are not source-qualified")
+        } else if Self::common(encoding) || self.layout.counters.contains(&encoding) {
+            Ok(())
+        } else {
+            Err("register is not allocated in the selected CPMU layout")
+        }
     }
 
     /// Whether counter `n` counts in `context`.
@@ -251,13 +288,13 @@ impl Pmu {
         if self.counts(CYCLES, self.context) {
             let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
             let frequency = u128::from(self.frequency);
-            self.counters[CYCLES] =
-                self.counters[CYCLES].wrapping_add((scaled / frequency) as u64) & self.width.mask();
+            self.counters[CYCLES] = self.counters[CYCLES].wrapping_add((scaled / frequency) as u64)
+                & self.layout.width.mask();
             self.remainder = (scaled % frequency) as u64;
         }
         if self.counts(INSTRUCTIONS, self.context) {
             self.counters[INSTRUCTIONS] =
-                self.counters[INSTRUCTIONS].wrapping_add(instructions) & self.width.mask();
+                self.counters[INSTRUCTIONS].wrapping_add(instructions) & self.layout.width.mask();
         }
         self.synced_count = self.synced_count.max(now);
         self.synced_retired = retired;
@@ -273,13 +310,17 @@ impl Pmu {
     /// The PMI of the current counts, and when the counting reaches one.
     fn update(&mut self) {
         let fiq = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ;
-        let armed = |n: usize| fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
-        self.asserted =
-            (0..COUNTERS).any(|n| armed(n) && self.counters[n] & self.width.overflow() != 0);
+        let armed = |n: usize| n < COUNTERS && fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
+        self.asserted = (0..self.counter_count())
+            .any(|n| armed(n) && self.counters[n] & self.layout.width.overflow() != 0);
         self.cycle_deadline = (armed(CYCLES) && self.counts(CYCLES, self.context))
             .then(|| {
                 let needed = u128::from(
-                    self.width.overflow().wrapping_sub(self.counters[CYCLES]) & self.width.mask(),
+                    self.layout
+                        .width
+                        .overflow()
+                        .wrapping_sub(self.counters[CYCLES])
+                        & self.layout.width.mask(),
                 );
                 let scaled = (needed * u128::from(self.frequency))
                     .saturating_sub(u128::from(self.remainder));
@@ -293,10 +334,11 @@ impl Pmu {
             && self.counts(INSTRUCTIONS, self.context))
         .then(|| {
             self.synced_retired.checked_add(
-                self.width
+                self.layout
+                    .width
                     .overflow()
                     .wrapping_sub(self.counters[INSTRUCTIONS])
-                    & self.width.mask(),
+                    & self.layout.width.mask(),
             )
         })
         .flatten();
@@ -317,8 +359,9 @@ impl Pmu {
         // A cached deadline identifies the first crossing, but the high
         // counter bit can clear again after a complete-width wrap. Do not
         // turn that deadline into an unqualified sticky pending latch.
-        (0..COUNTERS).any(|n| {
-            let armed = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ
+        (0..self.counter_count()).any(|n| {
+            let armed = n < COUNTERS
+                && self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ
                 && self.pmcr0 & counter_bit(12, 44, n) != 0;
             if !armed {
                 return false;
@@ -336,7 +379,7 @@ impl Pmu {
             } else {
                 0
             };
-            self.counters[n].wrapping_add(increment) & self.width.overflow() != 0
+            self.counters[n].wrapping_add(increment) & self.layout.width.overflow() != 0
         })
     }
 
@@ -357,6 +400,7 @@ impl Pmu {
         retired: u64,
         context: Context,
     ) -> Result<u64, &'static str> {
+        self.check_access(encoding)?;
         self.sync(now, retired, context);
         let stored = |value: Option<u64>| {
             value.ok_or("read of a performance monitor control before its first write")
@@ -367,11 +411,11 @@ impl Pmu {
             PMCR1_ALTERNATE => stored(self.alternate)?,
             PMESR0 => stored(self.pmesr[0])?,
             PMESR1 => stored(self.pmesr[1])?,
-            PMSR => (0..COUNTERS)
-                .filter(|&n| self.counters[n] & self.width.overflow() != 0)
-                .fold(0, |status, n| status | 1 << n),
+            PMSR => (0..self.counter_count())
+                .filter(|&n| self.counters[n] & self.layout.width.overflow() != 0)
+                .fold(0, |status, n| status | self.layout.status_bit(n)),
             PC_CAPTURE => return Err("PMI PC capture is not modelled"),
-            _ => match PMC.iter().position(|&pmc| pmc == encoding) {
+            _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
                 Some(n) => self.counters[n],
                 None => {
                     let index = EXTENSION.iter().position(|&register| register == encoding);
@@ -389,6 +433,7 @@ impl Pmu {
         retired: u64,
         context: Context,
     ) -> Result<(), &'static str> {
+        self.check_access(encoding)?;
         self.advance(now, retired);
         let written = self.store(encoding, value);
         self.context = context;
@@ -403,7 +448,9 @@ impl Pmu {
                     return Err("PMCR0 bit without public description");
                 }
                 if value & PMCR0_COUNT & !PMCR0_FIXED != 0 {
-                    return Err("PMCR0 enables an event counter (PMC2-9); events are not modelled");
+                    return Err(
+                        "PMCR0 enables a programmable counter; event counting is not modelled",
+                    );
                 }
                 if !matches!(value & PMCR0_INTGEN, 0 | PMCR0_INTGEN_FIQ) {
                     return Err("PMCR0 PMI generation other than FIQ");
@@ -433,11 +480,17 @@ impl Pmu {
                     self.alternate = Some(value);
                 }
             }
-            PMESR0 => self.pmesr[0] = Some(value),
-            PMESR1 => self.pmesr[1] = Some(value),
+            PMESR0 | PMESR1 => {
+                if value & !self.layout.selectors != 0 {
+                    return Err(
+                        "CPMU event selector field is not source-qualified for this layout",
+                    );
+                }
+                self.pmesr[usize::from(encoding == PMESR1)] = Some(value);
+            }
             PMSR | PC_CAPTURE => return Err("write of a performance monitor status register"),
-            _ => match PMC.iter().position(|&pmc| pmc == encoding) {
-                Some(n) => self.counters[n] = value & self.width.mask(),
+            _ => match self.layout.counters.iter().position(|&pmc| pmc == encoding) {
+                Some(n) => self.counters[n] = value & self.layout.width.mask(),
                 None => {
                     let index = EXTENSION
                         .iter()
@@ -588,8 +641,108 @@ mod tests {
         }
         assert!(!Pmu::owns(monitor(2, 8, 0)), "PMC8 is CRm9, not CRm8");
         for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
-            assert!(!Pmu::on(chip));
-            assert!(Pmu::for_chip(chip, CLOCK, FREQUENCY).is_none());
+            assert!(Pmu::on(chip));
+            assert!(Pmu::for_chip(chip, CLOCK, FREQUENCY).is_some());
+        }
+    }
+
+    #[test]
+    fn later_layouts_keep_exact_counter_aliases_selectors_and_status_positions() {
+        for chip in Chip::ALL {
+            let mut pmu = Pmu::for_chip(chip, CLOCK, FREQUENCY).unwrap();
+            assert_eq!(
+                pmu.counter_count(),
+                if chip == Chip::AppleM6 { 15 } else { 10 }
+            );
+            assert_eq!(pmu.counter_encoding(pmu.counter_count()), None);
+            for slot in 0..pmu.counter_count() {
+                let encoding = pmu.counter_encoding(slot).unwrap();
+                assert!(Pmu::owns_on(chip, encoding));
+                if chip == Chip::AppleM6 {
+                    assert_eq!(
+                        encoding,
+                        if slot < 10 {
+                            monitor(2, slot as u8, 0)
+                        } else {
+                            Encoding::new(3, 0, 11, 13, (slot - 10) as u8)
+                        }
+                    );
+                } else {
+                    assert_eq!(Some(encoding), PMC.get(slot).copied());
+                }
+                // Each raw counter remains independent even where M6
+                // moves an old encoding or adds another CRn bank.
+                pmu.write(encoding, slot as u64 + 100, 0, 0, KERNEL)
+                    .unwrap();
+            }
+            for slot in 0..pmu.counter_count() {
+                let encoding = pmu.counter_encoding(slot).unwrap();
+                assert_eq!(pmu.read(encoding, 0, 0, KERNEL), Ok(slot as u64 + 100));
+            }
+            let overflow = pmu.layout.width.overflow();
+            for slot in 0..pmu.counter_count() {
+                let encoding = pmu.counter_encoding(slot).unwrap();
+                pmu.write(encoding, overflow, 0, 0, KERNEL).unwrap();
+                assert_eq!(
+                    pmu.read(PMSR, 0, 0, KERNEL),
+                    Ok(1 << if slot < 10 { slot } else { slot + 22 })
+                );
+                pmu.write(encoding, 0, 0, 0, KERNEL).unwrap();
+            }
+            let selectors = match chip {
+                Chip::AppleM1 | Chip::AppleM2 => u32::MAX as u64,
+                Chip::AppleM3 | Chip::AppleM4 | Chip::AppleM5 => u64::MAX,
+                Chip::AppleM6 => 0,
+            };
+            for encoding in [PMESR0, PMESR1] {
+                pmu.write(encoding, selectors, 0, 0, KERNEL).unwrap();
+                assert_eq!(pmu.read(encoding, 0, 0, KERNEL), Ok(selectors));
+                if selectors != u64::MAX {
+                    assert!(pmu.write(encoding, !selectors, 0, 0, KERNEL).is_err());
+                    assert_eq!(pmu.read(encoding, 0, 0, KERNEL), Ok(selectors));
+                }
+            }
+            assert!(Pmu::for_chip(chip, 0, FREQUENCY).is_none());
+            assert!(Pmu::for_chip(chip, CLOCK, 0).is_none());
+        }
+        assert!(!Pmu::owns_on(Chip::AppleM5, monitor(2, 8, 0)));
+        assert!(!Pmu::owns_on(Chip::AppleM6, monitor(2, 10, 0)));
+        let mut m6 = Pmu::for_chip(Chip::AppleM6, CLOCK, FREQUENCY).unwrap();
+        assert!(m6.write(PMC[9], 123, 0, 0, KERNEL).is_err());
+        assert!(m6.read(PMC[9], 0, 0, KERNEL).is_err());
+        assert_eq!(m6.read(monitor(2, 9, 0), 0, 0, KERNEL), Ok(0));
+        for &encoding in m6.layout.unqualified_controls {
+            assert!(Pmu::owns_on(Chip::AppleM6, encoding));
+            assert!(m6.read(encoding, 0, 0, KERNEL).is_err());
+            for value in [0, 1, u64::MAX] {
+                assert!(m6.write(encoding, value, 0, 0, KERNEL).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn all_chip_fixed_events_keep_their_counter_width_and_interrupt_contract() {
+        for chip in Chip::ALL {
+            let mut pmu = configured_on(chip, 10_000_000);
+            let overflow = if chip == Chip::AppleM1 {
+                1u64 << 47
+            } else {
+                1u64 << 63
+            };
+            pmu.write(PMC[0], overflow - 1, 0, 0, KERNEL).unwrap();
+            pmu.write(PMC[1], overflow - 2, 0, 0, KERNEL).unwrap();
+            assert_eq!(pmu.deadline(), Some(3));
+            assert!(!pmu.asserted(2, 1));
+            assert!(pmu.asserted(2, 2));
+            assert_eq!(pmu.read(PMSR, 2, 2, KERNEL), Ok(2));
+            assert_eq!(pmu.read(PMSR, 3, 2, KERNEL), Ok(3));
+            pmu.write(PMC[0], 0, 3, 2, KERNEL).unwrap();
+            pmu.write(PMC[1], 0, 3, 2, KERNEL).unwrap();
+            assert!(!pmu.asserted(3, 2));
+            for value in [1 << 2, 1 << 32, 2 << 8, 1 << 24, 1 << 30] {
+                assert!(pmu.write(PMCR0, value, 3, 2, KERNEL).is_err());
+            }
+            assert_eq!(pmu.read(PMCR0, 3, 2, KERNEL), Ok(PMCR0_INIT));
         }
     }
 

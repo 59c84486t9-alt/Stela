@@ -1442,6 +1442,12 @@ mod tests {
         for chip in Chip::ALL {
             let mut machine = machine_on(chip, &[]);
             assert!(machine.cpu.pmu.is_none());
+            machine.cpu.state.x[0] = 0x5a;
+            assert!(matches!(
+                machine.system_instruction(access(true, pmu::PMC[0], 0)),
+                Err(Stop::Unsupported(_))
+            ));
+            assert_eq!(machine.cpu.state.x[0], 0x5a);
             // A synthetic profile clock tests ownership and routing; it is
             // not a hardware clock declaration for any board.
             machine.profile.processors = alloc::vec![Identity {
@@ -1464,6 +1470,21 @@ mod tests {
                     machine.cpu.state.x[1],
                     if chip == Chip::AppleM1 { 0 } else { 1 << 48 }
                 );
+            }
+            if chip == Chip::AppleM6 {
+                let extra = Encoding::new(3, 0, 11, 13, 4);
+                machine.cpu.state.x[0] = 1 << 63;
+                machine.system_instruction(access(false, extra, 0)).unwrap();
+                machine.system_instruction(access(true, extra, 1)).unwrap();
+                assert_eq!(machine.cpu.state.x[1], 1 << 63);
+                machine
+                    .system_instruction(access(true, pmu::PMSR, 1))
+                    .unwrap();
+                assert_eq!(machine.cpu.state.x[1], 1 << 36);
+                assert!(matches!(
+                    machine.system_instruction(access(false, Encoding::new(3, 0, 11, 13, 5), 0)),
+                    Err(Stop::Unsupported(_))
+                ));
             }
             machine.profile.processors[0].clock = None;
             machine.load_profile();

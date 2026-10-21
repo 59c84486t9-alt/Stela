@@ -540,6 +540,32 @@ impl Cpu {
                 }
             };
         }
+        if Pmu::owns_on(self.registers.chip(), encoding) {
+            let Some(pmu) = self.pmu.as_mut() else {
+                return Outcome::Refused(Refusal::UnsupportedSetting(
+                    "CPMU access requires an explicit PE clock in the CPU profile",
+                ));
+            };
+            let context = super::pmu::Context {
+                el: self.pstate.el,
+                waiting: false,
+            };
+            let retired = self.retired;
+            let outcome = if read {
+                pmu.read(encoding, physical, retired, context)
+                    .map(Outcome::Read)
+            } else {
+                pmu.write(encoding, value, physical, retired, context)
+                    .map(|()| {
+                        Outcome::Written(Changes {
+                            interrupts: true,
+                            ..Changes::default()
+                        })
+                    })
+            };
+            return outcome
+                .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
+        }
         let consumed = impdef::consumed(encoding, self.registers.chip());
         if encoding.crn() == 11 {
             return if consumed {
@@ -561,27 +587,6 @@ impl Cpu {
             } else {
                 self.amx.write(encoding, el, value).expect("checked")
             };
-        }
-        if let Some(pmu) = self.pmu.as_mut().filter(|_| Pmu::owns(encoding)) {
-            let context = super::pmu::Context {
-                el: self.pstate.el,
-                waiting: false,
-            };
-            let retired = self.retired;
-            let outcome = if read {
-                pmu.read(encoding, physical, retired, context)
-                    .map(Outcome::Read)
-            } else {
-                pmu.write(encoding, value, physical, retired, context)
-                    .map(|()| {
-                        Outcome::Written(Changes {
-                            interrupts: true,
-                            ..Changes::default()
-                        })
-                    })
-            };
-            return outcome
-                .unwrap_or_else(|reason| Outcome::Refused(Refusal::UnsupportedSetting(reason)));
         }
         if let Some(entry) = impdef::lookup(encoding, self.registers.chip()) {
             if entry.el2 && self.pstate.el != 2 {
@@ -1279,6 +1284,42 @@ mod tests {
             write(&mut cpu, SPRR_PERM_EL0, 3 << 36 | 0xf << 20),
             Outcome::Refused(_)
         ));
+    }
+
+    #[test]
+    fn qualified_pmu_registers_trap_before_mutation_and_stay_undefined_at_el0() {
+        for chip in super::super::Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+            cpu.pmu = Pmu::for_chip(chip, 1_000_000_000, 24_000_000);
+            let mut encodings = alloc::vec![super::super::pmu::PMC[1]];
+            if chip == super::super::Chip::AppleM6 {
+                encodings.push(Encoding::new(3, 0, 11, 13, 2));
+            }
+            for encoding in encodings {
+                cpu.pstate.el = 2;
+                cpu.state.x[5] = 123;
+                assert!(matches!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Written(_)
+                ));
+                cpu.pstate.el = 1;
+                cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_TIDCP);
+                cpu.state.x[5] = 456;
+                assert_eq!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Trapped(Some(2))
+                );
+                assert_eq!(
+                    cpu.apple_access(mrs(0, encoding), 0),
+                    Outcome::Trapped(Some(2))
+                );
+                cpu.pstate.el = 0;
+                assert_eq!(cpu.apple_access(msr(5, encoding), 0), Outcome::Undefined);
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
+                cpu.pstate.el = 2;
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(123));
+            }
+        }
     }
 
     /// Every IMPLEMENTATION DEFINED encoding the M1's and M2's censused
