@@ -5,6 +5,7 @@
 //! Revision15 follows the donor's gigabit capability policy.
 pub mod firmware;
 mod framing;
+mod identity;
 mod registers;
 pub mod rtl815x;
 
@@ -17,17 +18,11 @@ use crate::{
 use alloc::{collections::VecDeque, format, string::String, vec::Vec};
 use core::sync::atomic::{Ordering, fence};
 pub use firmware::Error;
+#[cfg(test)]
+pub(crate) use identity::USB_IDS;
+pub use identity::matches;
+use identity::policy;
 use rtl815x::{Chip, Control, Revision};
-
-/// The exact Realtek vendor-mode IDs audited in the donor. OEM IDs are not
-/// inferred from strings or vendor identity and are not matched yet.
-pub fn matches(descriptor: &[u8; 18]) -> bool {
-    u16::from_le_bytes([descriptor[8], descriptor[9]]) == 0x0bda
-        && matches!(
-            u16::from_le_bytes([descriptor[10], descriptor[11]]),
-            0x8050 | 0x8053 | 0x8152 | 0x8153 | 0x8155 | 0x8156
-        )
-}
 
 #[derive(Clone, Debug)]
 pub struct Binding {
@@ -62,6 +57,11 @@ impl Binding {
             .collect();
         if input.len() != 1 || output.len() != 1 {
             return Err("RTL815x requires unique bulk IN/OUT endpoints");
+        }
+        // rtl_check_vendor_ok fixes the controller's RX/TX pipe numbers.
+        // Carrier is polled, so the unused interrupt endpoint is not required.
+        if input[0].address != 0x81 || output[0].address != 0x02 {
+            return Err("RTL815x requires RX endpoint1 and TX endpoint2");
         }
         Ok(Self {
             input: input[0],
@@ -125,11 +125,12 @@ impl UsbEthernet {
             controller: controller.clone(),
             slot: device.slot,
         };
-        let (chip, mac) = Chip::attach_with_firmware(
+        let (chip, mac) = Chip::attach_with_policy(
             io,
             binding.revision,
             device.speed,
             firmware.as_ref().map(|(_, parsed)| parsed),
+            policy(device),
         )?;
         let receive_bytes = chip.receive_bytes();
         let family = if binding.revision.is_8153a() {
@@ -311,5 +312,45 @@ impl Link for UsbEthernet {
                 .map_err(|why| LinkError::Adapter(why.into()))?,
         );
         Ok(self.pending.pop_front())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires pinned unchanged Linux RTL815x USB ID table"]
+    fn unchanged_linux_rtl815x_exact_usb_candidates_and_flags() {
+        extern crate std;
+        use sha2::{Digest, Sha256};
+        let ids =
+            std::fs::read_to_string(std::env::var("STELA_RTL815X_IDS_ORACLE").unwrap()).unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(ids.as_bytes())),
+            "e722f13b67f558590bbe36bfa80ca12174007f5f8a2a661a2f0d84bfd8b3aab1"
+        );
+        let expected: Vec<_> = ids
+            .lines()
+            .map(|line| {
+                let (vid, pid) = line.split_once(' ').unwrap();
+                (
+                    u16::from_str_radix(vid, 16).unwrap(),
+                    u16::from_str_radix(pid, 16).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(USB_IDS, expected);
+        for (vid, pid) in expected {
+            let mut descriptor = [0; 18];
+            descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+            descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+            assert!(matches(&descriptor));
+            descriptor[8..10].copy_from_slice(&(vid ^ 0x8000).to_le_bytes());
+            assert!(!matches(&descriptor));
+            descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+            descriptor[10..12].copy_from_slice(&0xffffu16.to_le_bytes());
+            assert!(!matches(&descriptor));
+        }
     }
 }

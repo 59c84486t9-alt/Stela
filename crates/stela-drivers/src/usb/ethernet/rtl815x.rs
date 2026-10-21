@@ -105,6 +105,12 @@ impl Revision {
     }
 }
 
+/// Source-defined device policy applied only by the selected revision path.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Policy {
+    pub disable_receive_aggregation: bool,
+}
+
 /// Failed register accesses latch inaccessible until a new device attachment.
 /// No read/modify/write is attempted after a short read or failed control TD.
 pub struct Chip<C> {
@@ -115,6 +121,7 @@ pub struct Chip<C> {
     enabled: bool,
     initialized: bool,
     usb_speed: u8,
+    policy: Policy,
 }
 
 impl<C: Control> Chip<C> {
@@ -142,6 +149,16 @@ impl<C: Control> Chip<C> {
         speed: u8,
         firmware: Option<&super::firmware::Firmware<'_>>,
     ) -> Result<(Self, Mac), BlockError> {
+        Self::attach_with_policy(io, expected, speed, firmware, Policy::default())
+    }
+
+    pub fn attach_with_policy(
+        io: C,
+        expected: Revision,
+        speed: u8,
+        firmware: Option<&super::firmware::Firmware<'_>>,
+        policy: Policy,
+    ) -> Result<(Self, Mac), BlockError> {
         let mut chip = Self::probe(io, expected)?;
         if !chip.revision.implemented() {
             return Err(BlockError::Unsupported(
@@ -157,6 +174,7 @@ impl<C: Control> Chip<C> {
             ));
         }
         chip.usb_speed = speed;
+        chip.policy = policy;
         // determine_ethernet_addr: revision01 stores the permanent address in
         // IDR; later revisions use BACKUP without platform/OEM passthrough.
         let station = if chip.revision.0 == 0x4c00 {
@@ -213,6 +231,7 @@ impl<C: Control> Chip<C> {
             enabled: false,
             initialized: false,
             usb_speed: 0,
+            policy: Policy::default(),
         })
     }
 
@@ -951,6 +970,7 @@ pub(crate) mod tests {
             enabled: false,
             initialized: false,
             usb_speed: 0,
+            policy: Policy::default(),
         };
         for bank in [USB, PLA] {
             for address in 0xc000..0xc020 {

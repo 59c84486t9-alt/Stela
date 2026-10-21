@@ -4110,25 +4110,38 @@ pub(crate) mod tests {
                 self.catalog.load(requirement)
             }
         }
-        for (revision, speed) in [
+        let native = [
             0x5c00, 0x5c10, 0x5c20, 0x5c30, 0x6000, 0x6010, 0x6400, 0x7020, 0x7030, 0x7400, 0x7410,
             0x7420,
         ]
         .into_iter()
         .flat_map(|revision| {
             [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
-        }) {
+        })
+        .map(|(revision, speed)| {
+            let pid = if ethernet::rtl815x::Revision(revision).is_8156() {
+                0x8156
+            } else {
+                0x8153
+            };
+            (0x0bda, pid, revision, speed, 0x3000u16, None)
+        });
+        let aliases = ethernet::USB_IDS
+            .iter()
+            .copied()
+            .map(|(vid, pid)| (vid, pid, 0x5c10, HIGH_SPEED, 0x3000, None));
+        let dock = [0x3011, 0x3010].into_iter().flat_map(|bcd| {
+            ["000001000000", "000002000000", "000003000000"]
+                .map(|serial| (0x413c, 0xb097, 0x5c10, HIGH_SPEED, bcd, Some(serial)))
+        });
+        for (vid, pid, revision, speed, bcd, serial) in native.chain(aliases).chain(dock) {
             let image = if matches!(revision, 0x5c00 | 0x6000 | 0x7020 | 0x7400) {
                 Vec::new()
             } else {
                 ethernet::firmware::tests::synthetic_upload(revision)
             };
             let is_8156 = ethernet::rtl815x::Revision(revision).is_8156();
-            let hardware_label = if is_8156 {
-                "usb:0bda:8156:3000"
-            } else {
-                "usb:0bda:8153:3000"
-            };
+            let hardware_label = format!("usb:{vid:04x}:{pid:04x}:{bcd:04x}");
             let name = ethernet::rtl815x::Revision(revision).firmware();
             let revision_label = format!("tcr-{revision:04x}");
             let digest: [u8; 32] = Sha256::digest(&image).into();
@@ -4137,7 +4150,7 @@ pub(crate) mod tests {
                     name,
                     target: Target {
                         driver: "usb-rtl815x",
-                        hardware: hardware_label,
+                        hardware: &hardware_label,
                         revision: &revision_label,
                         board: None,
                     },
@@ -4222,13 +4235,14 @@ pub(crate) mod tests {
             let mut device = configuration::tests::device(vec![configuration]);
             device.speed = speed;
             device.descriptor[8..14].copy_from_slice(&[
-                0xda,
-                0x0b,
-                if is_8156 { 0x56 } else { 0x53 },
-                0x81,
-                0x00,
-                0x30,
+                vid as u8,
+                (vid >> 8) as u8,
+                pid as u8,
+                (pid >> 8) as u8,
+                bcd as u8,
+                (bcd >> 8) as u8,
             ]);
+            device.serial = serial.map(Into::into);
             controller.preflight_vendor_ethernet(&mut device).unwrap();
             configuration::select(&mut device).unwrap();
             let shared = Rc::new(RefCell::new(controller));
@@ -4244,6 +4258,19 @@ pub(crate) mod tests {
             assert_eq!(
                 provider.requests.borrow().len(),
                 usize::from(name.is_some())
+            );
+            let bytes = shared
+                .borrow_mut()
+                .control(1, setup(0xc0, 5, 0xd404, 0, 4), &[])
+                .unwrap();
+            let aggregation = u16::from_le_bytes([bytes[2], bytes[3]]) & 0x90;
+            assert_eq!(
+                aggregation,
+                if bcd == 0x3011 && matches!(serial, Some("000001000000" | "000002000000")) {
+                    0x10
+                } else {
+                    0
+                }
             );
             let mut link = found.vendor_links.pop().unwrap();
             if let Some(name) = name {

@@ -139,7 +139,17 @@ impl<C: Control> Chip<C> {
         // keeps host U1/U2/suspend disabled and makes no successful LPM claim.
         self.modify(PLA, PLA_CONFIG6, 1, 0, LANWAKE_CLR_EN)?;
         self.modify(PLA, PLA_LWAKE_CTRL_REG, 1, LANWAKE_PIN, 0)?;
-        self.modify(USB, USB_USB_CTRL, 2, RX_AGG_DISABLE | RX_ZERO_EN, 0)?;
+        self.modify(
+            USB,
+            USB_USB_CTRL,
+            2,
+            RX_AGG_DISABLE | RX_ZERO_EN,
+            if self.policy.disable_receive_aggregation {
+                RX_AGG_DISABLE
+            } else {
+                0
+            },
+        )?;
         self.modify(PLA, PLA_RSTTALLY, 2, 0, TALLY_RESET)?;
 
         // r8153_hw_phy_cfg, with EEE advertisement deliberately disabled.
@@ -288,6 +298,43 @@ mod tests {
     };
     use alloc::rc::Rc;
     use core::cell::RefCell;
+
+    #[test]
+    fn exact_device_receive_aggregation_policy_preserves_other_usb_fields() {
+        for revision in [0x5c00, 0x5c10, 0x5c20, 0x5c30] {
+            let bytes = if revision == 0x5c00 {
+                Vec::new()
+            } else {
+                synthetic_upload(revision)
+            };
+            let firmware =
+                (!bytes.is_empty()).then(|| Firmware::parse(&bytes, Revision(revision)).unwrap());
+            for disabled in [false, true] {
+                let model = Rc::new(RefCell::new(FirmwareModel::new(revision, &bytes)));
+                model.borrow_mut().core.set(USB, USB_USB_CTRL, 2, 0xffff);
+                let (mut chip, _) = Chip::attach_with_policy(
+                    FirmwareIo(model.clone()),
+                    Revision(revision),
+                    3,
+                    firmware.as_ref(),
+                    Policy {
+                        disable_receive_aggregation: disabled,
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    model.borrow().core.get(USB, USB_USB_CTRL, 2),
+                    if disabled { 0xff7f } else { 0xff6f }
+                );
+                assert!(chip.carrier().unwrap());
+                chip.stop().unwrap();
+                assert_eq!(
+                    model.borrow().core.get(USB, USB_USB_CTRL, 2),
+                    if disabled { 0xff7f } else { 0xff6f }
+                );
+            }
+        }
+    }
 
     #[test]
     fn all_8153a_revisions_apply_their_actual_phy_power_fifo_and_link_branches() {

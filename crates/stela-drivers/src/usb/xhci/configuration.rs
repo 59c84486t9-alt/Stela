@@ -518,6 +518,42 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn exact_oem_candidates_need_observed_supported_chip_and_fixed_bulk_pipes() {
+        for &(vid, pid) in ethernet::USB_IDS {
+            for revision in [None, Some(0x4c20), Some(0x1030), Some(0x2020), Some(0x5c10)] {
+                for variant in 0..4 {
+                    let mut vendor = storage(7);
+                    vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
+                    match variant {
+                        1 => vendor[20] = 0x83,
+                        2 => vendor[27] = 0x01,
+                        3 => vendor[14] = 0x02,
+                        _ => {}
+                    }
+                    for configurations in
+                        [vec![vendor.clone(), ecm(42)], vec![ecm(42), vendor.clone()]]
+                    {
+                        let mut device = device(configurations);
+                        device.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+                        device.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+                        device.vendor_ethernet_revision = revision;
+                        select(&mut device).unwrap();
+                        assert_eq!(
+                            device.configuration_value(),
+                            if revision == Some(0x5c10) && variant == 0 {
+                                7
+                            } else {
+                                42
+                            },
+                            "{vid:04x}:{pid:04x} {revision:?}/{variant}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn selected_alternate_cannot_overlap_another_default_active_interface() {
         let mut bytes = ecm(42);
         bytes.extend_from_slice(&[9, 4, 2, 0, 1, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 64, 0, 0]);
