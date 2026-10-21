@@ -1001,9 +1001,12 @@ mod tests {
     #[test]
     fn private_identify_matches_features_and_partition_capacity() {
         let mut rig = Rig::new();
-        rig.submit(0, 0, 6, 0, DATA, [0; 6]).unwrap();
+        // The original AP builder selects CNS 1 for its NSID-zero query.
+        rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
         assert_eq!(rig.bytes(DATA + 0x204, 4), 1u32.to_le_bytes());
         assert_eq!(&rig.bytes(DATA + 0xc00, 16)[..14], b"Stela ANS2 1.0");
+        assert_eq!(rig.bytes(DATA + 0xc1c, 2), [0, 1]);
+        assert_eq!(rig.bytes(DATA + 0xc21, 3), [1, 0, 1]);
         assert_eq!(rig.bytes(DATA + 0xe06, 2), 1u16.to_le_bytes());
         let descriptor = u64::from_le_bytes(rig.bytes(DATA + 0xd00, 8).try_into().unwrap());
         rig.retire(0, 0);
@@ -1017,6 +1020,17 @@ mod tests {
         assert_eq!(rig.bytes(CQ + 16, 4), [0; 4]);
         rig.retire(0, 1);
         assert!(rig.submit(0, 0, 9, 0, 0, [0xc0, 0, 0, 0, 0, 0]).is_err());
+    }
+
+    #[test]
+    fn namespace_zero_is_invalid_for_namespace_identify() {
+        let mut rig = Rig::new();
+        let sentinel = vec![0xa5; commands::IDENTIFY_BYTES];
+        assert!(rig.ram.write(DATA, &sentinel));
+        rig.submit(0, 0, 6, 0, DATA, [0; 6]).unwrap();
+        assert_eq!(rig.bytes(DATA, commands::IDENTIFY_BYTES), sentinel);
+        let status = u16::from_le_bytes(rig.bytes(CQ + 14, 2).try_into().unwrap()) >> 1;
+        assert_eq!(status, commands::INVALID_NAMESPACE);
     }
 
     #[test]
@@ -1314,7 +1328,7 @@ mod tests {
         // `IdentifyNamespaces`, then `CheckClogVersionMismatch`'s
         // namespace-1 Identify (0x3df6c90), which must not answer Invalid
         // Namespace, and the type `IsFWNamespaceTypeMismatch` compares.
-        assert_eq!(admin(&mut rig, 2, 6, 0, DATA, [0; 6]).0, 0);
+        assert_eq!(admin(&mut rig, 2, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).0, 0);
         assert_eq!(rig.bytes(DATA + 0x204, 4), 1u32.to_le_bytes());
         assert_eq!(admin(&mut rig, 3, 6, 1, DATA, [0; 6]).0, 0);
         assert_eq!(rig.bytes(DATA + 0x180, 1), [1]);

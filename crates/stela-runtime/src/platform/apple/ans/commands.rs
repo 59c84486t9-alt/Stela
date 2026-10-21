@@ -18,7 +18,7 @@ use crate::platform::{apple::sart::Sart, dma::Port};
 use alloc::vec;
 use stela_drivers::block::BlockError;
 
-const IDENTIFY_BYTES: usize = 4096;
+pub(super) const IDENTIFY_BYTES: usize = 4096;
 /// `AppleANS2NVMeController::AllocateTunnelBuffer` (0x3dbe83c) rounds every
 /// tunnel buffer up to 16 KiB (0x3dbe844..0x3dbe84c), `AppleNVMeBuffer::Init`
 /// keeps that rounded size (0x3de6318) and `ProcessTunnelCommand`
@@ -118,7 +118,7 @@ const READ_ONLY_FIRMWARE_SLOT: u8 = (1 << 1) | 1;
 const SUCCESS: u16 = 0;
 const INVALID_FIELD: u16 = 2;
 const DATA_TRANSFER_ERROR: u16 = 4;
-const INVALID_NAMESPACE: u16 = 0xb;
+pub(super) const INVALID_NAMESPACE: u16 = 0xb;
 /// Command-specific status (SCT 1): Invalid Queue Identifier and Invalid
 /// Queue Deletion (NVMe 1.4 figures 145 and 151).
 const INVALID_QUEUE: u16 = 0x101;
@@ -372,6 +372,11 @@ impl Ans {
         match cmd.word(40) {
             1 if cmd.nsid() == 0 => {
                 self.controller_identity(&mut data);
+                // IdentifyNamespaces passes NSID 0 to IssueIdentifyCommand
+                // (26A434 file 0x3db24c8), which selects CNS 1 at
+                // 0x3ddfffc..0x3de0004. Apple's private controller fields
+                // therefore extend the standard controller response.
+                die::identify(&self.medium, &mut data)?;
                 data[260] = READ_ONLY_FIRMWARE_SLOT;
                 data[77] = 8; // MDTS: 2^8 * 4 KiB = 1 MiB.
                 put16(&mut data, 78, 1); // Controller ID, Stela choice.
@@ -381,10 +386,6 @@ impl Ans {
                 put32(&mut data, 516, self.medium.namespaces.len() as u32);
                 put16(&mut data, 520, ONCS); // No write zeroes or crypto.
                 // VWC/OACS are zero: no downloadable firmware/cache.
-            }
-            0 if cmd.nsid() == 0 => {
-                self.controller_identity(&mut data);
-                die::identify(&self.medium, &mut data)?;
             }
             0 => {
                 let Some(ns) = self.medium.namespace(cmd.nsid()) else {
