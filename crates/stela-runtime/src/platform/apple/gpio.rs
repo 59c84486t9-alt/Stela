@@ -37,8 +37,14 @@
 //! that word then refuses until software supplies a pull or disables the
 //! receiver. No level is invented. Levels are sampled on each access and
 //! each device advance, so a net change is observed at the next one.
+//!
+//! Powered clock/quiesce pauses preserve pad configuration and driven chip
+//! selects. They require no armed or pending GPIO interrupt: the original
+//! driver's separate enableWakeOnly/claimWakeEvents contract is not modeled,
+//! so a stopped clock cannot silently discard edge/wake ownership. Physical
+//! supply loss, pad retention and reset remain explicit refusals.
 use super::{
-    bus::{Access, Direction, MmioDevice, MmioError, Width, refuse},
+    bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
 };
 use alloc::{rc::Rc, vec, vec::Vec};
@@ -116,6 +122,7 @@ impl OpenDrain {
 }
 
 pub struct Gpio {
+    lifecycle: LifecycleState,
     pins: Vec<u32>,
     nets: Vec<Option<Net>>,
     /// Last sampled level of each pin in an edge mode.
@@ -153,6 +160,13 @@ impl Gpio {
         }
         let words = (pins as usize).div_ceil(32);
         let mut bank = Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: true,
+            },
             pins: vec![INPUT_OFF; pins as usize],
             nets: vec![None; pins as usize],
             sampled: vec![None; pins as usize],
@@ -215,6 +229,9 @@ impl Gpio {
     }
     /// Latches every armed pin's condition and drives each group's line.
     fn sample(&mut self, access: &mut Access<'_>) {
+        if !self.lifecycle.clocked || self.lifecycle.quiesced {
+            return;
+        }
         for &pin in &self.armed {
             let word = self.pins[pin];
             let level = self.input_level(pin, word);
@@ -248,9 +265,37 @@ impl Gpio {
         }
     }
 }
+impl Lifecycle for Gpio {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if proposed.reset {
+            return Err("GPIO physical reset, pad state and interrupt restoration are unqualified");
+        }
+        if !proposed.powered {
+            return Err("GPIO supply loss and physical pad/interrupt retention are unqualified");
+        }
+        if (!proposed.clocked || proposed.quiesced)
+            && (!self.armed.is_empty() || self.pending.iter().any(|word| *word != 0))
+        {
+            return Err(
+                "GPIO pause with armed or pending interrupts has unqualified edge/wake capture",
+            );
+        }
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        // Clock/quiesce never rewrite pad configuration or withdraw a driven
+        // chip select. Armed/pending IRQ ownership was checked before commit.
+        self.lifecycle = proposed;
+        self.sample(access);
+    }
+}
 impl MmioDevice for Gpio {
     fn name(&self) -> &'static str {
         NAME
+    }
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
     }
     fn read(
         &mut self,
@@ -259,6 +304,11 @@ impl MmioDevice for Gpio {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        if !self.lifecycle.clocked {
+            return Err(err(
+                "GPIO MMIO while its physical clock is stopped is unqualified",
+            ));
+        }
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
@@ -288,6 +338,16 @@ impl MmioDevice for Gpio {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        if !self.lifecycle.clocked {
+            return Err(err(
+                "GPIO MMIO while its physical clock is stopped is unqualified",
+            ));
+        }
+        if self.lifecycle.quiesced {
+            return Err(err(
+                "GPIO register changes while native service is quiesced are unqualified",
+            ));
+        }
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("GPIO registers require aligned 32-bit accesses"));
         }
@@ -362,6 +422,256 @@ mod tests {
     use crate::platform::apple::interrupt::InterruptLatch;
     fn lines() -> Vec<AicInput> {
         (199..206).map(|irq| AicInput::new(0, irq)).collect()
+    }
+    #[test]
+    fn retained_clock_and_quiesce_preserve_pad_ownership_independently() {
+        let net = Net::new();
+        let input = net.open_drain().unwrap();
+        let mut bank = Gpio::new(64, lines(), &[49], vec![(8, net)]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        bank.write(49 * 4, Width::Word, u64::from(OUTPUT | LOCK), &mut access)
+            .unwrap();
+        bank.write(
+            8 * 4,
+            Width::Word,
+            u64::from(INPUT_OFF | INPUT_ENABLE),
+            &mut access,
+        )
+        .unwrap();
+        let active = bank.lifecycle;
+        let quiesced = LifecycleState {
+            quiesced: true,
+            ..active
+        };
+        bank.check_lifecycle(quiesced).unwrap();
+        bank.set_lifecycle(quiesced, &mut access);
+        assert_eq!(bank.output(49), Some(false));
+        assert!(
+            bank.write(49 * 4, Width::Word, u64::from(OUTPUT | DATA), &mut access)
+                .is_err()
+        );
+        assert_eq!(bank.output(49), Some(false));
+        let stopped = LifecycleState {
+            clocked: false,
+            ..quiesced
+        };
+        bank.check_lifecycle(stopped).unwrap();
+        bank.set_lifecycle(stopped, &mut access);
+        assert!(bank.read(49 * 4, Width::Word, &mut access).is_err());
+        input.pull_low(true);
+        bank.advance(&mut access).unwrap();
+        assert_eq!(bank.output(49), Some(false));
+        bank.check_lifecycle(quiesced).unwrap();
+        bank.set_lifecycle(quiesced, &mut access);
+        assert!(
+            bank.lifecycle.quiesced,
+            "clock restart does not resume service"
+        );
+        assert_eq!(
+            bank.read(49 * 4, Width::Word, &mut access),
+            Ok(u64::from(OUTPUT | LOCK))
+        );
+        bank.check_lifecycle(active).unwrap();
+        bank.set_lifecycle(active, &mut access);
+        assert_eq!(
+            bank.read(8 * 4, Width::Word, &mut access),
+            Ok(u64::from(INPUT_OFF | INPUT_ENABLE))
+        );
+        assert!(bank.pending.iter().all(|word| *word == 0));
+        assert!(latch.take_aic_inputs().is_empty());
+    }
+
+    #[test]
+    fn armed_edge_or_owned_pending_interrupt_prevents_pause_without_losing_events() {
+        let net = Net::new();
+        let input = net.open_drain().unwrap();
+        let mut bank = Gpio::new(64, lines(), &[], vec![(8, net)]).unwrap();
+        let mut latch = InterruptLatch::new();
+        let active = bank.lifecycle;
+        let stopped = LifecycleState {
+            clocked: false,
+            ..active
+        };
+        let mut access = Access::new(0, 0, &mut latch);
+        bank.write(
+            8 * 4,
+            Width::Word,
+            u64::from(EDGE_FALLING | INPUT_ENABLE),
+            &mut access,
+        )
+        .unwrap();
+        assert!(bank.check_lifecycle(stopped).is_err());
+        assert_eq!(bank.lifecycle, active);
+        input.pull_low(true);
+        bank.advance(&mut access).unwrap();
+        input.pull_low(false);
+        bank.advance(&mut access).unwrap();
+        assert_eq!(
+            bank.pending[0],
+            1 << 8,
+            "refused pause leaves edge capture active"
+        );
+        // Removing the trigger does not surrender an already-owned latch.
+        bank.write(8 * 4, Width::Word, u64::from(INPUT_OFF), &mut access)
+            .unwrap();
+        assert!(bank.armed.is_empty());
+        assert!(bank.check_lifecycle(stopped).is_err());
+        assert!(
+            bank.check_lifecycle(LifecycleState {
+                quiesced: true,
+                ..active
+            })
+            .is_err()
+        );
+        bank.write(IRQ_BASE, Width::Word, 1 << 8, &mut access)
+            .unwrap();
+        bank.check_lifecycle(stopped).unwrap();
+        bank.set_lifecycle(stopped, &mut access);
+        for proposed in [
+            LifecycleState {
+                reset: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: false,
+                ..active
+            },
+        ] {
+            assert!(bank.check_lifecycle(proposed).is_err());
+            assert_eq!(bank.lifecycle, stopped);
+            assert_eq!(bank.pending[0], 0);
+        }
+        assert_eq!(
+            latch.take_aic_inputs(),
+            [(lines()[0], true), (lines()[0], false)]
+        );
+    }
+
+    #[test]
+    fn mounted_gpio_refusal_keeps_real_aic_delivery_owned() {
+        use crate::platform::apple::{
+            aic::{AIC2_IRQ_CFG, Aic2, Aic2Config},
+            bus::Bus,
+        };
+        let net = Net::new();
+        let input = net.open_drain().unwrap();
+        let gpio = Gpio::new(32, vec![AicInput::new(0, 3)], &[], vec![(8, net)]).unwrap();
+        let aic = Aic2::new(Aic2Config {
+            version: 2,
+            nr_irq: 32,
+            max_irq: 32,
+            irq_config: AIC2_IRQ_CFG,
+            event_offset: 0x4000,
+            timestamps: 0,
+            cpus: 1,
+            default_cpus: 1,
+            target_groups: [None; 4],
+        })
+        .unwrap();
+        let mut bus = Bus::new();
+        let gpio_id = bus.add(Box::new(gpio));
+        let aic_id = bus.add(Box::new(aic));
+        bus.map(gpio_id, 0x10000, 0x1000, 0).unwrap();
+        bus.map(aic_id, 0x20000, 0x4004, 0).unwrap();
+        let mut latch = InterruptLatch::new();
+        bus.write(
+            0x10020,
+            Width::Word,
+            u64::from(LEVEL_LOW | INPUT_ENABLE),
+            &mut Access::new(0, 0, &mut latch),
+        )
+        .unwrap();
+        // An aggregate preflight must check every real bank before committing
+        // either one. AIC is idle, but the GPIO wake/edge path is unqualified.
+        let paused = LifecycleState {
+            powered: true,
+            clocked: false,
+            quiesced: false,
+            reset: false,
+            retention: true,
+        };
+        bus.lifecycle(aic_id)
+            .unwrap()
+            .check_lifecycle(paused)
+            .unwrap();
+        assert!(
+            bus.lifecycle(gpio_id)
+                .unwrap()
+                .check_lifecycle(paused)
+                .is_err()
+        );
+        input.pull_low(true);
+        bus.advance(&mut Access::new(0, 1, &mut latch)).unwrap();
+        for (line, level) in latch.take_aic_inputs() {
+            bus.device_mut::<Aic2>(aic_id)
+                .unwrap()
+                .set_input(line, level, &mut Access::new(0, 1, &mut latch))
+                .unwrap();
+        }
+        // Unmask source 3 and enable the actual mapped AIC. The earlier
+        // refused lifecycle preflight changed neither bank or input level.
+        bus.write(
+            0x20000 + AIC2_IRQ_CFG + 4 * 32 + 12,
+            Width::Word,
+            1 << 3,
+            &mut Access::new(0, 2, &mut latch),
+        )
+        .unwrap();
+        bus.write(0x20014, Width::Word, 1, &mut Access::new(0, 2, &mut latch))
+            .unwrap();
+        assert!(latch.pins(0).irq);
+        assert_eq!(
+            bus.read(0x24000, Width::Word, &mut Access::new(0, 3, &mut latch)),
+            Ok(1 << 16 | 3)
+        );
+        assert!(!latch.pins(0).irq);
+        assert_eq!(
+            bus.read(0x10800, Width::Word, &mut Access::new(0, 3, &mut latch)),
+            Ok(1 << 8)
+        );
+    }
+    #[test]
+    #[ignore = "requires pinned original J473 26A434 kernelcache; no Apple image is committed"]
+    fn original_drivers_keep_wake_claim_and_timestamp_disarm_explicit() {
+        use sha2::{Digest, Sha256};
+        let path = std::env::var("STELA_TEST_PMGR_KERNELCACHE")
+            .expect("pinned original J473 kernelcache path");
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "06846c718a67715f540c7f5a5d5a183da6185d94b6fc01f1ce57a30b601be44d"
+        );
+        // GPIO setPowerState claims separate wake ownership; this is not
+        // evidence for resetting pads or dropping pending edges on suspend.
+        // AIC stopInterruptTimestamping separately disarms its slot.
+        for (offset, opcode) in [
+            (0x24d9480, 0xf900b401),
+            (0x24d9484, 0xf100043f),
+            (0x24d9498, 0x97fffded),
+            (0x24dd7a0, 0x528041c9),
+            (0x24dd7a8, 0xb9000308),
+            (0x24dd7f8, 0xb9000128),
+            (0x24dd91c, 0x321f0922),
+            (0x24dd920, 0xb9000102),
+            (0x24dd9b8, 0xb9000128),
+            (0x28232e0, 0x52830009),
+            (0x28232e4, 0x0b081121),
+            (0x2823308, 0x52800002),
+            (0x2823310, 0xd73f0910),
+        ] {
+            assert_eq!(
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+                opcode,
+                "original IRQ lifecycle source at {offset:#x}"
+            );
+        }
     }
     #[test]
     fn enabling_an_undriven_receiver_does_not_invent_a_sample() {

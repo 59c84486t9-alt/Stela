@@ -55,10 +55,18 @@
 //! `intmaskclear-stride` from the ADT. Each bank's established address is
 //! supplied independently; the legacy constructor keeps the single-die
 //! contiguous layout. Unknown banks or hardware capacity are not inferred.
+//!
+//! Physical lifecycle is checked independently of CONFIG.ENABLE. Retained
+//! clock/quiesce pauses require delivery disabled and all timestamp slots
+//! disarmed: capture/wake behavior while the physical clock is stopped is
+//! unqualified. Software pending, current external levels, masks, routes and
+//! timestamp history remain owned. Supply loss and physical reset refuse.
 pub mod layout;
 pub use layout::Aic2Layout;
 
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+};
 use super::interrupt::{AicInput, CpuIndex, Wire};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -176,6 +184,7 @@ struct Timestamp {
 }
 
 pub struct Aic2 {
+    lifecycle: LifecycleState,
     config: Aic2Config,
     layout: Aic2Layout,
     span: u64,
@@ -265,6 +274,13 @@ impl Aic2 {
         let span = layout.validate(&config).map_err(Aic2Error::InvalidConfig)?;
         let words = usize::from(config.max_irq / 32) * layout.dies.len();
         Ok(Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: true,
+            },
             timestamps: vec![Timestamp::default(); config.timestamps],
             enabled: false,
             irq_cfg: vec![0; usize::from(config.max_irq) * layout.dies.len()],
@@ -367,7 +383,7 @@ impl Aic2 {
     }
     /// The highest-priority deliverable IRQ for `cpu`.
     fn pending_for(&self, cpu: CpuIndex) -> Option<usize> {
-        if !self.enabled {
+        if !self.enabled || !self.lifecycle.clocked || self.lifecycle.quiesced {
             return None;
         }
         (0..self.software.len())
@@ -551,6 +567,38 @@ impl Aic2 {
     }
 }
 
+impl Lifecycle for Aic2 {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if proposed.reset {
+            return Err("AIC physical reset and interrupt/timestamp restoration are unqualified");
+        }
+        if !proposed.powered {
+            return Err(
+                "AIC supply loss, input wake capture and physical retention are unqualified",
+            );
+        }
+        if (!proposed.clocked || proposed.quiesced)
+            && (self.enabled
+                || self
+                    .timestamps
+                    .iter()
+                    .any(|slot| slot.config & TIMESTAMP_ENABLE != 0))
+        {
+            return Err(
+                "AIC pause with IRQ delivery or timestamp capture armed has unqualified wake behavior",
+            );
+        }
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        // All-bank preflight has already qualified this edge. Input levels,
+        // software pending bits, masks and timestamp history remain owned.
+        self.lifecycle = proposed;
+        self.update(access);
+    }
+}
+
 fn position(irq: usize) -> (usize, u32) {
     (irq / 32, 1 << (irq % 32))
 }
@@ -559,6 +607,9 @@ impl MmioDevice for Aic2 {
     fn name(&self) -> &'static str {
         NAME
     }
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn read(
         &mut self,
         offset: u64,
@@ -566,6 +617,11 @@ impl MmioDevice for Aic2 {
         access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        if !self.lifecycle.clocked {
+            return Err(fail(
+                "AIC MMIO while its physical clock is stopped is unqualified",
+            ));
+        }
         if width != Width::Word {
             return Err(fail("AIC2 registers are 32-bit"));
         }
@@ -584,6 +640,16 @@ impl MmioDevice for Aic2 {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        if !self.lifecycle.clocked {
+            return Err(fail(
+                "AIC MMIO while its physical clock is stopped is unqualified",
+            ));
+        }
+        if self.lifecycle.quiesced {
+            return Err(fail(
+                "AIC register changes while native service is quiesced are unqualified",
+            ));
+        }
         if width != Width::Word {
             return Err(fail("AIC2 registers are 32-bit"));
         }
@@ -638,6 +704,148 @@ mod tests {
             &mut Access::new(0, 0, latch),
         )
         .unwrap();
+    }
+    #[test]
+    fn retained_clock_pause_preserves_pending_levels_masks_and_timestamp_history() {
+        let mut aic = aic(2);
+        let mut latch = InterruptLatch::new();
+        let (word, bit) = position(usize::from(UART.irq));
+        write(&mut aic, &mut latch, MASK_CLR + 4 * word as u64, bit);
+        write(&mut aic, &mut latch, SW_SET + 4 * word as u64, bit);
+        write(
+            &mut aic,
+            &mut latch,
+            TIMESTAMPS,
+            TIMESTAMP_ENABLE | u32::from(UART.irq),
+        );
+        aic.set_input(UART, true, &mut Access::new(0, 123, &mut latch))
+            .unwrap();
+        write(&mut aic, &mut latch, TIMESTAMPS, 0);
+        let active = aic.lifecycle;
+        let paused = LifecycleState {
+            clocked: false,
+            ..active
+        };
+        aic.check_lifecycle(paused).unwrap();
+        aic.set_lifecycle(paused, &mut Access::new(0, 124, &mut latch));
+        assert!(
+            aic.read(VERSION, Width::Word, &mut Access::new(0, 125, &mut latch))
+                .is_err()
+        );
+        // External lines remain levels. No enabled timestamp or delivery
+        // engine was suspended, so no pulse/wake behavior is invented.
+        aic.set_input(UART, false, &mut Access::new(0, 126, &mut latch))
+            .unwrap();
+        aic.set_input(UART, true, &mut Access::new(0, 127, &mut latch))
+            .unwrap();
+        assert!(!latch.pins(0).irq);
+        assert_eq!(aic.software[word] & bit, bit);
+        assert_eq!(aic.hardware[word] & bit, bit);
+        assert_eq!(aic.mask[word] & bit, 0);
+        assert_eq!(aic.timestamps[0].counter, 123);
+        aic.check_lifecycle(active).unwrap();
+        aic.set_lifecycle(active, &mut Access::new(0, 128, &mut latch));
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        assert!(latch.pins(0).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), EVENT_TYPE_IRQ | 739);
+        assert!(!latch.pins(0).irq);
+        // Claim masks the source without consuming software or wire state.
+        assert_eq!(aic.software[word] & bit, bit);
+        assert_eq!(aic.hardware[word] & bit, bit);
+    }
+
+    #[test]
+    fn quiesce_is_independent_of_clock_and_cannot_arm_new_delivery() {
+        let mut aic = aic(2);
+        let mut latch = InterruptLatch::new();
+        let active = aic.lifecycle;
+        let quiesced = LifecycleState {
+            quiesced: true,
+            ..active
+        };
+        aic.check_lifecycle(quiesced).unwrap();
+        aic.set_lifecycle(quiesced, &mut Access::new(0, 0, &mut latch));
+        assert_eq!(read(&mut aic, &mut latch, 0, CONFIG), 0);
+        assert!(
+            aic.write(
+                CONFIG,
+                Width::Word,
+                CONFIG_ENABLE.into(),
+                &mut Access::new(0, 1, &mut latch),
+            )
+            .is_err()
+        );
+        assert!(!aic.enabled);
+        let clock_stopped = LifecycleState {
+            clocked: false,
+            ..quiesced
+        };
+        aic.check_lifecycle(clock_stopped).unwrap();
+        aic.set_lifecycle(clock_stopped, &mut Access::new(0, 2, &mut latch));
+        aic.check_lifecycle(quiesced).unwrap();
+        aic.set_lifecycle(quiesced, &mut Access::new(0, 3, &mut latch));
+        assert!(
+            aic.lifecycle.quiesced,
+            "clock restart cannot resume service"
+        );
+        aic.check_lifecycle(active).unwrap();
+        aic.set_lifecycle(active, &mut Access::new(0, 4, &mut latch));
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+    }
+
+    #[test]
+    fn armed_delivery_capture_and_destructive_edges_refuse_without_effects() {
+        let mut aic = aic(2);
+        let mut latch = InterruptLatch::new();
+        let active = aic.lifecycle;
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        for proposed in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                reset: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: false,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            assert!(aic.check_lifecycle(proposed).is_err());
+            assert_eq!(aic.lifecycle, active);
+            assert!(aic.enabled);
+        }
+        write(&mut aic, &mut latch, CONFIG, 0);
+        write(&mut aic, &mut latch, TIMESTAMPS, TIMESTAMP_ENABLE | 5);
+        assert!(
+            aic.check_lifecycle(LifecycleState {
+                clocked: false,
+                ..active
+            })
+            .is_err()
+        );
+        aic.set_input(
+            AicInput::new(0, 5),
+            true,
+            &mut Access::new(0, 99, &mut latch),
+        )
+        .unwrap();
+        assert_eq!(
+            aic.timestamps[0].counter, 99,
+            "refused pause still captures"
+        );
     }
     /// Linux `aic_of_ic_init`: read INFO1/INFO3, mask and clear every IRQ,
     /// then set CONFIG.ENABLE with a read-modify-write.
