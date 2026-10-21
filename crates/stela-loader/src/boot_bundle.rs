@@ -58,7 +58,8 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// carveouts, including the four SGX bootstrap ranges.
 /// Revision 10: publish independently numbered ECPU/PCPU domain tables;
 /// validate the complete carveout reservation against supplied guest DRAM.
-pub const REVISION: u32 = 10;
+/// Revision 11: publish original T6000 AMCC and IOA lockdown maps.
+pub const REVISION: u32 = 11;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -938,6 +939,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             lock_regs::AMCC
         )),
         None => {}
+    }
+    if let Some(controller) = inputs.target.chip_id.and_then(lock_regs::ioa_table) {
+        lock_regs::publish_ioa(&mut tree, controller)?;
     }
     darts::publish(&mut tree)?;
     if let Some(chip_id) = inputs.target.chip_id {
