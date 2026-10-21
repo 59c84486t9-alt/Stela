@@ -82,6 +82,9 @@ pub struct AnalogRoute {
     nodes: Vec<u8>,
 }
 impl AnalogRoute {
+    pub(super) fn codec_address(&self) -> u8 {
+        self.codec
+    }
     pub fn nodes(&self) -> &[u8] {
         &self.nodes
     }

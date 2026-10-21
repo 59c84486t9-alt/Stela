@@ -402,6 +402,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// a stopped controller stream and is verified through converter readback.
     /// Mono/stereo converters consume their declared channel span starting at
     /// `channel`. Wider converters need channel-count control and are rejected.
+    /// A converter reserved by an analog route cannot be rebound, including
+    /// reconfiguration by the same stream, until controller reinitialization.
     pub fn bind_converter(
         &mut self,
         graph: &CodecGraph,
@@ -409,6 +411,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
     ) -> Result<(), Error> {
+        if self.routing_failed {
+            return Err(Error::NeedsReset);
+        }
+        if self.routes.iter().any(|(_, route)| {
+            route.codec_address() == graph.address && route.nodes().contains(&node)
+        }) {
+            return Err(Error::RouteInUse);
+        }
         self.validate_converter(graph, node, id, channel)?;
         let stream = self.stream(id)?;
         let format = stream.format.encode()?;

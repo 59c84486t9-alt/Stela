@@ -1994,6 +1994,17 @@ mod tests {
             .configure_analog_route(&graph, &route, first, 0, options)
             .unwrap();
         let count = model.borrow().commands.len();
+        let original_binding = model.borrow().bindings[&2];
+        assert_eq!(
+            controller.bind_converter(&graph, 2, second, 0),
+            Err(Error::RouteInUse)
+        );
+        assert_eq!(
+            controller.bind_converter(&graph, 2, first, 0),
+            Err(Error::RouteInUse)
+        );
+        assert_eq!(model.borrow().bindings[&2], original_binding);
+        assert_eq!(model.borrow().commands.len(), count);
         assert_eq!(
             controller.configure_analog_route(&graph, &route, second, 0, options),
             Err(Error::RouteInUse)
