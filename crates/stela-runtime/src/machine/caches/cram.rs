@@ -715,7 +715,7 @@ mod tests {
             hosted::host::NativeRunner,
             machine::{
                 Chip, Cpu, CpuProfile, DeviceError, Devices, FaultCause, Host, InstallError, Lines,
-                Machine, NativeCode, NativeExit, Regime, Stop,
+                Machine, NativeCode, NativeExit, Regime, RequirementKind, Stop,
                 exception::Pstate,
                 registers::{Identity, encodings::MPIDR_EL1},
             },
@@ -760,6 +760,8 @@ mod tests {
 
         struct NativeHost {
             original: alloc::vec::Vec<u8>,
+            entry: Option<std::rc::Rc<std::cell::RefCell<EntryRam>>>,
+            regime: Option<Regime>,
             code: alloc::vec::Vec<(Mapping, usize)>,
             output_prefix: alloc::string::String,
             patches: usize,
@@ -767,6 +769,9 @@ mod tests {
         }
         impl Host for NativeHost {
             fn read_ram(&mut self, physical: u64, out: &mut [u8]) -> bool {
+                if let Some(entry) = &self.entry {
+                    return entry.borrow_mut().read(physical, out);
+                }
                 let Some(start) = physical
                     .checked_sub(BASE)
                     .and_then(|start| usize::try_from(start).ok())
@@ -782,8 +787,10 @@ mod tests {
                 out.copy_from_slice(bytes);
                 true
             }
-            fn write_ram(&mut self, _: u64, _: &[u8]) -> bool {
-                false
+            fn write_ram(&mut self, physical: u64, bytes: &[u8]) -> bool {
+                self.entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.borrow_mut().write(physical, bytes))
             }
             fn install(&mut self, bytes: &[u8]) -> Result<NativeCode, InstallError> {
                 let mapping = Mapping::new(bytes).unwrap();
@@ -806,8 +813,8 @@ mod tests {
                         .write_all(bytes)
                         .unwrap();
                 }
-                // This fixture executes only register/arithmetic paths. A
-                // native data fault is an unexpected test failure, not MMIO.
+                // Register-window fixtures reject data faults; full entry routes
+                // them through the actual Machine regime and canonical backing.
                 self.runner.set_ranges(
                     self.code
                         .iter()
@@ -879,13 +886,49 @@ mod tests {
                         next_pc: exit.next_pc,
                         kind: exit.kind,
                     },
-                    Err(fault) => NativeExit::Fault(fault.native(
-                        fault.rip.wrapping_sub(code.0 as u64) as usize,
-                        fault.check_cause().unwrap_or(FaultCause::InvalidOpcode),
-                    )),
+                    Err(fault) => {
+                        let cause = if let Some(entry) = &self.entry
+                            && fault.trap == 14
+                        {
+                            let regime = self
+                                .regime
+                                .as_ref()
+                                .expect("Machine publishes actual regime");
+                            match crate::machine::mmu::translate(
+                                &regime.controls,
+                                fault.address,
+                                if fault.write {
+                                    crate::machine::mmu::Access::Write
+                                } else {
+                                    crate::machine::mmu::Access::Read
+                                },
+                                regime.requester,
+                                &mut EntryTables(entry.clone()),
+                            ) {
+                                crate::machine::mmu::Outcome::Mapped(mapping) => {
+                                    FaultCause::Device {
+                                        physical: mapping.physical,
+                                    }
+                                }
+                                crate::machine::mmu::Outcome::Fault(fault) => {
+                                    FaultCause::Guest(fault)
+                                }
+                                crate::machine::mmu::Outcome::Unsupported(reason) => {
+                                    FaultCause::Translation(reason)
+                                }
+                            }
+                        } else {
+                            fault.check_cause().unwrap_or(FaultCause::InvalidOpcode)
+                        };
+                        NativeExit::Fault(
+                            fault.native(fault.rip.wrapping_sub(code.0 as u64) as usize, cause),
+                        )
+                    }
                 }
             }
-            fn set_regime(&mut self, _: &Regime) {}
+            fn set_regime(&mut self, regime: &Regime) {
+                self.regime = Some(*regime);
+            }
             fn invalidate_translations(&mut self) {}
             fn counter(&mut self) -> u64 {
                 0
@@ -963,6 +1006,8 @@ mod tests {
         ) -> (u64, usize, usize) {
             let host = NativeHost {
                 original: original(input),
+                entry: None,
+                regime: None,
                 code: alloc::vec::Vec::new(),
                 output_prefix: alloc::format!(
                     "entry-{entry:x}-aff2-{aff2:x}-descriptor-{:x}",
@@ -1083,6 +1128,340 @@ mod tests {
                 (input.returned, 1, 0)
             );
             assert_eq!(complete.backing().commits, 0);
+        }
+
+        const ENTRY_BASE: u64 = 0x1fc058000;
+        const APERTURE: u64 = 0x1fc000000;
+        const CAPACITY: usize = 0x3c0000;
+        const GUARD_BYTES: usize = (0x400000000 - APERTURE) as usize;
+        static ENTRY_EXECUTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        struct EntryGuard(*mut libc::c_void);
+        impl EntryGuard {
+            fn new() -> Self {
+                // Reserve only; never replace host mappings or expose guest RAM
+                // directly to native code. Actual accesses use the canonical view.
+                let pointer = unsafe {
+                    libc::mmap(
+                        APERTURE as *mut _,
+                        GUARD_BYTES,
+                        libc::PROT_NONE,
+                        libc::MAP_PRIVATE | libc::MAP_ANON,
+                        -1,
+                        0,
+                    )
+                };
+                assert_ne!(pointer, libc::MAP_FAILED);
+                if pointer as u64 != APERTURE {
+                    unsafe {
+                        libc::munmap(pointer, GUARD_BYTES);
+                    }
+                    panic!("guest aperture guard is occupied");
+                }
+                Self(pointer)
+            }
+        }
+        impl Drop for EntryGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    libc::munmap(self.0, GUARD_BYTES);
+                }
+            }
+        }
+        struct EntryRam {
+            cram: Cram<Owned>,
+            known: Vec<bool>,
+            source_reads: usize,
+            committed: Vec<(u64, Vec<u8>)>,
+            unknown: Vec<(u64, usize)>,
+            registers: Vec<(Encoding, Option<u64>)>,
+        }
+        impl EntryRam {
+            fn range(&self, address: u64, count: usize) -> Option<core::ops::Range<usize>> {
+                let start = usize::try_from(address.checked_sub(APERTURE)?).ok()?;
+                let end = start.checked_add(count)?;
+                (end <= self.known.len()).then_some(start..end)
+            }
+            fn read(&mut self, address: u64, out: &mut [u8]) -> bool {
+                let Some(range) = self.range(address, out.len()) else {
+                    self.unknown.push((address, out.len()));
+                    return false;
+                };
+                if !self.known[range].iter().all(|known| *known) {
+                    self.unknown.push((address, out.len()));
+                    return false;
+                }
+                let Some(view) = self.cram.backing().view.as_ref() else {
+                    return false;
+                };
+                let Ok(access) = view.resolve(address, out.len(), AccessKind::Read) else {
+                    return false;
+                };
+                // One thread owns this live canonical backing; native accesses
+                // always fault and no remap/retirement overlaps this host copy.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        access.host_ptr().as_ptr(),
+                        out.as_mut_ptr(),
+                        out.len(),
+                    );
+                }
+                self.source_reads += 1;
+                true
+            }
+            fn write(&mut self, address: u64, bytes: &[u8]) -> bool {
+                let Some(range) = self.range(address, bytes.len()) else {
+                    return false;
+                };
+                let Some(view) = self.cram.backing().view.as_ref() else {
+                    return false;
+                };
+                let Ok(access) = view.resolve(address, bytes.len(), AccessKind::Write) else {
+                    return false;
+                };
+                // Same exclusive canonical route as source loading. No second
+                // RAM image or successful byte initialization is substituted.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        access.host_ptr().as_ptr(),
+                        bytes.len(),
+                    );
+                }
+                self.known[range].fill(true);
+                self.committed.push((address, bytes.to_vec()));
+                true
+            }
+        }
+        struct EntryTables(std::rc::Rc<std::cell::RefCell<EntryRam>>);
+        impl crate::machine::mmu::TableMemory for EntryTables {
+            fn read_descriptor(&mut self, address: u64) -> Option<u64> {
+                let mut bytes = [0; 8];
+                self.0
+                    .borrow_mut()
+                    .read(address, &mut bytes)
+                    .then(|| u64::from_le_bytes(bytes))
+            }
+            fn update_descriptor(&mut self, address: u64, old: u64, new: u64) -> Option<bool> {
+                if self.read_descriptor(address)? != old {
+                    return Some(false);
+                }
+                self.0
+                    .borrow_mut()
+                    .write(address, &new.to_le_bytes())
+                    .then_some(true)
+            }
+        }
+        struct EntryBus(std::rc::Rc<std::cell::RefCell<EntryRam>>);
+        impl Devices for EntryBus {
+            fn read(
+                &mut self,
+                _: usize,
+                address: u64,
+                bytes: u8,
+                _: u64,
+            ) -> Result<u64, DeviceError> {
+                let mut value = [0; 8];
+                if bytes > 8
+                    || !self
+                        .0
+                        .borrow_mut()
+                        .read(address, &mut value[..usize::from(bytes)])
+                {
+                    return Err(DeviceError::Refused(
+                        "original entry physical input is unknown".into(),
+                    ));
+                }
+                Ok(u64::from_le_bytes(value))
+            }
+            fn write(
+                &mut self,
+                _: usize,
+                address: u64,
+                bytes: u8,
+                value: u64,
+                _: u64,
+            ) -> Result<(), DeviceError> {
+                if bytes > 8
+                    || !self
+                        .0
+                        .borrow_mut()
+                        .write(address, &value.to_le_bytes()[..usize::from(bytes)])
+                {
+                    return Err(DeviceError::Refused(
+                        "original entry target has no live qualified RAM/MMIO owner".into(),
+                    ));
+                }
+                Ok(())
+            }
+            fn lines(&mut self, _: usize, _: u64) -> Lines {
+                Lines::default()
+            }
+            fn system_register(
+                &mut self,
+                _: usize,
+                encoding: Encoding,
+                written: Option<u64>,
+                _: u64,
+            ) -> Option<Result<u64, &'static str>> {
+                let mut entry = self.0.borrow_mut();
+                entry.registers.push((encoding, written));
+                if encoding != Encoding::new(3, 3, 15, 7, 0) {
+                    return None;
+                }
+                Some(match written {
+                    None => entry
+                        .cram
+                        .read()
+                        .map_err(|_| "actual canonical CRAM owner refused read"),
+                    Some(value) => entry
+                        .cram
+                        .write(value)
+                        .map(|()| 0)
+                        .map_err(|_| "actual canonical CRAM owner refused write"),
+                })
+            }
+        }
+        #[test]
+        #[ignore = "requires pinned J314s LLB; declared live CRAM is an emulated entry handoff, not Apple reset state"]
+        fn unchanged_j314s_entry_fetches_from_live_canonical_aperture_before_original_consumers() {
+            let _serial = ENTRY_EXECUTION.lock().unwrap();
+            let _guard = EntryGuard::new();
+            let bytes = original(J314S);
+            assert_eq!(
+                u64::from_le_bytes(bytes[0x380..0x388].try_into().unwrap()),
+                ENTRY_BASE
+            );
+            assert_eq!(
+                u64::from_le_bytes(bytes[0x226c8..0x226d0].try_into().unwrap()),
+                APERTURE
+            );
+            assert_eq!(
+                u64::from_le_bytes(bytes[0x226d0..0x226d8].try_into().unwrap()),
+                APERTURE + CAPACITY as u64
+            );
+            // Declared emulated resource, not guessed native hardware geometry.
+            // Its initial allocation is ACTUALLY LIVE before any image loading.
+            let geometry = Geometry::new(APERTURE, 16, 60).unwrap();
+            assert_eq!(geometry.capacity(), CAPACITY as u64);
+            let owner = Owned::new(geometry, 60);
+            let mut entry = EntryRam {
+                cram: Cram::new(geometry, geometry.register_fields() | READY | 60, owner).unwrap(),
+                known: vec![false; CAPACITY],
+                source_reads: 0,
+                committed: vec![],
+                unknown: vec![],
+                registers: vec![],
+            };
+            let before = entry.cram.backing().state();
+            let view = entry.cram.backing().view.as_ref().unwrap().clone();
+            assert!(view.is_current());
+            assert_eq!(view.permissions(), RIGHTS);
+            // System Machine fetches physical instruction bytes through
+            // Host::read_ram, then enforces architectural execute permission.
+            // This is not a process SourceExecutor Execute-view admission; the
+            // original RW physical backing contract remains unchanged.
+            assert_eq!(before.active_bytes, CAPACITY as u64);
+            assert!(entry.write(ENTRY_BASE, &bytes));
+            // Underlying fixture storage has an explicit synthetic pattern, but
+            // only original loaded bytes and subsequently committed stores may
+            // answer guest reads. Untouched bytes remain UNKNOWN in this run.
+            let mut untouched = [0; 8];
+            assert!(!entry.read(APERTURE, &mut untouched));
+            entry.unknown.clear();
+            entry.committed.clear(); // source loading is separate from guest stores
+            drop(bytes); // no parallel original-code RAM buffer survives
+            let shared = std::rc::Rc::new(std::cell::RefCell::new(entry));
+            let host = NativeHost {
+                original: vec![],
+                entry: Some(shared.clone()),
+                regime: None,
+                code: vec![],
+                output_prefix: "j314s-live-entry".into(),
+                patches: 0,
+                runner: NativeRunner::new(vec![]),
+            };
+            let target = TargetCpu::Baseline;
+            let mut fixed = crate::machine::identification::derive(
+                Chip::AppleM1,
+                target,
+                true,
+                crate::machine::identification::Speculation::NONE,
+            );
+            fixed.push((MPIDR_EL1, 0x80000000));
+            let profile = CpuProfile {
+                name: "J314s original entry with explicitly declared live canonical CRAM",
+                chip: Chip::AppleM1,
+                counter_frequency: 24_000_000,
+                fixed,
+                processors: vec![],
+            };
+            let mut machine = Machine::new(
+                Cpu::of(Chip::AppleM1, ENTRY_BASE, Pstate::reset(2)),
+                host,
+                EntryBus(shared.clone()),
+                profile,
+                target,
+            );
+            machine.set_strict(true);
+            machine.set_watches(&[(APERTURE, APERTURE + GUARD_BYTES as u64 - 1)]);
+            let mut watch = vec![];
+            let stop = (1..=32768).find_map(|budget| {
+                let stop = machine.run(budget);
+                for hit in machine.take_watch_hits() {
+                    assert_eq!(hit.dropped, 0);
+                    watch.push(serde_json::json!({"pc":hit.pc,"physical":hit.physical,"bytes":hit.bytes,
+                        "value":hit.value,"write":hit.write,"completed":hit.completed}));
+                }
+                (stop != Stop::Budget).then_some(stop)
+            }).unwrap_or(Stop::Budget);
+            let entry = shared.borrow();
+            eprintln!(
+                "original J314s live entry stop {stop:?}, pc={:#x}, blocks={}, writes={}",
+                machine.cpu.pc,
+                machine.statistics.blocks,
+                entry.committed.len()
+            );
+            assert_ne!(machine.cpu.pc, ENTRY_BASE + J314S.allocation);
+            assert_eq!(entry.cram.backing().state(), before);
+            assert_eq!(entry.cram.backing().commits, 0);
+            assert!(view.is_current());
+            assert!(entry.source_reads > 0);
+            assert!(entry.registers.iter().any(|(encoding, value)| *encoding
+                == Encoding::new(3, 3, 15, 7, 0)
+                && value.is_none()));
+            let Stop::Unsupported(requirement) = &stop else {
+                panic!(
+                    "original entry did not reach its actual unknown storage boundary: {stop:?}"
+                );
+            };
+            assert_eq!(requirement.pc, ENTRY_BASE + 0xcf27c);
+            assert!(matches!(&requirement.kind, RequirementKind::Device {
+                physical: 0x1fc2c65e0, write: false, detail,
+            } if detail == "original entry physical input is unknown"));
+            assert_eq!(entry.unknown.last(), Some(&(0x1fc2c65e0, 1)));
+            assert_eq!(machine.statistics.exceptions, 0);
+            assert!(!entry.committed.is_empty());
+            if let Some(path) = std::env::var_os("STELA_TEST_CRAM_ENTRY_REPORT") {
+                use std::io::Write as _;
+                let report = serde_json::json!({"schema":1,"source_sha256":J314S.sha256,"entry":ENTRY_BASE,
+                    "scope":"unchanged original entry; explicit emulated active canonical CRAM, not Apple initial state or completed PMGR handoff",
+                    "aperture_base":APERTURE,"aperture_bytes":CAPACITY,"unit_exponent":16,"limit":60,"initial_units":60,
+                    "initial_mapping":format!("{before:?}"),"final_mapping":format!("{:?}",entry.cram.backing().state()),
+                    "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),"pc":machine.cpu.pc,
+                    "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,
+                    "registers":machine.cpu.state.x,"sp":machine.cpu.state.sp,
+                    "source_reads":entry.source_reads,"guest_stores":entry.committed,"unknown_reads":entry.unknown,
+                    "system_accesses":entry.registers.iter().map(|(e,v)|(format!("{e:?}"),v)).collect::<Vec<_>>(),"watch":watch,
+                    "knownness":"only actual original image copy and successful guest stores initialize bytes; underlying synthetic pattern is never supplied as original input"});
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .unwrap();
+                file.write_all(&serde_json::to_vec_pretty(&report).unwrap())
+                    .unwrap();
+                file.write_all(b"\n").unwrap();
+            }
         }
         #[test]
         #[ignore = "requires pinned J473 LLB; synthetic resource is not an Apple handoff observation"]

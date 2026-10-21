@@ -341,3 +341,126 @@ fn complete_t6000_request_routes_preserve_wait_and_provider_boundaries() {
     assert_eq!(quad(&llb, 0x23f288), 0x28e09a000);
     assert_eq!(quad(&llb, 0x23f290), 0x51);
 }
+
+#[test]
+#[ignore = "requires original J314s LLB; original storage and copied-cleanup lifetime guards"]
+fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
+    let bytes = original(
+        "STELA_TEST_PMGR_M1_LLB",
+        "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
+    );
+    for (start, end, digest) in [
+        (
+            0x0,
+            0x1bc,
+            "84da23dc0681899fc5b564a70c12e1b830ab8580ed309d9546b845efdb6e8d24",
+        ),
+        (
+            0xcf260,
+            0xcf294,
+            "9e29b912e96203e4a4829734f31f247edea493dccf995b444b48725c812a0bba",
+        ),
+        (
+            0x15450,
+            0x15468,
+            "c7a33cac2d3a857faa9efeb894eb7fe77d64a514673fe10d8d3015e2858dfed5",
+        ),
+        (
+            0x224e8,
+            0x22688,
+            "dd3adf4ea53fc3b09127e1f4b2afce8a7ba92b476b94a9645d0c02b62cf8165d",
+        ),
+        (
+            0x226c8,
+            0x226f0,
+            "b84362351694dca88cad34b878121f4a06d5ece480c7493134df9c475c47f484",
+        ),
+        (
+            0xa53b0,
+            0xa5410,
+            "17f825324943567697102c9c01e4470cbd204d95ed2159b494cfcf7609ac5c0f",
+        ),
+        (
+            0xf616c,
+            0xf61a4,
+            "d48624b15de5528912e1878e1e3ab490c669e712a4fe6ab5772feb8096fc4404",
+        ),
+        (
+            0xf57ec,
+            0xf58e0,
+            "4d2e820a27f95a241f20471ef00fe94958c914a1f112e9ac25e66548844ea2d0",
+        ),
+        (
+            0x2c740,
+            0x2cafc,
+            "d0890f97d8e2b1da2eca0256b04ed880b766e0ee7af03721944362d047c71d75",
+        ),
+        (
+            0xf7c60,
+            0xf7cd8,
+            "27b40ab1d0c851f9c4d96da40177c1357775d54a9cbebc2acee8e2fe0be3bc51",
+        ),
+        (
+            0x102a08,
+            0x102a70,
+            "8eeaf0be51c235bec42ce7b5a6f8f2461d9ebdca94b194578b3fbe3413bd89e5",
+        ),
+        (
+            0x102dd8,
+            0x102de8,
+            "5e20a4b30e198d46b8735dc19b7702758e4f3ebc423b470eee19294d4244bdb2",
+        ),
+        (
+            0x59134,
+            0x591fc,
+            "d93a633da1d7c1f8c87a813e87f08d231c70fd0c521a8750d610008a6402df88",
+        ),
+        (
+            0x25dc8,
+            0x25dfc,
+            "c5d0a6017b0b45cf6231651ce73ab9bf821891ef1cb393ffb7afa1ccaf77e3bb",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    let base = quad(&bytes, 0x226c8);
+    let end = quad(&bytes, 0x226d0);
+    assert_eq!((base, end), (0x1fc000000, 0x1fc3c0000));
+    assert_eq!(end - base, 0x3c0000);
+    assert_eq!(quad(&bytes, 0x380), 0x1fc058000); // linked image start
+    assert_eq!(quad(&bytes, 0x388), 0x1fc2a11c0); // source image extent
+    assert_eq!(quad(&bytes, 0x3c0), 0x1fc2d1dd0); // additional runtime extent
+    assert!(quad(&bytes, 0x388) < quad(&bytes, 0x3c0));
+    assert!(quad(&bytes, 0x3c0) < end);
+    assert_eq!(quad(&bytes, 0x3d8), 0x1fc038000);
+    assert_eq!(quad(&bytes, 0x3e0), 0x1fc03c000); // first explicit zero-store interval
+    assert_eq!(branch_target(&bytes, 0x28), 0x282c0); // before relocation/initialization
+    assert_eq!(word(&bytes, 0xcf274), 0xf0000ce3); // actual runtime-tail flag address
+    assert_eq!(word(&bytes, 0xcf278), 0x91178063);
+    assert_eq!(word(&bytes, 0xcf27c), 0x39400063); // unknown byte read before memory helper stores
+    assert_eq!(word(&bytes, 0x1a8), 0xa8817d5f); // actual early STP xzr pair
+    assert_eq!(branch_target(&bytes, 0x1b8), 0x224e8);
+    assert_eq!(quad(&bytes, 0x22660), 0x1fc038000); // startup SP
+    assert_eq!(branch_target(&bytes, 0x2250c), 0xf5210); // first identity load/store helper
+    // Copied source extent and its runtime scratch bounds are distinct from
+    // physical storage. The original code translates that runtime address.
+    assert_eq!(quad(&bytes, 0x22628), 0x10064000000);
+    assert_eq!(quad(&bytes, 0x22630) - quad(&bytes, 0x22628), 0x4000);
+    assert_eq!(branch_target(&bytes, 0xf5888), 0xcf804); // source span copy
+    assert_eq!(branch_target(&bytes, 0xf58a4), 0xcf770); // remaining scratch initialization
+    assert_eq!(branch_target(&bytes, 0x102a14), 0xf57ec); // prepare copied cleanup
+    assert_eq!(branch_target(&bytes, 0x102a18), 0xf7c60); // actual table translation
+    assert_eq!(branch_target(&bytes, 0xf7c74), 0x22a40); // select translation regime
+    assert_eq!(branch_target(&bytes, 0xf7cd4), 0xf7afc); // page-table descriptor walk
+    assert_eq!(branch_target(&bytes, 0x102de4), 0x59134); // final transfer adapter
+    assert_eq!(branch_target(&bytes, 0x591b0), 0x108368);
+    assert_eq!(branch_target(&bytes, 0x108368), 0x25dc8); // returns runtime scratch bounds
+    assert_eq!(word(&bytes, 0x591f4), 0xd63f0b1f); // actual authenticated indirect call
+    // Release is inside the copied extent, not a standalone callable helper.
+    assert_eq!(word(&bytes, 0x2c910), 0xd51bf702); // allocation count cleared before poll
+    assert_eq!(branch_target(&bytes, 0x2ca48), 0x2cac0);
+    // Tail uses PC-relative copied positions and scrubs its preceding prefix;
+    // its code must remain live outside the revoked CRAM view until RET.
+    assert_eq!(word(&bytes, 0x2cac8), 0xa8817c1f);
+    assert_eq!(word(&bytes, 0x2caf8), 0xd65f03c0);
+}
