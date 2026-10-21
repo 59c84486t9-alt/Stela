@@ -18,6 +18,8 @@ use core::{
     sync::atomic::{AtomicU64, Ordering, fence},
 };
 
+pub mod rx;
+
 const DESC_BYTES: usize = 16;
 const DONE: u32 = 1 << 31;
 const LAST: u32 = 1 << 30;
@@ -35,6 +37,9 @@ pub enum Error {
     RegisterFailure,
     InvalidDeviceIndex,
     OwnershipMismatch,
+    InvalidDeviceLength,
+    UnsupportedDescriptor,
+    ReceiveChainLimit,
 }
 impl From<MemoryError> for Error {
     fn from(e: MemoryError) -> Self {
@@ -152,6 +157,11 @@ impl Allocation {
         // is CPU-owned when written; no Rust reference aliases a device access.
         unsafe { ptr.write_volatile(value.to_le()) };
         Ok(())
+    }
+    fn read32(&self, at: usize) -> Result<u32, Error> {
+        let ptr = self.pointer(at, 4)?.cast::<u32>();
+        // SAFETY: bounded aligned qualified-coherent WB descriptor polling.
+        Ok(u32::from_le(unsafe { ptr.read_volatile() }))
     }
     unsafe fn release(&mut self) -> Result<(), Error> {
         if self.unmapped {
@@ -444,7 +454,7 @@ mod tests {
             unsafe { dealloc(self.ptr.as_ptr(), self.layout) }
         }
     }
-    struct Source;
+    pub(super) struct Source;
     impl PageSource for Source {
         fn allocate(
             &self,
@@ -464,25 +474,25 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct State {
-        next: u64,
-        mappings: BTreeMap<u64, (PinnedPages, usize)>,
-        base: u64,
-        count: u16,
-        head: u16,
-        index: u16,
-        queue_drops: usize,
-        fail_publish: bool,
-        fail_configure: bool,
-        invalid_index: bool,
-        fail_unmap: bool,
-        fail_unmap_at: Option<usize>,
-        unmaps: usize,
-        fail_sync_at: Option<usize>,
-        completed: Vec<Vec<u8>>,
-        syncs: Vec<(bool, u64, Range<usize>)>,
+    pub(super) struct State {
+        pub(super) next: u64,
+        pub(super) mappings: BTreeMap<u64, (PinnedPages, usize)>,
+        pub(super) base: u64,
+        pub(super) count: u16,
+        pub(super) head: u16,
+        pub(super) index: u16,
+        pub(super) queue_drops: usize,
+        pub(super) fail_publish: bool,
+        pub(super) fail_configure: bool,
+        pub(super) invalid_index: bool,
+        pub(super) fail_unmap: bool,
+        pub(super) fail_unmap_at: Option<usize>,
+        pub(super) unmaps: usize,
+        pub(super) fail_sync_at: Option<usize>,
+        pub(super) completed: Vec<Vec<u8>>,
+        pub(super) syncs: Vec<(bool, u64, Range<usize>)>,
     }
-    struct Domain(Arc<Mutex<State>>);
+    pub(super) struct Domain(pub(super) Arc<Mutex<State>>);
     // SAFETY: this domain is a stateful test IOVA/page-pin map, not a claim of
     // privileged IOMMU effects. It retains pins and serializes every access.
     unsafe impl DmaDomain for Domain {
@@ -547,7 +557,7 @@ mod tests {
             Ok(())
         }
     }
-    struct Io(Arc<Mutex<State>>);
+    pub(super) struct Io(pub(super) Arc<Mutex<State>>);
     impl Drop for Io {
         fn drop(&mut self) {
             self.0.lock().unwrap().queue_drops += 1;
