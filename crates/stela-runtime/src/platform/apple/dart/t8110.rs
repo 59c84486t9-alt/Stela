@@ -305,6 +305,10 @@ impl Dart {
         Ok(())
     }
 
+    pub(super) const fn stream_capacity(&self) -> usize {
+        self.streams
+    }
+
     /// A DART of `streams` streams (`sid-count`, at most 256), every stream
     /// disabled and untranslated, signalling faults on `irq`.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {

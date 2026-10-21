@@ -158,6 +158,15 @@ impl Dart {
         })
     }
 
+    /// Constructed incoming-SID capacity, independent of enable/configuration
+    /// and lifecycle. Native masters validate their actual owner before mapping.
+    pub fn stream_capacity(&self) -> usize {
+        match &self.model {
+            Model::Legacy(model) => model.stream_capacity(),
+            Model::T8110(model) => model.stream_capacity(),
+        }
+    }
+
     /// Independent TRAD windows sharing one level-sensitive fault wire.
     pub fn group(streams: usize, irq: Option<AicInput>, count: usize) -> Vec<Self> {
         assert!(count != 0, "a DART group needs a translation instance");
@@ -597,6 +606,22 @@ mod tests {
             Err(DmaError::Fault(_))
         ));
         assert!(models[1].bind_shared_irq(&SharedIrq::new(input)).is_err());
+    }
+
+    #[test]
+    fn native_owner_capacity_is_available_without_mmio_or_power() {
+        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+            for count in [1, profile.stream_limit()] {
+                let mut model = Dart::for_profile(profile, count, None).unwrap();
+                let mut latch = InterruptLatch::new();
+                let mut access = Access::new(0, 0, &mut latch);
+                model.set_clock(false);
+                model.set_power(false, true, &mut access);
+                assert_eq!(model.stream_capacity(), count);
+                model.set_reset(true, &mut access);
+                assert_eq!(model.stream_capacity(), count);
+            }
+        }
     }
 
     #[test]

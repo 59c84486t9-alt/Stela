@@ -113,6 +113,10 @@ impl Dart {
         Ok(())
     }
 
+    pub(super) const fn stream_capacity(&self) -> usize {
+        self.streams
+    }
+
     pub(super) fn new(profile: Profile, streams: usize, irq: Option<AicInput>) -> Self {
         Self {
             profile,
