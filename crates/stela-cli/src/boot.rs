@@ -10,6 +10,7 @@ use stela_loader::boot_bundle::{
     self, Input, Inputs, Options, OverlayProperty, RootHash, Source, Target,
 };
 use stela_loader::boot_policy::{OsEnvironment, SealedVolume, SecurityMode, SecurityPolicy};
+use stela_loader::handoff::{self, BootCommand as FirmwareBootCommand};
 use stela_loader::im4m;
 use stela_loader::root_selection::Root;
 use stela_runtime::{apfs::btree::Seal, payload::Purpose};
@@ -870,6 +871,17 @@ impl Prepare {
                 (false, true) => Some(RECOVERY_ENVIRONMENT),
                 (false, false) => None,
             }),
+            // --restore replaces the host-received iBEC path, for both
+            // erase and update IPSW identities. Disk updates are assigned
+            // Upgrade by stela_loader::upgrade instead.
+            boot_command: Some(match (self.restore, self.recovery) {
+                (true, _) => FirmwareBootCommand::TetheredRestore,
+                (false, true) => FirmwareBootCommand::RecoverSystem,
+                (false, false) => handoff::installed_command(
+                    None,
+                    self.boot_args.as_deref().unwrap_or(DEFAULT_BOOT_ARGS),
+                )?,
+            }),
             // A restore ramdisk roots from itself as `md0`; recoveryOS from
             // its RAM disk image's volume; an installed system's root is
             // named from its disk (`stela_loader::installed`).
@@ -1051,6 +1063,10 @@ mod tests {
         let recovery = parse("--recovery").unwrap();
         let options = recovery.options(None, Some(volume)).unwrap();
         assert_eq!(
+            options.boot_command,
+            Some(FirmwareBootCommand::RecoverSystem)
+        );
+        assert_eq!(
             options.root,
             Some(Root::RamImage {
                 volume: volume.into()
@@ -1059,6 +1075,10 @@ mod tests {
         assert!(!options.boot_args.contains("rd="));
         assert!(recovery.options(None, None).is_err());
         let restore = parse("--restore").unwrap();
+        assert_eq!(
+            restore.options(None, None).unwrap().boot_command,
+            Some(FirmwareBootCommand::TetheredRestore)
+        );
         assert_eq!(
             restore.options(None, None).unwrap().root,
             Some(Root::Ramdisk)
@@ -1081,8 +1101,33 @@ mod tests {
         .prepare;
         assert!(update.update);
         assert_eq!(
+            update.options(None, None).unwrap().boot_command,
+            Some(FirmwareBootCommand::TetheredRestore)
+        );
+        assert_eq!(
             update.options(None, None).unwrap().root,
             Some(Root::Ramdisk)
+        );
+        // Merely overriding the environment and arguments does not claim
+        // that an iBEC image was received from a restore host.
+        let manual = Line::try_parse_from([
+            "prepare",
+            "--ipsw",
+            "a.ipsw",
+            "--model",
+            "Mac14,3",
+            "--output",
+            "out",
+            "--osenvironment",
+            "darwinos-ramdisk",
+            "--boot-args",
+            "rd=md0 -restore",
+        ])
+        .unwrap()
+        .prepare;
+        assert_eq!(
+            manual.options(None, None).unwrap().boot_command,
+            Some(FirmwareBootCommand::Fsboot)
         );
     }
 }

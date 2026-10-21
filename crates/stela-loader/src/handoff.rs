@@ -7,12 +7,102 @@
 use crate::{apple_device_tree::DeviceTree, boot_policy::Decision};
 use alloc::{format, string::String, vec, vec::Vec};
 use anyhow::{Result, ensure};
+use serde::Serialize;
 
 const ROOT: &str = "/";
 const CPUS: &str = "/cpus";
 const ARM_IO: &str = "/arm-io";
 const PLATFORM_NAME: &str = "platform-name";
 const ENVIRONMENTS: &str = "osenvironments";
+
+/// The previous boot stage's command, not the OS environment or root device.
+/// Known codes come from 26A434 J473 LLB's dispatch table at raw 0x1544e8
+/// (0x38-byte entries, command at +0x30), or its received-iBEC path at
+/// 0x132c/0x2075c. The setter at 0xc76c0 records the byte at handoff +0xc;
+/// iBoot imports that byte at 0xea4c8 and publishes it without remapping.
+/// Values whose origin is unknown remain unrepresentable here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+#[repr(u8)]
+pub enum BootCommand {
+    Fsboot = 1,
+    Kcgen = 2,
+    Upgrade = 3,
+    RecoverSystem = 4,
+    TetheredRestore = 7,
+    FieldDiags = 8,
+    FsbootSafe = 9,
+    Recover = 11,
+    FieldDiagsPaired = 13,
+    PostUpgrade = 14,
+}
+
+impl TryFrom<u8> for BootCommand {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> core::result::Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Fsboot),
+            2 => Ok(Self::Kcgen),
+            3 => Ok(Self::Upgrade),
+            4 => Ok(Self::RecoverSystem),
+            7 => Ok(Self::TetheredRestore),
+            8 => Ok(Self::FieldDiags),
+            9 => Ok(Self::FsbootSafe),
+            11 => Ok(Self::Recover),
+            13 => Ok(Self::FieldDiagsPaired),
+            14 => Ok(Self::PostUpgrade),
+            _ => Err("boot command has no modeled previous-stage origin"),
+        }
+    }
+}
+
+/// The command of a disk-loaded installed system. LLB promotes fsboot to
+/// fsboot-safe when `-x` is set (0xd41d8..0xd4224), while post-upgrade keeps
+/// its distinct command. Other origins do not load an installed System root.
+pub fn installed_command(requested: Option<BootCommand>, boot_args: &str) -> Result<BootCommand> {
+    let command = requested.unwrap_or(BootCommand::Fsboot);
+    Ok(match command {
+        BootCommand::Fsboot if boot_args.split_ascii_whitespace().any(|arg| arg == "-x") => {
+            BootCommand::FsbootSafe
+        }
+        BootCommand::Fsboot | BootCommand::FsbootSafe | BootCommand::PostUpgrade => command,
+        _ => anyhow::bail!("boot command {command:?} does not load an installed macOS System root"),
+    })
+}
+
+/// Publish the explicit entry origin in both iBoot rows. Its writer takes
+/// the saved byte through 0xdd848, then writes a u32 to `/chosen boot-command`
+/// (0x24084..0x240ac) and `/chosen/handoff boot_type` (0x34098..0x340c0). No environment or
+/// command-line flag supplies the missing fact when `command` is None.
+pub fn apply_boot_command(
+    tree: &mut DeviceTree,
+    command: Option<BootCommand>,
+) -> Result<(Vec<Decision>, Vec<String>)> {
+    let Some(command) = command else {
+        return Ok((
+            vec![],
+            vec![
+                "/chosen boot-command, /chosen/handoff boot_type: no previous-stage boot origin \
+                 was supplied"
+                    .into(),
+            ],
+        ));
+    };
+    ensure!(tree.node(CHOSEN).is_some(), "DeviceTree has no {CHOSEN}");
+    tree.ensure_child(CHOSEN, "handoff")?;
+    let value = u32::from(command as u8).to_le_bytes().to_vec();
+    let source = format!(
+        "previous-stage entry origin {command:?} ({})",
+        command as u8
+    );
+    let mut decisions = vec![];
+    for (path, property) in [(CHOSEN, "boot-command"), ("/chosen/handoff", "boot_type")] {
+        tree.set_property(path, property, value.clone())?;
+        decisions.push(decision(path, property, &value, source.clone()));
+    }
+    Ok((decisions, vec![]))
+}
 
 fn decision(path: &str, property: &str, value: &[u8], source: String) -> Decision {
     Decision {
@@ -201,9 +291,6 @@ fn unproduced(tree: &DeviceTree) -> Vec<String> {
         "/chosen boot-nonce: no AP nonce model (iBoot derives it from NVRAM \
          com.apple.System.boot-nonce)"
             .into(),
-        "/chosen boot-command, /chosen/handoff boot_type: the previous stage's boot command is \
-         not modeled (TXM reads an absent boot-command as not 7)"
-            .into(),
         "/chosen iboot-handoff: iBoot's hand-off carveout (region 1) is not placed".into(),
         "/chosen trusted-boot-policy-measurement: no LocalPolicy measurement model".into(),
         "/chosen restore-security-overrides0..3: iBoot's override table is not modeled; no \
@@ -280,6 +367,93 @@ mod tests {
         }
         tree.ensure_child(ROOT, ENVIRONMENTS).unwrap();
         tree
+    }
+
+    #[test]
+    fn every_known_entry_origin_publishes_the_same_u32_in_both_rows() -> Result<()> {
+        let commands = [
+            BootCommand::Fsboot,
+            BootCommand::Kcgen,
+            BootCommand::Upgrade,
+            BootCommand::RecoverSystem,
+            BootCommand::TetheredRestore,
+            BootCommand::FieldDiags,
+            BootCommand::FsbootSafe,
+            BootCommand::Recover,
+            BootCommand::FieldDiagsPaired,
+            BootCommand::PostUpgrade,
+        ];
+        for command in commands {
+            assert_eq!(BootCommand::try_from(command as u8), Ok(command));
+            let mut tree = tree();
+            tree.ensure_child(ROOT, "chosen")?;
+            tree.ensure_child(CHOSEN, "handoff")?;
+            tree.set_property("/chosen/handoff", "other", vec![0x5a])?;
+            let (decisions, gaps) = apply_boot_command(&mut tree, Some(command))?;
+            assert!(gaps.is_empty());
+            assert_eq!(decisions.len(), 2);
+            let expected = u32::from(command as u8).to_le_bytes();
+            assert_eq!(value_of(&tree, "boot-command"), expected);
+            assert_eq!(
+                tree.property("/chosen/handoff", "boot_type").unwrap().value,
+                expected
+            );
+            assert_eq!(
+                tree.property("/chosen/handoff", "other").unwrap().value,
+                [0x5a]
+            );
+        }
+        for value in 0..=u8::MAX {
+            assert_eq!(
+                BootCommand::try_from(value).is_ok(),
+                commands.iter().any(|c| *c as u8 == value)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn an_unstated_origin_is_reported_without_inference_from_restore_flags() -> Result<()> {
+        let mut tree = tree();
+        tree.ensure_child(ROOT, "chosen")?;
+        tree.set_property(CHOSEN, "osenvironment", b"darwinos-ramdisk\0".to_vec())?;
+        tree.set_property(CHOSEN, "boot-args", b"rd=md0 -restore\0".to_vec())?;
+        let (decisions, gaps) = apply_boot_command(&mut tree, None)?;
+        assert!(decisions.is_empty());
+        assert_eq!(gaps.len(), 1);
+        assert!(tree.property(CHOSEN, "boot-command").is_none());
+        assert!(tree.node("/chosen/handoff").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn installed_entry_origins_preserve_post_upgrade_and_promote_safe_fsboot() -> Result<()> {
+        assert_eq!(installed_command(None, "-v")?, BootCommand::Fsboot);
+        assert_eq!(installed_command(None, "-v -x")?, BootCommand::FsbootSafe);
+        assert_eq!(
+            installed_command(Some(BootCommand::Fsboot), "-x")?,
+            BootCommand::FsbootSafe
+        );
+        assert_eq!(
+            installed_command(Some(BootCommand::PostUpgrade), "-v -x")?,
+            BootCommand::PostUpgrade
+        );
+        assert_eq!(
+            installed_command(Some(BootCommand::FsbootSafe), "-v")?,
+            BootCommand::FsbootSafe
+        );
+        for command in [
+            BootCommand::Upgrade,
+            BootCommand::Recover,
+            BootCommand::RecoverSystem,
+            BootCommand::TetheredRestore,
+            BootCommand::Kcgen,
+            BootCommand::FieldDiags,
+            BootCommand::FieldDiagsPaired,
+        ] {
+            assert!(installed_command(Some(command), "-v").is_err());
+        }
+        Ok(())
     }
 
     #[test]

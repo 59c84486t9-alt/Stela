@@ -42,6 +42,7 @@ use stela_compiler::TargetCpu;
 use stela_loader::{
     boot_bundle,
     boot_selection::{self, BootVolume},
+    handoff::BootCommand as FirmwareBootCommand,
     installed, recovery,
 };
 use stela_runtime::machine::apple::WallClock;
@@ -114,6 +115,8 @@ struct Options {
     boot_volume: Option<BootVolume>,
     /// NVRAM asked for a safe-mode boot (`--safe-boot`).
     safe_boot: bool,
+    /// The entry origin retained after NVRAM's one-shot command is consumed.
+    boot_command: Option<FirmwareBootCommand>,
     /// NVRAM chose a staged macOS update (`--upgrade`): build from the
     /// Preboot disk's Update volume.
     upgrade: bool,
@@ -263,6 +266,7 @@ impl Options {
             preboot: None,
             boot_volume: None,
             safe_boot: false,
+            boot_command: None,
             upgrade: false,
             recovery: None,
             storage: None,
@@ -469,6 +473,15 @@ impl Options {
                 options.safe_boot = true;
                 continue;
             }
+            if name == boot_selection::BOOT_COMMAND_OPTION {
+                let value = number(words.next().ok_or("missing boot command")?)?;
+                let value = u8::try_from(value).map_err(|_| "boot command is not a byte")?;
+                let command = FirmwareBootCommand::try_from(value)?;
+                if options.boot_command.replace(command).is_some() {
+                    return Err("duplicate boot command");
+                }
+                continue;
+            }
             if name == boot_selection::UPGRADE_OPTION {
                 options.upgrade = true;
                 continue;
@@ -553,12 +566,13 @@ impl Options {
         }
         if options.preboot.is_none()
             && (options.boot_volume.is_some()
+                || options.boot_command.is_some()
                 || options.safe_boot
                 || options.upgrade
                 || options.recovery.is_some())
         {
             return Err(
-                "--boot-volume, --safe-boot, --upgrade, --paired-recovery and --system-recovery \
+                "--boot-volume, --boot-command, --safe-boot, --upgrade, --paired-recovery and --system-recovery \
                  choose a --preboot boot",
             );
         }
@@ -1386,6 +1400,7 @@ fn from_disk(
     // boot log records, as setup's bundles have it.
     let defaults = boot_bundle::Options {
         ecid: options.ecid,
+        boot_command: options.boot_command,
         boot_args: "-v serial=3 serial-device-name=uart0".into(),
         ..boot_bundle::Options::default()
     };

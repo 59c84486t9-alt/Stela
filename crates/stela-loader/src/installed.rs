@@ -631,6 +631,19 @@ pub fn prepare<R: ReadAt>(
         }),
     };
     let mut options = options.placed_at(inputs.dram_base()?);
+    options.boot_command = Some(crate::handoff::installed_command(
+        options.boot_command,
+        &options.boot_args,
+    )?);
+    // iBoot appends -x for the safe entry command (0x29a34..0x29abc).
+    if options.boot_command == Some(crate::handoff::BootCommand::FsbootSafe)
+        && !options
+            .boot_args
+            .split_ascii_whitespace()
+            .any(|arg| arg == "-x")
+    {
+        options.boot_args.push_str(" -x");
+    }
     options.root = Some(Root::System {
         volume_group: disk.set.volume_group.clone(),
         boot_hash: disk.set.boot_hash.clone(),

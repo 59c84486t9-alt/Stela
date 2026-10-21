@@ -534,6 +534,9 @@ pub fn prepare<R: ReadAt>(
     };
     let mut options = options.placed_at(inputs.dram_base().map_err(|e| format!("{e:#}"))?);
     options.root = Some(Root::Ramdisk);
+    // LLB's Update-volume dispatch records 3 before loading /boot/iBEC;
+    // it does not use the host-received iBEC origin (7).
+    options.boot_command = Some(crate::handoff::BootCommand::Upgrade);
     let owned = OwnedRamdisk {
         bytes: ramdisk.bytes,
         source: ramdisk.source,

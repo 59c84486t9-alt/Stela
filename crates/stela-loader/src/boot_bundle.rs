@@ -44,7 +44,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// `/chosen` `embedded-panic-log-size` give XNU its panic buffer
 /// (`carveouts`). Revision 2: retain the original boot IM4M in the
 /// read-only boot run and publish its object range and secure hash.
-pub const REVISION: u32 = 2;
+/// Revision 3: publish the explicit previous-stage boot command in `/chosen`
+/// and `/chosen/handoff`, independently of the OS environment.
+pub const REVISION: u32 = 3;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -182,6 +184,9 @@ pub struct Options {
     /// The OS environment iBoot enters, such as `darwinos-ramdisk` for a
     /// restore ramdisk; `None` is macOS.
     pub osenvironment: Option<boot_policy::OsEnvironment>,
+    /// The actual previous-stage entry origin; independent of the OS
+    /// environment. `None` leaves the boot-command handoff unresolved.
+    pub boot_command: Option<handoff::BootCommand>,
     /// The volume the kernel roots from (`/chosen apfs-preboot-uuid`,
     /// `boot-uuid`, `associated-volume-group`, `boot-objects-path`); `None`
     /// keeps the template's values.
@@ -232,6 +237,7 @@ impl Default for Options {
                 sepfw_load_at_boot: None,
             },
             osenvironment: None,
+            boot_command: None,
             root: None,
             ecid: None,
             overlay: Vec::new(),
@@ -782,6 +788,9 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     // iBoot deletes the environments once one is applied.
     security.extend(handoff::remove_environments(&mut tree));
     let (decisions, gaps) = handoff::apply(&mut tree, inputs.target.chip_id)?;
+    security.extend(decisions);
+    unresolved.extend(gaps);
+    let (decisions, gaps) = handoff::apply_boot_command(&mut tree, options.boot_command)?;
     security.extend(decisions);
     unresolved.extend(gaps);
     let (decisions, gaps) =
@@ -1814,6 +1823,7 @@ mod tests {
             boot_args: "-v".into(),
             boot_cpu: "cpu0".into(),
             osenvironment: None,
+            boot_command: None,
             root: None,
             ecid: None,
             timebase_frequency: 24_000_000,
@@ -1847,6 +1857,34 @@ mod tests {
             options.dram_base
         );
         let bundle = prepare(&inputs, &options)?;
+        // Origin is an independent loader input, not inferred from these
+        // fixtures' OS environment or verbose-only command line.
+        let origin_options = Options {
+            boot_command: Some(handoff::BootCommand::TetheredRestore),
+            ..options.clone()
+        };
+        let originated = prepare(&inputs, &origin_options)?;
+        let origin_tree = DeviceTree::parse(
+            &originated
+                .files
+                .iter()
+                .find(|(name, _)| name == DEVICE_TREE_FILE)
+                .unwrap()
+                .1,
+        )?;
+        for (path, name) in [
+            ("/chosen", "boot-command"),
+            ("/chosen/handoff", "boot_type"),
+        ] {
+            assert_eq!(origin_tree.property(path, name).unwrap().as_u32(), Some(7));
+        }
+        assert!(
+            !originated
+                .manifest
+                .unresolved
+                .iter()
+                .any(|gap| gap.starts_with("/chosen boot-command"))
+        );
         // An owned ramdisk moves into the same bundle.
         let borrowed = inputs.ramdisk.take().expect("a ramdisk");
         let owned = OwnedRamdisk {

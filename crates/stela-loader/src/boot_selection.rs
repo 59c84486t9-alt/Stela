@@ -311,6 +311,9 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub target: Target,
+    /// The original NVRAM command, retained through one-shot consumption;
+    /// post-upgrade has a distinct firmware handoff despite booting macOS.
+    pub command: Option<Command>,
     /// The boot volume, when NVRAM names one; otherwise the disk's only
     /// installed system is used.
     pub volume: Option<BootVolume>,
@@ -386,6 +389,7 @@ fn shown(name: &[u8], value: &[u8]) -> String {
 pub fn select(variables: &Variables) -> Result<Selection> {
     let mut selection = Selection {
         target: Target::MacOs { safe: false },
+        command: None,
         volume: None,
         reasons: Vec::new(),
         consumed: Vec::new(),
@@ -446,6 +450,7 @@ pub fn select(variables: &Variables) -> Result<Selection> {
                 .push((BOOT_COMMAND, Command::Recover.name().as_bytes()));
         }
         selection.target = Target::Upgrade;
+        selection.command = Some(Command::Upgrade);
         check_volume(&selection)?;
         return Ok(selection);
     }
@@ -465,6 +470,7 @@ pub fn select(variables: &Variables) -> Result<Selection> {
         None => None,
     };
     let recovery_mode = lookup(variables, RECOVERY_BOOT_MODE);
+    selection.command = command;
     selection.target = match command {
         Some(Command::Recover | Command::RecoverOnce) => Target::PairedRecovery,
         Some(Command::RecoverSystem | Command::RecoverFallback) => Target::SystemRecovery,
@@ -554,6 +560,8 @@ pub const BUNDLE_OPTION: &str = "--bundle";
 /// a safe-mode boot.
 pub const BOOT_VOLUME_OPTION: &str = "--boot-volume";
 pub const SAFE_BOOT_OPTION: &str = "--safe-boot";
+/// The previous-stage entry code retained after consuming NVRAM commands.
+pub const BOOT_COMMAND_OPTION: &str = "--boot-command";
 /// Build the bundle from the Preboot disk's Update volume
 /// (`stela_loader::upgrade`) instead of its installed system.
 pub const UPGRADE_OPTION: &str = "--upgrade";
@@ -568,12 +576,13 @@ pub const SYSTEM_RECOVERY_OPTION: &str = "--system-recovery";
 /// startup choices.
 pub const RECOVERY_MODE_REFUSAL: &str = "NVRAM holds the machine in iBoot's recovery mode";
 /// What the engine is told only by NVRAM.
-const NVRAM_OPTIONS: [&str; 5] = [
+const NVRAM_OPTIONS: [&str; 6] = [
     BOOT_VOLUME_OPTION,
     SAFE_BOOT_OPTION,
     UPGRADE_OPTION,
     PAIRED_RECOVERY_OPTION,
     SYSTEM_RECOVERY_OPTION,
+    BOOT_COMMAND_OPTION,
 ];
 
 /// The engine options for `selection` (none when NVRAM was not read): a
@@ -617,20 +626,30 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
         selection.reasons.join(", ")
     };
     let mut extra: Vec<String> = Vec::new();
-    let on_disk = |extra: &mut Vec<String>, what: &str| -> Result<()> {
-        ensure!(
-            words.contains(&PREBOOT_OPTION),
-            "NVRAM boots {what}, which needs {PREBOOT_OPTION}"
-        );
-        if let Some(volume) = &selection.volume {
-            extra.push(BOOT_VOLUME_OPTION.into());
-            extra.push(String::from_utf8(volume.encode()).expect("ASCII"));
-        }
-        Ok(())
-    };
+    let on_disk =
+        |extra: &mut Vec<String>, what: &str, command: crate::handoff::BootCommand| -> Result<()> {
+            ensure!(
+                words.contains(&PREBOOT_OPTION),
+                "NVRAM boots {what}, which needs {PREBOOT_OPTION}"
+            );
+            if let Some(volume) = &selection.volume {
+                extra.push(BOOT_VOLUME_OPTION.into());
+                extra.push(String::from_utf8(volume.encode()).expect("ASCII"));
+            }
+            extra.push(BOOT_COMMAND_OPTION.into());
+            extra.push(format!("{}", command as u8));
+            Ok(())
+        };
     let log = match selection.target {
         Target::MacOs { safe } => {
-            on_disk(&mut extra, "macOS")?;
+            let command = if safe {
+                crate::handoff::BootCommand::FsbootSafe
+            } else if selection.command == Some(Command::PostUpgrade) {
+                crate::handoff::BootCommand::PostUpgrade
+            } else {
+                crate::handoff::BootCommand::Fsboot
+            };
+            on_disk(&mut extra, "macOS", command)?;
             if safe {
                 extra.push(SAFE_BOOT_OPTION.into());
             }
@@ -640,7 +659,11 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
             )
         }
         Target::Upgrade => {
-            on_disk(&mut extra, "a macOS update")?;
+            on_disk(
+                &mut extra,
+                "a macOS update",
+                crate::handoff::BootCommand::Upgrade,
+            )?;
             extra.push(UPGRADE_OPTION.into());
             format!("macOS update from the Update volume ({reasons})")
         }
@@ -649,12 +672,20 @@ pub fn route(options: &str, selection: Option<&Selection>) -> Result<(String, St
              interrupted restore leaves it; choose Install macOS (Stela) to restore again"
         ),
         Target::PairedRecovery if selection.paired_on_disk => {
-            on_disk(&mut extra, "the paired recoveryOS")?;
+            on_disk(
+                &mut extra,
+                "the paired recoveryOS",
+                crate::handoff::BootCommand::Recover,
+            )?;
             extra.push(PAIRED_RECOVERY_OPTION.into());
             format!("paired recoveryOS from the Recovery volume ({reasons})")
         }
         target @ (Target::PairedRecovery | Target::SystemRecovery) if selection.system_on_disk => {
-            on_disk(&mut extra, "System Recovery")?;
+            on_disk(
+                &mut extra,
+                "System Recovery",
+                crate::handoff::BootCommand::RecoverSystem,
+            )?;
             extra.push(SYSTEM_RECOVERY_OPTION.into());
             match target {
                 Target::PairedRecovery => format!(
@@ -1002,7 +1033,7 @@ mod tests {
         let (options, log) = route(CONFIG, Some(&select(&vars).unwrap())).unwrap();
         let expected = format!(
             "--system --storage S:G --nor S:N --preboot S:G --ram-bytes 0x200000000 \
-             --boot-volume {} --safe-boot",
+             --boot-volume {} --boot-command 9 --safe-boot",
             String::from_utf8(volume(VolumeType::Apfs)).unwrap()
         );
         assert_eq!(options, expected);
@@ -1010,6 +1041,49 @@ mod tests {
         // Without NVRAM only the recovery bundle option is removed.
         let (plain, _) = route(CONFIG, None).unwrap();
         assert!(!plain.contains(RECOVERY_BUNDLE_OPTION) && plain.contains("--preboot S:G"));
+    }
+
+    #[test]
+    fn disk_routes_preserve_command_origins_after_consuming_one_shots() {
+        for (command, origin) in [
+            (b"fsboot".as_slice(), 1),
+            (b"fsboot-safe".as_slice(), 9),
+            (b"post-upgrade".as_slice(), 14),
+            (b"recover".as_slice(), 11),
+            (b"recover-system".as_slice(), 4),
+            (b"recover-fallback".as_slice(), 4),
+        ] {
+            let mut vars = variables(&[(Partition::System, ONE_TIME_BOOT_COMMAND, command)]);
+            let mut selection = select(&vars).unwrap();
+            selection.paired_on_disk = true;
+            selection.system_on_disk = true;
+            assert!(consume(&mut vars, &selection).unwrap());
+            assert!(lookup(&vars, ONE_TIME_BOOT_COMMAND).is_none());
+            let (options, _) = route(CONFIG, Some(&selection)).unwrap();
+            assert!(
+                options.contains(&format!("{BOOT_COMMAND_OPTION} {origin}")),
+                "{command:?}: {options}"
+            );
+        }
+        let update = select(&variables(&[(Partition::System, BOOT_COMMAND, b"upgrade")])).unwrap();
+        assert!(
+            route(CONFIG, Some(&update))
+                .unwrap()
+                .0
+                .contains("--boot-command 3")
+        );
+        let mut fallback =
+            select(&variables(&[(Partition::System, BOOT_COMMAND, b"recover")])).unwrap();
+        fallback.system_on_disk = true;
+        assert!(
+            route(CONFIG, Some(&fallback))
+                .unwrap()
+                .0
+                .contains("--boot-command 4")
+        );
+        // An arbitrary config value cannot replace the origin derived by
+        // boot selection. Unknown bytes are separately refused by BootCommand.
+        assert!(route("--system --preboot S:G --boot-command 7", Some(&update)).is_err());
     }
 
     #[test]

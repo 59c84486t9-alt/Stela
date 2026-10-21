@@ -626,6 +626,10 @@ pub fn prepare<R: ReadAt>(
     let mut options = options.placed_at(inputs.dram_base()?);
     options.boot_args = boot_args(&options.boot_args, &directory)?;
     options.osenvironment = Some(ENVIRONMENT);
+    options.boot_command = Some(match found.kind {
+        Kind::Paired => crate::handoff::BootCommand::Recover,
+        Kind::System => crate::handoff::BootCommand::RecoverSystem,
+    });
     let volume_uuid = apfs_uuid(&found.volume.uuid);
     options.root = Some(match found.kind {
         Kind::Paired => Root::PairedRecovery {
