@@ -171,6 +171,61 @@ impl Submission {
     }
 }
 
+/// One stock command owned by the firmware frontend. Its envelope and
+/// current record cannot be redirected by AP memory changes during a later
+/// DMA fault. Decoding does not complete a record or authorize GPU effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Accepted {
+    pub submission: Submission,
+    cursor: Cursor,
+    current: Option<Frame>,
+}
+
+impl Accepted {
+    pub fn read(
+        memory: &mut dyn Shared,
+        family: &Family,
+        command: Command,
+    ) -> Result<Self, &'static str> {
+        let submission = Submission::read(memory, family, command)?;
+        let cursor = submission.cursor();
+        Ok(Self {
+            submission,
+            cursor,
+            current: None,
+        })
+    }
+
+    /// Accept one complete record before its consumer performs the first
+    /// effect. A failed read retains the cursor; a later effect failure
+    /// retains all original record bytes, even if the AP changes the stream.
+    pub fn current(&mut self, memory: &mut dyn Shared) -> Result<&Frame, &'static str> {
+        if self.current.is_none() {
+            self.current = Some(
+                self.cursor
+                    .next(memory)?
+                    .ok_or("GFX stock work has no next record before command completion")?,
+            );
+        }
+        Ok(self.current.as_ref().unwrap())
+    }
+
+    /// Only the actual record-effect owner may release this snapshot after
+    /// all native, RAM and callback phases have settled. The end record is
+    /// retained until command completion, rather than treated as an empty job.
+    pub fn record_completed(&mut self) -> Result<(), &'static str> {
+        let record = self
+            .current
+            .as_ref()
+            .ok_or("GFX work has no accepted record to complete")?;
+        if record.record == Record::End {
+            return Err("GFX work end requires actual command completion ownership");
+        }
+        self.current = None;
+        Ok(())
+    }
+}
+
 /// A SKU stream cursor. The caller retains accepted frames before applying
 /// their effects; rewinding this decoder is not an execution retry protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,6 +356,29 @@ mod tests {
         memory.put_u32(COMMAND + stamp_offset, 0xa00);
         memory.put_u32(COMMAND + stamp_offset + 4, 127);
         Command { va: COMMAND, kind }
+    }
+
+    #[test]
+    fn accepted_records_release_only_after_the_effect_owner_and_keep_end_for_completion() {
+        let mut memory = Flat::new(BASE, 0x4000);
+        let command = envelope(&mut memory, Kind::Cl, 0x1e8, 0x2a8, 0x200);
+        memory.put_u32(STREAM, 11);
+        memory.put_u64(STREAM + 4, 0x1234);
+        memory.put_u32(STREAM + 0x16c, 0x4000_0002);
+        let mut owned = Accepted::read(&mut memory, &generation::G14G, command).unwrap();
+        assert!(owned.record_completed().is_err());
+        assert_eq!(owned.current(&mut memory).unwrap().u64(4), Ok(0x1234));
+        memory.put_u32(STREAM, u32::MAX);
+        memory.put_u64(STREAM + 4, 0);
+        assert_eq!(owned.current(&mut memory).unwrap().u64(4), Ok(0x1234));
+        owned.record_completed().unwrap();
+        assert_eq!(owned.current(&mut memory).unwrap().record, Record::End);
+        assert_eq!(
+            owned.record_completed(),
+            Err("GFX work end requires actual command completion ownership")
+        );
+        memory.put_u32(STREAM + 0x16c, u32::MAX);
+        assert_eq!(owned.current(&mut memory).unwrap().record, Record::End);
     }
 
     #[test]
