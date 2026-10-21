@@ -169,6 +169,14 @@ impl core::fmt::Display for Log {
                 f,
                 "DCP AFK ep={endpoint:#x} {name} doorbell tx={tx:x?} rx={rx:x?}"
             ),
+            Log::Afk {
+                endpoint,
+                name,
+                event: afk::Event::Lifecycle(packet),
+            } => write!(
+                f,
+                "DCP AFK ep={endpoint:#x} {name} lifecycle packet={packet:02x?}"
+            ),
             Log::Dropped(count) => write!(f, "DCP log dropped {count} entries"),
         }
     }
@@ -577,6 +585,18 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("swap_submit_dcp bytes=0x60"));
         assert!(lines[1].starts_with("DCP payload A407 +0x0040 [00, 07,"));
+        let lifecycle = alloc::format!(
+            "{}",
+            Log::Afk {
+                endpoint: 0x2a,
+                name: "DPTX port",
+                event: afk::Event::Lifecycle([0x79, 0, 0, 0, 4, 0, 0, 0, 2, 0, 0, 0]),
+            }
+        );
+        assert!(
+            lifecycle
+                .ends_with("lifecycle packet=[79, 00, 00, 00, 04, 00, 00, 00, 02, 00, 00, 00]")
+        );
     }
 
     #[test]

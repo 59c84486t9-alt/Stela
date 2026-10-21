@@ -17,7 +17,7 @@
 //! | 0xa3 START | registered; reply 0x86 and enter started |
 //! | 0x85 / 0xa2 doorbell | started; inspect the shared queue headers, ignoring payload |
 //! | 0xa8 FULL | started; drain AP queue then reply 0xa7 SPACE |
-//! | 0xa7 SPACE | started; clear transmit backpressure (none with no announced services) |
+//! | 0xa7 SPACE | started; retry replies waiting for transmit space |
 //! | 0xc0 SHUTDOWN | started; release transport and reply 0xc1 |
 //!
 //! The remaining rows answer a flow this coprocessor never initiates:
@@ -61,9 +61,14 @@
 //! report on a new channel, `afk_recv_handle_init`); the AP only talks to an
 //! announced channel. This model brings the transport up and announces no
 //! service: the DCP model drives its one display through the IOMFB link and
-//! programs no DPTX PHY, DP AV or system service the AP would serve. An entry
-//! the AP still sends refuses by name, with its channel, type and EPIC
-//! category recorded in the display log.
+//! programs no DPTX PHY, DP AV or system service the AP would serve.
+//! AFKEPV2 also has interface-zero lifecycle packets independent of those
+//! services: Pause/PauseDone (2/3) and Unpause/UnpauseDone (4/5).
+//! They run over queue channel/type zero, with an eight-byte AFKEPV2 header
+//! and four-byte internal command. Those packets are modeled; service
+//! traffic to any unpublished interface refuses by name.
+mod lifecycle;
+
 use super::rpc::Bus;
 use alloc::collections::VecDeque;
 #[cfg(not(feature = "std"))]
@@ -113,6 +118,8 @@ const QE_MAGIC: u32 = 0x2050_4f49;
 /// Its high half selects the magic/size/channel/type entry layout. With a
 /// zero format the AP instead writes size/channel/type/magic.
 const RING_FORMAT: u32 = 0x0007_0006;
+const ENTRY_BLOCK: u32 = 0x80;
+const DATA_BYTES: u32 = (RING_BYTES - RING_HEADER) as u32;
 
 /// The message type of an AFK word.
 pub fn kind(word: u64) -> u64 {
@@ -150,6 +157,8 @@ pub enum Event {
     /// Both ring headers at a doorbell (AP transmit first), including their
     /// format words. The mailbox payload is not a write pointer.
     Doorbell { tx: [u32; 4], rx: [u32; 4] },
+    /// The full AFKEPV2 header and internal command received on interface zero.
+    Lifecycle([u8; lifecycle::PACKET_BYTES]),
 }
 
 /// A ring entry the AP wrote.
@@ -174,6 +183,11 @@ pub struct Afk {
     window: Option<u64>,
     /// AP words whose handling needs the buffer.
     incoming: VecDeque<u64>,
+    peer: lifecycle::PeerState,
+    reply: Option<lifecycle::Command>,
+    sequence: u8,
+    transmit_full: bool,
+    receive_full: bool,
     /// What the endpoint saw, drained by the coprocessor's log.
     pub(super) seen: VecDeque<Event>,
 }
@@ -186,6 +200,11 @@ impl Afk {
             state: State::Ready,
             window,
             incoming: VecDeque::new(),
+            peer: lifecycle::PeerState::default(),
+            reply: None,
+            sequence: 0,
+            transmit_full: false,
+            receive_full: false,
             seen: VecDeque::new(),
         }
     }
@@ -241,7 +260,7 @@ impl Afk {
             }
             (VERSION, _) => Err("DCP AFK version query after initialization"),
             (INIT, _) => Err("DCP AFK INIT on an endpoint already started"),
-            (GETBUF_ACK, State::Asked) | (RECV | SEND | FULL, State::Started { .. }) => {
+            (GETBUF_ACK, State::Asked) | (RECV | SEND | FULL | SPACE, State::Started { .. }) => {
                 self.incoming.push_back(word);
                 Ok(())
             }
@@ -252,13 +271,17 @@ impl Afk {
                 Ok(())
             }
             (START, _) => Err("DCP AFK START before both rings were described"),
-            (SPACE, State::Started { .. }) => Ok(()),
             (RECV | SEND | FULL | SPACE, _) => {
                 Err("DCP AFK queue notification on an endpoint that has not started")
             }
             (SHUTDOWN, State::Started { .. }) => {
                 self.state = State::Stopped;
                 self.incoming.clear();
+                self.peer = lifecycle::PeerState::default();
+                self.reply = None;
+                self.sequence = 0;
+                self.transmit_full = false;
+                self.receive_full = false;
                 outbox.push(message(SHUTDOWN_ACK, 0));
                 Ok(())
             }
@@ -299,23 +322,22 @@ impl Afk {
                     }
                     self.state = State::Described { buffer };
                 }
-                (RECV | SEND | FULL, State::Started { buffer }) => {
+                (RECV | SEND | FULL | SPACE, State::Started { buffer }) => {
                     let tx = self.header(bus, buffer + TX_RING)?;
                     let rx = self.header(bus, buffer + RX_RING)?;
                     self.seen.push_back(Event::Doorbell { tx, rx });
                     self.validate_header(tx)?;
                     self.validate_header(rx)?;
-                    if tx[2] == tx[3] {
-                        if kind(word) == FULL {
-                            outbox.push(message(SPACE, 0));
-                        }
-                        continue;
+                    if kind(word) == SPACE {
+                        self.transmit_full = false;
                     }
-                    let entry = self.entry(bus, buffer)?;
-                    self.seen.push_back(Event::Entry(entry));
-                    return Err(
-                        "DCP AFK endpoint announces no EPIC service, but the AP sent a ring entry",
-                    );
+                    self.receive_full |= kind(word) == FULL;
+                    self.drain(bus, buffer, tx, outbox)?;
+                    let after = self.header(bus, buffer + TX_RING)?;
+                    if self.receive_full && after[2] == after[3] {
+                        outbox.push(message(SPACE, 0));
+                        self.receive_full = false;
+                    }
                 }
                 _ => return Err("DCP AFK queued message no longer matches the endpoint"),
             }
@@ -343,7 +365,78 @@ impl Afk {
         {
             return Err("DCP AFK ring pointer lies outside the ring");
         }
+        if fields[2..].iter().any(|p| p % ENTRY_BLOCK != 0) {
+            return Err("DCP AFK ring pointer is not entry-block aligned");
+        }
         Ok(())
+    }
+
+    /// Keep one reply pending when the AP has not released transmit credit;
+    /// stop consuming requests until it can be published, preserving order.
+    fn drain(
+        &mut self,
+        bus: &mut dyn Bus,
+        buffer: u64,
+        mut tx: [u32; 4],
+        outbox: &mut Vec<u64>,
+    ) -> Result<(), &'static str> {
+        loop {
+            if !self.flush_reply(bus, buffer, outbox)? || tx[2] == tx[3] {
+                return Ok(());
+            }
+            let entry = self.entry(bus, buffer)?;
+            self.seen.push_back(Event::Entry(entry));
+            if entry.channel != 0 || entry.kind != 0 || entry.size != lifecycle::PACKET_BYTES as u32
+            {
+                return Err("DCP AFK AP ring entry is not a supported AFKEPV2 lifecycle packet");
+            }
+            let mut packet = [0; lifecycle::PACKET_BYTES];
+            bus.read(
+                buffer + TX_RING + RING_HEADER + u64::from(tx[2]) + 16,
+                &mut packet,
+            )?;
+            self.seen.push_back(Event::Lifecycle(packet));
+            let command = lifecycle::Command::decode(&packet)?;
+            tx[2] = next_pointer(tx[2]);
+            bus.write(buffer + TX_RING + RPTR, &tx[2].to_le_bytes())?;
+            self.reply = self.peer.receive(command);
+            // Read-pointer updates signal the same symmetric doorbell as
+            // enqueue, even when this command has no response.
+            outbox.push(message(RECV, 0));
+        }
+    }
+
+    fn flush_reply(
+        &mut self,
+        bus: &mut dyn Bus,
+        buffer: u64,
+        outbox: &mut Vec<u64>,
+    ) -> Result<bool, &'static str> {
+        let Some(reply) = self.reply else {
+            return Ok(true);
+        };
+        let ring = buffer + RX_RING;
+        let header = self.header(bus, ring)?;
+        self.validate_header(header)?;
+        let next = next_pointer(header[3]);
+        if next == header[2] {
+            if !self.transmit_full {
+                outbox.push(message(FULL, 0));
+                self.transmit_full = true;
+            }
+            return Ok(false);
+        }
+        let mut block = [0; ENTRY_BLOCK as usize];
+        block[..4].copy_from_slice(&QE_MAGIC.to_le_bytes());
+        block[4..8].copy_from_slice(&(lifecycle::PACKET_BYTES as u32).to_le_bytes());
+        block[16..16 + lifecycle::PACKET_BYTES].copy_from_slice(&reply.packet(self.sequence));
+        bus.write(ring + RING_HEADER + u64::from(header[3]), &block)?;
+        bus.write(ring + WPTR, &next.to_le_bytes())?;
+        self.sequence = self.sequence.wrapping_add(1);
+        self.reply = None;
+        self.transmit_full = false;
+        outbox.push(message(RECV, 0));
+        Ok(true)
     }
 
     /// The entry at the AP ring's read pointer.
@@ -383,6 +476,11 @@ impl Afk {
             subtype: epic.map(|(_, subtype)| subtype),
         })
     }
+}
+
+fn next_pointer(pointer: u32) -> u32 {
+    let next = pointer + ENTRY_BLOCK;
+    if next == DATA_BYTES { 0 } else { next }
 }
 
 #[cfg(test)]
@@ -500,7 +598,137 @@ mod tests {
         assert_eq!(out, [message(SPACE, 0)]);
         out.clear();
         afk.receive(message(SPACE, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
         assert!(!afk.pending() && out.is_empty());
+    }
+
+    fn enqueue_internal(memory: &mut Memory, pointer: u32, opcode: u8) -> u32 {
+        let ring = WINDOW + 0x4000;
+        let at = ring + RING_HEADER + u64::from(pointer);
+        let mut bytes = [0; 28];
+        bytes[..4].copy_from_slice(&0x2050_4f49u32.to_le_bytes());
+        bytes[4] = 12;
+        bytes[16] = 0x79; // AP sequence is unrelated to the DCP's counter.
+        bytes[20] = 4;
+        bytes[24] = opcode;
+        memory.write(at, &bytes).unwrap();
+        let next = next_pointer(pointer);
+        memory.write(ring + WPTR, &next.to_le_bytes()).unwrap();
+        next
+    }
+
+    fn read_word(memory: &mut Memory, at: u64) -> u32 {
+        let mut bytes = [0; 4];
+        memory.read(at, &mut bytes).unwrap();
+        u32::from_le_bytes(bytes)
+    }
+
+    #[test]
+    fn lifecycle_requests_and_completions_drain_and_reply_over_the_real_ring() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        let mut pointer = 0;
+        for opcode in [2, 3, 4, 5] {
+            pointer = enqueue_internal(&mut memory, pointer, opcode);
+        }
+        let mut out = Vec::new();
+        afk.receive(message(RECV, 0x80_0000), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(read_word(&mut memory, WINDOW + 0x4000 + RPTR), 0x200);
+        let rx = WINDOW + 0x6000;
+        assert_eq!(read_word(&mut memory, rx + WPTR), 0x100);
+        for (offset, sequence, opcode) in [(0, 0, 3), (0x80, 1, 5)] {
+            let mut actual = [0; 28];
+            memory.read(rx + RING_HEADER + offset, &mut actual).unwrap();
+            assert_eq!(
+                u32::from_le_bytes(actual[..4].try_into().unwrap()),
+                0x2050_4f49
+            );
+            assert_eq!(&actual[4..16], &[12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert_eq!(
+                &actual[16..],
+                &[sequence, 0, 0, 0, 4, 0, 0, 0, opcode, 0, 0, 0]
+            );
+        }
+        assert_eq!(afk.peer, lifecycle::PeerState::Running);
+        assert!(afk.reply.is_none());
+        assert_eq!(out, [message(RECV, 0); 6]); // Four consumed, two enqueued.
+    }
+
+    #[test]
+    fn lifecycle_pointers_and_sequence_wrap_without_touching_the_ring_header() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        let last = DATA_BYTES - ENTRY_BLOCK;
+        let tx = WINDOW + 0x4000;
+        let rx = WINDOW + 0x6000;
+        memory.write(tx + RPTR, &last.to_le_bytes()).unwrap();
+        memory.write(rx + RPTR, &0x80u32.to_le_bytes()).unwrap();
+        memory.write(rx + WPTR, &last.to_le_bytes()).unwrap();
+        enqueue_internal(&mut memory, last, 4);
+        afk.sequence = 255;
+        let mut out = Vec::new();
+        afk.receive(message(SEND, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(read_word(&mut memory, tx + RPTR), 0);
+        assert_eq!(read_word(&mut memory, rx + WPTR), 0);
+        assert_eq!(read_word(&mut memory, rx), DATA_BYTES);
+        assert_eq!(afk.sequence, 0);
+        assert_eq!(
+            read_word(&mut memory, rx + RING_HEADER + u64::from(last) + 16),
+            255
+        );
+    }
+
+    #[test]
+    fn full_transmit_ring_preserves_the_reply_and_resumes_in_order_on_credit() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        let rx = WINDOW + 0x6000;
+        memory.write(rx + RPTR, &0x80u32.to_le_bytes()).unwrap();
+        let next = enqueue_internal(&mut memory, 0, 2);
+        enqueue_internal(&mut memory, next, 4);
+        let mut out = Vec::new();
+        afk.receive(message(FULL, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(out, [message(RECV, 0), message(FULL, 0)]);
+        assert_eq!(read_word(&mut memory, WINDOW + 0x4000 + RPTR), 0x80);
+        assert_eq!(read_word(&mut memory, rx + WPTR), 0);
+        assert_eq!(afk.peer, lifecycle::PeerState::Paused);
+        // AP frees two blocks, allowing both replies. SPACE resumes DMA.
+        memory.write(rx + RPTR, &0x180u32.to_le_bytes()).unwrap();
+        out.clear();
+        afk.receive(message(SPACE, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(read_word(&mut memory, rx + WPTR), 0x100);
+        assert_eq!(read_word(&mut memory, rx + RING_HEADER + 24), 3);
+        assert_eq!(read_word(&mut memory, rx + RING_HEADER + 0x80 + 24), 5);
+        assert_eq!(
+            out,
+            [
+                message(RECV, 0),
+                message(RECV, 0),
+                message(RECV, 0),
+                message(SPACE, 0)
+            ]
+        );
+        assert!(!afk.receive_full && !afk.transmit_full && afk.reply.is_none());
+    }
+
+    #[test]
+    fn an_unknown_internal_command_preserves_the_input_entry() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        enqueue_internal(&mut memory, 0, 1);
+        let mut out = Vec::new();
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        assert_eq!(
+            afk.dma(&mut memory, &mut out),
+            Err("DCP AFKEPV2 unknown internal command")
+        );
+        assert_eq!(read_word(&mut memory, WINDOW + 0x4000 + RPTR), 0);
+        assert_eq!(read_word(&mut memory, WINDOW + 0x6000 + WPTR), 0);
+        assert!(out.is_empty());
     }
 
     #[test]
@@ -576,8 +804,14 @@ mod tests {
         out.clear();
         assert!(afk.receive(message(SHUTDOWN, 0), &mut out).is_err());
         afk.state = State::Started { buffer: 0x4000 };
+        afk.peer = lifecycle::PeerState::Paused;
+        afk.reply = Some(lifecycle::Command::PauseDone);
+        afk.transmit_full = true;
+        afk.receive_full = true;
         afk.receive(message(SHUTDOWN, 0), &mut out).unwrap();
         assert_eq!(out, [SHUTDOWN_ACK << 48]);
+        assert_eq!(afk.peer, lifecycle::PeerState::Running);
+        assert!(afk.reply.is_none() && !afk.transmit_full && !afk.receive_full);
         assert!(afk.receive(message(INIT, 0x100), &mut out).is_err());
         afk.start();
         afk.receive(message(INIT, 0x100), &mut out).unwrap();
