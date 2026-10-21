@@ -8,6 +8,7 @@
 use super::super::rpc::Bus;
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 const REPORT: u8 = 0;
@@ -59,7 +60,7 @@ pub(crate) struct CommandRequest {
 /// Publication is admitted only with a real service implementing its effects.
 pub(crate) struct Descriptor {
     pub number: u16,
-    pub name: &'static str,
+    pub name: String,
     /// A complete OSUnserialize document, including its terminator.
     pub properties: Vec<u8>,
 }
@@ -592,7 +593,7 @@ mod tests {
                 .register(
                     Descriptor {
                         number,
-                        name: "service",
+                        name: "service".into(),
                         properties: b"<dict/>\0".to_vec(),
                     },
                     Box::new(Echo(effects.clone())),
@@ -678,7 +679,7 @@ mod tests {
                 .register(
                     Descriptor {
                         number,
-                        name: "client",
+                        name: "client".into(),
                         properties: b"<dict/>\0".to_vec(),
                     },
                     Box::new(Client(producer.clone())),
@@ -706,7 +707,7 @@ mod tests {
             .register(
                 Descriptor {
                     number: 7,
-                    name: "client",
+                    name: "client".into(),
                     properties: b"<dict/>\0".to_vec(),
                 },
                 Box::new(Client(producer.clone())),

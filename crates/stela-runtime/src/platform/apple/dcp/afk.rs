@@ -829,7 +829,7 @@ mod tests {
         afk.register(
             interface::Descriptor {
                 number: 7,
-                name: "implemented-service",
+                name: "implemented-service".into(),
                 properties: b"<dict/>\0".to_vec(),
             },
             Box::new(Counted(calls.clone())),
@@ -912,7 +912,7 @@ mod tests {
         afk.register(
             interface::Descriptor {
                 number: 9,
-                name: "client",
+                name: "client".into(),
                 properties: b"<dict/>\0".to_vec(),
             },
             Box::new(Initiator(queued.clone(), completed.clone())),
@@ -1002,7 +1002,7 @@ mod tests {
             afk.register(
                 interface::Descriptor {
                     number,
-                    name: "cancelling",
+                    name: "cancelling".into(),
                     properties: b"<dict/>\0".to_vec(),
                 },
                 Box::new(Cancelling {

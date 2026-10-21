@@ -58,6 +58,35 @@ pub const DPAV_ENDPOINT: u8 = 0x24;
 pub const DPTX_ENDPOINT: u8 = 0x2a;
 pub use link::IOMFB_ENDPOINT;
 
+/// Identity of the one backed external output. The unnumbered DCPEXT and
+/// numbered DCPEXT0/1 use the same original firmware protocol, but publish
+/// distinct AFKEPV2 interface names. This does not model an internal panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExternalIdentity {
+    #[default]
+    Unnumbered,
+    /// The external pipe ordinal, not the AFKEPV2 interface ID or unit.
+    Numbered(u8),
+}
+
+impl ExternalIdentity {
+    fn interface_name(self) -> Result<alloc::string::String, &'static str> {
+        // t600xdcp_restore 0xf9434..0xf944c formats %s%c:%s:%u. Its external
+        // instance byte 0 yields E; 1..10 yield 0..9. Each model has one
+        // controller (unit 0) and an independently allocated interface ID.
+        let suffix = match self {
+            Self::Unnumbered => 'E',
+            Self::Numbered(index @ 0..=9) => char::from(b'0' + index),
+            Self::Numbered(_) => {
+                return Err(
+                    "DCP external pipe ordinal exceeds the native single-character identity",
+                );
+            }
+        };
+        Ok(alloc::format!("dispext{suffix}:{}:0", avipc::SERVICE_NAME))
+    }
+}
+
 const AFK_ENDPOINTS: [(u8, &str); 3] = [
     (SYSTEM_ENDPOINT, "system"),
     (DPAV_ENDPOINT, "DP AV"),
@@ -283,10 +312,26 @@ impl Coprocessor {
     /// (kernel file 0x1bb1424) then hands the coprocessor only a DVA's low
     /// 32 bits, which lie in that window.
     pub fn new(scanout: Box<dyn Scanout>, window: Option<u64>) -> Result<Self, &'static str> {
-        Self::with_methods(iomfb::Methods::new(scanout), window)
+        Self::for_external(scanout, window, ExternalIdentity::Unnumbered)
     }
 
-    fn with_methods(methods: iomfb::Methods, window: Option<u64>) -> Result<Self, &'static str> {
+    /// Bind a real scanout to one external pipe. Placement supplies the
+    /// original pipe's identity and DMA streams; this constructor provides
+    /// the complete existing monitor, controller, power and present services.
+    pub fn for_external(
+        scanout: Box<dyn Scanout>,
+        window: Option<u64>,
+        identity: ExternalIdentity,
+    ) -> Result<Self, &'static str> {
+        Self::with_identity(iomfb::Methods::new(scanout), window, identity)
+    }
+
+    fn with_identity(
+        methods: iomfb::Methods,
+        window: Option<u64>,
+        identity: ExternalIdentity,
+    ) -> Result<Self, &'static str> {
+        let descriptor = avipc::descriptor(identity.interface_name()?);
         let display = methods.display_state();
         let link = Rc::new(RefCell::new(rpc::Link::new(methods, window)));
         let afk: Vec<_> = AFK_ENDPOINTS
@@ -297,10 +342,7 @@ impl Coprocessor {
             .find(|afk| afk.borrow().endpoint == avipc::ENDPOINT)
             .ok_or("DCPAVIPC controller transport is not provided")?
             .borrow_mut()
-            .register(
-                avipc::descriptor(),
-                Box::new(avipc::Controller::new(display)),
-            )?;
+            .register(descriptor, Box::new(avipc::Controller::new(display)))?;
         let mut endpoints: Vec<(u8, Box<dyn Endpoint>)> = afk
             .iter()
             .map(|afk| {
@@ -964,12 +1006,31 @@ mod tests {
 
     #[test]
     fn the_published_controller_owns_real_commands_shared_power_and_transport_lifetime() {
+        for (identity, name) in [
+            (
+                ExternalIdentity::Unnumbered,
+                "dispextE:dcpav-controller-epic:0",
+            ),
+            (
+                ExternalIdentity::Numbered(0),
+                "dispext0:dcpav-controller-epic:0",
+            ),
+            (
+                ExternalIdentity::Numbered(1),
+                "dispext1:dcpav-controller-epic:0",
+            ),
+        ] {
+            check_published_controller(identity, name);
+        }
+    }
+
+    fn check_published_controller(identity: ExternalIdentity, name: &str) {
         let (scanout, _) = screen(4, 2);
-        let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity).unwrap();
         let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
         let published = controller_start(&mut coprocessor, &mut ram);
         assert_eq!(&published[8..11], &[0x11, 0, 1]);
-        assert_eq!(&published[16..47], b"dispextE:dcpav-controller-epic:");
+        assert_eq!(&published[16..47], &name.as_bytes()[..31]);
         assert_eq!(published[47], 0);
         let properties = core::str::from_utf8(&published[48..published.len() - 1]).unwrap();
         assert_eq!(published.last(), Some(&0));
@@ -978,7 +1039,7 @@ mod tests {
             "<key>EPICLocation</key><string>External</string>",
             "<key>EPICUnit</key><integer size=\"32\">0</integer>",
             "<key>EPICProviderClass</key><string>AppleDCPDPTXController</string>",
-            "<string>dispextE:dcpav-controller-epic:0</string>",
+            &alloc::format!("<string>{name}</string>"),
             "<key>interface-id</key><integer size=\"32\">1</integer>",
         ] {
             assert!(properties.contains(expected));
@@ -1036,9 +1097,27 @@ mod tests {
 
     #[test]
     fn a_presented_swap_completes_on_a_coprocessor_stream() {
+        for identity in [
+            ExternalIdentity::Unnumbered,
+            ExternalIdentity::Numbered(0),
+            ExternalIdentity::Numbered(1),
+        ] {
+            check_presented_swap(identity);
+        }
+    }
+
+    #[test]
+    fn an_unrepresentable_external_identity_refuses_before_publication() {
+        let (scanout, _) = screen(4, 2);
+        assert!(matches!(
+            Coprocessor::for_external(scanout, None, ExternalIdentity::Numbered(10)),
+            Err("DCP external pipe ordinal exceeds the native single-character identity")
+        ));
+    }
+
+    fn check_presented_swap(identity: ExternalIdentity) {
         let (scanout, presented) = screen(4, 2);
-        let methods = iomfb::Methods::new(scanout);
-        let mut coprocessor = Coprocessor::with_methods(methods, Some(RAM)).unwrap();
+        let mut coprocessor = Coprocessor::for_external(scanout, Some(RAM), identity).unwrap();
         let mut ram = Ram::new(RAM, AV_BUFFER + 0x4000);
         controller_start(&mut coprocessor, &mut ram);
         let mut endpoint = up(&mut coprocessor, &mut ram);
