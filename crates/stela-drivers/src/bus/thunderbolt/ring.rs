@@ -1625,4 +1625,170 @@ mod tests {
             release(&mut ring);
         }
     }
+
+    #[test]
+    fn inspector_reads_actual_router_adapter_and_capability_dma_without_control_adapter_zero() {
+        use super::super::{
+            config::Route,
+            topology::{AdapterKind, AdapterObservation, Event, Inspector},
+        };
+        let (source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let mut inspector = Inspector::new(channel, 100, 64).unwrap();
+        assert_eq!(
+            inspector.begin(Route::new(1).unwrap(), 0),
+            Err(super::super::topology::Error::RootRequired)
+        );
+        inspector.begin(Route::new(0).unwrap(), 0).unwrap();
+        let mut adapter1 = vec![0; 8];
+        adapter1[1] = 0x10;
+        adapter1[2] = 1;
+        adapter1[3] = 1 << 20;
+        adapter1[4] = 19 | (67 << 20);
+        adapter1[5] = 31 | (63 << 11);
+        let mut adapter3 = vec![0; 8];
+        adapter3[2] = 0xabcdef;
+        adapter3[3] = 3 << 20;
+        // (space,port,offset,words,reply-data/error). Every expected request is
+        // decoded from the driver's actual mapped TX frame, not a mock RPC.
+        type InspectStep = (u32, u32, u32, u32, Result<Vec<u32>, u32>);
+        let steps: Vec<InspectStep> = vec![
+            (
+                2,
+                0,
+                0,
+                5,
+                Ok(vec![0x12348086, 0x20 | (3 << 14), 0, 0, 1 << 29]),
+            ),
+            (2, 0, 0x20, 2, Ok(vec![0x330, 0x12345678])),
+            (2, 0, 0x30, 2, Ok(vec![0x02010500, 0xabcd])),
+            (1, 1, 0, 8, Ok(adapter1)),
+            (1, 1, 0x10, 1, Ok(vec![0x120])),
+            (1, 1, 0x20, 1, Ok(vec![0x600])),
+            (1, 2, 0, 8, Err(2)),
+            (1, 3, 0, 8, Ok(adapter3)),
+        ];
+        let mut result = None;
+        for (index, (space, port, offset, words, data)) in steps.into_iter().enumerate() {
+            let sent = domain.data(model.frame_address(Direction::Tx, index % 10), 16);
+            let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+            assert_eq!((address >> 25) & 3, space);
+            assert_eq!((address >> 19) & 63, port);
+            assert_eq!(address & 0x1fff, offset);
+            assert_eq!((address >> 13) & 63, words);
+            assert!(!(space == 1 && port == 0));
+            model.finish(Direction::Tx, index % 10, &[], None);
+            let response = match data {
+                Ok(data) => {
+                    let mut words = vec![1 << 31, 0, address & !(63 << 19)];
+                    words.extend(data);
+                    incoming(PacketType::Read, &words)
+                }
+                Err(code) => incoming(PacketType::Error, &[1 << 31, 0, code]),
+            };
+            finish_rx(&model, index % 10, &response);
+            result = inspector.poll(index as u64 + 1).unwrap();
+            if index < 7 {
+                assert_eq!(result, None);
+            }
+        }
+        let Some(Event::Inventory(inventory)) = result else {
+            panic!("inventory")
+        };
+        assert_eq!(inventory.header.vendor(), 0x8086);
+        assert_eq!(inventory.header.device(), 0x1234);
+        assert_eq!(inventory.header.usb4_version(), 1);
+        assert_eq!(inventory.capabilities.len(), 2);
+        assert_eq!(inventory.capabilities[1].vendor_specific, Some(1));
+        assert_eq!(inventory.capabilities[0].raw, vec![0x330, 0x12345678]);
+        assert_eq!(inventory.adapters.len(), 3);
+        let AdapterObservation::Present {
+            header,
+            capabilities,
+            ..
+        } = &inventory.adapters[0]
+        else {
+            panic!("adapter1")
+        };
+        assert_eq!(header.kind(), AdapterKind::Lane);
+        assert_eq!((header.max_in_hop(), header.max_out_hop()), (31, 63));
+        assert_eq!((header.nonflow_buffers(), header.total_buffers()), (19, 67));
+        assert_eq!(
+            capabilities.iter().map(|cap| cap.id).collect::<Vec<_>>(),
+            vec![1, 6]
+        );
+        assert!(matches!(
+            inventory.adapters[1],
+            AdapterObservation::Unimplemented {
+                port: 2,
+                raw: 2,
+                ..
+            }
+        ));
+        assert!(
+            matches!(&inventory.adapters[2],AdapterObservation::Present { header,.. } if header.kind()==AdapterKind::Unknown(0xabcdef))
+        );
+        let mut channel = inspector.into_channel();
+        channel_release(&mut channel);
+        drop(channel);
+        assert!(domain.state.lock().unwrap().maps.is_empty());
+        assert_eq!(
+            source.allocated.load(Ordering::Relaxed),
+            source.released.load(Ordering::Relaxed)
+        );
+    }
+
+    #[test]
+    fn inspector_rejects_capability_cycles_and_hotplug_stale_snapshot_before_new_reads() {
+        use super::super::{
+            config::Route,
+            topology::{Error as InspectError, Event, Inspector},
+        };
+        for case in 0..3 {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let mut inspector = Inspector::new(channel, 100, 64).unwrap();
+            inspector.begin(Route::new(0).unwrap(), 0).unwrap();
+            if case == 2 {
+                let event = incoming(PacketType::Event, &[0, 0, 1]);
+                finish_rx(&model, 0, &event);
+                assert!(matches!(inspector.poll(1).unwrap(), Some(Event::Plug(_))));
+            }
+            let sent = domain.data(model.frame_address(Direction::Tx, 0), 16);
+            let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+            model.finish(Direction::Tx, 0, &[], None);
+            let response = incoming(
+                PacketType::Read,
+                &[
+                    1 << 31,
+                    0,
+                    address,
+                    0x12348086,
+                    if case == 1 { 4 } else { 0x20 },
+                    0,
+                    0,
+                    1 << 29,
+                ],
+            );
+            finish_rx(&model, if case == 2 { 1 } else { 0 }, &response);
+            if case == 2 {
+                assert_eq!(inspector.poll(2), Err(InspectError::TopologyChanged));
+            } else if case == 1 {
+                assert_eq!(inspector.poll(2), Err(InspectError::CapabilityOffset(4)));
+            } else {
+                assert_eq!(inspector.poll(2).unwrap(), None);
+                let sent = domain.data(model.frame_address(Direction::Tx, 1), 16);
+                let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+                model.finish(Direction::Tx, 1, &[], None);
+                let response = incoming(PacketType::Read, &[1 << 31, 0, address, 0x320, 0]);
+                finish_rx(&model, 1, &response);
+                assert_eq!(inspector.poll(3), Err(InspectError::CapabilityLoop(0x20)));
+            }
+            let writes = model.state.lock().unwrap().writes.len();
+            assert_eq!(inspector.poll(4).unwrap(), None);
+            assert_eq!(writes, model.state.lock().unwrap().writes.len());
+            let mut channel = inspector.into_channel();
+            channel_release(&mut channel);
+        }
+    }
 }
