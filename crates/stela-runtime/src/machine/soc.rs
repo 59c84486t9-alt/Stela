@@ -4506,7 +4506,7 @@ fn dcp_device(
         let input = dart
             .profile
             .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
-            .map_err(|reason| err(reason))?;
+            .map_err(&err)?;
         let input = u32::try_from(input).map_err(|_| err("DMA input stream overflows"))?;
         Ok((index, 0, context, input))
     };

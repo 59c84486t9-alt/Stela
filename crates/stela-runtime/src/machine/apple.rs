@@ -3842,7 +3842,8 @@ mod tests {
         let mut d = AppleDevices::new();
         let base = 0x2_3500_4000;
         let smmu = 0x2_7130_0000;
-        for profile in [dart::Profile::T8020] {
+        {
+            let profile = dart::Profile::T8020;
             let legacy = d
                 .bus
                 .add(Box::new(Dart::for_profile(profile, 16, None).unwrap()));
