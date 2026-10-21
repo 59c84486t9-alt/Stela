@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::{fmt, ops::Range};
 
 mod aspm;
-pub use aspm::disable_aspm_link;
+pub use aspm::{disable_aspm_l1_2_link, disable_aspm_link};
 
 const VENDOR: u16 = 0x00;
 const COMMAND: u16 = 0x04;

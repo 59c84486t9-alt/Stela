@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright(c) 1999 - 2018 Intel Corporation.
+// Copyright (C) 2007 Intel
+// Copyright (C) Zhang Yanmin (yanmin.zhang@intel.com)
+// Copyright (C) Shaohua Li (shaohua.li@intel.com)
 // Copyright (c) 2026 Stela contributors
 //! PCIe ASPM errata handling, shared by physical-device drivers.
 //!
@@ -17,6 +20,126 @@ const PCIE_FLAGS: u16 = 0x02;
 const PCIE_LINK_CONTROL: u16 = 0x10;
 const PCIE_ASPM: u16 = 3;
 const BRIDGE_BUSES: u16 = 0x18;
+const EXT_CAPABILITY_L1SS: u16 = 0x1e;
+const L1SS_CONTROL1: u16 = 8;
+const ASPM_L1_2: u32 = 1 << 2;
+
+/// Disable only ASPM L1.2 at the actual downstream/upstream link components.
+/// PCI-PM L1.2, L1.1, timing parameters and conventional Link Control remain
+/// unchanged. Both capability chains and control snapshots are validated before
+/// the downstream-first writes. An error may leave the downstream disabled;
+/// it never rolls back by re-enabling an unsafe state or enables the device.
+///
+/// # Safety
+/// The `disable_aspm_link` ownership/mapping requirements apply. In addition,
+/// the host must own firmware/ACPI ASPM policy for this link; no firmware/AML
+/// or other driver may restore L1.2 while this policy is in force.
+pub unsafe fn disable_aspm_l1_2_link(
+    function: &mut Function,
+    handoff: &Handoff,
+) -> Result<(), BlockError> {
+    let windows = segment_windows(function, handoff)?;
+    let mut functions = Vec::new();
+    for window in windows {
+        // SAFETY: qualified exclusive segment ownership and complete ECAM
+        // mappings; no second PCI or firmware owner may race this operation.
+        functions.extend(unsafe { Function::enumerate(&window) });
+    }
+    disable_l1_2_with(function, &mut functions)
+}
+
+fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u32)>, BlockError> {
+    // Validate a real conventional PCIe function before accessing its extended
+    // configuration space. Keep malformed chains distinct from absent L1SS.
+    link_control(function)?;
+    let mut seen = [false; 1024];
+    let mut offset = 0x100u16;
+    let mut found = None;
+    loop {
+        if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {
+            return Err(BlockError::Unsupported(
+                "invalid PCI extended capability offset",
+            ));
+        }
+        if core::mem::replace(&mut seen[usize::from(offset / 4)], true) {
+            return Err(BlockError::Unsupported("looping PCI extended capabilities"));
+        }
+        let header = function.config.read32(offset);
+        if header == u32::MAX {
+            return Err(BlockError::Device { status: header });
+        }
+        if header == 0 {
+            break;
+        }
+        if header as u16 == EXT_CAPABILITY_L1SS {
+            if found.is_some() || (header >> 16) & 15 != 1 || offset > 0xff0 {
+                return Err(BlockError::Unsupported(
+                    "invalid or duplicate PCI L1SS capability",
+                ));
+            }
+            let capability = function.config.read32(offset + 4);
+            let control = function.config.read32(offset + L1SS_CONTROL1);
+            if capability == u32::MAX || control == u32::MAX {
+                return Err(BlockError::Device { status: u32::MAX });
+            }
+            if capability & (1 << 4) == 0
+                || (control & ASPM_L1_2 != 0 && capability & ASPM_L1_2 == 0)
+            {
+                return Err(BlockError::Unsupported(
+                    "inconsistent PCI L1SS support/control",
+                ));
+            }
+            found = Some((offset + L1SS_CONTROL1, control));
+        }
+        let next = (header >> 20) as u16;
+        if next == 0 {
+            break;
+        }
+        offset = next;
+    }
+    Ok(found)
+}
+
+fn clear_l1_2<C: ConfigSpace>(
+    function: &mut Function<C>,
+    snapshot: (u16, u32),
+) -> Result<(), BlockError> {
+    let (offset, original) = snapshot;
+    let wanted = original & !ASPM_L1_2;
+    if original != wanted {
+        // Linux notes some devices require DWORD access to L1SS. CTL1 is a
+        // full control register, unlike Link Control's adjacent W1C status.
+        function.config.write32(offset, wanted);
+    }
+    let observed = function.config.read32(offset);
+    if observed != wanted {
+        return Err(BlockError::Device { status: observed });
+    }
+    Ok(())
+}
+
+fn disable_l1_2_with<C: ConfigSpace>(
+    function: &mut Function<C>,
+    functions: &mut [Function<C>],
+) -> Result<(), BlockError> {
+    let parent = upstream(function, functions)?;
+    let child_control = l1ss_control(function)?;
+    let parent_control = parent
+        .map(|index| l1ss_control(&functions[index]))
+        .transpose()?
+        .flatten();
+    match (child_control, parent_control) {
+        (None, None) => Ok(()),
+        (Some(child), Some(upstream)) => {
+            clear_l1_2(function, child)?;
+            clear_l1_2(
+                &mut functions[parent.expect("observed parent capability")],
+                upstream,
+            )
+        }
+        _ => Err(BlockError::Unsupported("unpaired PCI L1SS capabilities")),
+    }
+}
 
 /// Disable both ASPM states on a PCIe function and its immediate upstream
 /// bridge, before enabling the device's MMIO or bus mastering. Both ends
@@ -184,24 +307,37 @@ mod tests {
     use alloc::{rc::Rc, vec};
     use core::cell::RefCell;
 
-    type Writes = Rc<RefCell<Vec<(Address, u16, u16)>>>;
+    type Writes = Rc<RefCell<Vec<(Address, u16, u32)>>>;
 
     struct Config {
-        words: [u32; 64],
+        words: [u32; 1024],
         address: Address,
         writes: Writes,
         refuses_aspm: bool,
+        refuses_l1ss: bool,
+        failed_read: Option<u16>,
     }
 
     impl ConfigSpace for Config {
         fn read32(&self, offset: u16) -> u32 {
+            if self.failed_read == Some(offset) {
+                return u32::MAX;
+            }
             self.words[usize::from(offset / 4)]
         }
-        fn write32(&mut self, _: u16, _: u32) {
-            panic!("ASPM must not write a DWORD containing W1C Link Status");
+        fn write32(&mut self, offset: u16, value: u32) {
+            assert!(
+                offset >= 0x100,
+                "ASPM must not write a DWORD containing W1C Link Status"
+            );
+            self.writes.borrow_mut().push((self.address, offset, value));
+            self.words[usize::from(offset / 4)] =
+                value | if self.refuses_l1ss { ASPM_L1_2 } else { 0 };
         }
         fn write16(&mut self, offset: u16, value: u16) {
-            self.writes.borrow_mut().push((self.address, offset, value));
+            self.writes
+                .borrow_mut()
+                .push((self.address, offset, u32::from(value)));
             let shift = (offset & 2) * 8;
             let value = if self.refuses_aspm {
                 value | PCIE_ASPM
@@ -224,10 +360,12 @@ mod tests {
 
     fn device(at: Address, bridge: Option<(u8, u8)>, writes: &Writes) -> Function<Config> {
         let mut config = Config {
-            words: [0; 64],
+            words: [0; 1024],
             address: at,
             writes: Rc::clone(writes),
             refuses_aspm: false,
+            refuses_l1ss: false,
+            failed_read: None,
         };
         config.words[0] = 0x10d3_8086;
         config.words[1] = 1 << 20; // status capability-list flag
@@ -372,5 +510,110 @@ mod tests {
             ..window
         }];
         assert!(segment_windows(&endpoint, &handoff).is_err());
+    }
+
+    fn add_l1ss(function: &mut Function<Config>, at: u16, control: u32) {
+        function.config.words[0x100 / 4] = u32::from(at) << 20 | 0x0001_0001;
+        function.config.words[usize::from(at / 4)] = 0x0001_001e;
+        function.config.words[usize::from((at + 4) / 4)] = 0x1f;
+        function.config.words[usize::from((at + 8) / 4)] = control;
+    }
+
+    #[test]
+    fn l1_2_changes_only_aspm_bit_downstream_before_parent_with_dword_access() {
+        let writes = Writes::default();
+        let mut endpoint = device(address(0, 8, 0), None, &writes);
+        let mut parent = device(address(0, 4, 1), Some((8, 12)), &writes);
+        add_l1ss(&mut endpoint, 0x180, 0x5abca50f);
+        add_l1ss(&mut parent, 0x240, 0xabcdff0f);
+        let parent_address = parent.address;
+        disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).unwrap();
+        assert_eq!(
+            *writes.borrow(),
+            [
+                (endpoint.address, 0x188, 0x5abca50b),
+                (parent_address, 0x248, 0xabcdff0b)
+            ]
+        );
+        assert_eq!(endpoint.config.words[20], 0xc000_a5a3);
+        assert_eq!(parent.config.words[20], 0xc000_a5a3);
+        assert_eq!(endpoint.config.words[0x188 / 4], 0x5abca50b);
+        assert_eq!(parent.config.words[0x248 / 4], 0xabcdff0b);
+        writes.borrow_mut().clear();
+        disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).unwrap();
+        assert!(
+            writes.borrow().is_empty(),
+            "already-disabled controls need no write"
+        );
+    }
+
+    #[test]
+    fn l1ss_absence_is_distinct_from_unpaired_or_malformed_capabilities() {
+        let writes = Writes::default();
+        let mut endpoint = device(address(0, 8, 0), None, &writes);
+        let mut parent = device(address(0, 4, 1), Some((8, 8)), &writes);
+        disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).unwrap();
+        add_l1ss(&mut endpoint, 0x180, 0xf);
+        assert!(disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).is_err());
+        assert!(disable_l1_2_with(&mut endpoint, &mut []).is_err());
+        add_l1ss(&mut parent, 0x180, 0xf);
+        for invalid in 0..8 {
+            let mut broken = device(address(0, 4, 1), Some((8, 8)), &writes);
+            add_l1ss(&mut broken, 0x180, 0xf);
+            match invalid {
+                0 => broken.config.words[0x180 / 4] |= 0x180 << 20, // loop
+                1 => broken.config.words[0x180 / 4] |= 0x183 << 20, // misalignment
+                2 => broken.config.words[0x180 / 4] |= 0x080 << 20, // below extended space
+                3 => broken.config.words[0x180 / 4] = 0x0002_001e,  // unknown L1SS version
+                4 => {
+                    broken.config.words[0x180 / 4] |= 0x200 << 20;
+                    broken.config.words[0x200 / 4] = 0x0001_001e;
+                }
+                5 => broken.config.words[0x184 / 4] = 0, // support absent
+                6 => {
+                    broken.config.words[0x184 / 4] = 0x10;
+                } // enabled unsupported L1.2
+                _ => {
+                    broken.config.words[0x100 / 4] = 0xff4 << 20 | 0x10001;
+                    broken.config.words[0xff4 / 4] = 0x1001e;
+                }
+            }
+            assert!(
+                disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut broken)).is_err(),
+                "invalid {invalid}"
+            );
+            assert!(writes.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn l1ss_failed_reads_and_refused_changes_leave_observable_partial_state() {
+        let writes = Writes::default();
+        for failed in [0x100, 0x180, 0x184, 0x188] {
+            let mut endpoint = device(address(0, 8, 0), None, &writes);
+            let mut parent = device(address(0, 4, 1), Some((8, 8)), &writes);
+            add_l1ss(&mut endpoint, 0x180, 0xf);
+            add_l1ss(&mut parent, 0x180, 0xf);
+            parent.config.failed_read = Some(failed);
+            assert_eq!(
+                disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)),
+                Err(BlockError::Device { status: u32::MAX })
+            );
+            assert!(writes.borrow().is_empty());
+        }
+        let mut endpoint = device(address(0, 8, 0), None, &writes);
+        let mut parent = device(address(0, 4, 1), Some((8, 8)), &writes);
+        add_l1ss(&mut endpoint, 0x180, 0xf);
+        add_l1ss(&mut parent, 0x180, 0xf);
+        endpoint.config.refuses_l1ss = true;
+        assert!(disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).is_err());
+        assert_eq!(writes.borrow().len(), 1);
+        writes.borrow_mut().clear();
+        endpoint.config.refuses_l1ss = false;
+        parent.config.refuses_l1ss = true;
+        assert!(disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).is_err());
+        assert_eq!(writes.borrow().len(), 2);
+        assert_eq!(endpoint.config.words[0x188 / 4], 0xb);
+        assert_eq!(parent.config.words[0x188 / 4], 0xf);
     }
 }
