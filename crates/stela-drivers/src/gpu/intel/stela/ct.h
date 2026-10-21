@@ -31,6 +31,8 @@ enum stela_intel_ct_mmio {
  * WC writes. mmio_write32() performs the actual uncached register write within
  * the selected root-tile or GT aperture. Register residency, force-wake and
  * posted-write ordering must already be guaranteed by the device owner.
+ * In particular the notify MMIO write must order the preceding descriptor
+ * write, including WC/device-memory descriptor mappings, as Xe's writel does.
  *
  * The context and every mapping remain pinned and accessible until all calls
  * stop. No callback may fail, reenter, allocate, or call guest ARM services.

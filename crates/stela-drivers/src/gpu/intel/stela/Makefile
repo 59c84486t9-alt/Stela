@@ -12,16 +12,19 @@ CFLAGS := --target=$(TARGET) -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 \
 HOST_CFLAGS := -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 -g -Wall -Wextra -Werror \
                -Wconversion -Wsign-conversion
 SANITIZE ?= -fsanitize=address,undefined
-OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o $(BUILD)/ct.o
+OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o $(BUILD)/ct.o \
+           $(BUILD)/i915_commands.o
 HEADERS := $(wildcard $(SOURCE)/*.h $(SOURCE)/../xe/xe_pt_walk.h \
              $(SOURCE)/../xe/xe_ring_emit.h $(SOURCE)/../xe/instructions/*.h \
              $(SOURCE)/../xe/xe_guc_ct_message.h $(SOURCE)/../xe/abi/*.h \
-             $(SOURCE)/../xe/regs/xe_guc_ct_regs.h)
+             $(SOURCE)/../xe/regs/xe_guc_ct_regs.h $(SOURCE)/../i915/gt/intel_gpu_commands.h \
+             $(SOURCE)/../i915/gt/intel_batch_emit.h)
 MESA_SOURCE ?= $(abspath $(SOURCE)/../../common/mesa)
 MESA_BUILD ?=
 PACKER_GENERATIONS := 120 125 200 300 350
+I915_PACKER_GENERATIONS := 60 70 75 80 90 110
 
-.PHONY: all test test-packers
+.PHONY: all test test-packers test-i915-packers
 all: $(BUILD)/libstela-intel.a
 
 $(BUILD):
@@ -37,6 +40,9 @@ $(BUILD)/commands.o: $(SOURCE)/commands.c | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 
 $(BUILD)/ct.o: $(SOURCE)/ct.c | $(BUILD)
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
+
+$(BUILD)/i915_commands.o: $(SOURCE)/i915_commands.c | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 
 $(BUILD)/libstela-intel.a: $(OBJECTS)
@@ -59,12 +65,26 @@ $(BUILD)/test-packers-%: $(SOURCE)/tests/commands_mesa.c $(SOURCE)/commands.c $(
 test-packers: $(addprefix $(BUILD)/test-packers-,$(PACKER_GENERATIONS))
 	$(foreach generation,$(PACKER_GENERATIONS),"$(BUILD)/test-packers-$(generation)" &&) true
 
+$(BUILD)/test-i915-packers-%: $(SOURCE)/tests/i915_commands_mesa.c $(SOURCE)/i915_commands.c $(HEADERS) | $(BUILD)
+	test -n "$(MESA_BUILD)"
+	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
+	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
+	    $(filter %.c,$^) -lm -o "$@"
+
+test-i915-packers: $(addprefix $(BUILD)/test-i915-packers-,$(I915_PACKER_GENERATIONS))
+	$(foreach generation,$(I915_PACKER_GENERATIONS),"$(BUILD)/test-i915-packers-$(generation)" &&) true
+
 $(BUILD)/test-ct: $(SOURCE)/tests/ct.c $(SOURCE)/ct.c $(HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) $(filter %.c,$^) -o "$@"
 
-test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct
+$(BUILD)/test-i915-commands: $(SOURCE)/tests/i915_commands.c $(SOURCE)/i915_commands.c $(HEADERS) | $(BUILD)
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) $(filter %.c,$^) -o "$@"
+
+test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/test-i915-commands
 	"$(BUILD)/test-pt-walk"
 	"$(BUILD)/test-commands"
 	"$(BUILD)/test-ct"
+	"$(BUILD)/test-i915-commands"
 
 -include $(OBJECTS:.o=.d)

@@ -1,4 +1,4 @@
-//! Native Intel packet construction using the retained Xe emitters. This module
+//! Native Intel packet construction using retained Xe and i915 emitters. This module
 //! does not initialize a device, map GPU memory, submit jobs or expose Metal.
 use core::marker::PhantomData;
 
@@ -14,6 +14,17 @@ pub enum AddressBits {
 pub enum AddressSpace {
     Global,
     PerProcess,
+}
+
+/// The retained i915 packet form selected by the actual engine policy. This
+/// enum is not a device-support or Metal-feature declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum I915BatchEncoding {
+    Gen4 = 4,
+    Gen6 = 6,
+    Haswell = 75,
+    Gen8 = 8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -36,9 +47,16 @@ unsafe extern "C" {
     fn stela_intel_store_qword(commands: *mut NativeCommands, address: u64, value: u64) -> i32;
     fn stela_intel_batch_end(commands: *mut NativeCommands) -> i32;
     fn stela_intel_user_interrupt(commands: *mut NativeCommands) -> i32;
+    fn stela_intel_i915_batch_start(
+        commands: *mut NativeCommands,
+        encoding: u32,
+        address: u64,
+        secure: bool,
+        no_preempt: bool,
+    ) -> i32;
 }
 
-/// Exclusively borrowed CPU storage for Xe Gen12+ command packets. C receives
+/// Exclusively borrowed CPU storage for Intel command packets. C receives
 /// native pointers only during a method call and retains none. Storage may be
 /// ordinary RAM; its physical placement and DMA visibility are the queue owner's
 /// responsibility. Completion of these methods establishes no GPU execution.
@@ -79,6 +97,32 @@ impl<'a> CommandBuffer<'a> {
     pub fn store_qword(&mut self, address: u64, value: u64) -> Result<(), CommandError> {
         // SAFETY: same exclusive bounded storage contract as batch_start.
         result(unsafe { stela_intel_store_qword(&mut self.native, address, value) })
+    }
+
+    /// Append an older i915 batch packet using the engine owner's selected
+    /// form. Gen4/6/Haswell use 32-bit addresses and Gen8 uses 48-bit addresses,
+    /// all aligned to 8 bytes. `secure` is a trusted owner's privileged selector;
+    /// the runtime must not let untrusted input choose it. `no_preempt` applies
+    /// only to Gen8, whose request teardown must eventually restore arbitration.
+    /// No context setup, flush, workarounds or submission are synthesized here.
+    pub fn i915_batch_start(
+        &mut self,
+        encoding: I915BatchEncoding,
+        address: u64,
+        secure: bool,
+        no_preempt: bool,
+    ) -> Result<(), CommandError> {
+        // SAFETY: the borrowed slice remains exclusive and live for this
+        // call. Native validation checks all bounds before any packet write.
+        result(unsafe {
+            stela_intel_i915_batch_start(
+                &mut self.native,
+                encoding as u32,
+                address,
+                secure,
+                no_preempt,
+            )
+        })
     }
 
     pub fn batch_end(&mut self) -> Result<(), CommandError> {
@@ -157,5 +201,31 @@ mod tests {
         assert_eq!(commands.remaining(), 0);
         assert!(commands.words().is_empty());
         assert_eq!(result(-123), Err(CommandError::Native(-123)));
+    }
+
+    #[test]
+    fn i915_encoding_uses_actual_native_packet_and_range_checks() {
+        let mut storage = [0xa5a5_a5a5; 8];
+        let mut commands = CommandBuffer::new(&mut storage, AddressBits::Bits48);
+        assert_eq!(
+            commands.i915_batch_start(I915BatchEncoding::Haswell, 1 << 32, false, false),
+            Err(CommandError::InvalidArgument)
+        );
+        assert!(commands.words().is_empty());
+        assert_eq!(
+            commands.i915_batch_start(I915BatchEncoding::Haswell, 0x2000, false, false),
+            Ok(())
+        );
+        assert_eq!(
+            commands.i915_batch_start(I915BatchEncoding::Gen8, 0x1234_5678_9000, false, false),
+            Ok(())
+        );
+        assert_eq!(
+            commands.words(),
+            [
+                0x18802100, 0x2000, 0x04000001, 0x18800101, 0x56789000, 0x1234, 0x04000000, 0
+            ]
+        );
+        assert_eq!(commands.remaining(), 0);
     }
 }

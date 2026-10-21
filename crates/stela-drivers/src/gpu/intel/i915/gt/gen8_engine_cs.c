@@ -8,6 +8,7 @@
 #include "gen8_engine_cs.h"
 #include "intel_engine_regs.h"
 #include "intel_gpu_commands.h"
+#include "intel_batch_emit.h"
 #include "intel_gt.h"
 #include "intel_lrc.h"
 #include "intel_ring.h"
@@ -558,13 +559,9 @@ int gen8_emit_bb_start_noarb(struct i915_request *rq,
 	 * re-enabled before we close the request
 	 * (engine->emit_fini_breadcrumb).
 	 */
-	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
-
 	/* FIXME(BDW+): Address space and security selectors. */
-	*cs++ = MI_BATCH_BUFFER_START_GEN8 |
-		(flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
-	*cs++ = lower_32_bits(offset);
-	*cs++ = upper_32_bits(offset);
+	cs = __gen8_emit_bb_start_noarb(cs, offset,
+				      flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
 
 	intel_ring_advance(rq, cs);
 
@@ -584,15 +581,8 @@ int gen8_emit_bb_start(struct i915_request *rq,
 	if (IS_ERR(cs))
 		return PTR_ERR(cs);
 
-	*cs++ = MI_ARB_ON_OFF | MI_ARB_ENABLE;
-
-	*cs++ = MI_BATCH_BUFFER_START_GEN8 |
-		(flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
-	*cs++ = lower_32_bits(offset);
-	*cs++ = upper_32_bits(offset);
-
-	*cs++ = MI_ARB_ON_OFF | MI_ARB_DISABLE;
-	*cs++ = MI_NOOP;
+	cs = __gen8_emit_bb_start_with_arb(cs, offset,
+					 flags & I915_DISPATCH_SECURE ? 0 : BIT(8));
 
 	intel_ring_advance(rq, cs);
 

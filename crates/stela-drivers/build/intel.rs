@@ -8,7 +8,8 @@ pub fn configure(build: &mut cc::Build) {
         .file(format!("{source}/xe/xe_pt_walk.c"))
         .file(format!("{source}/stela/pt_walk.c"))
         .file(format!("{source}/stela/commands.c"))
-        .file(format!("{source}/stela/ct.c"));
+        .file(format!("{source}/stela/ct.c"))
+        .file(format!("{source}/stela/i915_commands.c"));
     for path in [
         "stela",
         "xe/xe_pt_walk.h",
@@ -17,6 +18,8 @@ pub fn configure(build: &mut cc::Build) {
         "xe/xe_guc_ct_message.h",
         "xe/abi",
         "xe/regs/xe_guc_ct_regs.h",
+        "i915/gt/intel_gpu_commands.h",
+        "i915/gt/intel_batch_emit.h",
     ] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }

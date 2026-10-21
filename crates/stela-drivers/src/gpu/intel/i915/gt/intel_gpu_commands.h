@@ -6,7 +6,11 @@
 #ifndef _INTEL_GPU_COMMANDS_H_
 #define _INTEL_GPU_COMMANDS_H_
 
+#ifdef STELA_NATIVE
+#include "../../stela/i915_bits.h"
+#else
 #include <linux/bitops.h>
+#endif
 
 /*
  * Target address alignments required for GPU access e.g.
