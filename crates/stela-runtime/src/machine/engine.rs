@@ -3260,9 +3260,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return None;
         }
         let instruction = block::decode_pointer_authentication(GuestAddress(pc), word).ok()??;
-        let form = x86_64_pointer::Form::of(instruction.operation)?;
-        let (memo, tags, service) = self.pointer.addresses();
-        let thunk = x86_64_pointer::thunk(form, GuestAddress(pc), memo, tags, service);
+        let thunk = match instruction.operation {
+            PointerAuthenticationOperation::Strip { data, destination } => {
+                x86_64_pointer::strip::thunk(
+                    GuestAddress(pc),
+                    destination,
+                    self.pointer.strip_address(data),
+                )?
+            }
+            operation => {
+                let form = x86_64_pointer::Form::of(operation)?;
+                let (memo, tags, service) = self.pointer.addresses();
+                x86_64_pointer::thunk(form, GuestAddress(pc), memo, tags, service)
+            }
+        };
         let installed = self.host.install(&thunk.code).ok()?;
         let site = code.0 as u64 + site as u64;
         let jump = chain::jump(site, installed.0 as u64)?;
@@ -3618,6 +3629,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return step;
         }
         let context = self.pointer_context()?;
+        if let PointerAuthenticationOperation::Strip { data, .. } = instruction.operation {
+            self.pointer.open_stripping(&context, data);
+        }
         if let PointerAuthenticationOperation::Load(load) = instruction.operation {
             return self.authenticated_load(word, Some(&context), load);
         }
@@ -8614,6 +8628,66 @@ mod tests {
         assert_eq!(machine.pointer.tags[usize::from(ib)], open);
         machine.derived_changed();
         assert_eq!(machine.pointer.tags, [0; 4]);
+    }
+
+    #[test]
+    fn xpac_thunks_follow_regime_masks_without_key_enables_and_close_on_changes() {
+        const ADD: u32 = 0x9100_0400;
+        const XPACD_X17: u32 = 0xdac1_47f1;
+        let mut native = machine(&[ADD, XPACD_X17, ADD]);
+        let base = native.cpu.pc;
+        native.host.exits = vec![NativeExit::Exit {
+            next_pc: base + 8,
+            kind: ExitKind::Fallthrough as u64,
+        }];
+        native.step().unwrap();
+        let thunk = x86_64_pointer::strip::thunk(
+            GuestAddress(base + 4),
+            17,
+            native.pointer.strip_address(true),
+        )
+        .unwrap();
+        assert_eq!(native.host.installed.last(), Some(&thunk.code));
+        let installed = native.host.installed.len();
+        assert_eq!(
+            native.blocks[0].successors,
+            [Successor {
+                site: (installed + thunk.next.unwrap()) as u64,
+                target: GuestAddress(base + 8),
+                kind: ExitKind::Fallthrough,
+            }]
+        );
+        let mut machine = pac_machine();
+        machine.cpu.registers.set(SystemRegister::SCTLR_EL1, 0, 0);
+        machine.cpu.registers.set(SystemRegister::HCR_EL2, 0, 0);
+        for tcr in [25 | 17 << 16, 25 | 17 << 16 | 1 << 37 | 1 << 38 | 1 << 51] {
+            machine.cpu.registers.set(SystemRegister::TCR_EL1, 0, tcr);
+            machine.derived_changed();
+            for (word, data, key) in [
+                (0xdac1_43f1, false, pauth::Key::Ia),
+                (XPACD_X17, true, pauth::Key::Da),
+            ] {
+                for pointer in [0xdead_1234_5678_aaaa, 0xdead_9234_5678_aaaa] {
+                    machine.cpu.state.x[17] = pointer;
+                    let expected = machine
+                        .pointer_context()
+                        .unwrap()
+                        .strip(key, pointer)
+                        .unwrap();
+                    let el = machine.cpu.pstate.el;
+                    machine.system_instruction_for_test(word);
+                    assert_eq!(
+                        machine.cpu.pstate.el, el,
+                        "XPAC neither uses nor traps a key"
+                    );
+                    assert_eq!(machine.cpu.state.x[17], expected);
+                    assert_eq!(machine.pointer.strips[usize::from(data)].enabled, 1);
+                    assert_eq!(machine.pointer.tags, [0; 4]);
+                }
+            }
+            machine.derived_changed();
+            assert!(machine.pointer.strips.iter().all(|cell| cell.enabled == 0));
+        }
     }
 
     /// A RETAB's PAC thunk ends its completion with the exit to the target

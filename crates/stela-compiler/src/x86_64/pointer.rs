@@ -34,6 +34,8 @@ use crate::{
 };
 use alloc::vec::Vec;
 
+pub mod strip;
+
 /// Entries in the memo.
 pub const MEMO_ENTRIES: usize = 1 << 14;
 /// The tag word of a key whose SCTLR enable is clear, so that every

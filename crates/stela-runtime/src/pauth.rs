@@ -312,6 +312,18 @@ impl Context {
         ))
     }
 
+    /// The bits retained by XPAC in the lower and upper address ranges.
+    /// Strip selects both its TnSZ and effective TBI by pointer bit 55.
+    /// These masks contain no key material and do not depend on key enables.
+    pub(crate) fn stripping_masks(&self, data: bool) -> [u64; 2] {
+        let domain = if data {
+            policy::Domain::Data
+        } else {
+            policy::Domain::Instruction
+        };
+        [0, 1 << 55].map(|pointer| !self.layout(domain, pointer, false).extension_mask())
+    }
+
     /// Sign with the IB key (the original single-key profile).
     pub fn sign_ib(&self, pointer: u64, modifier: u64) -> Result<u64> {
         self.sign(Key::Ib, pointer, modifier)

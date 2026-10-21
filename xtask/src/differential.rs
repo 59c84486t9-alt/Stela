@@ -66,6 +66,8 @@ const ZERO_OR_SP: u32 = 31;
 const SYSTEM_MODE_PROFILE: &str = "system-mode-v1";
 const WFI: u32 = 0xd503_207f;
 const XPACLRI: u32 = 0xd503_20ff;
+const XPACI: u32 = 0xdac1_43e0;
+const XPACD: u32 = 0xdac1_47e0;
 /// Exception classes whose FAR is architecturally valid: instruction and data
 /// aborts, PC alignment and watchpoints.
 const FAR_CLASSES: [u64; 7] = [0x20, 0x21, 0x22, 0x24, 0x25, 0x34, 0x35];
@@ -352,9 +354,11 @@ fn system_oracle_limit(form: &str, case: &Case) -> bool {
     // firmware call where the profile, without EL3, makes it UNDEFINED.
     let psci = !el2_machine && el1 && form == "HVC_EX_exception"
         || el2_machine && case.el != 0 && form == "SMC_EX_exception";
-    // QEMU treats XPACLRI as a NOP while SCTLR_EL1 enables no PAC key, as the
-    // harness's does; the architecture strips X30 regardless.
-    let strip = word == XPACLRI;
+    // QEMU gates XPACLRI and explicit XPAC on pauth_active (translate-a64.c,
+    // do_xpac), although Arm Strip needs no enabled key. Explicit XPAC cases
+    // enable EnIA to reach that helper; disabled-key behavior is tested in
+    // the runtime and actual native thunk tests instead.
+    let strip = !case.pauth && (word == XPACLRI || matches!(word & !REGISTER_FIELD, XPACI | XPACD));
     // CNTFRQ_EL0 is writable only at the highest EL: EL2 on the engine's
     // profile, EL1 on QEMU's virt machine without EL2.
     let frequency = !el2_machine && el1 && word & !0x1f == MSR_CNTFRQ_EL0;
@@ -582,6 +586,13 @@ fn unmirrored_read(word: u32) -> Option<usize> {
 
 fn is_system_mode(form: &Value) -> bool {
     form["profile"] == SYSTEM_MODE_PROFILE
+        // XPAC uses no key or cipher algorithm. Its software-service
+        // registry rows can use the architectural System oracle lane too.
+        || form["id"].as_str().is_some_and(is_keyless_strip)
+}
+
+fn is_keyless_strip(form: &str) -> bool {
+    matches!(form, "XPACI_64Z_dp_1src" | "XPACD_64Z_dp_1src")
 }
 
 /// System-mode rows below "implemented", drafts included, are compared for
@@ -785,6 +796,7 @@ impl Differential {
                     }
                 }
                 Case {
+                    pauth: is_keyless_strip(&subject.form),
                     code: subject.code.clone(),
                     steps: subject.code.len(),
                     state,
@@ -1068,6 +1080,20 @@ fn subjects_for(
         translation,
     };
     let mut subjects = Vec::with_capacity(3);
+    // The first strip opens the cell; change its pointer before the second
+    // so a native completion that does nothing cannot pass by idempotence.
+    if is_keyless_strip(id) && code.len() == 1 {
+        const EOR_X: u32 = 0xca00_0000;
+        let destination = code[0] & REGISTER_FIELD;
+        let other = (destination + 1) % ZERO_OR_SP;
+        let eor = EOR_X | other << 16 | destination << 5 | destination;
+        let warm = vec![code[0], eor, code[0]];
+        // The EL0 lane intentionally has a one-block budget; EL1/2 run
+        // through all three words to their UDF sentinel.
+        for el in 1..=if el2 { 2 } else { 1 } {
+            subjects.push(subject(warm.clone(), Translation::system(&warm)?, el));
+        }
+    }
     if system && el2 && el2_admissible(code[0]) {
         subjects.push(subject(code.clone(), Translation::system(&code)?, 2));
     }
@@ -1317,6 +1343,24 @@ fn print_difference(case: &Case, original: &Outcome, translated: &Outcome) {
 mod tests {
     use super::*;
     use crate::oracle::Exception;
+
+    #[test]
+    fn keyless_strip_services_use_system_oracle_without_admitting_crypto_services() {
+        for id in ["XPACI_64Z_dp_1src", "XPACD_64Z_dp_1src"] {
+            assert!(is_system_mode(&serde_json::json!({
+                "id": id, "profile": "apple-arm64e-software-pauth-clock-v1"
+            })));
+        }
+        for id in [
+            "PACIA_64P_dp_1src",
+            "AUTDA_64P_dp_1src",
+            "XPACD_64Z_dp_1src_extra",
+        ] {
+            assert!(!is_system_mode(&serde_json::json!({
+                "id": id, "profile": "apple-arm64e-software-pauth-clock-v1"
+            })));
+        }
+    }
 
     #[test]
     fn el2_cases_keep_the_harness_controls() {

@@ -94,6 +94,8 @@ pub(super) struct PointerService {
     /// key enabled and untrapped under the current memo, and again whenever
     /// derived state may have changed.
     pub(super) tags: [u64; 4],
+    /// Instruction/data XPAC masks, independent of cryptographic key state.
+    pub(super) strips: [pointer::strip::Cell; 2],
 }
 
 impl PointerService {
@@ -106,6 +108,7 @@ impl PointerService {
             seen: Vec::new(),
             generations: 0,
             tags: [0; 4],
+            strips: [pointer::strip::Cell::default(); 2],
         }
     }
 
@@ -113,6 +116,20 @@ impl PointerService {
     pub(super) fn close(&mut self) {
         self.context = None;
         self.tags = [0; 4];
+        self.strips.iter_mut().for_each(|cell| cell.enabled = 0);
+    }
+
+    pub(super) fn strip_address(&self, data: bool) -> u64 {
+        &self.strips[usize::from(data)] as *const pointer::strip::Cell as u64
+    }
+
+    pub(super) fn open_stripping(&mut self, context: &pauth::Context, data: bool) {
+        let keep = context.stripping_masks(data);
+        self.strips[usize::from(data)] = pointer::strip::Cell {
+            enabled: 1,
+            keep,
+            upper_extension: !keep[1],
+        };
     }
 
     pub(super) fn is_open(&self) -> bool {
@@ -295,6 +312,47 @@ pub(super) extern "sysv64" fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stripping_cells_match_the_authoritative_layout_and_close_without_keys() {
+        let mut service = PointerService::new();
+        for t0 in [0, 16, 17, 25, 39, 63] {
+            for t1 in [0, 16, 17, 25, 39, 63] {
+                for controls in 0..16u64 {
+                    let tcr = t0
+                        | t1 << 16
+                        | (controls & 1) << 37
+                        | (controls & 2) << 37
+                        | (controls & 4) << 49
+                        | (controls & 8) << 49;
+                    let context =
+                        pauth::Context::new(0, pauth::Keys::from_optional_words([None; 4]))
+                            .with_translation_regime(tcr);
+                    for data in [false, true] {
+                        service.open_stripping(&context, data);
+                        assert!(
+                            !service.is_open(),
+                            "no cryptographic context or key is needed"
+                        );
+                        assert_eq!(service.tags, [0; 4]);
+                        let cell = service.strips[usize::from(data)];
+                        assert_eq!(cell.enabled, 1);
+                        for pointer in [0, u64::MAX, 1 << 55, 1 << 63, 0xdead_1234_5678_abcd] {
+                            let upper = pointer & (1 << 55) != 0;
+                            let keep = cell.keep[usize::from(upper)];
+                            let key = if data { pauth::Key::Da } else { pauth::Key::Ia };
+                            assert_eq!(
+                                (pointer & keep) | if upper { cell.upper_extension } else { 0 },
+                                context.strip(key, pointer).unwrap()
+                            );
+                        }
+                    }
+                    service.close();
+                    assert!(service.strips.iter().all(|cell| cell.enabled == 0));
+                }
+            }
+        }
+    }
 
     fn inputs(version: pauth::Version, tcr: u64) -> PointerInputs {
         let key = |index: u64| [0x1122_3344_5566_7788 ^ index, 0x99aa_bbcc_ddee_ff00 + index];

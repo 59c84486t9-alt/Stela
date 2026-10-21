@@ -53,7 +53,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    const fn extension_mask(self) -> u64 {
+    pub(super) const fn extension_mask(self) -> u64 {
         let below_top = if self.top_shift == 63 {
             u64::MAX
         } else {

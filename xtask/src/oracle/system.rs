@@ -40,6 +40,8 @@ use stela_runtime::machine::{
 
 /// The harness's SCTLR_EL1: MMU and caches on, every EL0 trap control clear.
 const SCTLR_VALUE: u64 = 0x30d0_0801 | (1 << 2) | (1 << 12) | (1 << 42) | (1 << 60);
+/// EnIA, used only to reach QEMU's keyless Strip helper.
+const SCTLR_PAUTH: u64 = 1 << 31;
 /// The harness's TCR_EL1: T0SZ=25, 4 KiB granule, TTBR1 walks off, 48-bit PA.
 const TCR_VALUE: u64 = 25 | (1 << 8) | (1 << 10) | (3 << 12) | (1 << 23) | (5 << 32);
 /// MAIR_EL1 attribute 0: Normal write-back.
@@ -395,7 +397,10 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         (Register::SPSR_EL1, spsr),
         (Register::TPIDR_EL1, case.steps as u64),
         (Register::MDSCR_EL1, MDSCR_SS),
-        (Register::SCTLR_EL1, SCTLR_VALUE),
+        (
+            Register::SCTLR_EL1,
+            SCTLR_VALUE | if case.pauth { SCTLR_PAUTH } else { 0 },
+        ),
         (Register::TCR_EL1, TCR_VALUE),
         (Register::TTBR0_EL1, L1_TABLE),
         (Register::MAIR_EL1, MAIR_VALUE),
@@ -425,7 +430,10 @@ pub unsafe fn run(case: &Case, target: TargetCpu) -> Result<Outcome> {
         for (register, value) in [
             (Register::VTCR_EL2, VTCR_VALUE),
             (Register::VTTBR_EL2, S2_L1_TABLE),
-            (Register::SCTLR_EL2, SCTLR_EL2_VALUE),
+            (
+                Register::SCTLR_EL2,
+                SCTLR_EL2_VALUE | if case.pauth { SCTLR_PAUTH } else { 0 },
+            ),
             (Register::VBAR_EL2, VECTOR_BASE),
             // An EL2 case is entered by the EL2 harness's ERET.
             (Register::ELR_EL2, CODE_PAGE),

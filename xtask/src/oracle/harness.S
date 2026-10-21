@@ -123,6 +123,8 @@
     .equ FLAG_FPMR,        1
     .equ FLAG_EL1,         2
     .equ FLAG_EL2,         4
+    .equ FLAG_PAUTH,       8
+    .equ SCTLR_PAUTH,      1 << 31
     .equ SPSR_M_EL1T,      4
     .equ SPSR_M_MASK,      0xf
     .equ SPSR_M_EL2T,      8
@@ -304,6 +306,14 @@ next_case:
     msr     pmuserenr_el0, xzr
     msr     cntp_ctl_el0, xzr
     msr     cntv_ctl_el0, xzr
+    // QEMU skips keyless XPAC with every PAC key disabled. Its cases
+    // enable EnIA only to reach Strip; restore the baseline for others.
+    ldr     x0, =SCTLR_VALUE
+    ldr     x1, [x20, #CASE_FLAGS]
+    tbz     x1, #3, 9f
+    orr     x0, x0, #SCTLR_PAUTH
+9:  msr     sctlr_el1, x0
+    isb
     // Under EL2, install the case's HCR_EL2 additions and stage 2.
     adr     x0, have_el2
     ldr     x0, [x0]
@@ -688,6 +698,12 @@ el2_lower_sync:
 el2_install:
     stp     x2, x3, [sp, #-16]!
     str     x30, [sp, #-16]!
+    ldr     x0, =SCTLR_EL2_VALUE
+    ldr     x1, [x20, #CASE_FLAGS]
+    tbz     x1, #3, 9f
+    orr     x0, x0, #SCTLR_PAUTH
+9:  msr     sctlr_el2, x0
+    isb
     ldr     x0, [sp, #32]
     ldr     x1, [x0, #EL2_HCR]
     ldr     x2, =HCR_BASE

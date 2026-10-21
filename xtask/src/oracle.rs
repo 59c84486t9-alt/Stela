@@ -69,6 +69,8 @@ const CASE_FLAGS: usize = 48;
 const FLAG_EL1: u64 = 2;
 /// Run the case at EL2t, unstepped, until its first exception.
 const FLAG_EL2: u64 = 4;
+/// Enable EnIA so QEMU reaches its keyless Strip helper.
+const FLAG_PAUTH: u64 = 8;
 const CASE_CODE: usize = 64;
 const CASE_STATE: usize = 512;
 /// The case's [`Hypervisor`] state: HCR_EL2 additions, then the stage-2
@@ -110,6 +112,10 @@ pub struct Case {
     pub el: u8,
     /// HCR_EL2 and stage 2, for an [`Oracle::with_el2`] machine only.
     pub hypervisor: Option<Hypervisor>,
+    /// Enable SCTLR.EnIA in both harness regimes. QEMU incorrectly skips
+    /// keyless XPAC when every PAC key is disabled; this fixture reaches
+    /// its Strip helper without changing the instruction's operands.
+    pub pauth: bool,
 }
 
 /// Stage 1 of the harness's EL1&0 regime: the page of the data window's
@@ -427,7 +433,11 @@ fn encode(cases: &[Case], layout: Layout) -> Result<Vec<u8>> {
             2 => FLAG_EL2,
             el => anyhow::bail!("no harness entry at EL{el}"),
         };
-        quad(slot, CASE_FLAGS, flags);
+        quad(
+            slot,
+            CASE_FLAGS,
+            flags | if case.pauth { FLAG_PAUTH } else { 0 },
+        );
         let hypervisor = case.hypervisor.unwrap_or_default();
         let block = [hypervisor.hcr, hypervisor.code, hypervisor.table];
         for (index, value) in block.iter().chain(&hypervisor.data).enumerate() {
