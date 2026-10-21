@@ -873,6 +873,10 @@ mod tests {
                 &mut access,
             )
             .unwrap();
+        assert_eq!(
+            handle.check_ram_access(),
+            Err("MCC resource RAM after DRAM access disable")
+        );
         let before = model.planes.borrow().clone();
         assert!(
             handle

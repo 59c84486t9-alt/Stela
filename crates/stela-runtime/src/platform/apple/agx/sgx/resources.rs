@@ -253,6 +253,9 @@ impl Access for ResourceAccess<'_, '_, '_> {
         if !self.owner.power.native.borrow().available {
             return Err("GFX resources while PMGR inhibits SGX execution");
         }
+        if let Some(cache) = &self.owner.cache {
+            cache.native.check_ram_access()?;
+        }
         Ok(())
     }
     fn check_native(&self, write: NativeWrite) -> Result<(), &'static str> {
@@ -547,8 +550,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn real_uat_faults_after_native_mcc_completion_retain_the_ram_clear_and_gate_its_retry() {
+    fn check_post_native_faults(disable_mcc: bool) {
         let mut sgx = gpu(&generation::G14G);
         let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
         let mut mcc = cache();
@@ -623,6 +625,23 @@ mod tests {
         assert!(pool.finish().is_err());
         port.write(0x4040, &0xdeadbeefdeadbeefu64.to_le_bytes())
             .unwrap();
+        if disable_mcc {
+            let mut stop_latch = InterruptLatch::new();
+            let mut stop = BusAccess::new(0, 0, &mut stop_latch);
+            mcc.write(0xf00000 + 0x410, Width::Word, 0, &mut stop)
+                .unwrap();
+            assert_eq!(
+                pool.advance(&mut owner.access(&mut port)),
+                Err("MCC resource RAM after DRAM access disable")
+            );
+            assert_eq!(cache.completions(4), vec![1; 4]);
+            assert!(pool.finish().is_err());
+            // Inspect the backing RAM without advancing the device owner.
+            let mut held = [0; 8];
+            assert!(port.memory.read(BASE + 0x14040, &mut held));
+            assert_eq!(u64::from_le_bytes(held), 0xdeadbeefdeadbeef);
+            return;
+        }
         let active = LifecycleState {
             powered: true,
             clocked: true,
@@ -673,6 +692,14 @@ mod tests {
         mcc.write(0xf00000 + 0x410, Width::Word, 0, &mut access)
             .unwrap();
         assert!(cache.check(MCC + 0xf13ffc).is_err());
+    }
+    #[test]
+    fn real_uat_faults_after_native_mcc_completion_retain_the_ram_clear_and_gate_its_retry() {
+        check_post_native_faults(false);
+    }
+    #[test]
+    fn actual_mcc_disable_vetoes_uncommitted_ram_tails_without_repeating_native_completion() {
+        check_post_native_faults(true);
     }
     #[test]
     fn original_scattered_cache_lists_resolve_every_bank_to_the_actual_owner() {

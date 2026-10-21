@@ -43,6 +43,15 @@ impl Amcc {
     }
 }
 impl FirmwareCache {
+    /// Resource RAM cannot resume after any participating DRAM plane has
+    /// been disabled. This is distinct from a targeted native command,
+    /// which may still address another plane without transferring RAM.
+    pub fn check_ram_access(&self) -> Result<(), &'static str> {
+        if self.planes.borrow().iter().any(|plane| !plane.dram_access) {
+            return Err("MCC resource RAM after DRAM access disable");
+        }
+        Ok(())
+    }
     #[cfg(test)]
     pub(crate) fn completions(&self, dsid: u8) -> Vec<u64> {
         self.planes
