@@ -77,9 +77,9 @@ pub struct LockGroup {
     pub page_size_shift: u32,
     pub lower_limit: Register,
     pub upper_limit: Register,
-    pub enable: Register,
-    pub write_disable: Register,
-    pub lock: Register,
+    pub enable: Option<Register>,
+    pub write_disable: Option<Register>,
+    pub lock: Option<Register>,
 }
 
 /// One aperture's planes and registers.
@@ -88,7 +88,7 @@ pub struct Layout {
     pub aperture_bytes: u64,
     pub planes: u32,
     pub stride: u64,
-    pub cache_status: Register,
+    pub cache_status: Option<Register>,
     pub group: LockGroup,
     /// The address limit 0 names.
     pub dram_base: u64,
@@ -254,12 +254,53 @@ impl Amcc {
     ) -> Result<Self, &'static str> {
         let shift = layout.group.page_size_shift;
         let page = 1u64.checked_shl(shift).ok_or("page-size-shift too large")?;
+        let stride = if layout.planes == 1 && layout.stride == 0 {
+            layout.aperture_bytes
+        } else {
+            layout.stride
+        };
+        let layout = Layout { stride, ..layout };
         let planes_end = layout
             .stride
             .checked_mul(u64::from(layout.planes))
             .ok_or("AMCC plane geometry wraps")?;
         if layout.planes == 0 || layout.stride == 0 || planes_end > layout.aperture_bytes {
             return Err("AMCC planes do not fit the aperture");
+        }
+        if apertures == 0 || apertures.checked_mul(layout.planes as usize).is_none() {
+            return Err("AMCC aperture count is empty or overflows");
+        }
+        let group = layout.group;
+        let registers = [
+            layout.cache_status,
+            Some(group.lower_limit),
+            Some(group.upper_limit),
+            group.enable,
+            group.write_disable,
+            group.lock,
+        ];
+        let mut addresses = Vec::new();
+        for register in registers.into_iter().flatten() {
+            if !register.offset.is_multiple_of(4)
+                || register.mask == 0
+                || register.value & !register.mask != 0
+            {
+                return Err("AMCC lock register has invalid alignment or mask");
+            }
+            for plane in 0..layout.planes {
+                let address = u64::from(plane)
+                    .checked_mul(layout.stride)
+                    .and_then(|offset| offset.checked_add(register.offset))
+                    .ok_or("AMCC lock register address wraps")?;
+                if address
+                    .checked_add(4)
+                    .is_none_or(|end| end > layout.aperture_bytes)
+                    || addresses.contains(&address)
+                {
+                    return Err("AMCC lock registers overlap or exceed the aperture");
+                }
+                addresses.push(address);
+            }
         }
         if let Some(cache) = cache {
             let (shared, shared_bytes) = cache.shared;
@@ -327,7 +368,24 @@ impl Amcc {
         let layout = &self.layout;
         let aperture = (offset / layout.aperture_bytes) as usize;
         let within = offset % layout.aperture_bytes;
+        if aperture >= self.planes.borrow().len() / layout.planes as usize {
+            return Err("AMCC offset exceeds the retained apertures");
+        }
         let first = aperture * layout.planes as usize;
+        // DT register offsets are relative to each plane's origin, and may
+        // exceed the stride (T6000 cache status is at 0x10000c). Decode these
+        // exact addresses before dividing the rest into conventional blocks.
+        for (register, _) in self.lock_registers() {
+            if let Some(delta) = within.checked_sub(register.offset)
+                && delta.is_multiple_of(layout.stride)
+                && delta / layout.stride < u64::from(layout.planes)
+            {
+                return Ok(Target::Plane(
+                    first + (delta / layout.stride) as usize,
+                    register.offset,
+                ));
+            }
+        }
         let plane = within / layout.stride;
         if plane < u64::from(layout.planes) {
             return Ok(Target::Plane(
@@ -348,32 +406,28 @@ impl Amcc {
         }
     }
 
-    fn lock_kind(&self, register: u64) -> Option<Kind> {
-        let layout = &self.layout;
-        let group = &layout.group;
+    fn lock_registers(&self) -> impl Iterator<Item = (Register, Kind)> {
+        let group = &self.layout.group;
         [
-            (layout.cache_status, Kind::CacheStatus),
-            (group.lower_limit, Kind::Lower),
-            (group.upper_limit, Kind::Upper),
-            (group.enable, Kind::Enable),
-            (group.write_disable, Kind::WriteDisable),
-            (group.lock, Kind::Lock),
+            self.layout
+                .cache_status
+                .map(|register| (register, Kind::CacheStatus)),
+            Some((group.lower_limit, Kind::Lower)),
+            Some((group.upper_limit, Kind::Upper)),
+            group.enable.map(|register| (register, Kind::Enable)),
+            group
+                .write_disable
+                .map(|register| (register, Kind::WriteDisable)),
+            group.lock.map(|register| (register, Kind::Lock)),
         ]
         .into_iter()
-        .find(|(candidate, _)| candidate.offset == register)
-        .map(|(_, kind)| kind)
+        .flatten()
     }
 
-    fn register(&self, kind: Kind) -> Register {
-        let group = &self.layout.group;
-        match kind {
-            Kind::CacheStatus => self.layout.cache_status,
-            Kind::Lower => group.lower_limit,
-            Kind::Upper => group.upper_limit,
-            Kind::Enable => group.enable,
-            Kind::WriteDisable => group.write_disable,
-            Kind::Lock => group.lock,
-        }
+    fn lock_kind(&self, register: u64) -> Option<(Kind, Register)> {
+        self.lock_registers()
+            .find(|(candidate, _)| candidate.offset == register)
+            .map(|(register, kind)| (kind, register))
     }
 
     fn plane_role(&self, register: u64, width: Width) -> Result<Role, &'static str> {
@@ -386,11 +440,10 @@ impl Amcc {
     fn read_plane(&self, index: usize, register: u64, width: Width) -> Result<u64, &'static str> {
         let planes = self.planes.borrow();
         let plane = &planes[index];
-        if let Some(kind) = self.lock_kind(register) {
+        if let Some((kind, bits)) = self.lock_kind(register) {
             if width != Width::Word {
                 return Err("AMCC register access other than 32 bits");
             }
-            let bits = self.register(kind);
             return Ok(match kind {
                 Kind::CacheStatus => bit(plane.cache_disabled, bits),
                 Kind::Lower => u64::from(plane.lower),
@@ -420,7 +473,7 @@ impl Amcc {
         width: Width,
         value: u64,
     ) -> Result<(), &'static str> {
-        let Some(kind) = self.lock_kind(register) else {
+        let Some((kind, bits)) = self.lock_kind(register) else {
             let role = self.plane_role(register, width)?;
             let ways = self.cache.map_or(0, |cache| cache.ways);
             let mut planes = self.planes.borrow_mut();
@@ -451,7 +504,6 @@ impl Amcc {
         if width != Width::Word {
             return Err("AMCC register access other than 32 bits");
         }
-        let bits = self.register(kind);
         let value = value as u32;
         if value & !bits.mask != 0 {
             return Err("AMCC register bit without described meaning");
@@ -663,17 +715,67 @@ mod tests {
             aperture_bytes: 0xf4_0000,
             planes: 4,
             stride: 0x4_0000,
-            cache_status: bit_register(0x424),
+            cache_status: Some(bit_register(0x424)),
             group: LockGroup {
                 page_size_shift: 14,
                 lower_limit: limit(0x680),
                 upper_limit: limit(0x684),
-                enable: bit_register(0x688),
-                write_disable: bit_register(0x7f0),
-                lock: bit_register(0x68c),
+                enable: Some(bit_register(0x688)),
+                write_disable: Some(bit_register(0x7f0)),
+                lock: Some(bit_register(0x68c)),
             },
             dram_base: 0x8_0000_0000,
         }
+    }
+
+    #[test]
+    fn io_access_limits_are_absolute_and_need_no_cache_or_lock_register() {
+        let mut description = layout();
+        description.aperture_bytes = 0x4000;
+        description.planes = 1;
+        description.stride = 0;
+        description.dram_base = 0;
+        description.cache_status = None;
+        description.group.lower_limit.offset = 0x220;
+        description.group.upper_limit.offset = 0x224;
+        description.group.enable = Some(bit_register(0x228));
+        description.group.write_disable = None;
+        description.group.lock = None;
+        let base = 0x100_0200_0000;
+        let mut model = Amcc::new(description, 4, Some((base, 0x8000)), None).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(model.locked_region(), None);
+        for aperture in 0..4 {
+            let origin = aperture * 0x4000;
+            assert_eq!(
+                model.read(origin + 0x220, Width::Word, &mut access),
+                Ok(base >> 14)
+            );
+            assert_eq!(
+                model.read(origin + 0x224, Width::Word, &mut access),
+                Ok((base + 0x7fff) >> 14)
+            );
+            model
+                .write(origin + 0x228, Width::Word, 1, &mut access)
+                .unwrap();
+            assert_eq!(model.read(origin + 0x228, Width::Word, &mut access), Ok(1));
+            for absent in [0, 0x22c, 0x424, 0x68c, 0x7f0] {
+                assert!(
+                    model
+                        .read(origin + absent, Width::Word, &mut access)
+                        .is_err()
+                );
+                assert!(
+                    model
+                        .write(origin + absent, Width::Word, 1, &mut access)
+                        .is_err()
+                );
+            }
+        }
+        assert_eq!(model.locked_region(), Some((base, base + 0x7fff)));
+        description.planes = 2;
+        assert!(Amcc::new(description, 1, None, None).is_err());
     }
 
     #[test]
@@ -702,6 +804,70 @@ mod tests {
             m.write(CACHE.broadcast + DRAM_ACCESS, Width::Double, 0, &mut a)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn extended_status_offsets_and_absent_controls_keep_each_plane_independent() {
+        let mut description = layout();
+        description.aperture_bytes = 0x20_0000;
+        description.cache_status = Some(bit_register(0x10_000c));
+        description.group.write_disable = None;
+        let base = description.dram_base;
+        let mut device =
+            Amcc::new(description, 2, Some((base + 0x200_0000, 0x4000)), None).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for aperture in 0..2 {
+            for plane in 0..4 {
+                let origin = aperture * description.aperture_bytes + plane * description.stride;
+                assert_eq!(
+                    device.read(origin + 0x10_000c, Width::Word, &mut access),
+                    Ok(1)
+                );
+                assert_eq!(
+                    device.read(origin + 0x680, Width::Word, &mut access),
+                    Ok(0x800)
+                );
+                assert!(
+                    device
+                        .read(origin + 0x7f0, Width::Word, &mut access)
+                        .is_err()
+                );
+                assert!(
+                    device
+                        .write(origin + 0x7f0, Width::Word, 1, &mut access)
+                        .is_err()
+                );
+                device
+                    .write(origin + 0x688, Width::Word, 1, &mut access)
+                    .unwrap();
+                device
+                    .write(origin + 0x68c, Width::Word, 1, &mut access)
+                    .unwrap();
+                assert!(
+                    device
+                        .write(origin + 0x680, Width::Word, 0, &mut access)
+                        .is_err()
+                );
+            }
+        }
+        assert_eq!(
+            device.locked_region(),
+            Some((base + 0x200_0000, base + 0x200_3fff))
+        );
+        assert!(
+            device
+                .read(2 * description.aperture_bytes, Width::Word, &mut access)
+                .is_err()
+        );
+        description.group.enable = None;
+        let mut absent = Amcc::new(description, 1, None, None).unwrap();
+        assert!(absent.read(0x688, Width::Word, &mut access).is_err());
+        description.cache_status.as_mut().unwrap().offset = 0x20_0000;
+        assert!(Amcc::new(description, 1, None, None).is_err());
+        description.cache_status.as_mut().unwrap().offset =
+            description.group.lower_limit.offset + description.stride;
+        assert!(Amcc::new(description, 1, None, None).is_err());
     }
 
     #[test]

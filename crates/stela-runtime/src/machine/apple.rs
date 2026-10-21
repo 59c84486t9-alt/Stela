@@ -908,6 +908,30 @@ impl AppleDevices {
         programmed: Option<(u64, u64)>,
         cache: Option<amcc::Cache>,
     ) -> Result<(), String> {
+        let device = self.map_lock_controller(apertures, layout, programmed, cache)?;
+        self.memory_controller = Some(device);
+        Ok(())
+    }
+
+    /// A separately owned I/O-access controller protects the same boot run
+    /// at its declared aperture map; it does not replace the DRAM controller.
+    pub fn add_io_access_controller(
+        &mut self,
+        apertures: &[u64],
+        layout: amcc::Layout,
+        programmed: Option<(u64, u64)>,
+    ) -> Result<(), String> {
+        self.map_lock_controller(apertures, layout, programmed, None)?;
+        Ok(())
+    }
+
+    fn map_lock_controller(
+        &mut self,
+        apertures: &[u64],
+        layout: amcc::Layout,
+        programmed: Option<(u64, u64)>,
+        cache: Option<amcc::Cache>,
+    ) -> Result<DeviceId, String> {
         let model = Amcc::new(layout, apertures.len(), programmed, cache).map_err(String::from)?;
         let device = self.bus.add(Box::new(model));
         let ranges: alloc::vec::Vec<Range> = apertures
@@ -918,9 +942,8 @@ impl AppleDevices {
             })
             .collect();
         self.map(device, &ranges)
-            .map_err(|error| format!("AMCC placement: {error:?}"))?;
-        self.memory_controller = Some(device);
-        Ok(())
+            .map_err(|error| format!("CTRR controller placement: {error:?}"))?;
+        Ok(device)
     }
 
     /// The memory cache controller's `channels` DRAM channels, sharing

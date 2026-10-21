@@ -1446,6 +1446,8 @@ pub struct Board {
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
     pub memory_controller: Option<MemoryController>,
+    /// The separately described I/O access CTRR controller.
+    pub io_access_controller: Option<MemoryController>,
     /// Every supported native DART group, preserving DT traversal order.
     pub darts: Vec<Iommu>,
     /// `/arm-io/aes`, an `aes,s8000`, when the DeviceTree keeps it.
@@ -2910,12 +2912,8 @@ pub struct MemoryController {
     pub layout: amcc::Layout,
 }
 
-const LOCK_GROUP: &str = "amcc-ctrr-a";
 /// The property iBoot's AMCC map always states.
 const APERTURE_COUNT: &str = "aperture-count";
-/// Lock groups iBoot's map names but leaves empty; one with registers is
-/// refused, as the model implements CTRR-A alone.
-const EMPTY_GROUPS: [&str; 3] = ["amcc-ctrr-b", "amcc-ctrr-c", "amcc-ctrr-d"];
 
 /// A `<name>-reg-offset`, `-reg-mask` and, for a bit register,
 /// `-reg-value` triple.
@@ -2941,23 +2939,43 @@ fn lock_register(
     })
 }
 
+fn lock_register_optional(
+    node: &Node<'_>,
+    path: &str,
+    name: &str,
+) -> Result<Option<amcc::Register>, String> {
+    let present = ["offset", "mask", "value"]
+        .iter()
+        .any(|suffix| node.property(&format!("{name}-reg-{suffix}")).is_some());
+    present
+        .then(|| lock_register(node, path, name, true))
+        .transpose()
+}
+
+fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, String> {
+    memory_controller_named(chosen, "amcc")
+}
+
 /// The AMCC map of `/chosen/lock-regs/amcc`, or `None` without one. The
 /// IPSW templates carry the node and its group children empty; a node the
 /// boot chain left so (no `aperture-count`, on a SoC whose iBoot map the
 /// loader lacks, `stela_loader::lock_regs`) describes no controller, and
 /// SPTM's own `ctrr_dt_get_lock_group` stops on it.
-fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, String> {
+fn memory_controller_named(
+    chosen: &Node<'_>,
+    controller: &str,
+) -> Result<Option<MemoryController>, String> {
     let Some(node) = chosen
         .child("lock-regs")
-        .and_then(|regs| regs.child("amcc"))
+        .and_then(|regs| regs.child(controller))
         .filter(|node| node.property(APERTURE_COUNT).is_some())
     else {
         return Ok(None);
     };
-    const PATH: &str = "/chosen/lock-regs/amcc";
+    let path = format!("/chosen/lock-regs/{controller}");
     let number = |name: &str| {
         node.first_u32(name)
-            .ok_or_else(|| format!("{PATH} has no {name}"))
+            .ok_or_else(|| format!("{path} has no {name}"))
     };
     let count = number(APERTURE_COUNT)? as usize;
     let apertures: Vec<u64> = node
@@ -2971,26 +2989,33 @@ fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, Stri
                 .collect()
         })
         .unwrap_or_default();
-    if count == 0 || apertures.len() != count {
+    if count == 0
+        || apertures.len() != count
+        || node
+            .property("aperture-phys-addr")
+            .is_none_or(|bytes| bytes.len() != count * 8)
+    {
         return Err(format!(
-            "{PATH} aperture-phys-addr does not list aperture-count apertures"
+            "{path} aperture-phys-addr does not list aperture-count apertures"
         ));
     }
-    let group_path = format!("{PATH}/{LOCK_GROUP}");
+    let group_path = format!("{path}/{controller}-ctrr-a");
     let group = node
-        .child(LOCK_GROUP)
-        .ok_or_else(|| format!("{PATH} has no {LOCK_GROUP}"))?;
-    for name in EMPTY_GROUPS {
+        .child(&format!("{controller}-ctrr-a"))
+        .ok_or_else(|| format!("missing lock group {group_path}"))?;
+    for suffix in ["b", "c", "d"] {
+        let name = format!("{controller}-ctrr-{suffix}");
         if node
-            .child(name)
+            .child(&name)
             .is_some_and(|empty| empty.property("page-size-shift").is_some())
         {
             return Err(format!(
-                "{PATH}/{name} is a lock group the AMCC model does not implement"
+                "{path}/{name} is a lock group the AMCC model does not implement"
             ));
         }
     }
     let register = |name: &str, bit: bool| lock_register(&group, &group_path, name, bit);
+    let optional_register = |name: &str| lock_register_optional(&group, &group_path, name);
     let dram_base = chosen
         .property("dram-base")
         .and_then(|value| {
@@ -3003,21 +3028,27 @@ fn memory_controller(chosen: &Node<'_>) -> Result<Option<MemoryController>, Stri
         aperture_bytes: u64::from(number("aperture-size")?),
         planes: number("plane-count")?,
         stride: u64::from(number("plane-stride")?),
-        cache_status: lock_register(&node, PATH, "cache-status", true)?,
+        cache_status: if controller == "amcc" {
+            Some(lock_register(&node, &path, "cache-status", true)?)
+        } else {
+            lock_register_optional(&node, &path, "cache-status")?
+        },
         group: amcc::LockGroup {
             page_size_shift: group
                 .first_u32("page-size-shift")
                 .ok_or_else(|| format!("{group_path} has no page-size-shift"))?,
             lower_limit: register("lower-limit", false)?,
             upper_limit: register("upper-limit", false)?,
-            enable: register("enable", true)?,
-            write_disable: register("write-disable", true)?,
-            lock: register("lock", true)?,
+            enable: optional_register("enable")?,
+            write_disable: optional_register("write-disable")?,
+            lock: optional_register("lock")?,
         },
-        dram_base,
+        // SPTM normalizes IOA absolute page limits by subtracting the
+        // DRAM page base (T6000 26A434 VA 0xfffffff0270d7748..d777c).
+        dram_base: if controller == "ioa" { 0 } else { dram_base },
     };
-    if layout.aperture_bytes == 0 || layout.stride == 0 {
-        return Err(format!("{PATH} has an empty aperture or plane stride"));
+    if layout.aperture_bytes == 0 || (layout.stride == 0 && layout.planes != 1) {
+        return Err(format!("{path} has an empty aperture or plane stride"));
     }
     Ok(Some(MemoryController { apertures, layout }))
 }
@@ -4320,8 +4351,9 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     .ok_or("DeviceTree walk failed")?;
     let highest = highest.ok_or("no node names the AIC as its interrupt parent")?;
     let inputs = u16::try_from(highest + 1).map_err(|_| "AIC interrupt number above 65534")?;
-    let memory_controller =
-        memory_controller(&root.child("chosen").ok_or("DeviceTree has no /chosen")?)?;
+    let chosen = root.child("chosen").ok_or("DeviceTree has no /chosen")?;
+    let memory_controller = memory_controller(&chosen)?;
+    let io_access_controller = memory_controller_named(&chosen, "ioa")?;
     let gpio = gpio_bank(&io, &translate, phandle)?;
     let aux_gpios = aux_gpio_banks(&root, &io, &translate, phandle)?;
     let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle, gpio.as_ref())?;
@@ -4376,6 +4408,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         counters,
         coresight,
         memory_controller,
+        io_access_controller,
         darts,
         aes,
         ans,
@@ -4417,6 +4450,70 @@ mod tests {
                 }),
             })
             .collect()
+    }
+
+    #[test]
+    fn io_access_description_preserves_optional_controls_and_absolute_page_basis() {
+        use crate::machine::adt::encode;
+        let chosen = |partial_enable: bool, extra_address_byte: bool| {
+            let mut properties: Vec<(String, Vec<u8>)> = vec![
+                ("name".into(), b"ioa-ctrr-a\0".to_vec()),
+                ("page-size-shift".into(), 14u32.to_le_bytes().to_vec()),
+            ];
+            for (name, offset, mask, value) in [
+                ("lower-limit", 0x220u32, u32::MAX, None),
+                ("upper-limit", 0x224, u32::MAX, None),
+                ("enable", 0x228, 1, Some(1u32)),
+            ] {
+                properties.push((format!("{name}-reg-offset"), offset.to_le_bytes().to_vec()));
+                properties.push((format!("{name}-reg-mask"), mask.to_le_bytes().to_vec()));
+                if let Some(value) = value
+                    && !partial_enable
+                {
+                    properties.push((format!("{name}-reg-value"), value.to_le_bytes().to_vec()));
+                }
+            }
+            let refs: Vec<_> = properties
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_slice()))
+                .collect();
+            let group = encode(&refs, &[]);
+            let mut addresses = 0x282000000u64.to_le_bytes().to_vec();
+            if extra_address_byte {
+                addresses.push(0);
+            }
+            let controller = encode(
+                &[
+                    ("name", b"ioa\0"),
+                    ("aperture-count", &1u32.to_le_bytes()),
+                    ("aperture-size", &0x4000u32.to_le_bytes()),
+                    ("aperture-phys-addr", &addresses),
+                    ("plane-count", &1u32.to_le_bytes()),
+                    ("plane-stride", &0u32.to_le_bytes()),
+                ],
+                &[group],
+            );
+            let registers = encode(&[("name", b"lock-regs\0")], &[controller]);
+            encode(
+                &[("dram-base", &0x10000000000u64.to_le_bytes())],
+                &[registers],
+            )
+        };
+        let bytes = chosen(false, false);
+        let root = Node::root(&bytes).unwrap();
+        assert!(memory_controller(&root).unwrap().is_none());
+        let ioa = memory_controller_named(&root, "ioa").unwrap().unwrap();
+        assert_eq!(ioa.apertures, [0x282000000]);
+        assert_eq!(ioa.layout.dram_base, 0);
+        assert_eq!(ioa.layout.stride, 0);
+        assert_eq!(ioa.layout.cache_status, None);
+        assert_eq!(ioa.layout.group.lower_limit.offset, 0x220);
+        assert_eq!(ioa.layout.group.enable.unwrap().offset, 0x228);
+        assert_eq!(ioa.layout.group.write_disable, None);
+        assert_eq!(ioa.layout.group.lock, None);
+        for bytes in [chosen(true, false), chosen(false, true)] {
+            assert!(memory_controller_named(&Node::root(&bytes).unwrap(), "ioa").is_err());
+        }
     }
 
     #[test]
@@ -6724,11 +6821,11 @@ mod tests {
                 aperture_bytes: 0xf4_0000,
                 planes: 4,
                 stride: 0x4_0000,
-                cache_status: amcc::Register {
+                cache_status: Some(amcc::Register {
                     offset: 0x424,
                     mask: 1,
                     value: 1,
-                },
+                }),
                 group: amcc::LockGroup {
                     page_size_shift: 14,
                     lower_limit: amcc::Register {
@@ -6741,21 +6838,21 @@ mod tests {
                         mask: u32::MAX,
                         value: 0,
                     },
-                    enable: amcc::Register {
+                    enable: Some(amcc::Register {
                         offset: 0x688,
                         mask: 1,
                         value: 1,
-                    },
-                    write_disable: amcc::Register {
+                    }),
+                    write_disable: Some(amcc::Register {
                         offset: 0x7f0,
                         mask: 1,
                         value: 1,
-                    },
-                    lock: amcc::Register {
+                    }),
+                    lock: Some(amcc::Register {
                         offset: 0x68c,
                         mask: 1,
                         value: 1,
-                    },
+                    }),
                 },
                 dram_base: 0x8_0000_0000,
             },
