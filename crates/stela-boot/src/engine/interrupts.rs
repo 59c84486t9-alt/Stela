@@ -58,21 +58,41 @@ struct TaskState {
 #[repr(C, align(16))]
 struct Stack([u8; IST_BYTES]);
 
-static mut TSS: TaskState = TaskState {
-    reserved0: 0,
-    rsp: [0; 3],
-    reserved1: 0,
-    ist: [0; 7],
-    reserved2: 0,
-    reserved3: 0,
-    io_map: size_of::<TaskState>() as u16,
-};
-static mut GDT: [u64; 5] = [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0, 0];
-static mut IDT: [[u64; 2]; 256] = [[0; 2]; 256];
-static mut FAULT_STACK: Stack = Stack([0; IST_BYTES]);
-static mut FATAL_STACK: Stack = Stack([0; IST_BYTES]);
-/// What every vector's stub calls with its frame; [`install`] sets it.
-static mut HANDLER: extern "sysv64" fn(&mut Frame) = interrupt;
+/// Private descriptors, interrupt stacks and GS-local record for one physical
+/// host processor. These addresses stay pinned even after its executor parks.
+pub(crate) struct Tables {
+    local: host::local::Local,
+    tss: TaskState,
+    gdt: [u64; 5],
+    idt: [[u64; 2]; 256],
+    fault_stack: Stack,
+    fatal_stack: Stack,
+}
+
+impl Tables {
+    pub(crate) const fn new() -> Self {
+        Self {
+            local: host::local::Local::new(),
+            tss: TaskState {
+                reserved0: 0,
+                rsp: [0; 3],
+                reserved1: 0,
+                ist: [0; 7],
+                reserved2: 0,
+                reserved3: 0,
+                io_map: size_of::<TaskState>() as u16,
+            },
+            gdt: [0, 0x00af_9a00_0000_ffff, 0x00cf_9200_0000_ffff, 0, 0],
+            idt: [[0; 2]; 256],
+            fault_stack: Stack([0; IST_BYTES]),
+            fatal_stack: Stack([0; IST_BYTES]),
+        }
+    }
+}
+
+// The BSP needs descriptors before its engine heap is installed. APs use their
+// own separately pinned Tables; they never modify this bootstrap allocation.
+static mut BSP_TABLES: Tables = Tables::new();
 
 #[repr(C, packed)]
 struct Pointer {
@@ -99,7 +119,7 @@ global_asm!(
     "push r15",
     "cld",
     "mov rdi, rsp",
-    "call [rip + {handler}]",
+    "call qword ptr gs:[{handler}]",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -117,7 +137,7 @@ global_asm!(
     "pop rax",
     "add rsp, 16",
     "iretq",
-    handler = sym HANDLER,
+    handler = const host::local::HANDLER_OFFSET,
 );
 
 // One stub per vector: push a zero error code when the CPU pushes none,
@@ -176,15 +196,29 @@ fn gate(handler: usize, ist: u8) -> [u64; 2] {
 /// # Safety
 /// Interrupts are disabled and nothing else uses the descriptor tables.
 pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
-    // SAFETY: the statics are only touched here, on one CPU.
+    let tables = &raw mut BSP_TABLES;
+    // SAFETY: only the BSP installs its permanent static tables, once.
+    unsafe { install_on(&mut *tables, handler) };
+}
+
+/// Install the descriptor/IST/local storage of this host processor.
+///
+/// # Safety
+/// `tables` belongs exclusively to this processor and stays pinned and mapped
+/// for its whole lifetime, including its parked state. Interrupts are disabled;
+/// no native execution/handler can still refer to preceding tables or GS state.
+pub(crate) unsafe fn install_on(
+    tables: &'static mut Tables,
+    handler: extern "sysv64" fn(&mut Frame),
+) {
+    // SAFETY: all data here is private to this physical processor.
     unsafe {
-        HANDLER = handler;
-        let tss = &raw mut TSS;
-        (*tss).ist[0] = (&raw mut FAULT_STACK as u64) + IST_BYTES as u64;
-        (*tss).ist[1] = (&raw mut FATAL_STACK as u64) + IST_BYTES as u64;
+        let tss = &raw mut tables.tss;
+        (*tss).ist[0] = (&raw mut tables.fault_stack as u64) + IST_BYTES as u64;
+        (*tss).ist[1] = (&raw mut tables.fatal_stack as u64) + IST_BYTES as u64;
         let base = tss as u64;
         let limit = (size_of::<TaskState>() - 1) as u64;
-        let gdt = &raw mut GDT;
+        let gdt = &raw mut tables.gdt;
         (*gdt)[3] = (limit & 0xffff)
             | ((base & 0xff_ffff) << 16)
             | (0x89 << 40)
@@ -213,7 +247,10 @@ pub unsafe fn install(handler: extern "sysv64" fn(&mut Frame)) {
             data = in(reg) DATA_SELECTOR,
             tss = in(reg) TSS_SELECTOR,
         );
-        let idt = &raw mut IDT;
+        // Loading a GS selector above resets its base; establish the private
+        // CPL0 record after GDT/segment setup, before making our IDT active.
+        host::local::activate(&mut tables.local, handler);
+        let idt = &raw mut tables.idt;
         let table = &stela_vector_table;
         for (index, &handler) in table.iter().enumerate() {
             let vector = if index == 65 { 255 } else { index };

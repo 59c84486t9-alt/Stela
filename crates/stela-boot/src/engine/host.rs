@@ -20,11 +20,7 @@ use crate::{
     tables::{self, Frames, NX, PAGE, PRESENT, WRITABLE},
 };
 use alloc::vec::Vec;
-use core::{
-    arch::{asm, global_asm},
-    cell::UnsafeCell,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use core::arch::{asm, global_asm};
 use stela_compiler::{GuestState, block::BlockExit};
 use stela_runtime::machine::{
     FaultCause, Host, InstallError, NativeCode, NativeExit, NativeFault, Regime,
@@ -37,8 +33,11 @@ use stela_runtime::machine::{
     },
 };
 
+pub(super) mod local;
 mod ram;
 mod translated;
+pub(crate) use local::Owner as HostOwner;
+use local::state;
 pub use ram::RamRange;
 
 /// Page-table frames from the handoff pool: a permanent part for roots and a
@@ -152,6 +151,7 @@ pub struct State {
     regime: Option<Regime>,
     /// The halves whose Tagged memory the tag-checked roots keep out.
     tag_checks: [bool; 2],
+    code_virtual: u64,
     code_physical: u64,
     code_bytes: u64,
     /// The arena's part new code goes to, and the offset after the code
@@ -198,18 +198,6 @@ pub struct State {
     pub guard_faults: u64,
 }
 
-struct Global(UnsafeCell<Option<State>>);
-// SAFETY: one CPU; the fault handler runs only while native code runs, and
-// the engine touches the state only through `state()` outside native code.
-unsafe impl Sync for Global {}
-static STATE: Global = Global(UnsafeCell::new(None));
-static HOST_INTERRUPT: AtomicBool = AtomicBool::new(false);
-
-fn state() -> &'static mut State {
-    // SAFETY: see `Global`; callers never hold two of these at once.
-    unsafe { (*STATE.0.get()).as_mut().expect("host state installed") }
-}
-
 pub use crate::apic::rdtsc;
 
 fn load_root(root: u64) {
@@ -228,8 +216,12 @@ pub struct Config {
     pub pool_bytes: u64,
     /// The loader's root, whose window entries every root shares.
     pub window_root: u64,
+    /// Processor-private executable alias; arena writes use the physmap.
+    pub code_virtual: u64,
     pub code_physical: u64,
     pub code_bytes: u64,
+    /// One common origin for every physical executor.
+    pub tsc_base: u64,
     pub tsc_hz: u64,
     pub apic_base: u64,
     pub placement: Placement,
@@ -241,8 +233,10 @@ pub struct Config {
 /// Install the host state, leave the identity map and start the APIC.
 ///
 /// # Safety
-/// Runs once, in the engine phase, with interrupts disabled.
-pub unsafe fn install(config: Config) -> Result<(), &'static str> {
+/// Runs once on this host processor, after its descriptor setup, with
+/// interrupts disabled. Its pool, code arena and bounce entries are private to
+/// this processor; the returned owner outlives every local native call/handler.
+pub unsafe fn install(config: Config) -> Result<HostOwner, &'static str> {
     let mut pool = Pool {
         base: config.pool_physical,
         bytes: config.pool_bytes,
@@ -280,9 +274,9 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         config.apic_base,
         layout::physical(config.apic_base & apic::BASE_ADDRESS),
     );
-    // SAFETY: the single initialization.
-    unsafe {
-        *STATE.0.get() = Some(State {
+    // SAFETY: this processor owns its disjoint host state until the owner drops.
+    let owner = unsafe {
+        local::install(State {
             ram: config.ram,
             pool,
             host_root,
@@ -290,13 +284,14 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             current: usize::MAX,
             regime: None,
             tag_checks: [false; 2],
+            code_virtual: config.code_virtual,
             code_physical: config.code_physical,
             code_bytes: config.code_bytes,
             code_unit: 0,
             code_used: 0,
             recorded: None,
             native: false,
-            tsc_base: rdtsc(),
+            tsc_base: config.tsc_base,
             tsc_hz: config.tsc_hz,
             counter_per_tsc: u64::try_from(
                 (u128::from(COUNTER_HZ) << 64) / u128::from(config.tsc_hz),
@@ -322,13 +317,13 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             helper_fills: 0,
             bounces: 0,
             guard_faults: 0,
-        });
-    }
+        })
+    };
     let state = state();
     state.apic_hz = state
         .apic
         .start(SPURIOUS_VECTOR, TIMER_VECTOR, state.tsc_hz);
-    Ok(())
+    Ok(owner)
 }
 
 /// The host's counters for the statistics line.
@@ -498,9 +493,9 @@ global_asm!(
     "push r13",
     "push r14",
     "push r15",
-    "mov [rip + stela_recovery_rsp], rsp",
+    "mov gs:[{recovery}], rsp",
     "call rsi",
-    "mov qword ptr [rip + stela_recovery_rsp], 0",
+    "mov qword ptr gs:[{recovery}], 0",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -510,8 +505,8 @@ global_asm!(
     "ret",
     ".global stela_native_recover",
     "stela_native_recover:",
-    "mov rsp, [rip + stela_recovery_rsp]",
-    "mov qword ptr [rip + stela_recovery_rsp], 0",
+    "mov rsp, gs:[{recovery}]",
+    "mov qword ptr gs:[{recovery}], 0",
     "pop r15",
     "pop r14",
     "pop r13",
@@ -521,10 +516,7 @@ global_asm!(
     "xor eax, eax",
     "mov edx, 0xffff",
     "ret",
-    ".data",
-    ".balign 8",
-    "stela_recovery_rsp: .quad 0",
-    ".text",
+    recovery = const local::RECOVERY_RSP_OFFSET,
 );
 
 unsafe extern "sysv64" {
@@ -533,7 +525,7 @@ unsafe extern "sysv64" {
 }
 
 fn in_code(state: &State, rip: u64) -> bool {
-    state.native && (layout::code()..layout::code() + state.code_bytes).contains(&rip)
+    state.native && (state.code_virtual..state.code_virtual + state.code_bytes).contains(&rip)
 }
 
 /// End the native block at `frame` and report `cause` to the engine.
@@ -676,7 +668,7 @@ pub fn native_exception(frame: &mut Frame) {
 }
 
 pub fn timer_interrupt() {
-    HOST_INTERRUPT.store(true, Ordering::Release);
+    local::interrupt();
     state().apic.eoi();
 }
 
@@ -686,8 +678,11 @@ pub fn stray_interrupt(_vector: u8) {
     state.apic.eoi();
 }
 
-/// The engine's handle; all state is in [`STATE`].
-pub struct BareHost;
+/// The engine's handle; mutable native state belongs to this host processor.
+pub struct BareHost<'a> {
+    _owner: core::marker::PhantomData<&'a mut HostOwner>,
+    _pinned: core::marker::PhantomData<*mut ()>,
+}
 
 /// The parts of the code arena, reclaimed for new code oldest first: the
 /// code of the most recent seven eighths of the run is kept, and only the
@@ -698,7 +693,7 @@ fn code_unit_bytes(state: &State) -> u64 {
     state.code_bytes / CODE_UNITS / 16 * 16
 }
 
-impl Host for BareHost {
+impl Host for BareHost<'_> {
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         // The engine reads guest RAM only once its translation allowed it.
         super::speculation::fence();
@@ -741,12 +736,12 @@ impl Host for BareHost {
         // Serialize before the executable alias runs the new bytes.
         core::arch::x86_64::__cpuid(0);
         state.code_used = end;
-        Ok(NativeCode((layout::code() + offset) as usize))
+        Ok(NativeCode((state.code_virtual + offset) as usize))
     }
 
     fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
         let state = state();
-        let offset = code.0 as u64 - layout::code();
+        let offset = code.0 as u64 - state.code_virtual;
         assert!(
             offset + bytes.len() as u64 <= state.code_bytes,
             "a patch outside the code arena"
@@ -774,7 +769,7 @@ impl Host for BareHost {
         let unit = code_unit_bytes(state);
         state.code_unit = (state.code_unit + 1) % CODE_UNITS;
         state.code_used = state.code_unit * unit;
-        let start = (layout::code() + state.code_used) as usize;
+        let start = (state.code_virtual + state.code_used) as usize;
         Some(start..start + unit as usize)
     }
 
@@ -934,7 +929,7 @@ impl Host for BareHost {
     }
 
     fn wait_for_interrupt(&mut self) {
-        HOST_INTERRUPT.store(false, Ordering::Relaxed);
+        local::clear_interrupt();
         // SAFETY: STI's interrupt shadow covers HLT, so no wake-up is lost.
         unsafe { asm!("sti", "hlt", "cli", options(nomem, nostack)) };
     }

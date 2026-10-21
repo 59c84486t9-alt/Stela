@@ -1784,19 +1784,21 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         pool_physical: handoff.pool.physical,
         pool_bytes: handoff.pool.bytes,
         window_root: handoff.root,
+        code_virtual: layout::code(),
         code_physical: handoff.code.physical,
         code_bytes: handoff.code.bytes,
+        tsc_base: host::rdtsc(),
         tsc_hz: handoff.tsc_hz,
         apic_base: handoff.apic_base,
         placement: handoff.placement,
         bounce: Some((layout::bounce(), handoff.bounce)),
     };
-    // SAFETY: once, with interrupts off.
-    if let Err(error) = unsafe { host::install(config) } {
-        output::fatal(error);
-    }
+    // SAFETY: once on the BSP, with interrupts off and owned native resources.
+    // Retain the processor-local state through every native call and handler.
+    let mut host_owner =
+        unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     let apic_hz = host::statistics().apic_hz;
-    let mut bare = BareHost;
+    let mut bare = host_owner.host();
     let target = target();
     let speculation = speculation::probe();
     let mut read_only_region = None;
