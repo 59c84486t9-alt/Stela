@@ -76,9 +76,16 @@ const NO_PMU: &str = "no-pmu";
 const IGNORE: &str = "AAPL,ignore";
 /// Required functions of name-matched hardware classes, not optional
 /// callbacks inferred from arbitrary `function-*` properties. The original
-/// AppleOLYHAL AMFM driver requires its PCIe port-control function in start
-/// (26A434 unslid 0xfffffe0009b3e108..0x9b3e1f4).
+/// AMFM requires its PCIe platform function. Other WLAN interfaces need
+/// their active bus established before imposing a direct PCIe requirement;
+/// the original driver also has a serial-provider personality.
 const REQUIRED_FUNCTIONS: &[(&str, &[&str])] = &[("amfm", &["function-pcie_port_control"])];
+/// A service-selected hardware interface replaces the direct platform
+/// function, rather than making it optional. AppleOLYHAL's withProvider
+/// (26A434 0xfffffe0009b465a8..0x9b465dc) selects its AMFM implementation
+/// when this marker exists; its init waits for AppleMultiFunctionManager
+/// (0x9b34d64..0x9b34dac), whose original IONameMatch is `amfm`.
+const REQUIRED_SERVICES: &[(&str, &str, &str)] = &[("wlan", "amfm-managed-port-control", "amfm")];
 /// The prefix of a button's platform function: the provider's phandle, the
 /// function code and its arguments (`function-button_hold`).
 const BUTTON_FUNCTION: &str = "function-button_";
@@ -234,7 +241,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     client_providers(&tree.root, &mut parents);
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
     hide_unprovided_buttons(tree, &mut hidden);
-    hide_unprovided_functions(tree, &mut hidden);
+    hide_unprovided_clients(tree, &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -272,7 +279,19 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     hidden
 }
 
+fn required_service(node: &Node) -> Option<&'static str> {
+    let kind = node.property(DEVICE_TYPE).and_then(|p| p.as_str());
+    REQUIRED_SERVICES
+        .iter()
+        .find_map(|&(client, selector, service)| {
+            (kind == Some(client) && node.property(selector).is_some()).then_some(service)
+        })
+}
+
 fn required_functions(node: &Node) -> &'static [&'static str] {
+    if required_service(node).is_some() {
+        return &[];
+    }
     let kind = node.property(DEVICE_TYPE).and_then(|p| p.as_str());
     REQUIRED_FUNCTIONS
         .iter()
@@ -280,19 +299,22 @@ fn required_functions(node: &Node) -> &'static [&'static str] {
         .unwrap_or_default()
 }
 
-struct FunctionClient {
+struct PlatformClient {
     path: String,
     phandle: Option<u32>,
     providers: Option<Vec<u32>>,
+    /// Hardware class of the service this admitted client supplies.
+    kind: Option<String>,
+    service: Option<&'static str>,
     provided: bool,
 }
 
 /// Collect trusted provider roots and clients whose required dependencies
 /// still need to be proven. An ignored subtree supplies no IOKit service.
-fn function_clients(
+fn platform_clients(
     node: &Node,
     path: &str,
-    clients: &mut Vec<FunctionClient>,
+    clients: &mut Vec<PlatformClient>,
     roots: &mut Vec<u32>,
 ) {
     if node.property(IGNORE).is_some() {
@@ -300,8 +322,9 @@ fn function_clients(
     }
     let required = required_functions(node);
     let phandle = node.property(PHANDLE).and_then(|p| p.as_u32());
+    let service = required_service(node);
     let here = if path.is_empty() { "/" } else { path };
-    if !required.is_empty() && !structural(here) {
+    if (!required.is_empty() || service.is_some()) && !structural(here) {
         let providers = required
             .iter()
             .map(|name| {
@@ -313,10 +336,15 @@ fn function_clients(
                 Some(u32::from_le_bytes(prefix[..4].try_into().expect("4 bytes")))
             })
             .collect();
-        clients.push(FunctionClient {
+        clients.push(PlatformClient {
             path: path.into(),
             phandle,
             providers,
+            kind: node
+                .property(DEVICE_TYPE)
+                .and_then(|p| p.as_str())
+                .map(String::from),
+            service,
             provided: false,
         });
     } else if node.property(COMPATIBLE).is_some()
@@ -326,26 +354,34 @@ fn function_clients(
     }
     for child in &node.children {
         let name = child.name().unwrap_or("?");
-        function_clients(child, &format!("{path}/{name}"), clients, roots);
+        platform_clients(child, &format!("{path}/{name}"), clients, roots);
     }
 }
 
-/// Prove required-provider chains from admitted roots. At most one pass per
-/// client can add a new provider, so a cycle without an admitted root stays
-/// unprovided and terminates. An optional function never hides its client.
-fn hide_unprovided_functions(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+/// Prove required-provider and service chains from admitted roots. At most
+/// one pass per client can add a provider or service, so a cycle without an
+/// admitted root stays unprovided and terminates. Optional functions never
+/// hide a client.
+fn hide_unprovided_clients(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
     let mut clients = Vec::new();
     let mut provided = Vec::new();
-    function_clients(&tree.root, "", &mut clients, &mut provided);
+    platform_clients(&tree.root, "", &mut clients, &mut provided);
+    let mut services = Vec::new();
     for _ in 0..clients.len() {
         let mut changed = false;
         for client in &mut clients {
             if !client.provided
+                && client
+                    .service
+                    .is_none_or(|required| services.iter().any(|kind| kind == required))
                 && client.providers.as_ref().is_some_and(|providers| {
                     providers.iter().all(|provider| provided.contains(provider))
                 })
             {
                 client.provided = true;
+                if let Some(kind) = &client.kind {
+                    services.push(kind.clone());
+                }
                 if let Some(phandle) = client.phandle {
                     provided.push(phandle);
                 }
@@ -655,6 +691,107 @@ mod tests {
             ),
         };
         assert_eq!(hide_unmodeled(&mut tree), ["/bad"]);
+    }
+
+    fn wlan(managed: bool) -> Node {
+        let mut client = node("wlan", None, vec![]);
+        client
+            .set_property(DEVICE_TYPE, b"wlan\0".to_vec())
+            .unwrap();
+        if managed {
+            client
+                .set_property("amfm-managed-port-control", vec![])
+                .unwrap();
+        }
+        client
+    }
+
+    #[test]
+    fn managed_wlan_requires_the_amfm_service_and_its_admitted_provider_chain() {
+        // The WLAN nub is independent of /amfm, matches by name and has
+        // no compatible. Put it first to exercise transitive convergence.
+        let tree = |provider| DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![wlan(true), function_client("amfm", 0x24, 0x35), provider],
+            ),
+        };
+        let mut provided = tree(phandle(
+            node("provider", Some(b"uart-1,samsung\0"), vec![]),
+            0x35,
+        ));
+        assert!(hide_unmodeled(&mut provided).is_empty());
+        assert!(provided.property("/wlan", IGNORE).is_none());
+        let mut hidden = tree(phandle(
+            node("provider", Some(b"apcie,t8112\0"), vec![]),
+            0x35,
+        ));
+        assert_eq!(hide_unmodeled(&mut hidden), ["/provider", "/wlan", "/amfm"]);
+        for path in ["/wlan", "/amfm"] {
+            assert!(hidden.property(path, IGNORE).is_some());
+        }
+        assert!(
+            hidden
+                .property("/wlan", "amfm-managed-port-control")
+                .is_some()
+        );
+        assert!(hide_unmodeled(&mut hidden).is_empty());
+        provided
+            .node_mut("/amfm")
+            .unwrap()
+            .set_property(IGNORE, vec![])
+            .unwrap();
+        assert_eq!(hide_unmodeled(&mut provided), ["/wlan"]);
+        let mut missing = DeviceTree {
+            root: node("", None, vec![wlan(true)]),
+        };
+        assert_eq!(hide_unmodeled(&mut missing), ["/wlan"]);
+    }
+
+    #[test]
+    fn unmarked_wlan_does_not_infer_a_pcie_requirement_from_its_hardware_class() {
+        let mut direct = wlan(false);
+        direct
+            .set_property(
+                "function-pcie_port_control",
+                [0x35u32, four_char_code(b"PrtC")]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![
+                    direct,
+                    phandle(node("provider", Some(b"uart-1,samsung\0"), vec![]), 0x35),
+                ],
+            ),
+        };
+        assert!(hide_unmodeled(&mut tree).is_empty());
+        tree.node_mut("/wlan")
+            .unwrap()
+            .set_property("amfm-managed-port-control", vec![])
+            .unwrap();
+        // The marker selects a different required interface: the direct
+        // function cannot make a missing AMFM service available.
+        assert_eq!(hide_unmodeled(&mut tree), ["/wlan"]);
+        let mut absent = DeviceTree {
+            root: node("", None, vec![wlan(false)]),
+        };
+        assert!(hide_unmodeled(&mut absent).is_empty());
+        // The driver has an AppleOnboardSerialSync personality too. A
+        // WLAN type alone does not establish which bus interface it uses.
+        absent
+            .node_mut("/wlan")
+            .unwrap()
+            .set_property(COMPATIBLE, b"uart-1,samsung\0".to_vec())
+            .unwrap();
+        assert!(hide_unmodeled(&mut absent).is_empty());
+        assert!(absent.property("/wlan", COMPATIBLE).is_some());
     }
 
     #[test]
