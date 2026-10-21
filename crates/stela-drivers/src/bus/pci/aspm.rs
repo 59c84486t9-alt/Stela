@@ -55,10 +55,16 @@ fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u
     let mut seen = [false; 1024];
     let mut offset = 0x100u16;
     let mut found = None;
+    let mut l1ss_start = None;
     loop {
         if !(0x100..=0xffc).contains(&offset) || !offset.is_multiple_of(4) {
             return Err(BlockError::Unsupported(
                 "invalid PCI extended capability offset",
+            ));
+        }
+        if l1ss_start.is_some_and(|start| offset > start && offset < start + 16) {
+            return Err(BlockError::Unsupported(
+                "PCI capability header overlaps L1SS body",
             ));
         }
         if core::mem::replace(&mut seen[usize::from(offset / 4)], true) {
@@ -77,6 +83,12 @@ fn l1ss_control<C: ConfigSpace>(function: &Function<C>) -> Result<Option<(u16, u
                     "invalid or duplicate PCI L1SS capability",
                 ));
             }
+            if (1..4).any(|word| seen[usize::from(offset / 4) + word]) {
+                return Err(BlockError::Unsupported(
+                    "L1SS body overlaps a PCI capability header",
+                ));
+            }
+            l1ss_start = Some(offset);
             let capability = function.config.read32(offset + 4);
             let control = function.config.read32(offset + L1SS_CONTROL1);
             if capability == u32::MAX || control == u32::MAX {
@@ -620,5 +632,47 @@ mod tests {
         assert_eq!(writes.borrow().len(), 2);
         assert_eq!(endpoint.config.words[0x188 / 4], 0xb);
         assert_eq!(parent.config.words[0x188 / 4], 0xf);
+    }
+
+    #[test]
+    fn extended_headers_cannot_alias_l1ss_bodies_in_either_traversal_direction() {
+        for body in [0x184u16, 0x188, 0x18c] {
+            for reverse in [false, true] {
+                for broken_parent in [false, true] {
+                    let writes = Writes::default();
+                    let mut endpoint = device(address(0, 8, 0), None, &writes);
+                    let mut parent = device(address(0, 4, 1), Some((8, 8)), &writes);
+                    add_l1ss(&mut endpoint, 0x180, 0x0001_0005);
+                    add_l1ss(&mut parent, 0x180, 0x0001_0005);
+                    let broken = if broken_parent {
+                        &mut parent
+                    } else {
+                        &mut endpoint
+                    };
+                    let unknown_header = if body == 0x184 {
+                        0x0001_001f
+                    } else {
+                        0x0001_0005
+                    };
+                    if reverse {
+                        broken.config.words[0x100 / 4] = u32::from(body) << 20 | 0x0001_0001;
+                        broken.config.words[usize::from(body / 4)] = 0x180 << 20 | unknown_header;
+                    } else {
+                        broken.config.words[0x180 / 4] |= u32::from(body) << 20;
+                        broken.config.words[usize::from(body / 4)] = unknown_header;
+                    }
+                    let endpoint_before = endpoint.config.words;
+                    let parent_before = parent.config.words;
+                    assert!(
+                        disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent))
+                            .is_err(),
+                        "body {body:x} reverse {reverse} parent {broken_parent}"
+                    );
+                    assert!(writes.borrow().is_empty());
+                    assert_eq!(endpoint.config.words, endpoint_before);
+                    assert_eq!(parent.config.words, parent_before);
+                }
+            }
+        }
     }
 }
