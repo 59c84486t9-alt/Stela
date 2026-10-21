@@ -324,7 +324,7 @@ mod tests {
         identity::{Chip, PciIdentity},
         ring::{
             rx::tests::device_receive,
-            tests::{Domain, Io, Source, State, device_complete_one},
+            tests::{Domain, Io, Memory, Source, State, device_complete_one},
         },
     };
     use super::*;
@@ -415,9 +415,23 @@ mod tests {
         wrong_seq: bool,
         delay: usize,
     ) -> (TestMailbox, ModelState, ModelState, ModelState) {
-        let wm = Arc::new(Mutex::new(State::default()));
-        let fwdl = Arc::new(Mutex::new(State::default()));
-        let rx = Arc::new(Mutex::new(State::default()));
+        // One real modeled requester/domain has one shared IOVA namespace.
+        // Queue register states remain independent; all device DMA resolves
+        // through this same registry and allocator.
+        let memory = Arc::new(Mutex::new(Memory::default()));
+        let domain: Arc<dyn crate::bus::dma::mapping::DmaDomain> = Arc::new(Domain(memory.clone()));
+        let wm = Arc::new(Mutex::new(State {
+            memory: memory.clone(),
+            ..State::default()
+        }));
+        let fwdl = Arc::new(Mutex::new(State {
+            memory: memory.clone(),
+            ..State::default()
+        }));
+        let rx = Arc::new(Mutex::new(State {
+            memory: memory.clone(),
+            ..State::default()
+        }));
         let alloc_tx = |state: Arc<Mutex<State>>, is_fwdl| {
             unsafe {
                 TxRing::install(
@@ -433,7 +447,7 @@ mod tests {
                         fwdl: is_fwdl,
                     },
                     &Source,
-                    Arc::new(Domain(state)),
+                    domain.clone(),
                     8,
                 )
             }
@@ -442,8 +456,26 @@ mod tests {
         let wmring = alloc_tx(wm.clone(), false);
         let fwring = alloc_tx(fwdl.clone(), true);
         let rxring =
-            unsafe { RxRing::install(Io(rx.clone()), &Source, Arc::new(Domain(rx.clone())), 8) }
-                .unwrap();
+            unsafe { RxRing::install(Io(rx.clone()), &Source, domain.clone(), 8) }.unwrap();
+        {
+            let bases = [
+                wm.lock().unwrap().base,
+                fwdl.lock().unwrap().base,
+                rx.lock().unwrap().base,
+            ];
+            let memory = memory.lock().unwrap();
+            assert_eq!(memory.mappings.len(), 27);
+            let mut last_end = 0;
+            let mut cpu = alloc::collections::BTreeSet::new();
+            for (&address, (pins, pointer, _direction)) in &memory.mappings {
+                assert!(address >= last_end);
+                last_end = address + pins.bytes() as u64;
+                assert!(cpu.insert(*pointer));
+            }
+            assert_ne!(bases[0], bases[1]);
+            assert_ne!(bases[0], bases[2]);
+            assert_ne!(bases[1], bases[2]);
+        }
         // SAFETY: all queues are exclusively owned parts of this one modeled chip;
         // clock is a live RDTSC test boundary and all firmware events use real IOVAs.
         let m = unsafe {
@@ -481,15 +513,39 @@ mod tests {
                 // SAFETY: actual modeled controller is stopped before teardown.
                 unsafe { mailbox.release_after_quiesce() }.unwrap();
                 drop(mailbox);
-                assert!(wm.lock().unwrap().mappings.is_empty());
-                assert!(fwdl.lock().unwrap().mappings.is_empty());
-                assert!(rx.lock().unwrap().mappings.is_empty());
+                assert!(
+                    wm.lock()
+                        .unwrap()
+                        .memory
+                        .lock()
+                        .unwrap()
+                        .mappings
+                        .is_empty()
+                );
+                assert!(
+                    fwdl.lock()
+                        .unwrap()
+                        .memory
+                        .lock()
+                        .unwrap()
+                        .mappings
+                        .is_empty()
+                );
+                assert!(
+                    rx.lock()
+                        .unwrap()
+                        .memory
+                        .lock()
+                        .unwrap()
+                        .mappings
+                        .is_empty()
+                );
             } else {
                 // Owned domains/pins remain live if the composed downloader
                 // is dropped before acknowledged controller quiescence.
                 drop(engine);
-                assert!(wm.lock().unwrap().mappings.len() >= 2);
-                assert!(rx.lock().unwrap().mappings.len() >= 2);
+                assert!(wm.lock().unwrap().memory.lock().unwrap().mappings.len() >= 2);
+                assert!(rx.lock().unwrap().memory.lock().unwrap().mappings.len() >= 2);
             }
         }
     }
@@ -501,7 +557,18 @@ mod tests {
         assert_eq!(m.replies().len(), 1);
         assert!(m.replies()[0].dma_released);
         assert_eq!(m.wm.pending(), 0);
-        assert_eq!(wm.lock().unwrap().syncs.iter().filter(|v| v.0).count(), 2);
+        assert_eq!(
+            wm.lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .syncs
+                .iter()
+                .filter(|v| v.0)
+                .count(),
+            4
+        );
         // SAFETY: explicit model stop covers every live TX/RX queue.
         unsafe { m.release_after_quiesce() }.unwrap();
     }
@@ -636,7 +703,16 @@ mod tests {
             assert_eq!(fi, fw.completed.len());
             drop(wm);
             drop(fw);
-            assert!(rx.lock().unwrap().syncs.iter().any(|v| v.0));
+            assert!(
+                rx.lock()
+                    .unwrap()
+                    .memory
+                    .lock()
+                    .unwrap()
+                    .syncs
+                    .iter()
+                    .any(|v| v.0)
+            );
         }
     }
     #[test]

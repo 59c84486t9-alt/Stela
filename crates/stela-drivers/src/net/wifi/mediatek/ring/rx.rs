@@ -274,7 +274,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
     use std::sync::Mutex;
     fn setup(count: usize) -> (RxRing<Io>, Arc<Mutex<State>>) {
         let state = Arc::new(Mutex::new(State::default()));
-        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.clone()));
+        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.lock().unwrap().memory.clone()));
         // SAFETY: exclusive, idle queue in the stateful device model.
         let ring = unsafe { RxRing::install(Io(state.clone()), &Source, domain, count) }.unwrap();
         (ring, state)
@@ -287,13 +287,14 @@ pub(in crate::net::wifi::mediatek) mod tests {
     ) {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
-        let descriptor = s.mappings[&s.base].1 + s.index as usize * DESC_BYTES;
+        let descriptor =
+            s.memory.lock().unwrap().mappings[&s.base].1 + s.index as usize * DESC_BYTES;
         let ptr = descriptor as *mut u32;
         let address = u64::from(u32::from_le(unsafe { ptr.read_volatile() }));
         let control = u32::from_le(unsafe { ptr.add(1).read_volatile() });
         assert_eq!(control & DONE, 0);
         assert_eq!(control >> 16, BUFFER_BYTES as u32);
-        let payload = s.mappings[&address].1 as *mut u8;
+        let payload = s.memory.lock().unwrap().mappings[&address].1 as *mut u8;
         assert_ne!(payload as u64, address);
         assert!(bytes.len() <= BUFFER_BYTES);
         // Device writes the actual IOVA-backed payload before publishing DDONE.
@@ -322,14 +323,32 @@ pub(in crate::net::wifi::mediatek) mod tests {
             assert_eq!(frame.info, 0x1234);
         }
         assert_eq!(
-            state.lock().unwrap().syncs.iter().filter(|v| v.0).count(),
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .syncs
+                .iter()
+                .filter(|v| v.0)
+                .count(),
             140
         );
         // SAFETY: explicit model stop ends every receive-buffer device access.
         unsafe { ring.release_after_quiesce() }.unwrap();
         drop(ring);
         assert_eq!(state.lock().unwrap().queue_drops, 1);
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
     }
     #[test]
     fn corrupt_length_and_unimplemented_wed_format_poison_without_reuse() {
@@ -341,7 +360,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
             let (mut ring, state) = setup(4);
             let pointer = {
                 let s = state.lock().unwrap();
-                s.mappings[&s.base].1 + 4
+                s.memory.lock().unwrap().mappings[&s.base].1 + 4
             };
             unsafe { (pointer as *mut u32).write_volatile(ctrl.to_le()) };
             let expected = if ctrl & 128 != 0 {
@@ -363,19 +382,34 @@ pub(in crate::net::wifi::mediatek) mod tests {
         state.lock().unwrap().fail_publish = true;
         assert_eq!(ring.poll(), Err(Error::RegisterFailure));
         assert!(ring.is_poisoned());
-        assert_eq!(state.lock().unwrap().mappings.len(), 5);
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            5
+        );
         assert_eq!(state.lock().unwrap().queue_drops, 0);
         // SAFETY: actual modeled device stopped before all mappings are removed.
         unsafe { ring.release_after_quiesce() }.unwrap();
         drop(ring);
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
         assert_eq!(state.lock().unwrap().queue_drops, 1);
     }
     #[test]
     fn active_drop_retains_owned_requester_and_all_posted_receive_pins() {
         let (ring, state) = setup(4);
         drop(ring);
-        assert_eq!(state.lock().unwrap().mappings.len(), 4); // descriptor + 3 posted
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            4
+        ); // descriptor + 3 posted
         assert_eq!(state.lock().unwrap().queue_drops, 0);
         device_receive(&state, &[0xa5; 100], true, 0);
     }
@@ -416,13 +450,22 @@ pub(in crate::net::wifi::mediatek) mod tests {
         assert_eq!(ring.poll().unwrap().unwrap().bytes, [0x39; 2048]);
         // SAFETY: the complete modeled receive engine is stopped.
         unsafe { ring.release_after_quiesce() }.unwrap();
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
     }
     #[test]
     fn every_completed_descriptor_payload_and_rearm_visibility_failure_retains_ownership() {
         for fail_at in 8..=11 {
             let (mut ring, state) = setup(4);
-            state.lock().unwrap().fail_sync_at = Some(fail_at);
+            state.lock().unwrap().memory.lock().unwrap().fail_sync_at = Some(fail_at);
             device_receive(&state, &[0x42; 200], true, 0);
             assert_eq!(
                 ring.poll(),
@@ -432,11 +475,23 @@ pub(in crate::net::wifi::mediatek) mod tests {
             );
             assert!(ring.is_poisoned());
             assert_eq!(state.lock().unwrap().queue_drops, 0);
-            assert_eq!(state.lock().unwrap().mappings.len(), 5);
+            assert_eq!(
+                state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+                5
+            );
             // SAFETY: explicit model stop permits quiescent invalidation.
             unsafe { ring.release_after_quiesce() }.unwrap();
             drop(ring);
-            assert!(state.lock().unwrap().mappings.is_empty());
+            assert!(
+                state
+                    .lock()
+                    .unwrap()
+                    .memory
+                    .lock()
+                    .unwrap()
+                    .mappings
+                    .is_empty()
+            );
             assert_eq!(state.lock().unwrap().queue_drops, 1);
         }
     }

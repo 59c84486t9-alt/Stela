@@ -474,9 +474,18 @@ pub(in crate::net::wifi::mediatek) mod tests {
         }
     }
     #[derive(Default)]
-    pub(in crate::net::wifi::mediatek) struct State {
+    pub(in crate::net::wifi::mediatek) struct Memory {
         pub(in crate::net::wifi::mediatek) next: u64,
-        pub(in crate::net::wifi::mediatek) mappings: BTreeMap<u64, (PinnedPages, usize)>,
+        pub(in crate::net::wifi::mediatek) mappings: BTreeMap<u64, (PinnedPages, usize, Direction)>,
+        pub(in crate::net::wifi::mediatek) fail_unmap: bool,
+        pub(in crate::net::wifi::mediatek) fail_unmap_at: Option<usize>,
+        pub(in crate::net::wifi::mediatek) unmaps: usize,
+        pub(in crate::net::wifi::mediatek) fail_sync_at: Option<usize>,
+        pub(in crate::net::wifi::mediatek) syncs: Vec<(bool, u64, Range<usize>)>,
+    }
+    #[derive(Default)]
+    pub(in crate::net::wifi::mediatek) struct State {
+        pub(in crate::net::wifi::mediatek) memory: Arc<Mutex<Memory>>,
         pub(in crate::net::wifi::mediatek) base: u64,
         pub(in crate::net::wifi::mediatek) count: u16,
         pub(in crate::net::wifi::mediatek) head: u16,
@@ -485,15 +494,10 @@ pub(in crate::net::wifi::mediatek) mod tests {
         pub(in crate::net::wifi::mediatek) fail_publish: bool,
         pub(in crate::net::wifi::mediatek) fail_configure: bool,
         pub(in crate::net::wifi::mediatek) invalid_index: bool,
-        pub(in crate::net::wifi::mediatek) fail_unmap: bool,
-        pub(in crate::net::wifi::mediatek) fail_unmap_at: Option<usize>,
-        pub(in crate::net::wifi::mediatek) unmaps: usize,
-        pub(in crate::net::wifi::mediatek) fail_sync_at: Option<usize>,
         pub(in crate::net::wifi::mediatek) completed: Vec<Vec<u8>>,
-        pub(in crate::net::wifi::mediatek) syncs: Vec<(bool, u64, Range<usize>)>,
     }
     pub(in crate::net::wifi::mediatek) struct Domain(
-        pub(in crate::net::wifi::mediatek) Arc<Mutex<State>>,
+        pub(in crate::net::wifi::mediatek) Arc<Mutex<Memory>>,
     );
     // SAFETY: this domain is a stateful test IOVA/page-pin map, not a claim of
     // privileged IOMMU effects. It retains pins and serializes every access.
@@ -501,7 +505,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
         unsafe fn map(
             &self,
             pages: &PinnedPages,
-            _direction: Direction,
+            direction: Direction,
             limit: u64,
         ) -> Result<DomainMapping, DmaError> {
             let mut s = self.0.lock().unwrap();
@@ -514,7 +518,8 @@ pub(in crate::net::wifi::mediatek) mod tests {
                 .address(0, pages.bytes())
                 .unwrap()
                 .as_ptr() as usize;
-            s.mappings.insert(address, (pages.clone(), pointer));
+            s.mappings
+                .insert(address, (pages.clone(), pointer, direction));
             Ok(DomainMapping {
                 id: address,
                 address,
@@ -534,10 +539,11 @@ pub(in crate::net::wifi::mediatek) mod tests {
             &self,
             m: DomainMapping,
             range: Range<usize>,
-            _d: Direction,
+            direction: Direction,
         ) -> Result<(), DmaError> {
             let mut s = self.0.lock().unwrap();
-            assert!(s.mappings.contains_key(&m.id));
+            assert_eq!(s.mappings[&m.id].2, direction);
+            assert!(range.start <= range.end && range.end <= m.bytes);
             s.syncs.push((false, m.id, range));
             if s.fail_sync_at == Some(s.syncs.len()) {
                 return Err(DmaError::VisibilityFailed);
@@ -548,10 +554,11 @@ pub(in crate::net::wifi::mediatek) mod tests {
             &self,
             m: DomainMapping,
             range: Range<usize>,
-            _d: Direction,
+            direction: Direction,
         ) -> Result<(), DmaError> {
             let mut s = self.0.lock().unwrap();
-            assert!(s.mappings.contains_key(&m.id));
+            assert_eq!(s.mappings[&m.id].2, direction);
+            assert!(range.start <= range.end && range.end <= m.bytes);
             s.syncs.push((true, m.id, range));
             if s.fail_sync_at == Some(s.syncs.len()) {
                 return Err(DmaError::VisibilityFailed);
@@ -596,7 +603,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
     }
     fn setup(count: usize) -> (TxRing<Io>, Arc<Mutex<State>>) {
         let state = Arc::new(Mutex::new(State::default()));
-        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.clone()));
+        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.lock().unwrap().memory.clone()));
         // SAFETY: no hardware; brand-new model queue is exclusively owned/idle.
         let ring = unsafe { TxRing::install(Io(state.clone()), &Source, domain, count) }.unwrap();
         (ring, state)
@@ -604,7 +611,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
     pub(in crate::net::wifi::mediatek) fn device_complete_one(state: &Arc<Mutex<State>>) {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
-        let ptr = s.mappings[&s.base].1 + s.index as usize * DESC_BYTES;
+        let ptr = s.memory.lock().unwrap().mappings[&s.base].1 + s.index as usize * DESC_BYTES;
         let descriptor = unsafe { core::slice::from_raw_parts(ptr as *const u32, 4) };
         let address = u64::from(u32::from_le(descriptor[0]));
         let ctrl = u32::from_le(descriptor[1]);
@@ -612,7 +619,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
         assert_eq!(descriptor[2], 0);
         assert_eq!(descriptor[3], 0);
         let len = (ctrl >> 16 & 0x3fff) as usize;
-        let payload = s.mappings[&address].1;
+        let payload = s.memory.lock().unwrap().mappings[&address].1;
         assert_ne!(address, payload as u64);
         let bytes = unsafe { core::slice::from_raw_parts(payload as *const u8, len) }.to_vec();
         s.completed.push(bytes);
@@ -638,11 +645,29 @@ pub(in crate::net::wifi::mediatek) mod tests {
         }
         let s = state.lock().unwrap();
         assert_eq!(s.completed.len(), 70);
-        assert_eq!(s.syncs.iter().filter(|v| v.0).count(), 140);
+        assert_eq!(
+            s.memory
+                .lock()
+                .unwrap()
+                .syncs
+                .iter()
+                .filter(|v| v.0)
+                .count(),
+            140
+        );
         drop(s);
         // SAFETY: model stopped consuming and every submission is completed.
         unsafe { ring.release_after_quiesce() }.unwrap();
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
         assert_eq!(ring.submit(1, &[1]), Err(Error::Poisoned));
     }
     #[test]
@@ -666,17 +691,32 @@ pub(in crate::net::wifi::mediatek) mod tests {
         assert_eq!(ring.submit(7, &[0xa5; 4096]), Err(Error::RegisterFailure));
         assert_eq!(ring.pending(), 1);
         assert_eq!(ring.submit(8, &[1]), Err(Error::Poisoned));
-        assert_eq!(state.lock().unwrap().mappings.len(), 5);
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            5
+        );
         // SAFETY: device model explicitly stopped before attempting teardown.
-        state.lock().unwrap().fail_unmap = true;
+        state.lock().unwrap().memory.lock().unwrap().fail_unmap = true;
         assert_eq!(
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
-        assert_eq!(state.lock().unwrap().mappings.len(), 5);
-        state.lock().unwrap().fail_unmap = false;
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            5
+        );
+        state.lock().unwrap().memory.lock().unwrap().fail_unmap = false;
         unsafe { ring.release_after_quiesce() }.unwrap();
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
     }
     #[test]
     fn dropping_active_queue_quarantines_descriptor_and_exposed_payload_pins() {
@@ -685,7 +725,10 @@ pub(in crate::net::wifi::mediatek) mod tests {
         drop(ring);
         // Three never-published payload allocations unmap; active descriptor and
         // payload mappings retain their domain and pins through canonical Drop.
-        assert_eq!(state.lock().unwrap().mappings.len(), 2);
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            2
+        );
         assert_eq!(state.lock().unwrap().queue_drops, 0);
         device_complete_one(&state);
         assert_eq!(state.lock().unwrap().completed[0], [9]);
@@ -694,7 +737,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
     fn visibility_failures_poison_without_releasing_unknown_ownership() {
         for fail_at in [2, 3, 4, 5] {
             let (mut ring, state) = setup(4);
-            state.lock().unwrap().fail_sync_at = Some(fail_at);
+            state.lock().unwrap().memory.lock().unwrap().fail_sync_at = Some(fail_at);
             let submit = ring.submit(11, &[11; 4096]);
             if fail_at <= 3 {
                 assert_eq!(submit, Err(Error::Dma(DmaError::VisibilityFailed)));
@@ -706,27 +749,51 @@ pub(in crate::net::wifi::mediatek) mod tests {
             }
             assert!(ring.is_poisoned());
             assert_eq!(ring.submit(12, &[12]), Err(Error::Poisoned));
-            assert_eq!(state.lock().unwrap().mappings.len(), 5);
+            assert_eq!(
+                state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+                5
+            );
             // SAFETY: model is explicitly stopped before mappings are removed.
             unsafe { ring.release_after_quiesce() }.unwrap();
-            assert!(state.lock().unwrap().mappings.is_empty());
+            assert!(
+                state
+                    .lock()
+                    .unwrap()
+                    .memory
+                    .lock()
+                    .unwrap()
+                    .mappings
+                    .is_empty()
+            );
         }
     }
     #[test]
     fn partial_unmap_failure_can_finish_after_acknowledged_quiescence() {
         let (mut ring, state) = setup(4);
         ring.submit(20, &[20]).unwrap();
-        state.lock().unwrap().fail_unmap_at = Some(2);
+        state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
         // SAFETY: hardware model stopped; injected invalidation error retains
         // the still-mapped resources for the explicit later retry.
         assert_eq!(
             unsafe { ring.release_after_quiesce() },
             Err(Error::Dma(DmaError::InvalidationFailed))
         );
-        assert_eq!(state.lock().unwrap().mappings.len(), 4);
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            4
+        );
         unsafe { ring.release_after_quiesce() }.unwrap();
         assert_eq!(ring.pending(), 0);
-        assert!(state.lock().unwrap().mappings.is_empty());
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .memory
+                .lock()
+                .unwrap()
+                .mappings
+                .is_empty()
+        );
     }
     #[test]
     fn uncertain_configuration_retains_only_the_published_descriptor_mapping() {
@@ -734,21 +801,24 @@ pub(in crate::net::wifi::mediatek) mod tests {
             fail_configure: true,
             ..State::default()
         }));
-        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.clone()));
+        let domain: Arc<dyn DmaDomain> = Arc::new(Domain(state.lock().unwrap().memory.clone()));
         // SAFETY: exclusive brand-new idle model. Configure fails after base
         // publication, making its descriptor mapping conservatively uncertain.
         assert!(matches!(
             unsafe { TxRing::install(Io(state.clone()), &Source, domain, 4) },
             Err(Error::RegisterFailure)
         ));
-        assert_eq!(state.lock().unwrap().mappings.len(), 1);
+        assert_eq!(
+            state.lock().unwrap().memory.lock().unwrap().mappings.len(),
+            1
+        );
         assert_eq!(state.lock().unwrap().queue_drops, 0);
     }
     #[test]
     fn requester_and_bar_owner_drop_only_after_full_quiescent_unmap() {
         let (mut ring, state) = setup(4);
         ring.submit(1, &[1]).unwrap();
-        state.lock().unwrap().fail_unmap_at = Some(2);
+        state.lock().unwrap().memory.lock().unwrap().fail_unmap_at = Some(2);
         // SAFETY: stopped model; partial invalidation fails and keeps Q alive.
         assert_eq!(
             unsafe { ring.release_after_quiesce() },
