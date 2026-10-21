@@ -128,17 +128,15 @@ fn disable_l1_2_with<C: ConfigSpace>(
         .map(|index| l1ss_control(&functions[index]))
         .transpose()?
         .flatten();
-    match (child_control, parent_control) {
-        (None, None) => Ok(()),
-        (Some(child), Some(upstream)) => {
-            clear_l1_2(function, child)?;
-            clear_l1_2(
-                &mut functions[parent.expect("observed parent capability")],
-                upstream,
-            )
-        }
-        _ => Err(BlockError::Unsupported("unpaired PCI L1SS capabilities")),
+    // An older peer without L1SS cannot form L1.2. Do not refuse a working
+    // endpoint or invent a missing control; disable every advertised side.
+    if let Some(child) = child_control {
+        clear_l1_2(function, child)?;
     }
+    if let Some((parent, control)) = parent.zip(parent_control) {
+        clear_l1_2(&mut functions[parent], control)?;
+    }
+    Ok(())
 }
 
 /// Disable both ASPM states on a PCIe function and its immediate upstream
@@ -548,15 +546,22 @@ mod tests {
     }
 
     #[test]
-    fn l1ss_absence_is_distinct_from_unpaired_or_malformed_capabilities() {
+    fn l1ss_absence_skips_missing_controls_and_malformed_capabilities_still_refuse() {
         let writes = Writes::default();
         let mut endpoint = device(address(0, 8, 0), None, &writes);
         let mut parent = device(address(0, 4, 1), Some((8, 8)), &writes);
         disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).unwrap();
         add_l1ss(&mut endpoint, 0x180, 0xf);
-        assert!(disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).is_err());
-        assert!(disable_l1_2_with(&mut endpoint, &mut []).is_err());
+        disable_l1_2_with(&mut endpoint, core::slice::from_mut(&mut parent)).unwrap();
+        assert_eq!(*writes.borrow(), [(endpoint.address, 0x188, 0xb)]);
+        writes.borrow_mut().clear();
+        disable_l1_2_with(&mut endpoint, &mut []).unwrap();
+        assert!(writes.borrow().is_empty());
         add_l1ss(&mut parent, 0x180, 0xf);
+        let mut older_endpoint = device(address(0, 8, 0), None, &writes);
+        disable_l1_2_with(&mut older_endpoint, core::slice::from_mut(&mut parent)).unwrap();
+        assert_eq!(*writes.borrow(), [(parent.address, 0x188, 0xb)]);
+        writes.borrow_mut().clear();
         for invalid in 0..8 {
             let mut broken = device(address(0, 4, 1), Some((8, 8)), &writes);
             add_l1ss(&mut broken, 0x180, 0xf);
