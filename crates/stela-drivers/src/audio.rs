@@ -84,6 +84,9 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidConfiguration,
+    RegisterUnavailable {
+        offset: usize,
+    },
     UnsupportedVersion {
         major: u8,
         minor: u8,

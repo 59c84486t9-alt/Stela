@@ -237,17 +237,31 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.stop_commands()?;
         self.registers.write32(DPLBASE, 0);
         self.registers.write32(DPUBASE, 0);
-        if self.registers.read32(GCTL) & GCTL_RESET != 0 {
+        let gctl = self.registers.read32(GCTL);
+        if gctl == u32::MAX {
+            return Err(Error::RegisterUnavailable { offset: GCTL });
+        }
+        if gctl & GCTL_RESET != 0 {
             self.registers.write16(STATESTS, CODEC_MASK);
         }
-        let gctl = self.registers.read32(GCTL) & !(GCTL_RESET | GCTL_UNSOL);
+        let gctl = gctl & !(GCTL_RESET | GCTL_UNSOL);
         self.registers.write32(GCTL, gctl);
-        self.wait(Phase::LinkResetEnter, |r| r.read32(GCTL) & GCTL_RESET == 0)?;
+        self.wait(Phase::LinkResetEnter, |r| {
+            let value = r.read32(GCTL);
+            value != u32::MAX && value & GCTL_RESET == 0
+        })?;
         self.delay(500); // Linux: >=100us link/codec PLL reset assertion.
         self.registers.write32(GCTL, gctl | GCTL_RESET);
-        self.wait(Phase::LinkResetExit, |r| r.read32(GCTL) & GCTL_RESET != 0)?;
+        self.wait(Phase::LinkResetExit, |r| {
+            let value = r.read32(GCTL);
+            value != u32::MAX && value & GCTL_RESET != 0
+        })?;
         self.delay(1000); // Codec initialization requires >=540us after CRST.
-        self.codec_mask = self.registers.read16(STATESTS) & CODEC_MASK;
+        let state = self.registers.read16(STATESTS);
+        if state == u16::MAX {
+            return Err(Error::RegisterUnavailable { offset: STATESTS });
+        }
+        self.codec_mask = state & CODEC_MASK;
         self.registers.write16(STATESTS, self.codec_mask);
         let (entries, encoding) = ring_size(self.registers.read8(CORBSIZE))?;
         self.corb_entries = entries;
@@ -276,7 +290,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         match self.config.corb_reset {
             CorbReset::Handshake => {
                 self.wait(Phase::CorbResetEnter, |r| {
-                    r.read16(CORBRP) & POINTER_RESET != 0
+                    let value = r.read16(CORBRP);
+                    value != u16::MAX && value & POINTER_RESET != 0
                 })?;
                 self.registers.write16(CORBRP, 0);
             }
@@ -419,6 +434,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
 }
 
 fn ring_size(capability: u8) -> Result<(u16, u8), Error> {
+    if capability == u8::MAX {
+        return Err(Error::UnsupportedRingSize);
+    }
     if capability & (1 << 6) != 0 {
         Ok((256, 2))
     } else if capability & (1 << 5) != 0 {
@@ -508,6 +526,10 @@ mod tests {
         response_count: u16,
         command_start_read_failure: Option<usize>,
         command_started_once: bool,
+        control_read_failure: Option<(usize, usize)>,
+        control_failure_after_write: Option<(usize, u32, usize)>,
+        control_failure_active: bool,
+        binding_read_failure: bool,
         commands: Vec<u32>,
         constant_reply: Option<u32>,
         parameters: BTreeMap<(u8, u8), u32>,
@@ -559,6 +581,10 @@ mod tests {
                 response_count: 0,
                 command_start_read_failure: None,
                 command_started_once: false,
+                control_read_failure: None,
+                control_failure_after_write: None,
+                control_failure_active: false,
+                binding_read_failure: false,
                 commands: Vec::new(),
                 constant_reply: Some(0x1234_abcd),
                 parameters: BTreeMap::new(),
@@ -795,7 +821,13 @@ mod tests {
                     self.bindings.insert(node, command as u8);
                     0
                 }
-                0xf06 => u32::from(*self.bindings.get(&node).unwrap_or(&0)),
+                0xf06 => {
+                    if self.binding_read_failure {
+                        u32::MAX
+                    } else {
+                        u32::from(*self.bindings.get(&node).unwrap_or(&0))
+                    }
+                }
                 0xa00 => u32::from(*self.formats.get(&node).unwrap_or(&0)),
                 _ if (command >> 16) & 15 == 2 => {
                     self.formats.insert(node, command as u16);
@@ -808,6 +840,9 @@ mod tests {
         fn write(&mut self, offset: usize, value: u32, bytes: usize) {
             self.advance();
             self.writes.push((offset, value, bytes));
+            if self.control_failure_after_write == Some((offset, value, bytes)) {
+                self.control_failure_active = true;
+            }
             if offset == STATESTS
                 || offset == CORBSTS
                 || offset == RIRBSTS
@@ -960,7 +995,9 @@ mod tests {
         fn read8(&mut self, offset: usize) -> u8 {
             let mut m = self.0.borrow_mut();
             m.advance();
-            if m.command_started_once && m.command_start_read_failure == Some(offset) {
+            if (m.command_started_once && m.command_start_read_failure == Some(offset))
+                || (m.control_failure_active && m.control_read_failure == Some((offset, 1)))
+            {
                 return u8::MAX;
             }
             m.get(offset, 1) as u8
@@ -968,11 +1005,17 @@ mod tests {
         fn read16(&mut self, offset: usize) -> u16 {
             let mut m = self.0.borrow_mut();
             m.advance();
+            if m.control_failure_active && m.control_read_failure == Some((offset, 2)) {
+                return u16::MAX;
+            }
             m.get(offset, 2) as u16
         }
         fn read32(&mut self, offset: usize) -> u32 {
             let mut m = self.0.borrow_mut();
             m.advance();
+            if m.control_failure_active && m.control_read_failure == Some((offset, 4)) {
+                return u32::MAX;
+            }
             m.get(offset, 4)
         }
         fn write8(&mut self, offset: usize, value: u8) {
@@ -2279,18 +2322,197 @@ mod tests {
             assert_eq!(m.bytes[VMAJ], 1);
             assert!(m.commands.is_empty());
             assert_eq!(m.get(CORBWP, 2), 0);
+            let enabled = m
+                .writes
+                .iter()
+                .rposition(|(off, value, bytes)| {
+                    *off == CORBCTL && *value == u32::from(COMMAND_RUN) && *bytes == 1
+                })
+                .unwrap();
+            let cleanup = &m.writes[enabled + 1..];
             assert!(
-                m.writes
+                cleanup
                     .iter()
-                    .rev()
                     .any(|(off, value, bytes)| *off == CORBCTL && *value == 0 && *bytes == 1)
             );
             assert!(
-                m.writes
+                cleanup
                     .iter()
-                    .rev()
                     .any(|(off, value, bytes)| *off == RIRBCTL && *value == 0 && *bytes == 1)
             );
+        }
+    }
+    #[test]
+    fn control_read_failures_cannot_acknowledge_link_corb_or_codec_presence() {
+        for case in 0..5 {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            let expected = {
+                let mut m = model.borrow_mut();
+                match case {
+                    0 => {
+                        m.control_read_failure = Some((GCTL, 4));
+                        m.control_failure_active = true;
+                        Error::RegisterUnavailable { offset: GCTL }
+                    }
+                    1 => {
+                        m.control_read_failure = Some((GCTL, 4));
+                        m.control_failure_after_write = Some((GCTL, GCTL_RESET, 4));
+                        Error::Timeout(Phase::LinkResetExit)
+                    }
+                    2 => {
+                        m.control_read_failure = Some((CORBRP, 2));
+                        m.control_failure_after_write = Some((CORBRP, u32::from(POINTER_RESET), 2));
+                        Error::Timeout(Phase::CorbResetEnter)
+                    }
+                    3 => {
+                        m.control_read_failure = Some((STATESTS, 2));
+                        m.control_failure_after_write = Some((GCTL, GCTL_RESET, 4));
+                        Error::RegisterUnavailable { offset: STATESTS }
+                    }
+                    _ => {
+                        m.control_read_failure = Some((CORBSIZE, 1));
+                        m.control_failure_active = true;
+                        Error::UnsupportedRingSize
+                    }
+                }
+            };
+            assert!(matches!(create(&model,&mut fixture,config()),Err(error) if error==expected));
+            assert!(model.borrow().commands.is_empty());
+            if case == 0 {
+                assert!(
+                    !model
+                        .borrow()
+                        .writes
+                        .iter()
+                        .any(|(offset, _, _)| *offset == GCTL)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn failed_stream_control_reads_refuse_reset_start_and_stop_without_cpu_buffer_ownership() {
+        for case in 0..4 {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let base = stream_base(controller.capabilities.input_streams);
+            if case == 0 {
+                {
+                    let mut m = model.borrow_mut();
+                    m.control_read_failure = Some((base + SD_CTL, 1));
+                    m.control_failure_after_write = Some((base + SD_CTL, u32::from(SD_RESET), 1));
+                }
+                assert_eq!(
+                    controller.allocate_stream(
+                        Direction::Playback,
+                        stereo(),
+                        128,
+                        2,
+                        &mut fixture.allocator
+                    ),
+                    Err(Error::Timeout(Phase::StreamResetEnter))
+                );
+                continue;
+            }
+            let id = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            if case == 1 {
+                {
+                    let mut m = model.borrow_mut();
+                    m.control_read_failure = Some((base + SD_CTL, 1));
+                    m.control_failure_after_write = Some((base + SD_CTL, u32::from(SD_RUN), 1));
+                }
+                assert_eq!(
+                    controller.start(id),
+                    Err(Error::Timeout(Phase::StreamStart))
+                );
+            } else {
+                controller.start(id).unwrap();
+                let before = model.borrow().writes.len();
+                {
+                    let mut m = model.borrow_mut();
+                    m.control_read_failure = Some((base + SD_CTL, 1));
+                    if case == 2 {
+                        m.control_failure_active = true;
+                    } else {
+                        m.control_failure_after_write = Some((base + SD_CTL, 0, 1));
+                    }
+                }
+                assert_eq!(
+                    controller.stop(id),
+                    Err(if case == 2 {
+                        Error::RegisterUnavailable {
+                            offset: base + SD_CTL,
+                        }
+                    } else {
+                        Error::Timeout(Phase::StreamStop)
+                    })
+                );
+                if case == 2 {
+                    assert_eq!(model.borrow().writes.len(), before);
+                }
+            }
+            assert_eq!(controller.write_pcm(id, 0, &[1]), Err(Error::NeedsReset));
+        }
+    }
+
+    #[test]
+    fn converter_binding_ff_is_valid_data_but_full_failed_response_is_rejected() {
+        for failed_read in [false, true] {
+            let mut fixture = Fixture::new();
+            let model = graph_model();
+            model.borrow_mut().set(GCAP, (15 << 12) | 1, 2);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let mut graph = controller.enumerate_codec(0).unwrap();
+            graph.groups[0]
+                .widgets
+                .iter_mut()
+                .find(|widget| widget.node == 2)
+                .unwrap()
+                .capabilities &= !1;
+            let small = PcmFormat {
+                rate: 8_000,
+                bits: 8,
+                channels: 1,
+            };
+            for _ in 0..14 {
+                controller
+                    .allocate_stream(Direction::Playback, small, 128, 2, &mut fixture.allocator)
+                    .unwrap();
+            }
+            let id = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    PcmFormat {
+                        channels: 16,
+                        ..stereo()
+                    },
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            assert_eq!(id.tag(), 15);
+            model.borrow_mut().binding_read_failure = failed_read;
+            let result = controller.bind_converter(&graph, 2, id, 15);
+            assert_eq!(
+                result,
+                if failed_read {
+                    Err(Error::ConverterRejected)
+                } else {
+                    Ok(())
+                }
+            );
+            assert_eq!(model.borrow().bindings[&2], 0xff);
         }
     }
 }

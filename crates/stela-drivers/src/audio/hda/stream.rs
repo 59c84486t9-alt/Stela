@@ -51,9 +51,18 @@ pub(super) struct Stream {
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn stop_descriptor(&mut self, index: u8) -> Result<(), Error> {
         let base = stream_base(index);
-        let control = self.registers.read8(base + SD_CTL) & !(SD_RUN | SD_STATUS);
+        let control = self.registers.read8(base + SD_CTL);
+        if control == u8::MAX {
+            return Err(Error::RegisterUnavailable {
+                offset: base + SD_CTL,
+            });
+        }
+        let control = control & !(SD_RUN | SD_STATUS);
         self.registers.write8(base + SD_CTL, control);
-        self.wait(Phase::StreamStop, |r| r.read8(base + SD_CTL) & SD_RUN == 0)?;
+        self.wait(Phase::StreamStop, |r| {
+            let value = r.read8(base + SD_CTL);
+            value != u8::MAX && value & SD_RUN == 0
+        })?;
         // SD_STS is W1C, so never access it through a dword CTL RMW.
         self.registers.write8(base + SD_STS, SD_STATUS);
         Ok(())
@@ -64,11 +73,13 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let base = stream_base(index);
         self.registers.write8(base + SD_CTL, SD_RESET);
         self.wait(Phase::StreamResetEnter, |r| {
-            r.read8(base + SD_CTL) & SD_RESET != 0
+            let value = r.read8(base + SD_CTL);
+            value != u8::MAX && value & SD_RESET != 0
         })?;
         self.registers.write8(base + SD_CTL, 0);
         self.wait(Phase::StreamResetExit, |r| {
-            r.read8(base + SD_CTL) & SD_RESET == 0
+            let value = r.read8(base + SD_CTL);
+            value != u8::MAX && value & SD_RESET == 0
         })
     }
 
@@ -334,8 +345,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.registers.write8(base + SD_STS, SD_STATUS);
         fence(Ordering::SeqCst);
         self.registers.write8(base + SD_CTL, SD_RUN); // Polling; all IRQ enables remain zero.
-        if let Err(error) = self.wait(Phase::StreamStart, |r| r.read8(base + SD_CTL) & SD_RUN != 0)
-        {
+        if let Err(error) = self.wait(Phase::StreamStart, |r| {
+            let value = r.read8(base + SD_CTL);
+            value != u8::MAX && value & SD_RUN != 0
+        }) {
             let _ = self.stop_descriptor(id.index);
             self.streams[usize::from(id.index)]
                 .as_mut()
@@ -431,7 +444,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.verb(Verb::short(graph.address, node, 0x706, binding)?)?;
         let read_format = self.verb(Verb::short(graph.address, node, 0xa00, 0)?)?;
         let read_binding = self.verb(Verb::short(graph.address, node, 0xf06, 0)?)?;
-        if read_format as u16 != format || read_binding as u8 != binding {
+        if read_format != u32::from(format) || read_binding != u32::from(binding) {
             return Err(Error::ConverterRejected);
         }
         Ok(())
