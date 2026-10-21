@@ -134,7 +134,35 @@ impl<'a> Access<'a> {
 /// A memory-mapped device model. Offsets are relative to the start of the
 /// device's address space as placed by [`Bus::map`]. Values occupy the low
 /// `width` bytes; implementations refuse widths their registers do not have.
+/// Effective supply, clock, DMA-quiesce and reset inputs of one actual native
+/// device. Retention describes that device's declared ordinary-state contract,
+/// not a request to reconstruct software configuration after a destructive edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifecycleState {
+    pub powered: bool,
+    pub clocked: bool,
+    pub quiesced: bool,
+    pub reset: bool,
+    pub retention: bool,
+}
+
+/// An actual native device's complete lifecycle boundary. Capability does not
+/// imply every proposed state is qualified. The machine checks every affected
+/// device without side effects before acknowledging the controller request,
+/// then commits the checked state before any subsequent client activity.
+/// A commit must not fail or generate synthetic completion of canceled work.
+pub trait Lifecycle {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str>;
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>);
+}
+
 pub trait MmioDevice: Any {
+    /// Type-erased capability: e.g. a UART keeps a generic console sink, so
+    /// lifecycle dispatch must not require downcasting to its concrete type.
+    /// Returning None keeps missing lifecycle support explicit.
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        None
+    }
     fn name(&self) -> &'static str;
     fn read(
         &mut self,
@@ -341,6 +369,10 @@ impl Bus {
         Ok(next)
     }
     /// A model's state, for engine wiring such as the AMCC's write lock.
+    pub fn lifecycle(&mut self, device: DeviceId) -> Option<&mut dyn Lifecycle> {
+        self.devices.get_mut(device.0)?.lifecycle()
+    }
+
     pub fn device<T: MmioDevice>(&self, device: DeviceId) -> Option<&T> {
         let device: &dyn Any = self.devices.get(device.0)?.as_ref();
         device.downcast_ref::<T>()
