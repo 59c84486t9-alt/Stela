@@ -158,6 +158,8 @@ pub struct FunctionGroup {
     /// without inventing audio widgets for modem/vendor-specific groups.
     pub function_type: u32,
     pub pcm: PcmCapabilities,
+    /// Standard audio-function-group power states; absent for non-audio groups.
+    pub power_states: Option<u32>,
     pub widgets: Vec<Widget>,
 }
 
@@ -214,6 +216,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 node,
                 function_type,
                 pcm: PcmCapabilities::default(),
+                power_states: None,
                 widgets: Vec::new(),
             };
             if function_type & 0xff != 1 {
@@ -221,6 +224,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 continue;
             }
             audio_groups += 1;
+            group.power_states = Some(self.parameter(address, node, PAR_POWER)?);
             group.pcm.rates_and_bits = self.parameter(address, node, PAR_PCM)?;
             group.pcm.stream_formats = self.parameter(address, node, PAR_STREAM)?;
             let input_amp = self.parameter(address, node, PAR_AMP_IN)?;

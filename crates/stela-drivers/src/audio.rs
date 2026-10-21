@@ -78,6 +78,7 @@ pub enum Phase {
     StreamResetEnter,
     StreamResetExit,
     StreamStart,
+    CodecPower,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +118,9 @@ pub enum Error {
     },
     InvalidPosition(u32),
     ConverterRejected,
+    InvalidPinControl,
+    RouteRejected,
+    RouteInUse,
     /// A command timeout makes later replies ambiguous. A full controller
     /// reset/platform reinitialization is required before further commands.
     NeedsReset,

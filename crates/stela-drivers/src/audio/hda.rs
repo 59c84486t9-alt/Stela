@@ -23,10 +23,12 @@ use crate::bus::{
 mod codec;
 pub mod pci;
 mod registers;
+mod routing;
 mod stream;
 pub use codec::{CodecGraph, FunctionGroup, PcmCapabilities, Verb, Widget, WidgetKind};
 use registers::*;
 pub use registers::{MmioRegisters, Registers};
+pub use routing::{AnalogRoute, PinOptions, Vref};
 use stream::Stream;
 pub use stream::{StreamId, StreamStatus};
 
@@ -86,6 +88,8 @@ pub struct Controller<R, T> {
     command_poisoned: bool,
     stopped: bool,
     streams: Vec<Option<Stream>>,
+    routes: Vec<(StreamId, AnalogRoute)>,
+    routing_failed: bool,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -159,6 +163,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             command_poisoned: false,
             stopped: false,
             streams: (0..total).map(|_| None).collect(),
+            routes: Vec::new(),
+            routing_failed: false,
         };
         if let Err(error) = controller.initialize() {
             let _ = controller.shutdown();
@@ -497,6 +503,14 @@ mod tests {
         connection_words: BTreeMap<(u8, u8), u32>,
         formats: BTreeMap<u8, u16>,
         bindings: BTreeMap<u8, u8>,
+        route_controls: BTreeMap<(u8, u16), u8>,
+        amplifiers: BTreeMap<(u8, bool, u8, u8), u8>,
+        power_ready: BTreeMap<u8, u64>,
+        power_delay: u64,
+        power_stuck: bool,
+        power_error: bool,
+        reject_route_control: Option<u16>,
+        reject_amplifier: bool,
         last_dma_time: u64,
         dma_step_bytes: usize,
         playback: Vec<u8>,
@@ -536,6 +550,14 @@ mod tests {
                 connection_words: BTreeMap::new(),
                 formats: BTreeMap::new(),
                 bindings: BTreeMap::new(),
+                route_controls: BTreeMap::new(),
+                amplifiers: BTreeMap::new(),
+                power_ready: BTreeMap::new(),
+                power_delay: 12,
+                power_stuck: false,
+                power_error: false,
+                reject_route_control: None,
+                reject_amplifier: false,
                 last_dma_time: 0,
                 dma_step_bytes: 0,
                 playback: Vec::new(),
@@ -678,7 +700,66 @@ mod tests {
             }
             let node = ((command >> 20) & 127) as u8;
             let verb = ((command >> 8) & 0xfff) as u16;
+            let long = (command >> 16) & 15;
+            if long == 3 {
+                let value = command as u16;
+                let output = value & (1 << 15) != 0;
+                assert_eq!(value & (1 << 14) != 0, !output);
+                let index = ((value >> 8) & 15) as u8;
+                if value & (1 << 13) != 0 {
+                    self.amplifiers
+                        .insert((node, output, index, 0), value as u8);
+                }
+                if value & (1 << 12) != 0 {
+                    self.amplifiers
+                        .insert((node, output, index, 1), value as u8);
+                }
+                return 0;
+            }
+            if long == 0xb {
+                if self.reject_amplifier {
+                    return 0xff;
+                }
+                let value = command as u16;
+                let output = value & (1 << 15) != 0;
+                let channel = u8::from(value & (1 << 13) == 0);
+                return u32::from(
+                    *self
+                        .amplifiers
+                        .get(&(node, output, value as u8 & 15, channel))
+                        .unwrap_or(&0x80),
+                );
+            }
             match verb {
+                0x705 => {
+                    self.power_ready
+                        .insert(node, self.clock.now_us() + self.power_delay);
+                    0
+                }
+                0xf05 => {
+                    if self.power_error {
+                        1 << 8
+                    } else if self.power_stuck
+                        || self.clock.now_us() < *self.power_ready.get(&node).unwrap_or(&u64::MAX)
+                    {
+                        3 << 4
+                    } else {
+                        0
+                    }
+                }
+                0x701 | 0x707 | 0x70c => {
+                    self.route_controls
+                        .insert((node, verb + 0x800), command as u8);
+                    0
+                }
+                0xf01 | 0xf07 | 0xf0c => {
+                    if self.reject_route_control == Some(verb) {
+                        0xffff_ffff
+                    } else {
+                        u32::from(*self.route_controls.get(&(node, verb)).unwrap_or(&0))
+                    }
+                }
+
                 0xf00 => *self.parameters.get(&(node, command as u8)).unwrap_or(&0),
                 0xf02 => *self
                     .connection_words
@@ -1076,6 +1157,7 @@ mod tests {
                 (0, 2, 0x0010_0100),
                 (0, 4, (1 << 16) | 1),
                 (1, 5, 1),
+                (1, 0x0f, 1),
                 (1, 4, (2 << 16) | 6),
                 (1, 0x0a, (1 << 6) | (1 << 17)),
                 (1, 0x0b, 1),
@@ -1570,5 +1652,434 @@ mod tests {
                 available_words: 29
             })
         );
+    }
+    fn analog_model() -> Rc<RefCell<Model>> {
+        let model = graph_model();
+        {
+            let mut m = model.borrow_mut();
+            m.parameters.insert((1, 0x0d), 0x8000_1f1f);
+            m.parameters.insert((1, 0x12), 0x8000_1f1f);
+            for (node, parameter, value) in [
+                (2, 9, 1 | (1 << 2) | (1 << 10)),
+                (2, 0x0f, 1),
+                (3, 9, (1 << 20) | 1 | (1 << 1) | (1 << 8)),
+                (4, 9, (4 << 20) | 1 | (1 << 2) | (1 << 8)),
+                (4, 0x0c, 0x18 | (1 << 16)),
+                (5, 9, (4 << 20) | 1 | (1 << 1)),
+                (5, 0x0c, 0x20 | (0x37 << 8)),
+                (6, 9, (2 << 20) | 1 | (1 << 1) | (1 << 2) | (1 << 8)),
+                (7, 9, (3 << 20) | 1 | (1 << 8)),
+                (7, 0x0e, 2),
+            ] {
+                m.parameters.insert((node, parameter), value);
+            }
+            m.connection_words.insert((4, 0), 7);
+            m.connection_words.insert((6, 0), 2 | (3 << 8));
+            m.connection_words.insert((7, 0), 6 | (2 << 8));
+            m.route_controls.insert((4, 0xf0c), 5); // Preserve BTL and L/R bits.
+        }
+        model
+    }
+
+    fn stereo() -> PcmFormat {
+        PcmFormat {
+            rate: 48_000,
+            bits: 16,
+            channels: 2,
+        }
+    }
+
+    #[test]
+    fn analog_routes_program_real_command_rings_power_mixers_pins_and_both_directions() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        let output = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        let input = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+        assert_eq!(output.nodes(), &[4, 7, 6, 2]);
+        assert_eq!(input.nodes(), &[3, 5]);
+        let playback = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        controller
+            .configure_analog_route(
+                &graph,
+                &output,
+                playback,
+                0,
+                PinOptions::Playback {
+                    headphone: true,
+                    eapd: Some(true),
+                },
+            )
+            .unwrap();
+        controller
+            .configure_analog_route(
+                &graph,
+                &input,
+                capture,
+                0,
+                PinOptions::Capture {
+                    vref: Vref::EightyPercent,
+                },
+            )
+            .unwrap();
+        let m = model.borrow();
+        assert_eq!(m.route_controls[&(4, 0xf07)], 0xc0);
+        assert_eq!(m.route_controls[&(4, 0xf0c)], 7);
+        assert_eq!(m.route_controls[&(5, 0xf07)], 0x24);
+        assert_eq!(m.route_controls[&(7, 0xf01)], 0);
+        for channel in 0..2 {
+            assert_eq!(m.amplifiers[&(2, true, 0, channel)], 0x1f);
+            assert_eq!(m.amplifiers[&(6, false, 0, channel)], 0x1f);
+            assert_eq!(m.amplifiers[&(6, false, 1, channel)], 0x9f);
+            assert_eq!(m.amplifiers[&(5, false, 0, channel)], 0x1f);
+        }
+        assert!(m.power_ready.contains_key(&1));
+        assert!(m.power_ready.contains_key(&2));
+        assert!(
+            m.commands
+                .iter()
+                .filter(|command| (**command >> 8) & 0xfff == 0xf05)
+                .count()
+                > 3
+        );
+        assert_eq!(m.bindings[&2], playback.tag() << 4);
+        assert_eq!(m.bindings[&3], capture.tag() << 4);
+    }
+
+    #[test]
+    fn analog_route_preflight_refuses_unsupported_electrical_caps_before_any_verb() {
+        for failure in 0..7 {
+            let mut fixture = Fixture::new();
+            let model = analog_model();
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let mut graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let playback = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let mut options = PinOptions::Playback {
+                headphone: false,
+                eapd: None,
+            };
+            match failure {
+                0 => {
+                    options = PinOptions::Playback {
+                        headphone: true,
+                        eapd: None,
+                    };
+                    graph.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 4)
+                        .unwrap()
+                        .pin_capabilities = Some(0x10);
+                }
+                1 => {
+                    options = PinOptions::Playback {
+                        headphone: false,
+                        eapd: Some(true),
+                    };
+                    graph.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 4)
+                        .unwrap()
+                        .pin_capabilities = Some(0x10);
+                }
+                2 => graph.groups[0].power_states = Some(0),
+                3 => {
+                    graph.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 6)
+                        .unwrap()
+                        .input_amplifier = Some(0x1f1f)
+                }
+                4 => {
+                    graph.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 6)
+                        .unwrap()
+                        .output_amplifier = Some(0x8000_0001)
+                }
+                5 => {
+                    graph.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 7)
+                        .unwrap()
+                        .capabilities |= 1 << 13
+                }
+                _ => {
+                    options = PinOptions::Capture {
+                        vref: Vref::HighImpedance,
+                    }
+                }
+            }
+            let count = model.borrow().commands.len();
+            assert!(
+                controller
+                    .configure_analog_route(&graph, &route, playback, 0, options)
+                    .is_err()
+            );
+            assert_eq!(model.borrow().commands.len(), count);
+            assert!(!controller.routing_failed);
+        }
+    }
+
+    #[test]
+    fn analog_route_cycles_digital_and_cross_group_endpoints_refuse_explicitly() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        for variant in 0..4 {
+            let mut altered = graph.clone();
+            match variant {
+                0 => {
+                    altered.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 2)
+                        .unwrap()
+                        .capabilities |= 1 << 9
+                }
+                1 => {
+                    altered.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 6)
+                        .unwrap()
+                        .connections = vec![4, 7];
+                    altered.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 7)
+                        .unwrap()
+                        .connections = vec![6];
+                }
+                2 => {
+                    altered.groups[0]
+                        .widgets
+                        .iter_mut()
+                        .find(|w| w.node == 4)
+                        .unwrap()
+                        .connections = vec![3]
+                }
+                _ => {
+                    let removed = altered.groups[0].widgets.remove(0);
+                    let mut extra = altered.groups[0].clone();
+                    extra.node = 8;
+                    extra.widgets = vec![removed];
+                    altered.groups.push(extra);
+                }
+            }
+            assert!(altered.analog_route(Direction::Playback, 4, 2).is_err());
+        }
+    }
+
+    #[test]
+    fn analog_route_hardware_failures_poison_future_configuration_and_start() {
+        for failure in 0..6 {
+            let mut fixture = Fixture::new();
+            let model = analog_model();
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let playback = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            {
+                let mut m = model.borrow_mut();
+                match failure {
+                    0 => m.power_stuck = true,
+                    1 => m.power_error = true,
+                    2 => m.reject_route_control = Some(0xf01),
+                    3 => m.reject_route_control = Some(0xf07),
+                    4 => m.reject_route_control = Some(0xf0c),
+                    _ => m.reject_amplifier = true,
+                }
+            }
+            let result = controller.configure_analog_route(
+                &graph,
+                &route,
+                playback,
+                0,
+                PinOptions::Playback {
+                    headphone: false,
+                    eapd: Some(true),
+                },
+            );
+            assert_eq!(
+                result,
+                Err(if failure == 0 {
+                    Error::Timeout(Phase::CodecPower)
+                } else {
+                    Error::RouteRejected
+                })
+            );
+            assert_eq!(controller.start(playback), Err(Error::NeedsReset));
+            assert_eq!(
+                controller.configure_analog_route(
+                    &graph,
+                    &route,
+                    playback,
+                    0,
+                    PinOptions::Playback {
+                        headphone: false,
+                        eapd: None
+                    }
+                ),
+                Err(Error::NeedsReset)
+            );
+            controller.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn analog_routes_reserve_widgets_and_require_every_stream_stopped() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        let first = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let second = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let options = PinOptions::Playback {
+            headphone: false,
+            eapd: None,
+        };
+        controller
+            .configure_analog_route(&graph, &route, first, 0, options)
+            .unwrap();
+        let count = model.borrow().commands.len();
+        assert_eq!(
+            controller.configure_analog_route(&graph, &route, second, 0, options),
+            Err(Error::RouteInUse)
+        );
+        assert_eq!(
+            controller.configure_analog_route(&graph, &route, first, 0, options),
+            Err(Error::RouteInUse)
+        );
+        controller.start(first).unwrap();
+        assert_eq!(
+            controller.configure_analog_route(&graph, &route, second, 0, options),
+            Err(Error::StreamRunning)
+        );
+        assert_eq!(model.borrow().commands.len(), count);
+        controller.stop(first).unwrap();
+    }
+
+    #[test]
+    fn capture_bias_choices_and_stopped_buffer_fill_observe_capability_and_dma_ownership() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let mut graph = controller.enumerate_codec(0).unwrap();
+        let route = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        let playback = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        graph.groups[0]
+            .widgets
+            .iter_mut()
+            .find(|w| w.node == 5)
+            .unwrap()
+            .pin_capabilities = Some(0x20);
+        let count = model.borrow().commands.len();
+        assert_eq!(
+            controller.configure_analog_route(
+                &graph,
+                &route,
+                capture,
+                0,
+                PinOptions::Capture { vref: Vref::Half }
+            ),
+            Err(Error::InvalidPinControl)
+        );
+        assert_eq!(model.borrow().commands.len(), count);
+        controller
+            .configure_analog_route(
+                &graph,
+                &route,
+                capture,
+                0,
+                PinOptions::Capture {
+                    vref: Vref::HighImpedance,
+                },
+            )
+            .unwrap();
+        assert_eq!(model.borrow().route_controls[&(5, 0xf07)], 0x20);
+        controller.fill_capture(capture, 0xa5).unwrap();
+        let mut bytes = [0; 256];
+        controller.read_pcm(capture, 0, &mut bytes).unwrap();
+        assert_eq!(bytes, [0xa5; 256]);
+        assert_eq!(
+            controller.fill_capture(playback, 0xa5),
+            Err(Error::InvalidStream)
+        );
+        model.borrow_mut().dma_step_bytes = 64;
+        controller.start(capture).unwrap();
+        assert_eq!(
+            controller.fill_capture(capture, 0),
+            Err(Error::StreamRunning)
+        );
+        for _ in 0..8 {
+            controller.timer.relax();
+            let _ = controller.position(capture).unwrap();
+        }
+        controller.stop(capture).unwrap();
+        controller.read_pcm(capture, 0, &mut bytes).unwrap();
+        assert_ne!(bytes, [0xa5; 256]);
     }
 }

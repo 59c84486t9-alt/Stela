@@ -242,6 +242,17 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(id)
     }
 
+    pub fn stream_direction(&self, id: StreamId) -> Result<Direction, Error> {
+        Ok(self.stream(id)?.direction)
+    }
+
+    pub(super) fn require_routing_stopped(&self) -> Result<(), Error> {
+        if self.streams.iter().flatten().any(|stream| stream.running) {
+            return Err(Error::StreamRunning);
+        }
+        Ok(())
+    }
+
     pub fn stream_format(&self, id: StreamId) -> Result<PcmFormat, Error> {
         Ok(self.stream(id)?.format)
     }
@@ -271,6 +282,26 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
+    /// Fill a stopped capture ring with a known byte before starting DMA.
+    /// This supports buffer sanitization and detecting actual device writes.
+    pub fn fill_capture(&mut self, id: StreamId, value: u8) -> Result<(), Error> {
+        let stream = self.stream(id)?;
+        if stream.running {
+            return Err(Error::StreamRunning);
+        }
+        if stream.direction != Direction::Capture {
+            return Err(Error::InvalidStream);
+        }
+        self.streams[usize::from(id.index)]
+            .as_mut()
+            .ok_or(Error::InvalidStream)?
+            .buffer
+            .bytes_mut()
+            .fill(value);
+        Ok(())
+    }
+
+    /// Copy a stopped capture ring range into CPU-owned memory.
     pub fn read_pcm(&self, id: StreamId, offset: usize, bytes: &mut [u8]) -> Result<(), Error> {
         let stream = self.stream(id)?;
         if stream.running {
@@ -289,6 +320,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub fn start(&mut self, id: StreamId) -> Result<(), Error> {
+        if self.routing_failed {
+            return Err(Error::NeedsReset);
+        }
         if self.stream(id)?.running {
             return Err(Error::StreamRunning);
         }
@@ -375,6 +409,26 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
     ) -> Result<(), Error> {
+        self.validate_converter(graph, node, id, channel)?;
+        let stream = self.stream(id)?;
+        let format = stream.format.encode()?;
+        let binding = (id.tag << 4) | channel;
+        self.verb(Verb::long(graph.address, node, 2, format)?)?;
+        self.verb(Verb::short(graph.address, node, 0x706, binding)?)?;
+        let read_format = self.verb(Verb::short(graph.address, node, 0xa00, 0)?)?;
+        let read_binding = self.verb(Verb::short(graph.address, node, 0xf06, 0)?)?;
+        if read_format as u16 != format || read_binding as u8 != binding {
+            return Err(Error::ConverterRejected);
+        }
+        Ok(())
+    }
+    pub(super) fn validate_converter(
+        &self,
+        graph: &CodecGraph,
+        node: u8,
+        id: StreamId,
+        channel: u8,
+    ) -> Result<(), Error> {
         let stream = self.stream(id)?;
         if stream.running {
             return Err(Error::StreamRunning);
@@ -392,15 +446,6 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             || widget.channels() > stream.format.channels - channel
         {
             return Err(Error::InvalidFormat);
-        }
-        let format = stream.format.encode()?;
-        let binding = (id.tag << 4) | channel;
-        self.verb(Verb::long(graph.address, node, 2, format)?)?;
-        self.verb(Verb::short(graph.address, node, 0x706, binding)?)?;
-        let read_format = self.verb(Verb::short(graph.address, node, 0xa00, 0)?)?;
-        let read_binding = self.verb(Verb::short(graph.address, node, 0xf06, 0)?)?;
-        if read_format as u16 != format || read_binding as u8 != binding {
-            return Err(Error::ConverterRejected);
         }
         Ok(())
     }
