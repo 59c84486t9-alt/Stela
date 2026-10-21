@@ -29,9 +29,7 @@ const DESCRIPTOR_BYTES: usize = 16;
 const PAGE: usize = 4096;
 const COMPLETED: u16 = 2;
 const POSTED: u16 = 4;
-const CRC_ERROR: u16 = 1;
-const RX_OVERRUN: u16 = 4;
-const INTERRUPT: u16 = 8;
+const DESCRIPTOR_FLAGS_MASK: u16 = 15;
 static QUARANTINED_RINGS: AtomicU64 = AtomicU64::new(0);
 
 /// Rings dropped with a published DMA pointer and no proven final drain.
@@ -574,10 +572,11 @@ impl<R: Registers> Ring<R> {
             };
             let slot = &mut self.slots[index];
             let pending = slot.pending.ok_or(Error::Busy)?;
-            if flags & !(COMPLETED | POSTED | INTERRUPT | CRC_ERROR) != 0
-                || flags & CRC_ERROR != 0
-                || (self.config.direction == Direction::Rx && flags & RX_OVERRUN != 0)
-            {
+            // Raw control mode does not define frame-mode CRC/overrun
+            // semantics. Linux ctl.c preserves these descriptor bits and
+            // checks the actual wire CRC instead. In particular POSTED shares
+            // bit 0x4 with frame-mode BUFFER_OVERRUN and may remain set.
+            if flags & !DESCRIPTOR_FLAGS_MASK != 0 {
                 return Err(Error::FrameFlags(flags));
             }
             let actual_address = u64::from(self.descriptors.read32(base)?)
@@ -1279,8 +1278,8 @@ mod tests {
             ring.start().unwrap();
             ring.receive().unwrap();
             let word = match case {
-                0 => (u32::from(COMPLETED | CRC_ERROR) << 20) | 16,
-                1 => (u32::from(COMPLETED | RX_OVERRUN) << 20) | 16,
+                0 => (u32::from(COMPLETED | 0x10) << 20) | 16,
+                1 => (u32::from(COMPLETED | 0x20) << 20) | 16,
                 2 => u32::from(COMPLETED) << 20,
                 _ => (u32::from(COMPLETED) << 20) | 16,
             };
@@ -1353,6 +1352,25 @@ mod tests {
                     3 << 16
                 }
             );
+        }
+    }
+
+    #[test]
+    fn raw_rx_preserves_posted_and_frame_mode_aliases_in_completed_descriptors() {
+        for flags in 0..16u16 {
+            let (_source, _domain, model, mut ring) = self::ring(Direction::Rx, 4);
+            ring.start().unwrap();
+            ring.receive().unwrap();
+            model.finish(
+                Direction::Rx,
+                0,
+                &[0x45; 16],
+                Some((u32::from(flags | COMPLETED) << 20) | (1 << 12) | 16),
+            );
+            let completed = ring.poll().unwrap().unwrap();
+            assert_eq!(completed.flags, flags | COMPLETED);
+            assert_eq!(completed.data, vec![0x45; 16]);
+            release(&mut ring);
         }
     }
 }
