@@ -21,6 +21,9 @@ use stela_compiler::aarch64::{
 
 impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn exclusive(&mut self, operand: Operand) -> Step {
+        if self.cpu.has_canonical_memory() {
+            return self.shared_exclusive(operand);
+        }
         let Operand::Transfer {
             element_bytes,
             base,

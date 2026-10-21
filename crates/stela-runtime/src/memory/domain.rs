@@ -656,6 +656,18 @@ pub struct MemoryThread<P> {
     policy: P,
 }
 
+/// The real local monitor plus its mapping/service exclusion loan, retained
+/// through the final infallible CPU/controller settlement.
+pub(crate) struct PreparedLocalClear<'a> {
+    clear: monitor::PreparedClear<'a, MemoryBacking, MemoryView, MappingAttributes>,
+    _loan: MemoryExecutionLoan,
+}
+impl PreparedLocalClear<'_> {
+    pub(crate) fn commit(self) {
+        self.clear.commit();
+    }
+}
+
 impl<P: DataPolicy> MemoryThread<P> {
     /// Match the exact immutable snapshot retained by a source attribute witness.
     /// Identity alone does not establish effective ARM memory attributes.
@@ -795,6 +807,19 @@ impl<P: DataPolicy> MemoryThread<P> {
             .reservations
             .check_event_endpoint(&self.reservation, &endpoint.producer())
             .map_err(|_| MemoryStatus::Domain)
+    }
+
+    pub(crate) fn prepare_clear_reservation(
+        &mut self,
+    ) -> Result<PreparedLocalClear<'_>, MemoryStatus> {
+        let loan = self.domain.execution_loan()?;
+        let clear = self
+            .domain
+            .system
+            .reservations
+            .prepare_clear(&mut self.reservation)
+            .map_err(|_| MemoryStatus::Domain)?;
+        Ok(PreparedLocalClear { clear, _loan: loan })
     }
 
     /// Clear only the local reservation. The independent global mark survives.

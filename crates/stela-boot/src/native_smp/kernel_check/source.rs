@@ -131,3 +131,8 @@ pub(super) fn read_only_alias() -> (u64, u64) {
 pub(super) fn reservation_body(entry: u64) -> Vec<u8> {
     bytes(alloc::vec![STXP_W7_X4_X5_X6, branch(entry + 4, entry)])
 }
+
+/// Independent fresh reservations after the stopped CPU clear checkpoint.
+pub(super) fn reservation_load_body(entry: u64) -> Vec<u8> {
+    bytes(alloc::vec![LDXP_X4_X5_X6, branch(entry + 4, entry)])
+}

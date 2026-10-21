@@ -245,6 +245,18 @@ pub struct ThreadMonitor<B, M, A> {
     event: Option<Arc<EventCell<B>>>,
 }
 
+/// A retained exclusive borrow of the real local monitor. Dropping this
+/// preparation changes nothing; commit cannot substitute another reservation.
+pub(crate) struct PreparedClear<'a, B, M, A> {
+    domain: &'a MonitorDomain<B, M, A>,
+    thread: &'a mut ThreadMonitor<B, M, A>,
+}
+impl<B, M, A> PreparedClear<'_, B, M, A> {
+    pub(crate) fn commit(self) {
+        self.domain.retire(self.thread.reservation.take());
+    }
+}
+
 /// Declare before stripe guards so error/unwind cleanup cannot self-deadlock.
 struct LocalRetirement<'a, B, M, A> {
     domain: &'a MonitorDomain<B, M, A>,
@@ -517,6 +529,18 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         {
             entries.remove(&key);
         }
+    }
+
+    pub(crate) fn prepare_clear<'a>(
+        &'a self,
+        thread: &'a mut ThreadMonitor<B, M, A>,
+    ) -> Result<PreparedClear<'a, B, M, A>, MonitorError> {
+        self.check_execution()?;
+        self.owner(thread)?;
+        Ok(PreparedClear {
+            domain: self,
+            thread,
+        })
     }
 
     pub fn clear(&self, thread: &mut ThreadMonitor<B, M, A>) -> Result<(), MonitorError> {

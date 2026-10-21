@@ -11,11 +11,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// ERET from the current EL through its ELR and SPSR, as the host's
     /// kernel returns from the exception the engine took to it. System
     /// registers the host changed meanwhile take effect for the next fetch.
-    pub fn return_from_exception(&mut self) {
+    pub fn return_from_exception(
+        &mut self,
+    ) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
         let target = self.cpu.exception_link();
-        self.cpu.exception_return(target);
+        self.cpu.exception_return(target)?;
         self.pacm_written = true;
         self.sync_regime();
+        Ok(())
     }
 
     /// The pointer-authentication context the PE's own PAC instructions

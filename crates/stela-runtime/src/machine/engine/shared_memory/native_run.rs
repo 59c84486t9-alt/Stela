@@ -221,23 +221,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// publications and unjoined DMA/host writers are stopped; RAM registration
     /// and event ownership remain live. Interrupts, timers, debug, PMU and every
     /// BSP System/PAC/AMX service are settled before dispatch/after recovery by
-    /// the scheduler. The serial Cpu monitor must be empty at initial handoff;
-    /// after conversion this persistent checked service owns reservations/events.
-    /// Until that authority is explicitly joined back, serial exclusive/WFE/ERET
-    /// and other System services must not inspect Cpu.monitor/Cpu.event or run
-    /// direct SystemModeV1 guest-data writers, even between native calls. This
-    /// bounded frame alone is not full machine SMP admission.
+    /// the scheduler. The actual Cpu owns the persistent canonical memory/event
+    /// service; its inactive legacy fields cannot authorize serial fallback.
+    /// Stopped services must use that same owner and held-generation protocol.
+    /// Direct SystemModeV1 data writers remain excluded, including between calls.
+    /// This bounded frame alone is not full machine SMP admission.
     pub unsafe fn shared_native_run<'a>(
         &'a mut self,
-        memory: &'a mut SharedMemory,
         binding: publication::WorkerBinding,
     ) -> Result<NativeRun<'a>, MemoryStatus> {
+        let memory = self
+            .cpu
+            .canonical_memory
+            .as_ref()
+            .ok_or(MemoryStatus::Unsupported)?;
         if !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
             return Err(MemoryStatus::Unsupported);
         }
         prepare(
             &mut self.cpu,
-            memory,
             binding,
             self.current,
             &self.profile,
@@ -249,18 +251,27 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 fn prepare<'a>(
     cpu: &'a mut crate::machine::Cpu,
-    memory: &'a mut SharedMemory,
     binding: publication::WorkerBinding,
     pe: usize,
     cpu_profile: &crate::machine::CpuProfile,
     missing: &[crate::machine::system::Register],
     admit: &crate::machine::chip::AdmitTable,
 ) -> Result<NativeRun<'a>, MemoryStatus> {
-    if binding.pe != pe || memory.pe != pe {
+    if binding.pe != pe || cpu.monitor.is_some() {
         return Err(MemoryStatus::Unsupported);
     }
     let controls = Controls::capture(cpu, cpu_profile.name, missing)?;
     let pc = cpu.pc;
+    let state = &mut cpu.state;
+    let retired = &mut cpu.retired;
+    let frame_pc = &mut cpu.pc;
+    let memory = cpu
+        .canonical_memory
+        .as_mut()
+        .ok_or(MemoryStatus::Unsupported)?;
+    if memory.pe != pe {
+        return Err(MemoryStatus::Unsupported);
+    }
     if !pc.is_multiple_of(4) {
         return Err(MemoryStatus::Alignment);
     }
@@ -316,9 +327,9 @@ fn prepare<'a>(
     memory.memory.policy_mut().failure = None;
     Ok(NativeRun {
         memory,
-        state: &mut cpu.state,
-        pc: &mut cpu.pc,
-        retired: &mut cpu.retired,
+        state,
+        pc: frame_pc,
+        retired,
         worker: binding.worker,
         artifact: Artifact {
             identity,
@@ -372,27 +383,43 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// the exact held stopped-cohort lease before changing controls or ACKing.
     pub unsafe fn shared_native_cohort<'a>(
         &'a mut self,
-        memory: &'a mut [SharedMemory],
         bindings: &[publication::WorkerBinding],
     ) -> Result<Cohort<'a, H>, MemoryStatus> {
-        if memory.len() != self.peers.len()
-            || bindings.len() != memory.len()
-            || memory.iter().enumerate().any(|(pe, memory)| {
-                memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity)
-            })
-            || self.waiting.is_some()
-        {
+        if bindings.len() != self.peers.len() || self.waiting.is_some() {
             return Err(MemoryStatus::Unsupported);
         }
-        let first = memory.first().ok_or(MemoryStatus::Unsupported)?;
-        if memory.iter().any(|candidate| {
+        let services: Vec<_> = self
+            .peers
+            .iter()
+            .enumerate()
+            .map(|(pe, peer)| {
+                let cpu = match peer {
+                    super::super::processors::Peer::Running if pe == self.current => &self.cpu,
+                    super::super::processors::Peer::Parked(parked) if parked.native_ready() => {
+                        parked.cpu()
+                    }
+                    _ => return Err(MemoryStatus::Unsupported),
+                };
+                let memory = cpu
+                    .canonical_memory
+                    .as_ref()
+                    .ok_or(MemoryStatus::Unsupported)?;
+                if memory.pe != pe || !Arc::ptr_eq(&memory.machine, &self.native_memory_identity) {
+                    return Err(MemoryStatus::Unsupported);
+                }
+                Ok(memory)
+            })
+            .collect::<Result<_, _>>()?;
+        let first = services.first().ok_or(MemoryStatus::Unsupported)?;
+        if services.iter().any(|candidate| {
             !Arc::ptr_eq(&candidate.ram, &first.ram) || !candidate.event.same_domain(&first.event)
         }) {
             return Err(MemoryStatus::Unsupported);
         }
+        drop(services);
         let mut current = Some(&mut self.cpu);
-        let mut frames = Vec::with_capacity(memory.len());
-        for (pe, (peer, memory)) in self.peers.iter_mut().zip(memory).enumerate() {
+        let mut frames = Vec::with_capacity(self.peers.len());
+        for (pe, peer) in self.peers.iter_mut().enumerate() {
             let binding = bindings
                 .iter()
                 .find(|binding| binding.pe == pe)
@@ -409,7 +436,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             };
             frames.push(prepare(
                 cpu,
-                memory,
                 binding,
                 pe,
                 &self.profile,

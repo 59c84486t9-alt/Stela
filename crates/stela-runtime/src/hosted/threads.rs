@@ -679,7 +679,9 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
     loop {
         match pe.run(pe.statistics.blocks + SLICE_BLOCKS) {
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) if kernel.jit_register(pe)? => {
-                pe.return_from_exception();
+                pe.return_from_exception().map_err(|status| {
+                    anyhow::anyhow!("exception-return monitor/event settlement: {status:?}")
+                })?;
             }
             Stop::Breakpoint(pe::LOWER_SYNCHRONOUS) => {
                 execution.release(thread);
@@ -696,7 +698,9 @@ fn run(kernel: &mut Kernel, pe: &mut Box<Pe>, member: &Member) -> Result<Option<
                     return Ok(None);
                 }
                 resume(kernel, member, pe)?;
-                pe.return_from_exception();
+                pe.return_from_exception().map_err(|status| {
+                    anyhow::anyhow!("exception-return monitor/event settlement: {status:?}")
+                })?;
             }
             // XNU defers an AST taken inside the commpage's
             // preemption-free zone until the zone's exit, marking X15 for

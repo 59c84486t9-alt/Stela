@@ -197,7 +197,39 @@ impl<'a> ProcessorWrite<'a> {
             .then(|| self.native.prepare(self.cpu))
             .transpose()?;
         let current_paused = settlement.paused(self.current);
+        let paused = |pe| {
+            settlement
+                .changes()
+                .iter()
+                .any(|change| change.pe == pe && change.paused)
+        };
+        // Borrow the actual local monitors before any clock/controller effect.
+        // Dropping a later refused preparation preserves every reservation.
+        let mut clears = alloc::vec::Vec::new();
+        if paused(self.current) {
+            clears.push(self.cpu.prepare_clear_exclusive().map_err(|status| {
+                ProcessorPowerError::CanonicalMemory {
+                    pe: self.current,
+                    status,
+                }
+            })?);
+        }
+        for (pe, peer) in self.peers.iter_mut().enumerate() {
+            if paused(pe)
+                && let Peer::Parked(parked) = peer
+            {
+                clears.push(
+                    parked
+                        .cpu
+                        .prepare_clear_exclusive()
+                        .map_err(|status| ProcessorPowerError::CanonicalMemory { pe, status })?,
+                );
+            }
+        }
         let changes = settlement.commit();
+        for clear in clears {
+            clear.commit();
+        }
         if changes.is_empty() {
             return Ok(SettledProcessorWrite { owners: self });
         }

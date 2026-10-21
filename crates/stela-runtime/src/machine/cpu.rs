@@ -208,7 +208,7 @@ pub enum GuardedRefusal {
     Exit,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Cpu {
     pub state: GuestState,
     pub pc: u64,
@@ -216,7 +216,8 @@ pub struct Cpu {
     /// The architectural System registers.
     pub registers: File,
     pub apple: AppleState,
-    /// The local event register (WFE/SEV).
+    /// The serial lane's event storage. Converted PEs use the linear canonical
+    /// endpoint; observers must use event_is_set, not this inactive scalar.
     pub event: bool,
     /// Arm `ShouldAdvanceSS`: the instruction being stepped advances the
     /// software step state machine when it completes; ERET cancels that.
@@ -228,9 +229,12 @@ pub struct Cpu {
     /// The caches CLIDR_EL1 and CCSIDR_EL1 describe, where the board's
     /// identity gives them (`machine::caches`).
     pub caches: Option<super::caches::Caches>,
-    /// The Exclusives monitor: the reservation an exclusive load marked
-    /// (`engine::exclusive`).
+    /// The serial lane's byte-observed reservation (`engine::exclusive`).
+    /// Converted PEs retain their actual monitor in canonical_memory.
     pub monitor: Option<Reservation>,
+    /// Linear canonical monitor/event owner after shared-system conversion.
+    /// The legacy fields above grant no authority while this owner is present.
+    pub(in crate::machine) canonical_memory: Option<super::engine::SharedMemory>,
     /// The PE's Apple AMX unit (`machine::amx`).
     pub amx: super::amx::Unit,
     /// The GICv3 virtual CPU interface (`machine::vgic`).
@@ -322,6 +326,21 @@ fn bank(el: u8) -> Bank {
     }
 }
 
+/// A consuming borrow of this exact local monitor. Preparation can fail before
+/// CPU/controller effects; dropping it leaves the reservation unchanged.
+pub(crate) enum PreparedExclusiveClear<'a> {
+    Legacy(&'a mut Option<Reservation>),
+    Canonical(crate::memory::domain::PreparedLocalClear<'a>),
+}
+impl PreparedExclusiveClear<'_> {
+    pub(crate) fn commit(self) {
+        match self {
+            Self::Legacy(monitor) => *monitor = None,
+            Self::Canonical(clear) => clear.commit(),
+        }
+    }
+}
+
 impl Cpu {
     /// A PE of the chip the tests run on ([`super::test_chip`]).
     #[cfg(test)]
@@ -356,6 +375,7 @@ impl Cpu {
             claim: 0,
             caches: None,
             monitor: None,
+            canonical_memory: None,
             amx: super::amx::Unit::on(chip),
             vgic: super::vgic::CpuInterface::default(),
             scalable: (chip.implemented(Feature::FEAT_SME) == Ok(true)).then(|| {
@@ -369,6 +389,49 @@ impl Cpu {
             ctrr: Rc::default(),
             memory_lock: None,
         }
+    }
+
+    /// The actual event register; converted PEs read their canonical endpoint.
+    pub fn event_is_set(&self) -> bool {
+        self.canonical_memory
+            .as_ref()
+            .map_or(self.event, |memory| memory.event_endpoint().is_set())
+    }
+    /// Publish an event to this PE, coalescing with concurrent monitor signals.
+    pub fn signal_event(&mut self) {
+        if let Some(memory) = &self.canonical_memory {
+            memory.event_endpoint().signal_local();
+        } else {
+            self.event = true;
+        }
+    }
+    /// Consume at most the currently published event; no copied bit is cleared.
+    pub fn consume_event(&mut self) -> bool {
+        if let Some(memory) = &self.canonical_memory {
+            memory.event_endpoint().consume_if_set()
+        } else {
+            core::mem::take(&mut self.event)
+        }
+    }
+    /// CLREX and legal exception return clear the same local reservation as
+    /// checked native stores. The physical global mark retains its own lifetime.
+    pub(crate) fn prepare_clear_exclusive(
+        &mut self,
+    ) -> Result<PreparedExclusiveClear<'_>, stela_compiler::context::memory::MemoryStatus> {
+        if let Some(memory) = &mut self.canonical_memory {
+            Ok(PreparedExclusiveClear::Canonical(
+                memory.prepare_clear_reservation()?,
+            ))
+        } else {
+            Ok(PreparedExclusiveClear::Legacy(&mut self.monitor))
+        }
+    }
+    pub fn clear_exclusive(&mut self) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
+        self.prepare_clear_exclusive()?.commit();
+        Ok(())
+    }
+    pub fn has_canonical_memory(&self) -> bool {
+        self.canonical_memory.is_some()
     }
 
     /// Present an identification that withholds the chip's features in
@@ -993,7 +1056,13 @@ impl Cpu {
     /// guarded: SPTM 26A434 enters TXM at GL0 that way (`__text+0x2b1c`,
     /// SPSR_GL M=EL0t), and leaves for unguarded code only through GEXIT
     /// with ASPSR_GL bit 0 clear (inference; no public description).
-    pub fn exception_return(&mut self, target: u64) {
+    pub fn exception_return(
+        &mut self,
+        target: u64,
+    ) -> Result<(), stela_compiler::context::memory::MemoryStatus> {
+        // Preflight/clear before any architectural CPU effect. A failed domain
+        // cannot appear to complete ERET with a stale local reservation.
+        self.clear_exclusive()?;
         let guarded = self.pstate.guarded;
         let spsr = self.exception_state();
         let illegal = self.illegal_return(spsr).is_some();
@@ -1016,8 +1085,8 @@ impl Cpu {
             self.branch_address(target)
         };
         // ERET clears the local exclusive monitor and sets the event register.
-        self.monitor = None;
-        self.event = true;
+        self.signal_event();
+        Ok(())
     }
 }
 
@@ -1056,7 +1125,7 @@ mod tests {
         assert!(cpu.pstate.pan);
         cpu.state.sp = 0xffff_0100;
         cpu.registers.set(Register::SPSR_EL1, 0, DAIF_I as u64 * 64); // EL0t with IRQs masked
-        cpu.exception_return(cpu.exception_link());
+        cpu.exception_return(cpu.exception_link()).unwrap();
         assert_eq!(
             (cpu.pc, cpu.state.sp, cpu.sp(1)),
             (0x4004, 0x7000, 0xffff_0100)
@@ -1096,22 +1165,22 @@ mod tests {
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0200, 2));
         assert_eq!(cpu.read(Register::SPSR_EL2) & 0xf, 0b1001, "EL2h");
         assert_eq!(cpu.read(Register::ESR_EL2), 0x5a00_0003);
-        cpu.exception_return(cpu.exception_link());
+        cpu.exception_return(cpu.exception_link()).unwrap();
         assert_eq!((cpu.pc, cpu.pstate.el), (0x8004, 2));
         // EL0 in the host: exceptions go to EL2.
         cpu.registers.set(Register::SPSR_EL2, 0, 0);
-        cpu.exception_return(cpu.exception_link());
+        cpu.exception_return(cpu.exception_link()).unwrap();
         assert_eq!((cpu.pstate.el, cpu.regime()), (0, TranslationRegime::El20));
         cpu.take(Exception::synchronous(Class::SupervisorCall, 0, 0x8008));
         assert_eq!((cpu.pc, cpu.pstate.el), (0x1_0400, 2));
         // A return to EL1 under TGE is illegal: EL2 stays and sets IL.
         cpu.registers.set(Register::SPSR_EL2, 0, 0b0101);
         assert_eq!(cpu.illegal_return(0b0101), Some(IllegalReturn::Host));
-        cpu.exception_return(0x9000);
+        cpu.exception_return(0x9000).unwrap();
         assert_eq!((cpu.pc, cpu.pstate.el, cpu.pstate.il), (0x9000, 2, true));
         // Without TGE it enters a guest.
         cpu.registers.set(Register::HCR_EL2, 0, 0);
-        cpu.exception_return(cpu.exception_link());
+        cpu.exception_return(cpu.exception_link()).unwrap();
         assert!(!cpu.pstate.il);
         assert_eq!((cpu.pstate.el, cpu.regime()), (1, TranslationRegime::El10));
         assert_eq!(cpu.route(), 1);

@@ -272,11 +272,11 @@ impl mmu::TableMemory for Tables<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::{
         machine::system::Register,
-        memory::{ReservedSystemRamRange, source_ram::system::fixture},
+        memory::{ReservedSystemRamRange, source_ram::system::fixture as ram_fixture},
     };
     use core::{cell::UnsafeCell, ptr::NonNull};
     const BASE: u64 = 0x10000;
@@ -290,7 +290,12 @@ mod tests {
     // retains these exact bytes and every writer uses its physical system.
     unsafe impl Send for Storage {}
     unsafe impl Sync for Storage {}
-    fn policy() -> Policy {
+    pub(in crate::machine::engine::shared_memory) fn fixture() -> (
+        crate::machine::Cpu,
+        crate::machine::CpuProfile,
+        Vec<Register>,
+        Arc<RegisteredSystemRam>,
+    ) {
         let storage = Arc::new(Storage(UnsafeCell::new([0; 6 * PAGE])));
         let range = ReservedSystemRamRange {
             source_pa: BASE,
@@ -299,7 +304,7 @@ mod tests {
             bytes: 6 * PAGE,
         };
         // SAFETY: test-only actual byte owner, no production CPL0 claim.
-        let ram = Arc::new(unsafe { fixture(&[range], storage) });
+        let ram = Arc::new(unsafe { ram_fixture(&[range], storage) });
         for (address, descriptor) in [
             (BASE, (BASE + PAGE as u64) | 3),
             (BASE + PAGE as u64, (BASE + 2 * PAGE as u64) | 3),
@@ -316,6 +321,10 @@ mod tests {
         );
         cpu.registers.set_raw(Register::TTBR0_EL1, 0, BASE);
         cpu.registers.set_raw(Register::MAIR_EL1, 0, 0xff);
+        (cpu, profile, missing, ram)
+    }
+    fn policy() -> Policy {
+        let (cpu, profile, missing, ram) = fixture();
         Policy::new(
             Controls::capture(&cpu, profile.name, &missing).unwrap(),
             ram,

@@ -224,8 +224,8 @@ pub(crate) unsafe fn check(
     unsafe { ram.publish_physical(entry, &source) }
         .map_err(|_| "native kernel shared source publication failed")?;
     let events = EventDomain::new();
-    let mut memory = machine
-        .shared_memory_for_processors(Arc::clone(&ram), &events)
+    machine
+        .install_shared_memory_for_processors(Arc::clone(&ram), &events)
         .map_err(|_| "native kernel source controls refused")?;
     let bindings: Vec<_> = (0..cores)
         .map(|pe| WorkerBinding {
@@ -260,7 +260,6 @@ pub(crate) unsafe fn check(
     let controls_before = control_state(&machine)?;
     let reports = execute(
         &mut machine,
-        &mut memory,
         &bindings,
         &mut bsp_owner,
         executors,
@@ -319,22 +318,34 @@ pub(crate) unsafe fn check(
         executors,
         sender,
         handoff.tsc_hz,
-        || {
-            // Same canonical all-writer gate, including same-value stores:
-            // returning bytes to zero must not restore the old reservation.
-            unsafe { ram.publish_physical(source::DATA + 64, &1u64.to_le_bytes()) }
-                .map_err(|_| "native kernel host ABA first publication refused")?;
-            unsafe { ram.publish_physical(source::DATA + 64, &0u64.to_le_bytes()) }
-                .map_err(|_| "native kernel host ABA restore refused")?;
+        |machine| {
+            if machine.cpu.pstate.el != 2 {
+                return Err("native kernel ERET fixture lost EL2 owner");
+            }
+            machine.cpu.consume_event();
+            let spsr = machine.cpu.pstate.to_spsr(machine.cpu.state.nzcv);
+            machine
+                .cpu
+                .registers
+                .set_raw(machine::system::Register::SPSR_EL2, 0, spsr);
+            machine
+                .cpu
+                .exception_return(entry)
+                .map_err(|_| "native kernel actual ERET owner failed")?;
+            if !machine.cpu.event_is_set() || machine.cpu.event || !machine.cpu.consume_event() {
+                return Err(
+                    "native kernel ERET used a copied event instead of its canonical endpoint",
+                );
+            }
             unsafe { ram.publish_physical(entry, &source::reservation_body(entry)) }
                 .map_err(|_| "native kernel exclusive source publication refused")
         },
     )?;
+    let cleared_pe = machine.processor();
     let exclusive_before = states(&machine)?;
     let exclusive_controls = control_state(&machine)?;
     let exclusive = execute(
         &mut machine,
-        &mut memory,
         &bindings,
         &mut bsp_owner,
         executors,
@@ -348,7 +359,57 @@ pub(crate) unsafe fn check(
         .zip(exclusive_before.iter().zip(&exclusive_after))
     {
         let mut expected = old.clone();
-        expected.x[7] = 1;
+        expected.x[7] = actual.x[7];
+        if report.status.is_err()
+            || report.memory_fault.is_some()
+            || report.source_failure.is_some()
+            || report.settled_pc != entry
+            || report.retired != 2
+            || *actual != expected
+            || actual.x[7] > 1
+            || report.identity.pe == cleared_pe && actual.x[7] != 1
+        {
+            return Err("native kernel actual STXP did not preserve the CPU-owned ERET clear");
+        }
+    }
+    if exclusive_after
+        .iter()
+        .filter(|state| state.x[7] == 0)
+        .count()
+        != usize::from(cores > 1)
+    {
+        return Err("native kernel canonical ERET clear lost the independent successful STXP");
+    }
+    stop(
+        &mut machine,
+        &mut bsp_owner,
+        executors,
+        sender,
+        handoff.tsc_hz,
+        |_| {
+            unsafe { ram.publish_physical(entry, &source::reservation_load_body(entry)) }
+                .map_err(|_| "native kernel fresh LDXP source publication refused")
+        },
+    )?;
+    let reloaded_before = states(&machine)?;
+    let reloaded_controls = control_state(&machine)?;
+    let reloaded = execute(
+        &mut machine,
+        &bindings,
+        &mut bsp_owner,
+        executors,
+        sender,
+        handoff.tsc_hz,
+    )?;
+    check_control_state(&machine, &reloaded_controls, 2)?;
+    let reloaded_after = states(&machine)?;
+    for (report, (old, actual)) in reloaded
+        .iter()
+        .zip(reloaded_before.iter().zip(&reloaded_after))
+    {
+        let mut expected = old.clone();
+        expected.x[4] = 0;
+        expected.x[5] = 0;
         if report.status.is_err()
             || report.memory_fault.is_some()
             || report.source_failure.is_some()
@@ -356,7 +417,7 @@ pub(crate) unsafe fn check(
             || report.retired != 2
             || *actual != expected
         {
-            return Err("native kernel actual STXP accepted an invalidated ABA reservation");
+            return Err("native kernel fresh LDXP changed its complete frame");
         }
     }
     stop(
@@ -365,7 +426,47 @@ pub(crate) unsafe fn check(
         executors,
         sender,
         handoff.tsc_hz,
-        || {
+        |_| {
+            unsafe { ram.publish_physical(source::DATA + 64, &1u64.to_le_bytes()) }
+                .map_err(|_| "native kernel host ABA first publication refused")?;
+            unsafe { ram.publish_physical(source::DATA + 64, &0u64.to_le_bytes()) }
+                .map_err(|_| "native kernel host ABA restore refused")?;
+            unsafe { ram.publish_physical(entry, &source::reservation_body(entry)) }
+                .map_err(|_| "native kernel ABA STXP source publication refused")
+        },
+    )?;
+    let aba_before = states(&machine)?;
+    let aba_controls = control_state(&machine)?;
+    let aba = execute(
+        &mut machine,
+        &bindings,
+        &mut bsp_owner,
+        executors,
+        sender,
+        handoff.tsc_hz,
+    )?;
+    check_control_state(&machine, &aba_controls, 2)?;
+    let aba_after = states(&machine)?;
+    for (report, (old, actual)) in aba.iter().zip(aba_before.iter().zip(&aba_after)) {
+        let mut expected = old.clone();
+        expected.x[7] = 1;
+        if report.status.is_err()
+            || report.memory_fault.is_some()
+            || report.source_failure.is_some()
+            || report.settled_pc != entry
+            || report.retired != 2
+            || *actual != expected
+        {
+            return Err("native kernel actual STXP accepted canonical host ABA");
+        }
+    }
+    stop(
+        &mut machine,
+        &mut bsp_owner,
+        executors,
+        sender,
+        handoff.tsc_hz,
+        |_| {
             let (address, descriptor) = source::read_only_alias();
             unsafe { ram.publish_physical(address, &descriptor.to_le_bytes()) }
                 .map_err(|_| "native kernel read-only alias publication refused")?;
@@ -377,7 +478,6 @@ pub(crate) unsafe fn check(
     let fault_controls = control_state(&machine)?;
     let faults = execute(
         &mut machine,
-        &mut memory,
         &bindings,
         &mut bsp_owner,
         executors,
@@ -422,10 +522,10 @@ pub(crate) unsafe fn check(
         executors,
         sender,
         handoff.tsc_hz,
-        || Ok(()),
+        |_| Ok(()),
     )?;
     crate::output::arguments(format_args!(
-        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared returned_and_invalidated=true permission_faults=precise host_ABA_STXP=failed; original macOS SMP unqualified\n",
+        "CHECK native-shared-kernel PASS physical_cores={cores} actual_frames={} lse_updates={} full_GPR_SIMD_FP_state=preserved canonical_RAM=shared returned_and_invalidated=true permission_faults=precise host_ABA_STXP=failed canonical_CPU_ERET_event=true; original macOS SMP unqualified\n",
         reports.len(),
         cores * source::INCREMENTS
     ));
@@ -433,7 +533,6 @@ pub(crate) unsafe fn check(
 }
 fn execute<H: Host>(
     machine: &mut Machine<H, TestDevices>,
-    memory: &mut [engine::SharedMemory],
     bindings: &[WorkerBinding],
     bsp_owner: &mut engine::publication::WorkerOwner,
     executors: &Executors,
@@ -443,7 +542,7 @@ fn execute<H: Host>(
     // SAFETY: every PE's real source controls/frame and canonical RAM are owned;
     // no DMA/IRQ/System service is concurrent, masks remain reset, GPR/LSE-only
     // bounded body. All AP loans are synchronously joined below without leaks.
-    let cohort = unsafe { machine.shared_native_cohort(memory, bindings) }
+    let cohort = unsafe { machine.shared_native_cohort(bindings) }
         .map_err(|_| "native kernel actual frame preparation refused")?;
     let mut pending = Vec::new();
     let mut bsp_loan = None;
@@ -498,7 +597,7 @@ fn stop<H: Host>(
     executors: &Executors,
     sender: &Apic,
     tsc_hz: u64,
-    stopped: impl FnOnce() -> Result<(), &'static str>,
+    stopped: impl FnOnce(&mut Machine<H, TestDevices>) -> Result<(), &'static str>,
 ) -> Result<(), &'static str> {
     let members: Vec<_> = (0..machine.peer_states().len()).collect();
     let inventory = machine
@@ -536,7 +635,10 @@ fn stop<H: Host>(
     let held = inventory
         .hold_stop(request)
         .map_err(|_| "native kernel actual all-worker stop refused")?;
-    stopped()?;
+    stopped(machine)?;
+    let inventory = machine
+        .native_worker_publications()
+        .ok_or("native kernel inventory absent")?;
     let releases = inventory
         .release(held)
         .map_err(|_| "native kernel held generation release refused")?;

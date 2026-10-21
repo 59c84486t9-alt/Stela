@@ -42,18 +42,31 @@ pub enum ProcessorPowerError {
     DuplicateDomain(u64),
     UnknownDomain(u64),
     EmptyCluster(u64),
-    UnknownPe { domain: u64, pe: usize },
-    DuplicatePe { domain: u64, pe: usize },
+    UnknownPe {
+        domain: u64,
+        pe: usize,
+    },
+    DuplicatePe {
+        domain: u64,
+        pe: usize,
+    },
     SupplyLossUnqualified(u64),
     ResetUnqualified(u64),
     RetentionCapabilityChanged(u64),
     StalePlan,
     MembershipChanged,
     RevisionExhausted,
-    OwnerCount { expected: usize, actual: usize },
+    OwnerCount {
+        expected: usize,
+        actual: usize,
+    },
     MissingLiveOwner(usize),
     UnexpectedLiveOwner(usize),
     NativeStateExhausted(&'static str),
+    CanonicalMemory {
+        pe: usize,
+        status: stela_compiler::context::memory::MemoryStatus,
+    },
     Publication(super::publication::PublicationError),
 }
 

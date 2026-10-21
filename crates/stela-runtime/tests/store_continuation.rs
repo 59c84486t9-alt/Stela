@@ -286,7 +286,7 @@ fn fault_prefix_and_repaired_continuation_keep_exact_pc_and_writeback() -> Resul
                     "fault prefix {name} split {split}"
                 );
                 assert_memory(&data, &[(address, &first[..split])], name);
-                machine.return_from_exception();
+                machine.return_from_exception().unwrap();
                 assert_eq!(machine.cpu.pc, code.0 + 4);
                 assert_eq!(
                     machine.run(machine.statistics.blocks + 64),

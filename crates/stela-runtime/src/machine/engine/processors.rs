@@ -353,7 +353,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     if kind == WaitKind::Event {
                         self.sample_events(now);
                     }
-                    (kind == WaitKind::Event && self.cpu.event)
+                    (kind == WaitKind::Event && self.cpu.event_is_set())
                         || timeout.is_some_and(|timeout| timeout.expired(now))
                         || self.interrupt_pending()
                 }
@@ -381,10 +381,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if let Some(previous) = parked.event_sample
                 && timer::event(&parked.cpu, previous, now)
             {
-                parked.cpu.event = true;
+                parked.cpu.signal_event();
             }
             parked.event_sample = Some(now);
-            if parked.cpu.event {
+            if parked.cpu.event_is_set() {
                 return true;
             }
         }
@@ -417,7 +417,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         self.sync_monitor();
         if kind == WaitKind::Event && !self.interrupt_pending() {
-            self.cpu.event = false;
+            self.cpu.consume_event();
         }
         self.next()
     }
@@ -516,7 +516,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let mut bytes = [0; RESERVATION_GRANULE as usize];
             if !self.host.read_ram(reservation.granule, &mut bytes) || bytes != reservation.bytes {
                 cpu.monitor = None;
-                cpu.event = true;
+                cpu.signal_event();
             }
         }
     }
@@ -525,7 +525,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// `SendEvent`, `SendEventLocal`). A PE held in reset or powered down
     /// takes none.
     pub(super) fn send_event(&mut self, local: bool) {
-        self.cpu.event = true;
+        self.cpu.signal_event();
         if local {
             return;
         }
@@ -533,7 +533,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             if let Peer::Parked(parked) = peer
                 && !down(parked.waiting)
             {
-                parked.cpu.event = true;
+                parked.cpu.signal_event();
             }
         }
     }
@@ -585,6 +585,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// AMX unit) restarts as on its other resets (inference: no 26A434
     /// component requests a Warm reset). The cluster's shared registers stay.
     pub(super) fn warm_reset(&mut self) -> Step {
+        if self.cpu.has_canonical_memory() {
+            return Err(self.unsupported(RequirementKind::Native(
+                "canonical native PE reset requires its RAM/event retirement and reset-rebind owner",
+            )));
+        }
         let pe = self.current;
         let Some(address) = self.devices.reset_vector(pe) else {
             return Err(self.unsupported(RequirementKind::Native(
@@ -702,9 +707,6 @@ fn pause_cpu(cpu: &mut Cpu, waiting: Option<Wait>, now: u64, paused: bool) {
     }
     if let Some(amu) = cpu.amu.as_mut() {
         amu.sync(now, cpu.retired, waiting);
-    }
-    if paused {
-        cpu.monitor = None;
     }
 }
 

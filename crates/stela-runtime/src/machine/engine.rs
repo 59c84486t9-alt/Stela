@@ -2150,7 +2150,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         if let Some(previous) = self.event_sample
             && timer::event(&self.cpu, previous, now)
         {
-            self.cpu.event = true;
+            self.cpu.signal_event();
         }
         self.event_sample = Some(now);
     }
@@ -2382,6 +2382,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
     /// Run until a stop. `budget` limits executed blocks (0 = unlimited).
     pub fn run(&mut self, budget: u64) -> Stop {
+        if self.cpu.has_canonical_memory() || self.peers.iter().any(|peer|
+            matches!(peer, processors::Peer::Parked(parked) if parked.cpu().has_canonical_memory())) {
+            return self.unsupported(RequirementKind::Native(
+                "converted shared-memory PEs require the qualified native scheduler; serialized direct-RAM fallback is forbidden",
+            ));
+        }
         self.block_limit = if budget == 0 { u64::MAX } else { budget };
         loop {
             if self.statistics.blocks >= self.block_limit {
@@ -5132,7 +5138,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         self.guest_entry(self.cpu.exception_state(), self.cpu.pstate.guarded)?;
-        self.cpu.exception_return(target);
+        self.cpu.exception_return(target).map_err(|_| {
+            self.unsupported(RequirementKind::Native(
+                "canonical exclusive/event settlement failed before exception return",
+            ))
+        })?;
         self.pacm_written = true;
         self.host.report(&Event::Return {
             to_el: self.cpu.pstate.el,
@@ -5432,8 +5442,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             self.sample_events(now);
         }
         match kind {
-            WaitKind::Event if self.cpu.event => {
-                self.cpu.event = false;
+            WaitKind::Event if self.cpu.consume_event() => {
                 // The WFE of a spin-wait ends the PE's time slice: the PE
                 // it waits for runs next instead of after the slice.
                 self.slice_end = self.statistics.blocks;
@@ -5463,6 +5472,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         // could not end that wait.
         let down = kind == WaitKind::Interrupt
             && self.cpu.wfi_mode() == registers::CYC_OVRD_WFI_POWER_DOWN;
+        if down && self.cpu.has_canonical_memory() {
+            return Err(self.unsupported(RequirementKind::Native(
+                "canonical native PE power-down requires its RAM/event retirement and reset-rebind owner",
+            )));
+        }
         if down && timeout.is_some() {
             return Err(self.unsupported(RequirementKind::Native(
                 "WFIT with CYC_OVRD's power-down mode (a powered-down core has no local timeout)",
