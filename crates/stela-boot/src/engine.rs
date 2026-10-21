@@ -60,9 +60,8 @@ use stela_runtime::restore::store::Verify;
 /// `payload.json`, `--install-source GUID` the FAT32 partition holding it.
 pub const INSTALL_OPTION: &str = "--install";
 const INSTALL_SOURCE_OPTION: &str = "--install-source";
-/// The restore host checks the payload's recorded hashes only as the
-/// restore reads each block, instead of reading every member whole before
-/// StartRestore (`restore::store::Verify::OnRead`).
+/// The restore host refuses a payload without recorded block hashes, which
+/// it would read whole before StartRestore (`restore::store::Verify`).
 pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
 /// Stop at the first unsupported device access instead of answering it as
 /// the SoC does (docs/design/runtime.md "Unsupported operations").
@@ -134,8 +133,8 @@ struct Options {
     install: Option<String>,
     /// The install medium's partition, by its unique GUID alone.
     install_source: Option<Guid>,
-    /// Check the payload's recorded hashes as blocks are read
-    /// (`--verify-on-read`), not every member before StartRestore.
+    /// Refuse a payload without recorded block hashes, which would be read
+    /// whole before StartRestore (`--verify-on-read`).
     verify_on_read: bool,
     /// Restore with the inventory's Update identity (`--update-restore`).
     update_restore: bool,

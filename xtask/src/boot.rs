@@ -144,11 +144,10 @@ pub struct Run {
     /// (`blocks.bin` beside it).
     #[arg(long, requires = "bundle")]
     restore_manifest: Option<PathBuf>,
-    /// Have the restore host check the payload's recorded hashes only as
-    /// the restore reads each block, instead of reading every member whole
-    /// before StartRestore: adds the mount's `--verify-on-read`. A USB
-    /// image carries it in its install entry (`stela setup
-    /// --verify-on-read`).
+    /// Have the restore host refuse a payload without recorded block
+    /// hashes, which it would read whole before StartRestore: adds the
+    /// mount's `--verify-on-read`. A USB image carries it in its install
+    /// entry (`stela setup --verify-on-read`).
     #[arg(long, requires = "bundle")]
     verify_on_read: bool,
     /// Answer unsupported operations as the SoC and its firmware do and

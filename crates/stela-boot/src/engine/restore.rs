@@ -117,9 +117,10 @@ pub struct Experiment {
 }
 impl Experiment {
     /// The study runs `identity`; the install the inventory's one Erase
-    /// identity, and the update its one Update identity. `verify` says when the payload's recorded hashes are
-    /// checked: every member before StartRestore, or each block as it is
-    /// read, which needs the hashes recorded.
+    /// identity, and the update its one Update identity. The payload is
+    /// checked block by block as the restore reads it when its hashes are
+    /// recorded, and every member before StartRestore otherwise, unless
+    /// `verify` is [`Verify::OnRead`], which refuses a payload without them.
     pub fn new(
         source: Source,
         usb: UsbId,
@@ -140,12 +141,18 @@ impl Experiment {
                 .restore_identity(purpose)
                 .map_err(|e| format!("{e}"))? as usize,
         };
+        // Recorded block hashes check each block as the restore reads it;
+        // without them every member is read whole first, to build them.
         let recorded = manifest.block_hashes.is_some();
-        if verify == Verify::OnRead && !recorded {
-            return Err(String::from(
-                "--verify-on-read needs the payload's recorded block hashes, and this restore inventory names none",
-            ));
-        }
+        let verify = match (recorded, verify) {
+            (true, _) => Verify::OnRead,
+            (false, Verify::OnRead) => {
+                return Err(String::from(
+                    "--verify-on-read needs the payload's recorded block hashes, and this restore inventory names none",
+                ));
+            }
+            (false, Verify::Full) => Verify::Full,
+        };
         output::arguments(format_args!(
             "{} build={} source_sha256={} manifest_sha256={} identity={} bytes={} hashes={} verify={}\n",
             match mode {

@@ -192,10 +192,10 @@ pub(crate) struct Setup {
     /// Turn the Apple signing server opt-in off on an existing setup.
     #[arg(long)]
     no_tss: bool,
-    /// Have the install check the IPSW's recorded hashes only as the restore
-    /// reads each block, instead of reading every member whole before the
-    /// restore starts: faster, for QEMU test runs. It adds the engine's
-    /// `--verify-on-read` to the Install macOS (Stela) choice.
+    /// Have the install refuse an IPSW without recorded block hashes, which
+    /// it otherwise reads whole before the restore starts; with them it
+    /// checks each block as the restore reads it either way. It adds the
+    /// engine's `--verify-on-read` to the Install macOS (Stela) choice.
     #[arg(long, requires = "target")]
     verify_on_read: bool,
     /// The USB's FAT32 data partition for the install medium (the full IPSW
