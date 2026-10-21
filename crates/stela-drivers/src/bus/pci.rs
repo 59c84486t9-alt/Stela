@@ -63,8 +63,8 @@ impl fmt::Display for Address {
 }
 
 /// Access to one function's configuration space. Real configuration-space
-/// implementations must override `write16` with a narrow store: a 32-bit
-/// read/modify/write can acknowledge unrelated write-one-to-clear status.
+/// implementations must override `write8` and `write16` with narrow stores:
+/// a wider read/modify/write can acknowledge unrelated write-one-to-clear status.
 pub trait ConfigSpace {
     fn read32(&self, offset: u16) -> u32;
     fn write32(&mut self, offset: u16, value: u32);
@@ -75,6 +75,15 @@ pub trait ConfigSpace {
 
     fn read8(&self, offset: u16) -> u8 {
         (self.read32(offset & !3) >> ((offset & 3) * 8)) as u8
+    }
+
+    /// Fallback for simple memory models. Real configuration-space accessors
+    /// must override this with a native byte store; neighboring bytes can be
+    /// write-one-to-clear status or vendor control registers.
+    fn write8(&mut self, offset: u16, value: u8) {
+        let shift = (offset & 3) * 8;
+        let word = self.read32(offset & !3) & !(0xff << shift) | u32::from(value) << shift;
+        self.write32(offset & !3, word);
     }
 
     fn write16(&mut self, offset: u16, value: u16) {
@@ -96,6 +105,10 @@ impl ConfigSpace for EcamConfig {
 
     fn write32(&mut self, offset: u16, value: u32) {
         self.registers.write32(usize::from(offset), value)
+    }
+
+    fn write8(&mut self, offset: u16, value: u8) {
+        self.registers.write8(usize::from(offset), value)
     }
 
     fn write16(&mut self, offset: u16, value: u16) {
@@ -354,6 +367,21 @@ impl Function {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_ecam_narrow_stores_preserve_adjacent_status_and_vendor_bytes() {
+        let mut words = [0xa5c3_5a7eu32; 1024];
+        let mut config = EcamConfig {
+            // SAFETY: this test exclusively owns the aligned backing allocation.
+            registers: unsafe { Mmio::new(words.as_mut_ptr() as u64) },
+        };
+        config.write8(0x44, 0x78);
+        assert_eq!(config.read32(0x44), 0xa5c3_5a78);
+        config.write8(0x47, 0x12);
+        assert_eq!(config.read32(0x44), 0x12c3_5a78);
+        config.write16(COMMAND, 0x0406);
+        assert_eq!(config.read32(COMMAND), 0xa5c3_0406);
+    }
 
     /// A configuration space whose BAR registers keep only their writable
     /// bits, as hardware does.
