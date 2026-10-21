@@ -1017,6 +1017,11 @@ impl AppleDevices {
                 .map_err(|e| format!("ANS VDMA cache placement: {e:?}"))?;
         }
         self.storage_masters.push((ans, sart));
+        // These are three banks of the same ANS resource. In particular a
+        // later protected-NVMe/SART veto must precede any ASC reset effects.
+        self.register_power_device(placement.wrapper.0, asc, false)?;
+        self.register_power_device(placement.wrapper.0, ans, false)?;
+        self.register_power_device(placement.wrapper.0, sart, false)?;
         Ok(())
     }
 
@@ -1086,7 +1091,8 @@ impl AppleDevices {
         self.coprocessors.push(("PMP", asc));
         self.bus
             .map(asc, placement.wrapper.0, placement.wrapper.1, 0)
-            .map_err(|e| format!("PMP ASC placement: {e:?}"))
+            .map_err(|e| format!("PMP ASC placement: {e:?}"))?;
+        self.register_power_device(placement.wrapper.0, asc, false)
     }
 
     /// Place the AGX GPU: the started GFX coprocessor (RTKit with the native
@@ -1098,6 +1104,11 @@ impl AppleDevices {
         placement: &super::soc::GfxController,
         observe: bool,
     ) -> Result<(), String> {
+        let sgx_physical = placement
+            .sgx
+            .first()
+            .ok_or("SGX has no canonical register aperture")?
+            .0;
         let coprocessor =
             GfxCoprocessor::with_observe(placement.gpu.family, observe).map_err(String::from)?;
         let wrapper = Asc::booted(
@@ -1123,6 +1134,10 @@ impl AppleDevices {
                 .map_err(|e| format!("sgx placement: {e:?}"))?;
         }
         self.gfx_masters.push((asc, block));
+        // sgx and gfx-asc are distinct root resources, coupled by their
+        // shared original PMGR domain, not an invented parent/child owner.
+        self.register_power_device(placement.wrapper.0, asc, false)?;
+        self.register_power_device(sgx_physical, block, false)?;
         Ok(())
     }
 
@@ -1170,7 +1185,8 @@ impl AppleDevices {
         });
         self.bus
             .map(asc, wrapper.physical, wrapper.bytes, 0)
-            .map_err(|e| format!("DCPEXT ASC placement: {e:?}"))
+            .map_err(|e| format!("DCPEXT ASC placement: {e:?}"))?;
+        self.register_power_device(wrapper.physical, asc, false)
     }
 
     /// Place the display-hardware register apertures around the DCP
@@ -3104,6 +3120,51 @@ mod tests {
         powered_dart_with(retention, supplies, |_| {})
     }
 
+    /// A declared synthetic physical supply for actual mounted native banks.
+    /// Tests choose retention explicitly; production constructors do not infer
+    /// it from an RTKit retained-sleep capability.
+    fn connect_native_power(
+        d: &mut AppleDevices,
+        supply: u64,
+        resources: &[(&str, u64)],
+        retained: bool,
+    ) {
+        use super::super::soc::{PowerResource, PowerStates};
+        let gate = coverage::DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            blocks: vec![(supply, 4)],
+            registers: vec![supply],
+            domains: vec![coverage::Domain {
+                id: gate,
+                address: Some(supply),
+                parents: [None; 2],
+            }],
+            resources: resources
+                .iter()
+                .map(|&(name, physical)| PowerResource {
+                    name: name.into(),
+                    clocks: vec![gate],
+                    power: vec![],
+                    owner: Some(PowerOwner::Mmio(physical)),
+                    admission: coverage::Admission::Required,
+                })
+                .collect(),
+        };
+        for device in &mut d.power_devices {
+            device.retention = retained;
+        }
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &[supply],
+        )
+        .unwrap();
+        d.connect_power_resources(&states, &[], &[]).unwrap();
+        assert!(d.power_refusals().is_empty());
+    }
+
     fn powered_dart_with(
         retention: bool,
         supplies: usize,
@@ -3928,6 +3989,7 @@ mod tests {
         const WRAPPER: u64 = 0x2_7740_0000;
         const VDMA: u64 = 0x2_7b10_0000;
         const RAM: u64 = 0x8_0000_0000;
+        const SUPPLY: u64 = 0x2_3b70_0428;
         let placement = AnsController {
             wrapper: (WRAPPER, 0x6c000),
             nvme: (NVME, 0x60000),
@@ -3952,10 +4014,31 @@ mod tests {
         devices
             .add_ans(&placement, Box::new(RamDisk::new("backing", 16, 4096)))
             .unwrap();
+        assert_eq!(devices.power_devices.len(), 3);
+        assert!(
+            devices
+                .power_devices
+                .iter()
+                .all(|bank| bank.physical == WRAPPER)
+        );
+        connect_native_power(&mut devices, SUPPLY, &[("/arm-io/ans", WRAPPER)], true);
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         // The roll call lists 0x20, which RTBuddy publishes as the
         // ANS2Endpoint1 service the NVMe driver waits for.
         walk_rtkit_start(&mut devices, WRAPPER);
+        // The ASC has no owned mailbox work and qualifies native cold reset;
+        // the later NVMe bank must veto before either it or PMGR changes.
+        let pmgr_before = devices.read(0, SUPPLY, 4, 0).unwrap();
+        devices.write(0, SUPPLY, 4, 0x40f, 0).unwrap();
+        let quiesced = devices.read(0, SUPPLY, 4, 0).unwrap();
+        let failure = devices.write(0, SUPPLY, 4, 0x8000_040f, 0).unwrap_err();
+        assert!(
+            matches!(failure, DeviceError::Refused(reason) if reason.contains("ANS physical reset"))
+        );
+        assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(quiesced));
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        devices.write(0, SUPPLY, 4, 15, 0).unwrap();
+        assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(pmgr_before));
         devices.write(0, WRAPPER + 0x8800, 8, 1, 0).unwrap();
         assert!(devices.write(0, WRAPPER + 0x8808, 8, 0x20, 0).is_err());
         devices.write(0, NVME + 0x13e8, 4, 1, 0).unwrap();
@@ -3991,6 +4074,15 @@ mod tests {
         assert!(Memory::write(&mut ram, RAM, &command));
         assert!(Memory::write(&mut ram, RAM + 0x2000, &tcb));
         devices.write(0, NVME + 0x2490c, 4, 0, 0).unwrap();
+        // A real accepted command is frozen through each retained gate.
+        for gate in [4, 0x40f, 0] {
+            devices.write(0, SUPPLY, 4, gate, 0).unwrap();
+            devices.transfer(0, &mut ram, 0).unwrap();
+            let mut empty = [1; 16];
+            assert!(Memory::read(&mut ram, RAM + 0x1000, &mut empty));
+            assert_eq!(empty, [0; 16]);
+            devices.write(0, SUPPLY, 4, 15, 0).unwrap();
+        }
         devices.transfer(0, &mut ram, 0).unwrap();
         let mut completion = [0; 16];
         assert!(Memory::read(&mut ram, RAM + 0x1000, &mut completion));
@@ -4104,6 +4196,15 @@ mod tests {
                 quiesced: false,
             })
             .unwrap();
+        assert_eq!(devices.power_devices.len(), 1);
+        assert_eq!(devices.power_devices[0].physical, WRAPPER);
+        let supply = 0x2_3b70_0410;
+        connect_native_power(&mut devices, supply, &[("/arm-io/pmp", WRAPPER)], false);
+        // Its committed HELLO survives a real clock gate without restarting
+        // native firmware or fabricating an additional message on release.
+        devices.write(0, supply, 4, 4, 0).unwrap();
+        assert!(devices.read(0, WRAPPER + 0x8830, 8, 0).is_err());
+        devices.write(0, supply, 4, 15, 0).unwrap();
         // Started and running; its HELLO waits in the outbox.
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
@@ -4120,6 +4221,7 @@ mod tests {
         const WRAPPER: u64 = 0x2_0640_0000;
         const SGX: u64 = 0x2_0400_0000;
         const RAM: u64 = 0x8_0000_0000;
+        const SUPPLY: u64 = 0x2_3b70_0430;
         let placement = GfxController {
             gpu: generation::by_chip(0x8112).unwrap(),
             wrapper: (WRAPPER, 0x6c000),
@@ -4133,6 +4235,15 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         devices.add_gfx(&placement, false).unwrap();
+        assert_eq!(devices.power_devices.len(), 2);
+        assert_eq!(devices.power_devices[0].physical, WRAPPER);
+        assert_eq!(devices.power_devices[1].physical, SGX);
+        connect_native_power(
+            &mut devices,
+            SUPPLY,
+            &[("/arm-io/gfx-asc", WRAPPER), ("/arm-io/sgx", SGX)],
+            true,
+        );
         // The coprocessor is running and the sgx identity reads through the bus.
         assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
         assert_eq!(devices.read(0, SGX + 0xd0_4000, 4, 0).unwrap() >> 24, 5);
@@ -4199,8 +4310,32 @@ mod tests {
         for endpoint in [0x20, 0x21] {
             send(&mut devices, 0, mgmt(5, endpoint << 32 | 2));
         }
+        devices.write(0, SUPPLY, 4, 0x40f, 0).unwrap();
+        let before = devices.read(0, SUPPLY, 4, 0).unwrap();
+        let failure = devices.write(0, SUPPLY, 4, 0x8000_040f, 0).unwrap_err();
+        assert!(
+            matches!(failure, DeviceError::Refused(reason) if reason.contains("SGX physical reset"))
+        );
+        assert_eq!(devices.read(0, SUPPLY, 4, 0), Ok(before));
+        assert_eq!(devices.read(0, WRAPPER + 0x44, 4, 0), Ok(1 << 4));
+        devices.write(0, SUPPLY, 4, 15, 0).unwrap();
         // notifyFirmwareStarted's initdata message, then the firmware's read.
         send(&mut devices, 0x20, 0x81 << 48 | (va & ((1 << 44) - 1)));
+        for gate in [4, 0x40f, 0] {
+            devices.write(0, SUPPLY, 4, gate, 0).unwrap();
+            devices.transfer(0, &mut ram, 0).unwrap();
+            assert!(
+                !devices
+                    .bus
+                    .device::<Asc>(devices.gfx_masters[0].0)
+                    .unwrap()
+                    .firmware::<firmware::Coprocessor>()
+                    .unwrap()
+                    .protocol()
+                    .with(|state| state.initdata_checked)
+            );
+            devices.write(0, SUPPLY, 4, 15, 0).unwrap();
+        }
         devices.transfer(0, &mut ram, 0).unwrap();
         let checked = devices
             .bus
@@ -4243,6 +4378,175 @@ mod tests {
         assert_eq!(devices.read(0, WATCHDOG + 0xc, 4, 0), Ok(0));
         devices.write(0, WATCHDOG + 0xc, 4, 0, 0).unwrap();
         assert_eq!(devices.coprocessor_diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn mounted_dcpext_retained_pm_gates_suppress_real_surface_dma_and_scanout() {
+        use crate::platform::apple::dcp::{link, swap};
+        struct Screen(Rc<RefCell<usize>>);
+        impl Scanout for Screen {
+            fn mode(&self) -> ScanoutMode {
+                ScanoutMode {
+                    width: 1,
+                    height: 1,
+                    format: ScanoutFormat::Bgra8888,
+                }
+            }
+            fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+                assert_eq!(rows, [1, 2, 3, 255]);
+                *self.0.borrow_mut() += 1;
+                Ok(())
+            }
+        }
+        struct CountMemory {
+            ram: Ram,
+            reads: usize,
+            writes: usize,
+        }
+        impl Memory for CountMemory {
+            fn read(&mut self, address: u64, bytes: &mut [u8]) -> bool {
+                self.reads += 1;
+                self.ram.read(address, bytes)
+            }
+            fn write(&mut self, address: u64, bytes: &[u8]) -> bool {
+                self.writes += 1;
+                self.ram.write(address, bytes)
+            }
+        }
+        const WRAPPER: u64 = 0x2_71c0_0000;
+        const DART: u64 = 0x2_7130_c000;
+        const RAM: u64 = 0x8_0000_0000;
+        const REGION: u64 = RAM + 0x4000;
+        const PIXELS: u64 = RAM + 0xd0000;
+        const SUPPLY: u64 = 0x2_3b70_0380;
+        fn send(d: &mut AppleDevices, endpoint: u64, payload: u64) {
+            d.write(0, WRAPPER + 0x8800, 8, payload, 0).unwrap();
+            d.write(0, WRAPPER + 0x8808, 8, endpoint, 0).unwrap();
+        }
+        fn call(
+            d: &mut AppleDevices,
+            memory: &mut CountMemory,
+            tag: &[u8; 4],
+            input: &[u8],
+            output: u32,
+        ) {
+            let stream = link::Stream {
+                owner: link::Owner::Ap,
+                index: 1,
+            };
+            let header = link::Header {
+                tag: *tag,
+                input: input.len() as u32,
+                output,
+            };
+            let at = REGION + stream.calls();
+            assert!(memory.ram.write(at, &header.bytes()));
+            assert!(memory.ram.write(at + 12, input));
+            send(
+                d,
+                0x37,
+                link::Word::Rpc(link::Rpc {
+                    answer: false,
+                    stream,
+                    opens: true,
+                    offset: 0,
+                    length: header.length().unwrap(),
+                    token: 0,
+                })
+                .encode(),
+            );
+            d.transfer(0, memory, 0).unwrap();
+            let reply = mailbox_drain(d, WRAPPER);
+            assert_eq!(reply.len(), 1);
+            assert_eq!(reply[0].0, 0x37);
+        }
+        let mut d = AppleDevices::new();
+        d.add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
+            .unwrap();
+        let dart = d
+            .add_dart(
+                Range {
+                    physical: DART,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        let frames = Rc::new(RefCell::new(0));
+        d.add_dcpext(
+            Range {
+                physical: WRAPPER,
+                bytes: 0x6c000,
+            },
+            [0x243, 0x242, 0x245, 0x244],
+            false,
+            Box::new(Screen(frames.clone())),
+            (dart, 5),
+            Some(RAM),
+            Some((dart, 5)),
+        )
+        .unwrap();
+        connect_native_power(&mut d, SUPPLY, &[("/arm-io/dcpext", WRAPPER)], true);
+        d.write(0, DART + 0x1014, 4, 6, 0).unwrap();
+        d.write(0, DART + 0xc00, 4, 1 << 5, 0).unwrap();
+        assert_eq!(mailbox_drain(&mut d, WRAPPER).len(), 1);
+        for payload in [
+            2 << 52 | 12 | 12 << 16,
+            8 << 52 | 1,
+            8 << 52 | 1 << 51 | 1 << 32,
+            5 << 52 | 0x37 << 32 | 2,
+        ] {
+            send(&mut d, 0, payload);
+            mailbox_drain(&mut d, WRAPPER);
+        }
+        let mut memory = CountMemory {
+            ram: Ram::new(RAM, 0x100000),
+            reads: 0,
+            writes: 0,
+        };
+        assert!(memory.ram.write(REGION + 12, &4u32.to_le_bytes()));
+        send(&mut d, 0x37, link::Word::Region { dva: 0x4000 }.encode());
+        d.transfer(0, &mut memory, 0).unwrap();
+        assert_eq!(mailbox_drain(&mut d, WRAPPER).len(), 1);
+        call(&mut d, &mut memory, b"A406", &[0; 0x10], 8);
+        assert!(memory.ram.write(PIXELS, &[1, 2, 3, 255]));
+        call(
+            &mut d,
+            &mut memory,
+            b"A407",
+            &swap::tests::submission(1, &[(0, 1, 1, PIXELS)]),
+            0xc,
+        );
+        for gate in [4, 0x40f, 0] {
+            d.write(0, SUPPLY, 4, gate, 0).unwrap();
+            let before = (memory.reads, memory.writes);
+            d.transfer(0, &mut memory, 0).unwrap();
+            assert_eq!((memory.reads, memory.writes), before);
+            assert_eq!(*frames.borrow(), 0);
+            assert!(
+                d.bus
+                    .device::<Asc>(d.dcp_masters[0].asc)
+                    .unwrap()
+                    .firmware::<dcp::Coprocessor>()
+                    .unwrap()
+                    .frame_pending()
+            );
+            d.write(0, SUPPLY, 4, 15, 0).unwrap();
+        }
+        d.transfer(0, &mut memory, 0).unwrap();
+        assert_eq!(*frames.borrow(), 1);
+        assert!(
+            !d.bus
+                .device::<Asc>(d.dcp_masters[0].asc)
+                .unwrap()
+                .firmware::<dcp::Coprocessor>()
+                .unwrap()
+                .frame_pending()
+        );
+        d.transfer(0, &mut memory, 0).unwrap();
+        assert_eq!(*frames.borrow(), 1);
     }
 
     #[test]
