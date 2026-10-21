@@ -1135,8 +1135,10 @@ pub struct Machine<H: Host, D: Devices> {
     /// The `index` keys of the blocks compiled from each physical page.
     code_pages: BTreeMap<u64, Vec<(u64, u64, Variant)>>,
     /// The fetch pages read for the translation store, by physical page,
-    /// until their code is invalidated ([`stored`]).
+    /// until their code is invalidated or they are the least recently used
+    /// ([`stored`]), and the count of their uses so far.
     pages: BTreeMap<u64, stored::StoredPage>,
+    page_uses: u64,
     /// Entry contexts by variant and address class.
     stored_contexts: BTreeMap<(Variant, u64), crate::translations::Digest>,
     /// How each variant's blocks are compiled ([`prepare`]).
@@ -1307,6 +1309,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
             pages: BTreeMap::new(),
+            page_uses: 0,
             stored_contexts: BTreeMap::new(),
             preparations: BTreeMap::new(),
             fetch: vec![None; FETCH_CACHE],

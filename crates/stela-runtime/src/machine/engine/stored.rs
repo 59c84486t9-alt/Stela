@@ -66,19 +66,21 @@ impl Offer {
     }
 }
 
-/// The fetch pages kept for their blocks at most: a page let go is read,
-/// hashed and looked up again for its next block, which only a block not
-/// yet installed needs.
+/// The fetch pages kept for their blocks at most; when full, the least
+/// recently used quarter is let go. A page let go is read, hashed and looked
+/// up again for its next block, which only a block not yet installed needs.
 #[cfg(not(test))]
 const KEPT_PAGES: usize = 4096;
 #[cfg(test)]
-const KEPT_PAGES: usize = 2;
+const KEPT_PAGES: usize = 4;
 
 /// A fetch page's bytes, as read for its first block, and its record.
 pub(super) struct StoredPage {
     pub(super) key: Digest,
     pub(super) bytes: Box<[u8; PAGE_BYTES]>,
     pub(super) record: Option<Arc<Record>>,
+    /// `Machine::page_uses` at its last use.
+    used: u64,
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
@@ -124,11 +126,30 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let key = Digest::of(bytes.as_slice());
             let record = self.host.translations()?.record(&key);
             if self.pages.len() == KEPT_PAGES {
-                self.pages.pop_first();
+                self.forget_least_used_pages();
             }
-            self.pages.insert(frame, StoredPage { key, bytes, record });
+            self.pages.insert(
+                frame,
+                StoredPage {
+                    key,
+                    bytes,
+                    record,
+                    used: 0,
+                },
+            );
         }
-        self.pages.get(&frame)
+        self.page_uses += 1;
+        let page = self.pages.get_mut(&frame)?;
+        page.used = self.page_uses;
+        Some(page)
+    }
+
+    /// Let the least recently used quarter of the kept pages go.
+    fn forget_least_used_pages(&mut self) {
+        let mut uses: Vec<u64> = self.pages.values().map(|page| page.used).collect();
+        let quarter = uses.len() / 4;
+        let (_, &mut least_kept, _) = uses.select_nth_unstable(quarter);
+        self.pages.retain(|_, page| page.used >= least_kept);
     }
 
     /// The entry context of blocks compiled for `variant` through
@@ -349,22 +370,27 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn only_the_latest_pages_are_kept() {
-        // A block in each of three pages: add x0, x0, #1; svc #0.
+    fn the_least_recently_used_pages_are_let_go() {
+        // A block in each of five pages: add x0, x0, #1; svc #0.
         const PAGE_WORDS: usize = FETCH_PAGE as usize / INSTRUCTION as usize;
-        let mut words = vec![0; 2 * PAGE_WORDS + 2];
-        for page in 0..3 {
+        let mut words = vec![0; 4 * PAGE_WORDS + 2];
+        for page in 0..5 {
             words[page * PAGE_WORDS..page * PAGE_WORDS + 2]
                 .copy_from_slice(&[0x9100_0400, 0xd400_0001]);
         }
         let mut machine = machine(&words);
         machine.host.store = Some(MemoryStore::default());
-        for page in 0..3 {
-            assert!(machine.fetch_block(BASE + page * FETCH_PAGE, false).is_ok());
+        let page = |n: u64| BASE + n * FETCH_PAGE;
+        for n in 0..4 {
+            assert!(machine.fetch_block(page(n), false).is_ok());
         }
+        // Page 0's second block uses it again: page 1 is the least
+        // recently used when page 4 needs room.
+        assert!(machine.fetch_block(page(0) + 4, false).is_ok());
+        assert!(machine.fetch_block(page(4), false).is_ok());
         assert_eq!(
             machine.pages.keys().copied().collect::<Vec<_>>(),
-            [BASE + FETCH_PAGE, BASE + 2 * FETCH_PAGE]
+            [page(0), page(2), page(3), page(4)]
         );
     }
 }
