@@ -373,7 +373,7 @@ fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory(
                 operand_rows += 1;
                 // Both control and adjacent-auto operands remain raw program
                 // requirements. No physical fetch-write opcode occurs here.
-                assert_ne!(word(row, 0) >> 16, 7);
+                assert!(matches!(word(row, 0) >> 16, 0 | 3));
             }
         }
     }
@@ -441,4 +441,355 @@ fn original_llb_isp_sequence_emission_is_distinct_from_a_physical_write() {
     assert_eq!(branch_target(&bytes, 0x4ecf8), 0x1413c);
     assert_eq!(branch_target(&bytes, 0x4ed08), 0x14078);
     assert_eq!(branch_target(&bytes, 0x4ed10), 0x140ec);
+}
+
+// These fixture views preserve original construction data. They deliberately
+// expose neither a hardware executor nor a default physical handoff state.
+#[derive(Debug, PartialEq, Eq)]
+struct LlbSequence {
+    id: u32,
+    group: u32,
+    pointer_slot: u32,
+    emission_mode: u32,
+    revision_mask: u32,
+}
+
+fn llb_sequences(bytes: &[u8], kind: usize) -> Vec<LlbSequence> {
+    let start = usize::try_from(quad(bytes, 0x160198 + kind * 8) - 0x1fc050000).unwrap();
+    let end = usize::try_from(quad(bytes, 0x160170 + kind * 8) - 0x1fc050000).unwrap();
+    // 4d8d0 uses the table only for kinds 0..3. Kind 4 returns sixteen
+    // directly; reading the following group-count word would yield two.
+    let count = if kind == 4 {
+        16
+    } else {
+        word(bytes, 0x1a3090 + kind * 4) as usize
+    };
+    assert_eq!(end - start, count * 64);
+    (0..count)
+        .map(|index| {
+            let offset = start + index * 64;
+            for field in [8, 16, 24, 32, 48] {
+                assert_eq!(quad(bytes, offset + field), 0);
+            }
+            LlbSequence {
+                id: word(bytes, offset),
+                group: word(bytes, offset + 4),
+                pointer_slot: word(bytes, offset + 40),
+                emission_mode: word(bytes, offset + 56),
+                revision_mask: word(bytes, offset + 60),
+            }
+        })
+        .collect()
+}
+
+fn relative_table(bytes: &[u8], table: usize, base: usize, count: usize) -> Vec<usize> {
+    (0..count)
+        .map(|index| base.wrapping_add_signed(word(bytes, table + index * 4) as i32 as isize))
+        .collect()
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_selection_binds_all_thirty_sequences_without_a_revision_default() {
+    use std::collections::BTreeSet;
+    let bytes = llb();
+    let mut all = BTreeSet::new();
+    let paired_slots = [3, 9, 4, 10, 5, 11, 0, 6, 1, 7, 2, 8];
+    for (kind, count, groups) in [
+        (0, 14, [0, 3]),
+        (1, 16, [1, 2]),
+        (2, 0, [0, 0]),
+        (3, 12, [0, 3]),
+        (4, 16, [1, 2]),
+    ] {
+        let sequences = llb_sequences(&bytes, kind);
+        assert_eq!(sequences.len(), count);
+        let odd = u32::from(matches!(kind, 1 | 4));
+        for (index, sequence) in sequences.iter().enumerate() {
+            let (id, group, pointer_slot) = if index < 12 {
+                (index as u32 * 2 + odd, groups[0], paired_slots[index])
+            } else if odd == 1 {
+                (index as u32 + 12, groups[1], index as u32 - 12)
+            } else {
+                (index as u32 + 16, groups[1], index as u32 - 12)
+            };
+            assert_eq!(
+                *sequence,
+                LlbSequence {
+                    id,
+                    group,
+                    pointer_slot,
+                    emission_mode: 0,
+                    revision_mask: 15,
+                }
+            );
+            all.insert(sequence.id);
+        }
+        let source_start =
+            usize::try_from(quad(&bytes, 0x160148 + kind * 8) - 0x1fc050000).unwrap();
+        let source_rows = word(&bytes, 0x1a30b4 + kind * 4) as usize;
+        for index in 0..source_rows {
+            let id = word(&bytes, source_start + index * 24) & 0xffff;
+            assert!(sequences.iter().any(|sequence| sequence.id == id));
+        }
+        assert_eq!(
+            word(&bytes, 0x1a30a0 + kind * 4),
+            if kind == 2 { 0 } else { 2 }
+        );
+    }
+    assert_eq!(all, (0..30).collect());
+    // Raw chip revision -> mask is separate from context+20's program kind.
+    // Unknown chips/revisions branch to explicit failures, not mask 15.
+    for (offset, opcode) in [
+        (0x4d7ac, 0x52902248),
+        (0x4d7b8, 0x52902208),
+        (0x4d7c8, 0x7100441f),
+        (0x4d7d0, 0x7100401f),
+        (0x4d7d8, 0x7100041f),
+        (0x4d7e0, 0x52800040),
+        (0x4d7e8, 0x52800080),
+        (0x4d7f0, 0x52800020),
+        (0x4d7f8, 0x52800100),
+        (0x4d830, 0xb9470108),
+        (0x4d8ec, 0x52800209),
+        (0x14490, 0xb9403e88),
+        (0x14494, 0x6a13011f),
+        (0x145a0, 0xb9403f48),
+        (0x145a4, 0x6a13011f),
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "selection at {offset:#x}");
+    }
+    assert_eq!(branch_target(&bytes, 0x4d828), 0x22fc4);
+    assert_eq!(word(&bytes, 0x14344), 0xb9002115); // caller kind -> context+20
+    // Every source descriptor currently admits all four recognized revisions;
+    // that does not resolve construction flags or actual hardware inputs.
+    assert_eq!(word(&bytes, 0x14c18), 0xb9401508); // A4: raw revision
+    assert_eq!(word(&bytes, 0x13ab8), 0xb9401108); // A5: chip ID
+    assert_eq!(word(&bytes, 0x13b50), 0xb9402908); // B8: revision mask
+    assert_eq!(word(&bytes, 0x13c34), 0xf9401d08); // AB: feature flags
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_counts_allocates_emits_and_publishes_before_enable_readback() {
+    let bytes = llb();
+    for (call, target) in [
+        (0x4ecdc, 0x142c0), // construct original descriptors/flags
+        (0x14800, 0x4d2cc), // constructor publishes initial zero code pointers
+        (0x4ecf4, 0x140ec),
+        (0x4ecf8, 0x1413c),
+        (0x4ecfc, 0x4ebdc),
+        (0x4ed04, 0x4dcd8), // reserve actual SRAM after the count pass
+        (0x4ed08, 0x14078),
+        (0x4ed10, 0x140ec), // reset count, mode 0
+        (0x4eedc, 0x1413c),
+        (0x4eee0, 0x4ebdc), // emit and flush/terminate
+        (0x4ddf8, 0x4d2cc), // bind allocated code and pointer table
+        (0x4ec4c, 0x11be0), // every active sequence gets a terminator
+    ] {
+        assert_eq!(branch_target(&bytes, call), target);
+    }
+    assert_eq!(
+        relative_table(&bytes, 0x4de58, 0x4dd28, 5),
+        [0x4dd34, 0x4dd58, 0x4de48, 0x4dd34, 0x4dd58]
+    );
+    assert_eq!(
+        relative_table(&bytes, 0x4f178, 0x4ed5c, 5),
+        [0x4ed68, 0x4ee44, 0x4f16c, 0x4ed68, 0x4ee44]
+    );
+    assert_eq!(
+        relative_table(&bytes, 0x4f18c, 0x4ef30, 5),
+        [0x4ef3c, 0x4ef50, 0x4ef7c, 0x4ef3c, 0x4ef50]
+    );
+    assert_eq!(
+        relative_table(&bytes, 0x4f1a0, 0x4efb8, 5),
+        [0x4efc4, 0x4effc, 0x4f160, 0x4efc4, 0x4effc]
+    );
+    for (offset, opcode) in [
+        (0x4ecf0, 0x52800020),
+        (0x4ed0c, 0x52800000),
+        (0x4ddbc, 0x927be908), // each sequence starts on a 32-byte boundary
+        (0x4ddcc, 0x11000529), // one extra native word reserved for termination
+        (0x4ddd4, 0xb900f2a9), // expected final native-word count
+        (0x4ddd8, 0x531e7529), // allocated bytes = native words * 4
+        (0x4d664, 0xd344a6c1), // code pointer is bits 41:4 of actual SRAM PA
+        (0x4d668, 0x531d7288), // pointer slot * 8, not a 32-bit slot
+        (0x4d66c, 0x8b0802a0),
+        (0x4ef8c, 0x5280818a), // stages 2,3,10 only enter value-3 command path
+        (0x4efdc, 0xb90002e8),
+        (0x4efe4, 0xb94002e8),
+        (0x4efe8, 0x71000d1f), // readback equals 3; not a sequence-PC read
+        (0x4f018, 0xb90002c8),
+        (0x4f020, 0xb94002c8),
+        (0x4f024, 0x71000d1f),
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "pipeline at {offset:#x}");
+    }
+    assert_eq!(branch_target(&bytes, 0x4d690), 0x103a0); // actual 64-bit store
+    // Runtime-dependent group1/2 allocation needs physical input metadata.
+    assert_eq!(branch_target(&bytes, 0x4dd84), 0x4f304);
+    assert_eq!(word(&bytes, 0x4f1e8), 0xb9400109);
+    assert_eq!(word(&bytes, 0x4f1f0), 0xb85fc10a);
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_complete_feature_filter_omits_the_isp_block_without_implying_off() {
+    let bytes = llb();
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes[0x4d990..0x4db74])),
+        "45c0ea994ab247b245d1b3830c0a175307220589794c7f0e01a3baffeabcde0c"
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes[0x4db74..0x4dcd8])),
+        "af5277a9d18d2756a6ca17b6561182496a796b6f1fcbcf3e66acae5861f16c25"
+    );
+    // Seven 48-byte stack descriptors, in original order. Names qualify the
+    // predicate inputs, never functional hardware ownership or initial state.
+    for (offset, name) in [
+        (0x1e5987, "ANE"),
+        (0x1e598b, "AVE"),
+        (0x1e3d60, "GFX"),
+        (0x1e598f, "ISP"),
+        (0x1e5993, "SCodec"),
+        (0x1e599a, "SIO"),
+        (0x1e3e07, "PMP"),
+    ] {
+        assert_eq!(&bytes[offset..offset + name.len()], name.as_bytes());
+        assert_eq!(bytes[offset + name.len()], 0);
+    }
+    for (offset, opcode) in [
+        (0x4daf4, 0x528000f6), // seven descriptors
+        (0x4db38, 0x9100c2f7), // descriptor stride 48
+        (0x4da50, 0xa90b7fe8), // ISP type pointer + zero enable at stack+b0/b8
+        (0x4da54, 0x5284000a), // ISP mask = 0x2000
+        (0x4da60, 0xa90c2fea), // mask at stack+c0, next name at stack+c8
+        (0x4db10, 0x394082e8), // load descriptor enable byte at +20
+        (0x4db14, 0x7100051f), // require exact enable value 1
+        (0x4db18, 0x540000a1), // otherwise skip predicate and clear mask
+        (0x4db28, 0x37000060), // true predicate retains mask
+        (0x4db2c, 0xf94016e8), // descriptor mask at +28
+        (0x4db30, 0x8a280273), // BIC flags,flags,mask
+        (0x4dc58, 0xf9000d00), // filtered flags replace context+38
+        (0x137dc, 0x54000061), // false condition takes nested skip path
+    ] {
+        assert_eq!(
+            word(&bytes, offset),
+            opcode,
+            "feature filter at {offset:#x}"
+        );
+    }
+    assert_eq!(branch_target(&bytes, 0x4db24), 0x2df30);
+    assert_eq!(branch_target(&bytes, 0x4dc4c), 0x4d990);
+    assert_eq!(branch_target(&bytes, 0x143dc), 0x4db74);
+    assert_eq!(branch_target(&bytes, 0x137e0), 0x13870); // taken: dispatch
+    assert_eq!(branch_target(&bytes, 0x137e8), 0x13594); // omitted: nested skip
+    assert_eq!(quad(&bytes, 0x230538), 0xab0017);
+    assert_eq!(quad(&bytes, 0x230540), 0x2000);
+    // Constructor filters run before both compilation passes. The source
+    // constants 230f/2300 inside this block therefore supply no physical PS
+    // write on that path, and neither constant becomes a handoff default.
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_native_emission_retains_packing_fetches_and_termination_limits() {
+    let bytes = llb();
+    for (start, end, digest) in [
+        (
+            0x109ec,
+            0x10e04,
+            "fd75f3c33c297f1a36e94c3a97ceea938ed5859866a1bd12e51056f47a53a8b3",
+        ),
+        (
+            0x10e04,
+            0x112d8,
+            "5d91af7f905f99f3c58ef69151dc5224ffd3c14a1faee61cfd6f90e01bc8d2d0",
+        ),
+        (
+            0x11be0,
+            0x11e0c,
+            "eb69091852f80d18150e9a3fa75128a714a4ea4c813a2c8a3be983364d89a1cb",
+        ),
+        (
+            0x4d2cc,
+            0x4d730,
+            "10f5489fda13c21946fb042436b562af057b999eccadce560e7c8825db5b1c9d",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    for (offset, opcode) in [
+        (0x124ec, 0xb9400022), // source opcode B fetches live peripheral data
+        (0x12180, 0xf94006c8), // opcode 1 consumes the next row's constant
+        (0x10c00, 0xd344ff8a), // native write header uses PA >> 4
+        (0x10c14, 0xb8286b29), // actual header written into allocated SRAM
+        (0x10c5c, 0xd364a689), // format 0 additionally emits PA bits 41:36
+        (0x10d20, 0xb8286b29), // wide-value alignment padding is retained
+        (0x10fac, 0xb8286b69), // poll header emitted; no physical poll here
+        (0x11d6c, 0xb8286abf), // native zero terminator is actually stored
+        (0x11db0, 0x6b0802bf), // final emitted word count must equal reservation
+    ] {
+        assert_eq!(
+            word(&bytes, offset),
+            opcode,
+            "native emission at {offset:#x}"
+        );
+    }
+    assert_eq!(branch_target(&bytes, 0x12194), 0x10810);
+    // Hardware interpretation of these SRAM words, its trigger queue and
+    // committed instruction/PS prefix still need an execution oracle. A zero
+    // terminator or matching build count alone cannot retire native effects.
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_controller_bindings_cover_every_sequence_and_preserve_field_geometry() {
+    let bytes = llb();
+    assert_eq!(
+        relative_table(&bytes, 0x4d2a0, 0x4d228, 4),
+        [0x4d268, 0x4d234, 0x4d23c, 0x4d250]
+    );
+    assert_eq!(
+        relative_table(&bytes, 0x4d6d0, 0x4d370, 24),
+        [
+            0x4d37c, 0x4d53c, 0x4d4ec, 0x4d51c, 0x4d4a4, 0x4d570, 0x4d5b8, 0x4d524, 0x4d600,
+            0x4d4d4, 0x4d5e8, 0x4d48c, 0x4d4bc, 0x4d5a0, 0x4d474, 0x4d504, 0x4d45c, 0x4d544,
+            0x4d5d0, 0x4d634, 0x4d558, 0x4d588, 0x4d61c, 0x4d648,
+        ]
+    );
+    assert_eq!(
+        relative_table(&bytes, 0x4d6b8, 0x4d3b4, 6),
+        [0x4d3c0, 0x4d420, 0x4d3ec, 0x4d404, 0x4d3d4, 0x4d43c]
+    );
+    // Native helpers replace only their selected five-bit field, preserving
+    // the other sequence's field. The physical group2/3 cases instead OR
+    // slots into their separately initialized registers; they are distinct.
+    for (offset, opcode) in [
+        (0x4e28c, 0x120b6808),
+        (0x4e290, 0x2a144108),
+        (0x4e298, 0x121b6808),
+        (0x4e29c, 0x2a080288),
+        (0x4d3e4, 0x12001289),
+        (0x4d44c, 0x531b1289),
+        (0x4d65c, 0x32080101), // high field enable bit 24
+        (0x4d614, 0x32180101), // low field enable bit 8
+        (0x4d64c, 0x91045260), // sequence23: base+114 = PA23d2d0318
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "binding at {offset:#x}");
+    }
+    // ISP source belongs to sequence23/group1/slot8, not physical domain ID23.
+    let sequences = llb_sequences(&bytes, 1);
+    assert_eq!(
+        sequences.iter().find(|entry| entry.id == 23).unwrap(),
+        &LlbSequence {
+            id: 23,
+            group: 1,
+            pointer_slot: 8,
+            emission_mode: 0,
+            revision_mask: 15
+        }
+    );
+    assert_eq!(branch_target(&bytes, 0x4d648), 0x4e244);
+    assert_eq!(branch_target(&bytes, 0x4d654), 0x4e28c);
 }
