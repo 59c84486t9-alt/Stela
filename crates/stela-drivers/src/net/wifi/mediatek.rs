@@ -11,4 +11,5 @@ pub mod firmware;
 pub mod identity;
 pub mod mailbox;
 pub mod mcu;
+pub mod registers;
 pub mod ring;
