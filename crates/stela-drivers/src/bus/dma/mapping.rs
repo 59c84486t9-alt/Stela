@@ -340,8 +340,11 @@ mod tests {
         assert_eq!(released.load(Ordering::Relaxed), 0);
         assert_eq!(Arc::strong_count(&domain), 2);
         let after = quarantine_status();
-        assert_eq!(after.mappings, before.mappings + 1);
-        assert_eq!(after.bytes, before.bytes + 4096);
+        // Other driver tests may quarantine their own leases concurrently.
+        // These global monotonic counters include at least this exact lease;
+        // the checks above independently prove its own backing/domain remain.
+        assert!(after.mappings > before.mappings);
+        assert!(after.bytes >= before.bytes + 4096);
         // Deliberate retained allocation: no fake completion/reset is supplied.
     }
 }
