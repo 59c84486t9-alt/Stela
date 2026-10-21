@@ -65,7 +65,7 @@ const CRC_NOT_APPENDED: u16 = 0;
 /// Directed, broadcast and all-multicast frames.
 const FILTER: u16 = 0x04 | 0x08 | 0x02;
 const NETWORK_CONNECTION: u8 = 0x00;
-/// An ECM frame's transfer, and the OUT block buffer.
+/// An ECM frame's DMA buffer.
 const FRAME_BYTES: usize = 2048;
 /// The largest NCM IN block this driver takes: room for ten full frames.
 pub const NCM_IN_BLOCK: usize = 16 * 1024;
@@ -245,6 +245,35 @@ impl UsbNet {
                     Framing::Ncm(parameters, 0)
                 }
             };
+            (mac, framing)
+        };
+        let (receive_bytes, send_bytes) = match &framing {
+            Framing::Ecm => (FRAME_BYTES, FRAME_BYTES),
+            Framing::Ncm(parameters, _) => (
+                parameters.in_max,
+                parameters
+                    .encoded_len(MAX_FRAME)
+                    .ok_or(BlockError::Unsupported(
+                        "NCM OUT parameters cannot fit the maximum Ethernet frame",
+                    ))?,
+            ),
+        };
+        // Both one-TD buffers must stay inside one 64 KiB xHCI window. The
+        // validated NTB16 OUT size is below 64 KiB, and IN is capped at 16 KiB;
+        // next-power-of-two alignment therefore contains every transfer.
+        let receive_align = receive_bytes
+            .checked_next_power_of_two()
+            .ok_or(BlockError::NoDmaMemory)?;
+        let send_align = send_bytes
+            .checked_next_power_of_two()
+            .ok_or(BlockError::NoDmaMemory)?;
+        let receive = dma.allocate(receive_bytes, receive_align)?;
+        let send = dma.allocate(send_bytes, send_align)?;
+        let status = dma.allocate(64, 64)?;
+        // Do not activate the data setting if any bounded DMA allocation failed.
+        {
+            let mut c = controller.borrow_mut();
+            let control = u16::from(binding.control);
             if binding.alternate != 0 {
                 let request = setup(
                     1,
@@ -263,22 +292,17 @@ impl UsbNet {
                 let request = setup(0x21, SET_ETHERNET_PACKET_FILTER, FILTER, control, 0);
                 c.control(device.slot, request, &[])?;
             }
-            (mac, framing)
-        };
-        let receive_bytes = match &framing {
-            Framing::Ecm => FRAME_BYTES,
-            Framing::Ncm(parameters, _) => parameters.in_max,
-        };
+        }
         Ok(Self {
             controller,
             slot: device.slot,
             binding,
             framing,
             mac,
-            receive: dma.allocate(receive_bytes, FRAME_BYTES)?,
+            receive,
             pending: VecDeque::new(),
-            send: dma.allocate(FRAME_BYTES, FRAME_BYTES)?,
-            status: dma.allocate(64, 64)?,
+            send,
+            status,
             queued: None,
             notify_queued: None,
             connected: None,
@@ -355,7 +379,7 @@ impl Link for UsbNet {
             Framing::Ncm(parameters, sequence) => {
                 let block = parameters
                     .encode(*sequence, frame)
-                    .filter(|block| block.len() <= FRAME_BYTES)
+                    .filter(|block| block.len() <= self.send.len())
                     .ok_or_else(|| {
                         LinkError::Adapter(String::from("frame above the NCM OUT block size"))
                     })?;

@@ -30,10 +30,14 @@ const NDP16_CRC: u32 = u32::from_le_bytes(*b"NCM1");
 const NDP16_HEADER: usize = 8;
 /// One datagram pointer: wDatagramIndex, wDatagramLength.
 const POINTER: usize = 4;
+/// One datagram entry and the mandatory terminating entry.
+const SINGLE_NDP16_BYTES: usize = NDP16_HEADER + 2 * POINTER;
 /// The CRC-32 an `NCM1` datagram carries after its frame.
 const CRC_BYTES: usize = 4;
 /// NCM's payload remainder applies after the Ethernet header, without FCS.
 const ETHERNET_HEADER_BYTES: usize = 14;
+/// CDC NCM's minimum NDP/payload modulus, also Linux's fallback for values below it.
+const MIN_ALIGNMENT: usize = 4;
 /// NDPs and a block's chain are bounded so a malformed block cannot loop.
 const MAX_TABLES: usize = 32;
 
@@ -80,11 +84,18 @@ impl Parameters {
         if in_max < MIN_BLOCK || out_max < MIN_BLOCK {
             return Err("NTB size below the 2048-byte minimum");
         }
-        // A zero divisor or alignment imposes none.
-        let out_divisor = out_divisor.max(1);
-        let out_alignment = out_alignment.max(4);
+        // Linux cdc_ncm_fix_modulus normalizes undersized moduli to four.
+        // Refuse other invalid values explicitly instead of guessing layouts.
+        let out_divisor = out_divisor.max(MIN_ALIGNMENT);
+        let out_alignment = out_alignment.max(MIN_ALIGNMENT);
         if !out_divisor.is_power_of_two() || !out_alignment.is_power_of_two() {
             return Err("NTB divisor or alignment not a power of two");
+        }
+        if out_remainder >= out_divisor {
+            return Err("NTB payload remainder outside divisor");
+        }
+        if out_divisor >= out_max || out_alignment >= out_max {
+            return Err("NTB divisor or alignment not below OUT block size");
         }
         Ok(Self {
             supports_ntb32: formats & NTB32 != 0,
@@ -99,20 +110,34 @@ impl Parameters {
         })
     }
 
+    fn layout(&self, frame_bytes: usize) -> Option<(usize, usize, usize)> {
+        let table = NTH16_BYTES.checked_next_multiple_of(self.out_alignment)?;
+        let mut datagram = table.checked_add(SINGLE_NDP16_BYTES)?;
+        let padding = self
+            .out_remainder
+            .checked_add(self.out_divisor)?
+            .checked_sub(datagram % self.out_divisor)?
+            % self.out_divisor;
+        datagram = datagram.checked_add(padding)?;
+        let total = datagram.checked_add(frame_bytes)?;
+        if total > self.out_max || total > usize::from(u16::MAX) {
+            return None;
+        }
+        Some((table, datagram, total))
+    }
+
+    /// Exact bytes needed for one Ethernet frame, including all device-required
+    /// padding. `None` if its full NTB cannot fit the device or NTB16 length.
+    pub fn encoded_len(&self, frame_bytes: usize) -> Option<usize> {
+        self.layout(frame_bytes).map(|(_, _, total)| total)
+    }
+
     /// One OUT block carrying `frame`: the NTH16, one NDP16 right after it
     /// at the required alignment, then the datagram at the first offset
     /// with the adjusted frame-start remainder, so the Ethernet payload meets
     /// the function's required remainder. `None` when it exceeds `out_max`.
     pub fn encode(&self, sequence: u16, frame: &[u8]) -> Option<Vec<u8>> {
-        let table = NTH16_BYTES.next_multiple_of(self.out_alignment);
-        let table_bytes = NDP16_HEADER + 2 * POINTER;
-        let mut datagram = table + table_bytes;
-        datagram += (self.out_remainder + self.out_divisor - datagram % self.out_divisor)
-            % self.out_divisor;
-        let total = datagram + frame.len();
-        if total > self.out_max || total > usize::from(u16::MAX) {
-            return None;
-        }
+        let (table, datagram, total) = self.layout(frame.len())?;
         let mut block = alloc::vec![0u8; total];
         let put16 = |b: &mut [u8], at: usize, v: usize| {
             b[at..at + 2].copy_from_slice(&(v as u16).to_le_bytes())
@@ -123,7 +148,7 @@ impl Parameters {
         put16(&mut block, 8, total);
         put16(&mut block, 10, table);
         block[table..table + 4].copy_from_slice(&NDP16.to_le_bytes());
-        put16(&mut block, table + 4, table_bytes);
+        put16(&mut block, table + 4, SINGLE_NDP16_BYTES);
         // wNextNdpIndex 0, then this datagram and the zero terminator.
         put16(&mut block, table + NDP16_HEADER, datagram);
         put16(&mut block, table + NDP16_HEADER + 2, frame.len());
@@ -225,8 +250,37 @@ mod tests {
         let mut small = parameters(4, 2, 4);
         small[16..20].copy_from_slice(&1024u32.to_le_bytes());
         assert!(Parameters::parse(&small).is_err());
-        assert!(Parameters::parse(&parameters(3, 0, 4)).is_err());
+        assert!(Parameters::parse(&parameters(6, 0, 4)).is_err());
         assert!(Parameters::parse(&parameters(4, 0, 4)[..20]).is_err());
+    }
+
+    #[test]
+    fn full_frame_capacity_checks_device_limits_ntb16_and_invalid_moduli() {
+        for value in 0..4 {
+            let p = Parameters::parse(&parameters(value, 0, value)).unwrap();
+            assert_eq!((p.out_divisor, p.out_alignment), (4, 4));
+        }
+        for bytes in [
+            parameters(6, 0, 4),
+            parameters(4, 0, 6),
+            parameters(4, 4, 4),
+        ] {
+            assert!(Parameters::parse(&bytes).is_err());
+        }
+        for bytes in [parameters(8192, 0, 4), parameters(4, 0, 8192)] {
+            assert!(Parameters::parse(&bytes).is_err());
+        }
+        let mut bytes = parameters(32768, 31267, 32768);
+        bytes[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        let p = Parameters::parse(&bytes).unwrap();
+        assert_eq!(p.encoded_len(1514), Some(65535));
+        let block = p.encode(0, &[0xab; 1514]).unwrap();
+        assert_eq!(block.len(), 65535);
+        assert_eq!(u16_at(&block, 8), Some(u16::MAX));
+        assert_eq!(p.encoded_len(1515), None);
+        assert_eq!(p.encoded_len(usize::MAX), None);
+        bytes[16..20].copy_from_slice(&65534u32.to_le_bytes());
+        assert_eq!(Parameters::parse(&bytes).unwrap().encoded_len(1514), None);
     }
 
     #[test]
@@ -313,10 +367,17 @@ mod tests {
 
     #[test]
     fn crc_bytes_must_fit_inside_the_declared_block_and_transfer() {
-        let p = Parameters::parse(&parameters(1, 0, 4)).unwrap();
-        let mut block = p.encode(1, &[0xab; 16]).unwrap();
-        assert_eq!(block.len(), 44);
+        // Independent malformed input: payload fits bytes28..44, advertised
+        // CRC reaches48. Its layout need not match our OUT alignment policy.
+        let mut block = vec![0; 44];
+        block[..4].copy_from_slice(b"NCMH");
+        block[4..6].copy_from_slice(&12u16.to_le_bytes());
+        block[8..10].copy_from_slice(&44u16.to_le_bytes());
+        block[10..12].copy_from_slice(&12u16.to_le_bytes());
         block[12..16].copy_from_slice(b"NCM1");
+        block[16..18].copy_from_slice(&16u16.to_le_bytes());
+        block[20..22].copy_from_slice(&28u16.to_le_bytes());
+        block[28..].fill(0xab);
         // All 16 payload bytes fit, but none of the advertised CRC does.
         block[22..24].copy_from_slice(&20u16.to_le_bytes());
         for trailing in 0..=CRC_BYTES {

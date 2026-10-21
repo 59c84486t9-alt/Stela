@@ -2917,6 +2917,161 @@ pub(crate) mod tests {
         bytes
     }
 
+    struct CdcDma<'a> {
+        inner: &'a mut dyn DmaAllocator,
+        fail: Option<(usize, usize)>,
+        requests: Vec<(usize, usize)>,
+    }
+
+    impl DmaAllocator for CdcDma<'_> {
+        fn allocate(&mut self, bytes: usize, align: usize) -> Result<DmaBuffer, BlockError> {
+            self.requests.push((bytes, align));
+            if self.fail == Some((bytes, align)) {
+                return Err(BlockError::NoDmaMemory);
+            }
+            self.inner.allocate(bytes, align)
+        }
+    }
+
+    #[test]
+    fn padded_ncm_full_frames_use_capacity_sized_non_crossing_real_tds() {
+        use crate::net::{Link, MAX_FRAME};
+        for (divisor, remainder, alignment, out_max, expected) in [
+            (2048u16, 0u16, 4u16, 8192u32, 3548usize),
+            (2048, 0, 2048, 8192, 5596),
+            // An exact maximum block must not get an extra terminating ZLP.
+            (2048, 548, 2048, 4096, 4096),
+            (32768, 31267, 32768, 65535, 65535),
+        ] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all modeled controller/class DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            let mut parameters = ncm_parameters();
+            parameters[16..20].copy_from_slice(&out_max.to_le_bytes());
+            parameters[20..22].copy_from_slice(&divisor.to_le_bytes());
+            parameters[22..24].copy_from_slice(&remainder.to_le_bytes());
+            parameters[24..26].copy_from_slice(&alignment.to_le_bytes());
+            model
+                .borrow_mut()
+                .control_replies
+                .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, cdc_device(Some(1)), &mut dma, &mut found);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.links.len(), 1);
+            let frame: Vec<_> = (0..MAX_FRAME).map(|byte| byte as u8).collect();
+            let link = &mut found.links[0];
+            link.transmit(&frame).unwrap();
+            assert_eq!(model.borrow().outgoing.len(), 1);
+            let model_ref = model.borrow();
+            let block = &model_ref.outgoing[0];
+            assert_eq!(block.len(), expected);
+            assert_eq!(
+                u16::from_le_bytes(block[8..10].try_into().unwrap()) as usize,
+                expected
+            );
+            let table = usize::from(u16::from_le_bytes(block[10..12].try_into().unwrap()));
+            assert_eq!(table % usize::from(alignment), 0);
+            let datagram = usize::from(u16::from_le_bytes(
+                block[table + 8..table + 10].try_into().unwrap(),
+            ));
+            assert_eq!(
+                (datagram + 14) % usize::from(divisor),
+                usize::from(remainder)
+            );
+            assert_eq!(&block[datagram..], frame);
+            let trb = model_ref.rings[4];
+            // SAFETY: the actual published OUT TRB remains in the live model
+            // ring; its referenced allocation is still retained by the link.
+            let (physical, length) = unsafe {
+                (
+                    (trb as *const u64).read_volatile(),
+                    ((trb + 8) as *const u32).read_volatile() as usize & 0x1ffff,
+                )
+            };
+            assert_eq!(length, expected);
+            assert_eq!(physical % expected.next_power_of_two() as u64, 0);
+            assert!(physical % 65536 + length as u64 <= 65536);
+            drop(model_ref);
+            assert_eq!(link.receive().unwrap(), None);
+            let (_, physical, length) = model.borrow().active[5].unwrap();
+            assert_eq!(length, 16384);
+            assert_eq!(physical % 16384, 0);
+            assert!(physical % 65536 + length as u64 <= 65536);
+        }
+    }
+
+    #[test]
+    fn ncm_dma_failures_and_unrepresentable_full_frames_never_activate_data() {
+        for failure in 0..5 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all modeled controller/class DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            let mut parameters = ncm_parameters();
+            parameters[16..20].copy_from_slice(&8192u32.to_le_bytes());
+            parameters[20..22].copy_from_slice(&2048u16.to_le_bytes());
+            let fail = match failure {
+                0 => Some((16384, 16384)),
+                1 => Some((3548, 4096)),
+                2 => Some((64, 64)),
+                3 => {
+                    parameters[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+                    parameters[20..22].copy_from_slice(&32768u16.to_le_bytes());
+                    parameters[22..24].copy_from_slice(&31268u16.to_le_bytes());
+                    parameters[24..26].copy_from_slice(&32768u16.to_le_bytes());
+                    None
+                }
+                4 => {
+                    parameters[16..20].copy_from_slice(&3547u32.to_le_bytes());
+                    None
+                }
+                _ => unreachable!(),
+            };
+            model
+                .borrow_mut()
+                .control_replies
+                .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            let mut checked = CdcDma {
+                inner: &mut dma,
+                fail,
+                requests: Vec::new(),
+            };
+            bind(&shared, cdc_device(Some(1)), &mut checked, &mut found);
+            assert!(found.links.is_empty());
+            assert_eq!(found.failures.len(), 1);
+            if let Some(request) = fail {
+                assert!(checked.requests.contains(&request));
+                assert_eq!(found.failures[0].1, BlockError::NoDmaMemory);
+            } else {
+                assert!(matches!(found.failures[0].1, BlockError::Unsupported(_)));
+                assert!(
+                    checked
+                        .requests
+                        .iter()
+                        .all(|request| *request == (RING_TRBS * TRB, 64))
+                );
+            }
+            assert!(
+                !model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .any(|(request, _)| matches!(request[1], SET_INTERFACE | 0x43))
+            );
+            assert!(model.borrow().outgoing.is_empty());
+            assert!(model.borrow().active[5].is_none());
+        }
+    }
+
     #[test]
     fn cdc_short_bulk_out_is_an_error_and_never_sends_a_terminating_zlp() {
         use crate::net::Link;
