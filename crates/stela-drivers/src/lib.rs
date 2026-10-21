@@ -52,6 +52,8 @@ pub struct Handoff {
     pub clock: Clock,
     /// Verified host-device firmware; sharing a handoff never copies image bytes.
     pub firmware: Option<Arc<firmware::Catalog>>,
+    /// Owned pre-EBS Intel Bluetooth board-variable observation and diagnostics.
+    pub bluetooth_platform: usb::bluetooth::intel::DsbrCapture,
 }
 
 impl Handoff {
@@ -194,6 +196,7 @@ mod tests {
     fn mapped_ranges_must_contain_the_whole_range() {
         let handoff = Handoff {
             firmware: None,
+            bluetooth_platform: Default::default(),
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
             dma: 0..0,

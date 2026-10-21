@@ -31,7 +31,7 @@ mod report;
 mod stages;
 mod tlv;
 pub use identity::{BootParameters, Identity};
-pub use platform::{DsbrInput, DsbrReport, PlatformInputs};
+pub use platform::{DsbrCapture, DsbrCaptureObservation, DsbrInput, DsbrReport, PlatformInputs};
 pub use report::{OwnedFirmwareEvidence, OwnedReport};
 pub use tlv::{InheritedField, TlvIdentity};
 

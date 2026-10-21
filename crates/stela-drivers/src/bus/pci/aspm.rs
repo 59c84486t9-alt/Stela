@@ -353,6 +353,7 @@ mod tests {
         };
         let mut handoff = Handoff {
             firmware: None,
+            bluetooth_platform: Default::default(),
             ecam: vec![window],
             mapped: vec![window.range()],
             dma: 0..0,

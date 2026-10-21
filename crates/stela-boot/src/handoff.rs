@@ -56,6 +56,8 @@ pub struct Storage {
     pub mapped_count: usize,
     pub dma: Region,
     pub ticks_per_microsecond: u64,
+    /// Copy-only pre-EBS board capture; no firmware service/heap borrow.
+    pub bluetooth_platform: stela_drivers::usb::bluetooth::intel::DsbrCapture,
 }
 
 impl Storage {
@@ -73,6 +75,7 @@ impl Storage {
             mapped_count: 0,
             dma: Region::default(),
             ticks_per_microsecond: 0,
+            bluetooth_platform: Default::default(),
         }
     }
 
@@ -96,12 +99,14 @@ impl Storage {
             bytes: handoff.dma.end - handoff.dma.start,
         };
         storage.ticks_per_microsecond = handoff.clock.ticks_per_microsecond;
+        storage.bluetooth_platform = handoff.bluetooth_platform;
         Ok(storage)
     }
 
     pub fn handoff(&self) -> Option<stela_drivers::Handoff> {
         self.present.then(|| stela_drivers::Handoff {
             firmware: None,
+            bluetooth_platform: self.bluetooth_platform,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()
@@ -161,4 +166,43 @@ pub struct Handoff {
     pub host_firmware: crate::host_firmware::Resources,
     /// The host's ACPI power hardware, when its FADT is usable.
     pub power: Option<pc::power::HostPower>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stela_drivers::usb::bluetooth::intel::{DsbrCapture, DsbrInput};
+    #[test]
+    fn physical_storage_record_preserves_owned_board_capture_after_source_drop() {
+        for capture in [
+            DsbrCapture::default(),
+            DsbrCapture::from_variable(&[7, 0xb1, 0xbe, 0xad, 0xde], 0x87),
+            DsbrCapture::from_uefi_error(0x8000_0000_0000_000e, None),
+            DsbrCapture::from_variable(&[1, 2, 3, 4], 0),
+            DsbrCapture::from_uefi_error(0x8000_0000_0000_0007, None),
+        ] {
+            let copied;
+            {
+                let mut record = Storage::absent();
+                record.present = true;
+                record.dma = Region {
+                    physical: 0x1000,
+                    bytes: 0x1000,
+                };
+                record.ticks_per_microsecond = 3;
+                record.bluetooth_platform = capture;
+                let source = record.handoff().unwrap();
+                let physical = Storage::new(&source).unwrap();
+                copied = physical;
+            }
+            let rebuilt = copied.handoff().unwrap();
+            assert_eq!(rebuilt.bluetooth_platform, capture);
+            assert_eq!(rebuilt.bluetooth_platform.input(), capture.input());
+            assert_eq!(rebuilt.dma, 0x1000..0x2000);
+            assert_eq!(rebuilt.clock.ticks_per_microsecond, 3);
+        }
+        let absent = Storage::absent();
+        assert!(absent.handoff().is_none());
+        assert_eq!(absent.bluetooth_platform.input(), DsbrInput::Unavailable);
+    }
 }

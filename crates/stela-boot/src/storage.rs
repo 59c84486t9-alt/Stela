@@ -6,6 +6,8 @@
 //! without writing. `--storage-check SERIAL:GUID` also overwrites the start
 //! of that partition with a known pattern, reads it back and reports its
 //! hash. Without either option nothing here touches the hardware.
+mod bluetooth_platform;
+
 use crate::{output, paging::Tables};
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::time::Duration;
@@ -140,6 +142,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
     }
     Ok(Handoff {
         firmware: None,
+        bluetooth_platform: bluetooth_platform::capture(),
         ecam,
         mapped,
         dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,

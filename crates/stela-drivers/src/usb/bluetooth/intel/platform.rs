@@ -6,6 +6,9 @@
 //! byte + LE u32, GUID e65d8884-d4af-4b20-8d03-772ecc3da531. The donor does not
 //! reject revision/reserved bits after a successful read. Preserve them here;
 //! command bytes follow its actual mask behavior, without a guessed whitelist.
+mod capture;
+pub use capture::{DsbrCapture, DsbrCaptureObservation};
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum DsbrInput {
     Present {
