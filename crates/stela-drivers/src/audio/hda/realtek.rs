@@ -8,6 +8,9 @@ use super::{CodecGraph, Controller, Registers, Verb};
 use crate::{audio::Error, bus::i2c::Timer};
 use alloc::vec::Vec;
 
+mod headphone;
+pub use headphone::RealtekHeadphoneReport;
+
 const PROCESSING: u8 = 0x20;
 const GET_PARAMETER: u16 = 0xf00;
 #[derive(Clone, Copy)]

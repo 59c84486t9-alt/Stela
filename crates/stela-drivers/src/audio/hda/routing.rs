@@ -89,6 +89,10 @@ impl AnalogRoute {
     pub(super) fn codec_address(&self) -> u8 {
         self.codec
     }
+    pub(super) fn group_node(&self) -> u8 {
+        self.group
+    }
+
     pub fn nodes(&self) -> &[u8] {
         &self.nodes
     }
@@ -215,7 +219,7 @@ struct Amplifier {
     mute: bool,
 }
 
-struct Plan {
+pub(super) struct Plan {
     power: Vec<u8>,
     selectors: Vec<(u8, u8)>,
     amplifiers: Vec<Amplifier>,
@@ -379,7 +383,7 @@ fn plan(graph: &CodecGraph, route: &AnalogRoute, options: PinOptions) -> Result<
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    fn route_control(
+    pub(super) fn route_control(
         &mut self,
         codec: u8,
         node: u8,
@@ -435,21 +439,15 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
-    /// Program one explicit standard analog route while every stream is stopped.
-    /// Uses 0dB amp offsets, isolates unselected mixer inputs, waits for D0 and
-    /// reads every written control back. Successful widget paths are reserved;
-    /// sharing/reconfiguration needs full controller reinitialization. Any
-    /// hardware failure after programming begins blocks future route/stream
-    /// starts until reinitialization; partial codec effects are not rolled back.
-    /// OEM GPIO/amp sequencing, jack detection and digital audio remain separate.
-    pub fn configure_analog_route(
-        &mut self,
+    /// Pure typed validation shared with codec-specific startup transactions.
+    pub(super) fn preflight_analog_route(
+        &self,
         graph: &CodecGraph,
         route: &AnalogRoute,
         id: StreamId,
         channel: u8,
         options: PinOptions,
-    ) -> Result<(), Error> {
+    ) -> Result<Plan, Error> {
         if graph.token != self.token || route.token != self.token {
             return Err(Error::InvalidCodecGraph);
         }
@@ -469,6 +467,25 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }) {
             return Err(Error::RouteInUse);
         }
+        Ok(plan)
+    }
+
+    /// Program one explicit standard analog route while every stream is stopped.
+    /// Uses 0dB amp offsets, isolates unselected mixer inputs, waits for D0 and
+    /// reads every written control back. Successful widget paths are reserved;
+    /// sharing/reconfiguration needs full controller reinitialization. Any
+    /// hardware failure after programming begins blocks future route/stream
+    /// starts until reinitialization; partial codec effects are not rolled back.
+    /// OEM GPIO/amp sequencing, jack detection and digital audio remain separate.
+    pub fn configure_analog_route(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+    ) -> Result<(), Error> {
+        let plan = self.preflight_analog_route(graph, route, id, channel, options)?;
         let result = (|| {
             for node in plan.power {
                 self.power_d0(route.codec, node)?;
