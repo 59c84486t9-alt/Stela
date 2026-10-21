@@ -9,6 +9,7 @@ use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
 use super::descriptor::Encoding;
 use super::fault::{Capture, Code, Level, Record};
 use super::handoff::Handoff;
+use super::streams::{self, Command, Snapshot};
 use crate::platform::{
     apple::bus::Access,
     dma::{DmaError, Iommu, Memory},
@@ -123,6 +124,70 @@ impl Tables {
             .get_mut(sid)
             .ok_or("gen3 DART enable SID is outside its native bounds")?
             .enabled = enabled;
+        Ok(())
+    }
+
+    /// The original readable set-side words. Clear-side readback is not
+    /// inferred from an ignored posted-write drain read in the source.
+    pub fn read_streams(&self, offset: u64) -> Result<u32, &'static str> {
+        if streams::word(offset, streams::DISABLE).is_ok() {
+            return Err("gen3 DART clear-side stream readback is unqualified");
+        }
+        let word = streams::word(offset, streams::ENABLE)?;
+        streams::validate(self.streams.len(), word, 0)?;
+        Ok(
+            self.streams[word * 32..self.streams.len().min((word + 1) * 32)]
+                .iter()
+                .enumerate()
+                .fold(0, |bits, (sid, stream)| {
+                    bits | u32::from(stream.enabled) << sid
+                }),
+        )
+    }
+
+    /// Execute a native set/clear word without changing unselected streams,
+    /// translation bindings or pending faults. Validate every bit first.
+    pub fn stream_command(&mut self, command: Command) -> Result<(), &'static str> {
+        streams::validate(self.streams.len(), command.word(), command.bits())?;
+        let first = command.word() * 32;
+        let last = self.streams.len().min(first + 32);
+        for (sid, stream) in self.streams[first..last].iter_mut().enumerate() {
+            if command.bits() & (1 << sid) != 0 {
+                stream.enabled = command.enabled();
+            }
+        }
+        Ok(())
+    }
+
+    /// Execute the recovered retained stream shutdown after the owning
+    /// boundary's DSB SY. This saves actual enable words and disables only
+    /// translating streams. It does not claim physical power/reset effects,
+    /// clear fault evidence or synthesize MMIO write/error completion.
+    pub fn save_disable_translation(&mut self) -> Snapshot {
+        let words = (0..self.streams.len().div_ceil(32))
+            .map(|word| {
+                self.read_streams(streams::ENABLE + word as u64 * 4)
+                    .unwrap()
+            })
+            .collect();
+        for stream in &mut self.streams {
+            if stream.config & TRANSLATE != 0 {
+                stream.enabled = false;
+            }
+        }
+        Snapshot::new(self.streams.len(), words)
+    }
+
+    /// Execute the original set-side restore of actual saved words. This
+    /// ORs their bits; it does not replace or clear newly enabled streams.
+    /// The register owner must restore/qualify other state before calling.
+    pub fn restore_enables(&mut self, snapshot: &Snapshot) -> Result<(), &'static str> {
+        if snapshot.streams() != self.streams.len() {
+            return Err("gen3 DART saved enable state belongs to a different SID geometry");
+        }
+        for (word, bits) in snapshot.words().iter().copied().enumerate() {
+            self.stream_command(Command::decode(streams::ENABLE + word as u64 * 4, bits)?)?;
+        }
         Ok(())
     }
 
