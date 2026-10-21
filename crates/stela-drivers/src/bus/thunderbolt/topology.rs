@@ -29,6 +29,11 @@ pub enum Error {
     CapabilityBudget,
     Busy,
     ClockOverflow,
+    PublicationTimeout {
+        route: Route,
+        port: u8,
+        offset: u16,
+    },
     UnexpectedReceipt,
     TopologyChanged,
     Controller {
@@ -301,6 +306,7 @@ enum Stage {
 struct Job {
     path: Path,
     expected: Option<u64>,
+    publication_deadline: Option<u64>,
     stage: Stage,
     inventory: Option<Inventory>,
     seen: Vec<u16>,
@@ -349,6 +355,7 @@ impl<R: Registers> Inspector<R> {
         self.job = Some(Job {
             path,
             expected: None,
+            publication_deadline: None,
             stage: Stage::Router,
             inventory: None,
             seen: Vec::new(),
@@ -389,12 +396,30 @@ impl<R: Registers> Inspector<R> {
         }
     }
     fn submit(&mut self, now: u64) -> Result<(), Error> {
-        let deadline = now.checked_add(self.timeout).ok_or(Error::ClockOverflow)?;
         let job = self.job.as_mut().ok_or(Error::UnexpectedReceipt)?;
         if job.expected.is_some() {
             return Ok(());
         }
         let address = Self::address(job.stage);
+        let deadline = match job.publication_deadline {
+            Some(deadline) => deadline,
+            None => {
+                let deadline = now.checked_add(self.timeout).ok_or(Error::ClockOverflow)?;
+                job.publication_deadline = Some(deadline);
+                deadline
+            }
+        };
+        if now >= deadline {
+            let error = Error::PublicationTimeout {
+                route: job.path.route(),
+                port: address.port,
+                offset: address.offset,
+            };
+            // A completed reply without TX progress is not proof that this
+            // channel's queued DMA can be reused. Keep its leases, poison it.
+            let _ = self.channel.cancel();
+            return Err(error);
+        }
         if address.offset != 0
             && (address.offset < if address.space == Space::Router { 5 } else { 8 }
                 || u32::from(address.offset) + u32::from(address.words) > 8192)
@@ -603,6 +628,7 @@ impl<R: Registers> Inspector<R> {
                     return Err(Error::UnexpectedReceipt);
                 }
                 job.expected = None;
+                job.publication_deadline = None;
                 if Self::complete(
                     &mut job,
                     reply,
@@ -709,6 +735,7 @@ mod tests {
         let mut job = Job {
             path: Path::new(Route::new(0).unwrap()).unwrap(),
             expected: None,
+            publication_deadline: None,
             stage: Stage::Router,
             inventory: None,
             seen: Vec::new(),

@@ -1839,4 +1839,55 @@ mod tests {
             channel_release(&mut channel);
         }
     }
+
+    #[test]
+    fn inventory_tx_publication_deadline_does_not_move_when_dma_consumer_stalls() {
+        use super::super::{
+            channel::Error as ChannelError,
+            config::Route,
+            topology::{Error as InspectError, Inspector},
+        };
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let mut inspector = Inspector::new(channel, 10, 64).unwrap();
+        inspector.begin(Route::new(0).unwrap(), 0).unwrap();
+        for index in 0..9 {
+            let sent = domain.data(model.frame_address(Direction::Tx, index), 16);
+            let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+            // The synthetic wire peer replies, but NHI never acknowledges any
+            // TX DMA descriptor. Nine real transmitted slots fill the ring.
+            let mut words = vec![1 << 31, 0, address & !(63 << 19)];
+            if index == 0 {
+                words.extend([0x12348086, 10 << 14, 0, 0, 1 << 29]);
+            } else {
+                words.extend([0; 8]);
+            }
+            finish_rx(&model, index, &incoming(PacketType::Read, &words));
+            assert_eq!(inspector.poll(index as u64).unwrap(), None);
+        }
+        assert_eq!(model.read32(TX_DESCRIPTOR + 8) >> 16, 9);
+        let writes = model.state.lock().unwrap().writes.len();
+        for now in 9..18 {
+            assert_eq!(inspector.poll(now).unwrap(), None);
+        }
+        assert_eq!(
+            inspector.poll(18),
+            Err(InspectError::PublicationTimeout {
+                route: Route::new(0).unwrap(),
+                port: 9,
+                offset: 0
+            })
+        );
+        assert_eq!(
+            inspector.poll(19),
+            Err(InspectError::Channel(ChannelError::Poisoned))
+        );
+        assert_eq!(
+            inspector.begin(Route::new(0).unwrap(), 19),
+            Err(InspectError::Channel(ChannelError::Poisoned))
+        );
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = inspector.into_channel();
+        channel_release(&mut channel);
+    }
 }
