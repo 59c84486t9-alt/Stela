@@ -8,4 +8,5 @@ pub mod irq;
 pub(crate) mod mmio;
 pub mod pci;
 pub mod smbus;
+pub mod thunderbolt;
 pub mod virtio;
