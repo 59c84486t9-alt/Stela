@@ -14,6 +14,7 @@
 //! after the complete record has been read; retrying a failed read has no
 //! architectural effect.
 
+pub mod cache_input;
 pub mod cl;
 pub mod registers;
 pub mod render_resources;
@@ -181,12 +182,16 @@ impl Submission {
 /// DMA fault. Decoding does not complete a record or authorize GPU effects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Accepted {
-    pub submission: Submission,
+    submission: Submission,
     cursor: Cursor,
     current: Option<Frame>,
+    cache_input: Option<cache_input::BufferCacheInput>,
 }
 
 impl Accepted {
+    pub fn submission(&self) -> &Submission {
+        &self.submission
+    }
     pub fn read(
         memory: &mut dyn Shared,
         family: &Family,
@@ -198,7 +203,32 @@ impl Accepted {
             submission,
             cursor,
             current: None,
+            cache_input: None,
         })
+    }
+
+    /// Capture at the original scheduler-descriptor phase, before SKU
+    /// execution. Do not hoist this read over preceding scheduler effects.
+    /// Once accepted, later record faults cannot redirect these inputs.
+    pub fn capture_cache_input(
+        &mut self,
+        memory: &mut dyn Shared,
+    ) -> Result<&cache_input::BufferCacheInput, &'static str> {
+        if self.cache_input.is_none() {
+            if self.current.is_some() || self.cursor.next != self.submission.stream {
+                return Err("GFX buffer-cache input capture follows SKU acceptance");
+            }
+            self.cache_input = Some(cache_input::BufferCacheInput::read(
+                memory,
+                &self.submission,
+            )?);
+        }
+        self.cache_input()
+    }
+    pub fn cache_input(&self) -> Result<&cache_input::BufferCacheInput, &'static str> {
+        self.cache_input
+            .as_ref()
+            .ok_or("GFX buffer-cache scheduler inputs have not been captured")
     }
 
     /// Accept one complete record before its consumer performs the first

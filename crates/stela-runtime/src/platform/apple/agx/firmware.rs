@@ -271,7 +271,7 @@ impl ActiveCommand {
             // native setup/start/effect consumer remains unqualified. No end,
             // stamp or ring retirement can turn this into a completed job.
             work.current(memory)?;
-            return Err(work.submission.command.kind.unexecuted());
+            return Err(work.submission().command.kind.unexecuted());
         };
         while let Some(&action) = actions.get(*next) {
             match action {
@@ -2210,11 +2210,11 @@ mod tests {
                 let Execution::Stock(owned) = &active.execution else {
                     panic!("stock owner lost")
                 };
-                assert_eq!(owned.submission.command.va, command);
-                assert_eq!(owned.submission.counter, 0x1234_5678);
-                assert_eq!(owned.submission.context, 7);
-                assert_eq!(owned.submission.stream, stream);
-                assert_eq!(owned.submission.stamp.index, 127);
+                assert_eq!(owned.submission().command.va, command);
+                assert_eq!(owned.submission().counter, 0x1234_5678);
+                assert_eq!(owned.submission().context, 7);
+                assert_eq!(owned.submission().stream, stream);
+                assert_eq!(owned.submission().stamp.index, 127);
                 // Once accepted, the record is not reread on refusal/retry.
                 memory.flat.put_u32(stream, u32::MAX);
                 memory.flat.put_u64(stream + 4, 0);
