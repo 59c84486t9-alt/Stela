@@ -26,6 +26,7 @@ use core::{
 
 pub mod block;
 pub mod bus;
+pub mod firmware;
 pub mod input;
 pub mod net;
 pub mod probe;
