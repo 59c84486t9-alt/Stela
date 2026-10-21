@@ -756,8 +756,10 @@ pub fn answer(
         b"A412" => sized(bool_reply(true)),
         // get_framebuffer_id: the single framebuffer's id.
         b"A405" => sized(1u32.to_le_bytes().to_vec()),
-        // set_display_device(index): one display, accepted.
-        b"A411" => sized(bool_reply(true)),
+        // set_display_device(index) -> link status, not bool. The AP
+        // wrapper (0x3d77988) passes this word to iomfb_status_from_link
+        // (0x3d9cf30): 0 succeeds; 1 maps to kIOReturnError (0xe00002bc).
+        b"A411" => sized(IO_RETURN_SUCCESS.to_le_bytes().to_vec()),
         // do_create_default_frame_buffer: the DCP does NOT create one; the
         // boot framebuffer is inherited, so this is 0 and the AP skips the
         // A036/A037 default-framebuffer-info path.
@@ -891,6 +893,51 @@ mod tests {
             answer(b"A412", &[], 4, FULL_HD).unwrap(),
             1u32.to_le_bytes()
         );
+    }
+
+    #[test]
+    fn status_methods_succeed_under_the_ap_link_status_contract() {
+        // The original AP maps link statuses 1..=18 to IOReturn errors
+        // (0x3d9cf30, table 0xaf72f0). In particular a boolean true is
+        // kIOReturnError, not success. Keep the consumer independent of
+        // the reply builder so accidentally changing zero to true fails.
+        fn ap_success(bytes: &[u8], offset: usize) -> bool {
+            let status = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            !(1..=18).contains(&status)
+        }
+        assert!(!ap_success(&1u32.to_le_bytes(), 0));
+        let mut methods = methods();
+        let mut parameter = [0; 0x28];
+        parameter[..4].copy_from_slice(&ADAPTIVE_SYNC.to_le_bytes());
+        let mut power = [0; 0x10];
+        power[..8].copy_from_slice(&1u64.to_le_bytes());
+        let mode = [
+            modes::COLOR_ID.to_le_bytes(),
+            modes::TIMING_ID.to_le_bytes(),
+        ]
+        .concat();
+        for (tag, input, output, status_offset) in [
+            (*b"A411", 2u32.to_le_bytes().as_slice(), 4, 0),
+            (*b"A450", parameter.as_slice(), 4, 0),
+            (*b"A484", power.as_slice(), 8, 4),
+            (*b"A413", mode.as_slice(), 4, 0),
+            (*b"A414", [0; 8].as_slice(), 8, 4),
+            (*b"A406", [0; 0x10].as_slice(), 8, 4),
+            (*b"A479", [0; 8].as_slice(), 4, 0),
+        ] {
+            let reply = returned(methods.call(tag, input, output));
+            assert!(ap_success(&reply, status_offset), "{tag:?}: {reply:?}");
+            // Use canonical zero rather than an out-of-range value the
+            // AP happens to accept.
+            assert_eq!(&reply[status_offset..status_offset + 4], &[0; 4]);
+        }
+        start_swap(&mut methods);
+        let reply = returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
+        assert!(ap_success(&reply, 8));
+        assert_eq!(&reply[8..12], &[0; 4]);
+        // setDisplayRefreshProperties is genuinely boolean: the AP at
+        // 0x3d7a4e4 reads its low bit instead of mapping a link status.
+        assert_eq!(returned(methods.call(*b"A475", &[], 4)), [1, 0, 0, 0]);
     }
 
     #[test]
