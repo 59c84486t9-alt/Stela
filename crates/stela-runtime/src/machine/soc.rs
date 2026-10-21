@@ -1023,6 +1023,24 @@ pub const SART: &str = "sart,coastguard";
 /// comment). No placed coprocessor model follows that contract.
 const UNAWAITED_NUB: [&str; 2] = ["remote-only", "automatic-rail-gating-enabled"];
 
+/// Select the protocol endpoint by its declared compatible under an already
+/// qualified ASC role. Node names are labels (J314s uses iop-gfx-nub0),
+/// not a second protocol discriminator. Ambiguous endpoints refuse.
+fn rtbuddy_nub<'a>(asc: &Node<'a>, role: &str) -> Result<Node<'a>, String> {
+    let children = asc
+        .children()
+        .ok_or_else(|| format!("{role} children are malformed"))?;
+    let mut nubs = children.into_iter().filter(|node| node.compatible(RTBUDDY));
+    let nub = nubs
+        .next()
+        .ok_or_else(|| format!("{role} has no RTBuddy v2 nub"))?;
+    if nubs.next().is_some() {
+        return Err(format!("{role} has ambiguous RTBuddy v2 nubs"));
+    }
+    awaited_nub(&nub, role)?;
+    Ok(nub)
+}
+
 /// Refuse an RTBuddy nub whose start-up the RTKit model does not carry.
 fn awaited_nub(nub: &Node<'_>, role: &str) -> Result<(), String> {
     match UNAWAITED_NUB
@@ -2346,11 +2364,7 @@ fn pmp_controller(
     else {
         return Ok(None);
     };
-    let nub = node
-        .child("iop-pmp-nub")
-        .filter(|nub| nub.compatible(RTBUDDY))
-        .ok_or("PMP has no RTBuddy v2 nub")?;
-    awaited_nub(&nub, "PMP")?;
+    let nub = rtbuddy_nub(&node, "PMP")?;
     if nub.first_u32("user-power-managed") != Some(1) {
         return Err("PMP nub is not user-power-managed".into());
     }
@@ -2451,11 +2465,7 @@ fn gfx_controller(
         .ok_or_else(|| format!("sgx is not the GPU of ApChipID {chip_id:#x}"))?;
     gpu.admitted()
         .map_err(|reason| format!("{} is not modeled: {reason}", gpu.compatible))?;
-    let nub = asc
-        .child("iop-gfx-nub")
-        .filter(|nub| nub.compatible(RTBUDDY))
-        .ok_or("gfx-asc has no RTBuddy v2 nub")?;
-    awaited_nub(&nub, "GFX")?;
+    rtbuddy_nub(&asc, "GFX")?;
     let place = |node: &Node<'_>, index: usize, minimum: u64, what: &str| {
         let (offset, bytes) = node
             .pairs("reg")
@@ -2525,11 +2535,7 @@ fn smc_controller(
     else {
         return Ok(None);
     };
-    let nub = node
-        .child("iop-smc-nub")
-        .filter(|nub| nub.compatible(RTBUDDY))
-        .ok_or("SMC has no RTBuddy v2 nub")?;
-    awaited_nub(&nub, "SMC")?;
+    let nub = rtbuddy_nub(&node, "SMC")?;
     let regs = node.pairs("reg").ok_or("SMC has no reg pairs")?;
     let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64), String> {
         let &(offset, bytes) = regs
@@ -2807,11 +2813,7 @@ fn ans_controller(
             "ANS2 {flag} selects an SPTM NVMe contract the model does not carry"
         ));
     }
-    let nub = node
-        .child("iop-ans-nub")
-        .filter(|nub| nub.compatible(RTBUDDY))
-        .ok_or("ANS2 has no RTBuddy v2 nub")?;
-    awaited_nub(&nub, "ANS2")?;
+    rtbuddy_nub(&node, "ANS2")?;
     let regs = node.pairs("reg").ok_or("ANS2 has no reg pairs")?;
     let parent = node
         .first_u32("iommu-parent")
@@ -5002,6 +5004,47 @@ mod tests {
     }
 
     #[test]
+    fn rtbuddy_endpoint_selection_uses_protocol_and_rejects_ambiguity() {
+        use crate::machine::adt::encode;
+        let endpoint = |name: &str, compatible: &str| {
+            let name = [name.as_bytes(), &[0]].concat();
+            let compatible = [compatible.as_bytes(), &[0]].concat();
+            encode(&[("name", &name), ("compatible", &compatible)], &[])
+        };
+        for name in ["iop-gfx-nub", "iop-gfx-nub0", "arbitrary-label"] {
+            let data = encode(&[], &[endpoint(name, RTBUDDY)]);
+            let root = Node::root(&data).unwrap();
+            assert_eq!(
+                rtbuddy_nub(&root, "GFX").unwrap().property("name"),
+                Some([name.as_bytes(), &[0]].concat().as_slice())
+            );
+        }
+        let missing = encode(&[], &[endpoint("iop-gfx-nub", "unknown")]);
+        assert!(rtbuddy_nub(&Node::root(&missing).unwrap(), "GFX").is_err());
+        let duplicate = encode(&[], &[endpoint("a", RTBUDDY), endpoint("b", RTBUDDY)]);
+        assert!(
+            rtbuddy_nub(&Node::root(&duplicate).unwrap(), "GFX")
+                .err()
+                .unwrap()
+                .contains("ambiguous")
+        );
+        let child = encode(
+            &[
+                ("compatible", b"iop-nub,rtbuddy-v2\0"),
+                ("remote-only", b""),
+            ],
+            &[],
+        );
+        let data = encode(&[], &[child]);
+        assert!(
+            rtbuddy_nub(&Node::root(&data).unwrap(), "GFX")
+                .err()
+                .unwrap()
+                .contains("remote-only")
+        );
+    }
+
+    #[test]
     fn rtbuddy_nubs_the_ap_does_not_wait_for_refuse() {
         use crate::machine::adt::encode;
         let name = b"iop-pmp-nub ".to_vec();
@@ -5077,7 +5120,7 @@ mod tests {
         };
         let tree = |asc_visible: bool, sgx_visible: bool| {
             let nub = encode(
-                &[("name", &z("iop-gfx-nub")), ("compatible", &z(RTBUDDY))],
+                &[("name", &z("iop-gfx-nub0")), ("compatible", &z(RTBUDDY))],
                 &[],
             );
             let (name, role, asc_compatible) = (z("gfx-asc"), z("GFX"), z(ASC));
