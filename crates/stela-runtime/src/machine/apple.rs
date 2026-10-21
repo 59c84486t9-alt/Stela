@@ -736,6 +736,7 @@ impl AppleDevices {
         self.bus
             .map(spi, device.physical, device.bytes, 0)
             .map_err(|e| format!("SPI placement: {e:?}"))?;
+        self.register_power_device(device.physical, spi, false)?;
         self.nor = Some(spi);
         if let Some(pin) = placement.select {
             let (base, _) = self.gpio.as_ref().ok_or("SPI CS requires the GPIO bank")?;
@@ -753,9 +754,12 @@ impl AppleDevices {
         console: C,
         ranges: &[Range],
         irq: Option<AicInput>,
-    ) -> Result<(), MapError> {
+    ) -> Result<(), String> {
+        let first = ranges.first().ok_or("UART has no canonical aperture")?;
         let device = self.bus.add(Box::new(S5lUart::new(console, irq)));
         self.map(device, ranges)
+            .map_err(|error| format!("UART placement: {error:?}"))?;
+        self.register_power_device(first.physical, device, false)
     }
 
     /// The lock pair at the end of one DT-placed CoreSight component page.
@@ -1278,7 +1282,8 @@ impl AppleDevices {
         let id = self.bus.add(Box::new(model));
         self.bus
             .map(id, device.physical, device.bytes, 0)
-            .map_err(|e| format!("I2C placement: {e:?}"))
+            .map_err(|e| format!("I2C placement: {e:?}"))?;
+        self.register_power_device(device.physical, id, false)
     }
 
     /// Place canonical PHY regions once. ADT aliases inside the core resolve
@@ -1734,6 +1739,7 @@ impl AppleDevices {
         let device = self.bus.add(Box::new(Aes::new(version, irq, uid)));
         self.map(device, &[block, key_disable])
             .map_err(|error| format!("AES placement: {error:?}"))?;
+        self.register_power_device(block.physical, device, false)?;
         self.masters.push(Master {
             aes: device,
             dart: dart.0,
@@ -3160,6 +3166,140 @@ mod tests {
         d.connect_power_resources(&states, &[vec![dart]], &[retention])
             .unwrap();
         (d, dart, supply, base)
+    }
+
+    fn powered_serial_controllers() -> (AppleDevices, Console, u64, [u64; 3]) {
+        use super::super::soc::{Device, I2cController, PowerResource, PowerStates, SpiNor};
+        use coverage::{Admission, Domain, DomainId};
+        let mut d = AppleDevices::new();
+        let supply = 0x2_3b70_0100;
+        let bases = [UART, 0x2_3501_0000, 0x2_3510_4000];
+        let id = DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            blocks: vec![(supply, 4)],
+            registers: vec![supply],
+            domains: vec![Domain {
+                id,
+                address: Some(supply),
+                parents: [None; 2],
+            }],
+            resources: bases
+                .iter()
+                .zip(["uart", "i2c", "spi"])
+                .map(|(&physical, name)| PowerResource {
+                    name: name.into(),
+                    clocks: vec![id],
+                    power: vec![],
+                    owner: Some(PowerOwner::Mmio(physical)),
+                    admission: Admission::Required,
+                })
+                .collect(),
+        };
+        let console = Console::default();
+        d.add_uart(
+            console.clone(),
+            &[Range {
+                physical: bases[0],
+                bytes: 0x4000,
+            }],
+            None,
+        )
+        .unwrap();
+        d.add_i2c(
+            &I2cController {
+                device: Device {
+                    physical: bases[1],
+                    bytes: 0x1000,
+                    irq: 761,
+                },
+                targets: vec![],
+            },
+            &|_| None,
+        )
+        .unwrap();
+        d.add_spi_nor(&SpiNor {
+            device: Device {
+                physical: bases[2],
+                bytes: 0x1000,
+                irq: 749,
+            },
+            image: crate::platform::apple::nor::Image::fresh(),
+            select: None,
+        })
+        .unwrap();
+        assert_eq!(
+            d.power_devices.len(),
+            3,
+            "actual constructors register each bank once"
+        );
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &[supply],
+        )
+        .unwrap();
+        d.connect_power_resources(&states, &[], &[]).unwrap();
+        assert!(d.power_refusals().is_empty());
+        (d, console, supply, bases)
+    }
+
+    #[test]
+    fn pmgr_serial_constructor_hooks_gate_actual_mmio_and_preserve_retained_configuration() {
+        let (mut d, console, supply, [uart, i2c, spi]) = powered_serial_controllers();
+        for (address, value) in [(uart, 3), (i2c + 0x30, 0x1234), (spi + 0x30, 7)] {
+            d.write(0, address, 4, value, 0).unwrap();
+        }
+        d.write(0, uart + 0x20, 4, u64::from(b'a'), 0).unwrap();
+        for client in &mut d.power_clients {
+            client.retention = true; // Explicit synthetic policy, not a J473 retention claim.
+        }
+        for request in [4, 0] {
+            d.write(0, supply, 4, request, 0).unwrap();
+            for address in [uart, i2c + 0x30, spi + 0x30] {
+                assert!(d.read(0, address, 4, 0).is_err());
+            }
+            d.write(0, supply, 4, 15, 0).unwrap();
+            for (address, value) in [(uart, 3), (i2c + 0x30, 0x1234), (spi + 0x30, 7)] {
+                assert_eq!(d.read(0, address, 4, 0), Ok(value));
+            }
+        }
+        assert_eq!(*console.0.borrow(), b"a");
+    }
+
+    #[test]
+    fn pmgr_serial_reset_preflights_actual_nor_before_clearing_other_controllers() {
+        let (mut d, console, supply, [uart, i2c, spi]) = powered_serial_controllers();
+        d.write(0, uart + 0x20, 4, u64::from(b'a'), 0).unwrap();
+        d.write(0, spi + 0x0c, 4, 0, 0).unwrap(); // Internal CS low.
+        d.write(0, spi + 0x4c, 4, 1, 0).unwrap();
+        d.write(0, spi + 0x10, 4, 3, 0).unwrap(); // READ, missing address.
+        d.write(0, spi, 4, 1, 0).unwrap();
+        d.write(0, supply, 4, 0x40f, 0).unwrap();
+        let before = d.read(0, supply, 4, 0).unwrap();
+        assert!(matches!(d.write(0, supply, 4, 0x8000040f, 0),
+            Err(DeviceError::Refused(reason)) if reason.contains("incomplete NOR")));
+        assert_eq!(d.read(0, supply, 4, 0), Ok(before));
+        assert_eq!(d.read(0, uart, 4, 0), Ok(3));
+        assert_eq!(d.read(0, i2c + 0x1c, 4, 0), Ok(0));
+        d.write(0, supply, 4, 15, 0).unwrap();
+        d.write(0, spi + 0x4c, 4, 3, 0).unwrap();
+        for _ in 0..3 {
+            d.write(0, spi + 0x10, 4, 0, 0).unwrap();
+        }
+        // Closing the now-complete command allows an actual shared reset.
+        d.write(0, spi + 0x0c, 4, 2, 0).unwrap();
+        for request in [0x40f, 0x8000040f, 0x40f, 15] {
+            d.write(0, supply, 4, request, 0).unwrap();
+        }
+        for address in [uart, i2c + 0x1c, spi] {
+            assert!(
+                d.read(0, address, 4, 0).is_err(),
+                "unknown reset image at {address:#x}"
+            );
+        }
+        assert_eq!(*console.0.borrow(), b"a");
     }
 
     /// A checked native bank fixture shares an actual mounted DART's supply.

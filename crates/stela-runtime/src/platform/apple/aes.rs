@@ -56,7 +56,9 @@
 //! (0x50-0x6c), RESET and RESET_AES, wrapped keys, key functions, HDCP keys
 //! and the DSB, SKG and WRITE_REG commands are refused until their values or
 //! behavior are known.
-use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use super::bus::{
+    Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
+};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::{DmaError, Port};
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
@@ -211,6 +213,7 @@ fn xor(block: &mut [u8; BLOCK], other: &[u8; BLOCK]) {
 }
 
 pub struct Aes {
+    lifecycle: LifecycleState,
     version: u32,
     irq: Option<AicInput>,
     irq_level: bool,
@@ -236,6 +239,13 @@ impl Aes {
             None => DISABLE_KNOWN,
         };
         Self {
+            lifecycle: LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            },
             version,
             irq,
             irq_level: false,
@@ -251,6 +261,23 @@ impl Aes {
             keys: [None, None],
             ivs: [[0; BLOCK]; 4],
         }
+    }
+
+    fn executing(&self) -> bool {
+        self.accessible().is_ok() && !self.lifecycle.quiesced
+    }
+
+    fn accessible(&self) -> Result<(), &'static str> {
+        if !self.lifecycle.powered {
+            return Err("AES power domain is off");
+        }
+        if !self.lifecycle.clocked {
+            return Err("AES clock is gated");
+        }
+        if self.lifecycle.reset {
+            return Err("AES physical reset is asserted");
+        }
+        Ok(())
     }
 
     fn command_fifo(&self) -> u64 {
@@ -293,13 +320,22 @@ impl Aes {
 
     /// Whether commands wait for [`Self::run`].
     pub fn pending(&self) -> bool {
-        self.started && !self.fifo.is_empty()
+        self.executing() && self.started && !self.fifo.is_empty()
     }
 
     /// Run every whole command at the head of the started FIFO, moving data
     /// through `port`. A command the model does not implement is refused
     /// and stays queued.
     pub fn run(&mut self, port: &mut Port<'_, '_>) -> Result<(), MmioError> {
+        if !self.executing() {
+            return Err(refuse(
+                NAME,
+                self.command_fifo(),
+                Width::Word,
+                Direction::Write,
+                "AES DMA while PMGR inhibits execution",
+            ));
+        }
         while self.started {
             let Some(&command) = self.fifo.front() else {
                 break;
@@ -519,7 +555,30 @@ fn key_bytes(command: u32) -> usize {
     }
 }
 
+impl Lifecycle for Aes {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        if !self.lifecycle.reset && proposed.reset
+            || self.lifecycle.powered && !proposed.powered && !proposed.retention
+        {
+            return Err(
+                "AES physical reset or nonretained power loss requires qualified key-disable, context and entropy restore semantics",
+            );
+        }
+        Ok(())
+    }
+
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        // Retained gates preserve accepted commands, sticky disable bits,
+        // key contexts, chaining values and already pending interrupts.
+        self.lifecycle = proposed;
+        self.signal(access);
+    }
+}
+
 impl MmioDevice for Aes {
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
     fn name(&self) -> &'static str {
         NAME
     }
@@ -531,6 +590,7 @@ impl MmioDevice for Aes {
         _access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        self.accessible().map_err(fail)?;
         if width != Width::Word {
             return Err(fail("AES registers are 32-bit"));
         }
@@ -556,6 +616,13 @@ impl MmioDevice for Aes {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        self.accessible().map_err(fail)?;
+        if self.lifecycle.quiesced
+            && (offset == self.command_fifo()
+                || offset == CONTROL && value == u64::from(CONTROL_START))
+        {
+            return Err(fail("AES command submission while PMGR quiesced"));
+        }
         if width != Width::Word {
             return Err(fail("AES registers are 32-bit"));
         }
@@ -743,6 +810,107 @@ mod tests {
         bench.write(INT_STATUS, u64::from(INT_FLAG));
         assert!(!bench.aes.irq_level);
         assert_eq!(bench.read(FIFO_STATUS), FIFO_LOW | FIFO_EMPTY);
+    }
+
+    #[test]
+    fn retained_gates_preserve_keys_chaining_queued_dma_and_completed_interrupts() {
+        let mut bench = Bench::new(Some([0x69; 32]));
+        let key = hex("2b7e151628aed2a6abf7158809cf4f3c");
+        bench
+            .push(core::iter::once(OPCODE_KEY << 28 | KEY_ENCRYPT | 1 << 16).chain(words(&key)))
+            .unwrap();
+        let iv = hex("000102030405060708090a0b0c0d0e0f");
+        bench
+            .push(core::iter::once(OPCODE_IV << 28).chain(words(&iv)))
+            .unwrap();
+        bench
+            .push([OPCODE_FLAG << 28 | FLAG_INTERRUPT | 0x2a])
+            .unwrap();
+        let plain = hex("6bc1bee22e409f96e93d7e117393172a");
+        assert!(bench.ram.write(SOURCE, &plain));
+        assert!(bench.ram.write(DESTINATION, &[0xa5; 16]));
+        for word in [
+            OPCODE_DATA << 28 | 16,
+            ((SOURCE >> 32) << 16 | DESTINATION >> 32) as u32,
+            SOURCE as u32,
+            DESTINATION as u32,
+        ] {
+            bench.write(FIFO, u64::from(word));
+        }
+        let active = bench.aes.lifecycle;
+        let fifo = bench.aes.fifo.clone();
+        let ivs = bench.aes.ivs;
+        let disabled = bench.aes.disabled;
+        for paused in [
+            LifecycleState {
+                clocked: false,
+                ..active
+            },
+            LifecycleState {
+                quiesced: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                retention: true,
+                ..active
+            },
+        ] {
+            bench.aes.check_lifecycle(paused).unwrap();
+            bench
+                .aes
+                .set_lifecycle(paused, &mut Access::new(0, 0, &mut bench.latch));
+            assert!(!bench.aes.pending());
+            assert!(bench.push([]).is_err());
+            assert!(
+                bench
+                    .aes
+                    .write(
+                        FIFO,
+                        Width::Word,
+                        0,
+                        &mut Access::new(0, 0, &mut bench.latch)
+                    )
+                    .is_err()
+            );
+            assert_eq!(bench.aes.fifo, fifo);
+            assert_eq!(bench.aes.ivs, ivs);
+            assert_eq!(bench.aes.disabled, disabled);
+            assert_eq!(bench.bytes(DESTINATION, 16), [0xa5; 16]);
+            assert!(bench.latch.is_asserted(Wire::Aic(AicInput::new(0, 0x2f7))));
+            bench
+                .aes
+                .set_lifecycle(active, &mut Access::new(0, 0, &mut bench.latch));
+            assert!(bench.aes.pending());
+        }
+        for destructive in [
+            LifecycleState {
+                reset: true,
+                ..active
+            },
+            LifecycleState {
+                powered: false,
+                ..active
+            },
+        ] {
+            assert!(bench.aes.check_lifecycle(destructive).is_err());
+            assert_eq!(bench.aes.lifecycle, active);
+            assert_eq!(bench.aes.fifo, fifo);
+            assert_eq!(bench.aes.uid, Some([0x69; 32]));
+        }
+        bench.push([]).unwrap();
+        assert_eq!(
+            bench.bytes(DESTINATION, 16),
+            hex("7649abac8119b246cee98e9b12e9197d")
+        );
+        assert!(bench.aes.fifo.is_empty());
+        let completed_iv = bench.aes.ivs;
+        bench.push([]).unwrap();
+        assert_eq!(
+            bench.aes.ivs, completed_iv,
+            "gate release cannot replay DMA"
+        );
+        assert_eq!(bench.read(FLAG_COMMAND), 0x2a);
     }
 
     /// NIST SP 800-38A F.5.2 (CTR-AES128.Decrypt) and F.2.2
