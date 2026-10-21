@@ -40,6 +40,10 @@ fn read_bounded(path: &Path, expected: Option<usize>, limit: usize) -> Result<Ve
 /// Resolve a stable local source directory without following symlinks or case
 /// aliases. The package is fully read and verified before destination writes.
 fn resolve(root: &Path, relative: &str) -> Result<PathBuf, Error> {
+    resolve_optional(root, relative)?.ok_or_else(|| fail("missing host firmware package file"))
+}
+
+fn resolve_optional(root: &Path, relative: &str) -> Result<Option<PathBuf>, Error> {
     let mut directory = root.to_path_buf();
     for component in relative.split('/') {
         let mut found = None;
@@ -62,9 +66,173 @@ fn resolve(root: &Path, relative: &str) -> Result<PathBuf, Error> {
                 found = Some(entry.path());
             }
         }
-        directory = found.ok_or_else(|| fail("missing host firmware package file"))?;
+        let Some(found) = found else {
+            return Ok(None);
+        };
+        directory = found;
     }
-    Ok(directory)
+    Ok(Some(directory))
+}
+
+pub(super) const NOTICE_MARKER: &str = "stela-notice-v1:";
+const NOTICE_INDEX: &str = "provenance.json";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoticeIndex {
+    schema: u32,
+    #[serde(deserialize_with = "bounded_notices")]
+    notices: Vec<NoticeEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoticeEntry {
+    path: String,
+    source: String,
+    revision: String,
+    member: String,
+    length: usize,
+    sha256: String,
+}
+
+fn bounded_notices<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<NoticeEntry>, D::Error> {
+    struct Notices;
+    impl<'de> Visitor<'de> for Notices {
+        type Value = Vec<NoticeEntry>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "at most 63 notice artifacts")
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut notices = Vec::new();
+            while let Some(notice) = seq.next_element()? {
+                if notices.len() == MAX_IMAGES - 1 {
+                    return Err(de::Error::custom("too many firmware notices"));
+                }
+                notices.push(notice);
+            }
+            Ok(notices)
+        }
+    }
+    deserializer.deserialize_seq(Notices)
+}
+
+fn read_notices(source: &Path, manifest: &Manifest<'_>) -> Result<Vec<(String, Vec<u8>)>, Error> {
+    let mut parents = Vec::new();
+    let mut selected = None;
+    for image in &manifest.images {
+        let parent = image.path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        if parents.contains(&parent) {
+            continue;
+        }
+        parents.push(parent);
+        let required = manifest.images.iter().any(|image| {
+            image.path.rsplit_once('/').map_or("", |(parent, _)| parent) == parent
+                && image.provenance.license.starts_with(NOTICE_MARKER)
+        });
+        // Legacy generated packages predate the marker and have one fixed
+        // content-addressed parent. Do not interpret arbitrary extra files in
+        // an ordinary local package as generated notice metadata.
+        let generated = parent.strip_prefix("objects/").is_some_and(|hash| {
+            hash.len() == 64
+                && hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        });
+        if !required && !generated {
+            continue;
+        }
+        let relative = if parent.is_empty() {
+            NOTICE_INDEX.into()
+        } else {
+            format!("{parent}/{NOTICE_INDEX}")
+        };
+        if !storage_path(&relative) {
+            return Err(fail("firmware notice index path exceeds its budget"));
+        }
+        let found = resolve_optional(source, &relative)?;
+        if let Some(found) = found {
+            if selected.is_some() {
+                return Err(fail(
+                    "multiple firmware notice indexes cannot be imported losslessly",
+                ));
+            }
+            selected = Some((parent, found));
+        } else if required {
+            return Err(fail(
+                "generated firmware package is missing required notices",
+            ));
+        }
+    }
+    let Some((parent, path)) = selected else {
+        return Ok(Vec::new());
+    };
+    let bytes = read_bounded(&path, None, MAX_MANIFEST_BYTES)?;
+    let index: NoticeIndex = serde_json::from_slice(&bytes).map_err(io)?;
+    if index.schema != 1 {
+        return Err(fail("unsupported firmware notice index"));
+    }
+    let mut total = bytes.len();
+    for (at, notice) in index.notices.iter().enumerate() {
+        if !storage_path(&notice.path)
+            || notice.path.contains('/')
+            || !notice.path.ends_with(".txt")
+            || !valid_label(&notice.source)
+            || !valid_label(&notice.revision)
+            || !logical_path(&notice.member)
+            || notice.length == 0
+            || notice.length > MAX_MANIFEST_BYTES
+            || notice.sha256.len() != 64
+            || !notice
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || index.notices[..at]
+                .iter()
+                .any(|other| other.path == notice.path)
+        {
+            return Err(fail("invalid or duplicate firmware notice entry"));
+        }
+        total = total
+            .checked_add(notice.length)
+            .filter(|n| *n <= 1024 * 1024)
+            .ok_or_else(|| fail("firmware notices exceed 1 MiB"))?;
+    }
+    for image in &manifest.images {
+        if let Some(member) = image.provenance.license.strip_prefix(NOTICE_MARKER)
+            && !index.notices.iter().any(|notice| {
+                notice.member == member
+                    && notice.source == image.provenance.source
+                    && notice.revision == image.provenance.revision
+            })
+        {
+            return Err(fail("required firmware notice provenance is missing"));
+        }
+    }
+    let mut notices = Vec::with_capacity(index.notices.len() + 1);
+    for notice in index.notices {
+        let relative = if parent.is_empty() {
+            notice.path.clone()
+        } else {
+            format!("{parent}/{}", notice.path)
+        };
+        if !storage_path(&relative) {
+            return Err(fail("firmware notice path exceeds its budget"));
+        }
+        let bytes = read_bounded(
+            &resolve(source, &relative)?,
+            Some(notice.length),
+            MAX_MANIFEST_BYTES,
+        )?;
+        if hex::encode(Sha256::digest(&bytes)) != notice.sha256 {
+            return Err(fail("firmware notice digest mismatch"));
+        }
+        notices.push((notice.path, bytes));
+    }
+    notices.push((NOTICE_INDEX.into(), bytes));
+    Ok(notices)
 }
 
 impl Package {
@@ -95,7 +263,8 @@ impl Package {
             }
             files.push(bytes);
         }
-        Self::assembled(manifest, files, Vec::new())
+        let notices = read_notices(&source, &parsed)?;
+        Self::assembled(manifest, files, notices)
     }
 
     /// Construct a generated package only after every image and accompanying
@@ -278,5 +447,30 @@ fn sync_directory(path: &Path) -> Result<(), Error> {
         Err(fail(
             "durable firmware package publication requires directory sync support",
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_firmware_named_like_a_notice_index_keeps_its_original_meaning() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("provenance.json"), b"abc").unwrap();
+        let manifest = serde_json::json!({"schema":1,"images":[{"name":"vendor/config.json","path":"provenance.json","length":3,
+            "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "target":{"driver":"fixture","hardware":"synthetic","revision":"v1","board":null},
+            "provenance":{"source":"synthetic","revision":"v1","member":"fixtures/abc.bin","license":"CC0-1.0"}}]});
+        std::fs::write(
+            dir.path().join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let package = Package::read(dir.path()).unwrap();
+        assert_eq!(package.inventory(), (1, 3));
+        let output = dir.path().join("output");
+        package.publish(&output).unwrap();
+        assert_eq!(Package::read(&output).unwrap().inventory(), (1, 3));
     }
 }

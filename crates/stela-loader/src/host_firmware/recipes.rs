@@ -319,7 +319,7 @@ impl Plan {
             files.push(bytes_for(&image).to_vec());
             serde_json::json!({"name":selection.request.name,"path":format!("{index}.bin"),
                 "target":selection.request.target,"length":image.length,"sha256":image.sha256,
-                "provenance":{"source":image.source,"revision":image.revision,"member":image.member,"license":selection.recipe.license.member}})
+                "provenance":{"source":image.source,"revision":image.revision,"member":image.member,"license":format!("{}{}", super::package::NOTICE_MARKER, selection.recipe.license.member)}})
         }).collect::<Vec<_>>();
         let mut notices = Vec::new();
         let mut notice_records = Vec::new();
@@ -499,5 +499,74 @@ mod tests {
             super::super::Package::read(&target).unwrap().inventory(),
             (1, 3)
         );
+        let original_manifest = std::fs::read(target.join("manifest.json")).unwrap();
+        let parsed = super::super::Manifest::parse(&original_manifest).unwrap();
+        let objects = target
+            .join(parsed.images[0].path)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let original_notice = std::fs::read(objects.join("license-0.txt")).unwrap();
+        let original_index = std::fs::read(objects.join("provenance.json")).unwrap();
+        let imported = super::super::Package::read(&target).unwrap();
+        let destination = dir.path().join("imported");
+        imported.publish(&destination).unwrap();
+        let imported_manifest = std::fs::read(destination.join("manifest.json")).unwrap();
+        let imported = super::super::Manifest::parse(&imported_manifest).unwrap();
+        let imported_objects = destination
+            .join(imported.images[0].path)
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert_eq!(
+            std::fs::read(imported_objects.join("license-0.txt")).unwrap(),
+            original_notice
+        );
+        assert_eq!(
+            std::fs::read(imported_objects.join("provenance.json")).unwrap(),
+            original_index
+        );
+        assert_eq!(
+            parsed.images[0].provenance.license,
+            imported.images[0].provenance.license
+        );
+        assert_eq!(parsed.images[0].sha256, imported.images[0].sha256);
+        assert_eq!(
+            super::super::Package::read(&destination)
+                .unwrap()
+                .inventory(),
+            (1, 3)
+        );
+        std::fs::remove_file(objects.join("provenance.json")).unwrap();
+        assert!(super::super::Package::read(&target).is_err());
+        std::fs::write(objects.join("provenance.json"), &original_index).unwrap();
+        std::fs::write(objects.join("license-0.txt"), b"bad").unwrap();
+        assert!(super::super::Package::read(&target).is_err());
+        std::fs::write(objects.join("license-0.txt"), &original_notice).unwrap();
+        for (key, value) in [
+            ("path", "../escape.txt"),
+            ("member", "another-license"),
+            (
+                "sha256",
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        ] {
+            let mut changed: serde_json::Value = serde_json::from_slice(&original_index).unwrap();
+            changed["notices"][0][key] = serde_json::json!(value);
+            std::fs::write(
+                objects.join("provenance.json"),
+                serde_json::to_vec(&changed).unwrap(),
+            )
+            .unwrap();
+            assert!(super::super::Package::read(&target).is_err(), "{key}");
+        }
+        std::fs::write(objects.join("provenance.json"), &original_index).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(objects.join("license-0.txt")).unwrap();
+            std::os::unix::fs::symlink(objects.join("0.bin"), objects.join("license-0.txt"))
+                .unwrap();
+            assert!(super::super::Package::read(&target).is_err());
+        }
     }
 }
