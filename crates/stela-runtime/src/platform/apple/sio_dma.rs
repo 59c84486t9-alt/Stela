@@ -281,7 +281,7 @@ impl Channel {
                 ));
             }
         }
-        Ok(u64::from(self.number) | u64::from(tag) << 8 | 0x65 << 16)
+        Ok(u64::from(self.number) | u64::from(tag) << 8 | 0x65 << 16 | u64::from(kind) << 32)
     }
 
     /// Software TERMINATE is distinct from physical DPA reset. Original
@@ -710,7 +710,7 @@ mod tests {
             };
             assert_eq!(
                 channel.command(pool(), configure, &mut port),
-                Ok(100 | 7 << 8 | 0x65 << 16)
+                Ok(100 | 7 << 8 | 0x65 << 16 | 5 << 32)
             );
             assert_eq!(channel.configuration().unwrap().word_bytes, 4);
             for unsupported in [
@@ -725,7 +725,7 @@ mod tests {
             }
             assert_eq!(
                 channel.command(pool(), issue, &mut port),
-                Ok(100 | 9 << 8 | 0x65 << 16)
+                Ok(100 | 9 << 8 | 0x65 << 16 | 6 << 32)
             );
             assert_eq!(channel.completion(), None);
             assert!(channel.command(pool(), configure, &mut port).is_err());
@@ -773,7 +773,7 @@ mod tests {
         assert_eq!(channel.remaining_delivery_bytes(), Some(6));
         assert_eq!(
             channel.command(pool(), 100 | 99 << 8 | 8 << 16, &mut port),
-            Ok(100 | 99 << 8 | 0x65 << 16)
+            Ok(100 | 99 << 8 | 0x65 << 16 | 8 << 32)
         );
         let report = Completion {
             channel: 100,
@@ -955,6 +955,8 @@ mod tests {
             (0x3e2c, 0xb940142a),
             (0x3e3c, 0xb9000fea),
             (0x3e4c, 0x3d800000),
+            (0x45b8, 0x39400823),
+            (0x45d4, 0xaa03814a),
         ] {
             let offset = address + 0x1000;
             assert_eq!(

@@ -5,6 +5,8 @@
 //! width4/8 perform a read, compare masked bits, then write only if changed.
 //! Reads and writes are physical MMIO, distinct from DMA of the table.
 //! The machine must route them through its normal checked device path.
+pub mod control;
+
 use super::Error;
 use crate::platform::{apple::bus::Width, dma::Port};
 use alloc::vec::Vec;
