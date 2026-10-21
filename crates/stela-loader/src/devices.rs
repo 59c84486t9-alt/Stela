@@ -160,7 +160,7 @@ fn modeled_dart(node: &Node) -> bool {
         .iter()
         .filter(|d| &d[..4] == b"TRAD")
         .count();
-    let mappers = node
+    let mut mappers = node
         .children
         .iter()
         .filter(|child| named(child, soc::IOMMU_MAPPER));
@@ -182,7 +182,7 @@ fn modeled_dart(node: &Node) -> bool {
         .map(|p| (p[0], p[1]))
         .collect::<Vec<_>>();
     // The source mapper names a context, not an incoming remapped SID.
-    mappers.into_iter().all(|mapper| {
+    mappers.all(|mapper| {
         let Some(context) = mapper
             .property("reg")
             .and_then(|p| <[u8; 4]>::try_from(p.value.as_slice()).ok())
@@ -1564,13 +1564,13 @@ mod tests {
         }
         let surface = tree.node("/arm-io/dart-dispext0").unwrap();
         assert_eq!(surface.property("instance").unwrap().value.len(), 24);
-        assert_eq!(surface.property("never-lock").unwrap().value, []);
-        assert_eq!(
+        assert!(surface.property("never-lock").unwrap().value.is_empty());
+        assert!(
             surface
                 .property("ignore-inconsistent-hw-locks")
                 .unwrap()
-                .value,
-            []
+                .value
+                .is_empty()
         );
         assert!(tree.property("/arm-io/dcpext1", COMPATIBLE).is_none());
         assert!(tree.property("/arm-io/usb-drd0", COMPATIBLE).is_none());
