@@ -1,0 +1,720 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2018 Intel Corporation
+//! Checked boot-lifetime adaptation of Linux igc_base/mac/phy/nvm/i225.c.
+use crate::{Clock, block::BlockError, bus::mmio::Mmio};
+
+pub(super) trait Registers {
+    fn read(&self, register: usize) -> u32;
+    fn write(&self, register: usize, value: u32);
+}
+
+impl Registers for Mmio {
+    fn read(&self, register: usize) -> u32 {
+        self.read32(register)
+    }
+    fn write(&self, register: usize, value: u32) {
+        self.write32(register, value);
+    }
+}
+pub(super) trait Timer {
+    fn delay(&self, microseconds: u64);
+}
+impl Timer for Clock {
+    fn delay(&self, microseconds: u64) {
+        Clock::delay(self, microseconds);
+    }
+}
+
+const CTRL: usize = 0;
+const STATUS: usize = 8;
+const EECD: usize = 0x10;
+const CTRL_EXT: usize = 0x18;
+const MDIC: usize = 0x20;
+const RCTL: usize = 0x100;
+const TCTL: usize = 0x400;
+const PHPM: usize = 0xe14;
+const EEER: usize = 0xe30;
+const IPCNFG: usize = 0xe38;
+const IMC: usize = 0x150c;
+const ICR: usize = 0x1500;
+const EIMC: usize = 0x1528;
+const RXPBS: usize = 0x2404;
+const TXPBS: usize = 0x3404;
+const RLPML: usize = 0x5004;
+const RXCSUM: usize = 0x5000;
+const MTA: usize = 0x5200;
+const RAL: usize = 0x5400;
+const MANC: usize = 0x5820;
+const SWSM: usize = 0x5b50;
+const SW_FW_SYNC: usize = 0x5b5c;
+const EERD: usize = 0x12014;
+
+const MASTER_DISABLE: u32 = 1 << 2;
+const MASTER_ENABLED: u32 = 1 << 19;
+const MAC_RESET: u32 = 1 << 26;
+const PHY_RESET: u32 = 1 << 31;
+const AUTO_READ_DONE: u32 = 1 << 9;
+const FLASH_PRESENT: u32 = 1 << 19;
+const SMBI: u32 = 1;
+const SWESMBI: u32 = 2;
+const PHY_SYNC: u32 = 2;
+const NVM_SYNC: u32 = 1;
+const MDIC_READY: u32 = 1 << 28;
+const MDIC_ERROR: u32 = 1 << 30;
+const MDIC_READ: u32 = 1 << 27;
+const MDIC_WRITE: u32 = 1 << 26;
+const MMD_CONTROL: u16 = 13;
+const MMD_DATA: u16 = 14;
+const PHY_CONTROL: u16 = 0;
+const PHY_ADVERTISEMENT: u16 = 4;
+const PHY_GIGABIT: u16 = 9;
+const MMD_AN: u16 = 7;
+const MMD_MULTIGIG: u16 = 32;
+
+pub(super) struct Hardware<'a, R: Registers, T: Timer> {
+    registers: &'a R,
+    timer: &'a T,
+    semaphore_attempts: usize,
+    clear_semaphore_once: bool,
+}
+
+impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
+    pub(super) fn new(registers: &'a R, timer: &'a T) -> Result<Self, BlockError> {
+        let eecd = registers.read(EECD);
+        if eecd == u32::MAX {
+            return Err(BlockError::Device { status: eecd });
+        }
+        // igc_init_nvm_params_base: actual NVM word count bounds semaphore polls.
+        let shift = (((eecd & 0x7800) >> 11) + 6).min(15);
+        Ok(Self {
+            registers,
+            timer,
+            semaphore_attempts: (1usize << shift) + 1,
+            clear_semaphore_once: true,
+        })
+    }
+
+    fn read(&self, register: usize) -> Result<u32, BlockError> {
+        let value = self.registers.read(register);
+        if value == u32::MAX {
+            Err(BlockError::Device { status: value })
+        } else {
+            Ok(value)
+        }
+    }
+    fn modify(&self, register: usize, clear: u32, set: u32) -> Result<(), BlockError> {
+        let value = self.read(register)?;
+        self.registers.write(register, value & !clear | set);
+        Ok(())
+    }
+    fn poll(
+        &self,
+        register: usize,
+        mask: u32,
+        set: bool,
+        attempts: usize,
+        delay: u64,
+    ) -> Result<u32, BlockError> {
+        for _ in 0..attempts {
+            let value = self.read(register)?;
+            if (value & mask != 0) == set {
+                return Ok(value);
+            }
+            self.timer.delay(delay);
+        }
+        Err(BlockError::Timeout)
+    }
+
+    fn reset(&self) -> Result<(), BlockError> {
+        self.registers.write(IMC, u32::MAX);
+        self.registers.write(EIMC, u32::MAX);
+        self.modify(CTRL, 0, MASTER_DISABLE)?;
+        // Unlike Linux's log-and-continue recovery, a fresh Stela attachment
+        // never continues past an uncertain DMA drain or NVM load.
+        self.poll(STATUS, MASTER_ENABLED, false, 800, 2_000)?;
+        self.registers.write(RCTL, 0);
+        self.registers.write(TCTL, 1 << 3);
+        self.read(STATUS)?; // Posted write flush before the required settle.
+        self.timer.delay(10_000);
+        self.modify(CTRL, 0, MAC_RESET)?;
+        self.poll(CTRL, MAC_RESET, false, 10, 1_000)?;
+        self.poll(EECD, AUTO_READ_DONE, true, 10, 1_000)?;
+        self.registers.write(IMC, u32::MAX);
+        self.registers.write(EIMC, u32::MAX);
+        self.read(ICR)?;
+        Ok(())
+    }
+
+    fn put_hw_semaphore(&self) -> Result<(), BlockError> {
+        self.modify(SWSM, SMBI | SWESMBI, 0)
+    }
+    fn hw_semaphore(&mut self) -> Result<(), BlockError> {
+        let mut acquired = false;
+        for retry in 0..2 {
+            for _ in 0..self.semaphore_attempts {
+                if self.read(SWSM)? & SMBI == 0 {
+                    acquired = true;
+                    break;
+                }
+                self.timer.delay(500);
+            }
+            if acquired {
+                break;
+            }
+            if retry != 0 || !self.clear_semaphore_once {
+                return Err(BlockError::Timeout);
+            }
+            self.clear_semaphore_once = false;
+            self.put_hw_semaphore()?;
+        }
+        for _ in 0..self.semaphore_attempts {
+            self.modify(SWSM, 0, SWESMBI)?;
+            if self.read(SWSM)? & SWESMBI != 0 {
+                return Ok(());
+            }
+            self.timer.delay(500);
+        }
+        self.put_hw_semaphore()?;
+        Err(BlockError::Timeout)
+    }
+    fn acquire(&mut self, mask: u32) -> Result<(), BlockError> {
+        for _ in 0..200 {
+            self.hw_semaphore()?;
+            let result = self.read(SW_FW_SYNC);
+            let value = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = self.put_hw_semaphore();
+                    return Err(error);
+                }
+            };
+            if value & (mask | mask << 16) == 0 {
+                self.registers.write(SW_FW_SYNC, value | mask);
+                // Observe the actual software bit before giving up HW ownership.
+                let observed = self.read(SW_FW_SYNC);
+                self.put_hw_semaphore()?;
+                return match observed {
+                    Ok(actual) if actual & (mask | mask << 16) == mask => Ok(()),
+                    Ok(_) => Err(BlockError::Unsupported("igc SW/FW semaphore did not latch")),
+                    Err(error) => Err(error),
+                };
+            }
+            self.put_hw_semaphore()?;
+            self.timer.delay(5_000);
+        }
+        Err(BlockError::Timeout)
+    }
+    fn release(&mut self, mask: u32) -> Result<(), BlockError> {
+        self.hw_semaphore()?;
+        let result = self.modify(SW_FW_SYNC, mask, 0).and_then(|()| {
+            if self.read(SW_FW_SYNC)? & mask != 0 {
+                Err(BlockError::Unsupported(
+                    "igc SW/FW semaphore did not release",
+                ))
+            } else {
+                Ok(())
+            }
+        });
+        let released = self.put_hw_semaphore();
+        result.and(released)
+    }
+    fn synchronized<V>(
+        &mut self,
+        mask: u32,
+        operation: impl FnOnce(&mut Self) -> Result<V, BlockError>,
+    ) -> Result<V, BlockError> {
+        self.acquire(mask)?;
+        let result = operation(self);
+        let released = self.release(mask);
+        match (result, released) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (_, Err(error)) => Err(error),
+        }
+    }
+
+    fn mdio(&self, register: u16, write: Option<u16>) -> Result<u16, BlockError> {
+        if register > 31 {
+            return Err(BlockError::Unsupported(
+                "igc MDIO register outside Clause22",
+            ));
+        }
+        // Linux igc leaves the integrated PHY's MDIC address at zero.
+        let command = u32::from(register) << 16
+            | write.map_or(MDIC_READ, |value| MDIC_WRITE | u32::from(value));
+        self.registers.write(MDIC, command);
+        let mut value = 0;
+        for _ in 0..1920 {
+            self.timer.delay(50);
+            value = self.read(MDIC)?;
+            if value & MDIC_READY != 0 {
+                break;
+            }
+        }
+        if value & MDIC_READY == 0 {
+            return Err(BlockError::Timeout);
+        }
+        if value & MDIC_ERROR != 0 {
+            return Err(BlockError::Device { status: value });
+        }
+        if (value >> 16) & 31 != u32::from(register) {
+            return Err(BlockError::Unsupported(
+                "igc MDIO completion register mismatch",
+            ));
+        }
+        Ok(value as u16)
+    }
+    fn mmd(&self, device: u16, register: u16, write: Option<u16>) -> Result<u16, BlockError> {
+        // Hold the PHY semaphore across the entire address/data sequence;
+        // no firmware or sibling operation can interleave its MMD selector.
+        self.mdio(MMD_CONTROL, Some(device))?;
+        self.mdio(MMD_DATA, Some(register))?;
+        self.mdio(MMD_CONTROL, Some(0x4000 | device))?;
+        let result = self.mdio(MMD_DATA, write)?;
+        self.mdio(MMD_CONTROL, Some(0))?;
+        Ok(result)
+    }
+
+    fn validate_nvm(&mut self) -> Result<(), BlockError> {
+        if self.read(EECD)? & FLASH_PRESENT == 0 {
+            return Ok(());
+        }
+        self.synchronized(NVM_SYNC, |hw| {
+            let mut sum = 0u16;
+            for word in 0..64u32 {
+                hw.registers.write(EERD, word << 2 | 1);
+                let value = hw.poll(EERD, 2, true, 100_000, 5)?;
+                sum = sum.wrapping_add((value >> 16) as u16);
+            }
+            if sum != 0xbaba {
+                return Err(BlockError::Unsupported("igc NVM checksum mismatch"));
+            }
+            Ok(())
+        })
+    }
+
+    fn phy(&mut self) -> Result<u32, BlockError> {
+        if self.read(MANC)? & (1 << 18) != 0 {
+            return Err(BlockError::Unsupported(
+                "igc PHY reset blocked by management firmware",
+            ));
+        }
+        self.synchronized(PHY_SYNC, |hw| {
+            let ctrl = hw.read(CTRL)?;
+            hw.registers.write(CTRL, ctrl | PHY_RESET);
+            hw.read(STATUS)?;
+            hw.timer.delay(100);
+            hw.registers.write(CTRL, ctrl);
+            hw.read(STATUS)?;
+            hw.timer.delay(100);
+            hw.poll(PHPM, 1 << 8, true, 10_000, 1)?;
+            hw.timer.delay(100);
+            Ok(())
+        })?;
+        self.synchronized(PHY_SYNC, |hw| {
+            let upper = hw.mdio(2, None)?;
+            hw.timer.delay(200);
+            let lower = hw.mdio(3, None)?;
+            let identity = u32::from(upper) << 16 | u32::from(lower);
+            if upper == 0 || upper == u16::MAX || lower == u16::MAX {
+                return Err(BlockError::Unsupported("igc invalid internal PHY identity"));
+            }
+            // Source igc_power_up_phy_copper, followed by actual advertisement.
+            let control = hw.mdio(PHY_CONTROL, None)?;
+            hw.mdio(PHY_CONTROL, Some(control & !(1 << 11)))?;
+            let adv = hw.mdio(PHY_ADVERTISEMENT, None)?;
+            let gigabit = hw.mdio(PHY_GIGABIT, None)?;
+            let multigig = hw.mmd(MMD_AN, MMD_MULTIGIG, None)?;
+            // All source default copper speeds, no 1000/2500 half duplex;
+            // explicit fc_none policy removes inherited PAUSE advertisement.
+            hw.mdio(PHY_ADVERTISEMENT, Some((adv & !0x0de0) | 0x01e0))?;
+            hw.mdio(PHY_GIGABIT, Some((gigabit & !0x0300) | 0x0200))?;
+            hw.mmd(MMD_AN, MMD_MULTIGIG, Some(multigig | 0x0080))?;
+            let control = hw.mdio(PHY_CONTROL, None)?;
+            hw.mdio(PHY_CONTROL, Some(control | 0x1200))?;
+            Ok(identity)
+        })
+    }
+
+    pub(super) fn initialize(&mut self) -> Result<u32, BlockError> {
+        self.reset()?;
+        self.validate_nvm()?;
+        let identity = self.phy()?;
+        // igc_setup_copper_link_base / igc_force_mac_fc(fc_none).
+        self.modify(
+            CTRL,
+            (7 << 8) | (1 << 0) | (1 << 11) | (1 << 12) | (3 << 27),
+            1 << 6,
+        )?;
+        self.modify(PHPM, 1 << 5, 0)?;
+        self.modify(CTRL_EXT, 0, 1 << 28)?;
+        // Explicit no-EEE profile: neither inherited LPI nor EEE advertisements.
+        self.modify(IPCNFG, 0x1c, 0)?;
+        self.modify(EEER, 7 << 16, 0)?;
+        self.read(IPCNFG)?;
+        self.read(EEER)?;
+        // Source default packet buffers and collision distance.
+        self.registers.write(RXPBS, 34 | 2 << 6);
+        self.registers.write(TXPBS, 20 | 4 << 24);
+        self.modify(TCTL, 0x003ff000, 63 << 12)?;
+        self.registers.write(RLPML, (super::MAX_FRAME + 4) as u32);
+        self.registers.write(RXCSUM, 0); // No checksum/CRC offload reporting.
+        for index in 0..128 {
+            self.registers.write(MTA + index * 4, 0);
+        }
+        for index in 1..16 {
+            self.registers.write(RAL + index * 8, 0);
+            self.registers.write(RAL + index * 8 + 4, 0);
+        }
+        Ok(identity)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::{collections::BTreeMap, vec::Vec};
+    use core::cell::{Cell, RefCell};
+
+    #[derive(Default)]
+    struct State {
+        registers: BTreeMap<usize, u32>,
+        phy: BTreeMap<u16, u16>,
+        mmd: BTreeMap<(u16, u16), u16>,
+        mmd_control: u16,
+        mmd_address: u16,
+        writes: Vec<(usize, u32)>,
+        nvm: Vec<u16>,
+    }
+    struct Model {
+        state: RefCell<State>,
+        reads: Cell<usize>,
+        fail_read: Cell<Option<usize>>,
+        mdio_count: Cell<usize>,
+        mdio_fail: Cell<Option<usize>>,
+        mdio_silent: Cell<bool>,
+        master_stuck: Cell<bool>,
+        reset_stuck: Cell<bool>,
+        autoload_stuck: Cell<bool>,
+        phy_reset_stuck: Cell<bool>,
+        firmware_busy: Cell<bool>,
+        software_busy: Cell<bool>,
+        sw_semaphore_refused: Cell<bool>,
+        elapsed: Cell<u64>,
+    }
+    impl Model {
+        fn ready(flash: bool) -> Self {
+            let mut state = State {
+                nvm: vec![0; 64],
+                ..State::default()
+            };
+            state
+                .registers
+                .insert(EECD, AUTO_READ_DONE | if flash { FLASH_PRESENT } else { 0 });
+            state.registers.insert(PHPM, 1 << 8 | 1 << 5);
+            state.registers.insert(CTRL, 0x18001f01);
+            state.registers.insert(IPCNFG, 0xa51f);
+            state.registers.insert(EEER, 0xa5071234);
+            state.phy.extend([
+                (0, 0x0800),
+                (2, 0x67c9),
+                (3, 0xdc01),
+                (4, 0xafe1),
+                (9, 0xf9ff),
+            ]);
+            state.mmd.insert((MMD_AN, MMD_MULTIGIG), 0x5501);
+            state.nvm[63] = 0xbaba;
+            Self {
+                state: RefCell::new(state),
+                reads: Cell::new(0),
+                fail_read: Cell::new(None),
+                mdio_count: Cell::new(0),
+                mdio_fail: Cell::new(None),
+                mdio_silent: Cell::new(false),
+                master_stuck: Cell::new(false),
+                reset_stuck: Cell::new(false),
+                autoload_stuck: Cell::new(false),
+                phy_reset_stuck: Cell::new(false),
+                firmware_busy: Cell::new(false),
+                software_busy: Cell::new(false),
+                sw_semaphore_refused: Cell::new(false),
+                elapsed: Cell::new(0),
+            }
+        }
+    }
+    impl Registers for Model {
+        fn read(&self, register: usize) -> u32 {
+            let count = self.reads.get() + 1;
+            self.reads.set(count);
+            if self.fail_read.get() == Some(count) {
+                return u32::MAX;
+            }
+            if register == STATUS && self.master_stuck.get() {
+                return MASTER_ENABLED;
+            }
+            if register == SWSM && self.software_busy.get() {
+                return SMBI;
+            }
+            if register == SW_FW_SYNC && self.firmware_busy.get() {
+                return PHY_SYNC << 16;
+            }
+            self.state
+                .borrow()
+                .registers
+                .get(&register)
+                .copied()
+                .unwrap_or(0)
+        }
+        fn write(&self, register: usize, value: u32) {
+            let mut state = self.state.borrow_mut();
+            state.writes.push((register, value));
+            state.registers.insert(register, value);
+            if register == SWSM && self.sw_semaphore_refused.get() {
+                state.registers.insert(SWSM, 0);
+            }
+            if register == CTRL && value & MAC_RESET != 0 && !self.reset_stuck.get() {
+                state.registers.insert(CTRL, 0);
+                let eecd = state.registers[&EECD];
+                state.registers.insert(
+                    EECD,
+                    if self.autoload_stuck.get() {
+                        eecd & !AUTO_READ_DONE
+                    } else {
+                        eecd | AUTO_READ_DONE
+                    },
+                );
+            }
+            if register == CTRL && value & PHY_RESET != 0 {
+                state.mmd_control = 0;
+                let phpm = state.registers[&PHPM];
+                state.registers.insert(
+                    PHPM,
+                    if self.phy_reset_stuck.get() {
+                        phpm & !(1 << 8)
+                    } else {
+                        phpm | 1 << 8
+                    },
+                );
+            }
+            if register == EERD {
+                let word = ((value >> 2) & 0x3fff) as usize;
+                let data = state.nvm[word];
+                state
+                    .registers
+                    .insert(EERD, u32::from(data) << 16 | value | 2);
+            }
+            if register != MDIC {
+                return;
+            }
+            let count = self.mdio_count.get() + 1;
+            self.mdio_count.set(count);
+            if self.mdio_silent.get() {
+                return;
+            }
+            if self.mdio_fail.get() == Some(count) {
+                state
+                    .registers
+                    .insert(MDIC, value | MDIC_READY | MDIC_ERROR);
+                return;
+            }
+            assert_eq!(value & (31 << 21), 0, "real donor integrated PHY address");
+            let reg = ((value >> 16) & 31) as u16;
+            let data = if value & MDIC_WRITE != 0 {
+                let data = value as u16;
+                match reg {
+                    MMD_CONTROL => state.mmd_control = data,
+                    MMD_DATA if state.mmd_control & 0x4000 == 0 => state.mmd_address = data,
+                    MMD_DATA => {
+                        let key = (state.mmd_control & 31, state.mmd_address);
+                        state.mmd.insert(key, data);
+                    }
+                    _ => {
+                        state.phy.insert(reg, data);
+                    }
+                }
+                data
+            } else {
+                match reg {
+                    MMD_CONTROL => state.mmd_control,
+                    MMD_DATA if state.mmd_control & 0x4000 != 0 => state
+                        .mmd
+                        .get(&(state.mmd_control & 31, state.mmd_address))
+                        .copied()
+                        .unwrap_or(0),
+                    _ => state.phy.get(&reg).copied().unwrap_or(0),
+                }
+            };
+            state
+                .registers
+                .insert(MDIC, value & !0xffff | u32::from(data) | MDIC_READY);
+        }
+    }
+    impl Timer for Model {
+        fn delay(&self, microseconds: u64) {
+            self.elapsed.set(self.elapsed.get() + microseconds);
+        }
+    }
+
+    #[test]
+    fn complete_initialization_replaces_inherited_phy_and_mac_state_for_all_declared_ids() {
+        for device in super::super::DEVICES {
+            for flash in [false, true] {
+                let model = Model::ready(flash);
+                let mut hw = Hardware::new(&model, &model).unwrap();
+                assert_eq!(hw.initialize(), Ok(0x67c9dc01), "device {device:04x}");
+                let state = model.state.borrow();
+                assert_eq!(state.phy[&0] & 0x1a00, 0x1200);
+                assert_eq!(state.phy[&4], 0xa3e1); // No PAUSE, all10/100 modes, other bits retained.
+                assert_eq!(state.phy[&9], 0xfaff); // No1G half duplex, 1G full.
+                assert_eq!(state.mmd[&(7, 32)], 0x5581);
+                assert_eq!(state.mmd_control, 0);
+                assert_eq!(state.registers[&SW_FW_SYNC] & 3, 0);
+                assert_eq!(state.registers[&SWSM] & 3, 0);
+                assert_eq!(state.registers[&CTRL] & (0x18001f01 | MASTER_DISABLE), 0);
+                assert_eq!(state.registers[&CTRL] & (1 << 6), 1 << 6);
+                assert_eq!(state.registers[&IPCNFG], 0xa503);
+                assert_eq!(state.registers[&EEER], 0xa5001234);
+                assert_eq!(state.registers[&RXPBS], 0xa2);
+                assert_eq!(state.registers[&TXPBS], 0x04000014);
+                assert_eq!(state.registers[&RLPML], 1518);
+                assert!(
+                    state
+                        .writes
+                        .iter()
+                        .any(|&(r, v)| r == CTRL && v & MAC_RESET != 0)
+                );
+                assert!(
+                    !state
+                        .writes
+                        .iter()
+                        .any(|&(r, v)| r == CTRL && v & (1 << 29) != 0)
+                );
+                for index in 1..16 {
+                    assert_eq!(state.registers[&(RAL + index * 8 + 4)], 0);
+                }
+                assert!(model.elapsed.get() >= 10_000);
+            }
+        }
+    }
+
+    #[test]
+    fn drain_mac_reset_autoload_and_phy_reset_deadlines_never_look_successful() {
+        for failure in 0..4 {
+            let model = Model::ready(false);
+            match failure {
+                0 => model.master_stuck.set(true),
+                1 => model.reset_stuck.set(true),
+                2 => model.autoload_stuck.set(true),
+                _ => model.phy_reset_stuck.set(true),
+            }
+            let mut hw = Hardware::new(&model, &model).unwrap();
+            assert_eq!(hw.initialize(), Err(BlockError::Timeout));
+            let state = model.state.borrow();
+            assert!(!state.writes.iter().any(|&(r, _)| r == RXPBS));
+            if failure == 0 {
+                assert!(
+                    !state
+                        .writes
+                        .iter()
+                        .any(|&(r, v)| r == CTRL && v & MAC_RESET != 0)
+                );
+            }
+            assert!(model.elapsed.get() < 2_000_000);
+        }
+    }
+
+    #[test]
+    fn every_actual_failed_register_read_refuses_initialization() {
+        let model = Model::ready(true);
+        Hardware::new(&model, &model).unwrap().initialize().unwrap();
+        let reads = model.reads.get();
+        for failure in 1..=reads {
+            let model = Model::ready(true);
+            model.fail_read.set(Some(failure));
+            let result = Hardware::new(&model, &model).and_then(|mut h| h.initialize());
+            assert!(result.is_err(), "failed read {failure}/{reads}");
+        }
+    }
+
+    #[test]
+    fn every_mdio_error_and_missing_completion_aborts_and_releases_software_ownership() {
+        let model = Model::ready(false);
+        Hardware::new(&model, &model).unwrap().initialize().unwrap();
+        for failure in 1..=model.mdio_count.get() {
+            let model = Model::ready(false);
+            model.mdio_fail.set(Some(failure));
+            assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
+            assert_eq!(model.state.borrow().registers[&SW_FW_SYNC] & PHY_SYNC, 0);
+            assert!(!model.state.borrow().writes.iter().any(|&(r, _)| r == RXPBS));
+        }
+        let model = Model::ready(false);
+        model.mdio_silent.set(true);
+        assert_eq!(
+            Hardware::new(&model, &model).unwrap().initialize(),
+            Err(BlockError::Timeout)
+        );
+    }
+
+    #[test]
+    fn firmware_management_and_semaphore_refusals_cannot_be_bypassed() {
+        for failure in 0..4 {
+            let model = Model::ready(false);
+            match failure {
+                0 => {
+                    model.state.borrow_mut().registers.insert(MANC, 1 << 18);
+                }
+                1 => model.firmware_busy.set(true),
+                2 => model.software_busy.set(true),
+                _ => model.sw_semaphore_refused.set(true),
+            }
+            assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
+            assert_eq!(model.mdio_count.get(), 0);
+        }
+    }
+
+    #[test]
+    fn programmed_flash_checksum_and_observed_phy_identity_are_not_fabricated() {
+        let model = Model::ready(true);
+        model.state.borrow_mut().nvm[10] = 1;
+        assert_eq!(
+            Hardware::new(&model, &model).unwrap().initialize(),
+            Err(BlockError::Unsupported("igc NVM checksum mismatch"))
+        );
+        assert_eq!(model.mdio_count.get(), 0);
+        for upper in [0, 0xffff] {
+            let model = Model::ready(false);
+            model.state.borrow_mut().phy.insert(2, upper);
+            assert!(Hardware::new(&model, &model).unwrap().initialize().is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires the pinned unchanged Linux C advertisement oracle"]
+    fn unchanged_linux_advertisement_matches_real_mdio_and_mmd_operations() {
+        extern crate std;
+        let path = std::env::var("STELA_IGC_AUTONEG_ORACLE").unwrap();
+        let trace = std::fs::read_to_string(path).unwrap();
+        let mut cases = 0;
+        for line in trace.lines() {
+            let values: Vec<u16> = line
+                .split_whitespace()
+                .map(|v| u16::from_str_radix(v, 16).unwrap())
+                .collect();
+            assert_eq!(values.len(), 6);
+            let model = Model::ready(false);
+            {
+                let mut state = model.state.borrow_mut();
+                state.phy.insert(4, values[0]);
+                state.phy.insert(9, values[1]);
+                state.mmd.insert((7, 32), values[2]);
+            }
+            Hardware::new(&model, &model).unwrap().initialize().unwrap();
+            let state = model.state.borrow();
+            assert_eq!(
+                [state.phy[&4], state.phy[&9], state.mmd[&(7, 32)]],
+                values[3..]
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 4096);
+    }
+}

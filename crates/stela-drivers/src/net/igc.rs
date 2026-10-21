@@ -1,18 +1,13 @@
 //! Intel I225 and I226 Ethernet controllers, as a polled raw Ethernet
 //! [`Link`]: the 2.5GBASE-T controllers most current PC boards carry.
 //!
-//! Intel's I225/I226 datasheet is under NDA. Register offsets and bits
-//! follow the BSD-licensed Intel shared code in FreeBSD's `sys/dev/igc`
-//! (`igc_regs.h`, `igc_defines.h`, `igc_base.h`, `igc_phy.h`), whose MAC
-//! and descriptor layout is the public I210 datasheet's (sections 7.1.5,
-//! 7.2.2, 8): one receive and one transmit queue of advanced descriptors,
-//! no offloads, no interrupts.
-//!
-//! The controller is reset as a whole (CTRL.DEV_RST), so nothing the
-//! firmware's UNDI left behind survives; the internal PHY keeps its power-on
-//! autonegotiation, and the driver only clears the PHY power manager's link
-//! disconnect and sets link up, as the reference driver's copper setup does.
-//! A controller with a blank NVM has no station address and is refused.
+//! Reset, NVM and PHY setup follow the pinned Linux `igc` shared code.
+//! The declared boot-lifetime profile uses one polled receive/transmit queue,
+//! ordinary Ethernet, autonegotiated 10/100/1000/2500 copper and no pause/EEE.
+//! Management-owned PHYs, blank NVM, failed register reads and incomplete
+//! reset/MDIO/semaphore exchanges fail before any new DMA ring is published.
+mod hardware;
+
 use super::{Link, LinkError, MAX_FRAME, Mac};
 use crate::{
     Clock, Handoff,
@@ -34,18 +29,9 @@ const DEVICES: [u16; 14] = [
     0x125d, 0x125e,
 ];
 
-const CTRL: usize = 0x0000;
 const STATUS: usize = 0x0008;
-const EECD: usize = 0x0010;
-const CTRL_EXT: usize = 0x0018;
 const RCTL: usize = 0x0100;
 const TCTL: usize = 0x0400;
-const PHPM: usize = 0x0e14;
-const ICR: usize = 0x1500;
-const IMC: usize = 0x150c;
-const EIMC: usize = 0x1528;
-const MTA: usize = 0x5200;
-const MTA_ENTRIES: usize = 128;
 const RAL: usize = 0x5400;
 const RAH: usize = 0x5404;
 /// Queue 0's receive and transmit registers.
@@ -63,20 +49,12 @@ const TDH: usize = 0xe010;
 const TDT: usize = 0xe018;
 const TXDCTL: usize = 0xe028;
 /// The register file the driver touches.
-const REGISTER_BYTES: u64 = 0x1_0000;
+const REGISTER_BYTES: u64 = 0x1_2018; // Includes EERD for validated programmed NVM.
 
-const CTRL_GIO_MASTER_DISABLE: u32 = 1 << 2;
-const CTRL_SLU: u32 = 1 << 6;
-const CTRL_FRCSPD: u32 = 1 << 11;
-const CTRL_FRCDPX: u32 = 1 << 12;
-const CTRL_DEV_RST: u32 = 1 << 29;
 const STATUS_LU: u32 = 1 << 1;
-const STATUS_GIO_MASTER_ENABLE: u32 = 1 << 19;
-const EECD_AUTO_RD: u32 = 1 << 9;
-const CTRL_EXT_DRV_LOAD: u32 = 1 << 28;
-const PHPM_GO_LINKD: u32 = 1 << 5;
 const RAH_AV: u32 = 1 << 31;
 const RCTL_EN: u32 = 1 << 1;
+const RCTL_MPE: u32 = 1 << 4;
 const RCTL_BAM: u32 = 1 << 15;
 const RCTL_SECRC: u32 = 1 << 26;
 const TCTL_EN: u32 = 1 << 1;
@@ -110,27 +88,22 @@ const DESCRIPTORS: usize = 32;
 const DESCRIPTOR: usize = 16;
 const BUFFER: usize = 2048;
 const _: () = assert!((DESCRIPTORS * DESCRIPTOR).is_multiple_of(128) && BUFFER >= MAX_FRAME);
-/// The reference driver's bounds, doubled: 80 ms for master requests to
-/// drain, 10 ms for the NVM auto-read, and the 10 ms settle before reset.
-const MASTER_DISABLE_US: u64 = 160_000;
-const AUTO_READ_US: u64 = 20_000;
-const SETTLE_US: u64 = 10_000;
 const QUEUE_ENABLE_US: u64 = 20_000;
 const TRANSMIT_WAIT_US: u64 = 100_000;
 
 pub fn matches(function: &Function) -> bool {
-    function.vendor == VENDOR && DEVICES.contains(&function.device)
+    function.vendor == VENDOR && DEVICES.contains(&function.device) && function.class == [2, 0, 0]
 }
 
 /// The station address in receive address register 0, which the NVM
 /// auto-read loads: RAL holds bytes 0-3, RAH bytes 4-5 and the valid bit.
 fn station(low: u32, high: u32) -> Option<Mac> {
-    if high & RAH_AV == 0 {
+    if high == u32::MAX || low == u32::MAX || high & RAH_AV == 0 {
         return None;
     }
     let [a, b, c, d] = low.to_le_bytes();
     let [e, f, _, _] = high.to_le_bytes();
-    Some(Mac([a, b, c, d, e, f])).filter(|mac| mac.0 != [0; 6])
+    Some(Mac([a, b, c, d, e, f])).filter(|mac| mac.0 != [0; 6] && mac.0[0] & 1 == 0)
 }
 
 /// An advanced data descriptor's command word and status for one frame in
@@ -151,7 +124,7 @@ fn received(status: u32, length: u16) -> Option<Option<usize>> {
         return None;
     }
     let length = usize::from(length);
-    let good = status & RX_EOP != 0 && status & RX_RXE == 0 && length <= BUFFER;
+    let good = status & RX_EOP != 0 && status & RX_RXE == 0 && length > 0 && length <= MAX_FRAME;
     Some(good.then_some(length))
 }
 
@@ -193,12 +166,18 @@ pub struct Igc {
     transmit: Ring,
     /// The next receive descriptor the controller fills.
     received: usize,
+    /// Discard the rest of a split/oversized frame through its actual EOP.
+    discarding: bool,
+    /// An absent/failed MMIO function requires a fresh attachment.
+    faulted: bool,
     /// The next free transmit descriptor, and the oldest one in flight.
     tail: usize,
     clean: usize,
     mac: Mac,
     clock: Clock,
     pub location: String,
+    /// Actual internal PHY identifier, including its silicon revision.
+    pub phy_identity: u32,
 }
 
 impl Igc {
@@ -207,30 +186,32 @@ impl Igc {
         handoff: &Handoff,
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
+        if !matches(function) {
+            return Err(BlockError::Unsupported(
+                "not an Intel I225/I226 copper candidate",
+            ));
+        }
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
         function.enable_polled();
         let clock = handoff.clock;
-        reset(&device, &clock);
+        let mut hardware = hardware::Hardware::new(&device, &clock)?;
+        let phy_identity = hardware.initialize()?;
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(
-            BlockError::Unsupported("Intel I225/I226 without a station address (blank NVM)"),
+            BlockError::Unsupported("Intel I225/I226 without a valid station address"),
         )?;
-        device.write32(CTRL_EXT, device.read32(CTRL_EXT) | CTRL_EXT_DRV_LOAD);
-        let control = device.read32(CTRL);
-        device.write32(CTRL, (control | CTRL_SLU) & !(CTRL_FRCSPD | CTRL_FRCDPX));
-        device.write32(PHPM, device.read32(PHPM) & !PHPM_GO_LINKD);
-        for entry in 0..MTA_ENTRIES {
-            device.write32(MTA + 4 * entry, 0);
-        }
         let mut net = Self {
             device,
             receive: Ring::new(dma)?,
             transmit: Ring::new(dma)?,
             received: 0,
+            discarding: false,
+            faulted: false,
             tail: 0,
             clean: 0,
             mac,
             clock,
             location: format!("{}", function.address),
+            phy_identity,
         };
         net.start_receive()?;
         net.start_transmit()?;
@@ -246,7 +227,8 @@ impl Igc {
         device.write32(RDT, 0);
         device.write32(RXDCTL, RXDCTL_THRESHOLDS | QUEUE_ENABLE);
         if !self.clock.wait(QUEUE_ENABLE_US, || {
-            device.read32(RXDCTL) & QUEUE_ENABLE != 0
+            let value = device.read32(RXDCTL);
+            value != u32::MAX && value & QUEUE_ENABLE != 0
         }) {
             return Err(BlockError::Unsupported(
                 "Intel I225/I226 receive queue did not enable",
@@ -259,7 +241,10 @@ impl Igc {
         // descriptor but the one before the head.
         fence(Ordering::SeqCst);
         self.device.write32(RDT, (DESCRIPTORS - 1) as u32);
-        self.device.write32(RCTL, RCTL_EN | RCTL_BAM | RCTL_SECRC);
+        // Link has no multicast-list callback. Admit all multicast, as the
+        // donor's IFF_ALLMULTI path does, so IPv6/other multicast reaches it.
+        self.device
+            .write32(RCTL, RCTL_EN | RCTL_MPE | RCTL_BAM | RCTL_SECRC);
         Ok(())
     }
 
@@ -270,13 +255,18 @@ impl Igc {
         device.write32(TDH, 0);
         device.write32(TXDCTL, TXDCTL_THRESHOLDS | QUEUE_ENABLE);
         if !self.clock.wait(QUEUE_ENABLE_US, || {
-            device.read32(TXDCTL) & QUEUE_ENABLE != 0
+            let value = device.read32(TXDCTL);
+            value != u32::MAX && value & QUEUE_ENABLE != 0
         }) {
             return Err(BlockError::Unsupported(
                 "Intel I225/I226 transmit queue did not enable",
             ));
         }
-        let control = device.read32(TCTL) & !TCTL_CT;
+        let control = device.read32(TCTL);
+        if control == u32::MAX {
+            return Err(BlockError::Device { status: control });
+        }
+        let control = control & !TCTL_CT;
         device.write32(
             TCTL,
             control | TCTL_PSP | TCTL_RTLC | TCTL_EN | COLLISION_THRESHOLD,
@@ -304,29 +294,18 @@ impl Igc {
         }
         (self.tail + 1) % DESCRIPTORS != self.clean
     }
-}
 
-/// Quiesce the controller and reset it whole, as the reference driver's
-/// `igc_reset_hw_i225`: master requests off, interrupts masked, receive and
-/// transmit off, then DEV_RST and the NVM auto-read. A controller whose
-/// master requests do not drain, or whose NVM read does not finish, is
-/// still reset; a missing station address refuses it afterwards.
-fn reset(device: &Mmio, clock: &Clock) {
-    device.write32(CTRL, device.read32(CTRL) | CTRL_GIO_MASTER_DISABLE);
-    clock.wait(MASTER_DISABLE_US, || {
-        device.read32(STATUS) & STATUS_GIO_MASTER_ENABLE == 0
-    });
-    device.write32(IMC, u32::MAX);
-    device.write32(EIMC, u32::MAX);
-    device.write32(RCTL, 0);
-    device.write32(TCTL, TCTL_PSP);
-    device.read32(STATUS);
-    clock.delay(SETTLE_US);
-    device.write32(CTRL, device.read32(CTRL) | CTRL_DEV_RST);
-    clock.wait(AUTO_READ_US, || device.read32(EECD) & EECD_AUTO_RD != 0);
-    device.write32(IMC, u32::MAX);
-    device.write32(EIMC, u32::MAX);
-    device.read32(ICR);
+    fn healthy(&mut self) -> Result<(), LinkError> {
+        self.faulted |= self.device.read32(STATUS) == u32::MAX;
+        if self.faulted {
+            Err(LinkError::Adapter(format!(
+                "Intel I225/I226 {} lost register access; reinitialization required",
+                self.location
+            )))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl Link for Igc {
@@ -335,10 +314,13 @@ impl Link for Igc {
     }
 
     fn carrier(&mut self) -> bool {
-        self.device.read32(STATUS) & STATUS_LU != 0
+        let status = self.device.read32(STATUS);
+        self.faulted |= status == u32::MAX;
+        !self.faulted && status & STATUS_LU != 0
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+        self.healthy()?;
         if frame.len() > MAX_FRAME {
             return Err(LinkError::Invalid("frame exceeds the Ethernet maximum"));
         }
@@ -367,6 +349,7 @@ impl Link for Igc {
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        self.healthy()?;
         loop {
             let index = self.received;
             let base = index * DESCRIPTOR;
@@ -376,7 +359,11 @@ impl Link for Igc {
             let Some(frame) = received(status, length) else {
                 return Ok(None);
             };
-            let frame = frame.map(|length| self.receive.buffer(index)[..length].to_vec());
+            let discarded = self.discarding || status & RX_EOP == 0;
+            self.discarding = status & RX_EOP == 0;
+            let frame = frame
+                .filter(|_| !discarded)
+                .map(|length| self.receive.buffer(index)[..length].to_vec());
             self.offer_receive(index);
             self.received = (index + 1) % DESCRIPTORS;
             fence(Ordering::SeqCst);
@@ -398,6 +385,7 @@ mod tests {
         assert_eq!(mac, Some(Mac([0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc])));
         assert_eq!(station(0x7856_3412, 0xbc9a), None);
         assert_eq!(station(0, RAH_AV), None);
+        assert_eq!(station(0x7856_3412, u32::MAX), None);
     }
 
     #[test]
@@ -422,5 +410,83 @@ mod tests {
         assert!(DEVICES.contains(&0x125c));
         assert!(!DEVICES.contains(&0x125f));
         assert!(!DEVICES.contains(&0x15fd));
+    }
+
+    #[test]
+    fn packet_rings_wrap_and_fragment_tails_are_not_delivered_as_frames() {
+        use crate::bus::dma::RegionAllocator;
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing remains live until all modeled DMA buffers drop.
+        let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
+        let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
+        // SAFETY: the vector is this fixture's exclusive live MMIO model.
+        let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+        let mut net = Igc {
+            device,
+            receive: Ring::new(&mut dma).unwrap(),
+            transmit: Ring::new(&mut dma).unwrap(),
+            received: 0,
+            discarding: false,
+            faulted: false,
+            tail: 0,
+            clean: 0,
+            mac: Mac([2, 0, 0, 0, 0, 1]),
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            location: "model".into(),
+            phy_identity: 0x67c9dc01,
+        };
+        net.start_receive().unwrap();
+        net.start_transmit().unwrap();
+        assert_ne!(registers[RCTL / 4] & RCTL_MPE, 0);
+        for sequence in 0..(DESCRIPTORS * 3) {
+            let frame = vec![sequence as u8; 60 + sequence % 128];
+            net.transmit(&frame).unwrap();
+            let index = sequence % DESCRIPTORS;
+            assert_eq!(&net.transmit.buffer(index)[..frame.len()], frame);
+            assert_eq!(
+                net.transmit.descriptors.read::<u64>(index * DESCRIPTOR),
+                net.transmit.buffer_address(index)
+            );
+            assert_eq!(
+                net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
+                transmit_words(frame.len()).0
+            );
+            // Actual modeled hardware writes completion into the same TD.
+            net.transmit
+                .descriptors
+                .write(index * DESCRIPTOR + 12, TX_DD);
+            net.receive.buffer(index)[..frame.len()].copy_from_slice(&frame);
+            net.receive
+                .descriptors
+                .write(index * DESCRIPTOR + 8, RX_DD | RX_EOP);
+            net.receive
+                .descriptors
+                .write(index * DESCRIPTOR + 12, frame.len() as u16);
+            assert_eq!(net.receive().unwrap(), Some(frame));
+            assert_eq!(registers[RDT / 4], index as u32);
+        }
+        for (index, status) in [(0, RX_DD), (1, RX_DD | RX_EOP), (2, RX_DD | RX_EOP)] {
+            net.receive.buffer(index)[..60].fill(index as u8);
+            net.receive
+                .descriptors
+                .write(index * DESCRIPTOR + 8, status);
+            net.receive
+                .descriptors
+                .write(index * DESCRIPTOR + 12, 60u16);
+        }
+        assert_eq!(net.receive().unwrap(), Some(vec![2; 60]));
+        assert_eq!(net.received, 3);
+        registers[STATUS / 4] = u32::MAX;
+        assert!(!net.carrier());
+        registers[STATUS / 4] = STATUS_LU;
+        assert!(!net.carrier());
+        assert!(net.transmit(&[0; 60]).is_err());
+        assert!(net.receive().is_err());
+        assert!(station(u32::MAX, u32::MAX).is_none());
+        assert_eq!(received(RX_DD | RX_EOP, 0), Some(None));
+        assert_eq!(received(RX_DD | RX_EOP, (MAX_FRAME + 1) as u16), Some(None));
     }
 }
