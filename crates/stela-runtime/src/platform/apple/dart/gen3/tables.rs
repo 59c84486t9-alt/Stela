@@ -6,9 +6,10 @@
 //! still independently required. Explicit software contexts can bind their
 //! recovered bounds/geometry; native out-of-context faults remain unqualified.
 use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
+use super::descriptor::Encoding;
 use super::fault::{Capture, Code, Level, Record};
 use crate::platform::{
-    apple::{bus::Access, dart::descriptor::Format},
+    apple::bus::Access,
     dma::{DmaError, Iommu, Memory},
 };
 use alloc::{vec, vec::Vec};
@@ -33,15 +34,24 @@ struct Stream {
 
 pub struct Tables {
     streams: Vec<Stream>,
+    encoding: Encoding,
     faults: Capture,
     quiesced: bool,
 }
 
 impl Tables {
     pub fn new(streams: usize) -> Result<Self, &'static str> {
+        Self::with_encoding(streams, Encoding::Shift4)
+    }
+
+    /// Bind the original builder's explicit RAM encoding. Native revision
+    /// and mode qualification belong to the profile owner; this constructor
+    /// does not infer them from software context or expose an MMIO profile.
+    pub fn with_encoding(streams: usize, encoding: Encoding) -> Result<Self, &'static str> {
         let faults = Capture::new(streams)?;
         Ok(Self {
             streams: vec![Stream::default(); streams],
+            encoding,
             faults,
             quiesced: false,
         })
@@ -151,14 +161,14 @@ impl Tables {
         }
         let mut table = u64::from(stream.ttbr & TTBR_ADDRESS) << 12;
         if let Some(context) = indices.context() {
-            table = next(memory, table, context, Level::Cte)?;
+            table = next(memory, table, context, Level::Cte, self.encoding)?;
         }
-        table = next(memory, table, indices.segment(), Level::Ste)?;
+        table = next(memory, table, indices.segment(), Level::Ste, self.encoding)?;
         let leaf = read(memory, table, indices.page())?;
         if leaf & ENTRY_VALID == 0 {
             return Err(WalkError::Fault(Code::Invalid, Level::Pte));
         }
-        let target = Format::Dart2.target(leaf, PA_BITS, PAGE, true)?;
+        let target = self.encoding.target(leaf, PA_BITS, PAGE, true)?;
         if write && leaf & NO_WRITE != 0 {
             return Err(WalkError::Fault(Code::Write, Level::Pte));
         }
@@ -194,12 +204,18 @@ fn read(memory: &mut dyn Memory, table: u64, index: u16) -> Result<u64, DmaError
     Ok(u64::from_le_bytes(bytes))
 }
 
-fn next(memory: &mut dyn Memory, table: u64, index: u16, level: Level) -> Result<u64, WalkError> {
+fn next(
+    memory: &mut dyn Memory,
+    table: u64,
+    index: u16,
+    level: Level,
+    encoding: Encoding,
+) -> Result<u64, WalkError> {
     let entry = read(memory, table, index)?;
     if entry & ENTRY_VALID == 0 {
         return Err(WalkError::Fault(Code::Invalid, level));
     }
-    Ok(Format::Dart2.target(entry, PA_BITS, PAGE, false)?)
+    Ok(encoding.target(entry, PA_BITS, PAGE, false)?)
 }
 
 impl Iommu for Tables {
@@ -253,6 +269,117 @@ mod tests {
 
     fn entry(address: u64) -> u64 {
         address >> 4 | ENTRY_VALID
+    }
+
+    #[test]
+    fn explicit_encodings_walk_both_geometries_and_preserve_partial_dma_and_faults() {
+        for encoding in [Encoding::Shift4, Encoding::Shift8] {
+            let entry = |address: u64| {
+                address
+                    >> match encoding {
+                        Encoding::Shift4 => 4,
+                        Encoding::Shift8 => 8,
+                    }
+                    | ENTRY_VALID
+            };
+            for three_levels in [false, true] {
+                let (context, iova, config) = if three_levels {
+                    (
+                        Context::from_vm_range(0x10000000000, 0x30000000000).unwrap(),
+                        0x21002004000,
+                        TRANSLATE | CONTEXT,
+                    )
+                } else {
+                    (
+                        Context::from_vm_range(0x10000004000, 0xffff0000).unwrap(),
+                        0x10002004000,
+                        TRANSLATE,
+                    )
+                };
+                let map = context.map(iova, 4, BoundsPolicy::Strict).unwrap();
+                let page = context
+                    .map_table(iova, TableLevel::Page, BoundsPolicy::Strict)
+                    .unwrap();
+                let mut ram = Ram::new(ROOT, (5 * PAGE) as usize);
+                let parent = if three_levels {
+                    let segment = context
+                        .map_table(iova, TableLevel::Segment, BoundsPolicy::Strict)
+                        .unwrap();
+                    ram.put_u64(ROOT + u64::from(segment.slot()) * 8, entry(CTE));
+                    CTE
+                } else {
+                    ROOT
+                };
+                let parent_slot = parent + u64::from(page.slot()) * 8;
+                let leaf_slot = LEAF + u64::from(map.indices().page()) * 8;
+                ram.put_u64(parent_slot, entry(LEAF));
+                ram.put_u64(leaf_slot, entry(FRAME) | 0xfff << 40);
+                let mut tables = Tables::with_encoding(256, encoding).unwrap();
+                // Native TTBR encoding stays PA>>12 under both RAM forms.
+                tables
+                    .configure_context(255, config, (ROOT >> 12) as u32 | 1, context)
+                    .unwrap();
+                tables.set_enabled(255, true).unwrap();
+                let mut sink = InterruptLatch::new();
+                let mut access = Access::new(0, 0, &mut sink);
+                assert_eq!(
+                    Port {
+                        iommu: &mut tables,
+                        stream: 255,
+                        memory: &mut ram,
+                        access: &mut access
+                    }
+                    .write(iova + PAGE - 4, &[1, 2, 3, 4, 5, 6, 7, 8]),
+                    Err(DmaError::Fault(3 << 12))
+                );
+                let mut actual = [0; 8];
+                assert!(ram.read(FRAME + PAGE - 4, &mut actual));
+                assert_eq!(actual, [1, 2, 3, 4, 0, 0, 0, 0]);
+                assert_eq!(
+                    tables.faults().record(255).unwrap().unwrap(),
+                    Record {
+                        code: Code::Invalid,
+                        level: Level::Pte,
+                        write: true,
+                        address: iova + PAGE,
+                    }
+                );
+                tables.acknowledge_faults(7, 1 << 31).unwrap();
+                ram.put_u64(leaf_slot, entry(FRAME) | 0xfff << 40 | NO_WRITE);
+                assert_eq!(
+                    tables.translate(&mut ram, 255, iova, iova + 3, true, &mut access),
+                    Err(DmaError::Fault(1))
+                );
+                assert_eq!(
+                    tables.translate(&mut ram, 255, iova, iova + 3, false, &mut access),
+                    Ok(FRAME)
+                );
+                tables.acknowledge_faults(7, 1 << 31).unwrap();
+                ram.put_u64(parent_slot, entry(LEAF) | 1 << 40);
+                assert!(matches!(
+                    tables.translate(&mut ram, 255, iova, iova + 3, false, &mut access),
+                    Err(DmaError::Unsupported(_))
+                ));
+                assert_eq!(tables.faults().pending(7), Ok(0));
+                if encoding == Encoding::Shift8 {
+                    for slot in [parent_slot, leaf_slot] {
+                        ram.put_u64(parent_slot, entry(LEAF));
+                        ram.put_u64(leaf_slot, entry(FRAME) | 0xfff << 40);
+                        let value = if slot == parent_slot {
+                            entry(LEAF)
+                        } else {
+                            entry(FRAME) | 0xfff << 40
+                        };
+                        ram.put_u64(slot, value | 1 << 34);
+                        assert!(matches!(
+                            tables.translate(&mut ram, 255, iova, iova + 3, false, &mut access),
+                            Err(DmaError::Unsupported(_))
+                        ));
+                        assert_eq!(tables.faults().pending(7), Ok(0));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
