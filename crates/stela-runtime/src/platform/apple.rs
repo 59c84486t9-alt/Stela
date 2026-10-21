@@ -38,6 +38,7 @@ pub mod i2c;
 pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
+pub mod mxwrap;
 pub mod nor;
 pub mod perf;
 pub mod pmgr;
