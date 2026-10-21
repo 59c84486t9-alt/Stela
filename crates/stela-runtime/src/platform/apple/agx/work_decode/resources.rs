@@ -123,13 +123,13 @@ impl Policy {
         }
         Ok(writes)
     }
-    fn dsid_release(self, clusters: u8, dsid: u8) -> Vec<NativeWrite> {
+    fn dsid_release(self, native_clusters: u8, dsid: u8) -> Vec<NativeWrite> {
         if self == Self::G14G {
             return alloc::vec![NativeWrite::MCache {
                 offset: 0xfffc + u32::from(dsid) * 4
             }];
         }
-        let groups = u32::from(clusters) * if self == Self::G13X { 2 } else { 1 };
+        let groups = u32::from(native_clusters) * if self == Self::G13X { 2 } else { 1 };
         let mut writes = Vec::with_capacity(groups as usize * 4);
         for group in 0..groups {
             for bank in [0xfffc, 0x23ffc, 0x37ffc, 0x4bffc] {
@@ -330,7 +330,7 @@ impl Update {
 struct Completion {
     address: u64,
     policy: Policy,
-    clusters: u8,
+    native_clusters: u8,
     dsid: u8,
     increment: Option<u32>,
     written: bool,
@@ -363,7 +363,7 @@ impl Completion {
             let current = (words >> 32) as u32;
             self.matched = Some(requested != 0 && requested == current);
             if self.matched == Some(true) {
-                self.native = self.policy.dsid_release(self.clusters, self.dsid);
+                self.native = self.policy.dsid_release(self.native_clusters, self.dsid);
             }
         }
         if !self.native_checked {
@@ -543,7 +543,7 @@ struct Pending {
 pub struct Pool {
     tables: Tables,
     policy: Policy,
-    clusters: u8,
+    native_clusters: u8,
     pending: Option<Pending>,
 }
 impl Pool {
@@ -551,18 +551,15 @@ impl Pool {
         memory: &mut dyn Shared,
         root: &Root,
         family: &Family,
-        clusters: u8,
+        native_clusters: u8,
     ) -> Result<Self, &'static str> {
-        if clusters == 0 {
-            return Err("GFX resource pool has no configured GPU clusters");
-        }
         let policy = Policy::for_family(family)?;
         let tables = Tables::read(memory, root)?;
         tables.snapshot(memory)?;
         Ok(Self {
             tables,
             policy,
-            clusters,
+            native_clusters,
             pending: None,
         })
     }
@@ -702,7 +699,13 @@ impl Pool {
                 PendingKind::Release(_) => {}
             }
             if let PendingKind::Release(release) = &mut pending.kind {
-                release_advance(&self.tables, self.policy, self.clusters, release, access)?;
+                release_advance(
+                    &self.tables,
+                    self.policy,
+                    self.native_clusters,
+                    release,
+                    access,
+                )?;
                 pending.done = true;
             }
         }
@@ -869,7 +872,7 @@ fn release_window(
 fn release_advance(
     tables: &Tables,
     policy: Policy,
-    clusters: u8,
+    native_clusters: u8,
     release: &mut Release,
     access: &mut dyn Access,
 ) -> Result<(), &'static str> {
@@ -948,7 +951,7 @@ fn release_advance(
                 unit.actions.push(Action::Completion(Completion {
                     address,
                     policy,
-                    clusters,
+                    native_clusters,
                     dsid: dsid as u8,
                     increment: None,
                     written: false,
@@ -1693,6 +1696,40 @@ mod tests {
         memory.put(DSID + 4 * 16, &0xdeadbeefdeadbeefu64.to_le_bytes());
         settle(&mut pool, &mut memory);
         assert_eq!(memory.read_u64(DSID + 4 * 16), Ok(0));
+        assert_eq!(
+            memory
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::Native(NativeWrite::MCache { .. })))
+                .count(),
+            1
+        );
+    }
+    #[test]
+    fn source_zero_legacy_native_count_skips_mcc_commands_but_keeps_the_dsid_release() {
+        for family in [&generation::G13G, &generation::G13X] {
+            let mut memory = Harness::new();
+            let mut pool = Pool::bind(&mut memory, &root(), family, 0).unwrap();
+            memory.put(DSID + 4 * 16, &1u32.to_le_bytes());
+            memory.native_supported = false; // no native command may be invented
+            pool.release(&mut memory, A, Some([1 << 4, 0, 0, 0]))
+                .unwrap();
+            assert_eq!(settle(&mut pool, &mut memory), Outcome::Released);
+            assert_eq!(
+                memory.effects,
+                vec![
+                    Effect::Ram(MASKS + 8, 0u32.to_le_bytes().to_vec()),
+                    Effect::Ram(DSID + 4 * 16 + 4, 1u32.to_le_bytes().to_vec()),
+                    Effect::Ram(DSID + 4 * 16, vec![0; 8]),
+                ]
+            );
+        }
+        let mut memory = Harness::new();
+        let mut pool = Pool::bind(&mut memory, &root(), &generation::G14G, 0).unwrap();
+        memory.put(DSID + 4 * 16, &1u32.to_le_bytes());
+        pool.release(&mut memory, A, Some([1 << 4, 0, 0, 0]))
+            .unwrap();
+        settle(&mut pool, &mut memory);
         assert_eq!(
             memory
                 .effects
