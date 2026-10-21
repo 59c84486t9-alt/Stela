@@ -113,6 +113,7 @@ impl Plan {
             required_host_caps: 0,
             required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
             required_sp_alignment: SpAlignmentRequirement::Any,
+            ..MemoryRequirements::default()
         })
     }
     pub(super) fn emit(self, target: TargetCpu) -> Result<NativeBlock, CompileError> {

@@ -253,6 +253,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             required_sp_alignment: SpAlignmentRequirement::Any,
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,
+            ..MemoryRequirements::default()
         };
     }
     let Profile::NormalWb(profile) = operand.profile else {
@@ -287,6 +288,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         } else {
             SpAlignmentRequirement::Any
         },
+        ..MemoryRequirements::default()
     }
 }
 

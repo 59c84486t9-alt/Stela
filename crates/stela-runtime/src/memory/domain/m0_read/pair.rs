@@ -62,6 +62,7 @@ impl M0ReadPairSource {
             required_sp_alignment: SpAlignmentRequirement::Any,
             required_address_checks: Default::default(),
             required_pointer_arithmetic: None,
+            ..MemoryRequirements::default()
         }
     }
     pub(crate) fn intent(&self, registers: &GuestState) -> M0ReadPairIntent {

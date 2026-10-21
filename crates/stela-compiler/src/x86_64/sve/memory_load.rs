@@ -163,6 +163,7 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
             } else {
                 0
             },
+        ..MemoryRequirements::default()
     }
 }
 
@@ -447,6 +448,7 @@ mod tests {
                 required_flags: checked,
                 required_host_caps: 0,
                 required_profile: checked_profile,
+                ..MemoryRequirements::default()
             }
         );
         assert_eq!(
@@ -458,6 +460,7 @@ mod tests {
                 required_flags: checked,
                 required_host_caps: host_caps::ATOMIC_LOAD16,
                 required_profile: checked_profile,
+                ..MemoryRequirements::default()
             }
         );
         assert_eq!(
@@ -469,6 +472,7 @@ mod tests {
                 required_flags: flags::SVE_PREDICATED,
                 required_host_caps: 0,
                 required_profile: profile_requirements::NATIVE_ACCESS,
+                ..MemoryRequirements::default()
             }
         );
     }

@@ -95,6 +95,7 @@ mod register_offset;
 pub mod register_read;
 mod scalable;
 mod scalable_matrix;
+pub(crate) mod shared_memory;
 mod simd;
 mod stack_alignment;
 pub(crate) use simd::memory_checked::CheckedOperand as CheckedFixedMemoryOperand;

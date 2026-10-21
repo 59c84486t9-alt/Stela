@@ -49,7 +49,9 @@ fn memory_pointer(code: &mut Vec<u8>) {
 pub(crate) fn begin(code: &mut Vec<u8>) {
     use crate::context::memory::MemoryContextView;
     memory_pointer(code);
-    code.extend(MOV_RDX_DISP8_IMM32);
+    // v2 places the validated fault-access code directly after fault_kind.
+    // Clear both before each reached instruction, including local faults.
+    code.extend(MOV_RDX_DISP8_IMM32_QWORD);
     code.push(field_offset(offset_of!(MemoryContextView, fault_kind)));
     code.extend((MemoryStatus::Success as u32).to_le_bytes());
     code.extend(MOV_RDX_DISP8_IMM32_QWORD);

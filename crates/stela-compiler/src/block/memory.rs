@@ -10,9 +10,9 @@ mod pointer;
 pub(crate) use pointer::CheckedOperation;
 
 pub const ORDINARY_GPR_PROCESS_MEMORY_PROFILE_ID: &str =
-    "el0-le-lse2-a0-cpa2off-mte0-spe0-normal-wb-gpr-memory-v3";
+    "el0-le-lse2-a0-cpa2off-mte0-spe0-normal-wb-gpr-memory-v4";
 pub const CHECKED_POINTER_PROCESS_MEMORY_PROFILE_ID: &str =
-    "el0-le-lse2-a0-cpa-qualified-mte0-spe0-normal-wb-memory-v4";
+    "el0-le-lse2-a0-cpa-qualified-mte0-spe0-normal-wb-memory-v5";
 /// Checked-memory specialization, selected from the process controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,16 +75,16 @@ impl CheckedMemoryProfile {
     pub const fn abi(self) -> &'static str {
         match self {
             Self::M0DeviceRamRead64Staged => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-device-ram-read64-staged-v1"
+                "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-device-ram-read64-staged-v2"
             }
             Self::AddressChecks(_) => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-v4"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-v5"
             }
             Self::SpAlignmentEnabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-v3"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-v4"
             }
             Self::SpAlignmentDisabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v3"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-v4"
             }
         }
     }
@@ -94,22 +94,22 @@ impl CheckedMemoryProfile {
                 "unadmitted-el1-m0-device-ram-read64-process-helpers-v1"
             }
             Self::AddressChecks(_) => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v2"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-memory-address-pauth-clock-thread-v3"
             }
             Self::SpAlignmentEnabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-pauth-clock-thread-v1"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-on-normal-wb-pauth-clock-thread-v2"
             }
             Self::SpAlignmentDisabled => {
-                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v1"
+                "x86_64-sysv-guest-state-v3-context-block-exit-checked-gpr-memory-sa0-off-normal-wb-pauth-clock-thread-v2"
             }
         }
     }
     pub const fn id(self) -> &'static str {
         match self {
-            Self::M0DeviceRamRead64Staged => "el1-m0-device-ram-read64-staged-v1",
-            Self::AddressChecks(_) => "checked-memory-address-v4",
-            Self::SpAlignmentEnabled => "checked-gpr-memory-sa0-on-normal-wb-v3",
-            Self::SpAlignmentDisabled => "checked-gpr-memory-sa0-off-normal-wb-v3",
+            Self::M0DeviceRamRead64Staged => "el1-m0-device-ram-read64-staged-v2",
+            Self::AddressChecks(_) => "checked-memory-address-v5",
+            Self::SpAlignmentEnabled => "checked-gpr-memory-sa0-on-normal-wb-v4",
+            Self::SpAlignmentDisabled => "checked-gpr-memory-sa0-off-normal-wb-v4",
         }
     }
     pub const fn sp_requirement(self) -> crate::context::memory::SpAlignmentRequirement {
@@ -457,7 +457,7 @@ mod tests {
         assert!(m0_plan(&[0xf940_0696, 0xd65f_03c0]).is_err());
     }
     #[test]
-    fn m0_identity_does_not_change_legacy_profile_or_context_layout() {
+    fn memory_context_v2_has_distinct_profile_identity_and_fixed_layout() {
         assert!(
             CheckedMemoryProfile::M0DeviceRamRead64Staged
                 .id()
@@ -468,16 +468,16 @@ mod tests {
                 .abi()
                 .contains("normal-wb")
         );
-        assert_eq!(crate::context::memory::MEMORY_CONTEXT_VERSION, 1);
+        assert_eq!(crate::context::memory::MEMORY_CONTEXT_VERSION, 2);
         assert_eq!(crate::context::memory::MEMORY_CONTEXT_BYTES, 64);
         assert_eq!(crate::context::memory::MEMORY_REQUEST_BYTES, 32);
         assert_eq!(
             CheckedMemoryProfile::SpAlignmentEnabled.id(),
-            "checked-gpr-memory-sa0-on-normal-wb-v3"
+            "checked-gpr-memory-sa0-on-normal-wb-v4"
         );
         assert_eq!(
             CheckedMemoryProfile::SpAlignmentDisabled.id(),
-            "checked-gpr-memory-sa0-off-normal-wb-v3"
+            "checked-gpr-memory-sa0-off-normal-wb-v4"
         );
     }
 }

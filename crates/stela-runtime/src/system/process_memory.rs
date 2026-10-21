@@ -26,10 +26,12 @@ use stela_compiler::{
 pub mod extended_controls;
 mod pointer;
 mod pointer_checks;
+mod shared;
 mod source;
 pub(crate) use pointer::PointerMemoryAuthorization;
 pub use pointer_checks::Error as PointerChecksError;
 pub(crate) use pointer_checks::ResolvedPointerChecks;
+pub(crate) use shared::SharedProcessMemoryAuthorization;
 pub use source::SourceNormalWbDomain;
 #[cfg(feature = "std")]
 mod low128;
@@ -379,8 +381,7 @@ impl FixedProcessMemoryControls {
 
         // AdvSIMD, structure, scalable and other typed memory categories need
         // their own CPU contracts. Exclusive is not a kind of Atomic.
-        let unsupported_classes =
-            flags::ATOMIC | flags::ORDERED | flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
+        let unsupported_classes = flags::ASIMD | flags::SME | flags::SVE_PREDICATED;
         if requirements.required_flags & unsupported_classes != 0 {
             return Err(ProcessMemoryError::Memory(MemoryStatus::Unsupported));
         }
@@ -432,7 +433,9 @@ impl FixedProcessMemoryControls {
             // It needs the existing reservation owner but no event attachment.
             None
         };
-        let authority = if requirements.required_flags & flags::EXCLUSIVE != 0 {
+        let authority = if requirements.required_flags & (flags::ATOMIC | flags::ORDERED) != 0 {
+            ProcessMemoryAuthorization::Shared(self.qualify_shared(requirements, system)?)
+        } else if requirements.required_flags & flags::EXCLUSIVE != 0 {
             ProcessMemoryAuthorization::Exclusive(ExclusiveProcessMemoryAuthorization {
                 system,
                 controls: self,
@@ -506,7 +509,7 @@ impl FixedProcessMemoryControls {
 }
 
 const fn requires_event_endpoint(requirements: MemoryRequirements) -> bool {
-    requirements.required_flags & flags::EXCLUSIVE != 0
+    requirements.required_flags & (flags::EXCLUSIVE | flags::ATOMIC | flags::ORDERED) != 0
         && requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0
 }
 
@@ -535,6 +538,7 @@ enum ProcessMemoryAuthorization<'run> {
         controls: &'run FixedProcessMemoryControls,
     },
     Exclusive(ExclusiveProcessMemoryAuthorization<'run>),
+    Shared(SharedProcessMemoryAuthorization<'run>),
 }
 
 impl ProcessMemoryAuthorization<'_> {
@@ -542,6 +546,7 @@ impl ProcessMemoryAuthorization<'_> {
         match self {
             Self::Ordinary { system, controls } => controls.memory_controls(system),
             Self::Exclusive(authority) => MemoryControls::for_exclusive_authority(authority),
+            Self::Shared(authority) => MemoryControls::for_shared_authority(authority),
         }
     }
 }

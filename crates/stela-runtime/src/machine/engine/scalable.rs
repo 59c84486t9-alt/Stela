@@ -422,7 +422,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             callback: serve::<H, D>,
             opaque: (&raw mut service).cast(),
             fault_kind: MemoryStatus::Success as u32,
-            reserved: 0,
+            fault_access: 0,
             fault_address: 0,
             fault_pc: 0,
             completed_bytes: 0,

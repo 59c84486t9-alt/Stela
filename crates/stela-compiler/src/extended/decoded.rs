@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub(crate) enum Decoded {
+    SharedMemory(crate::x86_64::shared_memory::CheckedOperand),
     Exclusive(crate::x86_64::exclusive::CheckedOperand),
     MemoryScalar(crate::x86_64::memory_store::checked_scalar::Operand),
     MemoryPair(crate::x86_64::memory_store::checked_pair::Operand),
@@ -66,7 +67,7 @@ pub(crate) enum Decoded {
 impl Decoded {
     pub(super) fn execution_access_requirements(&self) -> ScalableAccessRequirements {
         match self {
-            Self::Exclusive(_) => ScalableAccessRequirements::Unqualified,
+            Self::Exclusive(_) | Self::SharedMemory(_) => ScalableAccessRequirements::Unqualified,
             Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
                 ScalableAccessRequirements::Unqualified
             }
@@ -121,7 +122,7 @@ impl Decoded {
 
     pub(super) const fn guest_memory_quantity(&self) -> GuestMemoryQuantity {
         match self {
-            Self::Exclusive(_) => GuestMemoryQuantity::Unqualified,
+            Self::Exclusive(_) | Self::SharedMemory(_) => GuestMemoryQuantity::Unqualified,
             Self::MemoryScalar(_) | Self::MemoryPair(_) | Self::MemoryFixed(_) => {
                 GuestMemoryQuantity::Unqualified
             }
@@ -177,6 +178,7 @@ impl Decoded {
             }
             Self::MemoryFixed(operand) => operand.requirements(),
             Self::Exclusive(operand) => crate::x86_64::exclusive::requirements(operand),
+            Self::SharedMemory(operand) => operand.requirements(),
             Self::MemoryLoad(operand) => x86_64::sve::memory_load::requirements(*operand),
             Self::SmeMemory(operand) => x86_64::sme::memory::requirements(operand),
             Self::MemoryMulti(operand) => x86_64::sve::memory_multi::requirements(operand),
@@ -220,7 +222,8 @@ impl Decoded {
         original_word: u32,
     ) -> Result<Option<crate::aarch64::sve::prefix::PrefixRequirement>, ()> {
         match self {
-            Self::Exclusive(_)
+            Self::SharedMemory(_)
+            | Self::Exclusive(_)
             | Self::MemoryScalar(_)
             | Self::MemoryPair(_)
             | Self::MemoryFixed(_) => Ok(None),
@@ -273,7 +276,8 @@ impl Decoded {
             | Self::RearrangeWiden(_)
             | Self::Reductions(_)
             | Self::IntegerArithmetic(_) => Ok(()),
-            Self::Exclusive(_)
+            Self::SharedMemory(_)
+            | Self::Exclusive(_)
             | Self::MemoryScalar(_)
             | Self::MemoryPair(_)
             | Self::MemoryFixed(_)
@@ -323,6 +327,12 @@ impl Decoded {
                 "operation outside staged M0 ordinary read64 profile at {:#x}",
                 instruction.pc.0
             )));
+        }
+        if let Some(operand) = crate::x86_64::shared_memory::CheckedOperand::from_operation(
+            &instruction.operation,
+            profile,
+        )? {
+            return Ok(Self::SharedMemory(operand));
         }
         if let Operation::Exclusive(operand) = instruction.operation {
             // The existing typed adapter validates every decoded exclusive shape,
@@ -385,6 +395,7 @@ impl Decoded {
                 crate::x86_64::memory_store::checked_pair::emit_context(code, operand, pc.0)
             }
             Self::MemoryFixed(operand) => operand.emit_context(code, pc.0),
+            Self::SharedMemory(operand) => operand.emit(code, pc.0),
             Self::Exclusive(operand) => {
                 crate::x86_64::exclusive::emit_context(code, operand, pc.0)?
             }

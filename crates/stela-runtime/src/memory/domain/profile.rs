@@ -113,6 +113,12 @@ impl MemoryProfile {
         requirements: MemoryRequirements,
         target: TargetCpu,
     ) -> Result<(), MemoryStatus> {
+        if requirements.context_version != stela_compiler::context::memory::MEMORY_CONTEXT_VERSION {
+            return Err(MemoryStatus::Unsupported);
+        }
+        if !requirements.required_instructions.valid() {
+            return Err(MemoryStatus::InvalidRequest);
+        }
         if requirements.required_flags & !flags::KNOWN != 0
             || requirements.required_host_caps & !host_caps::KNOWN != 0
             || requirements.required_profile & !profile_requirements::KNOWN != 0
@@ -141,7 +147,7 @@ impl MemoryProfile {
         {
             return Err(MemoryStatus::Unsupported);
         }
-        if requirements.required_flags & flags::EXCLUSIVE != 0
+        if requirements.required_flags & (flags::EXCLUSIVE | flags::ATOMIC) != 0
             && requirements.required_profile & profile_requirements::NATIVE_ACCESS != 0
             && !self.reservation_congruent
         {

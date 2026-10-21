@@ -236,6 +236,119 @@ pub(super) unsafe fn exchange_part(
     }
 }
 
+/// Exact-width locked addition, returning the normalized old value.
+///
+/// # Safety
+/// Same readable/writable pinned Normal-WB contract as `exchange_part`.
+/// Caller owns source permissions, all-writer participation and reservations.
+#[cfg(test)]
+#[inline]
+pub(super) unsafe fn add_part(
+    pointer: *mut u8,
+    bytes: usize,
+    value: u128,
+) -> Result<u128, AccessError> {
+    if !matches!(bytes, 1 | 2 | 4 | 8) {
+        return Err(AccessError::InvalidWidth);
+    }
+    validate_part(pointer as usize, bytes)?;
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: caller guarantees exact live WB bytes and common physical gates;
+    // LOCK XADD publishes the old+operand value as one SCA operation.
+    unsafe {
+        let old = match bytes {
+            1 => {
+                let mut value = value as u8;
+                core::arch::asm!("lock xadd byte ptr [{pointer}], {value}",pointer=in(reg)pointer,value=inout(reg_byte)value,options(nostack));
+                u64::from(value)
+            }
+            2 => {
+                let mut value = value as u64;
+                core::arch::asm!("lock xadd word ptr [{pointer}], {value:x}",pointer=in(reg)pointer,value=inout(reg)value,options(nostack));
+                value & u64::from(u16::MAX)
+            }
+            4 => {
+                let mut value = value as u64;
+                core::arch::asm!("lock xadd dword ptr [{pointer}], {value:e}",pointer=in(reg)pointer,value=inout(reg)value,options(nostack));
+                value & u64::from(u32::MAX)
+            }
+            8 => {
+                let mut value = value as u64;
+                core::arch::asm!("lock xadd qword ptr [{pointer}], {value}",pointer=in(reg)pointer,value=inout(reg)value,options(nostack));
+                value
+            }
+            _ => unreachable!("validated add width"),
+        };
+        Ok(u128::from(old))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = value;
+        Err(AccessError::UnsupportedHost)
+    }
+}
+/// One locked compare-exchange, including the source-permitted same-value
+/// writeback on failure. It is a writer even when the comparison fails.
+///
+/// # Safety
+/// Same exact pinned WB contract as `write_part`, including checked CX16 for
+/// the aligned 16-byte form and caller-owned fault/reservation handling.
+#[inline]
+pub(super) unsafe fn compare_exchange_part(
+    pointer: *mut u8,
+    bytes: usize,
+    compare: u128,
+    value: u128,
+    target: TargetCpu,
+) -> Result<u128, AccessError> {
+    validate_part(pointer as usize, bytes)?;
+    if bytes == QUADWORD_BYTES && !target.supports(TargetCpu::Cx16) {
+        return Err(AccessError::MissingCx16);
+    }
+    #[cfg(target_arch = "x86_64")]
+    // SAFETY: caller guarantees the exact initialized live WB quantity; pointer
+    // congruence and CX16 were validated. No Rust RAM reference is introduced.
+    unsafe {
+        if bytes == QUADWORD_BYTES {
+            let mut low = compare as u64;
+            let mut high = (compare >> DOUBLEWORD_BITS) as u64;
+            core::arch::asm!("mov r9, rbx","mov rbx, r8","lock cmpxchg16b xmmword ptr [rsi]","mov rbx, r9",
+                in("rsi")pointer,in("r8")value as u64,in("rcx")(value>>DOUBLEWORD_BITS) as u64,
+                inout("rax")low,inout("rdx")high,out("r9")_,options(nostack));
+            return Ok(u128::from(low) | (u128::from(high) << DOUBLEWORD_BITS));
+        }
+        let old = match bytes {
+            1 => {
+                let mut old = compare as u8;
+                core::arch::asm!("lock cmpxchg byte ptr [{pointer}], {value}",pointer=in(reg)pointer,value=in(reg_byte)value as u8,inout("al")old,options(nostack));
+                u64::from(old)
+            }
+            2 => {
+                let mut old = compare as u64;
+                core::arch::asm!("lock cmpxchg word ptr [{pointer}], {value:x}",pointer=in(reg)pointer,value=in(reg)value as u64,inout("rax")old,options(nostack));
+                old & u64::from(u16::MAX)
+            }
+            4 => {
+                let mut old = compare as u64;
+                core::arch::asm!("lock cmpxchg dword ptr [{pointer}], {value:e}",pointer=in(reg)pointer,value=in(reg)value as u64,inout("rax")old,options(nostack));
+                old & u64::from(u32::MAX)
+            }
+            8 => {
+                let mut old = compare as u64;
+                core::arch::asm!("lock cmpxchg qword ptr [{pointer}], {value}",pointer=in(reg)pointer,value=in(reg)value as u64,inout("rax")old,options(nostack));
+                old
+            }
+            _ => unreachable!("validated compare-exchange width"),
+        };
+        Ok(u128::from(old))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (compare, value);
+        Err(AccessError::UnsupportedHost)
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 unsafe fn read_quadword(pointer: *const u8) -> u128 {
     let low: u64;
@@ -407,5 +520,55 @@ mod tests {
             expected[offset..offset + bytes].copy_from_slice(&replacement.to_le_bytes()[..bytes]);
             assert_eq!(memory.0, expected, "width={bytes} offset={offset}");
         }
+    }
+    #[test]
+    fn locked_add_and_compare_exchange_keep_width_results_and_exact_neighbor_bytes() {
+        let target = TargetCpu::detect();
+        for bytes in [1, 2, 4, 8, 16] {
+            if bytes == 16 && !target.supports(TargetCpu::Cx16) {
+                continue;
+            }
+            for offset in 0..=16 - bytes {
+                let original = [0x80u8; 16];
+                let mut storage = Quantity(original);
+                let pointer = storage.0.as_mut_ptr().wrapping_add(offset);
+                let mut value = [0; 16];
+                value[..bytes].copy_from_slice(&original[offset..offset + bytes]);
+                let old = u128::from_le_bytes(value);
+                // SAFETY: private exact raw storage; no simultaneous observer or
+                // writer exists, and the selected host capabilities are actual.
+                assert_eq!(
+                    unsafe { compare_exchange_part(pointer, bytes, old, 3, target) }.unwrap(),
+                    old
+                );
+                let mut expected = original;
+                expected[offset..offset + bytes].copy_from_slice(&3u128.to_le_bytes()[..bytes]);
+                assert_eq!(storage.0, expected);
+                assert_eq!(
+                    unsafe { compare_exchange_part(pointer, bytes, 9, 5, target) }.unwrap(),
+                    3
+                );
+                assert_eq!(storage.0, expected);
+                if bytes < 16 {
+                    assert_eq!(unsafe { add_part(pointer, bytes, u128::MAX) }.unwrap(), 3);
+                    expected[offset..offset + bytes].copy_from_slice(&2u128.to_le_bytes()[..bytes]);
+                    assert_eq!(storage.0, expected);
+                }
+            }
+        }
+        for bytes in [0, 3, 5, 17] {
+            assert_eq!(
+                unsafe { add_part(std::ptr::null_mut(), bytes, 0) },
+                Err(AccessError::InvalidWidth)
+            );
+            assert_eq!(
+                unsafe { compare_exchange_part(std::ptr::null_mut(), bytes, 0, 0, target) },
+                Err(AccessError::InvalidWidth)
+            );
+        }
+        assert_eq!(
+            unsafe { compare_exchange_part(std::ptr::null_mut(), 16, 0, 0, TargetCpu::Baseline) },
+            Err(AccessError::MissingCx16)
+        );
     }
 }

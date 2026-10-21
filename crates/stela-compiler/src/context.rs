@@ -6,8 +6,9 @@ use core::ffi::c_void;
 
 pub const EXECUTION_CONTEXT_VERSION: u32 = 1;
 pub const EXECUTION_CONTEXT_BYTES: u32 = 32;
-pub const CONTEXT_LEAF_ABI: &str = "x86_64-sysv-guest-state-v1-context-direct-ram";
-pub const CONTEXT_BLOCK_ABI: &str = "x86_64-sysv-guest-state-v1-context-block-exit-direct-ram";
+pub const CONTEXT_LEAF_ABI: &str = "x86_64-sysv-guest-state-v3-context-memory-v2-direct-ram";
+pub const CONTEXT_BLOCK_ABI: &str =
+    "x86_64-sysv-guest-state-v3-context-memory-v2-block-exit-direct-ram";
 pub const SCALABLE_STATE_VIEW_BYTES: usize = 72;
 pub const EXECUTION_CONTEXT_MEMORY_OFFSET: u32 = 8;
 pub const EXECUTION_CONTEXT_SCALABLE_OFFSET: u32 = 16;

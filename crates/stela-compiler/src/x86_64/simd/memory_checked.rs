@@ -298,6 +298,7 @@ fn transfer_requirements(
         } else {
             SpAlignmentRequirement::Any
         },
+        ..MemoryRequirements::default()
     }
 }
 
@@ -738,7 +739,7 @@ mod tests {
             callback,
             opaque: (harness as *mut Harness).cast(),
             fault_kind: 0,
-            reserved: 0,
+            fault_access: 0,
             fault_address: 0,
             fault_pc: 0,
             completed_bytes: 0,

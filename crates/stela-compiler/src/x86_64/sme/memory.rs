@@ -181,6 +181,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         } else {
             SpAlignmentRequirement::Any
         },
+        ..MemoryRequirements::default()
     }
 }
 

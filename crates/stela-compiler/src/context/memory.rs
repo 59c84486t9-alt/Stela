@@ -6,9 +6,13 @@ use core::ffi::c_void;
 mod operation;
 pub use operation::{MemoryOperationClass, MemoryOrder};
 pub mod address;
+pub mod atomic;
 pub mod exclusive;
+pub mod instructions;
+pub mod ordered;
+pub use instructions::InstructionRequirements;
 
-pub const MEMORY_CONTEXT_VERSION: u32 = 1;
+pub const MEMORY_CONTEXT_VERSION: u32 = 2;
 pub const MEMORY_CONTEXT_BYTES: u32 = 64;
 pub const MEMORY_CALLBACK_OFFSET: u32 = 8;
 pub const MEMORY_REQUEST_BYTES: usize = 32;
@@ -42,8 +46,13 @@ pub mod flags {
 
 /// Requirements derived from and bound to one consumed native body. `None`
 /// at a containing manifest means absent metadata, not these empty requirements.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MemoryRequirements {
+    /// Missing old artifact metadata deserializes to zero and must be refused.
+    #[serde(default)]
+    pub context_version: u32,
+    #[serde(default, skip_serializing_if = "InstructionRequirements::is_empty")]
+    pub required_instructions: InstructionRequirements,
     pub required_flags: u32,
     pub required_host_caps: u32,
     pub required_profile: u32,
@@ -57,6 +66,21 @@ pub struct MemoryRequirements {
     /// FEAT_CPA arithmetic at the current EL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_pointer_arithmetic: Option<crate::context::pointer::PointerArithmeticRequirement>,
+}
+
+impl Default for MemoryRequirements {
+    fn default() -> Self {
+        Self {
+            context_version: MEMORY_CONTEXT_VERSION,
+            required_instructions: InstructionRequirements::NONE,
+            required_flags: 0,
+            required_host_caps: 0,
+            required_profile: 0,
+            required_sp_alignment: SpAlignmentRequirement::Any,
+            required_address_checks: Default::default(),
+            required_pointer_arithmetic: None,
+        }
+    }
 }
 
 /// Original-SP checking specialized into one consumed native body. This is
@@ -81,12 +105,19 @@ pub enum MemoryImplementationProfile {
 }
 
 pub const MEMORY_IMPLEMENTATION_PROFILE_ID: &str =
-    "scalable-memory-tags-checked-checkspnoneactive-v2";
+    "scalable-memory-tags-checked-checkspnoneactive-v3";
 
 impl MemoryRequirements {
     /// Combine requirements for one consumed body. Opposite SP specializations
     /// cannot share a single effective-control policy and must fail compilation.
     pub fn merge(self, other: Self) -> Option<Self> {
+        if self.context_version != MEMORY_CONTEXT_VERSION
+            || other.context_version != MEMORY_CONTEXT_VERSION
+            || !self.required_instructions.valid()
+            || !other.required_instructions.valid()
+        {
+            return None;
+        }
         let required_sp_alignment = match (self.required_sp_alignment, other.required_sp_alignment)
         {
             (SpAlignmentRequirement::Any, requirement)
@@ -111,6 +142,10 @@ impl MemoryRequirements {
             return None;
         }
         Some(Self {
+            context_version: MEMORY_CONTEXT_VERSION,
+            required_instructions: self
+                .required_instructions
+                .union(other.required_instructions),
             required_flags: self.required_flags | other.required_flags,
             required_host_caps: self.required_host_caps | other.required_host_caps,
             required_profile: self.required_profile | other.required_profile,
@@ -241,7 +276,9 @@ pub struct MemoryContextView {
     pub callback: MemoryCallback,
     pub opaque: *mut c_void,
     pub fault_kind: u32,
-    pub reserved: u32,
+    /// Dynamic fault direction, introduced by memory-context v2. OriginalSource
+    /// keeps the source instruction's ordinary read/write classification.
+    pub fault_access: u32,
     pub fault_address: u64,
     pub fault_pc: u64,
     pub completed_bytes: u64,
@@ -252,15 +289,50 @@ impl MemoryContextView {
     pub const fn has_supported_header(&self) -> bool {
         self.version == MEMORY_CONTEXT_VERSION
             && self.bytes >= MEMORY_CONTEXT_BYTES
-            && self.reserved == 0
+            && matches!(self.fault_access, 0..=2)
+            && (self.fault_kind != MemoryStatus::Success as u32 || self.fault_access == 0)
             && self.reserved_tail == 0
     }
 
     pub fn record(&mut self, status: MemoryStatus, address: u64, pc: u64, completed: u64) {
+        self.fault_access = FaultAccess::OriginalSource as u32;
         self.fault_kind = status as u32;
         self.fault_address = address;
         self.fault_pc = pc;
         self.completed_bytes = completed;
+    }
+
+    pub fn record_access(
+        &mut self,
+        status: MemoryStatus,
+        address: u64,
+        pc: u64,
+        completed: u64,
+        access: FaultAccess,
+    ) {
+        self.record(status, address, pc, completed);
+        self.fault_access = access as u32;
+    }
+}
+
+/// The reached side of a read-modify-write fault. Access intent does not change
+/// DFSC/status, address, completed prefix or source PC.
+#[repr(u32)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum FaultAccess {
+    #[default]
+    OriginalSource = 0,
+    Read = 1,
+    Write = 2,
+}
+impl FaultAccess {
+    pub const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            0 => Some(Self::OriginalSource),
+            1 => Some(Self::Read),
+            2 => Some(Self::Write),
+            _ => None,
+        }
     }
 }
 
@@ -422,5 +494,46 @@ mod tests {
             offset_of!(MemoryContextView, callback),
             MEMORY_CALLBACK_OFFSET as usize
         );
+    }
+    #[test]
+    fn context_v2_layout_and_requirement_versions_are_not_legacy_reserved_bytes() {
+        assert_eq!(offset_of!(MemoryContextView, fault_kind), 24);
+        assert_eq!(offset_of!(MemoryContextView, fault_access), 28);
+        assert_eq!(offset_of!(MemoryContextView, completed_bytes), 48);
+        let current = MemoryRequirements::default();
+        assert_eq!(current.context_version, 2);
+        for version in [0, 1, 3, u32::MAX] {
+            let old = MemoryRequirements {
+                context_version: version,
+                ..current
+            };
+            assert!(old.merge(current).is_none());
+            assert!(current.merge(old).is_none());
+        }
+        let lse = MemoryRequirements {
+            required_instructions: InstructionRequirements::LSE,
+            ..current
+        };
+        let rcpc = MemoryRequirements {
+            required_instructions: InstructionRequirements::RCPC2,
+            ..current
+        };
+        let merged = lse.merge(rcpc).unwrap();
+        assert!(
+            merged
+                .required_instructions
+                .contains(InstructionRequirements::LSE)
+        );
+        assert!(
+            merged
+                .required_instructions
+                .contains(InstructionRequirements::RCPC2)
+        );
+        assert_eq!(FaultAccess::from_code(0), Some(FaultAccess::OriginalSource));
+        assert_eq!(FaultAccess::from_code(1), Some(FaultAccess::Read));
+        assert_eq!(FaultAccess::from_code(2), Some(FaultAccess::Write));
+        for code in [3, u32::MAX] {
+            assert!(FaultAccess::from_code(code).is_none());
+        }
     }
 }

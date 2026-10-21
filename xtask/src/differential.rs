@@ -94,6 +94,10 @@ pub struct Differential {
     /// Mismatches to print in full.
     #[arg(long, default_value_t = 20)]
     show: usize,
+    /// Run LSE/ordered forms through the snapshot-bound checked memory service
+    /// instead of the direct-RAM leaf. LOR and unavailable host tiers refuse.
+    #[arg(long, conflicts_with_all = ["system_matrix", "el2", "data_independent_timing"])]
+    checked_memory: bool,
     /// Run the System form and accessor rows of the system requirement
     /// matrix instead of the registries.
     #[arg(long)]
@@ -629,6 +633,7 @@ const FAULT_POINTER: u64 = DATA_WINDOW + 0x10_0000;
 /// How one registry form is translated for comparison.
 struct Lane<'a> {
     mode: Mode,
+    checked_memory: bool,
     registry: &'a Value,
     form: &'a Value,
 }
@@ -637,6 +642,9 @@ impl Lane<'_> {
     /// Stela's translation of `code` at the code page under `sample`'s profile,
     /// or `None` when it needs a service the differential does not provide.
     fn translate(&self, code: &[u32], sample: &Value) -> Result<Option<Translation>> {
+        if self.checked_memory {
+            return Translation::checked_shared(code);
+        }
         match self.mode {
             Mode::Leaf => Translation::leaf(code).map(Some),
             Mode::Block => Translation::block(code).map(Some),
@@ -946,9 +954,13 @@ impl Differential {
                 }
                 let lane = Lane {
                     mode,
+                    checked_memory: self.checked_memory,
                     registry: &registry,
                     form,
                 };
+                if self.checked_memory && mode != Mode::Leaf {
+                    continue;
+                }
                 let samples = form["smoke_samples"].as_array().context("samples")?;
                 let mut seen = BTreeSet::new();
                 for sample in samples {
@@ -1007,7 +1019,8 @@ impl Differential {
         skipped: &mut usize,
         mut each: impl FnMut(&mut Random, Subject) -> Result<()>,
     ) -> Result<()> {
-        if self.profile.is_some()
+        if self.checked_memory
+            || self.profile.is_some()
             || self
                 .form
                 .as_ref()

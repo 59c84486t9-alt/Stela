@@ -520,7 +520,30 @@ impl<'code> BoundSource<'code> {
                 fault.pc
             )
         })?;
+        let atomic = matches!(instruction.operation, Operation::Atomic(_));
+        anyhow::ensure!(
+            if atomic
+                && !matches!(
+                    fault.status,
+                    MemoryStatus::Alignment | MemoryStatus::StackAlignment
+                )
+            {
+                matches!(
+                    fault.access,
+                    stela_compiler::context::memory::FaultAccess::Read
+                        | stela_compiler::context::memory::FaultAccess::Write
+                )
+            } else {
+                fault.access == stela_compiler::context::memory::FaultAccess::OriginalSource
+            },
+            "dynamic access direction does not belong to this source fault"
+        );
         let maximum = match instruction.operation {
+            Operation::Atomic(operand) => u64::from(operand.bytes),
+            Operation::Ordered(stela_compiler::aarch64::ordered::Operand::Transfer {
+                bytes,
+                ..
+            }) => u64::from(bytes),
             Operation::Memory { bytes, .. } => u64::from(bytes),
             Operation::MemoryRegisterOffset(operand) => u64::from(operand.bytes),
             Operation::MemoryUnprivileged(operand) => u64::from(operand.bytes),
@@ -555,6 +578,10 @@ impl<'code> BoundSource<'code> {
             }
             _ => anyhow::bail!("fault source is not a bounded checked memory operation"),
         };
+        anyhow::ensure!(
+            !atomic || fault.completed_bytes == 0,
+            "atomic fault reports a partial quantity"
+        );
         anyhow::ensure!(
             fault.completed_bytes < maximum,
             "fault reports completed whole instruction"

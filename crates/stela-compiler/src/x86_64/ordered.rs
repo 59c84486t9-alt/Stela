@@ -164,6 +164,7 @@ pub(super) fn emit(
             base,
             displacement,
             extension,
+            ..
         } => {
             address_offset(
                 code,
@@ -353,6 +354,7 @@ mod tests {
             for bytes in [BYTE_BYTES, HALFWORD_BYTES, DWORD_BYTES, QWORD_BYTES] {
                 for base in [Register::X(0), Register::X(30), Register::Sp] {
                     let operand = Operand::Transfer {
+                        feature: crate::aarch64::ordered::Feature::Base,
                         kind,
                         bytes,
                         data: Register::Zero,
@@ -379,6 +381,7 @@ mod tests {
         for bytes in [HALFWORD_BYTES, DWORD_BYTES, QWORD_BYTES] {
             for displacement in -256..=255 {
                 let operand = Operand::Transfer {
+                    feature: crate::aarch64::ordered::Feature::Base,
                     kind: Kind::AcquirePc,
                     bytes,
                     data: Register::X(0),
@@ -410,6 +413,7 @@ mod tests {
             ..MemoryChecks::DEFAULT
         };
         let operand = Operand::Transfer {
+            feature: crate::aarch64::ordered::Feature::Base,
             kind: Kind::Acquire,
             bytes: QWORD_BYTES,
             data: Register::X(0),
@@ -446,6 +450,7 @@ mod tests {
         assert_eq!(barrier, [NOP]);
         for kind in [Kind::Acquire, Kind::AcquirePc, Kind::Release] {
             let operand = Operand::Transfer {
+                feature: crate::aarch64::ordered::Feature::Base,
                 kind,
                 bytes: QWORD_BYTES,
                 data: Register::X(1),
@@ -477,6 +482,7 @@ mod tests {
         let emitted = |kind, base, displacement, checks| {
             let mut code = Vec::new();
             let operand = Operand::Transfer {
+                feature: crate::aarch64::ordered::Feature::Base,
                 kind,
                 bytes: DWORD_BYTES,
                 data: Register::X(1),
@@ -530,6 +536,7 @@ mod tests {
         ] {
             for checks in [MemoryChecks::DEFAULT, relaxed] {
                 let operand = Operand::Transfer {
+                    feature: crate::aarch64::ordered::Feature::Base,
                     kind: Kind::Release,
                     bytes,
                     data: Register::X(1),

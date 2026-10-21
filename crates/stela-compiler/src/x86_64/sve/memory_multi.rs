@@ -196,6 +196,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             } else {
                 0
             },
+        ..MemoryRequirements::default()
     }
 }
 
@@ -371,6 +372,7 @@ mod tests {
                         } else {
                             0
                         },
+                    ..MemoryRequirements::default()
                 }
             );
             assert_eq!(

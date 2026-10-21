@@ -59,17 +59,29 @@ pub struct Observation {
 
 /// A finalization failure keeps the native observation available for diagnosis;
 /// returning from native code alone does not establish successful retirement.
+#[derive(Debug, Clone, Copy)]
+pub struct RawMemoryObservation {
+    pub version: u32,
+    pub bytes: u32,
+    pub status_code: u32,
+    pub access_code: u32,
+    pub address: u64,
+    pub pc: u64,
+    pub completed_bytes: u64,
+}
+
 #[derive(Debug)]
 pub struct FinalizationFailure {
     pub status: stela_compiler::context::memory::MemoryStatus,
     pub observation: Option<Observation>,
+    pub raw_memory: Option<RawMemoryObservation>,
 }
 impl core::fmt::Display for FinalizationFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "checked block finalization failed: {:?}; observation: {:?}",
-            self.status, self.observation
+            "checked block finalization failed: {:?}; observation: {:?}; raw memory: {:?}",
+            self.status, self.observation, self.raw_memory
         )
     }
 }
@@ -130,6 +142,8 @@ impl CheckedMemoryBlock {
                 ) || matches!(
                     instruction.operation,
                     Operation::Exclusive(_)
+                        | Operation::Atomic(_)
+                        | Operation::Ordered(_)
                         | Operation::Literal(_)
                         | Operation::MemoryRegisterOffset(_)
                         | Operation::MemoryNonTemporal(_)
@@ -151,7 +165,7 @@ impl CheckedMemoryBlock {
             compiler_source_sha256: stela_compiler::SOURCE_SHA256,
             target,
             abi: profile.abi(),
-            memory_model: "checked-normal-wb-all-writers-reservations-v1",
+            memory_model: "checked-normal-wb-all-writers-reservations-lse-ordered-memory-v2",
         };
         let mapping = platform::Mapping::new(&compiled.native.x86_64_code)?;
         Ok(Self {
@@ -227,6 +241,7 @@ impl CheckedMemoryBlock {
         let _floating = HostFloatingEnvironment::capture();
         let mut context = ExecutionContext::default();
         let mut observation = None;
+        let mut raw_memory = None;
         // SAFETY: only this owner's exact compiler-produced checked mapping is
         // invoked. The typed entry retains CPU policy/storage/PE borrows, and
         // private state, context and staging cannot escape the synchronous call.
@@ -236,6 +251,15 @@ impl CheckedMemoryBlock {
                 let exit = self
                     .mapping
                     .call_context_block(&mut state.registers, loan.context())?;
+                raw_memory = Some(RawMemoryObservation {
+                    version: view.version,
+                    bytes: view.bytes,
+                    status_code: view.fault_kind,
+                    access_code: view.fault_access,
+                    address: view.fault_address,
+                    pc: view.fault_pc,
+                    completed_bytes: view.completed_bytes,
+                });
                 ensure!(
                     loan.context().has_supported_header()
                         && loan.context().memory == core::ptr::from_mut(view).cast(),
@@ -244,8 +268,17 @@ impl CheckedMemoryBlock {
                 let status =
                     stela_compiler::context::memory::MemoryStatus::from_code(view.fault_kind)
                         .ok_or_else(|| anyhow::anyhow!("unknown checked memory status"))?;
+                let access =
+                    stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "unknown checked memory fault access {}",
+                                view.fault_access
+                            )
+                        })?;
                 let fault = (status != stela_compiler::context::memory::MemoryStatus::Success)
                     .then_some(MemoryFault {
+                        access,
                         status,
                         address: view.fault_address,
                         pc: view.fault_pc,
@@ -267,6 +300,7 @@ impl CheckedMemoryBlock {
                 return Err(FinalizationFailure {
                     status,
                     observation,
+                    raw_memory,
                 }
                 .into());
             }
@@ -342,6 +376,9 @@ mod tests {
     }
 
     fn domain() -> Arc<MemoryDomain> {
+        domain_storage().0
+    }
+    fn domain_storage() -> (Arc<MemoryDomain>, Arc<MemorySystem>, Arc<MemoryBacking>) {
         let layout = Layout::from_size_align(128, 64).unwrap();
         let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
         let storage = Arc::new(Storage { pointer, layout });
@@ -350,8 +387,19 @@ mod tests {
         let backing = unsafe { MemoryBacking::new(pointer, 128, RIGHTS, storage) }.unwrap();
         let view = MemoryView::new(Arc::clone(&backing), DATA, 0, 128, RIGHTS).unwrap();
         let alias = MemoryView::new(Arc::clone(&backing), ALIAS, 0, 128, RIGHTS).unwrap();
+        let write_only = MemoryView::new(
+            Arc::clone(&backing),
+            ALIAS + 0x3000,
+            0,
+            128,
+            AccessPermissions {
+                readable: false,
+                ..RIGHTS
+            },
+        )
+        .unwrap();
         let read_only = MemoryView::new(
-            backing,
+            Arc::clone(&backing),
             ALIAS + 0x1000,
             0,
             128,
@@ -365,17 +413,20 @@ mod tests {
             tagged: false,
             shareable: true,
         };
-        MemoryDomain::new_for_address_space(
+        let system = MemorySystem::new(64, 8).unwrap();
+        let domain = MemoryDomain::new_for_address_space(
             ASID,
-            MemorySystem::new(64, 8).unwrap(),
+            Arc::clone(&system),
             vec![
                 (view, attributes),
                 (alias, attributes),
                 (read_only, attributes),
+                (write_only, attributes),
             ],
             TargetCpu::detect(),
         )
-        .unwrap()
+        .unwrap();
+        (domain, system, backing)
     }
 
     struct Worker {
@@ -417,6 +468,45 @@ mod tests {
                 system: SystemState::new(0, 0, El1Registers::new(0, 0, 0, 0, 0)).unwrap(),
             }
         }
+        fn qualified(domain: &Arc<MemoryDomain>, lse: u64, rcpc: u64, naa: bool) -> Self {
+            use crate::system::{
+                identification::Register as Id, identification_snapshot::Snapshot,
+            };
+            let mut worker = Self::new(domain);
+            let ids = Arc::new(
+                Snapshot::declared(
+                    "checked-shared-el0-native-qualification",
+                    &[
+                        (Id::IdAa64Pfr0El1, 0x11),
+                        (Id::IdAa64Mmfr0El1, 0),
+                        (Id::IdAa64Mmfr2El1, 1 << 32),
+                        (Id::IdAa64Isar3El1, 0),
+                        (Id::IdAa64Pfr1El1, 0),
+                        (Id::IdAa64Dfr0El1, 0),
+                        (Id::IdAa64Isar0El1, lse << 20),
+                        (Id::IdAa64Isar1El1, rcpc << 20),
+                    ],
+                )
+                .unwrap(),
+            );
+            // SAFETY: same resolved fixture source as `new`, with no external writer.
+            let source =
+                unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(domain)) }.unwrap();
+            worker.controls = FixedProcessMemoryControls::new_with_identification(
+                ids,
+                1 | (1 << 2) | if naa { 1 << 6 } else { 0 },
+                25,
+                39,
+                source,
+            )
+            .unwrap();
+            worker
+        }
+        fn snapshot(&mut self) -> Vec<u8> {
+            (0..128)
+                .map(|offset| self.memory.read_scalar(DATA + offset, 1, 0, PC.0).unwrap() as u8)
+                .collect()
+        }
         fn run(
             &mut self,
             block: &CheckedMemoryBlock,
@@ -451,14 +541,57 @@ mod tests {
         }
     }
     fn block(words: &[u32]) -> CheckedMemoryBlock {
-        CheckedMemoryBlock::compile(
+        let body = CheckedMemoryBlock::compile(
             ASID,
             PC,
             words.iter().flat_map(|word| word.to_le_bytes()).collect(),
             CheckedMemoryProfile::SpAlignmentDisabled,
             TargetCpu::detect(),
         )
-        .unwrap()
+        .unwrap();
+        if let Some(directory) = std::env::var_os("STELA_SHARED_MEMORY_ARTIFACTS") {
+            // Export setup can race across test workers compiling identical
+            // source. Serialize evidence publication, outside native execution.
+            static EXPORT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let _export = EXPORT.lock().unwrap();
+            let directory = std::path::PathBuf::from(directory).join(&body.identity.source_sha256);
+            std::fs::create_dir_all(&directory).unwrap();
+            let emitted = CompilationPlan::new(
+                &body.source,
+                PC,
+                BlockProfile::CheckedMemory(body.profile),
+                body.identity.target,
+            )
+            .unwrap()
+            .compile()
+            .unwrap();
+            assert_eq!(
+                crate::sha256(&emitted.native.x86_64_code),
+                body.identity.native_sha256
+            );
+            for (name, bytes) in [
+                ("source.bin", body.source.as_slice()),
+                ("native.bin", emitted.native.x86_64_code.as_slice()),
+            ] {
+                let path = directory.join(name);
+                if path.exists() {
+                    assert_eq!(std::fs::read(path).unwrap(), bytes);
+                } else {
+                    std::fs::write(path, bytes).unwrap();
+                }
+            }
+            std::fs::write(
+                directory.join("identity.json"),
+                serde_json::to_vec_pretty(&body.identity).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                directory.join("source-map.json"),
+                serde_json::to_vec_pretty(&body.source_map).unwrap(),
+            )
+            .unwrap();
+        }
+        body
     }
     fn state(address: u64) -> GuestState {
         let mut state = GuestState {
@@ -623,9 +756,8 @@ mod tests {
             original.identity().compiler_source_sha256,
             stela_compiler::SOURCE_SHA256
         );
-        // LSE and ordered data classes require their own typed CPU authority;
-        // this executor cannot broaden the existing fixed process contract.
-        for word in [0xf821_0002, 0xc89f_fc01, 0xdac0_2000] {
+        // Optional register instructions still need their separate CPU owner.
+        for word in [0xdac0_2000, 0x1ac0_5000] {
             assert!(
                 CheckedMemoryBlock::compile(
                     ASID,
@@ -705,17 +837,620 @@ mod tests {
         assert_eq!(foreign.read(), 0);
     }
 
+    fn write(worker: &mut Worker, address: u64, value: u64) {
+        let mut registers = state(address);
+        registers.x[1] = value;
+        assert!(
+            worker
+                .run(&block(&[STR, RET]), &mut registers)
+                .unwrap()
+                .fault
+                .is_none()
+        );
+    }
+    fn rmw_word(size: u32, operation: u32, order: u32, destination: u32) -> u32 {
+        0x3820_0000
+            | (size << 30)
+            | (1 << 16)
+            | (operation << 12)
+            | destination
+            | if order & 1 != 0 { 1 << 23 } else { 0 }
+            | if order & 2 != 0 { 1 << 22 } else { 0 }
+    }
+    #[test]
+    fn native_shared_scalar_lse_matrix_preserves_complete_state_and_neighbors() {
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        for size in 0..4 {
+            let bytes = 1usize << size;
+            let mask = u64::MAX >> ((8 - bytes) * 8);
+            for operation in 0..9 {
+                for order in 0..4 {
+                    for offset in [0, 7] {
+                        write(&mut worker, DATA + offset, 0x80);
+                        let before_memory = worker.snapshot();
+                        let mut registers = state(ALIAS + offset);
+                        registers.x[1] = 3;
+                        let mut expected = registers.clone();
+                        expected.x[2] = 0x80;
+                        let word = rmw_word(size, operation, order, 2);
+                        assert!(
+                            worker
+                                .run(&block(&[word, RET]), &mut registers)
+                                .unwrap()
+                                .fault
+                                .is_none()
+                        );
+                        assert_eq!(registers, expected, "word={word:08x}");
+                        let value = match operation {
+                            0 => 0x83,
+                            1 => 0x80,
+                            2 | 3 => 0x83,
+                            4 => {
+                                if bytes == 1 {
+                                    3
+                                } else {
+                                    0x80
+                                }
+                            }
+                            5 => {
+                                if bytes == 1 {
+                                    0x80
+                                } else {
+                                    3
+                                }
+                            }
+                            6 => 0x80,
+                            7 | 8 => 3,
+                            _ => unreachable!(),
+                        } & mask;
+                        let mut memory = before_memory;
+                        memory[offset as usize..offset as usize + bytes]
+                            .copy_from_slice(&value.to_le_bytes()[..bytes]);
+                        assert_eq!(worker.snapshot(), memory, "word={word:08x}");
+                    }
+                }
+            }
+        }
+        // The address and RMW source may alias; ZR suppresses result publication.
+        write(&mut worker, DATA, 5);
+        let mut registers = state(DATA);
+        let mut expected = registers.clone();
+        worker
+            .run(&block(&[0xf820_0000, RET]), &mut registers)
+            .unwrap();
+        expected.x[0] = 5;
+        assert_eq!(registers, expected);
+        assert_eq!(worker.read(), DATA + 5);
+        let before = registers.clone();
+        registers.x[0] = DATA;
+        registers.x[1] = 0;
+        let expected = registers.clone();
+        worker
+            .run(&block(&[rmw_word(3, 0, 3, 31), RET]), &mut registers)
+            .unwrap();
+        assert_eq!(registers, expected);
+        assert_eq!(before.x[0], 5);
+    }
+    #[test]
+    fn native_shared_cas_and_casp_commit_old_registers_only_after_complete_success() {
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        for size in 0..4 {
+            for matched in [false, true] {
+                for order in 0..4 {
+                    let bytes = 1usize << size;
+                    write(&mut worker, DATA, 0x80);
+                    let before_memory = worker.snapshot();
+                    let mut registers = state(DATA);
+                    registers.x[1] = if matched { 0x80 } else { 0x81 };
+                    registers.x[2] = 3;
+                    let mut expected = registers.clone();
+                    expected.x[1] = 0x80;
+                    let word = 0x08a0_7c02
+                        | (size << 30)
+                        | (1 << 16)
+                        | if order & 1 != 0 { 1 << 22 } else { 0 }
+                        | if order & 2 != 0 { 1 << 15 } else { 0 };
+                    let observed = worker.run(&block(&[word, RET]), &mut registers).unwrap();
+                    assert!(observed.fault.is_none());
+                    assert_eq!(registers, expected);
+                    let mut memory = before_memory;
+                    if matched {
+                        memory[..bytes].copy_from_slice(&3u64.to_le_bytes()[..bytes]);
+                    }
+                    assert_eq!(worker.snapshot(), memory);
+                }
+            }
+        }
+        for size in 0..2 {
+            if size == 1 && !TargetCpu::detect().supports(TargetCpu::Cx16) {
+                continue;
+            }
+            for matched in [false, true] {
+                for order in 0..4 {
+                    let bytes = 4usize << size;
+                    write(&mut worker, DATA, 0x1122_3344);
+                    write(&mut worker, DATA + bytes as u64, 0x5566_7788);
+                    let before_memory = worker.snapshot();
+                    let mut registers = state(ALIAS);
+                    registers.x[2] = if matched { 0x1122_3344 } else { 0 };
+                    registers.x[3] = 0x5566_7788;
+                    registers.x[4] = 7;
+                    registers.x[5] = 9;
+                    let mut expected = registers.clone();
+                    expected.x[2] = 0x1122_3344;
+                    expected.x[3] = 0x5566_7788;
+                    let word = 0x0820_7c04
+                        | (size << 30)
+                        | (2 << 16)
+                        | if order & 1 != 0 { 1 << 22 } else { 0 }
+                        | if order & 2 != 0 { 1 << 15 } else { 0 };
+                    assert!(
+                        worker
+                            .run(&block(&[word, RET]), &mut registers)
+                            .unwrap()
+                            .fault
+                            .is_none()
+                    );
+                    assert_eq!(registers, expected);
+                    let mut memory = before_memory;
+                    if matched {
+                        memory[..bytes].copy_from_slice(&7u64.to_le_bytes()[..bytes]);
+                        memory[bytes..2 * bytes].copy_from_slice(&9u64.to_le_bytes()[..bytes]);
+                    }
+                    assert_eq!(worker.snapshot(), memory);
+                }
+            }
+        }
+    }
+    #[test]
+    fn native_shared_atomic_fault_direction_prefix_and_failed_cas_invalidation_are_precise() {
+        use stela_compiler::context::memory::FaultAccess;
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let add = block(&[rmw_word(3, 0, 0, 2), RET]);
+        for (address, status, access) in [
+            (0xa000, MemoryStatus::Translation, FaultAccess::Read),
+            (ALIAS + 0x3000, MemoryStatus::Permission, FaultAccess::Read),
+            (ALIAS + 0x1000, MemoryStatus::Permission, FaultAccess::Write),
+            (
+                DATA + 15,
+                MemoryStatus::Alignment,
+                FaultAccess::OriginalSource,
+            ),
+        ] {
+            let mut registers = state(address);
+            let before = registers.clone();
+            let memory = worker.snapshot();
+            let fault = worker.run(&add, &mut registers).unwrap().fault.unwrap();
+            assert_eq!(
+                (
+                    fault.status,
+                    fault.access,
+                    fault.address,
+                    fault.pc,
+                    fault.completed_bytes
+                ),
+                (status, access, address, PC.0, 0)
+            );
+            assert_eq!(registers, before);
+            assert_eq!(worker.snapshot(), memory);
+        }
+        let prefix = block(&[STR, 0xf821_0062, RET]);
+        let mut registers = state(DATA);
+        registers.x[1] = 9;
+        registers.x[3] = ALIAS + 0x1000;
+        let before = registers.clone();
+        let fault = worker.run(&prefix, &mut registers).unwrap().fault.unwrap();
+        assert_eq!(
+            (fault.pc, fault.completed_bytes, fault.access),
+            (PC.0 + 4, 0, FaultAccess::Write)
+        );
+        assert_eq!(registers, before);
+        assert_eq!(worker.read(), 9);
+        let mut other = Worker::new(&domain);
+        let mut reserved = state(ALIAS);
+        other.run(&block(&[LDXR, RET]), &mut reserved).unwrap();
+        let mut registers = state(DATA);
+        registers.x[1] = 42;
+        registers.x[2] = 99;
+        worker
+            .run(&block(&[0xc8a1_7c02, RET]), &mut registers)
+            .unwrap();
+        assert_eq!(registers.x[1], 9);
+        assert_eq!(worker.read(), 9);
+        reserved.x[1] = 11;
+        other.run(&block(&[STXR, RET]), &mut reserved).unwrap();
+        assert_eq!(reserved.x[2], 1);
+        assert_eq!(worker.read(), 9);
+    }
+    #[test]
+    fn native_ordered_source_features_sign_extension_and_raw_control_refusals_are_exact() {
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        write(&mut worker, DATA, 0xffff_ff80);
+        for (word, expected_value) in [
+            (0xc8df_fc01, 0xffff_ff80u64),        // LDAR X1,[X0]
+            (0xf8bf_c001, 0xffff_ff80),           // LDAPR X1,[X0]
+            (0x19c0_0001, 0xffff_ff80),           // LDAPURSB W1,[X0]
+            (0x1980_0001, 0xffff_ffff_ffff_ff80), // LDAPURSB X1,[X0]
+            (0x9940_0001, 0xffff_ff80),
+        ] {
+            // LDAPUR W1,[X0]
+            let mut registers = state(DATA);
+            let mut expected = registers.clone();
+            expected.x[1] = expected_value;
+            assert!(
+                worker
+                    .run(&block(&[word, RET]), &mut registers)
+                    .unwrap()
+                    .fault
+                    .is_none()
+            );
+            assert_eq!(registers, expected, "word={word:08x}");
+        }
+        for word in [0xc89f_fc01, 0xd900_0001] {
+            // STLR/STLUR X1,[X0]
+            let mut registers = state(ALIAS);
+            registers.x[1] = 17;
+            let expected = registers.clone();
+            assert!(
+                worker
+                    .run(&block(&[word, RET]), &mut registers)
+                    .unwrap()
+                    .fault
+                    .is_none()
+            );
+            assert_eq!(registers, expected);
+            assert_eq!(worker.read(), 17);
+        }
+        for option in 0..16 {
+            let mut registers = state(DATA);
+            let expected = registers.clone();
+            worker
+                .run(&block(&[0xd503_30bf | (option << 8), RET]), &mut registers)
+                .unwrap();
+            assert_eq!(registers, expected);
+        }
+        for (lse, rcpc, naa, word) in [
+            (0, 2, false, rmw_word(3, 0, 0, 2)),
+            (1, 2, false, rmw_word(3, 0, 0, 2)),
+            (15, 2, false, rmw_word(3, 0, 0, 2)),
+            (2, 0, false, 0xf8bf_c001),
+            (2, 1, false, 0x1940_0001),
+            (2, 15, false, 0xf8bf_c001),
+            (2, 2, true, 0xc8df_fc01),
+            (2, 2, false, 0xc8df_7c01),
+        ] {
+            let mut unavailable = Worker::qualified(&domain, lse, rcpc, naa);
+            let mut registers = state(DATA);
+            let before = registers.clone();
+            let memory = worker.snapshot();
+            assert!(
+                unavailable
+                    .run(&block(&[word, RET]), &mut registers)
+                    .is_err(),
+                "unexpected admission {word:08x}"
+            );
+            assert_eq!(registers, before);
+            assert_eq!(worker.snapshot(), memory);
+        }
+        let mut raw = Worker::new(&domain);
+        for word in [rmw_word(3, 0, 0, 2), 0xc89f_fc01, 0xd503_3fbf] {
+            let mut registers = state(DATA);
+            let before = registers.clone();
+            assert!(raw.run(&block(&[word, RET]), &mut registers).is_err());
+            assert_eq!(registers, before);
+        }
+        let mut naa = Worker::qualified(&domain, 2, 2, true);
+        let mut registers = state(DATA);
+        naa.run(&block(&[0xd503_3fbf, RET]), &mut registers)
+            .unwrap();
+    }
+    #[test]
+    fn concurrent_native_lse_and_llsc_share_alias_reservations_without_a_process_lock() {
+        const INCREMENTS: usize = 2000;
+        let domain = domain();
+        let ready = Arc::new(Barrier::new(2));
+        let joins: Vec<_> = (0..2)
+            .map(|index| {
+                let domain = Arc::clone(&domain);
+                let ready = Arc::clone(&ready);
+                std::thread::spawn(move || {
+                    let mut worker = Worker::qualified(&domain, 2, 2, false);
+                    let increment = block(&if index == 0 {
+                        [rmw_word(3, 0, 3, 2), RET].to_vec()
+                    } else {
+                        vec![LDXR, ADD, STXR, RET]
+                    });
+                    let mut registers = state(if index == 0 { DATA } else { ALIAS });
+                    let mut olds = Vec::new();
+                    let mut attempts = 0;
+                    ready.wait();
+                    for _ in 0..INCREMENTS {
+                        loop {
+                            attempts += 1;
+                            assert!(attempts < INCREMENTS * 100);
+                            if index == 0 {
+                                registers.x[1] = 1;
+                            }
+                            assert!(
+                                worker
+                                    .run(&increment, &mut registers)
+                                    .unwrap()
+                                    .fault
+                                    .is_none()
+                            );
+                            if index == 0 {
+                                olds.push(registers.x[2]);
+                                break;
+                            }
+                            if registers.x[2] == 0 {
+                                olds.push(registers.x[1] - 1);
+                                break;
+                            }
+                        }
+                    }
+                    olds
+                })
+            })
+            .collect();
+        let mut olds: Vec<_> = joins
+            .into_iter()
+            .flat_map(|join| join.join().unwrap())
+            .collect();
+        olds.sort_unstable();
+        assert_eq!(olds, (0..2 * INCREMENTS as u64).collect::<Vec<_>>());
+        assert_eq!(Worker::new(&domain).read(), 2 * INCREMENTS as u64);
+    }
+
+    #[test]
+    fn native_lse_failed_cas_and_host_publication_never_lose_or_tear_a_shared_write() {
+        const ITERATIONS: usize = 4000;
+        let (domain, system, backing) = domain_storage();
+        let ready = Arc::new(Barrier::new(2));
+        let producer = std::thread::spawn({
+            let ready = Arc::clone(&ready);
+            move || {
+                ready.wait();
+                for index in 0..ITERATIONS {
+                    let bytes = if index % 2 == 0 { u64::MAX } else { 0 }.to_le_bytes();
+                    // SAFETY: private bytes and pinned raw RAM; publication uses the
+                    // exact same physical system/backing as both guest aliases.
+                    unsafe { system.publish(&backing, 0, &bytes) }.unwrap();
+                }
+            }
+        });
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let cas = block(&[0xc8a1_7c02, RET]);
+        ready.wait();
+        for _ in 0..ITERATIONS {
+            let mut registers = state(ALIAS);
+            registers.x[1] = 0x1122_3344;
+            registers.x[2] = 0x55aa;
+            let before = registers.clone();
+            assert!(worker.run(&cas, &mut registers).unwrap().fault.is_none());
+            assert!(matches!(registers.x[1], 0 | u64::MAX));
+            let mut expected = before;
+            expected.x[1] = registers.x[1];
+            assert_eq!(registers, expected);
+        }
+        producer.join().unwrap();
+        assert_eq!(worker.read(), 0);
+    }
+    #[test]
+    fn concurrent_native_casp_publication_is_atomic_to_ordinary_pair_readers() {
+        let target = TargetCpu::detect();
+        if !target.supports(TargetCpu::Cx16) || !target.supports(TargetCpu::AtomicLoad16) {
+            return;
+        }
+        const ITERATIONS: u64 = 3000;
+        let domain = domain();
+        let mut setup = Worker::new(&domain);
+        write(&mut setup, DATA, 0);
+        write(&mut setup, DATA + 8, u64::MAX);
+        let ready = Arc::new(Barrier::new(2));
+        let writer = std::thread::spawn({
+            let domain = Arc::clone(&domain);
+            let ready = Arc::clone(&ready);
+            move || {
+                let mut worker = Worker::qualified(&domain, 2, 2, false);
+                let casp = block(&[0x4822_7c04, RET]);
+                let mut registers = state(DATA);
+                registers.x[2] = 0;
+                registers.x[3] = u64::MAX;
+                ready.wait();
+                for value in 1..=ITERATIONS {
+                    registers.x[4] = value;
+                    registers.x[5] = !value;
+                    worker.run(&casp, &mut registers).unwrap();
+                    assert_eq!((registers.x[2], registers.x[3]), (value - 1, !(value - 1)));
+                    registers.x[2] = value;
+                    registers.x[3] = !value;
+                }
+            }
+        });
+        let mut reader = Worker::new(&domain);
+        let load = block(&[0xa940_0c02, RET]); // LDP X2,X3,[X0]
+        let mut registers = state(ALIAS);
+        ready.wait();
+        for _ in 0..ITERATIONS {
+            reader.run(&load, &mut registers).unwrap();
+            assert_eq!(registers.x[3], !registers.x[2]);
+            assert!(registers.x[2] <= ITERATIONS);
+        }
+        writer.join().unwrap();
+        assert_eq!(reader.read(), ITERATIONS);
+    }
+    #[test]
+    fn native_lse_and_ordered_same_value_writers_invalidate_alias_exclusives_and_old_abis_refuse() {
+        let domain = domain();
+        let mut reserved = Worker::new(&domain);
+        let mut writer = Worker::qualified(&domain, 2, 2, false);
+        for word in [rmw_word(3, 0, 0, 2), 0xc89f_fc01] {
+            let mut registers = state(ALIAS);
+            reserved.run(&block(&[LDXR, RET]), &mut registers).unwrap();
+            let mut output = state(DATA);
+            output.x[1] = 0;
+            writer.run(&block(&[word, RET]), &mut output).unwrap();
+            registers.x[1] = 7;
+            reserved.run(&block(&[STXR, RET]), &mut registers).unwrap();
+            assert_eq!(registers.x[2], 1);
+            assert_eq!(writer.read(), 0);
+        }
+        for version in [0, 1, 3, u32::MAX] {
+            let mut old = block(&[rmw_word(3, 0, 0, 2), RET]);
+            old.requirements.context_version = version;
+            let mut registers = state(DATA);
+            let before = registers.clone();
+            assert!(writer.run(&old, &mut registers).is_err());
+            assert_eq!(registers, before);
+            assert_eq!(writer.read(), 0);
+        }
+    }
+
+    #[test]
+    fn native_shared_sp_fault_precedes_data_alignment_and_preserves_all_effects() {
+        let domain = domain();
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let ids = Arc::clone(worker.controls.identification_snapshot_owner().unwrap());
+        // SAFETY: same fully resolved fixed fixture source; no mapping changed.
+        let source =
+            unsafe { SourceNormalWbDomain::from_source_resolved(Arc::clone(&domain)) }.unwrap();
+        worker.controls = FixedProcessMemoryControls::new_with_identification(
+            ids,
+            1 | (1 << 2) | (1 << 4),
+            25,
+            39,
+            source,
+        )
+        .unwrap();
+        for word in [
+            rmw_word(3, 0, 3, 2) | (31 << 5),
+            0xc8df_fc01 | (31 << 5),
+            0x4822_7c04 | (31 << 5),
+        ] {
+            let source = [word, RET].into_iter().flat_map(u32::to_le_bytes).collect();
+            let body = CheckedMemoryBlock::compile(
+                ASID,
+                PC,
+                source,
+                CheckedMemoryProfile::SpAlignmentEnabled,
+                TargetCpu::detect(),
+            )
+            .unwrap();
+            let mut registers = state(DATA);
+            registers.sp = DATA + 15;
+            let before = registers.clone();
+            let memory = worker.snapshot();
+            let fault = worker.run(&body, &mut registers).unwrap().fault.unwrap();
+            assert_eq!(
+                (
+                    fault.status,
+                    fault.access,
+                    fault.address,
+                    fault.pc,
+                    fault.completed_bytes
+                ),
+                (
+                    MemoryStatus::StackAlignment,
+                    stela_compiler::context::memory::FaultAccess::OriginalSource,
+                    DATA + 15,
+                    PC.0,
+                    0
+                )
+            );
+            assert_eq!(registers, before);
+            assert_eq!(worker.snapshot(), memory);
+        }
+    }
+    #[test]
+    fn native_ordered_release_acquire_publishes_ordinary_data_across_host_workers() {
+        const ITERATIONS: u64 = 1000;
+        let domain = domain();
+        let ready = Arc::new(Barrier::new(2));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let producer = std::thread::spawn({
+            let domain = Arc::clone(&domain);
+            let ready = Arc::clone(&ready);
+            move || {
+                let mut worker = Worker::qualified(&domain, 2, 2, false);
+                let poll = block(&[0xc8df_fc02, RET]);
+                let publish = block(&[STR, 0xc89f_fc62, RET]);
+                ready.wait();
+                for value in 1..=ITERATIONS {
+                    let mut registers = state(DATA);
+                    loop {
+                        worker.run(&poll, &mut registers).unwrap();
+                        if registers.x[2] == 0 {
+                            break;
+                        }
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "bounded release/acquire handshake"
+                        );
+                        std::thread::yield_now();
+                    }
+                    registers.x[0] = DATA + 64;
+                    registers.x[1] = value;
+                    registers.x[2] = 1;
+                    registers.x[3] = DATA;
+                    worker.run(&publish, &mut registers).unwrap();
+                }
+            }
+        });
+        let mut worker = Worker::qualified(&domain, 2, 2, false);
+        let observe = block(&[0xc8df_fc02, 0xf940_0061, RET]);
+        let acknowledge = block(&[0xc89f_fc01, RET]);
+        ready.wait();
+        for value in 1..=ITERATIONS {
+            let mut registers = state(ALIAS);
+            registers.x[3] = ALIAS + 64;
+            loop {
+                worker.run(&observe, &mut registers).unwrap();
+                if registers.x[2] == 1 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "bounded release/acquire handshake"
+                );
+                std::thread::yield_now();
+            }
+            assert_eq!(registers.x[1], value);
+            registers.x[1] = 0;
+            worker.run(&acknowledge, &mut registers).unwrap();
+        }
+        producer.join().unwrap();
+    }
+
     /// Opt-in actual native execution benchmark, never an acceptance throughput
     /// claim. Run with --release --ignored --nocapture and record host/load/source.
     #[test]
     #[ignore = "bounded native timing; run explicitly on an otherwise measured host"]
     fn benchmark_native_llsc_serialized_and_parallel() {
+        benchmark_native_counters(false);
+    }
+
+    #[test]
+    #[ignore = "bounded native timing; run explicitly with source/load evidence"]
+    fn benchmark_native_lse_serialized_and_parallel() {
+        benchmark_native_counters(true);
+    }
+
+    fn benchmark_native_counters(lse: bool) {
+        let words = if lse {
+            vec![rmw_word(3, 0, 3, 2), RET]
+        } else {
+            vec![LDXR, ADD, STXR, RET]
+        };
         const ITERATIONS: usize = 20_000;
         if let Some(directory) = std::env::var_os("STELA_CONCURRENCY_ARTIFACTS") {
             use std::io::Write;
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir(&directory).expect("fresh evidence directory");
-            let body = block(&[LDXR, ADD, STXR, RET]);
+            let body = block(&words);
             let emitted = CompilationPlan::new(
                 &body.source,
                 PC,
@@ -765,13 +1500,18 @@ mod tests {
             let start_workers = Arc::new(Barrier::new(3));
             let joins: Vec<_> = (0..2)
                 .map(|index| {
+                    let words = words.clone();
                     let domain = Arc::clone(&domain);
                     let gate = Arc::clone(&gate);
                     let ready = Arc::clone(&ready);
                     let start_workers = Arc::clone(&start_workers);
                     std::thread::spawn(move || {
-                        let mut worker = Worker::new(&domain);
-                        let increment = block(&[LDXR, ADD, STXR, RET]);
+                        let mut worker = if lse {
+                            Worker::qualified(&domain, 2, 2, false)
+                        } else {
+                            Worker::new(&domain)
+                        };
+                        let increment = block(&words);
                         let mut thread = crate::blocks::ThreadState {
                             registers: state(
                                 DATA + if case == "disjoint" { index * 64 } else { 0 },
@@ -786,6 +1526,9 @@ mod tests {
                             loop {
                                 let _guard = (!parallel).then(|| gate.lock().unwrap());
                                 thread.pc = PC;
+                                if lse {
+                                    thread.registers.x[1] = 1;
+                                }
                                 assert!(
                                     // SAFETY: same closed fixture contract as
                                     // Worker::run, with state owned by this worker.
@@ -803,7 +1546,7 @@ mod tests {
                                     .is_none()
                                 );
                                 attempts += 1;
-                                if thread.registers.x[2] == 0 {
+                                if lse || thread.registers.x[2] == 0 {
                                     break;
                                 }
                             }
@@ -840,7 +1583,7 @@ mod tests {
             }
             println!(
                 "{}",
-                serde_json::json!({"trial": trial, "case": case, "parallel": parallel, "workers": 2,
+                serde_json::json!({"family":if lse {"lse"}else{"llsc"},"trial": trial, "case": case, "parallel": parallel, "workers": 2,
                 "increments": 2 * ITERATIONS, "attempts": attempts, "wall_ns": elapsed.as_nanos(),
                 "summed_worker_cpu_ns": cpu_ns, "identity": results[0].2})
             );

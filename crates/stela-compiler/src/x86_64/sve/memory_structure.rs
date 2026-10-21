@@ -135,6 +135,7 @@ pub(crate) fn requirements(operand: Operand) -> MemoryRequirements {
             } else {
                 0
             },
+        ..MemoryRequirements::default()
     }
 }
 

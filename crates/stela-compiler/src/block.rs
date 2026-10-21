@@ -69,7 +69,7 @@ pub const SYSTEM_REGISTER_BLOCK_ABI: &str =
 pub const SYSTEM_MODE_BLOCK_ABI: &str =
     "x86_64-sysv-guest-state-v2-block-exit-direct-ram-system-mode-v1";
 pub const EL1_PLATFORM_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v1";
+    "x86_64-sysv-guest-state-v3-context-block-exit-el1-platform-v2";
 
 /// Blocks of exactly one B (immediate) at EL1.
 pub const EL1_DIRECT_BRANCH_BLOCK_ABI: &str =
@@ -77,7 +77,7 @@ pub const EL1_DIRECT_BRANCH_BLOCK_ABI: &str =
 /// Context ABI for EL1 integer blocks with the MMU off. Literal reads go
 /// through a staged RAM callback.
 pub const EL1_M0_INTEGER_BLOCK_ABI: &str =
-    "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-integer-v1";
+    "x86_64-sysv-guest-state-v3-context-block-exit-el1-m0-integer-v2";
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

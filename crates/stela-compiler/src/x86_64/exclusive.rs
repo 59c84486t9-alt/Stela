@@ -197,6 +197,7 @@ pub(crate) fn requirements(checked: &CheckedOperand) -> MemoryRequirements {
         } else {
             SpAlignmentRequirement::Any
         },
+        ..MemoryRequirements::default()
     }
 }
 
@@ -539,7 +540,7 @@ mod tests {
                 callback,
                 opaque: core::ptr::from_mut(observation).cast(),
                 fault_kind: 7,
-                reserved: 0,
+                fault_access: 0,
                 fault_address: 0x1234,
                 fault_pc: 0x5678,
                 completed_bytes: 999,

@@ -46,7 +46,7 @@ impl<'call, 'loan, 'owner> WriteCallback<'call, 'loan, 'owner> {
             callback: reached_write,
             opaque: (self as *mut Self).cast(),
             fault_kind: MemoryStatus::Success as u32,
-            reserved: 0,
+            fault_access: 0,
             fault_address: 0,
             fault_pc: 0,
             completed_bytes: 0,

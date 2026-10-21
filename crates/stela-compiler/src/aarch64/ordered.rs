@@ -40,6 +40,17 @@ pub enum Kind {
     AcquirePc,
 }
 
+/// Decode-time feature identity cannot be recovered from the effective kind or
+/// displacement: an unscaled zero offset still requires RCpc2, and limited
+/// transfers need the separate effective LORegion owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Feature {
+    Base,
+    Rcpc,
+    Rcpc2,
+    Lor,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadExtension {
     Zero,
@@ -56,6 +67,7 @@ pub enum Barrier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     Transfer {
+        feature: Feature,
         kind: Kind,
         bytes: u8,
         data: Register,
@@ -89,13 +101,16 @@ pub fn decode(word: u32) -> Option<Operand> {
     if word & UNSCALED_MASK == UNSCALED_CLASS {
         return decode_unscaled(word);
     }
-    let kind = match word & TRANSFER_MASK {
-        ACQUIRE_CLASS | LIMITED_ACQUIRE_CLASS => Kind::Acquire,
-        RELEASE_CLASS | LIMITED_RELEASE_CLASS => Kind::Release,
-        _ if word & ACQUIRE_PC_MASK == ACQUIRE_PC_CLASS => Kind::AcquirePc,
+    let (kind, feature) = match word & TRANSFER_MASK {
+        ACQUIRE_CLASS => (Kind::Acquire, Feature::Base),
+        LIMITED_ACQUIRE_CLASS => (Kind::Acquire, Feature::Lor),
+        RELEASE_CLASS => (Kind::Release, Feature::Base),
+        LIMITED_RELEASE_CLASS => (Kind::Release, Feature::Lor),
+        _ if word & ACQUIRE_PC_MASK == ACQUIRE_PC_CLASS => (Kind::AcquirePc, Feature::Rcpc),
         _ => return None,
     };
     Some(Operand::Transfer {
+        feature,
         kind,
         bytes: 1 << (word >> SIZE_SHIFT),
         data: register(word & REGISTER_MASK, false),
@@ -120,6 +135,7 @@ fn decode_unscaled(word: u32) -> Option<Operand> {
     };
     let immediate = ((word >> IMMEDIATE_SHIFT) & IMMEDIATE_MASK) as i32;
     Some(Operand::Transfer {
+        feature: Feature::Rcpc2,
         kind,
         bytes: 1 << size,
         data: register(word & REGISTER_MASK, false),
@@ -150,6 +166,11 @@ mod tests {
                     for base in 0..=REGISTER_MASK {
                         let word = class | (size << SIZE_SHIFT) | (base << BASE_SHIFT) | data;
                         let expected = Operand::Transfer {
+                            feature: match class {
+                                LIMITED_ACQUIRE_CLASS | LIMITED_RELEASE_CLASS => Feature::Lor,
+                                ACQUIRE_PC_CLASS => Feature::Rcpc,
+                                _ => Feature::Base,
+                            },
                             kind,
                             bytes: 1 << size,
                             data: register(data, false),
@@ -239,6 +260,7 @@ mod tests {
                 assert_eq!(
                     decode(word),
                     Some(Operand::Transfer {
+                        feature: Feature::Rcpc2,
                         kind: expected.0,
                         bytes: 1 << size,
                         data: Register::X(0),
@@ -269,6 +291,7 @@ mod tests {
             assert_eq!(
                 decode(word),
                 Some(Operand::Transfer {
+                    feature: Feature::Rcpc2,
                     kind: Kind::AcquirePc,
                     bytes: 1,
                     data: Register::Zero,
@@ -285,6 +308,7 @@ mod tests {
                 assert_eq!(
                     decode(word),
                     Some(Operand::Transfer {
+                        feature: Feature::Rcpc2,
                         kind: Kind::Release,
                         bytes: 8,
                         data: register(data, false),

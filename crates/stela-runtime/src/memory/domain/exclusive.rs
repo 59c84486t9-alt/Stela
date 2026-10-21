@@ -79,6 +79,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                     0
                 },
             required_sp_alignment: SpAlignmentRequirement::Any,
+            ..MemoryRequirements::default()
         };
         self.domain
             .profile()

@@ -57,7 +57,7 @@ fn emit_decoded(
     fixups: &mut Vec<(GuestAddress, GuestAddress, usize)>,
 ) -> Result<(), CompileError> {
     match instruction {
-        Decoded::Exclusive(_) => {
+        Decoded::SharedMemory(_) | Decoded::Exclusive(_) => {
             return Err(CompileError(
                 "exclusive service was not requested by scalable profile".into(),
             ));
@@ -2082,6 +2082,7 @@ mod tests {
                         | profile_requirements::TAG_GRANULES
                         | profile_requirements::SCALABLE_TAG_CHECKS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
         }
@@ -2305,6 +2306,7 @@ mod tests {
                         | profile_requirements::TAG_GRANULES
                         | profile_requirements::SCALABLE_TAG_CHECKS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
             assert_eq!(
@@ -2322,6 +2324,7 @@ mod tests {
                     required_host_caps: 0,
                     required_profile: profile_requirements::NATIVE_ACCESS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
         }
@@ -2529,6 +2532,7 @@ mod tests {
                     required_host_caps: 0,
                     required_profile: profile_requirements::NATIVE_ACCESS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
             assert_eq!(
@@ -2542,6 +2546,7 @@ mod tests {
                         | profile_requirements::TAG_GRANULES
                         | profile_requirements::SCALABLE_TAG_CHECKS,
                     required_sp_alignment: SpAlignmentRequirement::Any,
+                    ..MemoryRequirements::default()
                 }
             );
             assert_eq!(
@@ -2558,6 +2563,7 @@ mod tests {
                         | profile_requirements::TAG_GRANULES
                         | profile_requirements::SCALABLE_TAG_CHECKS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
         }
@@ -2781,6 +2787,7 @@ mod tests {
                         | profile_requirements::TAG_GRANULES
                         | profile_requirements::SCALABLE_TAG_CHECKS,
                     required_sp_alignment: SpAlignmentRequirement::Enabled,
+                    ..MemoryRequirements::default()
                 }
             );
         }

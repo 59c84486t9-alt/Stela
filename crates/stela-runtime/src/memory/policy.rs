@@ -68,6 +68,10 @@ pub enum TagCheckFaultMode {
 enum OperationScope {
     Unbound,
     FixedEl0ProcessExclusive,
+    FixedEl0ProcessShared {
+        classes: u32,
+        instructions: stela_compiler::context::memory::InstructionRequirements,
+    },
     FixedEl0ProcessLow128,
 }
 
@@ -120,6 +124,17 @@ impl MemoryControls {
     ) -> Self {
         let mut controls = authority.memory_controls();
         controls.operation_scope = OperationScope::FixedEl0ProcessExclusive;
+        controls
+    }
+
+    pub(crate) fn for_shared_authority(
+        authority: &crate::system::process_memory::SharedProcessMemoryAuthorization<'_>,
+    ) -> Self {
+        let mut controls = authority.memory_controls();
+        controls.operation_scope = OperationScope::FixedEl0ProcessShared {
+            classes: authority.classes(),
+            instructions: authority.instructions(),
+        };
         controls
     }
 
@@ -219,12 +234,41 @@ impl MemoryControls {
 }
 
 impl DataPolicy for MemoryControls {
+    fn validate_instructions(
+        &self,
+        required: stela_compiler::context::memory::InstructionRequirements,
+    ) -> Result<(), MemoryStatus> {
+        if !required.valid() {
+            return Err(MemoryStatus::InvalidRequest);
+        }
+        let available = match self.operation_scope {
+            OperationScope::FixedEl0ProcessShared { instructions, .. } => instructions,
+            _ => stela_compiler::context::memory::InstructionRequirements::NONE,
+        };
+        if available.contains(required) {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
+
     fn validate_operation_execution(
         &self,
         class: MemoryOperationClass,
     ) -> Result<(), MemoryStatus> {
         match (class, self.operation_scope) {
             (MemoryOperationClass::Exclusive, OperationScope::FixedEl0ProcessExclusive) => Ok(()),
+            (class, OperationScope::FixedEl0ProcessShared { classes, .. })
+                if classes
+                    & match class {
+                        MemoryOperationClass::Exclusive => flags::EXCLUSIVE,
+                        MemoryOperationClass::Atomic => flags::ATOMIC,
+                        MemoryOperationClass::Ordered => flags::ORDERED,
+                    }
+                    != 0 =>
+            {
+                Ok(())
+            }
             _ => Err(MemoryStatus::Unsupported),
         }
     }

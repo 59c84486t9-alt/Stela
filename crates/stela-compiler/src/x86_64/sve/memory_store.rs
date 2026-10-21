@@ -314,6 +314,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             }
             _ => SpAlignmentRequirement::Any,
         },
+        ..MemoryRequirements::default()
     }
 }
 

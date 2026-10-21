@@ -276,6 +276,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             // The EL1 runtime checks SP against SCTLR.SA before address
             // arithmetic.
             required_sp_alignment: SpAlignmentRequirement::Any,
+            ..MemoryRequirements::default()
         };
     }
     if operand.profile == CheckedMemoryProfile::M0DeviceRamRead64Staged {
@@ -288,6 +289,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
             required_host_caps: 0,
             required_profile: profile_requirements::M0_DEVICE_RAM_READ64,
             required_sp_alignment: SpAlignmentRequirement::Any,
+            ..MemoryRequirements::default()
         };
     }
     let write = matches!(operand.transfer, MemoryTransfer::Store);
@@ -316,6 +318,7 @@ pub(crate) fn requirements(operand: &Operand) -> MemoryRequirements {
         } else {
             SpAlignmentRequirement::Any
         },
+        ..MemoryRequirements::default()
     }
 }
 

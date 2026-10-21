@@ -885,9 +885,87 @@ mod tests {
             "required_profile": 0,
             "required_sp_alignment": "Any",
         });
-        assert_eq!(serde_json::to_value(MemoryRequirements::default())?, legacy);
+        let mut current = legacy.clone();
+        current["context_version"] = serde_json::json!(2);
+        assert_eq!(
+            serde_json::to_value(MemoryRequirements::default())?,
+            current
+        );
         let restored: MemoryRequirements = serde_json::from_value(legacy)?;
-        assert_eq!(restored, MemoryRequirements::default());
+        assert_eq!(restored.context_version, 0);
+        assert!(restored.merge(MemoryRequirements::default()).is_none());
+        assert_ne!(
+            original,
+            memory_specialization_sha256(
+                profile,
+                Some(MemoryRequirements {
+                    context_version: 1,
+                    ..required
+                })
+            )?
+        );
+        assert_ne!(
+            original,
+            memory_specialization_sha256(
+                profile,
+                Some(MemoryRequirements {
+                    required_instructions:
+                        stela_compiler::context::memory::InstructionRequirements::LSE,
+                    ..required
+                })
+            )?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn intact_old_memory_context_metadata_is_rejected_before_native_payload_read() -> Result<()> {
+        use stela_compiler::{
+            TargetCpu,
+            block::{BlockProfile, CheckedMemoryProfile},
+        };
+        let source: Vec<_> = [0xf821_0002u32, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let profile = BlockProfile::CheckedMemory(CheckedMemoryProfile::SpAlignmentDisabled);
+        for version in [None, Some(0), Some(1), Some(3)] {
+            let root = tempfile::tempdir()?;
+            let prepared = prepare_block_for_target(
+                &source,
+                GuestAddress(0x1000),
+                root.path(),
+                profile,
+                TargetCpu::Baseline,
+            )?;
+            let directory = prepared.prepared.directory;
+            let mut metadata = serde_json::to_value(prepared.prepared.manifest)?;
+            if let Some(version) = version {
+                metadata["memory_requirements"]["context_version"] = serde_json::json!(version);
+            } else {
+                metadata["memory_requirements"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("context_version");
+            }
+            write_json(&directory.join("manifest.json"), &metadata)?;
+            let bytes = std::fs::read(directory.join("manifest.json"))?;
+            write_json(&directory.join("manifest.sha256.json"), &sha256(&bytes))?;
+            // Distinguish metadata refusal from attempting to read/map old code.
+            std::fs::remove_file(directory.join("native.bin"))?;
+            let error = prepare_block_for_target(
+                &source,
+                GuestAddress(0x1000),
+                root.path(),
+                profile,
+                TargetCpu::Baseline,
+            )
+            .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("memory requirements"),
+                "{error:#}"
+            );
+        }
         Ok(())
     }
 

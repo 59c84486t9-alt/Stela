@@ -27,6 +27,7 @@ pub(crate) mod m0_read;
 mod m0_scalar;
 pub(crate) mod m0_write;
 pub(crate) mod physical;
+mod shared;
 
 use crate::platform::sync::Mutex;
 use crate::system::events::{EventEndpoint, EventProducer};
@@ -64,6 +65,16 @@ pub struct MappingAttributes {
 /// Effective CPU controls belong to the per-thread policy, not each ISA family.
 /// Policy callbacks must not reenter or retire this domain while an access is active.
 pub trait DataPolicy {
+    fn validate_instructions(
+        &self,
+        required: stela_compiler::context::memory::InstructionRequirements,
+    ) -> Result<(), MemoryStatus> {
+        if required.is_empty() {
+            Ok(())
+        } else {
+            Err(MemoryStatus::Unsupported)
+        }
+    }
     /// Typed service classes must be admitted by the CPU owner.
     fn validate_operation_execution(
         &self,
@@ -582,6 +593,9 @@ impl<P: DataPolicy> MemoryThread<P> {
             owner.validate_execution(requirements.required_flags)?;
             owner
                 .policy
+                .validate_instructions(requirements.required_instructions)?;
+            owner
+                .policy
                 .validate_sp_alignment(requirements.required_sp_alignment)?;
             owner
                 .policy
@@ -721,17 +735,23 @@ impl<P: DataPolicy> MemoryThread<P> {
             callback: dispatch::<P>,
             opaque: core::ptr::from_mut(self).cast(),
             fault_kind: MemoryStatus::Success as u32,
-            reserved: 0,
+            fault_access: 0,
             fault_address: 0,
             fault_pc: 0,
             completed_bytes: 0,
             reserved_tail: 0,
         };
         let result = callback(&mut view);
-        let finalization = MemoryStatus::from_code(view.fault_kind)
+        let finalization = view
+            .has_supported_header()
+            .then_some(())
             .ok_or(MemoryStatus::Domain)
+            .and_then(|()| MemoryStatus::from_code(view.fault_kind).ok_or(MemoryStatus::Domain))
             .and_then(|status| self.settle_fault(status))
             .and_then(|()| self.domain.check_execution());
+        if finalization == Err(MemoryStatus::Domain) {
+            self.domain.system.failed.store(true, Ordering::Release);
+        }
         (result, finalization)
     }
 
@@ -740,6 +760,10 @@ impl<P: DataPolicy> MemoryThread<P> {
         view: &mut MemoryContextView,
         request: &MemoryRequest,
     ) -> Result<(), (MemoryStatus, u64)> {
+        if request.flags & (flags::ATOMIC | flags::ORDERED) != 0 {
+            // SAFETY: dedicated typed payload staging is inherited from dispatch.
+            return unsafe { self.transfer_shared(view, request) };
+        }
         if request.flags & flags::EXCLUSIVE != 0 {
             // SAFETY: category-specific staging contract is inherited from dispatch.
             return unsafe { self.transfer_exclusive(view, request) };
@@ -920,11 +944,33 @@ unsafe extern "sysv64" fn dispatch<P: DataPolicy>(
         unsafe { owner.transfer(view, request) }
     }));
     match result {
-        Ok(Ok(())) => MemoryStatus::Success as u32,
+        Ok(Ok(())) => {
+            if stela_compiler::context::memory::FaultAccess::from_code(view.fault_access).is_none()
+            {
+                owner.domain.system.failed.store(true, Ordering::Release);
+                view.fault_kind = MemoryStatus::Domain as u32;
+                return MemoryStatus::Domain as u32;
+            }
+            view.fault_access = 0;
+            MemoryStatus::Success as u32
+        }
         Ok(Err((status, address))) => {
             // Architectural fault cleanup is common at with_view return; a
             // platform/ABI decline must preserve the existing local mark.
-            view.record(status, address, request.pc, view.completed_bytes);
+            let status =
+                if stela_compiler::context::memory::FaultAccess::from_code(view.fault_access)
+                    .is_some()
+                {
+                    status
+                } else {
+                    owner.domain.system.failed.store(true, Ordering::Release);
+                    MemoryStatus::Domain
+                };
+            // Keep the raw access code even on an ABI violation. Native-call
+            // diagnostics must not normalize an unknown direction into success.
+            view.fault_kind = status as u32;
+            view.fault_address = address;
+            view.fault_pc = request.pc;
             status as u32
         }
         Err(_) => {
@@ -934,12 +980,9 @@ unsafe extern "sysv64" fn dispatch<P: DataPolicy>(
                 .system
                 .reservations
                 .clear(&mut owner.reservation);
-            view.record(
-                MemoryStatus::Domain,
-                request.address,
-                request.pc,
-                view.completed_bytes,
-            );
+            view.fault_kind = MemoryStatus::Domain as u32;
+            view.fault_address = request.address;
+            view.fault_pc = request.pc;
             MemoryStatus::Domain as u32
         }
     }
@@ -2026,6 +2069,7 @@ mod tests {
                 required_profile:
                     stela_compiler::context::memory::profile_requirements::NATIVE_ACCESS,
                 required_sp_alignment: SpAlignmentRequirement::Any,
+                ..MemoryRequirements::default()
             };
             assert!(thread.prepare(req).is_err());
             thread.policy.unavailable = false;
@@ -2394,6 +2438,7 @@ mod tests {
                 required_profile:
                     stela_compiler::context::memory::profile_requirements::NATIVE_ACCESS,
                 required_sp_alignment: SpAlignmentRequirement::Any,
+                ..MemoryRequirements::default()
             };
             assert!(matches!(
                 thread.prepare(req),
@@ -2528,6 +2573,7 @@ mod tests {
                     required_host_caps: 0,
                     required_profile: 0,
                     required_sp_alignment: SpAlignmentRequirement::Any,
+                    ..MemoryRequirements::default()
                 };
                 assert!(matches!(
                     thread.prepare_tag(req, false),

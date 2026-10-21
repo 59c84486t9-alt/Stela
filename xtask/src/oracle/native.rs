@@ -31,6 +31,8 @@ use stela_runtime::{
     },
 };
 
+mod shared_memory;
+
 const PAGE_BYTES: usize = 0x1000;
 const INSTRUCTION_BYTES: usize = 4;
 const RET: u32 = 0xd65f_03c0;
@@ -204,6 +206,8 @@ pub(super) fn set_mxcsr(value: u32) {
 
 /// Stela's native translation of one case's code at [`CODE_PAGE`].
 pub enum Translation {
+    /// Original LSE/ordered source through the typed all-writer service.
+    CheckedShared(stela_runtime::execution::checked_memory::CheckedMemoryBlock),
     /// A leaf ending in RET X30; execution falls through past the case.
     Leaf(Executable),
     /// A production block dispatcher over the case's code, run for one block.
@@ -221,6 +225,9 @@ pub enum Translation {
 }
 
 impl Translation {
+    pub fn checked_shared(words: &[u32]) -> Result<Option<Self>> {
+        shared_memory::prepare(words).map(|body| body.map(Self::CheckedShared))
+    }
     /// Translate `words` and a closing RET as a leaf.
     pub fn leaf(words: &[u32]) -> Result<Self> {
         let source: Vec<u8> = words
@@ -322,6 +329,7 @@ impl Translation {
         let saved = mxcsr();
         let mut scalable_result = None;
         let result = match self {
+            Self::CheckedShared(body) => shared_memory::run(body, &windows, case),
             Self::Leaf(executable) => {
                 let mut state = case.state.clone();
                 // SAFETY: the mapping holds a leaf that follows the guest-state ABI.

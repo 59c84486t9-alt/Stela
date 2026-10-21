@@ -3,7 +3,7 @@
 use super::{
     AllocationTagPolicy, DataPolicy, MemoryRequest, MemoryStatus, MemoryThread, SCA_BYTES, flags,
 };
-use stela_compiler::context::memory::{MemoryRequirements, profile_requirements};
+use stela_compiler::context::memory::{FaultAccess, MemoryRequirements, profile_requirements};
 
 // Only ordinary read descriptors fit this service's private scalar staging.
 // This whitelist remains safe when the global ABI gains typed payload classes.
@@ -13,6 +13,7 @@ const SCALAR_READ_FLAGS: u32 =
 /// A scalar read fault with its guest source location and read prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct MemoryFault {
+    pub access: FaultAccess,
     #[serde(serialize_with = "serialize_status")]
     pub status: MemoryStatus,
     pub address: u64,
@@ -91,6 +92,7 @@ impl<P: DataPolicy> MemoryThread<P> {
     ) -> Result<u128, MemoryFault> {
         if required_flags & !SCALAR_READ_FLAGS != 0 || !matches!(bytes, 1 | 2 | 4 | 8 | 16) {
             return Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::InvalidRequest,
                 address,
                 pc: guestpc,
@@ -109,6 +111,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 ..MemoryRequirements::default()
             })
             .map_err(|status| MemoryFault {
+                access: FaultAccess::Read,
                 status,
                 address,
                 pc: guestpc,
@@ -127,6 +130,7 @@ impl<P: DataPolicy> MemoryThread<P> {
         // live outside `R` because finalization may discard the callback result
         // after native reads filled the staging.
         let mut observed = MemoryFault {
+            access: FaultAccess::Read,
             status: MemoryStatus::Domain,
             address,
             pc: guestpc,
@@ -139,6 +143,7 @@ impl<P: DataPolicy> MemoryThread<P> {
                 let callback_fault =
                     matches!(decoded, Some(status) if status != MemoryStatus::Success);
                 observed = MemoryFault {
+                    access: FaultAccess::Read,
                     status: decoded.unwrap_or(MemoryStatus::Domain),
                     address: if callback_fault {
                         view.fault_address
@@ -409,6 +414,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(address, 8, 0, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Unsupported,
                 address,
                 pc: GUEST_PC,
@@ -427,6 +433,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(address, 8, flags::TAG_CHECKED, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::TagCheck,
                 address,
                 pc: GUEST_PC,
@@ -493,6 +500,7 @@ mod tests {
                 GUEST_PC
             ),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Permission,
                 address: tagged(GUEST_BASE + SCA_BYTES as u64, TAG),
                 pc: GUEST_PC,
@@ -503,6 +511,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(unmapped, 8, flags::TAG_CHECKED, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Translation,
                 address: unmapped,
                 pc: GUEST_PC,
@@ -529,6 +538,7 @@ mod tests {
                 GUEST_PC
             ),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::TagCheck,
                 address: tagged(GUEST_BASE + SCA_BYTES as u64, TAG),
                 pc: GUEST_PC,
@@ -556,6 +566,7 @@ mod tests {
             assert_eq!(
                 thread.read_scalar(address, bytes, required_flags, GUEST_PC),
                 Err(MemoryFault {
+                    access: FaultAccess::Read,
                     status: MemoryStatus::InvalidRequest,
                     address,
                     pc: GUEST_PC,
@@ -576,6 +587,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(address, 8, flags::TAG_CHECKED, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Unsupported,
                 address,
                 pc: GUEST_PC,
@@ -608,6 +620,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(address, SCA_BYTES as u8, flags::TAG_CHECKED, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Unsupported,
                 address,
                 pc: GUEST_PC,
@@ -636,6 +649,7 @@ mod tests {
     #[test]
     fn faults_serialize_with_typed_status_as_stable_abi_code() {
         let fault = MemoryFault {
+            access: FaultAccess::Read,
             status: MemoryStatus::TagCheck,
             address: tagged(GUEST_BASE, TAG),
             pc: GUEST_PC,
@@ -672,6 +686,7 @@ mod tests {
         let access = reserve(&mut thread);
         let address = tagged(GUEST_BASE, TAG);
         let expected = MemoryFault {
+            access: FaultAccess::Read,
             status: MemoryStatus::Domain,
             address,
             pc: GUEST_PC,
@@ -712,6 +727,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(address, 8, 0, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Domain,
                 address,
                 pc: GUEST_PC,
@@ -794,6 +810,7 @@ mod tests {
                 assert_eq!(
                     thread.read_scalar(tagged(GUEST_BASE, TAG), 8, descriptor | ordinary, GUEST_PC),
                     Err(MemoryFault {
+                        access: FaultAccess::Read,
                         status: MemoryStatus::InvalidRequest,
                         address: tagged(GUEST_BASE, TAG),
                         pc: GUEST_PC,
@@ -823,6 +840,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(tagged(GUEST_BASE, TAG), 8, 0, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Domain,
                 address: tagged(GUEST_BASE, TAG),
                 pc: GUEST_PC,
@@ -847,6 +865,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(raw, 4, 0, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Domain,
                 address: raw + 1,
                 pc: GUEST_PC,
@@ -879,6 +898,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(tagged(GUEST_BASE, TAG), 8, 0, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Domain,
                 address: tagged(GUEST_BASE, TAG),
                 pc: GUEST_PC,
@@ -920,6 +940,7 @@ mod tests {
         assert_eq!(
             thread.read_scalar(raw, 8, flags::TAG_CHECKED, GUEST_PC),
             Err(MemoryFault {
+                access: FaultAccess::Read,
                 status: MemoryStatus::Domain,
                 address: raw,
                 pc: GUEST_PC,

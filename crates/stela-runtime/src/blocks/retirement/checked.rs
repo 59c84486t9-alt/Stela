@@ -118,6 +118,7 @@ pub(crate) struct SettledPrefix {
 // The fault address is read through Debug, in run reports.
 #[allow(dead_code)]
 pub(crate) struct OwnedMemoryFault {
+    pub access: stela_compiler::context::memory::FaultAccess,
     pub status: stela_compiler::context::memory::MemoryStatus,
     pub address: GuestAddress,
     pub pc: GuestAddress,

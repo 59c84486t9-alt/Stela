@@ -105,6 +105,7 @@ impl M0WriteSource {
                 required_sp_alignment: SpAlignmentRequirement::Any,
                 required_address_checks: Default::default(),
                 required_pointer_arithmetic: None,
+                ..MemoryRequirements::default()
             },
         }
     }
