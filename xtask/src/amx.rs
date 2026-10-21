@@ -1,5 +1,5 @@
-//! AMX model fidelity: run the original corsix/amx C emulator, built for M2
-//! (`AMX_VER_M2`) with FPCR.DN, on QEMU's AArch64 `virt` CPU, and compare every
+//! AMX model fidelity: run the original corsix/amx C emulator for a selected
+//! source-qualified generation with FPCR.DN, on QEMU's AArch64 `virt` CPU, and compare every
 //! step with Stela's Rust model.
 //!
 //! QEMU has no AMX, so this checks the port against corsix's hardware-compared
@@ -11,14 +11,15 @@ pub mod kernels;
 
 use crate::tools::{exec, root, wait};
 use anyhow::{Context, Result, bail, ensure};
-use clap::Args;
+use clap::{Args, ValueEnum};
+use sha2::{Digest, Sha256};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 use stela_compiler::amx::{
-    AmxOperation, AmxRegisters,
+    AmxOperation, AmxRegisters, Generation,
     model::{self, AmxMemory, MemoryFault},
     state::REGISTER_BYTES,
 };
@@ -32,7 +33,7 @@ const EMULATOR_SOURCES: [&str; 10] = [
     "ldst.c", "extr.c", "fma.c", "fms.c", "genlut.c", "mac16.c", "matfp.c", "matint.c", "vecfp.c",
     "vecint.c",
 ];
-/// The pinned research commit; `emulate.h` must match it.
+/// The pinned research commit; every compiled source must match it.
 const CORSIX_COMMIT: &str = "483714bb051da088d08a66724b22dd08a5db3c99";
 const CLANG_TARGET: &str = "--target=aarch64-none-elf";
 const ARCHITECTURE: &str = "-march=armv8.2-a+fp16";
@@ -49,8 +50,89 @@ const BATCH_LIMIT: u64 = RESULTS_ADDRESS - BATCH_ADDRESS;
 const RESULTS_LIMIT: u64 = 0x2000_0000;
 const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
+/// All external source bytes, including the license, admitted by this harness.
+const CORSIX_SOURCES: &[(&str, &str)] = &[
+    (
+        "LICENSE",
+        "5a26ecfba372d3a59431f1b417af9f1ecb766d9b4d1b6d7d39dce10de6601987",
+    ),
+    (
+        "emulate.h",
+        "668e89d5d661117668df2994632eb54d31e2d37f0c372983f0d5dd3f8bd443e2",
+    ),
+    (
+        "ldst.c",
+        "a9f8d0bc93f95b28698f523e7a1a01cbaf00eee776a81f0b57c1a4f248ee2bee",
+    ),
+    (
+        "extr.c",
+        "10b28b15e7133bda173c1d650f3d8548e6e1f96b5c02349bbe2d9db894c9b57f",
+    ),
+    (
+        "fma.c",
+        "84e39da675353f8f9cfd52f446c31beaea45a5ff2b645b1f36b178c4a464475b",
+    ),
+    (
+        "fms.c",
+        "30c0cbc017fa88f79e82074d372f726dce65c95314d3b920fb9ba7d5b4f0f1be",
+    ),
+    (
+        "genlut.c",
+        "7b4b67cc54519a930fe870b4eae6e7b02a79652ff339a1fe66efb09b45ed2062",
+    ),
+    (
+        "mac16.c",
+        "2a38e96eb9c2ce418450cc031ab1cba8a11f593862e263bb4fc3238de8b6c22e",
+    ),
+    (
+        "matfp.c",
+        "53c3825f6a61ad2a7ebfa21b99b0ecafdd2591343f74e1bd13e43c04b9e0cb16",
+    ),
+    (
+        "matint.c",
+        "cc4f741a454101f0213305e6e76ce68b008707f61bd1f06a8c82052260ed3917",
+    ),
+    (
+        "vecfp.c",
+        "26bb30fe16dfd91729f310b46a8b550451cc62a1cf9815d7a06d1c8235da9d9e",
+    ),
+    (
+        "vecint.c",
+        "8ed98920a0ae89f44ea37ac1b29c192cba0b7f1be27f8db308252a071aba4b7c",
+    ),
+];
+
+fn validate_sources(corsix: &Path) -> Result<()> {
+    for &(name, expected) in CORSIX_SOURCES {
+        let bytes = fs::read(corsix.join(name)).with_context(|| format!("read pinned {name}"))?;
+        ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == expected,
+            "corsix/amx {name} does not match pinned commit {CORSIX_COMMIT}"
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReferenceGeneration {
+    M1,
+    M2,
+}
+
+impl From<ReferenceGeneration> for Generation {
+    fn from(value: ReferenceGeneration) -> Self {
+        match value {
+            ReferenceGeneration::M1 => Self::M1,
+            ReferenceGeneration::M2 => Self::M2,
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct AmxReference {
+    /// The exact semantic generation, independent of the host or profile label.
+    #[arg(long, value_enum, default_value_t = ReferenceGeneration::M2)]
+    generation: ReferenceGeneration,
     /// A corsix/amx checkout at the pinned commit.
     #[arg(long)]
     corsix: PathBuf,
@@ -62,6 +144,10 @@ pub struct AmxReference {
     steps: usize,
     #[arg(long, default_value_t = 1)]
     seed: u64,
+    /// Exercise every ALU mode/type pair (at least 16 chains and 256 steps),
+    /// plus generation boundary bits, while retaining seeded surrounding bits.
+    #[arg(long)]
+    generation_boundaries: bool,
     /// Only this corsix mnemonic, such as `fma32`.
     #[arg(long)]
     operation: Option<String>,
@@ -137,6 +223,32 @@ impl AmxMemory for Buffer {
     }
 }
 
+/// Deterministic generation boundaries combined with seeded surrounding bits.
+/// Vector/matrix cases cover all 64 ALU modes × 16 types with indexed mode off,
+/// leaving random/indexed operation coverage to the ordinary run.
+fn boundary_operand(operation: AmxOperation, chain: usize, step: usize, random: u64) -> u64 {
+    use AmxOperation::*;
+    match operation {
+        VectorFloat | VectorInteger | MatrixFloat | MatrixInteger => {
+            let mut value = random & !((0x3ff << 47) | (0xf << 42) | (1 << 31));
+            value |= ((step as u64 & 63) << 47) | ((chain as u64 & 15) << 42);
+            value | (((step as u64 >> 6) & 1) << 31)
+        }
+        ExtractX | ExtractY => {
+            let mut value = random & !((1 << 63) | (15 << 11) | (1 << 31));
+            value |= ((step as u64 & 15) << 11) | (((step as u64 >> 4) & 1) << 63);
+            value | (((step as u64 >> 5) & 1) << 31)
+        }
+        GenerateLookup => {
+            (random & !((15 << 53) | (1 << 30)))
+                | ((step as u64 & 15) << 53)
+                | (((step as u64 >> 4) & 1) << 30)
+        }
+        _ if operation.accesses_memory() => (random & !(0xff << 56)) | ((step as u64 & 255) << 56),
+        _ => random,
+    }
+}
+
 struct Chain {
     registers: Box<AmxRegisters>,
     buffer: Buffer,
@@ -155,13 +267,27 @@ fn digest(registers: &AmxRegisters, buffer: &[u8]) -> u64 {
 
 impl AmxReference {
     pub fn run(self) -> Result<()> {
+        ensure!(
+            self.chains != 0 && self.steps != 0,
+            "AMX reference requires nonzero chains and steps"
+        );
+        if let Some(name) = self.operation.as_deref() {
+            ensure!(
+                AmxOperation::ALL.into_iter().any(|operation| !matches!(
+                    operation,
+                    AmxOperation::Set | AmxOperation::Clear
+                ) && operation.mnemonic() == name),
+                "{name} is not a comparable AMX register operation"
+            );
+        }
         let emulate = self.corsix.join("emulate.h");
         ensure!(
             emulate.is_file(),
             "{} is not a corsix/amx checkout",
             self.corsix.display()
         );
-        let image = build_reference(&self.corsix)?;
+        validate_sources(&self.corsix)?;
+        let image = build_reference(&self.corsix, self.generation.into())?;
         let qemu = match &self.qemu {
             Some(path) => path.clone(),
             None => {
@@ -175,9 +301,27 @@ impl AmxReference {
             }
         };
         println!(
-            "corsix/amx {CORSIX_COMMIT}: AMX_VER_M2, FPCR.DN, QEMU {}",
+            "corsix/amx {CORSIX_COMMIT}: {:?}, FPCR.DN, seed {}, QEMU {}",
+            self.generation,
+            self.seed,
             qemu.display()
         );
+        println!(
+            "operands: {}, chains {}, steps {}",
+            if self.generation_boundaries {
+                "generation boundaries"
+            } else {
+                "random"
+            },
+            self.chains,
+            self.steps
+        );
+        if self.generation_boundaries {
+            ensure!(
+                self.chains >= 16 && self.steps >= 256,
+                "generation-boundary coverage requires at least 16 chains and 256 steps"
+            );
+        }
         let mut failures = 0;
         for operation in AmxOperation::ALL {
             if matches!(operation, AmxOperation::Set | AmxOperation::Clear)
@@ -216,8 +360,13 @@ impl AmxReference {
                 let address =
                     BATCH_ADDRESS + CHAINS_OFFSET + index as u64 * stride + REGISTER_BYTES as u64;
                 let operands = (0..self.steps)
-                    .map(|_| {
-                        let operand = random.next();
+                    .map(|step| {
+                        let random = random.next();
+                        let operand = if self.generation_boundaries {
+                            boundary_operand(operation, index, step, random)
+                        } else {
+                            random
+                        };
                         if !operation.accesses_memory() {
                             return operand;
                         }
@@ -258,12 +407,16 @@ impl AmxReference {
         {
             for step in 0..self.steps {
                 let operand = chain.operands[step];
-                model::execute(&mut chain.registers, operation, operand, &mut chain.buffer)
-                    .map_err(|error| {
-                        anyhow::anyhow!(
-                            "chain {index} step {step} operand {operand:#018x}: {error:?}"
-                        )
-                    })?;
+                model::execute_for(
+                    self.generation.into(),
+                    &mut chain.registers,
+                    operation,
+                    operand,
+                    &mut chain.buffer,
+                )
+                .map_err(|error| {
+                    anyhow::anyhow!("chain {index} step {step} operand {operand:#018x}: {error:?}")
+                })?;
                 let expected = u64::from_le_bytes(result[step * 8..][..8].try_into()?);
                 if digest(&chain.registers, &chain.buffer.bytes) != expected {
                     let detail = self.explain(qemu, image, operation, index, step)?;
@@ -312,7 +465,13 @@ impl AmxReference {
             step + 1,
         )?;
         for &operand in &chain.operands {
-            let _ = model::execute(&mut chain.registers, operation, operand, &mut chain.buffer);
+            let _ = model::execute_for(
+                self.generation.into(),
+                &mut chain.registers,
+                operation,
+                operand,
+                &mut chain.buffer,
+            );
         }
         Ok(difference(&chain, &record[(step + 1) * 8..]))
     }
@@ -417,7 +576,7 @@ fn run_reference(
 
 /// Compile the emulator and driver for bare-metal AArch64 and link a flat image
 /// at [`IMAGE_ADDRESS`] with the toolchain's rust-lld.
-fn build_reference(corsix: &Path) -> Result<Vec<u8>> {
+fn build_reference(corsix: &Path, generation: Generation) -> Result<Vec<u8>> {
     let directory = tempfile::tempdir()?;
     let work = directory.path();
     fs::create_dir(work.join("include"))?;
@@ -440,6 +599,10 @@ fn build_reference(corsix: &Path) -> Result<Vec<u8>> {
         exec(
             Command::new(&clang)
                 .args([CLANG_TARGET, ARCHITECTURE, "-O2", "-ffreestanding"])
+                .arg(format!(
+                    "-DSTELA_AMX_VER={}",
+                    generation.reference_version()
+                ))
                 // QEMU treats MMU-off data accesses as Device memory.
                 .args(["-mstrict-align", "-fno-stack-protector"])
                 .arg("-I")
@@ -492,6 +655,76 @@ fn build_reference(corsix: &Path) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_or_unknown_comparisons_cannot_report_success() {
+        let mut options = AmxReference {
+            generation: ReferenceGeneration::M1,
+            corsix: PathBuf::from("/unused-AMX-validation-path"),
+            chains: 0,
+            steps: 256,
+            seed: 7,
+            generation_boundaries: false,
+            operation: None,
+            qemu: None,
+        };
+        assert!(
+            options
+                .run()
+                .unwrap_err()
+                .to_string()
+                .contains("nonzero chains and steps")
+        );
+        options = AmxReference {
+            generation: ReferenceGeneration::M2,
+            corsix: PathBuf::from("/unused-AMX-validation-path"),
+            chains: 1,
+            steps: 1,
+            seed: 7,
+            generation_boundaries: false,
+            operation: Some("set".into()),
+            qemu: None,
+        };
+        assert!(
+            options
+                .run()
+                .unwrap_err()
+                .to_string()
+                .contains("not a comparable AMX register operation")
+        );
+    }
+
+    #[test]
+    fn modified_reference_sources_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join("LICENSE"), b"modified source").unwrap();
+        let error = validate_sources(directory.path()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("LICENSE does not match pinned commit")
+        );
+    }
+
+    #[test]
+    fn boundary_corpus_covers_modes_types_and_generation_switches() {
+        for operation in [
+            AmxOperation::VectorFloat,
+            AmxOperation::VectorInteger,
+            AmxOperation::MatrixFloat,
+            AmxOperation::MatrixInteger,
+        ] {
+            let mut cases = std::collections::BTreeSet::new();
+            for chain in 0..16 {
+                for step in 0..256 {
+                    let value = boundary_operand(operation, chain, step, u64::MAX);
+                    assert_eq!((value >> 53) & 15, 0);
+                    cases.insert(((value >> 47) & 63, (value >> 42) & 15, (value >> 31) & 1));
+                }
+            }
+            assert_eq!(cases.len(), 64 * 16 * 2);
+        }
+    }
 
     #[test]
     fn xoshiro_matches_the_reference_sequence() {

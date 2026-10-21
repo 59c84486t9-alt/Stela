@@ -1,4 +1,4 @@
-//! `vecfp` and `matfp` (corsix `vecfp.c`, `matfp.c`) for M2: bf16 types 0/1,
+//! `vecfp` and `matfp` (corsix `vecfp.c`, `matfp.c`): M2 adds bf16 types 0/1,
 //! ALU modes 10..12 and the bit-31 multi-row vector forms.
 use super::{
     Row, bit_select,
@@ -9,7 +9,10 @@ use super::{
     fused::{read_lane, write_lane},
     load_indexed, load_pool, shuffle, write_mask,
 };
-use crate::{aarch64::floating::Format, amx::AmxRegisters};
+use crate::{
+    aarch64::floating::Format,
+    amx::{AmxRegisters, Generation},
+};
 
 const INDEXED_LOAD: u64 = 1 << 53;
 const INDEXED_LOAD_Y: u64 = 1 << 47;
@@ -59,10 +62,10 @@ fn alu(format: Format, x: u64, y: u64, z: u64, mode: u64) -> u64 {
 }
 
 /// X/Y bits, Z bits and bf16 for the type field 45:42.
-fn types(operand: u64) -> (u32, u32, bool) {
+fn types(generation: Generation, operand: u64) -> (u32, u32, bool) {
     match (operand >> 42) & 0xf {
-        0 => (16, 16, true),
-        1 => (16, 32, true),
+        0 if generation.m2_extensions() => (16, 16, true),
+        1 if generation.m2_extensions() => (16, 32, true),
         3 => (16, 32, false),
         4 => (32, 32, false),
         7 => (64, 64, false),
@@ -134,7 +137,7 @@ fn lane(
     write_lane(&mut registers.z[row], z_bytes, z_lane, result);
 }
 
-pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
+pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
     if (operand >> 54) & 7 != 0 {
         return;
     }
@@ -144,10 +147,12 @@ pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
     } else {
         (operand >> 47) & 0x3f
     };
-    if !matches!(mode, 0 | 1 | 4 | 5 | 7 | 10 | 11 | 12) {
+    if !matches!(mode, 0 | 1 | 4 | 5 | 7)
+        && !(generation.m2_extensions() && matches!(mode, 10..=12))
+    {
         return;
     }
-    let (xy_bits, z_bits, bf16) = types(operand);
+    let (xy_bits, z_bits, bf16) = types(generation, operand);
     let xy_bytes = (xy_bits / 8) as usize;
     let mut z_row = operand >> 20;
     let mut z_step = 64;
@@ -161,7 +166,7 @@ pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
     } else {
         2
     };
-    if operand & MULTIPLE_ROWS != 0 {
+    if generation.m2_extensions() && operand & MULTIPLE_ROWS != 0 {
         let broadcast = (operand >> 32) & 7;
         operand &= !(0x1ff << 32);
         match broadcast {
@@ -250,7 +255,7 @@ pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
     }
 }
 
-pub(super) fn matrix(registers: &mut AmxRegisters, mut operand: u64) {
+pub(super) fn matrix(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
     if (operand >> 54) & 7 != 0 {
         return;
     }
@@ -264,7 +269,7 @@ pub(super) fn matrix(registers: &mut AmxRegisters, mut operand: u64) {
     if !matches!(mode, 0 | 1 | 4) {
         return;
     }
-    let (xy_bits, z_bits, bf16) = types(operand);
+    let (xy_bits, z_bits, bf16) = types(generation, operand);
     let xy_bytes = (xy_bits / 8) as usize;
     let mut x = load_pool(&registers.x, (operand >> 10) & 0x1ff);
     let mut y = load_pool(&registers.y, operand & 0x1ff);
@@ -351,19 +356,23 @@ mod tests {
         splat(&mut registers.y[0], 4, 5.0f32.to_bits().into());
         splat(&mut registers.z[4], 4, 1.0f32.to_bits().into());
         let base = (4 << 42) | (4 << 20);
-        vector(&mut registers, base);
+        vector(Generation::M2, &mut registers, base);
         assert_eq!(read_lane(&registers.z[4], 4, 0), 11.0f32.to_bits().into());
         // Mode 1: z - x*y.
-        vector(&mut registers, base | (1 << 47));
+        vector(Generation::M2, &mut registers, base | (1 << 47));
         assert_eq!(read_lane(&registers.z[4], 4, 7), 1.0f32.to_bits().into());
         // Mode 4: x <= 0 ? 0 : y.
-        vector(&mut registers, base | (4 << 47));
+        vector(Generation::M2, &mut registers, base | (4 << 47));
         assert_eq!(read_lane(&registers.z[4], 4, 3), 5.0f32.to_bits().into());
         // Reserved bits 56:54 make the instruction a no-op.
-        vector(&mut registers, base | (1 << 55) | (11 << 47));
+        vector(
+            Generation::M2,
+            &mut registers,
+            base | (1 << 55) | (11 << 47),
+        );
         assert_eq!(read_lane(&registers.z[4], 4, 3), 5.0f32.to_bits().into());
         // Mode 11 (M2): z + x.
-        vector(&mut registers, base | (11 << 47));
+        vector(Generation::M2, &mut registers, base | (11 << 47));
         assert_eq!(read_lane(&registers.z[4], 4, 3), 7.0f32.to_bits().into());
     }
 
@@ -376,11 +385,16 @@ mod tests {
         }
         // Bit 31 with selector 0: rows 0 and 32, consecutive X and Y rows,
         // mode 10 (x*y, M2).
-        vector(&mut registers, MULTIPLE_ROWS | (10 << 47) | (4 << 42));
+        vector(
+            Generation::M2,
+            &mut registers,
+            MULTIPLE_ROWS | (10 << 47) | (4 << 42),
+        );
         assert_eq!(read_lane(&registers.z[0], 4, 0), 0.0f32.to_bits().into());
         assert_eq!(read_lane(&registers.z[32], 4, 0), 1.0f32.to_bits().into());
         // Broadcast 2 reuses X row 0 for rows 2, 18, 34, 50 (selector 34).
         vector(
+            Generation::M2,
             &mut registers,
             MULTIPLE_ROWS | (2 << 32) | (10 << 47) | (4 << 42) | (34 << 20),
         );
@@ -390,6 +404,7 @@ mod tests {
         // Broadcast 1 writes zeros.
         splat(&mut registers.z[1], 4, 9);
         vector(
+            Generation::M2,
             &mut registers,
             MULTIPLE_ROWS | (1 << 32) | (4 << 42) | (1 << 20),
         );
@@ -402,14 +417,14 @@ mod tests {
         splat(&mut registers.x[0], 2, 0x4000); // f16/bf16 2.0 bit patterns
         splat(&mut registers.y[0], 2, 0x4200);
         // Type 3: f16 -> f32 interleaved across rows 0/1: 2 * 3.
-        vector(&mut registers, 3 << 42);
+        vector(Generation::M2, &mut registers, 3 << 42);
         assert_eq!(read_lane(&registers.z[0], 4, 0), 6.0f32.to_bits().into());
         assert_eq!(read_lane(&registers.z[1], 4, 15), 6.0f32.to_bits().into());
         // Type 1 (M2 bf16 -> f32): 0x4000 is 2.0, 0x4200 is 32.0.
-        vector(&mut registers, (1 << 42) | (2 << 20));
+        vector(Generation::M2, &mut registers, (1 << 42) | (2 << 20));
         assert_eq!(read_lane(&registers.z[2], 4, 0), 64.0f32.to_bits().into());
         // Type 0 (M2 bf16): 2 * 32 + 0.
-        vector(&mut registers, 4 << 20);
+        vector(Generation::M2, &mut registers, 4 << 20);
         assert_eq!(read_lane(&registers.z[4], 2, 0), 0x4280);
     }
 
@@ -422,12 +437,16 @@ mod tests {
         }
         // f64, Z offset 3, Y mode 2 (first n=2 lanes): rows 3 and 11 only.
         let operand = (7 << 42) | (3 << 20) | (2 << 23) | (2 << 58);
-        matrix(&mut registers, operand);
+        matrix(Generation::M2, &mut registers, operand);
         assert_eq!(read_lane(&registers.z[3], 8, 5), 10.0f64.to_bits());
         assert_eq!(read_lane(&registers.z[11], 8, 7), 14.0f64.to_bits());
         assert_eq!(read_lane(&registers.z[19], 8, 7), 0);
         // Mode 2/3 and >= 5 are no-ops.
-        matrix(&mut registers, (7 << 42) | (3 << 20) | (5 << 47));
+        matrix(
+            Generation::M2,
+            &mut registers,
+            (7 << 42) | (3 << 20) | (5 << 47),
+        );
         assert_eq!(read_lane(&registers.z[19], 8, 7), 0);
     }
 
@@ -447,6 +466,7 @@ mod tests {
         registers.x[0][..4].copy_from_slice(&[0x1b, 0x1b, 0x1b, 0x1b]);
         splat(&mut registers.y[0], 4, 1.0f32.to_bits().into());
         vector(
+            Generation::M2,
             &mut registers,
             INDEXED_LOAD | (3 << 49) | (4 << 42) | (1 << 52),
         );

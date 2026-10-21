@@ -157,6 +157,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return step;
         }
         let operation = instruction.operation;
+        let Some(generation) = self.cpu.amx.generation() else {
+            return self.refuse_amx(word, amx::UNQUALIFIED_GENERATION);
+        };
         if !self.cpu.amx.enabled(amx::governing(
             if self.cpu.regime() == crate::machine::cpu::TranslationRegime::El20 {
                 2
@@ -208,7 +211,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             machine: self,
             failure: None,
         };
-        let result = model::execute(&mut registers, operation, operand, &mut memory);
+        let result =
+            model::execute_for(generation, &mut registers, operation, operand, &mut memory);
         let failure = memory.failure.take();
         self.cpu.amx.registers = Some(registers);
         match result {
@@ -237,13 +241,18 @@ impl<H: Host, D: Devices> Machine<H, D> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{BASE, machine};
+    use super::super::tests::{BASE, machine_on};
     use super::*;
+    use crate::machine::Chip;
     use crate::machine::system::Register as SystemRegister;
     use crate::machine::{
         amx::{AMX_CTL_EL1, AMX_STATE_T, AmxView},
         exception::syndrome,
     };
+
+    fn machine(words: &[u32]) -> Machine<super::super::tests::FakeHost, super::super::NoDevices> {
+        machine_on(Chip::AppleM2, words)
+    }
 
     const LDX: u32 = 0x0020_1000;
     const STZ: u32 = 0x0020_10a0;
@@ -268,27 +277,29 @@ mod tests {
 
     #[test]
     fn disabled_amx_raises_the_implementation_defined_class() {
-        let mut machine = machine(&[]);
-        machine
-            .cpu
-            .registers
-            .set(SystemRegister::VBAR_EL1, 0, BASE + 0x4000);
-        machine.amx(LDX).unwrap();
-        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xfe00_0003);
-        assert_eq!(
-            machine.cpu.read(SystemRegister::ESR_EL1),
-            syndrome(Class::ImplementationDefined, DISABLED_ISS)
-        );
-        assert_eq!(
-            machine.cpu.read(SystemRegister::ELR_EL1),
-            BASE,
-            "the PC stays on the word"
-        );
-        assert_eq!(machine.cpu.pc, BASE + 0x4200);
-        assert!(
-            machine.amx(0x0020_12e0).is_err(),
-            "unallocated while disabled"
-        );
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let mut machine = machine_on(chip, &[]);
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::VBAR_EL1, 0, BASE + 0x4000);
+            machine.amx(LDX).unwrap();
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xfe00_0003);
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                syndrome(Class::ImplementationDefined, DISABLED_ISS)
+            );
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ELR_EL1),
+                BASE,
+                "the PC stays on the word"
+            );
+            assert_eq!(machine.cpu.pc, BASE + 0x4200);
+            assert!(
+                machine.amx(0x0020_12e0).is_err(),
+                "unallocated while disabled"
+            );
+        }
     }
 
     #[test]
@@ -334,6 +345,55 @@ mod tests {
     }
 
     #[test]
+    fn chip_generation_drives_id_and_transfer_semantics() {
+        for (chip, id, rows) in [(Chip::AppleM1, 1, 2), (Chip::AppleM2, 2, 4)] {
+            let mut machine = machine_on(chip, &[]);
+            machine
+                .system_instruction(mrs(crate::machine::amx::AMXIDR_EL1, 2))
+                .unwrap();
+            assert_eq!(machine.cpu.state.x[2], id);
+            machine.cpu.state.x[1] = (1 << 63) | 0x107;
+            machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
+            machine.amx(SET).unwrap();
+            for row in 0..4 {
+                assert!(
+                    machine
+                        .host
+                        .write_ram(DATA + row * 64, &[row as u8 + 1; 64])
+                );
+            }
+            // Bit60 selects four rows only on M2; bit61 remains ignored on
+            // both qualified generations. The destination wraps after X7.
+            machine.cpu.state.x[3] = (1 << 62) | (1 << 61) | (1 << 60) | (7 << 56) | DATA;
+            machine.amx(LDX | 3).unwrap();
+            let registers = machine.cpu.amx.registers.as_ref().unwrap();
+            assert_eq!(registers.x[7], [1; 64]);
+            assert_eq!(registers.x[0], [2; 64]);
+            assert_eq!(registers.x[1], [if rows == 4 { 3 } else { 0 }; 64]);
+            assert_eq!(registers.x[2], [if rows == 4 { 4 } else { 0 }; 64]);
+            machine.amx(CLR).unwrap();
+            assert!(!machine.cpu.amx.live());
+        }
+    }
+
+    #[test]
+    fn unqualified_generation_refuses_before_enablement_or_state_effects() {
+        for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            let mut machine = machine_on(chip, &[]);
+            let ram = machine.host.ram.clone();
+            let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+            for word in [SET, LDX, FMA32, CLR] {
+                let error = machine.amx(word).unwrap_err();
+                assert!(format!("{error:?}").contains(amx::UNQUALIFIED_GENERATION));
+                assert_eq!(machine.cpu.pc, BASE);
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+                assert!(!machine.cpu.amx.live());
+                assert_eq!(machine.host.ram, ram);
+            }
+        }
+    }
+
+    #[test]
     fn a_vhe_host_kernel_is_governed_by_the_el2_copy() {
         let mut machine = machine(&[]);
         machine.cpu.pstate = crate::machine::exception::Pstate::reset(2);
@@ -360,65 +420,67 @@ mod tests {
 
     #[test]
     fn translated_transfers_cross_pages_and_fault_without_partial_effects() {
-        let mut machine = machine(&[]);
-        // 4 KiB granule, 39-bit low half: L1, L2 and L3 tables in RAM. VA
-        // page 0 is writable, page 1 read-only and page 2 unmapped.
-        let (l1, l2, l3) = (BASE + 0xa000, BASE + 0xb000, BASE + 0xc000);
-        let page =
-            |pa: u64, read_only: bool| pa | 0b11 | 1 << 10 | 1 << 2 | u64::from(read_only) << 7;
-        for (slot, descriptor) in [
-            (l1, l2 | 0b11),
-            (l2, l3 | 0b11),
-            (l3, page(BASE, false)),
-            (l3 + 8, page(BASE + 0x1000, true)),
-        ] {
-            assert!(machine.host.write_ram(slot, &descriptor.to_le_bytes()));
+        for chip in [Chip::AppleM1, Chip::AppleM2] {
+            let mut machine = machine_on(chip, &[]);
+            // 4 KiB granule, 39-bit low half: L1, L2 and L3 tables in RAM. VA
+            // page 0 is writable, page 1 read-only and page 2 unmapped.
+            let (l1, l2, l3) = (BASE + 0xa000, BASE + 0xb000, BASE + 0xc000);
+            let page =
+                |pa: u64, read_only: bool| pa | 0b11 | 1 << 10 | 1 << 2 | u64::from(read_only) << 7;
+            for (slot, descriptor) in [
+                (l1, l2 | 0b11),
+                (l2, l3 | 0b11),
+                (l3, page(BASE, false)),
+                (l3 + 8, page(BASE + 0x1000, true)),
+            ] {
+                assert!(machine.host.write_ram(slot, &descriptor.to_le_bytes()));
+            }
+            for (register, value) in [
+                (SystemRegister::SCTLR_EL1, mmu::SCTLR_M),
+                // T0SZ 25, EPD1, 48-bit IPS.
+                (SystemRegister::TCR_EL1, 25 | 1 << 23 | 5 << 32),
+                (SystemRegister::TTBR0_EL1, l1),
+                (SystemRegister::MAIR_EL1, 0xff00),
+            ] {
+                machine.cpu.registers.set(register, 0, value);
+            }
+            machine.cpu.registers.set(SystemRegister::VBAR_EL1, 0, 0x0);
+            let bytes: Vec<u8> = (0..512).map(|i| (i * 7) as u8).collect();
+            assert!(machine.host.write_ram(BASE + 0xf00, &bytes));
+            *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
+            machine.amx(SET).unwrap();
+
+            machine.cpu.state.x[3] = 0xfe0;
+            machine.amx(LDX | 3).unwrap();
+            let registers = machine.cpu.amx.registers.as_deref().unwrap();
+            assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64]);
+
+            // A store into page 1 is a permission fault at its first byte there.
+            let mut before = [0u8; 64];
+            assert!(machine.host.read_ram(BASE + 0xfe0, &mut before));
+            machine.cpu.pc = 0x40;
+            machine.amx(STZ | 3).unwrap();
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                syndrome(Class::DataAbortSame, 0b00_1111 | 1 << 6)
+            );
+            assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x1000);
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x40);
+            let mut after = [0u8; 64];
+            assert!(machine.host.read_ram(BASE + 0xfe0, &mut after));
+            assert_eq!(after, before, "nothing written");
+
+            // A load reaching page 2 is a level 3 translation fault.
+            machine.cpu.state.x[3] = 0x1fe0;
+            machine.amx(LDX | 3).unwrap();
+            assert_eq!(
+                machine.cpu.read(SystemRegister::ESR_EL1),
+                syndrome(Class::DataAbortSame, 0b00_0111)
+            );
+            assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x2000);
+            let registers = machine.cpu.amx.registers.as_deref().unwrap();
+            assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64], "unchanged");
         }
-        for (register, value) in [
-            (SystemRegister::SCTLR_EL1, mmu::SCTLR_M),
-            // T0SZ 25, EPD1, 48-bit IPS.
-            (SystemRegister::TCR_EL1, 25 | 1 << 23 | 5 << 32),
-            (SystemRegister::TTBR0_EL1, l1),
-            (SystemRegister::MAIR_EL1, 0xff00),
-        ] {
-            machine.cpu.registers.set(register, 0, value);
-        }
-        machine.cpu.registers.set(SystemRegister::VBAR_EL1, 0, 0x0);
-        let bytes: Vec<u8> = (0..512).map(|i| (i * 7) as u8).collect();
-        assert!(machine.host.write_ram(BASE + 0xf00, &bytes));
-        *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
-        machine.amx(SET).unwrap();
-
-        machine.cpu.state.x[3] = 0xfe0;
-        machine.amx(LDX | 3).unwrap();
-        let registers = machine.cpu.amx.registers.as_deref().unwrap();
-        assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64]);
-
-        // A store into page 1 is a permission fault at its first byte there.
-        let mut before = [0u8; 64];
-        assert!(machine.host.read_ram(BASE + 0xfe0, &mut before));
-        machine.cpu.pc = 0x40;
-        machine.amx(STZ | 3).unwrap();
-        assert_eq!(
-            machine.cpu.read(SystemRegister::ESR_EL1),
-            syndrome(Class::DataAbortSame, 0b00_1111 | 1 << 6)
-        );
-        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x1000);
-        assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), 0x40);
-        let mut after = [0u8; 64];
-        assert!(machine.host.read_ram(BASE + 0xfe0, &mut after));
-        assert_eq!(after, before, "nothing written");
-
-        // A load reaching page 2 is a level 3 translation fault.
-        machine.cpu.state.x[3] = 0x1fe0;
-        machine.amx(LDX | 3).unwrap();
-        assert_eq!(
-            machine.cpu.read(SystemRegister::ESR_EL1),
-            syndrome(Class::DataAbortSame, 0b00_0111)
-        );
-        assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x2000);
-        let registers = machine.cpu.amx.registers.as_deref().unwrap();
-        assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64], "unchanged");
     }
 
     #[test]

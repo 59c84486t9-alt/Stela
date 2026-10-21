@@ -1,8 +1,8 @@
-//! `ldx ldy ldz ldzi stx sty stz stzi` (corsix `ldst.c`), M2: bit 62 moves two
-//! rows; for X and Y loads bit 60 then moves four. Bit 61 (M3 non-consecutive)
-//! and bit 63 are ignored.
+//! `ldx ldy ldz ldzi stx sty stz stzi` (corsix `ldst.c`): bit 62 moves two
+//! rows; for M2 X and Y loads bit 60 then moves four. X/Y loads ignore
+//! bit 61 (M3 non-consecutive) and bit 63. Z uses bit 61 within its row index.
 use super::{AmxError, AmxMemory, MemoryFault, Row, effective_address};
-use crate::amx::{AmxOperation, AmxRegisters};
+use crate::amx::{AmxOperation, AmxRegisters, Generation};
 
 const MULTIPLE: u64 = 1 << 62;
 const MULTIPLE_MEANS_FOUR: u64 = 1 << 60;
@@ -11,6 +11,7 @@ const MULTIPLE_ALIGNMENT: u64 = 128;
 const INTERLEAVED_LANES: usize = 16;
 
 pub(super) fn execute(
+    generation: Generation,
     registers: &mut AmxRegisters,
     operation: AmxOperation,
     operand: u64,
@@ -19,8 +20,20 @@ pub(super) fn execute(
     use AmxOperation::*;
     let address = effective_address(operand);
     match operation {
-        LoadX => load(&mut registers.x, operand, address, memory, true),
-        LoadY => load(&mut registers.y, operand, address, memory, true),
+        LoadX => load(
+            &mut registers.x,
+            operand,
+            address,
+            memory,
+            generation.m2_extensions(),
+        ),
+        LoadY => load(
+            &mut registers.y,
+            operand,
+            address,
+            memory,
+            generation.m2_extensions(),
+        ),
         LoadZ => load(&mut registers.z, operand, address, memory, false),
         StoreX => store(&registers.x, operand, address, memory),
         StoreY => store(&registers.y, operand, address, memory),
@@ -195,6 +208,39 @@ mod tests {
         assert_eq!(registers.z[63][..], memory.bytes[..64]);
         assert_eq!(registers.z[0][..], memory.bytes[64..128]);
         assert_eq!(memory.accesses[1], (memory.base, 128, false));
+    }
+
+    #[test]
+    fn m1_pair_load_ignores_four_row_and_nonconsecutive_bits() {
+        let mut memory = window();
+        let mut registers = AmxRegisters::zeroed();
+        registers.x.fill([0xa5; 64]);
+        let operand = MULTIPLE | MULTIPLE_MEANS_FOUR | (1 << 61) | (7 << 56) | memory.base;
+        crate::amx::model::execute_for(
+            Generation::M1,
+            &mut registers,
+            AmxOperation::LoadX,
+            operand,
+            &mut memory,
+        )
+        .unwrap();
+        assert_eq!(registers.x[7][..], memory.bytes[..64]);
+        assert_eq!(registers.x[0][..], memory.bytes[64..128]);
+        assert_eq!(registers.x[1], [0xa5; 64]);
+        assert_eq!(memory.accesses, [(memory.base, 128, false)]);
+        let before = registers.clone();
+        assert!(matches!(
+            crate::amx::model::execute_for(
+                Generation::M1,
+                &mut registers,
+                AmxOperation::LoadX,
+                operand + 1,
+                &mut memory
+            ),
+            Err(AmxError::Unsupported { .. })
+        ));
+        assert_eq!(registers, before);
+        assert_eq!(memory.accesses.len(), 1);
     }
 
     #[test]

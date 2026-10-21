@@ -353,7 +353,7 @@ impl Cpu {
             claim: 0,
             caches: None,
             monitor: None,
-            amx: super::amx::Unit::default(),
+            amx: super::amx::Unit::on(chip),
             vgic: super::vgic::CpuInterface::default(),
             scalable: (chip.implemented(Feature::FEAT_SME) == Ok(true)).then(|| {
                 let length = VectorLength::from_bytes(STREAMING_VECTOR_BYTES)

@@ -7,7 +7,7 @@
 //! `docs/research/amx.md#system-mode-abi-26a434-xnu-j473`:
 //!
 //! - CPU initialization writes `AMX_CTL_EL1` = 0x100, or 0x100 | MPIDR.Aff0
-//!   under one boot configuration, and in others writes MPIDR.Aff0 to
+//!   for generation 1, and for generations 2–4 writes MPIDR.Aff0 to
 //!   `AMX_CTX_EL1` (`0xfffffe000bd80ef4`). The meaning of bits 0..8 is
 //!   unknown; they are kept as written and have no effect here.
 //! - Every `AMX_CTL` copy is reached through [`Unit::control`] with an
@@ -18,9 +18,10 @@
 //!   `machine_routines_apple.c` (`0xfffffe000c551f80`) takes its highest set
 //!   bit of 0..5 as generation 1..6, panics on any of bits 6..15 ("Unknown
 //!   AMX feature ID bit") or none ("doesn't advertise any known version"),
-//!   and CPU initialization branches on the result. The model is corsix's
-//!   `AMX_VER_M2`, generation 2; whether hardware also sets bit 0 is not
-//!   known and the kernel would not see it.
+//!   and CPU initialization branches on the result. The declared emulated
+//!   capability is generation 1 on M1, 2 on M2, matching the selected reference
+//!   model. These IDR answers are not observed hardware register values.
+//!   M3–M6 controls and instructions refuse pending qualification.
 //! - Every context-switch use sets or clears only bit 63 with
 //!   read-modify-write, and reads `AMX_STATE_T` after `dsb ish` testing only
 //!   for nonzero (`0xfffffe000bd83694`). Live state reads as 1 here
@@ -28,7 +29,10 @@
 use crate::machine::registers::{Changes, Outcome, Refusal};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
-use stela_compiler::{aarch64::system::registers::Encoding, amx::AmxRegisters};
+use stela_compiler::{
+    aarch64::system::registers::Encoding,
+    amx::{AmxRegisters, Generation},
+};
 
 /// `S3_4_C15_C1_4`: AMX enable (bit 63) and the CPU-init fields.
 pub const AMX_CTL_EL1: Encoding = Encoding::new(3, 4, 15, 1, 4);
@@ -39,8 +43,9 @@ pub const AMX_CTL_EL2: Encoding = Encoding::new(3, 4, 15, 4, 7);
 pub const AMX_STATE_T: Encoding = Encoding::new(3, 4, 15, 1, 3);
 /// `S3_6_C15_C2_7`: the AMX generation, one bit per generation.
 pub const AMXIDR_EL1: Encoding = Encoding::new(3, 6, 15, 2, 7);
-/// The generation this unit implements (`docs/research/amx.md`).
-const GENERATION: u32 = 2;
+/// No later-generation behavior is inferred from M1/M2 reference semantics.
+pub(super) const UNQUALIFIED_GENERATION: &str =
+    "AMX controls and instruction generation are not source-qualified for this chip";
 pub const AMX_CTL_ENABLE: u64 = 1 << 63;
 /// The low fields CPU initialization writes (0x100 | MPIDR.Aff0).
 const AMX_CTL_INIT_FIELDS: u64 = 0x1ff;
@@ -91,13 +96,40 @@ pub fn governing(kernel_el: u8) -> AmxView {
 }
 
 /// One PE's AMX unit. `registers` exists between `set` and `clr`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Unit {
+    generation: Option<Generation>,
     controls: [u64; 2],
     pub registers: Option<Box<AmxRegisters>>,
 }
 
+/// Preserve the original M2 unit API. CPU construction must use `on(chip)`.
+impl Default for Unit {
+    fn default() -> Self {
+        Self::on(super::Chip::AppleM2)
+    }
+}
+
 impl Unit {
+    /// The emulated generation qualified by the reference semantics and original
+    /// kernel control flow. This is not an observation of silicon IDR bits.
+    pub fn on(chip: super::Chip) -> Self {
+        let generation = match chip {
+            super::Chip::AppleM1 => Some(Generation::M1),
+            super::Chip::AppleM2 => Some(Generation::M2),
+            _ => None,
+        };
+        Self {
+            generation,
+            controls: [0; 2],
+            registers: None,
+        }
+    }
+
+    pub fn generation(&self) -> Option<Generation> {
+        self.generation
+    }
+
     /// The single accessor of every `AMX_CTL` copy.
     pub fn control(&mut self, view: AmxView) -> &mut u64 {
         &mut self.controls[view as usize]
@@ -115,6 +147,14 @@ impl Unit {
 
     /// MRS of an AMX control register, or `None` for other encodings.
     pub fn read(&mut self, encoding: Encoding, kernel_el: u8) -> Option<Outcome> {
+        if !Self::owns(encoding) {
+            return None;
+        }
+        let Some(generation) = self.generation else {
+            return Some(Outcome::Refused(Refusal::UnsupportedSetting(
+                UNQUALIFIED_GENERATION,
+            )));
+        };
         match route(encoding, kernel_el) {
             Some(Route::View(view)) => return Some(Outcome::Read(*self.control(view))),
             Some(Route::Undefined) => return Some(Outcome::Undefined),
@@ -122,7 +162,7 @@ impl Unit {
         }
         match encoding {
             AMX_STATE_T => Some(Outcome::Read(u64::from(self.live()))),
-            AMXIDR_EL1 => Some(Outcome::Read(1 << (GENERATION - 1))),
+            AMXIDR_EL1 => Some(Outcome::Read(1 << (generation.reference_version() - 1))),
             _ => None,
         }
     }
@@ -138,6 +178,12 @@ impl Unit {
     /// MSR of an AMX control register, or `None` for other encodings.
     pub fn write(&mut self, encoding: Encoding, kernel_el: u8, value: u64) -> Option<Outcome> {
         let refuse = |reason| Outcome::Refused(Refusal::UnsupportedSetting(reason));
+        if !Self::owns(encoding) {
+            return None;
+        }
+        if self.generation.is_none() {
+            return Some(refuse(UNQUALIFIED_GENERATION));
+        }
         match route(encoding, kernel_el) {
             Some(Route::View(_)) if value & !(AMX_CTL_ENABLE | AMX_CTL_INIT_FIELDS) != 0 => {
                 return Some(refuse("AMX_CTL bit the kernel never writes"));
@@ -160,6 +206,66 @@ impl Unit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chip_binding_selects_declared_capability_and_refuses_unqualified_controls() {
+        for chip in super::super::Chip::ALL {
+            let mut unit = Unit::on(chip);
+            match chip {
+                super::super::Chip::AppleM1 | super::super::Chip::AppleM2 => {
+                    let version = if chip == super::super::Chip::AppleM1 {
+                        1
+                    } else {
+                        2
+                    };
+                    assert_eq!(unit.generation().unwrap().reference_version(), version);
+                    assert_eq!(
+                        unit.read(AMXIDR_EL1, 1),
+                        Some(Outcome::Read(1 << (version - 1)))
+                    );
+                    // The original version-1 CPU-init branch includes Aff0.
+                    unit.write(AMX_CTL_EL1, 1, 0x100 | 7);
+                    assert_eq!(unit.read(AMX_CTL_EL1, 1), Some(Outcome::Read(0x107)));
+                    assert!(!unit.enabled(AmxView::El1));
+                    unit.write(AMX_CTL_EL1, 1, AMX_CTL_ENABLE | 0x107);
+                    assert!(unit.enabled(AmxView::El1));
+                    assert!(matches!(
+                        unit.write(AMX_CTL_EL1, 1, 1 << 62),
+                        Some(Outcome::Refused(_))
+                    ));
+                    assert_eq!(
+                        unit.read(AMX_CTL_EL1, 1),
+                        Some(Outcome::Read(AMX_CTL_ENABLE | 0x107))
+                    );
+                }
+                _ => {
+                    assert!(unit.generation().is_none());
+                    for encoding in [
+                        AMX_CTL_EL1,
+                        AMX_CTL_EL2,
+                        AMX_CTL_EL12,
+                        AMXIDR_EL1,
+                        AMX_STATE_T,
+                    ] {
+                        assert_eq!(
+                            unit.read(encoding, 2),
+                            Some(Outcome::Refused(Refusal::UnsupportedSetting(
+                                UNQUALIFIED_GENERATION
+                            )))
+                        );
+                        assert_eq!(
+                            unit.write(encoding, 2, AMX_CTL_ENABLE),
+                            Some(Outcome::Refused(Refusal::UnsupportedSetting(
+                                UNQUALIFIED_GENERATION
+                            )))
+                        );
+                    }
+                    assert_eq!(unit.controls, [0; 2]);
+                    assert!(!unit.live());
+                }
+            }
+        }
+    }
 
     #[test]
     fn control_keeps_the_kernel_fields_and_state_reports_liveness() {

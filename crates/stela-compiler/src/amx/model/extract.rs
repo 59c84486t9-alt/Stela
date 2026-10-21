@@ -5,7 +5,7 @@ use super::{
     float::{single_to_bf16, single_to_half},
     load_integer, store_integer, write_mask,
 };
-use crate::amx::AmxRegisters;
+use crate::amx::{AmxRegisters, Generation};
 
 const SIGNED_INPUT: u64 = 1 << 57;
 const SIGNED_OUTPUT: u64 = 1 << 56;
@@ -56,12 +56,14 @@ fn narrow(value: i64, operand: u64, output_bits: u32) -> i64 {
 
 /// X/Y element bytes, Z element bytes and narrowing stride of a
 /// horizontal/vertical extraction.
-fn layout(operand: u64) -> (usize, usize, usize) {
+fn layout(generation: Generation, operand: u64) -> (usize, usize, usize) {
     match ((operand >> 63) << 4) | ((operand >> 11) & 0xf) {
         0 => (1, 1, 0),
         8 | 24 => (4, 4, 0),
-        9 | 25 => (2, 4, 1),
-        10 | 26 => (2, 4, 2),
+        9 => (2, 4, 1),
+        25 if generation.m2_extensions() => (2, 4, 1),
+        10 => (2, 4, 2),
+        26 if generation.m2_extensions() => (2, 4, 2),
         11 => (1, 4, 1),
         13 => (1, 2, 1),
         17 => (8, 8, 0),
@@ -90,12 +92,17 @@ struct Shape {
 }
 
 /// Shared prologue; `None` for an X/Y copy, which is complete.
-fn shape(registers: &mut AmxRegisters, operand: &mut u64, column: bool) -> Option<Shape> {
+fn shape(
+    generation: Generation,
+    registers: &mut AmxRegisters,
+    operand: &mut u64,
+    column: bool,
+) -> Option<Shape> {
     let selector = *operand >> 20;
     if *operand & HORIZONTAL_VERTICAL != 0 {
-        let (xy_bytes, z_bytes, stride) = layout(*operand);
+        let (xy_bytes, z_bytes, stride) = layout(generation, *operand);
         let mut step = 64;
-        if *operand & MULTIPLE_ROWS != 0 {
+        if generation.m2_extensions() && *operand & MULTIPLE_ROWS != 0 {
             *operand &= !(0x1ff << 32);
             step = if selector & 32 != 0 { 16 } else { 32 };
         }
@@ -140,8 +147,8 @@ fn shape(registers: &mut AmxRegisters, operand: &mut u64, column: bool) -> Optio
 }
 
 /// `x[i] = f(z[_][i])` and its variants.
-pub(super) fn extract_x(registers: &mut AmxRegisters, mut operand: u64) {
-    let Some(mut shape) = shape(registers, &mut operand, false) else {
+pub(super) fn extract_x(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
+    let Some(mut shape) = shape(generation, registers, &mut operand, false) else {
         return;
     };
     let sign_extend = sign_extension(operand, shape.z_bytes);
@@ -176,8 +183,8 @@ pub(super) fn extract_x(registers: &mut AmxRegisters, mut operand: u64) {
 }
 
 /// `y[j] = f(z[j][_])` and its variants.
-pub(super) fn extract_y(registers: &mut AmxRegisters, mut operand: u64) {
-    let Some(mut shape) = shape(registers, &mut operand, true) else {
+pub(super) fn extract_y(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
+    let Some(mut shape) = shape(generation, registers, &mut operand, true) else {
         return;
     };
     let sign_extend = sign_extension(operand, shape.z_bytes);
@@ -242,7 +249,7 @@ mod tests {
     fn plain_rows_and_columns_copy_with_offsets_and_masks() {
         let mut registers = numbered();
         // extrx: Z row 5 into X at byte offset 500, wrapping the pool.
-        extract_x(&mut registers, (5 << 20) | (500 << 10));
+        extract_x(Generation::M2, &mut registers, (5 << 20) | (500 << 10));
         let flat = *registers.x.as_flattened().first_chunk::<512>().unwrap();
         for index in 0..64 {
             assert_eq!(flat[(500 + index) % 512], registers.z[5][index]);
@@ -250,7 +257,7 @@ mod tests {
         // extry with 32-bit elements: column 8 (bytes 8..12) of every fourth
         // row, i.e. Z[j][column] for j the element's byte index.
         let mut registers = numbered();
-        extract_y(&mut registers, (1 << 28) | (8 << 20));
+        extract_y(Generation::M2, &mut registers, (1 << 28) | (8 << 20));
         for element in 0..16 {
             let row = element * 4;
             assert_eq!(
@@ -261,6 +268,7 @@ mod tests {
         // Mode 1 enables only lane 3.
         let mut registers = numbered();
         extract_x(
+            Generation::M2,
             &mut registers,
             (1 << 46) | (3 << 41) | (1 << 28) | (2 << 20),
         );
@@ -273,7 +281,7 @@ mod tests {
     fn byte_elements_use_even_bytes_only() {
         let mut registers = numbered();
         registers.x[0] = [0xee; 64];
-        extract_x(&mut registers, 3 << 28);
+        extract_x(Generation::M2, &mut registers, 3 << 28);
         for index in 0..64 {
             let expected = if index % 2 == 0 {
                 registers.z[0][index]
@@ -288,10 +296,18 @@ mod tests {
     fn copies_between_x_and_y() {
         let mut registers = numbered();
         registers.y[6] = [7; 64];
-        extract_x(&mut registers, BETWEEN_XY | (6 << 20) | (2 << 16));
+        extract_x(
+            Generation::M2,
+            &mut registers,
+            BETWEEN_XY | (6 << 20) | (2 << 16),
+        );
         assert_eq!(registers.x[2], [7; 64]);
         registers.x[1] = [9; 64];
-        extract_y(&mut registers, BETWEEN_XY | (1 << 20) | (5 << 6));
+        extract_y(
+            Generation::M2,
+            &mut registers,
+            BETWEEN_XY | (1 << 20) | (5 << 6),
+        );
         assert_eq!(registers.y[5], [9; 64]);
     }
 
@@ -312,7 +328,7 @@ mod tests {
             | SATURATE
             | ROUNDING_SHIFT
             | (1 << 58);
-        extract_x(&mut registers, operand);
+        extract_x(Generation::M2, &mut registers, operand);
         let lanes: [i16; 32] = core::array::from_fn(|lane| {
             i16::from_le_bytes([registers.x[0][lane * 2], registers.x[0][lane * 2 + 1]])
         });
@@ -327,13 +343,18 @@ mod tests {
         let mut registers = AmxRegisters::zeroed();
         registers.z[0][..4].copy_from_slice(&0x3f80_1000u32.to_le_bytes());
         // bit 63 with case 9: f32 to f16.
-        extract_x(&mut registers, (1 << 63) | HORIZONTAL_VERTICAL | (9 << 11));
+        extract_x(
+            Generation::M2,
+            &mut registers,
+            (1 << 63) | HORIZONTAL_VERTICAL | (9 << 11),
+        );
         assert_eq!(
             u16::from_le_bytes([registers.x[0][0], registers.x[0][1]]),
             0x3c00
         );
         // A shift field of 16 selects bf16.
         extract_x(
+            Generation::M2,
             &mut registers,
             (1 << 63) | (16 << 58) | HORIZONTAL_VERTICAL | (9 << 11),
         );
@@ -348,6 +369,7 @@ mod tests {
         let mut registers = numbered();
         // Bit 31 with selector 33: rows 1, 17, 33, 49 go to four X rows.
         extract_x(
+            Generation::M2,
             &mut registers,
             MULTIPLE_ROWS | HORIZONTAL_VERTICAL | (8 << 11) | (33 << 20) | (3 << 32),
         );

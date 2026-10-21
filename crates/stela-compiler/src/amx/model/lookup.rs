@@ -7,7 +7,10 @@ use super::{
     fused::read_lane,
     load_indexed, load_pool,
 };
-use crate::{aarch64::floating::Format, amx::AmxRegisters};
+use crate::{
+    aarch64::floating::Format,
+    amx::{AmxRegisters, Generation},
+};
 
 const TABLE_Y: u64 = 1 << 59;
 const BF16: u64 = 1 << 30;
@@ -17,10 +20,16 @@ const SOURCE_Y: u64 = 1 << 10;
 
 /// `find_first_greater_than`: for each source lane, the index of the last
 /// table entry before the first one greater than it (255 when none precede).
-fn first_greater(mode: u64, source: &Row, table: &Row, operand: u64) -> [u8; 32] {
+fn first_greater(
+    generation: Generation,
+    mode: u64,
+    source: &Row,
+    table: &Row,
+    operand: u64,
+) -> [u8; 32] {
     let (bytes, compare): (usize, fn(u64, u64) -> bool) = match mode {
         0 => (4, |a, b| greater(Format::Single, a, b)),
-        1 if operand & BF16 != 0 => (2, |a, b| {
+        1 if generation.m2_extensions() && operand & BF16 != 0 => (2, |a, b| {
             greater(
                 Format::Single,
                 u64::from(bf16_to_single(a as u16)),
@@ -67,7 +76,7 @@ fn pack(indices: &[u8; 32], index_bits: u32, element_bits: u32) -> Row {
     *row.first_chunk::<64>().expect("64-byte row")
 }
 
-pub(super) fn execute(registers: &mut AmxRegisters, mut operand: u64) {
+pub(super) fn execute(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
     let mode = (operand >> 53) & 0xf;
     let source_pool = if operand & SOURCE_Y != 0 {
         &registers.y
@@ -93,7 +102,7 @@ pub(super) fn execute(registers: &mut AmxRegisters, mut operand: u64) {
         _ => (5, 8),
     };
     if mode <= 6 {
-        let indices = first_greater(mode, &row, &table, operand);
+        let indices = first_greater(generation, mode, &row, &table, operand);
         row = pack(&indices, index_bits, element_bits);
         operand &= !DESTINATION_Z;
     } else {
@@ -132,6 +141,7 @@ mod tests {
         }
         // Mode 0 into Y row 1 (bit 26 is ignored for generation).
         execute(
+            Generation::M2,
             &mut registers,
             (2 << 60) | DESTINATION_Z | DESTINATION_Y | (1 << 20),
         );
@@ -150,6 +160,7 @@ mod tests {
         registers.x[0][0] = 0b11_10_01_00;
         // Mode 9: 2-bit indices into byte lanes of table Y row 4, into Z row 40.
         execute(
+            Generation::M2,
             &mut registers,
             (9 << 53) | TABLE_Y | (4 << 60) | DESTINATION_Z | (40 << 20),
         );

@@ -1,10 +1,10 @@
-//! `vecint` and `matint` (corsix `vecint.c`, `matint.c`) for M2: vector ALU
+//! `vecint` and `matint` (corsix `vecint.c`, `matint.c`): M2 adds vector ALU
 //! modes 10..12, the bit-31 multi-row forms and the M1/M2 `matint` mode 8
 //! layout (type 12 stays i8 x i8 -> i16).
 use super::{
     Row, bit_select, load_indexed, load_integer, load_pool, shuffle, store_integer, write_mask,
 };
-use crate::amx::AmxRegisters;
+use crate::amx::{AmxRegisters, Generation};
 
 const ROUNDING_SHIFT: u64 = 1 << 29;
 const SATURATE: u64 = 1 << 30;
@@ -84,7 +84,7 @@ fn zero_lanes(write: bool, value: i64) -> i64 {
     if write { value } else { 0 }
 }
 
-pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
+pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut operand: u64) {
     if (operand >> 54) & 7 != 0 {
         return;
     }
@@ -93,7 +93,7 @@ pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
     let mut x_step = 64u64;
     let mut y_step = 64u64;
     let mut x_lane_mask = usize::MAX;
-    if operand & MULTIPLE_ROWS != 0 {
+    if generation.m2_extensions() && operand & MULTIPLE_ROWS != 0 {
         let broadcast = (operand >> 32) & 7;
         operand &= !(0x1ff << 32);
         match broadcast {
@@ -154,7 +154,7 @@ pub(super) fn vector(registers: &mut AmxRegisters, mut operand: u64) {
         }
         return;
     }
-    if mode >= 7 && !matches!(mode, 10..=12) {
+    if mode >= 7 && !(generation.m2_extensions() && matches!(mode, 10..=12)) {
         return;
     }
     let (x_bits, y_bits, z_bits) = if mode == 5 || mode == 6 {
@@ -413,7 +413,7 @@ mod tests {
             write_lane(&mut registers.y[0], 2, lane, 3);
         }
         // Type 3: i16 x i16 -> i32 across rows 6/7.
-        vector(&mut registers, (3 << 42) | (6 << 20));
+        vector(Generation::M2, &mut registers, (3 << 42) | (6 << 20));
         assert_eq!(read_lane(&registers.z[6], 4, 5), 30);
         assert_eq!(read_lane(&registers.z[7], 4, 5), 33);
     }
@@ -444,6 +444,7 @@ mod tests {
         write_lane(&mut registers.z[2], 2, 0, (-300i16) as u16 as u64);
         // Signed 16-bit shift by 2 with signed 8-bit saturation (type 11).
         vector(
+            Generation::M2,
             &mut registers,
             (4 << 47)
                 | (11 << 42)
@@ -456,6 +457,7 @@ mod tests {
         assert_eq!(read_lane(&registers.z[2], 2, 0) as u16 as i16, -75);
         write_lane(&mut registers.z[2], 2, 0, 1000);
         vector(
+            Generation::M2,
             &mut registers,
             (4 << 47) | (11 << 42) | (2 << 20) | SATURATE | SIGNED_OUTPUT | SIGNED_Z_OR_X,
         );

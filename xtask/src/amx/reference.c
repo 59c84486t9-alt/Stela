@@ -1,4 +1,4 @@
-// Bare-metal driver for the corsix/amx C emulator (AMX_VER_M2) on QEMU `virt`.
+// Bare-metal driver for the corsix/amx C emulator (selected AMX_VER) on QEMU `virt`.
 //
 // The batch header at BATCH holds the chain count, steps per chain, AMX
 // operation, result-name length and chain stride, then the result file name at
@@ -8,7 +8,8 @@
 // match `amx.rs`. start.S sets FPCR.DN, as corsix's hardware comparison did.
 #include "emulate.h"
 
-uint32_t AMX_VER = AMX_VER_M2;
+// Selected by the Rust harness; no implicit generation fallback.
+uint32_t AMX_VER = STELA_AMX_VER;
 
 #define BATCH 0x41000000ull
 #define RESULTS 0x50000000ull
