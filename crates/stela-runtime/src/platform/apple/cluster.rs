@@ -44,6 +44,8 @@
 //! configuration. No physical snooze or overload cause is invented.
 //!
 //! Every other register refuses.
+pub mod t6000;
+
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::regfile::Held;
 use alloc::vec::Vec;
