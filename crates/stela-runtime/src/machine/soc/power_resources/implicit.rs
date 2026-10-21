@@ -80,6 +80,7 @@ pub(super) fn resolve(
         {
             if entry.owner != Some(PowerOwner::Mmio(binding.physical))
                 || !node.compatible(binding.compatible)
+                || node.property("reg").is_none_or(|raw| raw.len() != 16)
             {
                 continue;
             }
@@ -92,8 +93,14 @@ pub(super) fn resolve(
             let complete_view = if inventory.ranges.is_empty() {
                 *address == binding.physical
             } else {
-                inventory.ranges.iter().any(|&(child, parent, size)| {
-                    *address >= child
+                let end = address.checked_add(*bytes);
+                let mut views = inventory.ranges.iter().filter(|&&(child, _, size)| {
+                    end.is_some_and(|end| child < end && *address < child.saturating_add(size))
+                });
+                views.next().is_some_and(|&(child, parent, size)| {
+                    views.next().is_none()
+                        && child.checked_add(size).is_some()
+                        && *address >= child
                         && address - child <= size
                         && *bytes <= size - (address - child)
                         && parent.checked_add(address - child) == Some(binding.physical)
@@ -349,6 +356,45 @@ mod tests {
         let requirements =
             resolve(&Node::root(&pmgr).unwrap(), &domains(), &inventory, &Some).unwrap();
         assert!(requirements.is_empty());
+        // A complete affine mapping cannot qualify an overlapping fragment
+        // whose priority could change an interior byte's translation.
+        inventory.ranges = vec![
+            (binding.physical, binding.physical, binding.bytes),
+            (binding.physical + 0x4000, 0x1000, 0x4000),
+        ];
+        assert!(
+            resolve(&Node::root(&pmgr).unwrap(), &domains(), &inventory, &Some)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn partial_trailing_register_cells_cannot_qualify_an_exact_native_view() {
+        for binding in T8112 {
+            for trailing in [1, 4, 8, 15, 16] {
+                let mut reg = [binding.physical, binding.bytes]
+                    .into_iter()
+                    .flat_map(u64::to_le_bytes)
+                    .collect::<Vec<_>>();
+                reg.resize(reg.len() + trailing, 0);
+                let node = encode(
+                    &[
+                        ("name", b"same"),
+                        ("compatible", binding.compatible.as_bytes()),
+                        ("reg", &reg),
+                    ],
+                    &[],
+                );
+                let bytes = encode(&[("name", b"arm-io")], &[node]);
+                assert!(
+                    states(&bytes, "pmgr1,t8112", domains())
+                        .unwrap()
+                        .implicit
+                        .is_empty()
+                );
+            }
+        }
     }
 
     #[test]
