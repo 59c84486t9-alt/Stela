@@ -6,7 +6,8 @@
 //! is made during the restore, long after ExitBootServices, so the client
 //! runs the runtime's IPv4 stack (`stela_runtime::net`) over the adapter's
 //! after-EBS driver (`stela_drivers::net::virtio`, `stela_drivers::net::igc`
-//! for an Intel I225/I226, or `stela_drivers::usb::cdc` for a USB Ethernet
+//! for an Intel I225/I226, `stela_drivers::net::e1000e` for an Intel 82574L,
+//! or `stela_drivers::usb::cdc` for a USB Ethernet
 //! adapter). Its registers and DMA pages are identity-mapped in the
 //! loader's root, so every frame moves inside that root
 //! (`storage::RestoreRoot`), as block and input I/O do.
@@ -78,9 +79,10 @@ impl HostNetwork {
     pub fn open(links: Links, clock: Clock) -> Result<Self, String> {
         let Some(device) = links.devices.into_iter().next() else {
             return Err(String::from(
-                "no host network adapter: the mount drives virtio-net, Intel I225/I226 and USB CDC Ethernet adapters after ExitBootServices",
+                "no host network adapter: the mount drives virtio-net, Intel I225/I226, Intel 82574L and USB CDC Ethernet adapters after ExitBootServices",
             ));
         };
+        output::arguments(format_args!("NETWORK driver={}\n", device.driver()));
         output::arguments(format_args!(
             "NETWORK adapter {} mac={}\n",
             device.location(),

@@ -9,7 +9,7 @@ use crate::{
         pci::{Address, EcamWindow, Function},
     },
     input::{self, virtio::VirtioInput},
-    net::{self, Link, LinkError, Mac, igc::Igc, virtio::VirtioNet},
+    net::{self, Link, LinkError, Mac, e1000e::E1000e, igc::Igc, virtio::VirtioNet},
     storage::{ahci, nvme, virtio},
     usb::{cdc::UsbNet, hid::UsbInput, xhci},
 };
@@ -19,15 +19,27 @@ use alloc::{boxed::Box, string::String, vec::Vec};
 pub enum Adapter {
     Virtio(VirtioNet),
     Igc(Igc),
+    E1000e(E1000e),
     Usb(UsbNet),
 }
 
 impl Adapter {
+    /// Stable implementation name for diagnostics and driver verification.
+    pub fn driver(&self) -> &'static str {
+        match self {
+            Self::Virtio(_) => "virtio-net",
+            Self::Igc(_) => "igc",
+            Self::E1000e(_) => "e1000e",
+            Self::Usb(_) => "usb-cdc",
+        }
+    }
+
     /// Where the adapter is, for logs.
     pub fn location(&self) -> &str {
         match self {
             Self::Virtio(device) => &device.location,
             Self::Igc(device) => &device.location,
+            Self::E1000e(device) => &device.location,
             Self::Usb(device) => &device.location,
         }
     }
@@ -38,6 +50,7 @@ impl Link for Adapter {
         match self {
             Self::Virtio(device) => device.mac(),
             Self::Igc(device) => device.mac(),
+            Self::E1000e(device) => device.mac(),
             Self::Usb(device) => device.mac(),
         }
     }
@@ -45,6 +58,7 @@ impl Link for Adapter {
         match self {
             Self::Virtio(device) => device.carrier(),
             Self::Igc(device) => device.carrier(),
+            Self::E1000e(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
         }
     }
@@ -52,6 +66,7 @@ impl Link for Adapter {
         match self {
             Self::Virtio(device) => device.transmit(frame),
             Self::Igc(device) => device.transmit(frame),
+            Self::E1000e(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
         }
     }
@@ -59,6 +74,7 @@ impl Link for Adapter {
         match self {
             Self::Virtio(device) => device.receive(),
             Self::Igc(device) => device.receive(),
+            Self::E1000e(device) => device.receive(),
             Self::Usb(device) => device.receive(),
         }
     }
@@ -84,7 +100,7 @@ pub struct Disks {
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
-/// every virtio-input device, every virtio-net and Intel I225/I226 adapter,
+/// every virtio-input device, every virtio-net, Intel I225/I226 and 82574L adapter,
 /// and every xHCI
 /// controller with the USB disks, keyboards, pointers and Ethernet
 /// adapters on it.
@@ -143,6 +159,14 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
             } else if net::igc::matches(&function) {
                 match Igc::new(&mut function, handoff, dma) {
                     Ok(device) => disks.links.push(Adapter::Igc(device)),
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
+            } else if net::e1000e::matches(&function) {
+                // SAFETY: the caller granted exclusive ownership of all mapped PCI
+                // functions and controllers after ExitBootServices.
+                match unsafe { E1000e::new(&mut function, handoff, dma) } {
+                    Ok(device) => disks.links.push(Adapter::E1000e(device)),
                     Err(error) => disks.failures.push((address, error)),
                 }
                 continue;
