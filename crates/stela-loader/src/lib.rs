@@ -18,6 +18,7 @@ pub mod boot_trace;
 pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;
+pub mod coprocessor;
 #[cfg(feature = "std")]
 pub use stela_runtime::code_signature;
 pub mod darts;
