@@ -2381,19 +2381,16 @@ fn sample_report(samples: &mut Vec<[u64; CHAIN]>, user: u32) {
 /// The counter, PSTATE.DAIF and each generic timer's CTL and CVAL, which
 /// show why a PE that should sleep in WFI does not.
 fn timer_report(machine: &mut Machine<BareHost, AppleDevices>) {
-    use stela_runtime::machine::{engine::Host, timer::CHANNELS};
-    let now = machine.host.counter();
-    let cpu = &machine.cpu;
+    use stela_runtime::machine::timer::CHANNELS;
+    let (now, timers) = machine.timer_snapshot();
     output::arguments(format_args!(
         "TIMERS now={now:#x} daif={:#x}",
-        cpu.pstate.daif
+        machine.cpu.pstate.daif
     ));
-    for channel in CHANNELS {
+    for (channel, (control, compare)) in CHANNELS.into_iter().zip(timers) {
         output::arguments(format_args!(
             " {:?}={:#x}/{:#x}",
-            channel.control,
-            channel.read_control(cpu, now),
-            cpu.read(channel.compare)
+            channel.control, control, compare
         ));
     }
     output::arguments(format_args!("\n"));

@@ -1552,6 +1552,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.clock.follow_host();
     }
 
+    /// The architectural system count and each generic timer's `(CTL, CVAL)`
+    /// in [`timer::CHANNELS`] order, sampled at that count. Diagnostics must
+    /// use this count, including slice lag and idle leaps, just as guest
+    /// register reads and timer delivery do; the host counter can differ.
+    pub fn timer_snapshot(&mut self) -> (u64, [(u64, u64); 4]) {
+        let now = self.now();
+        let timers = timer::CHANNELS.map(|channel| {
+            (
+                channel.read_control(&self.cpu, now),
+                self.cpu.read(channel.compare),
+            )
+        });
+        (now, timers)
+    }
+
     /// Bound each wait of every PE on the host to `limit` system counter
     /// ticks, after which `run` returns [`Stop::Waiting`] so the host can
     /// take inputs that reach the board from outside it, such as its power
@@ -7051,6 +7066,57 @@ mod tests {
             .set(SystemRegister::CNTV_CTL_EL0, 0, 0);
         machine.derived_changed();
         assert_eq!(wait(&mut machine, 0xd503_207f), Err(Stop::Idle));
+    }
+
+    #[test]
+    fn timer_snapshot_tracks_guest_reads_and_wfi_when_the_clock_lags() {
+        let mut machine = machine(&[]);
+        // A slow slice charged 1000 host counts as lag. At host count 2000
+        // the guest still sees 1000, before its timer's deadline of 1500.
+        machine.clock.start_slice(0, 0, 1);
+        machine.host.now = 1000;
+        machine.clock.end_slice(1000, 0);
+        machine.host.now = 2000;
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CVAL_EL0, 0, 1500);
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::CNTV_CTL_EL0, 0, timer::ENABLE);
+        machine.derived_changed();
+        assert_eq!(
+            timer::CHANNELS[1].read_control(&machine.cpu, machine.host.now),
+            timer::ENABLE | timer::ISTATUS,
+            "the host count would incorrectly report an expired timer"
+        );
+        let (now, timers) = machine.timer_snapshot();
+        assert_eq!((now, timers[1]), (1000, (timer::ENABLE, 1500)));
+        machine.system_instruction(0xd53b_e041).unwrap(); // mrs x1, cntvct_el0
+        machine.system_instruction(0xd53b_e322).unwrap(); // mrs x2, cntv_ctl_el0
+        assert_eq!(
+            (machine.cpu.state.x[1], machine.cpu.state.x[2]),
+            (now, timers[1].0)
+        );
+
+        machine.system_instruction(0xd503_207f).unwrap(); // wfi
+        assert!(machine.waiting.is_some());
+        assert_eq!(machine.timer_snapshot(), (now, timers));
+        machine.schedule().unwrap();
+        assert_eq!(machine.host.now, 3000, "WFI waited for guest time");
+        let (now, timers) = machine.timer_snapshot();
+        assert_eq!(
+            (now, timers[1]),
+            (2000, (timer::ENABLE | timer::ISTATUS, 1500))
+        );
+        machine.system_instruction(0xd53b_e041).unwrap();
+        machine.system_instruction(0xd53b_e322).unwrap();
+        assert_eq!(
+            (machine.cpu.state.x[1], machine.cpu.state.x[2]),
+            (now, timers[1].0)
+        );
+        assert!(machine.waiting.is_none());
     }
 
     #[test]
