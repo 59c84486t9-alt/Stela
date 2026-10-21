@@ -14,8 +14,10 @@
 //! bootloader bulk framing and returns a controller-specific firmware report.
 //! The explicit native [`Hci::initialize_with_provider`] consumer retains owned
 //! device-specific evidence/errors after the provider is released. Raw attachment
-//! itself never initializes a controller. Other vendor initialization remains unsupported. A Bluetooth host stack must
-//! independently establish radio services after controller initialization.
+//! itself never initializes a controller. [`realtek::initialize`] adds exact
+//! RTL8761BU/RTL8822B stock-ROM identification and EPATCH v1 upload with owned
+//! observations. Other vendor/format variants remain explicit unsupported paths.
+//! A Bluetooth host stack independently establishes radio services.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! SCO, USB isochronous/ISO traffic, bulk serialization, hotplug reattachment,
 //! suspend/resume and guest USB forwarding remain unsupported/separate work.

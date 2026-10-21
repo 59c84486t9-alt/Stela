@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! Explicit native consumer initialization, separate from raw USB attachment.
 //! The retained result owns metadata only and never extends a provider borrow.
-use super::{Error, Hci, Io, intel};
+use super::{Error, Hci, Io, intel, realtek};
 use crate::firmware::Provider;
 use alloc::boxed::Box;
 use core::fmt;
@@ -11,9 +11,10 @@ use core::fmt;
 #[derive(Debug)]
 pub enum InitializationReport {
     Intel(intel::OwnedReport),
+    Realtek(realtek::OwnedReport),
 }
-/// Retained typed failure. Intel preserves exact resource names/targets errors,
-/// HCI controller status, transport/cleanup errors and completed stage receipts.
+/// Retained typed failure. Each initializer preserves exact resource/target errors,
+/// HCI controller status, transport/cleanup errors and partial receipts.
 #[derive(Debug)]
 pub enum InitializationError {
     UnsupportedDevice {
@@ -22,6 +23,7 @@ pub enum InitializationError {
         revision: u16,
     },
     Intel(intel::Error),
+    Realtek(realtek::Error),
     Transport(Error),
 }
 impl fmt::Display for InitializationError {
@@ -65,6 +67,11 @@ impl<B: Io> Hci<B> {
         platform: intel::PlatformInputs,
     ) -> Result<InitializationReport, InitializationError> {
         self.open().map_err(InitializationError::Transport)?;
+        if realtek::is_candidate(self.binding.device()) {
+            return realtek::initialize(self, provider)
+                .map(InitializationReport::Realtek)
+                .map_err(InitializationError::Realtek);
+        }
         if !intel::is_candidate(self.binding.device()) {
             let descriptor = &self.binding.device().descriptor;
             return Err(InitializationError::UnsupportedDevice {

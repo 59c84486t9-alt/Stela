@@ -1309,7 +1309,9 @@ pub(crate) mod tests {
                 }
                 // This borrow of the result crosses the Catalog's destruction:
                 // the public method's returned lifetime belongs only to Hci.
-                let InitializationReport::Intel(report) = retained;
+                let InitializationReport::Intel(report) = retained else {
+                    panic!("expected Intel report")
+                };
                 assert!(report.after.is_operational());
                 match (&report.evidence, path) {
                     (
@@ -1404,7 +1406,10 @@ pub(crate) mod tests {
                     };
                     let InitializationReport::Intel(report) = hci
                         .initialize_with_provider(&provider, PlatformInputs::default())
-                        .unwrap();
+                        .unwrap()
+                    else {
+                        panic!("expected Intel report")
+                    };
                     assert!(matches!(
                         report.evidence,
                         OwnedFirmwareEvidence::RunningUnknown
@@ -1413,7 +1418,10 @@ pub(crate) mod tests {
                     assert!(report.stages.is_empty());
                     assert!(provider.calls.borrow().is_empty());
                 }
-                let InitializationReport::Intel(report) = hci.initialization().unwrap().unwrap();
+                let InitializationReport::Intel(report) = hci.initialization().unwrap().unwrap()
+                else {
+                    panic!("expected Intel report")
+                };
                 assert!(report.after.is_operational());
                 assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
                 assert!(hci.io.script.steps.is_empty());
