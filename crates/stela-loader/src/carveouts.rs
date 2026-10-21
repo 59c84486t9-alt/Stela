@@ -42,7 +42,7 @@
 use crate::apple_device_tree::DeviceTree;
 use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use stela_runtime::machine::soc;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
@@ -155,32 +155,83 @@ pub fn for_chip(chip_id: u32) -> Vec<Carveout> {
     fixed.iter().copied().chain(panic).collect()
 }
 
-/// The carveouts placed back to back from `dram_base`.
-pub fn place(table: &[Carveout], dram_base: u64) -> Vec<Placed> {
-    let mut cursor = dram_base;
-    table
-        .iter()
-        .map(|carveout| {
-            let placed = Placed {
-                id: carveout.id,
-                base: cursor,
-                bytes: carveout.bytes,
-            };
-            cursor += carveout.bytes.next_multiple_of(PAGE_BYTES);
-            placed
-        })
-        .collect()
+/// Checked placement within the guest DRAM allocation. This reserves guest
+/// physical addresses; the system mount separately owns their native backing.
+#[derive(Debug)]
+pub struct Reservation {
+    regions: Vec<Placed>,
+    managed_floor: u64,
 }
 
-/// The first address the managed range may start at: past every carveout,
-/// on a [`MANAGED_ALIGNMENT`] boundary.
-pub fn managed_floor(placed: &[Placed], dram_base: u64) -> u64 {
-    placed
-        .iter()
-        .map(|carveout| carveout.base + carveout.bytes.next_multiple_of(PAGE_BYTES))
-        .max()
-        .unwrap_or(dram_base)
-        .next_multiple_of(MANAGED_ALIGNMENT)
+impl Reservation {
+    pub fn regions(&self) -> &[Placed] {
+        &self.regions
+    }
+
+    pub fn into_regions(self) -> Vec<Placed> {
+        self.regions
+    }
+
+    pub fn managed_floor(&self) -> u64 {
+        self.managed_floor
+    }
+}
+
+/// Place required protocol-sized ranges back to back inside actual guest DRAM.
+/// The alignment padding is reserved too; at least one managed page must remain.
+pub fn reserve(table: &[Carveout], dram_base: u64, dram_bytes: u64) -> Result<Reservation> {
+    ensure!(
+        dram_base.is_multiple_of(PAGE_BYTES),
+        "carveout DRAM base is unaligned"
+    );
+    ensure!(
+        dram_bytes > 0 && dram_bytes.is_multiple_of(PAGE_BYTES),
+        "carveout DRAM size is empty or unaligned"
+    );
+    let dram_end = dram_base
+        .checked_add(dram_bytes)
+        .context("carveout DRAM end overflows")?;
+    let mut cursor = dram_base;
+    let mut regions: Vec<Placed> = Vec::with_capacity(table.len());
+    for carveout in table {
+        ensure!(
+            carveout.bytes > 0
+                && carveout.bytes.is_multiple_of(PAGE_BYTES)
+                && carveout.bytes / PAGE_BYTES < 0x10000,
+            "carveout {} violates SPTM page bounds",
+            carveout.id
+        );
+        ensure!(
+            !regions.iter().any(|region| region.id == carveout.id),
+            "duplicate carveout {}",
+            carveout.id
+        );
+        let end = cursor
+            .checked_add(carveout.bytes)
+            .context("carveout end overflows")?;
+        ensure!(
+            end <= dram_end,
+            "carveout {} exceeds guest DRAM",
+            carveout.id
+        );
+        regions.push(Placed {
+            id: carveout.id,
+            base: cursor,
+            bytes: carveout.bytes,
+        });
+        cursor = end;
+    }
+    let managed_floor = cursor
+        .checked_next_multiple_of(MANAGED_ALIGNMENT)
+        .context("managed DRAM alignment overflows")?;
+    ensure!(
+        managed_floor < dram_end,
+        "carveouts and alignment padding exhaust guest DRAM"
+    );
+    Ok(Reservation {
+        regions,
+        managed_floor,
+    })
 }
 
 fn range(base: u64, bytes: u64) -> Vec<u8> {
@@ -278,14 +329,41 @@ mod tests {
 
     #[test]
     fn carveouts_pack_from_the_dram_base_and_the_managed_range_starts_on_a_block() {
-        let placed = place(&T8112, 0x8_0000_0000);
+        let plan = reserve(&T8112, 0x8_0000_0000, 1 << 30).unwrap();
+        let placed = plan.regions();
         assert_eq!(placed[0].base, 0x8_0000_0000);
         assert_eq!(placed[1].base, 0x8_0004_0000);
         assert!(placed.iter().all(|c| c.base % PAGE_BYTES == 0));
         let end = placed.last().map(|c| c.base + c.bytes).unwrap();
-        assert!(end <= managed_floor(&placed, 0x8_0000_0000));
-        assert_eq!(managed_floor(&placed, 0x8_0000_0000), 0x8_0200_0000);
-        assert_eq!(managed_floor(&[], 0x8_0000_0000), 0x8_0000_0000);
+        assert!(end <= plan.managed_floor());
+        assert_eq!(plan.managed_floor(), 0x8_0200_0000);
+        assert_eq!(
+            reserve(&[], 0x8_0000_0000, 1 << 30)
+                .unwrap()
+                .managed_floor(),
+            0x8_0000_0000
+        );
+    }
+
+    #[test]
+    fn reservation_checks_bounds_protocol_extents_and_alignment_padding() {
+        let base = 0x100_0000_0000;
+        let table = for_chip(0x6000);
+        let plan = reserve(&table, base, MANAGED_ALIGNMENT + PAGE_BYTES).unwrap();
+        let payload: u64 = plan.regions().iter().map(|region| region.bytes).sum();
+        assert_eq!(payload, 3_342_336);
+        assert_eq!(plan.managed_floor() - base, MANAGED_ALIGNMENT);
+        assert_eq!(plan.managed_floor() - base - payload, 30_212_096);
+        assert!(reserve(&table, base, MANAGED_ALIGNMENT).is_err());
+        assert!(reserve(&table, base, PAGE_BYTES).is_err());
+        assert!(reserve(&[], u64::MAX - PAGE_BYTES + 1, PAGE_BYTES).is_err());
+        assert!(reserve(&[], u64::MAX - 2 * PAGE_BYTES + 1, PAGE_BYTES).is_err());
+        assert!(reserve(&[], base + 1, MANAGED_ALIGNMENT).is_err());
+        assert!(reserve(&[], base, PAGE_BYTES + 1).is_err());
+        for bytes in [0, PAGE_BYTES - 1, PAGE_BYTES * 0x10000] {
+            assert!(reserve(&[carveout(1, bytes)], base, 1 << 32).is_err());
+        }
+        assert!(reserve(&[PANIC, PANIC], base, 1 << 30).is_err());
     }
 
     #[test]
@@ -312,7 +390,9 @@ mod tests {
         tree.ensure_child("/chosen", "carveout-memory-map")?;
         tree.ensure_child("/", "arm-io")?;
         tree.ensure_child("/arm-io", "sgx")?;
-        let placed = place(&T8112, 0x8_0000_0000);
+        let placed = reserve(&T8112, 0x8_0000_0000, 1 << 30)
+            .unwrap()
+            .into_regions();
         publish(&mut tree, &placed)?;
         let handoff = placed.iter().find(|c| c.id == 0x38).unwrap();
         assert_eq!(
@@ -345,10 +425,18 @@ mod tests {
         assert!(for_chip(0x6050).is_empty());
         // It meets SPTM's I/O range rules and leaves physBase where it was.
         assert!(PANIC.bytes.is_multiple_of(PAGE_BYTES) && PANIC.bytes / PAGE_BYTES < 0x10000);
-        let placed = place(&t8112, 0x8_0000_0000);
-        assert_eq!(managed_floor(&placed, 0x8_0000_0000), 0x8_0200_0000);
-        let alone = place(&[PANIC], 0x10_0000_0000);
-        assert_eq!(managed_floor(&alone, 0x10_0000_0000), 0x10_0200_0000);
+        assert_eq!(
+            reserve(&t8112, 0x8_0000_0000, 1 << 30)
+                .unwrap()
+                .managed_floor(),
+            0x8_0200_0000
+        );
+        assert_eq!(
+            reserve(&[PANIC], 0x10_0000_0000, 1 << 30)
+                .unwrap()
+                .managed_floor(),
+            0x10_0200_0000
+        );
     }
 
     #[test]
@@ -356,8 +444,9 @@ mod tests {
         let dram = 0x100_0000_0000;
         let table = for_chip(0x6000);
         assert_eq!(table.last(), Some(&PANIC));
-        let placed = place(&table, dram);
-        let managed = managed_floor(&placed, dram);
+        let plan = reserve(&table, dram, 1 << 30).unwrap();
+        let managed = plan.managed_floor();
+        let placed = plan.into_regions();
         for (index, region) in placed.iter().enumerate() {
             assert!(region.base.is_multiple_of(PAGE_BYTES));
             assert!(region.base >= dram && region.base + region.bytes <= managed);
@@ -427,7 +516,9 @@ mod tests {
     fn the_panic_region_is_pram_reg_region_98_and_the_panic_log_size() -> Result<()> {
         let mut tree = tree_with(&["chosen", "pram"])?;
         tree.set_property(PRAM, "reg", vec![0; 16])?;
-        let placed = place(&for_chip(0x8112), 0x8_0000_0000);
+        let placed = reserve(&for_chip(0x8112), 0x8_0000_0000, 1 << 30)
+            .unwrap()
+            .into_regions();
         publish(&mut tree, &placed)?;
         let panic = placed.last().unwrap();
         assert_eq!(panic.id, 98);

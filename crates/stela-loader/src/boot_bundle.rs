@@ -56,7 +56,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// mapper/client dependencies with generation-aware admission and mounting.
 /// Revision 9: reserve and publish T6000's source-qualified ordinary fixed
 /// carveouts, including the four SGX bootstrap ranges.
-pub const REVISION: u32 = 9;
+/// Revision 10: publish independently numbered ECPU/PCPU domain tables;
+/// validate the complete carveout reservation against supplied guest DRAM.
+pub const REVISION: u32 = 10;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -782,17 +784,21 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
         .map(|ramdisk| ramdisk.bytes.len())
         .or_else(|| inputs.ramdisk.as_ref().map(|ramdisk| ramdisk.bytes.len()));
     // iBoot's carveouts sit below the managed range, which starts past them.
-    let carveouts = inputs
+    let table = inputs
         .target
         .chip_id
-        .map(|chip_id| carveouts::place(&carveouts::for_chip(chip_id), options.dram_base))
+        .map(carveouts::for_chip)
         .unwrap_or_default();
+    let reservation = carveouts::reserve(&table, options.dram_base, options.dram_size)?;
+    let dram_end = options
+        .dram_base
+        .checked_add(options.dram_size)
+        .context("DRAM end overflows")?;
     let options = &Options {
-        phys_base: options
-            .phys_base
-            .max(carveouts::managed_floor(&carveouts, options.dram_base)),
+        phys_base: options.phys_base.max(reservation.managed_floor()),
         ..options.clone()
     };
+    let carveouts = reservation.into_regions();
     if let (Some(chip_id), Some(base)) = (inputs.target.chip_id, inputs.dram_base()?) {
         ensure!(
             options.dram_base == base,
@@ -802,6 +808,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
     ensure!(
         options.phys_base >= options.dram_base
+            && options.phys_base < dram_end
             && options.phys_base.is_multiple_of(PAGE_BYTES)
             && options.load_offset.is_multiple_of(PAGE_BYTES),
         "phys_base must be a page-aligned address inside DRAM"
@@ -1127,7 +1134,10 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     }
 
     // Place every region back to back from the load base.
-    let load_base = options.phys_base + options.load_offset;
+    let load_base = options
+        .phys_base
+        .checked_add(options.load_offset)
+        .context("load base overflows")?;
     let mut cursor = load_base;
     let mut regions = vec![];
     for content in contents {
@@ -1141,11 +1151,12 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
             sha256: String::new(),
             virtual_address: content.virtual_address,
         });
-        cursor += page_round(content.memory_bytes);
+        cursor = cursor
+            .checked_add(page_round(content.memory_bytes))
+            .context("loaded region end overflows")?;
     }
     validate_sptm_region_order(&regions)?;
     let top_of_kernel_data = cursor;
-    let dram_end = options.dram_base + options.dram_size;
     ensure!(
         top_of_kernel_data <= dram_end,
         "regions end at {top_of_kernel_data:#x}, past DRAM end {dram_end:#x}"

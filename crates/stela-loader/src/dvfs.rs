@@ -35,7 +35,7 @@
 //! monitors and the kernel's earlier boot have run.
 use crate::apple_device_tree::DeviceTree;
 use alloc::{format, string::String, vec::Vec};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use stela_runtime::machine::soc;
 
 const PMGR: &str = "/arm-io/pmgr";
@@ -67,11 +67,20 @@ pub struct Table {
 /// A CPU cluster's table: its operating points as periods, voltages 0, or
 /// `None` when the SoC with `chip_id` has none.
 fn cluster(domain: &str, chip_id: u32) -> Result<Option<Vec<u8>>> {
-    let cluster_type = match domain {
-        "ECPU" => b'E',
-        "PCPU" => b'P',
-        _ => bail!("CPU domain {domain} names no cluster type"),
+    // The original J314s tree has separate PCPU (table 5) and PCPU1
+    // (table 13) records. The suffix identifies a domain, not a core count;
+    // each table retains its own identity and uses its core type's OPPs.
+    let (cluster_type, suffix) = if let Some(suffix) = domain.strip_prefix("ECPU") {
+        (b'E', suffix)
+    } else if let Some(suffix) = domain.strip_prefix("PCPU") {
+        (b'P', suffix)
+    } else {
+        anyhow::bail!("CPU domain {domain} names no cluster type");
     };
+    ensure!(
+        suffix.bytes().all(|byte| byte.is_ascii_digit()),
+        "CPU domain {domain} has an invalid cluster suffix"
+    );
     let Some(points) = soc::operating_points(chip_id)
         .and_then(|clusters| clusters.into_iter().find(|(kind, _)| *kind == cluster_type))
         .map(|(_, points)| points)
@@ -199,6 +208,36 @@ mod tests {
             24
         );
         assert!(publish(&mut tree, 0x8112).unwrap().is_empty());
+    }
+
+    #[test]
+    fn numbered_cpu_domains_keep_independent_table_identities() {
+        let domains = [
+            domain(1, true, "ECPU"),
+            domain(5, true, "PCPU"),
+            domain(13, true, "PCPU1"),
+        ];
+        let mut tree = with_domains(Some(&domains.concat()));
+        let written = publish(&mut tree, 0x6000).unwrap();
+        assert_eq!(written.len(), 3);
+        assert!(
+            written
+                .iter()
+                .all(|t| t.contents == Contents::OperatingPoints)
+        );
+        assert_eq!(written[2].domain, "PCPU1");
+        let first = &tree.property(PMGR, "voltage-states5").unwrap().value;
+        let second = &tree.property(PMGR, "voltage-states13").unwrap().value;
+        assert!(!first.is_empty());
+        assert_eq!(first, second);
+        assert_eq!(
+            cluster("ECPU12", 0x6000).unwrap(),
+            cluster("ECPU", 0x6000).unwrap()
+        );
+        assert!(cluster("PCPU1", 0x8122).unwrap().is_none());
+        for invalid in ["PCPU-1", "PCPU1x", "PCPU１", "PCPU ", "MCPU", ""] {
+            assert!(cluster(invalid, 0x6000).is_err(), "{invalid}");
+        }
     }
 
     #[test]
