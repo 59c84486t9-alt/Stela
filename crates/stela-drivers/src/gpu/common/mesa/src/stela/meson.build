@@ -19,6 +19,25 @@ stela_apple_source_test = executable(
 )
 test('stela_apple_source_boundary', stela_apple_source_test, suite : 'stela')
 
+if with_stela_amd_llvm
+  stela_amd_llvm_float = static_library(
+    'stela_amd_llvm_float',
+    '../../../../amd/stela/llvm_float.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_nir, idep_mesautil, dep_llvm, idep_amd_generated_headers],
+    c_args : ['-Werror'],
+  )
+  stela_amd_llvm_float_probe = executable(
+    'stela_amd_llvm_float_probe',
+    '../../../../amd/tests/llvm_float_test.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_nir, idep_mesautil, dep_llvm, idep_amd_generated_headers],
+    link_with : [stela_amd_llvm_float],
+    c_args : ['-Werror'],
+  )
+  test('stela_amd_llvm_float', stela_amd_llvm_float_probe, suite : 'stela')
+endif
+
 stela_air_llvm = get_option('stela-air-llvm-library')
 if stela_air_llvm != ''
   if not ['darwin', 'linux'].contains(host_machine.system())
@@ -89,7 +108,8 @@ if stela_air_llvm != ''
         # Keep the full matching development headers. idep_stela_air exposes
         # the narrow C-only header set, unsuitable for this C++ LLVM backend.
         dependencies : [idep_nir, idep_mesautil, dep_llvm, idep_amd_generated_headers],
-        link_with : [stela_air, libamd_common_llvm, libamd_compiler_support],
+        link_with : [stela_air, libamd_common_llvm, libamd_compiler_support,
+                     stela_amd_llvm_float],
         c_args : ['-Werror'],
         build_rpath : fs.parent(stela_air_llvm),
       )
@@ -292,6 +312,24 @@ if with_stela_intel
   )
   test('stela_intel_legacy_compute_program', stela_intel_legacy_compute_program_probe,
        suite : 'stela')
+  if stela_air_llvm != ''
+    stela_intel_fp_controls_probe = executable(
+      'stela_intel_fp_controls_probe',
+      ['../../../../intel/stela/tests/fp_controls.c',
+       '../../../../intel/stela/tests/fp_controls_elk.c',
+       '../../../../intel/stela/tests/legacy_elk_validate.c'],
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                      idep_intel_compiler_elk, idep_intel_compiler_gen,
+                      idep_intel_dev, idep_mesautil],
+      link_with : [stela_intel_compute_policy, stela_intel_compute_native,
+                   stela_intel_legacy_compute, libisl],
+      c_args : ['-Werror'],
+      link_args : stela_intel_policy_gc,
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_intel_fp_controls', stela_intel_fp_controls_probe, suite : 'stela')
+  endif
   stela_intel_compute_packet_probe = executable(
     'stela_intel_compute_packet_probe',
     '../../../../intel/stela/tests/compute_dispatch.c',
@@ -369,7 +407,7 @@ if with_stela_amd
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
                    (with_stela_amd_llvm ? [dep_llvm] : []),
-    link_with : [stela_amd_compute],
+    link_with : [stela_amd_compute] + (with_stela_amd_llvm ? [stela_amd_llvm_float] : []),
     c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=' + (with_stela_amd_llvm ? '1' : '0')],
   )
   test('stela_amd_compute', stela_amd_compute_probe, suite : 'stela')

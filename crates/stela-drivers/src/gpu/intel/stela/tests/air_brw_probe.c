@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
+#include "air_probe_profile.h"
 #include "air_probe_input.h"
 #include "stela/intel_probe.h"
 #include "stela/probe_report.h"
@@ -58,7 +59,8 @@ bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 }
 
 static int
-compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, bool fixture)
+compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, bool fixture,
+            enum stela_air_fp_profile fp_profile)
 {
    struct intel_device_info device;
    int pci_id = intel_device_name_to_pci_device_id(platform);
@@ -77,7 +79,7 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    unsigned bindings[2] = {0};
    const struct stela_air_options options = {
       .workgroup_size = {32, 1, 1}, .max_instructions = 100,
-      .bind_buffer = bind_buffer, .binding_data = bindings,
+      .bind_buffer = bind_buffer, .binding_data = bindings, .fp_profile = fp_profile,
    };
    struct stela_air_error error;
    nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
@@ -92,6 +94,8 @@ compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, 
    }
    CHECK(nir->info.workgroup_size[0] == 32 && nir->info.workgroup_size[1] == 1 &&
          nir->info.workgroup_size[2] == 1);
+   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-brw\",\"target\":\"%s\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
+          platform, (unsigned)fp_profile, nir->info.float_controls_execution_mode);
    const struct brw_nir_compiler_opts compiler_options = {0};
    brw_preprocess_nir(compiler, nir, &compiler_options);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -157,15 +161,19 @@ main(int argc, char **argv)
       "adl", "dg2", "mtl", "arl", "lnl", "bmg", "ptl", "nvl-u", "nvl",
    };
    const char *entry = "kernel";
+   enum stela_air_fp_profile fp_profile;
+   if (!stela_air_probe_profile(&argc, argv, &fp_profile))
+      return 2;
+   stela_air_probe_profile_receipt(fp_profile);
    LLVMMemoryBufferRef input = stela_intel_air_probe_input(argc, argv, &entry);
    if (!input) {
-      fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER] (4 bytes..16 MiB)\n", argv[0]);
+      fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER [--fp-profile NAME]] (4 bytes..16 MiB)\n", argv[0]);
       return 2;
    }
    glsl_type_singleton_init_or_ref();
    int result = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(platforms); ++i)
-      result |= compile_air(platforms[i], input, entry, argc == 1);
+      result |= compile_air(platforms[i], input, entry, argc == 1, fp_profile);
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
    return result;

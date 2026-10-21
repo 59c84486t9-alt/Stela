@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Offline, original-input compiler qualification. No device is opened. */
 #include "air_to_nir.h"
+#include "air_probe_profile.h"
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
 #include "util/mesa-blake3.h"
@@ -35,7 +36,8 @@ print_digest(const void *data, size_t size)
 }
 
 static void
-compile_input(const void *input, size_t size, const char *entry, unsigned sm)
+compile_input(const void *input, size_t size, const char *entry, unsigned sm,
+              enum stela_air_fp_profile fp_profile)
 {
    const struct nv_device_info device = {.sm = sm, .max_warps_per_mp = 32};
    const struct nak_constant_offset_info layout = {
@@ -47,7 +49,7 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm)
    unsigned bindings = 0;
    const struct stela_air_options options = {
       .workgroup_size = {32, 1, 1}, .max_instructions = 256,
-      .bind_buffer = bind_buffer, .binding_data = &bindings,
+      .bind_buffer = bind_buffer, .binding_data = &bindings, .fp_profile = fp_profile,
    };
    struct stela_air_error error;
    nir_shader *nir = stela_air_to_nir(input, size, entry,
@@ -55,6 +57,8 @@ compile_input(const void *input, size_t size, const char *entry, unsigned sm)
    if (!nir)
       fprintf(stderr, "AIR input refused (%u): %s\n", error.kind, error.detail);
    CHECK(nir && bindings == 1);
+   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-nak\",\"target\":\"sm%u\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
+          sm, (unsigned)fp_profile, nir->info.float_controls_execution_mode);
    nir_validate_shader(nir, "original AIR input");
    nak_preprocess_nir(nir, compiler);
    /* nak_compile_shader runs the retained postprocessing itself. */
@@ -81,6 +85,9 @@ main(int argc, char **argv)
 {
    const char *entry = NULL, *files[32];
    unsigned file_count = 0;
+   enum stela_air_fp_profile fp_profile;
+   if (!stela_air_probe_profile(&argc, argv, &fp_profile))
+      goto usage;
    for (int i = 1; i < argc; i++) {
       if (!strcmp(argv[i], "--entry") && !entry && i + 1 < argc)
          entry = argv[++i];
@@ -98,6 +105,7 @@ main(int argc, char **argv)
             (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '$'))
          goto usage;
    }
+   stela_air_probe_profile_receipt(fp_profile);
    glsl_type_singleton_init_or_ref();
    for (unsigned file = 0; file < file_count; file++) {
       /* Bound before allocation, and retain the exact bytes without reassembly,
@@ -116,12 +124,12 @@ main(int argc, char **argv)
       puts("\"}");
       const unsigned targets[] = {75, 80, 86, 87, 89, 90, 100, 104, 120};
       for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
-         compile_input(bytes, length, entry, targets[i]);
+         compile_input(bytes, length, entry, targets[i], fp_profile);
       free(bytes);
    }
    glsl_type_singleton_decref();
    return 0;
 usage:
-      fprintf(stderr, "usage: %s --entry NAME --input raw-original.bc [--input ... up to 32 files]\n", argv[0]);
+      fprintf(stderr, "usage: %s --entry NAME --input raw-original.bc [--input ... up to 32 files] [--fp-profile NAME]\n", argv[0]);
       return 2;
 }

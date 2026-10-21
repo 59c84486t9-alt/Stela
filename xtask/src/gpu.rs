@@ -1,13 +1,38 @@
 //! Native GPU build tasks. Compiling a core is distinct from linking its
 //! platform port into Stela or executing work on a physical GPU.
 use anyhow::Result;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 mod macos;
 mod mesa;
 mod nvidia;
 mod support;
+
+/// An explicit input-owner qualification, never a physical GPU capability.
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum AirFpProfile {
+    #[default]
+    Ieee,
+    #[value(name = "apple-32023.922-air2.9-msl4.1")]
+    Apple32023Air29Msl41,
+}
+
+impl AirFpProfile {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Ieee => "ieee",
+            Self::Apple32023Air29Msl41 => "apple-32023.922-air2.9-msl4.1",
+        }
+    }
+
+    fn kind(self) -> u32 {
+        match self {
+            Self::Ieee => 0,
+            Self::Apple32023Air29Msl41 => 1,
+        }
+    }
+}
 
 #[derive(Subcommand)]
 pub enum Command {
@@ -39,6 +64,11 @@ pub enum Command {
         /// Exact entry point in every supplied raw AIR input.
         #[arg(long, requires = "air_input")]
         entry: Option<String>,
+        /// Qualified floating-point profile for the unchanged raw AIR inputs.
+        /// Selection requires independent compiler provenance; metadata alone
+        /// does not authenticate the selected private compiler profile.
+        #[arg(long, value_enum, requires = "air_input")]
+        air_fp_profile: Option<AirFpProfile>,
     },
     /// Compile NVIDIA's resource-manager and display cores for native Stela
     /// or as Linux reference objects, retaining unresolved platform imports.
@@ -61,6 +91,7 @@ pub fn run(command: Command) -> Result<()> {
             llvm_config,
             air_input,
             entry,
+            air_fp_profile,
         } => mesa::build(
             jobs,
             require_all_targets,
@@ -68,6 +99,7 @@ pub fn run(command: Command) -> Result<()> {
             llvm_config.as_deref(),
             &air_input,
             entry.as_deref(),
+            air_fp_profile.unwrap_or_default(),
         ),
         Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
     }

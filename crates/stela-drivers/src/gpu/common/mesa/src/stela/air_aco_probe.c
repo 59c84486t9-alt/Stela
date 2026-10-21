@@ -3,6 +3,7 @@
  * CPU compilation only: no initialized GPU, mappings or submission are claimed.
  */
 #include "air_to_nir.h"
+#include "air_probe_profile.h"
 #include "air_test_fixture.h"
 #include "probe_report.h"
 #include "amd/compiler/aco_interface.h"
@@ -102,7 +103,8 @@ compute_args(struct binding *binding, const struct radeon_info *gpu)
 
 static bool
 compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
-               enum radeon_family family, bool graphics, unsigned wave, bool file)
+               enum radeon_family family, bool graphics, unsigned wave, bool file,
+               enum stela_air_fp_profile fp_profile)
 {
    struct radeon_info gpu = {
       .gfx_level = ac_get_gfx_level(family), .family = family, .has_graphics = graphics,
@@ -120,7 +122,7 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
    compute_args(&binding, &gpu);
    const struct stela_air_options air_options = {
       .workgroup_size = {32, 1, 1}, .max_instructions = 100,
-      .bind_buffer = bind_buffer, .binding_data = &binding,
+      .bind_buffer = bind_buffer, .binding_data = &binding, .fp_profile = fp_profile,
    };
    struct stela_air_error error;
    nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
@@ -130,6 +132,8 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
       return false;
    }
    CHECK(binding.count == 1 && error.kind == STELA_AIR_OK);
+   printf("STELA_AIR_ENVIRONMENT {\"backend\":\"air-aco\",\"target\":\"%s\",\"fp_profile\":%u,\"nir_float_controls\":%u}\n",
+          target, (unsigned)fp_profile, shader->info.float_controls_execution_mode);
    unsigned loads = 0, stores = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
@@ -222,6 +226,10 @@ main(int argc, char **argv)
    };
    const char *entry = "kernel";
    bool file = false;
+   enum stela_air_fp_profile fp_profile;
+   if (!stela_air_probe_profile(&argc, argv, &fp_profile))
+      return 2;
+   stela_air_probe_profile_receipt(fp_profile);
    LLVMMemoryBufferRef input;
    if (argc == 1) {
       input = stela_air_test_bitcode(stela_air_test_store_body, "");
@@ -233,7 +241,7 @@ main(int argc, char **argv)
       if (!input)
          return 1;
    } else {
-      fprintf(stderr, "usage: %s [--input raw.bc --entry kernel_name]\n", argv[0]);
+      fprintf(stderr, "usage: %s [--input raw.bc --entry kernel_name [--fp-profile NAME]]\n", argv[0]);
       return 1;
    }
    char input_hash[BLAKE3_HEX_LEN];
@@ -245,9 +253,9 @@ main(int argc, char **argv)
 
    bool ok = true;
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64, file);
+      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64, file, fp_profile);
       if (ac_get_gfx_level(targets[i].family) >= GFX10)
-         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32, file);
+         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32, file, fp_profile);
    }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
