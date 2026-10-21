@@ -27,6 +27,9 @@ pub const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_LABEL_BYTES: usize = 256;
 pub const MAX_PATH_BYTES: usize = 240;
 
+pub mod recipes;
+pub mod requirements;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Manifest<'a> {

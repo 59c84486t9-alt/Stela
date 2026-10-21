@@ -13,6 +13,7 @@ use std::{
 pub struct Package {
     manifest: Vec<u8>,
     files: Vec<Vec<u8>>,
+    notices: Vec<(String, Vec<u8>)>,
 }
 fn io(error: impl fmt::Display) -> Error {
     Error(format!("host firmware IO: {error}"))
@@ -94,7 +95,50 @@ impl Package {
             }
             files.push(bytes);
         }
-        Ok(Self { manifest, files })
+        Self::assembled(manifest, files, Vec::new())
+    }
+
+    /// Construct a generated package only after every image and accompanying
+    /// notice has been fetched and checked by its pinned recipe.
+    pub(super) fn assembled(
+        manifest: Vec<u8>,
+        files: Vec<Vec<u8>>,
+        notices: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self, Error> {
+        let parsed = Manifest::parse(&manifest)?;
+        if parsed.images.len() != files.len() {
+            return Err(fail("assembled firmware image count mismatch"));
+        }
+        for (image, bytes) in parsed.images.iter().zip(&files) {
+            let actual: [u8; 32] = Sha256::digest(bytes).into();
+            if bytes.len() != image.length || actual != image.digest()? {
+                return Err(fail("assembled firmware image differs from manifest"));
+            }
+        }
+        if notices.len() > MAX_IMAGES {
+            return Err(fail("too many host firmware notices"));
+        }
+        let mut total = 0usize;
+        for (index, (name, bytes)) in notices.iter().enumerate() {
+            if !storage_path(name)
+                || name.contains('/')
+                || !(name.ends_with(".txt") || name == "provenance.json")
+                || bytes.is_empty()
+                || bytes.len() > MAX_MANIFEST_BYTES
+                || notices[..index].iter().any(|(other, _)| other == name)
+            {
+                return Err(fail("invalid or oversized host firmware notice"));
+            }
+            total = total
+                .checked_add(bytes.len())
+                .filter(|n| *n <= 1024 * 1024)
+                .ok_or_else(|| fail("host firmware notices exceed 1 MiB"))?;
+        }
+        Ok(Self {
+            manifest,
+            files,
+            notices,
+        })
     }
 
     pub fn inventory(&self) -> (usize, usize) {
@@ -167,6 +211,23 @@ impl Package {
             sync_directory(&object_directory)?;
             checkpoint(&destination)?;
             manifest["images"][index]["path"] = serde_json::Value::String(path);
+        }
+        for (name, bytes) in &self.notices {
+            let destination = object_directory.join(name);
+            if destination.exists() {
+                if fs::symlink_metadata(&destination).map_err(io)?.is_symlink()
+                    || read_bounded(&destination, Some(bytes.len()), MAX_MANIFEST_BYTES)? != *bytes
+                {
+                    return Err(fail("existing immutable firmware notice differs"));
+                }
+            } else {
+                atomic_write(&destination, bytes)?;
+            }
+            File::open(&destination)
+                .and_then(|file| file.sync_all())
+                .map_err(io)?;
+            sync_directory(&object_directory)?;
+            checkpoint(&destination)?;
         }
         let manifest = serde_json::to_vec_pretty(&manifest).map_err(io)?;
         Manifest::parse(&manifest)?;

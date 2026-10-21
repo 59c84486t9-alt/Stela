@@ -49,6 +49,7 @@
 mod bundle;
 mod doctor;
 mod ecid;
+mod firmware;
 pub(crate) mod host;
 mod installed;
 mod machines;
@@ -265,6 +266,17 @@ pub(crate) struct Setup {
     /// and resources) onto an existing USB; independent of Apple boot bundles.
     #[arg(long, value_name = "DIRECTORY")]
     host_firmware: Option<PathBuf>,
+    /// Download pinned vendor firmware for exact requirements captured by native
+    /// drivers. The inventory must come from the target PC, not this setup host.
+    #[arg(long, value_name = "FILE")]
+    host_firmware_requirements: Option<PathBuf>,
+    /// Cache for pinned host firmware images and redistribution notices.
+    #[arg(
+        long,
+        value_name = "DIRECTORY",
+        requires = "host_firmware_requirements"
+    )]
+    host_firmware_cache: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1077,6 +1089,10 @@ impl Setup {
     fn check_actions(&self) -> Result<()> {
         let actions = [
             ("--host-firmware", self.host_firmware.is_some()),
+            (
+                "--host-firmware-requirements",
+                self.host_firmware_requirements.is_some(),
+            ),
             ("--uninstall", self.uninstall),
             ("--update-stela", self.update_stela),
             ("--update-os", self.update_os),
@@ -1120,6 +1136,26 @@ impl Setup {
 
     fn dispatch(self, environment: &Environment<'_>) -> Result<String> {
         self.check_actions()?;
+        if let Some(inventory) = &self.host_firmware_requirements {
+            let record = read_record(environment, &self.usb)?;
+            check_installed_efi(environment, &record)?;
+            ensure!(
+                stela_loader::host_firmware::supports_mount(&fs::read(
+                    record.esp.join(LOADER_PATH)
+                )?),
+                "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
+            );
+            let cache = self
+                .host_firmware_cache
+                .clone()
+                .unwrap_or_else(|| download_dir().with_file_name("firmware"));
+            return firmware::provision(
+                inventory,
+                &record.esp.join(stela_loader::host_firmware::DIRECTORY),
+                &cache,
+                self.dry_run,
+            );
+        }
         if let Some(source) = &self.host_firmware {
             let record = read_record(environment, &self.usb)?;
             check_installed_efi(environment, &record)?;
@@ -2524,6 +2560,8 @@ mod tests {
             boot_log: false,
             translation_store_bytes: None,
             host_firmware: None,
+            host_firmware_requirements: None,
+            host_firmware_cache: None,
         }
     }
 
@@ -4967,6 +5005,54 @@ mod tests {
         }
         assert!(choices.entries[7].options.contains(" --update-restore"));
     }
+    #[test]
+    fn observed_firmware_setup_action_requires_capability_and_preserves_dry_run() {
+        let f = fixture(64 * GIB, false);
+        setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let inventory = f._dir.path().join("observed-firmware.json");
+        fs::write(&inventory, br#"{"schema":1,"complete":true,"requirements":[{"name":"rtl_nic/rtl8168e-3.fw","target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-2c8","board":null},"minimum_bytes":4}]}"#).unwrap();
+        let before = snapshot(&f.esp);
+        assert!(
+            rerun(&f, |c| {
+                c.host_firmware_requirements = Some(inventory.clone());
+                c.dry_run = true;
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("predates host firmware")
+        );
+        assert_eq!(snapshot(&f.esp), before);
+        let capable = f._dir.path().join("firmware-capable.efi");
+        let mut image = efi_image(b"observed-firmware-capable");
+        image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+        fs::write(&capable, image).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(capable.clone());
+        })
+        .unwrap();
+        let before = snapshot(&f.esp);
+        let cache = f._dir.path().join("firmware-cache");
+        let report = rerun(&f, |c| {
+            c.host_firmware_requirements = Some(inventory.clone());
+            c.host_firmware_cache = Some(cache.clone());
+            c.dry_run = true;
+        })
+        .unwrap();
+        assert!(report.contains("1 exact observed bindings"));
+        assert!(report.contains("3872 bytes"));
+        assert_eq!(snapshot(&f.esp), before);
+        assert!(!cache.exists());
+        assert!(
+            rerun(&f, |c| {
+                c.host_firmware_requirements = Some(inventory.clone());
+                c.host_firmware = Some(f._dir.path().join("manual"));
+            })
+            .is_err()
+        );
+        assert_eq!(snapshot(&f.esp), before);
+    }
+
     #[test]
     fn host_firmware_action_validates_dry_run_and_publishes_separately_from_guest_bundles() {
         let f = fixture(64 * GIB, false);
