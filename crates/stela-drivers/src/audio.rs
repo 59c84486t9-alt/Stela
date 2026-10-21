@@ -106,6 +106,8 @@ pub enum Error {
     NoDmaMemory,
     DmaAddress,
     NoStream,
+    StreamsAllocated,
+    NeedsDiscovery,
     InvalidStream,
     StreamRunning,
     StreamStopped,

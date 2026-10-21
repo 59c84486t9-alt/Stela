@@ -27,6 +27,7 @@ mod registers;
 mod routing;
 mod stream;
 pub use codec::{CodecGraph, FunctionGroup, PcmCapabilities, Verb, Widget, WidgetKind};
+pub use lifecycle::{CodecDiscovery, CodecFailure, DiscoveryFailure, ProbePolicy};
 use registers::*;
 pub use registers::{MmioRegisters, Registers};
 pub use routing::{AnalogRoute, PinOptions, Vref};
@@ -49,6 +50,7 @@ pub struct Config {
     /// This does not establish IOMMU reachability or coherency. Valid 32..=64.
     pub dma_address_bits: u8,
     pub position_policy: PositionPolicy,
+    pub probe_policy: ProbePolicy,
     pub transition_timeout_us: u32,
     pub verb_timeout_us: u32,
 }
@@ -59,6 +61,7 @@ impl Default for Config {
             corb_reset: CorbReset::Handshake,
             dma_address_bits: 64,
             position_policy: PositionPolicy::Link,
+            probe_policy: ProbePolicy::Once,
             transition_timeout_us: 100_000,
             verb_timeout_us: 100_000,
         }
@@ -109,6 +112,7 @@ pub struct Controller<R, T> {
     routing_failed: bool,
     token: ControllerToken,
     lifecycle_failed: bool,
+    discovery_ready: bool,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -138,6 +142,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         {
             return Err(Error::InvalidConfiguration);
         }
+        config.probe_policy.budget()?;
         let mut registers = registers;
         let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
         if major != 1 || minor != 0 {
@@ -186,6 +191,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 generation: 1,
             },
             lifecycle_failed: false,
+            discovery_ready: false,
             corb,
             rirb,
             corb_entries: 0,
@@ -552,6 +558,11 @@ mod tests {
         replies: Vec<Reply>,
         self_clear: bool,
         reset_enter_stuck: bool,
+        link_initializations: u8,
+        advertised_codecs: u16,
+        codec_ready_after_resets: u8,
+        drop_reply_until_resets: u8,
+        codec_vendor_overrides: BTreeMap<u8, u32>,
         reset_exit_stuck: bool,
         command_stop_stuck: bool,
         corb_reset_stuck: bool,
@@ -608,6 +619,11 @@ mod tests {
                 replies: Vec::new(),
                 self_clear: false,
                 reset_enter_stuck: false,
+                link_initializations: 0,
+                advertised_codecs: 1,
+                codec_ready_after_resets: 0,
+                drop_reply_until_resets: 0,
+                codec_vendor_overrides: BTreeMap::new(),
                 reset_exit_stuck: false,
                 command_stop_stuck: false,
                 corb_reset_stuck: false,
@@ -698,8 +714,12 @@ mod tests {
                 let event = self.events.remove(index);
                 let was_reset = self.get(GCTL, 4) & GCTL_RESET == 0;
                 self.set(event.offset, event.value, event.bytes);
+                if event.offset == GCTL && event.value & GCTL_RESET == 0 {
+                    self.replies.clear(); // Link reset discards in-flight codec responses.
+                }
                 if event.offset == GCTL && event.value & GCTL_RESET != 0 && was_reset {
-                    self.set(STATESTS, 1, 2);
+                    self.link_initializations += 1;
+                    self.set(STATESTS, u32::from(self.advertised_codecs), 2);
                 }
             }
             let response_limit = match self.get(RINTCNT, 2) as u16 {
@@ -724,7 +744,8 @@ mod tests {
                     self.set(CORBRP, u32::from(next), 2);
                     self.next_consume = now + self.consume_delay;
                     let response = self.reply_for(command);
-                    if !self.drop_reply {
+                    if !self.drop_reply && self.link_initializations >= self.drop_reply_until_resets
+                    {
                         let codec = if self.wrong_codec { 1 } else { command >> 28 };
                         if self.inject_unsolicited {
                             self.replies.push(Reply {
@@ -789,6 +810,14 @@ mod tests {
         }
 
         fn reply_for(&mut self, command: u32) -> u32 {
+            if command & 0x0fff_ffff == 0x000f_0000 {
+                if self.link_initializations < self.codec_ready_after_resets {
+                    return 0;
+                }
+                if let Some(value) = self.codec_vendor_overrides.get(&((command >> 28) as u8)) {
+                    return *value;
+                }
+            }
             if let Some(value) = self.constant_reply {
                 return value;
             }
@@ -1813,6 +1842,202 @@ mod tests {
             bits: 16,
             channels: 2,
         }
+    }
+
+    fn retry_config(attempts: u8) -> Config {
+        Config {
+            probe_policy: ProbePolicy::Retry {
+                attempts,
+                delay_us: 80,
+            },
+            ..config()
+        }
+    }
+
+    #[test]
+    fn discovery_budget_and_required_pre_stream_gate_fail_before_any_register_access() {
+        for (attempts, delay_us) in [(0, 1), (61, 1), (1, 0), (1, 1_000_001)] {
+            let mut fixture = Fixture::new();
+            let model = graph_model();
+            assert!(matches!(
+                create(
+                    &model,
+                    &mut fixture,
+                    Config {
+                        probe_policy: ProbePolicy::Retry { attempts, delay_us },
+                        ..config()
+                    }
+                ),
+                Err(Error::InvalidConfiguration)
+            ));
+            assert_eq!(access_counts(&model), (0, 0, 0));
+        }
+        let mut fixture = Fixture::new();
+        let model = graph_model();
+        let mut controller = create(&model, &mut fixture, retry_config(2)).unwrap();
+        // Manual enumeration does not bypass an identity-required discovery gate.
+        controller.enumerate_codec(0).unwrap();
+        let before = access_counts(&model);
+        let remaining = fixture.allocator.remaining();
+        assert_eq!(
+            controller.allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator
+            ),
+            Err(Error::NeedsDiscovery)
+        );
+        assert_eq!(access_counts(&model), before);
+        assert_eq!(fixture.allocator.remaining(), remaining);
+        let result = controller.discover_codecs().unwrap();
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.codecs.len(), 1);
+        assert!(result.failures.is_empty());
+        controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let before = access_counts(&model);
+        let failure = controller.discover_codecs().unwrap_err();
+        assert_eq!(failure.attempts, 0);
+        assert_eq!(failure.error, Error::StreamsAllocated);
+        assert_eq!(access_counts(&model), before);
+        controller.reinitialize().unwrap();
+        assert_eq!(
+            controller.allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator
+            ),
+            Err(Error::NeedsDiscovery)
+        );
+    }
+
+    #[test]
+    fn discovery_retries_reset_generation_and_retains_each_codec_failure_without_empty_success() {
+        for ready_after in [2, 4] {
+            let mut fixture = Fixture::new();
+            let model = graph_model();
+            model.borrow_mut().codec_ready_after_resets = ready_after;
+            let mut controller = create(&model, &mut fixture, retry_config(3)).unwrap();
+            let start = model.borrow().clock.now_us();
+            let result = controller.discover_codecs();
+            let failures = if ready_after == 2 {
+                let result = result.unwrap();
+                assert_eq!(result.attempts, 2);
+                assert_eq!(result.codecs.len(), 1);
+                assert_eq!(result.codecs[0].token, controller.token);
+                assert_eq!(controller.token.generation, 2);
+                result.failures
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(failure.attempts, 3);
+                assert_eq!(failure.error, Error::InvalidCodecGraph);
+                assert_eq!(controller.token.generation, 3);
+                failure.failures
+            };
+            assert!(model.borrow().clock.now_us() - start >= 80);
+            assert_eq!(failures.len(), if ready_after == 2 { 1 } else { 3 });
+            for (index, failure) in failures.iter().enumerate() {
+                assert_eq!(
+                    *failure,
+                    CodecFailure {
+                        attempt: index as u8 + 1,
+                        address: 0,
+                        error: Error::InvalidCodecGraph
+                    }
+                );
+            }
+        }
+        let mut fixture = Fixture::new();
+        let model = graph_model();
+        model.borrow_mut().advertised_codecs = 0;
+        let mut controller = create(&model, &mut fixture, retry_config(2)).unwrap();
+        let failure = controller.discover_codecs().unwrap_err();
+        assert_eq!(failure.attempts, 2);
+        assert_eq!(failure.error, Error::CodecAbsent);
+        assert!(failure.failures.is_empty());
+        assert!(model.borrow().commands.is_empty());
+    }
+
+    #[test]
+    fn discovery_retains_partial_codec_failures_and_resets_poison_before_any_new_command() {
+        let mut fixture = Fixture::new();
+        let model = graph_model();
+        model.borrow_mut().advertised_codecs = 3;
+        model
+            .borrow_mut()
+            .codec_vendor_overrides
+            .insert(1, u32::MAX);
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let result = controller.discover_codecs().unwrap();
+        assert_eq!(result.codecs.len(), 1);
+        assert_eq!(result.codecs[0].address, 0);
+        assert_eq!(
+            result.failures,
+            [CodecFailure {
+                attempt: 1,
+                address: 1,
+                error: Error::InvalidCodecGraph
+            }]
+        );
+
+        let model = graph_model();
+        model.borrow_mut().advertised_codecs = 3;
+        model.borrow_mut().drop_reply_until_resets = 2;
+        let mut controller = create(&model, &mut fixture, retry_config(2)).unwrap();
+        let result = controller.discover_codecs().unwrap();
+        assert_eq!(result.attempts, 2);
+        assert_eq!(result.codecs.len(), 2);
+        assert_eq!(
+            result.failures,
+            [CodecFailure {
+                attempt: 1,
+                address: 0,
+                error: Error::Timeout(Phase::Verb)
+            }]
+        );
+        assert_eq!(model.borrow().commands[0] >> 28, 0);
+        assert_eq!(model.borrow().commands[1] >> 28, 0);
+        assert_eq!(controller.token.generation, 2);
+        assert!(!controller.command_poisoned);
+    }
+
+    #[test]
+    fn discovery_retry_quiescence_failure_is_final_and_preserves_original_error_history() {
+        let mut fixture = Fixture::new();
+        let model = graph_model();
+        model.borrow_mut().codec_ready_after_resets = 2;
+        let mut controller = create(&model, &mut fixture, retry_config(3)).unwrap();
+        model.borrow_mut().command_stop_stuck = true;
+        let failure = controller.discover_codecs().unwrap_err();
+        assert_eq!(failure.attempts, 1);
+        assert_eq!(failure.error, Error::Timeout(Phase::CommandStop));
+        assert_eq!(
+            failure.failures,
+            [CodecFailure {
+                attempt: 1,
+                address: 0,
+                error: Error::InvalidCodecGraph
+            }]
+        );
+        assert_eq!(model.borrow().commands.len(), 1);
+        let before = access_counts(&model);
+        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+        assert_eq!(
+            controller.discover_codecs().unwrap_err().error,
+            Error::NeedsReset
+        );
+        assert_eq!(access_counts(&model), before);
     }
 
     fn access_counts(model: &Rc<RefCell<Model>>) -> (usize, usize, usize) {

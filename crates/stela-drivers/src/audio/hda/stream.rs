@@ -171,6 +171,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if self.stopped {
             return Err(Error::Shutdown);
         }
+        if self.config.probe_policy != super::ProbePolicy::Once && !self.discovery_ready {
+            return Err(Error::NeedsDiscovery);
+        }
         let encoded = format.encode()?;
         let frame = format.frame_bytes()?;
         let bytes = period_bytes
