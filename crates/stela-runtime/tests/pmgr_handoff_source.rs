@@ -925,3 +925,159 @@ fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary()
     // requirements. None identifies a completed native sequence or its final
     // PS values without physical trigger-to-sequence and retirement evidence.
 }
+
+#[test]
+#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
+    let bytes = kernelcache();
+    for (start, end, digest) in [
+        (
+            0x2b8d394,
+            0x2b8d654,
+            "8305d646a1c18a2e0d7b412edf1ee7dd1e570d6d3f791bf9d0131da7bd87c02b",
+        ),
+        (
+            0x2fa59ac,
+            0x2fa5a44,
+            "b509233456d0f966478abb1d3ad6b9fb871a1d1b020992238bddccdaa71af9a8",
+        ),
+        (
+            0x2fa5c18,
+            0x2fa5cd8,
+            "2303d612ff4d74d3e9ce70b77d7aa8c65574d9850a40e620515411185374408f",
+        ),
+        (
+            0x2ba7770,
+            0x2ba77d8,
+            "9940fef4c5ccf5a498e55e6c1bafe0fc59db4712c1e68b81c23f6976f620deaa",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    // Follow the actual IOCommandGate allocation and authenticated sleep slot.
+    // The local byte is an event identity, not a proven sleep output parameter.
+    for (start, end, digest) in [
+        (
+            0x2b683c4,
+            0x2b683d8,
+            "7713ba40d3e92126ecaf22aa3ad5e40b8d08b68f554749e9e2ef979345e49b2e",
+        ),
+        (
+            0x2bcd96c,
+            0x2bcd97c,
+            "efc542f6c249c31c5be8f2923477f13328fd24cac874732213c98a1ffbf87465",
+        ),
+        (
+            0x540c2c0,
+            0x540c358,
+            "a3f5befa875a295ee275b5a411d1e5f02fb161e6ba2fa1247cb58ef95320e42a",
+        ),
+        (
+            0x540abc0,
+            0x540ac9c,
+            "5c4cc17efc223b04396a661aab1a5a97add08c35b8486c38b655565bb2dd08cf",
+        ),
+        (
+            0x54077b8,
+            0x5407904,
+            "8b3e40e93319a726ee9ed2918309acbcd3a3dbfa05323e0a8c0da2db6d4a5606",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    assert_eq!(quad(&bytes, 0x12778d0), 0x801100000540d5ac);
+    assert_eq!(quad(&bytes, 0xf02f10 + 16 + 0x210), 0x801110e10540c2c0);
+    assert_eq!(branch_target(&bytes, 0x540c338), 0x540abc0);
+    assert_eq!(branch_target(&bytes, 0x5407868), 0x4c07e20);
+    // All read/write/wait wrappers preserve their actual map and die argument;
+    // a request register is not a substitute for SRAM/PC or every PS register.
+    for offset in [0x2b8d3d8, 0x2b8d44c, 0x2b8d4c8] {
+        assert_eq!(word(&bytes, offset), 0x52800c41); // RegMap62
+    }
+    for offset in [0x2b8d538, 0x2b8d5ac, 0x2b8d628] {
+        assert_eq!(word(&bytes, offset), 0x52800c61); // RegMap63
+    }
+    for (offset, opcode) in [
+        (0x2b8d3a4, 0xb9400108), // actual die count object+631c
+        (0x2b8d3ac, 0x54000242), // invalid die rejects before register dispatch
+        (0x2fa59f4, 0x52800259), // separate diagnostic capture: eighteen words
+        (0x2fa5a10, 0xb9000b40), // retain actual read result in diagnostic row
+        (0x2fa5a28, 0x3707fdf6), // second diagnostic cluster, not PS table
+        (0x2fa5c6c, 0x12000c08), // VDD CIO sync tests actual low4
+        (0x2fa5c7c, 0x71003d1f), // first word f or inspect second word
+        (0x2fa5c88, 0x1a9f17e1), // actual PS comparison becomes VDD CIO argument
+        (0x2ba7010, 0x3900ffff), // local event byte starts zero
+        (0x540c2e0, 0xaa0103f5), // commandSleep preserves event pointer
+        (0x5407860, 0xaa1503e2), // workloop passes event identity to lock sleep
+        (0x2ba70e8, 0x3940ffe8), // read local event byte after commandSleep
+        (0x2ba70ec, 0x3607fa88), // zero event byte retries actual physical read
+        (0x2ba7104, 0xd65f0fff), // syntactic nonzero-byte fallthrough; no writer qualified
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "controller at {offset:#x}");
+    }
+    // TBZ's signed imm14 identifies the actual retry target independently of
+    // the source-window hash. A syntactic fallthrough exists, but sleep takes
+    // the byte address as an event key; no writer making it nonzero is qualified.
+    let test_branch = word(&bytes, 0x2ba70ec);
+    let displacement = ((((test_branch >> 5) & 0x3fff) << 18) as i32 >> 16) as isize;
+    assert_eq!(0x2ba70ecusize.wrapping_add_signed(displacement), 0x2ba703c);
+    // Neither a clear mask nor commandSleep returning qualifies a selected
+    // native sequence, end retirement or the complete initial handoff state.
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_group_table_publication_retains_actual_metadata_and_pointer_widths() {
+    let bytes = llb();
+    for (start, end, digest) in [
+        (
+            0x4d1b4,
+            0x4d2cc,
+            "5200f1b2c54fc7f4310d7484018b4e9ff996be3f1f12736d113508071ec87fd1",
+        ),
+        (
+            0x4e244,
+            0x4e2ec,
+            "e345dc6d8feacf8d182b4cb8ceb12f5f5e4b86cefbb2e7982156461cf4e301b4",
+        ),
+        (
+            0x4f1b4,
+            0x4f304,
+            "4e1d756207b5a578e9aef39bee4d420bb6204f7eafafbba227d6bc6bff2922a6",
+        ),
+        (
+            0x4f304,
+            0x4f398,
+            "6ecd82ed2d4dad1d4e1d517291a5341e7d3ab3de4fce3d5c66c10c122ddf1709",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    for (offset, opcode) in [
+        (0x4d20c, 0x321827ea), // groups0/1 table base fragment mask3ff00
+        (0x4d248, 0xd348fd29), // groups2/3 table PA shifted eight
+        (0x4d250, 0xd348fd29),
+        (0x4d264, 0x12be000a), // groups2/3 retain twenty-eight base bits
+        (0x4d268, 0x0a090141), // selected base fragment, no guessed high bits
+        (0x4d664, 0xd344a6c1), // actual code PA bits41:4
+        (0x4d668, 0x531d7288), // pointer-table slot stride eight
+        (0x4d66c, 0x8b0802a0), // actual group table PA plus slot offset
+        (0x103a0, 0xf9000001), // pointer store is64-bit
+        (0x103a8, 0xb9000001), // controller field store is32-bit
+        (0x4f1e8, 0xb9400109), // metadata word1 is a physical input
+        (0x4f1ec, 0x53144d29), // word1 shift uses32-bit arithmetic
+        (0x4f1f0, 0xb85fc10a), // separate metadata word0 read
+        (0x4f1f4, 0xd3741d4a), // word0 low8 supplies page offset
+        (0x4f208, 0xeb17001f), // actual region end bounds before allocation
+        (0x4f238, 0x52802001), // table alignment256
+        (0x4f250, 0xa901fd00), // publish actual allocated group table PA
+        (0x4f254, 0x91040000), // reserve256 bytes per actual group
+        (0x4f268, 0x52800401), // code pool alignment32
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "table/SRAM at {offset:#x}");
+    }
+    assert_eq!(branch_target(&bytes, 0x4d284), 0x103a8);
+    assert_eq!(branch_target(&bytes, 0x4d690), 0x103a0);
+    // These encode actual installation effects, not a hardware decoder for
+    // request->table->selected PC. Metadata and supplied SRAM stay required.
+}
