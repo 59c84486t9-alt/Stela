@@ -73,9 +73,11 @@ const LOGGED_INPUT: usize = 64;
 const DUMPED_SWAPS: u32 = 2;
 /// `IOMFBPARAM_ADAPTIVE_SYNC` (Asahi `iomfb.h`).
 const ADAPTIVE_SYNC: u32 = 14;
-/// `D594 swap_complete_ap_gated`'s input starts with the swap ID. No swap
-/// statistics or info blobs are supplied. The nullable statistics field
-/// uses its actual null flag rather than a present all-zero record.
+/// `D594 swap_complete_ap_gated`'s input starts with the swap ID. Its
+/// statistics pointer is absent. The fixed eight-blob storage remains zero
+/// with count zero; the original dispatcher passes that array unconditionally
+/// and has no independent blob-null flag. The sole null flag is at +0x72c;
+/// +0x72d..+0x72f is padding in the complete 0x730-byte record.
 const SWAP_COMPLETE: [u8; 4] = *b"D594";
 /// Original T6000 `D594_callback__` (container file 0x3daec14) reads this
 /// flag at VA 0xfffffe000adb2cec and passes nullptr for bit0=1. The AP
