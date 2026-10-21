@@ -186,9 +186,10 @@ endif
 if with_stela_intel
   stela_intel_surface = static_library(
     'stela_intel_surface',
-    '../../../../intel/stela/hosted/surface.c',
+    ['../../../../intel/stela/hosted/surface.c',
+     '../../../../intel/stela/hosted/image.c'],
     include_directories : [inc_include, inc_src, inc_intel],
-    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev, idep_genxml],
     link_with : [libisl],
     c_args : ['-Werror'],
   )
@@ -201,6 +202,30 @@ if with_stela_intel
     c_args : ['-Werror'],
   )
   test('stela_intel_surface', stela_intel_surface_probe, suite : 'stela')
+  stela_intel_image_bits = custom_target(
+    'stela_intel_image_bits',
+    input : ['../intel/genxml/gen_bits_header.py',
+             '../intel/genxml/gen70.xml', '../intel/genxml/gen75.xml',
+             '../intel/genxml/gen80.xml', '../intel/genxml/gen90.xml',
+             '../intel/genxml/gen110.xml', '../intel/genxml/gen120.xml',
+             '../intel/genxml/gen125.xml', '../intel/genxml/xe2.xml',
+             '../intel/genxml/xe3.xml', '../intel/genxml/xe3p.xml'],
+    output : 'image_bits.h',
+    command : [prog_python, '@INPUT0@', '--include-symbols',
+      'RENDER_SURFACE_STATE::Surface Base Address,RENDER_SURFACE_STATE::Surface Pitch,RENDER_SURFACE_STATE::Surface QPitch,RENDER_SURFACE_STATE::Width,RENDER_SURFACE_STATE::Height,RENDER_SURFACE_STATE::Depth,RENDER_SURFACE_STATE::Surface Format,RENDER_SURFACE_STATE::Surface Type,RENDER_SURFACE_STATE::Minimum Array Element,RENDER_SURFACE_STATE::Render Target View Extent,RENDER_SURFACE_STATE::Surface Min LOD,RENDER_SURFACE_STATE::MIP Count / LOD,RENDER_SURFACE_STATE::Auxiliary Surface Mode,RENDER_SURFACE_STATE::Number of Multisamples,RENDER_SURFACE_STATE::Surface Array',
+      '-o', '@OUTPUT@', '@INPUT1@', '@INPUT2@', '@INPUT3@', '@INPUT4@', '@INPUT5@',
+      '@INPUT6@', '@INPUT7@', '@INPUT8@', '@INPUT9@', '@INPUT10@'],
+    depend_files : gen_pack_header_deps,
+  )
+  stela_intel_image_probe = executable(
+    'stela_intel_image_probe',
+    ['../../../../intel/stela/tests/image.c', stela_intel_image_bits],
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [stela_intel_surface, libisl],
+    c_args : ['-Werror'],
+  )
+  test('stela_intel_image', stela_intel_image_probe, suite : 'stela')
 
   # The native integer encoders use the same retained XML generator as the
   # hosted packers. Explicit struct dependencies keep the narrow prologue free
@@ -368,6 +393,40 @@ if with_stela_intel
 endif
 
 if with_stela_amd
+  stela_amd_sampler = static_library(
+    'stela_amd_sampler',
+    '../../../../amd/stela/sampler.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [libamd_compiler_support],
+    c_args : ['-Werror'],
+  )
+  stela_amd_sampler_probe = executable(
+    'stela_amd_sampler_probe',
+    '../../../../amd/tests/sampler_test.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_sampler, libamd_compiler_support],
+    c_args : ['-Werror'],
+  )
+  test('stela_amd_sampler', stela_amd_sampler_probe, suite : 'stela')
+  stela_amd_surface = static_library(
+    'stela_amd_surface',
+    '../amd/common/ac_surface.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [libamdgpu_addrlib, libamd_compiler_support],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  stela_amd_surface_probe = executable(
+    'stela_amd_surface_probe',
+    ['../../../../amd/tests/surface_host_test.c', '../amd/common/amdgpu_devices.c'],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_surface],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  test('stela_amd_surface', stela_amd_surface_probe, suite : 'stela')
   stela_amd_buffer = static_library(
     'stela_amd_buffer',
     '../../../../amd/stela/buffer.c',
@@ -385,6 +444,23 @@ if with_stela_amd
     c_args : ['-Werror'],
   )
   test('stela_amd_buffer', stela_amd_buffer_probe, suite : 'stela')
+  stela_amd_image = static_library(
+    'stela_amd_image',
+    '../../../../amd/stela/image.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_surface, stela_amd_buffer, libamd_compiler_support],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  stela_amd_image_probe = executable(
+    'stela_amd_image_probe',
+    ['../../../../amd/tests/image_test.c', '../amd/common/amdgpu_devices.c'],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_image],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  test('stela_amd_image', stela_amd_image_probe, suite : 'stela')
   stela_amd_commands = static_library(
     'stela_amd_commands',
     'amd_commands.c',

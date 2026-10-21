@@ -51,6 +51,12 @@ files_addrlib = files(
 # Skip the addrlib definition of ADDR_FASTCALL so as not to use regparm.
 cpp_args_addrlib = ['-DADDR_FASTCALL=']
 
+# The native Stela host uses Addrlib's original public type/libc path. Apple's
+# private addrExtDef.h and compiler-runtime helper are not host dependencies.
+if with_stela_amd and host_machine.system() == 'darwin'
+  cpp_args_addrlib += '-DHAVE_TSERVER'
+endif
+
 # The SIMD path in addrlib only supports x86 and Aarch64 (NEON).
 if host_machine.cpu_family() in ['x86', 'x86_64', 'aarch64']
   cpp_args_addrlib += '-DADDR_ALLOW_SIMD=1'

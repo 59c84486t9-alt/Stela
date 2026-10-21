@@ -25,6 +25,10 @@ const LIBRARIES: &[&str] = &[
     "src/amd/common/libamd_command_support.a",
     "src/stela/libstela_amd_commands.a",
     "src/stela/libstela_amd_buffer.a",
+    "src/stela/libstela_amd_sampler.a",
+    "src/stela/libstela_amd_surface.a",
+    "src/stela/libstela_amd_image.a",
+    "src/amd/addrlib/libaddrlib.a",
     "src/stela/libstela_amd_compute.a",
     "src/stela/libstela_intel_surface.a",
     "src/stela/libstela_intel_compute_native.a",
@@ -108,7 +112,13 @@ fn inspect_archive(path: &Path) -> Result<Value> {
     // device access. Inspect actual objects rather than only Meson options.
     if matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some("libamd_compiler_support.a" | "libintel_dev.a")
+        Some(
+            "libamd_compiler_support.a"
+                | "libintel_dev.a"
+                | "libstela_amd_surface.a"
+                | "libstela_amd_image.a"
+                | "libstela_intel_surface.a"
+        )
     ) {
         for name in &undefined {
             let name = name.trim_start_matches('_');
@@ -118,6 +128,14 @@ fn inspect_archive(path: &Path) -> Result<Value> {
                 path.display()
             );
         }
+    }
+    if path.file_name().and_then(|name| name.to_str()) == Some("libaddrlib.a") {
+        ensure!(
+            !undefined
+                .iter()
+                .any(|name| name.trim_start_matches('_') == "umoddi3"),
+            "the public Addrlib host build must not import Apple's private compiler helper"
+        );
     }
     if path.file_name().and_then(|name| name.to_str()) == Some("libstela_apple_source.a") {
         for name in &undefined {
@@ -362,6 +380,14 @@ pub fn build(
             "amd/stela/buffer.c",
             "amd/stela/buffer.h",
             "amd/tests/buffer_test.c",
+            "amd/stela/sampler.c",
+            "amd/stela/sampler.h",
+            "amd/tests/sampler_test.c",
+            "amd/tests/sampler_policy_reference.h",
+            "amd/tests/surface_host_test.c",
+            "amd/stela/image.c",
+            "amd/stela/image.h",
+            "amd/tests/image_test.c",
             "amd/stela/compute.c",
             "amd/stela/compute.h",
             "amd/stela/compute_policy.c",
@@ -371,6 +397,9 @@ pub fn build(
             "intel/stela/hosted/surface.c",
             "intel/stela/hosted/surface.h",
             "intel/stela/tests/surface.c",
+            "intel/stela/hosted/image.c",
+            "intel/stela/hosted/image.h",
+            "intel/stela/tests/image.c",
             "intel/stela/commands.h",
             "intel/stela/compute_dispatch.c",
             "intel/stela/compute_dispatch.h",
@@ -523,8 +552,12 @@ pub fn build(
         "src/stela/stela_apple_source_test",
         "src/stela/stela_amd_commands_probe",
         "src/stela/stela_amd_buffer_probe",
+        "src/stela/stela_amd_sampler_probe",
+        "src/stela/stela_amd_surface_probe",
+        "src/stela/stela_amd_image_probe",
         "src/stela/stela_amd_compute_probe",
         "src/stela/stela_intel_surface_probe",
+        "src/stela/stela_intel_image_probe",
         "src/stela/stela_intel_compute_program_probe",
         "src/stela/stela_intel_legacy_compute_program_probe",
         "src/stela/stela_intel_compute_packet_probe",
@@ -571,8 +604,12 @@ pub fn build(
     let mut resource_probes = Vec::new();
     let mut resource_stages = vec![
         "amd_buffer",
+        "amd_sampler",
+        "amd_surface",
+        "amd_image",
         "amd_compute",
         "intel_surface",
+        "intel_image",
         "intel_compute_program",
         "intel_legacy_compute_program",
         "intel_compute_packet",
