@@ -9,7 +9,7 @@
 //! scrolling redraws from the grid instead of moving pixels.
 mod font;
 
-use alloc::{vec, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use core::{
     cell::UnsafeCell,
     sync::atomic::{AtomicBool, Ordering},
@@ -271,11 +271,10 @@ impl Text {
                 if self.column == self.columns {
                     self.newline();
                 }
-                let character = match character {
-                    b' '..=b'~' => character,
-                    _ => b'?',
+                self.cells[self.row * self.columns + self.column] = Cell {
+                    character: printable(character),
+                    color,
                 };
-                self.cells[self.row * self.columns + self.column] = Cell { character, color };
                 self.column += 1;
             }
         }
@@ -308,6 +307,13 @@ impl Text {
                 }
             }
         }
+    }
+}
+
+fn printable(character: u8) -> u8 {
+    match character {
+        b' '..=b'~' => character,
+        _ => b'?',
     }
 }
 
@@ -392,6 +398,30 @@ pub fn rewrite(segments: &[(&str, Color)]) {
                     break;
                 }
                 text.put(character, *color);
+            }
+        }
+        text.present();
+    });
+}
+
+/// Show `lines` on the rows under the cursor's, `indent` cells in and each
+/// cut to the line, the last ones when not all fit, and blank the rest; the
+/// cursor stays. An empty `lines` clears what an earlier call showed.
+pub fn below(lines: &[String], indent: usize, color: Color) {
+    with(|text| {
+        let first = text.row + 1;
+        let shown = &lines[lines.len().saturating_sub(text.rows - first)..];
+        for row in first..text.rows {
+            let cells = &mut text.cells[row * text.columns..(row + 1) * text.columns];
+            cells.fill(BLANK);
+            if let Some(line) = shown.get(row - first) {
+                let cells = cells.iter_mut().skip(indent);
+                for (cell, character) in cells.zip(line.bytes()) {
+                    *cell = Cell {
+                        character: printable(character),
+                        color,
+                    };
+                }
             }
         }
         text.present();

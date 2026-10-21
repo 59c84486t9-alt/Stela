@@ -1,11 +1,13 @@
 //! What the screen says while Stela starts: one line per step, in the style
 //! of a Linux boot, while every detail goes to the UART and the boot log
-//! ([`output`]). A running step's line shows a moving marker, its progress
-//! and its time so far, and its result replaces it when it ends:
+//! ([`output`]). A running step's line shows a moving marker, its time so
+//! far and its progress, with lines such as macOS's console output under
+//! it ([`stream`]), and its result replaces them when it ends:
 //!
 //! ```text
 //! [  OK  ] Read Install macOS (Stela) (484 MB, 12 s)
-//! [ ***  ] Getting a network address on Intel I226-V (3 s)
+//! [ ***  ] Starting the macOS installer (46 s)  installer: fdr create
+//!          AppleNVMe: controller ready
 //! ```
 //!
 //! [`tick`] moves the marker, at most eight frames a second: the firmware's
@@ -18,7 +20,7 @@ use crate::{
     console::{self, Color},
     output,
 };
-use alloc::{format, string::String};
+use alloc::{format, string::String, vec::Vec};
 use core::{
     arch::x86_64::_rdtsc,
     cell::RefCell,
@@ -30,6 +32,11 @@ const FRAMES: usize = 14;
 const MARKER: usize = 6;
 /// The finished lines kept for the system engine's screen.
 pub const HISTORY_BYTES: usize = 4096;
+/// The most lines [`stream`] shows under the running step.
+pub const STREAM_LINES: usize = 40;
+/// The width of `[  OK  ] `, where a step's text starts: info and streamed
+/// lines start there too.
+const TEXT_INDENT: &str = "         ";
 
 /// Text formatted on the stack: a tick may interrupt the heap's holder, so
 /// drawing the running step allocates nothing.
@@ -68,6 +75,10 @@ struct Running {
 struct State {
     tsc_hz: u64,
     running: Option<Running>,
+    /// The lines under the running step, oldest first, and whether the
+    /// screen shows them yet.
+    stream: Vec<String>,
+    streamed: bool,
     /// Finished lines, each its mark's letter then its text.
     history: String,
 }
@@ -81,6 +92,8 @@ unsafe impl Sync for Global {}
 static STATE: Global = Global(RefCell::new(State {
     tsc_hz: 0,
     running: None,
+    stream: Vec::new(),
+    streamed: true,
     history: String::new(),
 }));
 
@@ -123,7 +136,7 @@ impl Mark {
             Mark::Warn => (" WARN ", Color::Warn),
             Mark::Failed => ("FAILED", Color::Fatal),
             Mark::Info => {
-                console::rewrite(&[("         ", Color::Text), (text, Color::Text)]);
+                console::rewrite(&[(TEXT_INDENT, Color::Text), (text, Color::Text)]);
                 console::write(&[("\n", Color::Text)]);
                 return;
             }
@@ -175,10 +188,14 @@ impl State {
             (marker, Color::Busy),
             ("] ", Color::Text),
             (&running.title, Color::Text),
+            (elapsed.as_str(), Color::Dim),
             (gap, Color::Text),
             (&running.detail, Color::Text),
-            (elapsed.as_str(), Color::Dim),
         ]);
+        if !self.streamed {
+            console::below(&self.stream, TEXT_INDENT.len(), Color::Dim);
+            self.streamed = true;
+        }
     }
 
     fn finish(&mut self, mark: Mark, result: &str) {
@@ -203,6 +220,10 @@ impl State {
     }
 
     fn line(&mut self, mark: Mark, text: &str) {
+        if !self.stream.is_empty() {
+            self.stream.clear();
+            console::below(&[], 0, Color::Dim);
+        }
         mark.draw(text);
         let line = format!("{}{text}\n", mark.letter());
         while self.history.len() + line.len() > HISTORY_BYTES {
@@ -277,6 +298,24 @@ pub fn tick() {
         running.drawn = now();
         running.frame += 1;
         state.draw_running();
+    });
+}
+
+/// Show `lines`, such as macOS's console output, under the running step,
+/// the newest lowest; the next [`tick`] draws them, and the step's end
+/// clears them.
+pub fn stream<'a>(lines: impl IntoIterator<Item = &'a str>) {
+    with(|state| {
+        if state.running.is_none() {
+            return;
+        }
+        for line in lines {
+            if state.stream.len() == STREAM_LINES {
+                state.stream.remove(0);
+            }
+            state.stream.push(String::from(line.trim_end()));
+            state.streamed = false;
+        }
     });
 }
 

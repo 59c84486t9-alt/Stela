@@ -740,9 +740,12 @@ impl ConsoleSink for GuestConsole {
             let line = String::from_utf8_lossy(&self.0);
             output::arguments(format_args!("GUEST| {line}\n"));
             if !line.trim().is_empty()
-                && let Ok(mut last) = GUEST_LINE.0.try_borrow_mut()
+                && let Ok(mut lines) = GUEST_LINES.0.try_borrow_mut()
             {
-                *last = Some(line.clone().into_owned());
+                if lines.len() == crate::status::STREAM_LINES {
+                    lines.remove(0);
+                }
+                lines.push(line.clone().into_owned());
             }
             // `panic(cpu N caller ADDRESS): MESSAGE`
             if let Some((_, message)) = line
@@ -1296,25 +1299,16 @@ fn stop_here(text: &str, code: u32) -> ! {
     output::terminate(code)
 }
 
-/// The guest's last console line since the run loop showed one.
-static GUEST_LINE: output::Global<Option<String>> = output::Global(RefCell::new(None));
+/// The guest's console lines since the run loop showed them, the last
+/// `status::STREAM_LINES` at most.
+static GUEST_LINES: output::Global<Vec<String>> = output::Global(RefCell::new(Vec::new()));
 
-/// The most a running step's detail shows of a guest line.
-const GLIMPSE_CHARS: usize = 96;
-
-/// `line` as the running step's detail: a restore step by its name, else
-/// the line itself, shortened.
-fn glimpse(line: &str) -> String {
+/// The restore step `line` begins, by name, as the running step's detail.
+fn installer_step(line: &str) -> Option<String> {
     // `[08:34:20.0721-GMT]{5>7} CHECKPOINT BEGIN: RESTORED:[0x067C] fdr_create`
-    if let Some((_, step)) = line.split_once("CHECKPOINT BEGIN: ") {
-        let name = step.rsplit_once(']').map_or(step, |(_, name)| name);
-        return format!("installer: {}", name.trim().replace('_', " "));
-    }
-    let line = line.trim();
-    match line.char_indices().nth(GLIMPSE_CHARS) {
-        Some((end, _)) => format!("{}...", &line[..end]),
-        None => String::from(line),
-    }
+    let (_, step) = line.split_once("CHECKPOINT BEGIN: ")?;
+    let name = step.rsplit_once(']').map_or(step, |(_, name)| name);
+    Some(format!("installer: {}", name.trim().replace('_', " ")))
 }
 
 /// The first kernel panic line the guest printed, which names a stop
@@ -2036,14 +2030,15 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
-        if let Some(line) = GUEST_LINE
+        let lines = GUEST_LINES
             .0
             .try_borrow_mut()
-            .ok()
-            .and_then(|mut line| line.take())
-        {
-            crate::status::progress(&glimpse(&line));
+            .map(|mut lines| core::mem::take(&mut *lines))
+            .unwrap_or_default();
+        if let Some(step) = lines.iter().rev().find_map(|line| installer_step(line)) {
+            crate::status::progress(&step);
         }
+        crate::status::stream(lines.iter().map(String::as_str));
         crate::status::tick();
         unmodeled_report(machine);
         sep_observation_report(machine);
