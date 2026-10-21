@@ -1301,18 +1301,20 @@ impl AppleDevices {
             .bus
             .device::<Dart>(dart.0)
             .ok_or("DART SMMU owner is not a DART")?;
+        if !model.supports_smmu() {
+            return Err("DART generation has no supported paired SMMU capture format".into());
+        }
         if model.has_smmu() {
             return Err("DART already has a paired SMMU view".into());
         }
         self.bus
             .map(dart.0, range.physical, range.bytes, dart::SMMU_OFFSET)
             .map_err(|error| format!("DART SMMU mapping: {error:?}"))?;
-        let attached = self
-            .bus
+        self.bus
             .device_mut::<Dart>(dart.0)
             .expect("validated DART owner remains present")
-            .enable_smmu();
-        debug_assert!(attached);
+            .enable_smmu()
+            .expect("validated DART capture support and uniqueness remain unchanged");
         Ok(())
     }
 
@@ -2525,6 +2527,24 @@ mod tests {
         let mut d = AppleDevices::new();
         let base = 0x2_3500_4000;
         let smmu = 0x2_7130_0000;
+        for profile in [dart::Profile::T8020, dart::Profile::T6000] {
+            let legacy = d
+                .bus
+                .add(Box::new(Dart::for_profile(profile, 16, None).unwrap()));
+            assert!(
+                d.add_dart_smmu(
+                    DartId(legacy),
+                    Range {
+                        physical: smmu,
+                        bytes: dart::SMMU_BYTES,
+                    }
+                )
+                .unwrap_err()
+                .contains("no supported paired SMMU")
+            );
+            assert!(!d.bus.device::<Dart>(legacy).unwrap().has_smmu());
+            assert!(d.read(0, smmu, 4, 0).is_err());
+        }
         let owner = d
             .add_dart(
                 Range {
