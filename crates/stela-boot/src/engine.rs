@@ -766,14 +766,14 @@ fn board_profile(board: &soc::Board, target: TargetCpu, speculation: Speculation
 #[derive(Default)]
 struct GuestConsole {
     lines: console_lines::Lines,
-    /// The last line was `Nested panic string:`: this one is the message
-    /// of the panic the nested one interrupted.
-    nested: bool,
 }
 
 impl ConsoleSink for GuestConsole {
     fn transmit(&mut self, byte: u8) -> Result<(), ConsoleBusy> {
         if let Some(fragment) = self.lines.push(byte) {
+            if let Ok(mut panic) = GUEST_PANIC.0.try_borrow_mut() {
+                panic.observe(&fragment);
+            }
             let line = fragment.text;
             output::arguments(format_args!("GUEST| {line}\n"));
             if !fragment.complete {
@@ -790,26 +790,6 @@ impl ConsoleSink for GuestConsole {
                 }
                 lines.push(line.clone());
             }
-            // `panic(cpu N caller ADDRESS): MESSAGE`
-            if let Some((_, message)) = line
-                .strip_prefix("panic(")
-                .and_then(|rest| rest.split_once("): "))
-                && let Ok(mut first) = GUEST_PANIC.0.try_borrow_mut()
-                && first.is_none()
-            {
-                *first = Some(panic_message(message));
-            }
-            // `Kernel data abort. at pc ADDRESS, lr ADDRESS (saved state: ...)`
-            if core::mem::take(&mut self.nested)
-                && let Ok(mut first) = GUEST_NESTED_PANIC.0.try_borrow_mut()
-                && first.is_none()
-            {
-                let message = line
-                    .split_once(" (saved state")
-                    .map_or(line.as_str(), |(m, _)| m);
-                *first = Some(panic_message(message));
-            }
-            self.nested = line.trim() == "Nested panic string:";
         }
         Ok(())
     }
@@ -1373,23 +1353,16 @@ fn installer_step(line: &str) -> Option<String> {
 
 /// The first kernel panic line the guest printed, which names a stop
 /// better than how the machine went down after it.
-static GUEST_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
-/// The first panic another one interrupted, as the nested one reports it:
-/// the stop's cause, which a panic in the panic's own flow hides.
-static GUEST_NESTED_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
+static GUEST_PANIC: output::Global<console_lines::Panic> =
+    output::Global(RefCell::new(console_lines::Panic::new()));
 
-/// A panic's message, one line: its parts are quoted strings, as in
-/// `"Unhandled error: " "STS=0"`.
-fn panic_message(message: &str) -> String {
-    message.replace("\" \"", "").replace('"', "").trim().into()
-}
-
-/// The first panic, preferring the original message recovered by a nested panic.
+/// The earliest observed panic, without replacing it with a later nested panic.
 fn guest_panic() -> Option<String> {
-    let first = |panic: &output::Global<Option<String>>| {
-        panic.0.try_borrow().ok().and_then(|panic| panic.clone())
-    };
-    first(&GUEST_NESTED_PANIC).or_else(|| first(&GUEST_PANIC))
+    GUEST_PANIC
+        .0
+        .try_borrow()
+        .ok()
+        .and_then(|panic| panic.message().map(String::from))
 }
 
 /// How the guest went down: the first panic, else `otherwise`.

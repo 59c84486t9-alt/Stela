@@ -15,11 +15,13 @@ pub struct Line {
     pub text: String,
     pub bytes: usize,
     pub complete: bool,
+    pub beginning: bool,
 }
 
 #[derive(Default)]
 pub struct Lines {
     bytes: Vec<u8>,
+    continuing: bool,
 }
 
 impl Lines {
@@ -52,9 +54,63 @@ impl Lines {
             text: escaped(&self.bytes[..end]),
             bytes: end,
             complete,
+            beginning: !self.continuing,
         };
         self.bytes.drain(..end);
+        self.continuing = !complete;
         line
+    }
+}
+
+/// The earliest panic message observed on the UART. Nested-panic metadata
+/// supplies a fallback only when no earlier panic header was received.
+#[derive(Default)]
+pub struct Panic {
+    first: Option<String>,
+    nested: bool,
+}
+
+impl Panic {
+    pub const fn new() -> Self {
+        Self {
+            first: None,
+            nested: false,
+        }
+    }
+
+    pub fn observe(&mut self, line: &Line) {
+        if self.first.is_some() || !line.beginning {
+            return;
+        }
+        let nested = core::mem::take(&mut self.nested);
+        let header = line
+            .text
+            .strip_prefix("panic(")
+            .and_then(|rest| rest.split_once("): "))
+            .map(|(_, message)| message);
+        let message = header.or_else(|| {
+            (nested
+                && !line.text.trim().is_empty()
+                && line.text.trim() != "<end nested panic string>")
+                .then(|| {
+                    line.text
+                        .split_once(" (saved state")
+                        .map_or(line.text.as_str(), |(message, _)| message)
+                })
+        });
+        if let Some(message) = message {
+            let mut message: String = message.replace("\" \"", "").replace('"', "").trim().into();
+            if !line.complete {
+                message += " [continued in guest log]";
+            }
+            self.first = Some(message);
+        } else {
+            self.nested = line.text.trim() == "Nested panic string:";
+        }
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        self.first.as_deref()
     }
 }
 
@@ -144,10 +200,14 @@ mod tests {
         let fragment = console.push(b'!').unwrap();
         assert_eq!(fragment.bytes, FRAGMENT_BYTES);
         assert!(!fragment.complete);
+        assert!(fragment.beginning);
         let line = console.push(b'\n').unwrap();
         assert_eq!(line.text, "!");
         assert_eq!(line.bytes, 1);
         assert!(line.complete);
+        assert!(!line.beginning);
+        let next = console.push(b'\n').unwrap();
+        assert!(next.beginning && next.complete);
     }
 
     #[test]
@@ -167,5 +227,81 @@ mod tests {
         let parts = lines(&source);
         assert_eq!(parts[0].len(), FRAGMENT_BYTES - 1);
         assert_eq!(parts[1], "é");
+    }
+
+    fn panics(bytes: &[u8]) -> Panic {
+        let mut lines = Lines::default();
+        let mut panic = Panic::new();
+        for &byte in bytes {
+            if let Some(line) = lines.push(byte) {
+                panic.observe(&line);
+            }
+        }
+        panic
+    }
+
+    #[test]
+    fn the_first_header_survives_nested_panic_text_and_repeated_headers() {
+        let source = b"panic(cpu 0 caller 0x1000): primary write far=0x8020\n\
+            Nested panic detected - entry count: 2\n\
+            Nested panic string:\n\
+            secondary sample far=0x90\n\
+            <end nested panic string>\n\
+            panic(cpu 0 caller 0x2000): secondary sample far=0x90\n";
+        assert_eq!(panics(source).message(), Some("primary write far=0x8020"));
+    }
+
+    #[test]
+    fn a_nested_message_is_a_fallback_when_no_prior_header_was_received() {
+        assert_eq!(
+            panics(
+                b"Nested panic string:\nKernel data abort. at pc 0x1234 (saved state: 0x8000)\n\
+                panic(cpu 0 caller 0x2000): later panic\n"
+            )
+            .message(),
+            Some("Kernel data abort. at pc 0x1234")
+        );
+        assert_eq!(
+            panics(
+                b"Nested panic string:\n<end nested panic string>\n\
+                panic(cpu 0 caller 0x1000): first actual message\n"
+            )
+            .message(),
+            Some("first actual message")
+        );
+    }
+
+    #[test]
+    fn quote_normalization_preserves_the_first_panic_text() {
+        assert_eq!(
+            panics(b"panic(cpu 1 caller 0x1000): \"Unhandled error: \" \"STS=0\"\r\n").message(),
+            Some("Unhandled error: STS=0")
+        );
+        assert!(
+            panics(b"driver: panic(cpu 1 caller 0x1000): ordinary data\n")
+                .message()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn continuation_fragments_cannot_invent_a_new_panic_header_or_marker() {
+        let mut source = vec![b'x'; FRAGMENT_BYTES];
+        source.extend_from_slice(b"panic(cpu 0 caller 0x1000): not a separate line\n");
+        assert!(panics(&source).message().is_none());
+        source.truncate(FRAGMENT_BYTES);
+        source.extend_from_slice(b"Nested panic string:\nordinary following line\n");
+        assert!(panics(&source).message().is_none());
+    }
+
+    #[test]
+    fn a_long_first_panic_has_an_explicit_excerpt_and_keeps_its_identity() {
+        let mut source = b"panic(cpu 0 caller 0x1000): ".to_vec();
+        source.extend(vec![b'x'; 2 * FRAGMENT_BYTES]);
+        source.extend_from_slice(b"\npanic(cpu 0 caller 0x2000): later panic\n");
+        let panic = panics(&source);
+        let message = panic.message().unwrap();
+        assert!(message.starts_with('x') && message.ends_with(" [continued in guest log]"));
+        assert!(!message.contains("later panic"));
     }
 }

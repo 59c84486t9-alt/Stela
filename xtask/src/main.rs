@@ -2,6 +2,14 @@
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
+// The UEFI binary cannot run libtest. Exercise its platform-independent
+// UART text and panic capture in the shared hosted gate instead.
+#[cfg(test)]
+extern crate alloc;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
+mod boot_console;
+
 mod agx_isa;
 mod agx_observe;
 mod amx;
