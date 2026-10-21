@@ -206,8 +206,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let mut bdl = allocator
             .allocate(4096, 128)
             .map_err(|_| Error::NoDmaMemory)?;
-        Self::check_dma(&buffer, 4096, self.capabilities.address_64_bit)?;
-        Self::check_dma(&bdl, 128, self.capabilities.address_64_bit)?;
+        Self::check_dma(&buffer, 4096, self.capabilities.dma_address_bits)?;
+        Self::check_dma(&bdl, 128, self.capabilities.dma_address_bits)?;
         if buffer.len() != bytes || bdl.len() < 4096 {
             return Err(Error::InvalidBuffer);
         }

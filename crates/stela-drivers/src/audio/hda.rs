@@ -44,6 +44,9 @@ pub enum CorbReset {
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     pub corb_reset: CorbReset,
+    /// Identity/platform-selected DMA address ceiling, in addition to GCAP.
+    /// This does not establish IOMMU reachability or coherency. Valid 32..=64.
+    pub dma_address_bits: u8,
     pub transition_timeout_us: u32,
     pub verb_timeout_us: u32,
 }
@@ -52,6 +55,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             corb_reset: CorbReset::Handshake,
+            dma_address_bits: 64,
             transition_timeout_us: 100_000,
             verb_timeout_us: 100_000,
         }
@@ -65,6 +69,8 @@ pub struct Capabilities {
     /// Reported but not allocated by this implementation.
     pub bidirectional_streams: u8,
     pub address_64_bit: bool,
+    /// Effective DMA ceiling after intersecting GCAP with the identity contract.
+    pub dma_address_bits: u8,
     /// Word budgets per 48kHz link frame, on a single unstriped SDO/SDI.
     pub output_payload_words: u16,
     pub input_payload_words: u16,
@@ -105,13 +111,18 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// memory and MMIO alive for the boot. On constructor failure, quiesce/reset
     /// hardware before releasing ownership: stop acknowledgement may have failed.
     /// Apply platform PCI/snoop/power/clock/quirk setup before calling this.
+    /// `config.dma_address_bits` must reflect the actual identity/platform DMA
+    /// reachability ceiling; GCAP's 64-bit flag alone does not establish it.
     pub unsafe fn new(
         registers: R,
         timer: T,
         allocator: &mut dyn DmaAllocator,
         config: Config,
     ) -> Result<Self, Error> {
-        if config.transition_timeout_us == 0 || config.verb_timeout_us == 0 {
+        if config.transition_timeout_us == 0
+            || config.verb_timeout_us == 0
+            || !(32..=64).contains(&config.dma_address_bits)
+        {
             return Err(Error::InvalidConfiguration);
         }
         let mut registers = registers;
@@ -125,6 +136,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             output_streams: ((gcap >> 12) & 15) as u8,
             bidirectional_streams: ((gcap >> 3) & 31) as u8,
             address_64_bit: gcap & 1 != 0,
+            dma_address_bits: config
+                .dma_address_bits
+                .min(if gcap & 1 != 0 { 64 } else { 32 }),
             output_payload_words: registers.read16(OUTPAY),
             input_payload_words: registers.read16(INPAY),
             output_stream_payload_words: registers.read16(OUTSTRMPAY),
@@ -143,8 +157,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let rirb = allocator
             .allocate(2048, 128)
             .map_err(|_| Error::NoDmaMemory)?;
-        Self::check_dma(&corb, 128, capabilities.address_64_bit)?;
-        Self::check_dma(&rirb, 128, capabilities.address_64_bit)?;
+        Self::check_dma(&corb, 128, capabilities.dma_address_bits)?;
+        Self::check_dma(&rirb, 128, capabilities.dma_address_bits)?;
         if corb.len() < 1024 || rirb.len() < 2048 {
             return Err(Error::InvalidBuffer);
         }
@@ -180,18 +194,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.codec_mask
     }
 
-    pub(super) fn check_dma(buffer: &DmaBuffer, align: u64, address64: bool) -> Result<(), Error> {
-        let end = buffer
-            .physical()
-            .checked_add(buffer.len() as u64)
-            .ok_or(Error::DmaAddress)?;
-        if buffer.physical() == 0
-            || buffer.physical() & (align - 1) != 0
-            || (!address64 && end > 1u64 << 32)
-        {
-            return Err(Error::DmaAddress);
-        }
-        Ok(())
+    pub(super) fn check_dma(buffer: &DmaBuffer, align: u64, address_bits: u8) -> Result<(), Error> {
+        check_dma_range(buffer.physical(), buffer.len(), align, address_bits)
     }
 
     pub(super) fn wait(
@@ -431,6 +435,21 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.stopped = true;
         Ok(())
     }
+}
+
+/// Check the entire device-visible extent, not merely its base. The caller has
+/// already intersected actual identity/platform limits with GCAP's 32/64 flag.
+fn check_dma_range(physical: u64, bytes: usize, align: u64, address_bits: u8) -> Result<(), Error> {
+    let end = physical
+        .checked_add(bytes as u64)
+        .ok_or(Error::DmaAddress)?;
+    if physical == 0
+        || physical & (align - 1) != 0
+        || (address_bits < 64 && end > 1u64 << address_bits)
+    {
+        return Err(Error::DmaAddress);
+    }
+    Ok(())
 }
 
 fn ring_size(capability: u8) -> Result<(u16, u8), Error> {
@@ -2513,6 +2532,92 @@ mod tests {
                 }
             );
             assert_eq!(model.borrow().bindings[&2], 0xff);
+        }
+    }
+    #[test]
+    fn dma_identity_ceiling_checks_full_32_40_and_64_bit_extents() {
+        for bits in [32, 40, 48] {
+            let limit = 1u64 << bits;
+            assert_eq!(check_dma_range(limit - 4096, 4096, 4096, bits), Ok(()));
+            assert_eq!(
+                check_dma_range(limit - 4096, 4097, 4096, bits),
+                Err(Error::DmaAddress)
+            );
+            assert_eq!(
+                check_dma_range(limit, 4096, 4096, bits),
+                Err(Error::DmaAddress)
+            );
+            assert_eq!(check_dma_range(limit - 4096, 4096, 4096, 64), Ok(()));
+        }
+        assert_eq!(check_dma_range(0, 4096, 4096, 64), Err(Error::DmaAddress));
+        assert_eq!(
+            check_dma_range(4097, 4096, 4096, 64),
+            Err(Error::DmaAddress)
+        );
+        assert_eq!(
+            check_dma_range(u64::MAX - 4095, 4096, 4096, 64),
+            Err(Error::DmaAddress)
+        );
+    }
+
+    #[test]
+    fn configured_dma_ceiling_is_explicit_and_applies_to_rings_before_hardware_writes() {
+        for bits in [0, 31, 65, u8::MAX] {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            assert!(matches!(
+                create(
+                    &model,
+                    &mut fixture,
+                    Config {
+                        dma_address_bits: bits,
+                        ..config()
+                    }
+                ),
+                Err(Error::InvalidConfiguration)
+            ));
+            assert!(model.borrow().writes.is_empty());
+        }
+        let mut fixture = Fixture::new();
+        let model = Model::new(256);
+        let mut controller = create(
+            &model,
+            &mut fixture,
+            Config {
+                dma_address_bits: 48,
+                ..config()
+            },
+        )
+        .unwrap();
+        assert_eq!(controller.capabilities().dma_address_bits, 48);
+        controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        controller.shutdown().unwrap();
+        // A valid allocator's CPU address can exceed a controller's identity
+        // width even when GCAP advertises 64-bit addressing. Never start DMA.
+        let next = fixture.allocator.allocate(128, 128).unwrap();
+        if next.physical() >= 1u64 << 40 {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            assert!(matches!(
+                create(
+                    &model,
+                    &mut fixture,
+                    Config {
+                        dma_address_bits: 40,
+                        ..config()
+                    }
+                ),
+                Err(Error::DmaAddress)
+            ));
+            assert!(model.borrow().writes.is_empty());
         }
     }
 }
