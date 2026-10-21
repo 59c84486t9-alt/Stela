@@ -124,6 +124,8 @@ pub fn discover() -> Result<Handoff, &'static str> {
                     || net::igc::matches(&function)
                     || net::e1000e::matches(&function)
                     || net::igb::matches(&function)
+                    || net::realtek::matches(&function)
+                    || stela_drivers::audio::hda::pci::identify(&function).is_ok()
                     || function.class == nvme::CLASS
                     || function.class == ahci::CLASS
                     || function.class == xhci::CLASS;

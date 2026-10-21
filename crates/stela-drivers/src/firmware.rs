@@ -210,6 +210,28 @@ pub trait Provider {
     fn load(&self, requirement: Requirement<'_>) -> Result<Image<'_>, Error>;
 }
 
+/// Borrow the boot handoff's optional catalog through the same exact provider
+/// contract. Absence behaves like an empty catalog, including validation of
+/// malformed requirements before reporting a missing resource.
+pub struct HandoffProvider<'a> {
+    catalog: Option<&'a Catalog>,
+}
+
+impl<'a> HandoffProvider<'a> {
+    pub const fn new(catalog: Option<&'a Catalog>) -> Self {
+        Self { catalog }
+    }
+}
+
+impl Provider for HandoffProvider<'_> {
+    fn load(&self, requirement: Requirement<'_>) -> Result<Image<'_>, Error> {
+        static EMPTY: Catalog = Catalog {
+            entries: Vec::new(),
+        };
+        self.catalog.unwrap_or(&EMPTY).load(requirement)
+    }
+}
+
 /// An immutable image borrowed from a catalog; no device upload has occurred.
 #[derive(Clone, Copy)]
 pub struct Image<'a> {
@@ -494,6 +516,92 @@ mod tests {
         assert_eq!(image.provenance().source, "temporary-source");
         assert_eq!(image.name(), requirement().name);
         assert_eq!(catalog.entries.len(), 1);
+    }
+
+    #[test]
+    fn optional_handoff_provider_preserves_validation_and_missing_resource_details() {
+        let provider = HandoffProvider::new(None);
+        let empty = Catalog::from_handoff(vec![]).unwrap();
+        for request in [
+            requirement(),
+            Requirement {
+                name: "../invalid",
+                ..requirement()
+            },
+            Requirement {
+                minimum_bytes: 0,
+                ..requirement()
+            },
+            Requirement {
+                target: Target {
+                    hardware: "",
+                    ..target()
+                },
+                ..requirement()
+            },
+        ] {
+            assert_eq!(
+                provider.load(request).unwrap_err(),
+                empty.load(request).unwrap_err()
+            );
+        }
+        let missing = provider.load(requirement()).unwrap_err();
+        assert_eq!(missing.name, requirement().name);
+        assert_eq!(missing.kind, ErrorKind::Missing);
+    }
+
+    #[test]
+    fn optional_handoff_provider_borrows_exact_catalog_images_without_fallback_or_copy() {
+        let resource = resource();
+        let original = resource.bytes.as_ptr();
+        let catalog = Catalog::from_handoff(vec![resource]).unwrap();
+        let provider = HandoffProvider::new(Some(&catalog));
+        let image = provider.load(requirement()).unwrap();
+        assert_eq!(image.bytes().as_ptr(), original);
+        assert_eq!(image.sha256(), ABC_SHA);
+        assert_eq!(image.provenance().member, "fixtures/abc.bin");
+        for request in [
+            Requirement {
+                target: Target {
+                    revision: "different-api",
+                    ..target()
+                },
+                ..requirement()
+            },
+            Requirement {
+                target: Target {
+                    board: Some("different-board"),
+                    ..target()
+                },
+                ..requirement()
+            },
+            Requirement {
+                name: "another.bin",
+                ..requirement()
+            },
+            Requirement {
+                minimum_bytes: 4,
+                ..requirement()
+            },
+        ] {
+            assert_eq!(
+                provider.load(request).unwrap_err(),
+                catalog.load(request).unwrap_err()
+            );
+        }
+        assert_eq!(
+            provider
+                .load(Requirement {
+                    target: Target {
+                        revision: "different-api",
+                        ..target()
+                    },
+                    ..requirement()
+                })
+                .unwrap_err()
+                .kind,
+            ErrorKind::WrongTarget
+        );
     }
 
     #[test]
