@@ -27,9 +27,9 @@ use crate::platform::apple::{
 use alloc::{format, string::String, vec::Vec};
 
 mod dart_topology;
-use dart_topology::iommus;
 #[cfg(test)]
 use dart_topology::iommu;
+use dart_topology::iommus;
 
 mod handoff;
 mod power_resources;
@@ -1260,10 +1260,10 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
     ]
     .contains(&name)
         || dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
-            property("compatible").is_none_or(|bytes| {
-                dart::Profile::from_compatible(bytes) == Some(profile)
-            }) && (profile == dart::Profile::T8110
-                || dart_topology::legacy_requirements(profile, &property).is_ok())
+            property("compatible")
+                .is_none_or(|bytes| dart::Profile::from_compatible(bytes) == Some(profile))
+                && (profile == dart::Profile::T8110
+                    || dart_topology::legacy_requirements(profile, &property).is_ok())
         })
         || GPU_ADMITTED && (name == GFX_MAPPER || admitted_gpu(name))
         || AICS.contains(&name)
@@ -3902,7 +3902,9 @@ fn usb_controller(
         stream,
         port,
         retention: node.property("retention").is_some(),
-        phy: node.first_u32("atc-phy-parent").ok_or_else(|| err("has no atc-phy-parent"))?,
+        phy: node
+            .first_u32("atc-phy-parent")
+            .ok_or_else(|| err("has no atc-phy-parent"))?,
     })
 }
 
@@ -4432,6 +4434,7 @@ mod tests {
             .collect::<Vec<_>>();
         let tree = |gates: &[u8], retention: bool, no_sleep: bool| {
             let mut props = vec![
+                ("compatible", b"dart,t8110\0".as_slice()),
                 ("reg", reg.as_slice()),
                 ("instance", b"TRAD\0\0\0\0DART\0\0\0\0".as_slice()),
                 ("sid-count", &b"\x10\0\0\0"[..]),

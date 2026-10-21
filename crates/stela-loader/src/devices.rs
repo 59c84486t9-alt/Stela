@@ -134,8 +134,9 @@ fn is_dart(node: &Node) -> bool {
 }
 
 fn modeled_dart(node: &Node) -> bool {
-    use stela_runtime::platform::apple::dart::Profile;
-    let Some(profile) = node.property(COMPATIBLE)
+    use stela_runtime::machine::apple::DartProfile as Profile;
+    let Some(profile) = node
+        .property(COMPATIBLE)
         .and_then(|property| Profile::from_compatible(&property.value))
     else {
         return false;
@@ -143,8 +144,13 @@ fn modeled_dart(node: &Node) -> bool {
     // Properties alone do not select which legacy translation instance a
     // mapper masters. Keep the same explicit routing gate as SoC placement.
     if profile != Profile::T8110
-        && node.property("instance").is_some_and(|property| property.value.len() > 12)
-        && node.children.iter().any(|child| named(child, soc::IOMMU_MAPPER))
+        && node
+            .property("instance")
+            .is_some_and(|property| property.value.len() > 12)
+        && node
+            .children
+            .iter()
+            .any(|child| named(child, soc::IOMMU_MAPPER))
     {
         return false;
     }
@@ -207,9 +213,11 @@ fn modeled(node: &Node, parents: &[u32]) -> bool {
             .and_then(|p| p.as_u32())
             .is_some_and(|p| parents.contains(&p))
     } else if is_dart(node) {
-        modeled_dart(node) && node.children
-            .iter()
-            .any(|child| kept_mapper(child, parents))
+        modeled_dart(node)
+            && node
+                .children
+                .iter()
+                .any(|child| kept_mapper(child, parents))
     } else if named(node, soc::SART) {
         node.property(PHANDLE)
             .and_then(|p| p.as_u32())
@@ -1434,13 +1442,23 @@ mod tests {
     fn native_legacy_dart_preparation_preserves_qualified_mapper_dependencies_only() {
         for compatible in [b"dart,t8020\0".as_slice(), b"dart,t6000\0"] {
             let mut engine = aes(b"aes,s8000\0");
-            engine.set_property(IOMMU_PARENT, 0x8au32.to_le_bytes().to_vec()).unwrap();
+            engine
+                .set_property(IOMMU_PARENT, 0x8au32.to_le_bytes().to_vec())
+                .unwrap();
             let mut stream = mapper("mapper-aes", 0x8a);
-            stream.set_property("reg", 0u32.to_le_bytes().to_vec()).unwrap();
+            stream
+                .set_property("reg", 0u32.to_le_bytes().to_vec())
+                .unwrap();
             let mut dart = node("dart-sio", Some(compatible), vec![stream]);
             for (key, bytes) in [
                 ("instance", b"TRADDART\0\0\0\0".to_vec()),
-                ("reg", [0x235004000u64, 0x4000].into_iter().flat_map(u64::to_le_bytes).collect()),
+                (
+                    "reg",
+                    [0x235004000u64, 0x4000]
+                        .into_iter()
+                        .flat_map(u64::to_le_bytes)
+                        .collect(),
+                ),
                 ("page-size", 0x4000u32.to_le_bytes().to_vec()),
                 ("sids", 1u32.to_le_bytes().to_vec()),
                 ("vm-base", 0u32.to_le_bytes().to_vec()),
@@ -1448,17 +1466,26 @@ mod tests {
                 dart.set_property(key, bytes).unwrap();
             }
             let original = DeviceTree {
-                root: secure_root(node("device-tree", None, vec![
-                    node("arm-io", None, vec![dart, engine]),
-                ])),
+                root: secure_root(node(
+                    "device-tree",
+                    None,
+                    vec![node("arm-io", None, vec![dart, engine])],
+                )),
             };
             let mut prepared = original.clone();
             hide_unmodeled(&mut prepared);
-            for path in ["/arm-io/dart-sio", "/arm-io/dart-sio/mapper-aes", "/arm-io/aes"] {
+            for path in [
+                "/arm-io/dart-sio",
+                "/arm-io/dart-sio/mapper-aes",
+                "/arm-io/aes",
+            ] {
                 assert!(prepared.property(path, COMPATIBLE).is_some(), "{path}");
             }
             for key in ["instance", "reg", "sids", "vm-base"] {
-                assert_eq!(prepared.property("/arm-io/dart-sio", key), original.property("/arm-io/dart-sio", key));
+                assert_eq!(
+                    prepared.property("/arm-io/dart-sio", key),
+                    original.property("/arm-io/dart-sio", key)
+                );
             }
             for unsupported in ["remap", "routing"] {
                 let mut prepared = original.clone();
@@ -1466,12 +1493,30 @@ mod tests {
                 if unsupported == "remap" {
                     dart.set_property("remap", vec![0, 1, 0, 0]).unwrap();
                 } else {
-                    dart.set_property("instance", [b"TRADDART\0\0\0\0".as_slice(), b"TRADDARTBLK\0"].concat()).unwrap();
-                    dart.set_property("reg", [0x235004000u64, 0x4000, 0x235008000, 0x4000].into_iter().flat_map(u64::to_le_bytes).collect()).unwrap();
+                    dart.set_property(
+                        "instance",
+                        [b"TRADDART\0\0\0\0".as_slice(), b"TRADDARTBLK\0"].concat(),
+                    )
+                    .unwrap();
+                    dart.set_property(
+                        "reg",
+                        [0x235004000u64, 0x4000, 0x235008000, 0x4000]
+                            .into_iter()
+                            .flat_map(u64::to_le_bytes)
+                            .collect(),
+                    )
+                    .unwrap();
                 }
                 hide_unmodeled(&mut prepared);
-                for path in ["/arm-io/dart-sio", "/arm-io/dart-sio/mapper-aes", "/arm-io/aes"] {
-                    assert!(prepared.property(path, COMPATIBLE).is_none(), "{unsupported}: {path}");
+                for path in [
+                    "/arm-io/dart-sio",
+                    "/arm-io/dart-sio/mapper-aes",
+                    "/arm-io/aes",
+                ] {
+                    assert!(
+                        prepared.property(path, COMPATIBLE).is_none(),
+                        "{unsupported}: {path}"
+                    );
                 }
                 assert!(prepared.property("/arm-io/dart-sio", "instance").is_some());
             }
