@@ -11,7 +11,7 @@ use crate::{
     input::{self, virtio::VirtioInput},
     net::{self, Link, LinkError, Mac, e1000e::E1000e, igb::Igb, igc::Igc, virtio::VirtioNet},
     storage::{ahci, nvme, virtio},
-    usb::{cdc::UsbNet, hid::UsbInput, xhci},
+    usb::{bluetooth::UsbHci, cdc::UsbNet, hid::UsbInput, xhci},
 };
 use alloc::{boxed::Box, string::String, vec::Vec};
 
@@ -95,6 +95,8 @@ pub struct Disks {
     pub inputs: Vec<VirtioInput>,
     /// USB keyboards and pointers behind xHCI controllers.
     pub usb_inputs: Vec<UsbInput>,
+    /// Raw USB HCI only; firmware readiness and guest forwarding are separate.
+    pub bluetooth: Vec<UsbHci>,
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, BlockError)>,
@@ -150,6 +152,7 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
                         disks.usb_inputs.extend(found.inputs);
+                        disks.bluetooth.extend(found.bluetooth);
                         disks
                             .links
                             .extend(found.links.into_iter().map(Adapter::Usb));

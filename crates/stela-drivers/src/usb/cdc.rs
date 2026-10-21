@@ -309,6 +309,11 @@ impl Link for UsbNet {
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
+        // A previous failed cancellation may still own this OUT buffer.
+        self.controller
+            .borrow_mut()
+            .endpoint_ready(self.slot, self.binding.output.dci())
+            .map_err(link_error)?;
         if frame.len() > MAX_FRAME {
             return Err(LinkError::Adapter(String::from(
                 "frame above the Ethernet maximum",
@@ -402,5 +407,62 @@ mod tests {
         );
         assert_eq!(parse_mac("0253540"), None);
         assert_eq!(parse_mac("02535400AB0G"), None);
+    }
+
+    #[test]
+    fn poisoned_output_refuses_to_rewrite_the_active_dma_buffer() {
+        use crate::bus::dma::RegionAllocator;
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives the controller/model and every DMA buffer.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let mut send = dma.allocate(FRAME_BYTES, FRAME_BYTES).unwrap();
+        send.bytes_mut().fill(0xa5);
+        let controller = super::super::xhci::tests::controller_with_unresolved_td(
+            &mut dma,
+            send.physical(),
+            send.len(),
+            4,
+        );
+        let input = Endpoint {
+            address: 0x82,
+            attributes: 2,
+            max_packet: 64,
+            interval: 0,
+        };
+        let output = Endpoint {
+            address: 0x02,
+            attributes: 2,
+            max_packet: 64,
+            interval: 0,
+        };
+        let mut net = UsbNet {
+            controller,
+            slot: 1,
+            binding: Binding {
+                model: Model::Ecm,
+                control: 0,
+                data: 1,
+                alternate: 0,
+                mac_string: 1,
+                input,
+                output,
+                notify: None,
+            },
+            framing: Framing::Ecm,
+            mac: Mac([2, 0, 0, 0, 0, 1]),
+            receive: dma.allocate(FRAME_BYTES, FRAME_BYTES).unwrap(),
+            pending: VecDeque::new(),
+            send,
+            status: dma.allocate(64, 64).unwrap(),
+            queued: None,
+            notify_queued: None,
+            connected: None,
+            location: "poisoned model CDC".into(),
+        };
+        assert!(net.transmit(&[1, 2, 3]).is_err());
+        // The model deliberately leaves this TD hardware-owned but performs no
+        // DMA while the test reads its sentinel; production never reads it here.
+        assert!(net.send.bytes().iter().all(|byte| *byte == 0xa5));
     }
 }

@@ -179,6 +179,14 @@ impl UsbDisk {
     /// One command: its IN data, or nothing. A failed command's status is
     /// its sense key and ASC/ASCQ (`key << 16 | asc << 8 | ascq`).
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        // The wrapper serves both OUT CBW and IN CSW. Do not rewrite either
+        // buffer after an unresolved transfer or failed EP0 reset recovery.
+        {
+            let mut controller = self.controller.borrow_mut();
+            for dci in [1, self.input.dci(), self.output.dci()] {
+                controller.endpoint_ready(self.slot, dci)?;
+            }
+        }
         let (length, is_in) = match &data {
             Data::None => (0, false),
             Data::In(length) => (*length, true),
@@ -318,5 +326,69 @@ impl BlockDevice for UsbDisk {
     fn flush(&mut self) -> Result<(), BlockError> {
         self.command(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::None)
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::dma::RegionAllocator;
+
+    #[test]
+    fn poisoned_input_output_or_reset_pipe_prevents_cbw_and_data_buffer_reuse() {
+        for dci in [1, 4, 5] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives the controller/model and all DMA buffers.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let mut wrapper = dma.allocate(64, 64).unwrap();
+            wrapper.bytes_mut().fill(0xa5);
+            let mut buffer = dma.allocate(512, 512).unwrap();
+            buffer.bytes_mut().fill(0x5a);
+            let controller = super::super::xhci::tests::controller_with_unresolved_td(
+                &mut dma,
+                wrapper.physical(),
+                wrapper.len(),
+                dci,
+            );
+            let mut disk = UsbDisk {
+                controller,
+                slot: 1,
+                interface: 0,
+                input: Endpoint {
+                    address: 0x82,
+                    attributes: 2,
+                    max_packet: 64,
+                    interval: 0,
+                },
+                output: Endpoint {
+                    address: 0x02,
+                    attributes: 2,
+                    max_packet: 64,
+                    interval: 0,
+                },
+                buffer,
+                wrapper,
+                tag: 7,
+                identity: Identity {
+                    transport: Transport::Usb,
+                    location: "poisoned model disk".into(),
+                    model: "fixture".into(),
+                    serial: "fixture".into(),
+                    blocks: 1,
+                    block_size: 512,
+                    read_only: false,
+                },
+            };
+            assert!(
+                disk.command(&[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0], Data::Out(&[1, 2, 3]))
+                    .is_err()
+            );
+            assert_eq!(disk.tag, 7);
+            // The model performs no concurrent DMA while these sentinels are
+            // inspected; production command returned before accessing them.
+            assert!(disk.wrapper.bytes().iter().all(|byte| *byte == 0xa5));
+            assert!(disk.buffer.bytes().iter().all(|byte| *byte == 0x5a));
+        }
     }
 }
