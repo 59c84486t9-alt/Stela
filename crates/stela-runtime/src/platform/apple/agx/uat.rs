@@ -251,8 +251,13 @@ pub const FIRMWARE_CONTEXT: usize = 0;
 pub const GPU_STREAM: usize = 1 << 8;
 
 /// The port stream of a GPU-unit access in `context`.
-pub const fn gpu_stream(context: usize) -> usize {
-    GPU_STREAM | context
+pub const fn gpu_stream(context: usize) -> Result<usize, DmaError> {
+    // Validate before inserting the agent bit: otherwise context 0x100
+    // would be encoded exactly like GPU context 0 and silently alias it.
+    if context >= CONTEXTS {
+        return Err(DmaError::Unsupported("UAT context outside the TTBAT"));
+    }
+    Ok(GPU_STREAM | context)
 }
 /// The level-0 index of the TTBR1 window every context shares through the
 /// shared L2 (`0xffff_ffa0_0000_0000`).
@@ -980,12 +985,24 @@ mod tests {
             Err(DmaError::Fault(FAULT_PERMISSION))
         );
         assert_eq!(
-            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(5), va + 8),
+            port_read(
+                &mut uat,
+                Agent::Firmware,
+                &mut ram,
+                gpu_stream(5).unwrap(),
+                va + 8
+            ),
             Ok(0xa6e5)
         );
         // An unmapped GPU address faults and is recorded as the GPU's.
         assert_eq!(
-            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(5), 0x4000),
+            port_read(
+                &mut uat,
+                Agent::Firmware,
+                &mut ram,
+                gpu_stream(5).unwrap(),
+                0x4000
+            ),
             Err(DmaError::Fault(FAULT_TRANSLATION))
         );
         let fault = uat.last_fault().unwrap();
@@ -995,17 +1012,17 @@ mod tests {
         );
         // The context tag must still match, and the context fit the TTBAT.
         assert!(matches!(
-            port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(4), va),
-            Err(DmaError::Fault(FAULT_TRANSLATION))
-        ));
-        assert!(matches!(
             port_read(
                 &mut uat,
                 Agent::Firmware,
                 &mut ram,
-                gpu_stream(CONTEXTS),
+                gpu_stream(4).unwrap(),
                 va
             ),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        ));
+        assert!(matches!(
+            gpu_stream(CONTEXTS),
             Err(DmaError::Unsupported(_))
         ));
     }

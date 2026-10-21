@@ -42,6 +42,7 @@ use super::exec::compute::{self, Job};
 use super::exec::render::{self, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
+use super::uat::CONTEXTS;
 use crate::platform::dma::DmaError;
 use alloc::vec::Vec;
 
@@ -99,6 +100,7 @@ pub fn run_compute(
     context: usize,
     job: &Job,
 ) -> Result<Vec<Event>, WorkError> {
+    check_context(context, job.vm_slot)?;
     {
         let mut view = GpuView::new(memory, context);
         compute::run(&mut view, job)?;
@@ -113,11 +115,26 @@ pub fn run_render(
     context: usize,
     pass: &RenderPass,
 ) -> Result<Vec<Event>, WorkError> {
+    check_context(context, pass.vm_slot)?;
     {
         let mut view = GpuView::new(memory, context);
         render::run(&mut view, pass)?;
     }
     complete(memory, command).map_err(WorkError::Refused)
+}
+
+/// The shader's advertised slot and the memory view must identify the same
+/// admitted UAT context, before the work can access any memory or complete.
+fn check_context(context: usize, vm_slot: u32) -> Result<(), WorkError> {
+    if context >= CONTEXTS {
+        return Err(WorkError::Refused("GPU work context outside the UAT TTBAT"));
+    }
+    if context != vm_slot as usize {
+        return Err(WorkError::Refused(
+            "GPU work vm_slot does not match its UAT context",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -228,5 +245,43 @@ mod tests {
         // flat memory); the stamps stay at zero.
         assert!(run_compute(&mut memory, &command, 5, &job).is_err());
         assert_eq!(memory.read_u32(COMMAND + 0x40), Ok(0));
+    }
+
+    #[test]
+    fn inconsistent_or_out_of_range_contexts_refuse_before_work_or_completion() {
+        let (mut memory, mut job) = compute_memory();
+        let command = cl_command(&mut memory);
+        let before = memory.bytes.clone();
+        for context in [CONTEXTS, 256, usize::MAX] {
+            assert_eq!(
+                run_compute(&mut memory, &command, context, &job),
+                Err(WorkError::Refused("GPU work context outside the UAT TTBAT"))
+            );
+            assert_eq!(memory.bytes, before);
+        }
+        job.vm_slot = 6;
+        assert_eq!(
+            run_compute(&mut memory, &command, 5, &job),
+            Err(WorkError::Refused(
+                "GPU work vm_slot does not match its UAT context"
+            ))
+        );
+        // Even with an invalid render pass, context mismatch is refused
+        // before touching the stream or framebuffer.
+        let pass = RenderPass {
+            vm_slot: 6,
+            ..RenderPass::default()
+        };
+        assert_eq!(
+            run_render(&mut memory, &command, 5, &pass),
+            Err(WorkError::Refused(
+                "GPU work vm_slot does not match its UAT context"
+            ))
+        );
+        assert_eq!(
+            run_render(&mut memory, &command, CONTEXTS, &pass),
+            Err(WorkError::Refused("GPU work context outside the UAT TTBAT"))
+        );
+        assert_eq!(memory.bytes, before);
     }
 }

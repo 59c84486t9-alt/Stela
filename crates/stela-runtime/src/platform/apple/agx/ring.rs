@@ -84,21 +84,22 @@ impl Shared for Port<'_, '_> {
         Port::write(self, va, data).map_err(reason)
     }
     fn gpu_read(&mut self, context: usize, va: u64, buffer: &mut [u8]) -> Result<(), DmaError> {
-        gpu_port(self, context).read(va, buffer)
+        gpu_port(self, context)?.read(va, buffer)
     }
     fn gpu_write(&mut self, context: usize, va: u64, data: &[u8]) -> Result<(), DmaError> {
-        gpu_port(self, context).write(va, data)
+        gpu_port(self, context)?.write(va, data)
     }
 }
 
 /// The same bus master's port for GPU-unit accesses in `context`.
-fn gpu_port<'c, 'b>(port: &'c mut Port<'_, 'b>, context: usize) -> Port<'c, 'b> {
-    Port {
+fn gpu_port<'c, 'b>(port: &'c mut Port<'_, 'b>, context: usize) -> Result<Port<'c, 'b>, DmaError> {
+    let stream = uat::gpu_stream(context)?;
+    Ok(Port {
         iommu: &mut *port.iommu,
-        stream: uat::gpu_stream(context),
+        stream,
         memory: &mut *port.memory,
         access: &mut *port.access,
-    }
+    })
 }
 
 /// What a ring carries, which fixes its entry size.
@@ -215,6 +216,66 @@ pub const fn next(index: u32) -> u32 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn an_invalid_gpu_context_cannot_alias_context_zero_or_access_its_memory() {
+        use crate::platform::apple::bus::Access;
+        use crate::platform::apple::interrupt::InterruptLatch;
+        use crate::platform::dma::tests::Ram;
+
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 5 * uat::PAGE_BYTES as usize);
+        let root = base + uat::PAGE_BYTES;
+        let directory = root + uat::PAGE_BYTES;
+        let leaves = directory + uat::PAGE_BYTES;
+        let page = leaves + uat::PAGE_BYTES;
+        let flags = uat::Flags {
+            access: uat::Access::FirmwareGpu,
+            memory: uat::MemoryAttr::Uncached,
+            global: true,
+            pxn: true,
+            uxn: true,
+            gpu_access: true,
+        };
+        ram.put_u64(base, uat::encode_gptbat(0, root, root)[0]);
+        ram.put_u64(root, uat::encode_table(directory));
+        ram.put_u64(directory, uat::encode_table(leaves));
+        ram.put_u64(leaves, uat::encode_pte(page, &flags));
+        ram.put_u64(page, 0x1234_5678);
+        let before = ram.bytes.clone();
+        let mut uat = uat::Uat::new(40);
+        uat.configure(base).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        {
+            let mut view = uat.agent(uat::Agent::Firmware);
+            let mut port = Port {
+                iommu: &mut view,
+                stream: 0,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            for context in [uat::CONTEXTS, 255, 256, 257, 319, usize::MAX] {
+                let mut output = [0x5a; 8];
+                assert_eq!(
+                    Shared::gpu_read(&mut port, context, 0, &mut output),
+                    Err(DmaError::Unsupported("UAT context outside the TTBAT"))
+                );
+                assert_eq!(output, [0x5a; 8]);
+                assert_eq!(
+                    Shared::gpu_write(&mut port, context, 0, &[0xff; 8]),
+                    Err(DmaError::Unsupported("UAT context outside the TTBAT"))
+                );
+            }
+            // The same address is genuinely mapped for context 0. Invalid
+            // IDs must be rejected before inserting/removing the agent bit.
+            let mut output = [0; 8];
+            Shared::gpu_read(&mut port, 0, 0, &mut output).unwrap();
+            assert_eq!(u64::from_le_bytes(output), 0x1234_5678);
+        }
+        assert_eq!(ram.bytes, before);
+        assert_eq!(uat.last_fault(), None);
+    }
 
     /// Flat shared memory: firmware VA `base + n` is byte `n`.
     pub(crate) struct Flat {
