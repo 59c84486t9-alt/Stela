@@ -2280,6 +2280,8 @@ pub struct AesEngine {
     pub stream: u32,
 }
 
+pub type AnsQueueGeometry = ans::QueueGeometry;
+
 /// ANS2's DT placement. `reg[0]` is the ASC wrapper; `reg[3]` is the
 /// NVMe aperture. `iommu-parent` names SART itself, not a DART stream.
 /// J473AP: `IOCoastGuardSARTMapper::start` (kernel file 0x2ccada8),
@@ -2288,6 +2290,7 @@ pub struct AesEngine {
 /// (`ans::VDMA_CACHE_OFFSET`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnsController {
+    pub geometry: AnsQueueGeometry,
     pub wrapper: (u64, u64),
     pub nvme: (u64, u64),
     pub vdma: Option<(u64, u64)>,
@@ -2788,13 +2791,14 @@ fn ans_controller(
                 .into(),
         );
     }
-    // SPTM INIT compares the kernel's queue entries, MQES, with this
-    // property (`ans::QUEUE_ENTRIES`).
-    if node.property("nvme-linear-sq").is_none()
-        || node.first_u32("nvme-queue-entries") != Some(u32::from(ans::QUEUE_ENTRIES - 1))
-    {
-        return Err("ANS2 requires linear submission queues with MQES 64".into());
+    if node.property("nvme-linear-sq").is_none() {
+        return Err("ANS2 requires the modeled linear submission contract".into());
     }
+    let geometry = AnsQueueGeometry::linear(
+        node.first_u32("nvme-queue-entries")
+            .ok_or("ANS2 has no nvme-queue-entries handoff")?,
+    )
+    .map_err(String::from)?;
     if let Some(flag) = UNMODELED_ANS_SPTM
         .into_iter()
         .find(|flag| node.property(flag).is_some())
@@ -2848,7 +2852,7 @@ fn ans_controller(
     let nvme = place(&regs, 3, ans::REGISTER_BYTES)?;
     let vdma = node
         .property("nvme-vdma-wa")
-        .map(|_| place(&regs, 13, ans::VDMA_CACHE_OFFSET + ans::VDMA_CACHE_BYTES))
+        .map(|_| place(&regs, 13, ans::VDMA_CACHE_OFFSET + geometry.vdma_bytes()))
         .transpose()?;
     let sart = place(&sart_regs, 0, sart::REGISTER_BYTES)?;
     let power = place(&sart_regs, 2, 4)?;
@@ -2887,6 +2891,7 @@ fn ans_controller(
     )
     .map_err(String::from)?;
     Ok(Some(AnsController {
+        geometry,
         wrapper,
         nvme,
         vdma,
@@ -7474,5 +7479,42 @@ mod tests {
             cpus(0x8112, "Apple M2", &processors),
             Err("duplicate CPU affinity reg 0x0".into())
         );
+    }
+    #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_ANS_DT"]
+    fn original_j314s_ans_geometry_and_handoff_qualify_independently_of_whole_board() {
+        let data = std::fs::read(std::env::var("STELA_TEST_ANS_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset| {
+            ranges
+                .iter()
+                .find(|(child, _, size)| (*child..child + size).contains(&offset))
+                .map(|(child, parent, _)| parent + (offset - child))
+        };
+        let security = root
+            .child("defaults")
+            .unwrap()
+            .property("nvme-iboot-sptm-security")
+            .is_some();
+        let placement = ans_controller(&io, &translate, security).unwrap().unwrap();
+        assert_eq!(placement.geometry.handoff_entries(), 253);
+        assert_eq!(placement.geometry.ring_entries(), 254);
+        assert_eq!(placement.geometry.tag_slots(), 253);
+        assert_eq!(placement.interrupts, [1070, 1069, 1072, 1071]);
+        assert_eq!(placement.completion_irq, 1613);
+        assert_eq!(placement.clock_gates, [481]);
+        assert_eq!(placement.power_gates, [71]);
+        assert!(placement.sart_exclusive_bounds);
+        assert_eq!(placement.vdma, None);
+        assert_eq!(placement.sart_idle, placement.nvme.0 + 0x13e8);
+        assert_eq!(placement.namespaces.len(), 3);
+        assert_eq!(placement.namespaces[2].blocks, 32768);
+        assert!(!models(ASC, |_| None)); // No whole-board/other ASC admission.
     }
 }

@@ -990,10 +990,11 @@ impl AppleDevices {
         .map_err(String::from)?;
         // The placement requires the boot stage's NVMe security hand-off,
         // which leaves the controller in linear submission mode.
-        let controller = Ans::new(
+        let controller = Ans::with_geometry(
             backing,
             &placement.namespaces,
             Some(irq(placement.completion_irq)),
+            placement.geometry,
         )
         .map_err(String::from)?
         .handed_off_linear();
@@ -1036,7 +1037,7 @@ impl AppleDevices {
                 .map(
                     ans,
                     base + ans::VDMA_CACHE_OFFSET,
-                    ans::VDMA_CACHE_BYTES,
+                    placement.geometry.vdma_bytes(),
                     ans::VDMA_CACHE,
                 )
                 .map_err(|e| format!("ANS VDMA cache placement: {e:?}"))?;
@@ -4127,6 +4128,7 @@ mod tests {
         const RAM: u64 = 0x8_0000_0000;
         const SUPPLY: u64 = 0x2_3b70_0428;
         let placement = AnsController {
+            geometry: ans::QueueGeometry::DEFAULT,
             wrapper: (WRAPPER, 0x6c000),
             nvme: (NVME, 0x60000),
             vdma: Some((VDMA, 0x44000)),
