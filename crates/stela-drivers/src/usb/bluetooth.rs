@@ -31,6 +31,7 @@ mod firmware;
 mod host;
 mod initialization;
 pub mod intel;
+pub mod mediatek;
 pub mod realtek;
 
 pub use binding::{Binding, CLASS};
