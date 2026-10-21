@@ -129,7 +129,7 @@ fn encode(kind: PacketType, words: &[u32]) -> Result<Encoded, Error> {
     Ok(Encoded { kind, bytes })
 }
 
-fn crc32c(bytes: &[u8]) -> u32 {
+pub(super) fn crc32c(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for byte in bytes {
         crc ^= u32::from(*byte);

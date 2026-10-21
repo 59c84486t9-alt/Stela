@@ -8,5 +8,6 @@
 //! resources must be established by the native platform before ring takeover.
 //! Config-channel traffic alone grants neither tunnel authorization nor a
 //! working connection manager. No PCI ID is admitted by this initial core.
+pub mod channel;
 pub mod config;
 pub mod ring;
