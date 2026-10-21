@@ -1369,6 +1369,18 @@ mod tests {
     }
 
     #[test]
+    fn native_fixture_does_not_hide_a_real_guest_panic() {
+        assert_eq!(
+            first_guest_panic("CHECK native-dma PASS traffic\nGUEST| panic(cpu 0): failed\n"),
+            Some("panic(cpu 0): failed")
+        );
+        assert_eq!(
+            first_guest_panic("GUEST| panic handlers ready\nGUEST| panic flow initialized\n"),
+            None
+        );
+    }
+
+    #[test]
     fn native_dma_fixture_requires_exclusive_test_topology() {
         use clap::Parser;
         let parsed = crate::Cli::try_parse_from([
@@ -1384,10 +1396,19 @@ mod tests {
             panic!("boot run");
         };
         assert!(run.native_dma_check);
-        assert!(crate::Cli::try_parse_from([
-            "xtask", "boot", "run", "--output", "/tmp/native-dma",
-            "--native-dma-check", "--audio-check", "transport-playback"
-        ]).is_err());
+        assert!(
+            crate::Cli::try_parse_from([
+                "xtask",
+                "boot",
+                "run",
+                "--output",
+                "/tmp/native-dma",
+                "--native-dma-check",
+                "--audio-check",
+                "transport-playback"
+            ])
+            .is_err()
+        );
         assert!(
             crate::Cli::try_parse_from([
                 "xtask",
