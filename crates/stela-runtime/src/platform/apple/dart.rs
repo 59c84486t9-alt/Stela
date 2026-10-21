@@ -367,6 +367,11 @@ impl Dart {
         self
     }
 
+    /// Whether the paired capture view is already attached.
+    pub fn has_smmu(&self) -> bool {
+        self.smmu.is_some()
+    }
+
     /// Attach the view to an already placed TRAD. Returns false if already
     /// attached, so the machine can reject duplicate physical views. The
     /// device group's power, retention, quiesce and reset apply to both views.

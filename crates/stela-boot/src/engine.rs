@@ -1017,7 +1017,7 @@ fn devices<'f>(
             .map_err(|error| alloc::format!("DART placement: {error:?}"))?;
         if let Some((physical, bytes)) = dart.smmu {
             devices
-                .add_dart_smmu(Range { physical, bytes })
+                .add_dart_smmu(placed[0], Range { physical, bytes })
                 .map_err(|error| alloc::format!("DART SMMU placement: {error:?}"))?;
         }
         darts.push(placed);

@@ -1290,11 +1290,30 @@ impl AppleDevices {
         Ok(ids)
     }
 
-    /// A DART's SMMU instance block at `range` (`soc::Iommu::smmu`): present
-    /// so the driver maps it, every access refusing by name.
-    pub fn add_dart_smmu(&mut self, range: Range) -> Result<(), MapError> {
-        let device = self.bus.add(Box::new(dart::SmmuBlock));
-        self.bus.map(device, range.physical, range.bytes, 0)
+    /// Map the capture view of an existing DART, sharing its lifecycle.
+    /// Validate and map before attaching so a failed placement changes neither
+    /// the device's capabilities nor the physical address map.
+    pub fn add_dart_smmu(&mut self, dart: DartId, range: Range) -> Result<(), String> {
+        if range.bytes != dart::SMMU_BYTES || !range.physical.is_multiple_of(dart::SMMU_BYTES) {
+            return Err("DART SMMU range must be one aligned 16 KiB aperture".into());
+        }
+        let model = self
+            .bus
+            .device::<Dart>(dart.0)
+            .ok_or("DART SMMU owner is not a DART")?;
+        if model.has_smmu() {
+            return Err("DART already has a paired SMMU view".into());
+        }
+        self.bus
+            .map(dart.0, range.physical, range.bytes, dart::SMMU_OFFSET)
+            .map_err(|error| format!("DART SMMU mapping: {error:?}"))?;
+        let attached = self
+            .bus
+            .device_mut::<Dart>(dart.0)
+            .expect("validated DART owner remains present")
+            .enable_smmu();
+        debug_assert!(attached);
+        Ok(())
     }
 
     /// A `dart,t8110` of `streams` streams at `range`.
@@ -2446,6 +2465,120 @@ mod tests {
             assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(u64::from(retention)));
             assert!(d.connect_dart_power(dart, &[supply + 4], false).is_err());
         }
+    }
+
+    #[test]
+    fn paired_smmu_shares_dart_power_and_reset() {
+        let mut d = AppleDevices::new();
+        let supply = 0x2_3b70_0100;
+        let base = 0x2_3500_4000;
+        let smmu = 0x2_7130_0000;
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &[supply],
+        )
+        .unwrap();
+        let owner = d
+            .add_dart(
+                Range {
+                    physical: base,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        d.add_dart_smmu(
+            owner,
+            Range {
+                physical: smmu,
+                bytes: dart::SMMU_BYTES,
+            },
+        )
+        .unwrap();
+        d.connect_dart_power(owner, &[supply], false).unwrap();
+        assert_eq!(d.read(0, smmu, 4, 0), Ok(0));
+        assert!(d.read(0, smmu, 8, 0).is_err());
+        assert!(d.read(0, smmu + 0x2000, 4, 0).is_err());
+        d.write(0, supply, 4, 0, 0).unwrap();
+        assert!(d.read(0, base, 4, 0).is_err());
+        assert!(d.read(0, smmu, 4, 0).is_err());
+        d.write(0, supply, 4, 15, 0).unwrap();
+        assert_eq!(d.read(0, smmu, 4, 0), Ok(0));
+        for reset in [true, false] {
+            let mut access = Access::new(0, 0, &mut d.latch);
+            d.bus
+                .device_mut::<Dart>(owner.0)
+                .unwrap()
+                .set_reset(reset, &mut access);
+            assert_eq!(d.read(0, smmu, 4, 0).is_err(), reset);
+            assert_eq!(d.read(0, base, 4, 0).is_err(), reset);
+        }
+    }
+
+    #[test]
+    fn failed_smmu_placement_does_not_attach_or_publish_a_view() {
+        let mut d = AppleDevices::new();
+        let base = 0x2_3500_4000;
+        let smmu = 0x2_7130_0000;
+        let owner = d
+            .add_dart(
+                Range {
+                    physical: base,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        for range in [
+            Range {
+                physical: smmu + 4,
+                bytes: dart::SMMU_BYTES,
+            },
+            Range {
+                physical: smmu,
+                bytes: dart::SMMU_BYTES / 2,
+            },
+            Range {
+                physical: base,
+                bytes: dart::SMMU_BYTES,
+            },
+            Range {
+                physical: u64::MAX & !(dart::SMMU_BYTES - 1),
+                bytes: dart::SMMU_BYTES,
+            },
+        ] {
+            assert!(d.add_dart_smmu(owner, range).is_err());
+            assert!(!d.bus.device::<Dart>(owner.0).unwrap().has_smmu());
+            assert!(d.read(0, smmu, 4, 0).is_err());
+        }
+        d.add_dart_smmu(
+            owner,
+            Range {
+                physical: smmu,
+                bytes: dart::SMMU_BYTES,
+            },
+        )
+        .unwrap();
+        let other = smmu + dart::SMMU_BYTES;
+        assert!(
+            d.add_dart_smmu(
+                owner,
+                Range {
+                    physical: other,
+                    bytes: dart::SMMU_BYTES
+                }
+            )
+            .is_err()
+        );
+        assert_eq!(d.read(0, smmu, 4, 0), Ok(0));
+        assert!(d.read(0, other, 4, 0).is_err());
     }
 
     #[test]
