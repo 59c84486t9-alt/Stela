@@ -65,6 +65,11 @@ pub(super) fn stream_base(index: u8) -> usize {
 /// Native access widths matter: SD_CTL occupies three bytes and the fourth
 /// byte is W1C status. Never implement byte writes through a dword RMW.
 pub trait Registers {
+    /// Bytes actually mapped by this register implementation. The conventional
+    /// contract already requires 0x440; extended capabilities need exact bounds.
+    fn region_bytes(&self) -> usize {
+        0x440
+    }
     /// Generic mappings cannot perform an identity-required native PCI reset.
     fn validate_config(&self, config: &Config) -> Result<(), Error> {
         if config.reset_policy != ResetPolicy::Generic {
@@ -85,6 +90,7 @@ pub trait Registers {
 
 pub struct MmioRegisters {
     mmio: Mmio,
+    bytes: usize,
 }
 
 impl MmioRegisters {
@@ -98,13 +104,18 @@ impl MmioRegisters {
         if base == 0 || base & 0x7f != 0 || bytes < 0x440 || base.checked_add(bytes).is_none() {
             return Err(Error::InvalidConfiguration);
         }
+        let bytes = usize::try_from(bytes).map_err(|_| Error::InvalidConfiguration)?;
         Ok(Self {
+            bytes,
             mmio: unsafe { Mmio::new(base) },
         })
     }
 }
 
 impl Registers for MmioRegisters {
+    fn region_bytes(&self) -> usize {
+        self.bytes
+    }
     fn read8(&mut self, offset: usize) -> u8 {
         self.mmio.read8(offset)
     }

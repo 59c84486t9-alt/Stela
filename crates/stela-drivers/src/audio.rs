@@ -79,6 +79,8 @@ pub enum Phase {
     StreamResetExit,
     StreamStart,
     CodecPower,
+    LinkPowerDown,
+    LinkPowerUp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +97,25 @@ pub enum Error {
         minor: u8,
     },
     UnsupportedRingSize,
+    InvalidExtendedCapability {
+        offset: usize,
+    },
+    UnsupportedExtendedCapability {
+        id: u16,
+        version: u8,
+    },
+    ProcessingOwned {
+        offset: usize,
+    },
+    UnsupportedLink {
+        offset: usize,
+    },
+    LinkPowerUncertain {
+        offset: usize,
+    },
+    LinkClockRejected {
+        offset: usize,
+    },
     UnsupportedTopology,
     InvalidVerb,
     CodecAbsent,

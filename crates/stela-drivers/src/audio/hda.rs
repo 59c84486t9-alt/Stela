@@ -21,6 +21,8 @@ use crate::bus::{
 };
 
 mod codec;
+mod extended;
+pub use extended::LinkClock;
 mod lifecycle;
 pub mod pci;
 mod registers;
@@ -126,6 +128,7 @@ pub struct Controller<R, T> {
     token: ControllerToken,
     lifecycle_failed: bool,
     discovery_ready: bool,
+    extended: Option<extended::ExtendedCapabilities>,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -182,6 +185,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         if total == 0 || total > 30 {
             return Err(Error::UnsupportedTopology);
         }
+        let extended = if config.reset_policy == ResetPolicy::IntelClockGate {
+            Some(extended::inspect(&mut registers, total)?)
+        } else {
+            None
+        };
         // Allocations remain alive if hardware refuses to stop on an error.
         let corb = allocator
             .allocate(1024, 128)
@@ -206,6 +214,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             },
             lifecycle_failed: false,
             discovery_ready: false,
+            extended,
             corb,
             rirb,
             corb_entries: 0,
@@ -271,6 +280,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn initialize(&mut self) -> Result<(), Error> {
+        self.refresh_extended()?;
         self.registers.write32(INTCTL, 0);
         self.registers.write16(WAKEEN, 0);
         for index in 0..self.streams.len() as u8 {
@@ -290,7 +300,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         let reset = self.initialize_link();
         let cleanup = self.registers.reset_clock_gate(true);
-        cleanup.and(reset)
+        cleanup?;
+        reset?;
+        self.refresh_extended()?;
+        self.configure_extended_link()
     }
 
     fn initialize_link(&mut self) -> Result<(), Error> {
@@ -468,6 +481,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// Stop every stream and both command engines. Failure retains ownership:
     /// DMA memory cannot be repurposed and the platform must reset the device.
     pub fn shutdown(&mut self) -> Result<(), Error> {
+        if let Err(error) = self.refresh_extended() {
+            self.lifecycle_failed = true;
+            self.command_poisoned = true;
+            for stream in self.streams.iter_mut().flatten() {
+                stream.poisoned = true;
+            }
+            return Err(error);
+        }
         self.registers.write32(INTCTL, 0);
         let mut error = None;
         for index in 0..self.streams.len() as u8 {
@@ -577,7 +598,13 @@ mod tests {
         extra: u32,
     }
     struct Model {
-        bytes: [u8; 0x440],
+        bytes: Vec<u8>,
+        link_controls: Vec<usize>,
+        link_down_stuck: bool,
+        link_up_stuck: bool,
+        reject_link_clock: bool,
+        link_clock_lost_on_power_up: bool,
+        link_reads: BTreeMap<usize, usize>,
         clock: ModelClock,
         hardware_delay: u64,
         consume_delay: u64,
@@ -611,6 +638,7 @@ mod tests {
         control_read_failure: Option<(usize, usize)>,
         control_failure_after_write: Option<(usize, u32, usize)>,
         control_failure_active: bool,
+        control_failed_reads: usize,
         binding_read_failure: bool,
         commands: Vec<u32>,
         constant_reply: Option<u32>,
@@ -639,7 +667,13 @@ mod tests {
         fn new(entries: u16) -> Rc<RefCell<Self>> {
             let clock = ModelClock(Rc::new(Cell::new(0)));
             let mut model = Self {
-                bytes: [0; 0x440],
+                bytes: vec![0; 0x440],
+                link_controls: Vec::new(),
+                link_down_stuck: false,
+                link_up_stuck: false,
+                reject_link_clock: false,
+                link_clock_lost_on_power_up: false,
+                link_reads: BTreeMap::new(),
                 clock,
                 hardware_delay: 2,
                 consume_delay: 2,
@@ -673,6 +707,7 @@ mod tests {
                 control_read_failure: None,
                 control_failure_after_write: None,
                 control_failure_active: false,
+                control_failed_reads: 0,
                 binding_read_failure: false,
                 commands: Vec::new(),
                 constant_reply: Some(0x1234_abcd),
@@ -744,7 +779,12 @@ mod tests {
                 }
                 let event = self.events.remove(index);
                 let was_reset = self.get(GCTL, 4) & GCTL_RESET == 0;
-                self.set(event.offset, event.value, event.bytes);
+                let event_value = if self.link_controls.contains(&event.offset) {
+                    (self.get(event.offset, 4) & !(1 << 23)) | (event.value & (1 << 23))
+                } else {
+                    event.value
+                };
+                self.set(event.offset, event_value, event.bytes);
                 if event.offset == GCTL && event.value & GCTL_RESET == 0 {
                     self.replies.clear(); // Link reset discards in-flight codec responses.
                 }
@@ -975,6 +1015,40 @@ mod tests {
                 }
                 return;
             }
+            if self.link_controls.contains(&offset) {
+                assert_eq!(bytes, 4);
+                let old = self.get(offset, 4);
+                let mut stored = (value & !(1 << 23)) | (old & (1 << 23));
+                if value & 15 != old & 15 {
+                    assert_eq!(
+                        old & ((1 << 16) | (1 << 23)),
+                        0,
+                        "SCF changed before link acknowledged off"
+                    );
+                    if self.reject_link_clock {
+                        stored = (stored & !15) | (old & 15);
+                    }
+                }
+                if value & (1 << 16) != 0 && self.link_clock_lost_on_power_up {
+                    stored &= !15;
+                }
+                self.set(offset, stored, 4);
+                if !(value & (1 << 16) == 0 && self.link_down_stuck
+                    || value & (1 << 16) != 0 && self.link_up_stuck)
+                {
+                    self.events.push(Event {
+                        due: self.clock.now_us() + self.hardware_delay,
+                        offset,
+                        value: if value & (1 << 16) != 0 {
+                            stored | (1 << 23)
+                        } else {
+                            stored & !(1 << 23)
+                        },
+                        bytes: 4,
+                    });
+                }
+                return;
+            }
             if offset == GCTL {
                 if let Some(gate) = &self.reset_gate {
                     assert!(
@@ -1101,6 +1175,9 @@ mod tests {
     #[derive(Clone)]
     struct ModelRegisters(Rc<RefCell<Model>>);
     impl Registers for ModelRegisters {
+        fn region_bytes(&self) -> usize {
+            self.0.borrow().bytes.len()
+        }
         fn read8(&mut self, offset: usize) -> u8 {
             let mut m = self.0.borrow_mut();
             m.reads += 1;
@@ -1123,9 +1200,13 @@ mod tests {
         }
         fn read32(&mut self, offset: usize) -> u32 {
             let mut m = self.0.borrow_mut();
+            if m.link_controls.contains(&offset) {
+                *m.link_reads.entry(offset).or_default() += 1;
+            }
             m.reads += 1;
             m.advance();
             if m.control_failure_active && m.control_read_failure == Some((offset, 4)) {
+                m.control_failed_reads += 1;
                 return u32::MAX;
             }
             m.get(offset, 4)
@@ -1233,6 +1314,31 @@ mod tests {
         .unwrap();
         (function, state)
     }
+    fn extended_model() -> Rc<RefCell<Model>> {
+        let model = graph_model();
+        {
+            let mut m = model.borrow_mut();
+            m.bytes.resize(0x2000, 0);
+            m.set(0x14, 0x500, 2);
+            for (offset, value) in [
+                (0x500, 0x1001_0800), //GTS ->PP, one known global counter unit.
+                (0x800, 0x1003_0c00), //PP ->ML.
+                (0xc00, 0x1002_0700), //ML ->SPB.
+                (0xc04, 1),           //Two conventional HDA links.
+                (0xc40, 0x3f),
+                (0xc44, (1 << 16) | (1 << 23)), //First link6MHz.
+                (0xc80, 0x3f),
+                (0xc84, 3 | (1 << 16) | (1 << 23)), //Second48MHz untouched.
+                (0x700, 0x1004_1000),               //SPB ->DRSM.
+                (0x1000, 0x1005_0000),
+            ] {
+                m.set(offset, value, 4);
+            }
+            m.link_controls = vec![0xc44, 0xc84];
+        }
+        model
+    }
+
     fn modern_config() -> Config {
         Config {
             reset_policy: ResetPolicy::IntelClockGate,
@@ -1441,6 +1547,311 @@ mod tests {
             model.borrow_mut().stream_stop_stuck = false;
             controller.reinitialize().unwrap();
             controller.verb(verb()).unwrap();
+        }
+    }
+
+    #[test]
+    fn extended_link_prefers_supported_clocks_and_preserves_other_link_and_capability_state() {
+        for (frequencies, expected) in [
+            (0x3f, 2u8),
+            (0x3b, 3),
+            (0x33, 1),
+            (0x31, 4),
+            (0x21, 5),
+            (1, 0),
+        ] {
+            for initially_on in [false, true] {
+                let mut fixture = Fixture::new();
+                let model = extended_model();
+                model.borrow_mut().set(0xc40, frequencies, 4);
+                model.borrow_mut().set(
+                    0xc44,
+                    if initially_on {
+                        (1 << 16) | (1 << 23)
+                    } else {
+                        0
+                    },
+                    4,
+                );
+                let (mut function, state) = reset_pci(&model);
+                let prepared = pci::tests::modern_prepared_model(function.address);
+                let registers = unsafe {
+                    prepared.bind_registers(&mut function, ModelRegisters(model.clone()))
+                }
+                .unwrap();
+                let timer = model.borrow().clock.clone();
+                let mut controller = unsafe {
+                    Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+                }
+                .unwrap();
+                assert_eq!(
+                    controller.link_clock(),
+                    Ok(Some(LinkClock {
+                        encoding: expected,
+                        mhz: 6u16 << expected
+                    }))
+                );
+                assert_eq!(model.borrow().get(0xc44, 4) & 15, u32::from(expected));
+                assert_eq!(
+                    model.borrow().get(0xc44, 4) & ((1 << 16) | (1 << 23)),
+                    (1 << 16) | (1 << 23)
+                );
+                assert_eq!(model.borrow().get(0xc84, 4), 3 | (1 << 16) | (1 << 23));
+                assert!(
+                    !model
+                        .borrow()
+                        .writes
+                        .iter()
+                        .any(|(offset, _, _)| matches!(*offset, 0xc84 | 0x804 | 0x704 | 0x1004))
+                );
+                assert_eq!(state.borrow().writes.len(), 2);
+                controller.reinitialize().unwrap();
+                assert_eq!(controller.link_clock().unwrap().unwrap().encoding, expected);
+                controller.verb(verb()).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn extended_preflight_refuses_active_processing_malformed_bodies_and_unmapped_caps_before_dma_or_writes()
+     {
+        for variant in 0..17 {
+            let mut fixture = Fixture::new();
+            let model = extended_model();
+            match variant {
+                0 => model.borrow_mut().set(0x804, 1 << 30, 4),
+                1 => model.borrow_mut().set(0x804, 1, 4),
+                2 => model.borrow_mut().set(0x704, 1, 4),
+                3 => model.borrow_mut().set(0x1004, 1, 4),
+                4 => model.borrow_mut().set(0x14, 0x501, 2),
+                5 => model.borrow_mut().set(0x14, 0x40, 2),
+                6 => model.borrow_mut().set(0x1000, 0x1005_5000, 4),
+                7 => model.borrow_mut().set(0x1000, 0x1005_0804, 4), //Back edge into PP body.
+                8 => model.borrow_mut().set(0xc04, u32::MAX, 4),
+                9 => model.borrow_mut().set(0xc40, (1 << 28) | 0x3f, 4),
+                10 => model.borrow_mut().set(0xc40, 0, 4),
+                11 => model.borrow_mut().set(0x500, 0x1006_0800, 4),
+                12 => model.borrow_mut().set(0x500, 0x2001_0800, 4),
+                13 => model.borrow_mut().set(0x804, u32::MAX, 4),
+                14 => model.borrow_mut().set(0x1000, 0x1005_0700, 4), //Repeated SPB.
+                15 => model.borrow_mut().bytes.truncate(0xc60),
+                _ => model.borrow_mut().set(0x504, 1, 4), //Undecoded GTS geometry.
+            }
+            let (mut function, state) = reset_pci(&model);
+            let prepared = pci::tests::modern_prepared_model(function.address);
+            let registers =
+                unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
+                    .unwrap();
+            let timer = model.borrow().clock.clone();
+            let remaining = fixture.allocator.remaining();
+            assert!(
+                unsafe {
+                    Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+                }
+                .is_err(),
+                "variant {variant}"
+            );
+            assert_eq!(
+                fixture.allocator.remaining(),
+                remaining,
+                "variant {variant}"
+            );
+            assert!(model.borrow().writes.is_empty(), "variant {variant}");
+            assert!(state.borrow().writes.is_empty(), "variant {variant}");
+        }
+    }
+
+    #[test]
+    fn extended_link_power_clock_and_failed_reads_refuse_constructor_and_attempt_link_restore() {
+        for variant in 0..9 {
+            let mut fixture = Fixture::new();
+            let model = extended_model();
+            match variant {
+                0 => model.borrow_mut().link_down_stuck = true,
+                1 => model.borrow_mut().link_up_stuck = true,
+                2 => model.borrow_mut().reject_link_clock = true,
+                3 => model.borrow_mut().set(0xc44, 1 << 16, 4),
+                4 => model.borrow_mut().set(0xc44, 7 | (1 << 16) | (1 << 23), 4),
+                5 => {
+                    let mut m = model.borrow_mut();
+                    m.control_failure_after_write = Some((0xc44, 2, 4));
+                    m.control_read_failure = Some((0xc44, 4));
+                }
+                6 => model.borrow_mut().link_clock_lost_on_power_up = true,
+                7 => {
+                    let mut m = model.borrow_mut();
+                    m.set(0xc40, 4, 4);
+                    m.set(0xc44, 3 | (1 << 16) | (1 << 23), 4);
+                }
+                _ => {
+                    let mut m = model.borrow_mut();
+                    m.control_failure_after_write = Some((0xc44, 0x10002, 4));
+                    m.control_read_failure = Some((0xc44, 4));
+                }
+            }
+            let (mut function, _state) = reset_pci(&model);
+            let prepared = pci::tests::modern_prepared_model(function.address);
+            let registers =
+                unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
+                    .unwrap();
+            let timer = model.borrow().clock.clone();
+            let result = unsafe {
+                Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+            };
+            let error = match result {
+                Err(error) => error,
+                Ok(_) => panic!("variant {variant} succeeded"),
+            };
+            assert_eq!(
+                error,
+                match variant {
+                    0 => Error::Timeout(Phase::LinkPowerDown),
+                    1 => Error::Timeout(Phase::LinkPowerUp),
+                    2 | 6 => Error::LinkClockRejected { offset: 0xc44 },
+                    3 => Error::LinkPowerUncertain { offset: 0xc44 },
+                    4 | 7 => Error::UnsupportedLink { offset: 0xc44 },
+                    _ => Error::RegisterUnavailable { offset: 0xc44 },
+                }
+            );
+            assert!(model.borrow().commands.is_empty());
+            assert_eq!(model.borrow().get(CORBCTL, 1) & u32::from(COMMAND_RUN), 0);
+            assert_eq!(model.borrow().get(RIRBCTL, 1) & u32::from(COMMAND_RUN), 0);
+            if variant == 1 {
+                assert!(
+                    model
+                        .borrow()
+                        .writes
+                        .iter()
+                        .filter(|(offset, value, _)| *offset == 0xc44 && value & (1 << 16) != 0)
+                        .count()
+                        >= 2
+                );
+            }
+            if variant == 5 || variant == 8 {
+                assert!(model.borrow().control_failed_reads >= 2);
+            }
+            if variant == 0 || variant == 1 || variant == 2 {
+                assert!(
+                    model
+                        .borrow()
+                        .writes
+                        .iter()
+                        .any(|(offset, value, _)| *offset == 0xc44 && value & (1 << 16) != 0)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn processing_ownership_change_refuses_reset_and_shutdown_without_touching_active_dsp_or_retiring_dma()
+     {
+        let mut fixture = Fixture::new();
+        let model = extended_model();
+        let (mut function, state) = reset_pci(&model);
+        let prepared = pci::tests::modern_prepared_model(function.address);
+        let registers =
+            unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
+                .unwrap();
+        let timer = model.borrow().clock.clone();
+        let mut controller =
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, modern_config()) }
+                .unwrap();
+        let id = controller
+            .allocate_stream(Direction::Playback, pcm(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        controller.start(id).unwrap();
+        model.borrow_mut().set(0x804, 1 << 30, 4);
+        let generation = controller.token;
+        let writes = model.borrow().writes.len();
+        let pci_writes = state.borrow().writes.len();
+        assert_eq!(
+            controller.reinitialize(),
+            Err(Error::ProcessingOwned { offset: 0x804 })
+        );
+        assert_eq!(
+            controller.shutdown(),
+            Err(Error::ProcessingOwned { offset: 0x804 })
+        );
+        assert_eq!(model.borrow().writes.len(), writes);
+        assert_eq!(state.borrow().writes.len(), pci_writes);
+        assert_eq!(controller.token, generation);
+        assert!(controller.streams[usize::from(id.descriptor_index())].is_some());
+        assert_eq!(controller.link_clock(), Err(Error::NeedsReset));
+        assert_eq!(controller.write_pcm(id, 0, &[1]), Err(Error::NeedsReset));
+        assert_ne!(
+            model
+                .borrow()
+                .get(stream_base(id.descriptor_index()) + SD_CTL, 1)
+                & u32::from(SD_RUN),
+            0
+        );
+    }
+
+    #[test]
+    fn configured_nonzero_link_clock_is_preserved_and_failed_reinitialization_never_exposes_stale_clock_metadata()
+     {
+        for initially_on in [false, true] {
+            let mut fixture = Fixture::new();
+            let model = extended_model();
+            model.borrow_mut().set(
+                0xc44,
+                3 | if initially_on {
+                    (1 << 16) | (1 << 23)
+                } else {
+                    0
+                },
+                4,
+            );
+            let (mut function, _state) = reset_pci(&model);
+            let prepared = pci::tests::modern_prepared_model(function.address);
+            let registers =
+                unsafe { prepared.bind_registers(&mut function, ModelRegisters(model.clone())) }
+                    .unwrap();
+            let timer = model.borrow().clock.clone();
+            let mut controller = unsafe {
+                Controller::new(registers, timer, &mut fixture.allocator, modern_config())
+            }
+            .unwrap();
+            assert_eq!(
+                controller.link_clock(),
+                Ok(Some(LinkClock {
+                    encoding: 3,
+                    mhz: 48
+                }))
+            );
+            assert_eq!(
+                model
+                    .borrow()
+                    .writes
+                    .iter()
+                    .filter(|(offset, _, _)| *offset == 0xc44)
+                    .count(),
+                usize::from(!initially_on)
+            );
+            let id = controller
+                .allocate_stream(Direction::Playback, pcm(), 128, 2, &mut fixture.allocator)
+                .unwrap();
+            controller.start(id).unwrap();
+            let remaining = fixture.allocator.remaining();
+            model.borrow_mut().set(0xc44, (1 << 16) | (1 << 23), 4);
+            model.borrow_mut().reject_link_clock = true;
+            assert_eq!(
+                controller.reinitialize(),
+                Err(Error::LinkClockRejected { offset: 0xc44 })
+            );
+            assert_eq!(controller.link_clock(), Err(Error::NeedsReset));
+            assert_eq!(controller.start(id), Err(Error::InvalidStream));
+            assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+            assert_eq!(fixture.allocator.remaining(), remaining);
+            model.borrow_mut().reject_link_clock = false;
+            controller.reinitialize().unwrap();
+            assert_eq!(
+                controller.link_clock(),
+                Ok(Some(LinkClock {
+                    encoding: 2,
+                    mhz: 24
+                }))
+            );
         }
     }
 

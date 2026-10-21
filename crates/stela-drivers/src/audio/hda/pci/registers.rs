@@ -21,6 +21,7 @@ pub struct PciRegisters<'a, R, C> {
     identity: Identity,
     address: Address,
     base: u64,
+    bytes: usize,
 }
 
 fn associated<C: ConfigSpace>(
@@ -52,6 +53,12 @@ impl Prepared {
         function: &'a mut Function<C>,
         inner: R,
     ) -> Result<PciRegisters<'a, R, C>, AttachError> {
+        if inner.region_bytes()
+            > usize::try_from(self.bytes).map_err(|_| AttachError::InvalidBar)?
+            || inner.region_bytes() < 0x440
+        {
+            return Err(AttachError::InvalidBar);
+        }
         if !associated(function, self.address, self.identity, self.base) {
             return Err(AttachError::IdentityChanged);
         }
@@ -61,6 +68,7 @@ impl Prepared {
             identity: self.identity,
             address: self.address,
             base: self.base,
+            bytes: self.bytes as usize,
         })
     }
 
@@ -80,6 +88,9 @@ impl Prepared {
 }
 
 impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
+    fn region_bytes(&self) -> usize {
+        self.inner.region_bytes().min(self.bytes)
+    }
     fn validate_config(&self, config: &Config) -> Result<(), Error> {
         let required = self.identity;
         if config.reset_policy != required.reset_policy
