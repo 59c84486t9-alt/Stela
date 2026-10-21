@@ -164,14 +164,17 @@ pub fn decode(received: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
                 break;
             }
             let start = usize::from(index);
-            let frame = usize::from(size)
+            // The advertised length includes the CRC. Validate that complete
+            // datagram before stripping it; a present payload does not make a
+            // truncated CRC a well-formed transfer block.
+            let datagram = block
+                .get(start..start + usize::from(size))
+                .ok_or("datagram past the NTB's end")?;
+            let frame = datagram
+                .len()
                 .checked_sub(crc)
                 .ok_or("datagram shorter than its CRC")?;
-            datagrams.push(
-                block
-                    .get(start..start + frame)
-                    .ok_or("datagram past the NTB's end")?,
-            );
+            datagrams.push(&datagram[..frame]);
         }
         table = next;
     }
@@ -252,5 +255,28 @@ mod tests {
         looped[18..20].copy_from_slice(&12u16.to_le_bytes());
         assert!(decode(&looped).is_err());
         assert!(decode(b"NCMX").is_err());
+    }
+
+    #[test]
+    fn crc_bytes_must_fit_inside_the_declared_block_and_transfer() {
+        let p = Parameters::parse(&parameters(1, 0, 4)).unwrap();
+        let mut block = p.encode(1, &[0xab; 16]).unwrap();
+        assert_eq!(block.len(), 44);
+        block[12..16].copy_from_slice(b"NCM1");
+        // All 16 payload bytes fit, but none of the advertised CRC does.
+        block[22..24].copy_from_slice(&20u16.to_le_bytes());
+        for trailing in 0..=CRC_BYTES {
+            let mut transfer = block.clone();
+            transfer.extend_from_slice(&[0xcc; CRC_BYTES][..trailing]);
+            // Extra transfer padding is outside wBlockLength.
+            assert!(decode(&transfer).is_err());
+            let length = transfer.len() as u16;
+            transfer[8..10].copy_from_slice(&length.to_le_bytes());
+            if trailing == CRC_BYTES {
+                assert_eq!(decode(&transfer).unwrap(), [&[0xab; 16][..]]);
+            } else {
+                assert!(decode(&transfer).is_err());
+            }
+        }
     }
 }

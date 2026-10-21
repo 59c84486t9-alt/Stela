@@ -2422,6 +2422,8 @@ pub(crate) mod tests {
         configuration_value: u8,
         configuration_seen_before_endpoints: Vec<u8>,
         short_control_out: bool,
+        control_replies: alloc::collections::VecDeque<([u8; 8], Vec<u8>)>,
+        short_bulk_out: bool,
         ethernet: Option<ethernet::rtl815x::tests::Model>,
         ethernet_upload: Option<ethernet::rtl815x::FirmwareModel>,
     }
@@ -2629,6 +2631,21 @@ pub(crate) mod tests {
                             );
                         }
                     }
+                    if request[0] == 0xa1 && !self.control_replies.is_empty() {
+                        let (expected, reply) = self.control_replies.pop_front().unwrap();
+                        assert_eq!(request, expected);
+                        received = reply.len();
+                        assert!(received <= length);
+                        // SAFETY: this synchronous device reply fits the live
+                        // Data TRB allocation, retained through completion.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                reply.as_ptr(),
+                                buffer as *mut u8,
+                                received,
+                            );
+                        }
+                    }
                     if request[1] == 5
                         && matches!(request[0], 0xc0 | 0x40)
                         && (self.ethernet.is_some() || self.ethernet_upload.is_some())
@@ -2708,7 +2725,14 @@ pub(crate) mod tests {
                     if self.silence_transfer == Some(dci) {
                         self.active[dci] = Some((at, parameter, length));
                     } else {
-                        self.event(at, SUCCESS, TRANSFER_EVENT, dci as u8, 0);
+                        let short = self.short_bulk_out && length != 0;
+                        self.event(
+                            at,
+                            if short { SHORT_PACKET } else { SUCCESS },
+                            TRANSFER_EVENT,
+                            dci as u8,
+                            usize::from(short),
+                        );
                     }
                 } else {
                     self.active[dci] = Some((at, parameter, length));
@@ -2788,6 +2812,8 @@ pub(crate) mod tests {
             configuration_value: 0,
             configuration_seen_before_endpoints: Vec::new(),
             short_control_out: false,
+            control_replies: Default::default(),
+            short_bulk_out: false,
             ethernet: None,
             ethernet_upload: None,
         }));
@@ -2829,6 +2855,209 @@ pub(crate) mod tests {
         controller.configure(1, &endpoints, None, dma).unwrap();
         model.borrow_mut().seen.clear();
         (controller, model)
+    }
+
+    fn cdc_device(ncm: Option<u8>) -> Device {
+        let mut bytes = configuration::tests::ecm(42);
+        if let Some(capabilities) = ncm {
+            bytes[15] = cdc::NCM;
+            bytes.splice(18..18, [6, 0x24, 0x1a, 0, 1, capabilities]);
+        }
+        let mut at = 0;
+        while at < bytes.len() {
+            let length = usize::from(bytes[at]);
+            if bytes[at + 1] == ENDPOINT_DESCRIPTOR {
+                // Reuse the model's actual event/ACL receive queues as the
+                // CDC notification and data endpoints, respectively.
+                if bytes[at + 3] & 3 == 3 {
+                    bytes[at + 2] = 0x81;
+                } else if bytes[at + 2] & 0x80 != 0 {
+                    bytes[at + 2] = 0x82;
+                }
+            }
+            at += length;
+        }
+        let total = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&total.to_le_bytes());
+        configuration::validate(&bytes).unwrap();
+        let mut device = configuration::tests::device(vec![bytes]);
+        configuration::select(&mut device).unwrap();
+        device
+    }
+
+    fn cdc_mac_descriptor() -> Vec<u8> {
+        let mut bytes = vec![26, STRING_DESCRIPTOR];
+        for unit in "025354000001".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn ncm_parameters() -> Vec<u8> {
+        let mut bytes = vec![0; 28];
+        bytes[..2].copy_from_slice(&28u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&1u16.to_le_bytes());
+        bytes[4..8].copy_from_slice(&32768u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&2048u32.to_le_bytes());
+        bytes[20..22].copy_from_slice(&8u16.to_le_bytes());
+        bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+        bytes[24..26].copy_from_slice(&8u16.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn cdc_short_bulk_out_is_an_error_and_never_sends_a_terminating_zlp() {
+        use crate::net::Link;
+        for ncm in [None, Some(1)] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all modeled controller/class DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            if ncm.is_some() {
+                model
+                    .borrow_mut()
+                    .control_replies
+                    .push_back((setup(0xa1, 0x80, 0, 0, 28), ncm_parameters()));
+            }
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, cdc_device(ncm), &mut dma, &mut found);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.links.len(), 1);
+            let link = &mut found.links[0];
+            let frame = vec![0x5a; if ncm.is_some() { 30 } else { 64 }];
+            model.borrow_mut().short_bulk_out = true;
+            assert!(link.transmit(&frame).is_err());
+            assert_eq!(model.borrow().outgoing.len(), 1);
+            assert_eq!(model.borrow().outgoing[0].len(), 64);
+            model.borrow_mut().short_bulk_out = false;
+            link.transmit(&frame).unwrap();
+            assert_eq!(model.borrow().outgoing.len(), 3);
+            assert_eq!(model.borrow().outgoing[1].len(), 64);
+            assert!(model.borrow().outgoing[2].is_empty());
+        }
+    }
+
+    #[test]
+    fn ncm_binding_negotiates_before_alt_setting_and_moves_real_transfer_blocks() {
+        use crate::net::{Link, Mac};
+        for capabilities in [0, 1, 0x20, 0x21] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all modeled controller/class DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            model
+                .borrow_mut()
+                .control_replies
+                .push_back((setup(0xa1, 0x80, 0, 0, 28), ncm_parameters()));
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(
+                &shared,
+                cdc_device(Some(capabilities)),
+                &mut dma,
+                &mut found,
+            );
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.links.len(), 1);
+            let mut expected = vec![
+                setup(0, SET_CONFIGURATION, 42, 0, 0),
+                setup(0x80, GET_DESCRIPTOR, 0x301, LANGUAGE_EN_US, 255),
+                setup(0xa1, 0x80, 0, 0, 28),
+                setup(
+                    0x21,
+                    0x86,
+                    0,
+                    0,
+                    if capabilities & 0x20 != 0 { 8 } else { 4 },
+                ),
+                setup(1, SET_INTERFACE, 3, 1, 0),
+            ];
+            if capabilities & 1 != 0 {
+                expected.push(setup(0x21, 0x43, 0x0e, 0, 0));
+            }
+            assert_eq!(
+                model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .map(|(request, _)| *request)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(model.borrow().control_replies.is_empty());
+            let mut size = 16384u32.to_le_bytes().to_vec();
+            if capabilities & 0x20 != 0 {
+                size.extend_from_slice(&[0; 4]);
+            }
+            assert_eq!(model.borrow().setup[3].1, size);
+            let link = &mut found.links[0];
+            assert_eq!(link.mac(), Mac([2, 0x53, 0x54, 0, 0, 1]));
+            let frame: Vec<_> = (0..30).collect();
+            link.transmit(&frame).unwrap();
+            let mut block = b"NCMH\x0c\x00\x00\x00\x40\x00\x10\x00\x00\x00\x00\x00NCM0\x10\x00\x00\x00\x22\x00\x1e\x00\x00\x00\x00\x00\x00\x00".to_vec();
+            block.extend_from_slice(&frame);
+            assert_eq!(model.borrow().outgoing, [block.clone(), Vec::new()]);
+            model.borrow_mut().incoming_acl.push_back(block);
+            assert_eq!(link.receive().unwrap(), Some(frame));
+            assert_eq!(link.receive().unwrap(), None);
+            // The next transfer is malformed and is dropped whole.
+            model.borrow_mut().incoming_acl.push_back(b"NCMX".to_vec());
+            assert_eq!(link.receive().unwrap(), None);
+            for connected in [false, true] {
+                model.borrow_mut().incoming_events.push_back(vec![
+                    0xa1,
+                    0,
+                    u8::from(connected),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
+                assert_eq!(link.carrier(), connected);
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_parameters_and_short_size_commands_abort_before_ncm_data_activation() {
+        for failure in 0..3 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives all modeled controller/class DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().descriptors = vec![(STRING_DESCRIPTOR, 1, cdc_mac_descriptor())];
+            let mut parameters = ncm_parameters();
+            match failure {
+                0 => parameters.truncate(22),
+                1 => parameters[2] = 2,
+                2 => model.borrow_mut().short_control_out = true,
+                _ => unreachable!(),
+            }
+            model
+                .borrow_mut()
+                .control_replies
+                .push_back((setup(0xa1, 0x80, 0, 0, 28), parameters));
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, cdc_device(Some(0x21)), &mut dma, &mut found);
+            assert_eq!(found.failures.len(), 1);
+            assert!(found.links.is_empty());
+            assert!(
+                !model
+                    .borrow()
+                    .setup
+                    .iter()
+                    .any(|(request, _)| request[1] == SET_INTERFACE || request[1] == 0x43)
+            );
+            assert!(model.borrow().outgoing.is_empty());
+        }
     }
 
     #[test]

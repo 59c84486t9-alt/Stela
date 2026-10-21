@@ -346,8 +346,14 @@ impl Link for UsbNet {
         let output = self.binding.output;
         let mut c = self.controller.borrow_mut();
         let physical = self.send.physical();
-        c.transfer(self.slot, output.dci(), physical, length, SEND_US)
+        let sent = c
+            .transfer(self.slot, output.dci(), physical, length, SEND_US)
             .map_err(link_error)?;
+        if sent != length {
+            return Err(LinkError::Adapter(String::from(
+                "short USB Ethernet OUT transfer",
+            )));
+        }
         let packet = usize::from(output.max_packet & 0x7ff).max(1);
         if length.is_multiple_of(packet) && whole != Some(length) {
             c.transfer(self.slot, output.dci(), physical, 0, SEND_US)
