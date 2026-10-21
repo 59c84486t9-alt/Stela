@@ -613,7 +613,9 @@ const SOCS: [Soc; 18] = [
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
-        cpu_start: Some(CPU_START_T8112),
+        // The original PMGR2 architecture node has no reg aperture. Its
+        // child register layout does not establish PMGR1 CPU-start offsets.
+        cpu_start: None,
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -7555,6 +7557,8 @@ mod tests {
     }
     #[test]
     fn core_requirements_keep_unknown_m6_capabilities_explicit() {
+        let soc = SOCS.iter().find(|soc| soc.chip_id == 0x8152).unwrap();
+        assert_eq!(soc.cpu_start, None);
         let cores = core_types(0x8152).unwrap();
         assert_eq!(
             cores
