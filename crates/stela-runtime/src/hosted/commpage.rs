@@ -122,8 +122,8 @@ pub fn data_page(hardware: &Hardware, identification: &Identification, time: Tim
     put(USER_PAGE_SHIFT_32, &[SIXTEENK_PAGE_SHIFT]);
     put(USER_PAGE_SHIFT_64, &[SIXTEENK_PAGE_SHIFT]);
     put(CACHE_LINESIZE, &(hardware.cache_line as u16).to_le_bytes());
-    put(CPU_CLUSTERS, &[hardware.clusters.len() as u8]);
-    put(ACTIVE_CPUS, &[cpus]);
+    put(CPU_CLUSTERS, &[hardware.cluster_count()]);
+    put(ACTIVE_CPUS, &[hardware.active_cpus()]);
     put(PHYSICAL_CPUS, &[cpus]);
     put(LOGICAL_CPUS, &[cpus]);
     put(KERNEL_PAGE_SHIFT, &[SIXTEENK_PAGE_SHIFT]);
@@ -543,6 +543,50 @@ mod tests {
         assert_eq!(page[APRR_SUPPORT], 3);
         assert_eq!(word(APRR_WRITE_ENABLE), 0x2010_0020_3030_0000);
         assert_eq!(word(APRR_WRITE_DISABLE), 0x2010_0020_3010_0000);
+    }
+
+    #[test]
+    fn shared_execution_count_fields_and_cluster_map_use_one_plan() {
+        let observed = crate::hosted::hardware::DarwinAvailability {
+            maximum_slots: 16,
+            available_slots: 12,
+            physical_active: Some(6),
+            physical_maximum: Some(8),
+            logical_active: Some(12),
+            logical_maximum: Some(16),
+        };
+        let hardware = Hardware::of_soc(0x6000, 16 << 30)
+            .unwrap()
+            .with_availability(observed)
+            .unwrap();
+        let page = data_page(
+            &hardware,
+            &Identification(&[]),
+            Time {
+                continuous_offset: 0,
+                boot_microseconds: 0,
+            },
+        );
+        assert_eq!(
+            (
+                page[NCPUS],
+                page[ACTIVE_CPUS],
+                page[PHYSICAL_CPUS],
+                page[LOGICAL_CPUS]
+            ),
+            (8, 6, 8, 8)
+        );
+        assert_eq!(page[CPU_CLUSTERS], 1);
+        assert_eq!(&page[CPU_TO_CLUSTER..CPU_TO_CLUSTER + 8], &[0; 8]);
+        let expected = cpu_capabilities(&Identification(&[]), hardware.cache_line, 8);
+        assert_eq!(
+            u64::from_le_bytes(
+                page[CPU_CAPABILITIES64..CPU_CAPABILITIES64 + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            expected
+        );
     }
 
     #[test]

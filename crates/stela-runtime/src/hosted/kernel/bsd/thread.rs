@@ -595,6 +595,9 @@ fn max_parallelism(kernel: &Kernel, qos: u64, flags: u64) -> Result<Outcome> {
 /// core type only, so it is every performance core; without performance
 /// clusters the scheduler's one node is every core.
 fn realtime_parallelism(hardware: &crate::hosted::hardware::Hardware) -> u32 {
+    if hardware.native_availability().is_some() {
+        return u32::from(hardware.active_cpus());
+    }
     let performance: u32 = hardware
         .clusters
         .iter()
@@ -602,7 +605,7 @@ fn realtime_parallelism(hardware: &crate::hosted::hardware::Hardware) -> u32 {
         .map(|cluster| u32::from(cluster.cores))
         .sum();
     if performance == 0 {
-        u32::from(hardware.cpus())
+        u32::from(hardware.active_cpus())
     } else {
         performance
     }
@@ -632,6 +635,9 @@ fn dispatch_apply_attribute(heavy: &mut bool, flags: u64) -> Outcome {
 /// The CPUs threads of `qos` may run on at once
 /// (`sched_edge_qos_max_parallelism` with `QOS_PARALLELISM_COUNT_LOGICAL`).
 pub(super) fn parallelism(hardware: &crate::hosted::hardware::Hardware, qos: u8) -> u32 {
+    if hardware.native_availability().is_some() {
+        return u32::from(hardware.active_cpus());
+    }
     hardware
         .clusters
         .iter()
@@ -689,6 +695,31 @@ mod tests {
             cluster.performance = false;
         }
         assert_eq!(realtime_parallelism(&uniform), 8);
+    }
+
+    #[test]
+    fn shared_uniform_parallelism_uses_online_physical_capacity_for_every_qos() {
+        let observed = crate::hosted::hardware::DarwinAvailability {
+            maximum_slots: 16,
+            available_slots: 12,
+            physical_active: Some(6),
+            physical_maximum: Some(8),
+            logical_active: Some(12),
+            logical_maximum: Some(16),
+        };
+        let hardware = Hardware::of_soc(0x6000, 1 << 34)
+            .unwrap()
+            .with_availability(observed)
+            .unwrap();
+        for qos in [
+            THREAD_QOS_LEGACY,
+            priority::THREAD_QOS_USER_INTERACTIVE,
+            THREAD_QOS_BACKGROUND,
+            THREAD_QOS_MAINTENANCE,
+        ] {
+            assert_eq!(parallelism(&hardware, qos), 6);
+        }
+        assert_eq!(realtime_parallelism(&hardware), 6);
     }
 
     #[test]

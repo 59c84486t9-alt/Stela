@@ -220,8 +220,16 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
              address 4 KiB or more into its guest page stops the run",
         ),
     ),
-    (Object::Host, "host_statistics_from_user", None),
-    (Object::Host, "host_statistics64_from_user", None),
+    (
+        Object::Host,
+        "host_statistics_from_user",
+        Some(CPU_ACCOUNTING_LIMIT),
+    ),
+    (
+        Object::Host,
+        "host_statistics64_from_user",
+        Some(CPU_ACCOUNTING_LIMIT),
+    ),
     (Object::Host, "host_get_special_port", None),
     (
         Object::Host,
@@ -229,7 +237,8 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
         Some(
             "the arm64 kernel's exception counters (PROCESSOR_CPU_STAT, PROCESSOR_CPU_STAT64) \
              stop the run: the x86 host kernel keeps none, and only the system-mode arm64 \
-             kernel takes those exceptions",
+             kernel takes those exceptions; shared execution also refuses native logical tick \
+             tables without a qualified physical-core attribution",
         ),
     ),
     (Object::Host, "processor_set_default", None),
@@ -440,6 +449,9 @@ const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception delivered with EXC
      MACH_EXCEPTION_BACKTRACE_PREFERRED stops the run, and delivery carries no voucher; the host \
      kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports pass the thread's ports for the \
      task's; a platform-restricted task's policy violation stops the run";
+
+const CPU_ACCOUNTING_LIMIT: &str = "native logical CPU ticks are not assigned physical-core \
+    accounting for shared execution; HOST_CPU_LOAD_INFO remains unsupported without a qualified mapping";
 
 const HARDENED_EXCEPTION_LIMITS: &str = "registration and adoption use actual native kernel port \
     resources with ARM flavors kept separately; a native resource-policy divergence or guest \
@@ -1265,7 +1277,7 @@ fn processor_set_info(hardware: &hardware::Hardware, host: u32, flavor: u32, cou
     if count < PROCESSOR_SET_BASIC_INFO_COUNT {
         return Reply::Failure(KERN_FAILURE);
     }
-    let cpus = u32::from(hardware.cpus());
+    let cpus = u32::from(hardware.active_cpus());
     let mut body = PROCESSOR_SET_BASIC_INFO_COUNT.to_le_bytes().to_vec();
     body.extend(
         [cpus, POLICY_TIMESHARE]
@@ -1313,8 +1325,10 @@ fn processor_set_statistics(
         .map(|&word| word as u32)
         .collect();
     if flavor == PROCESSOR_SET_LOAD_INFO && words.len() > PROCESSOR_SET_MACH_FACTOR {
-        words[PROCESSOR_SET_MACH_FACTOR] =
-            accounting::mach_factor(words[PROCESSOR_SET_LOAD_AVERAGE], hardware.cpus().into());
+        words[PROCESSOR_SET_MACH_FACTOR] = accounting::mach_factor(
+            words[PROCESSOR_SET_LOAD_AVERAGE],
+            hardware.active_cpus().into(),
+        );
     }
     let mut body = (words.len() as u32).to_le_bytes().to_vec();
     for word in words {
@@ -1350,7 +1364,7 @@ fn processor_info(hardware: &hardware::Hardware, host: u32, flavor: u32) -> Resu
                     [
                         hardware::CPU_TYPE_ARM64,
                         hardware::CPU_SUBTYPE_ARM64E,
-                        1,
+                        u32::from(slot < u32::from(hardware.active_cpus())),
                         slot,
                         u32::from(slot == 0),
                     ]
@@ -1359,6 +1373,13 @@ fn processor_info(hardware: &hardware::Hardware, host: u32, flavor: u32) -> Resu
             PROCESSOR_BASIC_INFO_COUNT,
         ),
         PROCESSOR_CPU_LOAD_INFO => {
+            if hardware.native_availability().is_some() {
+                unsupported::refuse!(
+                    Failure::Kern(KERN_FAILURE),
+                    "host_processor_info: native logical CPU ticks have no qualified \
+                     physical-core attribution for the shared guest execution group"
+                );
+            }
             let ticks = match host_load_ticks(host) {
                 Ok(ticks) => ticks,
                 Err(code) => return Ok(Reply::Failure(code)),
@@ -1635,6 +1656,7 @@ fn vm_map(request: &Request) -> Result<Reply> {
 /// `osfmk/mach/host_info.h` statistics flavors.
 const HOST_LOAD_INFO: u32 = 1;
 const HOST_VM_INFO: u32 = 2;
+const HOST_CPU_LOAD_INFO: u32 = 3;
 const HOST_VM_INFO64: u32 = 4;
 /// The words of `vm_statistics` and `vm_statistics64` that count resident
 /// or compressed pages (free, active, inactive, wired, purgeable,
@@ -1706,6 +1728,13 @@ fn host_statistics(
     if status != 0 {
         return Ok(Reply::Failure(status as u32));
     }
+    if flavor == HOST_CPU_LOAD_INFO && hardware.native_availability().is_some() {
+        unsupported::refuse!(
+            Failure::Kern(KERN_FAILURE),
+            "host_statistics: native logical CPU ticks have no qualified physical-core \
+             attribution for the shared guest execution group"
+        );
+    }
     let mut words: Vec<u32> = words[..filled.min(HOST_INFO_MAX) as usize]
         .iter()
         .map(|&word| word as u32)
@@ -1722,7 +1751,7 @@ fn host_statistics(
         tag_storage_pages(hardware.memory_bytes, tagging),
     );
     if flavor == HOST_LOAD_INFO {
-        restate_load(&mut words, hardware.cpus().into());
+        restate_load(&mut words, hardware.active_cpus().into());
     }
     let mut body = (words.len() as u32).to_le_bytes().to_vec();
     for word in words {
@@ -1810,6 +1839,7 @@ const CPU_THREADTYPE_NONE: u32 = 0;
 /// caller's capacity in `integer_t`s.
 fn host_info(hardware: &hardware::Hardware, flavor: u32, count: u32) -> Reply {
     let cpus = u32::from(hardware.cpus());
+    let active = u32::from(hardware.active_cpus());
     let words: Vec<u32> = match flavor {
         HOST_BASIC_INFO => {
             if count < HOST_BASIC_INFO_OLD_COUNT {
@@ -1819,13 +1849,13 @@ fn host_info(hardware: &hardware::Hardware, flavor: u32, count: u32) -> Reply {
             // memory size; `max_mem` the whole.
             let mut words = vec![
                 cpus,
-                cpus,
+                active,
                 hardware.memory_bytes as u32,
                 hardware::CPU_TYPE_ARM64,
                 hardware::CPU_SUBTYPE_ARM64E,
             ];
             if count >= HOST_BASIC_INFO_COUNT {
-                words.extend([CPU_THREADTYPE_NONE, cpus, cpus, cpus, cpus]);
+                words.extend([CPU_THREADTYPE_NONE, active, cpus, active, cpus]);
                 words.extend([
                     hardware.memory_bytes as u32,
                     (hardware.memory_bytes >> 32) as u32,
@@ -1943,10 +1973,8 @@ mod tests {
         // zero on every profile: the hosted machine presents no memory
         // tagging, even on a chip with it.
         let hardware = hardware::Hardware::of(Chip::AppleM2, 0x4_0000_0000).unwrap();
-        let tagging = hardware::Hardware {
-            memory_tagging: true,
-            ..hardware.clone()
-        };
+        let mut tagging = hardware.clone();
+        tagging.memory_tagging = true;
         for profile in [&hardware, &tagging] {
             let Ok(Reply::Success(body)) =
                 host_statistics(profile, true, HOST_VM_INFO64, HOST_INFO_MAX)
@@ -2275,6 +2303,75 @@ mod tests {
             Reply::Failure(KERN_FAILURE)
         ));
         assert!(processor_info(&hardware, host, PROCESSOR_CPU_STAT).is_err());
+    }
+
+    #[test]
+    fn shared_host_services_use_one_physical_budget_and_keep_ticks_unqualified() {
+        let observed = hardware::DarwinAvailability {
+            maximum_slots: 16,
+            available_slots: 12,
+            physical_active: Some(6),
+            physical_maximum: Some(8),
+            logical_active: Some(12),
+            logical_maximum: Some(16),
+        };
+        let hardware = hardware::Hardware::of_soc(0x6000, 16 << 30)
+            .unwrap()
+            .with_availability(observed)
+            .unwrap();
+        let basic = words(host_info(&hardware, HOST_BASIC_INFO, HOST_INFO_MAX));
+        assert_eq!(&basic[1..3], &[8, 6]);
+        assert_eq!(&basic[6..11], &[CPU_THREADTYPE_NONE, 6, 8, 6, 8]);
+        let Reply::Complex { body, .. } =
+            processor_set_info(&hardware, 0, PROCESSOR_SET_BASIC_INFO, 2)
+        else {
+            panic!("default set information failed");
+        };
+        assert_eq!(
+            body,
+            [2u32, 6, POLICY_TIMESHARE]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        // SAFETY: one owned host send right, released below.
+        let host = unsafe { mach_host_self() };
+        let Reply::Complex { descriptors, body } =
+            processor_info(&hardware, host, PROCESSOR_BASIC_INFO).unwrap()
+        else {
+            panic!("uniform processor records failed");
+        };
+        assert_eq!(
+            body,
+            [8u32, 40]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+        let records = records(&descriptors);
+        assert_eq!(records.len(), 40);
+        for (slot, record) in records.as_chunks::<5>().0.iter().enumerate() {
+            assert_eq!(
+                *record,
+                [
+                    hardware::CPU_TYPE_ARM64,
+                    hardware::CPU_SUBTYPE_ARM64E,
+                    u32::from(slot < 6),
+                    slot as u32,
+                    u32::from(slot == 0)
+                ]
+            );
+        }
+        assert!(processor_info(&hardware, host, PROCESSOR_CPU_LOAD_INFO).is_err());
+        assert!(host_statistics(&hardware, false, HOST_CPU_LOAD_INFO, 4).is_err());
+        let load = words(host_statistics(&hardware, false, HOST_LOAD_INFO, HOST_INFO_MAX).unwrap());
+        for index in 0..LOAD_AVERAGES {
+            assert_eq!(
+                load[1 + LOAD_AVERAGES + index],
+                accounting::mach_factor(load[1 + index], 6)
+            );
+        }
+        release_send(host);
     }
 
     #[test]

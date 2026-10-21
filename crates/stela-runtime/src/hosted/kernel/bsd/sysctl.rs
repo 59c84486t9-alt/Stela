@@ -214,6 +214,7 @@ struct Level {
     name: &'static str,
     /// The type's cores in all its clusters (`ml_get_cpu_number_type`).
     cores: i32,
+    maximum: i32,
     /// The cores sharing one L2: the type's first cluster's
     /// (`ml_cpu_cache_sharing(2, type)`).
     cores_per_l2: i32,
@@ -230,6 +231,7 @@ impl Model {
         release: &Release,
     ) -> Self {
         let cpus = i32::from(hardware.cpus());
+        let active = i32::from(hardware.active_cpus());
         let levels = levels(hardware);
         // Unscoped cache variables describe the lowest performance level.
         let lowest = levels.last().expect("a machine has a performance level");
@@ -238,17 +240,21 @@ impl Model {
         let mut add = |name: &str, value: Value| entries.push((name.to_owned(), value));
         for name in [
             "hw.ncpu",
-            "hw.activecpu",
-            "hw.physicalcpu",
             "hw.physicalcpu_max",
-            "hw.logicalcpu",
             "hw.logicalcpu_max",
             "machdep.cpu.cores_per_package",
-            "machdep.cpu.core_count",
             "machdep.cpu.logical_per_package",
-            "machdep.cpu.thread_count",
         ] {
             add(name, Value::Int(cpus));
+        }
+        for name in [
+            "hw.activecpu",
+            "hw.physicalcpu",
+            "hw.logicalcpu",
+            "machdep.cpu.core_count",
+            "machdep.cpu.thread_count",
+        ] {
+            add(name, Value::Int(active));
         }
         add("hw.byteorder", Value::Int(LITTLE_ENDIAN));
         add("hw.cputype", Value::Int(hardware::CPU_TYPE_ARM64 as i32));
@@ -259,16 +265,18 @@ impl Model {
         add("hw.cpu64bit_capable", Value::Int(1));
         add("hw.cpufamily", Value::Int(hardware.cpu_family as i32));
         add("hw.cpusubfamily", Value::Int(hardware.cpu_subfamily as i32));
-        let mut config = [0u64; CACHE_ENTRIES];
-        config[0] = u64::from(hardware.cpus());
-        config[1] = 1;
-        config[2] = lowest.cores_per_l2 as u64;
-        add("hw.cacheconfig", Value::Opaque(words(&config)));
-        let mut sizes = [0u64; CACHE_ENTRIES];
-        sizes[0] = hardware.memory_bytes;
-        sizes[1] = lowest.l1d as u64;
-        sizes[2] = lowest.l2 as u64;
-        add("hw.cachesize", Value::Opaque(words(&sizes)));
+        if hardware.has_cache_geometry() {
+            let mut config = [0u64; CACHE_ENTRIES];
+            config[0] = u64::from(hardware.cpus());
+            config[1] = 1;
+            config[2] = lowest.cores_per_l2 as u64;
+            add("hw.cacheconfig", Value::Opaque(words(&config)));
+            let mut sizes = [0u64; CACHE_ENTRIES];
+            sizes[0] = hardware.memory_bytes;
+            sizes[1] = lowest.l1d as u64;
+            sizes[2] = lowest.l2 as u64;
+            add("hw.cachesize", Value::Opaque(words(&sizes)));
+        }
         add("hw.pagesize", Value::Number(page));
         add("hw.pagesize32", Value::Number(page));
         add("hw.pagesize_compat", Value::Int(page as i32));
@@ -295,15 +303,17 @@ impl Model {
         let line = i64::from(hardware.cache_line);
         add("hw.cachelinesize", Value::Quad(line));
         add("hw.cachelinesize_compat", Value::Int(line as i32));
-        add("hw.l1icachesize", Value::Quad(lowest.l1i));
-        add("hw.l1icachesize_compat", Value::Int(lowest.l1i as i32));
-        add("hw.l1dcachesize", Value::Quad(lowest.l1d));
-        add("hw.l1dcachesize_compat", Value::Int(lowest.l1d as i32));
-        add("hw.l2cachesize", Value::Quad(lowest.l2));
-        add("hw.l2cachesize_compat", Value::Int(lowest.l2 as i32));
-        // Apple SoCs report no L3 (`l3_cache_size == UINT32_MAX`).
-        add("hw.l3cachesize", Value::FailsQuad(EINVAL));
-        add("hw.l3cachesize_compat", Value::Fails(EINVAL));
+        if hardware.has_cache_geometry() {
+            add("hw.l1icachesize", Value::Quad(lowest.l1i));
+            add("hw.l1icachesize_compat", Value::Int(lowest.l1i as i32));
+            add("hw.l1dcachesize", Value::Quad(lowest.l1d));
+            add("hw.l1dcachesize_compat", Value::Int(lowest.l1d as i32));
+            add("hw.l2cachesize", Value::Quad(lowest.l2));
+            add("hw.l2cachesize_compat", Value::Int(lowest.l2 as i32));
+            // Apple SoCs report no L3 (`l3_cache_size == UINT32_MAX`).
+            add("hw.l3cachesize", Value::FailsQuad(EINVAL));
+            add("hw.l3cachesize_compat", Value::Fails(EINVAL));
+        }
         let timebase = crate::hosted::host::COUNTER_HZ as i64;
         add("hw.tbfrequency", Value::Number(timebase));
         add("hw.tbfrequency_compat", Value::Int(timebase as i32));
@@ -317,29 +327,29 @@ impl Model {
         add("hw.vectorunit", Value::Int(1));
         for (index, level) in levels.iter().enumerate() {
             let prefix = format!("hw.perflevel{index}.");
-            for field in [
-                "physicalcpu",
-                "physicalcpu_max",
-                "logicalcpu",
-                "logicalcpu_max",
-            ] {
+            for field in ["physicalcpu", "logicalcpu"] {
                 add(&format!("{prefix}{field}"), Value::Int(level.cores));
             }
-            add(
-                &format!("{prefix}cpusperl2"),
-                Value::Int(level.cores_per_l2),
-            );
-            add(
-                &format!("{prefix}l1icachesize"),
-                Value::Int(level.l1i as i32),
-            );
-            add(
-                &format!("{prefix}l1dcachesize"),
-                Value::Int(level.l1d as i32),
-            );
-            add(&format!("{prefix}l2cachesize"), Value::Int(level.l2 as i32));
-            add(&format!("{prefix}l3cachesize"), Value::Fails(EINVAL));
-            add(&format!("{prefix}cpusperl3"), Value::Fails(EINVAL));
+            for field in ["physicalcpu_max", "logicalcpu_max"] {
+                add(&format!("{prefix}{field}"), Value::Int(level.maximum));
+            }
+            if hardware.has_cache_geometry() {
+                add(
+                    &format!("{prefix}cpusperl2"),
+                    Value::Int(level.cores_per_l2),
+                );
+                add(
+                    &format!("{prefix}l1icachesize"),
+                    Value::Int(level.l1i as i32),
+                );
+                add(
+                    &format!("{prefix}l1dcachesize"),
+                    Value::Int(level.l1d as i32),
+                );
+                add(&format!("{prefix}l2cachesize"), Value::Int(level.l2 as i32));
+                add(&format!("{prefix}l3cachesize"), Value::Fails(EINVAL));
+                add(&format!("{prefix}cpusperl3"), Value::Fails(EINVAL));
+            }
             add(&format!("{prefix}name"), Value::String(level.name.into()));
         }
         add("hw.optional.floatingpoint", Value::Int(1));
@@ -446,7 +456,16 @@ fn levels(hardware: &Hardware) -> Vec<Level> {
                 } else {
                     "Efficiency"
                 },
-                cores: i32::from(first.cores) + others,
+                cores: if hardware.native_availability().is_some() {
+                    i32::from(hardware.active_cpus())
+                } else {
+                    i32::from(first.cores) + others
+                },
+                maximum: if hardware.native_availability().is_some() {
+                    i32::from(hardware.cpus())
+                } else {
+                    i32::from(first.cores) + others
+                },
                 cores_per_l2: first.cores.into(),
                 l1i: first.l1i_bytes.into(),
                 l1d: first.l1d_bytes.into(),
@@ -732,6 +751,70 @@ mod tests {
         assert_eq!(kernel_release(VERSION), Some("1.2.3"));
         assert_eq!(kernel_release("Darwin Kernel Version"), None);
         Ok(())
+    }
+
+    #[test]
+    fn shared_execution_publication_has_physical_budgets_and_unqualified_cache_contents() {
+        let observed = hardware::DarwinAvailability {
+            maximum_slots: 16,
+            available_slots: 12,
+            physical_active: Some(6),
+            physical_maximum: Some(8),
+            logical_active: Some(12),
+            logical_maximum: Some(16),
+        };
+        let hardware = Hardware::of_soc(0x6000, 1 << 34)
+            .unwrap()
+            .with_availability(observed)
+            .unwrap();
+        let model = Model::new(&hardware, &[], &release());
+        let value = |name: &str| model.entries[model.index(name).unwrap()].1.clone();
+        for name in [
+            "hw.ncpu",
+            "hw.physicalcpu_max",
+            "hw.logicalcpu_max",
+            "machdep.cpu.cores_per_package",
+            "machdep.cpu.logical_per_package",
+            "hw.perflevel0.physicalcpu_max",
+            "hw.perflevel0.logicalcpu_max",
+        ] {
+            assert_eq!(value(name), Value::Int(8), "{name}");
+        }
+        for name in [
+            "hw.activecpu",
+            "hw.physicalcpu",
+            "hw.logicalcpu",
+            "machdep.cpu.core_count",
+            "machdep.cpu.thread_count",
+            "hw.perflevel0.physicalcpu",
+            "hw.perflevel0.logicalcpu",
+        ] {
+            assert_eq!(value(name), Value::Int(6), "{name}");
+        }
+        assert_eq!(value("hw.nperflevels"), Value::Int(1));
+        assert_eq!(
+            value("hw.perflevel0.name"),
+            Value::String("Efficiency".into())
+        );
+        assert_eq!(value("hw.cachelinesize"), Value::Quad(128));
+        for name in [
+            "hw.cacheconfig",
+            "hw.cachesize",
+            "hw.l1icachesize",
+            "hw.l1dcachesize",
+            "hw.l2cachesize",
+            "hw.l3cachesize",
+            "hw.perflevel0.cpusperl2",
+            "hw.perflevel0.l1icachesize",
+            "hw.perflevel0.l1dcachesize",
+            "hw.perflevel0.l2cachesize",
+            "hw.perflevel0.cpusperl3",
+            "hw.perflevel0.l3cachesize",
+        ] {
+            assert!(model.index(name).is_none(), "{name}");
+            assert!(metadata::info(name).is_some(), "{name}");
+            assert!(lookup(&model, name).is_err(), "{name}");
+        }
     }
 
     /// One performance level per core type: its cores in every cluster,

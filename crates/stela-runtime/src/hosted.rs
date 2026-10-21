@@ -194,7 +194,7 @@ fn commpage_time() -> Result<commpage::Time> {
 /// [`Launch::model`]) compiles its blocks on this host, for translating its
 /// images ahead of time outside it (`stelad`).
 pub fn preparation(model: &str) -> Result<std::sync::Arc<crate::machine::Preparation>> {
-    let hardware = hardware::Hardware::of_model(model, host_memory()?)?;
+    let hardware = hardware::Hardware::for_host_model(model, host_memory()?)?;
     let target = TargetCpu::detect();
     let profile = pe::profile(&hardware, target)?;
     let (engine, _) = threads::engine(
@@ -222,7 +222,7 @@ pub fn run(launch: Launch) -> Result<Report> {
     // SAFETY: restores an inherited disposition.
     unsafe { libc::signal(libc::SIGPIPE, sigpipe) };
     let memory_bytes = host_memory()?;
-    let mut hardware = hardware::Hardware::of_model(&launch.model, memory_bytes)?;
+    let mut hardware = hardware::Hardware::for_host_model(&launch.model, memory_bytes)?;
     let chip = hardware.chip;
     let target = TargetCpu::detect();
     let profile = pe::profile(&hardware, target)?;

@@ -1073,13 +1073,9 @@ fn open(kernel: &mut Kernel) -> Outcome {
     if kernel.process.threads.registration().is_none() {
         return Outcome::Error(EINVAL);
     }
-    let cpus: u32 = kernel
-        .process
-        .hardware
-        .clusters
-        .iter()
-        .map(|cluster| u32::from(cluster.cores))
-        .sum();
+    // workq_open sizes these pool limits with ml_wait_max_cpus(),
+    // independently of online QoS parallelism below.
+    let cpus = u32::from(kernel.process.hardware.cpus());
     let mut state = kernel.process.workqueue.state();
     if !state.open {
         state.open = true;

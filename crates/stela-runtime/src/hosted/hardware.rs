@@ -1,21 +1,18 @@
-//! The Apple-silicon machine a hosted process observes: the SoC's CPU
-//! family, topology and caches, which the commpage and the `hw.*` sysctls
-//! report instead of the x86 host's. Memory size is the host's, as the
-//! guest's allocations are.
+//! Declared ARM board capabilities and the hosted process's resource plan.
+//! Original DeviceTree geometry remains source evidence, not a CPU budget.
+//! Actual runs observe native Darwin physical/logical availability once,
+//! then configure one shared uniform group of their actual CPU0 ARM
+//! semantics. Native SMT, cache sharing and exclusive bindings are not
+//! inferred from Apple SKU counts.
 //!
-//! Each SoC is one [`BOARDS`] row: a board of the universal macOS 27.0.1
-//! `26A434` IPSW and its DeviceTree's cluster layout (`/cpus` `cluster-type`,
-//! `reg` and `l2-cache-size`, recorded per board in `isa/apple-soc-facts.json`
-//! by `cargo xtask soc-facts`). Everything the system engine also presents
-//! comes from the same `machine` tables, so the two cannot disagree: the
-//! SoC's name, CPU and per-core-type MIDR_EL1 part from `machine::soc`'s
-//! rows, the level 1 caches from the same rows, and memory tagging from
-//! `machine::identification`. The CPU family and subfamily are XNU's for
-//! those MIDR parts ([`FAMILIES`]).
-//!
-//! The DeviceTree lists every core its die has. A binned SoC (fewer cores
-//! enabled than the die has) is not a separate row: no 26A434 input gives
-//! its fused core count, which iBoot applies.
+//! Board/CPU identities, architectural cache capabilities and memory
+//! tagging use the shared `machine` tables. The DeviceTree facts are pinned
+//! to the universal 26A434 IPSW (`isa/apple-soc-facts.json`). CPU family and
+//! subfamily are XNU's for the selected MIDR part ([`FAMILIES`]).
+mod availability;
+pub use availability::DarwinAvailability;
+use availability::SharedScheduler;
+
 use crate::machine::{Chip, identification, soc};
 use anyhow::{Context, Result, bail, ensure};
 
@@ -311,7 +308,9 @@ const BOARDS: &[Board] = &[
     },
 ];
 
-/// One cluster of identical cores.
+/// One declared guest execution cluster of identical ARM core semantics.
+/// Cache capacities describe the architectural profile; they do not
+/// establish native cache sharing for a shared scheduler allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cluster {
     pub cores: u8,
@@ -324,6 +323,9 @@ pub struct Cluster {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hardware {
+    /// None for an unallocated source profile; actual hosted execution
+    /// uses a single observed shared scheduler resource plan.
+    shared: Option<SharedScheduler>,
     pub chip: Chip,
     /// The SoC's ApChipID.
     pub chip_id: u32,
@@ -338,8 +340,8 @@ pub struct Hardware {
     /// `hw.cpusubfamily`.
     pub cpu_subfamily: u32,
     pub cache_line: u32,
-    /// In logical CPU order: the DeviceTree's `/cpus` order, which numbers
-    /// the efficiency cluster first.
+    /// In logical guest CPU order. Source profiles retain DeviceTree
+    /// order; shared execution has one actual uniform CPU0 group.
     pub clusters: Vec<Cluster>,
     /// `hw.memsize`: the host's physical memory.
     pub memory_bytes: u64,
@@ -368,7 +370,8 @@ pub fn models() -> impl Iterator<Item = &'static str> {
 }
 
 impl Hardware {
-    /// The hosted board whose product type is `model`, such as Mac14,3.
+    /// An unallocated board capability/source profile. Actual process
+    /// construction must use [`Self::for_host_model`].
     pub fn of_model(model: &str, memory_bytes: u64) -> Result<Self> {
         let board = BOARDS
             .iter()
@@ -380,6 +383,44 @@ impl Hardware {
                 )
             })?;
         Self::of_soc(board.chip_id, memory_bytes)
+    }
+
+    /// A hosted resource plan from one native availability snapshot.
+    pub fn for_host_model(model: &str, memory_bytes: u64) -> Result<Self> {
+        Self::of_model(model, memory_bytes)?.with_availability(DarwinAvailability::observe()?)
+    }
+
+    /// Configure the actual uniform CPU0 execution group of the shared
+    /// scheduler. No SKU core distribution, native P/E or L2 mapping is
+    /// inferred from the observed physical capacity.
+    pub fn with_availability(mut self, observed: DarwinAvailability) -> Result<Self> {
+        let plan = SharedScheduler::new(observed)?;
+        let mut cluster = *self
+            .clusters
+            .first()
+            .context("a hosted profile has no CPU0 semantics")?;
+        cluster.cores = plan.maximum;
+        self.clusters = vec![cluster];
+        self.shared = Some(plan);
+        Ok(self)
+    }
+
+    /// The shared scheduler's native observations, without any exclusive
+    /// physical assignment or affinity guarantee.
+    pub fn native_availability(&self) -> Option<&DarwinAvailability> {
+        self.shared.as_ref().map(|plan| &plan.observed)
+    }
+
+    /// Whether service cache-capacity/sharing values are qualified. The
+    /// unallocated source profiles retain original board geometry;
+    /// shared execution has no native cache binding.
+    pub fn has_cache_geometry(&self) -> bool {
+        self.shared.is_none()
+    }
+
+    /// Online logical guest CPU capacity, separately from maximum slots.
+    pub fn active_cpus(&self) -> u8 {
+        self.shared.map_or_else(|| self.cpus(), |plan| plan.active)
     }
 
     /// The base SoC of `chip`: the M1, M2, M3, M4, M5 or M6.
@@ -435,6 +476,7 @@ impl Hardware {
         let (cpu_family, cpu_subfamily) = family.context("hosted board without clusters")?;
         let (breakpoints, watchpoints) = identification::breakpoints_and_watchpoints(chip);
         Ok(Self {
+            shared: None,
             chip,
             chip_id,
             model: board.model,
@@ -467,12 +509,30 @@ impl Hardware {
         }
     }
 
+    /// Maximum logical guest CPU slots. Shared execution budgets one per
+    /// observed physical core; native SMT siblings do not add guest slots.
     pub fn cpus(&self) -> u8 {
-        self.clusters.iter().map(|cluster| cluster.cores).sum()
+        self.shared.map_or_else(
+            || self.clusters.iter().map(|cluster| cluster.cores).sum(),
+            |plan| plan.maximum,
+        )
     }
 
-    /// Logical CPU number → cluster number.
+    /// Configured execution groups, not a native cache-sharing count.
+    pub fn cluster_count(&self) -> u8 {
+        if self.shared.is_some() {
+            1
+        } else {
+            u8::try_from(self.clusters.len())
+                .expect("declared cluster count exceeds the commpage width")
+        }
+    }
+
+    /// Logical CPU number → configured guest execution cluster number.
     pub fn cpu_clusters(&self) -> Vec<u8> {
+        if let Some(plan) = self.shared {
+            return vec![0; usize::from(plan.maximum)];
+        }
         self.clusters
             .iter()
             .enumerate()
@@ -484,6 +544,39 @@ impl Hardware {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_profile_uses_observed_capacity_and_its_actual_cpu0_semantics() {
+        let observed = DarwinAvailability {
+            maximum_slots: 16,
+            available_slots: 12,
+            physical_active: Some(6),
+            physical_maximum: Some(8),
+            logical_active: Some(12),
+            logical_maximum: Some(16),
+        };
+        for model in models() {
+            let source = Hardware::of_model(model, 1 << 34).unwrap();
+            let cpu0 = source.boot_processor();
+            let shared = source.clone().with_availability(observed).unwrap();
+            assert_eq!((shared.active_cpus(), shared.cpus()), (6, 8), "{model}");
+            assert_eq!(shared.cpu_clusters(), vec![0; 8], "{model}");
+            assert_eq!(shared.clusters.len(), 1, "{model}");
+            let actual = shared.boot_processor();
+            assert_eq!(
+                (actual.cluster_type, actual.reg, actual.l2_bytes),
+                (cpu0.cluster_type, cpu0.reg, cpu0.l2_bytes),
+                "{model}"
+            );
+            assert_eq!(shared.native_availability(), Some(&observed));
+            assert!(!shared.has_cache_geometry());
+            assert!(source.has_cache_geometry());
+            assert_eq!(
+                (shared.chip_id, shared.model, shared.cpu_family),
+                (source.chip_id, source.model, source.cpu_family)
+            );
+        }
+    }
 
     #[test]
     fn m2_topology_is_declared() {
