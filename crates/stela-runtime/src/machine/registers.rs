@@ -1087,6 +1087,69 @@ mod tests {
         assert_eq!(write(&mut el1, SPR_LOCKDOWN_EL2, MASK), Outcome::Undefined);
     }
 
+    /// Exercise decoded MRS/MSR, including privilege routing before validation:
+    /// no rejected access can corrupt the PE's predictor configuration.
+    #[test]
+    fn objc_prediction_accesses_preserve_state_and_trap_before_writing() {
+        use crate::machine::Chip;
+        use impdef::{BP_OBJC_ADR_EL1, BP_OBJC_CTL_EL1};
+
+        for chip in Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(1));
+            for (encoding, value, unknown) in [
+                (BP_OBJC_ADR_EL1, 0x00ab_cdef_1234_5678, 1 << 56),
+                (BP_OBJC_CTL_EL1, 0x001a_bcde_f83b_107f, 1 << 22),
+            ] {
+                cpu.state.x[5] = value;
+                if chip == Chip::AppleM1 {
+                    assert_eq!(cpu.apple_access(msr(5, encoding), 0), Outcome::Undefined);
+                    assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
+                    assert_eq!(cpu.apple.impdef.used().count(), 0);
+                    continue;
+                }
+                assert_eq!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Written(Changes::default())
+                );
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(value));
+                let writes = cpu.apple.impdef.writes.clone();
+                cpu.state.x[5] = value | unknown;
+                assert!(matches!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Refused(Refusal::UnsupportedSetting(_))
+                ));
+                assert_eq!(cpu.apple.impdef.writes, writes);
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(value));
+
+                cpu.registers.set(Register::HCR_EL2, 0, 1 << HCR_TIDCP);
+                assert_eq!(
+                    cpu.apple_access(msr(5, encoding), 0),
+                    Outcome::Trapped(Some(2))
+                );
+                assert_eq!(
+                    cpu.apple_access(mrs(0, encoding), 0),
+                    Outcome::Trapped(Some(2))
+                );
+                assert_eq!(cpu.apple.impdef.writes, writes);
+                cpu.registers.set(Register::HCR_EL2, 0, 0);
+                cpu.pstate.el = 0;
+                assert_eq!(cpu.apple_access(msr(5, encoding), 0), Outcome::Undefined);
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Undefined);
+                assert_eq!(cpu.apple.impdef.writes, writes);
+                // EL2's SPTM uses the same physical PE state. Writing XZR
+                // clears it, even though X5 still contains an invalid value.
+                cpu.pstate.el = 2;
+                assert_eq!(cpu.apple_access(mrs(0, encoding), 0), Outcome::Read(value));
+                assert_eq!(
+                    cpu.apple_access(msr(31, encoding), 0),
+                    Outcome::Written(Changes::default())
+                );
+                assert_eq!(cpu.apple_access(mrs(31, encoding), 0), Outcome::Read(0));
+                cpu.pstate.el = 1;
+            }
+        }
+    }
+
     #[test]
     fn apple_registers_follow_the_vhe_names_and_tidcp() {
         let mut cpu = Cpu::new(0, Pstate::reset(2));
