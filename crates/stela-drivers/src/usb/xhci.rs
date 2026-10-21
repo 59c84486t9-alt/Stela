@@ -2179,6 +2179,7 @@ pub(crate) mod tests {
         fatal_on_command: Option<u32>,
         silence_transfer: Option<usize>,
         halt_transfer: Option<usize>,
+        script: Option<crate::usb::bluetooth::intel::tests::Script>,
     }
     impl CancelModel {
         fn state(&self, dci: usize) -> u32 {
@@ -2308,6 +2309,18 @@ pub(crate) mod tests {
             }
             self.event(at, code, COMMAND_COMPLETION, 0, 0);
         }
+        fn scripted(&mut self, bulk: bool, packet: &[u8]) {
+            use crate::usb::bluetooth::Pipe;
+            if let Some(script) = &mut self.script {
+                for (pipe, event) in script.command(bulk, packet) {
+                    match pipe {
+                        Pipe::Event => &mut self.incoming_events,
+                        Pipe::Acl => &mut self.incoming_acl,
+                    }
+                    .push_back(event);
+                }
+            }
+        }
         fn transfer(&mut self, dci: usize) {
             let at = self.rings[dci] + (self.indices[dci] * TRB) as u64;
             // SAFETY: a doorbell publishes a live transfer ring entry and any
@@ -2339,6 +2352,7 @@ pub(crate) mod tests {
                     let buffer = unsafe { ((at + TRB as u64) as *const u64).read_volatile() };
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, length).to_vec() }
                 };
+                self.scripted(false, &data);
                 self.setup.push((request, data));
                 let trbs = if length == 0 { 2 } else { 3 };
                 if self.silence_transfer == Some(dci) {
@@ -2352,9 +2366,11 @@ pub(crate) mod tests {
                 if dci == 4 {
                     // SAFETY: the submitted bulk OUT buffer is live until the
                     // completion below acknowledges its bytes.
-                    self.outgoing.push(unsafe {
+                    let packet = unsafe {
                         core::slice::from_raw_parts(parameter as *const u8, length).to_vec()
-                    });
+                    };
+                    self.scripted(true, &packet);
+                    self.outgoing.push(packet);
                     if self.silence_transfer == Some(dci) {
                         self.active[dci] = Some((at, parameter, length));
                     } else {
@@ -2432,6 +2448,7 @@ pub(crate) mod tests {
             fatal_on_command: None,
             silence_transfer: None,
             halt_transfer: None,
+            script: None,
         }));
         model.borrow_mut().set_state(1, 1);
         controller.registers = Box::new(CancelRegisters(model.clone()));
@@ -2655,6 +2672,51 @@ pub(crate) mod tests {
             drop(hci);
             assert_eq!(model.borrow().seen.len(), count); // Drop does not reset another device.
         }
+    }
+
+    #[test]
+    fn intel_initializer_uses_actual_xhci_dma_and_reframes_bulk_after_acknowledged_stop() {
+        use crate::usb::bluetooth::{FirmwareStatus, Packet, intel};
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: exclusive model DMA stays live through all host endpoints.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (controller, model) = cancellation_controller(&mut dma);
+        let shared: Shared = Rc::new(RefCell::new(controller));
+        let (device, catalog, script) = intel::tests::fixture();
+        let mut found = Found::default();
+        bind(&shared, device, &mut dma, &mut found);
+        assert!(found.failures.is_empty(), "{:?}", found.failures);
+        let mut hci = found.bluetooth.pop().unwrap();
+        model.borrow_mut().script = Some(script);
+        let report = intel::initialize(&mut hci, &catalog).unwrap();
+        assert_eq!(report.after.firmware_variant, 0x23);
+        assert!(model.borrow().script.as_ref().unwrap().steps.is_empty());
+        assert_eq!(model.borrow().outgoing.len(), 6);
+        assert!(model.borrow().outgoing.iter().all(|p| p[..2] == [9, 0xfc]));
+        // Entry cancels the idle posted bulk IN via Running Stop -> Stopped
+        // Set Dequeue. Exit follows its completed boot-event TD; no hardware
+        // ownership remains to cancel before restoring ordinary ACL framing.
+        assert_eq!(
+            model
+                .borrow()
+                .seen
+                .iter()
+                .filter(|&&kind| kind == STOP_ENDPOINT)
+                .count(),
+            1
+        );
+        assert_eq!(model.borrow().dequeues.len(), 1);
+        assert_eq!(hci.firmware_status(), FirmwareStatus::Unverified);
+        assert!(hci.poll().unwrap().is_empty());
+        model
+            .borrow_mut()
+            .incoming_acl
+            .push_back(vec![1, 0x20, 2, 0, 0xaa, 0xbb]);
+        assert_eq!(
+            hci.poll().unwrap(),
+            vec![Packet::Acl(vec![1, 0x20, 2, 0, 0xaa, 0xbb])]
+        );
     }
 
     #[test]

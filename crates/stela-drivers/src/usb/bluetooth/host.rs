@@ -133,6 +133,9 @@ impl Io for Host {
         if packet.len() > self.transmit.len() {
             return Err(BlockError::Unsupported("USB Bluetooth ACL buffer size"));
         }
+        self.controller
+            .borrow_mut()
+            .endpoint_ready(self.slot, self.output.dci())?;
         self.transmit.bytes_mut()[..packet.len()].copy_from_slice(packet);
         fence(Ordering::Release);
         let dci = self.output.dci();
@@ -163,6 +166,17 @@ impl Io for Host {
             crate::waiting();
             core::hint::spin_loop();
         }
+    }
+
+    fn quiesce_bulk(&mut self) -> Result<(), BlockError> {
+        self.open()?;
+        if self.input.queued.is_some() {
+            self.controller
+                .borrow_mut()
+                .cancel(self.slot, self.input.endpoint.dci())?;
+            self.input.queued = None;
+        }
+        Ok(())
     }
 
     fn close(&mut self) -> Result<(), BlockError> {

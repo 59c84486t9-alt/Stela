@@ -10,8 +10,10 @@
 //! Attachment opens a **raw transport** and always leaves firmware initialization
 //! [`FirmwareStatus::Unverified`]. It does not reset/initialize a controller,
 //! load firmware, pair, advertise, manage HCI credits or provide profiles.
-//! Vendor initialization must use the raw command/event path and independently
-//! establish firmware readiness before a Bluetooth host stack can use the radio.
+//! The explicit [`intel::initialize`] path adds identified Intel legacy-RSA
+//! bootloader bulk framing and returns a controller-specific firmware report.
+//! Other vendor initialization remains unsupported. A Bluetooth host stack must
+//! independently establish radio services after controller initialization.
 //! A successful USB command submission is not HCI Command Complete/Status.
 //! SCO, USB isochronous/ISO traffic, bulk serialization, hotplug reattachment,
 //! suspend/resume and guest USB forwarding remain unsupported/separate work.
@@ -22,6 +24,7 @@
 //! reuse. There is deliberately no generic method to mark firmware "ready".
 mod binding;
 mod host;
+pub mod intel;
 
 pub use binding::{Binding, CLASS};
 pub use host::Host;
@@ -73,7 +76,10 @@ impl Pipe {
 pub trait Io {
     fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> Result<(), BlockError>;
     fn receive(&mut self, pipe: Pipe) -> Result<Option<Vec<u8>>, BlockError>;
+    /// Raw bulk OUT; the HCI layer validates ACL or identified vendor commands.
     fn write_acl(&mut self, packet: &[u8]) -> Result<(), BlockError>;
+    /// Cancel/acknowledge a posted bulk IN before changing its framing mode.
+    fn quiesce_bulk(&mut self) -> Result<(), BlockError>;
     fn close(&mut self) -> Result<(), BlockError>;
     fn now_us(&self) -> u64;
 }
@@ -136,6 +142,7 @@ pub struct Hci<B: Io> {
     state: State,
     events: Assembler,
     acl: Assembler,
+    intel_bootloader: bool,
 }
 pub type UsbHci = Hci<Host>;
 
@@ -149,6 +156,7 @@ impl<B: Io> Hci<B> {
             state: State::Open,
             events: Assembler::new(Pipe::Event),
             acl: Assembler::new(Pipe::Acl),
+            intel_bootloader: false,
         }
     }
     pub fn binding(&self) -> &Binding {
@@ -184,6 +192,12 @@ impl<B: Io> Hci<B> {
         if packet.len() < 3 || packet.len() != 3 + usize::from(packet[2]) {
             return Err(error(ErrorKind::InvalidPacket("HCI command length")));
         }
+        if self.intel_bootloader && packet[..2] == intel::SECURE_SEND.to_le_bytes() {
+            return self
+                .io
+                .write_acl(packet)
+                .map_err(|failure| self.fail(ErrorKind::Usb(failure)));
+        }
         let index = if self.binding.recipient == 0x21 {
             u16::from(self.binding.interface)
         } else {
@@ -199,6 +213,11 @@ impl<B: Io> Hci<B> {
     /// control and firmware initialization remain the caller's responsibility.
     pub fn submit_acl(&mut self, packet: &[u8]) -> Result<(), Error> {
         self.open()?;
+        if self.intel_bootloader {
+            return Err(error(ErrorKind::InvalidPacket(
+                "ACL unavailable in Intel bootloader mode",
+            )));
+        }
         if packet.len() < 4
             || packet.len() != 4 + usize::from(u16::from_le_bytes([packet[2], packet[3]]))
         {
@@ -252,10 +271,28 @@ impl<B: Io> Hci<B> {
             };
             packets.extend(frames.into_iter().map(|frame| match pipe {
                 Pipe::Event => Packet::Event(frame),
+                Pipe::Acl if self.intel_bootloader => Packet::Event(frame),
                 Pipe::Acl => Packet::Acl(frame),
             }));
         }
         Ok(packets)
+    }
+
+    // Private to this module and its identified vendor initializer. Both pipes
+    // must have complete frames; cancel the posted bulk TD before reframing it.
+    fn intel_mode(&mut self, bootloader: bool) -> Result<(), Error> {
+        self.open()?;
+        if self.events.since.is_some() || self.acl.since.is_some() {
+            return Err(self.fail(ErrorKind::InvalidPacket(
+                "partial HCI frame at mode transition",
+            )));
+        }
+        self.io
+            .quiesce_bulk()
+            .map_err(|failure| self.fail(ErrorKind::Usb(failure)))?;
+        self.acl = Assembler::new(if bootloader { Pipe::Event } else { Pipe::Acl });
+        self.intel_bootloader = bootloader;
+        Ok(())
     }
 
     /// Stop outstanding USB receives. This is idempotent after successful close;
@@ -499,6 +536,9 @@ mod tests {
                 Some(error) => Err(error),
                 None => Ok(()),
             }
+        }
+        fn quiesce_bulk(&mut self) -> Result<(), BlockError> {
+            Ok(())
         }
         fn close(&mut self) -> Result<(), BlockError> {
             self.close_count.set(self.close_count.get() + 1);
