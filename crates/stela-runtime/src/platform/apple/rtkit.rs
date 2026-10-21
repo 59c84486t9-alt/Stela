@@ -224,6 +224,12 @@ impl RtKit {
         self
     }
 
+    /// The last accepted IOP power state, for retained device-state hooks.
+    /// A rejected management message does not change this value.
+    pub fn iop_power(&self) -> u64 {
+        self.iop_power
+    }
+
     /// Application endpoint `number`'s model, for board events it reports.
     pub fn endpoint_mut<E: Endpoint>(&mut self, number: u8) -> Option<&mut E> {
         let (endpoint, _) = self.endpoints.get_mut(&number)?;

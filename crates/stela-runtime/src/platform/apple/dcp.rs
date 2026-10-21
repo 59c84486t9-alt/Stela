@@ -317,7 +317,15 @@ impl Firmware for Coprocessor {
         self.rtkit.start(outbox)
     }
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
-        self.rtkit.receive(message, outbox)
+        let previous = self.rtkit.iop_power();
+        self.rtkit.receive(message, outbox)?;
+        // Firmware 0x257f8 decodes wire 0x201/0x202 to internal state 8
+        // and 0x220 to 0x21. Its retained-link power callback 0x187524
+        // resumes only the 8 -> 0x21 edge, without a new endpoint Hello.
+        if matches!(previous, 0x201 | 0x202) && self.rtkit.iop_power() == 0x220 {
+            self.link.borrow_mut().service_mut().resume();
+        }
+        Ok(())
     }
     fn dma_pending(&self) -> bool {
         self.link.borrow().pending() || self.afk.iter().any(|afk| afk.borrow().pending())
@@ -484,6 +492,106 @@ mod tests {
         assert_eq!(&ram.bytes[at + 12..at + 16], &1920u32.to_le_bytes());
         assert!(!coprocessor.dma_pending());
         assert!(matches!(coprocessor.take_log(), Some(Log::Call { tag, .. }) if &tag == b"A451"));
+    }
+
+    fn iop_power(coprocessor: &mut Coprocessor, state: u64) -> Result<Vec<Message>, &'static str> {
+        let mut out = Vec::new();
+        coprocessor.receive(
+            Message {
+                endpoint: 0,
+                payload: 6 << 52 | state,
+            },
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    fn quiesced(link: &Shared) -> bool {
+        rpc::Service::call(link.borrow_mut().service_mut(), *b"A035", &[], 4).is_err()
+    }
+
+    #[test]
+    fn iop_sleep_to_wake_resumes_the_retained_rpc_region_without_a_hello() {
+        for sleep in [0x201, 0x202] {
+            let (scanout, _) = screen(1920, 1080);
+            let mut coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+            let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+            let mut endpoint = up(&mut coprocessor, &mut ram);
+            // Bring a separate AFK transport up before the display sleeps.
+            // Retained power must not restart it or clear its registered rings.
+            let afk = coprocessor.afk[0].clone();
+            afk.borrow_mut()
+                .receive(afk::INIT << 48 | 0x100, &mut Vec::new())
+                .unwrap();
+            afk.borrow_mut()
+                .receive(afk::GETBUF_ACK << 48 | 0x8000, &mut Vec::new())
+                .unwrap();
+            dma(&mut coprocessor, &mut ram).unwrap();
+            afk.borrow_mut()
+                .receive(afk::START << 48, &mut Vec::new())
+                .unwrap();
+            assert!(afk.borrow().started());
+            let heap = coprocessor.link.borrow().heap();
+            let shutdown = call(
+                &mut endpoint,
+                &mut ram,
+                0,
+                b"A500",
+                &[0, 0, 0xaa, 0xaa],
+                0,
+                true,
+            );
+            assert_eq!(
+                dma(&mut coprocessor, &mut ram).unwrap()[0].payload,
+                link::Word::Rpc(shutdown.answer()).encode()
+            );
+            assert!(quiesced(&coprocessor.link));
+            // A wake request without a preceding sleep does not revive A500.
+            iop_power(&mut coprocessor, 0x220).unwrap();
+            assert!(quiesced(&coprocessor.link));
+            iop_power(&mut coprocessor, sleep).unwrap();
+            assert!(iop_power(&mut coprocessor, 0x221).is_err());
+            assert_eq!(coprocessor.rtkit.iop_power(), sleep);
+            assert!(quiesced(&coprocessor.link));
+            let out = iop_power(&mut coprocessor, 0x220).unwrap();
+            // Only RTKit's power ACK: no Hello, new region or endpoint reset.
+            assert_eq!(
+                out,
+                [Message {
+                    endpoint: 0,
+                    payload: 7 << 52 | 0x220
+                }]
+            );
+            assert!(coprocessor.link.borrow().is_up());
+            assert!(afk.borrow().started());
+            assert_eq!(coprocessor.link.borrow().heap(), heap);
+            assert!(!coprocessor.dma_pending());
+            let request = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
+            let answer = dma(&mut coprocessor, &mut ram).unwrap();
+            assert_eq!(
+                answer[0].payload,
+                link::Word::Rpc(request.answer()).encode()
+            );
+            assert_eq!(&ram.bytes[0xc00c..0xc010], &1920u32.to_le_bytes());
+            assert_eq!(coprocessor.link.borrow().heap(), heap);
+            // Repeated wake and a rail-off-to-wake request are distinct from
+            // the retained sleep edge and leave a new shutdown quiesced.
+            call(
+                &mut endpoint,
+                &mut ram,
+                0,
+                b"A500",
+                &[0, 0, 0xaa, 0xaa],
+                0,
+                true,
+            );
+            dma(&mut coprocessor, &mut ram).unwrap();
+            iop_power(&mut coprocessor, 0x220).unwrap();
+            assert!(quiesced(&coprocessor.link));
+            iop_power(&mut coprocessor, 0).unwrap();
+            iop_power(&mut coprocessor, 0x220).unwrap();
+            assert!(quiesced(&coprocessor.link));
+        }
     }
 
     #[test]

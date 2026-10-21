@@ -149,6 +149,14 @@ pub struct Methods {
 }
 
 impl Methods {
+    /// Resume the retained link after the coprocessor's sleep-to-wake edge.
+    /// Firmware 0x187658 clears its quiescence byte and releases stopped
+    /// streams; the shared region, mode and client state remain allocated.
+    /// No callbacks or swaps discarded by A500 are recreated here.
+    pub(super) fn resume(&mut self) {
+        self.shut_down = false;
+    }
+
     pub fn new(scanout: Box<dyn Scanout>) -> Self {
         let advertised = Advertised::new(scanout.mode());
         Self {
@@ -361,7 +369,7 @@ impl Service for Methods {
         if self.shut_down {
             return self.refuse(
                 tag,
-                "the AP shut the DCP link down; restarting the coprocessor is not modeled",
+                "the AP shut the DCP link down; an IOP sleep-to-wake transition is required",
             );
         }
         let mut fields = Fields::new(input);
@@ -556,7 +564,8 @@ impl Service for Methods {
             // link_shutdown_signal(bool hibernate, bool): the AP's
             // DCPPowerManager::set_power_state (0x3d852c0) sends it for
             // power state 0 once the link is idle, then waits for its own
-            // streams and cuts the DCP's power and DART; no method follows.
+            // streams and cuts the DCP's power and DART. Methods resume
+            // only on the coprocessor's retained sleep-to-wake edge.
             // The firmware (restore 0x191390, normal 0x191594) reads only
             // the first byte. 1 also saves the pipe for hibernation
             // (0x191434, 0x1884a4). Otherwise it stops the pipe (0x27c99c),
@@ -969,6 +978,9 @@ mod tests {
                 .unwrap()
                 .contains("shut the DCP link down")
         );
+        methods.resume();
+        assert_eq!(returned(methods.call(*b"A035", &[], 4)), [0; 4]);
+        assert!(!methods.callback_pending() && methods.take_callback().is_none());
     }
 
     #[test]
