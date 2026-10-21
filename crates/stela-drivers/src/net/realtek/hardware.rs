@@ -51,8 +51,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         Err(BlockError::Timeout)
     }
     pub fn reset(&self) -> Result<(), BlockError> {
-        self.registers.write16(INTERRUPT_MASK, 0);
-        self.registers.write16(INTERRUPT_STATUS, u16::MAX);
+        self.interrupts_off();
         self.registers.write8(COMMAND, RESET);
         for _ in 0..100 {
             self.timer.delay(100);
@@ -65,6 +64,15 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
             }
         }
         Err(BlockError::Timeout)
+    }
+    pub fn interrupts_off(&self) {
+        if self.revision.nbase() {
+            self.registers.write32(NBASE_INTERRUPT_MASK, 0);
+            self.registers.write32(NBASE_INTERRUPT_STATUS, u32::MAX);
+        } else {
+            self.registers.write16(INTERRUPT_MASK, 0);
+            self.registers.write16(INTERRUPT_STATUS, u16::MAX);
+        }
     }
     pub fn efuse_read(&self, address: u16) -> Result<u8, BlockError> {
         if address > 0x03ff {

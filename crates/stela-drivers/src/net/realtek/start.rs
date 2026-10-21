@@ -9,6 +9,7 @@ use crate::block::BlockError;
 mod ep;
 mod g;
 mod h;
+mod nbase;
 
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     fn ephys(&self, values: &[(u8, u16, u16)]) -> Result<(), BlockError> {
@@ -31,13 +32,16 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             // MAC28's exact DP4 branch re-enables it in PCIe Link Control
             // after EPHY setup. MAC32+ clears these MAC-local bits first.
             if self.revision.version >= 32 {
-                if self.revision.version == 46 {
+                if self.revision.version == 46 || self.revision.nbase() {
                     self.mac_ocp_modify(0xe092, 0x00ff, 0)?;
                 }
                 r.write8(CONFIG2, r.read8(CONFIG2) & !(1 << 7));
                 r.write8(CONFIG5, r.read8(CONFIG5) & !1);
                 if self.revision.version == 46 {
                     self.mac_ocp_write(0xe048, 1500 + 14 + 0x20)?; // Donor TX idle timer in bytes.
+                }
+                if self.revision.nbase() {
+                    r.write16(NBASE_EEE_TXIDLE, 1500 + 14 + 0x20);
                 }
             }
             let mut cplus = r.read16(CPLUS) & (1 << 13); // normal mode only; no VLAN/checksum offloads.
@@ -58,6 +62,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     }
                     r.write32(0x7c, magic);
                 }
+            } else if self.revision.nbase() {
+                self.nbase_mac()?;
             } else {
                 r.write8(
                     EARLY_TX,
@@ -238,7 +244,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 }
             }
             r.write16(CPLUS, cplus);
-            r.write16(INTERRUPT_MITIGATION, 0);
+            if !self.revision.nbase() {
+                r.write16(INTERRUPT_MITIGATION, 0);
+            }
             // Restrict receive size to one allocated buffer, allowing the FCS.
             r.write16(RX_MAXIMUM, BUFFER as u16);
             Ok(())

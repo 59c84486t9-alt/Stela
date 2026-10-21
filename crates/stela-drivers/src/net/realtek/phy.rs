@@ -15,6 +15,7 @@ mod ep;
 mod f;
 mod g;
 mod h;
+mod nbase;
 
 const S: &[(u16, u16)] = &[
     (0x1f, 0x0001),
@@ -295,7 +296,12 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         // This slice implements the internal FE/GE path and RTL8211B's
         // ID-specific resume quirk, followed by generic reset/autonegotiation.
         // Other external PHY IDs need their own realtek_main.c quirks.
-        if !matches!(id, 0x001c_c800 | 0x001c_c912) {
+        let supported = if self.revision.nbase() {
+            matches!(id, 0x001c_c800 | 0x001c_c840)
+        } else {
+            matches!(id, 0x001c_c800 | 0x001c_c912)
+        };
+        if !supported {
             return Err(Error::UnsupportedPhy(id));
         }
         if matches!(
@@ -314,7 +320,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         self.phy_modify(PHY_CONTROL, 1 << 11, 0)?; // genphy_resume
         self.timer.delay(20_000);
-        if id == 0x001c_c800 {
+        if id == 0x001c_c800 || self.revision.nbase() {
             // realtek_main.c distinguishes the generic FE/GE PHY from the
             // identical-ID 2.5G PHY by vendor page a61's capability register.
             self.phy_write(PHY_PAGE, 0x0a61)?;
@@ -322,7 +328,10 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             let restored = self.phy_write(PHY_PAGE, 0);
             let capability = capability?;
             restored?;
-            if capability & 0x2000 != 0 {
+            if (capability & 0x2000 != 0) != self.revision.nbase() {
+                return Err(Error::UnsupportedPhy(id));
+            }
+            if self.revision.nbase() && !self.nbase_internal_phy()? {
                 return Err(Error::UnsupportedPhy(id));
             }
         }
@@ -379,6 +388,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
                 51 => self.ep_phy()?,
                 52 => self.fp_phy()?, // XID54a's MAC firmware executes after MAC setup.
+                61 | 63 => {
+                    self.nbase_phy(script.ok_or(Error::Script("RTL8125A/B requires firmware"))?)?
+                }
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
@@ -391,6 +403,16 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 // MAC40+ has actual direct PHY-OCP/C45 access. Clear it after
                 // reset, before restarting autonegotiation; no EEE advertised.
                 self.phy_ocp_write(PHY_OCP_EEE_ADV, 0)?;
+            }
+            if self.revision.nbase() {
+                self.phy_ocp_write(PHY_OCP_EEE_ADV, 0)?;
+                self.phy_ocp_write(NBASE_EEE_ADV2, 0)?;
+                let advertised = self.phy_ocp_read(NBASE_AN_CONTROL)?;
+                self.phy_ocp_write(
+                    NBASE_AN_CONTROL,
+                    (advertised & !(NBASE_ADV_2500 | NBASE_ADV_5000 | NBASE_ADV_10000))
+                        | NBASE_ADV_2500,
+                )?;
             }
             self.phy_write(4, 0x01e1)?; // IEEE selector, 10/100 half/full, no pause.
             self.phy_modify(9, (3 << 8) | (3 << 11) | (7 << 13), 1 << 9)?; // 1000 full, auto master.

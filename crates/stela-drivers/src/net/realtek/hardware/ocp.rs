@@ -21,6 +21,15 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         Ok(value)
     }
+    pub(in super::super) fn mmio16(&self, reg: usize) -> Result<u16, BlockError> {
+        let value = self.registers.read16(reg);
+        if value == u16::MAX {
+            return Err(BlockError::Device {
+                status: u32::from(value),
+            });
+        }
+        Ok(value)
+    }
     pub(in super::super) fn wait8(
         &self,
         reg: usize,
@@ -90,7 +99,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.mac_ocp_write(address, (self.mac_ocp_read(address)? & !clear) | set)
     }
     pub fn initialize_modern(&self) -> Result<(), BlockError> {
-        if !matches!(self.revision.version, 40 | 42 | 44 | 46 | 51 | 52) {
+        if !matches!(self.revision.version, 40 | 42 | 44 | 46 | 51 | 52 | 61 | 63) {
             return Ok(());
         }
         if matches!(self.revision.version, 51 | 52) {
@@ -99,19 +108,42 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let r = self.registers;
         r.write32(MISC, self.mmio32(MISC)? | RXDV_GATED); // RXDV gate.
         self.timer.delay(2_000);
-        self.poll32(TX_CONFIG, TX_FIFO_EMPTY, true, 100, 42)?;
+        if self.revision.version < 61 {
+            self.poll32(TX_CONFIG, TX_FIFO_EMPTY, true, 100, 42)?;
+        } else if self.revision.version >= 63 {
+            r.write8(COMMAND, self.mmio8(COMMAND)? | 0x80); // StopReq.
+        }
         self.wait8(
             MCU,
             MCU_TX_EMPTY | MCU_RX_EMPTY,
             MCU_TX_EMPTY | MCU_RX_EMPTY,
             42,
         )?; // Both TX and RX FIFOs empty.
+        if self.revision.version >= 63 {
+            let mut ready = false;
+            for _ in 0..42 {
+                self.timer.delay(100);
+                if self.mmio16(INTERRUPT_MITIGATION)? & 0x0103 == 0x0103 {
+                    ready = true;
+                    break;
+                }
+            }
+            if !ready {
+                return Err(BlockError::Timeout);
+            }
+        }
         r.write8(COMMAND, self.mmio8(COMMAND)? & !ENABLE);
         self.timer.delay(1_000);
         r.write8(MCU, self.mmio8(MCU)? & !MCU_OOB);
         self.mac_ocp_modify(0xe8de, 1 << 14, 0)?;
         self.wait8(MCU, LINK_LIST_READY, LINK_LIST_READY, 42)?; // Shared link-list ownership ready.
-        self.mac_ocp_modify(0xe8de, 0, 1 << 15)?;
+        if self.revision.nbase() {
+            self.mac_ocp_write(0xc0aa, 0x07d0)?;
+            self.mac_ocp_write(0xc0a6, 0x0150)?;
+            self.mac_ocp_write(0xc01e, 0x5555)?;
+        } else {
+            self.mac_ocp_modify(0xe8de, 0, 1 << 15)?;
+        }
         self.wait8(MCU, LINK_LIST_READY, LINK_LIST_READY, 42)
     }
 }
