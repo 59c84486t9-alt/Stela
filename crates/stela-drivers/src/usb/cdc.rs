@@ -89,6 +89,11 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// The data interface and alternate setting selected by this binding.
+    pub(super) fn data_setting(&self) -> (u8, u8) {
+        (self.data, self.alternate)
+    }
+
     pub(super) fn endpoints(&self) -> Vec<Endpoint> {
         let mut endpoints = alloc::vec![self.input, self.output];
         endpoints.extend(self.notify);

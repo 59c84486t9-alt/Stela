@@ -48,6 +48,8 @@ use core::{
     sync::atomic::{Ordering, fence},
 };
 
+mod configuration;
+
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
 
 // Capability registers.
@@ -168,6 +170,8 @@ const MAX_TIERS: u8 = 5;
 /// The most one TD moves, and the boundary it must not cross.
 pub const MAX_TD: usize = 64 * 1024;
 const CONTROL_BYTES: usize = 4096;
+/// Complete descriptor inventory per device, never a silently truncated prefix.
+const CONFIGURATION_INVENTORY_BYTES: usize = 64 * 1024;
 
 const RESET_US: u64 = 1_000_000;
 const HALT_US: u64 = 20_000;
@@ -192,8 +196,6 @@ pub const INTERFACE_DESCRIPTOR: u8 = 4;
 pub const ENDPOINT_DESCRIPTOR: u8 = 5;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
-/// bInterfaceClass 0xff: a vendor-specific interface.
-const VENDOR_CLASS: u8 = 0xff;
 const PORT_RESET: u16 = 4;
 const PORT_POWER: u16 = 8;
 const C_PORT_CONNECTION: u16 = 16;
@@ -368,13 +370,6 @@ pub struct Interface {
     pub extra: Vec<Vec<u8>>,
 }
 
-/// Whether a configuration's first interface has a standard class.
-fn standard_class(configuration: &[u8]) -> bool {
-    interfaces(configuration)
-        .first()
-        .is_some_and(|interface| interface.class != VENDOR_CLASS)
-}
-
 /// The interfaces of a configuration descriptor, in order.
 pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
     let mut interfaces: Vec<Interface> = Vec::new();
@@ -424,6 +419,10 @@ pub struct Device {
     /// Where it is: the controller's PCI function, root port and hub ports.
     pub location: String,
     pub descriptor: [u8; 18],
+    /// Every complete configuration descriptor in GET_DESCRIPTOR index order.
+    /// The descriptor's bConfigurationValue is independent of that index.
+    pub configurations: Vec<Vec<u8>>,
+    /// Selected configuration bytes; selection alone does not configure hardware.
     pub configuration: Vec<u8>,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
@@ -432,7 +431,7 @@ pub struct Device {
 
 impl Device {
     pub fn configuration_value(&self) -> u8 {
-        self.configuration.get(5).copied().unwrap_or(1)
+        self.configuration.get(5).copied().unwrap_or(0)
     }
     /// A name for logs: the product string, or the IDs.
     pub fn name(&self) -> String {
@@ -452,6 +451,8 @@ struct Transfer {
     is_in: bool,
     /// A failed cancellation leaves hardware ownership unresolved.
     poisoned: bool,
+    /// Only an acknowledged Configure Endpoint permits transfer submission.
+    enabled: bool,
 }
 
 struct Slot {
@@ -462,6 +463,8 @@ struct Slot {
     endpoints: [Option<Transfer>; 32],
     control: DmaBuffer,
     speed: u8,
+    /// None after an unresolved SET_CONFIGURATION; Some(0) is Address state.
+    current_configuration: Option<u8>,
 }
 
 /// Where a device hangs off the controller.
@@ -838,6 +841,7 @@ impl Controller {
             ring,
             is_in: false,
             poisoned: false,
+            enabled: true,
         });
         let input_address = input.physical();
         self.slots[usize::from(slot)] = Some(Slot {
@@ -847,6 +851,7 @@ impl Controller {
             endpoints,
             control,
             speed: attachment.speed,
+            current_configuration: Some(0),
         });
         during(
             format!("slot {slot} Address Device"),
@@ -911,8 +916,13 @@ impl Controller {
     /// outstanding TD; its normal completion/cancellation must still be awaited.
     pub fn endpoint_ready(&mut self, slot: u8, dci: u8) -> Result<(), BlockError> {
         self.ready()?;
-        let endpoint = self
-            .slot(slot)?
+        let state = self.slot(slot)?;
+        if dci != 1 && !state.current_configuration.is_some_and(|value| value != 0) {
+            return Err(BlockError::Unsupported(
+                "USB device configuration is not acknowledged",
+            ));
+        }
+        let endpoint = state
             .endpoints
             .get(usize::from(dci))
             .and_then(Option::as_ref)
@@ -920,11 +930,66 @@ impl Controller {
         if endpoint.poisoned {
             return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
         }
+        if !endpoint.enabled {
+            return Err(BlockError::Unsupported(
+                "xHCI endpoint configuration is not acknowledged",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Cached device state, updated only by acknowledged standard requests.
+    pub fn current_configuration(&mut self, slot: u8) -> Result<Option<u8>, BlockError> {
+        self.ready()?;
+        Ok(self.slot(slot)?.current_configuration)
+    }
+
+    /// Idempotent class-binding request. Repeating SET_CONFIGURATION, even with
+    /// the same value, resets alternate settings and endpoint state (USB 9.4.7).
+    pub fn set_configuration(&mut self, slot: u8, value: u8) -> Result<(), BlockError> {
+        if self.current_configuration(slot)? == Some(value) {
+            return Ok(());
+        }
+        self.control(
+            slot,
+            setup(0, SET_CONFIGURATION, u16::from(value), 0, 0),
+            &[],
+        )?;
         Ok(())
     }
 
     /// One control transfer on EP0; IN data is returned, OUT data sent.
     pub fn control(
+        &mut self,
+        slot: u8,
+        request: [u8; 8],
+        out: &[u8],
+    ) -> Result<Vec<u8>, BlockError> {
+        let configuration = request[0] == 0 && request[1] == SET_CONFIGURATION;
+        if configuration {
+            if request[3..] != [0; 5] || !out.is_empty() {
+                return Err(BlockError::Unsupported("invalid SET_CONFIGURATION request"));
+            }
+            if self.slot(slot)?.endpoints[2..].iter().any(Option::is_some) {
+                return Err(BlockError::Unsupported(
+                    "USB configuration change requires endpoint teardown",
+                ));
+            }
+        }
+        // A timeout may occur after the device accepted the request; do not
+        // preserve the old value or infer success from cancellation of EP0.
+        self.endpoint_ready(slot, 1)?;
+        if configuration {
+            self.slot(slot)?.current_configuration = None;
+        }
+        let result = self.control_transfer(slot, request, out);
+        if configuration && result.is_ok() {
+            self.slot(slot)?.current_configuration = Some(request[2]);
+        }
+        result
+    }
+
+    fn control_transfer(
         &mut self,
         slot: u8,
         request: [u8; 8],
@@ -1057,28 +1122,56 @@ impl Controller {
         dma: &mut dyn DmaAllocator,
     ) -> Result<(), BlockError> {
         self.ready()?;
+        if !self
+            .slot(slot)?
+            .current_configuration
+            .is_some_and(|value| value != 0)
+        {
+            return Err(BlockError::Unsupported(
+                "USB device configuration is not acknowledged",
+            ));
+        }
+        // Validate every endpoint and allocate every ring before publishing any
+        // change. Existing rings may still be DMA-owned, even after a failure.
+        let mut selected = 0u32;
         for endpoint in endpoints {
-            if self.slot(slot)?.endpoints[usize::from(endpoint.dci())]
-                .as_ref()
-                .is_some_and(|endpoint| endpoint.poisoned)
+            let dci = endpoint.dci();
+            if endpoint.address & 0x70 != 0
+                || dci < 2
+                || endpoint.max_packet & 0x7ff == 0
+                || !matches!(endpoint.kind(), 2 | 3)
+                || selected & (1 << dci) != 0
             {
-                return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
+                return Err(BlockError::Unsupported(
+                    "invalid or duplicate xHCI endpoint",
+                ));
             }
+            if let Some(transfer) = &self.slot(slot)?.endpoints[usize::from(dci)] {
+                return Err(BlockError::Unsupported(if transfer.poisoned {
+                    "xHCI endpoint cancellation failed"
+                } else {
+                    "xHCI endpoint replacement requires teardown"
+                }));
+            }
+            selected |= 1 << dci;
+        }
+        let mut rings = Vec::new();
+        for _ in endpoints {
+            rings.push(Ring::new(dma)?);
         }
         self.clear_input(slot)?;
         let context = self.context();
         let speed = self.slot(slot)?.speed;
         let mut add = 1u32;
         let mut last = 1u8;
-        for endpoint in endpoints {
+        for (endpoint, ring) in endpoints.iter().zip(rings) {
             let dci = endpoint.dci();
-            let ring = Ring::new(dma)?;
             let kind = match (endpoint.kind(), endpoint.is_in()) {
                 (2, false) => 2,
                 (3, false) => 3,
                 (2, true) => 6,
                 (3, true) => 7,
-                _ => return Err(BlockError::Unsupported("isochronous or control endpoint")),
+                _ => unreachable!("endpoint type validated before allocation"),
             };
             let max_packet = u32::from(endpoint.max_packet & 0x7ff);
             let burst = u32::from(endpoint.max_packet >> 11 & 3);
@@ -1107,6 +1200,7 @@ impl Controller {
                 ring,
                 is_in: endpoint.is_in(),
                 poisoned: false,
+                enabled: false,
             });
             add |= 1 << dci;
             last = last.max(dci);
@@ -1128,11 +1222,21 @@ impl Controller {
             }
             state.input.physical()
         };
-        self.command(
+        let result = self.command(
             input_address,
             0,
             CONFIGURE_ENDPOINT << 10 | u32::from(slot) << 24,
-        )?;
+        );
+        // Retain rings on any error: a lost command completion may still leave
+        // them reachable by the controller. Never expose an unacknowledged ring.
+        for endpoint in endpoints {
+            let transfer = self.slot(slot)?.endpoints[usize::from(endpoint.dci())]
+                .as_mut()
+                .unwrap();
+            transfer.enabled = result.is_ok();
+            transfer.poisoned = result.is_err();
+        }
+        result?;
         Ok(())
     }
 
@@ -1381,12 +1485,22 @@ impl Controller {
         failures: &mut Vec<(String, BlockError)>,
     ) {
         match self.identify(attachment, location.clone(), dma) {
-            Ok(device) if device.descriptor[4] == HUB_CLASS => {
-                if let Err(error) = self.hub(&device, attachment, dma, devices, failures) {
+            Ok(mut device) => {
+                if let Err(why) = configuration::select(&mut device) {
+                    device.configuration.clear();
+                    failures.push((
+                        format!("{location} {} choose configuration", device.name()),
+                        BlockError::Unsupported(why),
+                    ));
+                } else if device.descriptor[4] == HUB_CLASS
+                    && let Err(error) = self.hub(&device, attachment, dma, devices, failures)
+                {
                     failures.push((format!("{location} {} enumerate hub", device.name()), error));
                 }
+                // Selection failures still preserve the entire descriptor
+                // inventory for diagnostics and future generic forwarding.
+                devices.push(device);
             }
-            Ok(device) => devices.push(device),
             Err((operation, error)) => {
                 let at = self.port_offset(attachment.root_port);
                 let portsc = self.registers.read32(at);
@@ -1440,35 +1554,71 @@ impl Controller {
             u16::from_le_bytes([descriptor[8], descriptor[9]]),
             u16::from_le_bytes([descriptor[10], descriptor[11]])
         );
-        // The USB core's choice (Linux `usb_choose_configuration`): the first
-        // configuration whose first interface has a standard class, so an
-        // adapter that also offers CDC Ethernet after its vendor-specific
-        // configuration (as Realtek RTL8153 adapters do) is used through it.
-        let mut chosen = None;
-        for index in 0..descriptor[17].max(1) {
-            let configuration = self
-                .configuration(slot, index)
-                .map_err(|(operation, error)| (format!("{identity} {operation}"), error))?;
-            if standard_class(&configuration) {
-                chosen = Some(configuration);
-                break;
-            }
-            chosen.get_or_insert(configuration);
+        if descriptor[0] != 18 || descriptor[1] != DEVICE_DESCRIPTOR || descriptor[17] == 0 {
+            return during(
+                format!("{identity} slot {slot} device descriptor"),
+                Err(BlockError::Unsupported(
+                    "invalid USB device descriptor/configuration count",
+                )),
+            );
         }
-        let configuration = chosen.expect("at least one configuration is read");
+        let configurations = self
+            .configurations(slot, descriptor[17])
+            .map_err(|(operation, error)| (format!("{identity} {operation}"), error))?;
         let manufacturer = self.string(slot, descriptor[14]);
         let product = self.string(slot, descriptor[15]);
         let serial = self.string(slot, descriptor[16]);
-        Ok(Device {
+        let device = Device {
             slot,
             speed: attachment.speed,
             location,
             descriptor,
-            configuration,
+            configurations,
+            configuration: Vec::new(),
             manufacturer,
             product,
             serial,
-        })
+        };
+        Ok(device)
+    }
+
+    /// Read every descriptor index, retaining the complete original byte streams.
+    fn configurations(
+        &mut self,
+        slot: u8,
+        count: u8,
+    ) -> Result<Vec<Vec<u8>>, (String, BlockError)> {
+        if count == 0 {
+            return during(
+                format!("slot {slot} configuration inventory"),
+                Err(BlockError::Unsupported("USB device has no configurations")),
+            );
+        }
+        let mut configurations = Vec::new();
+        let mut inventory_bytes = 0;
+        for index in 0..count {
+            let bytes = self.configuration(slot, index)?;
+            inventory_bytes += bytes.len();
+            if inventory_bytes > CONFIGURATION_INVENTORY_BYTES {
+                return during(
+                    format!("slot {slot} configuration {index}"),
+                    Err(BlockError::Unsupported(
+                        "USB configuration inventory exceeds 64 KiB",
+                    )),
+                );
+            }
+            if configurations
+                .iter()
+                .any(|previous: &Vec<u8>| previous[5] == bytes[5])
+            {
+                return during(
+                    format!("slot {slot} configuration {index}"),
+                    Err(BlockError::Unsupported("duplicate USB configuration value")),
+                );
+            }
+            configurations.push(bytes);
+        }
+        Ok(configurations)
     }
 
     /// Configuration descriptor `index`, whole.
@@ -1480,8 +1630,36 @@ impl Controller {
                 Err(BlockError::Unsupported("short configuration descriptor")),
             );
         }
-        let total = u16::from_le_bytes([head[2], head[3]]).min(CONTROL_BYTES as u16);
-        self.enumeration_descriptor(slot, CONFIGURATION_DESCRIPTOR, index, total)
+        let total = u16::from_le_bytes([head[2], head[3]]);
+        if head[0] != 9
+            || head[1] != CONFIGURATION_DESCRIPTOR
+            || total < 9
+            || usize::from(total) > CONTROL_BYTES
+        {
+            return during(
+                format!("slot {slot} configuration {index} length={total}"),
+                Err(BlockError::Unsupported(
+                    "invalid or oversized USB configuration descriptor",
+                )),
+            );
+        }
+        let bytes = self.enumeration_descriptor(slot, CONFIGURATION_DESCRIPTOR, index, total)?;
+        during(
+            format!(
+                "slot {slot} configuration {index} value={} validate",
+                head[5]
+            ),
+            configuration::validate(&bytes)
+                .and_then(|()| {
+                    if bytes[..9] != head[..9] {
+                        Err("USB configuration header changed during enumeration")
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(BlockError::Unsupported),
+        )?;
+        Ok(bytes)
     }
 
     fn enumeration_descriptor(
@@ -1524,9 +1702,9 @@ impl Controller {
         let characteristics = u16::from_le_bytes([hub[3], hub[4]]);
         let power_good_us = u64::from(hub[5]) * 2000;
         // A multi-TT hub reports protocol 2 on its interface (11.23.1).
-        let multi = interfaces(&device.configuration)
-            .iter()
-            .any(|interface| interface.class == HUB_CLASS && interface.protocol == 2);
+        let multi = interfaces(&device.configuration).iter().any(|interface| {
+            interface.class == HUB_CLASS && interface.alternate == 0 && interface.protocol == 2
+        });
         let think_time = (characteristics >> 5 & 3) as u8;
         let status = interfaces(&device.configuration)
             .into_iter()
@@ -1538,18 +1716,8 @@ impl Controller {
         } else {
             0
         };
+        self.set_configuration(slot, device.configuration_value())?;
         self.configure(slot, &endpoints, Some((ports, tt_think, multi)), dma)?;
-        self.control(
-            slot,
-            setup(
-                0,
-                SET_CONFIGURATION,
-                u16::from(device.configuration_value()),
-                0,
-                0,
-            ),
-            &[],
-        )?;
         for port in 1..=ports {
             self.control(
                 slot,
@@ -1674,6 +1842,9 @@ pub struct Found {
     /// Devices or interfaces no driver here takes, and why.
     pub unused: Vec<(String, &'static str)>,
     pub failures: Vec<(String, BlockError)>,
+    /// Descriptor inventory of all addressed devices, including hubs and devices
+    /// without a supported class driver. Hardware state belongs to Controller.
+    pub devices: Vec<Device>,
 }
 
 /// Starts the controller at `function`, enumerates its devices and binds
@@ -1712,9 +1883,10 @@ pub fn start(
     let mut found = Found::default();
     let devices = controller.enumerate(dma, &mut found.failures);
     let shared: Shared = Rc::new(RefCell::new(controller));
-    for device in devices {
-        bind(&shared, device, dma, &mut found);
+    for device in &devices {
+        bind(&shared, device.clone(), dma, &mut found);
     }
+    found.devices = devices;
     Ok(found)
 }
 
@@ -1726,17 +1898,7 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
     let mut plans = Vec::new();
     // CDC data interfaces belong to their communications interface.
     for interface in all.iter().filter(|i| i.alternate == 0 && i.class != 10) {
-        let plan = if interface.class == storage::CLASS {
-            storage::plan(interface)
-        } else if interface.class == hid::CLASS {
-            hid::plan(interface)
-        } else if interface.class == cdc::COMMUNICATIONS {
-            cdc::plan(interface, &all)
-        } else if interface.class == bluetooth::CLASS {
-            bluetooth::Binding::new(&device, interface).map(Plan::Bluetooth)
-        } else {
-            Err("no class driver for this interface")
-        };
+        let plan = configuration::plan(&device, interface, &all);
         match plan {
             Ok(plan) => {
                 endpoints.extend(plan.endpoints().iter().copied());
@@ -1760,17 +1922,16 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
     }
     let configured = {
         let mut controller = shared.borrow_mut();
+        let value = device.configuration_value();
         during(
-            format!("slot {} Configure Endpoint", device.slot),
-            controller.configure(device.slot, &endpoints, None, dma),
+            format!("slot {} EP0 SET_CONFIGURATION value={value}", device.slot),
+            controller.set_configuration(device.slot, value),
         )
         .and_then(|()| {
-            let value = u16::from(device.configuration_value());
             during(
-                format!("slot {} EP0 SET_CONFIGURATION value={value}", device.slot),
-                controller.control(device.slot, setup(0, SET_CONFIGURATION, value, 0, 0), &[]),
+                format!("slot {} Configure Endpoint", device.slot),
+                controller.configure(device.slot, &endpoints, None, dma),
             )
-            .map(|_| ())
         })
     };
     if let Err((operation, error)) = configured {
@@ -2116,21 +2277,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_vendor_specific_configuration_is_passed_over() {
-        let vendor = [
-            9, 2, 18, 0, 1, 1, 0, 0x80, 50, // configuration 1
-            9, 4, 0, 0, 0, 0xff, 0xff, 0, 0, // vendor interface
-        ];
-        let ecm = [
-            9, 2, 18, 0, 2, 2, 0, 0x80, 50, // configuration 2
-            9, 4, 0, 0, 1, 2, 6, 0, 0, // CDC ECM communications interface
-        ];
-        assert!(!standard_class(&vendor));
-        assert!(standard_class(&ecm));
-        assert!(!standard_class(&vendor[..9]));
-    }
-
-    #[test]
     fn a_ring_wraps_through_its_link_trb_with_the_cycle_toggled() {
         let mut backing: Vec<u64> = vec![0; 1024];
         let start = backing.as_mut_ptr() as u64;
@@ -2180,6 +2326,9 @@ pub(crate) mod tests {
         silence_transfer: Option<usize>,
         halt_transfer: Option<usize>,
         script: Option<crate::usb::bluetooth::intel::tests::Script>,
+        descriptors: Vec<(u8, u8, Vec<u8>)>,
+        configuration_value: u8,
+        configuration_seen_before_endpoints: Vec<u8>,
     }
     impl CancelModel {
         fn state(&self, dci: usize) -> u32 {
@@ -2254,6 +2403,8 @@ pub(crate) mod tests {
             if code == SUCCESS {
                 match kind {
                     CONFIGURE_ENDPOINT => {
+                        let value = self.configuration_value;
+                        self.configuration_seen_before_endpoints.push(value);
                         // SAFETY: Configure Endpoint points to the live input
                         // context, with enabled endpoint dequeue pointers.
                         let flags = unsafe { ((parameter + 4) as *const u32).read_volatile() };
@@ -2344,20 +2495,53 @@ pub(crate) mod tests {
             if dci == 1 {
                 let request = parameter.to_le_bytes();
                 let length = usize::from(u16::from_le_bytes([request[6], request[7]]));
+                let mut received = length;
                 let data = if length == 0 {
+                    if request[0] == 0 && request[1] == SET_CONFIGURATION {
+                        self.configuration_value = request[2];
+                    }
                     Vec::new()
                 } else {
                     // SAFETY: the next Data TRB's buffer is live through this
                     // synchronous modeled control completion.
                     let buffer = unsafe { ((at + TRB as u64) as *const u64).read_volatile() };
+                    if request[0] == 0x80
+                        && request[1] == GET_DESCRIPTOR
+                        && let Some((_, _, bytes)) = self
+                            .descriptors
+                            .iter()
+                            .find(|(kind, index, _)| (*kind, *index) == (request[3], request[2]))
+                    {
+                        received = bytes.len().min(length);
+                        // SAFETY: buffer has the requested length and the
+                        // device writes only that bounded response.
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                bytes.as_ptr(),
+                                buffer as *mut u8,
+                                received,
+                            );
+                        }
+                    }
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, length).to_vec() }
                 };
-                self.scripted(false, &data);
+                if request[0] & 0x80 == 0 && request[1] != SET_CONFIGURATION {
+                    self.scripted(false, &data);
+                }
                 self.setup.push((request, data));
                 let trbs = if length == 0 { 2 } else { 3 };
                 if self.silence_transfer == Some(dci) {
                     self.active[dci] = Some((at, 0, length));
                 } else {
+                    if received < length {
+                        self.event(
+                            at + TRB as u64,
+                            SHORT_PACKET,
+                            TRANSFER_EVENT,
+                            1,
+                            length - received,
+                        );
+                    }
                     self.event(at + (trbs - 1) * TRB as u64, SUCCESS, TRANSFER_EVENT, 1, 0);
                 }
                 self.indices[dci] += trbs as usize;
@@ -2404,7 +2588,7 @@ pub(crate) mod tests {
             }
         }
     }
-    fn cancellation_controller(
+    fn unconfigured_cancellation_controller(
         dma: &mut dyn DmaAllocator,
     ) -> (Controller, Rc<RefCell<CancelModel>>) {
         let (mut controller, _) = address_controller(dma, SUCCESS);
@@ -2449,11 +2633,22 @@ pub(crate) mod tests {
             silence_transfer: None,
             halt_transfer: None,
             script: None,
+            descriptors: Vec::new(),
+            configuration_value: 0,
+            configuration_seen_before_endpoints: Vec::new(),
         }));
         model.borrow_mut().set_state(1, 1);
         controller.registers = Box::new(CancelRegisters(model.clone()));
         // A short actual test deadline without pretending any completion happened.
         controller.clock.ticks_per_microsecond = 1;
+        (controller, model)
+    }
+
+    fn cancellation_controller(
+        dma: &mut dyn DmaAllocator,
+    ) -> (Controller, Rc<RefCell<CancelModel>>) {
+        let (mut controller, model) = unconfigured_cancellation_controller(dma);
+        controller.set_configuration(1, 1).unwrap();
         let endpoints = [
             Endpoint {
                 address: 0x81,
@@ -2477,6 +2672,260 @@ pub(crate) mod tests {
         controller.configure(1, &endpoints, None, dma).unwrap();
         model.borrow_mut().seen.clear();
         (controller, model)
+    }
+
+    #[test]
+    fn all_configuration_indices_travel_through_ep0_and_selection_uses_the_wire_value() {
+        use configuration::tests::{device, ecm, vendor};
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing remains live and exclusive through all modeled DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        let originals = vec![vendor(9), ecm(42), vendor(5)];
+        model.borrow_mut().descriptors = originals
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| (CONFIGURATION_DESCRIPTOR, index as u8, bytes.clone()))
+            .collect();
+        let inventory = controller.configurations(1, 3).unwrap();
+        assert_eq!(inventory, originals);
+        let mut device = device(inventory);
+        configuration::select(&mut device).unwrap();
+        assert_eq!(device.configuration_value(), 42);
+        assert_eq!(
+            model
+                .borrow()
+                .setup
+                .iter()
+                .map(|(request, _)| request[2])
+                .collect::<Vec<_>>(),
+            vec![0, 0, 1, 1, 2, 2]
+        );
+        let all = interfaces(&device.configuration);
+        let plan = configuration::plan(&device, &all[0], &all).unwrap();
+        assert!(
+            controller
+                .configure(1, &plan.endpoints(), None, &mut dma)
+                .is_err()
+        );
+        assert!(model.borrow().seen.is_empty());
+        controller
+            .set_configuration(1, device.configuration_value())
+            .unwrap();
+        controller
+            .configure(1, &plan.endpoints(), None, &mut dma)
+            .unwrap();
+        assert_eq!(controller.current_configuration(1), Ok(Some(42)));
+        assert_eq!(model.borrow().configuration_seen_before_endpoints, vec![42]);
+        assert_eq!(
+            model.borrow().setup.last().unwrap().0,
+            setup(0, SET_CONFIGURATION, 42, 0, 0)
+        );
+        let requests = model.borrow().setup.len();
+        controller.set_configuration(1, 42).unwrap(); // Another class binder must not reset the device.
+        assert_eq!(model.borrow().setup.len(), requests);
+        assert!(controller.set_configuration(1, 9).is_err());
+        assert!(
+            controller
+                .control(1, setup(0, SET_CONFIGURATION, 42, 0, 0), &[])
+                .is_err()
+        );
+        assert_eq!(model.borrow().setup.len(), requests);
+        assert_eq!(controller.current_configuration(1), Ok(Some(42)));
+    }
+
+    #[test]
+    fn descriptor_inventory_refuses_truncation_duplicate_values_and_silent_size_caps() {
+        use configuration::tests::vendor;
+        for scenario in 0..5 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: exclusive live test backing holds all rings and buffers.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let mut bytes = vendor(7);
+            match scenario {
+                0 => {
+                    bytes.pop();
+                }
+                1 => {
+                    bytes[2..4].copy_from_slice(&4097u16.to_le_bytes());
+                }
+                2 => {
+                    bytes[5] = 0;
+                }
+                3 => {
+                    bytes[2..4].copy_from_slice(&8u16.to_le_bytes());
+                }
+                _ => {}
+            }
+            model.borrow_mut().descriptors = vec![
+                (CONFIGURATION_DESCRIPTOR, 0, bytes.clone()),
+                (CONFIGURATION_DESCRIPTOR, 1, bytes),
+            ];
+            let error = controller.configurations(1, 2).unwrap_err();
+            assert!(matches!(error.1, BlockError::Unsupported(_)), "{error:?}");
+            assert_eq!(controller.current_configuration(1), Ok(Some(0)));
+            assert!(model.borrow().seen.is_empty());
+            if scenario == 1 || scenario == 3 {
+                assert_eq!(model.borrow().setup.len(), 1); // Reject before requesting capped/full bytes.
+            }
+        }
+    }
+
+    #[test]
+    fn configuration_inventory_has_an_explicit_aggregate_resource_limit() {
+        use configuration::tests::vendor;
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: this exclusive allocation remains live for every DMA access.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        for index in 0..17 {
+            let mut bytes = vendor(index + 1);
+            while bytes.len() < CONTROL_BYTES {
+                bytes.extend_from_slice(&[2, 0x30]); // Preserved unknown class descriptors.
+            }
+            bytes[2..4].copy_from_slice(&(CONTROL_BYTES as u16).to_le_bytes());
+            model
+                .borrow_mut()
+                .descriptors
+                .push((CONFIGURATION_DESCRIPTOR, index, bytes));
+        }
+        assert_eq!(
+            controller.configurations(1, 17).unwrap_err().1,
+            BlockError::Unsupported("USB configuration inventory exceeds 64 KiB")
+        );
+        assert_eq!(model.borrow().setup.len(), 34);
+        assert_eq!(controller.current_configuration(1), Ok(Some(0)));
+        assert!(model.borrow().seen.is_empty());
+    }
+
+    #[test]
+    fn unacknowledged_configuration_never_activates_endpoints_or_reuses_poisoned_ep0() {
+        for scenario in 0..3 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: exclusive backing outlives controller and hardware model.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            if scenario == 0 {
+                model.borrow_mut().halt_transfer = Some(1);
+            } else {
+                model.borrow_mut().silence_transfer = Some(1);
+                if scenario == 2 {
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, 11));
+                }
+            }
+            assert!(controller.set_configuration(1, 42).is_err());
+            assert_eq!(controller.current_configuration(1), Ok(None));
+            let endpoint = fixture_endpoint(3);
+            assert!(
+                controller
+                    .configure(1, &[endpoint], None, &mut dma)
+                    .is_err()
+            );
+            assert!(controller.slots[1].as_ref().unwrap().endpoints[3].is_none());
+            let request_count = model.borrow().setup.len();
+            model.borrow_mut().halt_transfer = None;
+            model.borrow_mut().silence_transfer = None;
+            if scenario == 2 {
+                let ring = controller.slots[1].as_ref().unwrap().endpoints[1]
+                    .as_ref()
+                    .unwrap()
+                    .ring
+                    .buffer
+                    .bytes()
+                    .to_vec();
+                assert!(controller.set_configuration(1, 42).is_err());
+                assert_eq!(model.borrow().setup.len(), request_count);
+                assert_eq!(
+                    controller.slots[1].as_ref().unwrap().endpoints[1]
+                        .as_ref()
+                        .unwrap()
+                        .ring
+                        .buffer
+                        .bytes(),
+                    ring
+                );
+            } else {
+                controller.set_configuration(1, 42).unwrap();
+                assert_eq!(controller.current_configuration(1), Ok(Some(42)));
+            }
+        }
+    }
+
+    #[test]
+    fn failed_endpoint_configuration_retains_rings_without_exposing_or_replacing_them() {
+        for missing_completion in [false, true] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing is live/exclusive through every retained DMA ring.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.set_configuration(1, 42).unwrap();
+            if missing_completion {
+                model.borrow_mut().silence = Some(CONFIGURE_ENDPOINT);
+            } else {
+                model.borrow_mut().fail = Some((CONFIGURE_ENDPOINT, 7));
+            }
+            let endpoint = fixture_endpoint(3);
+            assert!(
+                controller
+                    .configure(1, &[endpoint], None, &mut dma)
+                    .is_err()
+            );
+            let transfer = controller.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap();
+            assert!(!transfer.enabled);
+            assert!(transfer.poisoned);
+            let address = transfer.ring.buffer.physical();
+            let bytes = transfer.ring.buffer.bytes().to_vec();
+            let commands = model.borrow().seen.len();
+            assert!(controller.submit(1, 3, address, 16).is_err());
+            assert!(
+                controller
+                    .configure(1, &[endpoint], None, &mut dma)
+                    .is_err()
+            );
+            let transfer = controller.slots[1].as_ref().unwrap().endpoints[3]
+                .as_ref()
+                .unwrap();
+            assert_eq!(transfer.ring.buffer.physical(), address);
+            assert_eq!(transfer.ring.buffer.bytes(), bytes);
+            assert_eq!(model.borrow().seen.len(), commands);
+        }
+    }
+
+    #[test]
+    fn acknowledged_zero_configuration_returns_to_address_state_without_endpoint_activation() {
+        let mut backing = vec![0u64; 128 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing remains live and exclusive through controller/model use.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        controller.set_configuration(1, 42).unwrap();
+        for malformed in [
+            setup(0, SET_CONFIGURATION, 0x100, 0, 0),
+            setup(0, SET_CONFIGURATION, 0, 1, 0),
+            setup(0, SET_CONFIGURATION, 0, 0, 1),
+        ] {
+            assert!(controller.control(1, malformed, &[]).is_err());
+        }
+        assert_eq!(controller.current_configuration(1), Ok(Some(42)));
+        assert_eq!(model.borrow().setup.len(), 1);
+        controller.set_configuration(1, 0).unwrap();
+        assert_eq!(controller.current_configuration(1), Ok(Some(0)));
+        assert_eq!(model.borrow().configuration_value, 0);
+        assert!(
+            controller
+                .configure(1, &[fixture_endpoint(3)], None, &mut dma)
+                .is_err()
+        );
+        assert!(controller.slots[1].as_ref().unwrap().endpoints[3].is_none());
+        assert!(model.borrow().seen.is_empty());
     }
 
     #[test]
@@ -2588,15 +3037,16 @@ pub(crate) mod tests {
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: this boot-lifetime-style allocation outlives every model DMA.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let (controller, model) = cancellation_controller(&mut dma);
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
             let shared: Shared = Rc::new(RefCell::new(controller));
-            let device = Device {
+            let mut device = Device {
                 slot: 1,
                 speed: FULL_SPEED,
                 location: "modeled physical HCI".into(),
                 descriptor: [
                     18, 1, 0, 2, 0xe0, 1, 1, 64, 0x34, 0x12, 0x78, 0x56, 0, 1, 0, 0, 0, 1,
                 ],
+                configurations: Vec::new(),
                 configuration: vec![
                     9, 2, 48, 0, 2, 1, 0, 0x80, 50, 9, 4, 0, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3,
                     16, 0, 1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x02, 2, 64, 0, 0, 9, 4, 1, 0, 0,
@@ -2606,6 +3056,7 @@ pub(crate) mod tests {
                 product: None,
                 serial: None,
             };
+            device.configurations = vec![device.configuration.clone()];
             let mut found = Found::default();
             bind(&shared, device, &mut dma, &mut found);
             assert!(found.failures.is_empty(), "{:?}", found.failures);
@@ -2681,7 +3132,7 @@ pub(crate) mod tests {
         let start = backing.as_mut_ptr() as u64;
         // SAFETY: exclusive model DMA stays live through all host endpoints.
         let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-        let (controller, model) = cancellation_controller(&mut dma);
+        let (controller, model) = unconfigured_cancellation_controller(&mut dma);
         let shared: Shared = Rc::new(RefCell::new(controller));
         let (device, catalog, script) = intel::tests::fixture();
         let mut found = Found::default();
@@ -2949,7 +3400,11 @@ pub(crate) mod tests {
         );
         assert_eq!(model.borrow().seen, vec![RESET_ENDPOINT, SET_DEQUEUE]);
         assert_eq!(model.borrow().state(usize::from(dci)), ENDPOINT_STOPPED);
-        assert_eq!(model.borrow().indices[usize::from(dci)], 0);
+        // EP0 already completed the configuration request in this fixture.
+        assert_eq!(
+            model.borrow().indices[usize::from(dci)],
+            if dci == 1 { 2 } else { 0 }
+        );
         assert!(model.borrow().dequeues.is_empty());
         assert!(!controller.command_poisoned);
         (controller, model)

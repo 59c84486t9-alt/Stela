@@ -481,6 +481,7 @@ mod tests {
                 0,
                 1,
             ],
+            configurations: vec![configuration.clone()],
             configuration,
             manufacturer: None,
             product: None,

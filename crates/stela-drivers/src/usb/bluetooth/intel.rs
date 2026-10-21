@@ -439,13 +439,14 @@ pub(crate) mod tests {
         }
     }
     pub(crate) fn fixture() -> (Device, Catalog, Script) {
-        let device = Device {
+        let mut device = Device {
             slot: 1,
             speed: FULL_SPEED,
             location: "Intel model".into(),
             descriptor: [
                 18, 1, 0, 2, 0xe0, 1, 1, 64, 0x87, 0x80, 0x29, 0, 0, 1, 0, 0, 0, 1,
             ],
+            configurations: Vec::new(),
             configuration: vec![
                 9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 2, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0,
                 1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 0x02, 2, 64, 0, 0,
@@ -454,6 +455,7 @@ pub(crate) mod tests {
             product: None,
             serial: None,
         };
+        device.configurations = vec![device.configuration.clone()];
         let sfi = image();
         let mut steps = VecDeque::new();
         let mut add = |opcode, params: &[u8], bulk, pipe, payload: &[u8]| {
