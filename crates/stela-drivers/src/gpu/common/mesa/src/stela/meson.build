@@ -154,7 +154,7 @@ endif
 if with_stela_nvidia
   stela_nv_image = static_library(
     'stela_nv_image',
-    '../../../../nvidia/stela/hosted/image.c',
+    ['../../../../nvidia/stela/hosted/image.c', '../../../../nvidia/stela/hosted/copy.c'],
     include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
     dependencies : [idep_nil, idep_mesautil],
     c_args : ['-Werror'],
@@ -168,6 +168,15 @@ if with_stela_nvidia
     c_args : ['-Werror'],
   )
   test('stela_nv_image', stela_nv_image_probe, suite : 'stela')
+  stela_nv_image_copy_probe = executable(
+    'stela_nv_image_copy_probe',
+    '../../../../nvidia/stela/tests/copy.c',
+    include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+    dependencies : [idep_nil, idep_mesautil],
+    link_with : [stela_nv_image],
+    c_args : ['-Werror'],
+  )
+  test('stela_nv_image_copy', stela_nv_image_copy_probe, suite : 'stela')
   stela_nv_compute = static_library(
     'stela_nv_compute',
     ['nvidia_compute.c', stela_nv_compute_headers],
@@ -242,6 +251,42 @@ if with_stela_intel
     c_args : ['-Werror'],
   )
   test('stela_intel_image', stela_intel_image_probe, suite : 'stela')
+
+  stela_intel_sampler = static_library(
+    'stela_intel_sampler',
+    ['../../../../intel/stela/hosted/sampler.c',
+     '../../../../intel/stela/hosted/sampler80.c', '../../../../intel/stela/hosted/sampler90.c',
+     '../../../../intel/stela/hosted/sampler110.c', '../../../../intel/stela/hosted/sampler120.c',
+     '../../../../intel/stela/hosted/sampler125.c', '../../../../intel/stela/hosted/sampler200.c',
+     '../../../../intel/stela/hosted/sampler300.c', '../../../../intel/stela/hosted/sampler350.c'],
+    include_directories : [inc_include, inc_src, inc_intel, inc_gallium,
+                           include_directories('../intel/genxml')],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev, idep_genxml],
+    link_with : [stela_intel_surface, libisl],
+    c_args : ['-Werror'],
+  )
+  stela_intel_sampler_bits = custom_target(
+    'stela_intel_sampler_bits',
+    input : ['../intel/genxml/gen_bits_header.py',
+             '../intel/genxml/gen80.xml', '../intel/genxml/gen90.xml',
+             '../intel/genxml/gen110.xml', '../intel/genxml/gen120.xml',
+             '../intel/genxml/gen125.xml', '../intel/genxml/xe2.xml',
+             '../intel/genxml/xe3.xml', '../intel/genxml/xe3p.xml'],
+    output : 'sampler_bits.h',
+    command : [prog_python, '@INPUT0@', '--include-symbols',
+      'SAMPLER_STATE::Texture LOD Bias,SAMPLER_STATE::Min Mode Filter,SAMPLER_STATE::Mag Mode Filter,SAMPLER_STATE::Mip Mode Filter,SAMPLER_STATE::LOD PreClamp Mode,SAMPLER_STATE::Min LOD,SAMPLER_STATE::Max LOD,SAMPLER_STATE::TCX Address Control Mode,SAMPLER_STATE::TCY Address Control Mode,SAMPLER_STATE::TCZ Address Control Mode,SAMPLER_STATE::U Address Min Filter Rounding Enable,SAMPLER_STATE::U Address Mag Filter Rounding Enable,SAMPLER_STATE::V Address Min Filter Rounding Enable,SAMPLER_STATE::V Address Mag Filter Rounding Enable,SAMPLER_STATE::R Address Min Filter Rounding Enable,SAMPLER_STATE::R Address Mag Filter Rounding Enable,SAMPLER_STATE::Border Color Pointer,SAMPLER_STATE::Shadow Function,SAMPLER_STATE::Sampler Disable,SAMPLER_STATE::Non-normalized Coordinate Enable,SAMPLER_STATE::Cube Surface Control Mode,SAMPLER_STATE::Maximum Anisotropy,SAMPLER_STATE::Anisotropic Algorithm,SAMPLER_STATE::Reduction Type,SAMPLER_STATE::Reduction Type Enable', '-o', '@OUTPUT@', '@INPUT1@', '@INPUT2@', '@INPUT3@', '@INPUT4@',
+      '@INPUT5@', '@INPUT6@', '@INPUT7@', '@INPUT8@'],
+    depend_files : gen_pack_header_deps,
+  )
+  stela_intel_sampler_probe = executable(
+    'stela_intel_sampler_probe',
+    ['../../../../intel/stela/tests/sampler.c', stela_intel_sampler_bits],
+    include_directories : [inc_include, inc_src, inc_intel, inc_gallium],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [stela_intel_sampler, libisl],
+    c_args : ['-Werror'],
+  )
+  test('stela_intel_sampler', stela_intel_sampler_probe, suite : 'stela')
 
   # The native integer encoders use the same retained XML generator as the
   # hosted packers. Explicit struct dependencies keep the narrow prologue free
@@ -462,7 +507,7 @@ if with_stela_amd
   test('stela_amd_buffer', stela_amd_buffer_probe, suite : 'stela')
   stela_amd_image = static_library(
     'stela_amd_image',
-    '../../../../amd/stela/image.c',
+    ['../../../../amd/stela/image.c', '../../../../amd/stela/image_resource.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_surface, stela_amd_buffer, libamd_compiler_support],
@@ -477,6 +522,15 @@ if with_stela_amd
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_image', stela_amd_image_probe, suite : 'stela')
+  stela_amd_image_resource_probe = executable(
+    'stela_amd_image_resource_probe',
+    ['../../../../amd/tests/image_resource_test.c', '../amd/common/amdgpu_devices.c'],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_image],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  test('stela_amd_image_resource', stela_amd_image_resource_probe, suite : 'stela')
   stela_amd_commands = static_library(
     'stela_amd_commands',
     'amd_commands.c',
