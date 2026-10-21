@@ -17,7 +17,7 @@
 //! quiescing through DEV_DISABLE are refused until a model connects them to
 //! the device models. Parent domains are not checked.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
@@ -56,12 +56,45 @@ pub enum PmgrError {
     UnknownState(u8),
     Misaligned(u64),
     Duplicate(u64),
+    UnknownDomain(u64),
+    AlreadyBound(u64),
+}
+
+/// State the machine must apply to every client of a physical PMGR domain.
+/// Quiescing inhibits client activity without discarding retained state;
+/// reset assertion restores the client's documented reset image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainState {
+    pub power: u8,
+    pub disabled: bool,
+    pub reset: bool,
+}
+
+impl DomainState {
+    fn decode(value: u32) -> Self {
+        Self {
+            power: ((value & ACTUAL) >> ACTUAL_SHIFT) as u8,
+            disabled: value & DEV_DISABLE != 0,
+            reset: value & RESET != 0,
+        }
+    }
+}
+
+/// One completed register request, ordered with respect to every other
+/// lifecycle request. The machine consumes these before resuming clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DomainTransition {
+    pub address: u64,
+    pub before: DomainState,
+    pub after: DomainState,
 }
 
 /// All power-state registers of one PMGR. Map each PMGR `reg` range on the
 /// bus with `device_offset` equal to its guest PA, so offsets are PAs.
 pub struct Pmgr {
     registers: BTreeMap<u64, u32>,
+    lifecycle: BTreeSet<u64>,
+    transitions: Vec<DomainTransition>,
 }
 impl Pmgr {
     pub fn new(states: impl IntoIterator<Item = PowerState>) -> Result<Self, PmgrError> {
@@ -75,8 +108,39 @@ impl Pmgr {
                 return Err(PmgrError::Duplicate(state.address));
             }
         }
-        Ok(Self { registers })
+        Ok(Self {
+            registers,
+            lifecycle: BTreeSet::new(),
+            transitions: Vec::new(),
+        })
     }
+    /// Enable reset/quiesce controls only after the machine has connected
+    /// every client of this domain to its lifecycle. Merely mapping a client
+    /// does not satisfy this requirement. Binding preserves the boot image.
+    pub fn bind_lifecycle(&mut self, address: u64) -> Result<(), PmgrError> {
+        if !self.registers.contains_key(&address) {
+            return Err(PmgrError::UnknownDomain(address));
+        }
+        if !self.lifecycle.insert(address) {
+            return Err(PmgrError::AlreadyBound(address));
+        }
+        Ok(())
+    }
+
+    /// Drain completed lifecycle requests in guest write order. No event is
+    /// emitted for a rejected write or a write that leaves state unchanged.
+    pub fn take_transitions(&mut self) -> Vec<DomainTransition> {
+        core::mem::take(&mut self.transitions)
+    }
+
+    /// Completed power, reset and quiesce state of a described domain.
+    pub fn domain_state(&self, address: u64) -> Option<DomainState> {
+        self.registers
+            .get(&address)
+            .copied()
+            .map(DomainState::decode)
+    }
+
     /// The completed hardware state of a described domain register.
     pub fn state(&self, address: u64) -> Option<u8> {
         self.registers
@@ -99,17 +163,27 @@ fn encode(state: u8) -> Option<u32> {
         .then(|| u32::from(state) | u32::from(state) << ACTUAL_SHIFT)
 }
 
-fn write_state(old: u32, value: u32) -> Result<u32, &'static str> {
+fn write_state(old: u32, value: u32, lifecycle: bool) -> Result<u32, &'static str> {
     if value & !KNOWN != 0 {
         return Err("PMGR power-state reserved field is not modeled");
     }
-    if value & RESET != 0 {
+    if !lifecycle && value & RESET != 0 {
         return Err("PMGR device reset is not connected to the device models");
     }
-    if value & DEV_DISABLE != 0 {
+    if !lifecycle && value & DEV_DISABLE != 0 {
         return Err("PMGR DEV_DISABLE quiescing is not connected to the device models");
     }
     let target = (value & TARGET) as u8;
+    if value & RESET != 0
+        && (target != ACTIVE
+            || old & ACTUAL != u32::from(ACTIVE) << ACTUAL_SHIFT
+            || value & DEV_DISABLE == 0)
+    {
+        return Err("PMGR reset requires an active, quiesced domain");
+    }
+    if old & RESET != 0 && target != ACTIVE {
+        return Err("PMGR power change while reset is held is not modeled");
+    }
     let mut new =
         encode(target).ok_or("PMGR power states other than 0, 4 and 15 are not modeled")?;
     let old_actual = ((old & ACTUAL) >> ACTUAL_SHIFT) as u8;
@@ -121,7 +195,7 @@ fn write_state(old: u32, value: u32) -> Result<u32, &'static str> {
             _ => 0,
         };
     }
-    new |= value & STORED | flags;
+    new |= value & (STORED | DEV_DISABLE | RESET) | flags;
     Ok(new)
 }
 
@@ -155,7 +229,18 @@ impl MmioDevice for Pmgr {
             .registers
             .get_mut(&offset)
             .ok_or_else(|| fail("PMGR register is not a modeled power state"))?;
-        *register = write_state(*register, value as u32).map_err(fail)?;
+        let before = DomainState::decode(*register);
+        let next =
+            write_state(*register, value as u32, self.lifecycle.contains(&offset)).map_err(fail)?;
+        let after = DomainState::decode(next);
+        *register = next;
+        if before != after && self.lifecycle.contains(&offset) {
+            self.transitions.push(DomainTransition {
+                address: offset,
+                before,
+                after,
+            });
+        }
         Ok(())
     }
 }
@@ -246,6 +331,116 @@ mod tests {
             pmgr.read(AIC, Width::Word, &mut access),
             Ok(u64::from(WAS_CLKGATED | 0x44))
         );
+    }
+
+    #[test]
+    fn bound_domains_deliver_the_complete_reset_and_quiesce_sequence() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut pmgr = pmgr();
+        pmgr.bind_lifecycle(AIC).unwrap();
+        let active = DomainState {
+            power: ACTIVE,
+            disabled: false,
+            reset: false,
+        };
+        let quiesced = DomainState {
+            disabled: true,
+            ..active
+        };
+        let reset = DomainState {
+            reset: true,
+            ..quiesced
+        };
+        assert_eq!(pmgr.domain_state(AIC), Some(active));
+        assert!(pmgr.take_transitions().is_empty());
+        // m1n1 pmgr_reset_device: four RMWs, each independently observable.
+        for value in [
+            0xff | DEV_DISABLE,
+            0xff | DEV_DISABLE | RESET,
+            0xff | DEV_DISABLE,
+            0xff,
+        ] {
+            pmgr.write(AIC, Width::Word, value.into(), &mut access)
+                .unwrap();
+            assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(value.into()));
+        }
+        let expected = [
+            (active, quiesced),
+            (quiesced, reset),
+            (reset, quiesced),
+            (quiesced, active),
+        ];
+        assert_eq!(
+            pmgr.take_transitions(),
+            expected.map(|(before, after)| DomainTransition {
+                address: AIC,
+                before,
+                after
+            })
+        );
+        assert!(pmgr.take_transitions().is_empty());
+        // State-neutral configuration writes never re-trigger a reset.
+        pmgr.write(AIC, Width::Word, (AUTO_ENABLE | 0xff).into(), &mut access)
+            .unwrap();
+        assert!(pmgr.take_transitions().is_empty());
+        assert_eq!(pmgr.domain_state(UART0).unwrap().power, POWER_GATED);
+        assert!(
+            pmgr.write(UART0, Width::Word, (DEV_DISABLE | 0xff).into(), &mut access)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn lifecycle_events_cover_gate_transitions_and_rejected_writes_are_atomic() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut pmgr = pmgr();
+        assert_eq!(
+            pmgr.bind_lifecycle(AIC + 4),
+            Err(PmgrError::UnknownDomain(AIC + 4))
+        );
+        pmgr.bind_lifecycle(AIC).unwrap();
+        assert_eq!(pmgr.bind_lifecycle(AIC), Err(PmgrError::AlreadyBound(AIC)));
+        for value in [RESET | 0xf, RESET | DEV_DISABLE | 4, DEV_DISABLE | 3] {
+            assert!(
+                pmgr.write(AIC, Width::Word, value.into(), &mut access)
+                    .is_err()
+            );
+            assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(0xff));
+            assert!(pmgr.take_transitions().is_empty());
+        }
+        for power in [CLOCK_GATED, POWER_GATED, ACTIVE] {
+            let before = pmgr.domain_state(AIC).unwrap();
+            pmgr.write(AIC, Width::Word, power.into(), &mut access)
+                .unwrap();
+            let after = DomainState { power, ..before };
+            assert_eq!(
+                pmgr.take_transitions(),
+                [DomainTransition {
+                    address: AIC,
+                    before,
+                    after
+                }]
+            );
+        }
+        pmgr.write(
+            AIC,
+            Width::Word,
+            (RESET | DEV_DISABLE | 0xf).into(),
+            &mut access,
+        )
+        .unwrap();
+        let held = pmgr.read(AIC, Width::Word, &mut access).unwrap();
+        pmgr.take_transitions();
+        for value in [0, 4, RESET | DEV_DISABLE] {
+            assert!(
+                pmgr.write(AIC, Width::Word, value.into(), &mut access)
+                    .is_err()
+            );
+            assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(held));
+            assert!(pmgr.take_transitions().is_empty());
+        }
     }
 
     #[test]
