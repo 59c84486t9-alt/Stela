@@ -32,6 +32,7 @@ use stela_runtime::sha256;
 mod a64;
 mod board;
 mod impdef;
+mod interfaces;
 mod macho;
 mod sptm;
 mod sysreg;
@@ -70,6 +71,16 @@ pub struct SocFacts {
     /// mount of the decrypted image.
     #[arg(long)]
     system_extensions: Option<PathBuf>,
+    /// Write the complete DeviceTree interface inventory without changing
+    /// the historical SPTM, kernel and CPU facts.
+    #[arg(long)]
+    board_interfaces: bool,
+    /// Write the full per-property inventory to this fresh research ledger.
+    #[arg(long, requires = "board_interfaces")]
+    interface_details: Option<PathBuf>,
+    /// A distinct compact ledger for a different source manifest.
+    #[arg(long, requires = "board_interfaces")]
+    interface_output: Option<PathBuf>,
     /// Fail instead of writing when the checked-in facts differ.
     #[arg(long)]
     check: bool,
@@ -337,6 +348,10 @@ impl SocFacts {
             !boards.is_empty(),
             "the IPSW names no SPTM board identities"
         );
+
+        if self.board_interfaces {
+            return interfaces::run(self, &report, &boards);
+        }
 
         let mut socs = Vec::new();
         for (member, group) in group(&boards, SPTM) {
