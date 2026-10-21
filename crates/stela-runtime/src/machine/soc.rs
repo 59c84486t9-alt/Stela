@@ -114,6 +114,25 @@ pub struct CoreType {
     caches: Option<CoreCaches>,
 }
 
+impl CoreType {
+    /// Compose the established MPIDR identity independently of the MIDR,
+    /// caches and clocks that a complete PE profile also requires. `reg`
+    /// retains the physical cluster/core coordinates; core type never
+    /// creates another physical cluster. Returns `None` for an unknown
+    /// mapping, out-of-field core type or undeclared `reg` bits.
+    pub fn mpidr(&self, reg: u32) -> Option<u64> {
+        // XNU xnu-12377.121.6 apple_arm64_regs.h:102–107 defines
+        // MPIDR_CORETYPE at bits 18:16, E=0, P=1, M=4.
+        const CORETYPE_MASK: u8 = 7;
+        const CORETYPE_SHIFT: u32 = 16;
+        let aff2 = self.mpidr_aff2?;
+        if aff2 & !CORETYPE_MASK != 0 || reg & !MPIDR_CLUSTER_CORE != 0 {
+            return None;
+        }
+        Some(0x8000_0000 | u64::from(aff2) << CORETYPE_SHIFT | u64::from(reg))
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WakeLayout {
     reg: usize,
@@ -206,14 +225,15 @@ const fn ep_cores(e_part: u16, p_part: u16, points: Option<[&'static [u32]; 2]>)
 /// Original J873GAP has six E cores and one mixed P2/M4 physical cluster.
 /// The historical per-cluster census copied the first PE's P type. The
 /// fresh per-PE ledger `isa/apple-board-interfaces.json` retains all types.
-/// The M type's hardware identity and L1 geometry remain unestablished.
+/// XNU's M_CORE identity establishes Aff2=4; its MIDR part, L1 geometry
+/// and clock requirements remain unestablished.
 const M6_CORES: [CoreType; 3] = [
     ep_cores(0x072, 0x073, None)[0],
     ep_cores(0x072, 0x073, None)[1],
     CoreType {
         cluster_type: b'M',
         midr_part: None,
-        mpidr_aff2: None,
+        mpidr_aff2: Some(4),
         operating_points: None,
         caches: None,
     },
@@ -745,7 +765,8 @@ pub struct Processor {
 /// MIDR_EL1 is implementer 0x61 (Apple), variant 1, architecture 0xF, the
 /// cluster type's part and revision 0, the values the J473AP profile has
 /// always used; variant and revision are inferred until a reference capture
-/// supplies them. MPIDR_EL1 is `reg` with bit 31 RES1 and Aff2 1 on a P core:
+/// supplies them. MPIDR_EL1 is `reg` with bit 31 RES1 and the core type's
+/// Aff2 (E=0, P=1, M=4 from XNU's `MPIDR_CORETYPE_ACC_*` definitions):
 /// `reg` is Aff1 (cluster) and Aff0 (core) on every single-die board (the
 /// J473AP's cpu0-3 are 0-3 and cpu4-7 0x100-0x103), the cores of P clusters
 /// have Aff2 1 (the `cpu@` `reg` of Linux `t8103.dtsi`, `t8112.dtsi`,
@@ -793,19 +814,19 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                     )
                 })?;
             let core = core.expect("a part requires a core descriptor");
-            let aff2 = core.mpidr_aff2.ok_or_else(|| {
-                format!(
-                    "{} cluster type {} has no public MPIDR mapping",
-                    soc.name,
-                    char::from(processor.cluster_type)
-                )
-            })?;
             if processor.reg & !MPIDR_CLUSTER_CORE != 0 {
                 return Err(format!(
                     "{} cpu reg {:#x} has no public MPIDR mapping",
                     soc.name, processor.reg
                 ));
             }
+            let mpidr = core.mpidr(processor.reg).ok_or_else(|| {
+                format!(
+                    "{} cluster type {} has no public MPIDR mapping",
+                    soc.name,
+                    char::from(processor.cluster_type)
+                )
+            })?;
             let caches = core.caches.ok_or_else(|| {
                 format!(
                     "{} cluster type {} has no cache geometry",
@@ -815,7 +836,7 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
             })?;
             Ok(Identity {
                 midr: 0x61 << 24 | 1 << 20 | 0xf << 16 | part << 4,
-                mpidr: 0x8000_0000 | u64::from(aff2) << 16 | u64::from(processor.reg),
+                mpidr,
                 clock: core
                     .operating_points
                     .and_then(|points| points.last())
@@ -7244,6 +7265,53 @@ mod tests {
         assert!(board(&tree(usb(&bad, 0xa4, &irqs))).is_err());
     }
     #[test]
+    fn mpidr_composition_preserves_ep_identities_and_rejects_unknown_coordinates() {
+        for soc in SOCS {
+            for (kind, aff2) in [(b'E', 0u64), (b'P', 1)] {
+                let core = soc
+                    .cores
+                    .iter()
+                    .find(|core| core.cluster_type == kind)
+                    .unwrap();
+                // Include both dies, sparse cores and the upper declared
+                // affinity boundary; this field does not define core count.
+                for reg in [0, 3, 0x100, 0x105, 0x800, 0x905, 0xfff] {
+                    assert_eq!(
+                        core.mpidr(reg),
+                        Some(0x8000_0000 | aff2 << 16 | u64::from(reg))
+                    );
+                }
+            }
+        }
+        let m_core = *core_types(0x8152)
+            .unwrap()
+            .iter()
+            .find(|core| core.cluster_type == b'M')
+            .unwrap();
+        for bit in 12..32 {
+            assert_eq!(m_core.mpidr(0x102 | 1 << bit), None);
+        }
+        assert_eq!(
+            CoreType {
+                mpidr_aff2: None,
+                ..m_core
+            }
+            .mpidr(0x102),
+            None
+        );
+        for aff2 in [8, 0x80, 0xff] {
+            assert_eq!(
+                CoreType {
+                    mpidr_aff2: Some(aff2),
+                    ..m_core
+                }
+                .mpidr(0x102),
+                None
+            );
+        }
+    }
+
+    #[test]
     fn core_requirements_keep_unknown_m6_capabilities_explicit() {
         let soc = SOCS.iter().find(|soc| soc.chip_id == 0x8152).unwrap();
         assert_eq!(soc.cpu_start, None);
@@ -7255,11 +7323,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             b"EPM"
         );
-        let medium = cores.iter().find(|core| core.cluster_type == b'M').unwrap();
-        assert_eq!(medium.midr_part, None);
-        assert_eq!(medium.mpidr_aff2, None);
-        assert_eq!(medium.operating_points, None);
-        assert!(medium.caches.is_none());
+        let m_core = cores.iter().find(|core| core.cluster_type == b'M').unwrap();
+        assert_eq!(m_core.midr_part, None);
+        assert_eq!(m_core.mpidr_aff2, Some(4));
+        assert_eq!(m_core.mpidr(0x102), Some(0x8004_0102));
+        assert_eq!(m_core.operating_points, None);
+        assert!(m_core.caches.is_none());
         assert_eq!(midr_part(0x8152, b'M'), None);
         assert_eq!(level1_caches(0x8152, b'M'), None);
         assert_eq!(operating_points(0x8152), None);

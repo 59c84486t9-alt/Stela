@@ -95,5 +95,56 @@ mod tests {
             pe(b'M', 0x105, Some(20 << 20)),
         ];
         assert!(validate(&processors).is_ok());
+        let cores = super::super::core_types(0x8152).unwrap();
+        let mpidrs: alloc::vec::Vec<_> = processors
+            .iter()
+            .map(|pe| {
+                cores
+                    .iter()
+                    .find(|core| core.cluster_type == pe.cluster_type)
+                    .unwrap()
+                    .mpidr(pe.reg)
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            mpidrs,
+            [
+                0x8000_0000,
+                0x8000_0001,
+                0x8000_0002,
+                0x8000_0003,
+                0x8000_0004,
+                0x8000_0005,
+                0x8001_0100,
+                0x8001_0101,
+                0x8004_0102,
+                0x8004_0103,
+                0x8004_0104,
+                0x8004_0105,
+            ]
+        );
+        // XNU groups physical clusters using DT reg, independently of
+        // core type. The M affinity must not split this shared P/M L2.
+        for (pe, mpidr) in processors.iter().zip(&mpidrs) {
+            assert_eq!(
+                (*mpidr >> 16) & 7,
+                u64::from(match pe.cluster_type {
+                    b'E' => 0u8,
+                    b'P' => 1,
+                    b'M' => 4,
+                    _ => unreachable!(),
+                })
+            );
+            assert_eq!((*mpidr >> 8) & 0xf, u64::from(pe.reg >> 8));
+            assert_eq!(*mpidr & 0xff, u64::from(pe.reg & 0xff));
+        }
+        assert_eq!(
+            mpidrs
+                .iter()
+                .filter(|mpidr| (*mpidr >> 8) & 0xf == 1)
+                .count(),
+            6
+        );
     }
 }
