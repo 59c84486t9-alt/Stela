@@ -62,9 +62,10 @@ impl PowerStates {
     /// or a placed hardware owner establishes its own obligations.
     pub fn apply_admission(&mut self, prepared: &[u8], hidden: &[String]) -> Result<usize, String> {
         let root = Node::root(prepared).ok_or("PMGR admission tree is invalid")?;
-        let expected = inventory(&root)?;
-        if expected.len() != self.resources.len()
+        let expected = inventory_with_nodes(&root)?;
+        if expected.resources.len() != self.resources.len()
             || expected
+                .resources
                 .iter()
                 .zip(&self.resources)
                 .any(|(expected, actual)| {
@@ -87,8 +88,7 @@ impl PowerStates {
             // The historical ledger also carries these preparation notes.
             // They establish no unavailable resource and cannot waive sinks.
             if let Some((path, note)) = entry.split_once(' ') {
-                let node = node_at(prepared, path)
-                    .ok_or_else(|| format!("PMGR admission note names missing {path}"))?;
+                let node = &expected.nodes[expected.locate(path)?];
                 let valid = match (path, note) {
                     ("/defaults", "serial-device") => node.property("serial-device").is_none(),
                     ("/", "secure-root-prefix") => node.property("secure-root-prefix").is_none(),
@@ -107,13 +107,9 @@ impl PowerStates {
             {
                 return Err(format!("PMGR admission cannot retire structural {entry}"));
             }
-            let node = node_at(prepared, entry)
-                .ok_or_else(|| format!("PMGR admission names missing resource {entry}"))?;
-            let resource = self
-                .resources
-                .iter()
-                .find(|resource| resource.name == *entry)
-                .ok_or_else(|| format!("PMGR admission has no inventory resource {entry}"))?;
+            let index = expected.locate(entry)?;
+            let node = &expected.nodes[index];
+            let resource = &self.resources[index];
             if resource
                 .owner
                 .is_some_and(|owner| !matches!(owner, PowerOwner::Mmio(_)))
@@ -123,29 +119,25 @@ impl PowerStates {
                     "PMGR unavailable admission conflicts with visible hardware {entry}"
                 ));
             }
-            if !unavailable.insert(entry.as_str()) {
+            if !unavailable.insert(index) {
                 return Err(format!("PMGR admission repeats resource {entry}"));
             }
         }
         let mut admissions = Vec::with_capacity(self.resources.len());
-        for resource in &self.resources {
-            let mut retired = false;
-            let mut path = String::new();
-            for component in resource.name.split('/').filter(|part| !part.is_empty()) {
-                path.push('/');
-                path.push_str(component);
-                let node = node_at(prepared, &path).expect("validated inventory path");
-                // A retained compatible starts an independent admitted
-                // interface; an unavailable ancestor cannot hide it.
-                if ["compatible", "reg", "clock-gates", "power-gates"]
-                    .iter()
-                    .any(|key| node.property(key).is_some())
-                {
-                    retired = false;
-                }
-                if unavailable.contains(path.as_str()) {
-                    retired = true;
-                }
+        for (index, resource) in self.resources.iter().enumerate() {
+            let mut retired = expected.parents[index]
+                .is_some_and(|parent| admissions[parent] == Admission::Unavailable);
+            let node = &expected.nodes[index];
+            // Resolve ancestry by the original tree position. A display name
+            // can repeat among siblings and must not select another node.
+            if ["compatible", "reg", "clock-gates", "power-gates"]
+                .iter()
+                .any(|key| node.property(key).is_some())
+            {
+                retired = false;
+            }
+            if unavailable.contains(&index) {
+                retired = true;
             }
             if resource
                 .owner
@@ -170,25 +162,29 @@ impl PowerStates {
     }
 }
 
-fn node_at<'a>(prepared: &'a [u8], path: &str) -> Option<Node<'a>> {
-    if !path.starts_with('/') || path != "/" && path.ends_with('/') {
-        return None;
-    }
-    let mut node = Node::root(prepared)?;
-    let mut components = path.strip_prefix('/')?.split('/');
-    if name_of(&node) == "arm-io" && components.next()? != "arm-io" {
-        return None;
-    }
-    for component in components {
-        if component.is_empty() && path == "/" {
-            continue;
+struct ResourceInventory<'a> {
+    resources: Vec<PowerResource>,
+    nodes: Vec<Node<'a>>,
+    parents: Vec<Option<usize>>,
+}
+
+impl ResourceInventory<'_> {
+    /// Historical admission ledgers contain paths, not node identities. Such
+    /// evidence is usable only when it names exactly one original resource.
+    fn locate(&self, path: &str) -> Result<usize, String> {
+        let mut matches = self
+            .resources
+            .iter()
+            .enumerate()
+            .filter_map(|(index, resource)| (resource.name == path).then_some(index));
+        let index = matches
+            .next()
+            .ok_or_else(|| format!("PMGR admission names missing resource {path}"))?;
+        if matches.next().is_some() {
+            return Err(format!("PMGR admission path is ambiguous: {path}"));
         }
-        if component.is_empty() || component == "." || component == ".." {
-            return None;
-        }
-        node = node.child(component)?;
+        Ok(index)
     }
-    Some(node)
 }
 
 /// Current ADT PMGR format uses u16 device/parent IDs. Preserve all bits and
@@ -215,6 +211,10 @@ fn domain_id(device: u16) -> DomainId {
 }
 
 fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
+    Ok(inventory_with_nodes(root)?.resources)
+}
+
+fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, String> {
     let ranges = root
         .child("arm-io")
         .and_then(|io| io.ranges())
@@ -254,6 +254,8 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         owner: None,
         admission: Admission::Required,
     }];
+    let mut nodes = alloc::vec![root.clone()];
+    let mut parents = alloc::vec![None];
     let mut pending = root
         .children()
         .ok_or("invalid resource tree")?
@@ -261,7 +263,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         .rev()
         .map(|node| {
             (
-                String::from(path),
+                0,
                 node,
                 clocks.clone(),
                 power.clone(),
@@ -275,7 +277,11 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
     let mut usbs = 0;
     let mut phys = 0;
     while let Some((parent, node, mut clocks, mut power, owner, views)) = pending.pop() {
-        let path = format!("{parent}/{}", name_of(&node));
+        let path = format!(
+            "{}/{}",
+            resources[parent].name.trim_end_matches('/'),
+            name_of(&node)
+        );
         clocks.extend(
             gate_ids(&node, &path, "clock-gates")?
                 .into_iter()
@@ -358,7 +364,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
                             .iter()
                             .all(|key| node.property(key).is_none())
             }) {
-                return match owner_from_parent(&resources, &parent) {
+                return match resources[parent].owner {
                     Some(PowerOwner::Mmio(address)) => Some(PowerOwner::Mmio(address)),
                     _ => None,
                 };
@@ -386,6 +392,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
                 _ => &[],
             });
         }
+        let index = resources.len();
         resources.push(PowerResource {
             name: path.clone(),
             clocks: clocks.clone(),
@@ -393,6 +400,8 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
             owner,
             admission: Admission::Required,
         });
+        nodes.push(node.clone());
+        parents.push(Some(parent));
         for child in node
             .children()
             .ok_or_else(|| format!("{path} has an invalid child"))?
@@ -400,7 +409,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
             .rev()
         {
             pending.push((
-                path.clone(),
+                index,
                 child,
                 clocks.clone(),
                 power.clone(),
@@ -409,15 +418,11 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
             ));
         }
     }
-    Ok(resources)
-}
-
-fn owner_from_parent(resources: &[PowerResource], parent: &str) -> Option<PowerOwner> {
-    resources
-        .iter()
-        .rev()
-        .find(|resource| resource.name == parent)
-        .and_then(|resource| resource.owner)
+    Ok(ResourceInventory {
+        resources,
+        nodes,
+        parents,
+    })
 }
 
 pub(super) fn power_states(
@@ -447,7 +452,9 @@ fn decode_power_states(
     let resources = inventory(root)?;
     let consumers = resources
         .iter()
-        .map(|resource| Consumer {
+        .enumerate()
+        .map(|(id, resource)| Consumer {
+            id,
             name: &resource.name,
             clocks: &resource.clocks,
             power: &resource.power,
@@ -603,6 +610,32 @@ mod tests {
             assert_eq!(states.registers.len(), registers);
             let coverage = coverage::analyze(&states.domains, &[]).unwrap();
             assert!(coverage.iter().all(|domain| !domain.bindable()));
+            // Account for every original resource, including repeated sibling
+            // display names. This remains source accounting, not chip/device
+            // admission or a lifecycle sink qualification.
+            let complete = decode_power_states(&root, &node, &translate).unwrap();
+            let consumers = complete
+                .resources
+                .iter()
+                .enumerate()
+                .map(|(id, resource)| Consumer {
+                    id,
+                    name: &resource.name,
+                    clocks: &resource.clocks,
+                    power: &resource.power,
+                    sinks: LifecycleSinks::default(),
+                    admission: resource.admission,
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                coverage::analyze(&complete.domains, &consumers)
+                    .unwrap()
+                    .iter()
+                    .all(|domain| !domain.bindable())
+            );
+            let mut admissions = complete.clone();
+            assert_eq!(admissions.apply_admission(&bytes, &[]), Ok(0));
+            assert_eq!(admissions, complete);
             assert!(
                 states
                     .domains
@@ -719,7 +752,9 @@ mod tests {
         let consumers = parsed
             .resources
             .iter()
-            .map(|resource| Consumer {
+            .enumerate()
+            .map(|(id, resource)| Consumer {
+                id,
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,
@@ -795,6 +830,61 @@ mod tests {
             assert_eq!(find(name).power, [domain_id(2)]);
             assert_eq!(find(name).owner, None);
         }
+    }
+
+    #[test]
+    fn repeated_sibling_names_keep_actual_ancestry_and_ambiguous_admission_is_atomic() {
+        let first = encode(&[("name", b"view")], &[]);
+        let leaf = encode(&[("name", b"leaf")], &[]);
+        let second = encode(&[("name", b"view"), ("reg", &words(&[0]))], &[leaf]);
+        let hidden = encode(
+            &[("name", b"hidden"), ("clock-gates", &words(&[1]))],
+            &[first, second],
+        );
+        let bytes = tree(&[(1, Some(0), [0, 0])], &[hidden]);
+        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            states.apply_admission(&bytes, &["/arm-io/hidden".into()]),
+            Ok(2)
+        );
+        let repeated = states
+            .resources
+            .iter()
+            .filter(|r| r.name == "/arm-io/hidden/view")
+            .map(|r| r.admission)
+            .collect::<Vec<_>>();
+        assert_eq!(repeated, [Admission::Unavailable, Admission::Required]);
+        assert_eq!(
+            states.resources.last().unwrap().admission,
+            Admission::Required
+        );
+        let before = states.clone();
+        for entry in ["/arm-io/hidden/view", "/arm-io/hidden/view +no-pmu"] {
+            assert!(
+                states
+                    .apply_admission(&bytes, &[entry.into()])
+                    .unwrap_err()
+                    .contains("ambiguous")
+            );
+            assert_eq!(states, before);
+        }
+        // A full path with only one matching node remains usable even when
+        // a shorter ancestor path has multiple matches.
+        assert_eq!(
+            states.apply_admission(&bytes, &["/arm-io/hidden/view/leaf".into()]),
+            Ok(1)
+        );
+        assert_eq!(
+            states.resources.last().unwrap().admission,
+            Admission::Unavailable
+        );
+        assert!(
+            states.resources[..states.resources.len() - 1]
+                .iter()
+                .all(|r| r.admission == Admission::Required)
+        );
     }
 
     #[test]
@@ -952,7 +1042,9 @@ mod tests {
         let consumers = states
             .resources
             .iter()
-            .map(|resource| Consumer {
+            .enumerate()
+            .map(|(id, resource)| Consumer {
+                id,
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,
@@ -1207,7 +1299,9 @@ mod tests {
         let consumers = states
             .resources
             .iter()
-            .map(|resource| Consumer {
+            .enumerate()
+            .map(|(id, resource)| Consumer {
+                id,
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,

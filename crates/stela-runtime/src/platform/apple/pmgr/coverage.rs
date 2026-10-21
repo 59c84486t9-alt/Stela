@@ -65,6 +65,9 @@ pub enum Admission {
 /// their names; proven views of one owner may share its actual sink.
 #[derive(Debug, Clone, Copy)]
 pub struct Consumer<'a> {
+    /// Stable identity within this complete inventory. ADT sibling names
+    /// need not be unique and cannot identify physical resource views.
+    pub id: usize,
     pub name: &'a str,
     pub clocks: &'a [DomainId],
     pub power: &'a [DomainId],
@@ -74,6 +77,7 @@ pub struct Consumer<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerCoverage {
+    pub id: usize,
     pub name: String,
     pub clock: bool,
     pub power: bool,
@@ -108,7 +112,7 @@ pub enum CoverageError {
     ParentCycle(DomainId),
     AliasCycle(u64),
     EmptyConsumer,
-    DuplicateConsumer(String),
+    DuplicateConsumer(usize),
     UnknownRequirement { consumer: String, domain: DomainId },
 }
 
@@ -161,7 +165,7 @@ pub fn analyze(
 
     // Normalize physical aliases before computing any reverse closure.
     let mut graph: BTreeMap<Key, BTreeSet<Key>> = BTreeMap::new();
-    let mut coverage: BTreeMap<u64, BTreeMap<String, ConsumerCoverage>> = BTreeMap::new();
+    let mut coverage: BTreeMap<u64, BTreeMap<usize, ConsumerCoverage>> = BTreeMap::new();
     for domain in domains {
         let key = domain.key();
         let parents = graph.entry(key).or_default();
@@ -180,13 +184,13 @@ pub fn analyze(
         Key::Virtual(id) => CoverageError::ParentCycle(id),
     })?;
 
-    let mut names = BTreeSet::new();
+    let mut consumers_seen = BTreeSet::new();
     for consumer in consumers {
         if consumer.name.is_empty() {
             return Err(CoverageError::EmptyConsumer);
         }
-        if !names.insert(consumer.name) {
-            return Err(CoverageError::DuplicateConsumer(consumer.name.into()));
+        if !consumers_seen.insert(consumer.id) {
+            return Err(CoverageError::DuplicateConsumer(consumer.id));
         }
         for (clock, requirements) in [(true, consumer.clocks), (false, consumer.power)] {
             let mut closure = BTreeSet::new();
@@ -204,8 +208,9 @@ pub fn analyze(
                     let record = coverage
                         .get_mut(&address)
                         .expect("physical graph node")
-                        .entry(consumer.name.into())
+                        .entry(consumer.id)
                         .or_insert_with(|| ConsumerCoverage {
+                            id: consumer.id,
                             name: consumer.name.into(),
                             clock: false,
                             power: false,
@@ -294,12 +299,14 @@ mod tests {
         result
     }
     fn consumer<'a>(
+        id: usize,
         name: &'a str,
         clocks: &'a [DomainId],
         power: &'a [DomainId],
         sinks: LifecycleSinks,
     ) -> Consumer<'a> {
         Consumer {
+            id,
             name,
             clocks,
             power,
@@ -307,6 +314,27 @@ mod tests {
             admission: Admission::Required,
         }
     }
+    #[test]
+    fn repeated_display_names_preserve_distinct_consumers_and_sink_obligations() {
+        let requirement = [id(1)];
+        let result = analyze(
+            &[domain(1, Some(0x100), &[])],
+            &[
+                consumer(0, "/arm-io/repeated", &requirement, &[], COMPLETE),
+                consumer(1, "/arm-io/repeated", &[], &requirement, NONE),
+            ],
+        )
+        .unwrap();
+        assert_eq!(result[0].consumers.len(), 2);
+        assert_eq!(result[0].consumers[0].id, 0);
+        assert_eq!(result[0].consumers[1].id, 1);
+        assert!(result[0].consumers[0].clock);
+        assert!(!result[0].consumers[0].power);
+        assert!(!result[0].consumers[1].clock);
+        assert!(result[0].consumers[1].power);
+        assert!(!result[0].bindable());
+    }
+
     #[test]
     fn unavailable_resources_preserve_requirements_without_claiming_sinks_or_waiving_admitted_clients()
      {
@@ -316,11 +344,11 @@ mod tests {
             domain(3, Some(0x300), &[]),
         ];
         let requirements = [id(2)];
-        let mut absent = consumer("unavailable", &requirements, &[], NONE);
+        let mut absent = consumer(0, "unavailable", &requirements, &[], NONE);
         absent.admission = Admission::Unavailable;
-        let native = consumer("native", &requirements, &[], COMPLETE);
+        let native = consumer(1, "native", &requirements, &[], COMPLETE);
         let parent = [id(1)];
-        let unknown = consumer("required", &[], &parent, NONE);
+        let unknown = consumer(2, "required", &[], &parent, NONE);
         let coverage = analyze(&domains, &[absent, native]).unwrap();
         assert!(coverage[..2].iter().all(DomainCoverage::bindable));
         assert!(!coverage[2].bindable()); // No positive admission evidence.
@@ -350,8 +378,8 @@ mod tests {
         let clocks = [id(4)];
         let power = [id(2)];
         let consumers = [
-            consumer("dart", &clocks, &[], COMPLETE),
-            consumer("usb", &[], &power, NONE),
+            consumer(3, "dart", &clocks, &[], COMPLETE),
+            consumer(4, "usb", &[], &power, NONE),
         ];
         let result = analyze(&domains, &consumers).unwrap();
         assert_eq!(
@@ -395,7 +423,13 @@ mod tests {
                 ..COMPLETE
             },
         ] {
-            let consumers = [consumer("firmware-endpoint", &required, &required, missing)];
+            let consumers = [consumer(
+                5,
+                "firmware-endpoint",
+                &required,
+                &required,
+                missing,
+            )];
             let result = analyze(&domains, &consumers).unwrap();
             assert_eq!(result.len(), 3);
             for record in result {
@@ -417,7 +451,7 @@ mod tests {
         let domains = [domain(1, Some(0x100), &[]), second];
         let result = analyze(
             &domains,
-            &[consumer("die1-dart", &[], &requirements, COMPLETE)],
+            &[consumer(6, "die1-dart", &[], &requirements, COMPLETE)],
         )
         .unwrap();
         assert!(!result[0].bindable());
@@ -431,7 +465,13 @@ mod tests {
             .collect::<Vec<_>>();
         domains.push(domain(5, Some(0x500), &[1, 2, 3, 4]));
         let requirements = [id(5)];
-        let consumers = [consumer("four-supply-client", &requirements, &[], COMPLETE)];
+        let consumers = [consumer(
+            7,
+            "four-supply-client",
+            &requirements,
+            &[],
+            COMPLETE,
+        )];
         let result = analyze(&domains, &consumers).unwrap();
         assert_eq!(result.len(), 5);
         assert!(result.iter().all(DomainCoverage::bindable));
@@ -471,7 +511,7 @@ mod tests {
         let requirements = [id(0)];
         let result = analyze(
             &domains,
-            &[consumer("deep-client", &requirements, &[], COMPLETE)],
+            &[consumer(8, "deep-client", &requirements, &[], COMPLETE)],
         )
         .unwrap();
         assert_eq!(result.len(), 4096);
@@ -514,14 +554,14 @@ mod tests {
         assert!(matches!(
             analyze(
                 core::slice::from_ref(&base),
-                &[consumer("dart", &unknown, &[], COMPLETE)]
+                &[consumer(9, "dart", &unknown, &[], COMPLETE)]
             ),
             Err(CoverageError::UnknownRequirement { .. })
         ));
         assert_eq!(
             analyze(
                 core::slice::from_ref(&base),
-                &[consumer("", &[], &[], COMPLETE)]
+                &[consumer(10, "", &[], &[], COMPLETE)]
             ),
             Err(CoverageError::EmptyConsumer)
         );
@@ -529,11 +569,11 @@ mod tests {
             analyze(
                 &[base],
                 &[
-                    consumer("same", &[], &[], COMPLETE),
-                    consumer("same", &[], &[], COMPLETE)
+                    consumer(1000, "same", &[], &[], COMPLETE),
+                    consumer(1000, "different-name-same-identity", &[], &[], COMPLETE)
                 ]
             ),
-            Err(CoverageError::DuplicateConsumer("same".into()))
+            Err(CoverageError::DuplicateConsumer(1000))
         );
     }
 }

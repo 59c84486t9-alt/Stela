@@ -4,6 +4,7 @@
 //! (m1n1 `adt.c`; the format `stela-loader` parses and serializes exactly).
 use alloc::vec::Vec;
 
+#[derive(Clone)]
 pub struct Node<'a> {
     data: &'a [u8],
     properties: usize,

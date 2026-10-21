@@ -1865,7 +1865,7 @@ impl AppleDevices {
             }
         }
         let mut consumers = Vec::new();
-        for resource in &states.resources {
+        for (id, resource) in states.resources.iter().enumerate() {
             let connected = resource.owner.is_some_and(|owner| match owner {
                 PowerOwner::Mmio(physical) => self
                     .power_devices
@@ -1888,6 +1888,7 @@ impl AppleDevices {
                 ));
             }
             consumers.push(Consumer {
+                id,
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,
@@ -1942,11 +1943,10 @@ impl AppleDevices {
             let domains = coverage
                 .iter()
                 .filter(|record| {
-                    record.consumers.iter().any(|consumer| {
-                        states.resources.iter().any(|resource| {
-                            resource.name == consumer.name && resource.owner == Some(owner)
-                        })
-                    })
+                    record
+                        .consumers
+                        .iter()
+                        .any(|consumer| states.resources[consumer.id].owner == Some(owner))
                 })
                 .map(|record| {
                     (
@@ -3423,6 +3423,69 @@ mod tests {
         fn write(&mut self, _: u64, _: Width, _: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn repeated_resource_names_do_not_cross_connect_native_power_domains() {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Admission, Domain, DomainId};
+        let mut d = AppleDevices::new();
+        let supply = 0x2_3b70_0100;
+        let native = [0x2_3600_0000, 0x2_3601_0000];
+        let registers = [supply, supply + 8];
+        let ids = [1, 2].map(|device| DomainId { die: 0, device });
+        let states = PowerStates {
+            blocks: vec![(supply, 16)],
+            registers: registers.into(),
+            domains: registers
+                .into_iter()
+                .zip(ids)
+                .map(|(address, id)| Domain {
+                    name: String::new(),
+                    id,
+                    address: Some(address),
+                    parents: [None; 4],
+                })
+                .collect(),
+            resources: native
+                .into_iter()
+                .zip(ids)
+                .map(|(physical, id)| PowerResource {
+                    name: "/arm-io/repeated".into(),
+                    clocks: vec![id],
+                    power: vec![],
+                    owner: Some(PowerOwner::Mmio(physical)),
+                    admission: Admission::Required,
+                })
+                .collect(),
+        };
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 16,
+            }],
+            &registers,
+        )
+        .unwrap();
+        for physical in native {
+            let bank = d.bus.add(Box::new(CheckedPowerBank {
+                reject: false,
+                committed: vec![],
+            }));
+            d.bus.map(bank, physical, 4, 0).unwrap();
+            d.register_power_device(physical, bank, true).unwrap();
+        }
+        d.connect_power_resources(&states, &[], &[]).unwrap();
+        assert_eq!(d.power_clients[0].domains.len(), 1);
+        assert_eq!(d.power_clients[0].domains[0].0, supply);
+        assert_eq!(d.power_clients[1].domains.len(), 1);
+        assert_eq!(d.power_clients[1].domains[0].0, supply + 8);
+        d.write(0, supply, 4, 0x3f4, 0).unwrap();
+        assert_eq!(d.read(0, native[0], 4, 0), Ok(1));
+        assert_eq!(d.read(0, native[1], 4, 0), Ok(0));
+        d.write(0, supply + 8, 4, 0x3f4, 0).unwrap();
+        assert_eq!(d.read(0, native[0], 4, 0), Ok(1));
+        assert_eq!(d.read(0, native[1], 4, 0), Ok(1));
     }
 
     #[test]
