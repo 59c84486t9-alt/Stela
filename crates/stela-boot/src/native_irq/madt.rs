@@ -200,6 +200,11 @@ impl Routing {
     }
     pub fn sci(&self, fadt: &[u8]) -> Result<LineRoute, RouteError> {
         let fadt = table(fadt, b"FACP", 116)?;
+        // HW_REDUCED_ACPI removes the legacy fixed hardware, including SCI;
+        // a nonzero legacy SCI_INT field cannot authorize that interface.
+        if dword(fadt, 112) & (1 << 20) != 0 {
+            return Err(RouteError::UnsupportedSci);
+        }
         let irq = u32::from(word(fadt, 46));
         if irq == 0 || irq == u32::from(u16::MAX) {
             return Err(RouteError::UnsupportedSci);
@@ -325,6 +330,34 @@ mod tests {
         let edge = Routing::parse(&madt(&[2, 10, 0, 9, 9, 0, 0, 0, 5, 0]), 48).unwrap();
         assert_eq!(edge.sci(&fadt(9)), Err(RouteError::UnsupportedSci));
     }
+    #[test]
+    fn hardware_reduced_fadt_never_admits_legacy_sci_even_with_nonzero_interrupt() {
+        let routing = Routing::parse(&madt(&[]), 48).unwrap();
+        let legacy = LineRoute {
+            gsi: 9,
+            polarity: Polarity::Low,
+            trigger: Trigger::Level,
+        };
+        for flags in [0u32, 1 << 19, 1 << 21, 1 << 20, (1 << 20) | (1 << 21)] {
+            let mut input = fadt(9);
+            input.resize(276, 0);
+            input[8] = 6;
+            input[112..116].copy_from_slice(&flags.to_le_bytes());
+            let input = finish(input, b"FACP");
+            assert_eq!(
+                input.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
+                0
+            );
+            assert_eq!(word(&input, 46), 9);
+            let expected = if flags & (1 << 20) != 0 {
+                Err(RouteError::UnsupportedSci)
+            } else {
+                Ok(legacy)
+            };
+            assert_eq!(routing.sci(&input), expected, "FADT flags {flags:#x}");
+        }
+    }
+
     #[test]
     fn malformed_flags_duplicates_unknown_entries_and_nmi_are_refused() {
         for extra in [
