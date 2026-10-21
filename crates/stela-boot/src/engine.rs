@@ -2180,11 +2180,13 @@ fn run(
                 statistics.waits,
             );
             let heap = crate::ALLOCATOR.usage();
+            let shadow = host::statistics();
             output::arguments(format_args!(
                 "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
                  compiled={} discards={} evictions={} chained={}% exceptions={} interrupts={} \
                  waits={} \
-                 heap={}M/{}M carved={}M peak={}M largest={}M\n",
+                 heap={}M/{}M carved={}M peak={}M largest={}M \
+                 shadow_peak={}M/{}M/{}M exhausted={}\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
                 cpu.pstate.el,
@@ -2203,6 +2205,10 @@ fn run(
                 heap.carved >> 20,
                 heap.peak >> 20,
                 heap.largest >> 20,
+                shadow.shadow_peak[0] >> 20,
+                shadow.shadow_peak[1] >> 20,
+                shadow.shadow_bytes >> 20,
+                shadow.exhausted,
             ));
             beat = (now, native, blocks, compiled, chained, events);
             translation = translation_report(machine, translation, compiled - beat_compiled);
@@ -2774,11 +2780,15 @@ fn finish(
     dump_report(machine, dumps);
     let host = host::statistics();
     output::arguments(format_args!(
-        "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} lower_resets={} scoped_invalidations={} stray_interrupts={} helper_calls={} helper_fills={} bounces={} guard_faults={} events={} seconds={seconds:.3}\n",
+        "STATISTICS {:?} shadow_fills={} shadow_prefills={} shadow_resets={} shadow_exhausted={} shadow_peak={}M/{}M/{}M lower_resets={} scoped_invalidations={} stray_interrupts={} helper_calls={} helper_fills={} bounces={} guard_faults={} events={} seconds={seconds:.3}\n",
         machine.statistics,
         host.fills,
         host.prefills,
         host.resets,
+        host.exhausted,
+        host.shadow_peak[0] >> 20,
+        host.shadow_peak[1] >> 20,
+        host.shadow_bytes >> 20,
         host.lower_resets,
         host.scoped,
         host.stray,

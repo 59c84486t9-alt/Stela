@@ -61,6 +61,8 @@ struct Pool {
     shadow_base: u64,
     /// The half the next frames map.
     half: usize,
+    /// The most bytes of shadow frames each half has held at once.
+    peak: [u64; 2],
 }
 
 /// The guest halves: VAs with bit 63 clear and set.
@@ -75,6 +77,8 @@ impl Frames for Pool {
         }
         let frame = self.base + self.shadow[self.half];
         self.shadow[self.half] += PAGE;
+        let used = self.shadow[self.half] - self.range(self.half).0;
+        self.peak[self.half] = self.peak[self.half].max(used);
         zero(frame);
         Some(frame)
     }
@@ -173,6 +177,8 @@ pub struct State {
     apic_hz: u64,
     pub fills: u64,
     pub resets: u64,
+    /// Resets because a half's shadow frames ran out.
+    pub exhausted: u64,
     /// Resets of the lower half alone.
     pub lower_resets: u64,
     /// The leaves each half was filled from.
@@ -250,6 +256,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
         shadow: [0; 2],
         shadow_base: config.pool_physical + PERMANENT_FRAMES * PAGE,
         half: LOWER,
+        peak: [0; 2],
     };
     for half in [LOWER, UPPER] {
         pool.reset_half(half);
@@ -306,6 +313,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             fills: 0,
             native_ticks: 0,
             resets: 0,
+            exhausted: 0,
             lower_resets: 0,
             extents: [Extents::new(), Extents::new()],
             scoped: 0,
@@ -335,9 +343,10 @@ pub struct Statistics {
     /// same leaves.
     pub fills: u64,
     pub prefills: u64,
-    /// Resets of the whole shadow, of the lower half alone, and TLBIs that
-    /// unmapped ranges instead.
+    /// Resets of the whole shadow, those because a half ran out of frames,
+    /// of the lower half alone, and TLBIs that unmapped ranges instead.
     pub resets: u64,
+    pub exhausted: u64,
     pub lower_resets: u64,
     pub scoped: u64,
     pub stray: u64,
@@ -349,6 +358,9 @@ pub struct Statistics {
     pub helper_fills: u64,
     pub bounces: u64,
     pub guard_faults: u64,
+    /// Each half's shadow bytes and the most it has held at once.
+    pub shadow_bytes: u64,
+    pub shadow_peak: [u64; 2],
 }
 
 pub fn statistics() -> Statistics {
@@ -357,6 +369,7 @@ pub fn statistics() -> Statistics {
         fills: state.fills,
         prefills: state.prefills,
         resets: state.resets,
+        exhausted: state.exhausted,
         lower_resets: state.lower_resets,
         scoped: state.scoped,
         stray: state.stray,
@@ -365,6 +378,11 @@ pub fn statistics() -> Statistics {
         helper_fills: state.helper_fills,
         bounces: state.bounces,
         guard_faults: state.guard_faults,
+        shadow_bytes: {
+            let (start, end) = state.pool.range(LOWER);
+            end - start
+        },
+        shadow_peak: state.pool.peak,
     }
 }
 
@@ -620,6 +638,7 @@ pub fn page_fault(frame: &mut Frame, address: u64) {
     state.pool.half = half;
     if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
         // The shadow pool is exhausted: start over and map again.
+        state.exhausted += 1;
         state.reset_shadow();
         state.pool.half = half;
         if tables::map_page(&mut state.pool, root, virtual_page, host, rights).is_err() {
