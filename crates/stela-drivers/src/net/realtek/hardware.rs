@@ -241,10 +241,18 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
     /// The CSI fallback supported by Linux for config dword 0x70c. Stela uses
     /// this documented controller protocol directly; it does not guess ECAM size.
     pub fn latency(&self) -> Result<(), BlockError> {
-        let cmd = 0x70c | 0xf000 | (u32::from(self.function) << 16);
+        self.csi_modify(0x70c, 0xff00_0000, 0x2700_0000)
+    }
+    pub(super) fn csi_modify(&self, address: u16, clear: u32, set: u32) -> Result<(), BlockError> {
+        if address & 3 != 0 || address > 0xfff || self.function > 7 {
+            return Err(BlockError::Unsupported(
+                "invalid Realtek CSI address or PCI function",
+            ));
+        }
+        let cmd = u32::from(address) | 0xf000 | (u32::from(self.function) << 16);
         self.registers.write32(CSI_ADDRESS, cmd);
         self.poll32(CSI_ADDRESS, ACCESS, true, 10, 100)?;
-        let value = (self.mmio32(CSI_DATA)? & 0x00ff_ffff) | 0x2700_0000;
+        let value = (self.mmio32(CSI_DATA)? & !clear) | set;
         self.registers.write32(CSI_DATA, value);
         self.registers.write32(CSI_ADDRESS, ACCESS | cmd);
         self.poll32(CSI_ADDRESS, ACCESS, false, 10, 100)

@@ -101,7 +101,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     pub fn initialize_modern(&self) -> Result<(), BlockError> {
         if !matches!(
             self.revision.version,
-            40 | 42 | 44 | 46 | 51 | 52 | 61 | 63..=66
+            40 | 42 | 44 | 46 | 51 | 52 | 61 | 63..=66 | 70
         ) {
             return Ok(());
         }

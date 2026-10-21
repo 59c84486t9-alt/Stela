@@ -298,7 +298,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         // Other external PHY IDs need their own realtek_main.c quirks.
         let supported = if self.revision.nbase() {
             matches!(id, 0x001c_c800 | 0x001c_c840)
-                || (matches!(self.revision.version, 64..=66)
+                || (matches!(self.revision.version, 64..=66 | 70)
                     && matches!(id, 0x001c_c841 | 0x001c_c862 | 0x001c_c890))
         } else {
             matches!(id, 0x001c_c800 | 0x001c_c912)
@@ -322,6 +322,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         self.phy_modify(PHY_CONTROL, 1 << 11, 0)?; // genphy_resume
         self.timer.delay(20_000);
+        let mut nbase_capability = 0;
         if id == 0x001c_c800 || self.revision.nbase() {
             // realtek_main.c distinguishes the generic FE/GE PHY from the
             // identical-ID 2.5G PHY by vendor page a61's capability register.
@@ -333,6 +334,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             if (capability & 0x2000 != 0) != self.revision.nbase() {
                 return Err(Error::UnsupportedPhy(id));
             }
+            nbase_capability = capability;
             if self.revision.nbase() && !self.nbase_internal_phy()? {
                 return Err(Error::UnsupportedPhy(id));
             }
@@ -390,8 +392,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
                 51 => self.ep_phy()?,
                 52 => self.fp_phy()?, // XID54a's MAC firmware executes after MAC setup.
-                61 | 63..=66 => self.nbase_phy(
-                    script.ok_or(Error::Script("RTL8125 requires revision firmware"))?,
+                61 | 63..=66 | 70 => self.nbase_phy(
+                    script.ok_or(Error::Script("Realtek NBASE requires revision firmware"))?,
                 )?,
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
@@ -413,7 +415,12 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 self.phy_ocp_write(
                     NBASE_AN_CONTROL,
                     (advertised & !(NBASE_ADV_2500 | NBASE_ADV_5000 | NBASE_ADV_10000))
-                        | NBASE_ADV_2500,
+                        | NBASE_ADV_2500
+                        | if self.revision.version == 70 && nbase_capability & 0x4000 != 0 {
+                            NBASE_ADV_5000
+                        } else {
+                            0
+                        },
                 )?;
             }
             self.phy_write(4, 0x01e1)?; // IEEE selector, 10/100 half/full, no pause.

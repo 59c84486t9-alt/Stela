@@ -35,7 +35,11 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 if self.revision.version == 46 || self.revision.nbase() {
                     self.mac_ocp_modify(0xe092, 0x00ff, 0)?;
                 }
-                r.write8(CONFIG2, r.read8(CONFIG2) & !(1 << 7));
+                if self.revision.version == 70 {
+                    r.write8(0x34, self.mmio8(0x34)? & !(1 << 3)); // INT_CFG0 CLKREQ.
+                } else {
+                    r.write8(CONFIG2, r.read8(CONFIG2) & !(1 << 7));
+                }
                 r.write8(CONFIG5, r.read8(CONFIG5) & !1);
                 if self.revision.version == 46 {
                     self.mac_ocp_write(0xe048, 1500 + 14 + 0x20)?; // Donor TX idle timer in bytes.

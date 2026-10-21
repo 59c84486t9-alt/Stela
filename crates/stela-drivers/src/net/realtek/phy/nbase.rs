@@ -6,7 +6,7 @@
 // Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
-//! Exact RTL8125A2/B/D/K/9151A/CP/BP PHY paths from pinned r8169_phy_config.c.
+//! Exact RTL8125A2/B/D/K/9151A/CP/BP/RTL8126A PHY paths from pinned r8169_phy_config.c.
 use super::{BlockError, Error, Hardware, Registers, Script, Timer};
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     fn n_parameter(&self, address: u16, clear: u16, set: u16) -> Result<(), BlockError> {
@@ -16,7 +16,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.phy_ocp_write(0xb87e, (value & !clear) | set)
     }
     pub(super) fn nbase_phy(&mut self, script: &Script<'_>) -> Result<(), Error> {
-        if !matches!(self.revision.version, 61 | 63..=66) {
+        if !matches!(self.revision.version, 61 | 63..=66 | 70) {
             return Err(Error::UnsupportedRevision(self.revision));
         }
         if self.revision.version == 61 {
@@ -109,7 +109,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             self.paged(0xa5b, 0x12, 1 << 15, 0)?; // Legacy force mode.
         }
         self.paged(0xa43, 0x10, 1 << 2, 0)?; // Disable ALDPS.
-        self.paged(0xa43, 0x11, 0, 1 << 4)?;
+        if self.revision.version != 70 {
+            self.paged(0xa43, 0x11, 0, 1 << 4)?; // 8126 uses only common EEE tuning.
+        }
         self.paged(0xa6d, 0x14, 0x10, 0)?;
         self.paged(0xa42, 0x14, 0x80, 0)?;
         self.paged(0xa4a, 0x11, 0x200, 0)?;

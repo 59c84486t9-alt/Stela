@@ -34,17 +34,16 @@
 //! MAC51/52 use the exact EP/FP OOB ERI namespace and bounded CMAC ownership.
 //! MAC52 XID54a requires MAC-only `rtl_nic/rtl8168fp-3.fw` after MAC tuning;
 //! XID54b and MAC51 require none. Their PHY/EPHY/start paths stay distinct.
-//! MAC61/63/64/65/66 (RTL8125A/B/D/K/9151A/CP/BP) require a checked BAR through 0x604a, their exact
+//! MAC61/63/64/65/66/70 (RTL8125/8126) require a checked BAR through 0x604a, their exact
 //! revision firmware, a validated internal NBASE PHY and real 2.5G
 //! capability. Their distinct FIFO/IRQ/doorbell/RX/EPHY and legacy descriptor
 //! setup precede DMA. Carrier uses actual polled PHY BMCR/BMSR with a 10 ms
-//! cache; EEE is disabled and 2.5G advertising is capped to the MAC capability.
+//! cache; EEE is disabled; advertising is capped to actual PHY and MAC capability.
 //! MAC28/31 use the DP MDIO gate and bounded initial DASH driver-start
 //! notification/acknowledgement. Their integrated RTL8211B identity erratum
 //! is an observable classification correction; MDIO returns actual values.
 //! Failed DP command ports require reset/reinitialization, without retries.
-//! Extended-XID 8125 and 8126 MAC versions are identified for diagnostics
-//! but **refused** until their complete MAC/PHY initialization is implemented.
+//! Extended-XID RTL9151AS and unlisted revisions remain explicitly refused.
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
 //! variants, SFP/TBI, DASH stop/release and power lifecycle, suspend/resume,
 //! interrupts and jumbo frames are
@@ -403,7 +402,7 @@ impl RuntimeLink {
             Err(BlockError::Device { status: 255 })
         } else if self.status != Some(status)
             && status & 2 != 0
-            && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52 | 61 | 63..=66)
+            && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52 | 61 | 63..=66 | 70)
         {
             link_patch(hw, status)
         } else {
@@ -592,7 +591,7 @@ fn publish<R: Registers, T: Timer>(
         25 | 26 | 28 | 31 | 32 | 33 => (1 << 15) | (7 << 8),
         40 | 42 | 44 | 46 | 51 | 52 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
         61 => (8 << 27) | (7 << 8),
-        63..=66 => (8 << 27) | (7 << 8) | (1 << 11),
+        63..=66 | 70 => (8 << 27) | (7 << 8) | (1 << 11),
         _ => (1 << 15) | (1 << 14) | (7 << 8),
     };
     // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
@@ -703,6 +702,8 @@ mod tests {
         mdio_commands: usize,
         phy_ocp_commands: usize,
         eri_commands: usize,
+        csi: BTreeMap<(u8, u16), u32>,
+        csi_commands: usize,
     }
     struct Model {
         state: RefCell<State>,
@@ -711,6 +712,7 @@ mod tests {
         failed_read: Option<usize>,
         fail_phy_at: usize,
         fail_eri_at: usize,
+        fail_csi_at: usize,
         stuck_reset: bool,
         stuck_phy_reset: bool,
         command_readback: Option<u8>,
@@ -749,6 +751,7 @@ mod tests {
                 failed_read: None,
                 fail_phy_at: usize::MAX,
                 fail_eri_at: usize::MAX,
+                fail_csi_at: usize::MAX,
                 stuck_reset: false,
                 stuck_phy_reset: false,
                 command_readback: None,
@@ -867,6 +870,7 @@ mod tests {
                 || self.fault == Some(port)
                 || (port == PHY_ACCESS && s.mdio_commands >= self.fail_phy_at)
                 || (port == ERI_ADDRESS && s.eri_commands >= self.fail_eri_at)
+                || (port == CSI_ADDRESS && s.csi_commands >= self.fail_csi_at)
                 || (port == DP_OCP_ACCESS && s.dp_commands >= self.fail_dp_at)
                 || (port == PHY_OCP && s.phy_ocp_commands >= self.fail_phy_ocp_at)
             {
@@ -969,13 +973,14 @@ mod tests {
                     }
                 }
                 CSI_ADDRESS => {
-                    // The source helper preserves the other config bytes at 70c.
-                    if !write {
-                        Self::store32(s, CSI_DATA, 0x1278_5634);
-                    }
+                    let key = (((command >> 16) & 7) as u8, (command & 0xfff) as u16);
                     if write {
+                        let value = Self::raw32(s, CSI_DATA);
+                        s.csi.insert(key, value);
                         command & !ACCESS
                     } else {
+                        let value = *s.csi.get(&key).unwrap_or(&0x1278_5634);
+                        Self::store32(s, CSI_DATA, value);
                         command | ACCESS
                     }
                 }
@@ -1138,6 +1143,8 @@ mod tests {
                     s.mdio_commands += 1;
                 } else if o == ERI_ADDRESS {
                     s.eri_commands += 1;
+                } else if o == CSI_ADDRESS {
+                    s.csi_commands += 1;
                 } else if o == DP_OCP_ACCESS {
                     s.dp_commands += 1;
                 } else if o == PHY_OCP {
@@ -1194,6 +1201,7 @@ mod tests {
             64 => 0x688,
             65 => 0x708,
             66 => 0x681,
+            70 => 0x649,
             32 => 0x2c1,
             33 => 0x2c0,
             35 => 0x480,
@@ -1238,7 +1246,7 @@ mod tests {
             let r = revision::detect(xid << 20).unwrap();
             assert_eq!((r.version, r.firmware), (version, fw));
             assert_eq!(u32::from(r.xid), xid);
-            if version >= 61 && !matches!(version, 61 | 63..=66) {
+            if version >= 61 && !matches!(version, 61 | 63..=66 | 70) {
                 assert!(!r.implemented());
             }
         }
@@ -1811,9 +1819,6 @@ mod tests {
             assert_eq!(model.read8(CONFIG_LOCK), 0);
             publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])).unwrap();
             assert_eq!(model.read32(RX_CONFIG), (1 << 15) | (7 << 8) | 0x0e);
-        }
-        for xid in [0x649, 0x64a] {
-            assert!(!revision::detect(xid << 20).unwrap().implemented());
         }
     }
     #[test]
@@ -3309,7 +3314,7 @@ mod tests {
         assert_eq!(register_aperture(0x8125), 0x604a);
         assert_eq!(register_aperture(0x8126), 0x604a);
         assert_eq!(register_aperture(0x8168), 256);
-        for version in [61, 63, 64, 65, 66] {
+        for version in [61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let model = Model::nbase(&time);
             let hw = Hardware::new(&model, &time, revision(version), 0);
@@ -3330,7 +3335,7 @@ mod tests {
 
     #[test]
     fn nbase_initial_fifo_and_new_b_shared_status_require_real_completion() {
-        for version in [61, 63, 64, 65, 66] {
+        for version in [61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let model = Model::nbase(&time);
             Model::store32(&mut model.state.borrow_mut(), TX_CONFIG, 0); // No old TXCFG_EMPTY condition.
@@ -3581,7 +3586,7 @@ mod tests {
 
     #[test]
     fn nbase_backup_station_and_runtime_tx_lpi_failure_do_not_guess_recovery() {
-        for version in [61, 63, 64, 65, 66] {
+        for version in [61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let model = Model::nbase(&time);
             let hw = Hardware::new(&model, &time, revision(version), 0);
@@ -3622,7 +3627,7 @@ mod tests {
 
     #[test]
     fn nbase_polled_carrier_preserves_latch_low_an_restart_and_cache_expiry() {
-        for version in [61, 63, 64, 65, 66] {
+        for version in [61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let model = Model::nbase(&time);
             {
@@ -3756,7 +3761,7 @@ mod tests {
     fn nbase_d_cp_id_capability_external_and_required_firmware_failures_are_explicit() {
         let bytes = 0x8016_a55au32.to_le_bytes();
         let script = Script::parse(&bytes).unwrap();
-        for version in [64, 65, 66] {
+        for version in [64, 65, 66, 70] {
             for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
                 for rejected in 0..4 {
                     let time = Time::default();
@@ -3796,7 +3801,7 @@ mod tests {
     fn nbase_d_cp_required_command_failures_abort_before_enable_or_dma() {
         let bytes = 0x8016_a55au32.to_le_bytes();
         let script = Script::parse(&bytes).unwrap();
-        for version in [64, 65, 66] {
+        for version in [64, 65, 66, 70] {
             for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
                 let time = Time::default();
                 let model = Model::nbase(&time);
@@ -3895,7 +3900,7 @@ mod tests {
     }
     #[test]
     fn csi_failed_data_read_does_not_publish_a_fabricated_config_value() {
-        for version in [34, 61, 63, 64, 65, 66] {
+        for version in [34, 61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let mut model = Model::nbase(&time);
             model.failed_read = Some(CSI_DATA);
@@ -4016,6 +4021,190 @@ mod tests {
             model.failed_read = Some(port);
             let hw = Hardware::new(&model, &time, revision(66), 0);
             assert_eq!(hw.ep_start(), Err(BlockError::Device { status: u32::MAX }));
+        }
+    }
+    #[test]
+    fn csi_rmw_checks_address_and_function_and_preserves_other_bytes() {
+        for function in [0, 2, 7] {
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            model.state.borrow_mut().csi.extend([
+                ((function, 0x890), 0xabcdef79),
+                ((function, 0x70c), 0x12785634),
+            ]);
+            let hw = Hardware::new(&model, &time, revision(70), function);
+            hw.csi_modify(0x890, 1, 0).unwrap();
+            hw.latency().unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.csi[&(function, 0x890)], 0xabcdef78);
+            assert_eq!(s.csi[&(function, 0x70c)], 0x27785634);
+            for addr in [0x890u32, 0x70c] {
+                let cmd = 0xf000 | addr | (u32::from(function) << 16);
+                assert!(s.writes.contains(&(CSI_ADDRESS, cmd, 4)));
+                assert!(s.writes.contains(&(CSI_ADDRESS, ACCESS | cmd, 4)));
+            }
+        }
+        for (address, function) in [(0x891, 0), (0x1000, 0), (0x890, 8)] {
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            let hw = Hardware::new(&model, &time, revision(70), function);
+            assert!(matches!(
+                hw.csi_modify(address, 1, 0),
+                Err(BlockError::Unsupported(_))
+            ));
+            assert!(model.state.borrow().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn nbase_8126_phy_uses_common_eee_only_and_advertises_observed_5g_capability() {
+        let bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&bytes).unwrap();
+        for xid in [0x649, 0x64a] {
+            for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
+                for (capability, advertised, geee) in [(0x2070, 0xeeff, 0), (0x6070, 0xefff, 0x10)]
+                {
+                    let time = Time::default();
+                    let model = Model::nbase(&time);
+                    model.state.borrow_mut().phy_ocp.extend([
+                        (0xa406, id),
+                        (0xa616, capability),
+                        (0xa432, geee),
+                        (NBASE_AN_CONTROL, 0xffff),
+                    ]);
+                    let revision = revision::detect(xid << 20).unwrap();
+                    assert!(revision.implemented());
+                    assert!(revision::pci_family(0x8126, revision));
+                    assert!(!revision::pci_family(0x8125, revision));
+                    let mut hw = Hardware::new(&model, &time, revision, 0);
+                    assert_eq!(hw.configure_phy(Some(&script), false).unwrap(), None);
+                    let s = model.state.borrow();
+                    assert_eq!(s.phy_ocp[&NBASE_AN_CONTROL], advertised);
+                    assert_eq!(s.phy_ocp[&0xa432], geee); // No 8125-specific GEEE bit4 write.
+                    assert_eq!(s.phy_ocp[&0xa400], 0x1200);
+                    assert_eq!(s.phy_ocp[&PHY_OCP_EEE_ADV], 0);
+                    assert_eq!(s.phy_ocp[&NBASE_EEE_ADV2], 0);
+                    assert_eq!(s.phy_ocp[&0xa5b4] & 0x8000, 0);
+                    assert!(s.g_parameters.is_empty());
+                    assert!(s.n_parameters.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nbase_8126_start_masks_clock_csi_and_legacy_dma_are_distinct() {
+        use crate::bus::dma::RegionAllocator;
+        for xid in [0x649, 0x64a] {
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            {
+                let mut s = model.state.borrow_mut();
+                s.bytes[CONFIG2] = 0x80;
+                s.bytes[0x34] = 0x28;
+                s.bytes[0xd8] = 0x56;
+                s.mac.extend([
+                    (0xe614, 0xffff),
+                    (0xe63e, 0xffff),
+                    (0xea1c, 0xffff),
+                    (0xeb58, 0xffff),
+                ]);
+                s.csi
+                    .extend([((2, 0x890), 0xabcdef79), ((2, 0x70c), 0x12785634)]);
+            }
+            let revision = revision::detect(xid << 20).unwrap();
+            let mut hw = Hardware::new(&model, &time, revision, 2);
+            hw.initialize_modern().unwrap();
+            hw.ep_start().unwrap();
+            hw.configure_mac(None).unwrap();
+            {
+                let s = model.state.borrow();
+                assert_eq!(s.bytes[CONFIG2], 0x80);
+                assert_eq!(s.bytes[0x34], 0);
+                assert_eq!(s.bytes[0xd8], 0x54);
+                assert!(s.writes.contains(&(0x34, 0x20, 1))); // CLKREQ bit3 cleared before INT_CFG0 reset.
+                assert_eq!(s.mac[&0xe614], 0xfcff);
+                assert_eq!(s.mac[&0xe63e], 0xf3ef);
+                assert_eq!(s.mac[&0xea1c], 0xfcf9);
+                assert_eq!(s.mac[&0xeb58], 0xfffe);
+                assert_eq!(s.csi[&(2, 0x890)], 0xabcdef78);
+                assert_eq!(s.csi[&(2, 0x70c)], 0x27785634);
+                assert!(s.writes.contains(&(0xa7c, 0, 4)));
+                assert!(s.writes.contains(&(0x7a, 0, 2)));
+                assert!(
+                    !s.writes
+                        .iter()
+                        .any(|(r, _, _)| *r == 0xa80 || *r == EPHY_ACCESS || *r == ERI_ADDRESS)
+                );
+                let at = |cmd| {
+                    s.writes
+                        .iter()
+                        .position(|(r, v, _)| *r == CSI_ADDRESS && *v == cmd)
+                        .unwrap()
+                };
+                assert!(at(0x8002_f890) < at(0x0002_f70c));
+            }
+            let mut backing = vec![0u64; 40_000];
+            let base = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives both rings and has no other accesses.
+            let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+            let mut rx = Ring::new(&mut dma, true).unwrap();
+            let mut tx = Ring::new(&mut dma, true).unwrap();
+            rx.initialize(true);
+            tx.initialize(false);
+            publish(&hw, &rx, &tx, read_station(&hw).unwrap()).unwrap();
+            assert_eq!(
+                model.read32(RX_CONFIG),
+                (8 << 27) | (7 << 8) | (1 << 11) | 0xe
+            );
+        }
+    }
+
+    #[test]
+    fn nbase_8126_csi_phases_and_new_mmio_faults_abort_before_dma() {
+        for nth in 1..=4 {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.fail_csi_at = nth;
+            let mut hw = Hardware::new(&model, &time, revision(70), 2);
+            assert_eq!(
+                hw.configure_mac(None),
+                Err(Error::Device(BlockError::Timeout))
+            );
+            let s = model.state.borrow();
+            assert_eq!(s.csi_commands, nth);
+            assert_eq!(s.bytes[CONFIG_LOCK], 0);
+            assert!(
+                !s.writes
+                    .iter()
+                    .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+            );
+        }
+        for address in [0x890, 0x70c] {
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            model.state.borrow_mut().csi.insert((2, address), u32::MAX);
+            let mut hw = Hardware::new(&model, &time, revision(70), 2);
+            assert_eq!(
+                hw.configure_mac(None),
+                Err(Error::Device(BlockError::Device { status: u32::MAX }))
+            );
+            let s = model.state.borrow();
+            assert_eq!(s.bytes[CONFIG_LOCK], 0);
+            assert!(!s.writes.iter().any(
+                |(r, v, _)| *r == CSI_ADDRESS && *v == (ACCESS | 0x2f000 | u32::from(address))
+            ));
+        }
+        for address in [0x34, 0xd8] {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.failed_read = Some(address);
+            let mut hw = Hardware::new(&model, &time, revision(70), 0);
+            assert_eq!(
+                hw.configure_mac(None),
+                Err(Error::Device(BlockError::Device { status: 255 }))
+            );
+            assert_eq!(model.state.borrow().bytes[CONFIG_LOCK], 0);
         }
     }
 }
