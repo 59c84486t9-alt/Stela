@@ -145,6 +145,7 @@ pub struct AppleDevices {
     /// pins.
     aux_gpios: Vec<(u32, Vec<(u32, Net)>)>,
     typec_ports: Vec<(u32, typec::Port)>,
+    phys: Vec<PhyBinding>,
     pmgr: Option<DeviceId>,
     power_clients: Vec<PowerClient>,
     power_refusals: Vec<(u64, String)>,
@@ -157,8 +158,18 @@ const USB_POLL_TICKS: u64 = 24_000_000 / 8000;
 /// A native host handle, owned by this AppleDevices instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UsbId(DeviceId);
+struct PhyBinding {
+    phandle: u32,
+    port: u32,
+    device: DeviceId,
+    retention: bool,
+    pipe: Option<(u64, u64)>,
+    events: (u64, u64),
+}
 struct UsbMaster {
     device: DeviceId,
+    phy: DeviceId,
+    phy_changed: bool,
     dart: DeviceId,
     stream: usize,
     session: UsbSession,
@@ -452,6 +463,7 @@ impl AppleDevices {
             gpio: None,
             aux_gpios: Vec::new(),
             typec_ports: Vec::new(),
+            phys: Vec::new(),
             pmgr: None,
             power_clients: Vec::new(),
             power_refusals: Vec::new(),
@@ -1261,19 +1273,18 @@ impl AppleDevices {
 
     /// Place canonical PHY regions once. ADT aliases inside the core resolve
     /// by physical address; no length concatenation or duplicate storage.
-    pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), MapError> {
+    pub fn add_atc_phy(&mut self, placement: &super::soc::TypecPhy) -> Result<(), String> {
+        if placement.phandle == 0 || placement.port == 0 || self.phys.iter().any(|phy| phy.phandle == placement.phandle || phy.port == placement.port) {
+            return Err("ATC PHY has an invalid/duplicate phandle or connector".into());
+        }
         let id = self.bus.add(Box::new(AtcPhy::new()));
         let pipe = placement.pipe.map(|pipe| (pipe, atc_phy::PIPE));
         for ((physical, bytes), offset) in [
-            (placement.usb2, atc_phy::USB2),
-            (placement.core, 0),
-            (placement.events, atc_phy::EVENTS),
-        ]
-        .into_iter()
-        .chain(pipe)
-        {
-            self.bus.map(id, physical, bytes, offset)?;
+            (placement.usb2, atc_phy::USB2), (placement.core, 0), (placement.events, atc_phy::EVENTS),
+        ].into_iter().chain(pipe) {
+            self.bus.map(id, physical, bytes, offset).map_err(|error| format!("ATC PHY placement: {error:?}"))?;
         }
+        self.phys.push(PhyBinding { phandle: placement.phandle, port: placement.port, device: id, retention: placement.retention, pipe: placement.pipe, events: placement.events });
         Ok(())
     }
 
@@ -1419,9 +1430,18 @@ impl AppleDevices {
         placement: &super::soc::UsbController,
         dart: DartId,
     ) -> Result<UsbId, String> {
+        let binding = self.phys.iter().find(|phy| phy.phandle == placement.phy && phy.port == placement.port)
+            .ok_or_else(|| format!("USB atc-phy-parent {:#x} has no placed PHY on connector {}", placement.phy, placement.port))?;
+        if binding.pipe != Some(placement.ranges[3]) || binding.events != placement.ranges[4] {
+            return Err("USB PHY lacks the matching physical pipehandler reset/event windows".into());
+        }
+        let phy = binding.device;
+        let state = self.bus.device::<AtcPhy>(phy).expect("placed PHY type").usb2_state();
         let connector = self.typec_port(placement.port);
         let irqs = core::array::from_fn(|n| AicInput::new(0, placement.irqs[n] as u16));
-        let device = self.bus.add(Box::new(Dwc3::new(irqs)));
+        let mut model = Dwc3::new(irqs);
+        model.set_phy_state(state.controller_reset, state.ready, state.clocked, state.quiesced, &mut Access::new(0, 0, &mut self.latch));
+        let device = self.bus.add(Box::new(model));
         let (physical, bytes) = placement.ranges[0];
         self.bus
             .map(device, physical, bytes, 0)
@@ -1439,6 +1459,8 @@ impl AppleDevices {
         }
         self.usb_masters.push(UsbMaster {
             device,
+            phy,
+            phy_changed: true,
             dart: dart.0,
             stream: placement.stream as usize,
             session: UsbSession::new(),
@@ -1688,6 +1710,7 @@ impl AppleDevices {
             if resource.owner.is_some_and(|owner| match owner {
                 PowerOwner::Dart(index) => index >= darts.len(),
                 PowerOwner::Usb(index) => index >= self.usb_masters.len(),
+                PowerOwner::Phy(index) => index >= self.phys.len(),
             }) {
                 return Err(format!(
                     "{} names an unplaced hardware lifecycle owner",
@@ -1730,6 +1753,7 @@ impl AppleDevices {
                 .enumerate()
                 .map(|(index, master)| (PowerOwner::Usb(index), master.device, master.retention)),
         );
+        clients.extend(self.phys.iter().enumerate().map(|(index, phy)| (PowerOwner::Phy(index), phy.device, phy.retention)));
         let mut links = Vec::new();
         for (owner, device, retention) in clients {
             let domains = coverage
@@ -2069,6 +2093,21 @@ impl AppleDevices {
             .map_err(|error| format!("AIC placement: {error:?}"))
     }
 
+    fn settle_phys(&mut self, cpu: CpuIndex, now: u64) {
+        for master in &mut self.usb_masters {
+            let state = self.bus.device::<AtcPhy>(master.phy).expect("USB retains actual PHY").usb2_state();
+            let mut access = Access::new(cpu, now, &mut self.latch);
+            let changed = self.bus.device_mut::<Dwc3>(master.device).expect("USB retains actual core")
+                .set_phy_state(state.controller_reset, state.ready, state.clocked, state.quiesced, &mut access);
+            master.phy_changed |= changed;
+        }
+    }
+
+    fn settle_lifecycle(&mut self, cpu: CpuIndex, now: u64) {
+        self.settle_power(cpu, now);
+        self.settle_phys(cpu, now);
+    }
+
     /// Replay each edge: off/on or reset assertion/release must still
     /// discard ordinary state even if the final image is active again.
     /// Infallible after binding, this runs before the next client effect,
@@ -2122,8 +2161,16 @@ impl AppleDevices {
                         usb.set_reset(reset, &mut access);
                         usb.set_power(powered, link.retention, &mut access);
                     }
+                    PowerOwner::Phy(_) => {
+                        let phy = self.bus.device_mut::<AtcPhy>(link.device).expect("binding checked PHY");
+                        phy.set_quiesced(quiesced);
+                        phy.set_clock(clocked);
+                        phy.set_reset(reset);
+                        phy.set_power(powered, link.retention);
+                    }
                 }
             }
+            self.settle_phys(cpu, now);
         }
     }
 
@@ -2133,7 +2180,7 @@ impl AppleDevices {
         if self.reset.is_none() {
             self.reset = reset;
         }
-        self.settle_power(cpu, now);
+        self.settle_lifecycle(cpu, now);
         self.release_cores()?;
         loop {
             let inputs = self.latch.take_aic_inputs();
@@ -2204,7 +2251,7 @@ impl Devices for AppleDevices {
     }
 
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
-        self.settle_power(cpu, now);
+        self.settle_lifecycle(cpu, now);
         let width = width(bytes)?;
         let mut access = Access::new(cpu, now, &mut self.latch);
         let value = self
@@ -2224,7 +2271,7 @@ impl Devices for AppleDevices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
-        self.settle_power(cpu, now);
+        self.settle_lifecycle(cpu, now);
         let width = width(bytes)?;
         // Validate the NOR CS edge before the GPIO word changes. This keeps
         // an incomplete-command refusal atomic across the two devices.
@@ -2300,7 +2347,7 @@ impl Devices for AppleDevices {
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
-        self.settle_power(cpu, now);
+        self.settle_lifecycle(cpu, now);
         if let Some(ipi) = self.ipi.as_mut() {
             ipi.advance(now, &mut self.latch);
         }
@@ -2331,7 +2378,7 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
-        self.settle_power(0, now);
+        self.settle_lifecycle(0, now);
         // Time-driven state is the board's, not a PE's: the access names
         // cpu0.
         let deferred = self
@@ -2398,7 +2445,7 @@ impl Devices for AppleDevices {
                 if !controller.is_some_and(Dwc3::lifecycle_active) {
                     return None;
                 }
-                if port != master.port || controller.is_some_and(Dwc3::host_pending) {
+                if master.phy_changed || port != master.port || controller.is_some_and(Dwc3::host_pending) {
                     return Some(0);
                 }
                 let poll = (port.ready || master.attached).then_some(master.next_poll);
@@ -2415,7 +2462,7 @@ impl Devices for AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
-        self.settle_power(cpu, now);
+        self.settle_lifecycle(cpu, now);
         for master in &self.masters {
             let (aes, dart) = self
                 .bus
@@ -2590,7 +2637,7 @@ impl Devices for AppleDevices {
                 memory,
                 access: &mut access,
             };
-            let fail = |why: &str| DeviceError::Refused(format!("USB device advance: {why}"));
+            let fail = |why: &str| DeviceError::TransferRefused(format!("USB device advance: {why}"));
             master
                 .cancel_session(controller.take_session_reset())
                 .map_err(fail)?;
@@ -2608,9 +2655,10 @@ impl Devices for AppleDevices {
             if !controller.lifecycle_active() {
                 continue;
             }
-            controller.sync_port(&master.port).map_err(fail)?;
+            let physical_port = UsbPort { generation: master.port.generation, ready: master.port.ready && controller.phy_ready() };
+            controller.sync_port(&physical_port).map_err(fail)?;
             controller
-                .attach_host_function(host_function(&master.connector))
+                .attach_host_function(controller.phy_ready().then(|| host_function(&master.connector)).flatten())
                 .map_err(fail)?;
             let function = master.peripheral.as_mut().map(|p| p as &mut dyn Function);
             controller.service_host(&mut port, function).map_err(fail)?;
@@ -2636,6 +2684,7 @@ impl Devices for AppleDevices {
                     .map_err(fail)?;
                 controller.flush(&mut port).map_err(fail)?;
             }
+            master.phy_changed = false;
         }
         self.settle(cpu, now, None)
     }
@@ -4051,7 +4100,159 @@ mod tests {
             stream: 1,
             port: 1,
             retention: false,
+            phy: 0xa2,
         }
+    }
+
+    fn add_usb_phy(d: &mut AppleDevices) -> super::super::soc::TypecPhy {
+        let placement = super::super::soc::TypecPhy {
+            phandle: 0xa2, port: 1, retention: true,
+            views: Vec::new(), usb2: (0x382a90000, atc_phy::WINDOW_BYTES),
+            core: (0x383000000, atc_phy::CORE_BYTES), pipe: Some((0x382a84000, atc_phy::WINDOW_BYTES)),
+            events: (0x382800000, atc_phy::WINDOW_BYTES),
+        };
+        d.add_atc_phy(&placement).unwrap();
+        placement
+    }
+
+    fn release_usb_phy(d: &mut AppleDevices, phy: &super::super::soc::TypecPhy) {
+        // Actual USB2 RUN, reset/SIDDQ release, core supply/reset release,
+        // and pipehandler controller RESET_N without clamp.
+        for (address, value) in [
+            (phy.usb2.0, 2), (phy.usb2.0 + 4, 4),
+            (phy.core.0 + 0x20000, 3 | 8 | 16), (phy.core.0 + 0x20008, 1),
+            (phy.pipe.unwrap().0 + 0x1c, 1),
+        ] { d.write(0, address, 4, value, 0).unwrap(); }
+    }
+
+    #[test]
+    fn mounted_usb_dma_service_failure_is_protected_from_survey_substitution() {
+        let mut d = AppleDevices::new();
+        let dart = d.add_dart(Range { physical: 0x382f00000, bytes: 0x4000 }, 16, None, None).unwrap();
+        let phy = add_usb_phy(&mut d);
+        let placement = usb_placement();
+        d.add_usb(&placement, dart).unwrap();
+        release_usb_phy(&mut d, &phy);
+        let base = placement.ranges[0].0;
+        let table = 0x800008000u64;
+        let events = 0x800009000u64;
+        let mut ram = Ram::new(0x800000000, 0x10000);
+        ram.put_u64(table, events);
+        ram.put_u64(table + 8, 16);
+        d.write(0, base + 0x468, 4, 1, 0).unwrap();
+        d.write(0, base + 0x470, 4, table as u32 as u64, 0).unwrap();
+        d.write(0, base + 0x474, 4, table >> 32, 0).unwrap();
+        // The actual placed stream is still disabled. Loading this real
+        // event segment table must fail through DART, never survey-success.
+        for now in [0, 10] {
+            let error = d.transfer(0, &mut ram, now).unwrap_err();
+            assert!(matches!(error, DeviceError::TransferRefused(ref reason) if reason.starts_with("USB device advance:")));
+        }
+        let mut untouched = [0; 16];
+        assert!(ram.read(events, &mut untouched));
+        assert_eq!(untouched, [0; 16]);
+    }
+
+    #[test]
+    fn actual_phy_clock_and_retained_supply_freeze_usb_time_while_quiesce_does_not() {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Domain, DomainId};
+        let mut d = AppleDevices::new();
+        let dart = d.add_dart(Range { physical: 0x382f00000, bytes: 0x4000 }, 16, None, None).unwrap();
+        let phy = add_usb_phy(&mut d);
+        let placement = usb_placement();
+        d.add_usb(&placement, dart).unwrap();
+        release_usb_phy(&mut d, &phy);
+        let supply = 0x23d280100;
+        let id = DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            registers: vec![supply], blocks: vec![(supply, 4)],
+            domains: vec![Domain { id, address: Some(supply), parents: [None; 2] }],
+            resources: vec![PowerResource { name: "/arm-io/atc-phy0".into(), clocks: vec![id], power: vec![], owner: Some(PowerOwner::Phy(0)) }],
+        };
+        d.add_power_states(&[Range { physical: supply, bytes: 4 }], &states.registers).unwrap();
+        d.connect_power_resources(&states, &[vec![dart]], &[false]).unwrap();
+        let base = placement.ranges[0].0;
+        d.write(0, base + 0x20, 4, 1, 0).unwrap();
+        assert_eq!(d.read(0, base + 0x440, 4, 15_000), Ok(5));
+        d.write(0, supply, 4, 4, 15_000).unwrap();
+        d.write(0, base + 0x20, 4, 1, 800_000).unwrap();
+        assert!(d.read(0, phy.usb2.0, 4, 900_000).is_err());
+        assert_eq!(d.read(0, base + 0x440, 4, 900_000), Ok(5));
+        d.write(0, supply, 4, 15, 900_000).unwrap();
+        d.write(0, supply, 4, 0x40f, 900_000).unwrap();
+        assert_eq!(d.read(0, base + 0x440, 4, 915_000), Ok(10));
+        assert!(!d.bus.device::<Dwc3>(d.usb_masters[0].device).unwrap().lifecycle_active());
+        d.write(0, supply, 4, 15, 915_000).unwrap();
+        d.write(0, supply, 4, 0, 915_000).unwrap();
+        assert_eq!(d.read(0, base + 0x440, 4, 1_915_000), Ok(10));
+        d.write(0, supply, 4, 15, 1_915_000).unwrap();
+        assert_eq!(d.read(0, base + 0x440, 4, 1_930_000), Ok(15));
+    }
+
+    #[test]
+    fn usb_requires_actual_phy_binding_and_retained_phy_pauses_preserve_sessions() {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Domain, DomainId};
+        let mut d = AppleDevices::new();
+        let base_dart = 0x382f00000;
+        let dart = d.add_dart(Range { physical: base_dart, bytes: 0x4000 }, 16, None, None).unwrap();
+        let placement = usb_placement();
+        assert!(d.add_usb(&placement, dart).unwrap_err().contains("no placed PHY"));
+        let phy = add_usb_phy(&mut d);
+        // An unbound PHY with no physical reset aperture is a supported
+        // standalone topology, but cannot silently hold a USB core forever.
+        let saved_pipe = d.phys[0].pipe.take();
+        assert!(d.add_usb(&placement, dart).unwrap_err().contains("pipehandler"));
+        d.phys[0].pipe = saved_pipe;
+        d.add_usb(&placement, dart).unwrap();
+        let base = placement.ranges[0].0;
+        assert!(d.read(0, base + 0xc704, 4, 0).is_err());
+        release_usb_phy(&mut d, &phy);
+        let supply = 0x23d280100;
+        let id = DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            registers: vec![supply], blocks: vec![(supply, 4)],
+            domains: vec![Domain { id, address: Some(supply), parents: [None; 2] }],
+            resources: vec![PowerResource { name: "/arm-io/atc-phy0".into(), clocks: vec![id], power: vec![], owner: Some(PowerOwner::Phy(0)) }],
+        };
+        d.add_power_states(&[Range { physical: supply, bytes: 4 }], &states.registers).unwrap();
+        d.connect_power_resources(&states, &[vec![dart]], &[false]).unwrap();
+        assert!(d.power_refusals().is_empty());
+        d.write(0, base_dart + 0xc00, 4, 2, 0).unwrap();
+        d.write(0, base_dart + 0x1004, 4, 6, 0).unwrap();
+        let cable = typec::Attached { orientation: typec::Orientation::Normal, role: typec::DataRole::Ufp, source: false, vbus: true, speed: typec::Usb2Speed::High };
+        d.set_connection(1, Some(cable)).unwrap();
+        d.write(0, base + 0xc704, 4, 1 << 31, 0).unwrap();
+        let mut ram = Ram::new(0x800000000, 0x10000);
+        d.transfer(0, &mut ram, 0).unwrap();
+        assert_eq!(d.usb_masters[0].epoch, 1);
+        for (tick, value) in [(10, 4), (40, 0), (70, 0x40f)] { // clock gate, retained off, quiesce
+            d.write(0, supply, 4, value, tick).unwrap();
+            d.transfer(0, &mut ram, tick + 10).unwrap();
+            assert!(d.usb_masters[0].attached);
+            assert_eq!(d.usb_masters[0].epoch, 1);
+            assert_eq!(d.read(0, base + 0xc704, 4, tick + 10), Ok(1 << 31));
+            d.write(0, supply, 4, 15, tick + 20).unwrap();
+            d.transfer(0, &mut ram, tick + 20).unwrap();
+        }
+        // A rapid electrical isolate/release must still cancel the old
+        // native session even when final-ready is true at service time.
+        d.write(0, phy.usb2.0, 4, 2 | 4, 100).unwrap();
+        d.write(0, phy.usb2.0, 4, 2, 100).unwrap();
+        d.transfer(0, &mut ram, 100).unwrap();
+        assert_eq!(d.usb_masters[0].epoch, 2);
+        assert_eq!(d.typec_port(1).snapshot().connection, Some(cable));
+        // PHY PMGR reset reaches the actual pipehandler/controller bank.
+        for value in [0x40f, 0x8000040f, 0x40f, 15] { d.write(0, supply, 4, value, 110).unwrap(); }
+        assert!(d.read(0, base + 0xc704, 4, 110).is_err());
+        d.transfer(0, &mut ram, 110).unwrap();
+        assert!(!d.usb_masters[0].attached);
+        release_usb_phy(&mut d, &phy);
+        assert_eq!(d.read(0, base + 0xc704, 4, 110), Ok(0));
+        d.write(0, base + 0xc704, 4, 1 << 31, 120).unwrap();
+        d.transfer(0, &mut ram, 120).unwrap();
+        assert_eq!(d.usb_masters[0].epoch, 3);
     }
 
     #[test]
@@ -4063,8 +4264,10 @@ mod tests {
         d.add_aic(0x3b0c0000, 1100, AicLayout::aic2(0x8000, 0)).unwrap();
         let dart_base = 0x382f00000;
         let dart = d.add_dart(Range { physical: dart_base, bytes: 0x4000 }, 16, None, None).unwrap();
+        let phy = add_usb_phy(&mut d);
         let placement = usb_placement();
         let usb = d.add_usb(&placement, dart).unwrap();
+        release_usb_phy(&mut d, &phy);
         let base = placement.ranges[0].0;
         let supply = 0x23d280098;
         let states = PowerStates {
@@ -4078,7 +4281,8 @@ mod tests {
                 PowerResource { name: "dart-usb0".into(), clocks: vec![id(0x210)], power: vec![], owner: Some(PowerOwner::Dart(0)) },
                 PowerResource { name: "usb-drd0".into(), clocks: vec![id(0x108)], power: vec![], owner: Some(PowerOwner::Usb(0)) },
                 PowerResource { name: "usb-drd0/port-hs".into(), clocks: vec![id(0x108)], power: vec![], owner: Some(PowerOwner::Usb(0)) },
-                PowerResource { name: "atc-phy0".into(), clocks: vec![id(2)], power: vec![], owner: None },
+                PowerResource { name: "acio0".into(), clocks: vec![id(2)], power: vec![], owner: None },
+                PowerResource { name: "atc-phy0".into(), clocks: vec![], power: vec![], owner: Some(PowerOwner::Phy(0)) },
             ],
         };
         d.add_power_states(&[Range { physical: supply, bytes: 12 }], &states.registers).unwrap();
@@ -4146,8 +4350,10 @@ mod tests {
                 None,
             )
             .unwrap();
+        let phy = add_usb_phy(&mut devices);
         let placement = usb_placement();
         let id = devices.add_usb(&placement, dart).unwrap();
+        release_usb_phy(&mut devices, &phy);
         assert_eq!(devices.read(0, BASE + 0xc120, 4, 0), Ok(0x5533_300a));
         devices
             .write(0, placement.ranges[2].0 + 0x700, 4, 5 << 3, 0)
@@ -4164,13 +4370,10 @@ mod tests {
                 Err(DeviceError::Refused(_))
             ));
         }
-        // The pipehandler and core event block are the ATC PHY's.
-        for index in [3, 4] {
-            assert_eq!(
-                devices.read(0, placement.ranges[index].0, 4, 0),
-                Err(DeviceError::NoDevice)
-            );
-        }
+        // The pipehandler and core event block are the actual ATC PHY's.
+        assert_eq!(devices.read(0, placement.ranges[3].0 + 0x1c, 4, 0), Ok(1));
+        assert_eq!(devices.read(0, placement.ranges[4].0, 4, 0), Ok(0));
+        devices.transfer(0, &mut Ram::new(0, 0x1000), 0).unwrap();
         assert_eq!(devices.dma_deadline(), None);
         let host = typec::Attached {
             orientation: typec::Orientation::Normal,

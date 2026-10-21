@@ -91,7 +91,21 @@ const MUX_DATA: u32 = 7;
 /// `PIPEHANDLER_MUX_CTRL_{CLK,DATA}_DUMMY`).
 const MUX_DUMMY: u32 = 4 << 3 | 2;
 
+/// Digital outputs consumed by the USB core. A retained lifecycle pause is
+/// distinct from an electrical disconnect and from the controller reset line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usb2State {
+    pub ready: bool,
+    pub clocked: bool,
+    pub quiesced: bool,
+    pub controller_reset: bool,
+}
+
 pub struct AtcPhy {
+    powered: bool,
+    clocked: bool,
+    quiesced: bool,
+    reset: bool,
     held: Held,
     /// The UTMI clock has been active with EVT_EN since the last LOAD_CNT.
     utmi_clock_event: bool,
@@ -110,14 +124,52 @@ impl AtcPhy {
         held.set(AON, u64::from(FORCE_CLAMP));
         held.set(MUX, u64::from(MUX_DUMMY));
         Self {
+            powered: true, clocked: true, quiesced: false, reset: false,
             held,
             utmi_clock_event: false,
         }
     }
+    fn mmio_ready(&self) -> Result<(), &'static str> {
+        if !self.powered { return Err("ATC PHY power domain is off"); }
+        if !self.clocked { return Err("ATC PHY clock is gated"); }
+        if self.reset { return Err("ATC PHY reset is asserted"); }
+        Ok(())
+    }
+    fn active(&self) -> bool { self.mmio_ready().is_ok() && !self.quiesced }
+    fn clear_ordinary(&mut self) {
+        let controls = (self.powered, self.clocked, self.quiesced, self.reset);
+        *self = Self::new();
+        (self.powered, self.clocked, self.quiesced, self.reset) = controls;
+    }
+    pub fn set_power(&mut self, powered: bool, retention: bool) {
+        if self.powered && !powered && !retention { self.clear_ordinary(); }
+        self.powered = powered;
+    }
+    pub fn set_clock(&mut self, clocked: bool) { self.clocked = clocked; }
+    pub fn set_quiesced(&mut self, quiesced: bool) { self.quiesced = quiesced; }
+    pub fn set_reset(&mut self, reset: bool) {
+        if reset && !self.reset { self.clear_ordinary(); }
+        self.reset = reset;
+    }
+
+    /// Power and digital resets must all release before USB bus activity.
+    /// The separate pipehandler reset/clamp output holds the controller's
+    /// ordinary bank in reset; clock/quiesce pauses do not assert that line.
+    pub fn usb2_state(&self) -> Usb2State {
+        Usb2State {
+            ready: self.electrical_usb2_ready() && self.core_ready()
+                && self.word(POWER_CTRL) & (CLAMP | CORE_PHY_N) == CORE_PHY_N
+                && self.controller_released(),
+            clocked: self.powered && self.clocked && !self.reset,
+            quiesced: self.quiesced,
+            controller_reset: self.reset || !self.controller_released(),
+        }
+    }
+
     fn sample_utmi_clock(&mut self) {
         let active =
             self.word(CTL) & (RESET | SIDDQ) == 0 && self.word(MISCTUNE) & REFCLK_GATE_OFF == 0;
-        if active && self.word(USB2_EVENTS) & EVENT_ENABLE != 0 {
+        if self.active() && active && self.word(USB2_EVENTS) & EVENT_ENABLE != 0 {
             self.utmi_clock_event = true;
         }
     }
@@ -131,8 +183,12 @@ impl AtcPhy {
     /// Electrical USB2 readiness only. A controller must separately check its
     /// reset/clamp release and the shared Type-C port generation/role/VBUS.
     pub fn usb2_ready(&self) -> bool {
+        self.active() && self.electrical_usb2_ready()
+    }
+    fn electrical_usb2_ready(&self) -> bool {
         self.word(USBCTL) & (RUN | ISOLATE) == RUN
             && self.word(CTL) & (RESET | PORT_RESET | APB_RESET_N | SIDDQ) == APB_RESET_N
+            && self.word(MISCTUNE) & REFCLK_GATE_OFF == 0
     }
     pub fn controller_released(&self) -> bool {
         self.word(AON) & (RESET_N | FORCE_CLAMP) == RESET_N
@@ -172,6 +228,7 @@ impl MmioDevice for AtcPhy {
     }
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        self.mmio_ready().map_err(err)?;
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("ATC PHY registers require aligned 32-bit accesses"));
         }
@@ -208,6 +265,7 @@ impl MmioDevice for AtcPhy {
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let err = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        self.mmio_ready().map_err(err)?;
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(err("ATC PHY registers require aligned 32-bit accesses"));
         }
@@ -296,6 +354,48 @@ mod tests {
         assert!(p.write(USB2_EVENTS, Width::Word, 2, &mut a).is_err());
         assert!(p.read(EVENTS + 4, Width::Word, &mut a).is_err());
     }
+    #[test]
+    fn lifecycle_retains_electrical_state_but_separates_clock_quiesce_and_reset() {
+        let mut p = AtcPhy::new();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        for (offset, value) in [(USBCTL, RUN), (CTL, APB_RESET_N),
+            (POWER_CTRL, SMALL | BIG | CORE_APB_N | CORE_PHY_N),
+            (MISC, MISC_RESET_N), (AON, RESET_N)] {
+            wr(&mut p, &mut a, offset, value);
+        }
+        let released = p.usb2_state();
+        assert_eq!(released, Usb2State { ready: true, clocked: true, quiesced: false, controller_reset: false });
+        p.set_quiesced(true);
+        assert_eq!(p.usb2_state(), Usb2State { quiesced: true, ..released });
+        assert_eq!(rd(&mut p, &mut a, USBCTL), u64::from(RUN));
+        p.set_quiesced(false);
+        p.set_clock(false);
+        assert_eq!(p.usb2_state(), Usb2State { clocked: false, ..released });
+        assert!(p.read(USBCTL, Width::Word, &mut a).is_err());
+        p.set_clock(true);
+        p.set_power(false, true);
+        assert_eq!(p.usb2_state(), Usb2State { clocked: false, ..released });
+        p.set_power(true, true);
+        assert_eq!(p.usb2_state(), released);
+        wr(&mut p, &mut a, MISCTUNE, REFCLK_GATE_OFF);
+        assert!(!p.usb2_state().ready);
+        assert!(!p.usb2_state().controller_reset);
+        wr(&mut p, &mut a, MISCTUNE, 0);
+        p.set_reset(true);
+        assert!(p.usb2_state().controller_reset);
+        assert!(p.write(AON, Width::Word, RESET_N.into(), &mut a).is_err());
+        p.set_reset(false);
+        assert!(p.usb2_state().controller_reset);
+        assert!(!p.usb2_state().ready);
+        assert_eq!(rd(&mut p, &mut a, USBCTL), u64::from(ISOLATE));
+        // A non-retained loss also clears the actual pipehandler release.
+        wr(&mut p, &mut a, AON, RESET_N);
+        p.set_power(false, false);
+        p.set_power(true, false);
+        assert!(!p.controller_released());
+    }
+
     #[test]
     fn power_pll_and_pipe_lock_handshakes_follow_requests_in_both_directions() {
         let mut p = AtcPhy::new();

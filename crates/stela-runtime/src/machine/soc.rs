@@ -1376,6 +1376,9 @@ pub struct UsbController {
     pub port: u32,
     /// Ordinary controller state survives supply gating only when declared.
     pub retention: bool,
+    /// Actual digital PHY provider (`atc-phy-parent`), never inferred from
+    /// the connector's display name or ordinal.
+    pub phy: u32,
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -1539,6 +1542,8 @@ impl Board {
 /// Unqualified shared fuse, AXI and analog-only views are not claimed here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypecPhy {
+    pub phandle: u32,
+    pub retention: bool,
     pub views: Vec<(u64, u64)>,
     pub usb2: (u64, u64),
     pub core: (u64, u64),
@@ -1767,6 +1772,8 @@ fn typec_devices(
                     return Err("ambiguous ATC controller or incomplete event view".into());
                 }
                 phys.push(TypecPhy {
+                    phandle,
+                    retention: node.property("retention").is_some(),
                     views,
                     usb2,
                     core,
@@ -4080,6 +4087,7 @@ fn usb_controller(
         stream,
         port,
         retention: node.property("retention").is_some(),
+        phy: node.first_u32("atc-phy-parent").ok_or_else(|| err("has no atc-phy-parent"))?,
     })
 }
 
@@ -7330,6 +7338,7 @@ mod tests {
                     ("iommu-parent", &words(&[parent])),
                     ("interrupts", &words(irqs)),
                     ("port-number", &words(&[1])),
+                    ("atc-phy-parent", &words(&[0xa2])),
                 ],
                 &[],
             )
@@ -7354,6 +7363,7 @@ mod tests {
                 stream: 1,
                 port: 1,
                 retention: false,
+                phy: 0xa2,
             }]
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
@@ -7367,6 +7377,7 @@ mod tests {
                 ("iommu-parent", &words(&[0xa4])),
                 ("interrupts", &words(&irqs)),
                 ("port-number", &words(&[2])),
+                ("atc-phy-parent", &words(&[0xa3])),
             ],
             &[],
         );

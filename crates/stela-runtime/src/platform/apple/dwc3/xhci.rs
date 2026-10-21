@@ -337,10 +337,17 @@ impl Xhci {
         if self.ports[0].attached == attached {
             return Ok(());
         }
-        let before = self.ports[0].portsc;
+        let before = self.ports[0];
+        let status = self.usbsts;
         self.ports[0].attached = attached;
         self.detect(0);
-        self.changed(0, before)
+        if let Err(reason) = self.changed(0, before.portsc) {
+            // A full event queue must not consume a physical disconnect.
+            self.ports[0] = before;
+            self.usbsts = status;
+            return Err(reason);
+        }
+        Ok(())
     }
 
     /// Brings port `n`'s connection status in line with its cable.
@@ -1124,6 +1131,28 @@ pub(crate) mod tests {
         assert_eq!(rd(&mut x, next + 8) & 0xffff, 0x0102);
         assert!(x.write(0, 4, 0, 0).is_err());
         assert!(x.read(1, 4, 0).is_err());
+    }
+
+    #[test]
+    fn physical_disconnect_retries_after_event_queue_backpressure() {
+        let mut x = Xhci::new();
+        wr(&mut x, PORT_BASE, PP);
+        wr(&mut x, OPERATIONAL, RUN);
+        x.attach(Some(Usb2Speed::High)).unwrap();
+        x.ports[0].portsc &= !PORT_CHANGES;
+        x.pending.clear();
+        for _ in 0..MAX_PENDING_EVENTS { x.post(0, Xhci::port_status_change(0)).unwrap(); }
+        let before = x.ports[0];
+        let status = x.usbsts;
+        assert!(x.attach(None).is_err());
+        assert_eq!(x.ports[0].attached, before.attached);
+        assert_eq!(x.ports[0].portsc, before.portsc);
+        assert_eq!(x.usbsts, status);
+        x.pending.clear();
+        x.attach(None).unwrap();
+        assert_eq!(x.ports[0].attached, None);
+        assert_eq!(x.ports[0].portsc & (CCS | PED), 0);
+        assert_eq!(x.pending.len(), 1);
     }
 
     #[test]

@@ -161,6 +161,11 @@ struct Lifecycle {
 
 pub struct Dwc3 {
     lifecycle: Lifecycle,
+    phy_reset: bool,
+    phy_ready: bool,
+    phy_quiesced: bool,
+    phy_clocked: bool,
+    pending_phy_disconnect: bool,
     session_reset: bool,
     irqs: [AicInput; RINGS],
     rings: [Ring; RINGS],
@@ -201,6 +206,8 @@ impl Dwc3 {
                 quiesced: false,
                 reset: false,
             },
+            phy_reset: false, phy_ready: false, phy_quiesced: false, phy_clocked: true,
+            pending_phy_disconnect: false,
             session_reset: false,
             irqs,
             rings: [Ring::new(); RINGS],
@@ -239,6 +246,7 @@ impl Dwc3 {
         if self.lifecycle.reset {
             return Err("DWC3 reset is asserted");
         }
+        if self.phy_reset { return Err("ATC PHY holds DWC3 controller reset"); }
         Ok(())
     }
 
@@ -247,6 +255,8 @@ impl Dwc3 {
         if self.lifecycle.quiesced {
             return Err("DWC3 DMA is quiesced");
         }
+        if !self.phy_clocked { return Err("ATC PHY clock is gated"); }
+        if self.phy_quiesced { return Err("ATC PHY DMA is quiesced"); }
         Ok(())
     }
 
@@ -255,7 +265,7 @@ impl Dwc3 {
     }
 
     fn clock_running(&self) -> bool {
-        self.lifecycle.powered && self.lifecycle.clocked && !self.lifecycle.reset
+        self.lifecycle.powered && self.lifecycle.clocked && !self.lifecycle.reset && !self.phy_reset && self.phy_clocked
     }
 
     /// Inhibit both personalities without losing their rings or configuration.
@@ -283,11 +293,36 @@ impl Dwc3 {
 
     pub fn set_reset(&mut self, asserted: bool, access: &mut Access<'_>) {
         let before = self.clock_running();
-        if asserted && !self.lifecycle.reset { self.reset(access); }
+        let reset_before = self.lifecycle.reset || self.phy_reset;
         self.lifecycle.reset = asserted;
+        if !reset_before && (self.lifecycle.reset || self.phy_reset) { self.reset(access); }
         let after = self.clock_running();
         if before != after { self.host.set_clock(after, access.now); }
     }
+
+    /// Independent physical outputs from the actual PHY. Reset sources are
+    /// ORed; neither a PMGR release nor a PHY release can clear the other.
+    pub fn set_phy_state(&mut self, reset: bool, ready: bool, clocked: bool, quiesced: bool, access: &mut Access<'_>) -> bool {
+        let changed = (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced) != (reset, ready, clocked, quiesced);
+        let before = self.clock_running();
+        let reset_before = self.lifecycle.reset || self.phy_reset;
+        if self.phy_ready && !ready {
+            // Keep an electrical falling edge until service, even if software
+            // immediately restores the PHY before the next DMA boundary.
+            self.pending_phy_disconnect = true;
+            self.session_reset = true;
+        }
+        self.phy_reset = reset;
+        self.phy_ready = ready;
+        self.phy_clocked = clocked;
+        self.phy_quiesced = quiesced;
+        if !reset_before && (self.lifecycle.reset || self.phy_reset) { self.reset(access); }
+        let after = self.clock_running();
+        if before != after { self.host.set_clock(after, access.now); }
+        changed
+    }
+
+    pub fn phy_ready(&self) -> bool { self.phy_ready }
 
     /// The adapter cancels its external peer session before further service.
     /// It retains its own retry flag if that cancellation reports failure.
@@ -343,16 +378,22 @@ impl Dwc3 {
 
     pub fn sync_port(&mut self, state: &impl PortState) -> Result<(), &'static str> {
         self.activity_ready()?;
+        if self.pending_phy_disconnect {
+            if self.connected {
+                self.device_event(0)?;
+                self.bus_event();
+                self.connected = false;
+            }
+            self.host.attach(None)?;
+            self.pending_phy_disconnect = false;
+        }
         let ready = state.high_speed_device_ready();
         if self.port_generation != state.generation() || self.port_ready != ready {
-            let disconnected = self.connected;
+            if self.connected { self.device_event(0)?; }
             self.bus_event();
             self.connected = false;
             self.port_generation = state.generation();
             self.port_ready = ready;
-            if disconnected {
-                self.device_event(0)?;
-            }
         }
         Ok(())
     }
@@ -443,10 +484,12 @@ impl Dwc3 {
         let generation = self.port_generation;
         let ready = self.port_ready;
         let lifecycle = self.lifecycle;
+        let phy = (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced);
         *self = Self::new(self.irqs);
         self.port_generation = generation;
         self.port_ready = ready;
         self.lifecycle = lifecycle;
+        (self.phy_reset, self.phy_ready, self.phy_clocked, self.phy_quiesced) = phy;
         self.session_reset = true;
     }
 
@@ -608,6 +651,8 @@ impl Dwc3 {
 
     pub fn available(&self) -> bool {
         self.lifecycle_active()
+            && self.phy_ready
+            && !self.pending_phy_disconnect
             && self.port_ready
             && self.dctl & RUN != 0
             && self.gctl & (CORE_RESET | PRTCAP) == PRTCAP_DEVICE
@@ -933,9 +978,11 @@ impl MmioDevice for Dwc3 {
         self.mmio_ready()
             .map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
         if offset < xhci::BYTES {
-            self.host
-                .write(offset, width.bytes(), value, access.now)
-                .map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
+            let result = self.host.write(offset, width.bytes(), value, access.now);
+            // This register bank has its own clock. Software RUN/STOP while
+            // the PHY clock is off cannot restart the external bus clock.
+            if !self.clock_running() { self.host.set_clock(false, access.now); }
+            result.map_err(|why| refuse(NAME, offset, width, Direction::Write, why))?;
             self.interrupts(access);
             return Ok(());
         }
@@ -1202,6 +1249,7 @@ mod tests {
         write_dart(&mut dart, DART_ENABLE, 1 << SID, &mut access);
         write_dart(&mut dart, DART_TCR + SID as u64 * 4, 6, &mut access);
         let mut dwc = Dwc3::new(irqs());
+        dwc.set_phy_state(false, true, true, false, &mut access);
         dwc.sync_port(&Attached(1, true)).unwrap();
         write(&mut dwc, DCTL, RUN, &mut access);
         let mut ram = Ram::new(RAM, 0x10000);
@@ -1324,6 +1372,60 @@ mod tests {
     }
 
     #[test]
+    fn phy_electrical_edges_preserve_transfer_resources_and_reset_sources_are_ored() {
+        let (mut dwc, mut dart, mut ram, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        configure(&mut dwc, 2, 0, &mut access);
+        trb(&mut ram, TRB, 1024, HWO | LST | IOC | 1 << 4);
+        start(&mut dwc, 2, TRB, &mut access);
+        let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
+        dwc.peer(&mut port).reset().unwrap();
+        let mut packet = [0x37; 512];
+        assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+        dwc.pending.clear();
+        dwc.devten = 1; // Disconnect event enabled.
+        dwc.set_phy_state(false, false, true, false, port.access);
+        dwc.set_phy_state(false, true, true, false, port.access);
+        assert!(!dwc.available()); // Final-ready must not swallow the edge.
+        assert!(dwc.take_session_reset());
+        // Backpressure preserves both the connection and its pending edge.
+        for _ in 0..MAX_PENDING_EVENTS { dwc.queue(0, 7).unwrap(); }
+        assert!(dwc.sync_port(&Attached(1, true)).is_err());
+        assert!(dwc.connected);
+        assert!(dwc.pending_phy_disconnect);
+        dwc.pending.clear();
+        dwc.sync_port(&Attached(1, true)).unwrap();
+        assert!(!dwc.connected);
+        assert_eq!(dwc.pending.len(), 1);
+        assert_eq!(dwc.pending[0].value, device_event(0));
+        assert!(dwc.endpoints[2].resource);
+        assert_eq!(dwc.endpoints[2].active.unwrap().done, 512);
+        dwc.peer(&mut port).reset().unwrap();
+        packet.fill(0x73);
+        assert_eq!(dwc.peer(&mut port).packet(1, Token::Out, &mut packet), Ok(Reply::Ack(512)));
+        dwc.set_phy_state(true, false, true, false, port.access);
+        dwc.set_reset(true, port.access);
+        dwc.set_phy_state(false, true, true, false, port.access);
+        assert!(dwc.read(DCTL, Width::Word, port.access).is_err());
+        dwc.set_reset(false, port.access);
+        assert_eq!(dwc.read(DCTL, Width::Word, port.access), Ok(0));
+        assert!(dwc.endpoints[2].active.is_none());
+        assert!(!dwc.endpoints[2].resource);
+        // Reversing the release order cannot clear the PHY's reset either.
+        dwc.set_reset(true, port.access);
+        dwc.set_phy_state(true, false, true, false, port.access);
+        dwc.set_reset(false, port.access);
+        assert!(dwc.read(DCTL, Width::Word, port.access).is_err());
+        dwc.set_phy_state(false, true, true, false, port.access);
+        assert_eq!(dwc.read(DCTL, Width::Word, port.access), Ok(0));
+        let mut committed = [0; 512];
+        assert!(port.memory.read(PAYLOAD, &mut committed));
+        assert_eq!(committed, [0x37; 512]);
+        assert!(port.memory.read(PAYLOAD + 512, &mut committed));
+        assert_eq!(committed, [0x73; 512]);
+    }
+
+    #[test]
     fn lifecycle_retains_real_host_rings_freezes_microframes_and_reset_prevents_stale_completion() {
         let (mut dwc, mut dart, mut ram, mut latch) = setup();
         let (erst, ring, commands) = (RAM + 0x8000, RAM + 0x9000, RAM + 0xa000);
@@ -1343,15 +1445,25 @@ mod tests {
         write(&mut dwc, 0x4e0, 0, &mut access);
         access.now = 15_000; // five microframes
         assert_eq!(dwc.read(0x440, Width::Word, &mut access), Ok(5));
-        dwc.set_clock(false, &access);
-        access.now = 999_000;
+        // The PHY clock freezes time without blocking the independently
+        // clocked DWC register bank. Quiesce stops DMA only.
+        dwc.set_phy_state(false, true, false, false, &mut access);
+        access.now = 900_000;
+        assert_eq!(dwc.read(0x440, Width::Word, &mut access), Ok(5));
+        dwc.set_phy_state(false, true, true, true, &mut access);
+        access.now = 915_000;
+        assert_eq!(dwc.read(0x440, Width::Word, &mut access), Ok(10));
         let mut port = Port { iommu: &mut dart, stream: SID, memory: &mut ram, access: &mut access };
+        assert!(dwc.service_host(&mut port, None).is_err());
+        dwc.set_phy_state(false, true, true, false, port.access);
+        dwc.set_clock(false, port.access);
+        port.access.now = 999_000;
         assert!(dwc.service_host(&mut port, None).is_err());
         let mut event = [0; 16];
         assert!(port.memory.read(ring, &mut event));
         assert_eq!(event, [0; 16]);
         dwc.set_clock(true, port.access);
-        assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(5));
+        assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(10));
         dwc.service_host(&mut port, None).unwrap();
         assert!(port.memory.read(ring, &mut event));
         assert_eq!(u32::from_le_bytes(event[8..12].try_into().unwrap()) >> 24, 1);
@@ -1359,7 +1471,7 @@ mod tests {
         assert!(dwc.read(0x440, Width::Word, port.access).is_err());
         port.access.now = 1_999_000;
         dwc.set_power(true, true, port.access);
-        assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(5));
+        assert_eq!(dwc.read(0x440, Width::Word, port.access), Ok(10));
         // Queue another actual command; reset cancels it while preserving
         // the previous event already committed to guest RAM.
         assert!(port.memory.write(commands + 24, &((23u64 << 42) | 1 << 32).to_le_bytes()));

@@ -4,8 +4,8 @@
 //! controller. Conversely, sharing an iommu-parent does not make a DMA client's
 //! controller part of the DART's physical supply. Hardware resources inherit
 //! their ADT ancestors' gates, including nubs and firmware endpoints.
-use super::{DART, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
-use crate::platform::apple::pmgr::coverage::{self, Consumer, Domain, DomainId, LifecycleSinks};
+use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
+use crate::platform::apple::{dart::Profile, pmgr::coverage::{self, Consumer, Domain, DomainId, LifecycleSinks}};
 use alloc::{format, string::String, vec::Vec};
 
 /// Bytes of one m1n1 `struct pmgr_device` record.
@@ -18,6 +18,7 @@ pub(super) const PMGR_VIRTUAL: u32 = 0x10;
 pub enum PowerOwner {
     Dart(usize),
     Usb(usize),
+    Phy(usize),
 }
 
 /// One original resource with separate inherited clock/power requirements.
@@ -105,6 +106,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
     let mut darts = 0;
     let mut dart_streams = Vec::new();
     let mut usbs = 0;
+    let mut phys = 0;
     while let Some((parent, node, mut clocks, mut power, owner)) = pending.pop() {
         let path = format!("{parent}/{}", name_of(&node));
         clocks.extend(
@@ -121,20 +123,28 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         clocks.dedup();
         power.sort_unstable();
         power.dedup();
-        let owner = if path.starts_with("/arm-io/") && node.compatible(DART) {
+        let profile = node.property("compatible").and_then(Profile::from_compatible);
+        let owner = if path.starts_with("/arm-io/") && profile.is_some() {
             let index = darts;
             darts += 1;
-            dart_streams.push(node.first_u32("sid-count").unwrap_or(0));
+            let default = match profile.expect("selected DART") {
+                Profile::T8020 | Profile::T6000 => 16,
+                Profile::T8110 => 0,
+            };
+            dart_streams.push(node.first_u32("sid-count").unwrap_or(default));
             Some(PowerOwner::Dart(index))
         } else if path.starts_with("/arm-io/") && node.compatible(USB_DRD) {
             let index = usbs;
             usbs += 1;
             Some(PowerOwner::Usb(index))
+        } else if path.starts_with("/arm-io/") && ATC_PHY_LAYOUTS.iter().any(|(layout, _)| node.compatible(layout)) {
+            let index = phys; phys += 1;
+            Some(PowerOwner::Phy(index))
         } else if node.compatible(IOMMU_MAPPER)
             && node.first_u32("AAPL,phandle").is_some()
             && owner.is_some_and(|owner| match owner {
                 PowerOwner::Dart(index) => node.first_u32("reg").is_some_and(|stream| stream < dart_streams[index]),
-                PowerOwner::Usb(_) => false,
+                PowerOwner::Usb(_) | PowerOwner::Phy(_) => false,
             })
             || node.property("reg").is_none()
                 && node.property("compatible").is_none()
@@ -261,7 +271,7 @@ pub(super) fn power_states(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::machine::adt::encode;
+    use crate::machine::{adt::encode, soc::DART};
 
     fn words(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
@@ -366,6 +376,27 @@ mod tests {
             assert_eq!(find(name).power, [domain_id(2)]);
             assert_eq!(find(name).owner, None);
         }
+    }
+
+    #[test]
+    fn inventory_uses_exact_admitted_dart_profiles_and_legacy_mapper_default() {
+        let mapper = encode(&[("name", b"mapper"), ("compatible", IOMMU_MAPPER.as_bytes()), ("AAPL,phandle", &words(&[7])), ("reg", &words(&[15]))], &[]);
+        let dart = |name: &[u8], compatible: &[u8]| encode(&[("name", name), ("compatible", compatible), ("clock-gates", &words(&[1]))], core::slice::from_ref(&mapper));
+        let phy = encode(&[("name", b"phy"), ("compatible", b"atc-phy,t8112"), ("clock-gates", &words(&[1]))], &[]);
+        let bytes = tree(&[(1, Some(0), [0, 0])], &[
+            dart(b"legacy", b"dart,t8020"),
+            dart(b"unknown", b"dart,t8110\0dart,gen3"),
+            dart(b"modern", b"dart,t8110"), phy,
+        ]);
+        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112).unwrap().unwrap();
+        let owner = |name| states.resources.iter().find(|resource| resource.name == name).unwrap().owner;
+        assert_eq!(owner("/arm-io/legacy"), Some(PowerOwner::Dart(0)));
+        assert_eq!(owner("/arm-io/legacy/mapper"), Some(PowerOwner::Dart(0)));
+        assert_eq!(owner("/arm-io/unknown"), None);
+        assert_eq!(owner("/arm-io/unknown/mapper"), None);
+        assert_eq!(owner("/arm-io/modern"), Some(PowerOwner::Dart(1)));
+        assert_eq!(owner("/arm-io/modern/mapper"), None); // sid-count required.
+        assert_eq!(owner("/arm-io/phy"), Some(PowerOwner::Phy(0)));
     }
 
     #[test]
