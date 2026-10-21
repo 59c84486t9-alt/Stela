@@ -75,6 +75,7 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 pub mod resources;
+pub mod work;
 
 const NAME: &str = "agx-sgx";
 
@@ -215,6 +216,7 @@ struct Native {
     wake: u32,
     gpu_awake: Rc<Cell<bool>>,
     resources: resources::Windows,
+    work: work::Registers,
 }
 impl Default for Native {
     fn default() -> Self {
@@ -225,6 +227,7 @@ impl Default for Native {
             wake: 0,
             gpu_awake: Rc::new(Cell::new(true)),
             resources: resources::Windows::default(),
+            work: work::Registers::default(),
         }
     }
 }
@@ -250,6 +253,9 @@ impl Native {
             FENDER_SLEEP if fender_sleep_supported(family) => {
                 if value > 1 {
                     return Err("GPU Fender sleep request is not zero or one");
+                }
+                if value == 1 && self.work.active() {
+                    return Err("GFX Fender sleep with owned native work");
                 }
                 self.sleep_request = value;
                 if value == 1 {
@@ -334,6 +340,9 @@ impl FirmwarePower {
         }
         if self.native.borrow().resources.active() {
             return Err("GFX firmware reset with retained native resource windows");
+        }
+        if self.native.borrow().work.active() {
+            return Err("GFX firmware reset with retained native work");
         }
         Ok(())
     }

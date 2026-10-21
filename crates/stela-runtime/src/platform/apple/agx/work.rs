@@ -230,6 +230,18 @@ impl Execution {
         }
     }
 
+    /// Inspect a retained result without issuing GPU accesses or replaying work.
+    pub fn outcome(&self) -> Option<Result<ResultKind, WorkError>> {
+        match &self.phase {
+            Phase::Ready => None,
+            Phase::Settled(Ok(output)) => Some(Ok(output.kind())),
+            Phase::Settled(Err(error)) => Some(Err(*error)),
+            Phase::Transferred => Some(Err(WorkError::Refused(
+                "GFX TA geometry ownership was already transferred",
+            ))),
+        }
+    }
+
     pub fn take_geometry(&mut self) -> Result<GeometryProduct, &'static str> {
         if !matches!(self.phase, Phase::Settled(Ok(Output::Geometry(_)))) {
             return Err("GFX TA has no successful owned geometry product");
