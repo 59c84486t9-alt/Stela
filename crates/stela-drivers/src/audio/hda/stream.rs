@@ -32,6 +32,18 @@ impl StreamId {
     }
 }
 
+/// Identity-selected stream-tag namespace. Tags are 1..=15, independently of
+/// descriptor index; handles still carry index and controller reset generation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StreamTagPolicy {
+    /// Unique across both directions, allowing at most 15 allocations total.
+    #[default]
+    Global,
+    /// Separate capture/playback namespaces, as required by modern Intel PCH
+    /// and Linux's fallback when GCAP reports more than 15 fixed streams.
+    PerDirection,
+}
+
 const AMD_FIFO_FRAMES: usize = 32;
 
 /// Select from the actual controller's source-backed identity policy.
@@ -247,11 +259,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .ok_or(Error::NoStream)?;
         let tag = (1..=15)
             .find(|tag| {
-                !self
-                    .streams
-                    .iter()
-                    .flatten()
-                    .any(|stream| stream.id.tag == *tag)
+                !self.streams.iter().flatten().any(|stream| {
+                    stream.id.tag == *tag
+                        && (self.config.stream_tag_policy == StreamTagPolicy::Global
+                            || stream.direction == direction)
+                })
             })
             .ok_or(Error::NoStream)?;
         // Count before any allocation/MMIO. Every period end is an IOC entry.

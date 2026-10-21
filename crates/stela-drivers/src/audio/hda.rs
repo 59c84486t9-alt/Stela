@@ -32,7 +32,7 @@ use registers::*;
 pub use registers::{MmioRegisters, Registers};
 pub use routing::{AnalogRoute, PinOptions, Vref};
 use stream::Stream;
-pub use stream::{PositionInfo, PositionPolicy, StreamId, StreamStatus};
+pub use stream::{PositionInfo, PositionPolicy, StreamId, StreamStatus, StreamTagPolicy};
 
 /// Select from an actual controller identity/quirk table in platform glue.
 /// Intel/AMD standard reset uses the set-then-clear handshake; a self-clearing
@@ -51,6 +51,7 @@ pub struct Config {
     pub dma_address_bits: u8,
     pub position_policy: PositionPolicy,
     pub probe_policy: ProbePolicy,
+    pub stream_tag_policy: StreamTagPolicy,
     pub transition_timeout_us: u32,
     pub verb_timeout_us: u32,
 }
@@ -62,6 +63,7 @@ impl Default for Config {
             dma_address_bits: 64,
             position_policy: PositionPolicy::Link,
             probe_policy: ProbePolicy::Once,
+            stream_tag_policy: StreamTagPolicy::Global,
             transition_timeout_us: 100_000,
             verb_timeout_us: 100_000,
         }
@@ -3069,6 +3071,108 @@ mod tests {
             assert!(model.borrow().writes.is_empty());
         }
     }
+    #[test]
+    fn independent_direction_tags_cover_all_thirty_descriptors_without_aliasing_buffers_or_handles()
+    {
+        for policy in [StreamTagPolicy::Global, StreamTagPolicy::PerDirection] {
+            let mut fixture = Fixture::new();
+            let model = Model::new(16);
+            model.borrow_mut().set(GCAP, 0xff01, 2); //15capture+15playback,64bitDMA.
+            model.borrow_mut().set(INPAY, 100, 2);
+            model.borrow_mut().set(OUTPAY, 100, 2);
+            let mut controller = create(
+                &model,
+                &mut fixture,
+                Config {
+                    stream_tag_policy: policy,
+                    ..config()
+                },
+            )
+            .unwrap();
+            let mut capture = Vec::new();
+            for tag in 1..=15 {
+                let id = controller
+                    .allocate_stream(Direction::Capture, pcm(), 128, 2, &mut fixture.allocator)
+                    .unwrap();
+                assert_eq!(id.tag(), tag);
+                assert_eq!(id.descriptor_index(), tag - 1);
+                capture.push(id);
+            }
+            if policy == StreamTagPolicy::Global {
+                let before = access_counts(&model);
+                let remaining = fixture.allocator.remaining();
+                assert_eq!(
+                    controller.allocate_stream(
+                        Direction::Playback,
+                        pcm(),
+                        128,
+                        2,
+                        &mut fixture.allocator
+                    ),
+                    Err(Error::NoStream)
+                );
+                assert_eq!(access_counts(&model), before);
+                assert_eq!(fixture.allocator.remaining(), remaining);
+                continue;
+            }
+            let mut playback = Vec::new();
+            for tag in 1..=15 {
+                let id = controller
+                    .allocate_stream(Direction::Playback, pcm(), 128, 2, &mut fixture.allocator)
+                    .unwrap();
+                assert_eq!(id.tag(), tag);
+                assert_eq!(id.descriptor_index(), 14 + tag);
+                assert_ne!(id, capture[usize::from(tag - 1)]);
+                let control = model
+                    .borrow()
+                    .get(stream_base(id.descriptor_index()) + SD_CTL + 2, 1);
+                assert_eq!(control >> 4, u32::from(tag));
+                playback.push(id);
+            }
+            assert_eq!(
+                controller.allocate_stream(
+                    Direction::Capture,
+                    pcm(),
+                    128,
+                    2,
+                    &mut fixture.allocator
+                ),
+                Err(Error::NoStream)
+            );
+            assert_eq!(
+                controller.allocate_stream(
+                    Direction::Playback,
+                    pcm(),
+                    128,
+                    2,
+                    &mut fixture.allocator
+                ),
+                Err(Error::NoStream)
+            );
+            controller.fill_capture(capture[0], 0xa5).unwrap();
+            controller.write_pcm(playback[0], 0, &[0x5a; 256]).unwrap();
+            let mut bytes = [0; 256];
+            controller.read_pcm(capture[0], 0, &mut bytes).unwrap();
+            assert_eq!(bytes, [0xa5; 256]);
+            controller.start(capture[0]).unwrap();
+            controller.start(playback[0]).unwrap();
+            assert_eq!(
+                model
+                    .borrow()
+                    .get(stream_base(capture[0].descriptor_index()) + SD_CTL, 1)
+                    & u32::from(SD_RUN),
+                u32::from(SD_RUN)
+            );
+            assert_eq!(
+                model
+                    .borrow()
+                    .get(stream_base(playback[0].descriptor_index()) + SD_CTL, 1)
+                    & u32::from(SD_RUN),
+                u32::from(SD_RUN)
+            );
+        }
+    }
+
     #[test]
     fn amd_fifo_capture_correction_keeps_exact_transport_and_wrap_coordinates() {
         let mut fixture = Fixture::new();
