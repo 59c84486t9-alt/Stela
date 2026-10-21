@@ -43,34 +43,7 @@
 #define util_bitpack_validate_value(x)
 #endif
 
-ALWAYS_INLINE static uint64_t
-util_bitpack_ones(uint32_t start, uint32_t end)
-{
-   return (UINT64_MAX >> (64 - (end - start + 1))) << start;
-}
-
-ALWAYS_INLINE static uint64_t
-util_bitpack_uint(uint64_t v, uint32_t start, UNUSED uint32_t end)
-{
-   util_bitpack_validate_value(v);
-
-#ifndef NDEBUG
-   const int bits = end - start + 1;
-   if (bits < 64) {
-      const uint64_t max = u_uintN_max(bits);
-      assert(v <= max);
-   }
-#endif
-
-   return v << start;
-}
-
-ALWAYS_INLINE static uint64_t
-util_bitpack_uint_nonzero(uint64_t v, uint32_t start, uint32_t end)
-{
-   assert(v != 0ull);
-   return util_bitpack_uint(v, start, end);
-}
+#include "util/bitpack_uint.h"
 
 ALWAYS_INLINE static uint64_t
 util_bitpack_sint(int64_t v, uint32_t start, uint32_t end)
