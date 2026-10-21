@@ -18,6 +18,7 @@ pub mod cl;
 pub mod registers;
 pub mod resources;
 pub mod scene;
+pub mod ta;
 
 use super::channel::{Command, Kind, Record, STAMPS, Stamp};
 use super::generation::{self, Family};

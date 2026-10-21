@@ -22,6 +22,8 @@ use crate::platform::dma::{DmaError, Port};
 use alloc::vec::Vec;
 use core::fmt;
 
+pub mod ta;
+
 const PARAMETER_REGISTERS: [u32; 13] = [
     0x10080, 0x1a420, 0x1a4d0, 0x1a4d8, 0x1a4e0, 0x1a4e8, 0x10070, 0x1a458, 0x11840, 0x11848,
     0x11f80, 0x1a440, 0x12090,
@@ -96,6 +98,7 @@ pub(super) struct Registers {
     resource: u64,
     parameters: [u64; 13],
     run: Option<Run>,
+    ta: ta::Registers,
 }
 impl fmt::Debug for Registers {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -111,10 +114,13 @@ impl fmt::Debug for Registers {
 }
 impl Registers {
     pub(super) fn active(&self) -> bool {
-        self.run.is_some()
+        self.run.is_some() || self.ta.active()
     }
 
     fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
+        if self.ta.active() {
+            return Err("GFX native parameter bank still belongs to accepted TA work");
+        }
         if submission.command.kind != CommandKind::Cl || lease.pipe != 2 || lease.slot >= 6 {
             return Err("GFX CL native ownership requires its compute lease");
         }
@@ -293,9 +299,17 @@ impl FirmwarePower {
                 registers.push(Register::Parameter(index));
             }
         }
-        let mut targets = Vec::new();
+        let mut words = Vec::new();
         for register in registers {
-            let (offset, width) = register.word(policy)?;
+            words.push(register.word(policy)?);
+        }
+        words.extend(
+            crate::platform::apple::agx::work_decode::ta::words(policy)
+                .into_iter()
+                .map(|word| word.range()),
+        );
+        let mut targets = Vec::new();
+        for (offset, width) in words {
             let physical = self
                 .banks
                 .iter()
@@ -308,8 +322,10 @@ impl FirmwarePower {
                     physical.checked_add(u64::from(width) - 1)?;
                     Some(physical)
                 })
-                .ok_or("GFX CL native target is not wholly inside an actual SGX bank")?;
-            targets.push((physical, width));
+                .ok_or("GFX native work target is not wholly inside an actual SGX bank")?;
+            if !targets.contains(&(physical, width)) {
+                targets.push((physical, width));
+            }
         }
         Ok(targets)
     }
@@ -357,8 +373,17 @@ impl FirmwareWork {
         register: Register,
         write: bool,
     ) -> Result<(), &'static str> {
-        self.available()?;
         let (offset, width) = register.word(self.policy)?;
+        self.target_word(port, offset, width, write)
+    }
+    fn target_word(
+        &self,
+        port: &mut Port<'_, '_>,
+        offset: u32,
+        width: u32,
+        write: bool,
+    ) -> Result<(), &'static str> {
+        self.available()?;
         let (va, expected) = self.region.range(offset, width, write)?;
         let physical = port
             .iommu
@@ -831,6 +856,176 @@ mod tests {
         let mut native = owner.power.native.borrow_mut();
         native.work.control = Some(0);
         native.work.context_mask = Some(1 << 9);
+    }
+    #[test]
+    fn ta_native_parameters_retain_captured_store_and_committed_prefix_across_real_uat_faults() {
+        use crate::platform::apple::agx::work_decode::ta;
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            let mut sgx = gpu(family);
+            let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+            let mcc = cache();
+            let owner = power
+                .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+                .unwrap();
+            let mut input = submission();
+            input.command.kind = CommandKind::Ta;
+            let lease = Lease { pipe: 0, slot: 1 };
+            let mut memory = ram();
+            mapping(&mut memory.ram, VA + 0x1c000, SGX + 0x1c000, true);
+            let frame = io(&mut sgx, &mut memory, |port| {
+                port.write(input.stream, &5u32.to_le_bytes()).unwrap();
+                port.write(input.stream + 4, &0x2200u64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0xc, &0x3ff8u64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0x1c, &0x2500u64.to_le_bytes())
+                    .unwrap();
+                port.write(input.stream + 0x3c, &input.context.to_le_bytes())
+                    .unwrap();
+                for index in 0..13 {
+                    port.write(0x2200 + index * 4, &(0x100 + index as u32).to_le_bytes())
+                        .unwrap();
+                }
+                for index in 0..36 {
+                    port.write(0x3ff8 + index * 8, &(0x4000 + index).to_le_bytes())
+                        .unwrap();
+                }
+                input.cursor().next(port).unwrap().unwrap()
+            });
+            let mut parameters = ta::Parameters::new(&input, &frame, lease, owner.policy).unwrap();
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .ta
+                    .value(ta::words(owner.policy)[0]),
+                None
+            );
+            // The thirteenth tiling read succeeds, but its actual native PIO
+            // store faults. Earlier native words remain committed.
+            mapping(&mut memory.ram, VA + 0x14000, 0, true);
+            assert!(
+                io(&mut sgx, &mut memory, |port| parameters
+                    .advance(&mut owner.ta_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!(power.native.borrow().work.ta.writes, 12);
+            assert!(power.check_reset().is_err());
+            assert!(owner.begin(&submission(), LEASE).is_err());
+            let mut other = input.clone();
+            other.counter += 1;
+            let mut foreign = ta::Parameters::new(&other, &frame, lease, owner.policy).unwrap();
+            let counts = (memory.reads, memory.writes);
+            assert!(
+                io(&mut sgx, &mut memory, |port| foreign
+                    .advance(&mut owner.ta_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!((memory.reads, memory.writes), counts);
+            let active = LifecycleState {
+                powered: true,
+                clocked: true,
+                quiesced: false,
+                reset: false,
+                retention: false,
+            };
+            let gated = LifecycleState {
+                clocked: false,
+                ..active
+            };
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            sgx.check_lifecycle(gated).unwrap();
+            sgx.set_lifecycle(gated, &mut access);
+            let counts = (memory.reads, memory.writes);
+            assert!(
+                io(&mut sgx, &mut memory, |port| parameters
+                    .advance(&mut owner.ta_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(power.native.borrow().work.ta.writes, 12);
+            sgx.check_lifecycle(active).unwrap();
+            sgx.set_lifecycle(active, &mut access);
+            memory.ram.put_u64(DATA + 0x2230, 0xdeadbeef);
+            mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
+            // A later parameter read faults across a different RAM page;
+            // retry must first store the retained tiling word, not reread it.
+            mapping(&mut memory.ram, 0x4000, 0, false);
+            assert!(
+                io(&mut sgx, &mut memory, |port| parameters
+                    .advance(&mut owner.ta_parameter_access(port)))
+                .is_err()
+            );
+            assert_eq!(power.native.borrow().work.ta.writes, 14);
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .ta
+                    .value(ta::words(owner.policy)[12]),
+                Some(0x10c)
+            );
+            mapping(&mut memory.ram, 0x4000, DATA + 0x4000, false);
+            io(&mut sgx, &mut memory, |port| {
+                parameters.advance(&mut owner.ta_parameter_access(port))
+            })
+            .unwrap();
+            assert!(parameters.completed());
+            let expected = if owner.policy == Policy::G13X { 49 } else { 41 };
+            assert_eq!(power.native.borrow().work.ta.writes, expected);
+            let counts = (memory.reads, memory.writes);
+            io(&mut sgx, &mut memory, |port| {
+                parameters.advance(&mut owner.ta_parameter_access(port))
+            })
+            .unwrap();
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(power.native.borrow().work.ta.writes, expected);
+            // No common control/mask initialization, GPU execution or command
+            // completion authority is manufactured by parameter storage.
+            assert_eq!(power.native.borrow().work.control, None);
+            assert_eq!(power.native.borrow().work.context_mask, None);
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .ta
+                    .value(ta::words(owner.policy)[14]),
+                Some(0x4001)
+            );
+            assert!(
+                owner
+                    .cancel_ta_parameters(
+                        &input,
+                        Lease { slot: 2, ..lease },
+                        &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted
+                    )
+                    .is_err()
+            );
+            owner
+                .cancel_ta_parameters(
+                    &input,
+                    lease,
+                    &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted,
+                )
+                .unwrap();
+            assert!(!power.native.borrow().work.active());
+            assert_eq!(
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .ta
+                    .value(ta::words(owner.policy)[12]),
+                Some(0x10c)
+            );
+            let mut stamp = [0; 4];
+            assert!(memory.ram.read(DATA + input.stamp.firmware, &mut stamp));
+            assert_eq!(stamp, [0; 4]);
+        }
     }
     fn program(owner: &FirmwareWork, sgx: &mut Sgx, memory: &mut TraceRam) {
         captured_rmw(owner);
