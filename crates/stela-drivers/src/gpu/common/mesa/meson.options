@@ -928,3 +928,9 @@ option(
   value : '',
   description : 'Absolute LLVM 23 shared-library path for the optional native AIR compiler; empty disables it',
 )
+option(
+  'stela-amd-llvm',
+  type : 'boolean',
+  value : false,
+  description : 'Build the retained AMD LLVM backend for Stela compiler targets (requires matching LLVM 23 development files)',
+)

@@ -44,6 +44,10 @@ with_stela_nvidia = stela_compilers.contains('nvidia')
 with_stela_amd = stela_compilers.contains('amd')
 with_stela_intel = stela_compilers.contains('intel')
 with_stela_compilers = stela_compilers.length() > 0
+with_stela_amd_llvm = get_option('stela-amd-llvm')
+if with_stela_amd_llvm and not with_stela_amd
+  error('stela-amd-llvm requires the amd Stela compiler target')
+endif
 
 if get_option('layout') != 'mirror'
   error('`mirror` is the only build directory layout supported')
@@ -59,8 +63,9 @@ if get_option('b_lto')
   endif
 endif
 
-with_llvm = get_option('llvm')
-amd_with_llvm = with_llvm.allowed() and get_option('amd-use-llvm')
+with_llvm = get_option('llvm').enable_if(with_stela_amd_llvm,
+  error_message : 'The Stela AMD LLVM backend requires LLVM')
+amd_with_llvm = with_llvm.allowed() and (get_option('amd-use-llvm') or with_stela_amd_llvm)
 
 with_mesa_debug = get_option('buildtype') == 'debug'
 
@@ -1972,7 +1977,7 @@ endif
 
 llvm_modules = ['bitwriter', 'engine', 'mcdisassembler', 'mcjit', 'core', 'executionengine', 'scalaropts', 'transformutils', 'instcombine']
 llvm_optional_modules = ['coroutines']
-if with_amd_vk or with_gallium_radeonsi
+if with_amd_vk or with_gallium_radeonsi or with_stela_amd_llvm
   llvm_modules += ['amdgpu', 'bitreader', 'ipo']
 endif
 if with_clc
@@ -2024,6 +2029,9 @@ dep_llvm = dependency(
   include_type : 'system',
 )
 if dep_llvm.found()
+  if with_stela_amd_llvm and not (dep_llvm.version().version_compare('>=23.0') and dep_llvm.version().version_compare('<24.0'))
+    error('The Stela AMD LLVM backend currently requires LLVM 23')
+  endif
   pre_args += '-DMESA_LLVM_VERSION_STRING="@0@"'.format(dep_llvm.version())
   pre_args += '-DLLVM_IS_SHARED=@0@'.format(_shared_llvm.to_int())
 

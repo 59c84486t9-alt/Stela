@@ -28,6 +28,10 @@ pub enum Command {
         /// against this native LLVM 23 shared library. No GPU work is submitted.
         #[arg(long)]
         llvm_library: Option<PathBuf>,
+        /// Enable the retained AMD LLVM backend using matching LLVM 23
+        /// development files located by this llvm-config executable.
+        #[arg(long, requires = "llvm_library")]
+        llvm_config: Option<PathBuf>,
         /// Also compile these unchanged raw AIR bitcode inputs through each
         /// vendor probe. Repeat for multiple inputs; no GPU work is submitted.
         #[arg(long, requires_all = ["llvm_library", "entry"])]
@@ -54,12 +58,14 @@ pub fn run(command: Command) -> Result<()> {
             jobs,
             require_all_targets,
             llvm_library,
+            llvm_config,
             air_input,
             entry,
         } => mesa::build(
             jobs,
             require_all_targets,
             llvm_library.as_deref(),
+            llvm_config.as_deref(),
             &air_input,
             entry.as_deref(),
         ),

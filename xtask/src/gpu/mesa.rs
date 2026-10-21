@@ -205,10 +205,38 @@ fn parse_original_input(log: &str, entry: &str, bytes: u64) -> Result<Value> {
     Ok(records.into_iter().next().expect("one record"))
 }
 
+fn llvm_development_files(config: &Path, library: &Path) -> Result<Value> {
+    let query = |args: &[&str]| capture(Command::new(config).args(args));
+    let version = query(&["--version"])?;
+    ensure!(
+        version.starts_with("23."),
+        "the AMD backend requires LLVM 23"
+    );
+    let headers = fs::canonicalize(query(&["--includedir"])?.trim())?;
+    let linked = fs::canonicalize(query(&["--link-shared", "--libfiles"])?.trim())?;
+    let shared = tools::binding(&linked)?;
+    let supplied = tools::binding(library)?;
+    ensure!(
+        shared["sha256"] == supplied["sha256"] && shared["bytes"] == supplied["bytes"],
+        "llvm-config and the AIR frontend must use the same LLVM shared library"
+    );
+    let rtti = query(&["--has-rtti"])?;
+    ensure!(
+        ["YES", "NO"].contains(&rtti.trim()),
+        "unknown LLVM RTTI configuration"
+    );
+    Ok(json!({
+        "config": tools::binding(config)?, "version": version.trim(),
+        "headers": headers, "headers_sha256": source_binding(&headers)?,
+        "shared_library": shared, "rtti": rtti.trim() == "YES",
+    }))
+}
+
 pub fn build(
     jobs: u16,
     require_all_targets: bool,
     llvm_library: Option<&Path>,
+    llvm_config: Option<&Path>,
     air_inputs: &[PathBuf],
     entry: Option<&str>,
 ) -> Result<()> {
@@ -217,6 +245,18 @@ pub fn build(
         "raw AIR inputs require --llvm-library and --entry"
     );
     let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
+    let llvm_config = llvm_config.map(fs::canonicalize).transpose()?;
+    let llvm_sdk = llvm_config
+        .as_ref()
+        .map(|config| {
+            llvm_development_files(
+                config,
+                llvm_library
+                    .as_deref()
+                    .context("--llvm-config requires --llvm-library")?,
+            )
+        })
+        .transpose()?;
     let meson = tool("meson", "generators/bin")?;
     let ninja = tool("ninja", "generators/bin")?;
     let bindgen = tool("bindgen", "rust/bin")?;
@@ -244,7 +284,11 @@ pub fn build(
                 "intel/stela/tests/air_brw_probe.c",
                 "intel/stela/tests/air_elk_probe.c",
                 "intel/stela/tests/air_probe_input.h",
+                "amd/tests/air_probe_input.h",
             ]);
+        }
+        if llvm_sdk.is_some() {
+            paths.push("amd/tests/air_llvm_probe.c");
         }
         paths
             .iter()
@@ -252,7 +296,20 @@ pub fn build(
             .collect()
     };
     let external_sources = external_inputs()?;
-    let build = tools::root().join(".stela/gpu/build/mesa-host");
+    let cache = if let Some(sdk) = &llvm_sdk {
+        format!(
+            "mesa-host-llvm-{}-{}",
+            &sdk["headers_sha256"]
+                .as_str()
+                .context("missing LLVM header hash")?[..16],
+            &sdk["shared_library"]["sha256"]
+                .as_str()
+                .context("missing LLVM library hash")?[..16]
+        )
+    } else {
+        "mesa-host".to_owned()
+    };
+    let build = tools::root().join(".stela/gpu/build").join(cache);
     let evidence = evidence_directory()?;
     let input_snapshots = snapshot_air_inputs(air_inputs, &evidence)?;
     let hash = source_binding(&source)?;
@@ -275,11 +332,32 @@ pub fn build(
             "-Degl=disabled",
             "-Dgbm=disabled",
             "-Dglx=disabled",
-            "-Dllvm=disabled",
             "-Dvideo-codecs=",
             "-Dbuild-tests=false",
             "-Dintel-elk=true",
         ]);
+    if let Some(config) = &llvm_config {
+        setup.env("LLVM_CONFIG", config);
+    }
+    setup.args([
+        if llvm_sdk.is_some() {
+            "-Dllvm=enabled"
+        } else {
+            "-Dllvm=disabled"
+        },
+        if llvm_sdk.is_some() {
+            "-Dstela-amd-llvm=true"
+        } else {
+            "-Dstela-amd-llvm=false"
+        },
+        "-Dshared-llvm=enabled",
+        "-Ddraw-use-llvm=false",
+        if llvm_sdk.as_ref().is_some_and(|sdk| sdk["rtti"] == false) {
+            "-Dcpp_rtti=false"
+        } else {
+            "-Dcpp_rtti=true"
+        },
+    ]);
     setup.arg(format!(
         "-Dstela-air-llvm-library={}",
         llvm_library
@@ -291,13 +369,17 @@ pub fn build(
     }
     run(&mut setup, &evidence, "setup")?;
     let mut compile = Command::new(&ninja);
+    let mut library_paths = LIBRARIES.to_vec();
+    if llvm_sdk.is_some() {
+        library_paths.push("src/amd/llvm/libamd_common_llvm.a");
+    }
     compile
         .env("PATH", &path)
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg("-C")
         .arg(&build)
         .arg(format!("-j{jobs}"))
-        .args(LIBRARIES)
+        .args(&library_paths)
         .args(PROBES.iter().map(|(_, binary)| binary));
     compile.args([
         "src/stela/stela_amd_commands_probe",
@@ -315,6 +397,9 @@ pub fn build(
         ]);
         if !input_snapshots.is_empty() {
             compile.arg("src/stela/stela_air_input_nak_probe");
+        }
+        if llvm_sdk.is_some() {
+            compile.arg("src/stela/stela_air_amd_llvm_probe");
         }
     }
     run(&mut compile, &evidence, "compile")?;
@@ -363,12 +448,16 @@ pub fn build(
     let compiler_unsupported = unsupported.len();
     let mut air_compiled = 0;
     if let Some(library) = &llvm_library {
-        for (backend, binary) in [
+        let mut air_targets = vec![
             ("air-nak", "src/stela/stela_air_test"),
             ("air-brw", "src/stela/stela_air_brw_probe"),
             ("air-elk", "src/stela/stela_air_elk_probe"),
             ("air-aco", "src/stela/stela_air_aco_probe"),
-        ] {
+        ];
+        if llvm_sdk.is_some() {
+            air_targets.push(("air-amd-llvm", "src/stela/stela_air_amd_llvm_probe"));
+        }
+        for (backend, binary) in air_targets {
             run(&mut Command::new(build.join(binary)), &evidence, backend)?;
             let log = evidence.join(format!("{backend}.log"));
             let targets = parse_targets(&fs::read_to_string(&log)?, backend)?;
@@ -420,12 +509,16 @@ pub fn build(
             .as_u64()
             .context("missing AIR size")?;
         let mut input_digest = None;
-        for (backend, binary) in [
+        let mut backends = vec![
             ("air-nak", "src/stela/stela_air_input_nak_probe"),
             ("air-aco", "src/stela/stela_air_aco_probe"),
             ("air-brw", "src/stela/stela_air_brw_probe"),
             ("air-elk", "src/stela/stela_air_elk_probe"),
-        ] {
+        ];
+        if llvm_sdk.is_some() {
+            backends.push(("air-amd-llvm", "src/stela/stela_air_amd_llvm_probe"));
+        }
+        for (backend, binary) in backends {
             let stage = format!("original-{index}-{backend}");
             let binary = build.join(binary);
             let mut probe = Command::new(&binary);
@@ -462,7 +555,7 @@ pub fn build(
             "AIR snapshot changed during compilation"
         );
     }
-    let libraries = LIBRARIES
+    let libraries = library_paths
         .iter()
         .map(|name| inspect_archive(&build.join(name)))
         .collect::<Result<Vec<_>>>()?;
@@ -474,11 +567,21 @@ pub fn build(
         external_inputs()? == external_sources,
         "external GPU source changed during the build"
     );
+    if let Some(config) = &llvm_config {
+        ensure!(
+            Some(llvm_development_files(
+                config,
+                llvm_library.as_deref().expect("validated LLVM library")
+            )?) == llvm_sdk,
+            "LLVM development inputs changed during the build"
+        );
+    }
     let receipt = json!({
         "schema": 2, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
         "air_compute_compiler_subset": llvm_library.is_some(),
+        "amd_llvm_development_files": llvm_sdk,
         "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
         "external_probe_sources": external_sources,

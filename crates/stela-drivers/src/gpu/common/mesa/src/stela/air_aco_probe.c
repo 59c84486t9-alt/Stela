@@ -10,6 +10,9 @@
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/ac_shader_args.h"
 #include "amd/common/nir/ac_nir.h"
+#if AMD_LLVM_AVAILABLE
+#include "amd/llvm/ac_llvm_util.h"
+#endif
 #include "util/ralloc.h"
 #include "util/mesa-blake3.h"
 #include "../../../../amd/tests/air_probe_input.h"
@@ -202,6 +205,9 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
 int
 main(int argc, char **argv)
 {
+#if AMD_LLVM_AVAILABLE
+   ac_init_llvm_once();
+#endif
    const struct { enum radeon_family family; bool graphics; } targets[] = {
       {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_CARRIZO, true},
       {CHIP_RAVEN, true}, {CHIP_NAVI10, true}, {CHIP_REMBRANDT, true},

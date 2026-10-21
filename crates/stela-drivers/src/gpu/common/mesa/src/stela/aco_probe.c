@@ -3,6 +3,9 @@
 #include "probe_report.h"
 #include "amd/common/ac_gpu_info.h"
 #include "amd/common/nir/ac_nir.h"
+#if AMD_LLVM_AVAILABLE
+#include "amd/llvm/ac_llvm_util.h"
+#endif
 #include "compiler/nir/nir_builder.h"
 #include "util/ralloc.h"
 #include <stdio.h>
@@ -92,6 +95,9 @@ compile_store(enum radeon_family family, bool has_graphics, unsigned wave_size)
 int
 main(void)
 {
+#if AMD_LLVM_AVAILABLE
+   ac_init_llvm_once();
+#endif
    const struct {
       enum radeon_family family;
       bool has_graphics;

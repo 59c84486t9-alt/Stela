@@ -19,7 +19,7 @@ libamd_common_llvm = static_library(
     inc_include, inc_src, inc_amd, inc_amd_common
   ],
   link_with: [
-    libamd_common
+    with_stela_amd_llvm ? libamd_compiler_support : libamd_common
   ],
   dependencies : [
     dep_llvm, dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,

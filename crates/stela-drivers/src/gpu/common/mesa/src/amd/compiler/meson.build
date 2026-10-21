@@ -99,6 +99,6 @@ _libaco = static_library(
 # Also link with aco
 idep_aco = declare_dependency(
   include_directories : include_directories('.'),
-  link_with : _libaco,
+  link_with : [_libaco] + (with_stela_amd_llvm ? [libamd_common_llvm] : []),
   sources : [aco_opcodes_h, aco_builder_h],
 )

@@ -62,11 +62,27 @@ if stela_air_llvm != ''
   )
   test('stela_air_ssbo', stela_air_ssbo_test, suite : 'stela')
   if with_stela_amd
+    if with_stela_amd_llvm
+      stela_air_amd_llvm_probe = executable(
+        'stela_air_amd_llvm_probe',
+        '../../../../amd/tests/air_llvm_probe.c',
+        include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                               include_directories('.')],
+        # Keep the full matching development headers. idep_stela_air exposes
+        # the narrow C-only header set, unsuitable for this C++ LLVM backend.
+        dependencies : [idep_nir, idep_mesautil, dep_llvm, idep_amd_generated_headers],
+        link_with : [stela_air, libamd_common_llvm, libamd_compiler_support],
+        c_args : ['-Werror'],
+        build_rpath : fs.parent(stela_air_llvm),
+      )
+      test('stela_air_amd_llvm', stela_air_amd_llvm_probe, suite : 'stela')
+    endif
     stela_air_aco_probe = executable(
       'stela_air_aco_probe',
       'air_aco_probe.c',
       include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
-      dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers],
+      dependencies : [idep_stela_air, idep_aco, idep_amd_generated_headers] +
+                     (with_stela_amd_llvm ? [dep_llvm] : []),
       link_with : [libamd_compiler_support],
       c_args : ['-Werror'],
       build_rpath : fs.parent(stela_air_llvm),
@@ -204,7 +220,8 @@ if with_stela_amd
     'stela_aco_probe',
     'aco_probe.c',
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
-    dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers],
+    dependencies : [idep_aco, idep_nir, idep_mesautil, idep_amd_generated_headers] +
+                   (with_stela_amd_llvm ? [dep_llvm] : []),
     link_with : [libamd_compiler_support],
   )
   test('stela_aco_codegen', stela_aco_probe, suite : 'stela')
