@@ -802,9 +802,26 @@ impl Firmware for Coprocessor {
         if message.endpoint == 0
             && message.payload >> 52 & 0xf == 6
             && matches!(message.payload & !(0xf << 52), 0x201 | 0x202 | 0)
-            && self.protocol.with(State::dma_pending)
         {
-            return Err("GFX IOP sleep with owned initdata or queued channel work");
+            if self.protocol.with(State::dma_pending) {
+                return Err("GFX IOP sleep with owned initdata or queued channel work");
+            }
+            if self.protocol.with(|state| state.initdata_va.is_some()) {
+                // Original native power callbacks depend on the AP hardware
+                // config, update shared powered/generation words and restore
+                // GPU registers. A bare management ACK cannot stand for them.
+                return Err(
+                    "GFX initialized IOP sleep requires native power callbacks and GPU restore semantics",
+                );
+            }
+        }
+        if matches!(message.endpoint, MESSAGE_ENDPOINT | DOORBELL_ENDPOINT)
+            && !matches!(
+                self.rtkit.iop_power(),
+                super::super::rtkit::POWER_ON | 0x220
+            )
+        {
+            return Err("GFX application message while the IOP is not awake");
         }
         self.rtkit.receive(message, outbox)
     }
@@ -891,6 +908,123 @@ mod tests {
 
     fn work(pipe: u64, index: u64) -> u64 {
         doorbell_payload(DOORBELL_WORK, (index & 7) << 2 | pipe)
+    }
+
+    fn booted_gfx(family: &'static Family) -> Coprocessor {
+        let mut firmware = Coprocessor::with_observe(family, false).unwrap();
+        firmware.start(&mut Vec::new()).unwrap();
+        for payload in [
+            2 << 52 | 12 | 12 << 16,
+            8 << 52,
+            8 << 52 | 1 << 51 | 1 << 32,
+        ] {
+            firmware
+                .receive(
+                    Mail {
+                        endpoint: 0,
+                        payload,
+                    },
+                    &mut Vec::new(),
+                )
+                .unwrap();
+        }
+        for endpoint in [MESSAGE_ENDPOINT, DOORBELL_ENDPOINT] {
+            firmware
+                .receive(
+                    Mail {
+                        endpoint: 0,
+                        payload: 5 << 52 | u64::from(endpoint) << 32 | 2,
+                    },
+                    &mut Vec::new(),
+                )
+                .unwrap();
+        }
+        firmware
+    }
+
+    #[test]
+    fn native_power_refusal_is_atomic_before_and_after_startup_for_every_modeled_family() {
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for sleep in [0, 0x201, 0x202] {
+                let mut firmware = booted_gfx(family);
+                let mut outbox = Vec::new();
+                let power = |state| Mail {
+                    endpoint: 0,
+                    payload: 6 << 52 | state,
+                };
+                // Before initdata there are no registered native callbacks.
+                firmware.receive(power(sleep), &mut outbox).unwrap();
+                assert_eq!(
+                    outbox,
+                    [Mail {
+                        endpoint: 0,
+                        payload: 7 << 52 | sleep
+                    }]
+                );
+                outbox.clear();
+                for message in [
+                    Mail {
+                        endpoint: MESSAGE_ENDPOINT,
+                        payload: MSG_INIT << TYPE_SHIFT | ROOT & INIT_VA_BITS,
+                    },
+                    Mail {
+                        endpoint: DOORBELL_ENDPOINT,
+                        payload: work(0, 0),
+                    },
+                ] {
+                    assert_eq!(
+                        firmware.receive(message, &mut outbox),
+                        Err("GFX application message while the IOP is not awake")
+                    );
+                }
+                assert!(!firmware.dma_pending());
+                assert!(outbox.is_empty());
+                firmware.receive(power(0x220), &mut outbox).unwrap();
+                outbox.clear();
+                let mut memory = Flat::new(BASE, 0x20000);
+                kext_root(&mut memory);
+                memory.put_u64(ROOT, family.initdata_magic.unwrap());
+                firmware
+                    .receive(
+                        Mail {
+                            endpoint: MESSAGE_ENDPOINT,
+                            payload: MSG_INIT << TYPE_SHIFT | ROOT & INIT_VA_BITS,
+                        },
+                        &mut outbox,
+                    )
+                    .unwrap();
+                for initialized in [false, true] {
+                    if initialized {
+                        firmware
+                            .protocol
+                            .0
+                            .borrow_mut()
+                            .dma(&mut memory, &mut outbox)
+                            .unwrap();
+                    }
+                    let bytes = memory.bytes.clone();
+                    assert!(firmware.receive(power(sleep), &mut outbox).is_err());
+                    assert!(outbox.is_empty());
+                    assert_eq!(firmware.rtkit.iop_power(), 0x220);
+                    assert_eq!(memory.bytes, bytes);
+                    assert_eq!(firmware.dma_pending(), !initialized);
+                    // A repeated wake has no native transition or generation.
+                    firmware.receive(power(0x220), &mut outbox).unwrap();
+                    assert_eq!(
+                        outbox,
+                        [Mail {
+                            endpoint: 0,
+                            payload: 7 << 52 | 0x220
+                        }]
+                    );
+                    outbox.clear();
+                    assert!(firmware.receive(power(0x10), &mut outbox).is_err());
+                    assert!(outbox.is_empty());
+                    assert_eq!(firmware.rtkit.iop_power(), 0x220);
+                    assert_eq!(memory.bytes, bytes);
+                }
+            }
+        }
     }
 
     const CONTROL_STATE: u64 = BASE + 0x8000;
