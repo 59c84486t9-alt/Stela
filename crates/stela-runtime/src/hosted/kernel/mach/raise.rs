@@ -23,8 +23,7 @@ use super::super::control::{self, UserState};
 use super::super::{End, Kernel, Pe};
 use super::server::NDR_RECORD;
 use crate::hosted::Termination;
-use crate::hosted::darwin::{self, SIGKILL, mach_msg, mach_port_allocate};
-use crate::hosted::host;
+use crate::hosted::darwin::{self, SIGKILL};
 use crate::hosted::unsupported::{self, Failure, Kind};
 use crate::mach::mig;
 use anyhow::{Result, bail};
@@ -46,8 +45,6 @@ const MACH_EXCEPTION_MASK: u32 = 0xe000_0000;
 const MACH_MSGH_BITS_COMPLEX: u32 = 0x8000_0000;
 const COPY_SEND: u32 = 19;
 const MOVE_SEND: u8 = 17;
-const MAKE_SEND_ONCE: u32 = 21;
-const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
 const PORT_DESCRIPTOR: u8 = 0;
 const MACH_NOTIFY_SEND_ONCE: i32 = 0o107;
 /// MIG's reply checks (`mig_errors.h`).
@@ -60,9 +57,10 @@ const MACH_RCV_PORT_DIED: u32 = 0x1000_4009;
 /// receive trailer.
 const REPLY_BYTES: usize = 24 + 8 + 12 + 4 * control::THREAD_STATE_MAX as usize + 256;
 
+mod rpc;
+
 unsafe extern "C" {
     fn task_create_identity_token(task: u32, token: *mut u32) -> i32;
-    fn mach_port_mod_refs(task: u32, name: u32, right: u32, delta: i32) -> i32;
 }
 
 /// One level's action for an exception: a send right of this space to its
@@ -423,7 +421,14 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
         exception,
         old.as_ref().map(|snapshot| (flavor, snapshot.words())),
     );
-    let (code, new) = rpc(kernel, name, id, !ports.is_empty(), &body, with_state)?;
+    let (code, new) = rpc::call(
+        kernel.control().map(AsRef::as_ref),
+        name,
+        id,
+        !ports.is_empty(),
+        &body,
+        with_state,
+    )?;
     let Some((flavor, words)) = new else {
         return Ok(code);
     };
@@ -439,63 +444,6 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
             darwin::KERN_SUCCESS
         }
         Err(code) => code,
-    })
-}
-
-/// Send the request `id` with `body` to `destination` with a reply port of
-/// this space and await its reply, as a host call of this thread: the
-/// routine's `kern_return_t` (or the send's or receive's failure), and the
-/// state routines' new state.
-fn rpc(
-    kernel: &Kernel,
-    destination: u32,
-    id: i32,
-    complex: bool,
-    body: &[u8],
-    state: bool,
-) -> Result<(u32, NewState)> {
-    let mut reply_port = 0;
-    // SAFETY: a new receive right of this space into an out name.
-    let code =
-        unsafe { mach_port_allocate(host::task(), MACH_PORT_RIGHT_RECEIVE, &raw mut reply_port) };
-    if code != 0 {
-        bail!("an exception reply port could not be made: {code:#x}");
-    }
-    let size = 24 + body.len();
-    let mut message = vec![0u8; size.max(REPLY_BYTES)];
-    let bits = COPY_SEND | MAKE_SEND_ONCE << 8 | if complex { MACH_MSGH_BITS_COMPLEX } else { 0 };
-    for (at, word) in [
-        (0, bits),
-        (4, size as u32),
-        (8, destination),
-        (12, reply_port),
-        (16, 0),
-        (20, id as u32),
-    ] {
-        message[at..at + 4].copy_from_slice(&word.to_le_bytes());
-    }
-    message[24..size].copy_from_slice(body);
-    let receive = message.len() as u32;
-    // SAFETY: a message buffer of `receive` bytes this frame owns; the
-    // reply port is this space's.
-    let sent = kernel.forwarding(|| unsafe {
-        mach_msg(
-            message.as_mut_ptr(),
-            darwin::MACH_SEND_MSG | darwin::MACH_RCV_MSG,
-            size as u32,
-            receive,
-            reply_port,
-            0,
-            0,
-        )
-    });
-    // SAFETY: the receive right made above.
-    unsafe { mach_port_mod_refs(host::task(), reply_port, MACH_PORT_RIGHT_RECEIVE, -1) };
-    Ok(match sent {
-        Some(0) => parse_reply(id, &message, state),
-        Some(failure) => (failure as u32, None),
-        // The thread was terminated: it does not return to user space.
-        None => (darwin::KERN_SUCCESS, None),
     })
 }
 
