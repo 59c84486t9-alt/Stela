@@ -12,7 +12,7 @@
 #include "amd/common/nir/ac_nir.h"
 #include "util/ralloc.h"
 #include "util/mesa-blake3.h"
-#include "llvm-c/BitReader.h"
+#include "../../../../amd/tests/air_probe_input.h"
 #include <inttypes.h>
 
 #define CHECK(condition) do { if (!(condition)) { \
@@ -95,123 +95,6 @@ compute_args(struct binding *binding, const struct radeon_info *gpu)
       ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_id_y);
       ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_id_z);
    }
-}
-
-/* Receipt strings come from verified-but-untrusted IR/CLI bytes. Encode them
- * without allowing metadata or entry names to inject extra JSON records. */
-static void
-json_string(const char *text)
-{
-   putchar('"');
-   for (const unsigned char *c = (const unsigned char *)text; *c; c++) {
-      if (*c == '"' || *c == '\\')
-         printf("\\%c", *c);
-      else if (*c < 32 || *c >= 127)
-         printf("\\u%04x", *c);
-      else
-         putchar(*c);
-   }
-   putchar('"');
-}
-
-static LLVMMemoryBufferRef
-read_raw_input(const char *path)
-{
-   FILE *file = fopen(path, "rb");
-   if (!file) {
-      fprintf(stderr, "cannot open AIR input\n");
-      return NULL;
-   }
-   long size = -1;
-   if (!fseek(file, 0, SEEK_END))
-      size = ftell(file);
-   if (size < 4 || size > 64 * 1024 * 1024 || fseek(file, 0, SEEK_SET)) {
-      fprintf(stderr, "AIR input must contain 4..64MiB of raw bitcode\n");
-      fclose(file);
-      return NULL;
-   }
-   char *bytes = malloc(size);
-   if (!bytes) {
-      fclose(file);
-      return NULL;
-   }
-   const bool read = fread(bytes, 1, size, file) == (size_t)size &&
-                     fgetc(file) == EOF && !ferror(file);
-   const bool closed = fclose(file) == 0;
-   LLVMMemoryBufferRef result = NULL;
-   if (read && closed && !memcmp(bytes, "BC\xc0\xde", 4))
-      result = LLVMCreateMemoryBufferWithMemoryRangeCopy(bytes, size, "raw-air-input");
-   else
-      fprintf(stderr, "AIR input changed, could not be read, or is not raw bitcode\n");
-   free(bytes);
-   return result;
-}
-
-static bool
-input_receipt(LLVMMemoryBufferRef input, const char *entry, bool file,
-              char input_hash[BLAKE3_HEX_LEN])
-{
-   blake3_hash hash;
-   _mesa_blake3_compute(LLVMGetBufferStart(input), LLVMGetBufferSize(input), hash);
-   _mesa_blake3_format(input_hash, hash);
-   LLVMContextRef context = LLVMContextCreate();
-   LLVMModuleRef module = NULL;
-   if (LLVMParseBitcodeInContext2(context, input, &module)) {
-      fprintf(stderr, "LLVM refused AIR input while reading provenance\n");
-      if (module)
-         LLVMDisposeModule(module);
-      LLVMContextDispose(context);
-      return false;
-   }
-   const char *metadata[] = {"air.version", "air.language_version", "air.compile_options",
-                             "llvm.ident", "llvm.module.flags"};
-   for (unsigned i = 0; i < ARRAY_SIZE(metadata); i++) {
-      if (LLVMGetNamedMetadataNumOperands(module, metadata[i]) > 256) {
-         fprintf(stderr, "AIR input metadata receipt budget exceeded\n");
-         LLVMDisposeModule(module);
-         LLVMContextDispose(context);
-         return false;
-      }
-   }
-   unsigned major, minor, patch;
-   LLVMGetVersion(&major, &minor, &patch);
-   printf("STELA_AIR_INPUT {\"origin\":\"%s\",\"bytes\":%zu,\"blake3\":\"%s\",\"entry\":",
-          file ? "raw_input_file" : "original_fixture", LLVMGetBufferSize(input), input_hash);
-   json_string(entry);
-   printf(",\"workgroup_size\":[32,1,1],\"instruction_budget\":100,\"llvm_version\":[%u,%u,%u],\"target\":",
-          major, minor, patch);
-   json_string(LLVMGetTarget(module));
-   printf(",\"mesa_version\":");
-   json_string(PACKAGE_VERSION);
-   for (unsigned i = 0; i < ARRAY_SIZE(metadata); i++) {
-      putchar(',');
-      json_string(metadata[i]);
-      printf(":[");
-      LLVMValueRef nodes[256];
-      unsigned count = LLVMGetNamedMetadataNumOperands(module, metadata[i]);
-      LLVMGetNamedMetadataOperands(module, metadata[i], nodes);
-      for (unsigned n = 0; n < count; n++) {
-         char *text = LLVMPrintValueToString(nodes[n]);
-         if (n)
-            putchar(',');
-         /* LLVM's standalone metadata printer prefixes its process-local
-          * object address. Keep the complete metadata expression, excluding
-          * that diagnostic decoration so receipts reproduce across runs. */
-         const char *expression = text;
-         if (!strncmp(text, "<0x", 3)) {
-            const char *end = strchr(text, '>');
-            if (end && !strncmp(end, "> = ", 4))
-               expression = end + 4;
-         }
-         json_string(expression);
-         LLVMDisposeMessage(text);
-      }
-      putchar(']');
-   }
-   printf("}\n");
-   LLVMDisposeModule(module);
-   LLVMContextDispose(context);
-   return true;
 }
 
 static bool
