@@ -108,7 +108,11 @@ fn shape(
         }
         Some(Shape {
             to_y: *operand & TO_Y != 0,
-            offset: *operand,
+            offset: if generation.aligned_multiple_offsets() && step < 64 {
+                *operand & !(super::super::state::ROW_BYTES as u64 - 1)
+            } else {
+                *operand
+            },
             step,
             enable: write_mask(*operand >> 32, xy_bytes as u32, 9),
             xy_bytes,

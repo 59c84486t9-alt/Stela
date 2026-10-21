@@ -117,6 +117,8 @@ fn validate_sources(corsix: &Path) -> Result<()> {
 enum ReferenceGeneration {
     M1,
     M2,
+    M3,
+    M4,
 }
 
 impl From<ReferenceGeneration> for Generation {
@@ -124,6 +126,8 @@ impl From<ReferenceGeneration> for Generation {
         match value {
             ReferenceGeneration::M1 => Self::M1,
             ReferenceGeneration::M2 => Self::M2,
+            ReferenceGeneration::M3 => Self::M3,
+            ReferenceGeneration::M4 => Self::M4,
         }
     }
 }
@@ -232,6 +236,24 @@ fn boundary_operand(operation: AmxOperation, chain: usize, step: usize, random: 
         VectorFloat | VectorInteger | MatrixFloat | MatrixInteger => {
             let mut value = random & !((0x3ff << 47) | (0xf << 42) | (1 << 31));
             value |= ((step as u64 & 63) << 47) | ((chain as u64 & 15) << 42);
+            if step & 256 != 0 {
+                // The second 256-step block covers indexed X/Y, 2/4-bit
+                // tables, all broadcasts, both row steps and misalignment.
+                value &= !((0x3ff << 47) | (0x1ff << 32) | (63 << 20) | (0x1ff << 10) | 0x1ff);
+                value |= (1 << 53)
+                    | (1 << 31)
+                    | (((step as u64 >> 3) & 1) << 47)
+                    | (((step as u64 >> 4) & 1) << 48)
+                    | ((chain as u64 & 7) << 49)
+                    | ((step as u64 & 7) << 32)
+                    | (((step as u64 >> 5) & 1) << 25)
+                    | ((chain as u64 & 31) << 20);
+                let offset = [1u64, 63, 127, 511][(step >> 6) & 3];
+                value |= offset | (offset << 10);
+                if operation == MatrixInteger && step & 128 != 0 {
+                    value |= 1 << 54; // Indexed mode 8, including type 12.
+                }
+            }
             value | (((step as u64 >> 6) & 1) << 31)
         }
         ExtractX | ExtractY => {
@@ -723,6 +745,25 @@ mod tests {
                 }
             }
             assert_eq!(cases.len(), 64 * 16 * 2);
+        }
+    }
+
+    #[test]
+    fn indexed_boundary_block_covers_alignment_selectors() {
+        for operation in [AmxOperation::VectorFloat, AmxOperation::VectorInteger] {
+            let mut cases = std::collections::BTreeSet::new();
+            for step in 256..512 {
+                let value = boundary_operand(operation, 12, step, u64::MAX);
+                assert_eq!((value >> 53) & 15, 1);
+                cases.insert((
+                    (value >> 47) & 1,
+                    (value >> 48) & 1,
+                    (value >> 25) & 1,
+                    (value >> 32) & 7,
+                    value & 511,
+                ));
+            }
+            assert_eq!(cases.len(), 2 * 2 * 2 * 8 * 4);
         }
     }
 

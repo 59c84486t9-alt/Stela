@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn disabled_amx_raises_the_implementation_defined_class() {
-        for chip in [Chip::AppleM1, Chip::AppleM2] {
+        for chip in [Chip::AppleM1, Chip::AppleM2, Chip::AppleM3, Chip::AppleM4] {
             let mut machine = machine_on(chip, &[]);
             machine
                 .cpu
@@ -346,13 +346,18 @@ mod tests {
 
     #[test]
     fn chip_generation_drives_id_and_transfer_semantics() {
-        for (chip, id, rows) in [(Chip::AppleM1, 1, 2), (Chip::AppleM2, 2, 4)] {
+        for (chip, id, rows) in [
+            (Chip::AppleM1, 1, 2),
+            (Chip::AppleM2, 2, 4),
+            (Chip::AppleM3, 4, 4),
+            (Chip::AppleM4, 8, 4),
+        ] {
             let mut machine = machine_on(chip, &[]);
             machine
                 .system_instruction(mrs(crate::machine::amx::AMXIDR_EL1, 2))
                 .unwrap();
             assert_eq!(machine.cpu.state.x[2], id);
-            machine.cpu.state.x[1] = (1 << 63) | 0x107;
+            machine.cpu.state.x[1] = (1 << 63) | 0x100;
             machine.system_instruction(msr(AMX_CTL_EL1, 1)).unwrap();
             machine.amx(SET).unwrap();
             for row in 0..4 {
@@ -362,15 +367,22 @@ mod tests {
                         .write_ram(DATA + row * 64, &[row as u8 + 1; 64])
                 );
             }
-            // Bit60 selects four rows only on M2; bit61 remains ignored on
-            // both qualified generations. The destination wraps after X7.
+            // Bit60 selects four rows on M2–M4; M3/M4 bit61 distributes
+            // them every other row. All destinations wrap after X7.
             machine.cpu.state.x[3] = (1 << 62) | (1 << 61) | (1 << 60) | (7 << 56) | DATA;
             machine.amx(LDX | 3).unwrap();
             let registers = machine.cpu.amx.registers.as_ref().unwrap();
             assert_eq!(registers.x[7], [1; 64]);
-            assert_eq!(registers.x[0], [2; 64]);
-            assert_eq!(registers.x[1], [if rows == 4 { 3 } else { 0 }; 64]);
-            assert_eq!(registers.x[2], [if rows == 4 { 4 } else { 0 }; 64]);
+            if matches!(chip, Chip::AppleM3 | Chip::AppleM4) {
+                assert_eq!(registers.x[1], [2; 64]);
+                assert_eq!(registers.x[3], [3; 64]);
+                assert_eq!(registers.x[5], [4; 64]);
+                assert_eq!(registers.x[0], [0; 64]);
+            } else {
+                assert_eq!(registers.x[0], [2; 64]);
+                assert_eq!(registers.x[1], [if rows == 4 { 3 } else { 0 }; 64]);
+                assert_eq!(registers.x[2], [if rows == 4 { 4 } else { 0 }; 64]);
+            }
             machine.amx(CLR).unwrap();
             assert!(!machine.cpu.amx.live());
         }
@@ -378,7 +390,7 @@ mod tests {
 
     #[test]
     fn unqualified_generation_refuses_before_enablement_or_state_effects() {
-        for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+        for chip in [Chip::AppleM5, Chip::AppleM6] {
             let mut machine = machine_on(chip, &[]);
             let ram = machine.host.ram.clone();
             let esr = machine.cpu.read(SystemRegister::ESR_EL1);
@@ -420,7 +432,7 @@ mod tests {
 
     #[test]
     fn translated_transfers_cross_pages_and_fault_without_partial_effects() {
-        for chip in [Chip::AppleM1, Chip::AppleM2] {
+        for chip in [Chip::AppleM1, Chip::AppleM2, Chip::AppleM3, Chip::AppleM4] {
             let mut machine = machine_on(chip, &[]);
             // 4 KiB granule, 39-bit low half: L1, L2 and L3 tables in RAM. VA
             // page 0 is writable, page 1 read-only and page 2 unmapped.

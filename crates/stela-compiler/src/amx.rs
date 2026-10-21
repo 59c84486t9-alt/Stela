@@ -1,11 +1,9 @@
-//! Apple AMX matrix-coprocessor instructions, M1 and M2 generations.
+//! Apple AMX matrix-coprocessor instructions, M1 through M4 generations.
 //!
 //! AMX is undocumented. The semantics follow the hardware-tested emulator of
 //! [corsix/amx](https://github.com/corsix/amx/tree/483714bb051da088d08a66724b22dd08a5db3c99)
-//! with `AMX_VER_M1` or `AMX_VER_M2`, ported in [`model`] under its MIT license
-//! (`LICENSES/corsix-amx.txt`). The M3/M4 changes
-//! (non-consecutive loads, `matint` mode 12 widening, aligned X/Y offsets) are
-//! not part of these generations. The research record is `docs/research/amx.md`.
+//! with explicit `AMX_VER_M1` through `AMX_VER_M4`, ported in [`model`] under
+//! its MIT license (`LICENSES/corsix-amx.txt`). M5/M6 semantics are unqualified. The research record is `docs/research/amx.md`.
 //!
 //! Instructions occupy the reserved A64 space `0x00201000 + (operation << 5) +
 //! operand`. Operation 17 takes a five-bit immediate (`set` 0, `clr` 1); every
@@ -26,6 +24,8 @@ pub use state::AmxRegisters;
 pub enum Generation {
     M1,
     M2,
+    M3,
+    M4,
 }
 
 impl Generation {
@@ -34,11 +34,23 @@ impl Generation {
         match self {
             Self::M1 => 1,
             Self::M2 => 2,
+            Self::M3 => 3,
+            Self::M4 => 4,
         }
     }
 
     /// The complete M2 additions qualified by the pinned reference model.
     pub(crate) const fn m2_extensions(self) -> bool {
-        matches!(self, Self::M2)
+        matches!(self, Self::M2 | Self::M3 | Self::M4)
+    }
+
+    /// Source-qualified nonconsecutive loads and mode-8 type-12 widening.
+    pub(crate) const fn m3_extensions(self) -> bool {
+        matches!(self, Self::M3 | Self::M4)
+    }
+
+    /// Source-qualified multi-row X/Y offset alignment.
+    pub(crate) const fn aligned_multiple_offsets(self) -> bool {
+        matches!(self, Self::M4)
     }
 }

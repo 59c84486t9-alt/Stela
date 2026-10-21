@@ -1,7 +1,7 @@
 //! `vecfp` and `matfp` (corsix `vecfp.c`, `matfp.c`): M2 adds bf16 types 0/1,
 //! ALU modes 10..12 and the bit-31 multi-row vector forms.
 use super::{
-    Row, bit_select,
+    Row, aligned_multiple_offset, bit_select,
     float::{
         self, BF16_ONE, bf16_fma, bf16_maximum, bf16_minimum, bf16_to_single, half_to_single,
         not_positive,
@@ -186,6 +186,26 @@ pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut o
             _ => {}
         }
         z_step = if z_row & 32 != 0 { 16 } else { 32 };
+        if generation.aligned_multiple_offsets() {
+            let indexed = operand & INDEXED_LOAD != 0;
+            let indexed_y = operand & INDEXED_LOAD_Y != 0;
+            x_offset = aligned_multiple_offset(
+                x_offset,
+                xy_bytes,
+                z_step,
+                index_bits,
+                indexed && !indexed_y,
+                broadcast == 6,
+            );
+            y_offset = aligned_multiple_offset(
+                y_offset,
+                xy_bytes,
+                z_step,
+                index_bits,
+                indexed && indexed_y,
+                broadcast == 7,
+            );
+        }
     }
     if operand & INDEXED_LOAD != 0 {
         if operand & INDEXED_LOAD_Y != 0 {

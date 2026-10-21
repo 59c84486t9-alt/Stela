@@ -19,9 +19,10 @@
 //!   bit of 0..5 as generation 1..6, panics on any of bits 6..15 ("Unknown
 //!   AMX feature ID bit") or none ("doesn't advertise any known version"),
 //!   and CPU initialization branches on the result. The declared emulated
-//!   capability is generation 1 on M1, 2 on M2, matching the selected reference
+//!   capability is generation 1–4 on M1–M4, matching the selected reference
 //!   model. These IDR answers are not observed hardware register values.
-//!   M3–M6 controls and instructions refuse pending qualification.
+//!   M3/M4 accept only the source-qualified CTL bit 8 and enable bit 63;
+//!   M5/M6 controls and instructions refuse pending qualification.
 //! - Every context-switch use sets or clears only bit 63 with
 //!   read-modify-write, and reads `AMX_STATE_T` after `dsb ish` testing only
 //!   for nonzero (`0xfffffe000bd83694`). Live state reads as 1 here
@@ -43,12 +44,14 @@ pub const AMX_CTL_EL2: Encoding = Encoding::new(3, 4, 15, 4, 7);
 pub const AMX_STATE_T: Encoding = Encoding::new(3, 4, 15, 1, 3);
 /// `S3_6_C15_C2_7`: the AMX generation, one bit per generation.
 pub const AMXIDR_EL1: Encoding = Encoding::new(3, 6, 15, 2, 7);
-/// No later-generation behavior is inferred from M1/M2 reference semantics.
+/// No M5/M6 behavior is inferred from the qualified M1–M4 reference semantics.
 pub(super) const UNQUALIFIED_GENERATION: &str =
     "AMX controls and instruction generation are not source-qualified for this chip";
 pub const AMX_CTL_ENABLE: u64 = 1 << 63;
 /// The low fields CPU initialization writes (0x100 | MPIDR.Aff0).
 const AMX_CTL_INIT_FIELDS: u64 = 0x1ff;
+/// Original selected version-3/4 initialization writes CTL=0x100 only.
+const AMX_CTL_VERSION_3_4_INIT_FIELDS: u64 = 1 << 8;
 
 /// The `AMX_CTL` copy an access reaches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +120,8 @@ impl Unit {
         let generation = match chip {
             super::Chip::AppleM1 => Some(Generation::M1),
             super::Chip::AppleM2 => Some(Generation::M2),
+            super::Chip::AppleM3 => Some(Generation::M3),
+            super::Chip::AppleM4 => Some(Generation::M4),
             _ => None,
         };
         Self {
@@ -184,8 +189,15 @@ impl Unit {
         if self.generation.is_none() {
             return Some(refuse(UNQUALIFIED_GENERATION));
         }
+        // M3/M4's selected version-3/4 initialization writes only bit 8;
+        // PE identity is written separately to CTX. Other low fields remain
+        // unqualified, not silently inherited from the legacy M2 API domain.
+        let init_fields = match self.generation {
+            Some(Generation::M3 | Generation::M4) => AMX_CTL_VERSION_3_4_INIT_FIELDS,
+            _ => AMX_CTL_INIT_FIELDS,
+        };
         match route(encoding, kernel_el) {
-            Some(Route::View(_)) if value & !(AMX_CTL_ENABLE | AMX_CTL_INIT_FIELDS) != 0 => {
+            Some(Route::View(_)) if value & !(AMX_CTL_ENABLE | init_fields) != 0 => {
                 return Some(refuse("AMX_CTL bit the kernel never writes"));
             }
             Some(Route::View(view)) => {
@@ -212,11 +224,16 @@ mod tests {
         for chip in super::super::Chip::ALL {
             let mut unit = Unit::on(chip);
             match chip {
-                super::super::Chip::AppleM1 | super::super::Chip::AppleM2 => {
-                    let version = if chip == super::super::Chip::AppleM1 {
-                        1
-                    } else {
-                        2
+                super::super::Chip::AppleM1
+                | super::super::Chip::AppleM2
+                | super::super::Chip::AppleM3
+                | super::super::Chip::AppleM4 => {
+                    let (version, init) = match chip {
+                        super::super::Chip::AppleM1 => (1, 0x107),
+                        super::super::Chip::AppleM2 => (2, 0x107),
+                        super::super::Chip::AppleM3 => (3, 0x100),
+                        super::super::Chip::AppleM4 => (4, 0x100),
+                        _ => unreachable!(),
                     };
                     assert_eq!(unit.generation().unwrap().reference_version(), version);
                     assert_eq!(
@@ -224,10 +241,19 @@ mod tests {
                         Some(Outcome::Read(1 << (version - 1)))
                     );
                     // The original version-1 CPU-init branch includes Aff0.
-                    unit.write(AMX_CTL_EL1, 1, 0x100 | 7);
-                    assert_eq!(unit.read(AMX_CTL_EL1, 1), Some(Outcome::Read(0x107)));
+                    unit.write(AMX_CTL_EL1, 1, init);
+                    assert_eq!(unit.read(AMX_CTL_EL1, 1), Some(Outcome::Read(init)));
                     assert!(!unit.enabled(AmxView::El1));
-                    unit.write(AMX_CTL_EL1, 1, AMX_CTL_ENABLE | 0x107);
+                    if version >= 3 {
+                        for bit in (0..63).filter(|&bit| bit != 8) {
+                            assert!(matches!(
+                                unit.write(AMX_CTL_EL1, 1, init | (1 << bit)),
+                                Some(Outcome::Refused(_))
+                            ));
+                            assert_eq!(unit.read(AMX_CTL_EL1, 1), Some(Outcome::Read(init)));
+                        }
+                    }
+                    unit.write(AMX_CTL_EL1, 1, AMX_CTL_ENABLE | init);
                     assert!(unit.enabled(AmxView::El1));
                     assert!(matches!(
                         unit.write(AMX_CTL_EL1, 1, 1 << 62),
@@ -235,7 +261,7 @@ mod tests {
                     ));
                     assert_eq!(
                         unit.read(AMX_CTL_EL1, 1),
-                        Some(Outcome::Read(AMX_CTL_ENABLE | 0x107))
+                        Some(Outcome::Read(AMX_CTL_ENABLE | init))
                     );
                 }
                 _ => {

@@ -1,8 +1,9 @@
 //! `vecint` and `matint` (corsix `vecint.c`, `matint.c`): M2 adds vector ALU
-//! modes 10..12, the bit-31 multi-row forms and the M1/M2 `matint` mode 8
-//! layout (type 12 stays i8 x i8 -> i16).
+//! modes 10..12 and bit-31 multi-row forms. M3 widens matrix mode-8 type 12;
+//! M4 aligns multi-row vector offsets.
 use super::{
-    Row, bit_select, load_indexed, load_integer, load_pool, shuffle, store_integer, write_mask,
+    Row, aligned_multiple_offset, bit_select, load_indexed, load_integer, load_pool, shuffle,
+    store_integer, write_mask,
 };
 use crate::amx::{AmxRegisters, Generation};
 
@@ -187,6 +188,26 @@ pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut o
             x_step = x_step * u64::from(index_bits) / u64::from(x_bits);
         }
     }
+    if generation.aligned_multiple_offsets() && z_step < 64 {
+        let indexed = operand & INDEXED_LOAD != 0;
+        let indexed_y = operand & INDEXED_LOAD_Y != 0;
+        x_offset = aligned_multiple_offset(
+            x_offset,
+            x_bytes,
+            z_step,
+            index_bits,
+            indexed && !indexed_y,
+            x_lane_mask == 0,
+        );
+        y_offset = aligned_multiple_offset(
+            y_offset,
+            y_bytes,
+            z_step,
+            index_bits,
+            indexed && indexed_y,
+            broadcast_y,
+        );
+    }
     while z_row <= 63 {
         let mut x = load_pool(&registers.x, x_offset & 0x1ff);
         x_offset = x_offset.wrapping_add(x_step);
@@ -247,7 +268,7 @@ pub(super) fn vector(generation: Generation, registers: &mut AmxRegisters, mut o
     }
 }
 
-pub(super) fn matrix(registers: &mut AmxRegisters, operand: u64) {
+pub(super) fn matrix(generation: Generation, registers: &mut AmxRegisters, operand: u64) {
     if (operand >> 55) & 3 != 0 {
         return;
     }
@@ -302,6 +323,7 @@ pub(super) fn matrix(registers: &mut AmxRegisters, operand: u64) {
             (16, 16, 16)
         }
         8 => match kind {
+            12 if generation.m3_extensions() => (8, 16, 32),
             10 => (8, 8, 32),
             _ => (8, 8, 16),
         },
@@ -425,7 +447,7 @@ mod tests {
         registers.y[0] = core::array::from_fn(|index| index as u8);
         // Indexed bit 54 is mode 8 only with an indexed load; without it the
         // instruction is ignored.
-        matrix(&mut registers, MATRIX_INDEXED_MODE_8);
+        matrix(Generation::M2, &mut registers, MATRIX_INDEXED_MODE_8);
         assert!(
             registers
                 .z
@@ -433,7 +455,7 @@ mod tests {
                 .all(|row| row.iter().all(|&byte| byte == 0))
         );
         // Mode 8, type 10: u8 x u8 -> i32, Y lanes 0, 4, 8, ...
-        matrix(&mut registers, (8 << 47) | (10 << 42));
+        matrix(Generation::M2, &mut registers, (8 << 47) | (10 << 42));
         // Row j | (i & 3), lane i / 4: y[8] * 2 into row 8 + (5 & 3).
         assert_eq!(read_lane(&registers.z[9], 4, 1), 16);
     }

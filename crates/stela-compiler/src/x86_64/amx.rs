@@ -812,18 +812,27 @@ mod tests {
                     model::execute(&mut expected, kernel.operation(), operand, &mut NoMemory)
                         .unwrap();
                     // The pinned reference has identical fused arithmetic on
-                    // M1 and M2. Compare both models before testing unchanged
+                    // M1–M4. Compare every model before testing unchanged
                     // native code against the shared expected result.
-                    let mut m1 = registers.clone();
-                    model::execute_for(
+                    for generation in [
                         crate::amx::Generation::M1,
-                        &mut m1,
-                        kernel.operation(),
-                        operand,
-                        &mut NoMemory,
-                    )
-                    .unwrap();
-                    assert_eq!(m1, expected, "M1/M2 fused semantics {kernel:?}");
+                        crate::amx::Generation::M3,
+                        crate::amx::Generation::M4,
+                    ] {
+                        let mut other = registers.clone();
+                        model::execute_for(
+                            generation,
+                            &mut other,
+                            kernel.operation(),
+                            operand,
+                            &mut NoMemory,
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            other, expected,
+                            "{generation:?}/M2 fused semantics {kernel:?}"
+                        );
+                    }
                     let x = registers.x_operand((operand >> 10) & 0x1ff);
                     let y = registers.y_operand(operand & 0x1ff);
                     let caller = mxcsr();

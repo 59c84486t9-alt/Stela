@@ -1,10 +1,11 @@
 //! `ldx ldy ldz ldzi stx sty stz stzi` (corsix `ldst.c`): bit 62 moves two
-//! rows; for M2 X and Y loads bit 60 then moves four. X/Y loads ignore
-//! bit 61 (M3 non-consecutive) and bit 63. Z uses bit 61 within its row index.
+//! rows; M2–M4 X/Y loads can move four with bit 60. M3/M4 bit 61 selects
+//! nonconsecutive placement. X/Y ignore bit 63; Z uses bit 61 in its row index.
 use super::{AmxError, AmxMemory, MemoryFault, Row, effective_address};
 use crate::amx::{AmxOperation, AmxRegisters, Generation};
 
 const MULTIPLE: u64 = 1 << 62;
+const NON_CONSECUTIVE: u64 = 1 << 61;
 const MULTIPLE_MEANS_FOUR: u64 = 1 << 60;
 /// Multi-row transfers were compared with hardware only at this alignment.
 const MULTIPLE_ALIGNMENT: u64 = 128;
@@ -20,21 +21,16 @@ pub(super) fn execute(
     use AmxOperation::*;
     let address = effective_address(operand);
     match operation {
-        LoadX => load(
-            &mut registers.x,
+        LoadX => load(generation, &mut registers.x, operand, address, memory, true),
+        LoadY => load(generation, &mut registers.y, operand, address, memory, true),
+        LoadZ => load(
+            generation,
+            &mut registers.z,
             operand,
             address,
             memory,
-            generation.m2_extensions(),
+            false,
         ),
-        LoadY => load(
-            &mut registers.y,
-            operand,
-            address,
-            memory,
-            generation.m2_extensions(),
-        ),
-        LoadZ => load(&mut registers.z, operand, address, memory, false),
         StoreX => store(&registers.x, operand, address, memory),
         StoreY => store(&registers.y, operand, address, memory),
         StoreZ => store(&registers.z, operand, address, memory),
@@ -91,19 +87,29 @@ fn aligned(rows: usize, address: u64) -> Result<(), AmxError> {
 }
 
 fn load<const N: usize>(
+    generation: Generation,
     file: &mut [Row; N],
     operand: u64,
     address: u64,
     memory: &mut dyn AmxMemory,
     xy: bool,
 ) -> Result<(), AmxError> {
-    let count = rows(operand, xy);
+    let count = rows(operand, xy && generation.m2_extensions());
     aligned(count, address)?;
     let mut bytes = [0u8; 256];
     memory.read(address, &mut bytes[..count * 64])?;
     let first = (operand >> 56) as usize % N;
+    let stride = if xy && generation.m3_extensions() && operand & NON_CONSECUTIVE != 0 {
+        if operand & MULTIPLE_MEANS_FOUR != 0 {
+            2
+        } else {
+            4
+        }
+    } else {
+        1
+    };
     for (index, chunk) in bytes[..count * 64].as_chunks::<64>().0.iter().enumerate() {
-        file[(first + index) % N].copy_from_slice(chunk);
+        file[(first + index * stride) % N].copy_from_slice(chunk);
     }
     Ok(())
 }
@@ -241,6 +247,45 @@ mod tests {
         ));
         assert_eq!(registers, before);
         assert_eq!(memory.accesses.len(), 1);
+    }
+
+    #[test]
+    fn m3_nonconsecutive_loads_cover_wrapping_pair_and_quad_placement() {
+        for generation in [Generation::M3, Generation::M4] {
+            for (four, destinations) in [(false, &[7, 3][..]), (true, &[7, 1, 3, 5][..])] {
+                let mut memory = window();
+                let mut registers = AmxRegisters::zeroed();
+                registers.x.fill([0xa5; 64]);
+                let operand = MULTIPLE
+                    | (1 << 61)
+                    | if four { MULTIPLE_MEANS_FOUR } else { 0 }
+                    | (7 << 56)
+                    | memory.base;
+                crate::amx::model::execute_for(
+                    generation,
+                    &mut registers,
+                    AmxOperation::LoadX,
+                    operand,
+                    &mut memory,
+                )
+                .unwrap();
+                for (index, &row) in destinations.iter().enumerate() {
+                    assert_eq!(
+                        registers.x[row][..],
+                        memory.bytes[index * 64..index * 64 + 64]
+                    );
+                }
+                for row in 0..8 {
+                    if !destinations.contains(&row) {
+                        assert_eq!(registers.x[row], [0xa5; 64]);
+                    }
+                }
+                assert_eq!(
+                    memory.accesses,
+                    [(memory.base, destinations.len() * 64, false)]
+                );
+            }
+        }
     }
 
     #[test]

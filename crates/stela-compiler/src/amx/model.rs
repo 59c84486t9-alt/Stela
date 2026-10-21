@@ -1,6 +1,6 @@
-//! Reference semantics of the M1 and M2 AMX generations, ported from the corsix/amx
+//! Reference semantics of the M1 through M4 AMX generations, ported from the corsix/amx
 //! emulator at 483714bb (MIT, `LICENSES/corsix-amx.txt`) with
-//! `AMX_VER_M1` or `AMX_VER_M2`. Each operation reads its 64-bit operand and
+//! explicit `AMX_VER_M1` through `AMX_VER_M4`. Each operation reads its 64-bit operand and
 //! updates only the register file or memory; it never reads FPCR.
 //!
 //! Floating-point arithmetic follows the configuration corsix compared with
@@ -107,7 +107,7 @@ pub fn execute_for(
             Ok(())
         }
         MatrixInteger => {
-            integer::matrix(registers, operand);
+            integer::matrix(generation, registers, operand);
             Ok(())
         }
         GenerateLookup => {
@@ -124,6 +124,33 @@ pub fn execute_for(
 /// match corsix's zero extension.
 pub const fn effective_address(operand: u64) -> u64 {
     (((operand << 8) as i64) >> 8) as u64
+}
+
+/// M4 packed-index blocks must fit within one XY row. Scalar broadcasts
+/// align to an element; ordinary vector operands align to the full row.
+/// This is the pinned vecfp.c/vecint.c mask, including the OR when the index
+/// block exceeds one row; it is not a guessed stricter alignment rule.
+fn aligned_multiple_offset(
+    offset: u64,
+    element_bytes: usize,
+    z_step: u64,
+    index_bits: u32,
+    indexed: bool,
+    scalar: bool,
+) -> u64 {
+    const ROW_BYTES: u64 = super::state::ROW_BYTES as u64;
+    const GRID_ROWS: u64 = super::state::Z_ROWS as u64;
+    const BITS_PER_BYTE: u64 = 8;
+    let mask = if indexed {
+        let index_bytes = ROW_BYTES * GRID_ROWS * u64::from(index_bits)
+            / (BITS_PER_BYTE * element_bytes as u64 * z_step);
+        0u64.wrapping_sub(ROW_BYTES) | 0u64.wrapping_sub(index_bytes)
+    } else if scalar {
+        0u64.wrapping_sub(element_bytes as u64)
+    } else {
+        0u64.wrapping_sub(ROW_BYTES)
+    };
+    offset & mask
 }
 
 type Row = [u8; 64];
@@ -397,6 +424,96 @@ mod generation_tests {
             assert_eq!(x.x[0], [3; 64]);
             let y = run(Generation::M1, &state, AmxOperation::ExtractY, operand);
             assert_eq!(y.x[0], core::array::from_fn(|byte| (byte as u8 & !1) | 1));
+        }
+    }
+
+    #[test]
+    fn m3_matrix_type12_widens_both_y_and_accumulator() {
+        let mut state = AmxRegisters::zeroed();
+        state.x[0].fill(0x80);
+        half(&mut state.y[0], 257);
+        let operand = (8 << 47) | (12 << 42) | (1 << 63);
+        let m2 = run(Generation::M2, &state, AmxOperation::MatrixInteger, operand);
+        assert_eq!(i16::from_le_bytes(m2.z[0][..2].try_into().unwrap()), -128);
+        for generation in [Generation::M3, Generation::M4] {
+            let wide = run(generation, &state, AmxOperation::MatrixInteger, operand);
+            assert_eq!(
+                i32::from_le_bytes(wide.z[0][..4].try_into().unwrap()),
+                -32896
+            );
+        }
+    }
+
+    #[test]
+    fn m4_index_alignment_preserves_complete_packed_blocks() {
+        assert_eq!(aligned_multiple_offset(63, 4, 16, 2, true, false), 48);
+        assert_eq!(aligned_multiple_offset(63, 4, 32, 2, true, false), 56);
+        assert_eq!(aligned_multiple_offset(127, 1, 16, 4, true, false), 64);
+        assert_eq!(aligned_multiple_offset(127, 2, 16, 2, false, true), 126);
+        assert_eq!(aligned_multiple_offset(127, 4, 32, 2, false, true), 124);
+        assert_eq!(aligned_multiple_offset(127, 8, 32, 2, false, true), 120);
+        assert_eq!(aligned_multiple_offset(127, 4, 16, 2, false, false), 64);
+        for (operation, kind, aligned, element_bytes) in [
+            (AmxOperation::VectorFloat, 4, 56, 4),
+            (AmxOperation::VectorInteger, 2, 48, 2),
+        ] {
+            let mut state = AmxRegisters::zeroed();
+            state.x[0].fill(0x55); // Packed 2-bit indices all select lane 1.
+            for index in 0..64 / element_bytes {
+                if element_bytes == 4 {
+                    state.x[1][index * 4..index * 4 + 4]
+                        .copy_from_slice(&((index + 1) as f32).to_le_bytes());
+                } else {
+                    state.x[1][index * 2..index * 2 + 2]
+                        .copy_from_slice(&((index + 1) as u16).to_le_bytes());
+                }
+            }
+            for row in &mut state.y {
+                if element_bytes == 4 {
+                    for lane in row.as_chunks_mut::<4>().0 {
+                        *lane = 1.0f32.to_le_bytes();
+                    }
+                } else {
+                    half(row, 1);
+                }
+            }
+            let base = (1 << 53) | (1 << 49) | (1 << 31) | (kind << 42);
+            let unaligned = base | (63 << 10);
+            let expected = run(Generation::M3, &state, operation, base | (aligned << 10));
+            let m4 = run(Generation::M4, &state, operation, unaligned);
+            assert_eq!(m4, expected);
+            assert_ne!(m4, run(Generation::M3, &state, operation, unaligned));
+        }
+    }
+
+    #[test]
+    fn m4_scalar_broadcast_aligns_to_element_and_extraction_aligns_to_row() {
+        let mut state = AmxRegisters::zeroed();
+        for row in &mut state.x {
+            for (i, lane) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                *lane = ((i + 1) as f32).to_le_bytes();
+            }
+        }
+        for row in &mut state.y {
+            for lane in row.as_chunks_mut::<4>().0 {
+                *lane = 1.0f32.to_le_bytes();
+            }
+        }
+        let scalar = (1 << 31) | (6 << 32) | (10 << 47) | (4 << 42) | (7 << 10);
+        let m4 = run(Generation::M4, &state, AmxOperation::VectorFloat, scalar);
+        for row in [0, 32] {
+            for lane in m4.z[row].as_chunks::<4>().0 {
+                assert_eq!(*lane, 2.0f32.to_le_bytes());
+            }
+        }
+        for (row, bytes) in state.z.iter_mut().enumerate() {
+            *bytes = [row as u8 + 1; 64];
+        }
+        let operand = (1 << 26) | (8 << 11) | (1 << 31) | (33 << 20) | 63;
+        for operation in [AmxOperation::ExtractX, AmxOperation::ExtractY] {
+            let m4 = run(Generation::M4, &state, operation, operand);
+            assert_eq!(m4, run(Generation::M3, &state, operation, operand & !63));
+            assert_ne!(m4, run(Generation::M3, &state, operation, operand));
         }
     }
 
