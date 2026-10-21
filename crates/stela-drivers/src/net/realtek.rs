@@ -156,7 +156,7 @@ pub struct Realtek {
     receive: Ring,
     transmit: Ring,
     mac: Mac,
-    link_status: Option<u8>,
+    link: RuntimeLink,
     revision: Revision,
     pub location: String,
 }
@@ -241,7 +241,7 @@ impl Realtek {
             receive: Ring::new(dma, revision.version >= 18)?,
             transmit: Ring::new(dma, revision.version >= 18)?,
             mac,
-            link_status: None,
+            link: RuntimeLink::default(),
             revision,
             location: format!(
                 "{} {} XID {:03x}",
@@ -261,23 +261,45 @@ impl Realtek {
     }
 
     fn update_link(&mut self) -> Result<bool, LinkError> {
-        let status = self.device.read8(PHY_STATUS);
-        if status == u8::MAX {
-            return Err(LinkError::Adapter(format!(
-                "{} PCI read failed",
-                self.location
-            )));
+        let hardware = Hardware::new(&self.device, &self.clock, self.revision, 0);
+        self.link.update(&hardware).map_err(|error| {
+            LinkError::Adapter(format!("{} link configuration: {error}", self.location))
+        })
+    }
+}
+
+/// Link-programming errors leave command completion and filter state uncertain.
+/// There is no retry or in-place recovery: only a fresh constructor after the
+/// caller's explicit device reset/reinitialization can regain ownership.
+#[derive(Default)]
+struct RuntimeLink {
+    status: Option<u8>,
+    failure: Option<BlockError>,
+}
+impl RuntimeLink {
+    fn update<R: Registers, T: Timer>(
+        &mut self,
+        hw: &Hardware<'_, R, T>,
+    ) -> Result<bool, BlockError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
         }
-        if self.link_status != Some(status)
+        let status = hw.registers.read8(PHY_STATUS);
+        let result = if status == u8::MAX {
+            Err(BlockError::Device { status: 255 })
+        } else if self.status != Some(status)
             && status & 2 != 0
-            && matches!(self.revision.version, 34..=36 | 38)
+            && matches!(hw.revision.version, 34..=36 | 38)
         {
-            let hardware = Hardware::new(&self.device, &self.clock, self.revision, 0);
-            link_patch(&hardware, status).map_err(|e| {
-                LinkError::Adapter(format!("{} link configuration: {e}", self.location))
-            })?;
+            link_patch(hw, status)
+        } else {
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.failure = Some(error.clone());
+            return Err(error);
         }
-        self.link_status = Some(status);
+        self.status = Some(status);
         Ok(status & 2 != 0)
     }
 }
@@ -485,6 +507,7 @@ mod tests {
         reset_mac_at: Option<u64>,
         writes: Vec<(usize, u32, u8)>,
         mdio_commands: usize,
+        eri_commands: usize,
     }
     struct Model {
         state: RefCell<State>,
@@ -492,6 +515,7 @@ mod tests {
         fault: Option<usize>,
         failed_read: Option<usize>,
         fail_phy_at: usize,
+        fail_eri_at: usize,
         stuck_reset: bool,
         stuck_phy_reset: bool,
         command_readback: Option<u8>,
@@ -518,6 +542,7 @@ mod tests {
                 fault: None,
                 failed_read: None,
                 fail_phy_at: usize::MAX,
+                fail_eri_at: usize::MAX,
                 stuck_reset: false,
                 stuck_phy_reset: false,
                 command_readback: None,
@@ -544,6 +569,7 @@ mod tests {
             if self.time.now() < when
                 || self.fault == Some(port)
                 || (port == PHY_ACCESS && s.mdio_commands >= self.fail_phy_at)
+                || (port == ERI_ADDRESS && s.eri_commands >= self.fail_eri_at)
             {
                 return;
             }
@@ -685,6 +711,8 @@ mod tests {
             ) {
                 if o == PHY_ACCESS {
                     s.mdio_commands += 1;
+                } else if o == ERI_ADDRESS {
+                    s.eri_commands += 1;
                 }
                 s.pending = Some((o, v, self.time.now() + 15));
             }
@@ -1546,6 +1574,47 @@ mod tests {
                     ))
                 );
             }
+        }
+    }
+    #[test]
+    fn runtime_link_patch_failure_permanently_blocks_work_after_late_completion() {
+        for version in [34, 35, 36, 38] {
+            let time = Time::default();
+            let mut model = Model::ready(&time);
+            model.state.borrow_mut().bytes[PHY_STATUS] = 0x12;
+            model.fail_eri_at = 2;
+            let mut link = RuntimeLink::default();
+            {
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(link.update(&hw), Err(BlockError::Timeout));
+            }
+            {
+                let s = model.state.borrow();
+                assert_eq!(s.eri[&0x1bc], 0x11);
+                assert!(!s.eri.contains_key(&0x1dc));
+                assert!(s.pending.is_some());
+                assert_eq!(s.eri_commands, 2);
+            }
+            // The timed-out write completes after the caller has lost its
+            // completion observation. Completion is not a recovery boundary.
+            model.fail_eri_at = usize::MAX;
+            time.delay(100);
+            model.read32(ERI_ADDRESS);
+            let writes = model.state.borrow().writes.len();
+            assert_eq!(model.state.borrow().eri[&0x1dc], 5);
+            model.state.borrow_mut().bytes[PHY_STATUS] = 0x0a;
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            for _ in 0..3 {
+                assert!(!link.update(&hw).unwrap_or(false)); // carrier gate
+                let transmit = link.update(&hw).map(|_| model.write8(TX_POLL, POLL_NORMAL));
+                assert_eq!(transmit, Err(BlockError::Timeout));
+                let receive = link
+                    .update(&hw)
+                    .map(|_| panic!("descriptor access after failure"));
+                assert_eq!(receive, Err(BlockError::Timeout));
+            }
+            assert_eq!(model.state.borrow().writes.len(), writes);
+            assert_eq!(model.state.borrow().eri_commands, 2);
         }
     }
 }
