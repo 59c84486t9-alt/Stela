@@ -349,6 +349,25 @@ pub trait Host {
     /// `code` was returned by [`Host::install`] since the last discard and
     /// was compiled for the system-mode block ABI.
     unsafe fn execute(&mut self, code: NativeCode, state: &mut GuestState) -> NativeExit;
+    /// Run an installed context-ABI block through this physical owner's native
+    /// recovery frame. `None` refuses context entry before any native effects.
+    ///
+    /// # Safety
+    /// `code` was installed by this same Host since its last discard, uses the
+    /// compiler's context-block ABI and matches the actual source-qualified
+    /// target/profile. The caller exclusively retains the real guest frame,
+    /// valid context and every reachable service/mapping/code owner through
+    /// actual return or fault, complete recovery and source-PC settlement.
+    /// The Host stays pinned to its physical owner; callbacks cannot reenter it.
+    unsafe fn execute_context(
+        &mut self,
+        _code: NativeCode,
+        _state: &mut GuestState,
+        _context: &mut stela_compiler::context::ExecutionContext,
+    ) -> Option<NativeExit> {
+        None
+    }
+
     /// The address to call installed context-leaf code at, with
     /// `stela_compiler::extended`'s two-argument ABI (the SVE and SME
     /// instructions run so), or `None` on a host that cannot run it. The

@@ -503,6 +503,28 @@ global_asm!(
     "pop rbx",
     "pop rbp",
     "ret",
+    // The extended block ABI passes state/context in RDI/RSI. Keep its
+    // published SysV stack alignment while using the same recovery layout.
+    ".global stela_enter_context_block",
+    "stela_enter_context_block:",
+    "push rbp",
+    "push rbx",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "mov gs:[{recovery}], rsp",
+    "sub rsp, 8",
+    "call rdx",
+    "add rsp, 8",
+    "mov qword ptr gs:[{recovery}], 0",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbx",
+    "pop rbp",
+    "ret",
     ".global stela_native_recover",
     "stela_native_recover:",
     "mov rsp, gs:[{recovery}]",
@@ -521,6 +543,11 @@ global_asm!(
 
 unsafe extern "sysv64" {
     fn stela_enter_block(state: *mut GuestState, code: usize) -> BlockExit;
+    fn stela_enter_context_block(
+        state: *mut GuestState,
+        context: *mut stela_compiler::context::ExecutionContext,
+        code: usize,
+    ) -> BlockExit;
     fn stela_native_recover();
 }
 
@@ -691,6 +718,29 @@ pub fn stray_interrupt(_vector: u8) {
     state.apic.eoi();
 }
 
+/// Complete one real owner-local native return, retaining exact fault GPRs.
+fn native_return(code: NativeCode, exit: BlockExit, entered: u64) -> NativeExit {
+    let state = state();
+    state.native = false;
+    state.native_ticks += rdtsc() - entered;
+    if exit.kind == FAULT_KIND
+        && let Some(recorded) = state.recorded.take()
+    {
+        return NativeExit::Fault(NativeFault {
+            // A chained block may lie below the entered one.
+            offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
+            address: recorded.address,
+            write: recorded.write,
+            cause: recorded.cause,
+            registers: recorded.registers,
+        });
+    }
+    NativeExit::Exit {
+        next_pc: exit.next_pc,
+        kind: exit.kind,
+    }
+}
+
 /// The engine's handle; mutable native state belongs to this host processor.
 pub struct BareHost<'a> {
     _owner: core::marker::PhantomData<&'a mut HostOwner>,
@@ -795,25 +845,22 @@ impl Host for BareHost<'_> {
         let entered = rdtsc();
         // SAFETY: the engine passes installed system-mode block code.
         let exit = unsafe { stela_enter_block(guest, code.0) };
-        let state = state();
-        state.native = false;
-        state.native_ticks += rdtsc() - entered;
-        if exit.kind == FAULT_KIND
-            && let Some(recorded) = state.recorded.take()
-        {
-            return NativeExit::Fault(NativeFault {
-                // A chained block may lie below the entered one.
-                offset: recorded.rip.wrapping_sub(code.0 as u64) as usize,
-                address: recorded.address,
-                write: recorded.write,
-                cause: recorded.cause,
-                registers: recorded.registers,
-            });
-        }
-        NativeExit::Exit {
-            next_pc: exit.next_pc,
-            kind: exit.kind,
-        }
+        native_return(code, exit, entered)
+    }
+
+    unsafe fn execute_context(
+        &mut self,
+        code: NativeCode,
+        guest: &mut GuestState,
+        context: &mut stela_compiler::context::ExecutionContext,
+    ) -> Option<NativeExit> {
+        assert!(!state().native, "nested native context entry");
+        state().native = true;
+        let entered = rdtsc();
+        // SAFETY: caller holds the installed context block, exact live frame
+        // and service owners. The current GS HostOwner retains recovery state.
+        let exit = unsafe { stela_enter_context_block(guest, context, code.0) };
+        Some(native_return(code, exit, entered))
     }
 
     fn context_entry(&mut self, code: NativeCode) -> Option<usize> {

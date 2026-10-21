@@ -3,6 +3,7 @@
 //! and processor-local resources afterward. Production shared-memory admission
 //! is distinct from SystemModeV1's single-agent translation contract.
 pub(crate) mod bootstrap;
+mod context_check;
 pub(crate) mod executor;
 pub(crate) mod firmware;
 pub(crate) mod memory_types;

@@ -26,7 +26,7 @@ pub(crate) enum StartupFailure {
     Bootstrap(&'static str),
     Delivery(apic::StartupError),
     Timeout { slot: usize },
-    Refused { slot: usize },
+    Refused { slot: usize, reason: &'static str },
 }
 
 /// This object and its descriptors remain pinned for the whole boot, even
@@ -42,6 +42,7 @@ struct Argument {
     observed: UnsafeCell<Option<topology::Snapshot>>,
     descriptors: UnsafeCell<Option<interrupts::Observation>>,
     doorbells: UnsafeCell<Option<&'static core::sync::atomic::AtomicU64>>,
+    refusal: UnsafeCell<Option<&'static str>>,
     status: AtomicU8,
 }
 
@@ -90,7 +91,10 @@ impl Processor {
         tsc_hz: u64,
     ) -> Result<u64, StartupFailure> {
         if self.argument.status.load(Ordering::Acquire) != READY {
-            return Err(StartupFailure::Refused { slot: self.slot });
+            return Err(StartupFailure::Refused {
+                slot: self.slot,
+                reason: "executor is not ready",
+            });
         }
         // SAFETY: the AP published this pinned read-only atomic reference before
         // READY. No Cpu, native frame, Host or recovery state is read here.
@@ -156,41 +160,51 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
     }
     let initialized = (|| {
         // SAFETY: CPL0 on the actual selected AP, with private descriptors.
-        let observed = unsafe { firmware::observe() }.map_err(|_| ())?;
+        let observed =
+            unsafe { firmware::observe() }.map_err(|_| "AP source-control capture refused")?;
         if !observed.matches(argument.processor) {
-            return Err(());
+            return Err("AP physical identity changed");
         }
         // SAFETY: this AP alone consumes its private disjoint host resources.
-        let mut config = unsafe { (&mut *argument.config.get()).take().ok_or(())? };
+        let mut config = unsafe {
+            (&mut *argument.config.get())
+                .take()
+                .ok_or("AP resources absent")?
+        };
         observed
             .qualify_native(matches!(
                 config.placement,
                 stela_runtime::machine::mmu::placement::Placement::FiveLevel
             ))
-            .map_err(|_| ())?;
+            .map_err(|_| "AP native controls refused")?;
         // The trampoline installs the BSP's already-qualified effective PAT;
         // The offline trampoline installed the complete validated BSP image.
         let source = topology::Snapshot {
             pat: argument.effective_pat,
             ..argument.source
         };
-        observed.same_memory_types(&source).map_err(|_| ())?;
+        observed
+            .same_memory_types(&source)
+            .map_err(|_| "AP memory types differ")?;
         config.apic_base = observed.apic_base;
         let loader_root = config.window_root;
         // SAFETY: configured pool/arena/bounce entries belong only to this AP;
         // tables/local record remain pinned through every native call and park.
-        let owner = unsafe { host::install(config) }.map_err(|_| ())?;
+        let mut owner =
+            unsafe { host::install(config) }.map_err(|_| "AP private host installation failed")?;
+        super::context_check::check(&mut owner.host())?;
         // Retain the actual installed private root/control state, not the
         // earlier loader root observed before Host initialization.
-        let installed = unsafe { firmware::observe() }.map_err(|_| ())?;
+        let installed =
+            unsafe { firmware::observe() }.map_err(|_| "AP installed-control capture refused")?;
         if installed.cr3 == loader_root || !installed.matches(argument.processor) {
-            return Err(());
+            return Err("AP private root or physical identity differs");
         }
         let descriptors = unsafe { interrupts::observe() };
         if !(argument.stack_bottom..argument.stack_top).contains(&descriptors.rsp)
             || !unsafe { &*tables_pointer }.matches(descriptors)
         {
-            return Err(());
+            return Err("AP private descriptor or stack differs");
         }
         // SAFETY: only this AP publishes these immutable observations, before
         // Release READY. The counter lives in its permanently pinned GS record.
@@ -208,7 +222,10 @@ unsafe extern "sysv64" fn enter(argument: u64) -> ! {
             // dropped while NMI/MCE or a later native command can reach it.
             park()
         }
-        Err(()) => {
+        Err(reason) => {
+            // SAFETY: only this AP writes the immutable reason before Release
+            // REFUSED. The BSP reads it only after the matching Acquire.
+            unsafe { *argument.refusal.get() = Some(reason) };
             argument.status.store(REFUSED, Ordering::Release);
             // Host state may not exist after refusal, so keep maskable IRQs
             // disabled rather than route a doorbell into an uninstalled Host.
@@ -315,6 +332,7 @@ pub(crate) unsafe fn start(
             observed: UnsafeCell::new(None),
             descriptors: UnsafeCell::new(None),
             doorbells: UnsafeCell::new(None),
+            refusal: UnsafeCell::new(None),
             status: AtomicU8::new(STARTING),
         }));
         let physical = handoff.native_resources.sipi;
@@ -366,7 +384,13 @@ pub(crate) unsafe fn start(
         loop {
             match argument.status.load(Ordering::Acquire) {
                 READY => break,
-                REFUSED => return Err(StartupFailure::Refused { slot }),
+                REFUSED => {
+                    // SAFETY: the owner published this immutable reason before
+                    // the Acquire REFUSED observation; storage remains pinned.
+                    let reason =
+                        unsafe { *argument.refusal.get() }.expect("refused AP publishes a reason");
+                    return Err(StartupFailure::Refused { slot, reason });
+                }
                 _ if apic::rdtsc().wrapping_sub(before) >= handoff.tsc_hz => {
                     return Err(StartupFailure::Timeout { slot });
                 }
