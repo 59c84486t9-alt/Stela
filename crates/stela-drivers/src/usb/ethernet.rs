@@ -1,6 +1,7 @@
 //! Vendor USB Ethernet backends. Candidate interfaces become usable links only
 //! after exact chip identification and revision-specific initialization.
 //! RTL8152B revisions 02/07 are implemented; RTL8153/8156 remain explicit gaps.
+pub mod firmware;
 mod framing;
 mod registers;
 pub mod rtl815x;
