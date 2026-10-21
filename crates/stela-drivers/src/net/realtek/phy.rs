@@ -265,15 +265,20 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         gigabyte_sc: bool,
     ) -> Result<(), Error> {
         self.phy_write(PHY_PAGE, 0)?;
-        self.phy_modify(PHY_CONTROL, 1 << 11, 0)?; // genphy_resume
-        self.timer.delay(20_000);
         let id = (u32::from(self.phy_read(2)?) << 16) | u32::from(self.phy_read(3)?);
-        // Only the generic internal FE/GE PHY and RTL8211B use the generic
-        // reset/autonegotiation path implemented in this slice. The other
-        // external PHY IDs require their own realtek_main.c quirks.
+        // This slice implements the internal FE/GE path and RTL8211B's
+        // ID-specific resume quirk, followed by generic reset/autonegotiation.
+        // Other external PHY IDs need their own realtek_main.c quirks.
         if !matches!(id, 0x001c_c800 | 0x001c_c912) {
             return Err(Error::UnsupportedPhy(id));
         }
+        if id == 0x001c_c912 {
+            // rtl8211b_resume clears MII_MMD_DATA before genphy_resume:
+            // rtl8211b_suspend may have left its bit 9 set.
+            self.phy_write(14, 0)?;
+        }
+        self.phy_modify(PHY_CONTROL, 1 << 11, 0)?; // genphy_resume
+        self.timer.delay(20_000);
         if id == 0x001c_c800 {
             // realtek_main.c distinguishes the generic FE/GE PHY from the
             // identical-ID 2.5G PHY by vendor page a61's capability register.

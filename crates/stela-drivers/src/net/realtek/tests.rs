@@ -649,3 +649,51 @@ fn dma_enable_readback_rejects_failed_bus_reads_and_missing_enable_bits() {
         assert_eq!(publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])), expected);
     }
 }
+
+#[test]
+fn rtl8211b_resume_clears_its_suspend_quirk_before_powerup_and_propagates_failure() {
+    for (id, fail) in [(0xc912, false), (0xc912, true), (0xc800, false)] {
+        let time = Time::default();
+        let mut model = Model::ready(&time);
+        {
+            let mut s = model.state.borrow_mut();
+            s.phy.insert((0, 3), id);
+            s.phy.insert((0, 14), 0x0200);
+            s.phy.insert((0, PHY_CONTROL), 0x1940);
+        }
+        if fail {
+            // Page zero, ID high, ID low, then the RTL8211B quirk write.
+            model.fail_phy_at = 4;
+        }
+        let mut hw = Hardware::new(&model, &time, revision(18), 0);
+        let result = hw.configure_phy(None, false);
+        let s = model.state.borrow();
+        let writes: Vec<_> = s
+            .writes
+            .iter()
+            .filter(|(r, v, _)| *r == PHY_ACCESS && *v & ACCESS != 0)
+            .map(|(_, v, _)| (((v >> 16) & 31) as u16, *v as u16))
+            .collect();
+        if fail {
+            assert_eq!(result, Err(Error::Device(BlockError::Timeout)));
+            assert_eq!(s.phy[&(0, 14)], 0x0200);
+            assert_eq!(s.phy[&(0, PHY_CONTROL)], 0x1940);
+            assert!(!s.phy.contains_key(&(2, 0x0c)));
+            assert_eq!(writes, [(PHY_PAGE, 0), (14, 0)]);
+        } else {
+            assert_eq!(result, Ok(()));
+            if id == 0xc912 {
+                assert_eq!(s.phy[&(0, 14)], 0);
+                let at = |entry| writes.iter().position(|v| *v == entry).unwrap();
+                assert!(at((14, 0)) < at((PHY_CONTROL, 0x1140)));
+                assert!(at((PHY_CONTROL, 0x1140)) < at((0x1d, 0x0f00)));
+                assert!(at((0x1d, 0x0f00)) < at((PHY_CONTROL, 0x9140)));
+                assert!(at((PHY_CONTROL, 0x9140)) < at((PHY_CONTROL, 0x1200)));
+            } else {
+                assert_eq!(s.phy[&(0, 14)], 0x0200);
+                assert!(!writes.iter().any(|(reg, _)| *reg == 14));
+            }
+            assert_eq!(s.phy[&(0, PHY_CONTROL)], 0x1200);
+        }
+    }
+}
