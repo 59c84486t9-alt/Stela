@@ -1015,6 +1015,41 @@ mod tests {
                         )
                         .unwrap()
                     };
+                    let foreign_program = if owner.policy == Policy::G13X {
+                        let variant = if variant == Some(G13XVariant::B000) {
+                            G13XVariant::C000
+                        } else {
+                            G13XVariant::B000
+                        };
+                        let root = crate::platform::apple::agx::initdata::Root {
+                            rings: 0,
+                            page_1660: 1,
+                            object_358: 2,
+                            object_848: 3,
+                            object_928: 4,
+                            object_930: 5,
+                            object_368: 6,
+                            config: [0; 0x68],
+                        };
+                        io(&mut sgx, &mut memory, |port| {
+                            Program::g13x(variant, &root, port)
+                        })
+                        .unwrap()
+                    } else {
+                        Program::fixed(
+                            if owner.policy == Policy::G13G {
+                                Policy::G14G
+                            } else {
+                                Policy::G13G
+                            },
+                            if owner.policy == Policy::G13G {
+                                *b"b000"
+                            } else {
+                                *b"b100"
+                            },
+                        )
+                        .unwrap()
+                    };
                     let mut prefix = Context::new(&input, &frame, lease, program).unwrap();
                     memory.fail_read = Some(memory.reads);
                     assert!(
@@ -1046,6 +1081,15 @@ mod tests {
                     );
                     assert_eq!((memory.reads, memory.writes), counts);
                     let mut prefix = Context::new(&input, &frame, lease, program).unwrap();
+                    let mut wrong_image =
+                        Context::new(&input, &frame, lease, foreign_program).unwrap();
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| wrong_image.advance(
+                            &mut owner.render_context_access(port, foreign_program)
+                        ))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
                     // Actual PIO translation faults after the private epoch
                     // store, while the context register still remains unknown.
                     mapping(&mut memory.ram, VA + 0x10000, SGX + 0x18000, true);
@@ -1085,41 +1129,6 @@ mod tests {
                         .is_err()
                     );
                     assert_eq!((memory.reads, memory.writes), counts);
-                    let foreign_program = if owner.policy == Policy::G13X {
-                        let variant = if variant == Some(G13XVariant::B000) {
-                            G13XVariant::C000
-                        } else {
-                            G13XVariant::B000
-                        };
-                        let root = crate::platform::apple::agx::initdata::Root {
-                            rings: 0,
-                            page_1660: 1,
-                            object_358: 2,
-                            object_848: 3,
-                            object_928: 4,
-                            object_930: 5,
-                            object_368: 6,
-                            config: [0; 0x68],
-                        };
-                        io(&mut sgx, &mut memory, |port| {
-                            Program::g13x(variant, &root, port)
-                        })
-                        .unwrap()
-                    } else {
-                        Program::fixed(
-                            if owner.policy == Policy::G13G {
-                                Policy::G14G
-                            } else {
-                                Policy::G13G
-                            },
-                            if owner.policy == Policy::G13G {
-                                *b"b000"
-                            } else {
-                                *b"b100"
-                            },
-                        )
-                        .unwrap()
-                    };
                     assert!(
                         io(&mut sgx, &mut memory, |port| prefix.advance(
                             &mut owner.render_context_access(port, foreign_program)
