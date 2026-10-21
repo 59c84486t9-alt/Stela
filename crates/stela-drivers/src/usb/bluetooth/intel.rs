@@ -37,7 +37,7 @@ pub use tlv::{InheritedField, TlvIdentity};
 
 use super::{Hci, Io, Packet, State};
 use crate::firmware::{Image, Provider, Requirement};
-use alloc::{boxed::Box, collections::VecDeque, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 use core::fmt;
 
 pub(super) const SECURE_SEND: u16 = 0xfc09;
@@ -149,40 +149,8 @@ pub enum FirmwareEvidence<'a> {
     },
     RunningUnknown,
 }
-/// Owned receipt survives a later-stage failure without borrowing its provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FirmwareReceipt {
-    pub name: String,
-    pub length: usize,
-    pub sha256: [u8; 32],
-    pub source: String,
-    pub revision: String,
-    pub member: String,
-    pub license: String,
-    pub target_driver: String,
-    pub target_hardware: String,
-    pub target_revision: String,
-    pub target_board: Option<String>,
-}
-impl From<Image<'_>> for FirmwareReceipt {
-    fn from(image: Image<'_>) -> Self {
-        let p = image.provenance();
-        let t = image.target();
-        Self {
-            name: image.name().into(),
-            length: image.bytes().len(),
-            sha256: image.sha256(),
-            source: p.source.into(),
-            revision: p.revision.into(),
-            member: p.member.into(),
-            license: p.license.into(),
-            target_driver: t.driver.into(),
-            target_hardware: t.hardware.into(),
-            target_revision: t.revision.into(),
-            target_board: t.board.map(Into::into),
-        }
-    }
-}
+// Keep the established Intel receipt path compatible.
+pub use super::FirmwareReceipt;
 /// One real secure-send/reset/boot transition, in upload order. Raw observed
 /// identities remain separate from explicitly inherited bootloader inputs.
 #[derive(Clone, Debug, PartialEq, Eq)]

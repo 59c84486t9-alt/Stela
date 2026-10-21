@@ -25,11 +25,14 @@
 //! the transport; failed hardware cancellation retains DMA ownership and prevents
 //! reuse. There is deliberately no generic method to mark firmware "ready".
 mod binding;
+mod firmware;
 mod host;
 mod initialization;
 pub mod intel;
+pub mod realtek;
 
 pub use binding::{Binding, CLASS};
+pub use firmware::FirmwareReceipt;
 pub use host::Host;
 pub use initialization::{InitializationError, InitializationReport};
 
