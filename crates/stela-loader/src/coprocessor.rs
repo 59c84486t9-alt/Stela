@@ -168,7 +168,9 @@ pub struct ZeroRange {
 pub struct Placement {
     pub physical_base: u64,
     pub backing_bytes: u64,
-    /// Location only: not permission to execute or program a locked register.
+    /// Entry bytes in guest physical backing, not the IORVBAR address. Original
+    /// iBoot programs the separate IOP remap/DVA selected by its mapping owner.
+    /// Neither address is permission to execute or program a locked register.
     pub entry_physical_address: u64,
     pub copies: Vec<CopyRange>,
     pub zeroes: Vec<ZeroRange>,
