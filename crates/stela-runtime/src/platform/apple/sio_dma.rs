@@ -14,6 +14,8 @@
 //! to manufacture progress. Full SIO setup/control, mailbox dispatch, receive
 //! channels and DPA physical reset ownership remain separate requirements.
 //! Consequently this boundary is not yet registered as complete PMGR coverage.
+pub mod setup;
+
 use super::bus::LifecycleState;
 use crate::platform::dma::{DmaError, Port};
 use alloc::collections::VecDeque;
