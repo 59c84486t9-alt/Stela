@@ -11,6 +11,8 @@ use crate::platform::apple::{
 };
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
+mod cpu;
+pub use cpu::ProcessorAssociation;
 mod records;
 use records::{Layout, Record};
 mod implicit;
@@ -59,6 +61,70 @@ pub struct PowerStates {
 }
 
 impl PowerStates {
+    /// Positively qualified physical CPU owners. The effective harvesting
+    /// setting must include supplied start-time overrides; this method supplies
+    /// no initial LifecycleState and never registers a participant or ACKs PMGR.
+    pub fn processor_associations(
+        &self,
+        chip: crate::machine::Chip,
+        root: &Node<'_>,
+        processors: &[crate::machine::registers::Identity],
+        acc_harvesting: u32,
+    ) -> Result<Vec<ProcessorAssociation>, String> {
+        let io = root.child("arm-io").ok_or("CPU PMGR requires arm-io")?;
+        let node = io.child("pmgr").ok_or("CPU PMGR requires pmgr")?;
+        // Reconstruct every original domain through the existing reader. The
+        // association resolver may trust normalized non-CPU locations only
+        // after this equality check, including aliases and parent identities.
+        let table = decode_domain_table(&node, &|address| cpu::physical(&io, address, 4).ok())?;
+        if self.domains != table.domains
+            || self.blocks != table.blocks
+            || self.registers != table.registers
+        {
+            return Err("CPU PMGR canonical inventory differs from the source tree".into());
+        }
+        let (layout, _) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
+            .map_err(String::from)?;
+        let devices = node
+            .property("devices")
+            .ok_or("CPU PMGR requires devices")?;
+        if !devices.len().is_multiple_of(PMGR_DEVICE)
+            || devices.len() / PMGR_DEVICE != self.domains.len()
+        {
+            return Err("CPU PMGR views differ from the complete domain inventory".into());
+        }
+        let views = devices
+            .as_chunks::<PMGR_DEVICE>()
+            .0
+            .iter()
+            .zip(&self.domains)
+            .map(|(raw, domain)| {
+                let record = Record::parse(layout, raw).map_err(String::from)?;
+                if domain.id != domain_id(record.id) || domain.name != record.name {
+                    return Err("CPU PMGR record and canonical domain differ".into());
+                }
+                let location = match (record.location, domain.address) {
+                    (Some(location), Some(address)) => Some(cpu::PmgrCpuLocation {
+                        group: location.group,
+                        index: location.index,
+                        address,
+                    }),
+                    (None, None) => None,
+                    _ => return Err("CPU PMGR physical/virtual domain mismatch".into()),
+                };
+                Ok(cpu::PmgrCpuRecord {
+                    id: domain.id,
+                    flags: raw[0],
+                    perf_domain: raw[2],
+                    name: record.name,
+                    location,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        cpu::resolve_cpu_power(chip, root, &views, processors, acc_harvesting)
+            .map_err(|error| format!("CPU PMGR associations: {error:?}"))
+    }
+
     /// Original power gates plus independently qualified physical ownership.
     /// Stable resource indices also identify the actual lifecycle owner.
     pub(crate) fn power_requirements(&self) -> Result<Vec<Vec<DomainId>>, String> {

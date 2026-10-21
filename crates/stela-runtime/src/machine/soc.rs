@@ -42,7 +42,7 @@ pub use handoff::{
 #[cfg(test)]
 use power_resources::PMGR_VIRTUAL;
 use power_resources::{PMGR_DEVICE, power_states};
-pub use power_resources::{PowerOwner, PowerResource, PowerStates};
+pub use power_resources::{PowerOwner, PowerResource, PowerStates, ProcessorAssociation};
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
 /// number of each `cluster-type`, and the `aic` node's `compatible` with the

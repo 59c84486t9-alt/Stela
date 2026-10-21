@@ -122,7 +122,7 @@ fn child<'a>(node: &Node<'a>, name: &[u8]) -> Result<Node<'a>, Error> {
     found.ok_or(Error::Malformed("missing structural ADT node"))
 }
 
-fn physical(io: &Node<'_>, address: u64, bytes: u64) -> Result<u64, Error> {
+pub(super) fn physical(io: &Node<'_>, address: u64, bytes: u64) -> Result<u64, Error> {
     let ranges = required(io, "ranges")?;
     if !ranges.len().is_multiple_of(24) || ranges.is_empty() {
         return Err(Error::Malformed("arm-io ranges"));
@@ -517,10 +517,14 @@ mod tests {
             ]);
             let mut groups = vec![0; (CPU_GROUP + 1) * 12];
             groups[CPU_GROUP * 12..].copy_from_slice(&cells32(&[0, 0, 0x3ff]));
+            groups[..12].copy_from_slice(&cells32(&[1, 0, 0x3ff]));
             let pmgr = vec![
                 ("name", b"pmgr\0".to_vec()),
                 ("compatible", COMPATIBLE.to_vec()),
-                ("reg", cells64(&[PS_BUS_BASE, PS_BYTES])),
+                (
+                    "reg",
+                    cells64(&[PS_BUS_BASE, PS_BYTES, 0x4000_0000, PS_BYTES]),
+                ),
                 ("ps-regs", groups),
             ];
             let mut cpus = Vec::new();
@@ -613,6 +617,53 @@ mod tests {
                 &self.identities,
                 0,
             )
+        }
+    }
+
+    fn canonical_states(root: &Node<'_>) -> super::super::PowerStates {
+        let io = root.child("arm-io").unwrap();
+        let pmgr = io.child("pmgr").unwrap();
+        let table =
+            super::super::decode_domain_table(&pmgr, &|address| physical(&io, address, 4).ok())
+                .unwrap();
+        super::super::PowerStates {
+            blocks: table.blocks,
+            registers: table.registers,
+            domains: table.domains,
+            resources: Vec::new(),
+            implicit: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parent_adapter_rechecks_the_entire_canonical_inventory_before_cpu_ownership() {
+        let fixture = Fixture::new();
+        let bytes = fixture.bytes();
+        let root = Node::root(&bytes).unwrap();
+        let states = canonical_states(&root);
+        let expected = fixture.resolve().unwrap();
+        assert_eq!(
+            states.processor_associations(Chip::AppleM2, &root, &fixture.identities, 0),
+            Ok(expected)
+        );
+        for mutation in 0..6 {
+            let mut changed = states.clone();
+            match mutation {
+                0 => changed.domains[0].address = Some(PS_PHYSICAL_BASE + PS_STRIDE),
+                1 => changed.domains.last_mut().unwrap().address = Some(PS_PHYSICAL_BASE),
+                2 => changed.domains[0].parents[0] = Some(DomainId { die: 0, device: 9 }),
+                3 => changed.domains[0].id.device = 0x700,
+                4 => changed.blocks[0].1 += 4,
+                _ => {
+                    changed.registers.pop().unwrap();
+                }
+            }
+            assert!(
+                changed
+                    .processor_associations(Chip::AppleM2, &root, &fixture.identities, 0)
+                    .is_err(),
+                "mutation {mutation} bypassed canonical source identity"
+            );
         }
     }
 
@@ -927,6 +978,18 @@ mod tests {
         let result = resolve_cpu_power(cpus.chip, &root, &records, &cpus.processors, 0).unwrap();
         assert_eq!(records.len(), 303);
         assert_eq!(result, Fixture::new().resolve().unwrap());
+        let states = canonical_states(&root);
+        assert_eq!(
+            states.processor_associations(cpus.chip, &root, &cpus.processors, 0),
+            Ok(result.clone())
+        );
+        let mut changed = states;
+        changed.domains.last_mut().unwrap().address = Some(PS_PHYSICAL_BASE);
+        assert!(
+            changed
+                .processor_associations(cpus.chip, &root, &cpus.processors, 0)
+                .is_err()
+        );
         // Source-integrity witnesses pin actual normal-mode constructor and
         // consumer instruction spans, independently of synthetic fixtures.
         for (offset, count, expected) in [
