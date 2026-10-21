@@ -295,8 +295,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         self.registers.write8(RIRBCTL, RIRB_RUN_STATUS);
         self.registers.write8(CORBCTL, COMMAND_RUN);
         self.wait(Phase::CommandStart, |r| {
-            r.read8(CORBCTL) & COMMAND_RUN != 0
-                && r.read8(RIRBCTL) & RIRB_RUN_STATUS == RIRB_RUN_STATUS
+            let corb = r.read8(CORBCTL);
+            let rirb = r.read8(RIRBCTL);
+            corb != u8::MAX
+                && rirb != u8::MAX
+                && corb & COMMAND_RUN != 0
+                && rirb & RIRB_RUN_STATUS == RIRB_RUN_STATUS
         })
     }
 
@@ -502,6 +506,8 @@ mod tests {
         rirb_reset_stuck: bool,
         response_backpressure: bool,
         response_count: u16,
+        command_start_read_failure: Option<usize>,
+        command_started_once: bool,
         commands: Vec<u32>,
         constant_reply: Option<u32>,
         parameters: BTreeMap<(u8, u8), u32>,
@@ -551,6 +557,8 @@ mod tests {
                 rirb_reset_stuck: false,
                 response_backpressure: false,
                 response_count: 0,
+                command_start_read_failure: None,
+                command_started_once: false,
                 commands: Vec::new(),
                 constant_reply: Some(0x1234_abcd),
                 parameters: BTreeMap::new(),
@@ -872,6 +880,12 @@ mod tests {
                 return;
             }
             self.set(offset, value, bytes);
+            if offset == CORBCTL
+                && value & u32::from(COMMAND_RUN) != 0
+                && self.bytes[RIRBCTL] & COMMAND_RUN != 0
+            {
+                self.command_started_once = true;
+            }
         }
 
         fn dma_stream(&mut self, index: u8) {
@@ -946,6 +960,9 @@ mod tests {
         fn read8(&mut self, offset: usize) -> u8 {
             let mut m = self.0.borrow_mut();
             m.advance();
+            if m.command_started_once && m.command_start_read_failure == Some(offset) {
+                return u8::MAX;
+            }
             m.get(offset, 1) as u8
         }
         fn read16(&mut self, offset: usize) -> u16 {
@@ -2245,6 +2262,35 @@ mod tests {
                 assert_eq!(result, Err(Error::Timeout(Phase::Verb)));
                 assert_eq!(model.borrow().commands.len(), 1);
             }
+        }
+    }
+    #[test]
+    fn all_ones_command_control_after_final_enable_refuses_constructor_and_attempts_cleanup() {
+        for offset in [CORBCTL, RIRBCTL] {
+            let mut fixture = Fixture::new();
+            let model = Model::new(256);
+            model.borrow_mut().command_start_read_failure = Some(offset);
+            assert!(matches!(
+                create(&model, &mut fixture, config()),
+                Err(Error::Timeout(Phase::CommandStart))
+            ));
+            let m = model.borrow();
+            assert!(m.command_started_once);
+            assert_eq!(m.bytes[VMAJ], 1);
+            assert!(m.commands.is_empty());
+            assert_eq!(m.get(CORBWP, 2), 0);
+            assert!(
+                m.writes
+                    .iter()
+                    .rev()
+                    .any(|(off, value, bytes)| *off == CORBCTL && *value == 0 && *bytes == 1)
+            );
+            assert!(
+                m.writes
+                    .iter()
+                    .rev()
+                    .any(|(off, value, bytes)| *off == RIRBCTL && *value == 0 && *bytes == 1)
+            );
         }
     }
 }
