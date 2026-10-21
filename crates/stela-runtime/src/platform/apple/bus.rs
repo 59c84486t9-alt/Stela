@@ -210,6 +210,8 @@ pub enum MapError {
     Overflow,
     Overlap { existing: DeviceId },
     UnknownDevice,
+    Allocation,
+    ProposedOverlap,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -237,6 +239,57 @@ impl Bus {
     pub fn add(&mut self, device: Box<dyn MmioDevice>) -> DeviceId {
         self.devices.push(device);
         DeviceId(self.devices.len() - 1)
+    }
+    /// Install one actual device and all its ranges atomically. Validate both
+    /// existing and proposed ownership before publishing any route or device.
+    /// Each binding is (guest PA, length, device offset).
+    pub fn install(
+        &mut self,
+        device: Box<dyn MmioDevice>,
+        bindings: &[(u64, u64, u64)],
+    ) -> Result<DeviceId, MapError> {
+        if bindings.is_empty() {
+            return Err(MapError::Empty);
+        }
+        let id = DeviceId(self.devices.len());
+        let mut proposed = Vec::new();
+        proposed
+            .try_reserve_exact(bindings.len())
+            .map_err(|_| MapError::Allocation)?;
+        for &(start, len, device_offset) in bindings {
+            if len == 0 {
+                return Err(MapError::Empty);
+            }
+            let end = start.checked_add(len).ok_or(MapError::Overflow)?;
+            device_offset.checked_add(len).ok_or(MapError::Overflow)?;
+            let overlaps = |region: &Region| region.start < end && start < region.end;
+            if let Some(region) = self.regions.iter().find(|region| overlaps(region)) {
+                return Err(MapError::Overlap {
+                    existing: region.device,
+                });
+            }
+            if proposed.iter().any(overlaps) {
+                return Err(MapError::ProposedOverlap);
+            }
+            proposed.push(Region {
+                start,
+                end,
+                device: id,
+                device_offset,
+            });
+        }
+        // Both allocations precede publication. Capacity changes on failure do
+        // not add observable routes or a device with partially mapped state.
+        self.devices
+            .try_reserve(1)
+            .map_err(|_| MapError::Allocation)?;
+        self.regions
+            .try_reserve(proposed.len())
+            .map_err(|_| MapError::Allocation)?;
+        self.devices.push(device);
+        self.regions.extend(proposed);
+        self.regions.sort_unstable_by_key(|region| region.start);
+        Ok(id)
     }
     /// Maps guest PAs `[start, start + len)` to device offsets
     /// `[device_offset, device_offset + len)`.
@@ -453,6 +506,43 @@ mod tests {
                 })
             );
         }
+    }
+
+    #[test]
+    fn install_validates_all_ranges_before_publishing_any_owner() {
+        let mut bus = Bus::new();
+        let original = bus
+            .install(Box::new(Scratch([0; 16])), &[(0x2000, 16, 0)])
+            .unwrap();
+        for bindings in [
+            vec![(0x1000, 16, 0), (0x2008, 16, 16)],
+            vec![(0x1000, 16, 0), (0x1008, 16, 16)],
+            vec![(0x1000, 16, 0), (u64::MAX - 7, 16, 0)],
+            vec![(0x1000, 16, 0), (0x3000, 16, u64::MAX - 7)],
+            vec![(0x1000, 16, 0), (0x3000, 0, 0)],
+            vec![],
+        ] {
+            assert!(bus.install(Box::new(Scratch([0; 16])), &bindings).is_err());
+            assert_eq!(bus.devices.len(), 1);
+            assert_eq!(bus.regions.len(), 1);
+            assert!(bus.route(0x1000, Width::Word).is_err());
+            assert_eq!(bus.route(0x2000, Width::Word), Ok((original, 0)));
+        }
+        assert_eq!(
+            bus.install(
+                Box::new(Scratch([0; 16])),
+                &[(0x1000, 16, 0), (0x1008, 16, 16)]
+            ),
+            Err(MapError::ProposedOverlap)
+        );
+        let added = bus
+            .install(
+                Box::new(Scratch([0; 16])),
+                &[(0x3000, 8, 8), (0x1000, 8, 0)],
+            )
+            .unwrap();
+        assert_eq!(bus.route(0x3004, Width::Word), Ok((added, 12)));
+        assert_eq!(bus.route(0x1000, Width::Word), Ok((added, 0)));
     }
 
     #[test]

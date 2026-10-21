@@ -32,6 +32,8 @@ use dart_topology::iommu;
 use dart_topology::iommus;
 
 mod handoff;
+mod memory_resources;
+pub use memory_resources::DirectMemoryCache;
 mod power_resources;
 mod topology;
 pub use handoff::{
@@ -1601,6 +1603,8 @@ pub struct Board {
     pub power_states: Option<PowerStates>,
     /// `/arm-io/mcc`, when the DeviceTree shows an `mcc,t8112`.
     pub memory_cache: Option<MemoryCache>,
+    /// Direct T6000 resources; parsing does not grant native RAM/DSB authority.
+    pub direct_memory_cache: Option<DirectMemoryCache>,
     /// The CPU clusters' PMGR registers, when the DeviceTree shows the SoC's
     /// PMGR and the SoC row describes them.
     pub clusters: Vec<CpuCluster>,
@@ -2392,6 +2396,8 @@ pub struct MemoryCache {
 pub struct PtdBank {
     pub physical: u64,
     pub ranges: Vec<ptd::Range>,
+    /// Original fourth word, in exactly the same order as ranges. Not AIC IDs.
+    pub interrupts: Vec<u32>,
 }
 
 /// A `ptd-range` record's bytes: id, first entry, entries, interrupt and a
@@ -4170,27 +4176,14 @@ fn memory_cache(
         .and_then(|nub| nub.property("ptd-range"))
         .filter(|records| !records.is_empty() && records.len() % PTD_RANGE == 0)
         .ok_or("/arm-io/pmp/iop-pmp-nub has no whole ptd-range records")?;
-    let ranges = records
-        .as_chunks::<PTD_RANGE>()
-        .0
-        .iter()
-        .map(|record| {
-            let word = |at: usize| u32::from_le_bytes(record[at..at + 4].try_into().expect("4"));
-            let name = record[16..]
-                .split(|&byte| byte == 0)
-                .next()
-                .unwrap_or_default();
-            ptd::Range {
-                id: word(0),
-                start: word(4),
-                count: word(8),
-                name: String::from_utf8_lossy(name).into_owned(),
-            }
-        })
-        .collect();
+    let (ranges, interrupts) = memory_resources::publication_ranges(
+        records,
+        ((ptd::PTD_BYTES - ptd::UPDATE_OFFSET) / 8) as usize,
+    )?;
     let ptd = PtdBank {
         physical: bank.0,
         ranges,
+        interrupts,
     };
     Ok(Some(MemoryCache {
         cache: amcc::Cache {
@@ -4862,6 +4855,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         cpu_start,
     } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
+    let direct_memory_cache =
+        memory_resources::direct_memory_cache(&io, &translate, memory_controller.as_ref())?;
     let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
     let spmis = spmi_controllers(&io, &translate, phandle)?;
     let dcp = dcp_device(&io, &translate, &darts)?;
@@ -4899,6 +4894,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         usbs,
         power_states,
         memory_cache,
+        direct_memory_cache,
         clusters,
         aon_fuses,
         cpu_start,
@@ -7709,6 +7705,7 @@ mod tests {
                 channels: (0x2_0100_0000, 0x200_0000, 8),
                 ptd: PtdBank {
                     physical: 0x2_3b3c_0000,
+                    interrupts: vec![0, 0],
                     ranges: vec![
                         ptd::Range {
                             id: 1,

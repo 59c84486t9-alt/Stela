@@ -1,0 +1,562 @@
+//! Prepared direct MCC/AMCC/PTD resources. No native RAM/DSB authority is
+//! manufactured here and no engine mount is enabled by constructing this object.
+use crate::{
+    machine::soc::{DirectMemoryCache, MemoryController},
+    platform::apple::{
+        amcc::{Amcc, Layout, Register},
+        bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
+        interrupt::Wire,
+        mcc::{self, Configuration, Controller},
+        ptd::Ptd,
+    },
+};
+use alloc::vec::Vec;
+
+/// One prepared software resource with immutable placement and actual shared
+/// controller identity. A caller must still bind canonical RAM, all writers,
+/// execution ownership, DSB retirement and paired PTD reads before mounting it.
+/// Engine adoption is deliberately separate: neither descriptor parsing nor a
+/// cacheless boot argument supplies that admission proof.
+pub struct Prepared {
+    router: Router,
+    ptd: Ptd,
+    descriptor: DirectMemoryCache,
+}
+impl Prepared {
+    pub fn new(
+        descriptor: DirectMemoryCache,
+        locks: &MemoryController,
+        programmed: Option<(u64, u64)>,
+        configuration: Configuration,
+        lifecycle: LifecycleState,
+        ptd_bindings: [Option<Wire>; 16],
+    ) -> Result<Self, &'static str> {
+        descriptor.validate(locks)?;
+        if configuration.dram.len() != descriptor.apertures.len()
+            || descriptor.apertures != locks.apertures
+            || descriptor.ptd.ranges.len() != descriptor.ptd.interrupts.len()
+        {
+            return Err("MCC preparation does not match actual descriptor/configuration ownership");
+        }
+        let controller = Controller::initialized_cacheless(configuration, lifecycle)?;
+        let router = Router::new(
+            locks.layout,
+            programmed,
+            controller,
+            descriptor.apertures.len(),
+        )?;
+        let ptd = Ptd::initialized(
+            u32::try_from(descriptor.ptd_entries)
+                .map_err(|_| "PTD entry count exceeds source width")?,
+            &descriptor.ptd.ranges,
+            lifecycle,
+            ptd_bindings,
+        )?;
+        Ok(Self {
+            router,
+            ptd,
+            descriptor,
+        })
+    }
+    pub fn controller(&self) -> &Controller {
+        &self.router.controller
+    }
+    pub fn publication_bank(&self) -> &Ptd {
+        &self.ptd
+    }
+    pub fn descriptor(&self) -> &DirectMemoryCache {
+        &self.descriptor
+    }
+    pub fn locked_region(&self) -> Option<(u64, u64)> {
+        self.router.locks.locked_region()
+    }
+    /// Complete aperture bindings, not a permission to publish them yet. One
+    /// bus device owns both register interpretations and every actual aperture.
+    pub fn bindings(&self) -> Vec<(u64, u64, u64)> {
+        let mut bindings: Vec<_> = self
+            .descriptor
+            .apertures
+            .iter()
+            .enumerate()
+            .map(|(index, &pa)| (pa, mcc::APERTURE_BYTES, index as u64 * mcc::APERTURE_BYTES))
+            .collect();
+        bindings.push((
+            self.descriptor.ptd.physical,
+            crate::platform::apple::ptd::PTD_BYTES,
+            self.ptd_offset(),
+        ));
+        bindings
+    }
+    fn ptd_offset(&self) -> u64 {
+        self.descriptor.apertures.len() as u64 * mcc::APERTURE_BYTES
+    }
+}
+impl Lifecycle for Prepared {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        self.router.check_lifecycle(proposed)?;
+        self.ptd.check_lifecycle(proposed)
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        assert!(self.check_lifecycle(proposed).is_ok());
+        self.router.set_lifecycle(proposed, access);
+        self.ptd.set_lifecycle(proposed, access);
+    }
+}
+impl MmioDevice for Prepared {
+    fn name(&self) -> &'static str {
+        "mcc-amcc-ptd"
+    }
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
+    fn read(
+        &mut self,
+        offset: u64,
+        width: Width,
+        access: &mut Access<'_>,
+    ) -> Result<u64, MmioError> {
+        if offset >= self.ptd_offset() {
+            self.ptd.read(offset - self.ptd_offset(), width, access)
+        } else {
+            self.router.read(offset, width, access)
+        }
+    }
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        access: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        if offset >= self.ptd_offset() {
+            self.ptd
+                .write(offset - self.ptd_offset(), width, value, access)
+        } else {
+            self.router.write(offset, width, value, access)
+        }
+    }
+    fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
+        self.ptd.advance(access)
+    }
+}
+
+/// Private until the canonical memory admission can consume Prepared. The lock
+/// model has no independent cache status/DSID bank: aliases have one owner.
+struct Router {
+    locks: Amcc,
+    controller: Controller,
+    views: Vec<mcc::View>,
+    offsets: Vec<u64>,
+    lock_layout: Layout,
+}
+impl Router {
+    fn new(
+        mut layout: Layout,
+        programmed: Option<(u64, u64)>,
+        controller: Controller,
+        apertures: usize,
+    ) -> Result<Self, &'static str> {
+        if layout.cache_status
+            != Some(Register {
+                offset: 0x10000c,
+                mask: 1,
+                value: 1,
+            })
+        {
+            return Err("joint MCC/AMCC cache-status descriptor is not source-qualified");
+        }
+        if apertures == 0
+            || apertures > 16
+            || layout.planes != u32::from(mcc::PLANES)
+            || layout.stride != mcc::PLANE_STRIDE
+            || layout.aperture_bytes > mcc::APERTURE_BYTES
+        {
+            return Err("joint MCC/AMCC geometry has no original direct-controller contract");
+        }
+        // DT cache-status offset0x10000c aliases the original MCC broadcast
+        // selector. Do not retain Amcc's separate default cache_disabled bit.
+        // Only the exact MCC word is presently qualified; other per-plane
+        // cache-status aliases refuse until their original relationship is known.
+        layout.cache_status = None;
+        let locks = Amcc::new(layout, apertures, programmed, None)?;
+        let mut views = Vec::new();
+        for aperture in 0..apertures {
+            views.push(controller.view(aperture as u8)?);
+        }
+        if controller.view(apertures as u8).is_ok() {
+            return Err("MCC owner has extra unplaced apertures");
+        }
+        let offsets = controller.register_offsets();
+        // A lock word colliding with an MCC word needs one source-qualified
+        // protocol, not priority-based fallback between independent devices.
+        let group = layout.group;
+        for register in [
+            Some(group.lower_limit),
+            Some(group.upper_limit),
+            group.enable,
+            group.write_disable,
+            group.lock,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            for plane in 0..layout.planes {
+                if offsets.contains(&(register.offset + u64::from(plane) * layout.stride)) {
+                    return Err("MCC and CTRR registers overlap without a shared protocol");
+                }
+            }
+        }
+        Ok(Self {
+            locks,
+            controller,
+            views,
+            offsets,
+            lock_layout: layout,
+        })
+    }
+    fn target(&self, offset: u64) -> Result<(usize, u64), &'static str> {
+        let lifecycle = self.controller.lifecycle_state();
+        if !lifecycle.powered || !lifecycle.clocked || lifecycle.quiesced || lifecycle.reset {
+            return Err("joint MCC/AMCC resource is paused by its actual owner");
+        }
+        let aperture = usize::try_from(offset / mcc::APERTURE_BYTES)
+            .map_err(|_| "MCC aperture index overflows")?;
+        if aperture >= self.views.len() {
+            return Err("MCC access exceeds prepared aperture ownership");
+        }
+        Ok((aperture, offset % mcc::APERTURE_BYTES))
+    }
+}
+impl Lifecycle for Router {
+    fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        for view in &self.views {
+            view.check_lifecycle(proposed)?;
+        }
+        Ok(())
+    }
+    fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>) {
+        assert!(self.check_lifecycle(proposed).is_ok());
+        // Views share the actual Controller. Commit once, after full preflight.
+        self.views[0].set_lifecycle(proposed, access);
+    }
+}
+impl MmioDevice for Router {
+    fn name(&self) -> &'static str {
+        "mcc-amcc"
+    }
+    fn lifecycle(&mut self) -> Option<&mut dyn Lifecycle> {
+        Some(self)
+    }
+    fn read(
+        &mut self,
+        offset: u64,
+        width: Width,
+        access: &mut Access<'_>,
+    ) -> Result<u64, MmioError> {
+        let (aperture, within) = self
+            .target(offset)
+            .map_err(|reason| refuse(self.name(), offset, width, Direction::Read, reason))?;
+        if self.offsets.contains(&within) {
+            return self.views[aperture].read(within, width, access);
+        }
+        if within >= self.lock_layout.aperture_bytes {
+            return Err(refuse(
+                self.name(),
+                offset,
+                width,
+                Direction::Read,
+                "unqualified MCC register beyond lock aperture",
+            ));
+        }
+        self.locks.read(
+            aperture as u64 * self.lock_layout.aperture_bytes + within,
+            width,
+            access,
+        )
+    }
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        access: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        let (aperture, within) = self
+            .target(offset)
+            .map_err(|reason| refuse(self.name(), offset, width, Direction::Write, reason))?;
+        if self.offsets.contains(&within) {
+            return self.views[aperture].write(within, width, value, access);
+        }
+        if within >= self.lock_layout.aperture_bytes {
+            return Err(refuse(
+                self.name(),
+                offset,
+                width,
+                Direction::Write,
+                "unqualified MCC register beyond lock aperture",
+            ));
+        }
+        self.locks.write(
+            aperture as u64 * self.lock_layout.aperture_bytes + within,
+            width,
+            value,
+            access,
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        machine::soc::PtdBank,
+        platform::apple::{
+            amcc::LockGroup, bus::Bus, interrupt::InterruptLatch, mcc::RequestKind, ptd,
+        },
+    };
+    use alloc::{boxed::Box, vec};
+
+    fn prepared() -> Prepared {
+        let reg = |offset, mask, value| Register {
+            offset,
+            mask,
+            value,
+        };
+        let locks = MemoryController {
+            apertures: vec![0x200000000, 0x201000000],
+            layout: Layout {
+                aperture_bytes: 0x200000,
+                planes: 4,
+                stride: mcc::PLANE_STRIDE,
+                cache_status: Some(reg(0x10000c, 1, 1)),
+                dram_base: 0x800000000,
+                group: LockGroup {
+                    page_size_shift: 14,
+                    lower_limit: reg(0x680, u32::MAX, 0),
+                    upper_limit: reg(0x684, u32::MAX, 0),
+                    enable: Some(reg(0x688, 1, 1)),
+                    write_disable: None,
+                    lock: Some(reg(0x68c, 1, 1)),
+                },
+            },
+        };
+        let descriptor = DirectMemoryCache {
+            apertures: locks.apertures.clone(),
+            config_data: vec![1],
+            alternate_dram_configuration: 0xffff0000,
+            ptd: PtdBank {
+                physical: 0x28e3c0000,
+                ranges: vec![ptd::Range {
+                    id: 1,
+                    start: 0,
+                    count: 2,
+                    name: "DECLARED".into(),
+                }],
+                interrupts: vec![14],
+            },
+            ptd_updates: (0x28e3d0000, 0xc00),
+            ptd_entries: 384,
+        };
+        Prepared::new(
+            descriptor,
+            &locks,
+            Some((0x800004000, 0x4000)),
+            Configuration {
+                dram: vec![[7; 4]; 2],
+                weights: [1; 32],
+            },
+            LifecycleState {
+                powered: true,
+                clocked: true,
+                reset: false,
+                quiesced: false,
+                retention: true,
+            },
+            [None; 16],
+        )
+        .unwrap()
+    }
+    #[test]
+    fn joint_resource_has_one_backing_for_broadcast_policy_and_publications() {
+        let owner = prepared();
+        let controller = owner.controller().clone();
+        let publication = owner.publication_bank().clone();
+        let bindings = owner.bindings();
+        assert_eq!(bindings.len(), 3);
+        let mut bus = Bus::new();
+        let id = bus.install(Box::new(owner), &bindings).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 17, &mut latch);
+        let base = 0x200000000;
+        assert_eq!(bus.read(base + 0x10000c, Width::Word, &mut access), Ok(0));
+        bus.write(base + 0x10000c, Width::Word, 1, &mut access)
+            .unwrap();
+        assert_eq!(
+            controller
+                .observations()
+                .iter()
+                .find(|word| word.aperture == 0 && word.offset == 0x10000c)
+                .unwrap()
+                .value,
+            1
+        );
+        // The extra plane status addresses never fall back to independent
+        // Amcc cache-disabled defaults. The original relationship is unknown.
+        for plane in 1..4 {
+            assert!(
+                bus.read(
+                    base + 0x10000c + plane * mcc::PLANE_STRIDE,
+                    Width::Word,
+                    &mut access
+                )
+                .is_err()
+            );
+        }
+        bus.write(base + 0x1c00, Width::Word, 0, &mut access)
+            .unwrap();
+        assert_eq!(bus.read(base + 0x1c04, Width::Word, &mut access), Ok(0));
+        assert!(
+            bus.write(base + 0x1c00, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        bus.write(base + 0x14000, Width::Word, 2, &mut access)
+            .unwrap();
+        assert!(matches!(
+            controller.requests().last().unwrap().kind,
+            RequestKind::Deprioritize { dsid: 1, .. }
+        ));
+        let before = controller.requests();
+        assert!(
+            bus.write(base + 0x14000, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        assert!(
+            bus.write(base + mcc::DCS_BASE + 0xa40, Width::Word, 0, &mut access)
+                .is_err()
+        );
+        assert_eq!(controller.requests(), before);
+        // The second aperture reaches the same actual owner's separate bank.
+        bus.write(
+            base + mcc::APERTURE_BYTES + 0xa000,
+            Width::Word,
+            0x10002,
+            &mut access,
+        )
+        .unwrap();
+        assert_eq!(
+            controller.policy(1, 1, 0).unwrap().configured_quota_bytes(),
+            2 << 17
+        );
+        assert_eq!(
+            controller.policy(0, 1, 0).unwrap().configured_quota_bytes(),
+            0
+        );
+        bus.write(0x28e3d0000, Width::Double, 0x1234, &mut access)
+            .unwrap();
+        assert!(bus.read(0x28e3c0000, Width::Double, &mut access).is_err());
+        assert_eq!(
+            publication.consume_entry(0, &mut access).unwrap().value,
+            0x1234
+        );
+        assert_eq!(bus.device::<Prepared>(id).unwrap().locked_region(), None);
+        // No register beyond AMCC's smaller lock aperture can alias a later
+        // aperture's lock plane through a changed device-offset divisor.
+        assert!(bus.read(base + 0x200680, Width::Word, &mut access).is_err());
+    }
+    #[test]
+    fn old_mount_paths_refuse_missing_owners_before_publishing_any_aperture() {
+        let owner = prepared();
+        let mut devices = super::super::AppleDevices::new();
+        let mut layout = owner.router.lock_layout;
+        let missing = devices.add_memory_controller(
+            &[0x400000000],
+            layout,
+            None,
+            Some(crate::platform::apple::amcc::Cache {
+                shared: (0x100000, 0x80000),
+                broadcast: 0xf00000,
+                bytes: 8 << 20,
+                ways: 16,
+            }),
+        );
+        assert!(
+            missing
+                .unwrap_err()
+                .contains("qualified memory, drain and service owner")
+        );
+        assert!(devices.memory_controller.is_none());
+        assert!(devices.bus.route(0x400000680, Width::Word).is_err());
+        layout.cache_status = Some(Register {
+            offset: 0x10000c,
+            mask: 1,
+            value: 1,
+        });
+        assert!(
+            devices
+                .add_memory_controller(&[0x400000000], layout, None, None)
+                .is_err()
+        );
+        assert!(devices.bus.route(0x400000680, Width::Word).is_err());
+        // Failure at a later aperture must not leave the earlier one mapped.
+        layout.cache_status = None;
+        let bindings = owner.bindings();
+        devices.bus.install(Box::new(owner), &bindings).unwrap();
+        assert!(
+            devices
+                .add_io_access_controller(&[0x400000000, 0x200000000], layout, None)
+                .is_err()
+        );
+        assert!(devices.bus.route(0x400000680, Width::Word).is_err());
+        assert!(devices.bus.route(0x200000680, Width::Word).is_ok());
+    }
+
+    #[test]
+    fn paused_joint_owner_refuses_locks_and_retains_checked_state() {
+        let mut owner = prepared();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(owner.read(0x680, Width::Word, &mut access), Ok(1));
+        let running = owner.controller().lifecycle_state();
+        let paused = LifecycleState {
+            clocked: false,
+            ..running
+        };
+        owner.set_lifecycle(paused, &mut access);
+        assert!(owner.read(0x680, Width::Word, &mut access).is_err());
+        assert!(owner.write(0x688, Width::Word, 1, &mut access).is_err());
+        owner.set_lifecycle(running, &mut access);
+        assert_eq!(owner.read(0x680, Width::Word, &mut access), Ok(1));
+        assert!(
+            owner
+                .check_lifecycle(LifecycleState {
+                    reset: true,
+                    ..running
+                })
+                .is_err()
+        );
+        assert!(
+            owner
+                .check_lifecycle(LifecycleState {
+                    powered: false,
+                    retention: false,
+                    ..running
+                })
+                .is_err()
+        );
+        owner.write(0x688, Width::Word, 1, &mut access).unwrap();
+        assert_eq!(owner.locked_region(), Some((0x800004000, 0x800007fff)));
+        for aperture in 0..2 {
+            for plane in 0..4 {
+                owner
+                    .write(
+                        aperture * mcc::APERTURE_BYTES + plane * mcc::PLANE_STRIDE + 0x688,
+                        Width::Word,
+                        1,
+                        &mut access,
+                    )
+                    .unwrap();
+            }
+        }
+        assert_eq!(owner.locked_region(), Some((0x800004000, 0x800007fff)));
+    }
+}

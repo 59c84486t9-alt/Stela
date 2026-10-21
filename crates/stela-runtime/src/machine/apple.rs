@@ -30,9 +30,7 @@ use crate::platform::apple::{
     cpm::Cpm,
     cpustart::{self, CpuStart},
     dart::{self, Dart},
-    dcp,
-    dcs::Dcs,
-    display as display_hw,
+    dcp, display as display_hw,
     dpe::Dpe,
     dwc3::{self, Dwc3, PortState},
     energy::{self, Energy},
@@ -51,7 +49,7 @@ use crate::platform::apple::{
     pmp,
     pmu::{self, Pmu},
     power::{self, Power},
-    ptd::{self, Ptd},
+    ptd,
     rtkit::{Management, RtKit},
     sart::{self, Sart},
     sep::{self, Sep},
@@ -81,6 +79,7 @@ use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
+pub mod memory_resources;
 mod sleep;
 pub use sleep::PowerLog;
 
@@ -937,18 +936,37 @@ impl AppleDevices {
         programmed: Option<(u64, u64)>,
         cache: Option<amcc::Cache>,
     ) -> Result<DeviceId, String> {
+        if cache.is_some() {
+            return Err(
+                "MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner"
+                    .into(),
+            );
+        }
+        if layout.cache_status.is_some_and(|status| {
+            layout
+                .stride
+                .checked_mul(u64::from(layout.planes))
+                .is_none_or(|end| status.offset >= end)
+        }) {
+            return Err(
+                "AMCC shared MCC status requires the prepared joint memory resource owner".into(),
+            );
+        }
         let model = Amcc::new(layout, apertures.len(), programmed, cache).map_err(String::from)?;
-        let device = self.bus.add(Box::new(model));
-        let ranges: alloc::vec::Vec<Range> = apertures
+        let ranges: alloc::vec::Vec<(u64, u64, u64)> = apertures
             .iter()
-            .map(|&physical| Range {
-                physical,
-                bytes: layout.aperture_bytes,
+            .enumerate()
+            .map(|(index, &physical)| {
+                let offset = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_mul(layout.aperture_bytes))
+                    .ok_or("CTRR device aperture offsets overflow")?;
+                Ok((physical, layout.aperture_bytes, offset))
             })
-            .collect();
-        self.map(device, &ranges)
-            .map_err(|error| format!("CTRR controller placement: {error:?}"))?;
-        Ok(device)
+            .collect::<Result<_, String>>()?;
+        self.bus
+            .install(Box::new(model), &ranges)
+            .map_err(|error| format!("CTRR controller placement: {error:?}"))
     }
 
     /// The memory cache controller's `channels` DRAM channels, sharing
@@ -960,16 +978,8 @@ impl AppleDevices {
         ptd: u64,
         ranges: &[ptd::Range],
     ) -> Result<(), String> {
-        let stride = range.bytes / channels.max(1) as u64;
-        let model = Dcs::new(channels, stride).map_err(String::from)?;
-        let device = self.bus.add(Box::new(model));
-        self.map(device, &[range])
-            .map_err(|error| format!("DCS placement: {error:?}"))?;
-        let model = Ptd::new(ranges).map_err(String::from)?;
-        let device = self.bus.add(Box::new(model));
-        self.bus
-            .map(device, ptd, ptd::PTD_BYTES, 0)
-            .map_err(|error| format!("PTD placement: {error:?}"))
+        let _ = (range, channels, ptd, ranges);
+        Err("MCC/DCS/PTD mount requires an actual qualified memory, drain and service owner".into())
     }
 
     /// Place an explicitly described ANS2, its started RTKit coprocessor

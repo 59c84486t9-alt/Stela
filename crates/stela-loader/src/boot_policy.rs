@@ -22,6 +22,8 @@ use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 
+pub mod mcc;
+
 const ASMB: &str = "/chosen/asmb";
 const CHOSEN: &str = "/chosen";
 const MANIFEST_PROPERTIES: &str = "/chosen/manifest-properties";
