@@ -27,6 +27,16 @@ DISPATCH_HEADERS := $(addprefix $(BUILD)/dispatch/gen,$(addsuffix _dispatch_pack
 DISPATCH_OBJECTS := $(addprefix $(BUILD)/dispatch-gen,$(addsuffix .o,$(DISPATCH_GENERATIONS)))
 HOST_DISPATCH_OBJECTS := $(addprefix $(BUILD)/host-dispatch-gen,$(addsuffix .o,$(DISPATCH_GENERATIONS)))
 OBJECTS += $(BUILD)/dispatch.o $(DISPATCH_OBJECTS)
+COMPUTE_GENERATIONS := 125 200 300 350
+COMPUTE_XML_125 := gen125
+COMPUTE_XML_200 := xe2
+COMPUTE_XML_300 := xe3
+COMPUTE_XML_350 := xe3p
+COMPUTE_HEADERS := $(addprefix $(BUILD)/dispatch/gen,$(addsuffix _compute_pack.h,$(COMPUTE_GENERATIONS)))
+COMPUTE_OBJECTS := $(addprefix $(BUILD)/compute-gen,$(addsuffix .o,$(COMPUTE_GENERATIONS)))
+HOST_COMPUTE_OBJECTS := $(addprefix $(BUILD)/host-compute-gen,$(addsuffix .o,$(COMPUTE_GENERATIONS)))
+.SECONDARY: $(COMPUTE_HEADERS)
+OBJECTS += $(BUILD)/compute_dispatch.o $(COMPUTE_OBJECTS)
 PACKER_GENERATIONS := 120 125 200 300 350
 I915_PACKER_GENERATIONS := 60 70 75 80 90 110
 
@@ -67,6 +77,45 @@ $(BUILD)/dispatch.o: $(SOURCE)/dispatch.c $(SOURCE)/dispatch.h $(SOURCE)/dispatc
 
 .PHONY: dispatch
 dispatch: $(BUILD)/dispatch.o $(DISPATCH_OBJECTS)
+
+$(BUILD)/dispatch/gen%_compute_pack.h: $(wildcard $(MESA_SOURCE)/src/intel/genxml/*.xml $(MESA_SOURCE)/src/intel/genxml/*.py) | $(BUILD)
+	mkdir -p "$(BUILD)/dispatch"
+	$(PYTHON) $(MESA_SOURCE)/src/intel/genxml/gen_pack_header.py \
+	    $(MESA_SOURCE)/src/intel/genxml/$(COMPUTE_XML_$*).xml \
+	    --include-symbols COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE --helpers-include genxml_native.h > "$@.tmp"
+	mv "$@.tmp" "$@"
+
+$(BUILD)/compute-gen%.o: $(SOURCE)/dispatch/compute%.c $(COMPUTE_HEADERS) $(SOURCE)/dispatch/compute_pack.h | $(BUILD)
+	$(CC) $(CFLAGS) -I$(SOURCE) -I$(BUILD)/dispatch -I$(MESA_SOURCE)/src \
+	    -I$(MESA_SOURCE)/src/intel/genxml -MD -MP -c "$<" -o "$@"
+
+$(BUILD)/compute_dispatch.o: $(SOURCE)/compute_dispatch.c $(SOURCE)/compute_dispatch.h $(SOURCE)/compute_dispatch_internal.h | $(BUILD)
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
+
+$(BUILD)/host-compute-gen%.o: $(SOURCE)/dispatch/compute%.c $(COMPUTE_HEADERS) $(SOURCE)/dispatch/compute_pack.h | $(BUILD)
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE) -I$(BUILD)/dispatch \
+	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/src/intel/genxml -MD -MP -c "$<" -o "$@"
+
+.PHONY: compute-dispatch test-compute-dispatch test-compute-packers
+compute-dispatch: $(BUILD)/compute_dispatch.o $(COMPUTE_OBJECTS)
+
+$(BUILD)/test-compute-dispatch: $(SOURCE)/tests/compute_dispatch.c $(SOURCE)/compute_dispatch.c \
+    $(HOST_COMPUTE_OBJECTS) $(HEADERS) $(SOURCE)/compute_dispatch_internal.h | $(BUILD)
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) $(filter %.c %.o,$^) -o "$@"
+
+test-compute-dispatch: $(BUILD)/test-compute-dispatch
+	"$(BUILD)/test-compute-dispatch"
+
+$(BUILD)/test-compute-packers-%: $(SOURCE)/tests/compute_dispatch_mesa.c $(SOURCE)/compute_dispatch.c \
+    $(HOST_COMPUTE_OBJECTS) $(HEADERS) $(SOURCE)/compute_dispatch_internal.h | $(BUILD)
+	test -n "$(MESA_BUILD)"
+	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
+	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
+	    $(filter %.c %.o,$^) -lm -o "$@"
+
+test-compute-packers: $(addprefix $(BUILD)/test-compute-packers-,$(COMPUTE_GENERATIONS))
+	$(foreach generation,$(COMPUTE_GENERATIONS),"$(BUILD)/test-compute-packers-$(generation)" &&) true
 
 $(BUILD)/host-dispatch-gen%.o: $(SOURCE)/dispatch/gen%.c $(DISPATCH_HEADERS) $(SOURCE)/dispatch/pack.h
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE) -I$(BUILD)/dispatch \
@@ -127,12 +176,14 @@ $(BUILD)/test-ct: $(SOURCE)/tests/ct.c $(SOURCE)/ct.c $(HEADERS) | $(BUILD)
 $(BUILD)/test-i915-commands: $(SOURCE)/tests/i915_commands.c $(SOURCE)/i915_commands.c $(HEADERS) | $(BUILD)
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) $(filter %.c,$^) -o "$@"
 
-test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/test-i915-commands $(BUILD)/test-dispatch
+test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/test-i915-commands $(BUILD)/test-dispatch $(BUILD)/test-compute-dispatch
 	"$(BUILD)/test-pt-walk"
 	"$(BUILD)/test-commands"
 	"$(BUILD)/test-ct"
 	"$(BUILD)/test-i915-commands"
 	"$(BUILD)/test-dispatch"
+	"$(BUILD)/test-compute-dispatch"
 
 -include $(OBJECTS:.o=.d)
 -include $(HOST_DISPATCH_OBJECTS:.o=.d)
+-include $(HOST_COMPUTE_OBJECTS:.o=.d)

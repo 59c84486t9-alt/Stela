@@ -34,6 +34,42 @@ pub enum CommandError {
     Native(i32),
 }
 
+/// Exact shader/resource policy for a direct Gen12.5+ COMPUTE_WALKER. This is
+/// a packet input, not device qualification. The physical owner supplies actual
+/// installed state bases, CFE/scratch, mappings/lifetimes, limits, cache policy,
+/// async throttling and workarounds. Encoded fields come from the original
+/// hosted Intel helpers and the selected compiled binary. Push-bearing shaders,
+/// indirect/predicated/partitioned dispatch and completion writes are unsupported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct ComputeDispatch {
+    pub gfx_verx10: u32,
+    pub local_size: [u32; 3],
+    pub simd_size: u32,
+    pub threads: u32,
+    pub right_mask: u32,
+    pub groups: [u32; 3],
+    /// Actual selected kernel's offset from instruction state base, aligned 64.
+    pub kernel_offset: u32,
+    /// Offset from the installed surface state base, aligned 32.
+    pub binding_table_offset: u32,
+    /// Hardware prefetch hint, not the complete runtime resource table extent.
+    pub binding_table_entry_count: u32,
+    pub sampler_offset: u32,
+    pub sampler_count: u32,
+    pub slm_encoding: u32,
+    pub preferred_slm_encoding: u32,
+    pub barrier_encoding: u32,
+    pub thread_group_dispatch_size: u32,
+    pub register_blocks: u32,
+    pub generate_local_id: u32,
+    pub walk_order: u32,
+    pub uses_sampler: u32,
+    pub post_sync_mocs: u32,
+    /// The actual total compiled push requirement; this path requires zero.
+    pub push_bytes: u32,
+}
+
 #[repr(C)]
 struct NativeCommands {
     words: *mut u32,
@@ -53,6 +89,10 @@ unsafe extern "C" {
         address: u64,
         secure: bool,
         no_preempt: bool,
+    ) -> i32;
+    fn stela_intel_compute_dispatch(
+        commands: *mut NativeCommands,
+        dispatch: *const ComputeDispatch,
     ) -> i32;
 }
 
@@ -130,6 +170,14 @@ impl<'a> CommandBuffer<'a> {
         result(unsafe { stela_intel_batch_end(&mut self.native) })
     }
 
+    /// Append the original native COMPUTE_WALKER encoding. Validates packet
+    /// bounds before modifying storage; does not initialize or submit a queue.
+    pub fn compute_dispatch(&mut self, dispatch: &ComputeDispatch) -> Result<(), CommandError> {
+        // SAFETY: the slice is exclusively borrowed for this call, the input
+        // has the asserted C layout, and C retains neither pointer.
+        result(unsafe { stela_intel_compute_dispatch(&mut self.native, dispatch) })
+    }
+
     /// Append Xe's user interrupt and arbitration sequence. Interrupt routing
     /// and delivery still require the real engine and interrupt owner.
     pub fn user_interrupt(&mut self) -> Result<(), CommandError> {
@@ -158,6 +206,9 @@ fn result(status: i32) -> Result<(), CommandError> {
 }
 
 const _: () = {
+    assert!(size_of::<ComputeDispatch>() == 25 * size_of::<u32>());
+    assert!(core::mem::offset_of!(ComputeDispatch, groups) == 7 * size_of::<u32>());
+    assert!(core::mem::offset_of!(ComputeDispatch, push_bytes) == 24 * size_of::<u32>());
     assert!(core::mem::offset_of!(NativeCommands, capacity) == size_of::<usize>());
     assert!(core::mem::offset_of!(NativeCommands, used) == 2 * size_of::<usize>());
     assert!(core::mem::offset_of!(NativeCommands, address_bits) == 3 * size_of::<usize>());
@@ -227,5 +278,56 @@ mod tests {
             ]
         );
         assert_eq!(commands.remaining(), 0);
+    }
+
+    #[test]
+    fn compute_dispatch_uses_bounded_native_encoder_without_submission() {
+        let mut storage = [0xa5a5_a5a5; 44];
+        let mut commands = CommandBuffer::new(&mut storage, AddressBits::Bits57);
+        let mut dispatch = ComputeDispatch {
+            gfx_verx10: 300,
+            local_size: [32, 1, 1],
+            simd_size: 16,
+            threads: 2,
+            right_mask: 0xffff,
+            groups: [2, 3, 4],
+            kernel_offset: 0x1000,
+            binding_table_offset: 0x2000,
+            binding_table_entry_count: 1,
+            sampler_offset: 0,
+            sampler_count: 0,
+            slm_encoding: 0,
+            preferred_slm_encoding: 0,
+            barrier_encoding: 0,
+            thread_group_dispatch_size: 0,
+            register_blocks: 0,
+            generate_local_id: 0,
+            walk_order: 0,
+            uses_sampler: 0,
+            post_sync_mocs: 2,
+            push_bytes: 32,
+        };
+        assert_eq!(
+            commands.compute_dispatch(&dispatch),
+            Err(CommandError::Native(-95))
+        );
+        assert!(commands.words().is_empty());
+        dispatch.push_bytes = 0;
+        dispatch.post_sync_mocs = 0;
+        assert_eq!(
+            commands.compute_dispatch(&dispatch),
+            Err(CommandError::InvalidArgument)
+        );
+        assert!(commands.words().is_empty());
+        dispatch.post_sync_mocs = 2;
+        assert_eq!(commands.compute_dispatch(&dispatch), Ok(()));
+        assert_eq!(commands.words().len(), 40);
+        assert_eq!(commands.words()[0] & 0xff, 38);
+        assert_eq!(commands.words()[19], 0x1000);
+        assert_eq!(
+            commands.compute_dispatch(&dispatch),
+            Err(CommandError::NoSpace)
+        );
+        assert_eq!(commands.words().len(), 40);
     }
 }

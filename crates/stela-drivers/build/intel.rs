@@ -38,14 +38,27 @@ fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &
     let genxml = "src/gpu/common/mesa/src/intel/genxml";
     let output = output.join("intel-dispatch");
     fs::create_dir_all(&output).expect("cannot create Intel packet generation directory");
-    for generation in [70, 75, 80, 90, 110, 120] {
-        let generated = output.join(format!("gen{generation}_dispatch_pack.h"));
+    const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
+    const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
+    for (generation, xml, family, unit, symbols) in [
+        (70, "gen70", "dispatch", "gen", LEGACY),
+        (75, "gen75", "dispatch", "gen", LEGACY),
+        (80, "gen80", "dispatch", "gen", LEGACY),
+        (90, "gen90", "dispatch", "gen", LEGACY),
+        (110, "gen110", "dispatch", "gen", LEGACY),
+        (120, "gen120", "dispatch", "gen", LEGACY),
+        (125, "gen125", "compute", "compute", COMPUTE),
+        (200, "xe2", "compute", "compute", COMPUTE),
+        (300, "xe3", "compute", "compute", COMPUTE),
+        (350, "xe3p", "compute", "compute", COMPUTE),
+    ] {
+        let generated = output.join(format!("gen{generation}_{family}_pack.h"));
         let result = Command::new(python)
             .arg(format!("{genxml}/gen_pack_header.py"))
-            .arg(format!("{genxml}/gen{generation}.xml"))
+            .arg(format!("{genxml}/{xml}.xml"))
             .args([
                 "--include-symbols",
-                "GPGPU_WALKER,MEDIA_STATE_FLUSH",
+                symbols,
                 "--helpers-include",
                 "genxml_native.h",
             ])
@@ -57,10 +70,11 @@ fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &
             String::from_utf8_lossy(&result.stderr)
         );
         fs::write(generated, result.stdout).expect("cannot write generated Intel packet header");
-        build.file(format!("src/gpu/intel/stela/dispatch/gen{generation}.c"));
+        build.file(format!("src/gpu/intel/stela/dispatch/{unit}{generation}.c"));
     }
     build
         .file("src/gpu/intel/stela/dispatch.c")
+        .file("src/gpu/intel/stela/compute_dispatch.c")
         .include(output)
         .include("src/gpu/intel/stela")
         .include("src/gpu/common/mesa/src")
