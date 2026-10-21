@@ -76,6 +76,8 @@ pub trait Scanout {
     /// Present one completed frame: `rows` are its pixels top to bottom, each
     /// `width` pixels of the scanout's format, already composed and clipped
     /// to the mode. Called once per completed swap, before the swap completes.
+    /// An error leaves presentation uncommitted; the owner may retry the same
+    /// swap. Validate fallible inputs before publishing host-visible pixels.
     fn present(&mut self, rows: &[u8]) -> Result<(), &'static str>;
 }
 

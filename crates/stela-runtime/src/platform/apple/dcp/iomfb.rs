@@ -271,12 +271,16 @@ impl Methods {
         if !self.display.borrow().active() {
             return Ok(());
         }
-        let Some(frame) = self.frames.pop_front() else {
+        let Some(frame) = self.frames.front() else {
             return Ok(());
         };
         let mode = self.mode();
         let rows = scanout::compose(&frame.layers, mode, read)?;
         self.scanout.present(&rows)?;
+        // Both the surface DMA and host sink can refuse. The submitted swap
+        // owns its surfaces until presentation succeeds, or the AP explicitly
+        // aborts/shuts down; neither failure consumes it or queues D594.
+        let frame = self.frames.pop_front().expect("presented front frame");
         self.record_log(Log::Presented {
             swap_id: frame.swap_id,
             surfaces: frame.layers.iter().map(|layer| layer.surface).collect(),
@@ -1355,6 +1359,75 @@ mod tests {
             .unwrap();
         let started = returned(methods.call(*b"A406", &start, 8));
         u32::from_le_bytes(started[0..4].try_into().unwrap())
+    }
+
+    #[test]
+    fn surface_and_sink_faults_retain_swap_order_and_abort_cancels_without_completion() {
+        struct Sink {
+            attempts: Rc<RefCell<usize>>,
+            frames: Rc<RefCell<Vec<Vec<u8>>>>,
+        }
+        impl Scanout for Sink {
+            fn mode(&self) -> Mode {
+                MODE
+            }
+            fn present(&mut self, rows: &[u8]) -> Result<(), &'static str> {
+                let mut attempts = self.attempts.borrow_mut();
+                *attempts += 1;
+                if *attempts == 1 {
+                    return Err("sink temporarily unavailable");
+                }
+                self.frames.borrow_mut().push(rows.to_vec());
+                Ok(())
+            }
+        }
+        let attempts = Rc::new(RefCell::new(0));
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let mut methods = Methods::new(Box::new(Sink {
+            attempts: attempts.clone(),
+            frames: frames.clone(),
+        }));
+        for (id, dva) in [(1, 0x1000), (2, 0x2000)] {
+            assert_eq!(start_swap(&mut methods), id);
+            returned(methods.call(*b"A407", &submission(id, &[(0, 4, 2, dva)]), 0xc));
+        }
+        let mut reads = 0;
+        assert!(
+            methods
+                .present(|dva, bytes| {
+                    reads += 1;
+                    assert!((0x1000..0x1020).contains(&dva));
+                    bytes.fill(0x11);
+                    reads != 2
+                })
+                .is_err()
+        );
+        assert_eq!(*attempts.borrow(), 0);
+        assert!(methods.frame_pending() && !methods.callback_pending());
+        let read = |dva, bytes: &mut [u8]| {
+            assert!((0x1000..0x1020).contains(&dva));
+            bytes.fill(0x11);
+            true
+        };
+        assert_eq!(methods.present(read), Err("sink temporarily unavailable"));
+        assert!(methods.frame_pending() && !methods.callback_pending());
+        assert!(frames.borrow().is_empty());
+        methods.present(read).unwrap();
+        assert_eq!(*attempts.borrow(), 2);
+        assert_eq!(frames.borrow().len(), 1);
+        let callback = methods.take_callback().unwrap();
+        assert_eq!(callback.tag, SWAP_COMPLETE);
+        assert_eq!(&callback.input[..4], &1u32.to_le_bytes());
+        (callback.then)(&mut methods, &[]).unwrap();
+        // The next submitted swap is still present, and an AP abort owns
+        // its cancellation. It emits no invented successful completion.
+        assert!(methods.frame_pending());
+        returned(methods.call(*b"A479", &[0; 8], 4));
+        assert!(!methods.frame_pending() && !methods.callback_pending());
+        methods
+            .present(|_, _| panic!("aborted swap has no DMA"))
+            .unwrap();
+        assert_eq!(*attempts.borrow(), 2);
     }
 
     #[test]
