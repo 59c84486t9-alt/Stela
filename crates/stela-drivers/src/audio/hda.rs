@@ -25,7 +25,9 @@ mod extended;
 pub use extended::LinkClock;
 mod lifecycle;
 pub mod pci;
+mod pins;
 mod registers;
+pub use pins::{AnalogEndpoint, PinConfiguration, PinConnection, PinDevice, PinSense};
 mod routing;
 mod stream;
 pub use codec::{CodecGraph, FunctionGroup, PcmCapabilities, Verb, Widget, WidgetKind};
@@ -643,6 +645,9 @@ mod tests {
         commands: Vec<u32>,
         constant_reply: Option<u32>,
         parameters: BTreeMap<(u8, u8), u32>,
+        pin_defaults: BTreeMap<u8, u32>,
+        pin_senses: BTreeMap<u8, u32>,
+        sense_triggers: Vec<u8>,
         connection_words: BTreeMap<(u8, u8), u32>,
         formats: BTreeMap<u8, u16>,
         bindings: BTreeMap<u8, u8>,
@@ -712,6 +717,9 @@ mod tests {
                 commands: Vec::new(),
                 constant_reply: Some(0x1234_abcd),
                 parameters: BTreeMap::new(),
+                pin_defaults: BTreeMap::new(),
+                pin_senses: BTreeMap::new(),
+                sense_triggers: Vec::new(),
                 connection_words: BTreeMap::new(),
                 formats: BTreeMap::new(),
                 bindings: BTreeMap::new(),
@@ -959,7 +967,12 @@ mod tests {
                     .connection_words
                     .get(&(node, command as u8))
                     .unwrap_or(&0),
-                0xf1c => 0x0101_4010,
+                0xf1c => *self.pin_defaults.get(&node).unwrap_or(&0x0101_4010),
+                0xf09 => *self.pin_senses.get(&node).unwrap_or(&0),
+                0x709 => {
+                    self.sense_triggers.push(node);
+                    0
+                }
                 0x706 => {
                     self.bindings.insert(node, command as u8);
                     0
@@ -3087,6 +3100,109 @@ mod tests {
         controller.token.generation = u64::MAX;
         let before = access_counts(&model);
         assert_eq!(controller.reinitialize(), Err(Error::NeedsReset));
+        assert_eq!(access_counts(&model), before);
+    }
+
+    #[test]
+    fn firmware_pin_candidates_are_real_format_checked_paths_without_electrical_inference() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        model.borrow_mut().pin_defaults.insert(5, 0x01a1_9020);
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        let before = access_counts(&model);
+        let output = graph
+            .analog_endpoints(Direction::Playback, stereo())
+            .unwrap();
+        assert_eq!(output.len(), 1);
+        assert_eq!(output[0].route.nodes(), &[4, 7, 6, 2]);
+        assert_eq!(output[0].configuration.device(), PinDevice::LineOut);
+        assert_eq!(output[0].configuration.connection(), PinConnection::Jack);
+        assert_eq!(output[0].configuration.association(), 1);
+        let input = graph
+            .analog_endpoints(Direction::Capture, stereo())
+            .unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0].route.nodes(), &[3, 5]);
+        assert_eq!(input[0].configuration.device(), PinDevice::Microphone);
+        assert_eq!(input[0].configuration.color(), 9);
+        assert_eq!(input[0].configuration.connector(), 1);
+        assert_eq!(input[0].configuration.location(), 1);
+        assert!(matches!(
+            graph.analog_endpoints(
+                Direction::Capture,
+                PcmFormat {
+                    rate: 192_000,
+                    ..stereo()
+                }
+            ),
+            Err(Error::UnsupportedTopology)
+        ));
+        assert_eq!(access_counts(&model), before);
+        let mut changed = graph.clone();
+        changed.groups[0]
+            .widgets
+            .iter_mut()
+            .find(|widget| widget.node == 4)
+            .unwrap()
+            .pin_default = Some(0x4000_0000);
+        assert!(matches!(
+            changed.analog_endpoints(Direction::Playback, stereo()),
+            Err(Error::UnsupportedTopology)
+        ));
+        let metadata = PinConfiguration { raw: u32::MAX };
+        assert_eq!(metadata.device(), PinDevice::Other);
+        assert_eq!(metadata.sequence(), 15);
+        assert!(metadata.no_presence_detection());
+    }
+
+    #[test]
+    fn polled_pin_sense_uses_real_verbs_trigger_and_full_width_measurement_without_routing_writes()
+    {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        model.borrow_mut().parameters.insert((4, 0x0c), 0x1001f);
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        for value in [0, 0x8000_0020, u32::MAX] {
+            model.borrow_mut().pin_senses.insert(4, value);
+            let sense = controller.poll_pin_sense(&graph, 4).unwrap();
+            assert_eq!(sense.raw, value);
+            assert_eq!(sense.present, value & (1 << 31) != 0);
+            assert_eq!(
+                sense.impedance_code,
+                if value == u32::MAX {
+                    None
+                } else {
+                    Some(value & 0x7fff_ffff)
+                }
+            );
+        }
+        let m = model.borrow();
+        assert_eq!(m.sense_triggers, [4, 4, 4]);
+        assert!(m.power_ready.is_empty());
+        assert!(m.amplifiers.is_empty());
+        assert_eq!(m.route_controls.len(), 1); //Only initial model EAPD, no routing.
+        drop(m);
+        let mut no_detect = graph.clone();
+        no_detect.groups[0]
+            .widgets
+            .iter_mut()
+            .find(|widget| widget.node == 4)
+            .unwrap()
+            .pin_default = Some(0x0101_4110);
+        let before = access_counts(&model);
+        assert_eq!(
+            controller.poll_pin_sense(&no_detect, 4),
+            Err(Error::UnsupportedTopology)
+        );
+        assert_eq!(access_counts(&model), before);
+        controller.reinitialize().unwrap();
+        let before = access_counts(&model);
+        assert_eq!(
+            controller.poll_pin_sense(&graph, 4),
+            Err(Error::InvalidCodecGraph)
+        );
         assert_eq!(access_counts(&model), before);
     }
 
