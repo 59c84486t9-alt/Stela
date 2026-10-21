@@ -20,7 +20,8 @@
 //! - ERROR (0x100): FLAG 31, STREAM [27:20], CODE [14:0] (READ_FAULT 5,
 //!   WRITE_FAULT 4, NO_PTE 3, NO_PMD 2, NO_PGD 1, NO_TTBR 0) and region
 //!   protect 29 (below); software
-//!   writes back what it read to clear it. ERROR_MASK (0x104), ERROR_ADDR_LO
+//!   writes back what it read to clear it; SPTM also writes only the code.
+//!   ERROR_MASK (0x104), ERROR_ADDR_LO
 //!   and _HI (0x170, 0x174) and the per-stream ERROR_STREAMS bitmap (0x1c0),
 //!   which software clears by writing ones.
 //! - PROTECT, UNPROTECT and PROTECT_LOCK (0x200, 0x204, 0x208), whose
@@ -76,7 +77,7 @@
 //!
 //! Inferred, not documented: the model caches no translations, so TLB
 //! commands complete at once and BUSY never reads set; a fault latches the
-//! first error until software clears its FLAG, and the interrupt follows
+//! first error until software acknowledges its FLAG or code, and the interrupt follows
 //! FLAG with an unmasked code; a missing first-level entry is NO_PMD and a
 //! missing page entry NO_PTE; an access to a stream not enabled, without
 //! translation or out of the 36-bit space faults NO_TTBR; while TTBR_TCR is
@@ -100,6 +101,11 @@
 //! checks, and bit 29 masks and signals like CODE. The identification
 //! fields not listed above (PARAMS2 bit 4, PARAMS4 NUM_CLIENTS) read 0; FOUR_LEVEL
 //! and REMAP_EN are refused until their behavior is known.
+//!
+//! Full family evidence, capability gates and qualification gaps are in
+//! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
+//! count of this cacheless implementation, not a physical chip's dump.
+pub mod smmu;
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::{DmaError, Iommu, Memory};
@@ -107,6 +113,7 @@ use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::vec;
 use alloc::{rc::Rc, vec::Vec};
 use core::cell::RefCell;
+pub use smmu::SmmuBlock;
 
 const NAME: &str = "dart-t8110";
 
@@ -181,6 +188,7 @@ const TTBR: u64 = 0x1400;
 const STREAM_WORDS: u64 = 8;
 
 const ERROR_FLAG: u32 = 1 << 31;
+const ERROR_WRITE: u32 = 1 << 28;
 const ERROR_STREAM_SHIFT: u32 = 20;
 const ERROR_CODE: u32 = 0x7fff | Fault::Region as u32;
 const PROTECT_TTBR_TCR: u32 = 1;
@@ -196,6 +204,10 @@ const TZ_END: u64 = 0x550;
 pub const DAPF_OFFSET: u64 = 0x4000;
 /// The filter's register span.
 pub const DAPF_BYTES: u64 = 0x4000;
+/// Internal bus offset of a paired UMMS aperture, distinct from the TRAD/APF
+/// windows. The machine maps the DT's physical SMMU range to the same device.
+pub const SMMU_OFFSET: u64 = DAPF_OFFSET + DAPF_BYTES;
+pub const SMMU_BYTES: u64 = 0x4000;
 const SLICE: u64 = 0x40;
 const SLICE_CONTROL: u64 = 0x00;
 const SLICE_START: u64 = 0x08;
@@ -217,6 +229,8 @@ const TCR_KNOWN: u32 = TCR_TRANSLATE
     | TCR_REMAP;
 const TTBR_VALID: u32 = 1;
 const TTBR_ADDRESS_SHIFT: u32 = 2;
+/// The 28-bit page-number field, independently defined by m1n1's R_TTBR.
+const TTBR_ADDRESS: u32 = 0x3fff_fffc;
 
 const PAGE_SHIFT: u32 = 14;
 const PAGE: u64 = 1 << PAGE_SHIFT;
@@ -245,6 +259,8 @@ pub enum Fault {
 pub struct Dart {
     streams: usize,
     powered: bool,
+    quiesced: bool,
+    reset: bool,
     tlimits: [u32; 2],
     tlb_words: [u32; 3],
     tcr: Vec<u32>,
@@ -260,6 +276,7 @@ pub struct Dart {
     locked: u32,
     /// The address permission filter's slices, when the DART has one.
     apf: Option<Vec<Slice>>,
+    smmu: Option<SmmuBlock>,
     irq: Option<AicInput>,
     irq_level: bool,
     shared_fault: Option<(Rc<RefCell<Vec<bool>>>, usize)>,
@@ -297,6 +314,8 @@ impl Dart {
         Self {
             streams,
             powered: true,
+            quiesced: false,
+            reset: false,
             tlimits: [0; 2],
             tlb_words: [0; 3],
             tcr: vec![0; streams],
@@ -311,6 +330,7 @@ impl Dart {
             protect: 0,
             locked: 0,
             apf: None,
+            smmu: None,
             irq,
             irq_level: false,
             shared_fault: None,
@@ -341,31 +361,71 @@ impl Dart {
         self
     }
 
+    /// Pair this cacheless TRAD with its revision-1 SMMU capture view.
+    pub fn with_smmu(mut self) -> Self {
+        self.enable_smmu();
+        self
+    }
+
+    /// Attach the view to an already placed TRAD. Returns false if already
+    /// attached, so the machine can reject duplicate physical views. The
+    /// device group's power, retention, quiesce and reset apply to both views.
+    pub fn enable_smmu(&mut self) -> bool {
+        if self.smmu.is_some() {
+            return false;
+        }
+        self.smmu = Some(SmmuBlock);
+        true
+    }
+
     /// Apply a PMGR supply transition. Clock gating keeps this state; a
     /// power gate resets ordinary registers unless the DT declares retention.
     /// Secure translation-zone configuration/protection remains outside the
     /// switched supply: SPTM verifies it before restoring ordinary state.
     pub fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
         if self.powered && !powered && !retention {
-            self.tlimits.fill(0);
-            self.tlb_words.fill(0);
-            self.tcr.fill(0);
-            self.ttbr.fill(0);
-            self.enabled.fill(0);
-            self.perf_interrupts = 0;
-            self.stream_interrupts.fill(0);
-            self.error = 0;
-            self.error_mask = 0;
-            self.error_address = 0;
-            self.error_streams.fill(0);
-            self.protect &= PROTECT_TZ;
-            self.locked &= PROTECT_TZ;
-            if let Some(apf) = &mut self.apf {
-                apf.fill(Slice::default());
-            }
-            self.signal(access);
+            self.clear_ordinary(access);
         }
         self.powered = powered;
+    }
+
+    /// Quiesce a bus master before resetting its domain. DMA is synchronous,
+    /// so there are no outstanding transactions to drain. Configuration stays
+    /// accessible until reset is asserted; releasing reset does not undo this
+    /// separate inhibit. The machine applies PMGR transitions in order.
+    pub fn set_quiesced(&mut self, quiesced: bool) {
+        self.quiesced = quiesced;
+    }
+
+    /// Apply the ordinary register bank's reset line independently of power
+    /// retention. Assertion clears ordinary state and faults; while held, MMIO
+    /// and DMA refuse. The disabled secure-zone bank is boot-owned and outside
+    /// this reset, as it is outside the switched ordinary power domain.
+    pub fn set_reset(&mut self, asserted: bool, access: &mut Access<'_>) {
+        if asserted && !self.reset {
+            self.clear_ordinary(access);
+        }
+        self.reset = asserted;
+    }
+
+    fn clear_ordinary(&mut self, access: &mut Access<'_>) {
+        self.tlimits.fill(0);
+        self.tlb_words.fill(0);
+        self.tcr.fill(0);
+        self.ttbr.fill(0);
+        self.enabled.fill(0);
+        self.perf_interrupts = 0;
+        self.stream_interrupts.fill(0);
+        self.error = 0;
+        self.error_mask = 0;
+        self.error_address = 0;
+        self.error_streams.fill(0);
+        self.protect &= PROTECT_TZ;
+        self.locked &= PROTECT_TZ;
+        if let Some(apf) = &mut self.apf {
+            apf.fill(Slice::default());
+        }
+        self.signal(access);
     }
 
     /// The protection domains this DART has.
@@ -399,10 +459,21 @@ impl Dart {
         if !self.powered {
             return Err(DmaError::Unsupported("DART power domain is off"));
         }
+        if self.reset {
+            return Err(DmaError::Unsupported("DART reset is asserted"));
+        }
+        if self.quiesced {
+            return Err(DmaError::Unsupported("DART DMA is quiesced"));
+        }
         if sid >= self.streams || !self.stream_enabled(sid) {
             return Err(fault(Fault::NoTtbr));
         }
         let tcr = self.tcr[sid];
+        if tcr & (TCR_BYPASS_DART | TCR_TRANSLATE) == TCR_BYPASS_DART | TCR_TRANSLATE {
+            return Err(DmaError::Unsupported(
+                "DART simultaneous translation and bypass",
+            ));
+        }
         if tcr & TCR_REMAP_ENABLE != 0 {
             return Err(DmaError::Unsupported("DART stream remapping"));
         }
@@ -422,7 +493,7 @@ impl Dart {
         if ttbr & TTBR_VALID == 0 {
             return Err(fault(Fault::NoTtbr));
         }
-        let root = u64::from(ttbr >> TTBR_ADDRESS_SHIFT) << PAGE_SHIFT;
+        let root = u64::from((ttbr & TTBR_ADDRESS) >> TTBR_ADDRESS_SHIFT) << PAGE_SHIFT;
         let first = entry(memory, root, iova >> (PAGE_SHIFT + LEVEL_BITS))?;
         if first & ENTRY_VALID == 0 {
             return Err(fault(Fault::NoPmd));
@@ -443,9 +514,12 @@ impl Dart {
         }
     }
 
-    fn report(&mut self, sid: usize, iova: u64, code: u32, access: &mut Access<'_>) {
+    fn report(&mut self, sid: usize, iova: u64, code: u32, write: bool, access: &mut Access<'_>) {
         if self.error & ERROR_FLAG == 0 {
-            self.error = ERROR_FLAG | (sid as u32) << ERROR_STREAM_SHIFT | code;
+            self.error = ERROR_FLAG
+                | (sid as u32 & 0xff) << ERROR_STREAM_SHIFT
+                | if write { ERROR_WRITE } else { 0 }
+                | code;
             self.error_address = iova;
         }
         if sid < 256 {
@@ -473,6 +547,9 @@ impl Dart {
 
     /// The stream of a per-stream register at `offset` from `base`.
     fn stream(&self, offset: u64, base: u64) -> Option<usize> {
+        if !offset.is_multiple_of(4) {
+            return None;
+        }
         let index = usize::try_from(offset.checked_sub(base)? / 4).ok()?;
         (index < self.streams).then_some(index)
     }
@@ -500,7 +577,7 @@ impl Iommu for Dart {
         debug_assert!(last >= iova && last >> PAGE_SHIFT == iova >> PAGE_SHIFT);
         let result = self.walk(memory, sid, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
-            self.report(sid, iova, code, access);
+            self.report(sid, iova, code, write, access);
         }
         result
     }
@@ -535,7 +612,7 @@ impl MmioDevice for Dart {
         &mut self,
         offset: u64,
         width: Width,
-        _access: &mut Access<'_>,
+        access: &mut Access<'_>,
     ) -> Result<u64, MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
         if width != Width::Word {
@@ -543,6 +620,16 @@ impl MmioDevice for Dart {
         }
         if !self.powered {
             return Err(fail("DART power domain is off"));
+        }
+        if self.reset {
+            return Err(fail("DART reset is asserted"));
+        }
+        if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            return self
+                .smmu
+                .as_mut()
+                .ok_or_else(|| fail("DART has no paired SMMU instance"))?
+                .read(offset - SMMU_OFFSET, width, access);
         }
         if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
             return self
@@ -613,6 +700,16 @@ impl MmioDevice for Dart {
         if !self.powered {
             return Err(fail("DART power domain is off"));
         }
+        if self.reset {
+            return Err(fail("DART reset is asserted"));
+        }
+        if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            return self
+                .smmu
+                .as_mut()
+                .ok_or_else(|| fail("DART has no paired SMMU instance"))?
+                .write(offset - SMMU_OFFSET, width, value, access);
+        }
         let value = value as u32;
         if let Some(apf) = offset.checked_sub(DAPF_OFFSET) {
             let locked = self.protect & PROTECT_APF != 0;
@@ -646,7 +743,9 @@ impl MmioDevice for Dart {
                 self.tlb_words[1 + usize::from(offset == TLB_RANGE[1])] = value
             }
             ERROR => {
-                if value & ERROR_FLAG != 0 {
+                // Linux writes the captured word. SPTM also acknowledges
+                // one code without FLAG (26A434 file 0xc99e8).
+                if value & ERROR_FLAG != 0 || value & self.error & ERROR_CODE != 0 {
                     self.error = 0;
                 }
             }
@@ -700,48 +799,6 @@ impl MmioDevice for Dart {
     }
 }
 
-/// A DART's SMMU instance (`instance` kind `UMMS`, J473AP `dart-dispext0`
-/// `reg[1]`): its registers are not documented, and the 26A434 driver maps
-/// them but reads them only to capture state after a DART fault
-/// (`machine::soc::Iommu::smmu`), so every access refuses by name.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SmmuBlock;
-
-const SMMU_NAME: &str = "dart-smmu";
-const SMMU_REASON: &str = "DART SMMU instance register has no documented meaning";
-
-impl MmioDevice for SmmuBlock {
-    fn name(&self) -> &'static str {
-        SMMU_NAME
-    }
-
-    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        Err(refuse(
-            SMMU_NAME,
-            offset,
-            width,
-            Direction::Read,
-            SMMU_REASON,
-        ))
-    }
-
-    fn write(
-        &mut self,
-        offset: u64,
-        width: Width,
-        _: u64,
-        _: &mut Access<'_>,
-    ) -> Result<(), MmioError> {
-        Err(refuse(
-            SMMU_NAME,
-            offset,
-            width,
-            Direction::Write,
-            SMMU_REASON,
-        ))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::interrupt::InterruptLatch;
@@ -751,16 +808,6 @@ mod tests {
     const ROOT: u64 = 0x1_0000_0000;
     const LEAVES: u64 = ROOT + PAGE;
     const FRAME: u64 = ROOT + 4 * PAGE;
-
-    #[test]
-    fn every_smmu_register_access_refuses_by_name() {
-        let mut latch = InterruptLatch::new();
-        let mut access = Access::new(0, 0, &mut latch);
-        let mut smmu = SmmuBlock;
-        assert_eq!(smmu.name(), SMMU_NAME);
-        assert!(smmu.read(0x18, Width::Word, &mut access).is_err());
-        assert!(smmu.write(0, Width::Word, 1, &mut access).is_err());
-    }
 
     fn table_entry(address: u64) -> u64 {
         (address >> ENTRY_ADDRESS_SHIFT) & ENTRY_ADDRESS | ENTRY_VALID
@@ -1036,7 +1083,7 @@ mod tests {
         let error = read(&mut dart, ERROR, &mut access);
         assert_eq!(
             error,
-            ERROR_FLAG | 1 << ERROR_STREAM_SHIFT | Fault::Write as u32
+            ERROR_FLAG | ERROR_WRITE | 1 << ERROR_STREAM_SHIFT | Fault::Write as u32
         );
         assert_eq!(read(&mut dart, ERROR_ADDRESS_LOW, &mut access), iova as u32);
         assert_eq!(read(&mut dart, ERROR_STREAMS, &mut access), 0b10);
@@ -1051,6 +1098,238 @@ mod tests {
         let _ = dart.translate(&mut ram, 3, 0, 0, false, &mut access);
         assert_eq!(read(&mut dart, ERROR, &mut access) & ERROR_CODE, 1);
         assert!(!dart.irq_level);
+    }
+
+    #[test]
+    fn sptm_code_only_acknowledgement_clears_the_fault_and_shared_irq() {
+        let irq = AicInput::new(0, 0x301);
+        let (mut dart, mut ram, mut sink) = setup();
+        let iova = 0x200_4000;
+        {
+            let mut a = Access::new(0, 0, &mut sink);
+            assert_eq!(
+                dart.translate(&mut ram, 1, iova, iova, true, &mut a),
+                Err(fault(Fault::Write))
+            );
+            // A later read failure keeps the first write's address/direction.
+            assert!(dart.translate(&mut ram, 3, 0, 0, false, &mut a).is_err());
+            assert_eq!(dart.read(ERROR_ADDRESS_LOW, Width::Word, &mut a), Ok(iova));
+            assert_ne!(
+                dart.read(ERROR, Width::Word, &mut a).unwrap() & u64::from(ERROR_WRITE),
+                0
+            );
+            dart.write(ERROR, Width::Word, Fault::Read as u64, &mut a)
+                .unwrap();
+        }
+        assert!(sink.is_asserted(Wire::Aic(irq)));
+        {
+            let mut a = Access::new(0, 0, &mut sink);
+            // The original SPTM writes the code, without ERROR_FLAG.
+            dart.write(ERROR, Width::Word, Fault::Write as u64, &mut a)
+                .unwrap();
+            assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
+            // Per-stream fault evidence is independently W1C.
+            assert_eq!(dart.read(ERROR_STREAMS, Width::Word, &mut a), Ok(0xa));
+            dart.write(ERROR_STREAMS, Width::Word, 2, &mut a).unwrap();
+            assert_eq!(dart.read(ERROR_STREAMS, Width::Word, &mut a), Ok(8));
+        }
+        assert!(!sink.is_asserted(Wire::Aic(irq)));
+        {
+            let mut a = Access::new(0, 0, &mut sink);
+            assert!(dart.translate(&mut ram, 3, 0, 0, false, &mut a).is_err());
+            assert_eq!(
+                dart.read(ERROR, Width::Word, &mut a).unwrap() & u64::from(ERROR_WRITE),
+                0
+            );
+        }
+        assert!(sink.is_asserted(Wire::Aic(irq)));
+    }
+
+    #[test]
+    fn ttbr_uses_only_the_address_field_and_stream_words_never_alias_unaligned_offsets() {
+        let (mut dart, mut ram, mut sink) = setup();
+        let mut a = Access::new(0, 0, &mut sink);
+        let ttbr = dart.read(TTBR + 4, Width::Word, &mut a).unwrap();
+        // R_TTBR.ADDR is [29:2]; bits31:30 and bit1 are not address bits.
+        dart.write(TTBR + 4, Width::Word, ttbr | 0xc000_0002, &mut a)
+            .unwrap();
+        let iova = 0x200_4000;
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, false, &mut a),
+            Ok(FRAME)
+        );
+        for offset in [TCR + 5, TTBR + 5, TCR + 4 * 16, TTBR + 4 * 16] {
+            assert!(dart.read(offset, Width::Word, &mut a).is_err());
+            assert!(dart.write(offset, Width::Word, 0, &mut a).is_err());
+        }
+        assert_eq!(
+            dart.read(TCR + 4, Width::Word, &mut a),
+            Ok(u64::from(TCR_TRANSLATE))
+        );
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, false, &mut a),
+            Ok(FRAME)
+        );
+    }
+
+    #[test]
+    fn unimplemented_and_invalid_translation_modes_never_bypass_permissions() {
+        let (mut dart, mut ram, mut sink) = setup();
+        let mut a = Access::new(0, 0, &mut sink);
+        for (mode, reason) in [
+            (
+                TCR_TRANSLATE | TCR_BYPASS_DART,
+                "DART simultaneous translation and bypass",
+            ),
+            (
+                TCR_TRANSLATE | TCR_REMAP_ENABLE | 3 << 8,
+                "DART stream remapping",
+            ),
+            (TCR_TRANSLATE | TCR_FOUR_LEVEL, "four-level DART tables"),
+        ] {
+            dart.write(TCR + 4, Width::Word, u64::from(mode), &mut a)
+                .unwrap();
+            assert_eq!(
+                dart.translate(&mut ram, 1, 0, 0, true, &mut a),
+                Err(DmaError::Unsupported(reason))
+            );
+            assert_eq!(dart.read(ERROR, Width::Word, &mut a), Ok(0));
+        }
+    }
+
+    #[test]
+    fn dma_completes_prior_pages_but_stops_before_a_protected_page() {
+        let (mut dart, mut ram, mut sink) = setup();
+        ram.put_u64(LEAVES + 8, table_entry(FRAME) | 0xfff << 40);
+        ram.put_u64(
+            LEAVES + 16,
+            table_entry(FRAME + PAGE) | 0xfff << 40 | ENTRY_NO_WRITE,
+        );
+        let mut a = Access::new(0, 0, &mut sink);
+        let first = 0x200_8000 - 4;
+        let mut port = crate::platform::dma::Port {
+            iommu: &mut dart,
+            stream: 1,
+            memory: &mut ram,
+            access: &mut a,
+        };
+        assert_eq!(
+            port.write(first, &[1, 2, 3, 4, 5, 6, 7, 8]),
+            Err(fault(Fault::Write))
+        );
+        let mut bytes = [0; 8];
+        assert!(ram.read(FRAME + PAGE - 4, &mut bytes));
+        assert_eq!(bytes, [1, 2, 3, 4, 0, 0, 0, 0]);
+        assert_eq!(
+            dart.read(ERROR_ADDRESS_LOW, Width::Word, &mut a),
+            Ok(0x200_8000)
+        );
+    }
+
+    #[test]
+    fn quiesce_and_reset_are_distinct_from_retained_power() {
+        let (mut dart, mut ram, mut sink) = setup();
+        let mut a = Access::new(0, 0, &mut sink);
+        dart.write(PROTECT, Width::Word, 1, &mut a).unwrap();
+        dart.write(PROTECT_LOCK, Width::Word, 1, &mut a).unwrap();
+        dart.set_quiesced(true);
+        assert_eq!(dart.read(TCR + 4, Width::Word, &mut a), Ok(1));
+        assert_eq!(
+            dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+            Err(DmaError::Unsupported("DART DMA is quiesced"))
+        );
+        dart.set_power(false, true, &mut a);
+        dart.set_power(true, true, &mut a);
+        assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut a), Ok(1));
+        // Reset assertion clears state even when the supply retained it.
+        dart.set_reset(true, &mut a);
+        assert!(dart.read(TCR + 4, Width::Word, &mut a).is_err());
+        assert!(dart.write(TCR, Width::Word, 1, &mut a).is_err());
+        assert_eq!(
+            dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+            Err(DmaError::Unsupported("DART reset is asserted"))
+        );
+        dart.set_reset(false, &mut a);
+        assert_eq!(dart.read(TCR + 4, Width::Word, &mut a), Ok(0));
+        assert_eq!(dart.read(PROTECT_LOCK, Width::Word, &mut a), Ok(0));
+        assert_eq!(
+            dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+            Err(DmaError::Unsupported("DART DMA is quiesced"))
+        );
+        dart.set_quiesced(false);
+        // Releasing reset does not restore a software-owned table or enable.
+        assert_eq!(
+            dart.translate(&mut ram, 2, ROOT, ROOT, false, &mut a),
+            Err(fault(Fault::NoTtbr))
+        );
+    }
+
+    #[test]
+    fn cacheless_invalidation_observes_new_tables_and_permissions() {
+        let (mut dart, mut ram, mut sink) = setup();
+        let mut a = Access::new(0, 0, &mut sink);
+        let iova = 0x200_4000;
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, false, &mut a),
+            Ok(FRAME)
+        );
+        ram.put_u64(
+            LEAVES + 8,
+            table_entry(FRAME + PAGE) | 0xfff << 40 | ENTRY_NO_READ,
+        );
+        dart.write(
+            TLB_CMD,
+            Width::Word,
+            u64::from(TLB_OP_FLUSH_STREAM | 1),
+            &mut a,
+        )
+        .unwrap();
+        assert_eq!(dart.read(TLB_CMD, Width::Word, &mut a), Ok(0));
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, false, &mut a),
+            Err(fault(Fault::Read))
+        );
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, true, &mut a),
+            Ok(FRAME + PAGE)
+        );
+        ram.put_u64(LEAVES + 8, 0);
+        dart.write(TLB_CMD, Width::Word, 0, &mut a).unwrap();
+        assert_eq!(
+            dart.translate(&mut ram, 1, iova, iova, true, &mut a),
+            Err(fault(Fault::NoPte))
+        );
+    }
+
+    #[test]
+    fn smmu_view_shares_trad_power_and_reset_without_creating_capture_entries() {
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut plain = Dart::new(16, None);
+        assert!(plain.read(SMMU_OFFSET, Width::Word, &mut a).is_err());
+        assert!(plain.enable_smmu());
+        assert!(!plain.enable_smmu());
+        let mut dart = Dart::new(16, None).with_smmu();
+        for model in [&mut plain, &mut dart] {
+            assert_eq!(model.read(SMMU_OFFSET, Width::Word, &mut a), Ok(0));
+            assert!(
+                model
+                    .write(SMMU_OFFSET + 0x80, Width::Word, 0, &mut a)
+                    .is_err()
+            );
+            assert!(
+                model
+                    .read(SMMU_OFFSET + 0x2000, Width::Word, &mut a)
+                    .is_err()
+            );
+            model.set_power(false, true, &mut a);
+            assert!(model.read(SMMU_OFFSET, Width::Word, &mut a).is_err());
+            model.set_power(true, true, &mut a);
+            model.set_reset(true, &mut a);
+            assert!(model.read(SMMU_OFFSET, Width::Word, &mut a).is_err());
+            model.set_reset(false, &mut a);
+            assert_eq!(model.read(SMMU_OFFSET, Width::Word, &mut a), Ok(0));
+        }
     }
 
     #[test]
