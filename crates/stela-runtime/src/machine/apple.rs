@@ -1224,6 +1224,10 @@ impl AppleDevices {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
         }
+        self.validate_native_dart("DCP firmware", dart, stream)?;
+        if let Some((dart, stream)) = surface {
+            self.validate_native_dart("DCP surface", dart, stream)?;
+        }
         let mut coprocessor =
             dcp::Coprocessor::for_external(scanout, window, identity).map_err(String::from)?;
         if quiesced {
@@ -1724,6 +1728,7 @@ impl AppleDevices {
         placement: &super::soc::UsbController,
         dart: DartId,
     ) -> Result<UsbId, String> {
+        self.validate_native_dart("USB", dart, placement.stream as usize)?;
         let binding = self
             .phys
             .iter()
@@ -1939,6 +1944,27 @@ impl AppleDevices {
         self.smc().ok()?.take_log()
     }
 
+    /// Pure preflight of actual boxed ownership and incoming-SID capacity.
+    /// Boot adapters validate every declared bank/mapper before publication;
+    /// this does not enable DMA or qualify a physical traffic classifier.
+    pub fn validate_native_dart(
+        &self,
+        name: &str,
+        dart: DartId,
+        stream: usize,
+    ) -> Result<(), String> {
+        let owner = self
+            .bus
+            .device::<Dart>(dart.0)
+            .ok_or_else(|| format!("{name} DMA owner is not a mounted DART"))?;
+        if stream >= owner.stream_capacity() {
+            return Err(format!(
+                "{name} incoming stream exceeds its mounted DART capacity"
+            ));
+        }
+        Ok(())
+    }
+
     /// The next entry of a display coprocessor's log: what the guest sent
     /// the DCP model and what it answered or refused.
     pub fn take_display_log(&mut self) -> Option<DisplayLog> {
@@ -1968,6 +1994,7 @@ impl AppleDevices {
         (dart, stream): (DartId, usize),
         uid: Option<[u8; 32]>,
     ) -> Result<(), String> {
+        self.validate_native_dart("AES", dart, stream)?;
         if block.bytes != aes::BLOCK_BYTES {
             return Err(format!(
                 "AES block registers span {:#x} bytes, not the modeled {:#x}",
@@ -5051,6 +5078,146 @@ mod tests {
     }
 
     #[test]
+    fn native_dma_constructors_preflight_every_actual_owner_before_publication() {
+        const DART: u64 = 0x235004000;
+        const AES: u64 = 0x23500c000;
+        const WRAPPER: u64 = 0x271c00000;
+        struct UnusedScreen;
+        impl Scanout for UnusedScreen {
+            fn mode(&self) -> ScanoutMode {
+                panic!("DCP used scanout before owner preflight")
+            }
+            fn present(&mut self, _: &[u8]) -> Result<(), &'static str> {
+                unreachable!()
+            }
+        }
+        fn refuse(d: &mut AppleDevices, dart: DartId, input: usize) {
+            assert!(
+                d.add_aes(
+                    [
+                        Range {
+                            physical: AES,
+                            bytes: aes::BLOCK_BYTES
+                        },
+                        Range {
+                            physical: 0x23d2dc000,
+                            bytes: 0x8000
+                        }
+                    ],
+                    3,
+                    None,
+                    (dart, input),
+                    None
+                )
+                .unwrap_err()
+                .contains("DART")
+            );
+            assert!(
+                d.add_dcpext(
+                    Range {
+                        physical: WRAPPER,
+                        bytes: 0x6c000
+                    },
+                    [1, 2, 3, 4],
+                    false,
+                    "DCPEXT",
+                    dcp::ExternalIdentity::Unnumbered,
+                    Box::new(UnusedScreen),
+                    (dart, input),
+                    None,
+                    None
+                )
+                .unwrap_err()
+                .contains("DART")
+            );
+            let mut usb = usb_placement();
+            usb.stream = input as u32;
+            assert!(d.add_usb(&usb, dart).unwrap_err().contains("DART"));
+            assert!(d.masters.is_empty() && d.dcp_masters.is_empty() && d.usb_masters.is_empty());
+            for address in [AES, WRAPPER + 0x8114, usb.ranges[0].0 + 0x20] {
+                assert!(d.read(0, address, 4, 0).is_err());
+            }
+        }
+        for profile in [dart::Profile::T6000, dart::Profile::T8110] {
+            let mut other = AppleDevices::new();
+            let absent = other
+                .add_dart(
+                    Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    },
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let mut d = AppleDevices::new();
+            refuse(&mut d, absent, 1);
+            d.add_aic(0x23b0c0000, 1152, AicLayout::aic2(0x8000, 0))
+                .unwrap();
+            let (Controller::V1(id) | Controller::V2(id)) = d.aic.unwrap();
+            refuse(&mut d, DartId(id), 1);
+            let owner = d
+                .add_dart_group_for_profile(
+                    profile,
+                    &[Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    }],
+                    2,
+                    None,
+                    None,
+                )
+                .unwrap()[0];
+            // Validate actual constructed capacity2, not the generation's limit.
+            refuse(&mut d, owner, 2);
+            refuse(&mut d, owner, u32::MAX as usize);
+            assert!(
+                d.add_dcpext(
+                    Range {
+                        physical: WRAPPER,
+                        bytes: 0x6c000
+                    },
+                    [1, 2, 3, 4],
+                    false,
+                    "DCPEXT",
+                    dcp::ExternalIdentity::Unnumbered,
+                    Box::new(UnusedScreen),
+                    (owner, 1),
+                    None,
+                    Some((owner, 2))
+                )
+                .unwrap_err()
+                .contains("DCP surface")
+            );
+            assert!(d.coprocessors.is_empty() && d.dcp_masters.is_empty());
+            assert!(d.read(0, WRAPPER + 0x8114, 4, 0).is_err());
+            // Every refusal left the apertures available for a valid native retry.
+            d.add_aes(
+                [
+                    Range {
+                        physical: AES,
+                        bytes: aes::BLOCK_BYTES,
+                    },
+                    Range {
+                        physical: 0x23d2dc000,
+                        bytes: 0x8000,
+                    },
+                ],
+                3,
+                None,
+                (owner, 1),
+                None,
+            )
+            .unwrap();
+            assert_eq!(d.masters[0].stream, 1);
+            let _phy = add_usb_phy(&mut d);
+            d.add_usb(&usb_placement(), owner).unwrap();
+            assert_eq!(d.usb_masters[0].stream, 1);
+        }
+    }
+
+    #[test]
     fn mounted_dcpext_retained_pm_gates_suppress_real_surface_dma_and_scanout() {
         use crate::platform::apple::dcp::{link, swap};
         struct Screen(Rc<RefCell<usize>>);
@@ -5958,6 +6125,9 @@ mod tests {
             ],
             irqs: [1031, 1032, 1033, 1034, 990],
             iommu: 0,
+            phandle: Some(0xa5),
+            mapper: 0xa4,
+            mapper_context: 1,
             stream: 1,
             port: 1,
             retention: false,

@@ -1497,6 +1497,12 @@ pub struct SepDevice {
 /// `reg[0]` with a stable model name, and the DART streams it masters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcpController {
+    pub phandle: Option<u32>,
+    pub mapper: u32,
+    pub surface_phandle: Option<u32>,
+    /// Full original surface mapper list, primary first; additional PIODMA
+    /// ownership is retained without inventing execution for that producer.
+    pub surface_routes: Vec<DcpMapperRoute>,
     pub role: &'static str,
     pub identity: dcp::ExternalIdentity,
     /// Explicit sole-TRAD selection, checked before this ordinal is retained.
@@ -1524,6 +1530,16 @@ pub struct DcpController {
     pub surface: Option<(usize, u32)>,
 }
 
+/// One original display-pipe mapper owner; metadata does not select traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DcpMapperRoute {
+    pub mapper: u32,
+    pub iommu: usize,
+    pub instance: usize,
+    pub mapper_context: u32,
+    pub stream: u32,
+}
+
 /// T8112 device controller compatible; admission stays closed until the
 /// unchanged Apple platform/PHY initialization has been observed.
 pub const USB_DRD: &str = "usb-drd,t8112";
@@ -1535,6 +1551,10 @@ pub struct UsbController {
     pub ranges: [(u64, u64); 9],
     pub irqs: [u32; 5],
     pub iommu: usize,
+    /// Actual owner identities; context survives native incoming assignment.
+    pub phandle: Option<u32>,
+    pub mapper: u32,
+    pub mapper_context: u32,
     pub stream: u32,
     /// The Type-C connector's `port-number`, shared with its HPM die.
     pub port: u32,
@@ -2458,6 +2478,10 @@ pub struct Iommu {
 /// of its `iommu-parent`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AesEngine {
+    pub phandle: Option<u32>,
+    pub mapper: u32,
+    pub mapper_context: u32,
+    pub instance: usize,
     pub ranges: [(u64, u64); 2],
     pub version: u32,
     pub irq: u32,
@@ -4221,24 +4245,35 @@ fn aes_engine(
         node.first_u32(name)
             .ok_or_else(|| format!("{PATH} has no {name}"))
     };
-    let parent = number("iommu-parent")?;
-    let (iommu, stream) = darts
-        .iter()
-        .enumerate()
-        .find_map(|(index, dart)| {
-            dart.mappers
-                .iter()
-                .find(|(phandle, _)| *phandle == parent)
-                .map(|&(_, stream)| (index, stream))
-        })
+    let phandle =
+        native_dma_phandle(&node, "AAPL,phandle").map_err(|why| format!("{PATH} {why}"))?;
+    let parent = native_dma_phandle(&node, "iommu-parent")
+        .map_err(|why| format!("{PATH} {why}"))?
+        .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
+    let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
+        dart.mappers
+            .iter()
+            .filter(move |(phandle, _)| *phandle == parent)
+            .map(move |&(_, context)| (index, context))
+    });
+    let (iommu, mapper_context) = matching
+        .next()
         .ok_or_else(|| format!("{PATH} iommu-parent {parent:#x} is no modeled DART's mapper"))?;
+    if matching.next().is_some() {
+        return Err(format!("{PATH} mapper ownership is ambiguous"));
+    }
     if darts[iommu].instances.len() != 1 {
         return Err(format!(
             "{PATH} DMA instance routing is undetermined for a multi-instance DART"
         ));
     }
-    let stream = native_mapper_input(&darts[iommu], stream)?;
+    let stream = native_mapper_input(&darts[iommu], mapper_context)
+        .map_err(|why| format!("{PATH} {why}"))?;
     Ok(Some(AesEngine {
+        phandle,
+        mapper: parent,
+        mapper_context,
+        instance: 0,
         ranges: [place(block)?, place(key_disable)?],
         version: number("aes-version")?,
         irq: number("interrupts")?,
@@ -4315,8 +4350,9 @@ fn usb_controller(
     if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
         return Err(err("interrupt exceeds AIC input encoding"));
     }
-    let parent = node
-        .first_u32("iommu-parent")
+    let phandle = native_dma_phandle(node, "AAPL,phandle").map_err(|why| err(&why))?;
+    let parent = native_dma_phandle(node, "iommu-parent")
+        .map_err(|why| err(&why))?
         .ok_or_else(|| err("has no iommu-parent"))?;
     let mut matching = darts.iter().enumerate().flat_map(|(index, dart)| {
         dart.mappers
@@ -4324,16 +4360,13 @@ fn usb_controller(
             .filter(move |(phandle, _)| *phandle == parent)
             .map(move |&(_, stream)| (index, stream))
     });
-    let (iommu, stream) = matching
+    let (iommu, mapper_context) = matching
         .next()
         .ok_or_else(|| err("iommu-parent is no modeled DART mapper"))?;
     if matching.next().is_some() {
         return Err(err("iommu-parent is ambiguous"));
     }
-    if stream >= u32::from(darts[iommu].streams) {
-        return Err(err("mapper stream exceeds DART capacity"));
-    }
-    let stream = native_mapper_input(&darts[iommu], stream)?;
+    let stream = native_mapper_input(&darts[iommu], mapper_context).map_err(|why| err(&why))?;
     let port = node
         .first_u32("port-number")
         .filter(|&port| port != 0)
@@ -4342,6 +4375,9 @@ fn usb_controller(
         ranges,
         irqs,
         iommu,
+        phandle,
+        mapper: parent,
+        mapper_context,
         stream,
         port,
         retention: node.property("retention").is_some(),
@@ -4483,10 +4519,48 @@ fn sep_device(
     }))
 }
 
+/// Owner properties are one nonzero phandle, never a truncated first word.
+fn native_dma_phandle(node: &Node<'_>, key: &str) -> Result<Option<u32>, String> {
+    node.property(key)
+        .map(|bytes| {
+            let value: [u8; 4] = bytes
+                .try_into()
+                .map_err(|_| format!("{key} is not one native DMA owner phandle"))?;
+            let value = u32::from_le_bytes(value);
+            if value == 0 {
+                return Err(format!("{key} native DMA owner phandle is zero"));
+            }
+            Ok(value)
+        })
+        .transpose()
+}
+
+/// Display pipes declare primary and PIODMA mapper parents in order.
+fn native_dma_mapper_list(node: &Node<'_>, key: &str) -> Result<Vec<u32>, String> {
+    let Some(bytes) = node.property(key) else {
+        return Ok(Vec::new());
+    };
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return Err(format!("{key} is not a complete native DMA mapper list"));
+    }
+    let mut parents = Vec::new();
+    for word in bytes.as_chunks::<4>().0 {
+        let parent = u32::from_le_bytes(*word);
+        if parent == 0 || parents.contains(&parent) {
+            return Err(format!("{key} has a zero or duplicate native DMA mapper"));
+        }
+        parents.push(parent);
+    }
+    Ok(parents)
+}
+
 /// Assign a modeled native endpoint its declared incoming route while
-/// retaining the original OS mapper context in the tree. This is a Stela
-/// endpoint assignment, not an observation of an Apple bus transaction.
+/// retaining its OS mapper context. This is a Stela endpoint assignment,
+/// not an observation of an Apple bus transaction.
 fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32, String> {
+    if !dart.sids.is_empty() && !dart.sids.contains(&context) {
+        return Err("mapper context is absent from the original SID set".into());
+    }
     let input = dart
         .profile
         .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
@@ -4613,14 +4687,29 @@ fn dcp_device(
         let input = u32::try_from(input).map_err(|_| err("DMA input stream overflows"))?;
         Ok((index, 0, context, input))
     };
-    let (iommu, instance, mapper_context, stream) = route(
-        node.first_u32("iommu-parent")
-            .ok_or_else(|| err("controller has no iommu-parent"))?,
-    )?;
-    let (surface_iommu, surface_instance, _, surface_stream) = route(
-        pipe.first_u32("iommu-parent")
-            .ok_or_else(|| err("pipe has no surface iommu-parent"))?,
-    )?;
+    let phandle = native_dma_phandle(node, "AAPL,phandle").map_err(|why| err(&why))?;
+    let mapper = native_dma_phandle(node, "iommu-parent")
+        .map_err(|why| err(&why))?
+        .ok_or_else(|| err("controller has no iommu-parent"))?;
+    let surface_phandle = native_dma_phandle(&pipe, "AAPL,phandle").map_err(|why| err(&why))?;
+    let surface_mappers = native_dma_mapper_list(&pipe, "iommu-parent").map_err(|why| err(&why))?;
+    let (iommu, instance, mapper_context, stream) = route(mapper)?;
+    let surface_routes = surface_mappers
+        .into_iter()
+        .map(|mapper| {
+            let (iommu, instance, mapper_context, stream) = route(mapper)?;
+            Ok(DcpMapperRoute {
+                mapper,
+                iommu,
+                instance,
+                mapper_context,
+                stream,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let primary_route = surface_routes
+        .first()
+        .ok_or_else(|| err("pipe has no surface iommu-parent"))?;
     let primary = pipe
         .pairs("reg")
         .unwrap_or_default()
@@ -4647,11 +4736,16 @@ fn dcp_device(
         }
     }
     Ok(Some(DcpController {
+        phandle,
+        mapper,
+        surface_phandle,
+        surface_instance: Some(primary_route.instance),
+        surface: Some((primary_route.iommu, primary_route.stream)),
+        surface_routes,
         role: profile.role,
         identity: profile.identity,
         instance,
         mapper_context,
-        surface_instance: Some(surface_instance),
         wrapper: place(wrapper.0, wrapper.1)?,
         interrupts,
         quiesced: nub.property("quiesced").is_some(),
@@ -4659,7 +4753,6 @@ fn dcp_device(
         iommu,
         stream,
         window: node.property("truncate-dvas").map(|_| darts[iommu].vm_base),
-        surface: Some((surface_iommu, surface_stream)),
     }))
 }
 
@@ -6692,6 +6785,10 @@ mod tests {
         assert_eq!(
             found.aes,
             Some(AesEngine {
+                phandle: None,
+                mapper: 0x8a,
+                mapper_context: 1,
+                instance: 0,
                 ranges: [(0x2_3500_c000, 0x4000), (0x2_3d2d_c000, 0x8000)],
                 version: 3,
                 irq: 0x2f7,
@@ -6709,6 +6806,66 @@ mod tests {
             )),
             Err("/arm-io/aes iommu-parent 0x99 is no modeled DART's mapper".into())
         );
+        let bytes = tree_with_io(
+            0x8112,
+            "Apple M2",
+            MODELED,
+            &[],
+            &[dart(&instance, &[0x35004000, 0x4000]), aes(0x8a)],
+        );
+        let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
+        let mut routes = found.darts.clone();
+        routes[0].profile = dart::Profile::T6000;
+        routes[0].remap = vec![(3, 1)];
+        routes[0].sids = vec![0, 1, 15];
+        let routed = aes_engine(&io, &Some, &routes).unwrap().unwrap();
+        assert_eq!(
+            (
+                routed.instance,
+                routed.mapper,
+                routed.mapper_context,
+                routed.stream
+            ),
+            (0, 0x8a, 1, 3)
+        );
+        let good = routes[0].clone();
+        routes[0].mappers.push((0x8a, 2));
+        assert!(
+            aes_engine(&io, &Some, &routes)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        routes[0] = good.clone();
+        routes.push(good.clone());
+        assert!(
+            aes_engine(&io, &Some, &routes)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        routes.pop();
+        routes[0] = good.clone();
+        routes[0].sids = vec![0, 15];
+        assert!(
+            aes_engine(&io, &Some, &routes)
+                .unwrap_err()
+                .contains("SID set")
+        );
+        routes[0] = good.clone();
+        routes[0].streams = 1;
+        assert!(
+            aes_engine(&io, &Some, &routes)
+                .unwrap_err()
+                .contains("outside the native profile")
+        );
+        routes[0] = good.clone();
+        routes[0].instances.push(good.instances[0].clone());
+        assert!(
+            aes_engine(&io, &Some, &routes)
+                .unwrap_err()
+                .contains("multi-instance")
+        );
+        routes[0].instances.clear();
+        assert!(aes_engine(&io, &Some, &routes).is_err());
         // An APF beside the DART needs its slice count.
         let dapf = [instance.as_slice(), b"FPAD", &[0; 4], b"DART", &[0; 4]].concat();
         let pmp = dart(&dapf, &[0x3b30_0000, 0x4000, 0x3b30_4000, 0x4000]);
@@ -8021,6 +8178,30 @@ mod tests {
             (1, 0, 0, 5)
         );
         assert_eq!((dcp.surface, dcp.surface_instance), (Some((0, 0)), Some(0)));
+        assert_eq!(dcp.mapper, 0x109);
+        assert_eq!(
+            dcp.surface_routes,
+            [
+                DcpMapperRoute {
+                    mapper: 0x103,
+                    iommu: 0,
+                    instance: 0,
+                    mapper_context: 0,
+                    stream: 0
+                },
+                DcpMapperRoute {
+                    mapper: 0x104,
+                    iommu: 0,
+                    instance: 0,
+                    mapper_context: 4,
+                    stream: 4
+                },
+            ]
+        );
+        println!(
+            "original DCP owner metadata: firmware={:?}/{:#x}, pipe={:?}, routes={:?}",
+            dcp.phandle, dcp.mapper, dcp.surface_phandle, dcp.surface_routes
+        );
         assert_eq!(dcp.wrapper, (0x2_89c0_0000, 0x6c000));
         assert_eq!(dcp.regions, [("dispext0", (0x2_8800_0000, 0x3000000))]);
         let mut devices = crate::machine::apple::AppleDevices::new();
@@ -8198,6 +8379,14 @@ mod tests {
         // The surfaces translate through dart-dispext0 stream 0; its SMMU
         // block is the second reg entry.
         assert_eq!(dcp.surface, Some((1, 0)));
+        assert_eq!(dcp.mapper, 0xc8);
+        assert_eq!(
+            dcp.surface_routes
+                .iter()
+                .map(|r| (r.mapper, r.mapper_context, r.stream))
+                .collect::<Vec<_>>(),
+            [(0xca, 0, 0), (0xcb, 4, 4)]
+        );
         assert_eq!(found.darts[1].instances[0].physical, 0x2_7130_4000);
         assert_eq!(found.darts[1].smmu, Some((0x2_7130_0000, 0x4000)));
         assert_eq!(found.darts[0].smmu, None);
@@ -8314,6 +8503,9 @@ mod tests {
                 ranges,
                 irqs,
                 iommu: 0,
+                phandle: None,
+                mapper: 0xa4,
+                mapper_context: 1,
                 stream: 1,
                 port: 1,
                 retention: false,
@@ -8321,6 +8513,30 @@ mod tests {
             }]
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
+        let bytes = usb(&ranges, 0xa4, &irqs);
+        let node = Node::root(&bytes).unwrap();
+        let mut routes = found.darts.clone();
+        routes[0].profile = dart::Profile::T6000;
+        routes[0].remap = vec![(0, 1)];
+        routes[0].sids = vec![1, 3];
+        let routed = usb_controller(&node, &Some, &routes).unwrap();
+        assert_eq!(
+            (routed.mapper, routed.mapper_context, routed.stream),
+            (0xa4, 1, 0)
+        );
+        routes[0].sids = vec![0, 3];
+        assert!(
+            usb_controller(&node, &Some, &routes)
+                .unwrap_err()
+                .contains("SID set")
+        );
+        routes[0].sids = vec![1, 3];
+        routes[0].mappers.push((0xa4, 3));
+        assert!(
+            usb_controller(&node, &Some, &routes)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
         // Every controller is placed, in DeviceTree order; a malformed
         // second one names itself.
         let second = encode(
@@ -8375,6 +8591,31 @@ mod tests {
         bad[0].1 = u64::MAX;
         assert!(board(&tree(usb(&bad, 0xa4, &irqs))).is_err());
     }
+    #[test]
+    fn native_dma_owner_properties_keep_complete_lists_and_refuse_truncation() {
+        use crate::machine::adt::encode;
+        for bytes in [&[][..], &[1, 0, 0][..], &[0, 0, 0, 0][..], &[1; 8][..]] {
+            let tree = encode(&[("AAPL,phandle", bytes)], &[]);
+            assert!(native_dma_phandle(&Node::root(&tree).unwrap(), "AAPL,phandle").is_err());
+        }
+        let tree = encode(&[("iommu-parent", &[3, 0, 0, 0, 4, 0, 0, 0])], &[]);
+        let node = Node::root(&tree).unwrap();
+        assert_eq!(
+            native_dma_mapper_list(&node, "iommu-parent").unwrap(),
+            [3, 4]
+        );
+        assert!(native_dma_phandle(&node, "iommu-parent").is_err());
+        for bytes in [
+            &[][..],
+            &[1, 0, 0][..],
+            &[1, 0, 0, 0, 0, 0, 0, 0][..],
+            &[1, 0, 0, 0, 1, 0, 0, 0][..],
+        ] {
+            let tree = encode(&[("iommu-parent", bytes)], &[]);
+            assert!(native_dma_mapper_list(&Node::root(&tree).unwrap(), "iommu-parent").is_err());
+        }
+    }
+
     #[test]
     fn mpidr_composition_preserves_ep_identities_and_rejects_unknown_coordinates() {
         for soc in SOCS {

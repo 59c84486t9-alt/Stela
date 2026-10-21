@@ -1071,7 +1071,29 @@ fn devices<'f>(
     // to the GOP framebuffer, mastering through its DART and reading swap
     // surfaces through the display pipe's; it needs a scanout, so it is
     // placed only when the firmware gave Stela a mode.
+    let native_dart = |group: usize, instance: usize| {
+        let mounted = darts
+            .get(group)
+            .ok_or("native DMA route names an unmounted DART group")?;
+        let declared = board
+            .and_then(|board| board.darts.get(group))
+            .ok_or("native DMA route has no declared DART group")?;
+        if mounted.len() != declared.instances.len() {
+            return Err("native DMA mounted DART group differs from its complete declaration");
+        }
+        mounted
+            .get(instance)
+            .copied()
+            .ok_or("native DMA route names an unmounted DART instance")
+    };
     if let Some(dcp) = board.and_then(|board| board.dcp.as_ref()) {
+        for route in &dcp.surface_routes {
+            devices.validate_native_dart(
+                "DCP declared surface mapper",
+                native_dart(route.iommu, route.instance)?,
+                route.stream as usize,
+            )?;
+        }
         let screen = cables
             .screen
             .ok_or("visible external DCP requires one actual GOP scanout")?;
@@ -1084,11 +1106,22 @@ fn devices<'f>(
             dcp.role,
             dcp.identity,
             alloc::boxed::Box::new(display::GopScanout::new(screen)),
-            (darts[dcp.iommu][dcp.instance], dcp.stream as usize),
+            (native_dart(dcp.iommu, dcp.instance)?, dcp.stream as usize),
             dcp.window,
-            dcp.surface
-                .zip(dcp.surface_instance)
-                .map(|((iommu, stream), instance)| (darts[iommu][instance], stream as usize)),
+            match (
+                dcp.surface,
+                dcp.surface_instance,
+                dcp.surface_routes.first(),
+            ) {
+                (Some((iommu, stream)), Some(instance), Some(primary))
+                    if (primary.iommu, primary.instance, primary.stream)
+                        == (iommu, instance, stream) =>
+                {
+                    Some((native_dart(iommu, instance)?, stream as usize))
+                }
+                (None, None, None) => None,
+                _ => return Err("DCP surface DMA owner metadata is incomplete".into()),
+            },
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions
@@ -1146,7 +1179,15 @@ fn devices<'f>(
         // The controller's stream translates through the group's first TRAD
         // instance, as SEP and AES masters do; per-instance selection is the
         // bus master's contract (`soc::Iommu`).
-        let id = devices.add_usb(usb, darts[usb.iommu][0])?;
+        let group = darts.get(usb.iommu).ok_or("USB DART group is missing")?;
+        for (instance, _) in group.iter().enumerate() {
+            devices.validate_native_dart(
+                "USB declared bank",
+                native_dart(usb.iommu, instance)?,
+                usb.stream as usize,
+            )?;
+        }
+        let id = devices.add_usb(usb, native_dart(usb.iommu, 0)?)?;
         // The native keyboard and pointer plug into the last connector
         // (J473AP usb-drd1), the Mac being the downstream-facing port.
         let hub = cables.input || !cables.usb.disks.is_empty() || cables.usb.network.is_some();
@@ -1195,7 +1236,7 @@ fn devices<'f>(
             [block, key_disable],
             aes.version,
             Some(AicInput::new(0, aes.irq as u16)),
-            (darts[aes.iommu][0], aes.stream as usize),
+            (native_dart(aes.iommu, aes.instance)?, aes.stream as usize),
             None,
         )?;
     }
