@@ -9,10 +9,14 @@
 //!
 //! Native sends drain synchronously. Native replies wait behind the physical
 //! eight-slot FIFO when full; the backlog is not hardware occupancy. As with
-//! ASC, outbox enable gates AP visibility and its interrupt. These are stated
-//! emulation choices. Empty reads, unknown fields and unimplemented firmware
-//! requests refuse. CPU idle and stop/restart require firmware lifecycle
-//! semantics and remain explicit refusals, never inferred from FIFO emptiness.
+//! ASC, outbox enable gates AP visibility and its interrupt. A2I enable is
+//! retained readback state; the running native receiver accepts sends even
+//! when that bit is clear. The AP send path checks FIFO status; the electrical
+//! meaning of a cleared enable bit is not established. These are stated
+//! emulation choices, not proof of disabled hardware FIFO behavior. Empty
+//! reads, unknown fields and unimplemented firmware requests refuse. CPU idle
+//! and stop/restart require firmware lifecycle semantics and remain explicit
+//! refusals, never inferred from FIFO emptiness.
 use super::asc::{Firmware, Lines, Message};
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::Wire;
@@ -544,8 +548,18 @@ mod tests {
         assert_eq!(count(word >> 32), 1);
         send(&mut wrapper, 8 << 52 | 1 << 51 | 1, &mut access);
         assert_eq!(receive(&mut wrapper, &mut access).0, 7 << 52 | 0x20);
+        // Native synchronous-drain choice, shared with Asc: bit0 remains
+        // readable, while a running receiver accepts an AP send regardless.
+        // This does not establish disabled-FIFO behavior on physical silicon.
+        wrapper
+            .write(A2I_CONTROL, Width::Word, 0, &mut access)
+            .unwrap();
         send(&mut wrapper, 3 << 52 | 0xabcdef, &mut access);
         assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0xabcdef);
+        assert_eq!(
+            wrapper.read(A2I_CONTROL, Width::Word, &mut access).unwrap() & ENABLE,
+            0
+        );
     }
 
     #[test]
