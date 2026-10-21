@@ -528,6 +528,7 @@ impl Release {
 enum PendingKind {
     Acquire(Acquisition),
     Release(Release),
+    CancelAcquire(Release),
 }
 #[derive(Debug)]
 struct Pending {
@@ -643,14 +644,25 @@ impl Pool {
         Ok(())
     }
     pub fn abort_pending_acquire(&mut self) -> Result<(), &'static str> {
-        let Some(Pending {
-            kind: PendingKind::Acquire(acquire),
-            ..
-        }) = self.pending.as_mut()
-        else {
-            return Err("GFX has no accepted resource acquisition to abort");
-        };
-        acquire.abort = true;
+        let pending = self
+            .pending
+            .as_mut()
+            .ok_or("GFX has no accepted resource acquisition to abort")?;
+        match &mut pending.kind {
+            PendingKind::Acquire(acquire) if pending.done => {
+                // A completed result still owns its lease until finish.
+                // Cancel it into release; never return the old success.
+                pending.kind =
+                    PendingKind::CancelAcquire(Release::new(alloc::vec![acquire.lease], None));
+                pending.outcome = Outcome::Aborted;
+                pending.done = false;
+            }
+            PendingKind::Acquire(acquire) => acquire.abort = true,
+            PendingKind::CancelAcquire(_) => {} // same owned cancellation, including retry
+            PendingKind::Release(_) => {
+                return Err("GFX pending release does not own an acquisition cancellation");
+            }
+        }
         Ok(())
     }
     pub fn advance(&mut self, access: &mut dyn Access) -> Result<Option<&Outcome>, &'static str> {
@@ -677,8 +689,10 @@ impl Pool {
                         acquire.active = None;
                     }
                     if acquire.abort {
-                        pending.kind =
-                            PendingKind::Release(Release::new(alloc::vec![acquire.lease], None));
+                        pending.kind = PendingKind::CancelAcquire(Release::new(
+                            alloc::vec![acquire.lease],
+                            None,
+                        ));
                         pending.outcome = Outcome::Aborted;
                         break;
                     }
@@ -696,9 +710,11 @@ impl Pool {
                         acquire.rows[acquire.next],
                     )?);
                 },
-                PendingKind::Release(_) => {}
+                PendingKind::Release(_) | PendingKind::CancelAcquire(_) => {}
             }
-            if let PendingKind::Release(release) = &mut pending.kind {
+            if let PendingKind::Release(release) | PendingKind::CancelAcquire(release) =
+                &mut pending.kind
+            {
                 release_advance(
                     &self.tables,
                     self.policy,
@@ -1738,5 +1754,64 @@ mod tests {
                 .count(),
             1
         );
+    }
+    #[test]
+    fn completed_unconsumed_acquisitions_cancel_into_retryable_release_before_success_can_be_taken()
+    {
+        for failed in [0, 1, 8] {
+            let mut memory = Harness::new();
+            let mut pool = memory.pool(&generation::G14G);
+            pool.acquire(&mut memory, A, 3, &[row(0x8000, 4)]).unwrap();
+            assert!(matches!(
+                pool.advance(&mut memory).unwrap(),
+                Some(Outcome::Acquired(_))
+            ));
+            memory.effects.clear();
+            pool.abort_pending_acquire().unwrap();
+            assert!(pool.finish().is_err());
+            memory.fail = Some(failed);
+            assert!(pool.advance(&mut memory).is_err());
+            assert!(pool.finish().is_err());
+            pool.abort_pending_acquire().unwrap(); // retry owns the same cancellation
+            assert_eq!(settle(&mut pool, &mut memory), Outcome::Aborted);
+            assert_eq!(memory.read_u32(MASKS + 0x48), Ok(0));
+            assert_eq!(memory.effects.len(), 9);
+            assert_eq!(
+                memory
+                    .effects
+                    .iter()
+                    .filter(|effect| matches!(effect, Effect::Native(_)))
+                    .count(),
+                1
+            );
+            assert!(
+                !memory
+                    .effects
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Native(NativeWrite::MCache { .. })))
+            );
+            pool.check_reset(&mut memory).unwrap();
+        }
+    }
+
+    #[test]
+    fn empty_acquisition_cancellation_is_retained_and_cannot_ack_an_unrelated_release() {
+        let mut memory = Harness::new();
+        let mut pool = memory.pool(&generation::G14G);
+        pool.acquire(&mut memory, A, 3, &[]).unwrap();
+        assert_eq!(
+            pool.advance(&mut memory).unwrap(),
+            Some(&Outcome::Acquired(vec![]))
+        );
+        pool.abort_pending_acquire().unwrap();
+        assert!(pool.finish().is_err());
+        assert_eq!(pool.advance(&mut memory).unwrap(), Some(&Outcome::Aborted));
+        pool.abort_pending_acquire().unwrap();
+        assert_eq!(pool.finish(), Ok(Outcome::Aborted));
+        assert_eq!(memory.effects, vec![Effect::Ram(MASKS + 8, vec![0; 4])]);
+        assert!(pool.abort_pending_acquire().is_err());
+        pool.release(&mut memory, A, None).unwrap();
+        assert!(pool.abort_pending_acquire().is_err());
+        assert_eq!(settle(&mut pool, &mut memory), Outcome::Aborted);
     }
 }
