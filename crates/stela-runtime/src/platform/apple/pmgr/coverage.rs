@@ -24,14 +24,14 @@ pub struct DomainId {
 }
 
 /// An original PMGR device record. Virtual domains have no register;
-/// both parents remain dependencies even when this domain is physical.
+/// all parents remain dependencies even when this domain is physical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
     /// Original firmware identity; aliases retain their separate names.
     pub name: String,
     pub id: DomainId,
     pub address: Option<u64>,
-    pub parents: [Option<DomainId>; 2],
+    pub parents: [Option<DomainId>; 4],
 }
 
 /// Actual handlers registered by the machine for one resource. These are
@@ -286,7 +286,7 @@ mod tests {
             name: String::new(),
             id: id(device),
             address,
-            parents: [None; 2],
+            parents: [None; 4],
         };
         for (slot, &parent) in result.parents.iter_mut().zip(parents) {
             *slot = Some(id(parent));
@@ -423,6 +423,32 @@ mod tests {
         assert!(!result[0].bindable());
         assert!(result[1].bindable());
     }
+
+    #[test]
+    fn third_and_fourth_parent_supplies_participate_in_full_coverage_and_cycle_checks() {
+        let mut domains = (1..=4)
+            .map(|id| domain(id, Some(u64::from(id) * 0x100), &[]))
+            .collect::<Vec<_>>();
+        domains.push(domain(5, Some(0x500), &[1, 2, 3, 4]));
+        let requirements = [id(5)];
+        let consumers = [consumer("four-supply-client", &requirements, &[], COMPLETE)];
+        let result = analyze(&domains, &consumers).unwrap();
+        assert_eq!(result.len(), 5);
+        assert!(result.iter().all(DomainCoverage::bindable));
+        domains[3].parents[3] = Some(id(5));
+        assert!(matches!(
+            analyze(&domains, &consumers),
+            Err(CoverageError::ParentCycle(_))
+        ));
+        domains[3].parents[3] = Some(id(6));
+        assert_eq!(
+            analyze(&domains, &consumers),
+            Err(CoverageError::MissingParent {
+                domain: id(4),
+                parent: id(6)
+            })
+        );
+    }
     #[test]
     fn deep_firmware_graphs_use_bounded_call_stack_and_keep_every_ancestor() {
         let domains = (0..4096)
@@ -436,6 +462,8 @@ mod tests {
                     } else {
                         Some(id(device + 1))
                     },
+                    None,
+                    None,
                     None,
                 ],
             })

@@ -3148,7 +3148,7 @@ mod tests {
                 name: String::new(),
                 id: gate,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: resources
                 .iter()
@@ -3205,7 +3205,7 @@ mod tests {
                     name: String::new(),
                     id,
                     address: Some(address),
-                    parents: [None; 2],
+                    parents: [None; 4],
                 })
                 .collect(),
             resources: vec![PowerResource {
@@ -3255,7 +3255,7 @@ mod tests {
                 name: String::new(),
                 id,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: bases
                 .iter()
@@ -3426,7 +3426,7 @@ mod tests {
                 name: String::new(),
                 id: gate,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: [
                 ("/arm-io/dart", PowerOwner::Dart(0)),
@@ -3732,7 +3732,7 @@ mod tests {
                 name: String::new(),
                 id,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: vec![PowerResource {
                 name: "/arm-io/unavailable".into(),
@@ -3799,12 +3799,12 @@ mod tests {
         use coverage::{Domain, DomainId};
         let id = |device| DomainId { die: 0, device };
         let (mut d, _, supply, base) = powered_dart_with(false, 3, |states| {
-            states.domains[1].parents = [Some(id(1)), None];
+            states.domains[1].parents = [Some(id(1)), None, None, None];
             states.domains.push(Domain {
                 name: String::new(),
                 id: id(4),
                 address: states.domains[1].address,
-                parents: [Some(id(3)), None],
+                parents: [Some(id(3)), None, None, None],
             });
             states.resources[0].clocks = vec![id(2)];
             for (name, device) in [("controller", 1), ("firmware-endpoint", 3)] {
@@ -5275,7 +5275,7 @@ mod tests {
                 name: String::new(),
                 id,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: vec![PowerResource {
                 name: "/arm-io/atc-phy0".into(),
@@ -5364,7 +5364,7 @@ mod tests {
                 name: String::new(),
                 id,
                 address: Some(supply),
-                parents: [None; 2],
+                parents: [None; 4],
             }],
             resources: vec![PowerResource {
                 name: "/arm-io/atc-phy0".into(),
@@ -5464,19 +5464,19 @@ mod tests {
                     name: String::new(),
                     id: id(0x210),
                     address: None,
-                    parents: [Some(id(0x108)), None],
+                    parents: [Some(id(0x108)), None, None, None],
                 },
                 Domain {
                     name: String::new(),
                     id: id(0x108),
                     address: Some(supply),
-                    parents: [Some(id(2)), None],
+                    parents: [Some(id(2)), None, None, None],
                 },
                 Domain {
                     name: String::new(),
                     id: id(2),
                     address: Some(supply + 8),
-                    parents: [None; 2],
+                    parents: [None; 4],
                 },
             ],
             resources: vec![

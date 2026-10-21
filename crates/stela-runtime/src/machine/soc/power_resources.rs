@@ -11,8 +11,12 @@ use crate::platform::apple::{
 };
 use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
+mod records;
+use records::{Layout, Record};
+
 /// Bytes of one m1n1 `struct pmgr_device` record.
-pub(super) const PMGR_DEVICE: usize = 48;
+pub(super) const PMGR_DEVICE: usize = records::BYTES;
+#[cfg(test)]
 pub(super) const PMGR_VIRTUAL: u32 = 0x10;
 
 /// Hardware owners, indexed in the board's corresponding placement vectors.
@@ -429,32 +433,81 @@ pub(super) fn power_states(
     else {
         return Ok(None);
     };
+    decode_power_states(root, &node, translate).map(Some)
+}
+
+/// Normalize firmware records without granting a new SoC's native model.
+/// `power_states` retains the independent complete-PMGR placement gate.
+fn decode_power_states(
+    root: &Node<'_>,
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<PowerStates, String> {
+    let table = decode_domain_table(node, translate)?;
+    let resources = inventory(root)?;
+    let consumers = resources
+        .iter()
+        .map(|resource| Consumer {
+            name: &resource.name,
+            clocks: &resource.clocks,
+            power: &resource.power,
+            sinks: LifecycleSinks::default(),
+            admission: resource.admission,
+        })
+        .collect::<Vec<_>>();
+    // Validate the entire graph even when a broken record is unreferenced.
+    coverage::analyze(&table.domains, &consumers)
+        .map_err(|error| format!("PMGR coverage: {error:?}"))?;
+    Ok(PowerStates {
+        blocks: table.blocks,
+        registers: table.registers,
+        domains: table.domains,
+        resources,
+    })
+}
+
+struct DomainTable {
+    blocks: Vec<(u64, u64)>,
+    registers: Vec<u64>,
+    domains: Vec<Domain>,
+}
+
+/// Record normalization is separate from the full resource inventory and
+/// coverage checks. This table alone never establishes lifecycle admission.
+fn decode_domain_table(
+    node: &Node<'_>,
+    translate: &dyn Fn(u64) -> Option<u64>,
+) -> Result<DomainTable, String> {
     const PATH: &str = "/arm-io/pmgr";
     let reg = node.pairs("reg").unwrap_or_default();
-    let raw_blocks = node.property("ps-regs").unwrap_or_default();
-    let blocks = node.cells32("ps-regs").unwrap_or_default();
+    let (layout, raw_blocks) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
+        .map_err(String::from)?;
+    let blocks = raw_blocks
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
+        .collect::<Vec<_>>();
     let devices = node.property("devices").unwrap_or_default();
     if !raw_blocks.len().is_multiple_of(12) || !devices.len().is_multiple_of(PMGR_DEVICE) {
-        return Err(format!("{PATH} ps-regs or devices is not whole entries"));
+        return Err(format!(
+            "{PATH} power-state groups or devices is not whole entries"
+        ));
     }
     let mut spans: Vec<Option<(u64, u64)>> = alloc::vec![None; blocks.len() / 3];
     let mut registers = Vec::new();
     let mut domains = Vec::new();
-    for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
-        let flags = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
-        let device = u16::from_le_bytes(entry[26..28].try_into().expect("device ID"));
-        let parents = [
-            u16::from_le_bytes(entry[4..6].try_into().expect("parent ID")),
-            u16::from_le_bytes(entry[6..8].try_into().expect("parent ID")),
-        ]
-        .map(|parent| (parent != 0).then(|| domain_id(parent)));
-        let address = if flags & PMGR_VIRTUAL != 0 {
-            None
-        } else {
-            let (index, block) = (u64::from(entry[10]), usize::from(entry[11]));
+    for (number, entry) in devices.as_chunks::<PMGR_DEVICE>().0.iter().enumerate() {
+        let record = Record::parse(layout, entry)
+            .map_err(|error| format!("{PATH} record {number}: {error}"))?;
+        let parents = record
+            .parents
+            .map(|parent| (parent != 0).then(|| domain_id(parent)));
+        let address = if let Some(location) = record.location {
+            let (index, block) = (u64::from(location.index), location.group);
             let cells = blocks
                 .get(block * 3..block * 3 + 3)
-                .ok_or_else(|| format!("{PATH} device names absent ps-regs block {block}"))?;
+                .ok_or_else(|| format!("{PATH} device names absent power-state block {block}"))?;
             let &(range, bytes) = reg
                 .get(cells[0] as usize)
                 .ok_or_else(|| format!("{PATH} ps-regs block {block} names absent reg"))?;
@@ -483,47 +536,92 @@ pub(super) fn power_states(
                 registers.push(physical);
             }
             Some(physical)
+        } else {
+            None
         };
-        let raw_name = &entry[32..48];
-        let end = raw_name
-            .iter()
-            .position(|&byte| byte == 0)
-            .unwrap_or(raw_name.len());
-        let name = core::str::from_utf8(&raw_name[..end])
-            .map_err(|_| format!("{PATH} domain {device:#x} has a non-UTF-8 name"))?;
         domains.push(Domain {
-            name: name.into(),
-            id: domain_id(device),
+            name: record.name.into(),
+            id: domain_id(record.id),
             address,
             parents,
         });
     }
-    let resources = inventory(root)?;
-    let consumers = resources
-        .iter()
-        .map(|resource| Consumer {
-            name: &resource.name,
-            clocks: &resource.clocks,
-            power: &resource.power,
-            sinks: LifecycleSinks::default(),
-            admission: resource.admission,
-        })
-        .collect::<Vec<_>>();
-    // Validate the entire graph even when a broken record is unreferenced.
-    coverage::analyze(&domains, &consumers).map_err(|error| format!("PMGR coverage: {error:?}"))?;
     registers.sort_unstable();
-    Ok(Some(PowerStates {
+    Ok(DomainTable {
         blocks: spans.into_iter().flatten().collect(),
         registers,
         domains,
-        resources,
-    }))
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::machine::{adt::encode, soc::DART};
+
+    #[test]
+    #[ignore = "requires pinned original 26A434 board DeviceTrees; no Apple image is committed"]
+    fn original_v2_board_graphs_preserve_all_parents_and_physical_locations() {
+        use sha2::{Digest, Sha256};
+        let directory =
+            std::env::var("STELA_TEST_PMGR_ADTS").expect("original board ADT directory");
+        for (file, expected_sha, domains, registers) in [
+            (
+                "DeviceTree.j614cap.adt",
+                "d91252105f7335211ee5e2a6975cd0602b5de0725c47374aeb29811567de3971",
+                490,
+                263,
+            ),
+            (
+                "DeviceTree.j700ap.adt",
+                "b0fbf661a25626403fa1035ba681d5a7ab8ce13130e2a6d2320d4167255d0a88",
+                296,
+                138,
+            ),
+            (
+                "DeviceTree.j704ap.adt",
+                "66596bdffc33f951d20170b20dfbda79e28b144252144a6a7010ad4fa54bcd2e",
+                387,
+                141,
+            ),
+        ] {
+            let bytes = std::fs::read(std::path::Path::new(&directory).join(file)).unwrap();
+            assert_eq!(hex::encode(Sha256::digest(&bytes)), expected_sha);
+            let root = Node::root(&bytes).unwrap();
+            let io = root.child("arm-io").unwrap();
+            let node = io.child("pmgr").unwrap();
+            let ranges = io.ranges().unwrap();
+            let translate = |address| {
+                ranges.iter().find_map(|&(child, parent, bytes)| {
+                    (address >= child && address - child < bytes)
+                        .then(|| parent.checked_add(address - child))
+                        .flatten()
+                })
+            };
+            let states = decode_domain_table(&node, &translate).unwrap();
+            assert_eq!(states.domains.len(), domains);
+            assert_eq!(states.registers.len(), registers);
+            let coverage = coverage::analyze(&states.domains, &[]).unwrap();
+            assert!(coverage.iter().all(|domain| !domain.bindable()));
+            assert!(
+                states
+                    .domains
+                    .iter()
+                    .any(|domain| domain.parents[2].is_some())
+            );
+            if file == "DeviceTree.j704ap.adt" {
+                let domain = states
+                    .domains
+                    .iter()
+                    .find(|domain| domain.name == "AFISOCNI0")
+                    .unwrap();
+                assert_eq!(
+                    domain.parents,
+                    [53, 55, 36, 35].map(|id| Some(domain_id(id)))
+                );
+            }
+        }
+    }
 
     fn words(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|word| word.to_le_bytes()).collect()
