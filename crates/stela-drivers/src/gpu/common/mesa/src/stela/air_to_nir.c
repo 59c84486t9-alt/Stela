@@ -850,6 +850,11 @@ instruction(struct translator *t, LLVMValueRef inst)
       else if (op == LLVMFMul)
          value = nir_fmul(&t->b, a, b);
       else {
+         const nir_shader_compiler_options *options = t->b.shader->options;
+         /* Match the original frontend/NIR option contract. Some backends
+          * lower only canonical comparisons before converting bool widths.
+          * These NaN-correct recipes come from the original SPIR-V frontend
+          * and NIR algebraic rules; NIR can fuse them when permitted. */
          switch (LLVMGetFCmpPredicate(inst)) {
          case LLVMRealPredicateFalse: value = nir_imm_zero(&t->b, components, 1); break;
          case LLVMRealPredicateTrue: value = nir_inot(&t->b, nir_imm_zero(&t->b, components, 1)); break;
@@ -858,14 +863,35 @@ instruction(struct translator *t, LLVMValueRef inst)
          case LLVMRealOGE: value = nir_fge(&t->b, a, b); break;
          case LLVMRealOLT: value = nir_flt(&t->b, a, b); break;
          case LLVMRealOLE: value = nir_fge(&t->b, b, a); break;
-         case LLVMRealONE: value = nir_fneo(&t->b, a, b); break;
-         case LLVMRealORD: value = nir_ford(&t->b, a, b); break;
-         case LLVMRealUNO: value = nir_funord(&t->b, a, b); break;
-         case LLVMRealUEQ: value = nir_fequ(&t->b, a, b); break;
-         case LLVMRealUGT: value = nir_fltu(&t->b, b, a); break;
-         case LLVMRealUGE: value = nir_fgeu(&t->b, a, b); break;
-         case LLVMRealULT: value = nir_fltu(&t->b, a, b); break;
-         case LLVMRealULE: value = nir_fgeu(&t->b, b, a); break;
+         case LLVMRealONE:
+            value = options->has_fneo_fcmpu ? nir_fneo(&t->b, a, b) :
+               nir_ior(&t->b, nir_flt(&t->b, a, b), nir_flt(&t->b, b, a));
+            break;
+         case LLVMRealORD:
+            value = options->has_ford_funord ? nir_ford(&t->b, a, b) :
+               nir_iand(&t->b, nir_feq(&t->b, a, a), nir_feq(&t->b, b, b));
+            break;
+         case LLVMRealUNO:
+            value = options->has_ford_funord ? nir_funord(&t->b, a, b) :
+               nir_ior(&t->b, nir_fneu(&t->b, a, a), nir_fneu(&t->b, b, b));
+            break;
+         case LLVMRealUEQ:
+            value = options->has_fneo_fcmpu ? nir_fequ(&t->b, a, b) :
+               nir_ior(&t->b, nir_feq(&t->b, a, b),
+                       nir_ior(&t->b, nir_fneu(&t->b, a, a), nir_fneu(&t->b, b, b)));
+            break;
+         case LLVMRealUGT:
+            value = options->has_fneo_fcmpu ? nir_fltu(&t->b, b, a) : nir_inot(&t->b, nir_fge(&t->b, b, a));
+            break;
+         case LLVMRealUGE:
+            value = options->has_fneo_fcmpu ? nir_fgeu(&t->b, a, b) : nir_inot(&t->b, nir_flt(&t->b, a, b));
+            break;
+         case LLVMRealULT:
+            value = options->has_fneo_fcmpu ? nir_fltu(&t->b, a, b) : nir_inot(&t->b, nir_fge(&t->b, a, b));
+            break;
+         case LLVMRealULE:
+            value = options->has_fneo_fcmpu ? nir_fgeu(&t->b, b, a) : nir_inot(&t->b, nir_flt(&t->b, b, a));
+            break;
          case LLVMRealUNE: value = nir_fneu(&t->b, a, b); break;
          default: return fail(t, STELA_AIR_INSTRUCTION, "unknown floating comparison");
          }

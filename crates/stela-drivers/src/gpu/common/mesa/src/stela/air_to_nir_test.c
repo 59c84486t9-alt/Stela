@@ -32,6 +32,9 @@ bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
 }
 
 static const nir_shader_compiler_options test_nir_options = {0};
+static const nir_shader_compiler_options extended_compare_options = {
+   .has_fneo_fcmpu = true, .has_ford_funord = true,
+};
 
 static nir_shader *
 translate_profile(LLVMMemoryBufferRef input, const nir_shader_compiler_options *nir_options,
@@ -74,11 +77,11 @@ expect_refusal(const char *body, const char *extra, unsigned budget,
 }
 
 static void
-constant_store_profile(LLVMMemoryBufferRef input, enum stela_air_fp_profile profile,
-                       uint64_t expected, uint64_t address)
+constant_store_options(LLVMMemoryBufferRef input, const nir_shader_compiler_options *nir_options,
+                       enum stela_air_fp_profile profile, uint64_t expected, uint64_t address)
 {
    struct stela_air_error error;
-   nir_shader *nir = translate_profile(input, &test_nir_options, 100, profile, &error);
+   nir_shader *nir = translate_profile(input, nir_options, 100, profile, &error);
    if (!nir)
       fprintf(stderr, "constant shader: %s\n", error.detail);
    CHECK(nir);
@@ -105,6 +108,13 @@ constant_store_profile(LLVMMemoryBufferRef input, enum stela_air_fp_profile prof
    nir_validate_shader(nir, "AIR constant semantics");
    ralloc_free(nir);
    LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+constant_store_profile(LLVMMemoryBufferRef input, enum stela_air_fp_profile profile,
+                       uint64_t expected, uint64_t address)
+{
+   constant_store_options(input, &test_nir_options, profile, expected, address);
 }
 
 static void
@@ -567,7 +577,6 @@ static const char *floating_body =
 static const char *float_predicates[] = {"false","oeq","ogt","oge","olt","ole","one","ord",
                                         "uno","ueq","ugt","uge","ult","ule","une","true"};
 
-#ifdef STELA_AIR_TEST_NAK
 static char *
 floating_comparison_body(void)
 {
@@ -592,12 +601,57 @@ floating_comparison_body(void)
       "store i32 %%m15, ptr addrspace(1) %%out, align 4\nret void\n") > 0);
    return body;
 }
-#endif
 
 static void
 ieee_store(const char *body, uint32_t expected)
 {
    constant_store_input(ieee_bitcode(stela_air_test_prefix, body), expected, 0x100000);
+}
+
+static void
+floating_backend_options(void)
+{
+   char *body = floating_comparison_body();
+   LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, body);
+   for (unsigned flags = 0; flags < 4; flags++) {
+      const nir_shader_compiler_options options = {
+         .has_fneo_fcmpu = (flags & 1) != 0,
+         .has_ford_funord = (flags & 2) != 0,
+      };
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &options, 256, &error);
+      CHECK(nir);
+      unsigned extended = 0, ordered = 0;
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_alu)
+                  continue;
+               switch (nir_instr_as_alu(instr)->op) {
+               case nir_op_fneo: case nir_op_fequ: case nir_op_fltu: case nir_op_fgeu:
+                  extended++;
+                  break;
+               case nir_op_ford: case nir_op_funord:
+                  ordered++;
+                  break;
+               default: break;
+               }
+            }
+         }
+      }
+      CHECK(extended == ((flags & 1) ? 6 : 0));
+      CHECK(ordered == ((flags & 2) ? 2 : 0));
+      nir_validate_shader(nir, "AIR comparison compiler options");
+      if (!flags) {
+         /* Original ELK pass requires canonical comparisons. Exercise the
+          * actual bool-width boundary that previously asserted on fneo. */
+         CHECK(nir_lower_bool_to_int32(nir));
+         nir_validate_shader(nir, "AIR canonical comparison bool lowering");
+      }
+      ralloc_free(nir);
+   }
+   LLVMDisposeMemoryBuffer(input);
+   free(body);
 }
 
 static void
@@ -662,6 +716,24 @@ floating_semantics(void)
             "store i32 %%value, ptr addrspace(1) %%out, align 4\nret void\n",
             comparisons[i].a, comparisons[i].b, float_predicates[p]);
          ieee_store(body, (comparisons[i].truth >> p) & 1);
+         constant_store_options(ieee_bitcode(stela_air_test_prefix, body), &extended_compare_options,
+            STELA_AIR_FP_IEEE_DEFAULT, (comparisons[i].truth >> p) & 1, 0x100000);
+      }
+   }
+   /* Each vector lane has a different relation: unordered, less, greater,
+    * equal signed zeros. Both option paths must retain per-lane semantics. */
+   const uint16_t vector_truth[] = {0xff00, 0xf0f0, 0xcccc, 0xaaaa};
+   for (unsigned p = 0; p < ARRAY_SIZE(float_predicates); p++) {
+      for (unsigned lane = 0; lane < ARRAY_SIZE(vector_truth); lane++) {
+         snprintf(body, sizeof(body),
+            "%%a = bitcast <4 x i32> <i32 2143363909, i32 1065353216, i32 1073741824, i32 0> to <4 x float>\n"
+            "%%b = bitcast <4 x i32> <i32 1065353216, i32 1073741824, i32 1065353216, i32 -2147483648> to <4 x float>\n"
+            "%%v = fcmp %s <4 x float> %%a, %%b\n%%value = zext <4 x i1> %%v to <4 x i32>\n"
+            "%%lane = extractelement <4 x i32> %%value, i32 %u\n"
+            "store i32 %%lane, ptr addrspace(1) %%out, align 4\nret void\n", float_predicates[p], lane);
+         ieee_store(body, (vector_truth[lane] >> p) & 1);
+         constant_store_options(ieee_bitcode(stela_air_test_prefix, body), &extended_compare_options,
+            STELA_AIR_FP_IEEE_DEFAULT, (vector_truth[lane] >> p) & 1, 0x100000);
       }
    }
    /* Exact memory/negation/select do not depend on the unqualified private AIR
@@ -905,6 +977,7 @@ tests(void)
    conditional_semantics();
    conditional_refusals();
    floating_semantics();
+   floating_backend_options();
    floating_contracts();
    qualified_floating_semantics();
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
