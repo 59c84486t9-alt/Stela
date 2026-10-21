@@ -3,8 +3,10 @@
 //! The partition's first [`CAPACITY`] bytes hold the image as the die
 //! stores it. An all-zero region is a partition never used for NOR (a new
 //! GPT partition reads as zeros) and receives a fresh image; any other
-//! content must hold a valid NVRAM bank, so a wrong partition is refused
-//! instead of overwritten. Committed changes are stored by erase sector.
+//! content must identify a NOR image ([`Image::boot_bank`]), so a wrong
+//! partition is refused. Damaged banks remain unchanged: boot firmware
+//! supplies an empty proxy until the guest saves. Committed changes are
+//! stored by erase sector.
 use super::{CAPACITY, Image, SECTOR_SIZE};
 use alloc::{format, string::String, vec};
 use stela_drivers::block::BlockDevice;
@@ -26,10 +28,10 @@ pub fn load(device: &mut dyn BlockDevice) -> Result<(Image, bool), String> {
         return Ok((image, true));
     }
     let image = Image::from_bytes(bytes).map_err(String::from)?;
-    image.current_bank().map_err(|_| {
+    image.boot_bank().map_err(|_| {
         format!(
-            "the NOR partition ({block_size}-byte blocks) is neither blank nor a NOR image \
-             with a valid NVRAM bank"
+            "the NOR partition ({block_size}-byte blocks) is neither blank nor an identifiable \
+             NOR image"
         )
     })?;
     Ok((image, false))
@@ -128,5 +130,26 @@ mod tests {
         assert_eq!(foreign.bytes[7], 1);
         assert!(load(&mut RamDisk::new("small", 100, 512)).is_err());
         assert!(load(&mut RamDisk::new("odd", 4096, 3000)).is_err());
+    }
+
+    #[test]
+    fn loading_torn_banks_preserves_disk_bytes_until_the_guest_syncs() {
+        let mut disk = RamDisk::new("nor", 2048, 512);
+        let (image, _) = load(&mut disk).unwrap();
+        let first = super::super::ANVRAM.0 as usize;
+        // Neither bank validates: bank 0 has an incomplete payload; bank
+        // 1 was erased before an interrupted program wrote its header.
+        disk.bytes[first + 256..first + super::super::nvram::BANK_SIZE].fill(0xff);
+        let before = disk.bytes.clone();
+        let (loaded, fresh) = load(&mut disk).unwrap();
+        assert!(!fresh);
+        assert!(loaded.current_bank().is_err());
+        assert_eq!(
+            loaded.boot_bank().unwrap().1,
+            super::super::nvram::empty_bank()
+        );
+        assert_eq!(loaded.bytes(), before);
+        assert_eq!(disk.bytes, before);
+        assert_ne!(loaded, image);
     }
 }

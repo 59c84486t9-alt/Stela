@@ -67,10 +67,14 @@ impl HostNor {
             output::arguments(format_args!("NOR refusal: {error}\n"));
             output::fatal("the NOR partition could not be loaded")
         });
-        let bank = image
-            .current_bank()
-            .expect("persist::load returns an image with a valid bank");
-        let proxy = image.bank(bank).expect("current bank").to_vec();
+        let (bank, proxy) = image
+            .boot_bank()
+            .expect("persist::load returns an identifiable NOR image");
+        if image.current_bank().is_err() {
+            output::arguments(format_args!(
+                "NVRAM recovery: no valid bank; using empty boot variables; flash preserved\n"
+            ));
+        }
         output::arguments(format_args!("NOR persistent fresh={fresh} bank={bank}\n"));
         open_log(&disk, block, available);
         (

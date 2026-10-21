@@ -286,9 +286,8 @@ fn select(target: &Target, part: Part, consume: bool) -> Result<Selection, Strin
         return select(&Variables::parse(&empty_bank()).map_err(String::from)?);
     }
     let mut image = Image::from_bytes(bytes).map_err(String::from)?;
-    let current = image.current_bank().map_err(String::from)?;
-    let mut variables =
-        Variables::parse(image.bank(current).map_err(String::from)?).map_err(String::from)?;
+    let (_, proxy) = image.boot_bank().map_err(String::from)?;
+    let mut variables = Variables::parse(&proxy).map_err(String::from)?;
     let selection = select(&variables)?;
     if consume
         && boot_selection::consume(&mut variables, &selection).map_err(|e| format!("{e:#}"))?

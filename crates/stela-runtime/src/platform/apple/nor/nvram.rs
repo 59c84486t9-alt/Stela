@@ -95,16 +95,24 @@ fn partition_name(header: &[u8]) -> &[u8] {
         .expect("one slice")
 }
 
+/// Recognize the Apple container independently of its payload's Adler-32.
+/// A torn program can leave a complete header above incomplete variables.
+/// This identifies a damaged bank; it does not authorize reading its variables.
+pub(super) fn has_apple_header(bank: &[u8]) -> bool {
+    bank.len() == BANK_SIZE
+        && bank[0] == APPLE_SIGNATURE
+        && matches!(partition_name(bank), b"nvram" | b"2nvram")
+        && u16::from_le_bytes([bank[2], bank[3]]) as usize * HEADER_SIZE == APPLE_HEADER_SIZE
+        && bank[1] == checksum(bank)
+}
+
 /// Validate the bounded CHRP image before accepting boot firmware's proxy.
 /// XNU accepts both v1 and v2 names; Stela creates v1 and preserves either.
 pub fn validate(bank: &[u8]) -> Result<(), &'static str> {
     if bank.len() != BANK_SIZE {
         return Err("NVRAM bank is not 64 KiB");
     }
-    let name = &bank[4..16];
-    if bank[0] != APPLE_SIGNATURE
-        || !(name.starts_with(b"nvram\0") || name.starts_with(b"2nvram\0"))
-        || bank[1] != checksum(bank)
+    if !has_apple_header(bank)
         || u32::from_le_bytes(bank[16..20].try_into().expect("4 bytes")) != adler(&bank[20..])
     {
         return Err("invalid Apple CHRP bank header or Adler-32");
@@ -158,5 +166,22 @@ mod tests {
         let mut bank = empty_bank();
         bank[1] ^= 1;
         assert!(validate(&bank).is_err());
+    }
+
+    #[test]
+    fn bank_recognition_needs_the_apple_header_but_never_trusts_the_payload() {
+        let mut bank = empty_bank();
+        bank[100] ^= 1;
+        assert!(has_apple_header(&bank));
+        assert!(validate(&bank).is_err());
+        bank[2] = 3; // The Apple container is its 32-byte header only.
+        bank[1] = checksum(&bank);
+        assert!(!has_apple_header(&bank));
+        assert!(validate(&bank).is_err());
+        assert!(!has_apple_header(&bank[..100]));
+        let mut bank = empty_bank();
+        bank[4..16].fill(b'x');
+        bank[1] = checksum(&bank);
+        assert!(!has_apple_header(&bank));
     }
 }

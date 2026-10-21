@@ -70,7 +70,7 @@ impl Image {
         let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
         Ok(&self.0[start..start + nvram::BANK_SIZE])
     }
-    /// The newest valid NVRAM bank, by generation; the lower bank wins a
+    /// The newest valid NVRAM bank, by generation; the higher bank wins a
     /// tie.
     pub fn current_bank(&self) -> Result<u32, &'static str> {
         (0..nvram::BANK_COUNT)
@@ -79,9 +79,33 @@ impl Image {
                 nvram::validate(bytes).ok()?;
                 Some((nvram::generation(bytes), bank))
             })
-            .max_by_key(|&(generation, bank)| (generation, core::cmp::Reverse(bank)))
+            .max_by_key(|&(generation, bank)| (generation, bank))
             .map(|(_, bank)| bank)
             .ok_or("the NOR image holds no valid NVRAM bank")
+    }
+    /// The bank boot firmware hands off, without changing the flash image.
+    ///
+    /// iBoot's CHRP reader skips bad banks, including bad Adler-32, and
+    /// succeeds with no imported variables when none survives (26A434 J473
+    /// raw offsets 0xec2ec..0xec2f4, 0xec52c..0xec598). Its handoff then
+    /// serializes the environment when no bank was loaded (0xece34..0xece50).
+    /// Stela supplies its empty environment in that case. The damaged banks
+    /// remain on the die until the guest erases/programs them itself.
+    ///
+    /// A checksummed Apple header at a bank boundary identifies damaged NOR;
+    /// a completely erased die is also NOR. Unidentified nonblank data is
+    /// refused, rather than treating a wrong host partition as corrupt NVRAM.
+    pub fn boot_bank(&self) -> Result<(u32, Vec<u8>), &'static str> {
+        if let Ok(current) = self.current_bank() {
+            return Ok((current, self.bank(current)?.to_vec()));
+        }
+        if self.0.iter().all(|&byte| byte == ERASED)
+            || (0..nvram::BANK_COUNT)
+                .any(|bank| nvram::has_apple_header(self.bank(bank).expect("bank in anvram")))
+        {
+            return Ok((nvram::CURRENT_BANK, nvram::empty_bank()));
+        }
+        Err("the NOR image has neither a valid NVRAM bank nor an identifiable Apple bank header")
     }
     /// Save `bank` as XNU's `IONVRAMCHRPHandler` does: into the bank after
     /// the current one, round robin. `bank` must be valid and newer than the
@@ -387,8 +411,74 @@ mod tests {
         let newer = nvram::empty_bank_of(2);
         let image = image.with_proxy(1, &newer).unwrap();
         assert_eq!(image.current_bank(), Ok(1));
+        let tied = image.with_proxy(0, &newer).unwrap();
+        assert_eq!(tied.current_bank(), Ok(1));
         let blank = Image::from_bytes(vec![ERASED; CAPACITY]).unwrap();
         assert!(blank.current_bank().is_err());
+    }
+
+    #[test]
+    fn invalid_banks_supply_an_empty_proxy_without_rewriting_the_flash() {
+        let mut image = Image::fresh()
+            .with_proxy(1, &nvram::empty_bank_of(2))
+            .unwrap();
+        // A nonempty bank whose payload was not programmed completely.
+        for bank in 0..nvram::BANK_COUNT {
+            let start = ANVRAM.0 as usize + bank as usize * nvram::BANK_SIZE;
+            image.0[start + PAGE_SIZE..start + nvram::BANK_SIZE].fill(ERASED);
+        }
+        image.0[SYSCFG.0 as usize + 10] = 0x42;
+        let before = image.clone();
+        assert!(image.current_bank().is_err());
+        let (bank, proxy) = image.boot_bank().unwrap();
+        assert_eq!(bank, nvram::CURRENT_BANK);
+        assert_eq!(proxy, nvram::empty_bank());
+        assert_eq!(image, before);
+        // A valid bank always takes precedence over damaged ones.
+        let valid = image.with_proxy(1, &nvram::empty_bank_of(3)).unwrap();
+        assert_eq!(valid.boot_bank().unwrap(), (1, nvram::empty_bank_of(3)));
+    }
+
+    #[test]
+    fn erased_flash_recovers_but_unidentified_data_and_corrupt_headers_refuse() {
+        let mut image = Image::from_bytes(vec![ERASED; CAPACITY]).unwrap();
+        assert_eq!(image.boot_bank().unwrap().1, nvram::empty_bank());
+        image.0[12] = 0x42;
+        assert!(image.boot_bank().is_err());
+        let mut image = Image::fresh();
+        image.0[ANVRAM.0 as usize + 1] ^= 1;
+        assert!(image.boot_bank().is_err());
+    }
+
+    #[test]
+    fn a_guest_save_after_recovery_replaces_only_its_selected_bank() {
+        let mut image = Image::fresh();
+        image.0[ANVRAM.0 as usize + 100] ^= 1;
+        let (_, proxy) = image.boot_bank().unwrap();
+        let mut variables = nvram::Variables::parse(&proxy).unwrap();
+        variables
+            .set(nvram::Partition::System, b"boot-command", b"recover")
+            .unwrap();
+        let saved = variables.encode().unwrap();
+        let untouched = image.bank(0).unwrap().to_vec();
+        let mut nor = Nor::new(image);
+        command(&mut nor, &[WRITE_ENABLE]);
+        command(&mut nor, &[ERASE_BLOCK, 0x0d, 0, 0]);
+        for (page, bytes) in saved.chunks(PAGE_SIZE).enumerate() {
+            let address = ANVRAM.0 as usize + nvram::BANK_SIZE + page * PAGE_SIZE;
+            let mut program = vec![
+                PROGRAM,
+                (address >> 16) as u8,
+                (address >> 8) as u8,
+                address as u8,
+            ];
+            program.extend_from_slice(bytes);
+            command(&mut nor, &[WRITE_ENABLE]);
+            command(&mut nor, &program);
+        }
+        assert_eq!(nor.image.current_bank(), Ok(1));
+        assert_eq!(nor.image.boot_bank().unwrap(), (1, saved));
+        assert_eq!(nor.image.bank(0).unwrap(), untouched);
     }
 
     #[test]
