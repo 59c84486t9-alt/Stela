@@ -2827,6 +2827,9 @@ fn finish(
         }
         Stop::Reset(reset) => {
             output::arguments(format_args!("STOP reset: {reset}\n"));
+            // The run is over: its blocks' memory goes to proving the new
+            // ones.
+            machine.discard_blocks();
             translations::write();
             match reset.transition {
                 Transition::Restart => {

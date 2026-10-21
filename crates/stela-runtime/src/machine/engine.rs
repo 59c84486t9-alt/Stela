@@ -3312,6 +3312,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         Ok(word)
     }
 
+    /// Discard every installed block, freeing its metadata, as a run that
+    /// has ended does before work that needs the memory.
+    pub fn discard_blocks(&mut self) {
+        self.discard_code();
+    }
+
     /// Exits to the engine from compiled code (System, FP, PAC and AMX), by
     /// the instruction word that took them: which words to compile inline.
     pub fn exit_words(&self) -> BTreeMap<u32, u64> {

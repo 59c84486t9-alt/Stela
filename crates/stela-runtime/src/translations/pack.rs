@@ -363,9 +363,11 @@ pub struct Store<'a> {
 #[derive(Debug)]
 pub struct Planned<'a> {
     pub layout: Layout<'a>,
-    /// Blocks proven and refused by their proofs.
+    /// Blocks proven and refused by their proofs, and those left unproven
+    /// when the room to prove them ran out.
     pub proven: u64,
     pub unprovable: u64,
+    pub unproven: u64,
     /// Records of the read pack left out to stay within the bound, and new
     /// ones that did not fit.
     pub evicted: u64,
@@ -402,12 +404,18 @@ impl<'a> Store<'a> {
         self.pending.len()
     }
 
-    /// Prove the offered blocks and lay out the next pack within `bound`
-    /// bytes.
-    pub fn plan(&mut self, bound: u64) -> Planned<'a> {
+    /// Prove the offered blocks while `room` says there is memory to, and
+    /// lay out the next pack within `bound` bytes.
+    pub fn plan(&mut self, bound: u64, room: impl Fn() -> bool) -> Planned<'a> {
         let mut proven: BTreeMap<Digest, Record> = BTreeMap::new();
         let (mut count, mut unprovable) = (0, 0);
-        for pending in core::mem::take(&mut self.pending) {
+        let pending = core::mem::take(&mut self.pending);
+        let mut unproven = pending.len() as u64;
+        for pending in pending {
+            if !room() {
+                break;
+            }
+            unproven -= 1;
             let Pending {
                 key,
                 page,
@@ -487,6 +495,7 @@ impl<'a> Store<'a> {
             layout: Layout::new(&self.translator, kept),
             proven: count,
             unprovable,
+            unproven,
             evicted,
         }
     }
@@ -612,6 +621,22 @@ mod tests {
     }
 
     #[test]
+    fn blocks_past_the_room_to_prove_them_stay_unproven() {
+        let translator = translator_id();
+        let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
+        let mut store = Store::new(translator, None).0;
+        store.offer(offer(0x1_0000_4008, first));
+        store.offer(offer(0x1_0000_8010, second));
+        let tried = core::cell::Cell::new(0);
+        let planned = store.plan(u64::MAX, || {
+            tried.set(tried.get() + 1);
+            tried.get() == 1
+        });
+        assert_eq!((planned.proven, planned.unproven), (1, 1));
+        assert_eq!(planned.layout.records(), 1);
+    }
+
+    #[test]
     fn a_boot_proves_its_blocks_into_the_next_pack_and_the_one_after_reads_them() {
         let translator = translator_id();
         let (first, second) = (Digest::of(b"first page"), Digest::of(b"second page"));
@@ -619,7 +644,7 @@ mod tests {
         store.offer(offer(0x1_0000_4008, first));
         store.offer(offer(0x1_0000_8010, second));
         assert_eq!(store.record(&first), None);
-        let planned = store.plan(u64::MAX);
+        let planned = store.plan(u64::MAX, || true);
         assert_eq!(
             (planned.proven, planned.unprovable, planned.evicted),
             (2, 0, 0)
@@ -640,7 +665,7 @@ mod tests {
         assert_eq!(next.counters.loaded, 1);
         // The record this boot used is kept first under a tight bound.
         let one = layout_bytes(1, next.pack().unwrap().get(&first).unwrap().len() as u64);
-        let planned = next.plan(one);
+        let planned = next.plan(one, || true);
         assert_eq!((planned.layout.records(), planned.evicted), (1, 1));
         let kept = planned.layout.to_vec();
         let pack = Pack::parse(&kept, &translator).unwrap();
@@ -719,10 +744,10 @@ mod tests {
         let key = Digest::of(b"page");
         let mut store = Store::new(translator, None).0;
         store.offer(offer(0x1_0000_4008, key));
-        let bytes = store.plan(u64::MAX).layout.to_vec();
+        let bytes = store.plan(u64::MAX, || true).layout.to_vec();
         let mut next = Store::new(translator, Some(&bytes)).0;
         next.offer(offer(0x1_0000_4010, key));
-        let merged = next.plan(u64::MAX).layout.to_vec();
+        let merged = next.plan(u64::MAX, || true).layout.to_vec();
         let pack = Pack::parse(&merged, &translator).unwrap();
         let record = Record::decode(pack.get(&key).unwrap(), &translator, &key).unwrap();
         let mut offsets: Vec<u16> = record.entries.iter().map(|entry| entry.offset).collect();

@@ -350,7 +350,9 @@ pub fn write() {
         counters.invalid,
         counters.dropped
     ));
-    let planned = store.plan(bound);
+    // Proving compiles each block twice more: it stops while the heap
+    // still has room for the layout and the write.
+    let planned = store.plan(bound, || !crate::ALLOCATOR.low());
     let mut volume = match Fat32::open(Bytes::new(partition)) {
         Ok(volume) => volume,
         Err(error) => {
@@ -368,11 +370,13 @@ pub fn write() {
     let mut device = volume.into_inner().into_inner();
     match pack::write_in_place(&mut *device, &file.extents, &planned.layout) {
         Ok(()) => output::arguments(format_args!(
-            "TRANSLATIONS written records={} bytes={} proven={} unprovable={} evicted={}\n",
+            "TRANSLATIONS written records={} bytes={} proven={} unprovable={} unproven={} \
+             evicted={}\n",
             planned.layout.records(),
             planned.layout.bytes(),
             planned.proven,
             planned.unprovable,
+            planned.unproven,
             planned.evicted
         )),
         Err(error) => output::arguments(format_args!("TRANSLATIONS not written: {error:?}\n")),
