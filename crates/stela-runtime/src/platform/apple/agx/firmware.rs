@@ -263,6 +263,181 @@ struct ActiveWork {
     retiring: bool,
 }
 
+/// A RAM-only effect of an accepted device-control entry. Multi-page
+/// buffers own their bytes through a partial-prefix fault; scalar stores
+/// must satisfy the same single-page contract as signal publications.
+#[derive(Debug)]
+struct ControlWrite {
+    address: u64,
+    bytes: Vec<u8>,
+}
+
+impl ControlWrite {
+    fn new(address: u64, bytes: &[u8]) -> Result<Self, &'static str> {
+        address
+            .checked_add(bytes.len() as u64 - 1)
+            .ok_or("GFX device-control output range wraps")?;
+        if bytes.len() <= 8 {
+            ring::scalar_range(address, bytes.len() as u64)?;
+        }
+        Ok(Self {
+            address,
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
+/// The entry, read-derived values and exact retirement stay accepted until
+/// all effects commit. Local notice/counter effects have their own phase so
+/// a final consumer-index fault cannot count or enqueue them twice.
+#[derive(Debug)]
+struct ActiveControl {
+    descriptor: ring::Descriptor,
+    next_read: u32,
+    kind: u32,
+    power: Option<PowerNotice>,
+    writes: Vec<ControlWrite>,
+    count: Option<ControlCount>,
+    next: usize,
+    local_committed: bool,
+}
+
+/// The original common-tail RMW follows the command's writes. Capture its
+/// result before attempting the write, so a write fault never increments
+/// twice; a read fault leaves prior command effects committed and owned.
+#[derive(Debug)]
+struct ControlCount {
+    address: u64,
+    value: Option<u32>,
+    committed: bool,
+}
+
+impl ControlCount {
+    fn commit(&mut self, memory: &mut dyn Shared) -> Result<(), &'static str> {
+        if self.committed {
+            return Ok(());
+        }
+        let value = match self.value {
+            Some(value) => value,
+            None => {
+                let value = memory.read_u32(self.address)?.wrapping_add(1);
+                self.value = Some(value);
+                value
+            }
+        };
+        memory.write(self.address, &value.to_le_bytes())?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl ActiveControl {
+    fn accept(
+        memory: &mut dyn Shared,
+        root: &Root,
+        layout: &Layout,
+        descriptor: ring::Descriptor,
+        read: u32,
+        entry: &[u8],
+    ) -> Result<Self, &'static str> {
+        let kind = u32::from_le_bytes(entry[..4].try_into().unwrap());
+        let mut writes = Vec::new();
+        let mut power = None;
+        let mut put = |address: u64, bytes: &[u8]| -> Result<(), &'static str> {
+            writes.push(ControlWrite::new(address, bytes)?);
+            Ok(())
+        };
+        let address = |base: u64, offset: u64| {
+            base.checked_add(offset)
+                .ok_or("GFX device-control output address wraps")
+        };
+        match device_control_entry(entry)? {
+            Command::Power(notice) => power = Some(notice),
+            Command::Private => {}
+            Command::DsidPriority {
+                dsid,
+                priority,
+                pointer,
+                value,
+            } => {
+                let slot = dsid_slot(memory, root, layout, dsid)?;
+                let matched = memory.read_u32(slot + 4)?;
+                put(slot, &priority.to_le_bytes())?;
+                if matched == priority && priority != 0 {
+                    put(slot, &[0; 8])?;
+                }
+                put(pointer, &value.to_le_bytes())?;
+            }
+            Command::DsidDeprioritize {
+                dsid,
+                pointer,
+                value,
+            } => {
+                let slot = dsid_slot(memory, root, layout, dsid)?;
+                put(slot, &[0; 8])?;
+                put(pointer, &value.to_le_bytes())?;
+            }
+            Command::Histogram { master, enable } => {
+                let at = address(root.rings, layout.histogram_enables)?;
+                let mut enables = [0];
+                memory.read(at, &mut enables)?;
+                let bit = 1 << master;
+                enables[0] = if enable {
+                    enables[0] | bit
+                } else {
+                    enables[0] & !bit
+                };
+                put(at, &enables)?;
+            }
+            Command::LateEvalTimeout { wait } => {
+                put(address(wait, LATE_EVAL_TIMED_OUT)?, &1u32.to_le_bytes())?;
+            }
+            Command::PowerCounters => {
+                put(
+                    address(root.object_928, layout.power_counters)?,
+                    &[0; POWER_COUNTER_BYTES],
+                )?;
+                put(
+                    address(root.object_928, layout.power_counter_samples)?,
+                    &[0; 4],
+                )?;
+            }
+            Command::Riart { word, value } => {
+                let offset = match word {
+                    Riart::ULevelsDisabled => layout.riart_u_levels_disabled,
+                    Riart::TDisabled => layout.riart_t_disabled,
+                };
+                put(address(root.object_358, offset)?, &value.to_le_bytes())?;
+            }
+        }
+        let count = if COUNTED_DEVICE_CONTROL
+            .checked_shr(kind)
+            .is_some_and(|bits| bits & 1 != 0)
+        {
+            let address = address(root.object_928, layout.device_control_count)?;
+            ring::scalar_range(address, 4)?;
+            Some(ControlCount {
+                address,
+                value: None,
+                committed: false,
+            })
+        } else {
+            None
+        };
+        ring::scalar_range(descriptor.state, 4)?;
+        Ok(Self {
+            descriptor,
+            next_read: ring::next(read),
+            kind,
+            power,
+            writes,
+            count,
+            next: 0,
+            local_committed: false,
+        })
+    }
+}
+
 /// The GFX firmware protocol state shared by its two endpoints.
 #[derive(Debug)]
 pub struct State {
@@ -290,6 +465,7 @@ pub struct State {
     pub events: u64,
     jobs: VecDeque<Job>,
     active_work: Option<ActiveWork>,
+    active_control: Option<ActiveControl>,
     /// When observing (`--agx-observe`), the record of each work command a
     /// doorbell ran. Each is still refused by name.
     observe: Option<Journal>,
@@ -313,6 +489,7 @@ impl State {
             events: 0,
             jobs: VecDeque::new(),
             active_work: None,
+            active_control: None,
             observe: observe.then(Journal::default),
         }
     }
@@ -380,6 +557,7 @@ impl State {
         (self.initdata_va.is_some() && !self.initdata_checked)
             || !self.jobs.is_empty()
             || self.active_work.is_some()
+            || self.active_control.is_some()
     }
 
     /// Read the root, then run the queued doorbells in order.
@@ -429,79 +607,36 @@ impl State {
     /// Consume the device-control ring up to its write index.
     fn device_control(&mut self, memory: &mut dyn Shared, root: &Root) -> Result<(), &'static str> {
         let layout: &Layout = &self.family.model()?.layout;
-        let control = root.device_control(memory)?;
-        let (mut read, write) = control.indices(memory)?;
-        while read != write {
-            let entry = control.entry(memory, Kind::DeviceControl, read)?;
-            let kind = u32::from_le_bytes(entry[..4].try_into().unwrap());
-            let counted = COUNTED_DEVICE_CONTROL
-                .checked_shr(kind)
-                .is_some_and(|bits| bits & 1 != 0);
-            match device_control_entry(&entry)? {
-                Command::Power(notice) => self.power.push(notice),
-                Command::Private => {}
-                Command::DsidPriority {
-                    dsid,
-                    priority,
-                    pointer,
-                    value,
-                } => {
-                    let slot = dsid_slot(memory, root, layout, dsid)?;
-                    memory.write(slot, &priority.to_le_bytes())?;
-                    let matched = memory.read_u32(slot + 4)?;
-                    if matched == priority && priority != 0 {
-                        memory.write(slot, &[0; 8])?;
-                    }
-                    memory.write(pointer, &value.to_le_bytes())?;
+        loop {
+            if self.active_control.is_none() {
+                let descriptor = root.device_control(memory)?;
+                let (read, write) = descriptor.indices(memory)?;
+                if read == write {
+                    return Ok(());
                 }
-                Command::DsidDeprioritize {
-                    dsid,
-                    pointer,
-                    value,
-                } => {
-                    let slot = dsid_slot(memory, root, layout, dsid)?;
-                    memory.write(slot, &[0; 8])?;
-                    memory.write(pointer, &value.to_le_bytes())?;
-                }
-                Command::Histogram { master, enable } => {
-                    let at = root.rings + layout.histogram_enables;
-                    let mut enables = [0];
-                    memory.read(at, &mut enables)?;
-                    let bit = 1 << master;
-                    enables[0] = if enable {
-                        enables[0] | bit
-                    } else {
-                        enables[0] & !bit
-                    };
-                    memory.write(at, &enables)?;
-                }
-                Command::LateEvalTimeout { wait } => {
-                    memory.write(wait + LATE_EVAL_TIMED_OUT, &1u32.to_le_bytes())?;
-                }
-                Command::PowerCounters => {
-                    let samples = root.object_928 + layout.power_counters;
-                    memory.write(samples, &[0; POWER_COUNTER_BYTES])?;
-                    let count = root.object_928 + layout.power_counter_samples;
-                    memory.write(count, &[0; 4])?;
-                }
-                Command::Riart { word, value } => {
-                    let offset = match word {
-                        Riart::ULevelsDisabled => layout.riart_u_levels_disabled,
-                        Riart::TDisabled => layout.riart_t_disabled,
-                    };
-                    memory.write(root.object_358 + offset, &value.to_le_bytes())?;
-                }
+                let entry = descriptor.entry(memory, Kind::DeviceControl, read)?;
+                self.active_control = Some(ActiveControl::accept(
+                    memory, root, layout, descriptor, read, &entry,
+                )?);
             }
-            *self.device_control.entry(kind).or_default() += 1;
-            if counted {
-                let count = root.object_928 + layout.device_control_count;
-                let handled = memory.read_u32(count)?.wrapping_add(1);
-                memory.write(count, &handled.to_le_bytes())?;
+            let active = self.active_control.as_mut().unwrap();
+            while let Some(write) = active.writes.get(active.next) {
+                memory.write(write.address, &write.bytes)?;
+                active.next += 1;
             }
-            read = ring::next(read);
-            control.retire(memory, read)?;
+            if let Some(count) = active.count.as_mut() {
+                count.commit(memory)?;
+            }
+            if !active.local_committed {
+                if let Some(notice) = active.power {
+                    self.power.push(notice);
+                }
+                *self.device_control.entry(active.kind).or_default() += 1;
+                active.local_committed = true;
+            }
+            active.descriptor.retire(memory, active.next_read)?;
+            self.active_control = None;
         }
-        Ok(())
     }
 
     /// Run a data-master ring's pending entries. Each names a channel; the
@@ -613,11 +748,20 @@ fn dsid_slot(
     layout: &Layout,
     dsid: u8,
 ) -> Result<u64, &'static str> {
-    let table = memory.read_u64(root.rings + DSID_TABLE)?;
+    let pointer = root
+        .rings
+        .checked_add(DSID_TABLE + 7)
+        .ok_or("GFX HWDSID table pointer wraps")?
+        - 7;
+    let table = memory.read_u64(pointer)?;
     if table == 0 {
         return Err("GFX ring directory names no HWDSID table");
     }
-    Ok(table + u64::from(dsid) * layout.dsid_slot_bytes)
+    let slot = table
+        .checked_add(u64::from(dsid) * layout.dsid_slot_bytes)
+        .ok_or("GFX HWDSID table slot wraps")?;
+    slot.checked_add(7).ok_or("GFX HWDSID table slot wraps")?;
+    Ok(slot)
 }
 
 /// Every byte of `entry` after the type and outside `fields`, each a
@@ -2052,6 +2196,189 @@ mod tests {
         ) -> Result<(), crate::platform::dma::DmaError> {
             panic!("a signal command cannot execute GPU writes");
         }
+    }
+
+    fn owned_control(family: &'static Family, kind: u32) -> (State, Flat, u64) {
+        let (mut state, mut memory) = with_device_control_on(family, &[]).unwrap();
+        let layout = &family.model().unwrap().layout;
+        let count = OBJECT_928 + layout.device_control_count;
+        memory.put_u32(count, 7);
+        let mut entry = of_type(kind);
+        match kind {
+            0xe | 0x14 => {
+                memory.put_u64(RINGS + DSID_TABLE, BASE + 0x1e000);
+                let slot = BASE + 0x1e000 + 3 * layout.dsid_slot_bytes;
+                memory.put_u32(slot + 4, 5);
+                entry[4..0xc].copy_from_slice(&(BASE + 0x1f000).to_le_bytes());
+                entry[0xc..0x10].copy_from_slice(&0x700u32.to_le_bytes());
+                entry[0x14] = 3;
+                if kind == 0xe {
+                    entry[0x10..0x14].copy_from_slice(&5u32.to_le_bytes());
+                }
+            }
+            0x1a => {
+                entry[4..8].copy_from_slice(&1u32.to_le_bytes());
+                entry[8] = 3;
+            }
+            0x27 => {
+                entry[4..0xc].copy_from_slice(&(BASE + 0x1f000).to_le_bytes());
+            }
+            0x34 => {
+                entry[4..8].copy_from_slice(&6u32.to_le_bytes());
+            }
+            0x35 => {
+                entry[4..8].copy_from_slice(&1u32.to_le_bytes());
+            }
+            _ => {}
+        }
+        memory.put(CONTROL_ENTRIES, &entry);
+        memory.put_u32(CONTROL_STATE + WRITE, 1);
+        state
+            .doorbell(doorbell_payload(DOORBELL_FWCTL, 0x11))
+            .unwrap();
+        (state, memory, count)
+    }
+
+    #[test]
+    fn accepted_device_controls_retain_all_effects_count_and_retirement_on_every_family() {
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for kind in [
+                7,
+                DEVICE_CONTROL_POWER,
+                0xe,
+                0x14,
+                0x1a,
+                0x27,
+                0x32,
+                0x34,
+                0x35,
+            ] {
+                let (mut baseline, flat, _) = owned_control(family, kind);
+                let mut complete = WorkMemory {
+                    flat,
+                    fail_write: None,
+                    fail_read: None,
+                    writes: Vec::new(),
+                };
+                baseline.dma(&mut complete, &mut Vec::new()).unwrap();
+                for failed_write in 0..complete.writes.len() {
+                    let (mut state, flat, count) = owned_control(family, kind);
+                    let mut memory = WorkMemory {
+                        flat,
+                        fail_write: Some(failed_write),
+                        fail_read: None,
+                        writes: Vec::new(),
+                    };
+                    assert_eq!(
+                        state.dma(&mut memory, &mut Vec::new()),
+                        Err("injected work publication write fault")
+                    );
+                    assert!(state.dma_pending());
+                    assert_eq!(memory.writes.len(), failed_write);
+                    // Every form, target, DSID comparison and derived bitmask
+                    // was accepted before the first command write. A later
+                    // error cannot redispatch a changed AP entry.
+                    memory.flat.put_u32(CONTROL_ENTRIES, 0xffff);
+                    state.dma(&mut memory, &mut Vec::new()).unwrap();
+                    assert_eq!(memory.writes, complete.writes);
+                    assert_eq!(state.device_control.get(&kind), Some(&1));
+                    assert_eq!(state.power.len(), usize::from(kind == DEVICE_CONTROL_POWER));
+                    let expected = if matches!(kind, 0xe | 0x14 | 0x1a) {
+                        7
+                    } else {
+                        8
+                    };
+                    assert_eq!(memory.flat.read_u32(count), Ok(expected));
+                    assert_eq!(memory.flat.read_u32(CONTROL_STATE), Ok(1));
+                    assert!(!state.dma_pending());
+                    state.dma(&mut memory, &mut Vec::new()).unwrap();
+                    assert_eq!(memory.writes, complete.writes);
+                    assert_eq!(state.device_control.get(&kind), Some(&1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_control_acceptance_fault_has_no_partial_effects_or_accepted_entry() {
+        let (mut state, flat, _) = owned_control(&G14G, 0xe);
+        let slot = BASE + 0x1e000 + 3 * layout().dsid_slot_bytes;
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: None,
+            fail_read: Some(slot + 4),
+            writes: Vec::new(),
+        };
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("injected work input read fault")
+        );
+        assert!(memory.writes.is_empty() && state.active_control.is_none());
+        assert!(state.device_control.is_empty());
+        // The failed acceptance owns no entry or effect. A corrected input
+        // is accepted afresh, unlike a retry after effects have begun.
+        memory.flat.put_u32(CONTROL_ENTRIES + 0xc, 0x800);
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
+        assert_eq!(memory.flat.read_u32(BASE + 0x1f000), Ok(0x800));
+        assert_eq!(memory.flat.read_u64(slot), Ok(0));
+        assert_eq!(state.device_control.get(&0xe), Some(&1));
+    }
+
+    #[test]
+    fn device_control_counter_read_and_write_have_separate_retained_phases() {
+        let (mut state, flat, count) = owned_control(&G14G, 0x27);
+        let mut memory = WorkMemory {
+            flat,
+            fail_write: None,
+            fail_read: Some(count),
+            writes: Vec::new(),
+        };
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("injected work input read fault")
+        );
+        assert_eq!(memory.writes.len(), 1); // timeout effect precedes common-tail count read
+        assert_eq!(memory.flat.read_u32(BASE + 0x1f038), Ok(1));
+        memory.flat.put_u32(count, u32::MAX);
+        memory.fail_write = Some(1); // fail the counter write after capturing its wraparound result
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("injected work publication write fault")
+        );
+        memory.flat.put_u32(count, 777);
+        memory.fail_write = Some(2); // commit captured count, then fail final retirement
+        assert_eq!(
+            state.dma(&mut memory, &mut Vec::new()),
+            Err("injected work publication write fault")
+        );
+        assert_eq!(memory.flat.read_u32(count), Ok(0));
+        assert_eq!(state.device_control.get(&0x27), Some(&1));
+        memory.flat.put_u32(count, 888);
+        let protocol = Protocol(Rc::new(RefCell::new(state)));
+        assert!(Message(protocol.clone()).check_reset().is_err());
+        protocol
+            .0
+            .borrow_mut()
+            .dma(&mut memory, &mut Vec::new())
+            .unwrap();
+        assert_eq!(memory.flat.read_u32(count), Ok(888)); // no repeated count after retirement fault
+        assert_eq!(
+            memory.writes.iter().map(|(at, _)| *at).collect::<Vec<_>>(),
+            [BASE + 0x1f038, count, CONTROL_STATE]
+        );
+        assert_eq!(
+            protocol.with(|state| state.device_control.get(&0x27).copied()),
+            Some(1)
+        );
+        Message(protocol).check_reset().unwrap();
+    }
+
+    #[test]
+    fn device_control_count_reads_after_the_original_effect_even_when_targets_overlap() {
+        let (mut state, mut memory, count) = owned_control(&G14G, 0x27);
+        memory.put_u64(CONTROL_ENTRIES + 4, count - LATE_EVAL_TIMED_OUT);
+        state.dma(&mut memory, &mut Vec::new()).unwrap();
+        assert_eq!(memory.read_u32(count), Ok(2)); // timeout writes1, common tail reads1 then writes2
     }
 
     #[test]
