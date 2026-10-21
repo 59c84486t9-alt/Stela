@@ -5,6 +5,7 @@ use alloc::{string::String, vec::Vec};
 use core::fmt;
 
 pub mod e1000e;
+pub mod igb;
 pub mod igc;
 pub mod virtio;
 
