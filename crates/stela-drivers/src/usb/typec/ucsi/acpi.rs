@@ -6,6 +6,7 @@
 //! by the native platform. This module cannot create a platform attachment.
 
 use super::{Transport, TransportError, Version};
+mod access;
 use core::{
     ptr::NonNull,
     sync::atomic::{Ordering, fence},
@@ -37,13 +38,17 @@ pub struct Mailbox<D: Dsm> {
 
 impl<D: Dsm> Mailbox<D> {
     /// # Safety
-    /// `base..base+bytes` must be the device's real _CRS UCSI mailbox, mapped
+    /// `base` must be eight-byte aligned. `base..base+bytes` must be the
+    /// device's real _CRS UCSI mailbox, mapped
     /// coherently as normal write-back memory for this object's lifetime. The
     /// caller retains the mapping lease and serializes CPU ownership; firmware
     /// may update it concurrently under the UCSI protocol. No Rust references
     /// may alias these bytes. `dsm` must evaluate this same physical device.
     pub unsafe fn new(base: NonNull<u8>, bytes: usize, dsm: D) -> Result<Self, TransportError> {
-        if bytes < 16 || (base.as_ptr() as usize).checked_add(bytes).is_none() {
+        if bytes < 16
+            || (base.as_ptr() as usize) & 7 != 0
+            || (base.as_ptr() as usize).checked_add(bytes).is_none()
+        {
             return Err(TransportError::Mapping);
         }
         Ok(Self {
@@ -89,9 +94,8 @@ impl<D: Dsm> Transport for Mailbox<D> {
     fn read_version(&mut self) -> Result<u16, TransportError> {
         self.version = None;
         self.refresh()?;
-        let mut bytes = [0; 2];
-        self.read(0, &mut bytes)?;
-        let raw = u16::from_le_bytes(bytes);
+        // SAFETY: constructor guarantees alignment and a live scalar region.
+        let raw = unsafe { access::version(self.base) };
         // Preserve unknown version for the core's UnsupportedVersion error.
         if let Ok(version) = Version::new(raw) {
             self.bounds(0, version.mailbox_bytes())?;
@@ -104,9 +108,8 @@ impl<D: Dsm> Transport for Mailbox<D> {
     fn poll_cci(&mut self) -> Result<u32, TransportError> {
         self.version()?;
         self.refresh()?;
-        let mut bytes = [0; 4];
-        self.read(4, &mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
+        // SAFETY: constructor guarantees one aligned native-width CCI load.
+        Ok(unsafe { access::cci(self.base) })
     }
     fn read_message_in(&mut self, bytes: &mut [u8]) -> Result<(), TransportError> {
         if bytes.len() > self.version()?.message_in_bytes() {
@@ -129,7 +132,8 @@ impl<D: Dsm> Transport for Mailbox<D> {
     }
     fn write_control(&mut self, control: u64) -> Result<(), TransportError> {
         self.version()?;
-        self.write(8, &control.to_le_bytes())?;
+        // SAFETY: constructor guarantees serialized, aligned scalar access.
+        unsafe { access::control(self.base, control) };
         fence(Ordering::SeqCst);
         self.dsm.evaluate(DSM_UUID, 1, 1)
     }
@@ -255,5 +259,47 @@ mod tests {
                 status: 0x1234
             })
         );
+    }
+    #[test]
+    fn unaligned_mapping_is_rejected_before_any_firmware_evaluation() {
+        let mut memory = vec![0; 64].into_boxed_slice();
+        let aligned = NonNull::new(memory.as_mut_ptr()).unwrap();
+        assert_eq!((aligned.as_ptr() as usize) & 7, 0);
+        // SAFETY: adding one stays within this allocation; constructor must
+        // reject the unaligned base without dereferencing or invoking DSM.
+        let base = unsafe { NonNull::new_unchecked(aligned.as_ptr().add(1)) };
+        let firmware = Firmware {
+            base,
+            calls: Vec::new(),
+            fail: None,
+            controls: Vec::new(),
+        };
+        assert!(matches!(
+            unsafe { Mailbox::new(base, 48, firmware) },
+            Err(TransportError::Mapping)
+        ));
+    }
+    #[test]
+    fn scalar_publication_preserves_all_cci_and_control_lanes() {
+        #[repr(C, align(8))]
+        struct Region([u8; 48]);
+        let mut memory = Region([0; 48]);
+        let base = NonNull::new(memory.0.as_mut_ptr()).unwrap();
+        for cci in [0x8000_0902u32, 0x2000_0004, 0x9000_fffe, 0x0800_0000] {
+            // SAFETY: this is a live, aligned, exclusively owned scalar region.
+            unsafe {
+                base.as_ptr()
+                    .add(4)
+                    .cast::<u32>()
+                    .write_volatile(cci.to_le());
+                assert_eq!(access::cci(base), cci);
+                let control = (u64::from(cci) << 32) | 0x1234_5678;
+                access::control(base, control);
+                assert_eq!(
+                    u64::from_le(base.as_ptr().add(8).cast::<u64>().read_volatile()),
+                    control
+                );
+            }
+        }
     }
 }
