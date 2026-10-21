@@ -119,6 +119,34 @@ pub const SUCCESS: u32 = 1;
 pub const STALL: u32 = 6;
 pub const SHORT_PACKET: u32 = 13;
 
+/// `error` in words: a transfer's or command's completion code by its name
+/// (xHCI 1.2 table 6-90), which [`BlockError::Device`] carries as a number.
+pub fn explain(error: &BlockError) -> String {
+    let BlockError::Device { status } = error else {
+        return format!("{error}");
+    };
+    let name = match status {
+        2 => "data buffer error",
+        3 => "babble detected",
+        4 => "USB transaction error",
+        5 => "TRB error",
+        6 => "stall",
+        7 => "resource error",
+        8 => "bandwidth error",
+        9 => "no slots available",
+        11 => "slot not enabled",
+        12 => "endpoint not enabled",
+        17 => "parameter error",
+        19 => "context state error",
+        20 => "no ping response",
+        22 => "incompatible device",
+        26 => "stopped",
+        36 => "split transaction error",
+        _ => "error",
+    };
+    format!("{name} (xHCI completion code {status})")
+}
+
 /// Port speed IDs (the default Protocol Speed IDs, xHCI 7.2.2.1.1).
 pub const FULL_SPEED: u8 = 1;
 pub const LOW_SPEED: u8 = 2;
@@ -1560,6 +1588,19 @@ mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use alloc::vec::Vec;
+
+    #[test]
+    fn completion_codes_are_named() {
+        assert_eq!(
+            explain(&BlockError::Device { status: 4 }),
+            "USB transaction error (xHCI completion code 4)"
+        );
+        assert_eq!(
+            explain(&BlockError::Device { status: 99 }),
+            "error (xHCI completion code 99)"
+        );
+        assert_eq!(explain(&BlockError::Timeout), "device timeout");
+    }
 
     #[test]
     fn configuration_descriptors_split_into_interfaces_with_their_endpoints() {

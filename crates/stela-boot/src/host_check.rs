@@ -369,7 +369,10 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
     for (location, error) in &disks.usb_failures {
-        output::arguments(format_args!("USB FAILED {location}: {error}\n"));
+        output::arguments(format_args!(
+            "USB FAILED {location}: {}\n",
+            stela_drivers::usb::xhci::explain(error)
+        ));
     }
     for (location, why) in &disks.usb_unused {
         output::arguments(format_args!("USB UNUSED {location}: {why}\n"));
