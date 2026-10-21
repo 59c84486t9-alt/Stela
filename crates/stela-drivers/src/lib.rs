@@ -24,6 +24,7 @@ use core::{
     sync::atomic::{AtomicPtr, Ordering},
 };
 
+pub mod audio;
 pub mod block;
 pub mod bus;
 pub mod firmware;
