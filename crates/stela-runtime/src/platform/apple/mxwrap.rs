@@ -14,9 +14,10 @@
 //! when that bit is clear. The AP send path checks FIFO status; the electrical
 //! meaning of a cleared enable bit is not established. These are stated
 //! emulation choices, not proof of disabled hardware FIFO behavior. Empty
-//! reads, unknown fields and unimplemented firmware requests refuse. CPU idle
-//! and stop/restart require firmware lifecycle semantics and remain explicit
-//! refusals, never inferred from FIFO emptiness.
+//! reads, unknown fields and unimplemented firmware requests refuse. Retained
+//! CPU halt/resume requires the firmware's explicit lifecycle hooks; it never
+//! repeats cold start or resets the mailboxes. CPU idle remains unsupported,
+//! never inferred from FIFO emptiness.
 use super::asc::{Firmware, Lines, Message};
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::Wire;
@@ -54,6 +55,7 @@ const ENDPOINT: u64 = 0xff;
 pub struct MxWrap {
     firmware: Box<dyn Firmware>,
     running: bool,
+    halted: bool,
     a2i_enabled: bool,
     i2a_enabled: bool,
     staged: Option<u64>,
@@ -75,6 +77,7 @@ impl MxWrap {
         Self {
             firmware,
             running: false,
+            halted: false,
             a2i_enabled: false,
             i2a_enabled: false,
             staged: None,
@@ -124,9 +127,23 @@ impl MxWrap {
     fn start(&mut self) -> Result<(), &'static str> {
         if !self.running {
             let mut produced = Vec::new();
-            self.firmware.start(&mut produced)?;
+            if self.halted {
+                self.firmware.resume(&mut produced)?;
+            } else {
+                self.firmware.start(&mut produced)?;
+            }
             self.deliver(produced);
             self.running = true;
+            self.halted = false;
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<(), &'static str> {
+        if self.running {
+            self.firmware.stop()?;
+            self.running = false;
+            self.halted = true;
         }
         Ok(())
     }
@@ -253,9 +270,7 @@ impl MmioDevice for MxWrap {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         match (offset, width) {
             (CPU_RUN, Width::Word) if value == RUN => self.start().map_err(fail)?,
-            (CPU_RUN, Width::Word) if value == STOP => {
-                return Err(fail("MxWrap firmware stop/restart is not modeled"));
-            }
+            (CPU_RUN, Width::Word) if value == STOP => self.stop().map_err(fail)?,
             (A2I_CONTROL, Width::Word) if value & !(ENABLE | STATUS) == 0 => {
                 self.a2i_enabled = value & ENABLE != 0;
             }
@@ -558,6 +573,143 @@ mod tests {
         assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0xabcdef);
         assert_eq!(
             wrapper.read(A2I_CONTROL, Width::Word, &mut access).unwrap() & ENABLE,
+            0
+        );
+        // Ready alone is not the firmware's retained-halt power contract.
+        assert!(
+            wrapper
+                .write(CPU_RUN, Width::Word, STOP, &mut access)
+                .is_err()
+        );
+        send(&mut wrapper, 6 << 52 | 0x201, &mut access);
+        assert_eq!(receive(&mut wrapper, &mut access).0, 7 << 52 | 0x201);
+        wrapper
+            .write(CPU_RUN, Width::Word, STOP, &mut access)
+            .unwrap();
+        assert!(wrapper.read(CPU_IDLE, Width::Word, &mut access).is_err());
+        wrapper
+            .write(CPU_RUN, Width::Word, RUN, &mut access)
+            .unwrap();
+        // No new HELLO/roll call: the same enumerated endpoint accepts this.
+        send(&mut wrapper, 3 << 52 | 0x1234, &mut access);
+        assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0x1234);
+        assert_eq!(
+            count(wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap()),
+            0
+        );
+    }
+
+    #[test]
+    fn retained_halt_preserves_fifo_indexes_backlog_staging_and_levels() {
+        #[derive(Default)]
+        struct Retained {
+            starts: usize,
+            stops: usize,
+            resumes: usize,
+            polls: usize,
+            refuse_resume: bool,
+        }
+        impl Firmware for Retained {
+            fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+                self.starts += 1;
+                outbox.extend((0..12).map(|payload| Message {
+                    endpoint: 0x20,
+                    payload,
+                }));
+                Ok(())
+            }
+            fn stop(&mut self) -> Result<(), &'static str> {
+                self.stops += 1;
+                Ok(())
+            }
+            fn resume(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                if self.refuse_resume {
+                    return Err("peer resume refused");
+                }
+                self.resumes += 1;
+                Ok(())
+            }
+            fn receive(
+                &mut self,
+                message: Message,
+                output: &mut Vec<Message>,
+            ) -> Result<(), &'static str> {
+                output.push(message);
+                Ok(())
+            }
+            fn poll(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                self.polls += 1;
+                Ok(())
+            }
+            fn dma_pending(&self) -> bool {
+                true
+            }
+        }
+        let lines = [0x42c, 0x42b, 0x42e, 0x42d].map(|i| AicInput::new(0, i));
+        let mut latch = InterruptLatch::new();
+        let mut wrapper =
+            MxWrap::booted(Box::<Retained>::default(), Lines::from_interrupts(lines)).unwrap();
+        {
+            let mut access = Access::new(0, 0, &mut latch);
+            assert_eq!(receive(&mut wrapper, &mut access).0, 0);
+            wrapper
+                .write(A2I_SEND0, Width::Double, 0xfeed, &mut access)
+                .unwrap();
+            let frozen = wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap();
+            assert!(wrapper.dma_pending());
+            wrapper
+                .write(CPU_RUN, Width::Word, STOP, &mut access)
+                .unwrap();
+            wrapper
+                .write(CPU_RUN, Width::Word, STOP, &mut access)
+                .unwrap();
+            wrapper.advance(&mut access).unwrap();
+            assert!(!wrapper.dma_pending());
+            assert_eq!(wrapper.firmware::<Retained>().unwrap().polls, 0);
+            assert_eq!(wrapper.firmware::<Retained>().unwrap().stops, 1);
+            assert_eq!(
+                wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap(),
+                frozen
+            );
+            assert!(
+                wrapper
+                    .write(A2I_SEND1, Width::Double, 0x20, &mut access)
+                    .is_err()
+            );
+            wrapper.firmware_mut::<Retained>().unwrap().refuse_resume = true;
+            assert!(
+                wrapper
+                    .write(CPU_RUN, Width::Word, RUN, &mut access)
+                    .is_err()
+            );
+            wrapper.advance(&mut access).unwrap();
+            assert_eq!(wrapper.firmware::<Retained>().unwrap().polls, 0);
+            assert!(!wrapper.dma_pending());
+        }
+        // Mailbox hardware remains visible and interrupting during a CPU halt.
+        assert!(latch.is_asserted(Wire::Aic(lines[2])));
+        let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(receive(&mut wrapper, &mut access).0, 1);
+        wrapper.firmware_mut::<Retained>().unwrap().refuse_resume = false;
+        wrapper
+            .write(CPU_RUN, Width::Word, RUN, &mut access)
+            .unwrap();
+        wrapper
+            .write(CPU_RUN, Width::Word, RUN, &mut access)
+            .unwrap();
+        assert!(wrapper.dma_pending());
+        assert_eq!(wrapper.firmware::<Retained>().unwrap().starts, 1);
+        assert_eq!(wrapper.firmware::<Retained>().unwrap().resumes, 1);
+        for expected in 2..12 {
+            assert_eq!(receive(&mut wrapper, &mut access).0, expected);
+        }
+        // The staged AP send survives both the halt and a refused resume.
+        wrapper
+            .write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        assert_eq!(receive(&mut wrapper, &mut access).0, 0xfeed);
+        assert_eq!(
+            count(wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap()),
             0
         );
     }
