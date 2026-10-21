@@ -73,10 +73,15 @@ const LOGGED_INPUT: usize = 64;
 const DUMPED_SWAPS: u32 = 2;
 /// `IOMFBPARAM_ADAPTIVE_SYNC` (Asahi `iomfb.h`).
 const ADAPTIVE_SYNC: u32 = 14;
-/// `D594 swap_complete_ap_gated`'s input: the swap id first (m1n1
-/// `swap_complete_ap_gated(swap_id, ...)`); the rest of this interface's
-/// record is zero (no timing statistics are reported).
+/// `D594 swap_complete_ap_gated`'s input starts with the swap ID. No swap
+/// statistics or info blobs are supplied. The nullable statistics field
+/// uses its actual null flag rather than a present all-zero record.
 const SWAP_COMPLETE: [u8; 4] = *b"D594";
+/// Original T6000 `D594_callback__` (container file 0x3daec14) reads this
+/// flag at VA 0xfffffe000adb2cec and passes nullptr for bit0=1. The AP
+/// skips absent statistics at 0xfffffe000ad9cb68 and still completes the
+/// presented swap. A present record copies its timestamp at +0x19.
+const SWAP_COMPLETE_DATA_NULL: usize = 0x72c;
 /// The property-publishing callbacks (`UnifiedPipeline_RemoteCalls::
 /// D126_callback__` 0x2a71628, `D127` 0x2a71730, `D128` 0x2a718b4).
 const PROP_START: [u8; 4] = *b"D126";
@@ -689,6 +694,7 @@ impl Service for Methods {
             as usize;
         let mut input = alloc::vec![0u8; length];
         input[0..4].copy_from_slice(&swap_id.to_le_bytes());
+        input[SWAP_COMPLETE_DATA_NULL] = 1;
         self.in_flight = true;
         self.callback_log(SWAP_COMPLETE, length, 0);
         Some(Callback {

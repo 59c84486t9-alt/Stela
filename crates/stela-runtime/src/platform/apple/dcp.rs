@@ -1158,6 +1158,12 @@ mod tests {
         let header_at = 0x4000 + callback.stream.calls() as usize;
         let header = link::Header::parse(ram.bytes[header_at..header_at + 12].try_into().unwrap());
         assert_eq!((&header.tag, header.input), (b"D594", 0x730));
+        let complete = &ram.bytes[header_at + 12..header_at + 12 + 0x730];
+        assert_eq!(&complete[..4], &1u32.to_le_bytes());
+        // Decode the actual AP callback fields: zero blobs and absent
+        // SwapCompleteData, so no fabricated timestamp reaches the AP.
+        assert_eq!(&complete[0x727..0x72b], &[0; 4]);
+        assert_eq!(complete[0x72c] & 1, 1);
         // Waiting for the AP is not runnable DMA, but still owns the stream
         // and its one-shot completion. Power/reset must not abandon it.
         assert!(!coprocessor.dma_pending() && !coprocessor.retained_idle());
