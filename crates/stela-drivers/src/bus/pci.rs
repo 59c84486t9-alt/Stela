@@ -100,6 +100,14 @@ pub struct EcamConfig {
 }
 
 impl ConfigSpace for EcamConfig {
+    fn read8(&self, offset: u16) -> u8 {
+        self.registers.read8(usize::from(offset))
+    }
+
+    fn read16(&self, offset: u16) -> u16 {
+        self.registers.read16(usize::from(offset))
+    }
+
     fn read32(&self, offset: u16) -> u32 {
         self.registers.read32(usize::from(offset))
     }
@@ -415,6 +423,18 @@ mod tests {
                 }
                 _ => value,
             };
+        }
+
+        fn write16(&mut self, offset: u16, value: u16) {
+            let shift = (offset & 2) * 8;
+            let word = &mut self.words[usize::from(offset / 4)];
+            *word = *word & !(0xffff << shift) | u32::from(value) << shift;
+        }
+
+        fn write8(&mut self, offset: u16, value: u8) {
+            let shift = (offset & 3) * 8;
+            let word = &mut self.words[usize::from(offset / 4)];
+            *word = *word & !(0xff << shift) | u32::from(value) << shift;
         }
     }
 

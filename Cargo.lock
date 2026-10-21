@@ -1599,6 +1599,7 @@ dependencies = [
 name = "stela-drivers"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "sha2",
 ]
 

@@ -26,6 +26,7 @@ pub fn run(fix: bool) -> Result<()> {
         "clippy",
         "--workspace",
         "--all-targets",
+        "--all-features",
         "--locked",
         "--",
         "-D",
@@ -68,5 +69,20 @@ pub fn run(fix: bool) -> Result<()> {
             ])
             .args(["--", "-D", "warnings"]),
     )?;
-    exec(cargo().args(["test", "--workspace", "--locked"]))
+    // Native GPU hooks are optional while their larger vendor ports are in
+    // progress, but their C/Rust ABI and UEFI target still belong to the gate.
+    exec(cargo().args([
+        "clippy",
+        "-p",
+        "stela-drivers",
+        "--features",
+        "nvidia-port",
+        "--target",
+        BOOT_TARGET,
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ]))?;
+    exec(cargo().args(["test", "--workspace", "--all-features", "--locked"]))
 }

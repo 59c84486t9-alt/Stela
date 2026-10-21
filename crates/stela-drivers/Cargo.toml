@@ -15,3 +15,8 @@ workspace = true
 [features]
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
+# Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
+nvidia-port = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "1", optional = true }

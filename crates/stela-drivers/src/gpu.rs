@@ -3,6 +3,9 @@
 //! module; see `docs/design/gpu.md` for their platform and language boundary.
 use crate::bus::pci::{Address, ConfigSpace, Function};
 
+#[cfg(feature = "nvidia-port")]
+pub mod nvidia;
+
 /// PCI base class for VGA, 3D and other display controllers.
 const DISPLAY_CLASS: u8 = 0x03;
 const NVIDIA_VENDOR: u16 = 0x10de;
@@ -80,6 +83,14 @@ mod tests {
         }
 
         fn write32(&mut self, _: u16, _: u32) {
+            panic!("GPU inventory must not change the controller");
+        }
+
+        fn write16(&mut self, _: u16, _: u16) {
+            panic!("GPU inventory must not change the controller");
+        }
+
+        fn write8(&mut self, _: u16, _: u8) {
             panic!("GPU inventory must not change the controller");
         }
     }
