@@ -293,11 +293,17 @@ pub fn fatal(message: &str) -> ! {
 }
 
 pub fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
-    let place = info
-        .location()
-        .map(|location| alloc::format!(" at {}:{}", location.file(), location.line()))
-        .unwrap_or_default();
-    arguments(format_args!("\nSTELA PANIC{place}\n"));
-    stopped(&alloc::format!("internal error{place}"));
+    let message = info.message();
+    // Logged before anything allocates: the panic may be the heap running
+    // out.
+    match info.location() {
+        Some(at) => arguments(format_args!(
+            "\nSTELA PANIC at {}:{}: {message}\n",
+            at.file(),
+            at.line()
+        )),
+        None => arguments(format_args!("\nSTELA PANIC: {message}\n")),
+    }
+    stopped(&alloc::format!("internal error: {message}"));
     terminate(0x11)
 }
