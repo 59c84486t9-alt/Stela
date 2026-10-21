@@ -1,50 +1,24 @@
-//! Executing the GPU-work channel commands (TA, 3D, CL, fast blit) on the
-//! engine and completing them with the stamps and events the kext waits on
-//! (docs/research/agx.md §5.1, FW-4, FW-6..FW-9, FW-17).
+//! Retained GPU backend execution in the submitting UAT context.
 //!
-//! A work command names a control stream (a CDM stream for CL compute, a VDM
-//! stream for TA/3D render) and the state the engine needs, in the submitting
-//! address space. This module is the bridge between the firmware's channel
-//! commands ([`super::channel`]) and the execution engine ([`super::exec`]):
-//!
-//! - [`GpuView`] gives the engine [`Memory`] over the firmware's shared view
-//!   ([`Shared`]) in one UAT context, with the GPU's own permissions
-//!   ([`super::uat::gpu_stream`]). The firmware and the GPU it drives are one
-//!   bus master behind one UAT (Decision; docs/research/agx.md §3): the engine
-//!   therefore reaches the same memory the kext built the streams in, faulting
-//!   exactly where a real GPU unit would.
-//! - [`complete`] finishes a work command the way the firmware's completion
-//!   path does and the signal commands already do ([`super::signal`]): it
-//!   writes the stamp value to the firmware stamp and the driver stamp, then
-//!   returns a Flag event for the stamp index. **Public** (Asahi
-//!   `FinalizeCompute`/`FinalizeFragment`/`FinalizeVertex` write `fw_stamp =
-//!   stamp_value` and the kext drains one Flag per completed stamp);
-//!   **Inferred** that a work command completes exactly as a signal command,
-//!   the path [`super::signal`] cites.
-//! - [`run_compute`] and [`run_render`] run a decoded job or render pass in
-//!   the submitting context and complete it.
-//!
-//! What this module does **not** do is read a work command's Apple SKU-stream
-//! setup/start records to recover the engine inputs (the CDM/VDM stream base,
-//! the USC execution base, the framebuffer and tile parameters, the ZLS
-//! buffers). Those record field offsets are Apple's own and are not recovered
-//! statically; the matrix leaves FW-6..FW-9 refused by name until the
-//! observation route (docs/research/agx.md §5.1a) confirms each offset by
-//! following it to a structure the engine decodes. The decode that would call
-//! [`run_compute`]/[`run_render`] from a real command is therefore gated on
-//! observation; here the two run from inputs a caller supplies, and the tests
-//! build those inputs from the engine's own stream encodings.
+//! An original accepted submission owns the decoded engine inputs and the
+//! complete backend result. GPU reads/writes may precede an error, so every
+//! result, including a refusal/fault, is terminal for this execution owner.
+//! Completion DMA and firmware resource release must never restart the helper.
+//! TA owns the geometry product; a distinct 3D owner consumes it once. These
+//! engine phases do not themselves publish stamps, events or ring retirement.
+//! Native setup/start, timing, resource and abort obligations remain with the
+//! stock firmware consumer; a decoded job is not a completed Apple command.
 
-use super::channel::{Command, Stamp};
-use super::event::Event;
+use super::channel::Kind;
 use super::exec::WorkError;
 use super::exec::compute::{self, Job};
 use super::exec::render::{self, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
 use super::uat::CONTEXTS;
+use super::work_decode::Submission;
 use crate::platform::dma::DmaError;
-use alloc::vec::Vec;
+use alloc::boxed::Box;
 
 /// The engine's [`Memory`] over the firmware's shared view in one UAT
 /// context, with the GPU's permissions. A fault in the walk is a [`Fault`]
@@ -79,48 +53,194 @@ fn fault(_error: DmaError, address: u64, write: bool) -> Fault {
     Fault { address, write }
 }
 
-/// Complete `command`: write its stamp value to the firmware and driver
-/// stamps, then return the Flag event for its stamp index. The caller posts
-/// the event and sends the 0x42 message, exactly as for a signal command.
-pub fn complete(memory: &mut dyn Shared, command: &Command) -> Result<Vec<Event>, &'static str> {
-    let stamp = command.stamp(memory)?;
-    write_stamps(memory, &stamp)?;
-    Ok(alloc::vec![Event::Flag(1 << stamp.index)])
+/// A backend outcome whose memory effects have settled. The geometry
+/// product stays in its execution owner until transferred to a 3D owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultKind {
+    Compute(compute::Stats),
+    Geometry(render::Stats),
+    Fragment(render::Stats),
 }
 
-fn write_stamps(memory: &mut dyn Shared, stamp: &Stamp) -> Result<(), &'static str> {
-    memory.write(stamp.firmware, &stamp.value.to_le_bytes())?;
-    memory.write(stamp.driver, &stamp.value.to_le_bytes())
+/// A linear TA product, retaining the exact parameters under which vertices
+/// were shaded and binned. This is deliberately not Clone: a second 3D start
+/// cannot reuse ownership by copying a private tiled-buffer representation.
+pub struct GeometryProduct(Box<GeometryData>);
+
+struct GeometryData {
+    pass: RenderPass,
+    binned: render::geometry::Binned,
+    stats: render::Stats,
 }
 
-/// Run a decoded compute job in `context` and complete `command`.
-pub fn run_compute(
-    memory: &mut dyn Shared,
-    command: &Command,
-    context: usize,
-    job: &Job,
-) -> Result<Vec<Event>, WorkError> {
-    check_context(context, job.vm_slot)?;
-    {
-        let mut view = GpuView::new(memory, context);
-        compute::run(&mut view, job)?;
+impl GeometryProduct {
+    fn matches(&self, pass: &RenderPass) -> bool {
+        self.0.pass.vm_slot == pass.vm_slot
+            && self.0.pass.usc_base == pass.usc_base
+            && self.0.pass.width == pass.width
+            && self.0.pass.height == pass.height
+            && self.0.pass.layers == pass.layers
+            && self.0.pass.samples == pass.samples
+            && self.0.pass.tile == pass.tile
     }
-    complete(memory, command).map_err(WorkError::Refused)
 }
 
-/// Run a decoded render pass in `context` and complete `command`.
-pub fn run_render(
-    memory: &mut dyn Shared,
-    command: &Command,
-    context: usize,
-    pass: &RenderPass,
-) -> Result<Vec<Event>, WorkError> {
-    check_context(context, pass.vm_slot)?;
-    {
-        let mut view = GpuView::new(memory, context);
-        render::run(&mut view, pass)?;
+enum JobKind {
+    Compute(Job),
+    Geometry(Box<RenderPass>),
+    Fragment {
+        pass: Box<RenderPass>,
+        product: GeometryProduct,
+    },
+}
+
+enum Output {
+    Compute(compute::Stats),
+    Geometry(GeometryProduct),
+    Fragment(render::Stats),
+}
+impl Output {
+    fn kind(&self) -> ResultKind {
+        match self {
+            Self::Compute(stats) => ResultKind::Compute(*stats),
+            Self::Geometry(product) => ResultKind::Geometry(product.0.stats),
+            Self::Fragment(stats) => ResultKind::Fragment(*stats),
+        }
     }
-    complete(memory, command).map_err(WorkError::Refused)
+}
+
+enum Phase {
+    Ready,
+    Settled(Result<Output, WorkError>),
+    Transferred,
+}
+
+/// One accepted backend invocation. The outer stock consumer must finish
+/// its native setup before `run` and retain this owner through all later
+/// resource, DMA and publication phases. Neither success nor failure here
+/// grants permission to retire a command or to reset outstanding ownership.
+pub struct Execution {
+    submission: Submission,
+    job: JobKind,
+    phase: Phase,
+}
+impl Execution {
+    pub fn compute(submission: Submission, job: Job) -> Result<Self, WorkError> {
+        if submission.command.kind != Kind::Cl {
+            return Err(WorkError::Refused(
+                "GFX compute execution requires an accepted CL command",
+            ));
+        }
+        check_context(submission.context as usize, job.vm_slot)?;
+        Ok(Self {
+            submission,
+            job: JobKind::Compute(job),
+            phase: Phase::Ready,
+        })
+    }
+
+    pub fn geometry(submission: Submission, pass: RenderPass) -> Result<Self, WorkError> {
+        if submission.command.kind != Kind::Ta {
+            return Err(WorkError::Refused(
+                "GFX geometry execution requires an accepted TA command",
+            ));
+        }
+        check_context(submission.context as usize, pass.vm_slot)?;
+        pass.check()?;
+        Ok(Self {
+            submission,
+            job: JobKind::Geometry(Box::new(pass)),
+            phase: Phase::Ready,
+        })
+    }
+
+    /// A refused 3D binding returns the still-owned TA product to its caller.
+    /// Association to the original scene/queue must be established by the
+    /// source-qualified firmware consumer before calling this constructor.
+    pub fn fragment(
+        submission: Submission,
+        pass: RenderPass,
+        product: GeometryProduct,
+    ) -> Result<Self, (WorkError, GeometryProduct)> {
+        let check = || {
+            if submission.command.kind != Kind::ThreeD {
+                return Err(WorkError::Refused(
+                    "GFX fragment execution requires an accepted 3D command",
+                ));
+            }
+            check_context(submission.context as usize, pass.vm_slot)?;
+            pass.check()?;
+            if !product.matches(&pass) {
+                return Err(WorkError::Refused(
+                    "GFX 3D geometry does not match its TA context or tiling extent",
+                ));
+            }
+            Ok(())
+        };
+        if let Err(error) = check() {
+            return Err((error, product));
+        }
+        Ok(Self {
+            submission,
+            job: JobKind::Fragment {
+                pass: Box::new(pass),
+                product,
+            },
+            phase: Phase::Ready,
+        })
+    }
+
+    pub fn submission(&self) -> &Submission {
+        &self.submission
+    }
+
+    /// Execute at most once. An engine error can follow committed GPU writes
+    /// and is retained with exactly the same identity as a successful result.
+    /// Subsequent firmware DMA faults may retry only the later firmware phase.
+    pub fn run(&mut self, memory: &mut dyn Shared) -> Result<ResultKind, WorkError> {
+        if matches!(self.phase, Phase::Ready) {
+            let mut view = GpuView::new(memory, self.submission.context as usize);
+            let result = match &self.job {
+                JobKind::Compute(job) => compute::run(&mut view, job).map(Output::Compute),
+                JobKind::Geometry(pass) => {
+                    let mut stats = render::Stats::default();
+                    render::geometry::run(&mut view, pass, &mut stats).map(|binned| {
+                        Output::Geometry(GeometryProduct(Box::new(GeometryData {
+                            pass: **pass,
+                            binned,
+                            stats,
+                        })))
+                    })
+                }
+                JobKind::Fragment { pass, product } => {
+                    let mut stats = product.0.stats;
+                    render::fragment::run(&mut view, pass, &product.0.binned, &mut stats)
+                        .map(|()| Output::Fragment(stats))
+                }
+            };
+            self.phase = Phase::Settled(result);
+        }
+        match &self.phase {
+            Phase::Settled(Ok(output)) => Ok(output.kind()),
+            Phase::Settled(Err(error)) => Err(*error),
+            Phase::Transferred => Err(WorkError::Refused(
+                "GFX TA geometry ownership was already transferred",
+            )),
+            Phase::Ready => unreachable!(),
+        }
+    }
+
+    pub fn take_geometry(&mut self) -> Result<GeometryProduct, &'static str> {
+        if !matches!(self.phase, Phase::Settled(Ok(Output::Geometry(_)))) {
+            return Err("GFX TA has no successful owned geometry product");
+        }
+        let Phase::Settled(Ok(Output::Geometry(product))) =
+            core::mem::replace(&mut self.phase, Phase::Transferred)
+        else {
+            unreachable!()
+        };
+        Ok(product)
+    }
 }
 
 /// The shader's advertised slot and the memory view must identify the same
@@ -140,39 +260,15 @@ fn check_context(context: usize, vm_slot: u32) -> Result<(), WorkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::agx::channel::{Command, Kind};
+    use crate::platform::apple::agx::channel::{Command, Kind, Stamp};
     use crate::platform::apple::agx::ring::tests::Flat;
+    use crate::platform::apple::agx::work_decode::Encoding;
+    use alloc::vec::Vec;
 
     // A low GPU VA: the USC uniform and texture words pack an address into a
     // bounded field, so the engine's own stream tests use a low base too.
     const BASE: u64 = 0x1_0000_0000;
     const COMMAND: u64 = BASE;
-
-    /// A CL command for stamp 4 (value 0x900) whose firmware and driver
-    /// stamps sit at the engine-recovered CL offset (0x2a8).
-    fn cl_command(memory: &mut Flat) -> Command {
-        memory.put_u32(COMMAND, 3);
-        memory.put_u64(COMMAND + 0x2a8 - 0x10, COMMAND + 0x40); // driver
-        memory.put_u64(COMMAND + 0x2a8 - 0x8, COMMAND + 0x48); // firmware
-        memory.put_u32(COMMAND + 0x2a8, 0x900); // value
-        memory.put_u32(COMMAND + 0x2a8 + 4, 4); // index
-        Command::read(memory, COMMAND).unwrap()
-    }
-
-    #[test]
-    fn completion_writes_both_stamps_and_posts_one_flag() {
-        let mut memory = Flat::new(BASE, 0x1000);
-        let command = cl_command(&mut memory);
-        let events = complete(&mut memory, &command).unwrap();
-        assert_eq!(events, [Event::Flag(1 << 4)]);
-        assert_eq!(memory.read_u32(COMMAND + 0x40), Ok(0x900));
-        assert_eq!(memory.read_u32(COMMAND + 0x48), Ok(0x900));
-        // A command type that carries no stamp cannot complete this way.
-        memory.put_u32(COMMAND, 4);
-        let barrier = Command::read(&mut memory, COMMAND).unwrap();
-        assert_eq!(barrier.kind, Kind::Barrier);
-        assert!(complete(&mut memory, &barrier).is_err());
-    }
 
     /// A memory holding a one-launch CDM stream and its USC list, built from
     /// the engine's own encodings (as the observe tests do).
@@ -216,72 +312,227 @@ mod tests {
         };
         (memory, job)
     }
-
-    #[test]
-    fn a_compute_job_runs_in_its_context_and_completes_the_command() {
-        let (mut memory, job) = compute_memory();
-        let command = cl_command(&mut memory);
-        let events = run_compute(&mut memory, &command, 5, &job).unwrap();
-        assert_eq!(events, [Event::Flag(1 << 4)]);
-        // The four grid threads wrote their index to the output buffer.
-        for i in 0..4 {
-            assert_eq!(memory.read_u32(BASE + 0x1000 + 4 * i), Ok(i as u32));
+    fn accepted(kind: Kind) -> Submission {
+        Submission {
+            command: Command { va: COMMAND, kind },
+            encoding: Encoding::Fixed,
+            counter: 0x1234,
+            context: 5,
+            stamp: Stamp {
+                driver: BASE + 0x40,
+                firmware: BASE + 0x48,
+                value: 0x900,
+                index: 4,
+            },
+            stream: BASE + 0x3000,
+            stream_bytes: 0x400,
         }
-        // The command's stamps completed.
-        assert_eq!(memory.read_u32(COMMAND + 0x40), Ok(0x900));
+    }
+
+    struct CountMemory {
+        flat: Flat,
+        gpu_reads: usize,
+        gpu_writes: usize,
+        fail_gpu_write: Option<usize>,
+        fail_firmware_write: bool,
+    }
+    impl CountMemory {
+        fn new(flat: Flat) -> Self {
+            Self {
+                flat,
+                gpu_reads: 0,
+                gpu_writes: 0,
+                fail_gpu_write: None,
+                fail_firmware_write: false,
+            }
+        }
+        fn counts(&self) -> (usize, usize) {
+            (self.gpu_reads, self.gpu_writes)
+        }
+    }
+    impl Shared for CountMemory {
+        fn read(&mut self, address: u64, buffer: &mut [u8]) -> Result<(), &'static str> {
+            self.flat.read(address, buffer)
+        }
+        fn write(&mut self, address: u64, data: &[u8]) -> Result<(), &'static str> {
+            if self.fail_firmware_write {
+                self.fail_firmware_write = false;
+                return Err("injected later firmware DMA fault");
+            }
+            self.flat.write(address, data)
+        }
+        fn gpu_read(
+            &mut self,
+            context: usize,
+            address: u64,
+            buffer: &mut [u8],
+        ) -> Result<(), DmaError> {
+            assert_eq!(context, 5);
+            self.gpu_reads += 1;
+            self.flat.gpu_read(context, address, buffer)
+        }
+        fn gpu_write(&mut self, context: usize, address: u64, data: &[u8]) -> Result<(), DmaError> {
+            assert_eq!(context, 5);
+            let index = self.gpu_writes;
+            self.gpu_writes += 1;
+            if self.fail_gpu_write == Some(index) {
+                self.fail_gpu_write = None;
+                return Err(DmaError::Memory);
+            }
+            self.flat.gpu_write(context, address, data)
+        }
     }
 
     #[test]
-    fn a_faulting_stream_refuses_and_leaves_the_stamps_untouched() {
+    fn a_compute_result_survives_later_firmware_dma_faults_and_input_changes() {
+        let (flat, job) = compute_memory();
+        let mut memory = CountMemory::new(flat);
+        let input = accepted(Kind::Cl);
+        let mut work = Execution::compute(input.clone(), job).unwrap();
+        let result = work.run(&mut memory).unwrap();
+        let ResultKind::Compute(stats) = result else {
+            panic!("compute result lost")
+        };
+        assert_eq!((stats.launches, stats.threadgroups), (1, 1));
+        let counts = memory.counts();
+        assert_eq!(counts.1, 4);
+        // A later firmware phase can fault without reopening GPU execution.
+        memory.fail_firmware_write = true;
+        assert_eq!(
+            memory.write(input.stamp.firmware, &input.stamp.value.to_le_bytes()),
+            Err("injected later firmware DMA fault")
+        );
+        memory.flat.put_u32(job.stream, u32::MAX);
+        memory.flat.put(BASE + 0x200, &[0xff; 16]);
+        for _ in 0..3 {
+            assert_eq!(work.run(&mut memory), Ok(result));
+        }
+        assert_eq!(memory.counts(), counts);
+        for i in 0..4 {
+            assert_eq!(memory.flat.read_u32(BASE + 0x1000 + 4 * i), Ok(i as u32));
+        }
+        assert_eq!(work.submission(), &input);
+        // Backend success alone never publishes command completion.
+        assert_eq!(memory.flat.read_u32(input.stamp.driver), Ok(0));
+        assert_eq!(memory.flat.read_u32(input.stamp.firmware), Ok(0));
+    }
+
+    #[test]
+    fn a_terminal_gpu_fault_keeps_its_committed_prefix_and_cannot_replay() {
+        let (flat, job) = compute_memory();
+        let mut memory = CountMemory::new(flat);
+        memory.fail_gpu_write = Some(2);
+        let mut work = Execution::compute(accepted(Kind::Cl), job).unwrap();
+        let error = work.run(&mut memory).unwrap_err();
+        let counts = memory.counts();
+        assert_eq!(counts.1, 3);
+        assert_eq!(memory.flat.read_u32(BASE + 0x1004), Ok(1));
+        memory.flat.put_u32(BASE + 0x1000, 777);
+        for _ in 0..3 {
+            assert_eq!(work.run(&mut memory), Err(error));
+        }
+        assert_eq!(memory.counts(), counts);
+        assert_eq!(memory.flat.read_u32(BASE + 0x1000), Ok(777));
+        assert_eq!(memory.flat.read_u32(BASE + 0x40), Ok(0));
+        assert_eq!(memory.flat.read_u32(BASE + 0x48), Ok(0));
+        assert!(work.take_geometry().is_err());
+    }
+
+    fn render_memory() -> (CountMemory, RenderPass) {
         let mut memory = Flat::new(BASE, 0x8000);
-        let command = cl_command(&mut memory);
-        // A CDM stream pointer into unmapped memory: the walk faults.
-        let job = Job {
-            stream: BASE + 0x7000,
+        memory.put_u32(BASE + 0x2000, 6 << 29); // VDM terminate, no draws
+        let code = crate::platform::apple::agx::isa::assemble::program("stop");
+        memory.put(BASE + 0x200, &code);
+        let mut usc = Vec::new();
+        usc.extend_from_slice(&0x8d_u32.to_le_bytes());
+        usc.extend_from_slice(&[0x0d, 0]);
+        usc.extend_from_slice(&0x200u32.to_le_bytes());
+        usc.extend_from_slice(&[0x88, 0]);
+        memory.put(BASE + 0x100, &usc);
+        let pass = RenderPass {
+            vdm_stream: BASE + 0x2000,
             usc_base: BASE,
             vm_slot: 5,
+            ppp_control: render::ppp_control::FIXED_POINT_FORMAT,
+            width: 16,
+            height: 16,
+            layers: 1,
+            samples: 1,
+            tile: (16, 16),
+            sample_bytes: 16,
+            background: render::Program {
+                usc: 0x100,
+                counts: 0,
+            },
+            end_of_tile: render::Program {
+                usc: 0x100,
+                counts: 0,
+            },
+            ..RenderPass::default()
         };
-        // The engine refuses (a stream that does not terminate within the
-        // flat memory); the stamps stay at zero.
-        assert!(run_compute(&mut memory, &command, 5, &job).is_err());
-        assert_eq!(memory.read_u32(COMMAND + 0x40), Ok(0));
+        (CountMemory::new(memory), pass)
     }
 
     #[test]
-    fn inconsistent_or_out_of_range_contexts_refuse_before_work_or_completion() {
-        let (mut memory, mut job) = compute_memory();
-        let command = cl_command(&mut memory);
-        let before = memory.bytes.clone();
-        for context in [CONTEXTS, 256, usize::MAX] {
-            assert_eq!(
-                run_compute(&mut memory, &command, context, &job),
-                Err(WorkError::Refused("GPU work context outside the UAT TTBAT"))
-            );
-            assert_eq!(memory.bytes, before);
-        }
-        job.vm_slot = 6;
-        assert_eq!(
-            run_compute(&mut memory, &command, 5, &job),
-            Err(WorkError::Refused(
-                "GPU work vm_slot does not match its UAT context"
-            ))
-        );
-        // Even with an invalid render pass, context mismatch is refused
-        // before touching the stream or framebuffer.
-        let pass = RenderPass {
-            vm_slot: 6,
-            ..RenderPass::default()
+    fn ta_transfers_its_geometry_once_and_3d_runs_its_own_phase_once() {
+        let (mut memory, pass) = render_memory();
+        let mut ta = Execution::geometry(accepted(Kind::Ta), pass).unwrap();
+        assert!(ta.take_geometry().is_err());
+        let geometry = ta.run(&mut memory).unwrap();
+        assert!(matches!(geometry, ResultKind::Geometry(_)));
+        let ta_counts = memory.counts();
+        assert_eq!(ta_counts.1, 0);
+        memory.flat.put_u32(pass.vdm_stream, u32::MAX);
+        assert_eq!(ta.run(&mut memory), Ok(geometry));
+        assert_eq!(memory.counts(), ta_counts);
+        let product = ta.take_geometry().unwrap();
+        assert!(ta.take_geometry().is_err());
+        assert!(ta.run(&mut memory).is_err());
+        // A mismatched 3D constructor returns the product without memory effects.
+        let bad = RenderPass { width: 32, ..pass };
+        let Err((_, product)) = Execution::fragment(accepted(Kind::ThreeD), bad, product) else {
+            panic!("mismatched tiling accepted")
         };
-        assert_eq!(
-            run_render(&mut memory, &command, 5, &pass),
+        assert_eq!(memory.counts(), ta_counts);
+        let mut fragment = match Execution::fragment(accepted(Kind::ThreeD), pass, product) {
+            Ok(work) => work,
+            Err(_) => panic!("matching TA/3D product refused"),
+        };
+        let result = fragment.run(&mut memory).unwrap();
+        let ResultKind::Fragment(stats) = result else {
+            panic!("3D phase result lost")
+        };
+        assert_eq!((stats.draws, stats.primitives, stats.tiles), (0, 0, 1));
+        let counts = memory.counts();
+        assert!(counts.0 > ta_counts.0);
+        memory.flat.put(BASE + 0x200, &[0xff; 16]);
+        assert_eq!(fragment.run(&mut memory), Ok(result));
+        assert_eq!(memory.counts(), counts);
+        assert_eq!(memory.flat.read_u32(BASE + 0x40), Ok(0));
+    }
+
+    #[test]
+    fn backend_constructors_check_original_kind_and_context_before_memory_access() {
+        let (_, job) = compute_memory();
+        assert!(matches!(
+            Execution::compute(accepted(Kind::Ta), job),
+            Err(WorkError::Refused(
+                "GFX compute execution requires an accepted CL command"
+            ))
+        ));
+        let mut input = accepted(Kind::Cl);
+        input.context = 6;
+        assert!(matches!(
+            Execution::compute(input, job),
             Err(WorkError::Refused(
                 "GPU work vm_slot does not match its UAT context"
             ))
-        );
-        assert_eq!(
-            run_render(&mut memory, &command, CONTEXTS, &pass),
+        ));
+        let mut input = accepted(Kind::Cl);
+        input.context = CONTEXTS as u32;
+        assert!(matches!(
+            Execution::compute(input, job),
             Err(WorkError::Refused("GPU work context outside the UAT TTBAT"))
-        );
-        assert_eq!(memory.bytes, before);
+        ));
     }
 }

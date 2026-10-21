@@ -206,7 +206,7 @@ impl RenderPass {
     }
 
     /// Refuse parameters outside what the sources define.
-    fn check(&self) -> Result<(), WorkError> {
+    pub(crate) fn check(&self) -> Result<(), WorkError> {
         if !TILE_SIZES.contains(&self.tile) {
             return Err(WorkError::Refused("a tile size the hardware lacks"));
         }
