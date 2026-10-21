@@ -45,7 +45,19 @@
 //! board configuration must name (the hardware group assignment is not
 //! public), so an unnamed group is refused; the first CPU to read the event
 //! register claims the IRQ; delay groups only affect coalescing latency, so
-//! immediate delivery is a permitted timing. Only one die is modeled.
+//! immediate delivery is a permitted timing. Across dies, the lowest die
+//! number wins before the lowest IRQ number; cross-die arbitration is not
+//! documented, so this is a deterministic permitted ordering.
+//!
+//! Multiple dies and AICv3's relocated capability/array registers require an
+//! explicit [`Aic2Layout`]. m1n1 `src/aic.c` reads `cap0-offset`,
+//! `maxnumirq-offset`, `extintrcfg-stride`, `intmaskset-stride` and
+//! `intmaskclear-stride` from the ADT. Each bank's established address is
+//! supplied independently; the legacy constructor keeps the single-die
+//! contiguous layout. Unknown banks or hardware capacity are not inferred.
+pub mod layout;
+pub use layout::Aic2Layout;
+
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::interrupt::{AicInput, CpuIndex, Wire};
 #[cfg(not(feature = "std"))]
@@ -165,6 +177,8 @@ struct Timestamp {
 
 pub struct Aic2 {
     config: Aic2Config,
+    layout: Aic2Layout,
+    span: u64,
     timestamps: Vec<Timestamp>,
     enabled: bool,
     irq_cfg: Vec<u32>,
@@ -199,6 +213,26 @@ enum Register {
 
 impl Aic2 {
     pub fn new(config: Aic2Config) -> Result<Self, Aic2Error> {
+        let layout = Aic2Layout::single(&config).ok_or(Aic2Error::InvalidConfig(
+            "AIC contiguous register layout overflows",
+        ))?;
+        let end = config
+            .irq_config
+            .checked_add(4 * u64::from(config.max_irq))
+            .and_then(|end| end.checked_add(20 * u64::from(config.max_irq / 32)))
+            .ok_or(Aic2Error::InvalidConfig("AIC register extent overflows"))?;
+        if config.event_offset < end {
+            return Err(Aic2Error::InvalidConfig(
+                "the event register must follow the per-die arrays",
+            ));
+        }
+        Self::new_with_layout(config, layout)
+    }
+
+    /// Construct only from established capability and per-die bank facts.
+    /// This supports multiple dies and AICv3's relocated capability/mask
+    /// banks without assuming a layout for an unobserved generation.
+    pub fn new_with_layout(config: Aic2Config, layout: Aic2Layout) -> Result<Self, Aic2Error> {
         let invalid = |reason| Err(Aic2Error::InvalidConfig(reason));
         if config.max_irq == 0 || !config.max_irq.is_multiple_of(32) {
             return invalid("MAX_IRQ must be a nonzero multiple of 32");
@@ -221,29 +255,31 @@ impl Aic2 {
             return invalid("the IRQ_CFG array must be a word after CONFIG");
         }
         if config.timestamps != 0
-            && TIMESTAMPS + TIMESTAMP_STRIDE * config.timestamps as u64 > config.irq_config
+            && TIMESTAMP_STRIDE
+                .checked_mul(config.timestamps as u64)
+                .and_then(|bytes| TIMESTAMPS.checked_add(bytes))
+                .is_none_or(|end| end > config.irq_config)
         {
             return invalid("the timestamp slots must end before the IRQ_CFG array");
         }
-        let words = usize::from(config.max_irq / 32);
-        let end = config.irq_config + 4 * u64::from(config.max_irq) + 4 * 5 * words as u64;
-        if config.event_offset < end || !config.event_offset.is_multiple_of(4) {
-            return invalid("the event register must follow the per-die arrays");
-        }
+        let span = layout.validate(&config).map_err(Aic2Error::InvalidConfig)?;
+        let words = usize::from(config.max_irq / 32) * layout.dies.len();
         Ok(Self {
             timestamps: vec![Timestamp::default(); config.timestamps],
             enabled: false,
-            irq_cfg: vec![0; usize::from(config.nr_irq)],
+            irq_cfg: vec![0; usize::from(config.max_irq) * layout.dies.len()],
             software: vec![0; words],
             hardware: vec![0; words],
             mask: vec![u32::MAX; words],
             irq_level: vec![false; config.cpus],
             config,
+            layout,
+            span,
         })
     }
     /// Size of the device address space to map: core block plus event word.
     pub fn span(&self) -> u64 {
-        self.config.event_offset + 4
+        self.span
     }
     /// Sets the level of one hardware input, as wired by the engine from the
     /// device models' `Wire::Aic` outputs.
@@ -253,12 +289,13 @@ impl Aic2 {
         asserted: bool,
         access: &mut Access<'_>,
     ) -> Result<(), Aic2Error> {
-        if input.die != 0 || input.irq >= self.config.nr_irq {
+        if usize::from(input.die) >= self.layout.dies.len() || input.irq >= self.config.nr_irq {
             return Err(Aic2Error::UnknownInput(input));
         }
-        let (word, bit) = position(usize::from(input.irq));
+        let (word, bit) = position(self.input_index(input));
         if asserted && self.hardware[word] & bit == 0 {
-            let config = TIMESTAMP_ENABLE | u32::from(input.irq);
+            let config =
+                TIMESTAMP_ENABLE | u32::from(input.die) << INFO_DIE_SHIFT | u32::from(input.irq);
             for slot in &mut self.timestamps {
                 if slot.config == config {
                     slot.counter = access.now;
@@ -281,21 +318,30 @@ impl Aic2 {
                 "aic-ext-intr-cfg is not a list of triples",
             ));
         }
+        // Validate the whole firmware property before applying any entry.
         for entry in property.as_chunks::<3>().0 {
-            let input = AicInput::new(
-                entry[1] >> 4,
-                u16::from(entry[0]) | u16::from(entry[1] & 0xf) << 8,
-            );
-            if input.die != 0 || input.irq >= self.config.nr_irq {
+            let input = Self::ext_input(entry);
+            if usize::from(input.die) >= self.layout.dies.len() || input.irq >= self.config.nr_irq {
                 return Err(Aic2Error::UnknownInput(input));
             }
-            let target = u32::from(entry[2]);
-            self.check_target(target)
+            self.check_target(u32::from(entry[2]))
                 .map_err(Aic2Error::InvalidConfig)?;
-            let cfg = &mut self.irq_cfg[usize::from(input.irq)];
-            *cfg = *cfg & !IRQ_CFG_TARGET | target;
+        }
+        for entry in property.as_chunks::<3>().0 {
+            let index = self.input_index(Self::ext_input(entry));
+            self.irq_cfg[index] = self.irq_cfg[index] & !IRQ_CFG_TARGET | u32::from(entry[2]);
         }
         Ok(())
+    }
+
+    fn ext_input(entry: &[u8; 3]) -> AicInput {
+        AicInput::new(
+            entry[1] >> 4,
+            u16::from(entry[0]) | u16::from(entry[1] & 0xf) << 8,
+        )
+    }
+    fn input_index(&self, input: AicInput) -> usize {
+        usize::from(input.die) * usize::from(self.config.max_irq) + usize::from(input.irq)
     }
 
     fn check_target(&self, target: u32) -> Result<(), &'static str> {
@@ -331,7 +377,7 @@ impl Aic2 {
                     .filter(move |bit| pending & 1 << bit != 0)
                     .map(move |bit| word * 32 + bit)
             })
-            .take_while(|&irq| irq < usize::from(self.config.nr_irq))
+            .filter(|&irq| irq % usize::from(self.config.max_irq) < usize::from(self.config.nr_irq))
             .find(|&irq| self.cpus_of(irq) & 1 << cpu != 0)
     }
     fn update(&mut self, access: &mut Access<'_>) {
@@ -344,52 +390,61 @@ impl Aic2 {
         }
     }
     fn decode(&self, offset: u64) -> Option<Register> {
-        let words = self.software.len() as u64;
-        let irq_config = self.config.irq_config;
-        let configs = irq_config + 4 * u64::from(self.config.max_irq);
-        let used_words = usize::from(self.config.nr_irq).div_ceil(32) as u64;
-        Some(match offset {
-            VERSION => Register::Version,
-            INFO1 => Register::Info1,
-            INFO3 => Register::Info3,
-            CONFIG => Register::Config,
-            offset if offset == self.config.event_offset => Register::Event,
-            offset
-                if (TIMESTAMPS..TIMESTAMPS + TIMESTAMP_STRIDE * self.timestamps.len() as u64)
-                    .contains(&offset) =>
-            {
-                let slot = ((offset - TIMESTAMPS) / TIMESTAMP_STRIDE) as usize;
-                match offset % TIMESTAMP_STRIDE {
-                    0 => Register::TimestampConfig(slot),
-                    TIMESTAMP_LOW => Register::TimestampLow(slot),
-                    TIMESTAMP_HIGH => Register::TimestampHigh(slot),
-                    _ => return None,
+        if !offset.is_multiple_of(4) {
+            return None;
+        }
+        if offset == self.layout.info1 {
+            return Some(Register::Info1);
+        }
+        if offset == self.layout.info3 {
+            return Some(Register::Info3);
+        }
+        match offset {
+            VERSION => return Some(Register::Version),
+            CONFIG => return Some(Register::Config),
+            offset if offset == self.config.event_offset => return Some(Register::Event),
+            _ => {}
+        }
+        if (TIMESTAMPS..TIMESTAMPS + TIMESTAMP_STRIDE * self.timestamps.len() as u64)
+            .contains(&offset)
+        {
+            let slot = ((offset - TIMESTAMPS) / TIMESTAMP_STRIDE) as usize;
+            return match offset % TIMESTAMP_STRIDE {
+                0 => Some(Register::TimestampConfig(slot)),
+                TIMESTAMP_LOW => Some(Register::TimestampLow(slot)),
+                TIMESTAMP_HIGH => Some(Register::TimestampHigh(slot)),
+                _ => None,
+            };
+        }
+        let words = usize::from(self.config.max_irq / 32);
+        let used_words = usize::from(self.config.nr_irq).div_ceil(32);
+        for (die, layout) in self.layout.dies.iter().enumerate() {
+            for (array, start) in layout.banks().into_iter().enumerate() {
+                let entries = if array == 0 {
+                    usize::from(self.config.nr_irq)
+                } else {
+                    used_words
+                };
+                if offset >= start && (offset - start) / 4 < entries as u64 {
+                    let index = ((offset - start) / 4) as usize;
+                    return Some(if array == 0 {
+                        Register::IrqConfig(die * usize::from(self.config.max_irq) + index)
+                    } else {
+                        Register::Bits(
+                            [
+                                Array::SoftwareSet,
+                                Array::SoftwareClear,
+                                Array::MaskSet,
+                                Array::MaskClear,
+                                Array::HardwareState,
+                            ][array - 1],
+                            die * words + index,
+                        )
+                    });
                 }
             }
-            offset if (irq_config..configs).contains(&offset) => {
-                let irq = (offset - irq_config) / 4;
-                if irq >= u64::from(self.config.nr_irq) {
-                    return None;
-                }
-                Register::IrqConfig(irq as usize)
-            }
-            offset if (configs..configs + 4 * 5 * words).contains(&offset) => {
-                let index = (offset - configs) / 4;
-                let (array, word) = (index / words, index % words);
-                if word >= used_words {
-                    return None;
-                }
-                let array = [
-                    Array::SoftwareSet,
-                    Array::SoftwareClear,
-                    Array::MaskSet,
-                    Array::MaskClear,
-                    Array::HardwareState,
-                ][array as usize];
-                Register::Bits(array, word as usize)
-            }
-            _ => return None,
-        })
+        }
+        None
     }
     fn unknown_reason(offset: u64) -> &'static str {
         match offset {
@@ -400,7 +455,7 @@ impl Aic2 {
     }
     /// Bits of `word` that name implemented IRQs.
     fn implemented(&self, word: usize) -> u32 {
-        let first = word * 32;
+        let first = word % usize::from(self.config.max_irq / 32) * 32;
         let count = usize::from(self.config.nr_irq)
             .saturating_sub(first)
             .min(32);
@@ -413,8 +468,13 @@ impl Aic2 {
     fn read_register(&mut self, register: Register, cpu: CpuIndex) -> Result<u32, &'static str> {
         Ok(match register {
             Register::Version => u32::from(self.config.version),
-            Register::Info1 => u32::from(self.config.nr_irq),
-            Register::Info3 => u32::from(self.config.max_irq) | 1 << INFO_DIE_SHIFT,
+            Register::Info1 => {
+                u32::from(self.config.nr_irq)
+                    | ((self.layout.dies.len() - 1) as u32) << INFO_DIE_SHIFT
+            }
+            Register::Info3 => {
+                u32::from(self.config.max_irq) | u32::from(self.layout.max_dies) << INFO_DIE_SHIFT
+            }
             Register::Config => u32::from(self.enabled),
             Register::IrqConfig(irq) => self.irq_cfg[irq],
             Register::Bits(Array::SoftwareSet | Array::SoftwareClear, word) => self.software[word],
@@ -433,7 +493,9 @@ impl Aic2 {
                     Some(irq) => {
                         let (word, bit) = position(irq);
                         self.mask[word] |= bit;
-                        EVENT_TYPE_IRQ | irq as u32
+                        let die = irq / usize::from(self.config.max_irq);
+                        let local = irq % usize::from(self.config.max_irq);
+                        EVENT_TYPE_IRQ | (die as u32) << INFO_DIE_SHIFT | local as u32
                     }
                     None => 0,
                 }
@@ -474,7 +536,7 @@ impl Aic2 {
                     return Err("AIC2 timestamp configuration reserved field is not modeled");
                 }
                 if value & TIMESTAMP_ENABLE != 0
-                    && (value & TIMESTAMP_DIE != 0
+                    && ((value & TIMESTAMP_DIE) >> INFO_DIE_SHIFT >= self.layout.dies.len() as u32
                         || value & TIMESTAMP_IRQ >= u32::from(self.config.nr_irq))
                 {
                     return Err("AIC2 timestamp names an IRQ the model does not have");
@@ -536,6 +598,7 @@ impl MmioDevice for Aic2 {
 
 #[cfg(test)]
 mod tests {
+    use super::layout::Aic2DieLayout;
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
 
@@ -769,6 +832,168 @@ mod tests {
             aic.set_input(AicInput::new(0, NR_IRQ), true, &mut access)
                 .is_err()
         );
+    }
+
+    fn two_dies() -> (Aic2Config, Aic2Layout) {
+        let config = Aic2Config {
+            version: 3,
+            nr_irq: 33,
+            max_irq: 64,
+            irq_config: IRQ_CFG,
+            event_offset: EVENT,
+            timestamps: 16,
+            cpus: 2,
+            default_cpus: 1,
+            target_groups: [Some(1), Some(2), None, None],
+        };
+        let first = Aic2DieLayout::contiguous(IRQ_CFG, config.max_irq).unwrap();
+        let mut second = Aic2DieLayout::contiguous(0x4000, config.max_irq).unwrap();
+        // Later firmware may supply distinct mask strides. Every other
+        // array is explicit too; none aliases the corresponding die0 bank.
+        second.mask_set = 0x6000;
+        second.mask_clear = 0x7000;
+        let layout = Aic2Layout {
+            info1: 0x100,
+            info3: 0x108,
+            max_dies: 4,
+            dies: vec![first, second],
+        };
+        (config, layout)
+    }
+
+    #[test]
+    fn explicit_layout_routes_claims_masks_and_timestamps_independently_per_die() {
+        let (config, layout) = two_dies();
+        let (first, second) = (layout.dies[0], layout.dies[1]);
+        let mut aic = Aic2::new_with_layout(config, layout).unwrap();
+        let mut latch = InterruptLatch::new();
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x100), 1 << 24 | 33);
+        assert_eq!(read(&mut aic, &mut latch, 0, 0x108), 4 << 24 | 64);
+        assert_eq!(aic.span(), EVENT + 4);
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        write(&mut aic, &mut latch, first.mask_clear + 4, 1);
+        write(&mut aic, &mut latch, second.mask_clear + 4, 1);
+        write(
+            &mut aic,
+            &mut latch,
+            TIMESTAMPS,
+            TIMESTAMP_ENABLE | 1 << 24 | 32,
+        );
+        let input = AicInput::new(1, 32);
+        aic.set_input(
+            input,
+            true,
+            &mut Access::new(0, 0x1234_5678_9abc_def0, &mut latch),
+        )
+        .unwrap();
+        assert_eq!(
+            read(&mut aic, &mut latch, 0, TIMESTAMPS + TIMESTAMP_LOW),
+            0x9abc_def0
+        );
+        assert_eq!(
+            read(&mut aic, &mut latch, 0, TIMESTAMPS + TIMESTAMP_HIGH),
+            0x1234_5678
+        );
+        assert_eq!(read(&mut aic, &mut latch, 0, first.hardware_state + 4), 0);
+        assert_eq!(read(&mut aic, &mut latch, 0, second.hardware_state + 4), 1);
+        write(&mut aic, &mut latch, first.software_set + 4, 1);
+        assert!(latch.pins(0).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), EVENT_TYPE_IRQ | 32);
+        assert!(latch.pins(0).irq, "die1 remains independently pending");
+        assert_eq!(
+            read(&mut aic, &mut latch, 0, EVENT),
+            1 << 24 | EVENT_TYPE_IRQ | 32
+        );
+        assert!(!latch.pins(0).irq);
+        // A held level fires again only after that die is unmasked.
+        write(&mut aic, &mut latch, first.mask_clear + 4, 1);
+        write(&mut aic, &mut latch, first.software_clear + 4, 1);
+        assert!(!latch.pins(0).irq);
+        write(&mut aic, &mut latch, second.mask_clear + 4, u32::MAX);
+        assert!(latch.pins(0).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, second.mask_set + 4), 0);
+        // Invalid tail bits are ignored independently in each die.
+        assert_eq!(read(&mut aic, &mut latch, 0, first.mask_set + 4), 0);
+        let mut access = Access::new(0, 0, &mut latch);
+        for offset in [
+            INFO1,
+            INFO3,
+            second.mask_set + 8,
+            second.irq_config + 4 * 33,
+            second.mask_set + 1,
+        ] {
+            assert!(aic.read(offset, Width::Word, &mut access).is_err());
+        }
+        assert!(
+            aic.set_input(AicInput::new(2, 0), true, &mut access)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn firmware_routing_is_atomic_and_multi_die_targets_reach_the_selected_cpu() {
+        let (config, layout) = two_dies();
+        let second = layout.dies[1];
+        let mut aic = Aic2::new_with_layout(config, layout).unwrap();
+        assert!(aic.apply_ext_intr_cfg(&[3, 0x10, 2, 0, 0x20, 1]).is_err());
+        let mut latch = InterruptLatch::new();
+        assert_eq!(read(&mut aic, &mut latch, 0, second.irq_config + 12), 0);
+        aic.apply_ext_intr_cfg(&[3, 0x10, 2]).unwrap();
+        write(&mut aic, &mut latch, CONFIG, CONFIG_ENABLE);
+        write(&mut aic, &mut latch, second.mask_clear, 1 << 3);
+        write(&mut aic, &mut latch, second.software_set, 1 << 3);
+        assert!(!latch.pins(0).irq && latch.pins(1).irq);
+        assert_eq!(read(&mut aic, &mut latch, 0, EVENT), 0);
+        assert_eq!(
+            read(&mut aic, &mut latch, 1, EVENT),
+            1 << 24 | EVENT_TYPE_IRQ | 3
+        );
+    }
+
+    #[test]
+    fn explicit_layout_refuses_missing_overlapping_unaligned_and_overflowing_banks() {
+        let (config, layout) = two_dies();
+        for invalid in [
+            Aic2Layout {
+                max_dies: 1,
+                ..layout.clone()
+            },
+            Aic2Layout {
+                max_dies: 16,
+                ..layout.clone()
+            },
+            Aic2Layout {
+                dies: vec![],
+                ..layout.clone()
+            },
+            Aic2Layout {
+                info1: VERSION,
+                ..layout.clone()
+            },
+            Aic2Layout {
+                info3: 0x101,
+                ..layout.clone()
+            },
+            Aic2Layout {
+                info1: TIMESTAMPS,
+                ..layout.clone()
+            },
+            Aic2Layout {
+                info3: u64::MAX - 3,
+                ..layout.clone()
+            },
+        ] {
+            assert!(Aic2::new_with_layout(config.clone(), invalid).is_err());
+        }
+        for offset in [layout.dies[0].mask_set, EVENT, 0x6001, u64::MAX - 3] {
+            let mut invalid = layout.clone();
+            invalid.dies[1].mask_set = offset;
+            assert!(Aic2::new_with_layout(config.clone(), invalid).is_err());
+        }
+        let mut invalid = layout.clone();
+        invalid.dies[0].irq_config += 4;
+        assert!(Aic2::new_with_layout(config, invalid).is_err());
+        assert!(Aic2DieLayout::contiguous(u64::MAX - 3, 64).is_none());
     }
 
     /// AICv3 (Linux `aic3_info`, `t8122.dtsi`): the same registers with the
