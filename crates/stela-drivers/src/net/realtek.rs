@@ -138,7 +138,7 @@ fn block_error(e: BlockError) -> Error {
 /// MAC revision and copper PHY. PCI-ID recognition alone does not claim support.
 pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
     function.vendor == 0x10ec
-        && matches!(function.device, 0x8161 | 0x8168 | 0x8169 | 0x8125 | 0x8126)
+        && revision::pci_candidate(function.device)
         && function.class == [2, 0, 0]
 }
 trait Registers {
@@ -246,37 +246,22 @@ impl Realtek {
                 BlockError::Unsupported("not a supported Realtek PCI Ethernet candidate").into(),
             );
         }
-        let pcie_link_control = if function.device != 0x8169 {
+        let pcie_link_control = prepare_pcie_link(function, |function| {
             // SAFETY: caller grants exclusive PCI segment access and valid ECAM.
-            unsafe { pci::disable_aspm_link(function, handoff)? };
-            let cap = function
-                .capabilities()
-                .into_iter()
-                .find(|(_, id)| *id == 0x10)
-                .ok_or(BlockError::Unsupported(
-                    "Realtek PCIe function without PCIe capability",
-                ))?
-                .0;
-            let offset = u16::from(cap) + 0x10;
-            clock_request(function.config(), offset, false)?;
-            Some(offset)
-        } else {
-            None
-        };
+            unsafe { pci::disable_aspm_link(function, handoff) }
+        })?;
         let bar = function
             .bars()
             .into_iter()
             .flatten()
             .find(|b| matches!(b, pci::Bar::Memory { .. }));
-        let device = map_registers(handoff, bar, 0, register_aperture(function.device))?;
+        let device = map_registers(handoff, bar, 0, 256)?;
         function.enable_polled();
         let txconfig = device.read32(TX_CONFIG);
         let revision = detect_revision(&device, txconfig, |bytes| {
             map_registers(handoff, bar, 0, bytes).map(|_| ())
         })?;
-        if !revision::pci_family(function.device, revision) || !revision.implemented() {
-            return Err(Error::UnsupportedRevision(revision));
-        }
+        admit_revision(function.device, pcie_link_control, revision)?;
         if !revision.nbase() && device.read8(PHY_STATUS) & 0x80 != 0 {
             return Err(BlockError::Unsupported("Realtek TBI/fiber mode").into());
         }
@@ -449,8 +434,42 @@ fn clock_request<C: ConfigSpace>(
     Ok(())
 }
 
-fn register_aperture(device: u16) -> u64 {
-    if matches!(device, 0x8125 | 0x8126) {
+fn prepare_pcie_link<C: ConfigSpace>(
+    function: &mut Function<C>,
+    disable_aspm: impl FnOnce(&mut Function<C>) -> Result<(), BlockError>,
+) -> Result<Option<u16>, BlockError> {
+    let mut control = None;
+    for (offset, id) in function.capabilities() {
+        if id == 0x10 {
+            let offset = u16::from(offset) + 0x10;
+            if offset + 2 > 0x100 || control.replace(offset).is_some() {
+                return Err(BlockError::Unsupported("invalid Realtek PCIe capabilities"));
+            }
+        }
+    }
+    if let Some(offset) = control {
+        // The shared ASPM boundary validates link type and topology before
+        // either MMIO decoding or bus mastering is enabled by this constructor.
+        disable_aspm(function)?;
+        clock_request(function.config(), offset, false)?;
+    }
+    Ok(control)
+}
+
+fn admit_revision(device: u16, pcie_control: Option<u16>, revision: Revision) -> Result<(), Error> {
+    if !revision::pci_family(device, revision) || !revision.implemented() {
+        return Err(Error::UnsupportedRevision(revision));
+    }
+    if revision.version > 6 && pcie_control.is_none() {
+        return Err(
+            BlockError::Unsupported("Realtek PCIe revision without PCIe capability").into(),
+        );
+    }
+    Ok(())
+}
+
+fn register_aperture(revision: Revision) -> u64 {
+    if revision.nbase() {
         NBASE_REGISTER_BYTES
     } else {
         256
@@ -471,7 +490,13 @@ fn detect_revision<R: Registers>(
     require_range: impl FnOnce(u64) -> Result<(), BlockError>,
 ) -> Result<Revision, Error> {
     if !revision::needs_extended(txconfig) {
-        return revision::detect(txconfig).ok_or(Error::UnknownMac(txconfig));
+        let revision = revision::detect(txconfig).ok_or(Error::UnknownMac(txconfig))?;
+        if revision.nbase() {
+            // PCI aliases do not imply a layout: validate the detected NBASE
+            // range before returning a revision that can reach extended I/O.
+            require_range(register_aperture(revision))?;
+        }
+        return Ok(revision);
     }
     // The actual first BAR must cover and map the extended word before I/O.
     require_range(EXTENDED_REGISTER_BYTES)?;
@@ -3345,9 +3370,9 @@ mod tests {
         // The actual shared map_registers boundary checks both BAR size and
         // retained mapping before returning MMIO. The constructor requests the
         // complete range through the 16-bit timer at 6048 before reading it.
-        assert_eq!(register_aperture(0x8125), 0x604a);
-        assert_eq!(register_aperture(0x8126), 0x604a);
-        assert_eq!(register_aperture(0x8168), 256);
+        assert_eq!(register_aperture(revision(61)), 0x604a);
+        assert_eq!(register_aperture(revision(70)), 0x604a);
+        assert_eq!(register_aperture(revision(34)), 256);
         for version in [61, 63, 64, 65, 66, 70] {
             let time = Time::default();
             let model = Model::nbase(&time);
@@ -4322,8 +4347,9 @@ mod tests {
             )))
         );
         assert_eq!(regs.reads.get(), 0);
-        let r = detect_revision(&regs, 0x688 << 20, |_| {
-            panic!("normal XID must not require larger aperture")
+        let r = detect_revision(&regs, 0x688 << 20, |bytes| {
+            assert_eq!(bytes, 0x604a);
+            Ok(())
         })
         .unwrap();
         assert_eq!(r.extended_xid, None);
@@ -4391,6 +4417,345 @@ mod tests {
             missing_extended.extended_xid = None;
             assert!(load_firmware(&catalog, "10ec:8125", missing_extended).is_err());
             assert!(load_firmware(&catalog, "10ec:8168", extended_revision).is_err());
+        }
+    }
+    fn alias_function(device: u16, express: bool) -> Function<AliasConfig> {
+        let mut config = AliasConfig {
+            words: [0; 64],
+            writes: Vec::new(),
+        };
+        config.words[0] = (u32::from(device) << 16) | 0x10ec;
+        config.words[2] = 0x0200_0000;
+        if express {
+            config.words[1] = 1 << 20; // Status: conventional capability list.
+            config.words[0x34 / 4] = 0x40;
+            config.words[0x40 / 4] = 0x0001_0010;
+            config.words[0x50 / 4] = 0xa5fc;
+        }
+        Function::new(
+            pci::Address {
+                segment: 0,
+                bus: 0,
+                device: 1,
+                function: 2,
+            },
+            config,
+        )
+        .unwrap()
+    }
+    struct AliasConfig {
+        words: [u32; 64],
+        writes: Vec<(u16, u16)>,
+    }
+    impl ConfigSpace for AliasConfig {
+        fn read32(&self, offset: u16) -> u32 {
+            self.words[usize::from(offset / 4)]
+        }
+        fn write32(&mut self, _: u16, _: u32) {
+            panic!("no wide configuration write is authorized")
+        }
+        fn write16(&mut self, offset: u16, value: u16) {
+            self.writes.push((offset, value));
+            let word = &mut self.words[usize::from(offset / 4)];
+            let shift = (offset & 2) * 8;
+            *word = (*word & !(0xffff << shift)) | (u32::from(value) << shift);
+        }
+    }
+
+    #[test]
+    fn source_same_vendor_pci_aliases_still_require_exact_implemented_revision_and_link() {
+        let aliases = [
+            0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+        ];
+        // Independent representative inputs exercise all41 ordered source entries,
+        // including generic-mask fallbacks3ca/3c4 that overlap specific entries.
+        let xids = [
+            0x64a, 0x649, 0x681, 0x708, 0x68b, 0x68a, 0x689, 0x688, 0x641, 0x609, 0x54b, 0x54a,
+            0x502, 0x541, 0x6c0, 0x5c8, 0x509, 0x4c0, 0x488, 0x481, 0x480, 0x2c8, 0x2c1, 0x2c0,
+            0x281, 0x280, 0x28a, 0x28b, 0x3c9, 0x3c8, 0x3ca, 0x3c0, 0x3c2, 0x3c3, 0x3c4, 0x380,
+            0x980, 0x180, 0x100, 0x040, 0x008,
+        ];
+        for alias in aliases {
+            let mut function = alias_function(alias, true);
+            assert!(matches(&function));
+            function.vendor = 0x1186;
+            assert!(!matches(&function));
+            function.vendor = 0x10ec;
+            function.class = [2, 0, 1];
+            assert!(!matches(&function));
+            function.class = [1, 6, 1];
+            assert!(!matches(&function));
+            for xid in xids {
+                let revision = revision::detect(xid << 20).unwrap();
+                assert!(admit_revision(alias, Some(0x50), revision).is_ok());
+                assert_eq!(
+                    admit_revision(alias, None, revision).is_ok(),
+                    revision.version <= 6
+                );
+            }
+            for raw in [0, 0x8000_0000] {
+                let extended = revision::detect_extended(0x7c8 << 20, raw).unwrap();
+                assert!(admit_revision(alias, Some(0x50), extended).is_ok());
+                assert!(admit_revision(alias, None, extended).is_err());
+            }
+            let mut unsupported = revision(64);
+            unsupported.version = 80;
+            assert_eq!(
+                admit_revision(alias, Some(0x50), unsupported),
+                Err(Error::UnsupportedRevision(unsupported))
+            );
+        }
+        for device in [0x8136, 0x8127, 0x8139, 0x8124, 0x2501, 0x2601, 0xffff] {
+            assert!(!matches(&alias_function(device, true)));
+            assert!(admit_revision(device, Some(0x50), revision(64)).is_err());
+        }
+        // Historical primary PCI families retain their narrower source boundaries.
+        assert!(admit_revision(0x8125, Some(0x50), revision(70)).is_err());
+        assert!(admit_revision(0x8169, Some(0x50), revision(64)).is_err());
+        assert!(admit_revision(0x8168, Some(0x50), revision(6)).is_err());
+    }
+
+    #[test]
+    fn pci_alias_aspm_selection_uses_actual_capability_before_clock_or_enable() {
+        for device in [
+            0x8169, 0x8129, 0x2502, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+        ] {
+            for express in [false, true] {
+                let mut function = alias_function(device, express);
+                let called = Cell::new(false);
+                let control = prepare_pcie_link(&mut function, |function| {
+                    called.set(true);
+                    assert_eq!(function.config().read16(4) & 6, 0); // No MMIO/bus-master enable yet.
+                    assert_eq!(function.config().read16(0x50), 0xa5fc);
+                    assert!(function.config().writes.is_empty());
+                    Ok(())
+                })
+                .unwrap();
+                assert_eq!(called.get(), express);
+                assert_eq!(control, express.then_some(0x50));
+                assert_eq!(function.config().read16(4) & 6, 0);
+                assert_eq!(
+                    function.config().writes,
+                    if express {
+                        vec![(0x50, 0xa4fc)]
+                    } else {
+                        vec![]
+                    }
+                );
+            }
+        }
+        let mut function = alias_function(0x2502, true);
+        assert_eq!(
+            prepare_pcie_link(&mut function, |_| Err(BlockError::Timeout)),
+            Err(BlockError::Timeout)
+        );
+        assert!(function.config().writes.is_empty());
+        function.config().words[0x50 / 4] = 0xffff;
+        assert_eq!(
+            prepare_pcie_link(&mut function, |_| Ok(())),
+            Err(BlockError::Device { status: 65535 })
+        );
+        assert!(function.config().writes.is_empty());
+        for invalid in [0, 1] {
+            let mut function = alias_function(0x2502, true);
+            if invalid == 0 {
+                function.config().words[0x40 / 4] |= 0x4000;
+            }
+            // Looping PCIe capability.
+            else {
+                function.config().words[0x34 / 4] = 0xf0;
+                function.config().words[0xf0 / 4] = 0x10;
+            }
+            assert!(
+                prepare_pcie_link(&mut function, |_| panic!(
+                    "invalid list must fail before ASPM"
+                ))
+                .is_err()
+            );
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn alias_detected_layout_requires_full_bar_before_hardware_or_dma() {
+        for alias in [
+            0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+        ] {
+            for xid in [0x609, 0x641, 0x688, 0x708, 0x681, 0x649] {
+                let time = Time::default();
+                let model = Model::nbase(&time);
+                let ranges = RefCell::new(Vec::new());
+                assert_eq!(
+                    detect_revision(&model, xid << 20, |bytes| {
+                        ranges.borrow_mut().push(bytes);
+                        Err(BlockError::Unsupported("unmapped detected BAR layout"))
+                    }),
+                    Err(Error::Device(BlockError::Unsupported(
+                        "unmapped detected BAR layout"
+                    )))
+                );
+                assert_eq!(*ranges.borrow(), vec![0x604a]);
+                assert!(model.state.borrow().writes.is_empty());
+                let revision = detect_revision(&model, xid << 20, |bytes| {
+                    assert_eq!(bytes, 0x604a);
+                    Ok(())
+                })
+                .unwrap();
+                admit_revision(alias, Some(0x50), revision).unwrap();
+                assert_eq!(register_aperture(revision), 0x604a);
+            }
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            assert!(
+                detect_revision(&model, 0x7c8 << 20, |bytes| {
+                    assert_eq!(bytes, 0x60b4);
+                    Err(BlockError::Unsupported("short extended BAR"))
+                })
+                .is_err()
+            );
+            assert!(model.state.borrow().writes.is_empty());
+            let old = detect_revision(&model, 0x380 << 20, |_| {
+                panic!("legacy layout already checked at initial256-byte map")
+            })
+            .unwrap();
+            admit_revision(alias, Some(0x50), old).unwrap();
+            assert_eq!(register_aperture(old), 256);
+            assert!(
+                detect_revision(&model, 0x300 << 20, |_| panic!(
+                    "unknown XID must not expand aperture"
+                ))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn alias_firmware_catalog_binds_actual_pci_identity_and_borrows_exact_bytes() {
+        use resources::{Catalog, Provenance, Resource, Target};
+        let digest = [
+            0x23, 0xc3, 0xcf, 0xd9, 0x9c, 0xa0, 0x28, 0xa0, 0xba, 0x72, 0xe8, 0x92, 0x40, 0xe4,
+            0xb4, 0xf8, 0x93, 0xc1, 0xb4, 0x26, 0xa2, 0x1a, 0x6e, 0x89, 0x36, 0xfd, 0x43, 0x13,
+            0x6b, 0x13, 0xc1, 0xba,
+        ];
+        for alias in [
+            0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+        ] {
+            let hardware = format!("10ec:{alias:04x}");
+            for (revision, key, name) in [
+                (revision(34), "xid-2c8", "rtl_nic/rtl8168e-3.fw"),
+                (
+                    revision::detect_extended(0x7c8 << 20, 0x80000000).unwrap(),
+                    "xid-7c8-ext-80000000",
+                    "rtl_nic/rtl9151a-1.fw",
+                ),
+            ] {
+                let bytes = 0x801f0000u32.to_le_bytes().to_vec();
+                let pointer = bytes.as_ptr();
+                let catalog = Catalog::from_handoff(vec![Resource {
+                    name,
+                    target: Target {
+                        driver: "realtek",
+                        hardware: &hardware,
+                        revision: key,
+                        board: None,
+                    },
+                    provenance: Provenance {
+                        source: "synthetic-test",
+                        revision: "1",
+                        member: name,
+                        license: "MIT",
+                    },
+                    expected_length: 4,
+                    expected_sha256: digest,
+                    bytes,
+                }])
+                .unwrap();
+                let image = load_firmware(&catalog, &hardware, revision)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(image.bytes().as_ptr(), pointer);
+                for wrong in ["10ec:8125", "10ec:8168", "1186:4300"] {
+                    assert!(load_firmware(&catalog, wrong, revision).is_err());
+                }
+                let mut wrong = revision;
+                wrong.xid ^= 1;
+                assert!(load_firmware(&catalog, &hardware, wrong).is_err());
+            }
+        }
+    }
+    #[test]
+    fn alias_admission_preserves_required_phy_identity_capability_and_bus_failures() {
+        let bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&bytes).unwrap();
+        for alias in [
+            0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+        ] {
+            for version in [17, 34, 64, 70] {
+                for failure in 0..5 {
+                    if failure == 2 && version == 17 {
+                        continue;
+                    } // This path requires no script.
+                    let time = Time::default();
+                    let mut model = if version >= 61 {
+                        Model::nbase(&time)
+                    } else {
+                        Model::ready(&time)
+                    };
+                    let revision = revision(version);
+                    admit_revision(alias, Some(0x50), revision).unwrap();
+                    if failure == 1 {
+                        let mut state = model.state.borrow_mut();
+                        if revision.nbase() {
+                            state.phy_ocp.insert(0xa406, 0xc999);
+                        } else {
+                            state.phy.insert((0, 3), 0xc999);
+                        }
+                    }
+                    if failure == 3 {
+                        model.fault = Some(if revision.nbase() {
+                            PHY_OCP
+                        } else {
+                            PHY_ACCESS
+                        });
+                    }
+                    if failure == 4 {
+                        let mut state = model.state.borrow_mut();
+                        if revision.nbase() {
+                            state.phy_ocp.insert(0xa616, 0x70);
+                        } else {
+                            state.phy.insert((0, 1), 0);
+                        }
+                    }
+                    let mut hw = Hardware::new(&model, &time, revision, 2);
+                    let result = hw.configure_phy((failure != 2).then_some(&script), false);
+                    match failure {
+                        0 => {
+                            result.unwrap();
+                            let state = model.state.borrow();
+                            assert_eq!(
+                                if revision.nbase() {
+                                    state.phy_ocp[&0xa400]
+                                } else {
+                                    state.phy[&(0, 0)]
+                                },
+                                0x1200
+                            );
+                        }
+                        1 => assert!(matches!(result, Err(Error::UnsupportedPhy(0x001c_c999)))),
+                        2 => assert!(matches!(result, Err(Error::Script(_)))),
+                        3 => assert_eq!(result, Err(Error::Device(BlockError::Timeout))),
+                        _ => assert!(result.is_err()),
+                    }
+                    assert!(
+                        !model
+                            .state
+                            .borrow()
+                            .writes
+                            .iter()
+                            .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+                    );
+                }
+            }
         }
     }
 }

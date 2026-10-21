@@ -171,12 +171,22 @@ pub(super) fn detect(txconfig: u32) -> Option<Revision> {
     })
 }
 
+// Same-vendor aliases use the pinned donor's common XID dispatch; they are
+// candidates, not a claim that any unknown or unsupported revision can run.
+const PCI_ALIASES: &[u16] = &[
+    0x2502, 0x2600, 0x8129, 0x8162, 0x8167, 0x3000, 0x5000, 0x0e10,
+];
+pub(super) fn pci_candidate(device: u16) -> bool {
+    matches!(device, 0x8161 | 0x8168 | 0x8169 | 0x8125 | 0x8126) || PCI_ALIASES.contains(&device)
+}
+
 pub(super) fn pci_family(device: u16, revision: Revision) -> bool {
     match device {
         0x8169 => revision.version <= 6,
         0x8168 | 0x8161 => revision.gigabit_pcie(),
         0x8125 => matches!(revision.version, 61 | 63 | 64 | 65 | 66),
         0x8126 => revision.version == 70,
+        alias if PCI_ALIASES.contains(&alias) => revision.implemented(),
         _ => false,
     }
 }
