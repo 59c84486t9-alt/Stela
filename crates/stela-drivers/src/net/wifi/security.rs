@@ -19,7 +19,18 @@
 //! protected management frames are explicitly unsupported by this first path.
 
 use super::{Aggregation, frame::Mpdu};
+use core::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
+
+static NEXT_NATIVE_EPOCH: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_epoch(counter: &AtomicU64) -> Result<u64, Error> {
+    counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
+            epoch.checked_add(1).filter(|_| epoch != 0)
+        })
+        .map_err(|_| Error::EpochExhausted)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cipher {
@@ -71,6 +82,7 @@ pub struct KeyIdentity {
     slot: u16,
     index: u8,
     generation: u64,
+    native_epoch: u64,
     cipher: Cipher,
 }
 
@@ -83,6 +95,9 @@ impl KeyIdentity {
     }
     pub const fn generation(self) -> u64 {
         self.generation
+    }
+    pub const fn native_epoch(self) -> u64 {
+        self.native_epoch
     }
     pub const fn cipher(self) -> Cipher {
         self.cipher
@@ -135,6 +150,7 @@ pub enum Error {
     Busy,
     Quarantined,
     GenerationExhausted,
+    EpochExhausted,
     StaleAcknowledgement,
     NoInstalledKey,
     WrongKey,
@@ -148,13 +164,43 @@ pub enum Error {
     Unsupported(&'static str),
 }
 
+/// Authenticated initial receive counters from the actual key exchange or
+/// device handoff. Queue0..15 correspond to TIDs; queue16 is non-QoS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplaySeed([u64; 17]);
+
+impl ReplaySeed {
+    /// Use only where the protocol specifies fresh-key initial counters of zero.
+    pub const ZERO: Self = Self([0; 17]);
+
+    /// E.g. an authenticated GTK Key RSC applied to all receive queues.
+    pub const fn uniform(pn: PacketNumber) -> Self {
+        Self([pn.0; 17])
+    }
+
+    pub fn per_queue(pn: [PacketNumber; 17]) -> Self {
+        Self(pn.map(|pn| pn.0))
+    }
+
+    pub const fn counters(self) -> [u64; 17] {
+        self.0
+    }
+}
+
 /// A command ticket stays unusable until an actual successful acknowledgement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InstallTicket(KeyIdentity);
+pub struct InstallTicket {
+    key: KeyIdentity,
+    receive: ReplaySeed,
+}
 
 impl InstallTicket {
     pub const fn identity(self) -> KeyIdentity {
-        self.0
+        self.key
+    }
+    /// Program these same initial counters into firmware/hardware when required.
+    pub const fn receive_seed(self) -> ReplaySeed {
+        self.receive
     }
 }
 
@@ -182,6 +228,7 @@ enum State {
 #[derive(Debug)]
 pub struct KeySlot {
     slot: u16,
+    native_epoch: u64,
     generation: u64,
     state: State,
     rx_pn: [u64; 17],
@@ -190,15 +237,32 @@ pub struct KeySlot {
 }
 
 impl KeySlot {
-    pub const fn new(slot: u16) -> Self {
-        Self {
+    /// Claim one actual hardware key slot, initially empty.
+    ///
+    /// # Safety
+    /// The caller must exclusively own this physical slot and its associated
+    /// vendor key table. Removal/reset of any previous key must be acknowledged;
+    /// all previous DMA RX, completions and deferred key users must be drained.
+    /// No other `KeySlot` may control the same physical slot concurrently.
+    /// The caller must also prevent reinstalling any previous temporal key
+    /// with reset transmit/receive counters. Preserve this object for retries;
+    /// a recreated owner requires a genuinely fresh authenticated key epoch.
+    ///
+    /// ```compile_fail
+    /// use stela_drivers::net::wifi::security::KeySlot;
+    /// let slot = KeySlot::new(7); // Physical ownership requires unsafe proof.
+    /// ```
+    pub unsafe fn new(slot: u16) -> Result<Self, Error> {
+        let native_epoch = allocate_epoch(&NEXT_NATIVE_EPOCH)?;
+        Ok(Self {
             slot,
+            native_epoch,
             generation: 0,
             state: State::Empty,
             rx_pn: [0; 17],
             material_digest: None,
             pending_digest: None,
-        }
+        })
     }
 
     pub fn begin_install(
@@ -206,6 +270,7 @@ impl KeySlot {
         index: u8,
         cipher: Cipher,
         material: &[u8],
+        receive: ReplaySeed,
     ) -> Result<InstallTicket, Error> {
         if index > 3 {
             return Err(Error::InvalidKeyIndex);
@@ -250,12 +315,13 @@ impl KeySlot {
             slot: self.slot,
             index,
             generation,
+            native_epoch: self.native_epoch,
             cipher,
         };
         // Invalidate the old binding before a command can change hardware state.
         self.state = State::Pending(key);
         self.pending_digest = Some(digest);
-        Ok(InstallTicket(key))
+        Ok(InstallTicket { key, receive })
     }
 
     /// Call only after matching the device command identity and real status.
@@ -265,14 +331,14 @@ impl KeySlot {
         ticket: InstallTicket,
         outcome: InstallOutcome,
     ) -> Result<(), Error> {
-        if self.state != State::Pending(ticket.0) {
+        if self.state != State::Pending(ticket.key) {
             return Err(Error::StaleAcknowledgement);
         }
         self.state = match outcome {
             InstallOutcome::Accepted => {
-                self.rx_pn = [0; 17];
+                self.rx_pn = ticket.receive.0;
                 self.material_digest = self.pending_digest.take();
-                State::Installed(ticket.0)
+                State::Installed(ticket.key)
             }
             InstallOutcome::RejectedAndEmpty => State::Empty,
             InstallOutcome::Uncertain => State::Quarantined,
@@ -409,8 +475,15 @@ mod tests {
     use crate::net::wifi::{Band, RadioStatus, RawRate};
     use alloc::vec;
 
+    fn slot(number: u16) -> KeySlot {
+        // Independent pure model: no physical slot, DMA or deferred users exist.
+        unsafe { KeySlot::new(number).unwrap() }
+    }
+
     fn install(slot: &mut KeySlot) -> KeyIdentity {
-        let ticket = slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16]).unwrap();
+        let ticket = slot
+            .begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO)
+            .unwrap();
         assert_eq!(slot.installed(), None);
         slot.complete_install(ticket, InstallOutcome::Accepted)
             .unwrap();
@@ -461,14 +534,14 @@ mod tests {
 
     #[test]
     fn key_acknowledgement_rekey_and_stale_rx() {
-        let mut slot = KeySlot::new(7);
+        let mut slot = slot(7);
         let old = install(&mut slot);
         assert_eq!(
             slot.authorize(&packet(old, 8, None)).unwrap().payload(),
             &[1, 2, 3]
         );
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16]),
+            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO),
             Err(Error::KeyStillInstalled)
         );
         slot.invalidate();
@@ -476,13 +549,15 @@ mod tests {
         unsafe {
             slot.retire_after_drain();
         }
-        let ticket = slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16]).unwrap();
+        let ticket = slot
+            .begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .unwrap();
         assert!(matches!(
             slot.authorize(&packet(old, 9, None)),
             Err(Error::NoInstalledKey)
         ));
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16]),
+            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO),
             Err(Error::Busy)
         );
         slot.complete_install(ticket, InstallOutcome::Accepted)
@@ -502,12 +577,14 @@ mod tests {
 
     #[test]
     fn uncertain_install_requires_real_retirement() {
-        let mut slot = KeySlot::new(3);
-        let ticket = slot.begin_install(0, Cipher::Gcmp128, &[0x43; 16]).unwrap();
+        let mut slot = slot(3);
+        let ticket = slot
+            .begin_install(0, Cipher::Gcmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .unwrap();
         slot.complete_install(ticket, InstallOutcome::Uncertain)
             .unwrap();
         assert_eq!(
-            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16]),
+            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16], ReplaySeed::ZERO),
             Err(Error::Quarantined)
         );
         // Fixture has no hardware or queued RX users.
@@ -515,7 +592,7 @@ mod tests {
             slot.retire_after_drain();
         }
         assert!(
-            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16])
+            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16], ReplaySeed::ZERO)
                 .unwrap()
                 .identity()
                 .generation()
@@ -525,7 +602,7 @@ mod tests {
 
     #[test]
     fn replay_is_per_tid_and_non_qos_and_zero_is_not_new() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         for tid in (0..16).map(Some).chain([None]) {
             assert!(matches!(
@@ -545,7 +622,7 @@ mod tests {
 
     #[test]
     fn decryption_and_hardware_replay_claim_do_not_authorize() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         let mut frame = packet(key, 10, Some(0));
         frame.security.integrity = Integrity::Unknown;
@@ -563,7 +640,7 @@ mod tests {
 
     #[test]
     fn failed_packet_does_not_advance_replay_state() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         let mut frame = packet(key, 99, None);
         frame.fcs_error = true;
@@ -577,7 +654,7 @@ mod tests {
 
     #[test]
     fn aggregates_fragments_and_non_data_are_explicit() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         let mut frame = packet(key, 1, None);
         frame.aggregation.ampdu = Some(2);
@@ -593,11 +670,11 @@ mod tests {
 
     #[test]
     fn identical_key_retry_does_not_reset_nonce_or_replay_state() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         assert!(slot.authorize(&packet(key, 10, None)).is_ok());
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16]),
+            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO),
             Err(Error::AlreadyInstalled(key))
         );
         assert!(matches!(
@@ -610,7 +687,7 @@ mod tests {
             slot.retire_after_drain();
         }
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16]),
+            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO),
             Err(Error::Reinstallation)
         );
     }
@@ -624,7 +701,7 @@ mod tests {
             Cipher::Gcmp256,
         ] {
             for index in 0..4 {
-                let mut slot = KeySlot::new(5);
+                let mut slot = slot(5);
                 let length = if matches!(cipher, Cipher::Ccmp128 | Cipher::Gcmp128) {
                     16
                 } else {
@@ -632,7 +709,7 @@ mod tests {
                 };
                 let material = [0x42; 32];
                 let ticket = slot
-                    .begin_install(index, cipher, &material[..length])
+                    .begin_install(index, cipher, &material[..length], ReplaySeed::ZERO)
                     .unwrap();
                 slot.complete_install(ticket, InstallOutcome::Accepted)
                     .unwrap();
@@ -670,7 +747,7 @@ mod tests {
 
     #[test]
     fn every_bad_security_observation_preserves_replay_floor() {
-        let mut slot = KeySlot::new(1);
+        let mut slot = slot(1);
         let key = install(&mut slot);
         for case in 0..7 {
             let mut frame = packet(key, 99, None);
@@ -686,6 +763,66 @@ mod tests {
             assert!(matches!(slot.authorize(&frame), Err(Error::Integrity)));
         }
         assert!(slot.authorize(&packet(key, 1, None)).is_ok());
+    }
+
+    #[test]
+    fn authenticated_initial_rsc_is_committed_only_with_key_ack() {
+        let mut slot = slot(7);
+        let seed = ReplaySeed::uniform(PacketNumber::new(100).unwrap());
+        let ticket = slot
+            .begin_install(2, Cipher::Ccmp128, &[0x42; 16], seed)
+            .unwrap();
+        assert_eq!(ticket.receive_seed().counters(), [100; 17]);
+        assert_eq!(slot.installed(), None);
+        slot.complete_install(ticket, InstallOutcome::Accepted)
+            .unwrap();
+        let key = slot.installed().unwrap();
+        for tid in (0..16).map(Some).chain([None]) {
+            assert!(matches!(
+                slot.authorize(&packet(key, 100, tid)),
+                Err(Error::Replay)
+            ));
+            assert!(slot.authorize(&packet(key, 101, tid)).is_ok());
+        }
+    }
+
+    #[test]
+    fn native_epoch_exhaustion_never_wraps_to_a_previous_identity() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_epoch(&counter), Ok(u64::MAX - 1));
+        assert_eq!(allocate_epoch(&counter), Err(Error::EpochExhausted));
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn recreated_hardware_slot_cannot_accept_old_native_epoch() {
+        let old = {
+            let mut previous = slot(7);
+            let old = install(&mut previous);
+            assert!(previous.authorize(&packet(old, 10, None)).is_ok());
+            previous.invalidate();
+            // Pure model has no hardware, queued RX, or outstanding key users.
+            unsafe {
+                previous.retire_after_drain();
+            }
+            old
+        };
+        let mut current = slot(7);
+        let ticket = current
+            .begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .unwrap();
+        current
+            .complete_install(ticket, InstallOutcome::Accepted)
+            .unwrap();
+        let new = current.installed().unwrap();
+        assert_eq!(old.slot(), new.slot());
+        assert_eq!(old.generation(), new.generation());
+        assert_ne!(old.native_epoch(), new.native_epoch());
+        assert!(matches!(
+            current.authorize(&packet(old, 10, None)),
+            Err(Error::WrongKey)
+        ));
+        assert!(current.authorize(&packet(new, 1, None)).is_ok());
     }
 
     #[test]
