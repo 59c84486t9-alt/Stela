@@ -55,6 +55,7 @@ fn nvidia() {
         .file(format!("{source}/stela/pci.c"))
         .file(format!("{source}/stela/memory.c"))
         .file(format!("{source}/stela/stela_ram_mapping.c"))
+        .file(format!("{source}/stela/stela_pages.c"))
         .include(format!("{source}/stela"))
         .include(format!("{source}/src/common/sdk/nvidia/inc"))
         .include(format!("{source}/src/nvidia/arch/nvalloc/unix/include"))

@@ -14,6 +14,7 @@ use core::{ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin, pt
 /// No implicit DMA completion or IRQ-safe release is supplied.
 pub struct Allocation {
     pages: PinnedPages,
+    pub(super) origin: Option<super::services::Origin>,
     _owner: PhantomData<*mut ()>,
     _pin: PhantomPinned,
 }
@@ -22,9 +23,14 @@ impl Allocation {
     pub fn new(pages: PinnedPages) -> Self {
         Self {
             pages,
+            origin: None,
             _owner: PhantomData,
             _pin: PhantomPinned,
         }
+    }
+
+    pub(super) fn pages(&self) -> &PinnedPages {
+        &self.pages
     }
 
     /// Allocation-private pointer accepted by `nv_alloc_kernel_mapping`.

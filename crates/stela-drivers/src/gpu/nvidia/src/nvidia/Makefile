@@ -23,6 +23,7 @@ ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
 ifeq ($(TARGET_OS),Stela)
 ALL_SRCS += ../../stela/pci.c ../../stela/memory.c ../../stela/stela_ram_mapping.c
+ALL_SRCS += ../../stela/stela_pages.c
 CFLAGS += -I ../../stela
 endif
 
