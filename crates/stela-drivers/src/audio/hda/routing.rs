@@ -8,7 +8,10 @@
 //! policy. No vendor fixup, GPIO amplifier, jack policy or digital route is
 //! inferred from a codec name, pin default, or successful DMA completion.
 use super::super::{Direction, Error, Phase};
-use super::{CodecGraph, Controller, FunctionGroup, Registers, StreamId, Verb, Widget, WidgetKind};
+use super::{
+    CodecGraph, Controller, ControllerToken, FunctionGroup, Registers, StreamId, Verb, Widget,
+    WidgetKind,
+};
 use crate::bus::i2c::Timer;
 use alloc::vec::Vec;
 
@@ -74,6 +77,7 @@ pub enum PinOptions {
 /// The route reserves its widget path until full controller reinitialization.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnalogRoute {
+    token: ControllerToken,
     codec: u8,
     group: u8,
     direction: Direction,
@@ -190,6 +194,7 @@ impl CodecGraph {
             return Err(Error::UnsupportedTopology);
         }
         Ok(AnalogRoute {
+            token: self.token,
             codec: self.address,
             group: group.node,
             direction,
@@ -445,6 +450,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<(), Error> {
+        if graph.token != self.token || route.token != self.token {
+            return Err(Error::InvalidCodecGraph);
+        }
         if self.routing_failed {
             return Err(Error::NeedsReset);
         }

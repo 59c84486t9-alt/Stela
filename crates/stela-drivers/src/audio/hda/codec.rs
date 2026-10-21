@@ -2,7 +2,7 @@
 //! Codec verb packing, capability inheritance and connection expansion adapted
 //! from Linux sound/hda/core/device.c and include/sound/hda_verbs.h.
 use super::super::{Error, PcmFormat};
-use super::{Controller, Registers};
+use super::{Controller, ControllerToken, Registers};
 use crate::bus::i2c::Timer;
 use alloc::vec::Vec;
 
@@ -166,6 +166,7 @@ pub struct FunctionGroup {
 
 #[derive(Clone, Debug)]
 pub struct CodecGraph {
+    pub(super) token: ControllerToken,
     pub address: u8,
     pub vendor_id: u32,
     pub revision_id: u32,
@@ -200,6 +201,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let revision_id = self.parameter(address, 0, PAR_REVISION)?;
         let nodes = node_range(self.parameter(address, 0, PAR_NODE_COUNT)?)?;
         let mut graph = CodecGraph {
+            token: self.token,
             address,
             vendor_id,
             revision_id,

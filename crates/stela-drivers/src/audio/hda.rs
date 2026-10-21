@@ -21,6 +21,7 @@ use crate::bus::{
 };
 
 mod codec;
+mod lifecycle;
 pub mod pci;
 mod registers;
 mod routing;
@@ -81,6 +82,14 @@ pub struct Capabilities {
     pub input_stream_payload_words: u16,
 }
 
+/// DMA allocation identity plus a non-recycled reset generation. Metadata and
+/// stream handles from another controller/reset must never program this device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControllerToken {
+    owner: u64,
+    generation: u64,
+}
+
 pub struct Controller<R, T> {
     registers: R,
     timer: T,
@@ -98,6 +107,8 @@ pub struct Controller<R, T> {
     streams: Vec<Option<Stream>>,
     routes: Vec<(StreamId, AnalogRoute)>,
     routing_failed: bool,
+    token: ControllerToken,
+    lifecycle_failed: bool,
 }
 
 impl<R: Registers, T: Timer> Controller<R, T> {
@@ -170,6 +181,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             config,
             capabilities,
             codec_mask: 0,
+            token: ControllerToken {
+                owner: corb.physical(),
+                generation: 1,
+            },
+            lifecycle_failed: false,
             corb,
             rirb,
             corb_entries: 0,
@@ -339,6 +355,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     /// poisons the transport: HDA responses have no transaction ID, so a late
     /// response cannot safely be matched to a later command for the same codec.
     pub fn verb(&mut self, verb: Verb) -> Result<u32, Error> {
+        if self.lifecycle_failed {
+            return Err(Error::NeedsReset);
+        }
         if self.stopped {
             return Err(Error::Shutdown);
         }
@@ -430,6 +449,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         self.command_poisoned = true;
         if let Some(error) = error {
+            self.lifecycle_failed = true;
             return Err(error);
         }
         self.registers.write32(DPLBASE, 0);
@@ -570,6 +590,7 @@ mod tests {
         playback: Vec<u8>,
         capture_counter: u8,
         stream_descriptors_seen: usize,
+        reads: usize,
         writes: Vec<(usize, u32, usize)>,
     }
 
@@ -625,6 +646,7 @@ mod tests {
                 playback: Vec::new(),
                 capture_counter: 0,
                 stream_descriptors_seen: 0,
+                reads: 0,
                 writes: Vec::new(),
             };
             model.set(VMAJ, 1, 1);
@@ -1015,6 +1037,7 @@ mod tests {
     impl Registers for ModelRegisters {
         fn read8(&mut self, offset: usize) -> u8 {
             let mut m = self.0.borrow_mut();
+            m.reads += 1;
             m.advance();
             if (m.command_started_once && m.command_start_read_failure == Some(offset))
                 || (m.control_failure_active && m.control_read_failure == Some((offset, 1)))
@@ -1025,6 +1048,7 @@ mod tests {
         }
         fn read16(&mut self, offset: usize) -> u16 {
             let mut m = self.0.borrow_mut();
+            m.reads += 1;
             m.advance();
             if m.control_failure_active && m.control_read_failure == Some((offset, 2)) {
                 return u16::MAX;
@@ -1033,6 +1057,7 @@ mod tests {
         }
         fn read32(&mut self, offset: usize) -> u32 {
             let mut m = self.0.borrow_mut();
+            m.reads += 1;
             m.advance();
             if m.control_failure_active && m.control_read_failure == Some((offset, 4)) {
                 return u32::MAX;
@@ -1788,6 +1813,203 @@ mod tests {
             bits: 16,
             channels: 2,
         }
+    }
+
+    fn access_counts(model: &Rc<RefCell<Model>>) -> (usize, usize, usize) {
+        let m = model.borrow();
+        (m.reads, m.writes.len(), m.commands.len())
+    }
+
+    #[test]
+    fn reinitialize_invalidates_reused_stream_tags_graphs_and_routes_before_register_access() {
+        let mut fixture = Fixture::new();
+        let model = analog_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        let old = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let options = PinOptions::Playback {
+            headphone: false,
+            eapd: None,
+        };
+        controller
+            .configure_analog_route(&graph, &route, old, 0, options)
+            .unwrap();
+        controller.start(old).unwrap();
+        controller.reinitialize().unwrap();
+        assert!(controller.routes.is_empty());
+        assert!(controller.streams.iter().all(Option::is_none));
+        let fresh_graph = controller.enumerate_codec(0).unwrap();
+        let fresh = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        assert_eq!(fresh.descriptor_index(), old.descriptor_index());
+        assert_eq!(fresh.tag(), old.tag());
+        assert_ne!(fresh, old);
+        let before = access_counts(&model);
+        assert_eq!(controller.start(old), Err(Error::InvalidStream));
+        assert_eq!(controller.stop(old), Err(Error::InvalidStream));
+        assert_eq!(controller.status(old), Err(Error::InvalidStream));
+        assert_eq!(controller.position(old), Err(Error::InvalidStream));
+        assert_eq!(
+            controller.write_pcm(old, 0, &[1]),
+            Err(Error::InvalidStream)
+        );
+        assert_eq!(
+            controller.bind_converter(&graph, 2, fresh, 0),
+            Err(Error::InvalidCodecGraph)
+        );
+        assert_eq!(
+            controller.configure_analog_route(&graph, &route, fresh, 0, options),
+            Err(Error::InvalidCodecGraph)
+        );
+        assert_eq!(
+            controller.configure_analog_route(&fresh_graph, &route, fresh, 0, options),
+            Err(Error::InvalidCodecGraph)
+        );
+        assert_eq!(access_counts(&model), before);
+        let fresh_route = fresh_graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        controller
+            .configure_analog_route(&fresh_graph, &fresh_route, fresh, 0, options)
+            .unwrap();
+        controller.start(fresh).unwrap();
+    }
+
+    #[test]
+    fn failed_reinitialize_quiescence_keeps_reservations_dma_and_blocks_normal_operations() {
+        for command_stop in [false, true] {
+            let mut fixture = Fixture::new();
+            let model = analog_model();
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let id = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            controller
+                .configure_analog_route(
+                    &graph,
+                    &route,
+                    id,
+                    0,
+                    PinOptions::Playback {
+                        headphone: false,
+                        eapd: None,
+                    },
+                )
+                .unwrap();
+            controller.start(id).unwrap();
+            let token = controller.token;
+            let descriptor = stream_base(id.descriptor_index());
+            let bdl = model
+                .borrow()
+                .address(descriptor + SD_BDLPL, descriptor + SD_BDLPU);
+            if command_stop {
+                model.borrow_mut().command_stop_stuck = true;
+            } else {
+                model.borrow_mut().stream_stop_stuck = true;
+            }
+            assert_eq!(
+                controller.reinitialize(),
+                Err(Error::Timeout(if command_stop {
+                    Phase::CommandStop
+                } else {
+                    Phase::StreamStop
+                }))
+            );
+            assert_eq!(controller.token, token);
+            assert_eq!(controller.routes.len(), 1);
+            let stream = controller.streams[usize::from(id.descriptor_index())]
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                model
+                    .borrow()
+                    .address(descriptor + SD_BDLPL, descriptor + SD_BDLPU),
+                bdl
+            );
+            assert!(stream.poisoned);
+            let before = access_counts(&model);
+            let remaining = fixture.allocator.remaining();
+            assert_eq!(controller.write_pcm(id, 0, &[1]), Err(Error::NeedsReset));
+            assert_eq!(controller.start(id), Err(Error::NeedsReset));
+            assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+            assert_eq!(
+                controller.enumerate_codec(0).unwrap_err(),
+                Error::NeedsReset
+            );
+            assert_eq!(
+                controller.allocate_stream(
+                    Direction::Capture,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator
+                ),
+                Err(Error::NeedsReset)
+            );
+            assert_eq!(fixture.allocator.remaining(), remaining);
+            assert_eq!(access_counts(&model), before);
+            model.borrow_mut().command_stop_stuck = false;
+            model.borrow_mut().stream_stop_stuck = false;
+            controller.reinitialize().unwrap();
+            assert!(controller.routes.is_empty());
+            assert_eq!(controller.start(id), Err(Error::InvalidStream));
+            controller.enumerate_codec(0).unwrap();
+        }
+    }
+
+    #[test]
+    fn reinitialize_reset_failure_blocks_until_explicit_recovery_and_generation_never_wraps() {
+        let mut fixture = Fixture::new();
+        let model = graph_model();
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let id = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        model.borrow_mut().reset_exit_stuck = true;
+        assert_eq!(
+            controller.reinitialize(),
+            Err(Error::Timeout(Phase::LinkResetExit))
+        );
+        assert_eq!(controller.token.generation, 2);
+        let before = access_counts(&model);
+        assert_eq!(controller.start(id), Err(Error::InvalidStream));
+        assert_eq!(controller.verb(verb()), Err(Error::NeedsReset));
+        assert_eq!(access_counts(&model), before);
+        model.borrow_mut().reset_exit_stuck = false;
+        controller.reinitialize().unwrap();
+        controller.enumerate_codec(0).unwrap();
+        controller.token.generation = u64::MAX;
+        let before = access_counts(&model);
+        assert_eq!(controller.reinitialize(), Err(Error::NeedsReset));
+        assert_eq!(access_counts(&model), before);
     }
 
     #[test]

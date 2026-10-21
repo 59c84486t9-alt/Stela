@@ -7,20 +7,20 @@
 //! Copyright (c) 2004 Takashi Iwai <tiwai@suse.de>
 //!                     PeiSen Hou <pshou@realtek.com.tw>
 use super::super::{Direction, Error, PcmFormat, Phase};
-use super::{CodecGraph, Controller, Registers, Verb, WidgetKind, registers::*};
+use super::{CodecGraph, Controller, ControllerToken, Registers, Verb, WidgetKind, registers::*};
 use crate::bus::{
     dma::{DmaAllocator, DmaBuffer},
     i2c::Timer,
 };
 use core::sync::atomic::{Ordering, fence};
 
-/// Opaque controller-local stream allocation. Allocations are never recycled,
-/// so a copied stale ID cannot accidentally refer to a later allocation.
+/// Opaque controller/reset-local allocation. A reset invalidates old IDs even
+/// when the next allocation reuses the same descriptor and stream tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamId {
     index: u8,
     tag: u8,
-    owner: u64,
+    token: ControllerToken,
 }
 
 impl StreamId {
@@ -131,6 +131,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     fn stream(&self, id: StreamId) -> Result<&Stream, Error> {
+        if id.token != self.token {
+            return Err(Error::InvalidStream);
+        }
+        if self.lifecycle_failed {
+            return Err(Error::NeedsReset);
+        }
         if self.stopped {
             return Err(Error::Shutdown);
         }
@@ -159,6 +165,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         periods: usize,
         allocator: &mut dyn DmaAllocator,
     ) -> Result<StreamId, Error> {
+        if self.lifecycle_failed {
+            return Err(Error::NeedsReset);
+        }
         if self.stopped {
             return Err(Error::Shutdown);
         }
@@ -291,7 +300,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         let id = StreamId {
             index,
             tag,
-            owner: self.corb.physical(),
+            token: self.token,
         };
         self.streams[usize::from(index)] = Some(Stream {
             id,
@@ -313,6 +322,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn require_routing_stopped(&self) -> Result<(), Error> {
+        if self.lifecycle_failed {
+            return Err(Error::NeedsReset);
+        }
         // A failed stop can clear software `running` while DMA is still active.
         if self.streams.iter().flatten().any(|stream| stream.poisoned) {
             return Err(Error::NeedsReset);
@@ -562,6 +574,9 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         id: StreamId,
         channel: u8,
     ) -> Result<(), Error> {
+        if graph.token != self.token {
+            return Err(Error::InvalidCodecGraph);
+        }
         let stream = self.stream(id)?;
         if stream.running {
             return Err(Error::StreamRunning);
