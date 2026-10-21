@@ -105,6 +105,7 @@ static STRAY: AtomicU64 = AtomicU64::new(0);
 static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
+    native_dma_check: bool,
     nor_file: Option<(Guid, String)>,
     deadline: Option<u64>,
     key_seconds: u64,
@@ -124,12 +125,14 @@ impl Options {
             return Err("host check: stela.cfg must start with --host-check");
         }
         let mut options = Self {
+            native_dma_check: false,
             nor_file: None,
             deadline: None,
             key_seconds: DEFAULT_KEY_SECONDS,
         };
         while let Some(word) = words.next() {
             match word {
+                "--native-dma-check" => options.native_dma_check = true,
                 "--nor-file" => {
                     let (guid, path) = words
                         .next()
@@ -210,6 +213,7 @@ impl Timing {
 
 /// What the check takes from the firmware, handed to [`run`].
 struct Machine {
+    native_dma: Option<crate::native_dma::diagnostic::Prepared>,
     options: Options,
     timing: Timing,
     screen: Option<Framebuffer>,
@@ -270,6 +274,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     boot::stall(Duration::from_millis(TSC_STALL_MILLISECONDS));
     let tsc_hz = (rdtsc() - started) * MILLISECONDS / TSC_STALL_MILLISECONDS;
     let mut machine = Machine {
+        native_dma: None,
         timing: Timing {
             tsc_hz,
             started,
@@ -310,12 +315,36 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         Ok(handoff) => machine.storage = Some(handoff),
         Err(error) => machine.record("storage", Verdict::Fail, format!("no PCI access: {error}")),
     }
+    if machine.options.native_dma_check {
+        let handoff = machine
+            .storage
+            .as_ref()
+            .ok_or("native DMA fixture needs PCI discovery")?;
+        let prepared = {
+            // SAFETY: no firmware callback may access PCI while BAR sizing
+            // temporarily disables decoding; restored before any service call.
+            let _tpl = unsafe { boot::raise_tpl(uefi::boot::Tpl::HIGH_LEVEL) };
+            crate::native_dma::diagnostic::Prepared::prepare(handoff)
+        };
+        match prepared {
+            Ok(prepared) => machine.native_dma = Some(prepared),
+            Err(error) => {
+                machine.record("native-dma", Verdict::Fail, error);
+                return Err("native DMA fixture preparation failed");
+            }
+        }
+    }
     let guard = firmware::pages(firmware::STACK_PAGES + 1)?;
     machine.stack_top = guard + (firmware::STACK_PAGES + 1) * PAGE;
     let image = firmware::Image::loaded()?;
     let mut tables = firmware::tables(&image, [0, guard], &[], machine.screen.as_ref())?;
     for range in machine.storage.iter().flat_map(|handoff| &handoff.mapped) {
         tables.device(range.start as usize, range.end as usize)?;
+    }
+    if let Some(prepared) = &machine.native_dma {
+        for range in prepared.mappings() {
+            tables.device(range.start as usize, range.end as usize)?;
+        }
     }
     let registers = (machine.apic_base & apic::BASE_ADDRESS) as usize;
     tables.device(registers, registers + PAGE)?;
@@ -339,6 +368,17 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     output::arguments(format_args!("STELA HOST CHECK\n"));
     // SAFETY: interrupts are disabled and nothing else uses the tables.
     unsafe { interrupts::install(interrupt) };
+    if let Some(prepared) = machine.native_dma.take() {
+        match prepared.run() {
+            Ok(detail) => machine.record("native-dma", Verdict::Pass, detail),
+            Err(error) => {
+                machine.record("native-dma", Verdict::Fail, error);
+                // The unit/requester may be in an uncertain DMA state. Unit
+                // and lease Drop retained its resources; do not resume probe.
+                output::fatal("native DMA fixture failed; normal probing inhibited");
+            }
+        }
+    }
     match crate::native_memory::verify() {
         Ok(()) => machine.record(
             "native-memory",

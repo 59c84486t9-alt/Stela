@@ -212,6 +212,13 @@ pub struct Run {
     #[arg(long, value_enum, num_args = 0..=1, default_missing_value = "duplex",
         conflicts_with_all = ["module", "usb_image", "payload", "storage_check"])]
     audio_check: Option<audio_check::Mode>,
+    /// Controlled QEMU EDU/VT-d DMA roundtrip, stale-IOVA fault and teardown.
+    #[arg(long, conflicts_with_all = [
+        "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input",
+        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+    ])]
+    native_dma_check: bool,
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
     /// from its removable-media boot loader; writes go to a temporary
     /// overlay.
@@ -482,6 +489,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
     };
+    if arguments.native_dma_check {
+        ensure!(
+            matches!(arguments.display, Display::None),
+            "native DMA fixture uses a headless flat PCI topology"
+        );
+        options = String::from("--host-check --native-dma-check --deadline 5 --key-seconds 1");
+    }
     let disks = match arguments.storage_check {
         true => {
             fs::create_dir_all(&output)?;
@@ -649,7 +663,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     };
     let (keyboard, cpu, access) = if usb {
         ("on", max, "readonly=off,file=fat:rw:")
-    } else if system {
+    } else if system || arguments.native_dma_check {
         ("off", max, "readonly=on,file=fat:")
     } else {
         ("off", "qemu64", "readonly=on,file=fat:")
@@ -857,6 +871,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .arg("-device")
             .arg(format!("nvme,drive=ans{index},serial={serial}"));
     }
+    if arguments.native_dma_check {
+        command.args([
+            "-device",
+            "intel-iommu,intremap=off,caching-mode=on",
+            "-device",
+            "edu",
+        ]);
+    }
     if let Some(port) = arguments.gdb {
         command
             .arg("-gdb")
@@ -926,6 +948,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         )
     } else if arguments.bundle.is_none()
         && arguments.module.is_none()
+        && !arguments.native_dma_check
         && arguments.scenario == Scenario::SystemKernel
     {
         let checked = verify_kernel(&serial_text);
@@ -1002,6 +1025,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Ok::<_, anyhow::Error>(report)
     });
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
+    let native_dma = arguments.native_dma_check.then(|| {
+        json!({
+            "passed": serial_text.lines().any(|line| line.starts_with("CHECK native-dma PASS "))
+                && !serial_text.lines().any(|line| line.starts_with("CHECK native-dma FAIL "))
+                && status.is_some() && code == IDLE_EXIT
+                && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
+        })
+    });
     let report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
@@ -1012,6 +1043,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
         "no_la57": arguments.no_la57,
+        "native_dma": native_dma,
         "options": options,
         "scenario": verification,
         "bundle": arguments.bundle,
@@ -1076,6 +1108,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     if let Some(Err(error)) = audio {
         return Err(error.context("native audio check failed"));
+    }
+    ensure!(
+        !arguments.native_dma_check || report["native_dma"]["passed"] == true,
+        "native DMA fixture did not verify actual device traffic, fault and teardown"
+    );
+    if arguments.native_dma_check {
+        return Ok(ExitCode::SUCCESS);
     }
     Ok(ExitCode::from(match (preboot.is_some(), entered) {
         (true, true) => 0,
@@ -1327,6 +1366,53 @@ mod tests {
             assert_eq!(first_unsupported(ordinary), None);
             assert_eq!(first_guest_panic(ordinary), None);
         }
+    }
+
+    #[test]
+    fn native_dma_fixture_requires_exclusive_test_topology() {
+        use clap::Parser;
+        let parsed = crate::Cli::try_parse_from([
+            "xtask",
+            "boot",
+            "run",
+            "--output",
+            "/tmp/native-dma",
+            "--native-dma-check",
+        ])
+        .unwrap();
+        let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+            panic!("boot run");
+        };
+        assert!(run.native_dma_check);
+        assert!(crate::Cli::try_parse_from([
+            "xtask", "boot", "run", "--output", "/tmp/native-dma",
+            "--native-dma-check", "--audio-check", "transport-playback"
+        ]).is_err());
+        assert!(
+            crate::Cli::try_parse_from([
+                "xtask",
+                "boot",
+                "run",
+                "--output",
+                "/tmp/native-dma",
+                "--native-dma-check",
+                "--append",
+                "--system"
+            ])
+            .is_err()
+        );
+        assert!(
+            crate::Cli::try_parse_from([
+                "xtask",
+                "boot",
+                "run",
+                "--output",
+                "/tmp/native-dma",
+                "--native-dma-check",
+                "--network"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,0 +1,1210 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright © 2006-2015 Intel Corporation.
+// Register definitions and legacy invalidation/context sequencing adapted from
+// Linux drivers/iommu/intel/{iommu.h,iommu.c,dmar.c}, commit
+// a804c5742bff224d4cb4d25dd383554d598be32b. Source hashes and license terms:
+// crates/stela-drivers/THIRD_PARTY.md and LICENSES/GPL-2.0-only.txt.
+//! Exclusive legacy VT-d unit, one isolated requester, coherent WB DMA RAM.
+//! Noncoherent table walks use actual CPUID-qualified CLFLUSH plus MFENCE.
+//! This never attaches by guessing a DMAR scope or changes active firmware
+//! domains. ATS, scalable mode, RMRR preservation, peer groups and AMD-Vi need
+//! their actual platform owners and are not supplied by this backend.
+use alloc::{collections::BTreeMap, sync::Arc, vec, vec::Vec};
+use core::{
+    cell::UnsafeCell,
+    mem::ManuallyDrop,
+    ops::Range,
+    ptr::NonNull,
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+};
+use stela_drivers::bus::dma::{
+    mapping::{Direction, DmaDomain, DmaError, DomainMapping},
+    memory::{CacheAttribute, CpuMapping, PageSource, PinnedPages},
+};
+
+const PAGE: usize = 4096;
+const ADDRESS: u64 = 0x000f_ffff_ffff_f000;
+const READ: u64 = 1;
+const WRITE: u64 = 2;
+const CAP: usize = 0x08;
+const ECAP: usize = 0x10;
+const GCMD: usize = 0x18;
+const GSTS: usize = 0x1c;
+const RTADDR: usize = 0x20;
+const CCMD: usize = 0x28;
+const FSTS: usize = 0x34;
+const FECTL: usize = 0x38;
+const PMEN: usize = 0x64;
+const TRANSLATION: u32 = 1 << 31;
+const ROOT_POINTER: u32 = 1 << 30;
+const WRITE_BUFFER: u32 = 1 << 27;
+const QUEUED_INVALIDATION: u32 = 1 << 26;
+const INTERRUPT_REMAP: u32 = 1 << 25;
+const CONTEXT_INVALIDATE: u64 = 1 << 63;
+const CONTEXT_GLOBAL: u64 = 1 << 61;
+const IOTLB_INVALIDATE: u64 = 1 << 63;
+const IOTLB_GLOBAL: u64 = 1 << 60;
+const IOTLB_WRITE_DRAIN: u64 = 1 << 48;
+const IOTLB_READ_DRAIN: u64 = 1 << 49;
+const MSI_START: u64 = 0xfee0_0000;
+const MSI_END: u64 = 0xfef0_0000;
+
+static QUARANTINED_UNITS: AtomicU64 = AtomicU64::new(0);
+
+pub fn quarantined_units() -> u64 {
+    QUARANTINED_UNITS.load(Ordering::Relaxed)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VtdError {
+    Busy,
+    Unsupported,
+    RegisterRange,
+    Memory,
+    Timeout,
+    Invalidation,
+    FaultOverflow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FaultRecord {
+    pub index: usize,
+    pub address: u64,
+    pub requester: u16,
+    pub reason: u8,
+    pub read: bool,
+}
+
+/// An actual exclusive, mapped VT-d register window and monotonic deadline.
+///
+/// # Safety
+/// All register accesses have their real effects, obey width/order and stay
+/// within an exclusively owned UC mapping. Its lifetime includes uncertain
+/// hardware teardown. The clock must advance while polling on this CPU.
+pub unsafe trait Registers: Send + Sync {
+    fn bytes(&self) -> usize;
+    fn read32(&self, offset: usize) -> u32;
+    fn read64(&self, offset: usize) -> u64;
+    fn write32(&self, offset: usize, value: u32);
+    fn write64(&self, offset: usize, value: u64);
+    fn ticks(&self) -> u64;
+    fn timeout_ticks(&self) -> u64;
+    /// Evict actual dirty WB table lines for a noncoherent walker.
+    ///
+    /// # Safety
+    /// The whole CPU span is retained mapped WB RAM, line-aligned, and
+    /// CLFLUSH/`line` have been qualified by actual CPUID on this CPU.
+    unsafe fn flush_table(&self, cpu: NonNull<u8>, bytes: usize, line: usize) {
+        // SAFETY: caller supplied the qualified, retained actual CPU span.
+        unsafe { flush_table(cpu, bytes, line) };
+    }
+}
+
+unsafe fn flush_table(cpu: NonNull<u8>, bytes: usize, line: usize) {
+    for offset in (0..bytes).step_by(line) {
+        // SAFETY: caller retains the complete qualified WB CPU span.
+        unsafe {
+            core::arch::asm!("clflush [{}]", in(reg) cpu.as_ptr().add(offset), options(nostack, preserves_flags));
+        }
+    }
+}
+
+fn qualified_flush_line(edx: u32, ebx: u32) -> Result<usize, VtdError> {
+    let line = ((ebx >> 8) & 255) as usize * 8;
+    if edx & (1 << 19) == 0 || !line.is_power_of_two() || !(8..=PAGE).contains(&line) {
+        Err(VtdError::Unsupported)
+    } else {
+        Ok(line)
+    }
+}
+
+/// Physical MMIO, kept valid by the platform's unit/mapping owner.
+pub struct MmioRegisters {
+    base: NonNull<u8>,
+    bytes: usize,
+    clock: fn() -> u64,
+    timeout: u64,
+}
+
+impl MmioRegisters {
+    /// # Safety
+    /// `base..base+bytes` is the real exclusively owned UC register window,
+    /// stable across roots and retained until successful shutdown or quarantine.
+    /// `clock` is monotonic and `timeout` is nonzero and less than half its wrap.
+    pub unsafe fn new(
+        base: NonNull<u8>,
+        bytes: usize,
+        clock: fn() -> u64,
+        timeout: u64,
+    ) -> Result<Self, VtdError> {
+        if bytes < 4096
+            || (base.as_ptr() as usize).checked_add(bytes).is_none()
+            || !(base.as_ptr() as usize).is_multiple_of(8)
+            || timeout == 0
+            || timeout > u64::MAX / 2
+        {
+            return Err(VtdError::RegisterRange);
+        }
+        Ok(Self {
+            base,
+            bytes,
+            clock,
+            timeout,
+        })
+    }
+
+    fn address<T>(&self, offset: usize) -> *mut T {
+        assert!(offset.is_multiple_of(core::mem::align_of::<T>()));
+        assert!(
+            offset
+                .checked_add(size_of::<T>())
+                .is_some_and(|end| end <= self.bytes)
+        );
+        // SAFETY: the full checked register access is in the retained mapping.
+        unsafe { self.base.as_ptr().add(offset).cast() }
+    }
+}
+
+// SAFETY: exclusive register ownership is serialized by Unit; no safe CPU
+// memory references are exposed, and its physical mapping is root-stable.
+unsafe impl Send for MmioRegisters {}
+// SAFETY: volatile accesses are serialized by the unit's process-context lock.
+unsafe impl Sync for MmioRegisters {}
+// SAFETY: construction requires the actual UC mapping and monotonic clock.
+unsafe impl Registers for MmioRegisters {
+    fn bytes(&self) -> usize {
+        self.bytes
+    }
+    fn read32(&self, offset: usize) -> u32 {
+        unsafe { self.address::<u32>(offset).read_volatile() }
+    }
+    fn read64(&self, offset: usize) -> u64 {
+        unsafe { self.address::<u64>(offset).read_volatile() }
+    }
+    fn write32(&self, offset: usize, value: u32) {
+        unsafe { self.address::<u32>(offset).write_volatile(value) }
+    }
+    fn write64(&self, offset: usize, value: u64) {
+        unsafe { self.address::<u64>(offset).write_volatile(value) }
+    }
+    fn ticks(&self) -> u64 {
+        (self.clock)()
+    }
+    fn timeout_ticks(&self) -> u64 {
+        self.timeout
+    }
+}
+
+struct Table {
+    pages: PinnedPages,
+    cpu: CpuMapping,
+}
+
+impl Table {
+    fn new(source: &dyn PageSource, physical_bits: u8) -> Result<Self, VtdError> {
+        let pages = source
+            .allocate(PAGE, PAGE, CacheAttribute::WriteBack)
+            .map_err(|_| VtdError::Memory)?;
+        if pages.bytes() != PAGE
+            || pages.page_shift() != 12
+            || pages.physical_pages().len() != 1
+            || pages.physical_pages()[0] >= (1u64 << physical_bits)
+        {
+            return Err(VtdError::Memory);
+        }
+        let cpu = pages
+            .cpu_mapping(CacheAttribute::WriteBack)
+            .map_err(|_| VtdError::Memory)?;
+        Ok(Self { pages, cpu })
+    }
+    fn physical(&self) -> u64 {
+        self.pages.physical_pages()[0]
+    }
+    fn pointer(&self, index: usize) -> *mut u64 {
+        self.cpu
+            .address(index * 8, 8)
+            .expect("bounded page-table entry")
+            .as_ptr()
+            .cast()
+    }
+    fn read(&self, index: usize) -> u64 {
+        // SAFETY: live coherent table page, accessed with the unit lock held.
+        unsafe { self.pointer(index).read_volatile() }
+    }
+    fn write(&self, index: usize, value: u64) {
+        // SAFETY: unique software table owner under the unit lock; publication
+        // and acknowledged invalidations precede device use/page release.
+        unsafe { self.pointer(index).write_volatile(value) };
+    }
+
+    fn flush<R: Registers>(&self, registers: &R, line: usize) {
+        let pointer = self.cpu.address(0, PAGE).expect("retained table page");
+        // SAFETY: qualified CLFLUSH/line; actual retained page-aligned WB RAM.
+        unsafe { registers.flush_table(pointer, PAGE, line) };
+    }
+}
+
+struct LiveMapping {
+    info: DomainMapping,
+    direction: Direction,
+    _pages: PinnedPages,
+    leaves: Vec<(usize, usize)>,
+}
+
+struct State {
+    root: Table,
+    _context: Table,
+    tables: Vec<Table>,
+    table_index: BTreeMap<u64, usize>,
+    mappings: BTreeMap<u64, LiveMapping>,
+    next_id: u64,
+    poisoned: bool,
+    shutdown: bool,
+}
+
+/// A single exclusive remapping unit/domain. All operations and final Drop
+/// require process/deferred context; the lock is not a hard-IRQ service.
+pub struct Unit<R: Registers> {
+    registers: ManuallyDrop<R>,
+    source: &'static (dyn PageSource + Sync),
+    held: AtomicBool,
+    state: ManuallyDrop<UnsafeCell<State>>,
+    levels: u8,
+    physical_bits: u8,
+    iotlb: usize,
+    cap: u64,
+    table_cacheline: Option<usize>,
+}
+
+// SAFETY: all mutable state/register accesses use the acquire/release lock.
+// IRQ reentry and platform ownership changes are excluded by construction.
+unsafe impl<R: Registers> Sync for Unit<R> {}
+
+struct Guard<'a, R: Registers>(&'a Unit<R>);
+impl<R: Registers> Guard<'_, R> {
+    fn state(&mut self) -> &mut State {
+        // SAFETY: only one guard owns the unit's acquire/release lock; the
+        // mutable borrow cannot escape the guard or overlap another borrow.
+        unsafe { &mut *self.0.state.get() }
+    }
+}
+impl<R: Registers> Drop for Guard<'_, R> {
+    fn drop(&mut self) {
+        self.0.held.store(false, Ordering::Release);
+    }
+}
+
+pub(super) fn publish() {
+    // SAFETY: MFENCE is in the x86-64 baseline. The default memory clobber
+    // prevents compiler motion; the coherent platform makes actual WB stores
+    // visible before subsequent UC register/descriptor publication.
+    unsafe {
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
+    }
+}
+
+impl<R: Registers> Unit<R> {
+    /// Snapshot real primary fault records while fault interrupts are masked.
+    /// This polled path does not supply a native interrupt handler.
+    pub fn pending_faults(&self) -> Result<Vec<FaultRecord>, VtdError> {
+        let _guard = self.lock();
+        let status = self.registers.read32(FSTS);
+        if status & 1 != 0 {
+            return Err(VtdError::FaultOverflow);
+        }
+        let mut faults = Vec::new();
+        if status & 2 == 0 {
+            return Ok(faults);
+        }
+        let base = ((self.cap >> 24) & 0x3ff) as usize * 16;
+        let count = ((self.cap >> 40) & 255) as usize + 1;
+        if base < 0x80
+            || base
+                .checked_add(count * 16)
+                .is_none_or(|end| end > self.registers.bytes())
+        {
+            return Err(VtdError::RegisterRange);
+        }
+        for index in 0..count {
+            let register = base + index * 16;
+            let high = self.registers.read32(register + 12);
+            if high & (1 << 31) == 0 {
+                continue;
+            }
+            let requester = self.registers.read32(register + 8) as u16;
+            let address = self.registers.read64(register) & !4095;
+            faults.push(FaultRecord {
+                index,
+                address,
+                requester,
+                reason: high as u8,
+                read: high & (1 << 30) != 0,
+            });
+        }
+        Ok(faults)
+    }
+
+    /// Acknowledge an observed record only after its owner recorded/handled it.
+    pub fn acknowledge_fault(&self, index: usize) -> Result<(), VtdError> {
+        let _guard = self.lock();
+        let base = ((self.cap >> 24) & 0x3ff) as usize * 16;
+        let count = ((self.cap >> 40) & 255) as usize + 1;
+        if index >= count
+            || base < 0x80
+            || base
+                .checked_add(count * 16)
+                .is_none_or(|end| end > self.registers.bytes())
+        {
+            return Err(VtdError::RegisterRange);
+        }
+        self.registers.write32(base + index * 16 + 12, 1 << 31);
+        self.registers.write32(FSTS, 1 | 2 | 1 << 7);
+        Ok(())
+    }
+    /// Take ownership of an inactive unit, not an active firmware domain.
+    ///
+    /// # Safety
+    /// Platform discovery has proved this physical unit routes exactly this
+    /// requester and no unresolved DMA aliases/groups/RMRRs. All requesters
+    /// behind the unit are stopped and drained, with ATS/PRI/PASID and device
+    /// NoSnoop disabled. No other CPU/firmware/SMM owner can change it. Native
+    /// WB RAM DMA is coherent independently of the ECAP table-walk coherency
+    /// bit. Bus mastering remains stopped until real mapping publication.
+    /// The register mapping and source's backing mappings stay valid across
+    /// roots and uncertain failures. No operation/final release runs in an IRQ.
+    pub unsafe fn take_over(
+        registers: R,
+        source: &'static (dyn PageSource + Sync),
+        requester: u16,
+        physical_bits: u8,
+    ) -> Result<Arc<Self>, VtdError> {
+        if !(32..=52).contains(&physical_bits) || registers.bytes() < 4096 {
+            return Err(VtdError::Unsupported);
+        }
+        let cap = registers.read64(CAP);
+        let ecap = registers.read64(ECAP);
+        let status = registers.read32(GSTS);
+        if status & (TRANSLATION | QUEUED_INVALIDATION | INTERRUPT_REMAP) != 0
+            || registers.read32(PMEN) & (1 << 31 | 1) != 0
+        {
+            return Err(VtdError::Busy);
+        }
+        let table_cacheline = if ecap & 1 == 0 {
+            let cpu = core::arch::x86_64::__cpuid(1);
+            Some(qualified_flush_line(cpu.edx, cpu.ebx)?)
+        } else {
+            None
+        };
+        let widths = (cap >> 8) & 31;
+        let maximum = ((cap >> 16) & 63) + 1;
+        let levels = if widths & 4 != 0 && maximum >= 48 {
+            4
+        } else if widths & 2 != 0 && maximum >= 39 {
+            3
+        } else {
+            return Err(VtdError::Unsupported);
+        };
+        let iotlb = ((ecap >> 8) & 0x3ff) as usize * 16 + 8;
+        if iotlb < 0x80
+            || iotlb
+                .checked_add(8)
+                .is_none_or(|end| end > registers.bytes())
+        {
+            return Err(VtdError::RegisterRange);
+        }
+        let root = Table::new(source, physical_bits)?;
+        let context = Table::new(source, physical_bits)?;
+        let domain = Table::new(source, physical_bits)?;
+        // Publish high context fields first and Present last (legacy TT=0).
+        context.write(
+            usize::from(requester & 255) * 2 + 1,
+            (1 << 8) | u64::from(levels - 2),
+        );
+        publish();
+        context.write(usize::from(requester & 255) * 2, domain.physical() | 1);
+        publish();
+        root.write(usize::from(requester >> 8) * 2, context.physical() | 1);
+        let mut table_index = BTreeMap::new();
+        table_index.insert(domain.physical(), 0);
+        let unit = Arc::new(Self {
+            registers: ManuallyDrop::new(registers),
+            source,
+            held: AtomicBool::new(false),
+            state: ManuallyDrop::new(UnsafeCell::new(State {
+                root,
+                _context: context,
+                tables: vec![domain],
+                table_index,
+                mappings: BTreeMap::new(),
+                next_id: 1,
+                poisoned: false,
+                shutdown: false,
+            })),
+            levels,
+            physical_bits,
+            iotlb,
+            cap,
+            table_cacheline,
+        });
+        let mut guard = unit.lock();
+        let state = guard.state();
+        unit.publish_tables(state);
+        // Mask fault interrupts; fault delivery needs its own registered IRQ
+        // owner, never a firmware handler retained across ownership transfer.
+        unit.registers.write32(FECTL, 1 << 31);
+        unit.registers.write64(RTADDR, state.root.physical());
+        unit.registers.write32(GCMD, ROOT_POINTER);
+        unit.wait32(GSTS, ROOT_POINTER, true)?;
+        unit.invalidate(0, true)?;
+        unit.registers.write32(GCMD, TRANSLATION);
+        unit.wait32(GSTS, TRANSLATION, true)?;
+        drop(guard);
+        Ok(unit)
+    }
+
+    fn lock(&self) -> Guard<'_, R> {
+        while self
+            .held
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Guard(self)
+    }
+    fn publish_tables(&self, state: &State) {
+        if let Some(line) = self.table_cacheline {
+            state.root.flush(&*self.registers, line);
+            state._context.flush(&*self.registers, line);
+            for table in &state.tables {
+                table.flush(&*self.registers, line);
+            }
+        }
+        // Orders actual dirty-line eviction before UC command submission.
+        publish();
+    }
+    fn wait32(&self, register: usize, mask: u32, set: bool) -> Result<(), VtdError> {
+        let start = self.registers.ticks();
+        loop {
+            if (self.registers.read32(register) & mask != 0) == set {
+                return Ok(());
+            }
+            if self.registers.ticks().wrapping_sub(start) >= self.registers.timeout_ticks() {
+                return Err(VtdError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+    }
+    fn wait64(&self, register: usize, mask: u64) -> Result<u64, VtdError> {
+        let start = self.registers.ticks();
+        loop {
+            let value = self.registers.read64(register);
+            if value & mask == 0 {
+                return Ok(value);
+            }
+            if self.registers.ticks().wrapping_sub(start) >= self.registers.timeout_ticks() {
+                return Err(VtdError::Timeout);
+            }
+            core::hint::spin_loop();
+        }
+    }
+    fn invalidate(&self, command: u32, context: bool) -> Result<(), VtdError> {
+        publish();
+        if context {
+            self.wait64(CCMD, CONTEXT_INVALIDATE)?;
+            self.registers
+                .write64(CCMD, CONTEXT_INVALIDATE | CONTEXT_GLOBAL);
+            let value = self.wait64(CCMD, CONTEXT_INVALIDATE)?;
+            if (value >> 59) & 3 != 1 {
+                return Err(VtdError::Invalidation);
+            }
+        }
+        let mut request = IOTLB_INVALIDATE | IOTLB_GLOBAL;
+        if self.cap & (1 << 54) != 0 {
+            request |= IOTLB_WRITE_DRAIN;
+        }
+        if self.cap & (1 << 55) != 0 {
+            request |= IOTLB_READ_DRAIN;
+        }
+        self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        self.registers.write64(self.iotlb, request);
+        let value = self.wait64(self.iotlb, IOTLB_INVALIDATE)?;
+        if (value >> 57) & 3 != 1 {
+            return Err(VtdError::Invalidation);
+        }
+        if self.cap & (1 << 4) != 0 {
+            self.registers.write32(GCMD, command | WRITE_BUFFER);
+            self.wait32(GSTS, WRITE_BUFFER, false)?;
+        }
+        Ok(())
+    }
+
+    /// Disable after device-specific stop, completion and worker/IRQ drain.
+    /// The unit remains retained on any failed hardware acknowledgement.
+    ///
+    /// # Safety
+    /// Every requester is stopped/drained and cannot issue further DMA. The
+    /// caller owns the platform exclusion against submissions and IRQ workers.
+    pub unsafe fn shut_down(&self) -> Result<(), VtdError> {
+        let mut guard = self.lock();
+        let state = guard.state();
+        if state.shutdown {
+            return Ok(());
+        }
+        if !state.mappings.is_empty() {
+            return Err(VtdError::Busy);
+        }
+        self.invalidate(TRANSLATION, true)?;
+        self.registers.write32(GCMD, 0);
+        self.wait32(GSTS, TRANSLATION, false)?;
+        state.shutdown = true;
+        Ok(())
+    }
+}
+
+impl<R: Registers> Drop for Unit<R> {
+    fn drop(&mut self) {
+        // SAFETY: final owner, so no lock/operation can still borrow state.
+        let shutdown = unsafe { &*self.state.get() }.shutdown;
+        if shutdown {
+            // SAFETY: actual device quiescence, all mappings retired, IOTLB
+            // acknowledgement and TE-off acknowledgement preceded shutdown.
+            unsafe {
+                ManuallyDrop::drop(&mut self.state);
+                ManuallyDrop::drop(&mut self.registers);
+            }
+        } else {
+            // Hardware may still hold any of these PA references. Deliberately
+            // retain the register owner, tables and pins, including map errors.
+            let _ = QUARANTINED_UNITS.try_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                Some(count.saturating_add(1))
+            });
+        }
+    }
+}
+
+impl State {
+    fn iova(&self, bytes: usize, limit: u64, width: u8) -> Result<u64, DmaError> {
+        let limit = limit.min((1u64 << (12 + 9 * u32::from(width))) - 1);
+        let mut candidate = PAGE as u64;
+        for live in self.mappings.values() {
+            let mut end = candidate
+                .checked_add(bytes as u64)
+                .ok_or(DmaError::AddressLimit)?;
+            if candidate < MSI_END && end > MSI_START {
+                candidate = MSI_END;
+                end = candidate
+                    .checked_add(bytes as u64)
+                    .ok_or(DmaError::AddressLimit)?;
+            }
+            if end - 1 <= limit && end <= live.info.address {
+                return Ok(candidate);
+            }
+            candidate = candidate.max(live.info.address + live.info.bytes as u64);
+        }
+        let mut end = candidate
+            .checked_add(bytes as u64)
+            .ok_or(DmaError::AddressLimit)?;
+        if candidate < MSI_END && end > MSI_START {
+            candidate = MSI_END;
+            end = candidate
+                .checked_add(bytes as u64)
+                .ok_or(DmaError::AddressLimit)?;
+        }
+        if end - 1 > limit {
+            Err(DmaError::AddressLimit)
+        } else {
+            Ok(candidate)
+        }
+    }
+
+    fn leaf(
+        &mut self,
+        source: &dyn PageSource,
+        levels: u8,
+        physical_bits: u8,
+        iova: u64,
+    ) -> Result<(usize, usize), VtdError> {
+        let mut table = 0;
+        for level in (1..levels).rev() {
+            let index = ((iova >> (12 + 9 * u32::from(level))) & 511) as usize;
+            let entry = self.tables[table].read(index);
+            if entry & (READ | WRITE) == 0 {
+                let child = Table::new(source, physical_bits)?;
+                let physical = child.physical();
+                let next = self.tables.len();
+                self.tables.push(child);
+                self.table_index.insert(physical, next);
+                publish();
+                self.tables[table].write(index, physical | READ | WRITE);
+                table = next;
+            } else {
+                table = *self
+                    .table_index
+                    .get(&(entry & ADDRESS))
+                    .ok_or(VtdError::Memory)?;
+            }
+        }
+        Ok((table, ((iova >> 12) & 511) as usize))
+    }
+
+    fn mapping(
+        &self,
+        info: DomainMapping,
+        range: &Range<usize>,
+        direction: Direction,
+    ) -> Result<&LiveMapping, DmaError> {
+        if self.shutdown || self.poisoned {
+            return Err(DmaError::MappingFailed);
+        }
+        let live = self
+            .mappings
+            .get(&info.address)
+            .filter(|live| live.info == info)
+            .ok_or(DmaError::Unmapped)?;
+        if range.start > range.end || range.end > live.info.bytes || live.direction != direction {
+            return Err(DmaError::InvalidRange);
+        }
+        Ok(live)
+    }
+}
+
+// SAFETY: the platform's takeover contract establishes actual exclusive
+// requester ownership, coherent WB DMA and stopped ATS/NoSnoop. Real native
+// pages and hardware tables are retained through acknowledged invalidation;
+// every failed/abandoned hardware lifetime preserves its backing. All mutable
+// operations are serialized outside hard IRQ context.
+unsafe impl<R: Registers + 'static> DmaDomain for Unit<R> {
+    unsafe fn map(
+        &self,
+        pages: &PinnedPages,
+        direction: Direction,
+        address_limit: u64,
+    ) -> Result<DomainMapping, DmaError> {
+        if pages.cache_attribute() != CacheAttribute::WriteBack
+            || pages.page_shift() < 12
+            || pages.physical_pages().iter().any(|pa| {
+                pa.checked_add(1u64 << pages.page_shift())
+                    .is_none_or(|end| end > 1u64 << self.physical_bits)
+            })
+        {
+            return Err(DmaError::MappingFailed);
+        }
+        let mut guard = self.lock();
+        let state = guard.state();
+        if state.shutdown || state.poisoned {
+            return Err(DmaError::MappingFailed);
+        }
+        let address = state.iova(pages.bytes(), address_limit, self.levels)?;
+        let id = state.next_id;
+        state.next_id = id.checked_add(1).ok_or(DmaError::MappingFailed)?;
+        let info = DomainMapping {
+            id,
+            address,
+            bytes: pages.bytes(),
+        };
+        let mut leaves = Vec::with_capacity(pages.bytes() / PAGE);
+        // Build all required table paths first. No leaf may be published until
+        // the owned mapping/pin and complete leaf inventory have been retained.
+        for offset in (0..pages.bytes()).step_by(PAGE) {
+            leaves.push(
+                state
+                    .leaf(
+                        self.source,
+                        self.levels,
+                        self.physical_bits,
+                        address + offset as u64,
+                    )
+                    .map_err(|_| DmaError::MappingFailed)?,
+            );
+        }
+        state.mappings.insert(
+            address,
+            LiveMapping {
+                info,
+                direction,
+                _pages: pages.clone(),
+                leaves,
+            },
+        );
+        let rights = match direction {
+            Direction::ToDevice => READ,
+            Direction::FromDevice => WRITE,
+            Direction::Bidirectional => READ | WRITE,
+        };
+        let live = &state.mappings[&address];
+        let native_size = 1usize << pages.page_shift();
+        for (page, &(table, index)) in live.leaves.iter().enumerate() {
+            let offset = page * PAGE;
+            let physical =
+                pages.physical_pages()[offset / native_size] + (offset % native_size) as u64;
+            state.tables[table].write(index, physical | rights);
+        }
+        self.publish_tables(state);
+        if self.invalidate(TRANSLATION, false).is_err() {
+            // An unacknowledged translation is never returned as a live lease;
+            // retain its pin/table inventory and poison further submissions.
+            state.poisoned = true;
+            return Err(DmaError::InvalidationFailed);
+        }
+        Ok(info)
+    }
+
+    unsafe fn unmap(&self, info: DomainMapping) -> Result<(), DmaError> {
+        let mut guard = self.lock();
+        let state = guard.state();
+        if state.shutdown {
+            return Err(DmaError::Unmapped);
+        }
+        let live = state
+            .mappings
+            .get(&info.address)
+            .filter(|live| live.info == info)
+            .ok_or(DmaError::Unmapped)?;
+        for &(table, index) in &live.leaves {
+            state.tables[table].write(index, 0);
+        }
+        self.publish_tables(state);
+        if self.invalidate(TRANSLATION, false).is_err() {
+            state.poisoned = true;
+            return Err(DmaError::InvalidationFailed);
+        }
+        state.mappings.remove(&info.address);
+        // Once poisoned, this initial backend requires full platform recovery;
+        // another mapping cannot assume an unrelated failed map was retired.
+        Ok(())
+    }
+
+    unsafe fn sync_for_device(
+        &self,
+        info: DomainMapping,
+        range: Range<usize>,
+        direction: Direction,
+    ) -> Result<(), DmaError> {
+        let mut guard = self.lock();
+        guard.state().mapping(info, &range, direction)?;
+        // DMA coherence is an explicit platform/requester qualification, not
+        // inferred from ECAP page-table coherency or WB CPU attributes alone.
+        publish();
+        Ok(())
+    }
+
+    unsafe fn sync_for_cpu(
+        &self,
+        info: DomainMapping,
+        range: Range<usize>,
+        direction: Direction,
+    ) -> Result<(), DmaError> {
+        let mut guard = self.lock();
+        guard.state().mapping(info, &range, direction)?;
+        // Caller has observed actual hardware completion before this acquire
+        // boundary; no completion or cache invalidation is invented here.
+        publish();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use self::std::sync::Mutex;
+    use super::*;
+    use alloc::{
+        alloc::{alloc_zeroed, dealloc},
+        boxed::Box,
+    };
+    use core::alloc::Layout;
+    use stela_drivers::bus::dma::{
+        mapping::DmaMapping,
+        memory::{MemoryError, PageBacking},
+    };
+
+    struct Backing {
+        pointer: NonNull<u8>,
+        layout: Layout,
+        pages: Vec<u64>,
+        shift: u8,
+        released: Arc<AtomicU64>,
+    }
+    // SAFETY: test-owned, immovable allocated RAM; immutable page metadata,
+    // no safe CPU aliases and no asynchronous physical hardware in the model.
+    unsafe impl Send for Backing {}
+    // SAFETY: shared access exposes metadata and raw pointers only.
+    unsafe impl Sync for Backing {}
+    // SAFETY: this is an explicit native physical-memory model. CPU RAM really
+    // exists and is retained; the named PAs are modeled, not identity-inferred.
+    unsafe impl PageBacking for Backing {
+        fn cpu_base(&self) -> NonNull<u8> {
+            self.pointer
+        }
+        fn physical_pages(&self) -> &[u64] {
+            &self.pages
+        }
+        fn page_shift(&self) -> u8 {
+            self.shift
+        }
+        fn cache_attribute(&self) -> CacheAttribute {
+            CacheAttribute::WriteBack
+        }
+    }
+    impl Drop for Backing {
+        fn drop(&mut self) {
+            self.released.fetch_add(1, Ordering::Relaxed);
+            // SAFETY: exact unique test allocation and original layout.
+            unsafe { dealloc(self.pointer.as_ptr(), self.layout) };
+        }
+    }
+    fn pages(bytes: usize, shift: u8, physical: u64, released: Arc<AtomicU64>) -> PinnedPages {
+        let size = 1usize << shift;
+        let layout = Layout::from_size_align(bytes, size).unwrap();
+        // SAFETY: actual exclusive zeroed model RAM, released by Backing.
+        let pointer = NonNull::new(unsafe { alloc_zeroed(layout) }).unwrap();
+        let backing = Backing {
+            pointer,
+            layout,
+            pages: (0..bytes / size)
+                .map(|index| physical + (index * size) as u64)
+                .collect(),
+            shift,
+            released,
+        };
+        PinnedPages::new(Box::new(backing), bytes, size).unwrap()
+    }
+    struct Source {
+        next: AtomicU64,
+        released: Arc<AtomicU64>,
+    }
+    impl PageSource for Source {
+        fn allocate(
+            &self,
+            bytes: usize,
+            alignment: usize,
+            attribute: CacheAttribute,
+        ) -> Result<PinnedPages, MemoryError> {
+            assert_eq!(
+                (bytes, alignment, attribute),
+                (PAGE, PAGE, CacheAttribute::WriteBack)
+            );
+            let physical = self.next.fetch_add(PAGE as u64, Ordering::Relaxed);
+            Ok(pages(bytes, 12, physical, self.released.clone()))
+        }
+    }
+    fn source() -> &'static Source {
+        Box::leak(Box::new(Source {
+            next: AtomicU64::new(0x100000),
+            released: Arc::new(AtomicU64::new(0)),
+        }))
+    }
+    struct Model {
+        values: BTreeMap<usize, u64>,
+        writes: Vec<(usize, u64)>,
+        ticks: u64,
+        block_iotlb: bool,
+        block_te_off: bool,
+        cache_events: Vec<(bool, usize)>,
+    }
+    #[derive(Clone)]
+    struct ModelRegisters(Arc<Mutex<Model>>);
+    impl ModelRegisters {
+        fn new() -> Self {
+            let mut values = BTreeMap::new();
+            values.insert(
+                CAP,
+                (47 << 16) | (4 << 8) | (1 << 4) | (1 << 54) | (1 << 55),
+            );
+            values.insert(ECAP, 1 | (0x10 << 8));
+            Self(Arc::new(Mutex::new(Model {
+                values,
+                writes: Vec::new(),
+                ticks: 0,
+                block_iotlb: false,
+                block_te_off: false,
+                cache_events: Vec::new(),
+            })))
+        }
+    }
+    // SAFETY: synchronous model of the real registers and acknowledgements.
+    // Timeout injection leaves requests genuinely unacknowledged in the model.
+    unsafe impl Registers for ModelRegisters {
+        fn bytes(&self) -> usize {
+            4096
+        }
+        fn read32(&self, offset: usize) -> u32 {
+            self.0
+                .lock()
+                .unwrap()
+                .values
+                .get(&offset)
+                .copied()
+                .unwrap_or(0) as u32
+        }
+        fn read64(&self, offset: usize) -> u64 {
+            let mut model = self.0.lock().unwrap();
+            let mut value = model.values.get(&offset).copied().unwrap_or(0);
+            if offset == CCMD && value & CONTEXT_INVALIDATE != 0 {
+                value = value & !CONTEXT_INVALIDATE | 1 << 59;
+                model.values.insert(offset, value);
+            }
+            if offset == 0x108 && value & IOTLB_INVALIDATE != 0 && !model.block_iotlb {
+                value = value & !IOTLB_INVALIDATE | 1 << 57;
+                model.values.insert(offset, value);
+            }
+            value
+        }
+        fn write32(&self, offset: usize, value: u32) {
+            let mut model = self.0.lock().unwrap();
+            model.writes.push((offset, u64::from(value)));
+            model.cache_events.push((false, offset));
+            model.values.insert(offset, u64::from(value));
+            if offset == GCMD {
+                let mut status = model.values.get(&GSTS).copied().unwrap_or(0) as u32;
+                if value & ROOT_POINTER != 0 {
+                    status |= ROOT_POINTER;
+                }
+                if value & TRANSLATION != 0 {
+                    status |= TRANSLATION;
+                } else if !model.block_te_off {
+                    status &= !TRANSLATION;
+                }
+                status &= !WRITE_BUFFER;
+                model.values.insert(GSTS, u64::from(status));
+            }
+        }
+        fn write64(&self, offset: usize, value: u64) {
+            let mut model = self.0.lock().unwrap();
+            model.writes.push((offset, value));
+            model.cache_events.push((false, offset));
+            model.values.insert(offset, value);
+        }
+        fn ticks(&self) -> u64 {
+            let mut model = self.0.lock().unwrap();
+            model.ticks += 1;
+            model.ticks
+        }
+        fn timeout_ticks(&self) -> u64 {
+            16
+        }
+        unsafe fn flush_table(&self, cpu: NonNull<u8>, bytes: usize, line: usize) {
+            assert_eq!(bytes, PAGE);
+            assert!((cpu.as_ptr() as usize).is_multiple_of(PAGE));
+            self.0
+                .lock()
+                .unwrap()
+                .cache_events
+                .push((true, cpu.as_ptr() as usize));
+            // SAFETY: the model uses actual retained allocated table RAM and
+            // the production CPUID qualification; keep real cache effects too.
+            unsafe { super::flush_table(cpu, bytes, line) };
+        }
+    }
+
+    #[test]
+    fn missing_flush_capability_and_malformed_line_sizes_are_refused() {
+        assert_eq!(qualified_flush_line(0, 8 << 8), Err(VtdError::Unsupported));
+        for encoded in [0, 3, 255] {
+            assert_eq!(
+                qualified_flush_line(1 << 19, encoded << 8),
+                Err(VtdError::Unsupported)
+            );
+        }
+        assert_eq!(qualified_flush_line(1 << 19, 8 << 8), Ok(64));
+    }
+
+    #[test]
+    fn noncoherent_table_flushes_precede_root_and_each_mapping_invalidation() {
+        let registers = ModelRegisters::new();
+        registers.0.lock().unwrap().values.insert(ECAP, 0x10 << 8);
+        // SAFETY: exclusive stopped model with CPUID-qualified native flushes.
+        let unit = unsafe { Unit::take_over(registers.clone(), source(), 8, 48) }.unwrap();
+        assert!(unit.table_cacheline.is_some());
+        let root_position = registers
+            .0
+            .lock()
+            .unwrap()
+            .cache_events
+            .iter()
+            .position(|event| *event == (false, RTADDR))
+            .unwrap();
+        assert_eq!(
+            registers.0.lock().unwrap().cache_events[..root_position]
+                .iter()
+                .filter(|event| event.0)
+                .count(),
+            3
+        );
+        registers.0.lock().unwrap().cache_events.clear();
+        let pin = pages(PAGE, 12, 0xa000000, Arc::new(AtomicU64::new(0)));
+        let mut mapping =
+            DmaMapping::map(unit.clone(), pin, Direction::Bidirectional, u64::MAX).unwrap();
+        let check = || {
+            let count = {
+                let mut guard = unit.lock();
+                guard.state().tables.len() + 2
+            };
+            let events = &registers.0.lock().unwrap().cache_events;
+            let invalidation = events
+                .iter()
+                .position(|event| *event == (false, unit.iotlb))
+                .unwrap();
+            assert_eq!(
+                events[..invalidation]
+                    .iter()
+                    .filter(|event| event.0)
+                    .count(),
+                count
+            );
+            assert!(!events[invalidation..].iter().any(|event| event.0));
+        };
+        check();
+        registers.0.lock().unwrap().cache_events.clear();
+        registers.0.lock().unwrap().block_iotlb = true;
+        // SAFETY: stopped synchronous model; unmap flush must precede IOTLB.
+        assert_eq!(
+            unsafe { mapping.unmap() },
+            Err(DmaError::InvalidationFailed)
+        );
+        check();
+        registers.0.lock().unwrap().cache_events.clear();
+        registers.0.lock().unwrap().block_iotlb = false;
+        // SAFETY: same stopped requester; retained retry must flush again.
+        unsafe { mapping.unmap() }.unwrap();
+        check();
+        // SAFETY: all mappings removed and no model DMA can restart.
+        unsafe { unit.shut_down() }.unwrap();
+    }
+
+    #[test]
+    fn native_page_array_maps_through_real_tables_and_reclaims_after_acknowledged_unmap() {
+        let registers = ModelRegisters::new();
+        let source = source();
+        // SAFETY: exclusively owned stopped requester in the explicit model.
+        let unit = unsafe { Unit::take_over(registers.clone(), source, 0x0218, 48) }.unwrap();
+        let released = Arc::new(AtomicU64::new(0));
+        // One actual 16 KiB native page; VT-d uses four 4 KiB leaves.
+        let pin = pages(16384, 14, 0x8000000, released.clone());
+        let mut mapping =
+            DmaMapping::map(unit.clone(), pin, Direction::ToDevice, u32::MAX as u64).unwrap();
+        let address = mapping.address().unwrap();
+        assert_ne!(address, 0x8000000);
+        {
+            let mut guard = unit.lock();
+            let state = guard.state();
+            let live = &state.mappings[&address];
+            assert_eq!(live.leaves.len(), 4);
+            for (index, &(table, slot)) in live.leaves.iter().enumerate() {
+                assert_eq!(
+                    state.tables[table].read(slot),
+                    (0x8000000 + (index * 4096) as u64) | READ
+                );
+            }
+            assert_eq!(state.root.read(2 * 2), state._context.physical() | 1);
+            assert_eq!(state._context.read(0x18 * 2 + 1), (1 << 8) | 2);
+        }
+        mapping.sync_for_device(0..16384).unwrap();
+        let token = {
+            let mut guard = unit.lock();
+            guard.state().mappings[&address].info
+        };
+        // SAFETY: defensive error-path probe; invalid metadata is rejected
+        // before any model DMA cache/memory operation can occur.
+        assert_eq!(
+            unsafe {
+                unit.sync_for_device(
+                    DomainMapping {
+                        id: token.id + 1,
+                        ..token
+                    },
+                    0..4096,
+                    Direction::ToDevice,
+                )
+            },
+            Err(DmaError::Unmapped)
+        );
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+        registers.0.lock().unwrap().block_iotlb = true;
+        // SAFETY: model requester has no outstanding DMA and is stopped.
+        assert_eq!(
+            unsafe { mapping.unmap() },
+            Err(DmaError::InvalidationFailed)
+        );
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+        registers.0.lock().unwrap().block_iotlb = false;
+        // SAFETY: same stopped requester, retry of retained original mapping.
+        unsafe { mapping.unmap() }.unwrap();
+        assert_eq!(released.load(Ordering::Relaxed), 1);
+        // SAFETY: all mappings are retired and model requester remains stopped.
+        unsafe { unit.shut_down() }.unwrap();
+        let table_count = source.next.load(Ordering::Relaxed).saturating_sub(0x100000) / 4096;
+        drop(unit);
+        assert_eq!(source.released.load(Ordering::Relaxed), table_count);
+        let model = registers.0.lock().unwrap();
+        let root = model
+            .writes
+            .iter()
+            .position(|(offset, _)| *offset == RTADDR)
+            .unwrap();
+        let context = model
+            .writes
+            .iter()
+            .position(|(offset, _)| *offset == CCMD)
+            .unwrap();
+        let enable = model
+            .writes
+            .iter()
+            .position(|(offset, value)| *offset == GCMD && *value == u64::from(TRANSLATION))
+            .unwrap();
+        assert!(root < context && context < enable);
+    }
+
+    #[test]
+    fn failed_translation_disable_retains_tables_until_actual_acknowledgement() {
+        let registers = ModelRegisters::new();
+        let source = source();
+        // SAFETY: exclusively stopped model unit, with real allocated tables.
+        let unit = unsafe { Unit::take_over(registers.clone(), source, 8, 48) }.unwrap();
+        registers.0.lock().unwrap().block_te_off = true;
+        // SAFETY: no model requesters or live mappings; inject TE-off timeout.
+        assert_eq!(unsafe { unit.shut_down() }, Err(VtdError::Timeout));
+        assert_eq!(source.released.load(Ordering::Relaxed), 0);
+        assert_ne!(registers.read32(GSTS) & TRANSLATION, 0);
+        let before = quarantined_units();
+        drop(unit);
+        assert!(quarantined_units() > before);
+        assert_eq!(source.released.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn busy_firmware_unit_is_refused_and_failed_map_keeps_pins_and_hardware_tables() {
+        let registers = ModelRegisters::new();
+        registers
+            .0
+            .lock()
+            .unwrap()
+            .values
+            .insert(GSTS, u64::from(TRANSLATION));
+        let source = source();
+        // SAFETY: model probe; active firmware translation must be refused.
+        assert!(matches!(
+            unsafe { Unit::take_over(registers.clone(), source, 8, 48) },
+            Err(VtdError::Busy)
+        ));
+        assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
+        assert!(registers.0.lock().unwrap().writes.is_empty());
+        registers.0.lock().unwrap().values.insert(GSTS, 0);
+        // SAFETY: exclusively owned model unit, all DMA stopped.
+        let unit = unsafe { Unit::take_over(registers.clone(), source, 8, 48) }.unwrap();
+        let released = Arc::new(AtomicU64::new(0));
+        let pin = pages(4096, 12, 0x9000000, released.clone());
+        registers.0.lock().unwrap().block_iotlb = true;
+        assert!(matches!(
+            DmaMapping::map(unit.clone(), pin, Direction::Bidirectional, u64::MAX),
+            Err(DmaError::InvalidationFailed)
+        ));
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+        let before = quarantined_units();
+        drop(unit);
+        assert!(quarantined_units() > before);
+        assert_eq!(source.released.load(Ordering::Relaxed), 0);
+        assert_eq!(released.load(Ordering::Relaxed), 0);
+    }
+}

@@ -10,11 +10,18 @@ extern crate alloc;
 #[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
 mod boot_console;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_dma/dmar.rs"]
+mod boot_dmar;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_memory.rs"]
 mod boot_native_memory;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
 mod boot_ram;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_dma/vtd.rs"]
+#[allow(dead_code)]
+mod boot_vtd;
 
 mod agx_isa;
 mod agx_observe;
