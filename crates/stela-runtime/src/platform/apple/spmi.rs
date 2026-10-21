@@ -1,4 +1,4 @@
-//! Apple SPMI Gen2 controller (`aapl,spmi`, `gen = 2`), a MIPI SPMI bus
+//! Apple SPMI Gen1/Gen2 controller (`aapl,spmi`, source-selected `gen`), a MIPI SPMI bus
 //! master and the interrupt controller of its slaves.
 //!
 //! Evidence (26A434 KC VAs, unslid): `AppleGen2SPMIHandler::initHandler`
@@ -8,16 +8,20 @@
 //! `resetQueueBase` 0xfffffe0009dceb50 use them. Bank A is `reg[0]`, bank B
 //! `reg[1]`; both are 32-bit registers.
 //!
-//! - A+0x00 STATUS: bit 24 response FIFO empty, bit 8 request FIFO empty.
+//! - A+0x00 STATUS: bit 24 response FIFO empty, bit 25 response FIFO full,
+//!   bit 8 request FIFO empty. Queue depths are byte counts, not word counts.
 //! - A+0x04 request FIFO: a header word, then a write's payload words.
 //! - A+0x08 response FIFO: one word per read.
 //! - A+0x20 + 4g / A+0x60 + 4g: interrupt enable / write-1-clear status of
 //!   vector group g (0..=8), bit `vector & 31`.
-//! - A+0xa0 control: `Gen2::resetQueue` saves, zeroes and restores it.
+//! - A+0xa0 control: both generations save, zero and restore it. The Gen1
+//!   declaration has zero control; other control-field effects refuse.
 //! - A+0xa4 queue reset: writing 1 flushes both FIFOs; `resetQueueBase`
 //!   then requires STATUS to read exactly 0x01000100.
-//! - B+0x110..0x11c fault latches; B+0x200..0x224 and B+0x25c..0x274 the
-//!   17 fault counters `Gen2::dumpFaultCounters` reads.
+//! - B+0 status and B+8 pop belong to the independent fault FIFO. Its clean
+//!   handoff is empty (bit24), and an empty pop refuses. Gen2 has B+0x110..11c
+//!   fault latches and 17 counters at B+0x200..224/B+0x25c..274. Gen1 uses
+//!   16 exact offsets in a separate reg[2]; see `config` and spmi-t6000.md.
 //!
 //! A header is `address << 16 | last << 15 | sid << 8 | opcode`, the opcode
 //! carrying the byte count minus one: extended write 0x00 and read 0x20
@@ -29,7 +33,8 @@
 //! per byte at bits 16 and up, then the data in little-endian words; a NACKed
 //! read is modeled with its parity bits clear and zero data, which the driver
 //! reports as a parity failure (0xe00002bc). The last chunk raises local
-//! vector 0x100, which the driver polls or takes through the AIC line.
+//! configured response vector (DT interrupts[0]: Gen1 J314s192, Gen2
+//! J473256), which the driver polls or takes through the AIC line.
 //!
 //! Stela handoff: idle, empty FIFOs, every vector masked and clear, no
 //! faults. The model executes a command when its last payload word arrives.
@@ -40,8 +45,13 @@
 //! owned; physical reset/rail loss and armed-source wake behavior refuse.
 //! Quiesce permits nonmutating reads, while a clock-stop MMIO access remains
 //! unqualified. Slave autonomous time is independent of controller gating.
-//! The debug queue windows (A+0xb0..0xb8), command types other than the four
+//! PMU autonomous interrupt capture/routing remains an explicit board
+//! requirement; attaching a slave does not claim that wire. The debug queue
+//! windows (A+0xb0..0xb8), command types other than the four
 //! extended forms and request or response overflow refuse.
+mod config;
+pub use config::{Configuration, Profile};
+
 use super::{
     bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
     interrupt::{AicInput, Wire},
@@ -51,6 +61,8 @@ use alloc::{boxed::Box, collections::VecDeque, vec::Vec};
 pub const BANK_BYTES: u64 = 0x4000;
 /// Bank B's device offset; the placement maps `reg[1]` here.
 pub const BANK_B: u64 = BANK_BYTES;
+/// Internal device offset of the independently mapped Gen1 counter view.
+pub const COUNTERS: u64 = 2 * BANK_BYTES;
 const NAME: &str = "SPMI";
 const STATUS: u64 = 0x00;
 const REQUEST: u64 = 0x04;
@@ -61,15 +73,15 @@ const GROUPS: usize = 9;
 const CONTROL: u64 = 0xa0;
 const QUEUE_RESET: u64 = 0xa4;
 const FAULT_LATCHES: u64 = BANK_B + 0x110;
-const FAULT_COUNTERS: [(u64, u64); 2] = [(BANK_B + 0x200, 10), (BANK_B + 0x25c, 7)];
+const FAULT_STATUS: u64 = BANK_B;
+const FAULT_RESPONSE: u64 = BANK_B + 8;
 const RESPONSE_EMPTY: u32 = 1 << 24;
+const RESPONSE_FULL: u32 = 1 << 25;
 const REQUEST_EMPTY: u32 = 1 << 8;
 const LAST: u32 = 1 << 15;
 const ACK: u32 = 1 << 15;
 /// The controller's own response vector.
 pub const RESPONSE_VECTOR: u32 = 0x100;
-/// `queue-depth`'s 0x100 response entries; more pending words refuse.
-const RESPONSE_CAPACITY: usize = 0x100;
 
 /// A slave's refusal to complete a transaction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +152,7 @@ impl Chunk {
 }
 
 pub struct Spmi {
+    configuration: Configuration,
     lifecycle: LifecycleState,
     irq: AicInput,
     slaves: Vec<(u8, Box<dyn SpmiSlave>)>,
@@ -153,7 +166,11 @@ pub struct Spmi {
 
 impl Spmi {
     pub fn new(irq: AicInput) -> Self {
+        Self::with_configuration(irq, Configuration::GEN2)
+    }
+    pub fn with_configuration(irq: AicInput, configuration: Configuration) -> Self {
         Self {
+            configuration,
             lifecycle: LifecycleState {
                 powered: true,
                 clocked: true,
@@ -183,6 +200,10 @@ impl Spmi {
             RESPONSE_EMPTY
         } else {
             0
+        }) | (if self.responses.len() == self.configuration.response_words() {
+            RESPONSE_FULL
+        } else {
+            0
         }) | if self.partial.is_none() {
             REQUEST_EMPTY
         } else {
@@ -198,25 +219,29 @@ impl Spmi {
         access.interrupts.set_level(Wire::Aic(self.irq), asserted);
     }
     fn request(&mut self, word: u32, now: u64) -> Result<(), &'static str> {
-        let (chunk, payload) = match self.partial.take() {
-            Some((chunk, mut payload)) => {
-                payload.push(word);
-                if payload.len() < chunk.words() {
-                    self.partial = Some((chunk, payload));
-                    return Ok(());
-                }
-                (chunk, payload)
+        if let Some((chunk, payload)) = &self.partial {
+            let mut words = payload.clone();
+            words.push(word);
+            if words.len() < chunk.words() {
+                self.partial.as_mut().expect("borrowed partial").1 = words;
+                return Ok(());
             }
-            None => {
-                let chunk = Chunk::decode(word)?;
-                if chunk.kind == Kind::Write {
-                    self.partial = Some((chunk, Vec::with_capacity(chunk.words())));
-                    return Ok(());
-                }
-                (chunk, Vec::new())
+            let chunk = *chunk;
+            // A refused final word is not consumed. In particular a full
+            // response FIFO or unsupported slave cannot discard its earlier
+            // accepted payload or repeat a completed slave effect on retry.
+            self.execute(chunk, &words, now)?;
+            self.partial = None;
+            Ok(())
+        } else {
+            let chunk = Chunk::decode(word)?;
+            if chunk.kind == Kind::Write {
+                self.partial = Some((chunk, Vec::with_capacity(chunk.words())));
+                Ok(())
+            } else {
+                self.execute(chunk, &[], now)
             }
-        };
-        self.execute(chunk, &payload, now)
+        }
     }
     fn execute(&mut self, chunk: Chunk, payload: &[u32], now: u64) -> Result<(), &'static str> {
         let words = 1 + if chunk.kind == Kind::Read {
@@ -224,7 +249,7 @@ impl Spmi {
         } else {
             0
         };
-        if self.responses.len() + words > RESPONSE_CAPACITY {
+        if self.responses.len() + words > self.configuration.response_words() {
             return Err("SPMI response FIFO overflow");
         }
         let slave = self
@@ -274,7 +299,8 @@ impl Spmi {
             }
         }
         if chunk.header & LAST != 0 {
-            self.pending[(RESPONSE_VECTOR >> 5) as usize] |= 1 << (RESPONSE_VECTOR & 31);
+            let vector = self.configuration.response_vector();
+            self.pending[(vector >> 5) as usize] |= 1 << (vector & 31);
         }
         Ok(())
     }
@@ -328,8 +354,8 @@ impl MmioDevice for Spmi {
         if self.lifecycle.quiesced && offset == RESPONSE {
             return Err(err("SPMI response ownership cannot advance while quiesced"));
         }
-        if width != Width::Word {
-            return Err(err("SPMI registers are 32-bit"));
+        if width != Width::Word || !offset.is_multiple_of(4) {
+            return Err(err("SPMI registers require aligned 32-bit accesses"));
         }
         let value = match offset {
             STATUS => self.status(),
@@ -349,13 +375,14 @@ impl MmioDevice for Spmi {
             }
             CONTROL => self.control,
             QUEUE_RESET => 0,
-            at if (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) => 0,
-            at if FAULT_COUNTERS
-                .iter()
-                .any(|&(base, count)| (base..base + 4 * count).contains(&at)) =>
+            FAULT_STATUS => RESPONSE_EMPTY,
+            FAULT_RESPONSE => return Err(err("SPMI fault FIFO read while empty")),
+            at if self.configuration.profile() == Profile::Gen2
+                && (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) =>
             {
                 0
             }
+            at if self.configuration.profile().counter(at) => 0,
             _ => return Err(err("unmodeled SPMI register")),
         };
         Ok(u64::from(value))
@@ -371,8 +398,8 @@ impl MmioDevice for Spmi {
         if !self.lifecycle.clocked || self.lifecycle.quiesced {
             return Err(err("SPMI controller transactions are paused"));
         }
-        if width != Width::Word {
-            return Err(err("SPMI registers are 32-bit"));
+        if width != Width::Word || !offset.is_multiple_of(4) {
+            return Err(err("SPMI registers require aligned 32-bit accesses"));
         }
         let value = value as u32;
         match offset {
@@ -383,7 +410,14 @@ impl MmioDevice for Spmi {
             at if (PENDING..PENDING + 4 * GROUPS as u64).contains(&at) => {
                 self.pending[((at - PENDING) / 4) as usize] &= !value;
             }
-            CONTROL => self.control = value,
+            CONTROL => {
+                if self.configuration.profile() == Profile::Gen1 && value != 0 {
+                    return Err(err(
+                        "SPMI Gen1 nonzero control-field effects are unqualified",
+                    ));
+                }
+                self.control = value;
+            }
             QUEUE_RESET => {
                 if value != 1 {
                     return Err(err("SPMI queue reset other than bit 0"));
@@ -392,7 +426,9 @@ impl MmioDevice for Spmi {
                 self.responses.clear();
             }
             // Read-then-write-back acknowledges latched faults; none latch.
-            at if (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) => {
+            at if self.configuration.profile() == Profile::Gen2
+                && (FAULT_LATCHES..FAULT_LATCHES + 0x10).contains(&at) =>
+            {
                 if value != 0 {
                     return Err(err("SPMI fault latch acknowledge of an unlatched fault"));
                 }
@@ -803,5 +839,337 @@ mod tests {
                 "original M1 opcode at {offset:#x}"
             );
         }
+    }
+    fn configured(profile: Profile, vector: u32, response_bytes: u32) -> Spmi {
+        let mut c = Spmi::with_configuration(
+            AicInput::new(0, 636),
+            Configuration::new(profile, vector, [256, response_bytes]).unwrap(),
+        );
+        c.attach(0xe, Box::new(Bytes([0; 0x100]))).unwrap();
+        c
+    }
+
+    #[test]
+    fn gen1_vector_and_counter_view_follow_separate_source_resources() {
+        let mut c = configured(Profile::Gen1, 192, 256);
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        wr(&mut c, &mut a, ENABLE + 6 * 4, 1);
+        wr(&mut c, &mut a, REQUEST, 0xe << 8 | LAST | 0x30);
+        wr(&mut c, &mut a, REQUEST, 0x7b);
+        assert!(asserted(&c));
+        assert_eq!(rd(&mut c, &mut a, PENDING + 6 * 4), 1);
+        assert_eq!(rd(&mut c, &mut a, PENDING + 8 * 4), 0);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8e30);
+        // Popping the response cannot acknowledge its separately latched vector.
+        assert_eq!(rd(&mut c, &mut a, PENDING + 6 * 4), 1);
+        wr(&mut c, &mut a, PENDING + 6 * 4, 1);
+        assert!(!asserted(&c));
+        for offset in [
+            0, 4, 8, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x5c, 0x60, 0x64, 0x68, 0x6c, 0x70, 0x74,
+        ] {
+            assert_eq!(rd(&mut c, &mut a, COUNTERS + offset), 0);
+        }
+        for offset in [
+            COUNTERS + 0xc,
+            COUNTERS + 0x28,
+            COUNTERS + 0x78,
+            BANK_B + 0x200,
+            FAULT_LATCHES,
+        ] {
+            assert!(c.read(offset, Width::Word, &mut a).is_err());
+            assert!(c.write(offset, Width::Word, 0, &mut a).is_err());
+        }
+        assert_eq!(rd(&mut c, &mut a, FAULT_STATUS), RESPONSE_EMPTY);
+        assert!(c.read(FAULT_RESPONSE, Width::Word, &mut a).is_err());
+        assert_eq!(rd(&mut c, &mut a, STATUS), RESPONSE_EMPTY | REQUEST_EMPTY);
+    }
+
+    #[test]
+    fn complete_extended_modes_have_identical_payload_effects_on_both_layouts() {
+        for (profile, vector) in [(Profile::Gen1, 192), (Profile::Gen2, 256)] {
+            for long in [false, true] {
+                for bytes in 1..=if long { 8 } else { 16 } {
+                    let mut c = configured(profile, vector, 256);
+                    let mut latch = InterruptLatch::new();
+                    let mut a = Access::new(0, 0, &mut latch);
+                    let command = 0x20 << 16 | 0xe << 8 | if long { 0x30 } else { 0 } | (bytes - 1);
+                    let data: Vec<u8> = (1..=bytes as u8).collect();
+                    wr(&mut c, &mut a, REQUEST, command);
+                    for word in data.chunks(4) {
+                        let mut value = [0x6a; 4];
+                        value[..word.len()].copy_from_slice(word);
+                        wr(&mut c, &mut a, REQUEST, u32::from_le_bytes(value));
+                    }
+                    assert_eq!(rd(&mut c, &mut a, RESPONSE), (command & 0x7fff) | ACK);
+                    assert!(c.pending.iter().all(|&bits| bits == 0));
+                    let read = command | LAST | if long { 8 } else { 0x20 };
+                    wr(&mut c, &mut a, REQUEST, read);
+                    assert_eq!(
+                        rd(&mut c, &mut a, RESPONSE),
+                        (read & 0xfff) | ACK | ((1 << bytes) - 1) << 16
+                    );
+                    let mut actual = Vec::new();
+                    for _ in 0..bytes.div_ceil(4) {
+                        actual.extend_from_slice(&rd(&mut c, &mut a, RESPONSE).to_le_bytes());
+                    }
+                    assert_eq!(&actual[..bytes as usize], data);
+                    assert!(actual[bytes as usize..].iter().all(|&b| b == 0));
+                    assert_eq!(c.pending[(vector / 32) as usize], 1 << (vector % 32));
+                    assert_eq!(rd(&mut c, &mut a, STATUS), RESPONSE_EMPTY | REQUEST_EMPTY);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fifo_byte_capacity_and_refused_final_payload_preserve_transaction_ownership() {
+        for (profile, vector) in [(Profile::Gen1, 192), (Profile::Gen2, 256)] {
+            let mut c = configured(profile, vector, 256);
+            let mut latch = InterruptLatch::new();
+            let mut a = Access::new(0, 0, &mut latch);
+            // 32 one-byte reads produce exactly64 words, not256 words.
+            for _ in 0..32 {
+                wr(&mut c, &mut a, REQUEST, 0xe << 8 | 0x38);
+            }
+            assert_eq!(rd(&mut c, &mut a, STATUS), RESPONSE_FULL | REQUEST_EMPTY);
+            let before = c.responses.clone();
+            let pending = c.pending;
+            assert!(
+                c.write(
+                    REQUEST,
+                    Width::Word,
+                    u64::from(0xe << 8 | LAST | 0x38),
+                    &mut a
+                )
+                .is_err()
+            );
+            assert_eq!(c.responses, before);
+            assert_eq!(c.pending, pending);
+            let write = 0x10 << 16 | 0xe << 8 | LAST | 0x37;
+            wr(&mut c, &mut a, REQUEST, write);
+            wr(&mut c, &mut a, REQUEST, 0x4433_2211);
+            assert!(c.write(REQUEST, Width::Word, 0x8877_6655, &mut a).is_err());
+            assert_eq!(c.partial.as_ref().unwrap().1, [0x4433_2211]);
+            assert_eq!(c.responses, before);
+            // Free space and retry exactly the previously unconsumed MMIO word.
+            for _ in 0..64 {
+                rd(&mut c, &mut a, RESPONSE);
+            }
+            wr(&mut c, &mut a, REQUEST, 0x8877_6655);
+            assert!(c.partial.is_none());
+            assert_eq!(c.responses.len(), 1);
+            assert_eq!(rd(&mut c, &mut a, RESPONSE), (write & 0x7fff) | ACK);
+            wr(&mut c, &mut a, REQUEST, 0x10 << 16 | 0xe << 8 | LAST | 0x3f);
+            rd(&mut c, &mut a, RESPONSE);
+            assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x4433_2211);
+            assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8877_6655);
+            // Misaligned register words cannot alias another register or consume it.
+            for offset in [RESPONSE + 1, ENABLE + 1, PENDING + 2] {
+                let before = (c.responses.clone(), c.enable, c.pending);
+                assert!(c.read(offset, Width::Word, &mut a).is_err());
+                assert!(c.write(offset, Width::Word, 1, &mut a).is_err());
+                assert_eq!((c.responses.clone(), c.enable, c.pending), before);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original26A434 J314s DT through STELA_TEST_SPMI_DT"]
+    fn original_j314s_all_seven_gen1_resource_views_match_the_qualified_contract() {
+        use crate::machine::adt::Node;
+        let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let mut controllers = 0;
+        for node in io.children().unwrap() {
+            if !node.compatible("aapl,spmi") {
+                continue;
+            }
+            controllers += 1;
+            assert_eq!(node.first_u32("gen"), Some(1));
+            let depths: [u32; 2] = node.cells32("queue-depth").unwrap().try_into().unwrap();
+            let vectors = node.cells32("interrupts").unwrap();
+            let cfg = Configuration::new(Profile::Gen1, vectors[0], depths).unwrap();
+            assert_eq!(cfg.response_vector(), 192);
+            assert_eq!(cfg.queue_bytes(), [256, 256]);
+            let banks = node.pairs("reg").unwrap();
+            assert_eq!(
+                banks.iter().map(|&(_, size)| size).collect::<Vec<_>>(),
+                [256, 256, 120]
+            );
+            assert_eq!(node.first_u32("fault-counters-enabled"), Some(1));
+            let parents = node.cells32("interrupt-parent").unwrap();
+            assert_eq!(parents[1], 130);
+            assert_eq!(parents[0], node.first_u32("AAPL,phandle").unwrap());
+            assert_eq!(parents[2], parents[0]);
+            let mut c = Spmi::with_configuration(AicInput::new(0, vectors[1] as u16), cfg);
+            let mut latch = InterruptLatch::new();
+            let mut a = Access::new(0, 0, &mut latch);
+            assert_eq!(rd(&mut c, &mut a, STATUS), 0x01000100);
+            assert_eq!(rd(&mut c, &mut a, FAULT_STATUS), 0x01000000);
+            assert_eq!(rd(&mut c, &mut a, COUNTERS + 0x74), 0);
+            assert!(c.read(FAULT_RESPONSE, Width::Word, &mut a).is_err());
+        }
+        assert_eq!(controllers, 7);
+    }
+    #[test]
+    fn unsupported_slave_preserves_unconsumed_payload_and_never_fabricates_ack() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        struct Refused {
+            allow: Rc<Cell<bool>>,
+            writes: Rc<Cell<u32>>,
+        }
+        impl SpmiSlave for Refused {
+            fn read(&mut self, _: u16, _: &mut [u8], _: u64) -> Result<(), SlaveError> {
+                Err(SlaveError::Unsupported("unqualified slave read"))
+            }
+            fn write(&mut self, _: u16, _: &[u8], _: u64) -> Result<(), SlaveError> {
+                if !self.allow.get() {
+                    return Err(SlaveError::Unsupported("unqualified slave write"));
+                }
+                self.writes.set(self.writes.get() + 1);
+                Ok(())
+            }
+        }
+        let allow = Rc::new(Cell::new(false));
+        let writes = Rc::new(Cell::new(0));
+        let mut c = configured(Profile::Gen1, 192, 256);
+        c.attach(
+            1,
+            Box::new(Refused {
+                allow: allow.clone(),
+                writes: writes.clone(),
+            }),
+        )
+        .unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        wr(&mut c, &mut a, REQUEST, 1 << 8 | LAST | 0x37);
+        wr(&mut c, &mut a, REQUEST, 0x44332211);
+        assert!(c.write(REQUEST, Width::Word, 0x88776655, &mut a).is_err());
+        assert_eq!(c.partial.as_ref().unwrap().1, [0x44332211]);
+        assert_eq!(writes.get(), 0);
+        assert!(c.responses.is_empty());
+        assert!(c.pending.iter().all(|&word| word == 0));
+        allow.set(true);
+        wr(&mut c, &mut a, REQUEST, 0x88776655);
+        assert_eq!(writes.get(), 1);
+        assert!(c.partial.is_none());
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8137);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "requires original mac13j26A434 via STELA_TEST_PMGR_M1_KERNELCACHE"]
+    fn original_gen1_layout_vector_depth_and_counter_tables_are_source_pinned() {
+        let bytes =
+            std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&bytes),
+            "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
+        );
+        let word = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+        // reg1 fault response; group6 sleep mask; independent reset/control;
+        // map reg2 counters; DT response-vector destination; byte->word depths.
+        for (offset, opcode) in [
+            (0x2d45a1c, 0x91002068),
+            (0x2d45a48, 0x528000c8),
+            (0x2d45a58, 0x91029049),
+            (0x2d45afc, 0x52800041),
+            (0x2d45b94, 0xf9406408),
+            (0x2d45b9c, 0xb900011f),
+            (0x2d45bac, 0xb9000114),
+            (0x2d45e84, 0xb8294901),
+            (0x2d48f30, 0x91062263),
+            (0x2d4e698, 0x53027d6b),
+            (0x2d4e69c, 0x53027d4a),
+        ] {
+            assert_eq!(word(offset), opcode, "original opcode {offset:#x}");
+        }
+        let values: Vec<u64> = (0..10)
+            .map(|i| {
+                u64::from_le_bytes(
+                    bytes[0x71f750 + i * 8..0x71f758 + i * 8]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            values,
+            [
+                4,
+                8,
+                0x10000000200,
+                0x100000002000000,
+                0x20,
+                0x60,
+                0x100000002000000,
+                0,
+                0xb8,
+                0xa0
+            ]
+        );
+        let offsets: Vec<u64> = (0..16)
+            .map(|i| {
+                u64::from_le_bytes(
+                    bytes[0x12a4f80 + i * 16..0x12a4f88 + i * 16]
+                        .try_into()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            [
+                0, 4, 8, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x5c, 0x60, 0x64, 0x68, 0x6c, 0x70,
+                0x74
+            ]
+        );
+    }
+    #[test]
+    fn gen1_only_zero_control_reset_is_qualified_and_retained_pauses_keep_owners() {
+        let mut c = configured(Profile::Gen1, 192, 256);
+        let mut latch = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut latch);
+        wr(&mut c, &mut a, REQUEST, 0xe << 8 | LAST | 0x37);
+        wr(&mut c, &mut a, REQUEST, 0x44332211);
+        let before = c.partial.clone();
+        assert!(c.write(CONTROL, Width::Word, 0x80000001, &mut a).is_err());
+        assert_eq!(rd(&mut c, &mut a, CONTROL), 0);
+        assert_eq!(c.partial.as_ref().unwrap().1, before.unwrap().1);
+        assert!(c.write(QUEUE_RESET, Width::Word, 0, &mut a).is_err());
+        assert!(c.partial.is_some());
+        wr(&mut c, &mut a, CONTROL, 0);
+        wr(&mut c, &mut a, QUEUE_RESET, 1);
+        assert!(c.partial.is_none());
+        assert_eq!(rd(&mut c, &mut a, STATUS), 0x01000100);
+        wr(&mut c, &mut a, REQUEST, 0xe << 8 | LAST | 0x30);
+        wr(&mut c, &mut a, REQUEST, 0x7b);
+        let responses = c.responses.clone();
+        let pending = c.pending;
+        let live = c.lifecycle;
+        let paused = LifecycleState {
+            clocked: false,
+            quiesced: true,
+            ..live
+        };
+        c.check_lifecycle(paused).unwrap();
+        c.set_lifecycle(paused, &mut a);
+        assert!(c.read(RESPONSE, Width::Word, &mut a).is_err());
+        assert!(c.write(QUEUE_RESET, Width::Word, 1, &mut a).is_err());
+        assert_eq!(c.responses, responses);
+        assert_eq!(c.pending, pending);
+        c.check_lifecycle(live).unwrap();
+        c.set_lifecycle(live, &mut a);
+        assert_eq!(rd(&mut c, &mut a, RESPONSE), 0x8e30);
+        assert_eq!(c.configuration.response_vector(), 192);
+        assert_eq!(c.configuration.queue_bytes(), [256, 256]);
     }
 }
