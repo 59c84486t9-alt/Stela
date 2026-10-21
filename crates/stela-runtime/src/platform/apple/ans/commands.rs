@@ -38,6 +38,7 @@ pub(super) const fn tunnel_buffer(bytes: u32) -> u32 {
 /// (`HousekeepingTimerEvent` 0x3de9144, `DoHousekeeping` 0x3db7fa0) or a
 /// later controller initialization (0x3db22b4) or format (0x3db5790).
 const DEVICE_TIME: u32 = 6;
+const APPLE_DEBUG_SERVICE: u8 = 0xc2;
 
 /// The host clocks one device-time tunnel carries (0x3df6e50..0x3df6e78),
 /// in a 4 KiB request with no output buffer. The status at +0x4c must be 0
@@ -198,6 +199,7 @@ impl Command {
                 // TCB grants no DMA: queue memory is reached physically.
                 CREATE_SQ | CREATE_CQ | DELETE_SQ | DELETE_CQ => Ok(0),
                 APPLE_TIME => Ok(0),
+                APPLE_DEBUG_SERVICE => Ok(0),
                 IDENTIFY => Ok(1),
                 SET_FEATURES | GET_FEATURES if self.long(24) == 0 => Ok(0),
                 APPLE_NAMESPACES => Ok(2),
@@ -280,6 +282,23 @@ impl Ans {
         }
         match cmd.opcode() {
             IDENTIFY => self.identify(cmd, port),
+            APPLE_DEBUG_SERVICE => {
+                if cmd.nsid() != 0
+                    || cmd.long(24) != 0
+                    || cmd.long(32) != 0
+                    || cmd.word(40) != 0
+                    || cmd.word(44) != 0
+                    || cmd.word(60) != 0
+                {
+                    return Err("ANS debug-service DMA or reserved fields are not modeled");
+                }
+                self.debug
+                    .execute(cmd.word(48), cmd.word(52), cmd.word(56))
+                    .map(|reply| match reply {
+                        super::debug::Reply::Value(value) => Outcome::result(value),
+                        super::debug::Reply::InvalidField => Outcome::status(INVALID_FIELD),
+                    })
+            }
             CREATE_CQ | CREATE_SQ => self.create_queue(cmd),
             DELETE_CQ | DELETE_SQ => self.delete_queue(cmd),
             SET_FEATURES | GET_FEATURES => self.feature(cmd),

@@ -26,6 +26,7 @@
 //! Undescribed registers, commands, fields and cryptographic effects refuse.
 mod bfh;
 mod commands;
+mod debug;
 mod die;
 mod namespace;
 mod prp;
@@ -214,6 +215,7 @@ pub struct Ans {
     shutdown: bool,
     /// NVMe feature state, indexed by the small standard feature IDs.
     features: [u32; 12],
+    debug: debug::DebugService,
     timestamp: u64,
     os_build: [u8; 16],
     /// The host clocks of the last device-time tunnel (request type 6).
@@ -253,6 +255,7 @@ impl Ans {
             auto_queue: false,
             shutdown: false,
             features: [0; 12],
+            debug: debug::DebugService::default(),
             timestamp: 0,
             os_build: [0; 16],
             device_time: None,
@@ -1031,6 +1034,55 @@ mod tests {
         assert_eq!(rig.bytes(DATA, commands::IDENTIFY_BYTES), sentinel);
         let status = u16::from_le_bytes(rig.bytes(CQ + 14, 2).try_into().unwrap()) >> 1;
         assert_eq!(status, commands::INVALID_NAMESPACE);
+    }
+
+    #[test]
+    fn debug_service_masks_round_trip_through_no_dma_completions() {
+        let mut rig = Rig::new();
+        for (selector, mask) in [(0xb00, 1), (0xb01, 0)] {
+            rig.submit(0, 0, 0xc2, 0, 0, [0, 0, 1, selector, mask, 0])
+                .unwrap();
+            rig.retire(0, 0);
+            let slot = rig.ans.queues[0].tail;
+            rig.submit(0, 1, 0xc2, 0, 0, [0, 0, 0, selector, 0, 0])
+                .unwrap();
+            assert_eq!(rig.bytes(CQ + u64::from(slot) * 16, 4), mask.to_le_bytes());
+            rig.retire(0, 1);
+        }
+        assert_eq!(rig.bytes(DATA, 16), [0; 16]);
+        // A debug request carries neither a namespace nor a PRP transfer.
+        for (namespace, prp) in [(1, 0), (0, DATA)] {
+            let mut rig = Rig::new();
+            assert!(
+                rig.submit(0, 0, 0xc2, namespace, prp, [0, 0, 1, 0xb00, 1, 0])
+                    .is_err()
+            );
+            assert_eq!(rig.ans.debug, debug::DebugService::default());
+            assert_eq!(rig.bytes(CQ, 16), [0; 16]);
+        }
+        for words in [
+            [1, 0, 1, 0xb00, 1, 0],
+            [0, 1, 1, 0xb00, 1, 0],
+            [0, 0, 1, 0xb00, 1, 1],
+            [0, 0, 0, 0xb00, 1, 0],
+        ] {
+            let mut rig = Rig::new();
+            assert!(rig.submit(0, 0, 0xc2, 0, 0, words).is_err());
+            assert_eq!(rig.ans.debug, debug::DebugService::default());
+        }
+        for (operation, selector, value, expected_status) in [
+            (1, 0x100, 0, 2),
+            (1, 0xb20, 0x56, 2),
+            (0, 0xa20, 0, 0),
+            (1, 0xa20, 0, 2),
+        ] {
+            let mut rig = Rig::new();
+            rig.submit(0, 0, 0xc2, 0, 0, [0, 0, operation, selector, value, 0])
+                .unwrap();
+            let status = u16::from_le_bytes(rig.bytes(CQ + 14, 2).try_into().unwrap()) >> 1;
+            assert_eq!(status, expected_status);
+            assert_eq!(rig.bytes(CQ, 4), [0; 4]);
+        }
     }
 
     #[test]
