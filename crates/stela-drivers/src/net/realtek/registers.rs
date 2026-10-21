@@ -87,3 +87,7 @@ pub(super) const FIRST: u32 = 1 << 29;
 pub(super) const LAST: u32 = 1 << 28;
 pub(super) const RX_ERRORS: u32 = 0xf << 19;
 pub(super) const LENGTH: u32 = 0x3fff;
+
+// The source extended-XID register lies beyond the normal NBASE timer aperture.
+pub(super) const TX_CONFIG_V2: usize = 0x60b0;
+pub(super) const EXTENDED_REGISTER_BYTES: u64 = TX_CONFIG_V2 as u64 + 4;

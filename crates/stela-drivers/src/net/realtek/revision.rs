@@ -13,6 +13,8 @@ pub struct Revision {
     pub name: &'static str,
     pub firmware: Option<&'static str>,
     pub xid: u16,
+    /// Actual TX_CONFIG_V2 word, present only for the primary extended-XID marker.
+    pub extended_xid: Option<u32>,
 }
 
 impl Revision {
@@ -20,6 +22,10 @@ impl Revision {
         matches!(self.version, 2..=6 | 17..=26 | 28 | 31..=36 | 38 | 40 | 42 | 44 | 46 | 51 | 52 | 61 | 63..=66 | 70)
     }
 
+    /// Pinned donor classification, kept separate from the raw firmware identity.
+    pub fn extended_classification(self) -> Option<u32> {
+        self.extended_xid.map(|raw| raw & 0x7fff_ffff)
+    }
     pub(super) fn gigabit_pcie(self) -> bool {
         self.version > 6 && self.version < 61
     }
@@ -161,6 +167,7 @@ pub(super) fn detect(txconfig: u32) -> Option<Revision> {
         name: e.3,
         firmware: e.4,
         xid,
+        extended_xid: None,
     })
 }
 
@@ -172,4 +179,22 @@ pub(super) fn pci_family(device: u16, revision: Revision) -> bool {
         0x8126 => revision.version == 70,
         _ => false,
     }
+}
+
+/// The primary source table delegates this exact marker to TX_CONFIG_V2.
+pub(super) fn needs_extended(txconfig: u32) -> bool {
+    txconfig != u32::MAX && ((txconfig >> 20) & 0x7cf) == 0x7c8
+}
+
+pub(super) fn detect_extended(txconfig: u32, raw: u32) -> Option<Revision> {
+    if !needs_extended(txconfig) || raw & 0x7fff_ffff != 0 {
+        return None;
+    }
+    Some(Revision {
+        version: 64,
+        name: "RTL9151AS",
+        firmware: fw("rtl_nic/rtl9151a-1.fw"),
+        xid: ((txconfig >> 20) & 0xfcf) as u16,
+        extended_xid: Some(raw),
+    })
 }

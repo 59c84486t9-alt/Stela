@@ -43,7 +43,8 @@
 //! notification/acknowledgement. Their integrated RTL8211B identity erratum
 //! is an observable classification correction; MDIO returns actual values.
 //! Failed DP command ports require reset/reinitialization, without retries.
-//! Extended-XID RTL9151AS and unlisted revisions remain explicitly refused.
+//! RTL9151AS retains the raw extended XID, verifies the larger 0x60b4 aperture,
+//! and binds firmware to the full primary/extended identity; unlisted values fail.
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
 //! variants, SFP/TBI, DASH stop/release and power lifecycle, suspend/resume,
 //! interrupts and jumbo frames are
@@ -88,6 +89,7 @@ pub enum Error {
     Firmware(resources::Error),
     Script(&'static str),
     UnknownMac(u32),
+    UnknownExtendedMac { primary: u16, extended: u32 },
     UnsupportedRevision(Revision),
     UnsupportedPhy(u32),
 }
@@ -98,11 +100,18 @@ impl fmt::Display for Error {
             Self::Firmware(e) => e.fmt(f),
             Self::Script(e) => write!(f, "Realtek firmware/PHY: {e}"),
             Self::UnknownMac(tx) => write!(f, "unknown Realtek MAC TxConfig {tx:#010x}"),
-            Self::UnsupportedRevision(r) => write!(
+            Self::UnknownExtendedMac { primary, extended } => write!(
                 f,
-                "{} MAC version {} XID {:03x} startup is not implemented",
-                r.name, r.version, r.xid
+                "unknown Realtek MAC XID {primary:03x} extended {extended:08x} (classification {:08x})",
+                extended & 0x7fff_ffff
             ),
+            Self::UnsupportedRevision(r) => {
+                write!(f, "{} MAC version {} XID {:03x}", r.name, r.version, r.xid)?;
+                if let Some(raw) = r.extended_xid {
+                    write!(f, " extended {raw:08x}")?;
+                }
+                write!(f, " startup is not implemented")
+            }
             Self::UnsupportedPhy(id) => write!(
                 f,
                 "Realtek copper PHY {id:#010x} startup is not implemented"
@@ -262,7 +271,9 @@ impl Realtek {
         let device = map_registers(handoff, bar, 0, register_aperture(function.device))?;
         function.enable_polled();
         let txconfig = device.read32(TX_CONFIG);
-        let revision = revision::detect(txconfig).ok_or(Error::UnknownMac(txconfig))?;
+        let revision = detect_revision(&device, txconfig, |bytes| {
+            map_registers(handoff, bar, 0, bytes).map(|_| ())
+        })?;
         if !revision::pci_family(function.device, revision) || !revision.implemented() {
             return Err(Error::UnsupportedRevision(revision));
         }
@@ -454,12 +465,35 @@ fn kick_transmit(registers: &impl Registers, revision: Revision) {
     }
 }
 
+fn detect_revision<R: Registers>(
+    registers: &R,
+    txconfig: u32,
+    require_range: impl FnOnce(u64) -> Result<(), BlockError>,
+) -> Result<Revision, Error> {
+    if !revision::needs_extended(txconfig) {
+        return revision::detect(txconfig).ok_or(Error::UnknownMac(txconfig));
+    }
+    // The actual first BAR must cover and map the extended word before I/O.
+    require_range(EXTENDED_REGISTER_BYTES)?;
+    let raw = registers.read32(TX_CONFIG_V2);
+    if raw == u32::MAX {
+        return Err(BlockError::Device { status: raw }.into());
+    }
+    revision::detect_extended(txconfig, raw).ok_or(Error::UnknownExtendedMac {
+        primary: ((txconfig >> 20) & 0xfcf) as u16,
+        extended: raw,
+    })
+}
+
 fn load_firmware<'a>(
     provider: &'a dyn resources::Provider,
     hardware: &str,
     revision: Revision,
 ) -> Result<Option<resources::Image<'a>>, Error> {
-    let xid = format!("xid-{:03x}", revision.xid);
+    let xid = match revision.extended_xid {
+        Some(raw) => format!("xid-{:03x}-ext-{raw:08x}", revision.xid),
+        None => format!("xid-{:03x}", revision.xid),
+    };
     revision
         .firmware
         .map(|name| {
@@ -4205,6 +4239,158 @@ mod tests {
                 Err(Error::Device(BlockError::Device { status: 255 }))
             );
             assert_eq!(model.state.borrow().bytes[CONFIG_LOCK], 0);
+        }
+    }
+    #[test]
+    fn extended_xid_checks_aperture_before_read_and_retains_raw_and_classification() {
+        struct Version {
+            raw: u32,
+            reads: Cell<usize>,
+        }
+        impl Registers for Version {
+            fn read32(&self, offset: usize) -> u32 {
+                assert_eq!(offset, TX_CONFIG_V2);
+                self.reads.set(self.reads.get() + 1);
+                self.raw
+            }
+            fn read8(&self, _: usize) -> u8 {
+                panic!("unexpected read")
+            }
+            fn read16(&self, _: usize) -> u16 {
+                panic!("unexpected read")
+            }
+            fn write8(&self, _: usize, _: u8) {
+                panic!("unexpected write")
+            }
+            fn write16(&self, _: usize, _: u16) {
+                panic!("unexpected write")
+            }
+            fn write32(&self, _: usize, _: u32) {
+                panic!("unexpected write")
+            }
+        }
+        for raw in [0, 0x8000_0000, 1, 0x8000_0001, u32::MAX] {
+            let regs = Version {
+                raw,
+                reads: Cell::new(0),
+            };
+            let result = detect_revision(&regs, 0x7c8 << 20, |bytes| {
+                assert_eq!(bytes, 0x60b4);
+                assert_eq!(regs.reads.get(), 0);
+                Ok(())
+            });
+            assert_eq!(regs.reads.get(), 1);
+            if raw & 0x7fff_ffff == 0 {
+                let r = result.unwrap();
+                assert_eq!(r.xid, 0x7c8);
+                assert_eq!(r.extended_xid, Some(raw));
+                assert_eq!(r.extended_classification(), Some(0));
+                assert_eq!(r.version, 64);
+                assert_eq!(r.name, "RTL9151AS");
+                assert_eq!(r.firmware, Some("rtl_nic/rtl9151a-1.fw"));
+                assert!(r.implemented());
+                assert!(revision::pci_family(0x8125, r));
+            } else if raw == u32::MAX {
+                assert_eq!(
+                    result,
+                    Err(Error::Device(BlockError::Device { status: u32::MAX }))
+                );
+            } else {
+                assert_eq!(
+                    result,
+                    Err(Error::UnknownExtendedMac {
+                        primary: 0x7c8,
+                        extended: raw
+                    })
+                );
+                assert!(format!("{}", result.unwrap_err()).contains(&format!("{raw:08x}")));
+            }
+        }
+        let alias = revision::detect_extended(0xfc8 << 20, 0x80000000).unwrap();
+        assert_eq!(alias.xid, 0xfc8);
+        assert_eq!(alias.extended_xid, Some(0x80000000));
+        let regs = Version {
+            raw: 0,
+            reads: Cell::new(0),
+        };
+        assert_eq!(
+            detect_revision(&regs, 0x7c8 << 20, |_| Err(BlockError::Unsupported(
+                "unmapped extended BAR"
+            ))),
+            Err(Error::Device(BlockError::Unsupported(
+                "unmapped extended BAR"
+            )))
+        );
+        assert_eq!(regs.reads.get(), 0);
+        let r = detect_revision(&regs, 0x688 << 20, |_| {
+            panic!("normal XID must not require larger aperture")
+        })
+        .unwrap();
+        assert_eq!(r.extended_xid, None);
+        assert_eq!(r.extended_classification(), None);
+        assert_eq!(regs.reads.get(), 0);
+        assert!(detect_revision(&regs, u32::MAX, |_| panic!("failed primary read")).is_err());
+        assert_eq!(regs.reads.get(), 0);
+        assert!(revision::detect_extended(0x688 << 20, 0).is_none());
+    }
+
+    #[test]
+    fn extended_firmware_catalog_uses_full_raw_identity_without_historical_fallback() {
+        use resources::{Catalog, ErrorKind, Provenance, Resource, Target};
+        let digest = [
+            0x23, 0xc3, 0xcf, 0xd9, 0x9c, 0xa0, 0x28, 0xa0, 0xba, 0x72, 0xe8, 0x92, 0x40, 0xe4,
+            0xb4, 0xf8, 0x93, 0xc1, 0xb4, 0x26, 0xa2, 0x1a, 0x6e, 0x89, 0x36, 0xfd, 0x43, 0x13,
+            0x6b, 0x13, 0xc1, 0xba,
+        ];
+        for (raw, key) in [
+            (0, "xid-7c8-ext-00000000"),
+            (0x80000000, "xid-7c8-ext-80000000"),
+        ] {
+            let catalog = Catalog::from_handoff(vec![Resource {
+                name: "rtl_nic/rtl9151a-1.fw",
+                target: Target {
+                    driver: "realtek",
+                    hardware: "10ec:8125",
+                    revision: key,
+                    board: None,
+                },
+                provenance: Provenance {
+                    source: "synthetic-test",
+                    revision: "1",
+                    member: "rtl_nic/rtl9151a-1.fw",
+                    license: "MIT",
+                },
+                expected_length: 4,
+                expected_sha256: digest,
+                bytes: 0x801f0000u32.to_le_bytes().to_vec(),
+            }])
+            .unwrap();
+            let extended_revision = revision::detect_extended(0x7c8 << 20, raw).unwrap();
+            assert_eq!(
+                load_firmware(&catalog, "10ec:8125", extended_revision)
+                    .unwrap()
+                    .unwrap()
+                    .bytes(),
+                &0x801f0000u32.to_le_bytes()
+            );
+            let mut primary_alias = extended_revision;
+            primary_alias.xid = 0xfc8;
+            assert!(load_firmware(&catalog, "10ec:8125", primary_alias).is_err());
+            let other = revision::detect_extended(0x7c8 << 20, raw ^ 0x80000000).unwrap();
+            assert!(matches!(
+                load_firmware(&catalog, "10ec:8125", other),
+                Err(Error::Firmware(resources::Error {
+                    kind: ErrorKind::WrongTarget,
+                    ..
+                }))
+            ));
+            assert!(load_firmware(&catalog, "10ec:8125", revision(64)).is_err());
+            let historical = revision::detect(0x68b << 20).unwrap();
+            assert!(load_firmware(&catalog, "10ec:8125", historical).is_err());
+            let mut missing_extended = extended_revision;
+            missing_extended.extended_xid = None;
+            assert!(load_firmware(&catalog, "10ec:8125", missing_extended).is_err());
+            assert!(load_firmware(&catalog, "10ec:8168", extended_revision).is_err());
         }
     }
 }
