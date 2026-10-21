@@ -8,6 +8,7 @@
 use super::context::{Context, Geometry, PAGE_BYTES as PAGE};
 use super::descriptor::Encoding;
 use super::fault::{Capture, Code, Level, Record};
+use super::handoff::Handoff;
 use crate::platform::{
     apple::bus::Access,
     dma::{DmaError, Iommu, Memory},
@@ -77,6 +78,21 @@ impl Tables {
             return Err("gen3 DART TCR geometry disagrees with its validated context");
         }
         self.configure_stream(sid, config, ttbr, Some(context))
+    }
+
+    /// Use the original native-client root qualification for actual RAM
+    /// walks. This still exposes no native MMIO profile: filter, security,
+    /// fault metadata and publication completion remain independent gates.
+    pub fn configure_handoff(
+        &mut self,
+        sid: usize,
+        ttbr: u32,
+        handoff: Handoff,
+    ) -> Result<(), &'static str> {
+        if self.encoding != handoff.encoding() {
+            return Err("gen3 DART RAM encoding disagrees with the qualified handoff");
+        }
+        self.configure_stream(sid, handoff.config(), ttbr, Some(handoff.context()))
     }
 
     fn configure_stream(
@@ -269,6 +285,66 @@ mod tests {
 
     fn entry(address: u64) -> u64 {
         address >> 4 | ENTRY_VALID
+    }
+
+    #[test]
+    fn qualified_handoffs_execute_both_native_roots_without_rebinding_an_encoding() {
+        for (base, bytes, iova, config) in [
+            (0x10000004000, 0xffff0000, 0x10002004000, TRANSLATE),
+            (0x10000000000, 3 << 40, 0x21002004000, TRANSLATE | CONTEXT),
+        ] {
+            let context = Context::from_vm_range(base, bytes).unwrap();
+            let handoff = Handoff::new(0x300, config, context).unwrap();
+            let indices = context
+                .map(iova, 4, BoundsPolicy::Strict)
+                .unwrap()
+                .indices();
+            let mut ram = Ram::new(ROOT, (5 * PAGE) as usize);
+            let parent = if let Some(slot) = indices.context() {
+                ram.put_u64(ROOT + u64::from(slot) * 8, entry(CTE));
+                CTE
+            } else {
+                ROOT
+            };
+            ram.put_u64(parent + u64::from(indices.segment()) * 8, entry(LEAF));
+            ram.put_u64(
+                LEAF + u64::from(indices.page()) * 8,
+                entry(FRAME) | 0xfff << 40,
+            );
+            let mut tables = Tables::new(256).unwrap();
+            tables
+                .configure_handoff(255, (ROOT >> 12) as u32 | 1, handoff)
+                .unwrap();
+            tables.set_enabled(255, true).unwrap();
+            let mut sink = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut sink);
+            Port {
+                iommu: &mut tables,
+                stream: 255,
+                memory: &mut ram,
+                access: &mut access,
+            }
+            .write(iova, &[1, 9, 25, 49])
+            .unwrap();
+            let mut actual = [0; 4];
+            assert!(ram.read(FRAME, &mut actual));
+            assert_eq!(actual, [1, 9, 25, 49]);
+            assert!(tables.configure_handoff(256, 0, handoff).is_err());
+            assert!(tables.configure_handoff(255, 2, handoff).is_err());
+            assert_eq!(
+                tables.translate(&mut ram, 255, iova, iova + 3, false, &mut access),
+                Ok(FRAME)
+            );
+            let foreign = iova & ((1 << 40) - 1);
+            assert!(matches!(
+                tables.translate(&mut ram, 255, foreign, foreign + 3, false, &mut access),
+                Err(DmaError::Unsupported(_))
+            ));
+            assert_eq!(tables.faults().pending(7), Ok(0));
+            let mut compact = Tables::with_encoding(1, Encoding::Shift8).unwrap();
+            assert!(compact.configure_handoff(0, 1, handoff).is_err());
+            assert!(compact.streams[0].context.is_none());
+        }
     }
 
     #[test]

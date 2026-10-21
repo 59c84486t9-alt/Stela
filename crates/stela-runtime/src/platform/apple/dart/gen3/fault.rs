@@ -2,9 +2,10 @@
 //!
 //! Original mac18g collection at VA fffffe0009289804 uses one 0x40-byte
 //! record per SID, with a separate pending bitmap at TRAD4000. Its numbered
-//! fault code and table level are recovered; its access-type header fields,
-//! auxiliary AXI data and secondary-capture behavior are not. This component
-//! retains direction as typed state and never fabricates a complete header.
+//! fault taxonomy and ordinary TRAD direction are recovered from the native
+//! decoder. Other header fields, auxiliary AXI data and secondary-capture
+//! behavior remain unqualified. Observations retain every raw summary bit;
+//! failed DMA never fabricates a complete header from the known fields.
 use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::{vec, vec::Vec};
 
@@ -20,7 +21,43 @@ pub enum Code {
     Invalid = 0,
     Write = 1,
     Read = 2,
+    Drop = 3,
+    AxiDecode = 4,
+    Axi = 5,
+    FillRegion = 6,
     Region = 7,
+    CtrrWrite = 8,
+    Apf = 9,
+    Bpf = 10,
+    SttMismatch = 11,
+    SttFlush = 12,
+    External = 13,
+    IllegalSid = 14,
+}
+
+impl TryFrom<u8> for Code {
+    type Error = &'static str;
+
+    fn try_from(code: u8) -> Result<Self, Self::Error> {
+        Ok(match code {
+            0 => Self::Invalid,
+            1 => Self::Write,
+            2 => Self::Read,
+            3 => Self::Drop,
+            4 => Self::AxiDecode,
+            5 => Self::Axi,
+            6 => Self::FillRegion,
+            7 => Self::Region,
+            8 => Self::CtrrWrite,
+            9 => Self::Apf,
+            10 => Self::Bpf,
+            11 => Self::SttMismatch,
+            12 => Self::SttFlush,
+            13 => Self::External,
+            14 => Self::IllegalSid,
+            _ => return Err("gen3 DART observed fault code is outside the native decoder"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +67,49 @@ pub enum Level {
     Cte = 1,
     Ste = 2,
     Pte = 3,
+}
+
+/// A supplied original TRAD summary, not a generated fault header. The
+/// native classifier at mac18g92889b4..9288cc0 and jump table9288e68
+/// identify these fields. Unknown bits are retained without interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObservedSummary {
+    raw: u32,
+    code: Code,
+}
+
+impl ObservedSummary {
+    pub fn trad(raw: u32) -> Result<Self, &'static str> {
+        if raw & 0x600 != 0 {
+            return Err("gen3 DART non-TRAD summary access type is unqualified");
+        }
+        let code = Code::try_from((raw & 0xf) as u8)?;
+        Ok(Self { raw, code })
+    }
+
+    pub const fn raw(self) -> u32 {
+        self.raw
+    }
+
+    pub const fn code(self) -> Code {
+        self.code
+    }
+
+    pub const fn write(self) -> bool {
+        self.raw & 0x100 != 0
+    }
+
+    pub const fn invalid_level(self) -> Option<Level> {
+        if !matches!(self.code, Code::Invalid) {
+            return None;
+        }
+        Some(match self.raw >> 12 & 3 {
+            0 => Level::Ttbr,
+            1 => Level::Cte,
+            2 => Level::Ste,
+            _ => Level::Pte,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +264,53 @@ impl MmioDevice for Capture {
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+
+    #[test]
+    fn original_fault_taxonomy_keeps_observed_direction_and_unmodeled_bits() {
+        // Original jump table9288e68, relative to9288b74, resolves the
+        // source strings741e87d..741e95b. Reasons name decoder output;
+        // they do not invent the hardware conditions generating each code.
+        let reasons = [
+            Code::Invalid,
+            Code::Write,
+            Code::Read,
+            Code::Drop,
+            Code::AxiDecode,
+            Code::Axi,
+            Code::FillRegion,
+            Code::Region,
+            Code::CtrrWrite,
+            Code::Apf,
+            Code::Bpf,
+            Code::SttMismatch,
+            Code::SttFlush,
+            Code::External,
+            Code::IllegalSid,
+        ];
+        for (code, reason) in reasons.into_iter().enumerate() {
+            for write in [false, true] {
+                for level in 0..4 {
+                    let raw = 0xa5a5_00f0 | code as u32 | (u32::from(write) << 8) | level << 12;
+                    let summary = ObservedSummary::trad(raw).unwrap();
+                    assert_eq!(summary.raw(), raw);
+                    assert_eq!(summary.code(), reason);
+                    assert_eq!(summary.write(), write);
+                    assert_eq!(summary.invalid_level().is_some(), code == 0);
+                    if let Some(actual) = summary.invalid_level() {
+                        assert_eq!(actual as u32, level);
+                    }
+                }
+            }
+        }
+        for code in [15, 16, 255] {
+            assert!(Code::try_from(code).is_err());
+        }
+        assert!(ObservedSummary::trad(15).is_err());
+        for access_type in [0x200, 0x400, 0x600] {
+            assert!(ObservedSummary::trad(access_type).is_err());
+            assert!(ObservedSummary::trad(access_type | 0x100 | 7).is_err());
+        }
+    }
 
     #[test]
     fn sid_words_keep_independent_records_and_acknowledge_only_selected_bits() {
