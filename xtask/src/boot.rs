@@ -866,10 +866,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         None => TIMEOUT_EXIT,
     };
     let serial_text = fs::read_to_string(&serial).unwrap_or_default();
-    let unsupported = serial_text
-        .lines()
-        .find_map(|line| line.strip_prefix("STOP UNSUPPORTED "))
-        .map(String::from);
+    let unsupported = first_unsupported(&serial_text);
     // The installed-system scenario ends at the bundle's entry: what the
     // engine meets after it is reported but does not fail the run.
     let mut entered = false;
@@ -960,6 +957,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .map(|(path, serial)| json!({ "path": path, "serial": serial }))
             .collect::<Vec<_>>(),
         "first_unsupported": unsupported,
+        "first_guest_panic": first_guest_panic(&serial_text),
         "returncode": code,
         "payload": arguments.payload.map(|mode| {
             matches!(mode, PayloadMode::Stage | PayloadMode::StagePath)
@@ -1004,6 +1002,24 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         (true, false) => FAILED_EXIT,
         (false, _) => code,
     }))
+}
+
+/// The first printed requirement, including graceful-mode diagnostics which
+/// do not terminate the engine. Buffered diagnostics are not a causal clock.
+fn first_unsupported(serial: &str) -> Option<&str> {
+    serial.lines().find_map(|line| {
+        line.strip_prefix("UNMODELED ")
+            .or_else(|| line.strip_prefix("STOP UNSUPPORTED "))
+    })
+}
+
+/// The immediate guest console's first panic, before any nested panic or
+/// subsequent machine reset. Ordinary messages about panic support do not match.
+fn first_guest_panic(serial: &str) -> Option<&str> {
+    serial.lines().find_map(|line| {
+        let message = line.strip_prefix("GUEST|")?.trim_start();
+        (message.starts_with("panic(") || message.starts_with("panic:")).then_some(message)
+    })
 }
 
 /// Copy `bundle.json` and every file it lists.
@@ -1193,6 +1209,45 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_report_keeps_graceful_requirements_and_the_first_guest_panic() {
+        let serial = concat!(
+            "UNSUPPORTED OPERATIONS mode=graceful\r\n",
+            "GUEST| panic handlers ready\r\n",
+            "UNMODELED pc=0x1000 device write at PA 0x2000: missing lifecycle\r\n",
+            "GUEST| panic(cpu 0 caller 0x3000): first failure\r\n",
+            "UNMODELED pc=0x4000 debug sample: PE is off\r\n",
+            "GUEST| panic: nested failure\r\n",
+            "STOP UNSUPPORTED a later terminal requirement\r\n",
+            "STOP reset: amcc: DRAM access disabled\r\n",
+        );
+        assert_eq!(
+            first_unsupported(serial),
+            Some("pc=0x1000 device write at PA 0x2000: missing lifecycle")
+        );
+        assert_eq!(
+            first_guest_panic(serial),
+            Some("panic(cpu 0 caller 0x3000): first failure")
+        );
+        assert_eq!(
+            first_unsupported("STOP UNSUPPORTED pc=0x1000 instruction\n"),
+            Some("pc=0x1000 instruction")
+        );
+        assert_eq!(
+            first_guest_panic("GUEST| panic: first failure\n"),
+            Some("panic: first failure")
+        );
+        for ordinary in [
+            "UNSUPPORTED OPERATIONS mode=strict\n",
+            "GUEST| UNMODELED guest text\n",
+            "GUEST| panic flow initialized\n",
+            "STOP reset: ordinary restart\n",
+        ] {
+            assert_eq!(first_unsupported(ordinary), None);
+            assert_eq!(first_guest_panic(ordinary), None);
+        }
+    }
 
     #[test]
     fn attached_storage_and_directory_volume_have_explicit_cli_contracts() {
