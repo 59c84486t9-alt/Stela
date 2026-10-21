@@ -5055,6 +5055,57 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    fn original_j314s_watchdog_mounts_one_shared_panic_flags_word() {
+        use crate::machine::{
+            Devices,
+            apple::{AppleDevices, Range},
+        };
+        let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset: u64| {
+            ranges.iter().find_map(|&(child, parent, bytes)| {
+                offset
+                    .checked_sub(child)
+                    .filter(|&delta| delta < bytes)
+                    .and_then(|delta| parent.checked_add(delta))
+            })
+        };
+        let node = io.child("wdt").unwrap();
+        let side = watchdog_side(&node, &translate).unwrap().unwrap();
+        assert_eq!(
+            side.words,
+            [0x2922b8020, 0x2922b802c, 0x2922b8008, 0x2922b8020]
+        );
+        assert_eq!(node.first_u32("panic-save-flag-bit"), Some(0));
+        assert_eq!(node.first_u32("panic-forcepoweroff-flag-bit"), Some(2));
+        assert_eq!(side.triggers.len(), 10);
+        let (offset, bytes) = node.pairs("reg").unwrap()[0];
+        let mut devices = AppleDevices::new();
+        devices
+            .add_watchdog_with_side(
+                Range {
+                    physical: translate(offset).unwrap(),
+                    bytes,
+                },
+                Some(&side),
+                None,
+                0,
+            )
+            .unwrap();
+        devices.write(0, side.words[0], 4, 1, 0).unwrap();
+        let word = devices.read(0, side.words[3], 4, 0).unwrap();
+        devices.write(0, side.words[3], 4, word | 4, 0).unwrap();
+        assert_eq!(devices.read(0, side.words[0], 4, 0), Ok(5));
+    }
+
+    #[test]
     fn s5l_gpio_admission_requires_qualified_pair_and_ap_role() {
         let compatible = b"gpio,t6000\0gpio,s5l8960x\0";
         for role in [

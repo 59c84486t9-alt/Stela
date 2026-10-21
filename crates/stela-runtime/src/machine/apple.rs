@@ -2308,26 +2308,80 @@ impl AppleDevices {
         side: Option<&super::soc::WatchdogSide>,
         irq: Option<AicInput>,
         now: u64,
-    ) -> Result<(), MapError> {
+    ) -> Result<(), String> {
         let Some(side) = side else {
-            return self.add_watchdog(&[range], irq, now);
+            return self
+                .add_watchdog(&[range], irq, now)
+                .map_err(|e| format!("{e:?}"));
         };
-        let device = self
-            .bus
-            .add(Box::new(AppleWdt::new(irq, now).with_side_controls()));
-        self.map(device, &[range])?;
+        if !(2..=4).contains(&side.words.len()) {
+            return Err("watchdog side controls require two to four complete words".into());
+        }
+        let shared_flags = side.words.len() == 4 && side.words[0] == side.words[3];
+        let end = range
+            .physical
+            .checked_add(range.bytes)
+            .ok_or("watchdog primary extent overflows")?;
+        for (index, &physical) in side.words.iter().enumerate() {
+            let last = physical
+                .checked_add(4)
+                .ok_or("watchdog side extent overflows")?;
+            if !physical.is_multiple_of(4) {
+                return Err("watchdog side word is unaligned".into());
+            }
+            if physical < end && range.physical < last {
+                return Err("watchdog side word overlaps primary timer registers".into());
+            }
+            if side.words[..index].contains(&physical) && !(shared_flags && index == 3) {
+                return Err("watchdog side alias lacks a qualified shared register owner".into());
+            }
+        }
+        let mut triggers = Vec::new();
+        for &(physical, mask, value) in &side.triggers {
+            let last = physical
+                .checked_add(4)
+                .ok_or("watchdog trigger extent overflows")?;
+            if !physical.is_multiple_of(4) || mask == 0 || value & !mask != 0 {
+                return Err("watchdog trigger word or mask is invalid".into());
+            }
+            if (physical < end && range.physical < last) || side.words.contains(&physical) {
+                return Err("watchdog trigger aliases a different register role".into());
+            }
+            if let Some(&previous) = triggers
+                .iter()
+                .find(|&&(address, _, _)| address == physical)
+            {
+                if previous != (physical, mask, value) {
+                    return Err("watchdog shared trigger has conflicting configurations".into());
+                }
+            } else {
+                triggers.push((physical, mask, value));
+            }
+        }
+        let mut model = AppleWdt::new(irq, now).with_side_controls();
+        if shared_flags {
+            model = model.with_shared_panic_flags();
+        }
+        let device = self.bus.add(Box::new(model));
+        self.map(device, &[range]).map_err(|e| format!("{e:?}"))?;
         let offsets = [
             wdt::PANIC_SAVE,
             wdt::MECHANISM,
             wdt::CONFIGURATION,
             wdt::POWER_OFF,
         ];
-        for (&physical, offset) in side.words.iter().zip(offsets) {
-            self.bus.map(device, physical, 4, offset)?;
+        for (index, (&physical, offset)) in side.words.iter().zip(offsets).enumerate() {
+            if !(shared_flags && index == 3) {
+                self.bus
+                    .map(device, physical, 4, offset)
+                    .map_err(|e| format!("{e:?}"))?;
+            }
         }
-        for &(physical, mask, _) in &side.triggers {
+        for (physical, mask, _) in triggers {
             let trigger = self.bus.add(Box::new(wdt::CoreTrigger::new(mask)));
-            self.bus.map(trigger, physical, 4, 0)?;
+            self.bus
+                .map(trigger, physical, 4, 0)
+                .map_err(|e| format!("{e:?}"))?;
         }
         Ok(())
     }
@@ -4159,6 +4213,73 @@ mod tests {
         d.write(0, trigger, 4, 1, 0).unwrap();
         assert_eq!(d.read(0, trigger, 4, 0), Ok(1));
         assert!(d.read(0, trigger + 4, 4, 0).is_err());
+    }
+
+    #[test]
+    fn watchdog_shares_declared_flags_and_refuses_unqualified_aliases_before_mapping() {
+        let base = 0x2_922b_0000;
+        let flags = base + 0x8020;
+        let words = [flags, base + 0x802c, base + 0x8008, flags];
+        let trigger = 0x2_1002_0304;
+        let range = Range {
+            physical: base,
+            bytes: 0x4000,
+        };
+        let side = super::super::soc::WatchdogSide {
+            words: words.to_vec(),
+            triggers: alloc::vec![(trigger, 0xf, 1), (trigger, 0xf, 1)],
+        };
+        let mut d = AppleDevices::new();
+        d.add_watchdog_with_side(range, Some(&side), None, 0)
+            .unwrap();
+        d.write(0, flags, 4, 0xabcd_0001, 0).unwrap();
+        let old = d.read(0, flags, 4, 0).unwrap();
+        d.write(0, flags, 4, old | 4, 0).unwrap();
+        assert_eq!(d.read(0, flags, 4, 0), Ok(0xabcd_0005));
+        assert_eq!(d.read(0, words[2], 4, 0), Ok(0));
+        assert!(d.read(0, words[1], 4, 0).is_err());
+        assert_eq!(d.read(0, base, 4, 0), Ok(0));
+        d.write(0, trigger, 4, 1, 0).unwrap();
+        assert_eq!(d.read(0, trigger, 4, 0), Ok(1));
+        assert!(d.read(0, flags + 4, 4, 0).is_err());
+
+        let mut bad_cases = Vec::new();
+        let mut bad = side.clone();
+        bad.words[1] = flags;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words[2] = flags;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words[0] = base;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words[0] += 1;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words[0] = u64::MAX - 3;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words.push(base + 0x9000);
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.words.truncate(1);
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.triggers[1].1 = 3;
+        bad_cases.push(bad);
+        let mut bad = side.clone();
+        bad.triggers[0].0 = flags;
+        bad_cases.push(bad);
+        for bad in bad_cases {
+            let mut d = AppleDevices::new();
+            assert!(
+                d.add_watchdog_with_side(range, Some(&bad), None, 0)
+                    .is_err()
+            );
+            assert!(d.read(0, base, 4, 0).is_err(), "no primary view published");
+            assert!(d.read(0, flags, 4, 0).is_err(), "no side view published");
+        }
     }
 
     #[test]

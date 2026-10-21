@@ -35,6 +35,9 @@
 //! and Stela stops the guest at either, so no later guest-visible behavior
 //! depends on them. Every side register starts zero in Stela's boot handoff.
 //! No side register changes the three primary timers.
+//! When the DT assigns panic-save and force-power-off the same physical
+//! word, both views share its full32 storage; separate layouts retain
+//! separate words. Command/configuration aliases require separate evidence.
 //!
 //! `CoreTrigger` is one `trigger-config` word in a CPU's CoreSight region,
 //! which the driver sets to its value under the record's mask on CPU start
@@ -61,6 +64,12 @@ pub const PANIC_SAVE: u64 = 0x4000;
 pub const MECHANISM: u64 = 0x4004;
 pub const CONFIGURATION: u64 = 0x4008;
 pub const POWER_OFF: u64 = 0x400c;
+
+enum PowerOff {
+    Separate(u32),
+    /// Both DT views name one physical flags word, not a copied value.
+    PanicSave,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Watchdog {
@@ -101,7 +110,7 @@ pub struct AppleWdt {
     /// The armed mechanism deadline, in seconds of the system counter.
     mechanism: Option<u32>,
     configuration: u32,
-    power_off: u32,
+    power_off: PowerOff,
 }
 impl AppleWdt {
     /// `irq` is the node's DeviceTree `interrupts` AIC input; `now` the
@@ -122,12 +131,21 @@ impl AppleWdt {
             panic_save: 0,
             mechanism: None,
             configuration: 0,
-            power_off: 0,
+            power_off: PowerOff::Separate(0),
         }
     }
     /// The optional DT side controls, separate from the timer window.
     pub fn with_side_controls(mut self) -> Self {
         self.side = true;
+        self
+    }
+
+    /// DT reg[1] and reg[4] name the same full32 flags word (original
+    /// T6000: panic-save bit 0 and force-power-off bit 2 at 0x2922b8020).
+    /// Both logical views retain the actual word, including unrelated bits.
+    pub fn with_shared_panic_flags(mut self) -> Self {
+        self.side = true;
+        self.power_off = PowerOff::PanicSave;
         self
     }
     fn evaluate(&mut self, access: &mut Access<'_>) -> Option<u64> {
@@ -209,7 +227,12 @@ impl MmioDevice for AppleWdt {
             match offset {
                 PANIC_SAVE => return Ok(u64::from(self.panic_save)),
                 CONFIGURATION => return Ok(u64::from(self.configuration)),
-                POWER_OFF => return Ok(u64::from(self.power_off)),
+                POWER_OFF => {
+                    return Ok(u64::from(match self.power_off {
+                        PowerOff::Separate(word) => word,
+                        PowerOff::PanicSave => self.panic_save,
+                    }));
+                }
                 _ => {}
             }
             if offset == MECHANISM {
@@ -249,7 +272,10 @@ impl MmioDevice for AppleWdt {
             let retained = match offset {
                 PANIC_SAVE => Some(&mut self.panic_save),
                 CONFIGURATION => Some(&mut self.configuration),
-                POWER_OFF => Some(&mut self.power_off),
+                POWER_OFF => Some(match &mut self.power_off {
+                    PowerOff::Separate(word) => word,
+                    PowerOff::PanicSave => &mut self.panic_save,
+                }),
                 _ => None,
             };
             if let Some(register) = retained {
@@ -344,6 +370,35 @@ mod tests {
 
     const WD1: u64 = STRIDE;
     const IRQ: AicInput = AicInput::new(0, 379);
+
+    #[test]
+    fn shared_panic_flags_are_one_word_through_both_logical_views() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut wdt = AppleWdt::new(None, 0).with_shared_panic_flags();
+        wdt.write(PANIC_SAVE, Width::Word, 0xabcd_0001, &mut access)
+            .unwrap();
+        assert_eq!(
+            wdt.read(POWER_OFF, Width::Word, &mut access),
+            Ok(0xabcd_0001)
+        );
+        let word = wdt.read(POWER_OFF, Width::Word, &mut access).unwrap();
+        wdt.write(POWER_OFF, Width::Word, word | 4, &mut access)
+            .unwrap();
+        assert_eq!(
+            wdt.read(PANIC_SAVE, Width::Word, &mut access),
+            Ok(0xabcd_0005)
+        );
+        assert_eq!(wdt.read(CONFIGURATION, Width::Word, &mut access), Ok(0));
+        assert_eq!(wdt.read(CUR_TIME, Width::Word, &mut access), Ok(0));
+        assert!(access.reset_request().is_none());
+        // A distinct physical layout continues to have two independent words.
+        let mut separate = AppleWdt::new(None, 0).with_side_controls();
+        separate
+            .write(PANIC_SAVE, Width::Word, 1, &mut access)
+            .unwrap();
+        assert_eq!(separate.read(POWER_OFF, Width::Word, &mut access), Ok(0));
+    }
 
     fn write(
         wdt: &mut AppleWdt,
