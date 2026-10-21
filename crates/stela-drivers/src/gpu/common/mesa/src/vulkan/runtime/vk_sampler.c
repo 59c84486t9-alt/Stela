@@ -25,6 +25,7 @@
 #include "vk_sampler.h"
 #include "vk_device.h"
 #include "vk_format.h"
+#include "vulkan/util/vk_color_value.h"
 #include "vk_limits.h"
 #include "vk_util.h"
 #include "vk_ycbcr_conversion.h"
@@ -53,20 +54,7 @@ vk_border_color_value(VkBorderColor color)
 bool
 vk_border_color_is_int(VkBorderColor color)
 {
-   switch (color) {
-   case VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK:
-   case VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK:
-   case VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE:
-   case VK_BORDER_COLOR_FLOAT_CUSTOM_EXT:
-      return false;
-   case VK_BORDER_COLOR_INT_TRANSPARENT_BLACK:
-   case VK_BORDER_COLOR_INT_OPAQUE_BLACK:
-   case VK_BORDER_COLOR_INT_OPAQUE_WHITE:
-   case VK_BORDER_COLOR_INT_CUSTOM_EXT:
-      return true;
-   default:
-      UNREACHABLE("Invalid border color enum");
-   }
+   return vk_color_value_is_int(color);
 }
 
 VkClearColorValue

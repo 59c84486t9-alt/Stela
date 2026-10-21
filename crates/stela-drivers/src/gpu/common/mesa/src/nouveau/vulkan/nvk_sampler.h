@@ -13,9 +13,7 @@
 
 #include "vk_format.h"
 
-struct nvk_sampler_header {
-   uint32_t bits[8];
-};
+#include "nouveau/nil/nil_sampler.h"
 
 struct nvk_sampler {
    struct vk_sampler vk;
