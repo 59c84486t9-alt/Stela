@@ -9,6 +9,7 @@ pub mod igb;
 pub mod igc;
 pub mod realtek;
 pub mod virtio;
+pub mod wifi;
 
 /// The shortest frame without FCS; shorter frames are padded (IEEE 802.3).
 pub const MIN_FRAME: usize = 60;
