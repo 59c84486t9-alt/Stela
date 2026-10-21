@@ -62,11 +62,13 @@ impl Lines {
     }
 }
 
-/// The earliest panic message observed on the UART. Nested-panic metadata
-/// supplies a fallback only when no earlier panic header was received.
+/// The earliest explicit panic header observed on the UART. Buffered console
+/// output can follow nested-panic metadata, which is only a fallback when no
+/// explicit header arrives.
 #[derive(Default)]
 pub struct Panic {
     first: Option<String>,
+    fallback: Option<String>,
     nested: bool,
 }
 
@@ -74,6 +76,7 @@ impl Panic {
     pub const fn new() -> Self {
         Self {
             first: None,
+            fallback: None,
             nested: false,
         }
     }
@@ -89,7 +92,8 @@ impl Panic {
             .and_then(|rest| rest.split_once("): "))
             .map(|(_, message)| message);
         let message = header.or_else(|| {
-            (nested
+            (self.fallback.is_none()
+                && nested
                 && !line.text.trim().is_empty()
                 && line.text.trim() != "<end nested panic string>")
                 .then(|| {
@@ -103,14 +107,18 @@ impl Panic {
             if !line.complete {
                 message += " [continued in guest log]";
             }
-            self.first = Some(message);
+            if header.is_some() {
+                self.first = Some(message);
+            } else {
+                self.fallback = Some(message);
+            }
         } else {
             self.nested = line.text.trim() == "Nested panic string:";
         }
     }
 
     pub fn message(&self) -> Option<&str> {
-        self.first.as_deref()
+        self.first.as_deref().or(self.fallback.as_deref())
     }
 }
 
@@ -252,14 +260,21 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_message_is_a_fallback_when_no_prior_header_was_received() {
+    fn a_nested_message_is_only_a_fallback_until_an_explicit_header_arrives() {
+        let source =
+            b"Nested panic string:\nKernel data abort. at pc 0x1234 (saved state: 0x8000)\n";
+        assert_eq!(
+            panics(source).message(),
+            Some("Kernel data abort. at pc 0x1234")
+        );
         assert_eq!(
             panics(
                 b"Nested panic string:\nKernel data abort. at pc 0x1234 (saved state: 0x8000)\n\
-                panic(cpu 0 caller 0x2000): later panic\n"
+                panic(cpu 0 caller 0x2000): original buffered panic\n\
+                panic(cpu 0 caller 0x3000): another panic\n"
             )
             .message(),
-            Some("Kernel data abort. at pc 0x1234")
+            Some("original buffered panic")
         );
         assert_eq!(
             panics(

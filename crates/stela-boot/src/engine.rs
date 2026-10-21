@@ -1358,7 +1358,8 @@ fn installer_step(line: &str) -> Option<String> {
 static GUEST_PANIC: output::Global<console_lines::Panic> =
     output::Global(RefCell::new(console_lines::Panic::new()));
 
-/// The earliest observed panic, without replacing it with a later nested panic.
+/// The first explicit panic header, falling back to nested metadata if the
+/// buffered original header has not arrived. Repeated headers never replace it.
 fn guest_panic() -> Option<String> {
     GUEST_PANIC
         .0
