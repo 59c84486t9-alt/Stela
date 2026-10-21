@@ -54,6 +54,13 @@
 //! the boot-chain facts that model declares (`soc::model_boot_properties`,
 //! `soc::ChildModel`), such as a native RTKit's preloaded state or ANS2's
 //! empty register tuning lists.
+//!
+//! Some peripherals bind by `name`/`device_type` without a `compatible`.
+//! Removing `compatible` cannot hide those clients. Declared required
+//! platform-function dependencies are resolved after ordinary admission;
+//! a client without its provider gets `AAPL,ignore`, which XNU's
+//! `IODTFindMatchingEntries` skips. Its name, phandle and properties remain
+//! available as DeviceTree data. Optional functions are not dependencies.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -66,6 +73,12 @@ const SECURE_ROOT_PREFIX: &str = "secure-root-prefix";
 const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
 const NO_PMU: &str = "no-pmu";
+const IGNORE: &str = "AAPL,ignore";
+/// Required functions of name-matched hardware classes, not optional
+/// callbacks inferred from arbitrary `function-*` properties. The original
+/// AppleOLYHAL AMFM driver requires its PCIe port-control function in start
+/// (26A434 unslid 0xfffffe0009b3e108..0x9b3e1f4).
+const REQUIRED_FUNCTIONS: &[(&str, &[&str])] = &[("amfm", &["function-pcie_port_control"])];
 /// The prefix of a button's platform function: the provider's phandle, the
 /// function code and its arguments (`function-button_hold`).
 const BUTTON_FUNCTION: &str = "function-button_";
@@ -209,7 +222,9 @@ fn hide_unserved_clients(node: &mut Node, path: &str, mappers: &[u32], hidden: &
 /// that no AES accelerator can acknowledge, marks visible watchdogs
 /// `no-pmu` when no PMU is visible, and returns their paths, those behind
 /// an unmodeled DART first and then the rest in tree order, then the
-/// selections and marks (`PATH +no-pmu`).
+/// selections and marks (`PATH +no-pmu`). Name-matched clients whose
+/// declared required function providers are unavailable get `AAPL,ignore`
+/// and an entry in that same ledger.
 pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     let mut mappers = Vec::new();
     unmodeled_mappers(&tree.root, &mut mappers);
@@ -219,6 +234,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     client_providers(&tree.root, &mut parents);
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
     hide_unprovided_buttons(tree, &mut hidden);
+    hide_unprovided_functions(tree, &mut hidden);
     let selected = tree
         .property(DEFAULTS, SERIAL_DEVICE)
         .and_then(|property| property.as_u32())
@@ -254,6 +270,101 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     }
     publish_gpu_ttbat(tree, &mut hidden);
     hidden
+}
+
+fn required_functions(node: &Node) -> &'static [&'static str] {
+    let kind = node.property(DEVICE_TYPE).and_then(|p| p.as_str());
+    REQUIRED_FUNCTIONS
+        .iter()
+        .find_map(|&(name, functions)| (kind == Some(name)).then_some(functions))
+        .unwrap_or_default()
+}
+
+struct FunctionClient {
+    path: String,
+    phandle: Option<u32>,
+    providers: Option<Vec<u32>>,
+    provided: bool,
+}
+
+/// Collect trusted provider roots and clients whose required dependencies
+/// still need to be proven. An ignored subtree supplies no IOKit service.
+fn function_clients(
+    node: &Node,
+    path: &str,
+    clients: &mut Vec<FunctionClient>,
+    roots: &mut Vec<u32>,
+) {
+    if node.property(IGNORE).is_some() {
+        return;
+    }
+    let required = required_functions(node);
+    let phandle = node.property(PHANDLE).and_then(|p| p.as_u32());
+    let here = if path.is_empty() { "/" } else { path };
+    if !required.is_empty() && !structural(here) {
+        let providers = required
+            .iter()
+            .map(|name| {
+                // Every platform function begins with a provider phandle
+                // and a four-character operation code; trailing arguments
+                // belong to that function's own protocol.
+                let value = &node.property(name)?.value;
+                let prefix = value.get(..8)?;
+                Some(u32::from_le_bytes(prefix[..4].try_into().expect("4 bytes")))
+            })
+            .collect();
+        clients.push(FunctionClient {
+            path: path.into(),
+            phandle,
+            providers,
+            provided: false,
+        });
+    } else if node.property(COMPATIBLE).is_some()
+        && let Some(phandle) = phandle
+    {
+        roots.push(phandle);
+    }
+    for child in &node.children {
+        let name = child.name().unwrap_or("?");
+        function_clients(child, &format!("{path}/{name}"), clients, roots);
+    }
+}
+
+/// Prove required-provider chains from admitted roots. At most one pass per
+/// client can add a new provider, so a cycle without an admitted root stays
+/// unprovided and terminates. An optional function never hides its client.
+fn hide_unprovided_functions(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    let mut clients = Vec::new();
+    let mut provided = Vec::new();
+    function_clients(&tree.root, "", &mut clients, &mut provided);
+    for _ in 0..clients.len() {
+        let mut changed = false;
+        for client in &mut clients {
+            if !client.provided
+                && client.providers.as_ref().is_some_and(|providers| {
+                    providers.iter().all(|provider| provided.contains(provider))
+                })
+            {
+                client.provided = true;
+                if let Some(phandle) = client.phandle {
+                    provided.push(phandle);
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for client in clients.into_iter().filter(|client| !client.provided) {
+        tree.node_mut(&client.path)
+            .expect("visited path")
+            .set_property(IGNORE, Vec::new())
+            .expect("empty property");
+        if !hidden.contains(&client.path) {
+            hidden.push(client.path);
+        }
+    }
 }
 
 /// Hides each visible `/buttons` node that names no `function-button_*`
@@ -427,6 +538,123 @@ mod tests {
         }
         node.children = children;
         node
+    }
+
+    fn function_client(name: &str, phandle_value: u32, provider: u32) -> Node {
+        let mut client = phandle(node(name, None, vec![]), phandle_value);
+        client
+            .set_property(DEVICE_TYPE, b"amfm\0".to_vec())
+            .unwrap();
+        client
+            .set_property(
+                "function-pcie_port_control",
+                [provider, four_char_code(b"PrtC"), 0x36]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+        client
+    }
+
+    #[test]
+    fn name_matched_clients_require_an_admitted_function_provider() {
+        let tree = |provider| DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![function_client("radio", 0x24, 0x35), provider],
+            ),
+        };
+        let mut hidden = tree(phandle(node("pcie", Some(b"apcie,t8112\0"), vec![]), 0x35));
+        let original = hidden.node("/radio").unwrap().clone();
+        assert_eq!(hide_unmodeled(&mut hidden), ["/pcie", "/radio"]);
+        assert!(hidden.property("/radio", IGNORE).is_some());
+        let mut retained = hidden.node("/radio").unwrap().clone();
+        retained.remove_property(IGNORE);
+        assert_eq!(retained, original);
+        assert!(hide_unmodeled(&mut hidden).is_empty());
+
+        let mut absent = tree(phandle(node("other", Some(b"uart-1,samsung\0"), vec![]), 7));
+        assert_eq!(hide_unmodeled(&mut absent), ["/radio"]);
+        // Availability follows the declared provider, never its node name.
+        let mut provided = tree(phandle(
+            node("device", Some(b"uart-1,samsung\0"), vec![]),
+            0x35,
+        ));
+        assert!(hide_unmodeled(&mut provided).is_empty());
+        assert!(provided.property("/radio", IGNORE).is_none());
+        provided
+            .node_mut("/device")
+            .unwrap()
+            .set_property(IGNORE, vec![])
+            .unwrap();
+        assert_eq!(hide_unmodeled(&mut provided), ["/radio"]);
+    }
+
+    #[test]
+    fn required_function_chains_are_proven_and_unrooted_cycles_are_hidden() {
+        let mut tree = DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![
+                    function_client("first", 1, 2),
+                    function_client("second", 2, 3),
+                    phandle(node("provider", Some(b"uart-1,samsung\0"), vec![]), 3),
+                ],
+            ),
+        };
+        assert!(hide_unmodeled(&mut tree).is_empty());
+        tree.root.children.pop();
+        tree.node_mut("/second")
+            .unwrap()
+            .set_property(
+                "function-pcie_port_control",
+                [1u32, four_char_code(b"PrtC")]
+                    .into_iter()
+                    .flat_map(u32::to_le_bytes)
+                    .collect(),
+            )
+            .unwrap();
+        assert_eq!(hide_unmodeled(&mut tree), ["/first", "/second"]);
+        assert!(tree.property("/first", IGNORE).is_some());
+        assert!(tree.property("/second", IGNORE).is_some());
+        assert!(hide_unmodeled(&mut tree).is_empty());
+    }
+
+    #[test]
+    fn undeclared_optional_functions_do_not_hide_clients_but_required_records_must_exist() {
+        let mut optional = node("optional", None, vec![]);
+        optional
+            .set_property(DEVICE_TYPE, b"metadata\0".to_vec())
+            .unwrap();
+        optional
+            .set_property("function-send_disp_clock", vec![])
+            .unwrap();
+        let mut required = function_client("required", 1, 2);
+        required.remove_property("function-pcie_port_control");
+        let mut tree = DeviceTree {
+            root: node("", None, vec![optional, required]),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), ["/required"]);
+        assert!(tree.property("/optional", IGNORE).is_none());
+        // A phandle alone is not a complete platform function.
+        let mut malformed = function_client("bad", 3, 2);
+        malformed
+            .set_property("function-pcie_port_control", 2u32.to_le_bytes().to_vec())
+            .unwrap();
+        let mut tree = DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![
+                    malformed,
+                    phandle(node("provider", Some(b"uart-1,samsung\0"), vec![]), 2),
+                ],
+            ),
+        };
+        assert_eq!(hide_unmodeled(&mut tree), ["/bad"]);
     }
 
     #[test]

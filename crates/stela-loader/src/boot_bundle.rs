@@ -46,7 +46,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// read-only boot run and publish its object range and secure hash.
 /// Revision 3: publish the explicit previous-stage boot command in `/chosen`
 /// and `/chosen/handoff`, independently of the OS environment.
-pub const REVISION: u32 = 3;
+/// Revision 4: restrict name-matched peripherals with unavailable required
+/// platform-function providers through `AAPL,ignore`.
+pub const REVISION: u32 = 4;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -859,7 +861,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let hidden_devices = devices::hide_unmodeled(&mut tree);
     if !hidden_devices.is_empty() {
         unresolved.push(format!(
-            "{} devices have no model; their compatible is removed (hidden_devices)",
+            "{} device admissions are restricted by missing models or providers (hidden_devices)",
             hidden_devices.len()
         ));
     }
