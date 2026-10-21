@@ -14,6 +14,7 @@ pub mod boot_bundle;
 pub mod boot_manifests;
 pub mod boot_policy;
 pub mod boot_selection;
+pub mod boot_trace;
 pub mod carveouts;
 #[cfg(feature = "std")]
 pub mod chained_fixups;

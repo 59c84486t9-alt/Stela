@@ -27,7 +27,8 @@ use core::arch::{
 };
 use stela_drivers::block::{BlockDevice, BlockError};
 use stela_loader::{
-    boot_bundle::Options, boot_selection::BootVolume, installed, recovery, upgrade,
+    apple_device_tree::DeviceTree, boot_bundle::Options, boot_selection::BootVolume, boot_trace,
+    installed, recovery, upgrade,
 };
 use stela_runtime::{
     boot_bundle::{Framebuffer, MANIFEST_FILE, Machine, Manifest, Nvram},
@@ -518,11 +519,48 @@ fn load_named<'a>(
     framebuffer: Option<Framebuffer>,
     nvram: Option<Nvram>,
 ) -> Result<Entry, String> {
+    let mut trace = boot_trace::Trace::new(TIMEBASE_HZ as u32).map_err(|e| format!("{e}"))?;
+    trace_record(host, &mut trace, *b"SVFY")?;
     let json = named(MANIFEST_FILE).ok_or("bundle.json was not read")?;
     let manifest = Manifest::parse(json).map_err(|e| format!("{e}"))?;
     let verified = manifest
         .verify(&|name| named(name))
         .map_err(|e| format!("{e}"))?;
+    trace_record(host, &mut trace, *b"EVFY")?;
+    // Use the verified tree region, including its file offset. The trace
+    // must stay in the original reserved range below managed memory.
+    let trace_region = manifest
+        .regions
+        .iter()
+        .find(|region| region.name == "DeviceTree")
+        .map(|region| -> Result<_, String> {
+            let file = named(&region.file).ok_or("verified DeviceTree file disappeared")?;
+            let start =
+                usize::try_from(region.file_offset).map_err(|_| "DeviceTree offset overflows")?;
+            let length =
+                usize::try_from(region.bytes).map_err(|_| "DeviceTree length overflows")?;
+            let end = start.checked_add(length).ok_or("DeviceTree range wraps")?;
+            let bytes = file
+                .get(start..end)
+                .ok_or("DeviceTree range is out of bounds")?;
+            let tree = DeviceTree::parse(bytes).map_err(|e| format!("boot trace tree: {e}"))?;
+            let trace = boot_trace::Region::from_tree(&tree).map_err(|e| format!("{e}"))?;
+            if let Some(trace) = trace {
+                trace
+                    .validate(
+                        dram_base,
+                        manifest.options.phys_base,
+                        manifest
+                            .regions
+                            .iter()
+                            .map(|region| (region.guest_pa, region.memory_bytes)),
+                    )
+                    .map_err(|e| format!("{e}"))?;
+            }
+            Ok(trace)
+        })
+        .transpose()?
+        .flatten();
     let machine = Machine {
         dram_base,
         ram_bytes,
@@ -531,11 +569,23 @@ fn load_named<'a>(
         boot_args: None,
         nvram,
     };
+    trace_record(host, &mut trace, *b"SLOD")?;
     let image = verified
         .load(&machine, &mut entropy, &mut |pa, data| {
             host.write_ram(pa, data)
         })
         .map_err(|e| format!("{e}"))?;
+    trace_record(host, &mut trace, *b"ELOD")?;
+    if let Some(region) = trace_region {
+        if !host.write_ram(region.base, trace.bytes()) {
+            return Err("boot trace guest RAM write failed".into());
+        }
+        output::arguments(format_args!(
+            "BOOTTRACE format=BTRD origin=stela-native stages=verify,load records=4 hz={TIMEBASE_HZ} pa={:#x} bytes={}\n",
+            region.base,
+            trace.bytes().len()
+        ));
+    }
     for region in &image.regions {
         output::arguments(format_args!(
             "REGION {} pa={:#x} bytes={:#x} memory={:#x}\n",
@@ -553,4 +603,23 @@ fn load_named<'a>(
             .read_only_region
             .map(|region| (region.base, region.bytes)),
     })
+}
+
+/// Observe the same 24 MHz counter the first guest slice reads. No guest
+/// slice has run yet, so no execution lag or idle leap has been charged.
+/// The inline native RIP explicitly identifies Stela as the record source.
+#[inline(always)]
+fn trace_record(
+    host: &mut impl Host,
+    trace: &mut boot_trace::Trace,
+    tag: [u8; 4],
+) -> Result<(), String> {
+    let pc: u64;
+    // SAFETY: obtains this native instruction address without accessing memory.
+    unsafe {
+        asm!("lea {pc}, [rip + 2f]", "2:", pc = out(reg) pc, options(nomem, nostack, preserves_flags));
+    }
+    trace
+        .record(host.counter(), pc, tag, 0)
+        .map_err(|e| format!("{e}"))
 }
