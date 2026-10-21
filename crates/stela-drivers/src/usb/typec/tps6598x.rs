@@ -446,9 +446,10 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
         self.ready = true;
         Ok(())
     }
-    /// Poll the real event registers (or run after a deferred IRQ). Raw events
-    /// and all status/identity reads are staged before either W1C. No partial
-    /// snapshot is published on failure; uncertain ACKs poison future work.
+    /// Poll the real event registers (or run after a deferred IRQ). Captured
+    /// banks are acknowledged before sampling status, so a same-bit change
+    /// during the sample remains latched for the next poll. No partial snapshot
+    /// is published on failure; failed ACKs or later reads poison future work.
     pub fn poll(&mut self) -> Result<Option<Event>, Error> {
         self.check_ready()?;
         let result = self.poll_inner();
@@ -463,9 +464,9 @@ impl<B: Bus, C: Timer> Tps6598x<B, C> {
         if first.iter().chain(second.iter()).all(|byte| *byte == 0) {
             return Ok(None);
         }
-        let snapshot = self.read_snapshot()?;
         self.write(0x18, &first[..usize::from(bytes)])?;
         self.write(0x19, &second[..usize::from(bytes)])?;
+        let snapshot = self.read_snapshot()?;
         self.snapshot = Some(snapshot);
         Ok(Some(Event {
             first,
@@ -570,6 +571,7 @@ mod tests {
         invalid: bool,
         task_result: u8,
         second_result: u8,
+        detach_during_sample: bool,
         patch_fail: Option<[u8; 4]>,
         role_changes: bool,
     }
@@ -589,6 +591,7 @@ mod tests {
                 invalid: false,
                 task_result: 0,
                 second_result: 0,
+                detach_during_sample: false,
                 patch_fail: None,
                 role_changes: true,
             };
@@ -672,6 +675,13 @@ mod tests {
                     assert_eq!(request.len(), 1);
                     let register = request[0];
                     assert!((2..=65).contains(&response.len()));
+                    if register == 0x5f && model.detach_during_sample {
+                        model.detach_during_sample = false;
+                        model.set32(STATUS, 0);
+                        model.set32(0x5f, 0);
+                        model.registers[0x3f][..2].fill(0);
+                        model.registers[0x14][0] |= 8;
+                    }
                     if register == CMD && model.pending.is_some() && !model.hang {
                         if model.invalid {
                             model.pending = None;
@@ -1061,6 +1071,24 @@ mod tests {
             let calls = model.borrow().calls;
             assert!(controller.request_data_role(DataRole::Device).is_err());
             assert_eq!(model.borrow().calls, calls);
+        }
+    }
+
+    #[test]
+    fn same_plug_bit_reasserted_during_status_sampling_is_not_lost() {
+        for hardware in [0, 0xf7, 0xf9] {
+            let (mut controller, model) = initialized(hardware);
+            model.borrow_mut().registers[0x14][0] = 8;
+            model.borrow_mut().detach_during_sample = true;
+            // STATUS is sampled before the peer detaches during DATA_STATUS.
+            // The captured event was already ACKed, so its newly reasserted
+            // same bit must survive this sample and trigger the next drain.
+            assert!(controller.poll().unwrap().unwrap().snapshot.connected());
+            assert_eq!(model.borrow().registers[0x14][0], 8);
+            assert!(!controller.poll().unwrap().unwrap().snapshot.connected());
+            assert_eq!(model.borrow().registers[0x14][0], 0);
+            assert_eq!(controller.poll().unwrap(), None);
+            assert!(!controller.snapshot().unwrap().connected());
         }
     }
     #[test]
