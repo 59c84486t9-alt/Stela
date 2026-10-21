@@ -353,6 +353,59 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_qualified_native_low_root_executes_dma_without_relaxing_context_bounds() {
+        let iova = 0x200_4000;
+        let context = Context::from_vm_range(0x200_0000, 0x100_0000).unwrap();
+        assert!(Handoff::new(0x300, TRANSLATE, context).is_err());
+        let handoff = Handoff::native_client(
+            0x300,
+            TRANSLATE,
+            context,
+            BoundsPolicy::NoncompliantDeadMappings,
+        )
+        .unwrap();
+        let indices = context
+            .map(iova, 4, BoundsPolicy::Strict)
+            .unwrap()
+            .indices();
+        let mut ram = Ram::new(ROOT, (4 * PAGE) as usize);
+        ram.put_u64(ROOT + u64::from(indices.segment()) * 8, entry(LEAF));
+        ram.put_u64(
+            LEAF + u64::from(indices.page()) * 8,
+            entry(FRAME) | 0xfff << 40,
+        );
+        let mut tables = Tables::new(256).unwrap();
+        tables
+            .configure_handoff(255, (ROOT >> 12) as u32 | 1, handoff)
+            .unwrap();
+        tables.set_enabled(255, true).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        Port {
+            iommu: &mut tables,
+            stream: 255,
+            memory: &mut ram,
+            access: &mut access,
+        }
+        .write(iova, &[2, 3, 5, 7])
+        .unwrap();
+        let mut actual = [0; 4];
+        assert!(ram.read(FRAME, &mut actual));
+        assert_eq!(actual, [2, 3, 5, 7]);
+        for foreign in [iova - 0x10000, iova + (1 << 36), iova + (16 << 36)] {
+            assert!(matches!(
+                tables.translate(&mut ram, 255, foreign, foreign + 3, false, &mut access),
+                Err(DmaError::Unsupported(_))
+            ));
+        }
+        assert_eq!(tables.faults().pending(7), Ok(0));
+        assert_eq!(
+            tables.translate(&mut ram, 255, iova, iova + 3, false, &mut access),
+            Ok(FRAME)
+        );
+    }
+
+    #[test]
     fn qualified_handoffs_execute_both_native_roots_without_rebinding_an_encoding() {
         for (base, bytes, iova, config) in [
             (0x10000004000, 0xffff0000, 0x10002004000, TRANSLATE),

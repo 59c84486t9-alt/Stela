@@ -6,7 +6,7 @@
 //! flag also publishes TCR bit3 at158568..158588. This qualifies the root
 //! used by a table walk, not native security, filters or generated faults.
 use super::{
-    context::{Context, Geometry, PAGE_SHIFT, TableLevel},
+    context::{BoundsPolicy, Context, Geometry, PAGE_SHIFT, TableLevel},
     descriptor::Encoding,
 };
 
@@ -29,6 +29,20 @@ impl Handoff {
     /// form and software bounds to a representable root. Unknown controls,
     /// compact handoff modes and bypass still require their own contracts.
     pub fn new(revision: u16, config: u32, context: Context) -> Result<Self, &'static str> {
+        Self::native_client(revision, config, context, BoundsPolicy::Strict)
+    }
+
+    /// Bind the original native SPTM-interface root policy explicitly.
+    /// mac18g92833e4..9283400 sources its low-root exception from presence
+    /// of `noncompliant-dead-mappings`; 9282e18..9282e1c explicitly enables
+    /// root checking. This qualifies software root selection, not missing
+    /// upper-TCR fields, native fill-region faults or out-of-context DMA.
+    pub fn native_client(
+        revision: u16,
+        config: u32,
+        context: Context,
+        policy: BoundsPolicy,
+    ) -> Result<Self, &'static str> {
         let encoding = Encoding::handoff_revision(revision)?;
         if config & !(TRANSLATE | THREE_LEVEL) != 0 {
             return Err("gen3 DART native handoff has unqualified TCR fields");
@@ -42,8 +56,16 @@ impl Handoff {
         if context.geometry() == Geometry::TwoLevel {
             let start = u64::from(context.start_page()) << PAGE_SHIFT;
             let end = u64::from(context.end_page()) << PAGE_SHIFT;
-            if start < ORDINARY_BASE || end > ORDINARY_END {
-                return Err("gen3 DART native two-level root requires the original upper index16");
+            let ordinary = start >= ORDINARY_BASE && end <= ORDINARY_END;
+            // Native dart_vo_tt_index928d194..928d1d8 selects expected
+            // index0 only with the explicit policy and DVA below1 TiB.
+            // Requiring that index throughout the context narrows the
+            // accepted low window to64 GiB, never all addresses below1 TiB.
+            let low = policy == BoundsPolicy::NoncompliantDeadMappings && end <= 1 << ROOT_SHIFT;
+            if !ordinary && !low {
+                return Err(
+                    "gen3 DART native two-level context exceeds its qualified root windows",
+                );
             }
         }
         // Context already enforces the original 42-bit construction limit.
@@ -85,6 +107,72 @@ impl Handoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_client_low_root_requires_the_original_explicit_property_and_complete_window() {
+        for (base, bytes) in [
+            (0, 1 << 20),
+            (0x4000, 0x100_0000),
+            ((1 << ROOT_SHIFT) - (1 << 20), 1 << 20),
+        ] {
+            let context = Context::from_vm_range(base, bytes).unwrap();
+            assert!(Handoff::new(0x300, TRANSLATE, context).is_err());
+            assert!(
+                Handoff::native_client(0x300, TRANSLATE, context, BoundsPolicy::Strict).is_err()
+            );
+            let handoff = Handoff::native_client(
+                0x300,
+                TRANSLATE,
+                context,
+                BoundsPolicy::NoncompliantDeadMappings,
+            )
+            .unwrap();
+            assert_eq!(handoff.context(), context);
+            assert_eq!(handoff.first_level(), TableLevel::Segment);
+            assert_eq!(handoff.root_slot(), 0);
+        }
+        for (base, bytes) in [
+            ((1 << ROOT_SHIFT) - (1 << 20), 2 << 20),
+            (1 << ROOT_SHIFT, 1 << 20),
+            ((1 << 40) - (1 << 20), 1 << 20),
+            (ORDINARY_BASE - (1 << 20), 2 << 20),
+        ] {
+            let context = Context::from_vm_range(base, bytes).unwrap();
+            assert!(
+                Handoff::native_client(
+                    0x300,
+                    TRANSLATE,
+                    context,
+                    BoundsPolicy::NoncompliantDeadMappings
+                )
+                .is_err()
+            );
+        }
+        let context = Context::from_vm_range(ORDINARY_BASE, 1 << 20).unwrap();
+        assert!(
+            Handoff::native_client(
+                0x300,
+                TRANSLATE,
+                context,
+                BoundsPolicy::NoncompliantDeadMappings
+            )
+            .is_ok()
+        );
+        // The property changes the original root-index expectation; it
+        // does not authorize a different revision or unknown TCR bits.
+        let context = Context::from_vm_range(0, 1 << 20).unwrap();
+        for (revision, config) in [(0x302, TRANSLATE), (0x300, 0), (0x300, TRANSLATE | 0x80)] {
+            assert!(
+                Handoff::native_client(
+                    revision,
+                    config,
+                    context,
+                    BoundsPolicy::NoncompliantDeadMappings
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn original_root_qualification_distinguishes_software_bounds_from_native_roots() {
