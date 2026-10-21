@@ -7,6 +7,8 @@ use super::control::{Address, Body, Header, Packet};
 use super::{Accepted, Consumer, Direction, Frame, Options, Transmit};
 use alloc::{boxed::Box, vec::Vec};
 
+pub mod cio;
+
 /// A real routed hardware error, distinct from a missing model requirement.
 pub struct Failure {
     pub route: u64,
