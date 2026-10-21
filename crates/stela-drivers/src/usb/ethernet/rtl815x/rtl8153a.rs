@@ -199,13 +199,19 @@ impl<C: Control> Chip<C> {
     /// different FIFO/MTU paths and must never enter this helper.
     pub(super) fn first_init_8153(&mut self) -> Result<(), BlockError> {
         self.modify(PLA, PLA_MISC_1, 2, 0, RXDY_GATED_EN)?;
-        self.modify(
-            PLA,
-            PLA_TEREDO_CFG,
-            2,
-            TEREDO_SEL | TEREDO_RS_EVENT_MASK | OOB_TEREDO_EN,
-            0,
-        )?;
+        if self.revision.is_8153b() {
+            // r8153_teredo_off: 08/09 use W1C event bits; clearing a
+            // select-mask word would leave those latched wake events pending.
+            self.write(PLA, PLA_TEREDO_CFG, 1, 0xff)?;
+        } else {
+            self.modify(
+                PLA,
+                PLA_TEREDO_CFG,
+                2,
+                TEREDO_SEL | TEREDO_RS_EVENT_MASK | OOB_TEREDO_EN,
+                0,
+            )?;
+        }
         self.write(PLA, PLA_WDT6_CTRL, 2, WDT6_SET_MODE)?;
         self.write(PLA, PLA_REALWOW_TIMER, 2, 0)?;
         self.write(PLA, PLA_TEREDO_TIMER, 4, 0)?;

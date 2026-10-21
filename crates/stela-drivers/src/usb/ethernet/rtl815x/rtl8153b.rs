@@ -314,6 +314,42 @@ mod tests {
     }
 
     #[test]
+    fn rtl8153b_clears_w1c_teredo_events_with_one_byte_and_preserves_neighbors() {
+        for revision in [0x6000, 0x6010] {
+            let bytes = if revision == 0x6010 {
+                synthetic_upload(revision)
+            } else {
+                Vec::new()
+            };
+            let firmware =
+                (!bytes.is_empty()).then(|| Firmware::parse(&bytes, Revision(revision)).unwrap());
+            let model = Rc::new(RefCell::new(FirmwareModel::new(revision, &bytes)));
+            model
+                .borrow_mut()
+                .core
+                .set(PLA, PLA_TEREDO_CFG, 4, 0x1234_abff);
+            Chip::attach_with_firmware(
+                FirmwareIo(model.clone()),
+                Revision(revision),
+                4,
+                firmware.as_ref(),
+            )
+            .unwrap();
+            assert_eq!(model.borrow().core.get(PLA, PLA_TEREDO_CFG, 4), 0x1234_ab00);
+            let hw = model.borrow();
+            let writes: Vec<_> = hw
+                .core
+                .trace
+                .iter()
+                .filter(|(request, _)| request[0] == 0x40 && request[2..4] == [0xbc, 0xc0])
+                .collect();
+            assert_eq!(writes.len(), 1);
+            assert_eq!(writes[0].0[4..6], [0x11, 1]);
+            assert_eq!(writes[0].1[0], 0xff);
+        }
+    }
+
+    #[test]
     fn rtl8153b_power_cut_during_ups_exit_requires_an_extra_phy_reload() {
         let model = Rc::new(RefCell::new(FirmwareModel::new(0x6000, &[])));
         model.borrow_mut().ups_exit_power_cut = true;

@@ -619,10 +619,23 @@ pub(crate) mod tests {
                     assert_eq!(enables & 0xf, enables >> 4);
                     let lanes = enables & 0xf;
                     assert!(matches!(lanes, 1 | 2 | 4 | 8 | 3 | 12 | 15));
+                    let teredo_events = self.get(PLA, PLA_TEREDO_CFG, 1);
+                    let teredo_w1c = bank == PLA
+                        && mapped == PLA_TEREDO_CFG
+                        && lanes & 1 != 0
+                        && (self.get(PLA, PLA_TCR0, 4) >> 16 & VERSION_MASK) >= 0x6000;
                     for (lane, byte) in output.iter().enumerate() {
                         if lanes & (1 << (lane % 4)) != 0 {
                             self.registers.insert((bank, mapped + lane as u32), *byte);
                         }
+                    }
+                    if teredo_w1c {
+                        self.set(
+                            PLA,
+                            PLA_TEREDO_CFG,
+                            1,
+                            teredo_events & !u32::from(output[0]),
+                        );
                     }
                     if address == PLA_OCP_GPHY_BASE {
                         self.base = self.get(PLA, PLA_OCP_GPHY_BASE, 2);
