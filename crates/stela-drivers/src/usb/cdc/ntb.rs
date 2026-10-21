@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT AND GPL-2.0-only
+// Ethernet payload alignment adapted from Linux cdc_ncm.c:
+// Copyright (C) ST-Ericsson 2010-2012
+// Original author: Hans Petter Selasky <hans.petter.selasky@stericsson.com>
 //! CDC NCM 1.0 transfer blocks in the 16-bit format (NTB16), the format a
 //! function uses after reset: an NTH16 header, then NDP16 datagram pointer
 //! tables, each naming its datagrams by offset and length.
@@ -28,6 +32,8 @@ const NDP16_HEADER: usize = 8;
 const POINTER: usize = 4;
 /// The CRC-32 an `NCM1` datagram carries after its frame.
 const CRC_BYTES: usize = 4;
+/// NCM's payload remainder applies after the Ethernet header, without FCS.
+const ETHERNET_HEADER_BYTES: usize = 14;
 /// NDPs and a block's chain are bounded so a malformed block cannot loop.
 const MAX_TABLES: usize = 32;
 
@@ -85,14 +91,18 @@ impl Parameters {
             in_max,
             out_max,
             out_divisor,
-            out_remainder: out_remainder % out_divisor,
+            // GET_NTB_PARAMETERS aligns the Ethernet payload, not the first
+            // byte of its frame. Convert it to a frame-start remainder as
+            // Linux cdc_ncm_fix_modulus does for an Ethernet (non-MBIM) link.
+            out_remainder: out_remainder.wrapping_sub(ETHERNET_HEADER_BYTES) & (out_divisor - 1),
             out_alignment,
         })
     }
 
     /// One OUT block carrying `frame`: the NTH16, one NDP16 right after it
     /// at the required alignment, then the datagram at the first offset
-    /// with the required remainder. `None` when it would exceed `out_max`.
+    /// with the adjusted frame-start remainder, so the Ethernet payload meets
+    /// the function's required remainder. `None` when it exceeds `out_max`.
     pub fn encode(&self, sequence: u16, frame: &[u8]) -> Option<Vec<u8>> {
         let table = NTH16_BYTES.next_multiple_of(self.out_alignment);
         let table_bytes = NDP16_HEADER + 2 * POINTER;
@@ -225,16 +235,52 @@ mod tests {
         let frame = [0xab; 60];
         let block = p.encode(7, &frame).unwrap();
         // NTH16 at 0, NDP16 aligned to 8 at 16, its 16 bytes, then the
-        // datagram at the first offset that is 2 modulo 4: 34.
+        // datagram at 32, so its Ethernet payload at 46 is 2 modulo 4.
         assert_eq!(&block[..4], b"NCMH");
         assert_eq!(u16_at(&block, 6), Some(7));
         assert_eq!(u16_at(&block, 8), Some(block.len() as u16));
         assert_eq!(u16_at(&block, 10), Some(16));
         assert_eq!(&block[16..20], b"NCM0");
-        assert_eq!(u16_at(&block, 24), Some(34));
-        assert_eq!(&block[34..], frame);
+        assert_eq!(u16_at(&block, 24), Some(32));
+        assert_eq!(&block[32..], frame);
         assert_eq!(decode(&block).unwrap(), [&frame[..]]);
         assert!(p.encode(0, &[0; 8192]).is_none());
+    }
+
+    #[test]
+    fn every_payload_remainder_aligns_after_the_ethernet_header() {
+        for divisor in [1u16, 2, 4, 8, 16, 64, 256, 1024] {
+            for remainder in 0..divisor {
+                let p = Parameters::parse(&parameters(divisor, remainder, 8)).unwrap();
+                let frame = [0x5a; 60];
+                let block = p.encode(0, &frame).unwrap();
+                let table = usize::from(u16_at(&block, 10).unwrap());
+                let start = usize::from(u16_at(&block, table + 8).unwrap());
+                assert_eq!((start + 14) % usize::from(divisor), usize::from(remainder));
+                assert_eq!(decode(&block).unwrap(), [&frame[..]]);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires STELA_CDC_NCM_ALIGNMENT_ORACLE from the pinned Linux reference script"]
+    fn unchanged_linux_ethernet_payload_alignment_agrees() {
+        extern crate std;
+        let path = std::env::var("STELA_CDC_NCM_ALIGNMENT_ORACLE").unwrap();
+        let trace = std::fs::read_to_string(path).unwrap();
+        let mut cases = 0;
+        for line in trace.lines() {
+            let fields: Vec<u16> = line
+                .split_whitespace()
+                .map(|n| n.parse().unwrap())
+                .collect();
+            assert_eq!(fields.len(), 5);
+            let p = Parameters::parse(&parameters(fields[0], fields[1], fields[2])).unwrap();
+            assert_eq!(p.out_remainder, usize::from(fields[3]));
+            assert_eq!(p.out_alignment, usize::from(fields[4]));
+            cases += 1;
+        }
+        assert_eq!(cases, 4088);
     }
 
     #[test]

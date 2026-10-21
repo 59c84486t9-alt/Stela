@@ -2910,7 +2910,9 @@ pub(crate) mod tests {
         bytes[4..8].copy_from_slice(&32768u32.to_le_bytes());
         bytes[16..20].copy_from_slice(&2048u32.to_le_bytes());
         bytes[20..22].copy_from_slice(&8u16.to_le_bytes());
-        bytes[22..24].copy_from_slice(&2u16.to_le_bytes());
+        // Ethernet payload (14 bytes after its frame start) is 8-byte aligned.
+        // The resulting frame start at 34 makes a 30-byte frame a 64-byte NTB.
+        bytes[22..24].copy_from_slice(&0u16.to_le_bytes());
         bytes[24..26].copy_from_slice(&8u16.to_le_bytes());
         bytes
     }
