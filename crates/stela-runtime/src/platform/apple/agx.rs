@@ -60,3 +60,4 @@ pub mod signal;
 pub mod stream;
 pub mod uat;
 pub mod work;
+pub mod work_decode;
