@@ -6,6 +6,8 @@
 //! shared L2 capacity. A cluster may mix core types, as the T8152's original
 //! DeviceTree mixes P and M cores in cluster 1. No fixed cluster/core count or
 //! generation label participates in this validation.
+pub mod assigned;
+
 use super::Processor;
 use alloc::{format, string::String};
 
