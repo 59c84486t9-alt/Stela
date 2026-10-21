@@ -42,6 +42,7 @@ use super::super::{GROUP_BUDGET, ShaderState, WorkError};
 use super::geometry::{Binned, POSITION_WORDS, Primitive, Shape, Vertex, object, output};
 use super::{Program as PassProgram, RenderPass, Stats, heap_sampler, zls};
 mod pipeline;
+mod primitive;
 use crate::platform::apple::agx::format::descriptor::{Pbe, Tiling};
 use crate::platform::apple::agx::format::image::{At, Image, ImageError};
 use crate::platform::apple::agx::format::isa::{IsaFormat, register_float};
@@ -735,6 +736,7 @@ pub fn run(
     for words in &binned.fragment_keys {
         pipelines.push(pipeline::load(memory, pass, words, &mut program)?);
     }
+    let primitives = primitive::prepare(memory, pass, binned)?;
     let background = load_program(memory, pass, &pass.background, &mut program)?;
     let end_of_tile = load_program(memory, pass, &pass.end_of_tile, &mut program)?;
     let mut visibility = Visibility::new();
@@ -767,7 +769,7 @@ pub fn run(
                     min: tile.origin,
                     max: [tile.origin[0] + tile.size[0], tile.origin[1] + tile.size[1]],
                 };
-                for primitive in binned.primitives.iter().filter(|p| p.layer == layer) {
+                for primitive in primitives.iter().filter(|p| p.layer == layer) {
                     let bounds = primitive.bounds.intersect(rect);
                     if bounds.is_empty() {
                         continue;

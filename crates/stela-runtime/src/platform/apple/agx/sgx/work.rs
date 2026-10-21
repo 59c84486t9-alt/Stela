@@ -1022,6 +1022,16 @@ mod tests {
                     port.write(0x3ff8 + index * 8, &(0x4000 + index).to_le_bytes())
                         .unwrap();
                 }
+                port.write(0x2208, &0x200u32.to_le_bytes()).unwrap();
+                port.write(0x220c, &0x000f000fu32.to_le_bytes()).unwrap();
+                let (vdm, usc) = if owner.policy == Policy::G14G {
+                    (0x70, 0xa8)
+                } else {
+                    (0x90, 0xe0)
+                };
+                port.write(0x3ff8 + vdm, &0x2000u64.to_le_bytes()).unwrap();
+                port.write(0x3ff8 + usc, &0x1100000000u64.to_le_bytes())
+                    .unwrap();
                 input.cursor().next(port).unwrap().unwrap()
             });
             let mut parameters = ta::Parameters::new(&input, &frame, lease, owner.policy).unwrap();
@@ -1043,6 +1053,7 @@ mod tests {
                 .is_err()
             );
             assert_eq!(power.native.borrow().work.render.writes, 12);
+            assert!(owner.ta_geometry_inputs(&input, lease, None).is_err());
             assert!(power.check_reset().is_err());
             assert!(owner.begin(&submission(), LEASE).is_err());
             let mut other = input.clone();
@@ -1106,6 +1117,19 @@ mod tests {
             })
             .unwrap();
             assert!(parameters.completed());
+            assert_eq!(
+                owner.ta_geometry_inputs(&input, lease, None).unwrap(),
+                crate::platform::apple::agx::exec::render::GeometryInputs {
+                    vdm_stream: 0x2000,
+                    usc_base: 0x1100000000,
+                    vm_slot: input.context,
+                    ppp_control: 0x200,
+                    width: 16,
+                    height: 16,
+                    sampler_heap: None,
+                }
+            );
+            assert!(owner.ta_geometry_inputs(&other, lease, None).is_err());
             let expected = if owner.policy == Policy::G13X { 49 } else { 41 };
             assert_eq!(power.native.borrow().work.render.writes, expected);
             let counts = (memory.reads, memory.writes);
@@ -1145,6 +1169,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(!power.native.borrow().work.active());
+            assert!(owner.ta_geometry_inputs(&input, lease, None).is_err());
             assert_eq!(
                 power
                     .native

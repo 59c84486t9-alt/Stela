@@ -12,7 +12,7 @@
 use super::channel::Kind;
 use super::exec::WorkError;
 use super::exec::compute::{self, Job};
-use super::exec::render::{self, RenderPass};
+use super::exec::render::{self, GeometryInputs, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
 use super::uat::CONTEXTS;
@@ -70,7 +70,7 @@ pub struct GeometryProduct(Box<GeometryData>);
 struct GeometryData {
     producer: Submission,
     scene: Option<scene::Key>,
-    pass: RenderPass,
+    pass: GeometryInputs,
     binned: render::geometry::Binned,
     stats: render::Stats,
 }
@@ -83,15 +83,12 @@ impl GeometryProduct {
         self.0.pass.vm_slot == pass.vm_slot
             && self.0.pass.width == pass.width
             && self.0.pass.height == pass.height
-            && self.0.pass.layers == pass.layers
-            && self.0.pass.samples == pass.samples
-            && self.0.pass.tile == pass.tile
     }
 }
 
 enum JobKind {
     Compute(Job),
-    Geometry(Box<RenderPass>),
+    Geometry(Box<GeometryInputs>),
     Fragment {
         pass: Box<RenderPass>,
         product: GeometryProduct,
@@ -151,6 +148,15 @@ impl Execution {
                 "GFX geometry execution requires an accepted TA command",
             ));
         }
+        pass.check()?;
+        Self::geometry_inputs(submission, pass.geometry_inputs())
+    }
+    fn geometry_inputs(submission: Submission, pass: GeometryInputs) -> Result<Self, WorkError> {
+        if submission.command.kind != Kind::Ta {
+            return Err(WorkError::Refused(
+                "GFX geometry execution requires an accepted TA command",
+            ));
+        }
         check_context(submission.context as usize, pass.vm_slot)?;
         pass.check()?;
         Ok(Self {
@@ -167,10 +173,10 @@ impl Execution {
     pub fn geometry_for_setup(
         submission: Submission,
         frame: &Frame,
-        pass: RenderPass,
+        pass: GeometryInputs,
     ) -> Result<Self, WorkError> {
         let key = scene::Key::read(&submission, frame).map_err(WorkError::Refused)?;
-        let mut owner = Self::geometry(submission, pass)?;
+        let mut owner = Self::geometry_inputs(submission, pass)?;
         owner.scene = Some(key);
         Ok(owner)
     }
@@ -619,7 +625,9 @@ mod tests {
         let (mut memory, pass) = render_memory();
         let input = accepted(Kind::Ta);
         let ta_frame = scene_frame(&input, BASE + 0x6000);
-        let mut ta = Execution::geometry_for_setup(input.clone(), &ta_frame, pass).unwrap();
+        let mut ta =
+            Execution::geometry_for_setup(input.clone(), &ta_frame, pass.geometry_inputs())
+                .unwrap();
         ta.run(&mut memory).unwrap();
         let product = ta.take_geometry().unwrap();
         assert_eq!(product.producer(), &input);

@@ -51,6 +51,35 @@ pub struct Zls {
     pub meta_stride: u32,
 }
 
+/// Explicitly bound sampler storage for a shader stage. Absence in the
+/// geometry inputs means unqualified; a shader requesting it must refuse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SamplerHeap {
+    pub base: u64,
+    pub entries: u32,
+}
+
+/// TA inputs only. Scissors, depth bias, ZLS, layers and fragment programs
+/// belong to 3D and cannot be borrowed to construct an original TA start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeometryInputs {
+    pub vdm_stream: u64,
+    pub usc_base: u64,
+    pub vm_slot: u32,
+    pub ppp_control: u32,
+    pub width: u32,
+    pub height: u32,
+    pub sampler_heap: Option<SamplerHeap>,
+}
+impl GeometryInputs {
+    pub(crate) fn check(&self) -> Result<(), WorkError> {
+        if self.width == 0 || self.height == 0 {
+            return Err(WorkError::Refused("empty TA clip bounds"));
+        }
+        check_ppp(self.ppp_control)
+    }
+}
+
 /// The parameters of one render pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RenderPass {
@@ -98,7 +127,7 @@ pub struct RenderPass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
     pub draws: u64,
-    /// Primitives that reached the rasterizer.
+    /// Primitives emitted by TA, before 3D layer/scissor filtering.
     pub primitives: u64,
     pub tiles: u64,
     /// Fragment SIMD groups shaded.
@@ -185,6 +214,24 @@ impl Zls {
 }
 
 impl RenderPass {
+    /// Adapt the explicit caller-supplied whole-pass helper. The native
+    /// frontend builds GeometryInputs from its actual TA configuration.
+    pub fn geometry_inputs(&self) -> GeometryInputs {
+        GeometryInputs {
+            vdm_stream: self.vdm_stream,
+            usc_base: self.usc_base,
+            vm_slot: self.vm_slot,
+            ppp_control: self.ppp_control,
+            width: self.width,
+            height: self.height,
+            sampler_heap: (self.sampler_heap != 0 && self.sampler_count != 0).then_some(
+                SamplerHeap {
+                    base: self.sampler_heap,
+                    entries: self.sampler_count,
+                },
+            ),
+        }
+    }
     pub fn zls(&self, bit: u32) -> bool {
         field(self.zls_control, bit, 1) != 0
     }
@@ -216,14 +263,7 @@ impl RenderPass {
         if self.width == 0 || self.height == 0 || self.layers == 0 {
             return Err(WorkError::Refused("an empty framebuffer"));
         }
-        if self.ppp_control & !ppp_control::KNOWN != 0 {
-            return Err(WorkError::Refused("a PPP control with unnamed bits"));
-        }
-        if self.ppp_control & ppp_control::FIXED_POINT_FORMAT == 0 {
-            return Err(WorkError::Refused(
-                "fixed-point format 0 (its precision is unrecorded; Mesa sets 1)",
-            ));
-        }
+        check_ppp(self.ppp_control)?;
         let known = [
             (zls::Z_LOAD_TILING, 8),
             (zls::S_LOAD, 2),
@@ -253,11 +293,23 @@ impl RenderPass {
     }
 }
 
+fn check_ppp(control: u32) -> Result<(), WorkError> {
+    if control & !ppp_control::KNOWN != 0 {
+        return Err(WorkError::Refused("a PPP control with unnamed bits"));
+    }
+    if control & ppp_control::FIXED_POINT_FORMAT == 0 {
+        return Err(WorkError::Refused(
+            "fixed-point format 0 (its precision is unrecorded; Mesa sets 1)",
+        ));
+    }
+    Ok(())
+}
+
 /// Run a render pass to completion.
 pub fn run(memory: &mut dyn Memory, pass: &RenderPass) -> Result<Stats, WorkError> {
     pass.check()?;
     let mut stats = Stats::default();
-    let binned = geometry::run(memory, pass, &mut stats)?;
+    let binned = geometry::run(memory, &pass.geometry_inputs(), &mut stats)?;
     fragment::run(memory, pass, &binned, &mut stats)?;
     Ok(stats)
 }
@@ -268,12 +320,31 @@ pub(crate) fn heap_sampler(
     pass: &RenderPass,
     index: u32,
 ) -> Result<[u8; 8], &'static str> {
-    if pass.sampler_heap == 0 || index >= pass.sampler_count {
+    heap_sampler_at(
+        memory,
+        SamplerHeap {
+            base: pass.sampler_heap,
+            entries: pass.sampler_count,
+        },
+        index,
+    )
+}
+pub(crate) fn heap_sampler_at(
+    memory: &mut dyn Memory,
+    heap: SamplerHeap,
+    index: u32,
+) -> Result<[u8; 8], &'static str> {
+    if heap.base == 0 || index >= heap.entries {
         return Err("a sampler-heap index past the pass's sampler heap");
     }
+    let address = heap
+        .base
+        .checked_add(8 * u64::from(index))
+        .ok_or("a sampler heap address wraps")?;
+    address.checked_add(7).ok_or("a sampler heap entry wraps")?;
     let mut sampler = [0u8; 8];
     memory
-        .read(pass.sampler_heap + 8 * u64::from(index), &mut sampler)
+        .read(address, &mut sampler)
         .map_err(|_| "a fault reading the sampler heap")?;
     Ok(sampler)
 }
@@ -576,6 +647,32 @@ mod tests {
                 .map_err(|_| crate::platform::dma::DmaError::Memory)
         }
     }
+    impl Memory for StagedMemory {
+        fn read(
+            &mut self,
+            address: u64,
+            bytes: &mut [u8],
+        ) -> Result<(), crate::platform::apple::agx::isa::machine::Fault> {
+            crate::platform::apple::agx::ring::Shared::gpu_read(self, 0, address, bytes).map_err(
+                |_| crate::platform::apple::agx::isa::machine::Fault {
+                    address,
+                    write: false,
+                },
+            )
+        }
+        fn write(
+            &mut self,
+            address: u64,
+            bytes: &[u8],
+        ) -> Result<(), crate::platform::apple::agx::isa::machine::Fault> {
+            crate::platform::apple::agx::ring::Shared::gpu_write(self, 0, address, bytes).map_err(
+                |_| crate::platform::apple::agx::isa::machine::Fault {
+                    address,
+                    write: true,
+                },
+            )
+        }
+    }
     fn accepted(
         kind: crate::platform::apple::agx::channel::Kind,
         context: u32,
@@ -703,6 +800,78 @@ mod tests {
             assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(memory.flat.get(MARKER, 4), &[42, 0, 0, 0]);
             assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
+        }
+    }
+
+    #[test]
+    fn ta_never_reads_3d_arrays_and_fragment_faults_are_terminal() {
+        use crate::platform::apple::agx::{channel::Kind, work::Execution};
+        for block_bias in [false, true] {
+            let red = [1.0, 0.0, 0.0, 1.0];
+            let (flat, mut pass) = scene(
+                &[
+                    vertex(-1.0, -1.0, 0.5, red),
+                    vertex(1.0, -1.0, 0.5, red),
+                    vertex(-1.0, 1.0, 0.5, red),
+                ],
+                ALWAYS_NO_WRITE,
+                1 << 16 | 1 << 17,
+                0,
+            );
+            pass.scissors = BASE + 0x900;
+            pass.depth_biases = BASE + 0x940;
+            let mut memory = StagedMemory {
+                flat,
+                blocked: Some(if block_bias {
+                    pass.depth_biases..pass.depth_biases + 12
+                } else {
+                    pass.scissors..pass.scissors + 16
+                }),
+                reads: 0,
+                writes: 0,
+                marker_writes: 0,
+                last_write: None,
+                fragment_reads: Vec::new(),
+            };
+            // No scissors, depth format, tile, sample or layer fields are
+            // needed by the typed TA backend. Even empty future scissors
+            // cannot suppress vertex geometry or shader side effects.
+            let mut stats = Stats::default();
+            let binned = geometry::run(&mut memory, &pass.geometry_inputs(), &mut stats).unwrap();
+            assert_eq!(binned.primitives.len(), 1);
+            assert!(binned.primitives[0].depth_clamp.is_none());
+            assert!(binned.primitives[0].bias.is_some());
+            assert_eq!(memory.writes, 0);
+            let mut geometry = Execution::geometry(accepted(Kind::Ta, pass.vm_slot), pass).unwrap();
+            geometry.run(&mut memory).unwrap();
+            // These values are installed only after actual TA has finished.
+            words(
+                &mut memory.flat,
+                pass.scissors,
+                &[
+                    8 << 16 | 16,
+                    8 << 16 | 16,
+                    0.0f32.to_bits(),
+                    1.0f32.to_bits(),
+                ],
+            );
+            let product = geometry.take_geometry().unwrap();
+            let mut fragment =
+                Execution::fragment(accepted(Kind::ThreeD, pass.vm_slot), pass, product)
+                    .unwrap_or_else(|_| panic!("matching TA product refused"));
+            let error = fragment.run(&mut memory).unwrap_err();
+            let counts = (memory.reads, memory.writes);
+            memory.blocked = None;
+            assert_eq!(fragment.run(&mut memory), Err(error));
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
+            // A separate fresh invocation actually consumes the late arrays.
+            let mut stats = Stats::default();
+            fragment::run(&mut memory, &pass, &binned, &mut stats).unwrap();
+            let pixel = |x, y| BASE + IMAGE + 4 * (y * u64::from(SIZE) + x);
+            assert_eq!(memory.flat.get(pixel(10, 10), 4), &[255, 0, 0, 255]);
+            let clear = CLEAR.map(|x| unorm8(f64::from(x)) as u8);
+            assert_eq!(memory.flat.get(pixel(2, 2), 4), &clear);
         }
     }
 

@@ -24,15 +24,14 @@
 //!   control and `Cull 2` enable it (Inferred placement after clipping).
 //! - The window position is `translate + scale * ndc`; the layer and
 //!   viewport come from the provoking vertex (`PPP Vertex`, Vulkan's rule).
-//!   A primitive on a layer past the pass is dropped (Inferred).
+//!   The captured layer is checked against the actual 3D pass later.
 //! - A triangle is front-facing when counter-clockwise in window space
 //!   under `front face CCW` (Vulkan's signed-area rule), culled per `Cull`,
 //!   and filled, outlined or drawn as points per its face's polygon mode.
 //!   Outlines skip edges clipping created unless `draw clipped edges`.
-//! - Depth bias (triangles only, as Mesa enables it) adds `constant * r +
-//!   slope * max(|dz/dx|, |dz/dy|)`, clamped; `r` is 1 for Z16 (Mesa scales
-//!   the constant for unorm) and `2^(e - 23)` for the triangle's largest
-//!   depth exponent `e` for Z32F (Vulkan's float rule; Inferred).
+//! - Polygons retain their depth plane slope and largest-depth exponent.
+//!   The fragment phase applies the actual depth-bias array and ZLS format;
+//!   geometry does not read the later 3D inputs.
 //! - Rasterizer discard drops every primitive (`Cull` or `Cull 2`).
 //!
 //! Refused by name: tessellation (in the stream walker), 16-bit varyings,
@@ -40,7 +39,7 @@
 //! without a size, and a viewport index past the PPP's viewports.
 
 use super::super::{GROUP_BUDGET, ShaderState, WorkError};
-use super::{RenderPass, Stats, heap_sampler, ppp_control};
+use super::{GeometryInputs, Stats, ppp_control};
 use crate::platform::apple::agx::isa::machine::{
     Env, Exit, Fault, Memory, Program, SIMD_WIDTH, Specials,
 };
@@ -186,11 +185,20 @@ pub struct Primitive {
     pub flat: Vec<Vec<u32>>,
     pub front: bool,
     pub layer: u32,
-    /// Pixels the primitive may cover (framebuffer, scissor, region clip).
+    /// TA clip and PPP region bounds. 3D intersects its actual scissor.
     pub bounds: Rect,
     /// The depth range fragments clamp to, when depth clamping.
     pub depth_clamp: Option<(f32, f32)>,
     pub id: u32,
+    /// The captured viewport selects the 3D scissor/depth-clamp range.
+    pub(super) viewport: usize,
+    /// Pure polygon data; 3D applies its actual depth-bias entry/format.
+    pub(super) bias: Option<DepthBiasBasis>,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct DepthBiasBasis {
+    pub slope: f64,
+    pub float_scale: f64,
 }
 
 /// The PPP state a primitive was drawn with.
@@ -215,7 +223,7 @@ pub struct Binned {
 /// A vertex shader thread's environment.
 struct VertexEnv<'a> {
     memory: &'a mut dyn Memory,
-    pass: &'a RenderPass,
+    pass: &'a GeometryInputs,
     outputs: &'a mut [Vec<u32>],
 }
 
@@ -245,7 +253,11 @@ impl Env for VertexEnv<'_> {
     }
 
     fn sampler_heap(&mut self, index: u32) -> Result<[u8; 8], &'static str> {
-        heap_sampler(self.memory, self.pass, index)
+        let heap = self
+            .pass
+            .sampler_heap
+            .ok_or("TA sampler heap input is not qualified")?;
+        super::heap_sampler_at(self.memory, heap, index)
     }
 }
 
@@ -278,9 +290,10 @@ impl VertexState {
 /// Run the vertex half of `pass`.
 pub fn run(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &GeometryInputs,
     stats: &mut Stats,
 ) -> Result<Binned, WorkError> {
+    pass.check()?;
     let mut binned = Binned::default();
     let mut ppp = PppState::default();
     let mut vertex = VertexState::default();
@@ -415,7 +428,7 @@ fn assemble(topology: u32, ids: &[Option<u32>]) -> Result<Vec<(Vec<u32>, u32)>, 
 /// Shade every vertex ID of one instance; returns their UVS words.
 fn shade_vertices(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &GeometryInputs,
     state: &ShaderState,
     program: &mut Program,
     ids: &[u32],
@@ -487,7 +500,7 @@ fn draw_state(ppp: &PppState, uvs: Uvs, binned: &mut Binned) -> usize {
 /// Shade, assemble, clip and bin one draw.
 fn draw_primitives(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &GeometryInputs,
     ppp: &PppState,
     vertex: &VertexState,
     draw: &Draw,
@@ -544,10 +557,10 @@ fn draw_primitives(
         ));
     }
     let state = draw_state(ppp, uvs.clone(), binned);
-    let mut context = Context::new(memory, pass, ppp, &uvs)?;
+    let context = Context::new(pass, ppp, &uvs)?;
     for instance in 0..instances {
         let shaded = shade_vertices(
-            context.memory,
+            memory,
             pass,
             &shader,
             &mut binned.program,
@@ -567,17 +580,13 @@ fn draw_primitives(
 
 /// What turning assembled vertices into window primitives needs.
 struct Context<'a> {
-    memory: &'a mut dyn Memory,
-    pass: &'a RenderPass,
+    pass: &'a GeometryInputs,
     ppp: &'a PppState,
     uvs: &'a Uvs,
     volume: Volume,
     w_clamp: Option<f64>,
 }
 
-/// `Scissor` entry bytes and `Depth bias` entry bytes.
-const SCISSOR_BYTES: u64 = 16;
-const DEPTH_BIAS_BYTES: u64 = 12;
 /// `Region clip` units.
 const REGION_TILE: u32 = 32;
 /// The mantissa bits of an f32 (Vulkan's float depth-bias unit).
@@ -587,12 +596,7 @@ const F64_BIAS: i32 = 1023;
 const F64_MANTISSA: i32 = 52;
 
 impl<'a> Context<'a> {
-    fn new(
-        memory: &'a mut dyn Memory,
-        pass: &'a RenderPass,
-        ppp: &'a PppState,
-        uvs: &'a Uvs,
-    ) -> Result<Self, WorkError> {
+    fn new(pass: &'a GeometryInputs, ppp: &'a PppState, uvs: &'a Uvs) -> Result<Self, WorkError> {
         let w_clamp = if pass.ppp_control & ppp_control::W_CLAMP != 0 && ppp.cull_2.clamp_w {
             Some(f64::from(ppp.w_clamp.ok_or(WorkError::Refused(
                 "W clamping without a W clamp word",
@@ -601,7 +605,6 @@ impl<'a> Context<'a> {
             None
         };
         Ok(Context {
-            memory,
             pass,
             ppp,
             uvs,
@@ -660,7 +663,7 @@ impl<'a> Context<'a> {
 
     /// Bin one assembled primitive of a draw.
     fn primitive(
-        &mut self,
+        &self,
         flat: Vec<Vec<u32>>,
         id: u32,
         state: usize,
@@ -686,11 +689,8 @@ impl<'a> Context<'a> {
             }
             None => (0, 0),
         };
-        if layer >= self.pass.layers {
-            return Ok(());
-        }
         let viewport = viewport as usize;
-        let (bounds, depth_range) = self.bounds(viewport)?;
+        let bounds = self.bounds(viewport);
         if bounds.is_empty() {
             return Ok(());
         }
@@ -708,8 +708,10 @@ impl<'a> Context<'a> {
             front: true,
             layer,
             bounds,
-            depth_clamp: self.ppp.cull.depth_clamp.then_some(depth_range),
+            depth_clamp: None,
             id,
+            viewport,
+            bias: None,
         };
         let vertices: Vec<clip::Vertex> = flat.iter().map(|w| self.clip_vertex(w)).collect();
         match vertices.len() {
@@ -743,7 +745,7 @@ impl<'a> Context<'a> {
                 if clipped.is_empty() {
                     return Ok(());
                 }
-                let mut window: Vec<Vertex> = clipped
+                let window: Vec<Vertex> = clipped
                     .iter()
                     .map(|v| self.window(v, viewport))
                     .collect::<Result<_, _>>()?;
@@ -762,14 +764,13 @@ impl<'a> Context<'a> {
                     return Ok(());
                 }
                 let control = self.ppp.fragment_control.unwrap_or_default();
-                if control.depth_bias {
-                    let bias = self.depth_bias(&window)?;
-                    for v in window.iter_mut() {
-                        v.window[2] += bias;
-                    }
-                }
+                let bias = control.depth_bias.then(|| depth_bias_basis(&window));
                 let face = if front { self.ppp.front } else { self.ppp.back };
-                let base = Primitive { front, ..base };
+                let base = Primitive {
+                    front,
+                    bias,
+                    ..base
+                };
                 match face.polygon_mode {
                     polygon::FILL => {
                         for i in 1..window.len() - 1 {
@@ -823,27 +824,12 @@ impl<'a> Context<'a> {
         Ok(())
     }
 
-    /// The pixels a primitive of `viewport` may cover and its depth range.
-    fn bounds(&mut self, viewport: usize) -> Result<(Rect, (f32, f32)), WorkError> {
+    /// TA clip bounds and captured PPP region clip, without future 3D arrays.
+    fn bounds(&self, viewport: usize) -> Rect {
         let mut rect = Rect {
             min: [0, 0],
             max: [self.pass.width, self.pass.height],
         };
-        let mut range = (0.0f32, 1.0f32);
-        let control = self.ppp.fragment_control.unwrap_or_default();
-        if control.scissor {
-            let index = u64::from(self.ppp.scissor_index) + viewport as u64;
-            let at = self.pass.scissors + SCISSOR_BYTES * index;
-            let w0 = read_u32(self.memory, at)?;
-            let w1 = read_u32(self.memory, at + 4)?;
-            let min_z = f32::from_bits(read_u32(self.memory, at + 8)?);
-            let max_z = f32::from_bits(read_u32(self.memory, at + 12)?);
-            rect = rect.intersect(Rect {
-                min: [w0 >> 16, w1 >> 16],
-                max: [w0 & 0xffff, w1 & 0xffff],
-            });
-            range = (min_z, max_z);
-        }
         if let Some(region) = self.ppp.region_clip.get(viewport)
             && region.enable
         {
@@ -852,38 +838,24 @@ impl<'a> Context<'a> {
                 max: region.max.map(|t| t * REGION_TILE),
             });
         }
-        Ok((rect, range))
+        rect
     }
+}
 
-    /// The depth bias of a polygon (`Depth bias` entry).
-    fn depth_bias(&mut self, window: &[Vertex]) -> Result<f64, WorkError> {
-        let at = self.pass.depth_biases + DEPTH_BIAS_BYTES * u64::from(self.ppp.depth_bias_index);
-        let constant = f64::from(f32::from_bits(read_u32(self.memory, at)?));
-        let slope = f64::from(f32::from_bits(read_u32(self.memory, at + 4)?));
-        let clamp = f64::from(f32::from_bits(read_u32(self.memory, at + 8)?));
-        let p = [0, 1, 2].map(|i| [window[i].window[0], window[i].window[1]]);
-        let plane = crate::platform::apple::agx::raster::plane::Plane::triangle(
-            p,
-            [0, 1, 2].map(|i| window[i].window[2]),
-        );
-        let m = plane.a.abs().max(plane.b.abs());
-        let r = if self.pass.depth_16() {
-            1.0
-        } else {
-            let largest = window.iter().map(|v| v.window[2].abs()).fold(0.0, f64::max);
-            let biased = ((largest as f32).to_bits() >> F32_MANTISSA) & 0xff;
-            let exponent = (biased as i32).max(1) - F32_BIAS;
-            // 2^(e - 23) as an f64 (always a normal number).
-            f64::from_bits(((exponent - F32_MANTISSA + F64_BIAS) as u64) << F64_MANTISSA)
-        };
-        let bias = constant * r + slope * m;
-        Ok(if clamp > 0.0 {
-            bias.min(clamp)
-        } else if clamp < 0.0 {
-            bias.max(clamp)
-        } else {
-            bias
-        })
+/// Preserve the original polygon plane and largest-depth calculation. The
+/// 3D phase supplies the actual constant/slope/clamp and depth format later.
+fn depth_bias_basis(window: &[Vertex]) -> DepthBiasBasis {
+    let p = [0, 1, 2].map(|i| [window[i].window[0], window[i].window[1]]);
+    let plane = crate::platform::apple::agx::raster::plane::Plane::triangle(
+        p,
+        [0, 1, 2].map(|i| window[i].window[2]),
+    );
+    let largest = window.iter().map(|v| v.window[2].abs()).fold(0.0, f64::max);
+    let biased = ((largest as f32).to_bits() >> F32_MANTISSA) & 0xff;
+    let exponent = (biased as i32).max(1) - F32_BIAS;
+    DepthBiasBasis {
+        slope: plane.a.abs().max(plane.b.abs()),
+        float_scale: f64::from_bits(((exponent - F32_MANTISSA + F64_BIAS) as u64) << F64_MANTISSA),
     }
 }
 

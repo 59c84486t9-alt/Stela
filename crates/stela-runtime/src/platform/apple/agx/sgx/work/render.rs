@@ -5,6 +5,7 @@
 use super::FirmwareWork;
 use crate::platform::apple::agx::{
     channel::Kind,
+    exec::render::{GeometryInputs, SamplerHeap},
     work_decode::{
         Submission,
         resources::{Lease, Outcome},
@@ -34,12 +35,15 @@ impl Registers {
     pub(super) fn active(&self) -> bool {
         self.run.is_some()
     }
-    #[cfg(test)]
-    pub(super) fn value(&self, word: Word) -> Option<u64> {
+    fn committed(&self, word: Word) -> Option<u64> {
         self.stored
             .iter()
             .find(|(stored, _)| *stored == word)
             .map(|(_, value)| *value)
+    }
+    #[cfg(test)]
+    pub(super) fn value(&self, word: Word) -> Option<u64> {
+        self.committed(word)
     }
 }
 
@@ -49,6 +53,51 @@ pub struct ParameterAccess<'a, 'p, 'm> {
     pipeline: Kind,
 }
 impl FirmwareWork {
+    /// Decode only TA configuration committed by this exact accepted owner.
+    /// No native trigger, TVB/resource authority or hardware readback follows.
+    /// A sampler heap must come from its separate actual context binding.
+    pub fn ta_geometry_inputs(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+        sampler_heap: Option<SamplerHeap>,
+    ) -> Result<GeometryInputs, &'static str> {
+        self.available()?;
+        let native = self.power.native.borrow();
+        let registers = &native.work.render;
+        let run = registers
+            .run
+            .as_ref()
+            .ok_or("GFX TA configuration has no native owner")?;
+        if run.submission != *submission
+            || run.lease != lease
+            || submission.command.kind != Kind::Ta
+            || run.next != run.words.len()
+        {
+            return Err("GFX TA configuration requires its complete accepted parameter phase");
+        }
+        let word = |offset, width| {
+            registers
+                .committed(Word::new(offset, width))
+                .ok_or("GFX TA configuration word has not been programmed")
+        };
+        // Original tiling +8/+c and second-block VDM/USC stores. The packed
+        // PPP screen holds inclusive x/y maxima; no future 3D field is read.
+        let screen = word(0x10128, 4)? as u32;
+        let inputs = GeometryInputs {
+            vdm_stream: word(0x16880, 8)?,
+            usc_base: word(0x10060, 8)?,
+            vm_slot: submission.context,
+            ppp_control: word(0x10120, 4)? as u32,
+            width: (screen & 0xffff) + 1,
+            height: (screen >> 16) + 1,
+            sampler_heap,
+        };
+        inputs
+            .check()
+            .map_err(|_| "GFX TA configuration has unsupported PPP clip/control inputs")?;
+        Ok(inputs)
+    }
     pub fn ta_parameter_access<'a, 'p, 'm>(
         &'a self,
         port: &'a mut Port<'p, 'm>,
