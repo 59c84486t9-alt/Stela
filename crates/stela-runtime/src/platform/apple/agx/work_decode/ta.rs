@@ -179,6 +179,9 @@ impl Parameters {
             held: None,
         })
     }
+    pub(super) fn identity(&self) -> (&Submission, &Frame, Lease, Policy) {
+        (&self.submission, &self.frame, self.lease, self.policy)
+    }
     pub fn completed(&self) -> bool {
         self.next == self.stores.len()
     }

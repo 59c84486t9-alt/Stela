@@ -266,6 +266,34 @@ impl FirmwareWork {
         Ok(())
     }
 }
+impl crate::platform::apple::agx::work_decode::render_resources::Access
+    for super::AttachmentAccess<'_, '_, '_>
+{
+    fn check_owner(
+        &self,
+        parameters: &crate::platform::apple::agx::work_decode::render_resources::Parameters,
+    ) -> Result<(), &'static str> {
+        self.owner.available()?;
+        let (submission, frame, lease, policy) = parameters.identity();
+        let native = self.owner.power.native.borrow();
+        let run = native
+            .work
+            .render
+            .run
+            .as_ref()
+            .ok_or("GFX render attachment phase has no accepted native owner")?;
+        if policy != self.owner.policy
+            || run.submission != *submission
+            || run.frame != *frame
+            || run.lease != lease
+            || run.next != run.words.len()
+        {
+            return Err("GFX render attachment phase differs from its complete native owner");
+        }
+        Ok(())
+    }
+}
+
 impl ta::Access for ParameterAccess<'_, '_, '_> {
     fn policy(&self) -> crate::platform::apple::agx::work_decode::resources::Policy {
         self.owner.policy

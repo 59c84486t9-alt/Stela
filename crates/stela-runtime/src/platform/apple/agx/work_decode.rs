@@ -16,6 +16,7 @@
 
 pub mod cl;
 pub mod registers;
+pub mod render_resources;
 pub mod resources;
 pub mod scene;
 pub mod ta;

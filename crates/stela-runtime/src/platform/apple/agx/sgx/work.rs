@@ -1885,6 +1885,203 @@ mod tests {
         }
     }
     #[test]
+    fn original_render_attachments_keep_native_and_ram_ownership_through_faults_and_abort() {
+        use crate::platform::apple::agx::{
+            channel::Record,
+            sgx::resources::FirmwareResources,
+            work_decode::{
+                render_resources::{Attachments, Parameters},
+                resources::{AttachmentResult, Outcome, Pool},
+                ta, three_d,
+            },
+        };
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            for kind in [CommandKind::Ta, CommandKind::ThreeD] {
+                // Cancel before acquisition, after committed native writes
+                // with an unfinished RAM tail, and after a held success.
+                for cancel_at in 0..3 {
+                    let policy = Policy::for_family(family).unwrap();
+                    let mut sgx = gpu(family);
+                    let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                    let apertures = if policy == Policy::G13X {
+                        alloc::vec![0x200000000, 0x201000000]
+                    } else {
+                        alloc::vec![0x200000000]
+                    };
+                    let mcc = cache_for(apertures.len());
+                    let cache = mcc.firmware_cache(&apertures).unwrap();
+                    let owner = power.firmware_work(region(), cache.clone()).unwrap();
+                    let resources = FirmwareResources::new(power.clone(), region())
+                        .unwrap()
+                        .with_cache(cache_region(policy), cache)
+                        .unwrap();
+                    let mut memory = ram();
+                    mapping(&mut memory.ram, VA + 0x1c000, SGX + 0x1c000, true);
+                    let root = resource_root(&mut memory);
+                    let mut input = submission();
+                    input.command.kind = kind;
+                    let lease = Lease {
+                        pipe: u8::from(kind == CommandKind::ThreeD),
+                        slot: 2,
+                    };
+                    let (record, scene_at, context_at, row_at) = if kind == CommandKind::Ta {
+                        (Record::SetupTa, 0x1c, 0x3c, 0x80)
+                    } else {
+                        (Record::Setup3d, 0x14, 0x54, 0xa0)
+                    };
+                    let mut bytes = alloc::vec![0;record.bytes() as usize];
+                    bytes[..4].copy_from_slice(
+                        &(if kind == CommandKind::Ta { 5u32 } else { 7 }).to_le_bytes(),
+                    );
+                    bytes[4..0xc].copy_from_slice(&0x2800u64.to_le_bytes());
+                    bytes[0xc..0x14].copy_from_slice(&0x2a00u64.to_le_bytes());
+                    bytes[scene_at..scene_at + 8].copy_from_slice(&0x2e00u64.to_le_bytes());
+                    bytes[context_at..context_at + 4].copy_from_slice(&input.context.to_le_bytes());
+                    bytes[row_at..row_at + 8].copy_from_slice(&0x60000000u64.to_le_bytes());
+                    bytes[row_at + 8..row_at + 12].copy_from_slice(&8u32.to_le_bytes());
+                    bytes[row_at + 12] = 5;
+                    bytes[row_at + 14..row_at + 16].copy_from_slice(&7u16.to_le_bytes());
+                    bytes[row_at + 0x100..row_at + 0x104].copy_from_slice(&1u32.to_le_bytes());
+                    assert!(memory.ram.write(DATA + input.stream, &bytes));
+                    let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                        .unwrap()
+                        .unwrap();
+                    let pool = io(&mut sgx, &mut memory, |port| {
+                        Pool::bind(port, &root, family, 1)
+                    })
+                    .unwrap();
+                    let parameters = if kind == CommandKind::Ta {
+                        Parameters::Ta(ta::Parameters::new(&input, &frame, lease, policy).unwrap())
+                    } else {
+                        Parameters::ThreeD(
+                            three_d::Parameters::new(&input, &frame, lease, policy).unwrap(),
+                        )
+                    };
+                    let counts = (memory.reads, memory.writes);
+                    let (mut parameters, pool, _) = Attachments::new(parameters, pool).unwrap_err();
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    io(&mut sgx, &mut memory, |port| match &mut *parameters {
+                        Parameters::Ta(parameters) => {
+                            parameters.advance(&mut owner.ta_parameter_access(port))
+                        }
+                        Parameters::ThreeD(parameters) => {
+                            parameters.advance(&mut owner.three_d_parameter_access(port))
+                        }
+                    })
+                    .unwrap();
+                    // The accepted row survives live AP edits before transfer.
+                    memory
+                        .ram
+                        .put_u64(DATA + input.stream + row_at as u64, 0x70000000);
+                    let mut phase = Attachments::new(*parameters, *pool).unwrap();
+                    if cancel_at == 0 {
+                        phase.abort().unwrap();
+                    } else if cancel_at == 1 {
+                        memory.fail_write = Some(memory.writes);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| phase.advance(
+                                &mut owner.attachment_access(&resources, port).unwrap()
+                            ))
+                            .is_err()
+                        );
+                        assert_eq!(power.native.borrow().resources.committed_writes, 3);
+                        assert_ne!(resources.window(0).unwrap().control, 0);
+                        phase = phase.finish().unwrap_err().0;
+                        let active = LifecycleState {
+                            powered: true,
+                            clocked: true,
+                            quiesced: false,
+                            reset: false,
+                            retention: false,
+                        };
+                        let gated = LifecycleState {
+                            clocked: false,
+                            ..active
+                        };
+                        let mut latch = InterruptLatch::new();
+                        let mut access = Access::new(0, 0, &mut latch);
+                        sgx.check_lifecycle(gated).unwrap();
+                        sgx.set_lifecycle(gated, &mut access);
+                        let counts = (memory.reads, memory.writes);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| phase.advance(
+                                &mut owner.attachment_access(&resources, port).unwrap()
+                            ))
+                            .is_err()
+                        );
+                        assert_eq!((memory.reads, memory.writes), counts);
+                        assert_eq!(power.native.borrow().resources.committed_writes, 3);
+                        sgx.check_lifecycle(active).unwrap();
+                        sgx.set_lifecycle(active, &mut access);
+                        phase.abort().unwrap();
+                    }
+                    io(&mut sgx, &mut memory, |port| {
+                        phase.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                    })
+                    .unwrap();
+                    if cancel_at == 2 {
+                        assert_eq!(
+                            phase.result(),
+                            Some(&Outcome::Acquired(alloc::vec![
+                                AttachmentResult::Allocated(0)
+                            ]))
+                        );
+                        assert_eq!(
+                            resources.window(0).unwrap().address,
+                            (0x60000000 >> 7) | (5 << 33) | (5 << 39) | (1 << 47)
+                        );
+                        let mask =
+                            DATA + 0x6400 + (u64::from(lease.pipe) * 6 + u64::from(lease.slot)) * 4;
+                        let mut actual = [0; 4];
+                        assert!(memory.ram.read(mask, &mut actual));
+                        assert_eq!(u32::from_le_bytes(actual), 1);
+                        phase.abort().unwrap();
+                        phase.abort().unwrap();
+                        memory.fail_write = Some(memory.writes + 1);
+                        assert!(
+                            io(&mut sgx, &mut memory, |port| phase.advance(
+                                &mut owner.attachment_access(&resources, port).unwrap()
+                            ))
+                            .is_err()
+                        );
+                        assert_eq!(power.native.borrow().resources.committed_writes, 4);
+                        assert_eq!(resources.window(0).unwrap().control, 0);
+                        phase = phase.finish().unwrap_err().0;
+                        io(&mut sgx, &mut memory, |port| {
+                            phase.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                        })
+                        .unwrap();
+                    }
+                    assert_eq!(phase.result(), Some(&Outcome::Aborted));
+                    let counts = (memory.reads, memory.writes);
+                    io(&mut sgx, &mut memory, |port| {
+                        phase.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                    })
+                    .unwrap();
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    assert_eq!(
+                        power.native.borrow().resources.committed_writes,
+                        if cancel_at == 0 { 0 } else { 4 }
+                    );
+                    let (_, pool, outcome) = phase.finish().unwrap();
+                    io(&mut sgx, &mut memory, |port| pool.check_reset(port)).unwrap();
+                    assert!(power.check_reset().is_err());
+                    if kind == CommandKind::Ta {
+                        owner.cancel_ta_parameters(&input, lease, &outcome).unwrap();
+                    } else {
+                        owner
+                            .cancel_three_d_parameters(&input, lease, &outcome)
+                            .unwrap();
+                    }
+                    power.check_reset().unwrap();
+                    assert_eq!(power.native.borrow().work.control, None);
+                    assert_eq!(power.native.borrow().work.context_mask, None);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn attachment_transfer_refusals_return_the_live_program_and_pool_owners() {
         use crate::platform::apple::agx::work_decode::{
             cl::{Parameters, attachments::Attachments},
