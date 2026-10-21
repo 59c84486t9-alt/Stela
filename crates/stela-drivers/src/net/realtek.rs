@@ -20,7 +20,7 @@
 //! Versions 32/33/35/36/38 require their exact E/F/8411 firmware and the
 //! internal FE/GE PHY; external PHY initialization is outside these new paths.
 //! E1/E2 return an observable warning for unavailable optional EEE cleanup;
-//! PHY EEE advertisement state is unchanged and EEE is not qualified.
+//! Optional EEE cleanup is not performed; EEE advertisement state is unverified.
 //! No firmware bytes are embedded or copied.
 //!
 //! Later 8168/8111, 8125 and 8126 MAC versions are identified for diagnostics
@@ -156,14 +156,14 @@ impl Timer for Clock {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Warning {
     /// MAC32/33's optional donor EEE cleanup has no C45 bus implementation.
-    /// The PHY's EEE advertisement state is unchanged and is not qualified.
+    /// The optional cleanup is not performed; EEE advertisement is unverified.
     EeeAdvertisementDisableUnavailable,
 }
 impl fmt::Display for Warning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EeeAdvertisementDisableUnavailable => f.write_str(
-                "optional EEE advertisement cleanup unavailable: C45 access unsupported; PHY EEE state unchanged",
+                "optional EEE advertisement cleanup not performed: C45 access unsupported; EEE advertisement state unverified",
             ),
         }
     }
@@ -1683,7 +1683,7 @@ mod tests {
             assert!(!s.writes.iter().any(|(r, _, _)| *r == PHY_OCP));
             let message = format!("{}", Warning::EeeAdvertisementDisableUnavailable);
             assert!(message.contains("unsupported"));
-            assert!(message.contains("unchanged"));
+            assert!(message.contains("unverified"));
         }
     }
 

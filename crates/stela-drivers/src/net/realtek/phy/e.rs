@@ -33,8 +33,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         // error. Generic FE/GE maps that to C45 VEND2 a5d0, but the r8169 bus
         // only supplies C45 access from MAC40. __mdiobus_c45_write therefore
         // returns EOPNOTSUPP before any I/O for these exact MAC32/33 paths.
-        // Preserve the unchanged hardware state and report the unsupported
-        // optional cleanup. Neither EEE negotiation nor disable is claimed.
+        // Report that this optional cleanup performs no I/O. The preceding
+        // firmware/analogue programming and reset may affect EEE state, which
+        // remains unverified; neither negotiation nor disable is claimed.
         Ok(Warning::EeeAdvertisementDisableUnavailable)
     }
 }
