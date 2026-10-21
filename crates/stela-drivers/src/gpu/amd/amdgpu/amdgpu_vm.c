@@ -37,6 +37,7 @@
 #include <drm/drm_exec.h>
 #include "amdgpu.h"
 #include "amdgpu_vm.h"
+#include "amdgpu_vm_cpu_entries.h"
 #include "amdgpu_trace.h"
 #include "amdgpu_amdkfd.h"
 #include "amdgpu_gmc.h"
@@ -945,17 +946,8 @@ struct amdgpu_bo_va *amdgpu_vm_bo_find(struct amdgpu_vm *vm,
  */
 uint64_t amdgpu_vm_map_gart(const dma_addr_t *pages_addr, uint64_t addr)
 {
-	uint64_t result;
-
-	/* page table offset */
-	result = pages_addr[addr >> PAGE_SHIFT];
-
-	/* in case cpu page size != gpu page size*/
-	result |= addr & (~PAGE_MASK);
-
-	result &= 0xFFFFFFFFFFFFF000ULL;
-
-	return result;
+	return amdgpu_vm_cpu_gart_address(pages_addr[addr >> PAGE_SHIFT],
+					  addr, PAGE_SHIFT);
 }
 
 /**

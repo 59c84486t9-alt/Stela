@@ -31,6 +31,7 @@
 
 #include "amdgpu.h"
 #include "amdgpu_gmc.h"
+#include "amdgpu_gmc_pte.h"
 #include "amdgpu_ras.h"
 #include "amdgpu_reset.h"
 #include "amdgpu_xgmi.h"
@@ -170,8 +171,7 @@ int amdgpu_gmc_set_pte_pde(struct amdgpu_device *adev, void *cpu_pt_addr,
 	/*
 	 * The following is for PTE only. GART does not have PDEs.
 	*/
-	value = addr & adev->gmc.pte_addr_mask;
-	value |= flags;
+	value = amdgpu_gmc_pte_value(addr, adev->gmc.pte_addr_mask, flags);
 	writeq(value, ptr + (gpu_page_idx * 8));
 
 	return 0;

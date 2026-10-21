@@ -21,6 +21,7 @@
  */
 
 #include "amdgpu_vm.h"
+#include "amdgpu_vm_cpu_entries.h"
 #include "amdgpu.h"
 #include "amdgpu_reset.h"
 #include "amdgpu_object.h"
@@ -57,6 +58,42 @@ static int amdgpu_vm_cpu_prepare(struct amdgpu_vm_update_params *p,
 	return amdgpu_sync_wait(sync, true);
 }
 
+struct amdgpu_vm_cpu_entry_context {
+	struct amdgpu_vm_update_params *params;
+	void *table;
+};
+
+static uint64_t amdgpu_vm_cpu_map_entry(void *context, uint64_t addr)
+{
+	struct amdgpu_vm_cpu_entry_context *entry = context;
+
+	return amdgpu_vm_map_gart(entry->params->pages_addr, addr);
+}
+
+static void amdgpu_vm_cpu_override_entry(void *context, uint64_t addr,
+					uint64_t *flags)
+{
+	struct amdgpu_vm_cpu_entry_context *entry = context;
+	struct amdgpu_vm_update_params *p = entry->params;
+
+	amdgpu_gmc_override_vm_pte_flags(p->adev, p->vm, addr, flags);
+}
+
+static void amdgpu_vm_cpu_set_entry(void *context, unsigned int index,
+				  uint64_t addr, uint64_t flags)
+{
+	struct amdgpu_vm_cpu_entry_context *entry = context;
+
+	amdgpu_gmc_set_pte_pde(entry->params->adev, entry->table,
+			       index, addr, flags);
+}
+
+static const struct amdgpu_vm_cpu_entry_ops amdgpu_vm_cpu_entry_ops = {
+	.map_gart = amdgpu_vm_cpu_map_entry,
+	.override_flags = amdgpu_vm_cpu_override_entry,
+	.set_pte_pde = amdgpu_vm_cpu_set_entry,
+};
+
 /**
  * amdgpu_vm_cpu_update - helper to update page tables via CPU
  *
@@ -75,8 +112,7 @@ static int amdgpu_vm_cpu_update(struct amdgpu_vm_update_params *p,
 				uint64_t addr, unsigned count, uint32_t incr,
 				uint64_t flags)
 {
-	unsigned int i;
-	uint64_t value;
+	struct amdgpu_vm_cpu_entry_context entry;
 	long r;
 
 	r = dma_resv_wait_timeout(vmbo->bo.tbo.base.resv, DMA_RESV_USAGE_KERNEL,
@@ -88,23 +124,11 @@ static int amdgpu_vm_cpu_update(struct amdgpu_vm_update_params *p,
 
 	trace_amdgpu_vm_set_ptes(pe, addr, count, incr, flags, p->immediate);
 
-	if (!p->pages_addr && p->override_pte)
-		amdgpu_gmc_override_vm_pte_flags(p->adev, p->vm, addr, &flags);
-
-	for (i = 0; i < count; i++) {
-		u64 oflags = flags;
-
-		value = p->pages_addr ?
-			amdgpu_vm_map_gart(p->pages_addr, addr) :
-			addr;
-
-		if (p->pages_addr && p->override_pte)
-			amdgpu_gmc_override_vm_pte_flags(p->adev, p->vm, value, &oflags);
-
-		amdgpu_gmc_set_pte_pde(p->adev, (void *)(uintptr_t)pe,
-				       i, value, oflags);
-		addr += incr;
-	}
+	entry.params = p;
+	entry.table = (void *)(uintptr_t)pe;
+	amdgpu_vm_cpu_write_entries(&entry, &amdgpu_vm_cpu_entry_ops,
+				   p->pages_addr != NULL, p->override_pte,
+				   addr, count, incr, flags);
 	return 0;
 }
 
