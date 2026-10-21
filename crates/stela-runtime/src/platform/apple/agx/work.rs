@@ -81,7 +81,6 @@ impl GeometryProduct {
     }
     fn matches(&self, pass: &RenderPass) -> bool {
         self.0.pass.vm_slot == pass.vm_slot
-            && self.0.pass.usc_base == pass.usc_base
             && self.0.pass.width == pass.width
             && self.0.pass.height == pass.height
             && self.0.pass.layers == pass.layers

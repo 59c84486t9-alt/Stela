@@ -34,16 +34,14 @@
 //! - Point coordinates run 0..1 across the point, `t` growing down the
 //!   window for `Point sprite UV=01` and up for `UV=10` (Inferred).
 //!
-//! Refused by name: shaders reading barycentrics (geometry), several-sample
+//! Refused by name: shaders reading barycentrics (the fragment pipeline), several-sample
 //! tilebuffer loads, tests run twice or discards of tested samples,
 //! block stores that would resolve samples, and rotated PBEs.
 
 use super::super::{GROUP_BUDGET, ShaderState, WorkError};
-use super::geometry::{
-    Binned, FragmentPipeline, POSITION_WORDS, Primitive, Shape, Vertex, object, output, shade,
-    source,
-};
+use super::geometry::{Binned, POSITION_WORDS, Primitive, Shape, Vertex, object, output};
 use super::{Program as PassProgram, RenderPass, Stats, heap_sampler, zls};
+mod pipeline;
 use crate::platform::apple::agx::format::descriptor::{Pbe, Tiling};
 use crate::platform::apple::agx::format::image::{At, Image, ImageError};
 use crate::platform::apple::agx::format::isa::{IsaFormat, register_float};
@@ -61,6 +59,7 @@ use crate::platform::apple::agx::stream::{field, usc};
 use alloc::collections::BTreeMap;
 use alloc::vec;
 use alloc::vec::Vec;
+use pipeline::{FragmentPipeline, shade, source};
 
 /// Pixels of a fragment SIMD group.
 const GROUP_WIDTH: u32 = 8;
@@ -732,6 +731,10 @@ pub fn run(
     let positions = coverage::sample_positions(pass.multisample_control, pass.samples);
     let surfaces = Surfaces::new(pass)?;
     let mut program = Program::default();
+    let mut pipelines = Vec::with_capacity(binned.fragment_keys.len());
+    for words in &binned.fragment_keys {
+        pipelines.push(pipeline::load(memory, pass, words, &mut program)?);
+    }
     let background = load_program(memory, pass, &pass.background, &mut program)?;
     let end_of_tile = load_program(memory, pass, &pass.end_of_tile, &mut program)?;
     let mut visibility = Visibility::new();
@@ -773,6 +776,7 @@ pub fn run(
                         memory,
                         &mut tile,
                         binned,
+                        &pipelines,
                         primitive,
                         bounds,
                         &mut program,
@@ -933,6 +937,7 @@ impl Context<'_> {
         memory: &mut dyn Memory,
         tile: &mut Tile,
         binned: &Binned,
+        pipelines: &[FragmentPipeline],
         primitive: &Primitive,
         bounds: Rect,
         program: &mut Program,
@@ -975,7 +980,7 @@ impl Context<'_> {
             return Ok(());
         }
         let pipeline = match state.fragment {
-            Some(index) => Some(&binned.pipelines[index]),
+            Some(index) => Some(&pipelines[index]),
             None if control.tag_write_disable => None,
             None => return Err(WorkError::Refused("a draw without a fragment shader")),
         };

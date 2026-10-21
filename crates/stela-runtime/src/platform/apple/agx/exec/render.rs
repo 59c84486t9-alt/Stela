@@ -518,6 +518,194 @@ mod tests {
 
     const ALWAYS_NO_WRITE: u32 = 7 << 24 | 1 << 21;
 
+    struct StagedMemory {
+        flat: Flat,
+        blocked: Option<core::ops::Range<u64>>,
+        reads: usize,
+        writes: usize,
+        marker_writes: usize,
+        last_write: Option<u64>,
+        fragment_reads: Vec<u64>,
+    }
+    const MARKER: u64 = BASE + 0x3f800;
+    impl crate::platform::apple::agx::ring::Shared for StagedMemory {
+        fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
+            self.flat.read(address, bytes).map_err(|_| "firmware read")
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), &'static str> {
+            self.flat
+                .write(address, bytes)
+                .map_err(|_| "firmware write")
+        }
+        fn gpu_read(
+            &mut self,
+            _: usize,
+            address: u64,
+            bytes: &mut [u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            self.reads += 1;
+            if [BASE, BASE + 0x4000].iter().any(|&base| {
+                (base + FS_USC..base + FS_USC + 0x80).contains(&address)
+                    || (base + 0x2000..base + 0x2040).contains(&address)
+                    || (base + CF..base + CF + 0x20).contains(&address)
+            }) {
+                self.fragment_reads.push(address - BASE);
+            }
+            if self.blocked.as_ref().is_some_and(|range| {
+                address < range.end && address + bytes.len() as u64 > range.start
+            }) {
+                return Err(crate::platform::dma::DmaError::Memory);
+            }
+            self.flat
+                .read(address, bytes)
+                .map_err(|_| crate::platform::dma::DmaError::Memory)
+        }
+        fn gpu_write(
+            &mut self,
+            _: usize,
+            address: u64,
+            bytes: &[u8],
+        ) -> Result<(), crate::platform::dma::DmaError> {
+            self.writes += 1;
+            self.last_write = Some(address);
+            if address == MARKER {
+                self.marker_writes += 1;
+            }
+            self.flat
+                .write(address, bytes)
+                .map_err(|_| crate::platform::dma::DmaError::Memory)
+        }
+    }
+    fn accepted(
+        kind: crate::platform::apple::agx::channel::Kind,
+        context: u32,
+    ) -> crate::platform::apple::agx::work_decode::Submission {
+        use crate::platform::apple::agx::{
+            channel::{Command, Stamp},
+            work_decode::{Encoding, Submission},
+        };
+        Submission {
+            command: Command {
+                va: BASE + 0x3f000,
+                kind,
+            },
+            encoding: Encoding::Fixed,
+            counter: 1,
+            context,
+            stamp: Stamp {
+                driver: BASE + 0x3ff00,
+                firmware: BASE + 0x3ff04,
+                value: 0x100,
+                index: 0,
+            },
+            stream: BASE + 0x3f100,
+            stream_bytes: 0x400,
+        }
+    }
+    #[test]
+    fn fragment_program_and_preshader_effects_belong_to_3d_and_survive_later_fault_once() {
+        use crate::platform::apple::agx::{channel::Kind, work::Execution};
+        for preshader in [false, true] {
+            let red = [1.0, 0.0, 0.0, 1.0];
+            let (mut flat, pass) = scene(
+                &[
+                    vertex(-1.0, -1.0, 0.5, red),
+                    vertex(1.0, -1.0, 0.5, red),
+                    vertex(-1.0, 1.0, 0.5, red),
+                ],
+                ALWAYS_NO_WRITE,
+                0,
+                0,
+            );
+            let blocked = if preshader {
+                usc(
+                    &mut flat,
+                    FS_USC,
+                    Some((0, 4, 0x580)),
+                    None,
+                    Some(true),
+                    FS_CODE,
+                );
+                flat.put(BASE + 0x580, &MARKER.to_le_bytes());
+                flat.put(
+                    BASE + FS_USC + 22,
+                    &(0x38u64 | 0xc08000 << 8 | 0x2000 << 32).to_le_bytes(),
+                );
+                flat.put(
+                    BASE + 0x2000,
+                    // r0 is the execution nesting counter, not a temporary.
+                    &program("mov r2, 1\nmov r3, 0\nstore r2, du0, r3, i32, x, a\nstop"),
+                );
+                assert_eq!(
+                    crate::platform::apple::agx::stream::usc::parse(&mut flat, BASE, FS_USC)
+                        .unwrap()
+                        .preshader,
+                    Some(0x2000)
+                );
+                // The native TA/3D USC base registers are independent.
+                let bytes = flat.get(BASE, 0x2040).to_vec();
+                flat.put(BASE + 0x4000, &bytes);
+                BASE + 0x4000 + CF..BASE + 0x4000 + CF + 0x20
+            } else {
+                BASE + FS_USC..BASE + FS_USC + 0x80
+            };
+            let mut memory = StagedMemory {
+                flat,
+                blocked: Some(blocked),
+                reads: 0,
+                writes: 0,
+                marker_writes: 0,
+                last_write: None,
+                fragment_reads: Vec::new(),
+            };
+            let mut geometry = Execution::geometry(accepted(Kind::Ta, pass.vm_slot), pass).unwrap();
+            geometry.run(&mut memory).unwrap();
+            assert!(memory.fragment_reads.is_empty());
+            assert_eq!((memory.writes, memory.marker_writes), (0, 0));
+            let product = geometry.take_geometry().unwrap();
+            let fragment_pass = if preshader {
+                RenderPass {
+                    usc_base: BASE + 0x4000,
+                    ..pass
+                }
+            } else {
+                pass
+            };
+            let mut fragment = match Execution::fragment(
+                accepted(Kind::ThreeD, pass.vm_slot),
+                fragment_pass,
+                product,
+            ) {
+                Ok(owner) => owner,
+                Err(_) => panic!("same render pass product refused"),
+            };
+            let error = fragment.run(&mut memory).unwrap_err();
+            assert_eq!(
+                memory.marker_writes,
+                usize::from(preshader),
+                "{error:?}, writes={} last={:?} reads={:?}",
+                memory.writes,
+                memory.last_write,
+                memory.fragment_reads
+            );
+            assert_eq!(
+                memory.flat.get(MARKER, 4),
+                if preshader {
+                    &[1, 0, 0, 0]
+                } else {
+                    &[0, 0, 0, 0]
+                }
+            );
+            let counts = (memory.reads, memory.writes);
+            memory.blocked = None;
+            memory.flat.put(MARKER, &42u32.to_le_bytes());
+            assert_eq!(fragment.run(&mut memory), Err(error));
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(memory.flat.get(MARKER, 4), &[42, 0, 0, 0]);
+            assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
+        }
+    }
+
     #[test]
     fn a_triangle_interpolates_its_colours_over_the_background() {
         let (red, green, blue) = (
