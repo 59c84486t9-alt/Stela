@@ -52,6 +52,7 @@ pub mod rtkit;
 pub mod sart;
 pub mod scanout;
 pub mod sep;
+pub mod sio_dma;
 pub mod smc;
 pub mod spi;
 pub mod spmi;
