@@ -53,6 +53,22 @@ impl From<realtek::Error> for Error {
     }
 }
 
+/// Nonfatal diagnostics retain controller-specific values through discovery.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Warning {
+    Message(&'static str),
+    Realtek(realtek::Warning),
+}
+
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::Realtek(warning) => write!(f, "Realtek {warning}"),
+        }
+    }
+}
+
 /// A host network adapter, as a raw Ethernet link.
 pub enum Adapter {
     Virtio(VirtioNet),
@@ -140,13 +156,16 @@ pub struct Disks {
     pub inputs: Vec<VirtioInput>,
     /// USB keyboards and pointers behind xHCI controllers.
     pub usb_inputs: Vec<UsbInput>,
+    /// Complete descriptor inventories, including hubs and unbound devices.
+    /// Retention does not grant hardware ownership or guest forwarding.
+    pub usb_devices: Vec<xhci::Device>,
     /// Raw USB HCI only; firmware readiness and guest forwarding are separate.
     pub bluetooth: Vec<UsbHci>,
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, Error)>,
     /// Nonfatal initialization diagnostics, including adapters not selected.
-    pub warnings: Vec<(Address, &'static str)>,
+    pub warnings: Vec<(Address, Warning)>,
     /// USB devices that failed to enumerate or bind, by location.
     pub usb_failures: Vec<(String, BlockError)>,
     /// USB interfaces no driver here takes, and why.
@@ -217,6 +236,7 @@ pub unsafe fn probe_with_provider(
                                 .map(|d| Box::new(d) as Box<dyn BlockDevice>),
                         );
                         disks.usb_inputs.extend(found.inputs);
+                        disks.usb_devices.extend(found.devices);
                         disks.bluetooth.extend(found.bluetooth);
                         disks
                             .links
@@ -255,13 +275,15 @@ pub unsafe fn probe_with_provider(
                         if device.warnings.nvm_autoload_timeout {
                             disks.warnings.push((
                                 address,
-                                "igb NVM autoload completion timed out; NVM contents validated",
+                                Warning::Message(
+                                    "igb NVM autoload completion timed out; NVM contents validated",
+                                ),
                             ));
                         }
                         if device.warnings.phy_configuration_timeout {
                             disks.warnings.push((
                                 address,
-                                "igb PHY configuration completion timed out; PHY transactions validated",
+                                Warning::Message("igb PHY configuration completion timed out; PHY transactions validated"),
                             ));
                         }
                         disks.links.push(Adapter::Igb(device));
@@ -275,12 +297,7 @@ pub unsafe fn probe_with_provider(
                 match unsafe { Realtek::new(&mut function, handoff, dma, firmware) } {
                     Ok(device) => {
                         if let Some(warning) = device.warning() {
-                            let message = match warning {
-                                realtek::Warning::EeeAdvertisementDisableUnavailable => {
-                                    "Realtek optional EEE advertisement cleanup not performed; EEE advertisement state unverified"
-                                }
-                            };
-                            disks.warnings.push((address, message));
+                            disks.warnings.push((address, Warning::Realtek(warning)));
                         }
                         disks.links.push(Adapter::Realtek(device));
                     }
