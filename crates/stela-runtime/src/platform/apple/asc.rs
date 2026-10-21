@@ -39,8 +39,10 @@
 //!   the AP enables it. 0x8110 bit 0 (`_getKICInboxEnabled`) is held;
 //! - a load of an empty outbox is refused (the hardware underflows, which
 //!   `AppleA7IOP::_outboxUnderflowCheck` treats as an error);
-//! - stopping a running coprocessor is refused until a firmware models what
-//!   a restart loses.
+//! - clearing RUN halts native firmware rather than resetting it. A firmware
+//!   must admit retained stop/resume explicitly; unsupported reset and
+//!   power-loss flows still refuse. Mailbox controls, staged payload and
+//!   queued responses survive a retained halt.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::interrupt::{AicInput, Wire};
 use crate::platform::dma::Port;
@@ -97,6 +99,17 @@ pub struct TransitionRequest {
 pub trait Firmware: Any {
     /// The coprocessor starts running; messages it sends go to `outbox`.
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
+    /// Halt CPU execution while retaining firmware state. Validate before
+    /// changing state: a refusal leaves RUN and the mailbox untouched.
+    /// Autonomous hardware work must be settled or retained by its owner.
+    fn stop(&mut self) -> Result<(), &'static str> {
+        Err("firmware retained CPU stop is not modeled")
+    }
+    /// Resume after an accepted retained halt, preserving protocol state.
+    /// This is distinct from cold `start`; refusal leaves the CPU halted.
+    fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        Err("firmware retained CPU resume is not modeled")
+    }
     /// The AP sent `message`.
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
     /// The coprocessor has bus-master work queued (DMA it began when it
@@ -156,6 +169,8 @@ impl Lines {
 pub struct Asc {
     firmware: Box<dyn Firmware>,
     running: bool,
+    /// RUN was cleared after firmware admitted a retained CPU halt.
+    halted: bool,
     cpu_control: u64,
     a2i_control: u64,
     outbox_enabled: bool,
@@ -190,6 +205,7 @@ impl Asc {
         Ok(Self {
             firmware,
             running,
+            halted: false,
             cpu_control: if running { RUN } else { 0 },
             a2i_control: 0,
             outbox_enabled: false,
@@ -341,13 +357,21 @@ impl Asc {
         }
         let run = value & RUN != 0;
         if self.running && !run {
-            return Err("stopping a running coprocessor is not modeled");
+            self.firmware.stop()?;
+            self.running = false;
+            self.halted = true;
         }
         if run && !self.running {
             let mut started = Vec::new();
-            let result = self.firmware.start(&mut started).map(|()| started);
+            let result = if self.halted {
+                self.firmware.resume(&mut started)
+            } else {
+                self.firmware.start(&mut started)
+            }
+            .map(|()| started);
             self.deliver(result)?;
             self.running = true;
+            self.halted = false;
         }
         self.cpu_control = value;
         Ok(())
@@ -640,6 +664,171 @@ mod tests {
         );
         assert!(asc.read(0x8004, Width::Word, &mut access).is_err());
         assert!(asc.read(I2A_RECV0, Width::Word, &mut access).is_err());
+    }
+
+    #[derive(Default)]
+    struct Retained {
+        starts: u32,
+        stops: u32,
+        resumes: u32,
+        polls: u32,
+        value: u64,
+        refuse_stop: bool,
+        refuse_resume: bool,
+    }
+
+    impl Firmware for Retained {
+        fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+            self.starts += 1;
+            outbox.push(Message {
+                endpoint: 0,
+                payload: 0x1234,
+            });
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), &'static str> {
+            if self.refuse_stop {
+                return Err("stop refused");
+            }
+            self.stops += 1;
+            Ok(())
+        }
+        fn resume(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+            if self.refuse_resume {
+                return Err("resume refused");
+            }
+            self.resumes += 1;
+            Ok(())
+        }
+        fn receive(
+            &mut self,
+            message: Message,
+            outbox: &mut Vec<Message>,
+        ) -> Result<(), &'static str> {
+            self.value += message.payload;
+            outbox.push(Message {
+                endpoint: message.endpoint,
+                payload: self.value,
+            });
+            Ok(())
+        }
+        fn poll(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+            self.polls += 1;
+            Ok(())
+        }
+        fn dma_pending(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn retained_halt_keeps_mailboxes_state_and_cpu_work_until_resume() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut asc = Asc::new(
+            Box::new(Retained::default()),
+            false,
+            Lines::from_interrupts(LINES),
+        )
+        .unwrap();
+        asc.write(CPU_CONTROL, Width::Word, 0, &mut access).unwrap();
+        assert_eq!(asc.firmware::<Retained>().unwrap().stops, 0);
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
+        asc.write(
+            CPU_CONTROL,
+            Width::Word,
+            RUN | CPU_CONTROL_HELD,
+            &mut access,
+        )
+        .unwrap();
+        asc.write(A2I_CONTROL, Width::Word, 1, &mut access).unwrap();
+        asc.write(I2A_CONTROL, Width::Word, 1, &mut access).unwrap();
+        asc.write(A2I_SEND0, Width::Double, 5, &mut access).unwrap();
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        asc.write(A2I_SEND0, Width::Double, 7, &mut access).unwrap();
+        asc.advance(&mut access).unwrap();
+        assert!(asc.dma_pending());
+        // Clearing RUN and the held bit are separate AP stores. Neither
+        // flushes a response or the first word of an AP message.
+        asc.write(CPU_CONTROL, Width::Word, CPU_CONTROL_HELD, &mut access)
+            .unwrap();
+        asc.write(CPU_CONTROL, Width::Word, 0, &mut access).unwrap();
+        asc.advance(&mut access).unwrap();
+        assert!(!asc.dma_pending());
+        assert_eq!(asc.levels[2], Some(true)); // Outbox IRQ survives CPU halt.
+        assert_eq!(asc.firmware::<Retained>().unwrap().polls, 1);
+        assert_eq!(
+            asc.read(A2I_CONTROL, Width::Word, &mut access),
+            Ok(CONTROL_ENABLE | CONTROL_EMPTY)
+        );
+        assert_eq!(receive(&mut asc, &mut access), (0x1234, 2 << 52));
+        assert_eq!(asc.levels[2], Some(true));
+        assert_eq!(receive(&mut asc, &mut access), (5, 0x20 | 1 << 52));
+        assert_eq!(asc.levels[2], Some(false));
+        assert_eq!(asc.levels[3], Some(true));
+        assert!(
+            asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+                .is_err()
+        );
+        assert_eq!(asc.send0, Some(7));
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+            .unwrap();
+        assert!(asc.dma_pending());
+        assert!(asc.outbox.is_empty()); // Resume did not emit another cold Hello.
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access)
+            .unwrap();
+        assert_eq!(receive(&mut asc, &mut access), (12, 0x20 | 1 << 52));
+        let firmware = asc.firmware::<Retained>().unwrap();
+        assert_eq!(
+            (firmware.starts, firmware.stops, firmware.resumes),
+            (1, 1, 1)
+        );
+        assert_eq!(firmware.value, 12);
+    }
+
+    #[test]
+    fn refused_halt_and_resume_leave_control_and_mailboxes_unchanged() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut asc = Asc::new(
+            Box::new(Retained {
+                refuse_stop: true,
+                ..Retained::default()
+            }),
+            true,
+            Lines::default(),
+        )
+        .unwrap();
+        asc.write(A2I_SEND0, Width::Double, 9, &mut access).unwrap();
+        assert!(asc.write(CPU_CONTROL, Width::Word, 0, &mut access).is_err());
+        assert!(asc.running && !asc.halted);
+        assert_eq!(asc.cpu_control, RUN);
+        assert_eq!(asc.send0, Some(9));
+        assert_eq!(asc.outbox.len(), 1);
+        asc.firmware_mut::<Retained>().unwrap().refuse_stop = false;
+        asc.write(CPU_CONTROL, Width::Word, 0, &mut access).unwrap();
+        asc.firmware_mut::<Retained>().unwrap().refuse_resume = true;
+        assert!(
+            asc.write(CPU_CONTROL, Width::Word, RUN, &mut access)
+                .is_err()
+        );
+        assert!(!asc.running && asc.halted);
+        assert_eq!(asc.cpu_control, 0);
+        assert_eq!(asc.send0, Some(9));
+        assert_eq!(asc.outbox.len(), 1);
+        assert!(
+            asc.write(CPU_CONTROL, Width::Word, RUN | 1, &mut access)
+                .is_err()
+        );
+        assert!(
+            asc.write(CPU_CONTROL, Width::Double, RUN, &mut access)
+                .is_err()
+        );
+        assert_eq!(asc.firmware::<Retained>().unwrap().resumes, 0);
     }
 
     /// Powers the machine off for any message and reports one event of

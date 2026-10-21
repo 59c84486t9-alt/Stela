@@ -235,6 +235,10 @@ impl Afk {
         !self.incoming.is_empty()
     }
 
+    pub(super) fn retained_idle(&self) -> bool {
+        !self.pending() && self.reply.is_none()
+    }
+
     /// The AP sent `word`; what needs no memory is answered at once.
     pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         self.seen.push_back(Event::Received(word));

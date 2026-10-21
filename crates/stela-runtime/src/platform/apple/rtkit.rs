@@ -58,6 +58,16 @@
 //! `_handleEPRollCall` (0xfffffe000b6746e8) requires at VersionOk. The
 //! rail-gated AP-power wake is not modeled and refuses.
 //!
+//! Retained CPU stop follows a completed IOP sleep request: the AP's power
+//! table at VA `0xfffffe0007cd8620` maps RTBuddy states 0/1/2/3 to wire
+//! 0x201/0x220/0x202/0, while `powerStatePreservesMemory` at
+//! `0xfffffe000b669488` admits only states below 3. RTBuddy waits for the
+//! sleep ACK, disables outbox delivery, then calls `stopCPU(false, ...)`
+//! (`0xfffffe000b661328..0xfffffe000b6615f4`). The ASC RUN edge retains
+//! protocol and endpoint state; resume emits no HELLO and leaves IOP power
+//! asleep until the AP sends 0x220. Unenumerated, awake and memory-loss
+//! CPU-stop paths explicitly refuse rather than substituting a retained halt.
+//!
 //! The roll call lists exactly the endpoints the model provides. Of RTKit's
 //! system endpoints (crashlog 1, syslog 2, kdebug 3, IOReporting 4, OSLog 8,
 //! ...) only the crashlog endpoint is listed: the kernel assumes it. On a
@@ -178,6 +188,8 @@ pub struct RtKit {
     /// The wake state acknowledged when enumeration completes.
     wake: Option<u64>,
     iop_power: u64,
+    /// The wrapper halted this CPU after a retained-sleep handshake.
+    cpu_stopped: bool,
     ap_power: u64,
     power_nap: bool,
 }
@@ -213,6 +225,7 @@ impl RtKit {
             quiesced: false,
             wake: None,
             iop_power: POWER_ON,
+            cpu_stopped: false,
             ap_power: 0,
             power_nap: false,
         })
@@ -379,6 +392,9 @@ impl RtKit {
 
 impl Firmware for RtKit {
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        if self.cpu_stopped {
+            return Err("RTKit cold start cannot replace a retained CPU resume");
+        }
         if self.quiesced {
             self.stage = Stage::Quiesced;
         } else {
@@ -387,7 +403,26 @@ impl Firmware for RtKit {
         Ok(())
     }
 
+    fn stop(&mut self) -> Result<(), &'static str> {
+        if self.stage != Stage::Ready || !matches!(self.iop_power, 0x201 | 0x202) {
+            return Err("RTKit CPU stop requires a completed retained-sleep handshake");
+        }
+        self.cpu_stopped = true;
+        Ok(())
+    }
+
+    fn resume(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        if !self.cpu_stopped {
+            return Err("RTKit CPU resume without a retained halt");
+        }
+        self.cpu_stopped = false;
+        Ok(())
+    }
+
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        if self.cpu_stopped {
+            return Err("RTKit message while its CPU is halted");
+        }
         if message.endpoint == MANAGEMENT {
             return self.manage(message.payload, outbox);
         }
@@ -417,7 +452,7 @@ impl Firmware for RtKit {
     /// Unsolicited messages of the enabled endpoints, once the AP has
     /// enumerated them.
     fn poll(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
-        if self.stage != Stage::Ready {
+        if self.cpu_stopped || self.stage != Stage::Ready {
             return Ok(());
         }
         for (&number, (endpoint, enabled)) in &mut self.endpoints {
@@ -594,6 +629,40 @@ mod tests {
         assert!(mgmt(&mut rtkit, AP_POWER, 0x202).is_err());
         assert!(mgmt(&mut rtkit, POWER_NAP, 2).is_err());
         assert!(mgmt(&mut rtkit, 0xf, 0).is_err());
+    }
+
+    #[test]
+    fn retained_cpu_halt_requires_sleep_and_resumes_without_enumeration() {
+        for sleep in [0x201, 0x202] {
+            let mut rtkit = booted(Management::Ordinary);
+            assert!(rtkit.stop().is_err()); // Incomplete protocol start.
+            mgmt(&mut rtkit, HELLO_REPLY, 12 | 12 << 16).unwrap();
+            mgmt(&mut rtkit, ROLL_CALL, 1).unwrap();
+            mgmt(&mut rtkit, ROLL_CALL, 1 << 32).unwrap();
+            mgmt(&mut rtkit, ROLL_CALL, ROLL_CALL_LAST | 2 << 32).unwrap();
+            mgmt(&mut rtkit, ENDPOINT_CONTROL, 0x20 << 32 | ENABLE).unwrap();
+            assert!(rtkit.stop().is_err()); // Awake, not retained sleep.
+            mgmt(&mut rtkit, IOP_POWER, 0).unwrap();
+            assert!(rtkit.stop().is_err()); // Memory-loss power state.
+            mgmt(&mut rtkit, IOP_POWER, sleep).unwrap();
+            rtkit.stop().unwrap();
+            assert_eq!(rtkit.iop_power(), sleep);
+            assert!(step(&mut rtkit, 0x20, 7).is_err());
+            assert!(mgmt(&mut rtkit, IOP_POWER, WAKE).is_err());
+            assert!(rtkit.start(&mut Vec::new()).is_err());
+            let mut out = Vec::new();
+            rtkit.resume(&mut out).unwrap();
+            assert!(out.is_empty());
+            assert_eq!(rtkit.stage, Stage::Ready);
+            assert!(rtkit.resume(&mut out).is_err());
+            assert_eq!(
+                mgmt(&mut rtkit, IOP_POWER, WAKE).unwrap(),
+                vec![management(IOP_POWER_ACK, WAKE)]
+            );
+            // The endpoint remains enabled and its existing native state serves
+            // another request without a new endpoint control or roll call.
+            assert_eq!(step(&mut rtkit, 0x20, 7).unwrap()[0].payload, !7u64);
+        }
     }
 
     #[test]

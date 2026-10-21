@@ -316,6 +316,20 @@ impl Firmware for Coprocessor {
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         self.rtkit.start(outbox)
     }
+    fn stop(&mut self) -> Result<(), &'static str> {
+        if self.link.borrow().pending()
+            || self.frame_pending()
+            || self.afk.iter().any(|afk| !afk.borrow().retained_idle())
+        {
+            return Err("DCP CPU stop with unfinished RPC, scanout or AFK work");
+        }
+        self.rtkit.stop()
+    }
+    fn resume(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        // CPU RUN alone resumes execution; the later IOP wake message
+        // releases the retained RPC link through receive's power edge.
+        self.rtkit.resume(outbox)
+    }
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         let previous = self.rtkit.iop_power();
         self.rtkit.receive(message, outbox)?;
@@ -592,6 +606,91 @@ mod tests {
             iop_power(&mut coprocessor, 0x220).unwrap();
             assert!(quiesced(&coprocessor.link));
         }
+    }
+
+    #[test]
+    fn asc_cpu_halt_and_restart_preserve_the_dcp_link_until_iop_wake() {
+        use super::super::asc::{Asc, Lines};
+        use super::super::bus::{Access, MmioDevice, Width};
+        use super::super::interrupt::InterruptLatch;
+
+        fn send(asc: &mut Asc, access: &mut Access<'_>, endpoint: u8, payload: u64) {
+            asc.write(0x8800, Width::Double, payload, access).unwrap();
+            asc.write(0x8808, Width::Double, u64::from(endpoint), access)
+                .unwrap();
+        }
+        fn take(asc: &mut Asc, access: &mut Access<'_>) -> u64 {
+            let payload = asc.read(0x8830, Width::Double, access).unwrap();
+            asc.read(0x8838, Width::Double, access).unwrap();
+            payload
+        }
+
+        let (scanout, _) = screen(1920, 1080);
+        let coprocessor = Coprocessor::new(scanout, Some(RAM)).unwrap();
+        let mut asc = Asc::booted(Box::new(coprocessor), Lines::default()).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        assert_eq!(take(&mut asc, &mut access) >> 52, 1); // RTKit Hello.
+        send(&mut asc, &mut access, 0, 2 << 52 | 12 | 12 << 16);
+        assert_eq!(take(&mut asc, &mut access) >> 52, 8);
+        send(&mut asc, &mut access, 0, 8 << 52 | 1);
+        assert_eq!(take(&mut asc, &mut access) >> 52, 8);
+        send(&mut asc, &mut access, 0, 8 << 52 | 1 << 51 | 1 << 32);
+        assert_eq!(take(&mut asc, &mut access), 7 << 52 | 0x20);
+        send(
+            &mut asc,
+            &mut access,
+            0,
+            5 << 52 | u64::from(IOMFB_ENDPOINT) << 32 | 2,
+        );
+        assert_eq!(take(&mut asc, &mut access), 0x100 | 211 << 16);
+        let mut ram = Ram::new(RAM, 0x4000 + link::REGION_BYTES as usize);
+        ram.bytes[0x4000 + 12] = 4;
+        send(
+            &mut asc,
+            &mut access,
+            IOMFB_ENDPOINT,
+            link::Word::Region { dva: 0x4000 }.encode(),
+        );
+        with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
+        take(&mut asc, &mut access);
+        let shared = asc.firmware::<Coprocessor>().unwrap().link.clone();
+        let heap = shared.borrow().heap();
+        let mut endpoint = Iomfb(shared.clone());
+        call(
+            &mut endpoint,
+            &mut ram,
+            0,
+            b"A500",
+            &[0, 0, 0xaa, 0xaa],
+            0,
+            true,
+        );
+        // A CPU stop cannot abandon a queued DMA/RPC message.
+        assert!(asc.write(0x44, Width::Word, 0, &mut access).is_err());
+        with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
+        take(&mut asc, &mut access);
+        send(&mut asc, &mut access, 0, 6 << 52 | 0x201);
+        assert_eq!(take(&mut asc, &mut access), 7 << 52 | 0x201);
+        asc.write(0x8114, Width::Word, 0, &mut access).unwrap();
+        asc.write(0x44, Width::Word, 0, &mut access).unwrap();
+        assert_eq!(asc.read(0x44, Width::Word, &mut access), Ok(0));
+        assert!(!asc.dma_pending());
+        assert!(with_port(&mut ram, |port| asc.service_dma(port)).is_err());
+        asc.write(0x44, Width::Word, 0x10, &mut access).unwrap();
+        asc.write(0x8114, Width::Word, 1, &mut access).unwrap();
+        assert!(asc.read(0x8830, Width::Double, &mut access).is_err());
+        assert!(quiesced(&shared)); // CPU resume alone does not wake the link.
+        send(&mut asc, &mut access, 0, 6 << 52 | 0x220);
+        assert_eq!(take(&mut asc, &mut access), 7 << 52 | 0x220);
+        assert_eq!(shared.borrow().heap(), heap);
+        let request = call(&mut endpoint, &mut ram, 0, b"A451", &[], 4, true);
+        with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
+        assert_eq!(
+            take(&mut asc, &mut access),
+            link::Word::Rpc(request.answer()).encode()
+        );
+        assert_eq!(&ram.bytes[0xc00c..0xc010], &1920u32.to_le_bytes());
     }
 
     #[test]
