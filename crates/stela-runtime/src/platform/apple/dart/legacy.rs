@@ -218,11 +218,12 @@ impl Dart {
         if self.quiesced {
             return Err(DmaError::Unsupported("DART DMA is quiesced"));
         }
-        let Some(&sid) = self.remap.get(input_sid) else {
+        if input_sid >= self.streams {
             return Err(DmaError::Unsupported(
                 "DART incoming stream is outside the native profile",
             ));
-        };
+        }
+        let sid = self.remap[input_sid];
         if usize::from(sid) != input_sid {
             return Err(DmaError::Unsupported("legacy DART stream remapping"));
         }

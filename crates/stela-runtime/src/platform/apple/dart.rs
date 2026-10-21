@@ -430,6 +430,30 @@ mod tests {
     }
 
     #[test]
+    fn incoming_streams_outside_the_profile_never_truncate_into_fault_sids() {
+        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+            let mut model = Dart::for_profile(profile, 1, None).unwrap();
+            let mut sink = InterruptLatch::new();
+            let mut a = Access::new(0, 0, &mut sink);
+            let mut ram = Ram::new(0, 0x4000);
+            for stream in [1, 16, 256, usize::MAX] {
+                assert_eq!(
+                    model.translate(&mut ram, stream, 0, 0, false, &mut a),
+                    Err(DmaError::Unsupported(
+                        "DART incoming stream is outside the native profile"
+                    ))
+                );
+                let error = if profile == Profile::T8110 {
+                    0x100
+                } else {
+                    0x40
+                };
+                assert_eq!(model.read(error, Width::Word, &mut a), Ok(0));
+            }
+        }
+    }
+
+    #[test]
     fn functional_clock_gating_retains_configuration_and_blocks_both_access_paths() {
         for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
             let mut model = Dart::for_profile(profile, 16, None).unwrap();

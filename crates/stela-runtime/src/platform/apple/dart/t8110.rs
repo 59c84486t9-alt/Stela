@@ -456,7 +456,12 @@ impl Dart {
         if self.quiesced {
             return Err(DmaError::Unsupported("DART DMA is quiesced"));
         }
-        if sid >= self.streams || !self.stream_enabled(sid) {
+        if sid >= self.streams {
+            return Err(DmaError::Unsupported(
+                "DART incoming stream is outside the native profile",
+            ));
+        }
+        if !self.stream_enabled(sid) {
             return Err(fault(Fault::NoTtbr));
         }
         let tcr = self.tcr[sid];
