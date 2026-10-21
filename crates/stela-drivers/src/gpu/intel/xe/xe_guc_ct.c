@@ -25,6 +25,7 @@
 #include "xe_gt_sriov_pf_control.h"
 #include "xe_gt_sriov_pf_monitor.h"
 #include "xe_guc.h"
+#include "xe_guc_ct_message.h"
 #include "xe_guc_log.h"
 #include "xe_guc_pagefault.h"
 #include "xe_guc_relay.h"
@@ -914,13 +915,6 @@ static u16 next_ct_seqno(struct xe_guc_ct *ct, bool is_g2h_fence)
 	return seqno;
 }
 
-#define MAKE_ACTION(type, __action)				\
-({								\
-	FIELD_PREP(GUC_HXG_MSG_0_TYPE, type) |			\
-	FIELD_PREP(GUC_HXG_EVENT_MSG_0_ACTION |			\
-		   GUC_HXG_EVENT_MSG_0_DATA0, __action);	\
-})
-
 static bool vf_action_can_safely_fail(struct xe_device *xe, u32 action)
 {
 	/*
@@ -1003,18 +997,18 @@ static int h2g_write(struct xe_guc_ct *ct, const u32 *action, u32 len,
 	 * dw1: HXG header (including action code)
 	 * dw2+: action data
 	 */
-	cmd[0] = FIELD_PREP(GUC_CTB_MSG_0_FORMAT, GUC_CTB_FORMAT_HXG) |
-		FIELD_PREP(GUC_CTB_MSG_0_NUM_DWORDS, len) |
-		FIELD_PREP(GUC_CTB_MSG_0_FENCE, ct_fence_value);
 	if (want_response) {
-		cmd[1] = MAKE_ACTION(GUC_HXG_TYPE_REQUEST, action[0]);
+		xe_guc_ct_message_header(cmd, len, ct_fence_value,
+					 GUC_HXG_TYPE_REQUEST, action[0]);
 	} else if (vf_action_can_safely_fail(xe, action[0])) {
-		cmd[1] = MAKE_ACTION(GUC_HXG_TYPE_EVENT, action[0]);
+		xe_guc_ct_message_header(cmd, len, ct_fence_value,
+					 GUC_HXG_TYPE_EVENT, action[0]);
 	} else {
 		fast_req_track(ct, ct_fence_value,
 			       FIELD_GET(GUC_HXG_EVENT_MSG_0_ACTION, action[0]));
 
-		cmd[1] = MAKE_ACTION(GUC_HXG_TYPE_FAST_REQUEST, action[0]);
+		xe_guc_ct_message_header(cmd, len, ct_fence_value,
+					 GUC_HXG_TYPE_FAST_REQUEST, action[0]);
 	}
 
 	/* H2G header in cmd[1] replaces action[0] so: */

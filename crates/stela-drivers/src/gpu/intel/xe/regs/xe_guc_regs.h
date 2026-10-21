@@ -10,6 +10,7 @@
 #include <linux/types.h>
 
 #include "regs/xe_reg_defs.h"
+#include "regs/xe_guc_ct_regs.h"
 
 /* Definitions of GuC H/W registers, bits, etc */
 
@@ -115,12 +116,12 @@
 #define GT_PM_CONFIG				XE_REG(0x13816c)
 #define   GT_DOORBELL_ENABLE			REG_BIT(0)
 
-#define GUC_HOST_INTERRUPT			XE_REG(0x1901f0, XE_REG_OPTION_VF)
+#define GUC_HOST_INTERRUPT			XE_REG(XE_GUC_CT_NOTIFY_REG_ADDR, XE_REG_OPTION_VF)
 
 #define VF_SW_FLAG(n)				XE_REG(0x190240 + (n) * 4, XE_REG_OPTION_VF)
 #define VF_SW_FLAG_COUNT			4
 
-#define MED_GUC_HOST_INTERRUPT			XE_REG(0x190304, XE_REG_OPTION_VF)
+#define MED_GUC_HOST_INTERRUPT			XE_REG(XE_GUC_CT_MEDIA_NOTIFY_REG_ADDR, XE_REG_OPTION_VF)
 
 #define MED_VF_SW_FLAG(n)			XE_REG(0x190310 + (n) * 4, XE_REG_OPTION_VF)
 #define MED_VF_SW_FLAG_COUNT			4

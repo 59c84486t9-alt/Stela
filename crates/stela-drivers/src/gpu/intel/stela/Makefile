@@ -12,9 +12,11 @@ CFLAGS := --target=$(TARGET) -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 \
 HOST_CFLAGS := -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 -g -Wall -Wextra -Werror \
                -Wconversion -Wsign-conversion
 SANITIZE ?= -fsanitize=address,undefined
-OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o
+OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o $(BUILD)/ct.o
 HEADERS := $(wildcard $(SOURCE)/*.h $(SOURCE)/../xe/xe_pt_walk.h \
-             $(SOURCE)/../xe/xe_ring_emit.h $(SOURCE)/../xe/instructions/*.h)
+             $(SOURCE)/../xe/xe_ring_emit.h $(SOURCE)/../xe/instructions/*.h \
+             $(SOURCE)/../xe/xe_guc_ct_message.h $(SOURCE)/../xe/abi/*.h \
+             $(SOURCE)/../xe/regs/xe_guc_ct_regs.h)
 MESA_SOURCE ?= $(abspath $(SOURCE)/../../common/mesa)
 MESA_BUILD ?=
 PACKER_GENERATIONS := 120 125 200 300 350
@@ -32,6 +34,9 @@ $(BUILD)/pt_walk.o: $(SOURCE)/pt_walk.c | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 
 $(BUILD)/commands.o: $(SOURCE)/commands.c | $(BUILD)
+	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
+
+$(BUILD)/ct.o: $(SOURCE)/ct.c | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 
 $(BUILD)/libstela-intel.a: $(OBJECTS)
@@ -54,8 +59,12 @@ $(BUILD)/test-packers-%: $(SOURCE)/tests/commands_mesa.c $(SOURCE)/commands.c $(
 test-packers: $(addprefix $(BUILD)/test-packers-,$(PACKER_GENERATIONS))
 	$(foreach generation,$(PACKER_GENERATIONS),"$(BUILD)/test-packers-$(generation)" &&) true
 
-test: $(BUILD)/test-pt-walk $(BUILD)/test-commands
+$(BUILD)/test-ct: $(SOURCE)/tests/ct.c $(SOURCE)/ct.c $(HEADERS) | $(BUILD)
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) $(filter %.c,$^) -o "$@"
+
+test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct
 	"$(BUILD)/test-pt-walk"
 	"$(BUILD)/test-commands"
+	"$(BUILD)/test-ct"
 
 -include $(OBJECTS:.o=.d)

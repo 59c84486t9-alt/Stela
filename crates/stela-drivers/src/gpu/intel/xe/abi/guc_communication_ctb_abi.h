@@ -6,8 +6,12 @@
 #ifndef _ABI_GUC_COMMUNICATION_CTB_ABI_H
 #define _ABI_GUC_COMMUNICATION_CTB_ABI_H
 
+#ifdef STELA_NATIVE
+#include "../../stela/ct_abi_platform.h"
+#else
 #include <linux/types.h>
 #include <linux/build_bug.h>
+#endif
 
 #include "guc_messages_abi.h"
 

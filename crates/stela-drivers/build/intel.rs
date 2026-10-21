@@ -7,12 +7,16 @@ pub fn configure(build: &mut cc::Build) {
         .include(format!("{source}/xe"))
         .file(format!("{source}/xe/xe_pt_walk.c"))
         .file(format!("{source}/stela/pt_walk.c"))
-        .file(format!("{source}/stela/commands.c"));
+        .file(format!("{source}/stela/commands.c"))
+        .file(format!("{source}/stela/ct.c"));
     for path in [
         "stela",
         "xe/xe_pt_walk.h",
         "xe/xe_ring_emit.h",
         "xe/instructions",
+        "xe/xe_guc_ct_message.h",
+        "xe/abi",
+        "xe/regs/xe_guc_ct_regs.h",
     ] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }
