@@ -74,6 +74,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
+pub mod resources;
+
 const NAME: &str = "agx-sgx";
 
 /// The GPC registers' offsets in the family's GPC block.
@@ -212,6 +214,7 @@ struct Native {
     sleep_request: u32,
     wake: u32,
     gpu_awake: Rc<Cell<bool>>,
+    resources: resources::Windows,
 }
 impl Default for Native {
     fn default() -> Self {
@@ -221,6 +224,7 @@ impl Default for Native {
             sleep_request: 0,
             wake: 0,
             gpu_awake: Rc::new(Cell::new(true)),
+            resources: resources::Windows::default(),
         }
     }
 }
@@ -328,13 +332,20 @@ impl FirmwarePower {
         if !self.native.borrow().gpu_awake.get() {
             return Err("GFX firmware reset while native GPU sleep retains restore ownership");
         }
+        if self.native.borrow().resources.active() {
+            return Err("GFX firmware reset with retained native resource windows");
+        }
         Ok(())
     }
 
     fn logical(&self, physical: u64) -> Result<u64, &'static str> {
+        self.logical_range(physical, 4)
+    }
+
+    fn logical_range(&self, physical: u64, width: u64) -> Result<u64, &'static str> {
         for &(base, bytes, offset) in &self.banks {
             if let Some(at) = physical.checked_sub(base)
-                && at.checked_add(4).is_some_and(|end| end <= bytes)
+                && at.checked_add(width).is_some_and(|end| end <= bytes)
             {
                 return Ok(offset + at);
             }
@@ -681,7 +692,7 @@ impl MmioDevice for Sgx {
                 offset,
                 width,
                 Direction::Read,
-                "sgx registers are 32-bit",
+                "sgx register access width is not qualified",
             ));
         }
         self.read32(offset)
@@ -698,8 +709,16 @@ impl MmioDevice for Sgx {
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
         self.accessible().map_err(fail)?;
+        if width == Width::Double {
+            return self
+                .native
+                .borrow_mut()
+                .resources
+                .write(self.family, offset, value)
+                .map_err(fail);
+        }
         if width != Width::Word {
-            return Err(fail("sgx registers are 32-bit"));
+            return Err(fail("sgx register access width is not qualified"));
         }
         self.write32(offset, value as u32).map_err(fail)
     }

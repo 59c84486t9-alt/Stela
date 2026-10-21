@@ -14,6 +14,8 @@ use super::ring::Shared;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Kind {
+    MCache = 3,
+    ResourceWindows = 17,
     GFender = 31,
     GmGifaf = 32,
     Gcpms = 34,
@@ -42,6 +44,42 @@ pub struct Region {
 }
 
 impl Region {
+    pub(super) fn geometry(&self) -> (u64, u32, u32) {
+        (self.physical, self.bytes, self.range_bytes)
+    }
+
+    /// An original producer-qualified physical list may qualify later
+    /// ranges. No caller may synthesize that list by adding to the first
+    /// descriptor base; every resulting native target still walks the UAT.
+    pub(super) fn listed_word(
+        &self,
+        offset: u32,
+        bases: &[u64],
+    ) -> Result<(u64, u64), &'static str> {
+        if bases.first() != Some(&self.physical)
+            || (bases.len() as u64).checked_mul(u64::from(self.range_bytes))
+                != Some(u64::from(self.bytes))
+        {
+            return Err("GFX firmware PIO physical list disagrees with its descriptor");
+        }
+        if offset & 3 != 0 || self.virtual_address & 3 != 0 || self.flags & WRITABLE == 0 {
+            return Err("GFX firmware PIO listed write is unaligned or read-only");
+        }
+        let end = offset
+            .checked_add(4)
+            .ok_or("GFX firmware PIO listed word wraps")?;
+        if end > self.bytes || offset / self.range_bytes != (end - 1) / self.range_bytes {
+            return Err("GFX firmware PIO listed word exceeds one mapped range");
+        }
+        let base = bases[(offset / self.range_bytes) as usize];
+        base.checked_add(u64::from(self.range_bytes))
+            .ok_or("GFX firmware PIO listed physical range wraps")?;
+        Ok((
+            self.virtual_address + u64::from(offset),
+            base + u64::from(offset % self.range_bytes),
+        ))
+    }
+
     pub fn read(
         memory: &mut dyn Shared,
         hardware_config: u64,
@@ -98,11 +136,29 @@ impl Region {
     /// Address a word in the first known physical range. The native target
     /// still has to check its actual physical bank and the UAT translation.
     pub(super) fn word(&self, offset: u32, write: bool) -> Result<(u64, u64), &'static str> {
-        if offset & 3 != 0 || self.physical & 3 != 0 || self.virtual_address & 3 != 0 {
+        self.range(offset, 4, write)
+    }
+
+    /// Qualify the complete native access, including eight-byte resource
+    /// windows. This does not infer a secondary physical range or bypass UAT.
+    pub(super) fn range(
+        &self,
+        offset: u32,
+        bytes: u32,
+        write: bool,
+    ) -> Result<(u64, u64), &'static str> {
+        if !matches!(bytes, 4 | 8) {
+            return Err("GFX firmware PIO native width is not qualified");
+        }
+        let mask = u64::from(bytes - 1);
+        if u64::from(offset) & mask != 0
+            || self.physical & mask != 0
+            || self.virtual_address & mask != 0
+        {
             return Err("GFX firmware PIO word is unaligned");
         }
         let end = offset
-            .checked_add(4)
+            .checked_add(bytes)
             .ok_or("GFX firmware PIO word offset wraps")?;
         if end > self.bytes {
             return Err("GFX firmware PIO word exceeds its descriptor");

@@ -54,7 +54,10 @@
 //! Every other register of the aperture refuses.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Transition, Width, refuse};
 use super::regfile::{self, Held, Span};
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
+use core::sync::atomic::{Ordering, fence};
 
 const NAME: &str = "amcc";
 const DRAM_ACCESS: u64 = 0x410;
@@ -107,6 +110,7 @@ pub struct Cache {
 /// What a plane or shared register of the memory cache means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
+    DsidInvalidate,
     DramAccess,
     /// The ways to power.
     Ways,
@@ -125,7 +129,7 @@ enum Role {
 const MIB: u64 = 1 << 20;
 
 /// The `mcc,t8112` plane registers besides the lock-regs ones.
-const T8112_PLANE: [Span<Role>; 13] = [
+const T8112_PLANE: [Span<Role>; 14] = [
     Span::new(DRAM_ACCESS, DRAM_ACCESS + 4, Width::Word, Role::DramAccess),
     Span::new(0x1c00, 0x1c04, Width::Word, Role::Ways),
     Span::new(0x1c04, 0x1c08, Width::Word, Role::PoweredWays),
@@ -133,6 +137,9 @@ const T8112_PLANE: [Span<Role>; 13] = [
     // DSID group quotas (32 groups) and the group timeout.
     Span::new(0xa000, 0xa080, Width::Word, Role::Held),
     Span::new(0xa820, 0xa824, Width::Word, Role::Held),
+    // Original G14G firmware type3 +fffc+4*DSID, with the source
+    // descriptor rooted at the MCC broadcast aperture +4000.
+    Span::new(0x1_3ffc, 0x1_43fc, Width::Word, Role::DsidInvalidate),
     // Performance counter control and configuration.
     Span::new(0x1_c00c, 0x1_c014, Width::Word, Role::Held),
     Span::new(0x1_e004, 0x1_e008, Width::Word, Role::Held),
@@ -169,6 +176,7 @@ struct Plane {
     dram_access: bool,
     ways: u32,
     held: Held,
+    dsid_completions: Vec<(u8, u64)>,
 }
 
 impl Default for Plane {
@@ -183,6 +191,7 @@ impl Default for Plane {
             dram_access: true,
             ways: 0,
             held: Held::default(),
+            dsid_completions: Vec::new(),
         }
     }
 }
@@ -209,13 +218,28 @@ enum Target {
 }
 
 /// Every aperture's planes behind one device.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Amcc {
     layout: Layout,
     cache: Option<Cache>,
-    planes: Vec<Plane>,
+    planes: Rc<RefCell<Vec<Plane>>>,
     shared: Vec<Held>,
 }
+
+// An explicit model snapshot remains independent. Firmware handles, in
+// contrast, share only the actual controller's plane/coherency state.
+impl Clone for Amcc {
+    fn clone(&self) -> Self {
+        Self {
+            layout: self.layout,
+            cache: self.cache,
+            planes: Rc::new(RefCell::new(self.planes.borrow().clone())),
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+pub mod firmware;
 
 impl Amcc {
     /// The controller with `apertures` apertures and the CTRR-A region iBoot
@@ -230,8 +254,11 @@ impl Amcc {
     ) -> Result<Self, &'static str> {
         let shift = layout.group.page_size_shift;
         let page = 1u64.checked_shl(shift).ok_or("page-size-shift too large")?;
-        let planes_end = layout.stride * u64::from(layout.planes);
-        if layout.planes == 0 || planes_end > layout.aperture_bytes {
+        let planes_end = layout
+            .stride
+            .checked_mul(u64::from(layout.planes))
+            .ok_or("AMCC plane geometry wraps")?;
+        if layout.planes == 0 || layout.stride == 0 || planes_end > layout.aperture_bytes {
             return Err("AMCC planes do not fit the aperture");
         }
         if let Some(cache) = cache {
@@ -269,7 +296,9 @@ impl Amcc {
                 limit(end - page).map_err(|_| "CTRR-A region beyond the limit registers")?;
         }
         Ok(Self {
-            planes: alloc::vec![plane; apertures * layout.planes as usize],
+            planes: Rc::new(RefCell::new(
+                alloc::vec![plane; apertures * layout.planes as usize],
+            )),
             shared: alloc::vec![Held::default(); apertures],
             layout,
             cache,
@@ -282,6 +311,7 @@ impl Amcc {
         let shift = self.layout.group.page_size_shift;
         let base = self.layout.dram_base;
         self.planes
+            .borrow()
             .iter()
             .filter(|plane| plane.enable || plane.write_disable)
             .map(|plane| {
@@ -354,7 +384,8 @@ impl Amcc {
     }
 
     fn read_plane(&self, index: usize, register: u64, width: Width) -> Result<u64, &'static str> {
-        let plane = &self.planes[index];
+        let planes = self.planes.borrow();
+        let plane = &planes[index];
         if let Some(kind) = self.lock_kind(register) {
             if width != Width::Word {
                 return Err("AMCC register access other than 32 bits");
@@ -371,6 +402,9 @@ impl Amcc {
         }
         Ok(match self.plane_role(register, width)? {
             Role::DramAccess => return Err("DRAM access command readback is not established"),
+            Role::DsidInvalidate => {
+                return Err("MCC DSID invalidation command readback is not established");
+            }
             Role::Ways => u64::from(plane.ways),
             Role::PoweredWays => u64::from(plane.ways) << 10 | u64::from(plane.ways) << 5,
             Role::Flush | Role::Counter => 0,
@@ -389,7 +423,8 @@ impl Amcc {
         let Some(kind) = self.lock_kind(register) else {
             let role = self.plane_role(register, width)?;
             let ways = self.cache.map_or(0, |cache| cache.ways);
-            let plane = &mut self.planes[index];
+            let mut planes = self.planes.borrow_mut();
+            let plane = &mut planes[index];
             return match role {
                 Role::DramAccess if value == 0 => {
                     plane.dram_access = false;
@@ -403,6 +438,7 @@ impl Amcc {
                 Role::Ways => Err("more memory cache ways than the cache has"),
                 Role::Flush if value == 1 => Ok(()),
                 Role::Flush => Err("memory cache flush value other than 1"),
+                Role::DsidInvalidate => invalidate(plane, register, value),
                 Role::Held => {
                     plane.held.set(register, value);
                     Ok(())
@@ -420,7 +456,8 @@ impl Amcc {
         if value & !bits.mask != 0 {
             return Err("AMCC register bit without described meaning");
         }
-        let plane = &mut self.planes[index];
+        let mut planes = self.planes.borrow_mut();
+        let plane = &mut planes[index];
         let set = match kind {
             Kind::CacheStatus if self.cache.is_none() => return Err("AMCC cache-status write"),
             Kind::Lower | Kind::Upper => {
@@ -518,10 +555,10 @@ impl Amcc {
             }
             // Every plane takes the write, or none does.
             (Target::Broadcast(first, register), Some(value)) => {
-                let before = self.planes[first..first + planes].to_vec();
+                let before = self.planes.borrow()[first..first + planes].to_vec();
                 for index in first..first + planes {
                     if let Err(reason) = self.write_plane(index, register, width, value) {
-                        self.planes[first..first + planes].clone_from_slice(&before);
+                        self.planes.borrow_mut()[first..first + planes].clone_from_slice(&before);
                         return Err(reason);
                     }
                 }
@@ -536,6 +573,36 @@ fn bit(set: bool, register: Register) -> u64 {
         u64::from(register.value & register.mask)
     } else {
         0
+    }
+}
+
+fn invalidate(plane: &mut Plane, register: u64, value: u64) -> Result<(), &'static str> {
+    if value != 1 {
+        return Err("MCC DSID invalidation requires its original write1 command");
+    }
+    if !plane.dram_access {
+        return Err("MCC DSID invalidation after DRAM access disable");
+    }
+    retire_invalidation(plane, register);
+    Ok(())
+}
+
+fn retire_invalidation(plane: &mut Plane, register: u64) {
+    let dsid = ((register - 0x13ffc) / 4) as u8;
+    // This actual memory-controller model stores no dirty cache lines.
+    // All PE/DMA/GPU writes copy directly to shared RAM, and a completed
+    // DMA call owns no deferred writeback. Establish their visibility before
+    // retiring the command; no successful completion is sent while a native
+    // job or its earlier DMA publication is still pending in its caller.
+    fence(Ordering::SeqCst);
+    if let Some((_, completed)) = plane
+        .dsid_completions
+        .iter_mut()
+        .find(|(id, _)| *id == dsid)
+    {
+        *completed = completed.wrapping_add(1);
+    } else {
+        plane.dsid_completions.push((dsid, 1));
     }
 }
 
@@ -614,16 +681,16 @@ mod tests {
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
         let mut m = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
-        assert!(m.planes.iter().all(|p| p.dram_access));
+        assert!(m.planes.borrow().iter().all(|p| p.dram_access));
         assert!(
             m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 1, &mut a)
                 .is_err()
         );
         assert!(a.reset_request().is_none());
-        assert!(m.planes.iter().all(|p| p.dram_access));
+        assert!(m.planes.borrow().iter().all(|p| p.dram_access));
         m.write(CACHE.broadcast + DRAM_ACCESS, Width::Word, 0, &mut a)
             .unwrap();
-        assert!(m.planes.iter().all(|p| !p.dram_access));
+        assert!(m.planes.borrow().iter().all(|p| !p.dram_access));
         let request = a.reset_request().unwrap();
         assert_eq!(request.transition, Transition::Halt);
         assert!(request.reason.contains("DRAM access disabled"));
@@ -674,7 +741,7 @@ mod tests {
         assert!(Amcc::new(layout(), 1, Some((0x8_0200_1000, 0x4000)), None).is_err());
         assert!(Amcc::new(layout(), 1, Some((0x7_0000_0000, 0x4000)), None).is_err());
         let blank = Amcc::new(layout(), 2, None, None).unwrap();
-        assert_eq!(blank.planes.len(), 8);
+        assert_eq!(blank.planes.borrow().len(), 8);
     }
 
     const CACHE: Cache = Cache {
@@ -756,5 +823,105 @@ mod tests {
             ..CACHE
         };
         assert!(Amcc::new(layout(), 1, None, Some(overlapping)).is_err());
+    }
+    #[test]
+    fn native_firmware_dsid_commands_share_the_actual_controller_and_veto_late_disabled_planes() {
+        let base = 0x200000000;
+        let mut model = Amcc::new(layout(), 1, None, Some(CACHE)).unwrap();
+        let handle = model.firmware_cache(&[base]).unwrap();
+        assert!(
+            handle
+                .command_ranges()
+                .contains(&(base + CACHE.broadcast + 0x13ffc, 0x400))
+        );
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let register = 0x13ffc + 255 * 4;
+        handle
+            .invalidate(base + CACHE.broadcast + register)
+            .unwrap();
+        assert!(
+            model
+                .planes
+                .borrow()
+                .iter()
+                .all(|plane| plane.dsid_completions == [(255, 1)])
+        );
+        assert!(
+            model
+                .read(CACHE.broadcast + register, Width::Word, &mut access)
+                .is_err()
+        );
+        for value in [0, 2, u64::MAX] {
+            assert!(
+                model
+                    .write(CACHE.broadcast + register, Width::Word, value, &mut access)
+                    .is_err()
+            );
+        }
+        assert!(handle.check(base + CACHE.broadcast + 0x143fc).is_err());
+        assert!(handle.check(base + CACHE.broadcast + 0x13ffe).is_err());
+        assert!(handle.check(base + CACHE.broadcast + 0x13ff8).is_err());
+        assert!(handle.check(base + layout().aperture_bytes).is_err());
+        assert!(model.firmware_cache(&[]).is_err());
+        assert!(model.firmware_cache(&[u64::MAX - 1]).is_err());
+        model
+            .write(
+                2 * layout().stride + DRAM_ACCESS,
+                Width::Word,
+                0,
+                &mut access,
+            )
+            .unwrap();
+        let before = model.planes.borrow().clone();
+        assert!(
+            handle
+                .invalidate(base + CACHE.broadcast + register)
+                .is_err()
+        );
+        assert!(
+            model
+                .write(CACHE.broadcast + register, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        assert_eq!(*model.planes.borrow(), before);
+        // A targeted plane is independent; cloning a model is a deep snapshot,
+        // while the original handle continues to observe its actual owner.
+        handle.invalidate(base + register).unwrap();
+        assert_eq!(model.planes.borrow()[0].dsid_completions, [(255, 2)]);
+        let clone = model.clone();
+        handle.invalidate(base + register).unwrap();
+        assert_eq!(clone.planes.borrow()[0].dsid_completions, [(255, 2)]);
+        assert_eq!(model.planes.borrow()[0].dsid_completions, [(255, 3)]);
+        let unknown = Amcc::new(layout(), 1, None, None).unwrap();
+        assert!(unknown.firmware_cache(&[base]).is_err());
+    }
+    #[test]
+    fn native_cache_geometry_refuses_wrapped_or_zero_plane_spans_before_allocating() {
+        assert!(
+            Amcc::new(
+                Layout {
+                    stride: u64::MAX,
+                    ..layout()
+                },
+                1,
+                None,
+                Some(CACHE)
+            )
+            .unwrap_err()
+            .contains("geometry wraps")
+        );
+        assert!(
+            Amcc::new(
+                Layout {
+                    stride: 0,
+                    ..layout()
+                },
+                1,
+                None,
+                Some(CACHE)
+            )
+            .is_err()
+        );
     }
 }

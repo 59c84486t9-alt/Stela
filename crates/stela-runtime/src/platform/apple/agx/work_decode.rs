@@ -15,6 +15,7 @@
 //! architectural effect.
 
 pub mod registers;
+pub mod resources;
 
 use super::channel::{Command, Kind, Record, STAMPS, Stamp};
 use super::generation::{self, Family};
