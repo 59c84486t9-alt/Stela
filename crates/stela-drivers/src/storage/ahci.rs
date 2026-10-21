@@ -61,6 +61,22 @@ const RESET_TIMEOUT_US: u64 = 1_000_000;
 const SPIN_UP_TIMEOUT_US: u64 = 10_000_000;
 const COMMAND_TIMEOUT_US: u64 = 30_000_000;
 
+/// Command register side effects, allowing hardware-like W1C and completion
+/// tests against the actual table and DMA algorithm.
+trait CommandPort {
+    fn read32(&self, offset: usize) -> u32;
+    fn write32(&self, offset: usize, value: u32);
+}
+
+impl CommandPort for Mmio {
+    fn read32(&self, offset: usize) -> u32 {
+        Mmio::read32(self, offset)
+    }
+    fn write32(&self, offset: usize, value: u32) {
+        Mmio::write32(self, offset, value);
+    }
+}
+
 pub struct AhciDisk {
     port: Mmio,
     commands: DmaBuffer,
@@ -68,6 +84,9 @@ pub struct AhciDisk {
     bounce: DmaBuffer,
     identity: Identity,
     clock: Clock,
+    /// Failed commands require acknowledged reset and re-identification.
+    /// The queue, FIS and bounce allocations remain reserved for this boot.
+    fault: Option<BlockError>,
 }
 
 /// Take the HBA from the firmware, reset it and return one device per port
@@ -116,6 +135,10 @@ pub fn attach(
 }
 
 impl AhciDisk {
+    fn ready(&self) -> Result<(), BlockError> {
+        self.fault.clone().map_or(Ok(()), Err)
+    }
+
     /// Reset the link on one port and, when an ATA disk answers, start the
     /// port and identify the disk.
     fn start(
@@ -192,6 +215,7 @@ impl AhciDisk {
                 read_only: false,
             },
             clock,
+            fault: None,
         };
         disk.issue(ATA_IDENTIFY, 0, 0, 512, false)?;
         let data = disk.bounce.bytes();
@@ -235,6 +259,20 @@ impl AhciDisk {
         bytes: usize,
         write: bool,
     ) -> Result<(), BlockError> {
+        let port = self.port;
+        self.issue_on(&port, command, lba, count, bytes, write)
+    }
+
+    fn issue_on(
+        &mut self,
+        port: &impl CommandPort,
+        command: u8,
+        lba: u64,
+        count: u16,
+        bytes: usize,
+        write: bool,
+    ) -> Result<(), BlockError> {
+        self.ready()?;
         let table = self.table.physical();
         self.table.bytes_mut()[..0x90].fill(0);
         let fis = [
@@ -264,7 +302,6 @@ impl AhciDisk {
         self.commands.write(4, 0u32);
         self.commands.write(8, table);
         fence(Ordering::SeqCst);
-        let port = self.port;
         port.write32(PORT_INTERRUPTS, u32::MAX);
         port.write32(PORT_ISSUE, 1);
         let mut failed = false;
@@ -275,26 +312,15 @@ impl AhciDisk {
         fence(Ordering::SeqCst);
         let task_file = port.read32(PORT_TASK_FILE);
         if failed || task_file & TASK_FILE_ERROR != 0 {
-            self.recover();
-            return Err(BlockError::Device { status: task_file });
+            let error = BlockError::Device { status: task_file };
+            self.fault = Some(error.clone());
+            return Err(error);
         }
         if !done {
-            self.recover();
+            self.fault = Some(BlockError::Timeout);
             return Err(BlockError::Timeout);
         }
         Ok(())
-    }
-
-    /// Restart the port after a failed command so the next one can run.
-    fn recover(&mut self) {
-        let port = self.port;
-        port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) & !COMMAND_START);
-        self.clock.wait(RESET_TIMEOUT_US, || {
-            port.read32(PORT_COMMAND) & COMMAND_LIST_RUNNING == 0
-        });
-        port.write32(PORT_SATA_ERROR, u32::MAX);
-        port.write32(PORT_INTERRUPTS, u32::MAX);
-        port.write32(PORT_COMMAND, port.read32(PORT_COMMAND) | COMMAND_START);
     }
 
     fn chunk_bytes(&self) -> usize {
@@ -314,6 +340,7 @@ impl BlockDevice for AhciDisk {
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.identity.check(lba, buffer.len())?;
+        self.ready()?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes();
         for (index, part) in buffer.chunks_mut(chunk).enumerate() {
@@ -327,6 +354,7 @@ impl BlockDevice for AhciDisk {
 
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         self.identity.check_write(lba, data.len())?;
+        self.ready()?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes();
         for (index, part) in data.chunks(chunk).enumerate() {
@@ -340,5 +368,191 @@ impl BlockDevice for AhciDisk {
 
     fn flush(&mut self) -> Result<(), BlockError> {
         self.issue(ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::dma::RegionAllocator;
+    use alloc::boxed::Box;
+    use core::cell::{Cell, RefCell};
+
+    #[derive(Clone, Copy)]
+    enum Behavior {
+        Complete,
+        Timeout,
+        TaskError,
+    }
+
+    struct PortModel {
+        registers: RefCell<[u32; 32]>,
+        behavior: Cell<Behavior>,
+        writes: RefCell<Vec<(usize, u32)>>,
+    }
+
+    impl PortModel {
+        fn new(behavior: Behavior) -> Self {
+            let mut registers = [0u32; 32];
+            registers[PORT_COMMAND / 4] = COMMAND_START | COMMAND_LIST_RUNNING;
+            Self {
+                registers: RefCell::new(registers),
+                behavior: Cell::new(behavior),
+                writes: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CommandPort for PortModel {
+        fn read32(&self, offset: usize) -> u32 {
+            let mut registers = self.registers.borrow_mut();
+            if registers[PORT_ISSUE / 4] & 1 != 0 {
+                match self.behavior.get() {
+                    Behavior::Complete if offset == PORT_ISSUE => registers[PORT_ISSUE / 4] = 0,
+                    Behavior::TaskError => {
+                        registers[PORT_INTERRUPTS / 4] |= INTERRUPT_TASK_FILE_ERROR;
+                        registers[PORT_TASK_FILE / 4] |= TASK_FILE_ERROR;
+                    }
+                    _ => {}
+                }
+            }
+            registers[offset / 4]
+        }
+        fn write32(&self, offset: usize, value: u32) {
+            self.writes.borrow_mut().push((offset, value));
+            let mut registers = self.registers.borrow_mut();
+            match offset {
+                PORT_INTERRUPTS | PORT_SATA_ERROR => registers[offset / 4] &= !value,
+                _ => registers[offset / 4] = value,
+            }
+        }
+    }
+
+    struct Fixture {
+        disk: AhciDisk,
+        _registers: Box<[u64]>,
+        _memory: Vec<u64>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut registers = vec![0u64; 16].into_boxed_slice();
+            let mut memory = vec![0u64; 32768];
+            let start = memory.as_mut_ptr() as u64;
+            // SAFETY: stable fixture allocations outlive the disk and all
+            // register/DMA operations; there is no physical device.
+            let (port, mut dma) = unsafe {
+                (
+                    Mmio::new(registers.as_mut_ptr() as u64),
+                    RegionAllocator::new(start..start + (memory.len() * 8) as u64),
+                )
+            };
+            Self {
+                disk: AhciDisk {
+                    port,
+                    commands: dma.allocate(1280, 1024).unwrap(),
+                    table: dma.allocate(4096, 128).unwrap(),
+                    bounce: dma.allocate(BOUNCE_BYTES, 4096).unwrap(),
+                    identity: Identity {
+                        transport: Transport::Ahci,
+                        location: "fixture".into(),
+                        model: "fixture".into(),
+                        serial: "fixture".into(),
+                        blocks: 1024,
+                        block_size: 512,
+                        read_only: false,
+                    },
+                    clock: Clock {
+                        ticks_per_microsecond: 0,
+                    },
+                    fault: None,
+                },
+                _registers: registers,
+                _memory: memory,
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_or_task_error_never_restarts_or_reuses_port_dma() {
+        for behavior in [Behavior::Timeout, Behavior::TaskError] {
+            let mut fixture = Fixture::new();
+            let model = PortModel::new(behavior);
+            let error = match behavior {
+                Behavior::Timeout => BlockError::Timeout,
+                _ => BlockError::Device {
+                    status: TASK_FILE_ERROR,
+                },
+            };
+            assert_eq!(
+                fixture
+                    .disk
+                    .issue_on(&model, ATA_READ_DMA_EXT, 0, 1, 512, false),
+                Err(error.clone())
+            );
+            // A still-running command engine never supplies an acknowledged
+            // reset merely because the CPU's timeout elapsed.
+            assert_eq!(
+                model.registers.borrow()[PORT_COMMAND / 4],
+                COMMAND_START | COMMAND_LIST_RUNNING
+            );
+            assert!(
+                !model
+                    .writes
+                    .borrow()
+                    .iter()
+                    .any(|(offset, _)| *offset == PORT_COMMAND)
+            );
+            fixture.disk.bounce.bytes_mut().fill(0x9d); // Late device DMA.
+            let commands = fixture.disk.commands.bytes().to_vec();
+            let table = fixture.disk.table.bytes().to_vec();
+            let writes = model.writes.borrow().len();
+            model.behavior.set(Behavior::Complete);
+            model.registers.borrow_mut()[PORT_ISSUE / 4] = 0;
+            assert_eq!(
+                fixture
+                    .disk
+                    .issue_on(&model, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false),
+                Err(error.clone())
+            );
+            assert_eq!(fixture.disk.write(0, &[0x44; 512]), Err(error.clone()));
+            let mut output = [0x66; 512];
+            assert_eq!(fixture.disk.read(0, &mut output), Err(error.clone()));
+            assert_eq!(fixture.disk.flush(), Err(error));
+            assert_eq!(output, [0x66; 512]);
+            assert!(fixture.disk.bounce.bytes().iter().all(|byte| *byte == 0x9d));
+            assert_eq!(fixture.disk.commands.bytes(), commands);
+            assert_eq!(fixture.disk.table.bytes(), table);
+            assert_eq!(model.writes.borrow().len(), writes);
+            assert!(fixture.disk.port.read32(PORT_ISSUE) == 0);
+        }
+    }
+
+    #[test]
+    fn acknowledged_completions_keep_the_real_command_path_usable() {
+        let mut fixture = Fixture::new();
+        let model = PortModel::new(Behavior::Complete);
+        fixture
+            .disk
+            .issue_on(&model, ATA_WRITE_DMA_EXT, 7, 1, 512, true)
+            .unwrap();
+        assert!(fixture.disk.fault.is_none());
+        assert_eq!(fixture.disk.table.bytes()[2], ATA_WRITE_DMA_EXT);
+        assert_eq!(fixture.disk.commands.read::<u32>(0), 5 | 1 << 6 | 1 << 16);
+        fixture
+            .disk
+            .issue_on(&model, ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+            .unwrap();
+        assert!(fixture.disk.fault.is_none());
+        assert_eq!(fixture.disk.commands.read::<u32>(0), 5);
+        assert_eq!(
+            model
+                .writes
+                .borrow()
+                .iter()
+                .filter(|(offset, _)| *offset == PORT_ISSUE)
+                .count(),
+            2
+        );
     }
 }
