@@ -235,7 +235,7 @@ pub(crate) fn validate_source(boundary: &EntryBoundary, source: &[u8]) -> Result
     Ok(())
 }
 
-fn baseline_register_operation(word: u32, operation: &Operation) -> bool {
+pub(crate) fn baseline_register_operation(word: u32, operation: &Operation) -> bool {
     // The shared decoder turns some constrained memory forms into NOPs and
     // erases BC's HBC origin. This profile supports neither, so the original
     // word is kept.
