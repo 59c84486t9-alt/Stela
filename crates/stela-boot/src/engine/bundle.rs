@@ -57,6 +57,7 @@ pub struct Entry {
     pub regions: usize,
     pub patches: usize,
     pub kept: Vec<String>,
+    pub hidden_devices: Vec<String>,
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
 }
@@ -599,6 +600,7 @@ fn load_named<'a>(
         regions: image.regions.len(),
         patches: image.patches.len(),
         kept: image.kept,
+        hidden_devices: manifest.hidden_devices,
         read_only_region: manifest
             .read_only_region
             .map(|region| (region.base, region.bytes)),

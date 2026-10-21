@@ -131,9 +131,6 @@ impl<'a> Access<'a> {
     }
 }
 
-/// A memory-mapped device model. Offsets are relative to the start of the
-/// device's address space as placed by [`Bus::map`]. Values occupy the low
-/// `width` bytes; implementations refuse widths their registers do not have.
 /// Effective supply, clock, DMA-quiesce and reset inputs of one actual native
 /// device. Retention describes that device's declared ordinary-state contract,
 /// not a request to reconstruct software configuration after a destructive edge.
@@ -156,6 +153,9 @@ pub trait Lifecycle {
     fn set_lifecycle(&mut self, proposed: LifecycleState, access: &mut Access<'_>);
 }
 
+/// A memory-mapped device model. Offsets are relative to the start of the
+/// device's address space as placed by [`Bus::map`]. Values occupy the low
+/// `width` bytes; implementations refuse widths their registers do not have.
 pub trait MmioDevice: Any {
     /// Type-erased capability: e.g. a UART keeps a generic console sink, so
     /// lifecycle dispatch must not require downcasting to its concrete type.

@@ -7,9 +7,9 @@
 use super::{ATC_PHY_LAYOUTS, IOMMU_MAPPER, Node, USB_DRD, name_of, pmgr};
 use crate::platform::apple::{
     dart::Profile,
-    pmgr::coverage::{self, Consumer, Domain, DomainId, LifecycleSinks},
+    pmgr::coverage::{self, Admission, Consumer, Domain, DomainId, LifecycleSinks},
 };
-use alloc::{format, string::String, vec::Vec};
+use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
 /// Bytes of one m1n1 `struct pmgr_device` record.
 pub(super) const PMGR_DEVICE: usize = 48;
@@ -22,6 +22,9 @@ pub enum PowerOwner {
     Dart(usize),
     Usb(usize),
     Phy(usize),
+    /// Candidate canonical physical aperture; only an actual registered
+    /// type-erased lifecycle object can satisfy this ownership key.
+    Mmio(u64),
 }
 
 /// One original resource with separate inherited clock/power requirements.
@@ -32,6 +35,9 @@ pub struct PowerResource {
     pub clocks: Vec<DomainId>,
     pub power: Vec<DomainId>,
     pub owner: Option<PowerOwner>,
+    /// Explicit preparation evidence; defaults to required even without owner
+    /// or compatible metadata. Unavailable never grants functional support.
+    pub admission: Admission,
 }
 
 /// PMGR blocks, complete original domain graph and all original ADT resources,
@@ -42,6 +48,143 @@ pub struct PowerStates {
     pub registers: Vec<u64>,
     pub domains: Vec<Domain>,
     pub resources: Vec<PowerResource>,
+}
+
+impl PowerStates {
+    /// Apply the bundle's existing positive device-admission ledger to the
+    /// matching prepared resource inventory. No node/property is removed.
+    /// Missing evidence remains required. A hidden controller's registerless
+    /// logical descendants follow it, until an independently admitted child
+    /// or a placed hardware owner establishes its own obligations.
+    pub fn apply_admission(&mut self, prepared: &[u8], hidden: &[String]) -> Result<usize, String> {
+        let root = Node::root(prepared).ok_or("PMGR admission tree is invalid")?;
+        let expected = inventory(&root)?;
+        if expected.len() != self.resources.len()
+            || expected
+                .iter()
+                .zip(&self.resources)
+                .any(|(expected, actual)| {
+                    expected.name != actual.name
+                        || expected.clocks != actual.clocks
+                        || expected.power != actual.power
+                        || expected.owner != actual.owner
+                })
+        {
+            return Err(
+                "PMGR admission evidence differs from the complete resource inventory".into(),
+            );
+        }
+        let mut unavailable = BTreeSet::new();
+        let mut evidence = BTreeSet::new();
+        for entry in hidden {
+            if !evidence.insert(entry.as_str()) {
+                return Err(format!("PMGR admission repeats evidence {entry}"));
+            }
+            // The historical ledger also carries these preparation notes.
+            // They establish no unavailable resource and cannot waive sinks.
+            if let Some((path, note)) = entry.split_once(' ') {
+                let node = node_at(prepared, path)
+                    .ok_or_else(|| format!("PMGR admission note names missing {path}"))?;
+                let valid = match (path, note) {
+                    ("/defaults", "serial-device") => node.property("serial-device").is_none(),
+                    ("/", "secure-root-prefix") => node.property("secure-root-prefix").is_none(),
+                    (_, "+no-pmu") => node.property("no-pmu").is_some(),
+                    (_, "+gptbat-ready") => node.property("gptbat-ready").is_some(),
+                    _ => false,
+                };
+                if !valid {
+                    return Err(format!(
+                        "PMGR admission has invalid preparation note {entry}"
+                    ));
+                }
+                continue;
+            }
+            if entry == "/" || entry == "/arm-io" || entry == "/cpus" || entry.starts_with("/cpus/")
+            {
+                return Err(format!("PMGR admission cannot retire structural {entry}"));
+            }
+            let node = node_at(prepared, entry)
+                .ok_or_else(|| format!("PMGR admission names missing resource {entry}"))?;
+            let resource = self
+                .resources
+                .iter()
+                .find(|resource| resource.name == *entry)
+                .ok_or_else(|| format!("PMGR admission has no inventory resource {entry}"))?;
+            if resource
+                .owner
+                .is_some_and(|owner| !matches!(owner, PowerOwner::Mmio(_)))
+                || node.property("compatible").is_some() && node.property("AAPL,ignore").is_none()
+            {
+                return Err(format!(
+                    "PMGR unavailable admission conflicts with visible hardware {entry}"
+                ));
+            }
+            if !unavailable.insert(entry.as_str()) {
+                return Err(format!("PMGR admission repeats resource {entry}"));
+            }
+        }
+        let mut admissions = Vec::with_capacity(self.resources.len());
+        for resource in &self.resources {
+            let mut retired = false;
+            let mut path = String::new();
+            for component in resource.name.split('/').filter(|part| !part.is_empty()) {
+                path.push('/');
+                path.push_str(component);
+                let node = node_at(prepared, &path).expect("validated inventory path");
+                // A retained compatible starts an independent admitted
+                // interface; an unavailable ancestor cannot hide it.
+                if ["compatible", "reg", "clock-gates", "power-gates"]
+                    .iter()
+                    .any(|key| node.property(key).is_some())
+                {
+                    retired = false;
+                }
+                if unavailable.contains(path.as_str()) {
+                    retired = true;
+                }
+            }
+            if resource
+                .owner
+                .is_some_and(|owner| !matches!(owner, PowerOwner::Mmio(_)))
+            {
+                retired = false;
+            }
+            admissions.push(if retired {
+                Admission::Unavailable
+            } else {
+                Admission::Required
+            });
+        }
+        let count = admissions
+            .iter()
+            .filter(|&&admission| admission == Admission::Unavailable)
+            .count();
+        for (resource, admission) in self.resources.iter_mut().zip(admissions) {
+            resource.admission = admission;
+        }
+        Ok(count)
+    }
+}
+
+fn node_at<'a>(prepared: &'a [u8], path: &str) -> Option<Node<'a>> {
+    if !path.starts_with('/') || path != "/" && path.ends_with('/') {
+        return None;
+    }
+    let mut node = Node::root(prepared)?;
+    let mut components = path.strip_prefix('/')?.split('/');
+    if name_of(&node) == "arm-io" && components.next()? != "arm-io" {
+        return None;
+    }
+    for component in components {
+        if component.is_empty() && path == "/" {
+            continue;
+        }
+        if component.is_empty() || component == "." || component == ".." {
+            return None;
+        }
+        node = node.child(component)?;
+    }
+    Some(node)
 }
 
 /// Current ADT PMGR format uses u16 device/parent IDs. Preserve all bits and
@@ -68,6 +211,21 @@ fn domain_id(device: u16) -> DomainId {
 }
 
 fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
+    let ranges = root
+        .child("arm-io")
+        .and_then(|io| io.ranges())
+        .or_else(|| root.ranges())
+        .unwrap_or_default();
+    let physical = |node: &Node<'_>| {
+        let (address, _) = node.pairs("reg")?.first().copied()?;
+        if ranges.is_empty() {
+            return Some(address);
+        }
+        ranges
+            .iter()
+            .find(|(child, _, size)| address >= *child && address - child < *size)
+            .and_then(|(child, parent, _)| parent.checked_add(address - child))
+    };
     let path = if name_of(root) == "arm-io" {
         "/arm-io"
     } else {
@@ -90,6 +248,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         clocks: clocks.clone(),
         power: power.clone(),
         owner: None,
+        admission: Admission::Required,
     }];
     let mut pending = root
         .children()
@@ -103,6 +262,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
                 clocks.clone(),
                 power.clone(),
                 None,
+                Vec::<&'static str>::new(),
             )
         })
         .collect::<Vec<_>>();
@@ -110,7 +270,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
     let mut dart_streams = Vec::new();
     let mut usbs = 0;
     let mut phys = 0;
-    while let Some((parent, node, mut clocks, mut power, owner)) = pending.pop() {
+    while let Some((parent, node, mut clocks, mut power, owner, views)) = pending.pop() {
         let path = format!("{parent}/{}", name_of(&node));
         clocks.extend(
             gate_ids(&node, &path, "clock-gates")?
@@ -158,7 +318,7 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
                 PowerOwner::Dart(index) => node
                     .first_u32("reg")
                     .is_some_and(|stream| stream < dart_streams[index]),
-                PowerOwner::Usb(_) | PowerOwner::Phy(_) => false,
+                PowerOwner::Usb(_) | PowerOwner::Phy(_) | PowerOwner::Mmio(_) => false,
             })
             || node.property("reg").is_none()
                 && node.property("compatible").is_none()
@@ -173,11 +333,61 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
         } else {
             None
         };
+        let owner = owner.or_else(|| {
+            if !path.starts_with("/arm-io/") {
+                return None;
+            }
+            let modeled = node
+                .property("compatible")
+                .into_iter()
+                .flat_map(|list| list.split(|byte| *byte == 0))
+                .filter_map(|name| core::str::from_utf8(name).ok())
+                .any(|name| super::models(name, |key| node.property(key)));
+            if modeled && let Some(address) = physical(&node) {
+                return Some(PowerOwner::Mmio(address));
+            }
+            if views.iter().any(|view| {
+                node.compatible(view)
+                    || *view == "debug-console"
+                        && name_of(&node) == "debug-console"
+                        && ["compatible", "reg", "clock-gates", "power-gates"]
+                            .iter()
+                            .all(|key| node.property(key).is_none())
+            }) {
+                return match owner_from_parent(&resources, &parent) {
+                    Some(PowerOwner::Mmio(address)) => Some(PowerOwner::Mmio(address)),
+                    _ => None,
+                };
+            }
+            None
+        });
+        let mut views = Vec::new();
+        for name in node
+            .property("compatible")
+            .into_iter()
+            .flat_map(|list| list.split(|byte| *byte == 0))
+            .filter_map(|name| core::str::from_utf8(name).ok())
+        {
+            views.extend(
+                super::model_children(name, |key| node.property(key))
+                    .iter()
+                    .map(|view| view.compatible),
+            );
+            views.extend(match name {
+                super::UART => &["debug-console"][..],
+                super::SPI => &[super::NOR][..],
+                super::NOR => &[super::NVRAM, super::SYSCFG][..],
+                super::I2C => &[super::HPM_MANAGER][..],
+                super::HPM_MANAGER => &[super::HPM][..],
+                _ => &[],
+            });
+        }
         resources.push(PowerResource {
             name: path.clone(),
             clocks: clocks.clone(),
             power: power.clone(),
             owner,
+            admission: Admission::Required,
         });
         for child in node
             .children()
@@ -185,10 +395,25 @@ fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
             .into_iter()
             .rev()
         {
-            pending.push((path.clone(), child, clocks.clone(), power.clone(), owner));
+            pending.push((
+                path.clone(),
+                child,
+                clocks.clone(),
+                power.clone(),
+                owner,
+                views.clone(),
+            ));
         }
     }
     Ok(resources)
+}
+
+fn owner_from_parent(resources: &[PowerResource], parent: &str) -> Option<PowerOwner> {
+    resources
+        .iter()
+        .rev()
+        .find(|resource| resource.name == parent)
+        .and_then(|resource| resource.owner)
 }
 
 pub(super) fn power_states(
@@ -273,6 +498,7 @@ pub(super) fn power_states(
             clocks: &resource.clocks,
             power: &resource.power,
             sinks: LifecycleSinks::default(),
+            admission: resource.admission,
         })
         .collect::<Vec<_>>();
     // Validate the entire graph even when a broken record is unreferenced.
@@ -327,6 +553,75 @@ mod tests {
         let mut children = children.to_vec();
         children.insert(0, pmgr);
         encode(&[("name", b"arm-io")], &children)
+    }
+
+    #[test]
+    fn physical_candidates_require_actual_registration_and_only_qualified_views_share_ownership() {
+        use crate::machine::soc::UART;
+        let reg = |address: u64| {
+            [address, 0x1000]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        let debug = encode(&[("name", b"debug-console")], &[]);
+        let unknown = encode(&[("name", b"firmware-endpoint")], &[]);
+        let uart = encode(
+            &[
+                ("name", b"uart0"),
+                ("compatible", UART.as_bytes()),
+                ("reg", &reg(0x2000)),
+                ("clock-gates", &words(&[1])),
+            ],
+            &[debug, unknown],
+        );
+        let independent = encode(&[("name", b"debug-console"), ("reg", &reg(0x4000))], &[]);
+        let second = encode(
+            &[
+                ("name", b"uart1"),
+                ("compatible", UART.as_bytes()),
+                ("reg", &reg(0x3000)),
+                ("clock-gates", &words(&[1])),
+            ],
+            &[independent],
+        );
+        let encoded = tree(&[(1, Some(0), [0, 0])], &[uart, second]);
+        let resources = inventory(&Node::root(&encoded).unwrap()).unwrap();
+        let owner = |name: &str| {
+            resources
+                .iter()
+                .find(|resource| resource.name == name)
+                .unwrap()
+                .owner
+        };
+        assert_eq!(owner("/arm-io/uart0"), Some(PowerOwner::Mmio(0x2000)));
+        assert_eq!(
+            owner("/arm-io/uart0/debug-console"),
+            Some(PowerOwner::Mmio(0x2000))
+        );
+        assert_eq!(owner("/arm-io/uart0/firmware-endpoint"), None);
+        assert_eq!(owner("/arm-io/uart1/debug-console"), None);
+        assert!(
+            resources
+                .iter()
+                .all(|resource| resource.admission == Admission::Required)
+        );
+        // A candidate owner is metadata, not evidence of complete sinks.
+        let parsed = power_states(&Node::root(&encoded).unwrap(), &Some, 0x8112)
+            .unwrap()
+            .unwrap();
+        let consumers = parsed
+            .resources
+            .iter()
+            .map(|resource| Consumer {
+                name: &resource.name,
+                clocks: &resource.clocks,
+                power: &resource.power,
+                sinks: LifecycleSinks::default(),
+                admission: resource.admission,
+            })
+            .collect::<Vec<_>>();
+        assert!(!coverage::analyze(&parsed.domains, &consumers).unwrap()[0].bindable());
     }
 
     #[test]
@@ -394,6 +689,216 @@ mod tests {
             assert_eq!(find(name).power, [domain_id(2)]);
             assert_eq!(find(name).owner, None);
         }
+    }
+
+    #[test]
+    fn positive_admission_is_atomic_and_preserves_independent_hardware_obligations() {
+        let logical = encode(&[("name", b"logical")], &[]);
+        let unknown = encode(&[("name", b"unknown"), ("reg", &words(&[0]))], &[]);
+        let visible = encode(
+            &[("name", b"visible"), ("compatible", b"required,unknown")],
+            &[],
+        );
+        let native = encode(
+            &[
+                ("name", b"dart"),
+                ("compatible", DART.as_bytes()),
+                ("sid-count", &words(&[16])),
+            ],
+            &[],
+        );
+        let hidden = encode(
+            &[("name", b"hidden"), ("clock-gates", &words(&[1]))],
+            &[logical, unknown, visible, native],
+        );
+        let leaf = encode(&[("name", b"leaf"), ("power-gates", &words(&[2]))], &[]);
+        let bytes = tree(
+            &[(1, Some(0), [0, 0]), (2, Some(1), [0, 0])],
+            &[hidden, leaf],
+        );
+        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
+            .unwrap()
+            .unwrap();
+        let original = states.clone();
+        assert_eq!(states.apply_admission(&bytes, &[]), Ok(0));
+        assert_eq!(
+            states.apply_admission(&bytes, &["/arm-io/hidden".into(), "/arm-io/leaf".into()]),
+            Ok(3)
+        );
+        for path in ["/arm-io/hidden", "/arm-io/hidden/logical", "/arm-io/leaf"] {
+            assert_eq!(
+                states
+                    .resources
+                    .iter()
+                    .find(|r| r.name == path)
+                    .unwrap()
+                    .admission,
+                Admission::Unavailable
+            );
+        }
+        for path in [
+            "/arm-io/hidden/unknown",
+            "/arm-io/hidden/visible",
+            "/arm-io/hidden/dart",
+        ] {
+            assert_eq!(
+                states
+                    .resources
+                    .iter()
+                    .find(|r| r.name == path)
+                    .unwrap()
+                    .admission,
+                Admission::Required
+            );
+        }
+        let accepted = states.clone();
+        for ledger in [
+            vec!["/arm-io/missing".into()],
+            vec!["/arm-io/hidden/visible".into()],
+            vec!["/arm-io/hidden/dart".into()],
+            vec!["/arm-io".into()],
+            vec!["/arm-io/hidden/".into()],
+            vec!["/arm-io/hidden/../leaf".into()],
+            vec!["/arm-io/hidden".into(), "/arm-io/hidden".into()],
+            vec!["/arm-io/hidden +unmodeled".into()],
+        ] {
+            assert!(states.apply_admission(&bytes, &ledger).is_err());
+            assert_eq!(states, accepted);
+        }
+        let mut mismatched = original;
+        mismatched.resources[0].clocks.push(domain_id(1));
+        assert!(
+            mismatched
+                .apply_admission(&bytes, &["/arm-io/leaf".into()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn preparation_notes_are_validated_without_retiring_resources() {
+        let watched = encode(
+            &[
+                ("name", b"watchdog"),
+                ("clock-gates", &words(&[1])),
+                ("no-pmu", b""),
+            ],
+            &[],
+        );
+        let bytes = tree(&[(1, Some(0), [0, 0])], &[watched]);
+        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            states.apply_admission(&bytes, &["/arm-io/watchdog +no-pmu".into()]),
+            Ok(0)
+        );
+        assert!(
+            states
+                .resources
+                .iter()
+                .all(|r| r.admission == Admission::Required)
+        );
+        assert!(
+            states
+                .apply_admission(&bytes, &["/arm-io/watchdog +gptbat-ready".into()])
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires the pinned prepared r8 J473 bundle; no Apple input is committed"]
+    fn prepared_j473_admission_keeps_complete_graph_and_names_all_remaining_sinks() {
+        use sha2::{Digest, Sha256};
+        let directory = std::path::PathBuf::from(
+            std::env::var("STELA_TEST_PMGR_BUNDLE").expect("prepared bundle directory"),
+        );
+        let bytes = std::fs::read(directory.join("devicetree.adt")).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes)),
+            "d60dbd13b11a6188f6bfa19a6fe173d49950d5b619197a5a7f4e9d76734d1680"
+        );
+        let manifest = crate::boot_bundle::Manifest::parse(
+            &std::fs::read(directory.join("bundle.json")).unwrap(),
+        )
+        .unwrap();
+        let root = Node::root(&bytes).unwrap();
+        let ranges = root.child("arm-io").unwrap().ranges().unwrap();
+        let translate = |address| {
+            ranges
+                .iter()
+                .find(|(child, _, size)| (*child..child + size).contains(&address))
+                .map(|(child, parent, _)| parent + address - child)
+        };
+        let mut states = power_states(&root, &translate, 0x8112).unwrap().unwrap();
+        let original = states.clone();
+        let retired = states
+            .apply_admission(&bytes, &manifest.hidden_devices)
+            .unwrap();
+        assert_eq!(states.domains, original.domains);
+        assert_eq!(states.registers, original.registers);
+        assert_eq!(states.resources.len(), original.resources.len());
+        let complete = LifecycleSinks {
+            clock: true,
+            power: true,
+            quiesce: true,
+            reset: true,
+        };
+        let consumers = states
+            .resources
+            .iter()
+            .map(|resource| Consumer {
+                name: &resource.name,
+                clocks: &resource.clocks,
+                power: &resource.power,
+                sinks: if matches!(
+                    resource.owner,
+                    Some(PowerOwner::Dart(_) | PowerOwner::Usb(_) | PowerOwner::Phy(_))
+                ) {
+                    complete
+                } else {
+                    LifecycleSinks::default()
+                },
+                admission: resource.admission,
+            })
+            .collect::<Vec<_>>();
+        let coverage = coverage::analyze(&states.domains, &consumers).unwrap();
+        let ave = coverage
+            .iter()
+            .find(|record| record.address == 0x23b708020)
+            .unwrap();
+        assert!(ave.bindable());
+        assert!(
+            ave.consumers
+                .iter()
+                .all(|c| c.admission == Admission::Unavailable && !c.sinks.complete())
+        );
+        let mut missing = BTreeSet::new();
+        for domain in coverage.iter().filter(|domain| !domain.bindable()) {
+            let names = domain
+                .consumers
+                .iter()
+                .filter(|c| c.admission == Admission::Required && !c.sinks.complete())
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>();
+            missing.extend(names.iter().map(|name| String::from(*name)));
+            std::println!("PMGR unresolved {:#x}: {:?}", domain.address, names);
+        }
+        std::println!(
+            "PMGR retired={} domains={} physical={} bindable={} remaining={:?}",
+            retired,
+            states.domains.len(),
+            coverage.len(),
+            coverage.iter().filter(|d| d.bindable()).count(),
+            missing
+        );
+        assert!(!missing.is_empty());
+        assert!(missing.contains("/arm-io/ans"));
+        assert!(
+            coverage
+                .iter()
+                .filter(|d| d.consumers.is_empty())
+                .all(|d| !d.bindable())
+        );
     }
 
     #[test]
@@ -592,11 +1097,15 @@ mod tests {
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,
-                sinks: if resource.owner.is_some() {
+                sinks: if matches!(
+                    resource.owner,
+                    Some(PowerOwner::Dart(_) | PowerOwner::Usb(_) | PowerOwner::Phy(_))
+                ) {
                     complete
                 } else {
                     LifecycleSinks::default()
                 },
+                admission: resource.admission,
             })
             .collect::<Vec<_>>();
         let coverage = coverage::analyze(&states.domains, &consumers).unwrap();

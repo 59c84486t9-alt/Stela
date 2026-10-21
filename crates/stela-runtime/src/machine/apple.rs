@@ -23,7 +23,7 @@ use crate::platform::apple::{
     asc::{self, Asc},
     atc_phy::{self, AtcPhy},
     bridge::Bridge,
-    bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
+    bus::{Access, Bus, DeviceId, LifecycleState, MapError, MmioError, Width},
     cluster::{self, Cluster},
     core_counters::{self, CoreCounters},
     coresight::{self, PcSampler, SoftwareLock},
@@ -149,6 +149,7 @@ pub struct AppleDevices {
     phys: Vec<PhyBinding>,
     pmgr: Option<DeviceId>,
     power_clients: Vec<PowerClient>,
+    power_devices: Vec<PowerDevice>,
     power_refusals: Vec<(u64, String)>,
     power_configured: bool,
     /// The SoC's sleep and wake (`sleep`).
@@ -308,7 +309,14 @@ struct CpuStarter {
 }
 
 /// Supplies shared by one DART, with its hardware retention property.
+struct PowerDevice {
+    physical: u64,
+    device: DeviceId,
+    retention: bool,
+}
+
 struct PowerClient {
+    resources: String,
     device: DeviceId,
     owner: PowerOwner,
     domains: Vec<(u64, DomainState)>,
@@ -467,6 +475,7 @@ impl AppleDevices {
             phys: Vec::new(),
             pmgr: None,
             power_clients: Vec::new(),
+            power_devices: Vec::new(),
             power_refusals: Vec::new(),
             power_configured: false,
             sleep: sleep::SocSleep::default(),
@@ -1753,6 +1762,36 @@ impl AppleDevices {
         Ok(())
     }
 
+    /// Register an actual model's checked lifecycle boundary against its
+    /// canonical first physical aperture. Several real banks may serve one
+    /// hardware owner; a bank must not receive conflicting duplicate inputs.
+    pub fn register_power_device(
+        &mut self,
+        physical: u64,
+        device: DeviceId,
+        retention: bool,
+    ) -> Result<(), String> {
+        if self.power_configured
+            || self
+                .power_devices
+                .iter()
+                .any(|entry| entry.device == device)
+        {
+            return Err("native lifecycle registration is duplicate or already bound".into());
+        }
+        if self.bus.lifecycle(device).is_none() {
+            return Err(format!(
+                "native lifecycle at {physical:#x} has no actual model hook"
+            ));
+        }
+        self.power_devices.push(PowerDevice {
+            physical,
+            device,
+            retention,
+        });
+        Ok(())
+    }
+
     /// Account for every original resource before connecting lifecycle.
     /// Mapper views have the same hardware owner as their DART. Other
     /// hardware needs its own real sinks. Validate all links before enabling
@@ -1790,10 +1829,21 @@ impl AppleDevices {
         }
         let mut consumers = Vec::new();
         for resource in &states.resources {
+            let connected = resource.owner.is_some_and(|owner| match owner {
+                PowerOwner::Mmio(physical) => self
+                    .power_devices
+                    .iter()
+                    .any(|entry| entry.physical == physical),
+                _ => true,
+            });
+            if connected && resource.admission == coverage::Admission::Unavailable {
+                return Err(format!("{} is both unavailable and placed", resource.name));
+            }
             if resource.owner.is_some_and(|owner| match owner {
                 PowerOwner::Dart(index) => index >= darts.len(),
                 PowerOwner::Usb(index) => index >= self.usb_masters.len(),
                 PowerOwner::Phy(index) => index >= self.phys.len(),
+                PowerOwner::Mmio(_) => false,
             }) {
                 return Err(format!(
                     "{} names an unplaced hardware lifecycle owner",
@@ -1804,7 +1854,8 @@ impl AppleDevices {
                 name: &resource.name,
                 clocks: &resource.clocks,
                 power: &resource.power,
-                sinks: if resource.owner.is_some() {
+                admission: resource.admission,
+                sinks: if connected {
                     complete
                 } else {
                     LifecycleSinks::default()
@@ -1842,6 +1893,13 @@ impl AppleDevices {
                 .enumerate()
                 .map(|(index, phy)| (PowerOwner::Phy(index), phy.device, phy.retention)),
         );
+        clients.extend(self.power_devices.iter().map(|entry| {
+            (
+                PowerOwner::Mmio(entry.physical),
+                entry.device,
+                entry.retention,
+            )
+        }));
         let mut links = Vec::new();
         for (owner, device, retention) in clients {
             let domains = coverage
@@ -1860,7 +1918,15 @@ impl AppleDevices {
                     )
                 })
                 .collect::<Vec<_>>();
+            let resources = states
+                .resources
+                .iter()
+                .filter(|resource| resource.owner == Some(owner))
+                .map(|resource| resource.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
             links.push(PowerClient {
+                resources,
                 device,
                 owner,
                 domains,
@@ -1874,7 +1940,10 @@ impl AppleDevices {
                 let names = record
                     .consumers
                     .iter()
-                    .filter(|consumer| !consumer.sinks.complete())
+                    .filter(|consumer| {
+                        consumer.admission == coverage::Admission::Required
+                            && !consumer.sinks.complete()
+                    })
                     .map(|consumer| consumer.name.as_str())
                     .collect::<Vec<_>>();
                 (
@@ -2209,6 +2278,66 @@ impl AppleDevices {
         self.settle_phys(cpu, now);
     }
 
+    /// Validate every actual affected bank before a PMGR request can change
+    /// its register or any client. A missing functional device is not created
+    /// by controller-state completion. Partial capability failures are atomic.
+    fn check_power_request(&mut self, physical: u64, value: u64) -> Result<(), DeviceError> {
+        let Some(pmgr) = self.pmgr.and_then(|id| self.bus.device::<Pmgr>(id)) else {
+            return Ok(());
+        };
+        if pmgr.domain_state(physical).is_none() {
+            return Ok(());
+        }
+        let transition = pmgr.preview(physical, value as u32).map_err(|reason| {
+            let resources = self
+                .power_refusals
+                .iter()
+                .find(|(address, _)| *address == physical)
+                .map(|(_, resources)| resources.as_str())
+                .unwrap_or("request validation");
+            DeviceError::Refused(format!("PMGR domain {physical:#x} ({resources}): {reason}"))
+        })?;
+        if transition.before == transition.after {
+            return Ok(());
+        }
+        for link in &self.power_clients {
+            if !matches!(link.owner, PowerOwner::Mmio(_))
+                || !link.domains.iter().any(|(address, _)| *address == physical)
+            {
+                continue;
+            }
+            let states = link
+                .domains
+                .iter()
+                .map(|(address, state)| {
+                    if *address == physical {
+                        transition.after
+                    } else {
+                        *state
+                    }
+                })
+                .collect::<Vec<_>>();
+            let proposed = LifecycleState {
+                powered: states.iter().all(|state| state.power != POWER_GATED),
+                clocked: states.iter().all(|state| state.power == ACTIVE),
+                quiesced: states.iter().any(|state| state.disabled),
+                reset: states.iter().any(|state| state.reset),
+                retention: link.retention,
+            };
+            self.bus
+                .lifecycle(link.device)
+                .expect("binding checked actual lifecycle hook")
+                .check_lifecycle(proposed)
+                .map_err(|reason| {
+                    DeviceError::Refused(format!(
+                        "PMGR domain {physical:#x} ({}): {reason}",
+                        link.resources
+                    ))
+                })?;
+        }
+        Ok(())
+    }
+
     /// Replay each edge: off/on or reset assertion/release must still
     /// discard ordinary state even if the final image is active again.
     /// Infallible after binding, this runs before the next client effect,
@@ -2261,6 +2390,19 @@ impl AppleDevices {
                         usb.set_clock(clocked, &access);
                         usb.set_reset(reset, &mut access);
                         usb.set_power(powered, link.retention, &mut access);
+                    }
+                    PowerOwner::Mmio(_) => {
+                        let state = LifecycleState {
+                            powered,
+                            clocked,
+                            quiesced,
+                            reset,
+                            retention: link.retention,
+                        };
+                        self.bus
+                            .lifecycle(link.device)
+                            .expect("binding checked actual lifecycle hook")
+                            .set_lifecycle(state, &mut access);
                     }
                     PowerOwner::Phy(_) => {
                         let phy = self
@@ -2391,6 +2533,9 @@ impl Devices for AppleDevices {
                 .expect("SPI wire")
                 .check_cs(high)
                 .map_err(|e| DeviceError::Refused(e.into()))?;
+        }
+        if width == Width::Word {
+            self.check_power_request(physical, value)?;
         }
         let mut access = Access::new(cpu, now, &mut self.latch);
         self.bus
@@ -2988,6 +3133,7 @@ mod tests {
                 clocks: ids,
                 power: Vec::new(),
                 owner: Some(PowerOwner::Dart(0)),
+                admission: coverage::Admission::Required,
             }],
         };
         edit(&mut states);
@@ -3013,6 +3159,158 @@ mod tests {
         d.connect_power_resources(&states, &[vec![dart]], &[retention])
             .unwrap();
         (d, dart, supply, base)
+    }
+
+    /// A checked native bank fixture shares an actual mounted DART's supply.
+    /// Its refusal models an explicitly unqualified destructive transition,
+    /// without claiming another physical controller implementation.
+    struct CheckedPowerBank {
+        reject: bool,
+        committed: Vec<LifecycleState>,
+    }
+    impl crate::platform::apple::bus::Lifecycle for CheckedPowerBank {
+        fn check_lifecycle(&self, state: LifecycleState) -> Result<(), &'static str> {
+            if self.reject && (!state.powered || state.reset) {
+                Err("native bank destructive transition remains unqualified")
+            } else {
+                Ok(())
+            }
+        }
+        fn set_lifecycle(&mut self, state: LifecycleState, _: &mut Access<'_>) {
+            self.committed.push(state);
+        }
+    }
+    impl MmioDevice for CheckedPowerBank {
+        fn lifecycle(&mut self) -> Option<&mut dyn crate::platform::apple::bus::Lifecycle> {
+            Some(self)
+        }
+        fn name(&self) -> &'static str {
+            "checked-power-bank"
+        }
+        fn read(&mut self, _: u64, _: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+            Ok(self.committed.len() as u64)
+        }
+        fn write(&mut self, _: u64, _: Width, _: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pmgr_all_native_banks_preflight_before_register_or_actual_dart_effects() {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Admission, Domain, DomainId};
+        let mut d = AppleDevices::new();
+        let supply = 0x2_3b70_0100;
+        let base = 0x2_3500_4000;
+        let canonical = 0x2_3600_0000;
+        let gate = DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            blocks: vec![(supply, 4)],
+            registers: vec![supply],
+            domains: vec![Domain {
+                id: gate,
+                address: Some(supply),
+                parents: [None; 2],
+            }],
+            resources: [
+                ("/arm-io/dart", PowerOwner::Dart(0)),
+                ("/arm-io/checked-native", PowerOwner::Mmio(canonical)),
+            ]
+            .map(|(name, owner)| PowerResource {
+                name: name.into(),
+                clocks: vec![gate],
+                power: vec![],
+                owner: Some(owner),
+                admission: Admission::Required,
+            })
+            .into(),
+        };
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &[supply],
+        )
+        .unwrap();
+        let dart = d
+            .add_dart(
+                Range {
+                    physical: base,
+                    bytes: 0x4000,
+                },
+                16,
+                None,
+                None,
+            )
+            .unwrap();
+        let first = d.bus.add(Box::new(CheckedPowerBank {
+            reject: false,
+            committed: vec![],
+        }));
+        let second = d.bus.add(Box::new(CheckedPowerBank {
+            reject: true,
+            committed: vec![],
+        }));
+        d.register_power_device(canonical, first, false).unwrap();
+        d.register_power_device(canonical, second, false).unwrap();
+        assert!(d.register_power_device(canonical, first, false).is_err());
+        let pmgr = d.pmgr.unwrap();
+        assert!(d.register_power_device(canonical, pmgr, false).is_err());
+        d.connect_power_resources(&states, &[vec![dart]], &[false])
+            .unwrap();
+        assert!(d.register_power_device(canonical, second, false).is_err());
+        d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+        let before = d.read(0, supply, 4, 0).unwrap();
+        let failure = d.write(0, supply, 4, 0x3f0, 0).unwrap_err();
+        assert!(
+            matches!(failure, DeviceError::Refused(reason) if reason.contains("checked-native") && reason.contains("unqualified"))
+        );
+        assert_eq!(d.read(0, supply, 4, 0), Ok(before));
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+        assert!(
+            d.bus
+                .device_mut::<Pmgr>(pmgr)
+                .unwrap()
+                .take_transitions()
+                .is_empty()
+        );
+        for bank in [first, second] {
+            assert!(
+                d.bus
+                    .device::<CheckedPowerBank>(bank)
+                    .unwrap()
+                    .committed
+                    .is_empty()
+            );
+        }
+        // No lifecycle change: configuration and width validation do not ask
+        // a native bank to qualify an unrelated destructive transition.
+        d.write(0, supply, 4, 0x1000f, 0).unwrap();
+        assert!(d.write(0, supply, 8, 0, 0).is_err());
+        for request in [4, 15, 0x40f] {
+            d.write(0, supply, 4, request, 0).unwrap();
+        }
+        let before = d.read(0, supply, 4, 0).unwrap();
+        assert!(d.write(0, supply, 4, 0x8000040f, 0).is_err());
+        assert_eq!(d.read(0, supply, 4, 0), Ok(before));
+        d.bus.device_mut::<CheckedPowerBank>(second).unwrap().reject = false;
+        for request in [0x8000040f, 0x40f, 15, 0, 15] {
+            d.write(0, supply, 4, request, 0).unwrap();
+        }
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
+        for bank in [first, second] {
+            let edges = &d.bus.device::<CheckedPowerBank>(bank).unwrap().committed;
+            assert_eq!(edges.len(), 8);
+            assert!(!edges[0].clocked && edges[0].powered);
+            assert!(edges[1].clocked);
+            assert!(edges[2].quiesced);
+            assert!(edges[3].reset);
+            assert!(!edges[4].reset && edges[4].quiesced);
+            assert!(!edges[5].quiesced);
+            assert!(!edges[6].powered);
+            assert!(edges[7].powered);
+        }
     }
 
     #[test]
@@ -3171,6 +3469,87 @@ mod tests {
     }
 
     #[test]
+    fn pmgr_unavailable_shared_consumers_keep_actual_native_lifecycle_effects_in_all_directions() {
+        use super::super::soc::PowerResource;
+        for retention in [false, true] {
+            let (mut d, _, supply, base) = powered_dart_with(retention, 1, |states| {
+                states.resources.push(PowerResource {
+                    name: "/arm-io/unavailable".into(),
+                    clocks: states.resources[0].clocks.clone(),
+                    power: vec![],
+                    owner: None,
+                    admission: coverage::Admission::Unavailable,
+                });
+            });
+            assert!(d.power_refusals().is_empty());
+            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+            d.write(0, supply, 4, 0x3f4, 0).unwrap(); // Read-only actual nibble is ignored.
+            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+            d.write(0, supply, 4, 15, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+            d.write(0, supply, 4, 0x3f0, 0).unwrap(); // Original global sweep encoding.
+            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+            assert_eq!(
+                d.bus.device::<Pmgr>(d.pmgr.unwrap()).unwrap().state(supply),
+                Some(POWER_GATED)
+            );
+            d.write(0, supply, 4, 15, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(u64::from(retention)));
+            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+            for value in [0x40f, 0x8000040f, 0x40f, 15] {
+                d.write(0, supply, 4, value, 0).unwrap();
+            }
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
+            assert_eq!(d.read(0, 0x2_3501_0000, 4, 0), Err(DeviceError::NoDevice));
+        }
+    }
+
+    #[test]
+    fn pmgr_unavailable_only_domains_model_controller_state_without_functional_device_credit() {
+        use super::super::soc::{PowerResource, PowerStates};
+        let supply = 0x2_3b70_8020;
+        let id = coverage::DomainId { die: 0, device: 1 };
+        let states = PowerStates {
+            blocks: vec![(supply, 4)],
+            registers: vec![supply],
+            domains: vec![coverage::Domain {
+                id,
+                address: Some(supply),
+                parents: [None; 2],
+            }],
+            resources: vec![PowerResource {
+                name: "/arm-io/unavailable".into(),
+                clocks: vec![id],
+                power: vec![],
+                owner: None,
+                admission: coverage::Admission::Unavailable,
+            }],
+        };
+        let mut d = AppleDevices::new();
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &states.registers,
+        )
+        .unwrap();
+        d.connect_power_resources(&states, &[], &[]).unwrap();
+        for state in [0u8, 4, 15, 4, 0, 15] {
+            d.write(0, supply, 4, 0x3f0 | u64::from(state), 0).unwrap();
+            assert_eq!(
+                d.bus.device::<Pmgr>(d.pmgr.unwrap()).unwrap().state(supply),
+                Some(state)
+            );
+        }
+        for value in [0x40f, 0x8000040f, 0x40f, 15] {
+            d.write(0, supply, 4, value, 0).unwrap();
+        }
+        assert!(d.power_clients.is_empty());
+        assert_eq!(d.read(0, 0x2_3501_0000, 4, 0), Err(DeviceError::NoDevice));
+    }
+
+    #[test]
     fn pmgr_multi_supply_inhibits_activity_until_every_clock_and_reset_is_released() {
         let (mut d, dart, supply, base) = powered_dart(true, 2);
         d.write(0, base + 0x1000, 4, 1, 0).unwrap();
@@ -3216,6 +3595,7 @@ mod tests {
                     clocks: vec![],
                     power: vec![id(device)],
                     owner: None,
+                    admission: coverage::Admission::Required,
                 });
             }
         });
@@ -4440,6 +4820,7 @@ mod tests {
                 clocks: vec![id],
                 power: vec![],
                 owner: Some(PowerOwner::Phy(0)),
+                admission: coverage::Admission::Required,
             }],
         };
         d.add_power_states(
@@ -4527,6 +4908,7 @@ mod tests {
                 clocks: vec![id],
                 power: vec![],
                 owner: Some(PowerOwner::Phy(0)),
+                admission: coverage::Admission::Required,
             }],
         };
         d.add_power_states(
@@ -4637,30 +5019,35 @@ mod tests {
                     clocks: vec![id(0x210)],
                     power: vec![],
                     owner: Some(PowerOwner::Dart(0)),
+                    admission: coverage::Admission::Required,
                 },
                 PowerResource {
                     name: "usb-drd0".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
                     owner: Some(PowerOwner::Usb(0)),
+                    admission: coverage::Admission::Required,
                 },
                 PowerResource {
                     name: "usb-drd0/port-hs".into(),
                     clocks: vec![id(0x108)],
                     power: vec![],
                     owner: Some(PowerOwner::Usb(0)),
+                    admission: coverage::Admission::Required,
                 },
                 PowerResource {
                     name: "acio0".into(),
                     clocks: vec![id(2)],
                     power: vec![],
                     owner: None,
+                    admission: coverage::Admission::Required,
                 },
                 PowerResource {
                     name: "atc-phy0".into(),
                     clocks: vec![],
                     power: vec![],
                     owner: Some(PowerOwner::Phy(0)),
+                    admission: coverage::Admission::Required,
                 },
             ],
         };

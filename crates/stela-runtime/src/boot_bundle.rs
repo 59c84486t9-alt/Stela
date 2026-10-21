@@ -135,6 +135,10 @@ pub struct Manifest {
     pub boot_args: BootArgs,
     pub top_of_kernel_data: u64,
     pub patches: Vec<Patch>,
+    /// Positive preparation admission evidence, already serialized by the
+    /// loader. Older bundles without it retain required lifecycle coverage.
+    #[serde(default)]
+    pub hidden_devices: Vec<String>,
     /// The AMCC CTRR-A region iBoot programs, when the bundle has one.
     #[serde(default)]
     pub read_only_region: Option<Programmed>,
@@ -639,6 +643,28 @@ mod tests {
             boot_args: None,
             nvram: None,
         }
+    }
+
+    #[test]
+    fn admission_ledger_defaults_conservatively_and_preserves_exact_evidence() {
+        let json = manifest_json(&[0xaa; 100], &[0x11; 20]);
+        assert!(
+            Manifest::parse(json.as_bytes())
+                .unwrap()
+                .hidden_devices
+                .is_empty()
+        );
+        let supplied = json.replacen("\"schema_version\": 1", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 1", 1);
+        assert_eq!(
+            Manifest::parse(supplied.as_bytes()).unwrap().hidden_devices,
+            ["/arm-io/ave", "/ secure-root-prefix"]
+        );
+        let malformed = json.replacen(
+            "\"schema_version\": 1",
+            "\"hidden_devices\": [17], \"schema_version\": 1",
+            1,
+        );
+        assert!(Manifest::parse(malformed.as_bytes()).is_err());
     }
 
     #[test]

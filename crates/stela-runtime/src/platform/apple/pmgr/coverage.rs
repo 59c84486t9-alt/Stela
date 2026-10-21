@@ -1,14 +1,16 @@
 //! Complete-consumer accounting before enabling a PMGR lifecycle control.
 //!
-//! Callers supply the original firmware's full domain graph and every admitted
+//! Callers supply the original firmware's full domain graph and every original
 //! resource's separate clock/power requirements, including inherited controller,
 //! nub, mapper and firmware-endpoint dependencies. The caller also accounts for
 //! implicit consumers: this module cannot infer them from absent metadata.
 //! Generation-specific ID/die encodings and ADT records are decoded by the board
 //! reader before this boundary. No application identity participates.
 //!
-//! A result is a binding candidate only when all its consumers have registered
-//! clock, power, quiesce and reset sinks. This module never enables controls or
+//! A result is a binding candidate only when every required consumer has actual
+//! clock, power, quiesce and reset sinks. Positive unavailable admission evidence
+//! qualifies controller state alone, without claiming functional support or
+//! removing those consumers from the inventory. This module never enables controls or
 //! delivers lifecycle events. A DART-only consumer list is not a full inventory.
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -47,14 +49,25 @@ impl LifecycleSinks {
     }
 }
 
-/// An admitted resource, not merely an ADT node. Distinct inherited children
-/// and protocol endpoints have distinct names and must register their sinks.
+/// Functional-device admission is independent of the PMGR controller. Only
+/// positive preparation evidence can declare a resource unavailable; missing
+/// compatible/owner metadata alone leaves its lifecycle obligations required.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Admission {
+    #[default]
+    Required,
+    Unavailable,
+}
+
+/// One original resource. Distinct inherited views and protocol endpoints keep
+/// their names; proven views of one owner may share its actual sink.
 #[derive(Debug, Clone, Copy)]
 pub struct Consumer<'a> {
     pub name: &'a str,
     pub clocks: &'a [DomainId],
     pub power: &'a [DomainId],
     pub sinks: LifecycleSinks,
+    pub admission: Admission,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +76,7 @@ pub struct ConsumerCoverage {
     pub clock: bool,
     pub power: bool,
     pub sinks: LifecycleSinks,
+    pub admission: Admission,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +86,15 @@ pub struct DomainCoverage {
 }
 
 impl DomainCoverage {
-    /// True only for a nonempty, fully connected consumer set. The caller
-    /// must still establish that its input resource inventory was complete.
+    /// True for a nonempty set with every required consumer connected. The
+    /// caller must establish inventory completeness and positive unavailable
+    /// admission evidence; this never grants functional-device support.
     pub fn bindable(&self) -> bool {
-        !self.consumers.is_empty() && self.consumers.iter().all(|c| c.sinks.complete())
+        !self.consumers.is_empty()
+            && self
+                .consumers
+                .iter()
+                .all(|c| c.admission == Admission::Unavailable || c.sinks.complete())
     }
 }
 
@@ -189,6 +208,7 @@ pub fn analyze(
                             clock: false,
                             power: false,
                             sinks: consumer.sinks,
+                            admission: consumer.admission,
                         });
                     if clock {
                         record.clock = true;
@@ -281,8 +301,40 @@ mod tests {
             clocks,
             power,
             sinks,
+            admission: Admission::Required,
         }
     }
+    #[test]
+    fn unavailable_resources_preserve_requirements_without_claiming_sinks_or_waiving_admitted_clients()
+     {
+        let domains = [
+            domain(1, Some(0x100), &[]),
+            domain(2, Some(0x200), &[1]),
+            domain(3, Some(0x300), &[]),
+        ];
+        let requirements = [id(2)];
+        let mut absent = consumer("unavailable", &requirements, &[], NONE);
+        absent.admission = Admission::Unavailable;
+        let native = consumer("native", &requirements, &[], COMPLETE);
+        let parent = [id(1)];
+        let unknown = consumer("required", &[], &parent, NONE);
+        let coverage = analyze(&domains, &[absent, native]).unwrap();
+        assert!(coverage[..2].iter().all(DomainCoverage::bindable));
+        assert!(!coverage[2].bindable()); // No positive admission evidence.
+        assert!(
+            coverage[0]
+                .consumers
+                .iter()
+                .any(|c| c.name == "unavailable" && !c.sinks.complete() && c.clock)
+        );
+        let coverage = analyze(&domains, &[absent, native, unknown]).unwrap();
+        assert!(!coverage[0].bindable());
+        assert!(coverage[1].bindable());
+        let coverage = analyze(&domains, &[absent]).unwrap();
+        assert!(coverage[..2].iter().all(DomainCoverage::bindable));
+        assert!(!coverage[0].consumers[0].sinks.complete());
+    }
+
     #[test]
     fn physical_and_virtual_parents_include_all_consumers_and_separate_gate_kinds() {
         let domains = [

@@ -1737,6 +1737,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let target = target();
     let speculation = speculation::probe();
     let mut read_only_region = None;
+    let mut hidden_devices = Vec::new();
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
     let framebuffer = handoff
         .screen
@@ -1766,6 +1767,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
         read_only_region = loaded.read_only_region;
+        hidden_devices = loaded.hidden_devices;
         crate::status::done("");
         (loaded.pc, loaded.x0)
     } else {
@@ -1819,6 +1821,19 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("the board could not be modeled")
         })
     });
+    if let (Some(board), Some(tree)) = (board.as_mut(), tree)
+        && let Some(states) = board.power_states.as_mut()
+    {
+        let unavailable = states
+            .apply_admission(tree, &hidden_devices)
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("PMGR admission refusal: {error}\n"));
+                output::fatal("the PMGR resource admission evidence is inconsistent")
+            });
+        output::arguments(format_args!(
+            "DEVICES pmgr unavailable-resources={unavailable}\n"
+        ));
+    }
     if let Some(image) = nor_image {
         match board.as_mut().and_then(|board| board.spi_nor.as_mut()) {
             Some(spi) => spi.image = image,

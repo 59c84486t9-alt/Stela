@@ -13,10 +13,11 @@
 //! is the fastest permitted completion. Inferred, not documented: the WAS_*
 //! bits are write-one-to-clear and latch when the actual state enters the
 //! gated state; automatic power management never lowers a domain, so the
-//! actual state stays at the target. Other states, device reset and
-//! quiescing through DEV_DISABLE are refused until a model connects them to
-//! the device models. The complete-consumer mount explicitly refuses lifecycle
-//! changes for uncovered domains and retains the resource names. Parent
+//! actual state stays at the target. Other states remain explicit refusals.
+//! The complete-consumer mount requires actual checked sinks for every admitted
+//! consumer before lifecycle changes, including reset and DEV_DISABLE. Positive
+//! unavailable admission evidence permits controller-state completion without
+//! inventing a functional device. Uncovered domains retain named refusals. Parent
 //! arbitration is not modeled; coverage includes their actual consumers.
 pub mod coverage;
 
@@ -121,9 +122,10 @@ impl Pmgr {
             transitions: Vec::new(),
         })
     }
-    /// Enable reset/quiesce controls only after the machine has connected
-    /// every client of this domain to its lifecycle. Merely mapping a client
-    /// does not satisfy this requirement. Binding preserves the boot image.
+    /// Enable controls after complete machine coverage: required clients have
+    /// actual sinks, unavailable clients have positive admission evidence.
+    /// Mapping or candidate ownership alone is insufficient. Binding preserves
+    /// the boot image and grants no functional-device support.
     pub fn bind_lifecycle(&mut self, address: u64) -> Result<(), PmgrError> {
         if !self.registers.contains_key(&address) {
             return Err(PmgrError::UnknownDomain(address));
@@ -149,6 +151,36 @@ impl Pmgr {
         }
         self.refused.insert(address);
         Ok(())
+    }
+
+    /// Pure request preview used to check every actual consumer before the
+    /// machine commits this PMGR register. Read-only ACTUAL/PARENT_OFF bits
+    /// in a guest RMW are not lifecycle inputs.
+    pub fn preview(&self, address: u64, value: u32) -> Result<DomainTransition, &'static str> {
+        self.prepare(address, value)
+            .map(|(_, transition)| transition)
+    }
+
+    fn prepare(&self, address: u64, value: u32) -> Result<(u32, DomainTransition), &'static str> {
+        let old = self
+            .registers
+            .get(&address)
+            .copied()
+            .ok_or("PMGR register is not a modeled power state")?;
+        if self.refused.contains(&address)
+            && value & (TARGET | DEV_DISABLE | RESET) != old & (TARGET | DEV_DISABLE | RESET)
+        {
+            return Err("PMGR lifecycle has required consumers without connected sinks");
+        }
+        let next = write_state(old, value, self.lifecycle.contains(&address))?;
+        Ok((
+            next,
+            DomainTransition {
+                address,
+                before: DomainState::decode(old),
+                after: DomainState::decode(next),
+            },
+        ))
     }
 
     /// Drain completed lifecycle requests in guest write order. No event is
@@ -249,29 +281,13 @@ impl MmioDevice for Pmgr {
         if width != Width::Word {
             return Err(fail("PMGR registers are 32-bit"));
         }
-        let register = self
+        let (next, transition) = self.prepare(offset, value as u32).map_err(fail)?;
+        *self
             .registers
             .get_mut(&offset)
-            .ok_or_else(|| fail("PMGR register is not a modeled power state"))?;
-        let before = DomainState::decode(*register);
-        // A failed coverage decision also forbids power/clock changes;
-        // unsupported consumers must never observe an acknowledged gate.
-        if self.refused.contains(&offset)
-            && (value as u32 & (TARGET | DEV_DISABLE | RESET)
-                != *register & (TARGET | DEV_DISABLE | RESET))
-        {
-            return Err(fail("PMGR lifecycle has consumers without connected sinks"));
-        }
-        let next =
-            write_state(*register, value as u32, self.lifecycle.contains(&offset)).map_err(fail)?;
-        let after = DomainState::decode(next);
-        *register = next;
-        if before != after && self.lifecycle.contains(&offset) {
-            self.transitions.push(DomainTransition {
-                address: offset,
-                before,
-                after,
-            });
+            .expect("validated power register") = next;
+        if transition.before != transition.after && self.lifecycle.contains(&offset) {
+            self.transitions.push(transition);
         }
         Ok(())
     }
@@ -299,6 +315,30 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn request_preview_is_pure_and_matches_committed_target_not_guest_actual_bits() {
+        let mut pmgr = pmgr();
+        pmgr.bind_lifecycle(AIC).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let before = pmgr.read(AIC, Width::Word, &mut access).unwrap();
+        let proposed = pmgr.preview(AIC, 0x3f0).unwrap();
+        assert_eq!(proposed.before.power, ACTIVE);
+        assert_eq!(proposed.after.power, POWER_GATED);
+        assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(before));
+        assert!(pmgr.take_transitions().is_empty());
+        for value in [1, 0x8000000f, 0x80000400, 0x2000000f] {
+            assert!(pmgr.preview(AIC, value).is_err());
+            assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(before));
+        }
+        pmgr.write(AIC, Width::Word, 0x3f0, &mut access).unwrap();
+        assert_eq!(pmgr.take_transitions(), [proposed]);
+        assert_eq!(
+            pmgr.read(AIC, Width::Word, &mut access),
+            Ok(u64::from(WAS_PWRGATED))
+        );
     }
 
     #[test]
