@@ -87,6 +87,9 @@ const TX_PAYLEN_SHIFT: u32 = 14;
 const DESCRIPTORS: usize = 32;
 const DESCRIPTOR: usize = 16;
 const BUFFER: usize = 2048;
+const ETHERNET_HEADER: usize = 14;
+/// igc_xmit_frame: TCTL.PSP still requires at least17 DMA bytes.
+const MIN_TRANSMIT: usize = 17;
 const _: () = assert!((DESCRIPTORS * DESCRIPTOR).is_multiple_of(128) && BUFFER >= MAX_FRAME);
 const QUEUE_ENABLE_US: u64 = 20_000;
 const TRANSMIT_WAIT_US: u64 = 100_000;
@@ -321,8 +324,8 @@ impl Link for Igc {
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
         self.healthy()?;
-        if frame.len() > MAX_FRAME {
-            return Err(LinkError::Invalid("frame exceeds the Ethernet maximum"));
+        if !(ETHERNET_HEADER..=MAX_FRAME).contains(&frame.len()) {
+            return Err(LinkError::Invalid("invalid Ethernet frame length"));
         }
         if !self.reclaim() {
             let clock = self.clock;
@@ -334,8 +337,11 @@ impl Link for Igc {
             }
         }
         let index = self.tail;
-        self.transmit.buffer(index)[..frame.len()].copy_from_slice(frame);
-        let (command, status) = transmit_words(frame.len());
+        let length = frame.len().max(MIN_TRANSMIT);
+        let buffer = self.transmit.buffer(index);
+        buffer[..length].fill(0);
+        buffer[..frame.len()].copy_from_slice(frame);
+        let (command, status) = transmit_words(length);
         let base = index * DESCRIPTOR;
         let address = self.transmit.buffer_address(index);
         let descriptors = &mut self.transmit.descriptors;
@@ -488,5 +494,70 @@ mod tests {
         assert!(station(u32::MAX, u32::MAX).is_none());
         assert_eq!(received(RX_DD | RX_EOP, 0), Some(None));
         assert_eq!(received(RX_DD | RX_EOP, (MAX_FRAME + 1) as u16), Some(None));
+    }
+
+    #[test]
+    fn short_transmits_publish_the_psp_minimum_with_zeroed_padding_and_reject_bad_headers() {
+        use crate::bus::dma::RegionAllocator;
+        let mut backing = vec![0u64; 256 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing remains live until all modeled DMA buffers drop.
+        let mut dma = unsafe { RegionAllocator::new(start..start + (backing.len() * 8) as u64) };
+        let mut registers = vec![0u32; REGISTER_BYTES as usize / 4];
+        // SAFETY: the vector is this fixture's exclusive live MMIO model.
+        let device = unsafe { Mmio::new(registers.as_mut_ptr() as u64) };
+        let mut net = Igc {
+            device,
+            receive: Ring::new(&mut dma).unwrap(),
+            transmit: Ring::new(&mut dma).unwrap(),
+            received: 0,
+            discarding: false,
+            faulted: false,
+            tail: 0,
+            clean: 0,
+            mac: Mac([2, 0, 0, 0, 0, 1]),
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            location: "model".into(),
+            phy_identity: 0x67c9dc01,
+        };
+        net.start_transmit().unwrap();
+        // Reuse every ring buffer after nonzero old packets have occupied it.
+        for sequence in 0..(DESCRIPTORS * 2) {
+            let index = sequence % DESCRIPTORS;
+            net.transmit.buffer(index).fill(0xa5);
+            let length = 14 + sequence % 4;
+            let frame = vec![sequence as u8; length];
+            net.transmit(&frame).unwrap();
+            assert_eq!(&net.transmit.buffer(index)[..length], frame);
+            assert!(
+                net.transmit.buffer(index)[length..17]
+                    .iter()
+                    .all(|&b| b == 0)
+            );
+            assert_eq!(
+                net.transmit.descriptors.read::<u32>(index * DESCRIPTOR + 8),
+                transmit_words(17).0
+            );
+            assert_eq!(
+                net.transmit
+                    .descriptors
+                    .read::<u32>(index * DESCRIPTOR + 12),
+                17 << TX_PAYLEN_SHIFT
+            );
+            net.transmit
+                .descriptors
+                .write(index * DESCRIPTOR + 12, TX_DD);
+        }
+        let tail = net.tail;
+        let before = net.transmit.buffer(tail).to_vec();
+        let descriptors = net.transmit.descriptors.bytes().to_vec();
+        for length in 0..14 {
+            assert!(net.transmit(&vec![0; length]).is_err());
+            assert_eq!(net.tail, tail);
+            assert_eq!(net.transmit.buffer(tail), before);
+            assert_eq!(net.transmit.descriptors.bytes(), descriptors);
+        }
     }
 }
