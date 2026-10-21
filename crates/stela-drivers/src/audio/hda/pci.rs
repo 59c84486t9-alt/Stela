@@ -190,6 +190,10 @@ pub enum AttachError {
     BoardExcluded,
     InvalidBar,
     InvalidCapabilities,
+    MappedPreflightRequired,
+    PowerNotReady,
+    ActiveDma { offset: usize },
+    MmioPreflight(crate::audio::Error),
     UnsupportedPowerManagement,
     PowerTransition,
     ConfigurationRejected,
@@ -211,8 +215,14 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
             (Setup::IntelIch, 64)
         }
         // Haswell/Broadwell analog PCH, without I915_COMPONENT. GPU HDMI
-        // identities and Skylake+ reset/multilink/DSP paths stay refused.
+        // identities require the separate graphics component and stay refused.
         (INTEL, 0x8c20 | 0x8ca0 | 0x8d20 | 0x8d21 | 0x9c20 | 0x9c21 | 0x9ca0) => {
+            (Setup::IntelPch, 64)
+        }
+        // Conventional-class SKL/KBL/Coffee/Cannon analog controllers. These
+        // require mapped ownership preflight, native PCI clock reset hooks and
+        // bounded extended-link setup, never the legacy preparation shortcut.
+        (INTEL, 0xa170 | 0x9d70 | 0xa171 | 0x9d71 | 0xa2f0 | 0xa348 | 0x9dc8) => {
             (Setup::IntelPch, 64)
         }
         // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
@@ -236,12 +246,25 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         } else {
             (PositionPolicy::Link, ProbePolicy::Once)
         };
+    let modern = vendor == INTEL
+        && matches!(
+            device,
+            0xa170 | 0x9d70 | 0xa171 | 0x9d71 | 0xa2f0 | 0xa348 | 0x9dc8
+        );
     Ok(Identity {
         vendor,
         device,
         corb_reset: CorbReset::Handshake,
-        reset_policy: ResetPolicy::Generic,
-        stream_tag_policy: StreamTagPolicy::Global,
+        reset_policy: if modern {
+            ResetPolicy::IntelClockGate
+        } else {
+            ResetPolicy::Generic
+        },
+        stream_tag_policy: if modern {
+            StreamTagPolicy::PerDirection
+        } else {
+            StreamTagPolicy::Global
+        },
         dma_address_bits,
         position_policy,
         probe_policy,
@@ -307,21 +330,27 @@ pub struct Prepared {
     bytes: u64,
 }
 
+impl Identity {
+    fn config(self) -> Config {
+        Config {
+            corb_reset: self.corb_reset,
+            reset_policy: self.reset_policy,
+            stream_tag_policy: self.stream_tag_policy,
+            dma_address_bits: self.dma_address_bits,
+            position_policy: self.position_policy,
+            probe_policy: self.probe_policy,
+            ..Config::default()
+        }
+    }
+}
+
 impl Prepared {
     pub fn identity(&self) -> Identity {
         self.identity
     }
 
     pub fn config(&self) -> Config {
-        Config {
-            corb_reset: self.identity.corb_reset,
-            reset_policy: self.identity.reset_policy,
-            stream_tag_policy: self.identity.stream_tag_policy,
-            dma_address_bits: self.identity.dma_address_bits,
-            position_policy: self.identity.position_policy,
-            probe_policy: self.identity.probe_policy,
-            ..Config::default()
-        }
+        self.identity.config()
     }
 
     pub fn bar_range(&self) -> core::ops::Range<u64> {
@@ -351,6 +380,7 @@ struct Capabilities {
 fn capabilities<C: ConfigSpace>(
     config: &C,
     controls: &[Control],
+    reset_policy: ResetPolicy,
 ) -> Result<Capabilities, AttachError> {
     let mut found = Capabilities::default();
     if config.read16(PCI_STATUS) & STATUS_CAPABILITIES == 0 {
@@ -379,6 +409,9 @@ fn capabilities<C: ConfigSpace>(
                     return Err(AttachError::InvalidCapabilities);
                 }
                 let control = config.read16(offset16 + 2);
+                if control == u16::MAX {
+                    return Err(AttachError::InvalidCapabilities);
+                }
                 let bytes = match (
                     control & MSI_ADDRESS_64 != 0,
                     control & MSI_VECTOR_MASK != 0,
@@ -390,7 +423,12 @@ fn capabilities<C: ConfigSpace>(
                 };
                 (Some(&mut found.msi), bytes)
             }
-            CAP_MSIX => (Some(&mut found.msix), 12),
+            CAP_MSIX => {
+                if offset16 + 4 > 0x100 || config.read16(offset16 + 2) == u16::MAX {
+                    return Err(AttachError::InvalidCapabilities);
+                }
+                (Some(&mut found.msix), 12)
+            }
             CAP_PCIE => {
                 if offset16 + 4 > 0x100 {
                     return Err(AttachError::InvalidCapabilities);
@@ -420,6 +458,14 @@ fn capabilities<C: ConfigSpace>(
         let end = usize::from(offset16 + bytes);
         let start = usize::from(offset);
         if end > occupied.len() || occupied[start..end].iter().any(|used| *used) {
+            return Err(AttachError::InvalidCapabilities);
+        }
+        if reset_policy == ResetPolicy::IntelClockGate
+            && ((start < usize::from(CGCTL + 4) && usize::from(CGCTL) < end)
+                // An unknown body's end cannot prove vendor-control ownership.
+                || (!matches!(id, CAP_PM | CAP_MSI | CAP_MSIX | CAP_PCIE)
+                    && start < usize::from(SCH_HDA_DEVC + 2)))
+        {
             return Err(AttachError::InvalidCapabilities);
         }
         for control in controls {
@@ -470,6 +516,138 @@ fn bar_matches<C: ConfigSpace>(config: &C, base: u64, wide: bool) -> bool {
     actual == base
 }
 
+fn validated_bar<C: ConfigSpace>(config: &C, bar0: Bar) -> Result<(u64, u64, bool), AttachError> {
+    let (base, bytes, wide) = match bar0 {
+        Bar::Memory {
+            address,
+            size,
+            prefetchable: false,
+            wide,
+        } if address != 0
+            && address & 0x7f == 0
+            && size >= 0x440
+            && size.is_power_of_two()
+            && address & (size - 1) == 0
+            && address.checked_add(size).is_some() =>
+        {
+            (address, size, wide)
+        }
+        _ => return Err(AttachError::InvalidBar),
+    };
+    if !bar_matches(config, base, wide) {
+        return Err(AttachError::InvalidBar);
+    }
+    Ok((base, bytes, wide))
+}
+
+/// Prepare an already mapped, D0, decoded and quiescent conventional function.
+/// Modern Intel identities require this path: read-only PCI/MMIO ownership
+/// preflight precedes every PCI mutation. No temporary power/decode operation
+/// is used to inspect an unknown DSP owner. Legacy `prepare` refuses these IDs.
+/// The returned adapter retains the exact PCI function and mandatory reset
+/// policy; use its `config()` when constructing the controller.
+///
+/// # Safety
+/// All `prepare` platform ownership, coherent DMA and mapping prerequisites
+/// apply. Additionally, the actual function must already be in D0 with memory
+/// decode enabled, and `registers` must map exactly its sized BAR0 uncached with
+/// native widths. Keep that mapping alive on failure as well as success. The
+/// platform must have quiesced all prior DMA and excluded firmware/AML/SMM/DSP
+/// owners before this read-only inspection; observation cannot grant ownership.
+pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
+    function: &'a mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
+    mut registers: R,
+) -> Result<PciRegisters<'a, R, C>, AttachError> {
+    use super::registers::{
+        COMMAND_RUN, CORBCTL, GCAP, RIRBCTL, SD_CTL, SD_RUN, VMAJ, VMIN, stream_base,
+    };
+    use crate::audio::Error;
+    if ownership != Ownership::ExclusiveLegacy {
+        return Err(AttachError::Ownership);
+    }
+    let selected = identify(function)?;
+    let config = function.config();
+    let id = config.read32(PCI_ID);
+    let class = config.read32(PCI_CLASS);
+    let actual = identity(
+        id as u16,
+        (id >> 16) as u16,
+        [(class >> 24) as u8, (class >> 16) as u8, (class >> 8) as u8],
+    )?;
+    if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
+        return Err(AttachError::IdentityChanged);
+    }
+    check_subsystem(config, selected, BoardIdentity::Unknown)?;
+    let (_, bytes, _) = validated_bar(config, bar0)?;
+    if registers.region_bytes() < 0x440 || registers.region_bytes() as u64 > bytes {
+        return Err(AttachError::InvalidBar);
+    }
+    let caps = capabilities(config, selected.setup.controls(), selected.reset_policy)?;
+    let command = config.read16(PCI_COMMAND);
+    if command == u16::MAX || command & COMMAND_MEMORY == 0 {
+        return Err(AttachError::PowerNotReady);
+    }
+    if let Some(pm) = caps.pm {
+        let version = config.read16(pm + 2) & 7;
+        let state = config.read16(pm + 4);
+        if !(1..=3).contains(&version) || state == u16::MAX || state & PM_STATE != 0 {
+            return Err(AttachError::PowerNotReady);
+        }
+    }
+    if selected.reset_policy == ResetPolicy::IntelClockGate && config.read32(CGCTL) == u32::MAX {
+        return Err(AttachError::ConfigurationRejected);
+    }
+    let (major, minor) = (registers.read8(VMAJ), registers.read8(VMIN));
+    if major != 1 || minor != 0 {
+        return Err(AttachError::MmioPreflight(Error::UnsupportedVersion {
+            major,
+            minor,
+        }));
+    }
+    let gcap = registers.read16(GCAP);
+    let total = ((gcap >> 8) & 15) + ((gcap >> 12) & 15) + ((gcap >> 3) & 31);
+    if total == 0 || total > 30 {
+        return Err(AttachError::MmioPreflight(Error::UnsupportedTopology));
+    }
+    for offset in [CORBCTL, RIRBCTL]
+        .into_iter()
+        .chain((0..total as u8).map(|index| stream_base(index) + SD_CTL))
+    {
+        let value = registers.read8(offset);
+        if value == u8::MAX {
+            return Err(AttachError::MmioPreflight(Error::RegisterUnavailable {
+                offset,
+            }));
+        }
+        let run = if matches!(offset, CORBCTL | RIRBCTL) {
+            COMMAND_RUN
+        } else {
+            SD_RUN
+        };
+        if value & run != 0 {
+            return Err(AttachError::ActiveDma { offset });
+        }
+    }
+    if selected.reset_policy == ResetPolicy::IntelClockGate {
+        super::extended::inspect(&mut registers, total as u8)
+            .map_err(AttachError::MmioPreflight)?;
+    }
+    let prepared = unsafe {
+        prepare_inner(
+            function,
+            bar0,
+            timer,
+            ownership,
+            BoardIdentity::Unknown,
+            true,
+        )
+    }?;
+    unsafe { prepared.bind_registers(function, registers) }
+}
+
 /// Enter PCI D0, select the identity's conventional coherent DMA behavior,
 /// enable memory/mastering, and disable all PCI interrupt delivery.
 ///
@@ -511,6 +689,17 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     ownership: Ownership,
     board: BoardIdentity<'_>,
 ) -> Result<Prepared, AttachError> {
+    unsafe { prepare_inner(function, bar0, timer, ownership, board, false) }
+}
+
+unsafe fn prepare_inner<C: ConfigSpace>(
+    function: &mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
+    board: BoardIdentity<'_>,
+    mapped_preflight: bool,
+) -> Result<Prepared, AttachError> {
     if ownership != Ownership::ExclusiveLegacy {
         return Err(AttachError::Ownership);
     }
@@ -527,29 +716,13 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
     if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
-    check_subsystem(config, actual, board)?;
-    let (base, bytes, wide) = match bar0 {
-        Bar::Memory {
-            address,
-            size,
-            prefetchable: false,
-            wide,
-        } if address != 0
-            && address & 0x7f == 0
-            && size >= 0x440
-            && size.is_power_of_two()
-            && address & (size - 1) == 0
-            && address.checked_add(size).is_some() =>
-        {
-            (address, size, wide)
-        }
-        _ => return Err(AttachError::InvalidBar),
-    };
-    if !bar_matches(config, base, wide) {
-        return Err(AttachError::InvalidBar);
+    if selected.reset_policy == ResetPolicy::IntelClockGate && !mapped_preflight {
+        return Err(AttachError::MappedPreflightRequired);
     }
+    check_subsystem(config, actual, board)?;
+    let (base, bytes, wide) = validated_bar(config, bar0)?;
     let controls = selected.setup.controls();
-    let caps = capabilities(config, controls)?;
+    let caps = capabilities(config, controls, selected.reset_policy)?;
     let pmcsr = caps.pm.map(|pm| {
         let version = config.read16(pm + 2) & 7;
         (pm + 4, version, config.read16(pm + 4))
@@ -602,18 +775,16 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
         for control in controls {
             control.apply(config)?;
         }
-        if let Some(offset) = caps.msi {
-            let control = config.read16(offset + 2) & !1;
-            config.write16(offset + 2, control);
-            if config.read16(offset + 2) & 1 != 0 {
-                return Err(AttachError::ConfigurationRejected);
-            }
-        }
-        if let Some(offset) = caps.msix {
-            let control = config.read16(offset + 2) & !(1 << 15);
-            config.write16(offset + 2, control);
-            if config.read16(offset + 2) & (1 << 15) != 0 {
-                return Err(AttachError::ConfigurationRejected);
+        for (offset, enable) in [(caps.msi, 1), (caps.msix, 1 << 15)] {
+            if let Some(offset) = offset {
+                let previous = config.read16(offset + 2);
+                if previous == u16::MAX {
+                    return Err(AttachError::ConfigurationRejected);
+                }
+                config.write16(offset + 2, previous & !enable);
+                if config.read16(offset + 2) & enable != 0 {
+                    return Err(AttachError::ConfigurationRejected);
+                }
             }
         }
         let enabled = command | COMMAND_MEMORY | COMMAND_MASTER | COMMAND_INTX_DISABLE;
@@ -645,7 +816,7 @@ pub(super) mod tests {
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::Cell;
 
-    struct Clock(Rc<Cell<u64>>);
+    pub(in crate::audio::hda) struct Clock(Rc<Cell<u64>>);
     impl Timer for Clock {
         fn now_us(&self) -> u64 {
             self.0.get()
@@ -655,8 +826,9 @@ pub(super) mod tests {
         }
     }
 
-    struct Model {
+    pub(in crate::audio::hda) struct Model {
         words: [u32; 64],
+        reset_gate: Option<Rc<Cell<bool>>>,
         now: Rc<Cell<u64>>,
         ready_at: u64,
         previous_state: u16,
@@ -666,6 +838,7 @@ pub(super) mod tests {
         fail_after_enable: bool,
         reject_snoop: bool,
         failed_snoop_read: bool,
+        failed_interrupt_read: Option<u16>,
         writes: Vec<(u16, u8, u32, u64)>,
     }
     impl Model {
@@ -681,6 +854,11 @@ pub(super) mod tests {
     impl ConfigSpace for Model {
         fn read32(&self, offset: u16) -> u32 {
             let value = self.words[usize::from(offset / 4)];
+            if self.failed_interrupt_read == Some(offset)
+                && self.writes.iter().any(|(off, _, _, _)| *off == PCI_COMMAND)
+            {
+                return u32::MAX;
+            }
             if offset == SCH_HDA_DEVC
                 && self.failed_snoop_read
                 && self
@@ -705,7 +883,15 @@ pub(super) mod tests {
             }
         }
         fn write32(&mut self, offset: u16, value: u32) {
-            // The only dword writes attachment needs are saved BAR restores.
+            if offset == CGCTL {
+                if let Some(gate) = &self.reset_gate {
+                    gate.set(value & CGCTL_MISCBDCGE != 0);
+                }
+                self.writes.push((offset, 4, value, self.now.get()));
+                self.words[usize::from(offset / 4)] = value;
+                return;
+            }
+            // Other dword writes attachment needs are saved BAR restores.
             assert!((PCI_BAR0..PCI_BAR0 + 24).contains(&offset));
             assert!(self.now.get() >= self.ready_at);
             assert_eq!(
@@ -781,6 +967,7 @@ pub(super) mod tests {
         let now = Rc::new(Cell::new(0));
         let mut model = Model {
             words: [0; 64],
+            reset_gate: None,
             now: now.clone(),
             ready_at: 0,
             previous_state: state,
@@ -790,6 +977,7 @@ pub(super) mod tests {
             fail_after_enable: false,
             reject_snoop: false,
             failed_snoop_read: false,
+            failed_interrupt_read: None,
             writes: Vec::new(),
         };
         model.words[0] = 0x2668_8086;
@@ -825,11 +1013,9 @@ pub(super) mod tests {
         )
     }
 
-    /// Internal pre-admission profile fixture; no public table selects it yet.
+    /// Core-only profile fixture; mapped-entry tests exercise actual preparation.
     pub(in crate::audio::hda) fn modern_prepared_model(address: Address) -> Prepared {
-        let mut selected = identity(INTEL, 0x8c20, CLASS).unwrap();
-        selected.reset_policy = ResetPolicy::IntelClockGate;
-        selected.stream_tag_policy = StreamTagPolicy::PerDirection;
+        let selected = identity(INTEL, 0xa170, CLASS).unwrap();
         Prepared {
             identity: selected,
             address,
@@ -864,8 +1050,8 @@ pub(super) mod tests {
             );
         }
         for (vendor, device, class) in [
-            (INTEL, 0xa170, CLASS),
-            (INTEL, 0x9dc8, CLASS),
+            (INTEL, 0x34c8, CLASS),
+            (INTEL, 0xa0c8, CLASS),
             (INTEL, 0x0a0c, CLASS),
             (INTEL, 0xffff, CLASS),
             (AMD, 0x15e2, CLASS),
@@ -1185,6 +1371,242 @@ pub(super) mod tests {
         (function, timer, bar)
     }
 
+    pub(in crate::audio::hda) fn modern_pci_model() -> (Function<Model>, Clock, Bar) {
+        let (mut function, timer, bar) = pch_fixture(0xa170, 2, 9);
+        function.config().set16(0x54, PM_PME_ENABLE | PM_PME_STATUS);
+        (function, timer, bar)
+    }
+
+    pub(in crate::audio::hda) fn connect_reset_gate(
+        function: &mut Function<Model>,
+        gate: Rc<Cell<bool>>,
+    ) {
+        function.config().words[usize::from(CGCTL / 4)] = 0xa5a5_00c3;
+        function.config().reset_gate = Some(gate);
+    }
+
+    #[derive(Clone)]
+    struct MappedModel {
+        bytes: alloc::rc::Rc<core::cell::RefCell<Vec<u8>>>,
+        reads: Rc<Cell<usize>>,
+    }
+    impl MappedModel {
+        fn new() -> Self {
+            let mut bytes = alloc::vec![0; 0x1000];
+            bytes[0..4].copy_from_slice(&0x0100_2201u32.to_le_bytes());
+            Self {
+                bytes: Rc::new(core::cell::RefCell::new(bytes)),
+                reads: Rc::new(Cell::new(0)),
+            }
+        }
+        fn set(&self, offset: usize, value: u32) {
+            self.bytes.borrow_mut()[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    impl Registers for MappedModel {
+        fn region_bytes(&self) -> usize {
+            self.bytes.borrow().len()
+        }
+        fn read8(&mut self, offset: usize) -> u8 {
+            self.reads.set(self.reads.get() + 1);
+            self.bytes.borrow()[offset]
+        }
+        fn read16(&mut self, offset: usize) -> u16 {
+            u16::from(self.read8(offset)) | u16::from(self.read8(offset + 1)) << 8
+        }
+        fn read32(&mut self, offset: usize) -> u32 {
+            u32::from(self.read16(offset)) | u32::from(self.read16(offset + 2)) << 16
+        }
+        fn write8(&mut self, _: usize, _: u8) {
+            panic!("preflight must not write MMIO")
+        }
+        fn write16(&mut self, _: usize, _: u16) {
+            panic!("preflight must not write MMIO")
+        }
+        fn write32(&mut self, _: usize, _: u32) {
+            panic!("preflight must not write MMIO")
+        }
+    }
+
+    #[test]
+    fn exact_conventional_skl_through_cnl_requires_mapped_preflight_and_pci_reset_adapter() {
+        for device in [0xa170, 0x9d70, 0xa171, 0x9d71, 0xa2f0, 0xa348, 0x9dc8] {
+            let (mut function, timer, bar) = modern_pci_model();
+            set_identity(&mut function, INTEL, device);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                AttachError::MappedPreflightRequired
+            );
+            assert!(function.config().writes.is_empty());
+            let registers = MappedModel::new();
+            let adapter = unsafe {
+                prepare_with_registers(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    registers.clone(),
+                )
+            }
+            .unwrap();
+            let config = adapter.config();
+            assert_eq!(config.reset_policy, ResetPolicy::IntelClockGate);
+            assert_eq!(config.stream_tag_policy, StreamTagPolicy::PerDirection);
+            assert_eq!(config.dma_address_bits, 64);
+            assert_eq!(config.position_policy, PositionPolicy::Link);
+            assert_eq!(config.probe_policy, ProbePolicy::Once);
+            drop(adapter);
+            assert!(registers.reads.get() > 0);
+            assert_eq!(function.config().words[30], 0xf91f_7255);
+            assert_eq!(function.config().words[17], 0x5ac3_a5f0);
+            assert!(
+                function
+                    .config()
+                    .writes
+                    .iter()
+                    .all(|(offset, _, _, _)| *offset != CGCTL)
+            );
+        }
+    }
+
+    #[test]
+    fn mapped_pci_identity_power_capability_and_mapping_failures_precede_mmio_and_mutation() {
+        for fault in 0..12 {
+            let (mut function, timer, bar) = modern_pci_model();
+            let registers = MappedModel::new();
+            let ownership = match fault {
+                0 => Ownership::Unknown,
+                1 => Ownership::Dsp,
+                _ => Ownership::ExclusiveLegacy,
+            };
+            match fault {
+                2 => function.config().words[2] = 0x0401_0000,
+                3 => function.config().words[2] = 0x0403_8000,
+                4 => function.config().set16(0x54, 3),
+                5 => function.config().set16(PCI_COMMAND, 0),
+                6 => function.config().set16(PCI_COMMAND, u16::MAX),
+                7 => function.config().words[18] = u32::MAX,
+                8 => {
+                    function.config().words[13] = 0x48;
+                    function.config().words[18] = 0x0003_5001;
+                }
+                9 => {
+                    function.config().words[13] = 0x40;
+                    function.config().words[16] = 0x50ff;
+                }
+                10 => registers.bytes.borrow_mut().resize(0x8000, 0),
+                11 => function.config().words[4] = 0xfebe_0000,
+                _ => (),
+            }
+            let result = unsafe {
+                prepare_with_registers(&mut function, bar, &timer, ownership, registers.clone())
+            };
+            assert!(result.is_err(), "fault {fault}");
+            drop(result);
+            assert_eq!(registers.reads.get(), 0, "fault {fault}");
+            assert!(function.config().writes.is_empty(), "fault {fault}");
+        }
+    }
+
+    #[test]
+    fn mapped_interrupt_control_read_failures_do_not_publish_failed_words() {
+        for offset in [0x60, 0xb0] {
+            for after_preflight in [false, true] {
+                let (mut function, timer, bar) = modern_pci_model();
+                if after_preflight {
+                    function.config().failed_interrupt_read = Some(offset);
+                } else {
+                    function.config().set16(offset + 2, u16::MAX);
+                }
+                let result = unsafe {
+                    prepare_with_registers(
+                        &mut function,
+                        bar,
+                        &timer,
+                        Ownership::ExclusiveLegacy,
+                        MappedModel::new(),
+                    )
+                };
+                assert!(matches!(
+                    result,
+                    Err(AttachError::ConfigurationRejected | AttachError::InvalidCapabilities)
+                ));
+                drop(result);
+                let config = function.config();
+                assert!(
+                    config
+                        .writes
+                        .iter()
+                        .all(|(off, _, _, _)| *off != offset + 2)
+                );
+                if after_preflight {
+                    assert_eq!(config.get16(PCI_COMMAND) & COMMAND_MASTER, 0);
+                    assert!(config.writes.iter().any(|(off, _, _, _)| *off == TCSEL));
+                } else {
+                    assert!(config.writes.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mapped_active_dma_failed_controls_and_extended_ownership_refuse_before_pci_mutation() {
+        for (offset, value, expected) in [
+            (0x4c, 2, AttachError::ActiveDma { offset: 0x4c }),
+            (0x5c, 2, AttachError::ActiveDma { offset: 0x5c }),
+            (0xe0, 2, AttachError::ActiveDma { offset: 0xe0 }), //Last descriptor.
+            (
+                0x4c,
+                0xff,
+                AttachError::MmioPreflight(crate::audio::Error::RegisterUnavailable {
+                    offset: 0x4c,
+                }),
+            ),
+            (
+                0xe0,
+                0xff,
+                AttachError::MmioPreflight(crate::audio::Error::RegisterUnavailable {
+                    offset: 0xe0,
+                }),
+            ),
+            (
+                0x504,
+                1 << 30,
+                AttachError::MmioPreflight(crate::audio::Error::ProcessingOwned { offset: 0x504 }),
+            ),
+            (
+                0x500,
+                0x2003_0000,
+                AttachError::MmioPreflight(crate::audio::Error::UnsupportedExtendedCapability {
+                    id: 3,
+                    version: 2,
+                }),
+            ),
+        ] {
+            let (mut function, timer, bar) = modern_pci_model();
+            let registers = MappedModel::new();
+            registers.set(0x14, 0x500);
+            registers.set(0x500, 0x1003_0000);
+            registers.set(offset, value);
+            let result = unsafe {
+                prepare_with_registers(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    registers.clone(),
+                )
+            };
+            assert!(
+                matches!(result, Err(error) if error == expected),
+                "offset {offset:x}"
+            );
+            drop(result);
+            assert!(registers.reads.get() > 0);
+            assert!(function.config().writes.is_empty());
+        }
+    }
+
     #[test]
     fn hsw_bdw_pch_word_snoop_preserves_device_status_and_tcsel_neighbors_after_d3hot() {
         for device in [0x8c20, 0x8ca0, 0x8d20, 0x8d21, 0x9c20, 0x9c21, 0x9ca0] {
@@ -1357,8 +1779,7 @@ pub(super) mod tests {
             assert!(function.config().writes.is_empty());
         }
         for device in [
-            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0xa170, 0x9d70, 0xa171, 0xa348, 0x9dc8, 0x34c8, 0xa0c8,
-            0x51c8, 0x7e28,
+            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0x34c8, 0xa0c8, 0x51c8, 0x7e28,
         ] {
             assert_eq!(
                 identity(INTEL, device, CLASS),
@@ -1499,7 +1920,7 @@ pub(super) mod tests {
             (ATI, 0x157a),
             (ATI, 0x0002),
             (0x10de, 0x0be3),
-            (INTEL, 0xa170),
+            (INTEL, 0x34c8),
         ] {
             let (mut function, timer, bar) = fixture(0);
             set_identity(&mut function, vendor, device);

@@ -1290,7 +1290,7 @@ mod tests {
         Rc<RefCell<ResetPciState>>,
     ) {
         let mut state = ResetPciState::default();
-        state.words[0] = 0x8c20_8086;
+        state.words[0] = 0xa170_8086;
         state.words[2] = 0x0403_0000;
         state.words[4] = 0xfebf_0000;
         state.words[18] = 0xa5a5_00c3;
@@ -1315,7 +1315,9 @@ mod tests {
         (function, state)
     }
     fn extended_model() -> Rc<RefCell<Model>> {
-        let model = graph_model();
+        with_extended(graph_model())
+    }
+    fn with_extended(model: Rc<RefCell<Model>>) -> Rc<RefCell<Model>> {
         {
             let mut m = model.borrow_mut();
             m.bytes.resize(0x2000, 0);
@@ -1895,6 +1897,100 @@ mod tests {
             m.clock.relax();
             m.advance();
         }
+    }
+
+    #[test]
+    fn actual_modern_pci_preparation_composes_reset_links_routes_and_finite_duplex_dma() {
+        let mut fixture = Fixture::new();
+        let model = with_extended(analog_model());
+        let gate = Rc::new(Cell::new(true));
+        model.borrow_mut().reset_gate = Some(gate.clone());
+        let (mut function, pci_timer, bar) = pci::tests::modern_pci_model();
+        pci::tests::connect_reset_gate(&mut function, gate.clone());
+        let registers = unsafe {
+            pci::prepare_with_registers(
+                &mut function,
+                bar,
+                &pci_timer,
+                pci::Ownership::ExclusiveLegacy,
+                ModelRegisters(model.clone()),
+            )
+        }
+        .unwrap();
+        let selected = registers.config();
+        let timer = model.borrow().clock.clone();
+        let mut controller =
+            unsafe { Controller::new(registers, timer, &mut fixture.allocator, selected) }.unwrap();
+        assert!(gate.get()); //The model asserts every CRST write occurs with gate clear.
+        assert_eq!(controller.link_clock().unwrap().unwrap().mhz, 24);
+        let graph = controller.enumerate_codec(0).unwrap();
+        let playback = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let capture = controller
+            .allocate_stream(Direction::Capture, stereo(), 128, 2, &mut fixture.allocator)
+            .unwrap();
+        assert_eq!(playback.tag(), 1);
+        assert_eq!(capture.tag(), 1);
+        assert_ne!(playback, capture);
+        let output = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        let input = graph.analog_route(Direction::Capture, 5, 3).unwrap();
+        controller
+            .configure_analog_route(
+                &graph,
+                &output,
+                playback,
+                0,
+                PinOptions::Playback {
+                    headphone: false,
+                    eapd: None,
+                },
+            )
+            .unwrap();
+        controller
+            .configure_analog_route(
+                &graph,
+                &input,
+                capture,
+                0,
+                PinOptions::Capture {
+                    vref: Vref::EightyPercent,
+                },
+            )
+            .unwrap();
+        controller.write_pcm(playback, 0, &[0x5a; 256]).unwrap();
+        controller.fill_capture(capture, 0xa5).unwrap();
+        controller.start(capture).unwrap();
+        controller.start(playback).unwrap();
+        model.borrow_mut().dma_step_bytes = 128;
+        advance(&model, 16);
+        assert!(controller.status(playback).unwrap().period_completed);
+        assert!(controller.status(capture).unwrap().period_completed);
+        controller.stop(playback).unwrap();
+        controller.stop(capture).unwrap();
+        assert!(model.borrow().playback.len() >= 256);
+        assert!(model.borrow().playback.iter().all(|byte| *byte == 0x5a));
+        let mut captured = [0; 256];
+        controller.read_pcm(capture, 0, &mut captured).unwrap();
+        assert_eq!(captured, core::array::from_fn(|index| index as u8));
+        model.borrow_mut().dma_step_bytes = 0;
+        controller.reinitialize().unwrap();
+        assert_eq!(model.borrow().link_initializations, 2);
+        assert!(gate.get());
+        let before = access_counts(&model);
+        assert_eq!(controller.start(playback), Err(Error::InvalidStream));
+        assert_eq!(
+            controller.read_pcm(capture, 0, &mut captured),
+            Err(Error::InvalidStream)
+        );
+        assert_eq!(access_counts(&model), before);
+        controller.shutdown().unwrap();
     }
 
     #[test]

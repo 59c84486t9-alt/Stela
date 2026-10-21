@@ -87,6 +87,13 @@ impl Prepared {
     }
 }
 
+impl<R, C> PciRegisters<'_, R, C> {
+    /// Mandatory identity-selected configuration for this retained function.
+    pub fn config(&self) -> Config {
+        self.identity.config()
+    }
+}
+
 impl<R: Registers, C: ConfigSpace> Registers for PciRegisters<'_, R, C> {
     fn region_bytes(&self) -> usize {
         self.inner.region_bytes().min(self.bytes)
