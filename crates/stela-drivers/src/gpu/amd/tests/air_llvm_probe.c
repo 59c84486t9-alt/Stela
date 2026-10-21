@@ -173,7 +173,7 @@ inspect_binary(const char *elf, size_t size, const char *target,
 
 static bool
 compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
-                enum radeon_family family)
+                enum radeon_family family, bool file)
 {
    char target[64];
    snprintf(target, sizeof(target), "%s.wave64", ac_get_family_name(family));
@@ -220,14 +220,18 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
                CHECK(!nir_src_is_const(intrinsic->src[0]));
                loads++;
             } else if (intrinsic->intrinsic == nir_intrinsic_store_global) {
-               CHECK(!nir_src_is_const(intrinsic->src[0]) &&
-                     !nir_src_is_const(intrinsic->src[1]));
+               CHECK(!nir_src_is_const(intrinsic->src[1]));
+               if (!file)
+                  CHECK(!nir_src_is_const(intrinsic->src[0]));
                stores++;
             }
          }
       }
    }
-   CHECK(loads == 1 && stores == 1);
+   CHECK(file ? loads + stores > 0 : loads == 1 && stores == 1);
+   printf("STELA_AIR_MEMORY {\"backend\":\"amd-llvm\",\"input_blake3\":\"%s\","
+          "\"target\":\"%s\",\"global_loads\":%u,\"global_stores\":%u}\n",
+          input_hash, target, loads, stores);
    const ac_nir_lower_intrinsics_to_args_options args_options = {
       .gfx_level = gpu.gfx_level, .hw_stage = AC_HW_COMPUTE_SHADER,
       .wave_size = 64, .workgroup_size = 32,
@@ -309,7 +313,7 @@ main(int argc, char **argv)
    bool ok = true;
    const enum radeon_family targets[] = {CHIP_MI100, CHIP_MI200, CHIP_GFX940, CHIP_GFX1210};
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++)
-      ok &= compile_target(input, entry, input_hash, targets[i]);
+      ok &= compile_target(input, entry, input_hash, targets[i], file);
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
    return !ok;

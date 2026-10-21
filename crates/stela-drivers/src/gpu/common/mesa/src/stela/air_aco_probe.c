@@ -102,7 +102,7 @@ compute_args(struct binding *binding, const struct radeon_info *gpu)
 
 static bool
 compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_hash,
-               enum radeon_family family, bool graphics, unsigned wave)
+               enum radeon_family family, bool graphics, unsigned wave, bool file)
 {
    struct radeon_info gpu = {
       .gfx_level = ac_get_gfx_level(family), .family = family, .has_graphics = graphics,
@@ -141,13 +141,18 @@ compile_target(LLVMMemoryBufferRef input, const char *entry, const char *input_h
                CHECK(!nir_src_is_const(intrinsic->src[0]));
                loads++;
             } else if (intrinsic->intrinsic == nir_intrinsic_store_global) {
-               CHECK(!nir_src_is_const(intrinsic->src[0]) && !nir_src_is_const(intrinsic->src[1]));
+               CHECK(!nir_src_is_const(intrinsic->src[1]));
+               if (!file)
+                  CHECK(!nir_src_is_const(intrinsic->src[0]));
                stores++;
             }
          }
       }
    }
-   CHECK(loads == 1 && stores == 1);
+   CHECK(file ? loads + stores > 0 : loads == 1 && stores == 1);
+   printf("STELA_AIR_MEMORY {\"backend\":\"aco\",\"input_blake3\":\"%s\","
+          "\"target\":\"%s\",\"global_loads\":%u,\"global_stores\":%u}\n",
+          input_hash, target, loads, stores);
    CHECK(shader->info.workgroup_size[0] == 32 && shader->info.workgroup_size[1] == 1 &&
          shader->info.workgroup_size[2] == 1);
    /* Reuse AMD's generation-specific system-value lowering rather than
@@ -240,9 +245,9 @@ main(int argc, char **argv)
 
    bool ok = true;
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64);
+      ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 64, file);
       if (ac_get_gfx_level(targets[i].family) >= GFX10)
-         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32);
+         ok &= compile_target(input, entry, input_hash, targets[i].family, targets[i].graphics, 32, file);
    }
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
