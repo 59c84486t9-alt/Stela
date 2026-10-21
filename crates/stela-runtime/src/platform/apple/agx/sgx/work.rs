@@ -411,6 +411,69 @@ impl FirmwareWork {
             .work
             .write(self.policy, register, value)
     }
+    fn check_setup_owner(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+        policy: Policy,
+    ) -> Result<(), &'static str> {
+        self.available()?;
+        let native = self.power.native.borrow();
+        let run = native
+            .work
+            .run
+            .as_ref()
+            .ok_or("GFX CL attachment phase has no accepted native owner")?;
+        let parameters = ((1u16 << 13) - 1)
+            & if policy == Policy::G13X {
+                !(1 << 7)
+            } else {
+                u16::MAX
+            };
+        let controls = if policy == Policy::G13X { 0x6f } else { 0x0f };
+        if self.policy != policy
+            || run.submission != *submission
+            || run.lease != lease
+            || run.backend.is_some()
+            || run.parameter_mask != parameters
+            || run.programmed != controls
+        {
+            return Err(
+                "GFX CL attachment phase does not own complete pre-trigger native parameters",
+            );
+        }
+        Ok(())
+    }
+    /// A canceled setup never started a GPU unit. Settle its actual resource
+    /// release before forgetting command ownership; native configuration stays.
+    pub fn cancel_setup(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+        outcome: &crate::platform::apple::agx::work_decode::resources::Outcome,
+    ) -> Result<(), &'static str> {
+        self.available()?;
+        let mut native = self.power.native.borrow_mut();
+        let run = native
+            .work
+            .run
+            .as_ref()
+            .ok_or("GFX CL setup cancellation has no native owner")?;
+        if run.submission != *submission
+            || run.lease != lease
+            || run.backend.is_some()
+            || !matches!(
+                outcome,
+                crate::platform::apple::agx::work_decode::resources::Outcome::Aborted
+            )
+        {
+            return Err(
+                "GFX CL setup cancellation requires its settled pre-trigger resource abort",
+            );
+        }
+        native.work.run = None;
+        Ok(())
+    }
     pub fn check_submitted(
         &self,
         submission: &Submission,
@@ -513,6 +576,60 @@ impl crate::platform::apple::agx::work_decode::cl::Access for ParameterAccess<'_
     }
 }
 
+/// A resource phase must use the same concrete SGX and MCC objects as its
+/// native parameters, not merely equal register addresses or geometry.
+pub struct AttachmentAccess<'a, 'b, 'c> {
+    owner: &'a FirmwareWork,
+    resources: &'a super::resources::FirmwareResources,
+    port: &'a mut Port<'b, 'c>,
+}
+impl FirmwareWork {
+    pub fn attachment_access<'a, 'b, 'c>(
+        &'a self,
+        resources: &'a super::resources::FirmwareResources,
+        port: &'a mut Port<'b, 'c>,
+    ) -> Result<AttachmentAccess<'a, 'b, 'c>, &'static str> {
+        resources.check_compute_owner(&self.power, &self.cache)?;
+        Ok(AttachmentAccess {
+            owner: self,
+            resources,
+            port,
+        })
+    }
+}
+impl crate::platform::apple::agx::work_decode::resources::Access for AttachmentAccess<'_, '_, '_> {
+    fn memory(&mut self) -> &mut dyn crate::platform::apple::agx::ring::Shared {
+        self.port
+    }
+    fn check_available(&self) -> Result<(), &'static str> {
+        self.owner.available()
+    }
+    fn check_native(
+        &self,
+        write: crate::platform::apple::agx::work_decode::resources::NativeWrite,
+    ) -> Result<(), &'static str> {
+        self.resources.check_native(write)
+    }
+    fn write_native(
+        &mut self,
+        write: crate::platform::apple::agx::work_decode::resources::NativeWrite,
+    ) -> Result<(), &'static str> {
+        self.owner.available()?;
+        self.resources.access(self.port).write_native(write)
+    }
+}
+impl crate::platform::apple::agx::work_decode::cl::attachments::Access
+    for AttachmentAccess<'_, '_, '_>
+{
+    fn check_owner(
+        &self,
+        parameters: &crate::platform::apple::agx::work_decode::cl::Parameters,
+    ) -> Result<(), &'static str> {
+        let (submission, lease, policy) = parameters.identity();
+        self.owner.check_setup_owner(submission, lease, policy)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +654,9 @@ mod tests {
     const DATA: u64 = RAM + 0x10000;
 
     fn cache() -> Amcc {
+        cache_for(1)
+    }
+    fn cache_for(apertures: usize) -> Amcc {
         let bit = |offset| MccRegister {
             offset,
             mask: 1,
@@ -563,7 +683,7 @@ mod tests {
                 },
                 dram_base: RAM,
             },
-            1,
+            apertures,
             None,
             Some(Cache {
                 shared: (0x100000, 0x80000),
@@ -637,13 +757,13 @@ mod tests {
     }
     impl Memory for TraceRam {
         fn read(&mut self, pa: u64, out: &mut [u8]) -> bool {
-            if (DATA..DATA + 0x4000).contains(&pa) {
+            if (DATA..DATA + 0x8000).contains(&pa) {
                 self.reads += 1;
             }
             self.ram.read(pa, out)
         }
         fn write(&mut self, pa: u64, data: &[u8]) -> bool {
-            if (DATA..DATA + 0x4000).contains(&pa) {
+            if (DATA..DATA + 0x8000).contains(&pa) {
                 let at = self.writes;
                 self.writes += 1;
                 if self.fail_write == Some(at) {
@@ -655,7 +775,7 @@ mod tests {
         }
     }
     fn ram() -> TraceRam {
-        let mut memory = Ram::new(RAM, 0x14000);
+        let mut memory = Ram::new(RAM, 0x18000);
         for context in [0, 5] {
             let [ttbr0, ttbr1] = uat::encode_gptbat(context, RAM + 0x4000, 0);
             memory.put_u64(RAM + u64::from(context) * 16, ttbr0);
@@ -664,6 +784,7 @@ mod tests {
         memory.put_u64(RAM + 0x4000, uat::encode_table(RAM + 0x8000));
         memory.put_u64(RAM + 0x8000, uat::encode_table(RAM + 0xc000));
         mapping(&mut memory, 0, DATA, false);
+        mapping(&mut memory, 0x4000, DATA + 0x4000, false);
         for page in [0x4000, 0x10000, 0x14000, 0x18000] {
             mapping(&mut memory, VA + page, SGX + page, true);
         }
@@ -776,6 +897,15 @@ mod tests {
                 assert!(
                     owner
                         .check_submitted(&input, Lease { slot: 1, ..LEASE })
+                        .is_err()
+                );
+                assert!(
+                    owner
+                        .cancel_setup(
+                            &input,
+                            LEASE,
+                            &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted
+                        )
                         .is_err()
                 );
                 let outcome = owner.outcome();
@@ -1041,6 +1171,286 @@ mod tests {
             // Neither source phase completes the original AP command.
             assert!(power.native.borrow().work.active());
         }
+    }
+
+    fn cache_region(policy: Policy) -> Region {
+        let mut source = Flat::new(0x1000, 0x4000);
+        let at = 0x1000 + 0x640 + 3 * 0x28;
+        let (physical, bytes, range) = match policy {
+            Policy::G14G => (0x200f04000u64, 0x18000u32, 0x18000u32),
+            Policy::G13G => (0x200004000, 4 * 0x14000, 0x14000),
+            Policy::G13X => (0x200004000, 8 * 0x14000, 0x14000),
+        };
+        source.put_u64(at, physical);
+        source.put_u64(at + 8, 0x180000);
+        source.put_u32(at + 0x10, bytes);
+        source.put_u32(at + 0x14, range);
+        source.put_u32(at + 0x20, 2);
+        Region::read(&mut source, 0x1000, Kind::MCache).unwrap()
+    }
+    fn resource_root(memory: &mut TraceRam) -> crate::platform::apple::agx::initdata::Root {
+        use crate::platform::apple::agx::initdata::{CONFIG_BYTES, Root};
+        memory.ram.put_u64(DATA + 0x4000 + 0x2c8, 0x4800);
+        memory.ram.put_u64(DATA + 0x4000 + 0x2d0, 0x6000);
+        memory.ram.put_u64(DATA + 0x4000 + 0x2d8, 0x6400);
+        Root {
+            page_1660: 1,
+            rings: 0x4000,
+            object_358: 1,
+            object_848: 1,
+            object_928: 1,
+            object_930: 1,
+            object_368: 1,
+            config: [0; CONFIG_BYTES],
+        }
+    }
+    fn setup_with_attachment(
+        input: &Submission,
+        sgx: &mut Sgx,
+        memory: &mut TraceRam,
+    ) -> crate::platform::apple::agx::work_decode::Frame {
+        let mut setup = alloc::vec![0;0x16c];
+        setup[..4].copy_from_slice(&11u32.to_le_bytes());
+        setup[0xc..0x14].copy_from_slice(&0x3000u64.to_le_bytes());
+        setup[0x14..0x1c].copy_from_slice(&0x3800u64.to_le_bytes());
+        setup[0x1c..0x24].copy_from_slice(&0x3900u64.to_le_bytes());
+        setup[0x24..0x28].copy_from_slice(&input.context.to_le_bytes());
+        setup[0x28..0x2c].copy_from_slice(&1u32.to_le_bytes());
+        setup[0x50..0x58].copy_from_slice(&0x60000000u64.to_le_bytes());
+        setup[0x58..0x5c].copy_from_slice(&8u32.to_le_bytes());
+        setup[0x5c] = 5;
+        setup[0x5e..0x60].copy_from_slice(&7u16.to_le_bytes());
+        setup[0x150..0x154].copy_from_slice(&1u32.to_le_bytes());
+        assert!(memory.ram.write(DATA + input.stream, &setup));
+        for (index, value) in [0u64, 0x2000, 0, 0, 0, 0, 0, 0x8c60, 0, 0, 0, 1, 0]
+            .into_iter()
+            .enumerate()
+        {
+            memory.ram.put_u64(DATA + 0x3000 + index as u64 * 8, value);
+        }
+        io(sgx, memory, |port| input.cursor().next(port))
+            .unwrap()
+            .unwrap()
+    }
+    #[test]
+    fn source_attachment_ownership_settles_real_native_and_ram_faults_before_canceling_setup() {
+        use crate::platform::apple::agx::{
+            sgx::resources::FirmwareResources,
+            work_decode::{
+                cl::{Parameters, attachments::Attachments},
+                resources::{AttachmentResult, Outcome, Pool},
+            },
+        };
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            for cancel_early in [false, true] {
+                let policy = Policy::for_family(family).unwrap();
+                let mut sgx = gpu(family);
+                let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                let apertures = if policy == Policy::G13X {
+                    alloc::vec![0x200000000, 0x201000000]
+                } else {
+                    alloc::vec![0x200000000]
+                };
+                let mcc = cache_for(apertures.len());
+                let cache = mcc.firmware_cache(&apertures).unwrap();
+                let owner = power.firmware_work(region(), cache.clone()).unwrap();
+                let resources = FirmwareResources::new(power.clone(), region())
+                    .unwrap()
+                    .with_cache(cache_region(policy), cache)
+                    .unwrap();
+                let input = submission();
+                let mut memory = ram();
+                let root = resource_root(&mut memory);
+                let frame = setup_with_attachment(&input, &mut sgx, &mut memory);
+                let pool = io(&mut sgx, &mut memory, |port| {
+                    Pool::bind(port, &root, family, 1)
+                })
+                .unwrap();
+                let mut parameters = Parameters::new(&input, &frame, LEASE, policy).unwrap();
+                captured_rmw(&owner);
+                io(&mut sgx, &mut memory, |port| {
+                    parameters.advance(&mut owner.parameter_access(port))
+                })
+                .unwrap();
+                let mut phase = Attachments::new(parameters, pool).unwrap();
+                // AP mutation after the accepted setup cannot redirect a row.
+                memory.ram.put_u64(DATA + input.stream + 0x50, 0x70000000);
+                if cancel_early {
+                    phase.abort().unwrap();
+                } else {
+                    // All three native stores commit before the first shared
+                    // row store faults; retries retain that native prefix.
+                    memory.fail_write = Some(memory.writes);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| phase.advance(
+                            &mut owner.attachment_access(&resources, port).unwrap()
+                        ))
+                        .is_err()
+                    );
+                    assert_ne!(resources.window(0).unwrap().control, 0);
+                    assert_eq!(power.native.borrow().resources.committed_writes, 3);
+                    // A refused transfer returns the same live owner, with
+                    // the pool's committed native prefix still retained.
+                    phase = phase.finish().unwrap_err().0;
+                    assert_eq!(power.native.borrow().resources.committed_writes, 3);
+                    let active = LifecycleState {
+                        powered: true,
+                        clocked: true,
+                        quiesced: false,
+                        reset: false,
+                        retention: false,
+                    };
+                    let gated = LifecycleState {
+                        clocked: false,
+                        ..active
+                    };
+                    let mut latch = InterruptLatch::new();
+                    let mut access = Access::new(0, 0, &mut latch);
+                    sgx.check_lifecycle(gated).unwrap();
+                    sgx.set_lifecycle(gated, &mut access);
+                    let counts = (memory.reads, memory.writes);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| phase.advance(
+                            &mut owner.attachment_access(&resources, port).unwrap()
+                        ))
+                        .is_err()
+                    );
+                    assert_eq!((memory.reads, memory.writes), counts);
+                    sgx.check_lifecycle(active).unwrap();
+                    sgx.set_lifecycle(active, &mut access);
+                }
+                io(&mut sgx, &mut memory, |port| {
+                    phase.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                })
+                .unwrap();
+                if !cancel_early {
+                    assert_eq!(
+                        phase.result(),
+                        Some(&Outcome::Acquired(alloc::vec![
+                            AttachmentResult::Allocated(0)
+                        ]))
+                    );
+                    assert_eq!(
+                        resources.window(0).unwrap().address,
+                        (0x60000000 >> 7) | (5 << 33) | (5 << 39) | (1 << 47)
+                    );
+                    assert!(
+                        owner
+                            .cancel_setup(&input, LEASE, &Outcome::Acquired(Vec::new()))
+                            .is_err()
+                    );
+                    assert_eq!(power.native.borrow().resources.committed_writes, 3);
+                    phase.abort().unwrap();
+                    phase.abort().unwrap();
+                    assert!(phase.result().is_none());
+                    memory.fail_write = Some(memory.writes + 1);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| phase.advance(
+                            &mut owner.attachment_access(&resources, port).unwrap()
+                        ))
+                        .is_err()
+                    );
+                    assert_eq!(resources.window(0).unwrap().control, 0);
+                    assert_eq!(power.native.borrow().resources.committed_writes, 4);
+                    assert!(phase.result().is_none());
+                    io(&mut sgx, &mut memory, |port| {
+                        phase.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                    })
+                    .unwrap();
+                }
+                assert_eq!(phase.result(), Some(&Outcome::Aborted));
+                assert_eq!(
+                    power.native.borrow().resources.committed_writes,
+                    if cancel_early { 0 } else { 4 }
+                );
+                assert_eq!(owner.outcome(), Ok(None));
+                let (_, pool, outcome) = phase.finish().unwrap();
+                io(&mut sgx, &mut memory, |port| pool.check_reset(port)).unwrap();
+                assert!(power.check_reset().is_err());
+                owner.cancel_setup(&input, LEASE, &outcome).unwrap();
+                power.check_reset().unwrap();
+                assert_eq!(power.native.borrow().work.parameters[1], 0x2000);
+            }
+        }
+    }
+    #[test]
+    fn attachment_transfer_refusals_return_the_live_program_and_pool_owners() {
+        use crate::platform::apple::agx::work_decode::{
+            cl::{Parameters, attachments::Attachments},
+            resources::Pool,
+        };
+        let mut sgx = gpu(&generation::G14G);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let owner = power
+            .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+            .unwrap();
+        let input = submission();
+        let mut memory = ram();
+        let root = resource_root(&mut memory);
+        let frame = setup_with_attachment(&input, &mut sgx, &mut memory);
+        let pool = io(&mut sgx, &mut memory, |port| {
+            Pool::bind(port, &root, &generation::G14G, 1)
+        })
+        .unwrap();
+        let parameters = Parameters::new(&input, &frame, LEASE, Policy::G14G).unwrap();
+        let (mut parameters, pool, reason) = Attachments::new(parameters, pool).unwrap_err();
+        assert!(reason.contains("precedes complete"));
+        assert!(!power.native.borrow().work.active());
+        assert_eq!(power.native.borrow().resources.committed_writes, 0);
+        captured_rmw(&owner);
+        io(&mut sgx, &mut memory, |port| {
+            parameters.advance(&mut owner.parameter_access(port))
+        })
+        .unwrap();
+        let foreign = io(&mut sgx, &mut memory, |port| {
+            Pool::bind(port, &root, &generation::G13G, 1)
+        })
+        .unwrap();
+        let (parameters, foreign, reason) = Attachments::new(*parameters, foreign).unwrap_err();
+        assert!(reason.contains("another fixed family"));
+        assert!(!foreign.pending());
+        assert!(power.native.borrow().work.active());
+        assert_eq!(power.native.borrow().resources.committed_writes, 0);
+        let phase = Attachments::new(*parameters, *pool).unwrap();
+        assert!(phase.result().is_none());
+        assert_eq!(owner.outcome(), Ok(None));
+    }
+
+    #[test]
+    fn attachment_composition_rejects_equal_geometry_with_foreign_concrete_owners() {
+        use crate::platform::apple::agx::sgx::resources::FirmwareResources;
+        let mut sgx = gpu(&generation::G14G);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let actual = mcc.firmware_cache(&[0x200000000]).unwrap();
+        let owner = power.firmware_work(region(), actual.clone()).unwrap();
+        let foreign = gpu(&generation::G14G);
+        let foreign_power = foreign.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mut memory = ram();
+        for resources in [
+            FirmwareResources::new(foreign_power, region())
+                .unwrap()
+                .with_cache(cache_region(Policy::G14G), actual)
+                .unwrap(),
+            FirmwareResources::new(power.clone(), region())
+                .unwrap()
+                .with_cache(
+                    cache_region(Policy::G14G),
+                    cache().firmware_cache(&[0x200000000]).unwrap(),
+                )
+                .unwrap(),
+            FirmwareResources::new(power.clone(), region()).unwrap(),
+        ] {
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner
+                    .attachment_access(&resources, port)
+                    .map(|_| ()))
+                .is_err()
+            );
+            assert_eq!((memory.reads, memory.writes), (0, 0));
+        }
+        assert!(!power.native.borrow().work.active());
     }
 
     #[test]

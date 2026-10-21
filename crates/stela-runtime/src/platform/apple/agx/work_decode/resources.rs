@@ -548,6 +548,9 @@ pub struct Pool {
     pending: Option<Pending>,
 }
 impl Pool {
+    pub(super) fn policy(&self) -> Policy {
+        self.policy
+    }
     pub fn bind(
         memory: &mut dyn Shared,
         root: &Root,

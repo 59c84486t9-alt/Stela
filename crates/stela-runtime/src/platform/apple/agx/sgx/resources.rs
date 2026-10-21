@@ -21,6 +21,8 @@ pub struct Window {
 }
 #[derive(Debug, Default)]
 pub(super) struct Windows {
+    #[cfg(test)]
+    pub(super) committed_writes: u64,
     rows: [Window; 32],
     legacy_controls: [u64; 16],
 }
@@ -86,6 +88,10 @@ impl Windows {
                 }
                 self.legacy_controls[index] = 0;
             }
+        }
+        #[cfg(test)]
+        {
+            self.committed_writes += 1;
         }
         Ok(())
     }
@@ -183,6 +189,25 @@ impl CacheBinding {
     }
 }
 impl FirmwareResources {
+    pub(super) fn check_compute_owner(
+        &self,
+        power: &FirmwarePower,
+        cache: &FirmwareCache,
+    ) -> Result<(), &'static str> {
+        if self.power.family != power.family
+            || !alloc::rc::Rc::ptr_eq(&self.power.native, &power.native)
+        {
+            return Err("GFX CL parameters and resource windows belong to different SGX owners");
+        }
+        if !self
+            .cache
+            .as_ref()
+            .is_some_and(|binding| binding.native.same_owner(cache))
+        {
+            return Err("GFX CL parameters and resource RAM lack the same actual MCC owner");
+        }
+        Ok(())
+    }
     pub fn new(power: FirmwarePower, region: Region) -> Result<Self, &'static str> {
         let policy = Policy::for_family(power.family)?;
         power.resource_window_targets()?;
@@ -226,6 +251,17 @@ impl FirmwareResources {
     pub fn access<'a, 'b, 'c>(&'a self, port: &'a mut Port<'b, 'c>) -> ResourceAccess<'a, 'b, 'c> {
         ResourceAccess { owner: self, port }
     }
+    pub(super) fn check_native(&self, write: NativeWrite) -> Result<(), &'static str> {
+        match write {
+            NativeWrite::Window { .. } => self.qualify(write).map(|_| ()),
+            NativeWrite::MCache { offset } => {
+                let cache = self.cache.as_ref().ok_or(
+                    "GFX MCache DSID completion requires its separately qualified physical owner",
+                )?;
+                cache.target(offset).map(|_| ())
+            }
+        }
+    }
     fn qualify(&self, write: NativeWrite) -> Result<(u32, u64, u64), &'static str> {
         let NativeWrite::Window { offset, value } = write else {
             return Err(
@@ -259,15 +295,7 @@ impl Access for ResourceAccess<'_, '_, '_> {
         Ok(())
     }
     fn check_native(&self, write: NativeWrite) -> Result<(), &'static str> {
-        match write {
-            NativeWrite::Window { .. } => self.owner.qualify(write).map(|_| ()),
-            NativeWrite::MCache { offset } => {
-                let cache = self.owner.cache.as_ref().ok_or(
-                    "GFX MCache DSID completion requires its separately qualified physical owner",
-                )?;
-                cache.target(offset).map(|_| ())
-            }
-        }
+        self.owner.check_native(write)
     }
     fn write_native(&mut self, write: NativeWrite) -> Result<(), &'static str> {
         self.check_available()?;

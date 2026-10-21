@@ -43,6 +43,9 @@ impl Amcc {
     }
 }
 impl FirmwareCache {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.planes, &other.planes) && self.apertures == other.apertures
+    }
     /// Resource RAM cannot resume after any participating DRAM plane has
     /// been disabled. This is distinct from a targeted native command,
     /// which may still address another plane without transferring RAM.

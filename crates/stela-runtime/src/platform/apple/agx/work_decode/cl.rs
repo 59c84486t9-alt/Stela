@@ -5,11 +5,12 @@
 //! its two legacy writes. A later RAM/native fault must not hoist a read,
 //! repeat a completed RMW or redirect a captured native store.
 
+pub mod attachments;
 pub mod slot;
 
 use super::{
     Encoding, Frame, Submission,
-    resources::{Lease, Policy},
+    resources::{Attachment, Lease, Policy},
 };
 use crate::platform::apple::agx::{
     channel::{Kind, Record},
@@ -53,6 +54,7 @@ struct Action {
 #[derive(Debug)]
 pub struct Parameters {
     policy: Policy,
+    attachments: Vec<Attachment>,
     submission: Submission,
     lease: Lease,
     actions: Vec<Action>,
@@ -137,6 +139,7 @@ impl Parameters {
         }
         Ok(Self {
             policy,
+            attachments: Attachment::read_setup(Encoding::Fixed, frame)?,
             submission: submission.clone(),
             lease,
             actions,
@@ -144,6 +147,9 @@ impl Parameters {
             held: None,
             mask: None,
         })
+    }
+    pub(crate) fn identity(&self) -> (&Submission, Lease, Policy) {
+        (&self.submission, self.lease, self.policy)
     }
     pub fn completed(&self) -> bool {
         self.next == self.actions.len()
