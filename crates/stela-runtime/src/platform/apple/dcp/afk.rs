@@ -3,20 +3,42 @@
 //!
 //! Public description (both are AP-side implementations of the same
 //! protocol): Asahi Linux `drivers/gpu/drm/apple/afk.c`/`afk.h` and m1n1
-//! `src/afk.c`, `proxyclient/m1n1/fw/afk/rbep.py`. A message's type is
-//! bits `[63:48]`:
+//! `src/afk.c`, `proxyclient/m1n1/fw/afk/rbep.py`.
 //!
-//! | Type | Direction | Meaning |
-//! | --- | --- | --- |
-//! | 0x80 `INIT` | AP | start the endpoint; 26A434 sends 0x100 |
-//! | 0xa0 `INIT_ACK` | coprocessor | the endpoint is alive; `[15:0]` picks the ring layout |
-//! | 0x89 `GETBUF` | coprocessor | lend me `[31:16]` 64-byte blocks, tag `[15:0]` |
-//! | 0xa1 `GETBUF_ACK` | AP | the buffer's DVA in `[47:0]` |
-//! | 0x8a `INIT_TX` / 0x8b `INIT_RX` | coprocessor | the AP-to-coprocessor / coprocessor-to-AP ring at block `[47:32]`, `[31:16]` blocks, tag `[15:0]` |
-//! | 0xa3 `START` | AP | both rings accepted |
-//! | 0x86 `START_ACK` | coprocessor | started |
-//! | 0xa2 `SEND` / 0x85 `RECV` | AP / coprocessor | a ring's new write pointer in `[31:0]` |
-//! | 0xc0 `SHUTDOWN` / 0xc1 `SHUTDOWN_ACK` | AP / coprocessor | stop |
+//! Both original peers use the same 17-row state table (AppleFirmwareKit
+//! file `0x1119c58`, DCP restore firmware VA `0x706148`). The message type
+//! is the byte `[55:48]`; the low 48 bits depend on the command:
+//!
+//! | Type | Accepted state / effect |
+//! | --- | --- |
+//! | 0x90 VERSION | ready; reply 0x91 with version 0x100 |
+//! | 0x80 INIT | ready; reply 0xa0 then request memory with 0x89 |
+//! | 0xa1 GETBUF_ACK | awaiting memory; low48 is its DVA; initialize and register rings |
+//! | 0xa3 START | registered; reply 0x86 and enter started |
+//! | 0x85 / 0xa2 doorbell | started; inspect the shared queue headers, ignoring payload |
+//! | 0xa8 FULL | started; drain AP queue then reply 0xa7 SPACE |
+//! | 0xa7 SPACE | started; clear transmit backpressure (none with no announced services) |
+//! | 0xc0 SHUTDOWN | started; release transport and reply 0xc1 |
+//!
+//! The remaining rows answer a flow this coprocessor never initiates:
+//! 0xa0 in state2, 0x89 in state3, 0x8d/0x8e in state4, 0x8a/0x8b in
+//! state5, 0x86 in state7 and 0xc1 in state6. They explicitly refuse in
+//! this coprocessor-owned-buffer flow. Unknown and out-of-state commands
+//! refuse without acknowledging. The ready state corresponds to the
+//! firmware's state1 (the endpoint has started), memory request to state4,
+//! registered to state7 and running to state8.
+//!
+//! Ring registration is relative to the *receiver*: 0x8a names its
+//! transmit ring and 0x8b its receive ring (`_afk_msgr_handle_q_reg`,
+//! kernel VA `0xfffffe00094c6910`). The sender uses these same ranges for
+//! receive and transmit respectively (`_afk_msgr_send_register_queues`,
+//! kernel `0xfffffe00094c5c0c`, DCP `0x2c660`). A doorbell signals either
+//! ring: enqueue, read-pointer update and reset all signal through
+//! `_buffer_signal_standard` (`0xfffffe00094c7224`), whose trailing
+//! arguments are incidental register contents for the latter two paths.
+//! Both 0x85 and 0xa2 dispatch to the same handler; its first operation
+//! reads the receiver's receive-ring pointers (`0xfffffe00094c7468`,
+//! DCP `0x2e2c0`). Equal pointers mean empty, including a credit-only bell.
 //!
 //! A ring starts with a header the coprocessor writes: the data size, the
 //! read pointer and the write pointer, one layout block each. Both sides
@@ -27,7 +49,11 @@
 //! with `INIT_ACK` 0x100 whatever the AP sent, so the AP's
 //! `_afk_msgr_handle_ready_ack` (AppleFirmwareKit 0x24c32c0) always takes
 //! the 0x80-byte layout and `_iop_ringbuffer_init_ex` (0x24c1ce4) checks
-//! `bufsz + 0x180` is the ring's size. Entries are a 16-byte `afk_qe`
+//! `bufsz + 0x180` is the ring's size. The initializer also writes
+//! `0x00070006` at header+4 (kernel `0xfffffe00094c5da8`, DCP `0x2c804`):
+//! its high half selects the modern entry layout. A zero header+4 selects
+//! the legacy size/channel/type/magic order, not the magic-first order.
+//! Entries are a 16-byte `afk_qe`
 //! (`' POI'` magic, size, channel, type) and an EPIC header, aligned to the
 //! layout's 0x80 bytes.
 //!
@@ -52,8 +78,13 @@ pub const INIT_TX: u64 = 0x8a;
 pub const INIT_RX: u64 = 0x8b;
 pub const START: u64 = 0xa3;
 pub const START_ACK: u64 = 0x86;
+/// Both doorbell codes invoke the same queue-not-empty handler.
 pub const SEND: u64 = 0xa2;
 pub const RECV: u64 = 0x85;
+pub const FULL: u64 = 0xa8;
+pub const SPACE: u64 = 0xa7;
+pub const VERSION: u64 = 0x90;
+pub const VERSION_ACK: u64 = 0x91;
 pub const SHUTDOWN: u64 = 0xc0;
 pub const SHUTDOWN_ACK: u64 = 0xc1;
 
@@ -78,10 +109,14 @@ const RPTR: u64 = 0x80;
 const WPTR: u64 = 0x100;
 /// `afk_qe.magic`, `' POI'` little-endian.
 const QE_MAGIC: u32 = 0x2050_4f49;
+/// `iop_ringbuffer_init_ex` initializes the format word alongside the size.
+/// Its high half selects the magic/size/channel/type entry layout. With a
+/// zero format the AP instead writes size/channel/type/magic.
+const RING_FORMAT: u32 = 0x0007_0006;
 
 /// The message type of an AFK word.
 pub fn kind(word: u64) -> u64 {
-    word >> TYPE_SHIFT
+    (word >> TYPE_SHIFT) & 0xff
 }
 
 fn message(kind: u64, value: u64) -> u64 {
@@ -90,7 +125,9 @@ fn message(kind: u64, value: u64) -> u64 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
-    /// Not started by the AP.
+    /// The transport endpoint is ready for INIT (firmware state 1).
+    Ready,
+    /// Shutdown completed; endpoint start must rearm the transport.
     Stopped,
     /// `GETBUF` sent; waiting for the buffer.
     Asked,
@@ -110,6 +147,9 @@ pub enum Event {
     Received(u64),
     /// A ring entry the AP wrote.
     Entry(Entry),
+    /// Both ring headers at a doorbell (AP transmit first), including their
+    /// format words. The mailbox payload is not a write pointer.
+    Doorbell { tx: [u32; 4], rx: [u32; 4] },
 }
 
 /// A ring entry the AP wrote.
@@ -143,10 +183,17 @@ impl Afk {
         Self {
             endpoint,
             name,
-            state: State::Stopped,
+            state: State::Ready,
             window,
             incoming: VecDeque::new(),
             seen: VecDeque::new(),
+        }
+    }
+
+    /// RTKit enabled the endpoint, starting the messenger again after shutdown.
+    pub fn start(&mut self) {
+        if self.state == State::Stopped {
+            self.state = State::Ready;
         }
     }
 
@@ -173,12 +220,13 @@ impl Afk {
     pub fn receive(&mut self, word: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         self.seen.push_back(Event::Received(word));
         match (kind(word), self.state) {
+            (_, State::Stopped) => Err("DCP AFK message after shutdown before endpoint restart"),
             // The firmware would lay its rings out in 0x40-byte blocks while
             // its `INIT_ACK` tells the AP 0x80; no 26A434 AP asks for that.
-            (INIT, State::Stopped) if word & 0xffff == SMALL_LAYOUT => {
+            (INIT, State::Ready) if word & 0xffff == SMALL_LAYOUT => {
                 Err("DCP AFK INIT asks for the 0x40-byte ring layout")
             }
-            (INIT, State::Stopped) => {
+            (INIT, State::Ready) => {
                 self.state = State::Asked;
                 outbox.push(message(INIT_ACK, INIT_ACK_VALUE));
                 outbox.push(message(
@@ -187,8 +235,13 @@ impl Afk {
                 ));
                 Ok(())
             }
+            (VERSION, State::Ready) => {
+                outbox.push(message(VERSION_ACK, INIT_ACK_VALUE));
+                Ok(())
+            }
+            (VERSION, _) => Err("DCP AFK version query after initialization"),
             (INIT, _) => Err("DCP AFK INIT on an endpoint already started"),
-            (GETBUF_ACK, State::Asked) | (SEND, State::Started { .. }) => {
+            (GETBUF_ACK, State::Asked) | (RECV | SEND | FULL, State::Started { .. }) => {
                 self.incoming.push_back(word);
                 Ok(())
             }
@@ -199,14 +252,24 @@ impl Afk {
                 Ok(())
             }
             (START, _) => Err("DCP AFK START before both rings were described"),
-            (SEND, _) => Err("DCP AFK SEND on an endpoint that has not started"),
-            (SHUTDOWN, _) => {
+            (SPACE, State::Started { .. }) => Ok(()),
+            (RECV | SEND | FULL | SPACE, _) => {
+                Err("DCP AFK queue notification on an endpoint that has not started")
+            }
+            (SHUTDOWN, State::Started { .. }) => {
                 self.state = State::Stopped;
                 self.incoming.clear();
                 outbox.push(message(SHUTDOWN_ACK, 0));
                 Ok(())
             }
-            _ => Err("DCP AFK message type is not one the AP sends"),
+            (SHUTDOWN, _) => Err("DCP AFK SHUTDOWN on an endpoint that has not started"),
+            (INIT_ACK | START_ACK | GETBUF | INIT_TX | INIT_RX | VERSION_ACK | SHUTDOWN_ACK, _) => {
+                Err(
+                    "DCP AFK response or queue registration is not pending in the coprocessor-owned-buffer flow",
+                )
+            }
+            (0x8d | 0x8e, _) => Err("DCP AFK unsolicited AP-owned buffer is unsupported"),
+            _ => Err("DCP AFK unknown message type"),
         }
     }
 
@@ -223,6 +286,7 @@ impl Afk {
                                 .expect("ring size")
                                 .to_le_bytes(),
                         );
+                        header[4..8].copy_from_slice(&RING_FORMAT.to_le_bytes());
                         bus.write(buffer + ring, &header)?;
                     }
                     for (kind, ring) in [(INIT_TX, TX_RING), (INIT_RX, RX_RING)] {
@@ -235,7 +299,18 @@ impl Afk {
                     }
                     self.state = State::Described { buffer };
                 }
-                (SEND, State::Started { buffer }) => {
+                (RECV | SEND | FULL, State::Started { buffer }) => {
+                    let tx = self.header(bus, buffer + TX_RING)?;
+                    let rx = self.header(bus, buffer + RX_RING)?;
+                    self.seen.push_back(Event::Doorbell { tx, rx });
+                    self.validate_header(tx)?;
+                    self.validate_header(rx)?;
+                    if tx[2] == tx[3] {
+                        if kind(word) == FULL {
+                            outbox.push(message(SPACE, 0));
+                        }
+                        continue;
+                    }
                     let entry = self.entry(bus, buffer)?;
                     self.seen.push_back(Event::Entry(entry));
                     return Err(
@@ -244,6 +319,29 @@ impl Afk {
                 }
                 _ => return Err("DCP AFK queued message no longer matches the endpoint"),
             }
+        }
+        Ok(())
+    }
+
+    fn header(&self, bus: &mut dyn Bus, ring: u64) -> Result<[u32; 4], &'static str> {
+        let mut fields = [0; 4];
+        for (field, offset) in fields.iter_mut().zip([0, 4, RPTR, WPTR]) {
+            let mut word = [0; 4];
+            bus.read(ring + offset, &mut word)?;
+            *field = u32::from_le_bytes(word);
+        }
+        Ok(fields)
+    }
+
+    fn validate_header(&self, fields: [u32; 4]) -> Result<(), &'static str> {
+        if u64::from(fields[0]) != RING_BYTES - RING_HEADER || fields[1] != RING_FORMAT {
+            return Err("DCP AFK ring header size or format changed");
+        }
+        if fields[2..]
+            .iter()
+            .any(|&p| u64::from(p) >= RING_BYTES - RING_HEADER)
+        {
+            return Err("DCP AFK ring pointer lies outside the ring");
         }
         Ok(())
     }
@@ -335,6 +433,11 @@ mod tests {
         for ring in [0, 0x2000] {
             let mut size = [0u8; 4];
             memory.read(WINDOW + 0x4000 + ring, &mut size).unwrap();
+            let mut format = [0u8; 4];
+            memory
+                .read(WINDOW + 0x4000 + ring + 4, &mut format)
+                .unwrap();
+            assert_eq!(u32::from_le_bytes(format), 0x0007_0006);
             assert_eq!(
                 u64::from(u32::from_le_bytes(size)) + RING_HEADER,
                 RING_BYTES
@@ -365,7 +468,10 @@ mod tests {
         memory.write(at, &qe).unwrap();
         memory.write(at + 32 + 5, &[0x30, 0xc0, 0]).unwrap();
         let mut out = Vec::new();
-        afk.receive(message(SEND, 0x80), &mut out).unwrap();
+        memory
+            .write(WINDOW + 0x4000 + WPTR, &0x80u32.to_le_bytes())
+            .unwrap();
+        afk.receive(message(RECV, 0x80_0000), &mut out).unwrap();
         assert!(afk.dma(&mut memory, &mut out).is_err());
         assert_eq!(
             afk.seen.pop_back(),
@@ -376,6 +482,82 @@ mod tests {
                 category: Some(0x30),
                 subtype: Some(0xc0),
             }))
+        );
+    }
+
+    #[test]
+    fn empty_and_credit_doorbells_do_not_read_an_entry() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        let mut out = Vec::new();
+        for code in [RECV, SEND] {
+            afk.receive(message(code, 0x80_0000), &mut out).unwrap();
+            afk.dma(&mut memory, &mut out).unwrap();
+        }
+        assert!(out.is_empty());
+        afk.receive(message(FULL, 0x40), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(out, [message(SPACE, 0)]);
+        out.clear();
+        afk.receive(message(SPACE, 0), &mut out).unwrap();
+        assert!(!afk.pending() && out.is_empty());
+    }
+
+    #[test]
+    fn version_query_and_command_states_match_the_table() {
+        let mut afk = Afk::new(0x20, "system", None);
+        let mut out = Vec::new();
+        afk.receive(message(VERSION, 0), &mut out).unwrap();
+        assert_eq!(out, [message(VERSION_ACK, 0x100)]);
+        out.clear();
+        for code in [RECV, SEND, FULL, SPACE, SHUTDOWN, GETBUF_ACK, START] {
+            assert!(afk.receive(message(code, 0), &mut out).is_err());
+        }
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
+        out.clear();
+        assert!(afk.receive(message(VERSION, 0), &mut out).is_err());
+        assert!(afk.receive(message(SHUTDOWN, 0), &mut out).is_err());
+        for code in [
+            INIT_ACK,
+            START_ACK,
+            GETBUF,
+            INIT_TX,
+            INIT_RX,
+            VERSION_ACK,
+            SHUTDOWN_ACK,
+            0x8d,
+            0x8e,
+            0x99,
+        ] {
+            assert!(afk.receive(message(code, 0), &mut out).is_err());
+        }
+        assert!(out.is_empty());
+        assert_eq!(kind(0xff85_0000_0000_0000), RECV);
+    }
+
+    #[test]
+    fn malformed_ring_headers_refuse_before_reading_entries() {
+        let mut memory = Memory::default();
+        let mut afk = started(&mut memory);
+        let mut out = Vec::new();
+        memory
+            .write(WINDOW + 0x4000 + WPTR, &0x2000u32.to_le_bytes())
+            .unwrap();
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        assert_eq!(
+            afk.dma(&mut memory, &mut out),
+            Err("DCP AFK ring pointer lies outside the ring")
+        );
+        memory
+            .write(WINDOW + 0x4000 + WPTR, &0u32.to_le_bytes())
+            .unwrap();
+        memory
+            .write(WINDOW + 0x4000 + 4, &0u32.to_le_bytes())
+            .unwrap();
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        assert_eq!(
+            afk.dma(&mut memory, &mut out),
+            Err("DCP AFK ring header size or format changed")
         );
     }
 
@@ -392,8 +574,12 @@ mod tests {
         afk.receive(message(INIT, 0x100), &mut out).unwrap();
         assert!(afk.receive(message(INIT, 0x100), &mut out).is_err());
         out.clear();
+        assert!(afk.receive(message(SHUTDOWN, 0), &mut out).is_err());
+        afk.state = State::Started { buffer: 0x4000 };
         afk.receive(message(SHUTDOWN, 0), &mut out).unwrap();
         assert_eq!(out, [SHUTDOWN_ACK << 48]);
+        assert!(afk.receive(message(INIT, 0x100), &mut out).is_err());
+        afk.start();
         afk.receive(message(INIT, 0x100), &mut out).unwrap();
         assert_eq!(afk.seen.front(), Some(&Event::Received(START << 48)));
     }

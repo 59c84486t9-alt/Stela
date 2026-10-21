@@ -161,6 +161,14 @@ impl core::fmt::Display for Log {
                 name,
                 event: afk::Event::Entry(entry),
             } => write!(f, "DCP AFK ep={endpoint:#x} {name} entry {entry:x?}"),
+            Log::Afk {
+                endpoint,
+                name,
+                event: afk::Event::Doorbell { tx, rx },
+            } => write!(
+                f,
+                "DCP AFK ep={endpoint:#x} {name} doorbell tx={tx:x?} rx={rx:x?}"
+            ),
             Log::Dropped(count) => write!(f, "DCP log dropped {count} entries"),
         }
     }
@@ -190,6 +198,7 @@ struct AfkEndpoint(Rc<RefCell<afk::Afk>>);
 
 impl Endpoint for AfkEndpoint {
     fn start(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
+        self.0.borrow_mut().start();
         Ok(())
     }
 
