@@ -220,3 +220,39 @@ pub(super) fn resolve(
     }
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coprocessor::tests::{context, fixture, prepare};
+
+    #[test]
+    fn full_chains_rebase_and_sign_under_explicit_context() -> Result<()> {
+        let s = prepare(&fixture())?.stage(0x800000, 0x3000)?;
+        assert_eq!(s.plan().chains.pointers.len(), 2);
+        let ctx = context();
+        let expected = ctx.sign(pauth::Key::Da, 8, 0x1234_0000_0000_2000)?;
+        let r = s.relocate(0, ctx, 16)?;
+        let signed = u64::from_le_bytes(r.bytes()[0x2000..0x2008].try_into()?);
+        assert_eq!(signed, expected);
+        assert_eq!(
+            u64::from_le_bytes(r.bytes()[0x2008..0x2010].try_into()?),
+            0xab00_0000_0000_0000
+        );
+        assert_eq!(r.receipt().authenticated_pointer_count, 1);
+        assert!(
+            prepare(&fixture())?
+                .stage(0x800000, 0x3000)?
+                .relocate(0x1000, context(), 16)
+                .is_err()
+        );
+        let missing = pauth::Context::new(123, pauth::Keys::from_ib_words(3, 4));
+        assert!(
+            prepare(&fixture())?
+                .stage(0x800000, 0x3000)?
+                .relocate(0, missing, 16)
+                .is_err()
+        );
+        Ok(())
+    }
+}

@@ -340,3 +340,43 @@ pub(super) fn parse(data: &[u8], limits: Limits) -> Result<Layout> {
         alignment,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::coprocessor::tests::{fixture, prepare, w32, w64};
+
+    #[test]
+    fn malformed_loads_and_chain_effects_are_refused() {
+        // All mutations retain correct outer hashes, reaching structural validation.
+        for (at, width, v) in [
+            (12, 4, 2),
+            (16, 4, 5),
+            (20, 4, 608),
+            (32 + 24, 8, u64::MAX),
+            (344 + 24, 8, 0x800),
+            (32 + 72 + 56, 4, 1),
+            (32 + 72 + 64, 4, 0x12),
+            (416 + 8, 4, 0),
+            (416 + 272, 8, 0x1000),
+            (0x1100, 4, 10),
+            (0x1104, 4, 5),
+            (0x1108, 4, 0x2004),
+            (0x110c, 4, 1),
+            (0x2000, 8, 1u64 << 62),
+            (0x2000, 8, (1u64 << 63) | (1u64 << 51)),
+            (0x2000, 8, 0x1800),
+            (704, 4, 0x80000034),
+        ] {
+            let mut raw = fixture();
+            if width == 4 {
+                w32(&mut raw, at, v as u32);
+            } else {
+                w64(&mut raw, at, v);
+            }
+            assert!(
+                prepare(&raw).is_err(),
+                "accepted mutation {at:x} width {width} value {v:x}"
+            );
+        }
+    }
+}

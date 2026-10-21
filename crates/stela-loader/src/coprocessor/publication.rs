@@ -228,3 +228,156 @@ impl Configured {
         })
     }
 }
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::coprocessor::{
+        self as publication_root,
+        tests::{fixture, name, prepare, w32, w64},
+    };
+    use configuration::tests::{config_policy, configured, provenance};
+    use publication_root::{configuration, publication};
+
+    pub(in crate::coprocessor) fn publication_policy(
+        c: &configuration::Configured,
+    ) -> publication::Policy {
+        publication::Policy {
+            allocation_owner: "allocation fixture1".into(),
+            mapping_owner: "DART fixture1".into(),
+            configured_sha256: c.receipt().configured_sha256.clone(),
+            segments: vec![
+                publication::SegmentPolicy {
+                    name: "__TEXT".into(),
+                    action: publication::Action::Publish {
+                        iop_remap: 0x100000,
+                        raw_flags: 1,
+                    },
+                    provenance: provenance(),
+                },
+                publication::SegmentPolicy {
+                    name: "__DATA".into(),
+                    action: publication::Action::Publish {
+                        iop_remap: 0x200000,
+                        raw_flags: 4,
+                    },
+                    provenance: provenance(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn publication_keeps_three_domains_and_exact_complete_wire_records() -> Result<()> {
+        let c = configured()?;
+        let proposal = c.publication_proposal(publication_policy(&c))?;
+        assert_eq!(proposal.segment_ranges.len(), 64);
+        assert_eq!(proposal.segment_names, b"__TEXT;__DATA;");
+        let q = |at| u64::from_le_bytes(proposal.segment_ranges[at..at + 8].try_into().unwrap());
+        assert_eq!((q(0), q(8), q(16)), (0x800000, 0, 0x100000));
+        assert_eq!(
+            (
+                proposal.entry.linked_virtual,
+                proposal.entry.physical,
+                proposal.entry.iop_remap
+            ),
+            (0, 0x800000, 0x100000)
+        );
+        assert_eq!(
+            (
+                proposal.records[1].physical,
+                proposal.records[1].linked_virtual,
+                proposal.records[1].iop_remap
+            ),
+            (0x802000, 0x2000, 0x200000)
+        );
+        let mut policy = publication_policy(&c);
+        policy.segments[0].action = publication::Action::Publish {
+            iop_remap: 0,
+            raw_flags: 1,
+        };
+        let zero = c.publication_proposal(policy)?;
+        assert_eq!(zero.entry.iop_remap, 0);
+        assert_ne!(zero.entry.physical, 0); // Proposal only, never an ASC authorization.
+        Ok(())
+    }
+
+    #[test]
+    fn publication_refuses_implicit_or_overlapping_owner_policy() -> Result<()> {
+        let c = configured()?;
+        for case in 0..7 {
+            let mut policy = publication_policy(&c);
+            match case {
+                0 => {
+                    policy.segments.pop();
+                }
+                1 => policy.segments[0].action = publication::Action::Omit,
+                2 => {
+                    policy.segments[1].action = publication::Action::Publish {
+                        iop_remap: 0x100800,
+                        raw_flags: 4,
+                    }
+                }
+                3 => {
+                    policy.segments[0].action = publication::Action::Publish {
+                        iop_remap: u64::MAX,
+                        raw_flags: 1,
+                    }
+                }
+                4 => {
+                    policy.segments[0].action = publication::Action::Publish {
+                        iop_remap: 0x100000,
+                        raw_flags: 0x20,
+                    }
+                }
+                5 => policy.mapping_owner.clear(),
+                _ => policy.configured_sha256 = "3".repeat(64),
+            }
+            assert!(c.publication_proposal(policy).is_err());
+        }
+        let mut policy = publication_policy(&c);
+        policy.segments[1].action = publication::Action::Omit;
+        let omitted = c.publication_proposal(policy)?;
+        assert_eq!(omitted.omitted.len(), 1);
+        assert_eq!(omitted.omitted[0].virtual_bytes, 0x100);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_segment_decision_is_explicit_and_publication_stays_unqualified() -> Result<()> {
+        let mut raw = fixture();
+        w32(&mut raw, 16, 5);
+        w32(&mut raw, 20, 768);
+        let at = 728;
+        w32(&mut raw, at, 0x19);
+        w32(&mut raw, at + 4, 72);
+        name(&mut raw, at + 8, "__EMPTY");
+        w64(&mut raw, at + 24, 0x2100);
+        w64(&mut raw, at + 40, 0x2010);
+        w32(&mut raw, at + 56, 3);
+        w32(&mut raw, at + 60, 3);
+        let p = prepare(&raw)?;
+        let policy = config_policy(p.plan());
+        let c = p.stage(0x800000, 0x3000)?.configure(policy)?;
+        assert!(c.publication_proposal(publication_policy(&c)).is_err());
+        let mut policy = publication_policy(&c);
+        policy.segments.push(publication::SegmentPolicy {
+            name: "__EMPTY".into(),
+            action: publication::Action::Omit,
+            provenance: provenance(),
+        });
+        let proposal = c.publication_proposal(policy)?;
+        assert_eq!(proposal.omitted[0].name, "__EMPTY");
+        let mut policy = publication_policy(&c);
+        policy.segments.push(publication::SegmentPolicy {
+            name: "__EMPTY".into(),
+            action: publication::Action::Publish {
+                iop_remap: 0x300000,
+                raw_flags: 0,
+            },
+            provenance: provenance(),
+        });
+        assert!(c.publication_proposal(policy).is_err());
+        Ok(())
+    }
+}

@@ -8,6 +8,8 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_runtime::sha256;
 
+pub mod native;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct Provenance {
     pub input_sha256: String,
@@ -136,6 +138,9 @@ pub struct Receipt {
     pub original_staged_sha256: String,
     pub patchbay_sha256: String,
     pub fields: Vec<AppliedField>,
+    /// Present only when the independent native version5 bootstrap header and
+    /// matching SLID patch have been applied together. This remains byte policy.
+    pub cold_slide: Option<native::ColdSlideProposal>,
     pub configured_sha256: String,
 }
 /// Encoded cold image after a complete caller-supplied patch policy. It has no
@@ -225,6 +230,7 @@ impl Staged {
             original_staged_sha256: self.placement().staged_sha256.clone(),
             patchbay_sha256: bay.source_sha256.clone(),
             fields,
+            cold_slide: None,
             configured_sha256: String::new(),
         };
         // No bytes change until every original field and every source claim has
@@ -251,5 +257,133 @@ impl Configured {
     }
     pub fn receipt(&self) -> &Receipt {
         &self.receipt
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::coprocessor::{
+        self as configuration_root,
+        tests::{fixture, prepare, w32, w64},
+    };
+    use alloc::vec;
+    use configuration_root::configuration;
+
+    pub(in crate::coprocessor) fn config_policy(plan: &Plan) -> configuration::Policy {
+        configuration::Policy {
+            owner: "synthetic boot policy".into(),
+            product_build: plan.product_build.clone(),
+            hardware_role: plan.hardware.role.clone(),
+            compatible: plan.hardware.compatible.clone(),
+            decoded_sha256: plan.source.decoded_sha256.clone(),
+            patchbay_sha256: plan.patchbay.as_ref().unwrap().source_sha256.clone(),
+            fields: plan
+                .patchbay
+                .as_ref()
+                .unwrap()
+                .records
+                .iter()
+                .map(|r| configuration::Field {
+                    tag: r.tag,
+                    action: configuration::Action::Preserve,
+                    provenance: provenance(),
+                })
+                .collect(),
+        }
+    }
+
+    pub(in crate::coprocessor) fn provenance() -> configuration::Provenance {
+        configuration::Provenance {
+            input_sha256: "1".repeat(64),
+            coordinates: "synthetic policy source span".into(),
+            span_sha256: "2".repeat(64),
+        }
+    }
+
+    pub(in crate::coprocessor) fn configured() -> Result<configuration::Configured> {
+        let p = prepare(&fixture())?;
+        let policy = config_policy(p.plan());
+        p.stage(0x800000, 0x3000)?.configure(policy)
+    }
+
+    #[test]
+    fn complete_configuration_preserves_source_and_encoded_cold_chains() -> Result<()> {
+        let p = prepare(&fixture())?;
+        let original = p.plan().source.decoded_sha256.clone();
+        let bay = p.plan().patchbay.as_ref().unwrap();
+        assert_eq!(bay.records.len(), 3);
+        assert_eq!(bay.records[2].bytes, 5); // Packed records do not imply alignment.
+        let mut policy = config_policy(p.plan());
+        policy.fields[0].action = configuration::Action::Replace(123u64.to_le_bytes().to_vec());
+        let s = p.stage(0x800000, 0x3000)?;
+        let encoded = s.bytes()[0x2000..0x2010].to_vec();
+        let c = s.configure(policy)?;
+        assert_eq!(c.plan().source.decoded_sha256, original);
+        assert_eq!(&c.bytes()[0x2000..0x2010], &encoded);
+        assert_eq!(&c.bytes()[0x208..0x210], &123u64.to_le_bytes());
+        assert_eq!(c.receipt().fields.iter().filter(|f| f.changed).count(), 1);
+        assert_ne!(c.receipt().configured_sha256, c.placement().staged_sha256);
+        assert_eq!(
+            configured()?.receipt().configured_sha256,
+            configured()?.placement().staged_sha256
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_rejects_incomplete_stale_or_malformed_policy() -> Result<()> {
+        for case in 0..7 {
+            let p = prepare(&fixture())?;
+            let mut policy = config_policy(p.plan());
+            match case {
+                0 => {
+                    policy.fields.pop();
+                }
+                1 => {
+                    policy.fields[1].tag = policy.fields[0].tag;
+                }
+                2 => policy.fields[0].action = configuration::Action::Replace(vec![0; 4]),
+                3 => policy.fields[0].tag = 0,
+                4 => policy.decoded_sha256 = "3".repeat(64),
+                5 => policy.fields[0].provenance.coordinates.clear(),
+                _ => policy.hardware_role = "another owner".into(),
+            }
+            assert!(p.stage(0x800000, 0x3000)?.configure(policy).is_err());
+        }
+        let mut malformed = fixture();
+        w32(&mut malformed, 0x1204, 0x10000);
+        assert!(prepare(&malformed).is_err());
+        let mut repeated = fixture();
+        w32(&mut repeated, 0x1210, 0x50414345);
+        assert!(prepare(&repeated).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn configuration_cannot_replace_original_encoded_fixup_slots() -> Result<()> {
+        let mut raw = fixture();
+        w32(&mut raw, 0x1108, 0x208);
+        w64(&mut raw, 0x1208, (1u64 << 63) | (2u64 << 49));
+        let p = prepare(&raw)?;
+        let mut policy = config_policy(p.plan());
+        policy.fields[0].action = configuration::Action::Replace(vec![0; 8]);
+        assert!(p.stage(0x800000, 0x3000)?.configure(policy).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn packed_zero_width_records_are_explicit_and_never_advance_by_alignment() -> Result<()> {
+        let mut raw = fixture();
+        w32(&mut raw, 0x1220, 0);
+        w64(&mut raw, 32 + 232 + 40, 36);
+        let p = prepare(&raw)?;
+        let mut policy = config_policy(p.plan());
+        assert_eq!(p.plan().patchbay.as_ref().unwrap().records[2].bytes, 0);
+        policy.fields[2].action = configuration::Action::Replace(vec![]);
+        let c = p.stage(0x800000, 0x3000)?.configure(policy)?;
+        assert_eq!(c.receipt().fields[2].bytes, 0);
+        assert!(!c.receipt().fields[2].changed);
+        Ok(())
     }
 }
