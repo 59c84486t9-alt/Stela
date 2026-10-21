@@ -3709,14 +3709,17 @@ pub(crate) mod tests {
     #[test]
     fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
         use crate::net::Link;
-        for scenario in 0..4 {
+        for (revision, scenario) in [0x4c00, 0x4c10, 0x4800]
+            .into_iter()
+            .flat_map(|r| (0..4).map(move |s| (r, s)))
+        {
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing outlives every controller/device/model DMA object.
             let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
             let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
             controller.slots[1].as_mut().unwrap().speed = HIGH_SPEED;
-            model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(0x4c10));
+            model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(revision));
             let configuration = vec![
                 9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
                 0, 7, 5, 0x02, 2, 0, 2, 0,
@@ -3725,8 +3728,11 @@ pub(crate) mod tests {
             device.speed = HIGH_SPEED;
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
             controller.preflight_vendor_ethernet(&mut device).unwrap();
-            assert_eq!(device.vendor_ethernet_revision, Some(0x4c10));
-            assert_eq!(device.vendor_ethernet_tcr, Some(0x4c10_0800));
+            assert_eq!(device.vendor_ethernet_revision, Some(revision));
+            assert_eq!(
+                device.vendor_ethernet_tcr,
+                Some((u32::from(revision) << 16) | 0x0800)
+            );
             configuration::select(&mut device).unwrap();
             let shared = Rc::new(RefCell::new(controller));
             let mut found = Found::default();

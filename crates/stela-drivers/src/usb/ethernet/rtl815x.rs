@@ -55,7 +55,7 @@ impl Revision {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self.0, 0x4c10 | 0x4800)
+        matches!(self.0, 0x4c00 | 0x4c10 | 0x4800)
             || self.is_8153a()
             || self.is_8153b()
             || self.is_8153c()
@@ -157,8 +157,15 @@ impl<C: Control> Chip<C> {
             ));
         }
         chip.usb_speed = speed;
-        let first = chip.read(PLA, PLA_BACKUP, 4)?.to_le_bytes();
-        let last = chip.read(PLA, PLA_BACKUP + 4, 4)?.to_le_bytes();
+        // determine_ethernet_addr: revision01 stores the permanent address in
+        // IDR; later revisions use BACKUP without platform/OEM passthrough.
+        let station = if chip.revision.0 == 0x4c00 {
+            PLA_IDR
+        } else {
+            PLA_BACKUP
+        };
+        let first = chip.read(PLA, station, 4)?.to_le_bytes();
+        let last = chip.read(PLA, station + 4, 4)?.to_le_bytes();
         let mac = Mac([first[0], first[1], first[2], first[3], last[0], last[1]]);
         if mac.0[0] & 1 != 0 || mac.0.iter().all(|b| *b == 0) {
             return Err(BlockError::Unsupported("RTL815x invalid station address"));
@@ -174,18 +181,19 @@ impl<C: Control> Chip<C> {
         } else {
             chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
         }
-        // set_ethernet_addr: supported revisions restore the permanent backup
-        // address into IDR under the configuration-write gate. Platform/OEM
-        // MAC passthrough policy is not inferred from a retail product string.
-        chip.write(PLA, PLA_CRWECR, 1, 0xc0)?;
-        chip.write(PLA, PLA_IDR, 4, u32::from_le_bytes(first))?;
-        chip.write(
-            PLA,
-            PLA_IDR + 4,
-            2,
-            u32::from(u16::from_le_bytes([last[0], last[1]])),
-        )?;
-        chip.write(PLA, PLA_CRWECR, 1, 0)?;
+        // set_ethernet_addr leaves revision01 IDR untouched. Later revisions
+        // restore the permanent backup address through the configuration gate.
+        if chip.revision.0 != 0x4c00 {
+            chip.write(PLA, PLA_CRWECR, 1, 0xc0)?;
+            chip.write(PLA, PLA_IDR, 4, u32::from_le_bytes(first))?;
+            chip.write(
+                PLA,
+                PLA_IDR + 4,
+                2,
+                u32::from(u16::from_le_bytes([last[0], last[1]])),
+            )?;
+            chip.write(PLA, PLA_CRWECR, 1, 0)?;
+        }
         chip.initialized = true;
         Ok((chip, mac))
     }
@@ -354,6 +362,9 @@ impl<C: Control> Chip<C> {
         // r8152b_init: wake PHY, disable ALDPS/power cut, set MAC clocks and FIFO aggregation.
         self.phy_modify(MII_BMCR, BMCR_PDOWN, 0)?;
         self.aldps(false)?;
+        if self.revision.0 == 0x4c00 {
+            self.modify(PLA, PLA_LED_FEATURE, 2, LED_MODE_MASK, 0)?;
+        }
         self.modify(USB, USB_UPS_CTRL, 2, POWER_CUT, 0)?;
         self.modify(USB, USB_PM_CTRL_STATUS, 2, RESUME_INDICATE, 0)?;
         self.modify(PLA, PLA_PHY_PWR, 2, 0, TX_10M_IDLE_EN | PFM_PWM_SWITCH)?;
@@ -374,7 +385,7 @@ impl<C: Control> Chip<C> {
         self.modify(USB, USB_USB_CTRL, 2, RX_AGG_DISABLE | RX_ZERO_EN, 0)?;
 
         // r8152b_hw_phy_cfg with EEE disabled (no host EEE policy/offload).
-        // Neither supported revision requests an external firmware in rtl_fw_init.
+        // No supported RTL8152 revision requests external firmware in rtl_fw_init.
         self.modify(PLA, PLA_EEE_CR, 2, EEE_RX_EN | EEE_TX_EN, 0)?;
         self.phy_modify(
             OCP_EEE_CONFIG1,
@@ -588,6 +599,8 @@ pub(crate) mod tests {
             );
             model.set(PLA, PLA_BACKUP, 4, 0x33221102);
             model.set(PLA, PLA_BACKUP + 4, 4, 0x5544);
+            model.set(PLA, PLA_IDR, 4, 0x33221102);
+            model.set(PLA, PLA_IDR + 4, 4, 0x5544);
             model.set(PLA, PLA_OOB_CTRL, 1, NOW_IS_OOB | LINK_LIST_READY | 0x30);
             model.set(PLA, PLA_BOOT_CTRL, 2, AUTOLOAD_DONE);
             model.set(PLA, OCP_PHY_STATUS, 2, PHY_STAT_LAN_ON);
@@ -717,8 +730,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn both_revisions_initialize_both_usb_fifo_modes_and_follow_carrier() {
-        for revision in [0x4c10, 0x4800] {
+    fn rtl8152_revisions_initialize_both_usb_fifo_modes_and_follow_carrier() {
+        for revision in [0x4c00, 0x4c10, 0x4800] {
             for full_speed in [false, true] {
                 let model = Rc::new(RefCell::new(Model::new(revision)));
                 let (mut chip, mac) =
@@ -748,15 +761,17 @@ pub(crate) mod tests {
 
     #[test]
     fn no_further_register_access_after_any_failed_initialization_transaction() {
-        let model = Rc::new(RefCell::new(Model::new(0x4c10)));
-        Chip::attach(Io(model.clone()), Revision(0x4c10), false).unwrap();
-        let operations = model.borrow().trace.len();
-        assert!(operations > 80);
-        for fail_at in 0..operations {
-            let model = Rc::new(RefCell::new(Model::new(0x4c10)));
-            model.borrow_mut().fail_at = Some(fail_at);
-            assert!(Chip::attach(Io(model.clone()), Revision(0x4c10), false).is_err());
-            assert_eq!(model.borrow().trace.len(), fail_at + 1);
+        for revision in [0x4c00, 0x4c10, 0x4800] {
+            let model = Rc::new(RefCell::new(Model::new(revision)));
+            Chip::attach(Io(model.clone()), Revision(revision), false).unwrap();
+            let operations = model.borrow().trace.len();
+            assert!(operations > 80);
+            for fail_at in 0..operations {
+                let model = Rc::new(RefCell::new(Model::new(revision)));
+                model.borrow_mut().fail_at = Some(fail_at);
+                assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
+                assert_eq!(model.borrow().trace.len(), fail_at + 1);
+            }
         }
         let model = Rc::new(RefCell::new(Model::new(0x4c10)));
         let (mut chip, _) = Chip::attach(Io(model.clone()), Revision(0x4c10), false).unwrap();
@@ -765,6 +780,115 @@ pub(crate) mod tests {
         assert!(chip.carrier().is_err());
         assert!(chip.carrier().is_err());
         assert_eq!(model.borrow().trace.len(), next + 1);
+    }
+
+    #[test]
+    fn revision01_reads_idr_preserves_station_and_masks_only_led_mode() {
+        for full_speed in [false, true] {
+            let model = Rc::new(RefCell::new(Model::new(0x4c00)));
+            model.borrow_mut().set(PLA, PLA_IDR, 4, 0x05040302);
+            model.borrow_mut().set(PLA, PLA_IDR + 4, 4, 0x88770706);
+            model.borrow_mut().set(PLA, PLA_BACKUP, 4, 0);
+            model.borrow_mut().set(PLA, PLA_BACKUP + 4, 4, 0);
+            model.borrow_mut().set(PLA, PLA_LED_FEATURE, 2, 0xa75a);
+            let (mut chip, mac) =
+                Chip::attach(Io(model.clone()), Revision(0x4c00), full_speed).unwrap();
+            assert_eq!(mac.0, [2, 3, 4, 5, 6, 7]);
+            assert_eq!(model.borrow().get(PLA, PLA_LED_FEATURE, 2), 0xa05a);
+            assert_eq!(model.borrow().get(PLA, PLA_IDR + 4, 4), 0x88770706);
+            assert!(model.borrow().trace.iter().all(|(request, _)| {
+                request[0] != 0x40
+                    || !matches!(
+                        u16::from_le_bytes([request[2], request[3]]),
+                        0xc000 | 0xc004
+                    )
+            }));
+            assert!(chip.carrier().unwrap());
+            chip.stop().unwrap();
+        }
+        for case in 0..4 {
+            let model = Rc::new(RefCell::new(Model::new(0x4c00)));
+            match case {
+                0 => model.borrow_mut().stuck_reset = true,
+                1 => model.borrow_mut().stuck_phy = true,
+                2 => model.borrow_mut().stuck_list = true,
+                _ => model.borrow_mut().set(PLA, PLA_IDR, 4, 0x05040303),
+            }
+            assert!(Chip::attach(Io(model), Revision(0x4c00), false).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires pinned unchanged Linux RTL8152 revision trace"]
+    fn unchanged_linux_rtl8152_revision_init_and_station_effects() {
+        extern crate std;
+        use sha2::{Digest, Sha256};
+        let trace =
+            std::fs::read_to_string(std::env::var("STELA_RTL8152_REVISION_ORACLE").unwrap())
+                .unwrap();
+        assert_eq!(
+            alloc::format!("{:x}", Sha256::digest(trace.as_bytes())),
+            "982fba3636eed37444bd94b3a862144b26731b163e72bbbe0d7cd1b2b128d4a2"
+        );
+        let fields = [
+            (PLA, PLA_LED_FEATURE, 2),
+            (USB, USB_UPS_CTRL, 2),
+            (USB, USB_PM_CTRL_STATUS, 2),
+            (PLA, PLA_PHY_PWR, 2),
+            (PLA, PLA_MAC_PWR_CTRL, 4),
+            (PLA, PLA_GPHY_INTR_IMR, 2),
+            (PLA, PLA_RSTTALLY, 2),
+            (USB, USB_USB_CTRL, 2),
+        ];
+        let mut count = 0;
+        for line in trace.lines() {
+            let values: Vec<_> = line.split_whitespace().collect();
+            assert_eq!(values.len(), 17);
+            let revision = u16::from_str_radix(values[0], 16).unwrap();
+            let seed = values[1].parse::<u32>().unwrap();
+            let model = Rc::new(RefCell::new(Model::new(revision)));
+            for (bank, address, width) in fields {
+                model.borrow_mut().set(
+                    bank,
+                    address,
+                    width,
+                    if width == 4 {
+                        seed | (seed << 16)
+                    } else {
+                        seed
+                    },
+                );
+            }
+            model.borrow_mut().set(PLA, PLA_IDR, 4, 0x05040302);
+            model.borrow_mut().set(PLA, PLA_IDR + 4, 4, 0x0706);
+            let (_, mac) = Chip::attach(Io(model.clone()), Revision(revision), false).unwrap();
+            for (actual, expected) in mac.0.into_iter().zip(&values[3..9]) {
+                assert_eq!(
+                    u32::from(actual),
+                    expected.parse::<u32>().unwrap(),
+                    "{line}"
+                );
+            }
+            let writes_idr = model
+                .borrow()
+                .trace
+                .iter()
+                .any(|(request, _)| request[0] == 0x40 && request[2..4] == [0, 0xc0]);
+            assert_eq!(
+                u32::from(writes_idr),
+                values[2].parse::<u32>().unwrap(),
+                "{line}"
+            );
+            for ((bank, address, width), expected) in fields.into_iter().zip(&values[9..]) {
+                assert_eq!(
+                    model.borrow().get(bank, address, width),
+                    expected.parse::<u32>().unwrap(),
+                    "{line}"
+                );
+            }
+            count += 1;
+        }
+        assert_eq!(count, 12);
     }
 
     #[test]
@@ -781,7 +905,7 @@ pub(crate) mod tests {
                 Err(BlockError::Timeout)
             ));
         }
-        for revision in [0x4c00, 0x5c10, 0x6010, 0x7030, 0x7410, 0xffff] {
+        for revision in [0x4c20, 0x5c10, 0x6010, 0x7030, 0x7410, 0xffff] {
             let model = Rc::new(RefCell::new(Model::new(revision)));
             assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
             assert_eq!(model.borrow().trace.len(), 1);

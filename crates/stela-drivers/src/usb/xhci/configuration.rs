@@ -474,7 +474,7 @@ pub(super) mod tests {
     fn unsupported_or_unobserved_realtek_revision_preserves_compatible_cdc_choice() {
         let mut vendor = storage(7);
         vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
-        for revision in [None, Some(0x4c00), Some(0x7010), Some(0x1030), Some(0x2020)] {
+        for revision in [None, Some(0x4c20), Some(0x7010), Some(0x1030), Some(0x2020)] {
             let mut device = device(vec![vendor.clone(), ecm(42)]);
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x56, 0x81]);
             device.vendor_ethernet_revision = revision;
@@ -497,7 +497,7 @@ pub(super) mod tests {
     fn implemented_realtek_vendor_mode_wins_equal_cdc_coverage_independent_of_order() {
         let mut vendor = storage(7);
         vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
-        for revision in [0x4c10, 0x4800] {
+        for revision in [0x4c00, 0x4c10, 0x4800] {
             for configurations in [vec![vendor.clone(), ecm(42)], vec![ecm(42), vendor.clone()]] {
                 let mut device = device(configurations);
                 device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);

@@ -1,6 +1,6 @@
 //! Vendor USB Ethernet backends. Candidate interfaces become usable links only
 //! after exact chip identification and revision-specific initialization.
-//! RTL8152B 02/07, RTL8153A 03/04/05/06, RTL8153B 08/09, RTL8153C 14
+//! RTL8152 01/02/07, RTL8153A 03/04/05/06, RTL8153B 08/09, RTL8153C 14
 //! and RTL8156A 10/11 and RTL8156B 12/13/15 have distinct implementations.
 //! Revision15 follows the donor's gigabit capability policy.
 pub mod firmware;
