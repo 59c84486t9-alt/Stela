@@ -107,6 +107,7 @@
 //! count of this cacheless implementation, not a physical chip's dump.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::super::interrupt::{AicInput, Wire};
+use super::descriptor::Format;
 use super::{DAPF_BYTES, DAPF_OFFSET, Fault, SMMU_BYTES, SMMU_OFFSET, SmmuBlock};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 #[cfg(not(feature = "std"))]
@@ -488,10 +489,11 @@ impl Dart {
         if first & ENTRY_VALID == 0 {
             return Err(fault(Fault::NoPmd));
         }
-        let page = entry(memory, target(first), iova >> PAGE_SHIFT)?;
+        let page = entry(memory, target(first, false)?, iova >> PAGE_SHIFT)?;
         if page & ENTRY_VALID == 0 {
             return Err(fault(Fault::NoPte));
         }
+        let target = target(page, true)?;
         let offset = iova & (PAGE - 1);
         let (first_unit, last_unit) = (page >> 52 & 0xfff, page >> 40 & 0xfff);
         let inside =
@@ -500,7 +502,7 @@ impl Dart {
             true if page & ENTRY_NO_WRITE != 0 => Err(fault(Fault::Write)),
             false if page & ENTRY_NO_READ != 0 => Err(fault(Fault::Read)),
             _ if !inside => Err(fault(Fault::Region)),
-            _ => Ok(target(page) + offset),
+            _ => Ok(target + offset),
         }
     }
 
@@ -584,8 +586,8 @@ fn entry(memory: &mut dyn Memory, table: u64, index: u64) -> Result<u64, DmaErro
 }
 
 /// The address an entry points at.
-fn target(entry: u64) -> u64 {
-    (entry & ENTRY_ADDRESS) << ENTRY_ADDRESS_SHIFT
+fn target(entry: u64, leaf: bool) -> Result<u64, DmaError> {
+    Format::Dart2.target(entry, PA_BITS, PAGE, leaf)
 }
 
 fn bitmap_word(offset: u64, base: u64) -> Option<usize> {

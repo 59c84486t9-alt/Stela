@@ -16,7 +16,7 @@
 //! successful-looking superset. Translation is cacheless and DMA synchronous.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::super::interrupt::{AicInput, Wire};
-use super::Profile;
+use super::{Profile, descriptor::Format};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
@@ -49,8 +49,6 @@ const TABLES: usize = 4;
 const IOVA_BITS: u32 = 32;
 const T8020_PA_BITS: u32 = 36;
 const T6000_PA_BITS: u32 = 42;
-const T8020_ADDRESS: u64 = 0x0000_00ff_ffff_c000;
-const T6000_ADDRESS: u64 = 0x0000_003f_ffff_fc00;
 const VALID: u64 = 1;
 const SUBPAGE_DISABLE: u64 = 1 << 1;
 const SUBPAGE_UNIT: u64 = 4;
@@ -188,18 +186,13 @@ impl Dart {
         (offset.is_multiple_of(4) && sid < self.streams).then_some(sid)
     }
 
-    fn target(&self, entry: u64) -> Result<u64, DmaError> {
-        let (address, bits) = match self.profile {
-            Profile::T8020 => (entry & T8020_ADDRESS, T8020_PA_BITS),
-            Profile::T6000 => ((entry & T6000_ADDRESS) << 4, T6000_PA_BITS),
+    fn target(&self, entry: u64, leaf: bool) -> Result<u64, DmaError> {
+        let (format, bits) = match self.profile {
+            Profile::T8020 => (Format::Dart1, T8020_PA_BITS),
+            Profile::T6000 => (Format::Dart2, T6000_PA_BITS),
             Profile::T8110 => unreachable!("legacy format"),
         };
-        if address >> bits != 0 {
-            return Err(DmaError::Unsupported(
-                "DART output address exceeds its native profile",
-            ));
-        }
-        Ok(address)
+        format.target(entry, bits, self.page(), leaf)
     }
 
     fn entry(&self, memory: &mut dyn Memory, table: u64, index: u64) -> Result<u64, DmaError> {
@@ -283,10 +276,11 @@ impl Dart {
         if first & VALID == 0 {
             return Err(DmaError::Fault(NO_PMD));
         }
-        let page = self.entry(memory, self.target(first)?, iova >> self.page_shift)?;
+        let page = self.entry(memory, self.target(first, false)?, iova >> self.page_shift)?;
         if page & VALID == 0 {
             return Err(DmaError::Fault(NO_PTE));
         }
+        let target = self.target(page, true)?;
         let (no_read, no_write) = if self.profile == Profile::T8020 {
             (1 << 8, 1 << 7)
         } else {
@@ -307,7 +301,7 @@ impl Dart {
                 return Err(DmaError::Fault(REGION_FAULT));
             }
         }
-        Ok(self.target(page)? + offset)
+        Ok(target + offset)
     }
 
     fn signal(&mut self, access: &mut Access<'_>) {
@@ -753,6 +747,19 @@ mod tests {
             assert_eq!(
                 model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
                 Err(DmaError::Memory)
+            );
+            assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
+            model
+                .write(
+                    TTBR + 16,
+                    Width::Word,
+                    u64::from(TTBR_VALID) | (ROOT + 0x1000) >> TTBR_SHIFT,
+                    &mut a,
+                )
+                .unwrap();
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Unsupported("unaligned legacy DART root table"))
             );
             assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
             let pa_bits = if profile == Profile::T8020 {

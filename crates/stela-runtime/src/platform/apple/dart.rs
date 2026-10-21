@@ -2,6 +2,7 @@
 //! register/table profile; a compatible string is never a generation alias.
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
+mod descriptor;
 mod legacy;
 pub mod smmu;
 mod t8110;
@@ -291,6 +292,62 @@ mod tests {
             let mut actual = [0; 4];
             assert!(ram.read(ROOT + 2 * PAGE + 7, &mut actual));
             assert_eq!(actual, [1, 3, 5, 7]);
+            let invalid_address = if profile == Profile::T8020 {
+                1 << 36
+            } else {
+                1 << 38
+            };
+            let leaf_permission = if profile == Profile::T8020 {
+                1 << 7
+            } else {
+                1 << 2
+            };
+            // Exercise both descriptor levels through a real DMA master.
+            // Rejection must precede the data write and cannot invent a
+            // physical fault classification or silently mask an address.
+            for (table_bits, page_bits, reason) in [
+                (1 << 9, 0, "DART descriptor contains unmodeled attributes"),
+                (0, 1 << 9, "DART descriptor contains unmodeled attributes"),
+                (
+                    leaf_permission,
+                    0,
+                    "DART descriptor contains unmodeled attributes",
+                ),
+                (
+                    invalid_address,
+                    0,
+                    "DART descriptor target exceeds its native profile",
+                ),
+                (
+                    0,
+                    invalid_address,
+                    "DART descriptor target exceeds its native profile",
+                ),
+            ] {
+                ram.put_u64(ROOT + 8, entry(ROOT + PAGE) | table_bits);
+                ram.put_u64(
+                    ROOT + PAGE + 8,
+                    entry(ROOT + 2 * PAGE) | 0xfff << 40 | page_bits,
+                );
+                let mut port = Port {
+                    iommu: &mut model,
+                    stream: 1,
+                    memory: &mut ram,
+                    access: &mut a,
+                };
+                assert_eq!(
+                    port.write(0x200_4007, &[9, 9, 9, 9]),
+                    Err(DmaError::Unsupported(reason))
+                );
+                assert!(ram.read(ROOT + 2 * PAGE + 7, &mut actual));
+                assert_eq!(actual, [1, 3, 5, 7]);
+                let error = if profile == Profile::T8110 {
+                    0x100
+                } else {
+                    0x40
+                };
+                assert_eq!(model.read(error, Width::Word, &mut a), Ok(0));
+            }
         }
         assert!(Dart::for_profile(Profile::T8020, 64, None).is_err());
         assert!(Dart::for_profile(Profile::T6000, 0, None).is_err());
