@@ -471,17 +471,19 @@ fn open_log(
     let file = volume
         .file(path)
         .map_err(|error| format!("partition {guid}: {error}"))?;
-    let (first, blocks) = boot_log::file_blocks(&file, block, boot_log::PARTITION_BYTES)
+    let runs = boot_log::file_runs(&file, block, boot_log::PARTITION_BYTES)
         .map_err(|error| format!("{path}: {error}"))?;
+    let pieces = runs.len();
     let partition = volume.into_inner().into_inner();
-    let window = Shared::new(Box::new(partition))
-        .window(first, blocks)
+    let file = Shared::new(Box::new(partition))
+        .runs(runs)
         .map_err(|error| format!("{path}: {error}"))?;
-    if !nor::open_log(&Shared::new(Box::new(window)), block, blocks * block) {
+    let blocks = file.identity().blocks;
+    if !nor::open_log(&Shared::new(Box::new(file)), block, blocks * block) {
         return Err(format!("{path}: the boot log could not be opened"));
     }
     Ok(format!(
-        "{path} on partition {guid}: blocks {first}+{blocks} of {block} bytes"
+        "{path} on partition {guid}: {blocks} blocks of {block} bytes in {pieces} runs"
     ))
 }
 

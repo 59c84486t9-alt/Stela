@@ -33,8 +33,8 @@
 //! file (`--nor-file`) laid out as the partition is, or the USB's own log
 //! (`stela_loader::mount_interface::BOOT_LOG_FILE`), [`LOG_BYTES`] of the
 //! region alone. Writes reach its blocks directly, never the volume's
-//! directory or FAT, so [`file_blocks`] takes only a file that is one
-//! contiguous, block-aligned run of the bytes its layout needs.
+//! directory or FAT: [`file_runs`] gives the block-aligned runs of its
+//! clusters, wherever they lie, that hold the bytes its layout needs.
 use super::fat32;
 use crate::machine::apple::{nor::CAPACITY, sep_state};
 use alloc::{format, vec, vec::Vec};
@@ -108,9 +108,7 @@ impl core::error::Error for HeaderError {}
 /// Why a file cannot stand in for the machine-state partition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileError {
-    /// Its clusters are not one contiguous run.
-    Fragmented { extents: usize },
-    /// It does not start on a block boundary.
+    /// A run of its clusters starts or ends off a block boundary.
     Misaligned { offset: u64, block: u64 },
     /// It holds fewer than the `needed` bytes in whole blocks.
     Short { bytes: u64, needed: u64 },
@@ -119,14 +117,9 @@ pub enum FileError {
 impl fmt::Display for FileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Fragmented { extents } => write!(
-                f,
-                "the file is in {extents} pieces, not one; preallocate it on a freshly formatted \
-                 volume"
-            ),
             Self::Misaligned { offset, block } => write!(
                 f,
-                "the file starts at byte {offset:#x}, not on a {block}-byte block boundary"
+                "the file has bytes from {offset:#x}, not on a {block}-byte block boundary"
             ),
             Self::Short { bytes, needed } => write!(
                 f,
@@ -165,29 +158,42 @@ impl fmt::Display for Unkept {
 
 impl core::error::Error for Unkept {}
 
-/// The first block and the block count of `file`, a file of at least
-/// `needed` bytes on a partition of `block`-byte blocks: [`PARTITION_BYTES`]
-/// for a machine-state file, [`LOG_BYTES`] for a log file.
-pub fn file_blocks(file: &fat32::File, block: u64, needed: u64) -> Result<(u64, u64), FileError> {
-    let [extent] = file.extents[..] else {
-        return Err(FileError::Fragmented {
-            extents: file.extents.len(),
-        });
-    };
-    if !extent.offset.is_multiple_of(block) {
-        return Err(FileError::Misaligned {
-            offset: extent.offset,
-            block,
-        });
+/// The runs of `file`'s blocks that hold its first `needed` bytes, each a
+/// first block and a count, in order: `file` is on a partition of
+/// `block`-byte blocks and holds [`PARTITION_BYTES`] for a machine-state
+/// file, [`LOG_BYTES`] for a log file.
+pub fn file_runs(
+    file: &fat32::File,
+    block: u64,
+    needed: u64,
+) -> Result<Vec<(u64, u64)>, FileError> {
+    let (mut runs, mut bytes) = (Vec::<(u64, u64)>::new(), 0);
+    // Where the last run ended inside a block, which no next run can follow.
+    let mut partial = None;
+    for extent in &file.extents {
+        if bytes >= needed {
+            break;
+        }
+        if let Some(offset) =
+            partial.or((!extent.offset.is_multiple_of(block)).then_some(extent.offset))
+        {
+            return Err(FileError::Misaligned { offset, block });
+        }
+        let count = (extent.bytes / block).min((needed - bytes).div_ceil(block));
+        if !extent.bytes.is_multiple_of(block) {
+            partial = Some(extent.offset + extent.bytes);
+        }
+        let first = extent.offset / block;
+        match runs.last_mut() {
+            Some((start, blocks)) if *start + *blocks == first => *blocks += count,
+            _ => runs.push((first, count)),
+        }
+        bytes += count * block;
     }
-    let blocks = extent.bytes / block;
-    if blocks * block < needed {
-        return Err(FileError::Short {
-            bytes: blocks * block,
-            needed,
-        });
+    if bytes < needed {
+        return Err(FileError::Short { bytes, needed });
     }
-    Ok((extent.offset / block, blocks))
+    Ok(runs)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1020,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_state_file_is_one_aligned_run_of_the_partition_size() {
+    fn a_file_gives_the_block_runs_of_its_clusters_that_hold_the_layout() {
         use crate::payload::pieces::Extent;
         let file = |extents: &[(u64, u64)]| fat32::File {
             bytes: extents.iter().map(|e| e.1).sum(),
@@ -1031,39 +1037,61 @@ mod tests {
         };
         let size = 6 << 20;
         assert_eq!(
-            file_blocks(&file(&[(0x10_0000, size)]), 512, PARTITION_BYTES),
-            Ok((0x800, size / 512))
+            file_runs(&file(&[(0x10_0000, size)]), 512, PARTITION_BYTES),
+            Ok(vec![(0x800, PARTITION_BYTES / 512)])
         );
+        // Scattered clusters give their runs in file order, adjacent ones
+        // joined, up to the bytes the layout needs.
         assert_eq!(
-            file_blocks(
-                &file(&[(0x10_0000, 0x1000), (0x20_0000, size)]),
+            file_runs(
+                &file(&[
+                    (0x20_0000, 0x1000),
+                    (0x20_1000, 0x1000),
+                    (0x10_0000, 0x1000),
+                    (0x40_0000, size)
+                ]),
                 512,
                 PARTITION_BYTES
             ),
-            Err(FileError::Fragmented { extents: 2 })
+            Ok(vec![
+                (0x1000, 16),
+                (0x800, 8),
+                (0x2000, (PARTITION_BYTES - 0x3000) / 512)
+            ])
         );
         assert_eq!(
-            file_blocks(&file(&[]), 512, PARTITION_BYTES),
-            Err(FileError::Fragmented { extents: 0 })
+            file_runs(&file(&[]), 512, PARTITION_BYTES),
+            Err(FileError::Short {
+                bytes: 0,
+                needed: PARTITION_BYTES
+            })
         );
         assert_eq!(
-            file_blocks(&file(&[(0x10_0200, size)]), 4096, PARTITION_BYTES),
+            file_runs(&file(&[(0x10_0200, size)]), 4096, PARTITION_BYTES),
             Err(FileError::Misaligned {
                 offset: 0x10_0200,
                 block: 4096
             })
         );
+        // A run may not end inside a block when another follows it.
+        assert_eq!(
+            file_runs(&file(&[(0, 0x1200), (0x8000, size)]), 4096, PARTITION_BYTES),
+            Err(FileError::Misaligned {
+                offset: 0x1200,
+                block: 4096
+            })
+        );
         // A partial last block does not count.
         assert_eq!(
-            file_blocks(
+            file_runs(
                 &file(&[(0, PARTITION_BYTES + 0x800)]),
                 4096,
                 PARTITION_BYTES
             ),
-            Ok((0, PARTITION_BYTES / 4096))
+            Ok(vec![(0, PARTITION_BYTES / 4096)])
         );
         assert_eq!(
-            file_blocks(&file(&[(0, PARTITION_BYTES - 1)]), 512, PARTITION_BYTES),
+            file_runs(&file(&[(0, PARTITION_BYTES - 1)]), 512, PARTITION_BYTES),
             Err(FileError::Short {
                 bytes: PARTITION_BYTES - 512,
                 needed: PARTITION_BYTES
@@ -1071,8 +1099,8 @@ mod tests {
         );
         // A log file needs only the region.
         assert_eq!(
-            file_blocks(&file(&[(0, LOG_BYTES)]), 512, LOG_BYTES),
-            Ok((0, LOG_BYTES / 512))
+            file_runs(&file(&[(0, LOG_BYTES)]), 512, LOG_BYTES),
+            Ok(vec![(0, LOG_BYTES / 512)])
         );
     }
 }

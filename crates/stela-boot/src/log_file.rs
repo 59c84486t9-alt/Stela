@@ -1,8 +1,9 @@
 //! The USB's own boot log, [`BOOT_LOG_FILE`] beside Stela on its volume,
-//! which `stela setup` preallocates contiguous: the loader writes it through
-//! the firmware's file system from its first line until boot services end
-//! ([`open`]), and the system engine writes on to the same blocks through
-//! Stela's own drivers ([`resume`]), so the stick keeps the whole run.
+//! which `stela setup` preallocates: the loader writes it through the
+//! firmware's file system from its first line until boot services end
+//! ([`open`]), and the system engine writes on to the same clusters, wherever
+//! they lie, through Stela's own drivers ([`resume`]), so the stick keeps the
+//! whole run.
 use crate::{
     engine::{bundle::Bytes, translations},
     output::{self, Log},
@@ -143,12 +144,11 @@ fn engine_file(partition: Box<dyn BlockDevice>) -> Result<(), String> {
     let file = volume
         .file(&BOOT_LOG_FILE.replace('\\', "/"))
         .map_err(|error| format!("{error}"))?;
-    let (first, _) =
-        boot_log::file_blocks(&file, block, LOG_BYTES).map_err(|error| format!("{error}"))?;
+    let runs = boot_log::file_runs(&file, block, LOG_BYTES).map_err(|error| format!("{error}"))?;
     let partition = volume.into_inner().into_inner();
     let mut device: Box<dyn BlockDevice> = Box::new(
         Shared::new(partition)
-            .window(first, LOG_BYTES / block)
+            .runs(runs)
             .map_err(|error| format!("{error}"))?,
     );
     let writer = Writer::resume(&mut *device).map_err(|error| format!("{error}"))?;

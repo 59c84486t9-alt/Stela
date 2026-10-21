@@ -206,8 +206,8 @@ pub(crate) fn add_mount(
     if let Some(options) = options {
         write_atomic(&esp.join(OPTIONS), options.as_bytes(), false)?;
     }
-    // An existing log keeps its earlier boots. Written in one piece on the
-    // volume, it is one contiguous run, as `stela.efi` needs.
+    // An existing log keeps its earlier boots. `stela.efi` writes its
+    // clusters wherever the volume put them.
     if !esp.join(BOOT_LOG).is_file() {
         write_atomic(
             &esp.join(BOOT_LOG),

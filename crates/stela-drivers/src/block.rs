@@ -1,5 +1,5 @@
 //! Block devices addressed by logical block, with explicit errors.
-use alloc::{boxed::Box, collections::BTreeMap, rc::Rc, string::String, vec};
+use alloc::{boxed::Box, collections::BTreeMap, rc::Rc, string::String, vec, vec::Vec};
 use core::cell::RefCell;
 use core::fmt;
 
@@ -189,6 +189,31 @@ impl Shared {
             identity,
         })
     }
+
+    /// The blocks of `runs`, each a first block and a count, in order, as
+    /// one device: a file's clusters where they lie on the disk.
+    pub fn runs(&self, runs: Vec<(u64, u64)>) -> Result<Runs, BlockError> {
+        let mut identity = self.0.borrow().identity().clone();
+        let mut blocks = 0u64;
+        for &(first, count) in &runs {
+            match first.checked_add(count) {
+                Some(end) if end <= identity.blocks => blocks += count,
+                _ => {
+                    return Err(BlockError::OutOfRange {
+                        lba: first,
+                        blocks: count,
+                        capacity: identity.blocks,
+                    });
+                }
+            }
+        }
+        identity.blocks = blocks;
+        Ok(Runs {
+            disk: self.clone(),
+            runs,
+            identity,
+        })
+    }
 }
 
 /// A run of blocks of a [`Shared`] disk.
@@ -211,6 +236,65 @@ impl BlockDevice for Window {
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         self.identity.check_write(lba, data.len())?;
         self.disk.0.borrow_mut().write(self.first + lba, data)
+    }
+
+    fn flush(&mut self) -> Result<(), BlockError> {
+        self.disk.0.borrow_mut().flush()
+    }
+}
+
+/// Runs of blocks of a [`Shared`] disk, one after another as one device.
+pub struct Runs {
+    disk: Shared,
+    runs: Vec<(u64, u64)>,
+    identity: Identity,
+}
+
+impl Runs {
+    /// The disk's blocks for `blocks` blocks from `lba`, which
+    /// [`Identity::check`] has kept inside the device: each piece's first
+    /// disk block, and its first block and count in the transfer.
+    fn pieces(&self, lba: u64, blocks: u64) -> Vec<(u64, usize, usize)> {
+        let (mut start, mut pieces) = (0, Vec::new());
+        let end = lba + blocks;
+        for &(first, count) in &self.runs {
+            let (from, to) = (lba.max(start), end.min(start + count));
+            if from < to {
+                pieces.push((
+                    first + from - start,
+                    (from - lba) as usize,
+                    (to - from) as usize,
+                ));
+            }
+            start += count;
+        }
+        pieces
+    }
+}
+
+impl BlockDevice for Runs {
+    fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        let blocks = self.identity.check(lba, buffer.len())?;
+        let size = self.identity.block_size as usize;
+        let mut disk = self.disk.0.borrow_mut();
+        for (at, from, count) in self.pieces(lba, blocks) {
+            disk.read(at, &mut buffer[from * size..(from + count) * size])?;
+        }
+        Ok(())
+    }
+
+    fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        let blocks = self.identity.check_write(lba, data.len())?;
+        let size = self.identity.block_size as usize;
+        let mut disk = self.disk.0.borrow_mut();
+        for (at, from, count) in self.pieces(lba, blocks) {
+            disk.write(at, &data[from * size..(from + count) * size])?;
+        }
+        Ok(())
     }
 
     fn flush(&mut self) -> Result<(), BlockError> {
@@ -323,7 +407,7 @@ impl BlockDevice for Volatile {
 #[cfg(any(test, feature = "ram-disk"))]
 pub struct RamDisk {
     pub identity: Identity,
-    pub bytes: alloc::vec::Vec<u8>,
+    pub bytes: Vec<u8>,
     pub flushes: usize,
 }
 
@@ -379,7 +463,6 @@ impl BlockDevice for RamDisk {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec::Vec;
 
     #[test]
     fn transfers_must_be_whole_blocks_inside_the_device() {
@@ -430,6 +513,27 @@ mod tests {
         whole.read(4, &mut block).unwrap();
         assert_eq!(block, [7; 512]);
         low.flush().unwrap();
+    }
+
+    #[test]
+    fn runs_join_scattered_blocks_into_one_device() {
+        let shared = Shared::new(Box::new(RamDisk::new("s", 16, 512)));
+        assert!(shared.runs(vec![(0, 2), (15, 2)]).is_err());
+        let mut runs = shared.runs(vec![(10, 2), (3, 1), (6, 3)]).unwrap();
+        assert_eq!(runs.identity().blocks, 6);
+        let data: Vec<u8> = (0..6 * 512).map(|i| (i / 512) as u8 + 1).collect();
+        runs.write(0, &data).unwrap();
+        assert!(runs.write(5, &[0; 1024]).is_err());
+        let mut whole = shared.whole();
+        let mut block = [0; 512];
+        for (lba, value) in [(10, 1), (11, 2), (3, 3), (6, 4), (7, 5), (8, 6), (9, 0)] {
+            whole.read(lba, &mut block).unwrap();
+            assert_eq!(block, [value; 512], "disk block {lba}");
+        }
+        let mut back = vec![0; 3 * 512];
+        runs.read(1, &mut back).unwrap();
+        assert_eq!(back, data[512..4 * 512]);
+        runs.flush().unwrap();
     }
 
     #[test]
