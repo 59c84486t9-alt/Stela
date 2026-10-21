@@ -58,8 +58,10 @@
 mod clock;
 mod config;
 mod fault;
+mod firmware;
 pub use clock::{RtcClock, RtcEpoch};
 pub use config::Configuration;
+pub use firmware::{FirmwareSram, FirmwareStartup};
 
 use super::spmi::{SlaveError, SpmiSlave};
 #[cfg(test)]
@@ -146,6 +148,8 @@ pub struct Pmu {
     monitor: u8,
     identity: Option<Window>,
     faults: Option<fault::FaultLog>,
+    firmware: Option<firmware::FirmwareMemory>,
+    startup: Option<FirmwareStartup>,
     /// Bytes of every storage window, in window order.
     storage: Vec<Vec<u8>>,
     alarm_control: u8,
@@ -193,6 +197,8 @@ impl Pmu {
             monitor,
             identity,
             fault_history,
+            firmware,
+            startup,
         } = config;
         if let Some(rtc) = rtc {
             windows.push(Window {
@@ -214,6 +220,8 @@ impl Pmu {
             monitor,
             identity,
             faults: fault_history.map(Into::into),
+            firmware: firmware.map(Into::into),
+            startup,
             storage,
             alarm_control: 0,
             alarm_event: 0,
@@ -304,6 +312,31 @@ impl Pmu {
         Ok((u32::from(address)..end).map(|a| a as u16))
     }
 
+    fn check_firmware_startup(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
+        let end = u64::from(address).saturating_add(bytes.max(1) as u64);
+        if self.startup.is_some_and(|profile| {
+            profile.windows().iter().any(|window| {
+                u64::from(address) < u64::from(window.base) + u64::from(window.bytes)
+                    && u64::from(window.base) < end
+            })
+        }) {
+            return Err(SlaveError::Unsupported(
+                "PMU firmware startup requires the actual protected-control, execution and completion owner",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check the shared oscillator before publishing any command effects.
+    fn publish_time(&mut self, now: u64) -> Result<(), SlaveError> {
+        self.check_time(now)?;
+        if self.rtc.is_some() {
+            self.clock.publish(now).map_err(SlaveError::Unsupported)?;
+        }
+        self.update(now);
+        Ok(())
+    }
+
     /// The counter value at which the enabled alarm latches its event, if
     /// it is enabled, armed and has not.
     fn alarm_deadline(&mut self) -> Option<u64> {
@@ -351,6 +384,20 @@ impl Pmu {
 impl SpmiSlave for Pmu {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
         self.check_identity(address, data.len())?;
+        self.check_firmware_startup(address, data.len())?;
+        if let Some(memory) = &self.firmware
+            && memory.claims(address, data.len())
+        {
+            let transfer = memory
+                .prepare(address, data.len(), firmware::Direction::Read)
+                .map_err(SlaveError::Unsupported)?;
+            self.publish_time(now)?;
+            self.firmware
+                .as_mut()
+                .expect("firmware owner")
+                .read(transfer, data);
+            return Ok(());
+        }
         let cells: Vec<_> = Self::span(address, data.len())?
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
@@ -362,11 +409,7 @@ impl SpmiSlave for Pmu {
                 .check_read()
                 .map_err(SlaveError::Unsupported)?;
         }
-        self.check_time(now)?;
-        if self.rtc.is_some() {
-            self.clock.publish(now).map_err(SlaveError::Unsupported)?;
-        }
-        self.update(now);
+        self.publish_time(now)?;
         // One sample serves every upcount byte of the access.
         let raw = if self.rtc.is_some() {
             (self
@@ -394,6 +437,32 @@ impl SpmiSlave for Pmu {
     }
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError> {
         self.check_identity(address, data.len())?;
+        self.check_firmware_startup(address, data.len())?;
+        if let Some(memory) = &self.firmware
+            && memory.claims(address, data.len())
+        {
+            let address_byte = memory
+                .check_address(address, data)
+                .map_err(SlaveError::Unsupported)?;
+            let transfer = if address_byte.is_none() {
+                Some(
+                    memory
+                        .prepare(address, data.len(), firmware::Direction::Write)
+                        .map_err(SlaveError::Unsupported)?,
+                )
+            } else {
+                None
+            };
+            self.publish_time(now)?;
+            let memory = self.firmware.as_mut().expect("firmware owner");
+            if let Some(byte) = address_byte {
+                memory.address(address, byte);
+            }
+            if let Some(transfer) = transfer {
+                memory.write(transfer, data);
+            }
+            return Ok(());
+        }
         let cells: Vec<_> = Self::span(address, data.len())?
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
@@ -430,11 +499,7 @@ impl SpmiSlave for Pmu {
                 }
             }
         }
-        self.check_time(now)?;
-        if self.rtc.is_some() {
-            self.clock.publish(now).map_err(SlaveError::Unsupported)?;
-        }
-        self.update(now);
+        self.publish_time(now)?;
         let alarm = self
             .rtc
             .map(|rtc| rtc.alarm_offset..rtc.alarm_offset + ALARM_BYTES);

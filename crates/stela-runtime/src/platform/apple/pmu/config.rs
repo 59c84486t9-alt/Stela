@@ -1,6 +1,7 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
 use super::fault::FaultHistory;
-use super::{ALARM_BYTES, OFFSET_BYTES, Rtc, UPCOUNT_BYTES, Window};
+use super::firmware::FirmwareHistory;
+use super::{ALARM_BYTES, FirmwareSram, FirmwareStartup, OFFSET_BYTES, Rtc, UPCOUNT_BYTES, Window};
 use alloc::vec::Vec;
 
 /// An explicit PMU register resource configuration, independent of its SID or SKU.
@@ -11,6 +12,8 @@ pub struct Configuration {
     pub(super) monitor: u8,
     pub(super) identity: Option<Window>,
     pub(super) fault_history: Option<FaultHistory>,
+    pub(super) firmware: Option<FirmwareHistory>,
+    pub(super) startup: Option<FirmwareStartup>,
 }
 
 impl Configuration {
@@ -101,6 +104,8 @@ impl Configuration {
             monitor,
             identity: None,
             fault_history: None,
+            firmware: None,
+            startup: None,
         })
     }
     /// Configure the source's outside-scratch fault log with explicit cold or
@@ -116,6 +121,44 @@ impl Configuration {
             return Err("PMU fault log duplicates or overlaps another register owner");
         }
         self.fault_history = Some(history);
+        Ok(self)
+    }
+
+    /// Bind real retained SRAM bytes to the AP address/data ports. This grants
+    /// no firmware execution, control/status, silicon identity or reset state.
+    pub fn with_firmware_sram(
+        mut self,
+        ports: FirmwareSram,
+        initial: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        let history = FirmwareHistory::new(ports, initial)?;
+        if self.firmware.is_some()
+            || ports
+                .windows()
+                .iter()
+                .any(|window| self.occupied().any(|other| overlaps(*window, other)))
+        {
+            return Err("PMU firmware SRAM duplicates or overlaps another register owner");
+        }
+        self.firmware = Some(history);
+        Ok(self)
+    }
+
+    /// Preserve the source's startup routes as explicit missing execution
+    /// requirements; never map reset/configuration/status to plain storage.
+    pub fn with_unqualified_firmware_startup(
+        mut self,
+        profile: FirmwareStartup,
+    ) -> Result<Self, &'static str> {
+        if self.startup.is_some()
+            || profile
+                .windows()
+                .iter()
+                .any(|window| self.occupied().any(|other| overlaps(*window, other)))
+        {
+            return Err("PMU firmware startup duplicates or overlaps another register owner");
+        }
+        self.startup = Some(profile);
         Ok(self)
     }
 
@@ -153,6 +196,16 @@ impl Configuration {
                 ]
             }))
             .chain(self.fault_history.iter().map(|history| history.window))
+            .chain(
+                self.firmware
+                    .iter()
+                    .flat_map(|history| history.ports.windows()),
+            )
+            .chain(
+                self.startup
+                    .into_iter()
+                    .flat_map(|profile| profile.windows().iter().copied()),
+            )
     }
     /// Retain the source's identity register extent without fabricating silicon
     /// identity bytes. Access stops explicitly until that separate contract exists.
@@ -169,7 +222,7 @@ impl Configuration {
     }
 }
 
-fn overlaps(a: Window, b: Window) -> bool {
+pub(super) fn overlaps(a: Window, b: Window) -> bool {
     u32::from(a.base) < u32::from(b.base) + u32::from(b.bytes)
         && u32::from(b.base) < u32::from(a.base) + u32::from(a.bytes)
 }
