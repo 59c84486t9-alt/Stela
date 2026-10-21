@@ -1,6 +1,24 @@
 # SPDX-License-Identifier: MIT
 # These executables exercise the real compiler and its complete link closure.
 # They do not open a device, submit GPU work, or expose a Metal device.
+# Hosted source compilation is independent of Mesa and the physical backend.
+# Resolve matching Apple LLVM functions dynamically; never link host LLVM here.
+stela_apple_source = static_library(
+  'stela_apple_source',
+  '../../../../metal/compiler/apple_source.c',
+  include_directories : include_directories('llvm/include'),
+  dependencies : [dep_thread, dep_dl],
+  c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+)
+stela_apple_source_test = executable(
+  'stela_apple_source_test',
+  '../../../../metal/compiler/apple_source_test.c',
+  link_with : stela_apple_source,
+  dependencies : [dep_thread, dep_dl],
+  c_args : ['-Wall', '-Wextra', '-Werror', '-Wconversion'],
+)
+test('stela_apple_source_boundary', stela_apple_source_test, suite : 'stela')
+
 stela_air_llvm = get_option('stela-air-llvm-library')
 if stela_air_llvm != ''
   if not ['darwin', 'linux'].contains(host_machine.system())

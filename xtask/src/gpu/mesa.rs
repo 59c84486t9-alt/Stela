@@ -14,6 +14,7 @@ use std::{
 };
 
 const LIBRARIES: &[&str] = &[
+    "src/stela/libstela_apple_source.a",
     "src/compiler/nir/libnir.a",
     "src/nouveau/compiler/libnak.a",
     "src/nouveau/compiler/libnak_rs.a",
@@ -100,6 +101,18 @@ fn inspect_archive(path: &Path) -> Result<Value> {
                 !name.starts_with("drm") && name != "ioctl",
                 "{} depends on device I/O through {name}",
                 path.display()
+            );
+        }
+    }
+    if path.file_name().and_then(|name| name.to_str()) == Some("libstela_apple_source.a") {
+        for name in &undefined {
+            let name = name.trim_start_matches('_');
+            ensure!(
+                !name.starts_with("LLVM")
+                    && !name.starts_with("MTL")
+                    && !name.starts_with("IOService")
+                    && !name.starts_with("IOConnect"),
+                "the hosted source adapter must not import host LLVM or GPU object APIs: {name}"
             );
         }
     }
@@ -272,6 +285,9 @@ pub fn build(
     let source = gpu.join("common/mesa");
     let external_inputs = || -> Result<Vec<Value>> {
         let mut paths = vec![
+            "metal/compiler/apple_source.c",
+            "metal/compiler/apple_source.h",
+            "metal/compiler/apple_source_test.c",
             "amd/stela/buffer.c",
             "amd/stela/buffer.h",
             "amd/tests/buffer_test.c",
@@ -337,18 +353,15 @@ pub fn build(
             "-Dintel-elk=true",
         ]);
     if let Some(config) = &llvm_config {
-        setup.env("LLVM_CONFIG", config);
+        setup
+            .env("LLVM_CONFIG", config)
+            .arg("-Dstela-amd-llvm=true");
     }
     setup.args([
         if llvm_sdk.is_some() {
             "-Dllvm=enabled"
         } else {
             "-Dllvm=disabled"
-        },
-        if llvm_sdk.is_some() {
-            "-Dstela-amd-llvm=true"
-        } else {
-            "-Dstela-amd-llvm=false"
         },
         "-Dshared-llvm=enabled",
         "-Ddraw-use-llvm=false",
@@ -382,6 +395,7 @@ pub fn build(
         .args(&library_paths)
         .args(PROBES.iter().map(|(_, binary)| binary));
     compile.args([
+        "src/stela/stela_apple_source_test",
         "src/stela/stela_amd_commands_probe",
         "src/stela/stela_amd_buffer_probe",
         "src/stela/stela_intel_surface_probe",
@@ -408,6 +422,17 @@ pub fn build(
         &evidence,
         "amd-commands",
     )?;
+    let source_boundary = build.join("src/stela/stela_apple_source_test");
+    run(
+        &mut Command::new(&source_boundary),
+        &evidence,
+        "apple-source-boundary",
+    )?;
+    let source_compiler_boundary = json!({
+        "binary": tools::binding(&source_boundary)?,
+        "output": tools::binding(&evidence.join("apple-source-boundary.log"))?,
+        "private_compiler_executed": false, "hardware_executed": false,
+    });
     let mut resource_probes = Vec::new();
     for stage in ["amd_buffer", "intel_surface"] {
         let binary = build.join(format!("src/stela/stela_{stage}_probe"));
@@ -580,6 +605,7 @@ pub fn build(
         "schema": 2, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
+        "source_compiler_boundary": source_compiler_boundary,
         "air_compute_compiler_subset": llvm_library.is_some(),
         "amd_llvm_development_files": llvm_sdk,
         "air_codegen_probes": air_probes,
