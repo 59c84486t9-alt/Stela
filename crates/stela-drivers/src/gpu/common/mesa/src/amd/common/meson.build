@@ -98,6 +98,7 @@ amd_common_files = files(
   'ac_binary.c',
   'ac_binary.h',
   'ac_cmdbuf.c',
+  'ac_cmdbuf_compute.c',
   'ac_cmdbuf.h',
   'ac_cmdbuf_base.h',
   'ac_cmdbuf_cp.c',
@@ -118,6 +119,7 @@ amd_common_files = files(
   'ac_surface.c',
   'ac_surface.h',
   'ac_debug.c',
+  'ac_registers.c',
   'ac_debug.h',
   'ac_descriptors.c',
   'ac_descriptors.h',
@@ -237,6 +239,14 @@ if with_stela_amd
           'ac_descriptors.c', 'ac_formats.c', 'nir/ac_nir.c',
           'nir/ac_nir_lower_global_access.c', 'nir/ac_nir_opt_shared_append.c') +
       [gfx10_format_table_c],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_nir_headers, idep_amd_generated_headers],
+    c_args : [no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+  libamd_command_support = static_library(
+    'amd_command_support',
+    files('ac_pm4.c', 'ac_cmdbuf_compute.c', 'ac_registers.c'),
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_nir_headers, idep_amd_generated_headers],
     c_args : [no_override_init_args],

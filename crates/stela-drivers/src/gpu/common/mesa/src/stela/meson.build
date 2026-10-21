@@ -32,6 +32,23 @@ if with_stela_intel
 endif
 
 if with_stela_amd
+  stela_amd_commands = static_library(
+    'stela_amd_commands',
+    'amd_commands.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [libamd_command_support],
+  )
+
+  stela_amd_commands_probe = executable(
+    'stela_amd_commands_probe',
+    'amd_commands_probe.c',
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_commands, libamd_command_support],
+  )
+  test('stela_amd_commands', stela_amd_commands_probe, suite : 'stela')
+
   stela_aco_probe = executable(
     'stela_aco_probe',
     'aco_probe.c',

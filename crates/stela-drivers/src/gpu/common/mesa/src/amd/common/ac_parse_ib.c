@@ -8,7 +8,6 @@
 #include "amd_cp_print_packet_gfx11.h"
 #include "amd_cp_print_packet_gfx12.h"
 #include "sid.h"
-#define SID_TABLE_IMPLEMENTATION
 #include "sid_tables.h"
 #include "ac_vcn.h"
 #include "ac_vcn_dec.h"
