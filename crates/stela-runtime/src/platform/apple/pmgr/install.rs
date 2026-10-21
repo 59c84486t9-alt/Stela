@@ -11,6 +11,8 @@ use super::sequencer::PhysicalWrite;
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod t6000;
+
 const NUB_BASE: u64 = 0x23df00000;
 const NUB_LIMIT: u64 = 0x23df3ffff;
 const FIXED_CODE: u64 = 0x23df05200;
