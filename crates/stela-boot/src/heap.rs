@@ -41,6 +41,8 @@ struct State {
     small: [*mut Small; CLASSES],
     ready: bool,
     total: usize,
+    /// Bytes allocated and not freed, size-class blocks by their class.
+    live: usize,
     /// Bytes carved from the free list and not released: live blocks and
     /// the size-class blocks kept for reuse.
     carved: usize,
@@ -51,6 +53,7 @@ struct State {
 #[derive(Clone, Copy, Debug)]
 pub struct Usage {
     pub total: usize,
+    pub live: usize,
     pub carved: usize,
     pub peak: usize,
     /// The largest free extent: the most one allocation can get.
@@ -72,6 +75,7 @@ impl Heap {
                 small: [ptr::null_mut(); CLASSES],
                 ready: false,
                 total: 0,
+                live: 0,
                 carved: 0,
                 peak: 0,
             }),
@@ -108,6 +112,13 @@ impl Heap {
         state.total = bytes;
     }
 
+    /// Whether more than three quarters of the heap is allocated.
+    pub fn low(&self) -> bool {
+        let _guard = self.lock();
+        let state = unsafe { &*self.state.get() };
+        state.live > state.total / 4 * 3
+    }
+
     /// The heap's usage, walking the free list for its largest extent.
     pub fn usage(&self) -> Usage {
         let _guard = self.lock();
@@ -123,6 +134,7 @@ impl Heap {
         }
         Usage {
             total: state.total,
+            live: state.live,
             carved: state.carved,
             peak: state.peak,
             largest,
@@ -151,21 +163,31 @@ unsafe impl GlobalAlloc for Heap {
             return ptr::null_mut();
         }
         let Some(class) = class(layout) else {
-            return unsafe { carve(state, layout.size(), layout.align()) };
+            let block = unsafe { carve(state, layout.size(), layout.align()) };
+            if !block.is_null() {
+                state.live += layout.size();
+            }
+            return block;
         };
         let head = state.small[class];
-        if head.is_null() {
-            return unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) };
+        let block = if head.is_null() {
+            unsafe { carve(state, SMALLEST << class, SMALL_ALIGNMENT) }
+        } else {
+            // SAFETY: a block of this class that `dealloc` linked and
+            // nothing else owns.
+            state.small[class] = unsafe { (*head).next };
+            head.cast()
+        };
+        if !block.is_null() {
+            state.live += SMALLEST << class;
         }
-        // SAFETY: a block of this class that `dealloc` linked and nothing
-        // else owns.
-        state.small[class] = unsafe { (*head).next };
-        head.cast()
+        block
     }
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
         let _guard = self.lock();
         let state = unsafe { &mut *self.state.get() };
         if let Some(class) = class(layout) {
+            state.live -= SMALLEST << class;
             let block = pointer.cast::<Small>();
             // SAFETY: the caller's block of this class, at least 16 bytes
             // and 16-byte aligned, which it no longer accesses.
@@ -176,6 +198,7 @@ unsafe impl GlobalAlloc for Heap {
             };
             state.small[class] = block;
         } else {
+            state.live -= layout.size();
             unsafe { release(state, pointer) };
         }
     }

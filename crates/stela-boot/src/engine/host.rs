@@ -753,6 +753,10 @@ impl Host for BareHost {
         state().code_used = 0;
     }
 
+    fn memory_low(&self) -> bool {
+        crate::ALLOCATOR.low()
+    }
+
     unsafe fn execute(&mut self, code: NativeCode, guest: &mut GuestState) -> NativeExit {
         state().native = true;
         let entered = rdtsc();

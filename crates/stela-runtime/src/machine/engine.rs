@@ -318,6 +318,12 @@ pub trait Host {
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);
     /// Free every installed block.
     fn discard_code(&mut self);
+    /// Whether the memory the engine's own data takes runs low. Installed
+    /// blocks' metadata is most of it, so the engine then discards them as
+    /// when the code arena fills.
+    fn memory_low(&self) -> bool {
+        false
+    }
     /// Run one native block on `state`, and the blocks it chains into. A
     /// fault's offset is from `code`.
     ///
@@ -3034,6 +3040,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let Variant { checks, single, .. } = variant;
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
+        if !self.blocks.is_empty() && self.host.memory_low() {
+            self.discard_code();
+        }
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
@@ -5343,6 +5352,8 @@ mod tests {
         counter_reads: usize,
         placement: mmu::placement::Placement,
         translation_helper: Option<u64>,
+        /// What [`Host::memory_low`] answers.
+        pub(super) memory_low: bool,
     }
 
     impl Host for FakeHost {
@@ -5382,6 +5393,9 @@ mod tests {
         fn discard_code(&mut self) {
             self.installed.clear();
             self.executables.clear();
+        }
+        fn memory_low(&self) -> bool {
+            self.memory_low
         }
         fn context_entry(&mut self, code: NativeCode) -> Option<usize> {
             // Context leaves run: they touch only the state, the context and
@@ -5536,6 +5550,7 @@ mod tests {
             counter_reads: 0,
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
+            memory_low: false,
         };
         let profile = CpuProfile {
             name: "test",
@@ -6363,6 +6378,19 @@ mod tests {
         assert!(machine.lines().fiq);
         machine.system_instruction(MRS_X7_PMCR0).unwrap();
         assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
+    }
+
+    #[test]
+    fn a_block_installed_while_memory_runs_low_discards_the_others_first() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; FETCH_PAGE as usize / 4 + 1]);
+        let base = machine.cpu.pc;
+        assert!(machine.fetch_block(base, false).is_ok());
+        machine.host.memory_low = true;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+        assert_eq!(left, [base + FETCH_PAGE]);
+        assert_eq!(machine.statistics.code_discards, 1);
     }
 
     #[test]
