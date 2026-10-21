@@ -28,6 +28,17 @@ pub use registers::PciRegisters;
 
 pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
 const INTEL: u16 = 0x8086;
+// Exact AZX_DRIVER_SKL | AZX_DCAPS_INTEL_SKYLAKE conventional subset in
+// pinned intel.c/pci_ids.h. This is not a range or a DSP/graphics admission.
+const INTEL_CLOCK_GATE_IDS: &[u16] = &[
+    0xa170, 0x9d70, // SKL / SKL-LP.
+    0xa171, 0x9d71, 0xa2f0, // KBL / KBL-LP / KBL-H.
+    0xa348, 0x9dc8, // Coffee / Cannon.
+    0x34c8, 0x3dc8, // Ice LP/H.
+    0xa0c8, 0x43c8, // Tiger LP/H.
+    0x7ad0, 0x51c8, 0x51c9, 0x51cd, 0x51cc, 0x54c8, // Alder S/P/PS/PX/M/N.
+    0x7e28, // Meteor.
+];
 const ATI: u16 = 0x1002;
 const AMD: u16 = 0x1022;
 const PCI_ID: u16 = 0;
@@ -219,12 +230,9 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         (INTEL, 0x8c20 | 0x8ca0 | 0x8d20 | 0x8d21 | 0x9c20 | 0x9c21 | 0x9ca0) => {
             (Setup::IntelPch, 64)
         }
-        // Conventional-class SKL/KBL/Coffee/Cannon analog controllers. These
-        // require mapped ownership preflight, native PCI clock reset hooks and
-        // bounded extended-link setup, never the legacy preparation shortcut.
-        (INTEL, 0xa170 | 0x9d70 | 0xa171 | 0x9d71 | 0xa2f0 | 0xa348 | 0x9dc8) => {
-            (Setup::IntelPch, 64)
-        }
+        // Mapped ownership, native PCI clock reset hooks and bounded
+        // conventional extended-link setup are mandatory for these IDs.
+        (INTEL, id) if INTEL_CLOCK_GATE_IDS.contains(&id) => (Setup::IntelPch, 64),
         // Linux restricts ATI to 40 bits, and SB600 companion-SMBus revisions
         // before 0x30 additionally require 32 bits. Without companion evidence,
         // retain the supported conservative 32-bit mode on every ATI stepping.
@@ -246,11 +254,7 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         } else {
             (PositionPolicy::Link, ProbePolicy::Once)
         };
-    let modern = vendor == INTEL
-        && matches!(
-            device,
-            0xa170 | 0x9d70 | 0xa171 | 0x9d71 | 0xa2f0 | 0xa348 | 0x9dc8
-        );
+    let modern = vendor == INTEL && INTEL_CLOCK_GATE_IDS.contains(&device);
     Ok(Identity {
         vendor,
         device,
@@ -632,7 +636,10 @@ pub unsafe fn prepare_with_registers<'a, C: ConfigSpace, R: Registers>(
         }
     }
     if selected.reset_policy == ResetPolicy::IntelClockGate {
-        super::extended::inspect(&mut registers, total as u8)
+        let extended = super::extended::inspect(&mut registers, total as u8)
+            .map_err(AttachError::MmioPreflight)?;
+        extended
+            .preflight_clock(&mut registers)
             .map_err(AttachError::MmioPreflight)?;
     }
     let prepared = unsafe {
@@ -1050,8 +1057,8 @@ pub(super) mod tests {
             );
         }
         for (vendor, device, class) in [
-            (INTEL, 0x34c8, CLASS),
-            (INTEL, 0xa0c8, CLASS),
+            (INTEL, 0xa828, CLASS),
+            (INTEL, 0xe428, CLASS),
             (INTEL, 0x0a0c, CLASS),
             (INTEL, 0xffff, CLASS),
             (AMD, 0x15e2, CLASS),
@@ -1372,7 +1379,12 @@ pub(super) mod tests {
     }
 
     pub(in crate::audio::hda) fn modern_pci_model() -> (Function<Model>, Clock, Bar) {
-        let (mut function, timer, bar) = pch_fixture(0xa170, 2, 9);
+        modern_pci_model_for(0xa170)
+    }
+    pub(in crate::audio::hda) fn modern_pci_model_for(
+        device: u16,
+    ) -> (Function<Model>, Clock, Bar) {
+        let (mut function, timer, bar) = pch_fixture(device, 2, 9);
         function.config().set16(0x54, PM_PME_ENABLE | PM_PME_STATUS);
         (function, timer, bar)
     }
@@ -1429,8 +1441,8 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn exact_conventional_skl_through_cnl_requires_mapped_preflight_and_pci_reset_adapter() {
-        for device in [0xa170, 0x9d70, 0xa171, 0x9d71, 0xa2f0, 0xa348, 0x9dc8] {
+    fn exact_conventional_intel_profile_requires_mapped_preflight_and_pci_reset_adapter() {
+        for &device in INTEL_CLOCK_GATE_IDS {
             let (mut function, timer, bar) = modern_pci_model();
             set_identity(&mut function, INTEL, device);
             assert_eq!(
@@ -1505,6 +1517,115 @@ pub(super) mod tests {
             drop(result);
             assert_eq!(registers.reads.get(), 0, "fault {fault}");
             assert!(function.config().writes.is_empty(), "fault {fault}");
+        }
+    }
+
+    #[test]
+    fn first_link_failed_reads_uncertain_power_and_unadvertised_clock_refuse_before_pci_writes() {
+        for (value, frequencies, expected) in [
+            (
+                u32::MAX,
+                0x3f,
+                crate::audio::Error::RegisterUnavailable { offset: 0x544 },
+            ),
+            (
+                1 << 16,
+                0x3f,
+                crate::audio::Error::LinkPowerUncertain { offset: 0x544 },
+            ),
+            (
+                1 << 23,
+                0x3f,
+                crate::audio::Error::LinkPowerUncertain { offset: 0x544 },
+            ),
+            (
+                15 | (1 << 16) | (1 << 23),
+                0x3f,
+                crate::audio::Error::UnsupportedLink { offset: 0x544 },
+            ),
+            (
+                3 | (1 << 16) | (1 << 23),
+                1 << 2,
+                crate::audio::Error::UnsupportedLink { offset: 0x544 },
+            ),
+        ] {
+            let (mut function, timer, bar) = modern_pci_model_for(0x7e28);
+            let registers = MappedModel::new();
+            registers.set(0x14, 0x500);
+            registers.set(0x500, 0x1002_0000);
+            registers.set(0x540, frequencies);
+            registers.set(0x544, value);
+            let before = registers.bytes.borrow().clone();
+            let result = unsafe {
+                prepare_with_registers(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    registers.clone(),
+                )
+            };
+            assert!(matches!(result, Err(AttachError::MmioPreflight(error)) if error == expected));
+            drop(result);
+            assert!(function.config().writes.is_empty());
+            assert_eq!(*registers.bytes.borrow(), before);
+        }
+        // Known conventional link powered down is valid: initialization obtains
+        // its actual power acknowledgement after PCI clock-bracketed reset.
+        for (clock, powered) in [(0, 0), (2, 0), (3, (1 << 16) | (1 << 23))] {
+            let (mut function, timer, bar) = modern_pci_model_for(0x7e28);
+            let registers = MappedModel::new();
+            registers.set(0x14, 0x500);
+            registers.set(0x500, 0x1002_0000);
+            registers.set(0x540, 0x3f);
+            registers.set(0x544, clock | powered);
+            let before = registers.bytes.borrow().clone();
+            let adapter = unsafe {
+                prepare_with_registers(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    registers.clone(),
+                )
+            }
+            .unwrap();
+            drop(adapter);
+            assert_eq!(*registers.bytes.borrow(), before);
+            assert!(!function.config().writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn each_new_conventional_intel_identity_refuses_dsp_and_selectable_classes_before_mmio() {
+        for device in [
+            0x34c8, 0x3dc8, 0xa0c8, 0x43c8, 0x7ad0, 0x51c8, 0x51c9, 0x51cd, 0x51cc, 0x54c8, 0x7e28,
+        ] {
+            for class in [[4, 1, 0], [4, 3, 0x80], [4, 3, 1]] {
+                for stale_enumeration in [true, false] {
+                    let (mut function, timer, bar) = modern_pci_model_for(device);
+                    if !stale_enumeration {
+                        function.class = class;
+                    }
+                    function.config().words[2] = (u32::from(class[0]) << 24)
+                        | (u32::from(class[1]) << 16)
+                        | (u32::from(class[2]) << 8);
+                    let registers = MappedModel::new();
+                    let result = unsafe {
+                        prepare_with_registers(
+                            &mut function,
+                            bar,
+                            &timer,
+                            Ownership::ExclusiveLegacy,
+                            registers.clone(),
+                        )
+                    };
+                    assert!(matches!(result, Err(AttachError::UnsupportedController)));
+                    drop(result);
+                    assert_eq!(registers.reads.get(), 0);
+                    assert!(function.config().writes.is_empty());
+                }
+            }
         }
     }
 
@@ -1779,7 +1900,7 @@ pub(super) mod tests {
             assert!(function.config().writes.is_empty());
         }
         for device in [
-            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0x34c8, 0xa0c8, 0x51c8, 0x7e28,
+            0x1c20, 0x1e20, 0x0a0c, 0x160c, 0xa828, 0xe428, 0xe328, 0xd328,
         ] {
             assert_eq!(
                 identity(INTEL, device, CLASS),
@@ -1920,7 +2041,7 @@ pub(super) mod tests {
             (ATI, 0x157a),
             (ATI, 0x0002),
             (0x10de, 0x0be3),
-            (INTEL, 0x34c8),
+            (INTEL, 0xa828),
         ] {
             let (mut function, timer, bar) = fixture(0);
             set_identity(&mut function, vendor, device);

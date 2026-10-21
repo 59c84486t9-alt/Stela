@@ -167,6 +167,37 @@ pub(super) fn inspect<R: Registers>(
     Ok(result)
 }
 
+fn select_clock(link: Link, value: u32) -> Result<u8, Error> {
+    let offset = link.base + LCTL;
+    if (value & SPA != 0) != (value & CPA != 0) {
+        return Err(Error::LinkPowerUncertain { offset });
+    }
+    let current = (value & SCF) as u8;
+    let selected = if current == 0 {
+        [2u8, 3, 1, 4, 5, 0]
+            .into_iter()
+            .find(|bit| link.frequencies & (1u32 << bit) != 0)
+            .unwrap()
+    } else {
+        current
+    };
+    if selected > 5 || link.frequencies & (1u32 << selected) == 0 {
+        return Err(Error::UnsupportedLink { offset });
+    }
+    Ok(selected)
+}
+impl ExtendedCapabilities {
+    /// Validate the exact first link's observable power/clock state without
+    /// changing it. Native PCI preparation calls this before any config write.
+    /// Reset repeats actual selection; this observation is not a power grant.
+    pub(super) fn preflight_clock(&self, registers: &mut impl Registers) -> Result<(), Error> {
+        if let Some(&link) = self.links.first() {
+            select_clock(link, control(registers, link.base + LCTL)?)?;
+        }
+        Ok(())
+    }
+}
+
 impl<R: Registers, T: Timer> Controller<R, T> {
     pub(super) fn refresh_extended(&mut self) -> Result<(), Error> {
         if self.config.reset_policy == ResetPolicy::IntelClockGate {
@@ -223,21 +254,8 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         };
         let offset = link.base + LCTL;
         let value = control(&mut self.registers, offset)?;
-        if (value & SPA != 0) != (value & CPA != 0) {
-            return Err(Error::LinkPowerUncertain { offset });
-        }
+        let selected = select_clock(link, value)?;
         let current = (value & SCF) as u8;
-        let selected = if current == 0 {
-            [2u8, 3, 1, 4, 5, 0]
-                .into_iter()
-                .find(|bit| link.frequencies & (1u32 << bit) != 0)
-                .unwrap()
-        } else {
-            current
-        };
-        if selected > 5 || link.frequencies & (1u32 << selected) == 0 {
-            return Err(Error::UnsupportedLink { offset });
-        }
         let result = (|| {
             if current == 0 {
                 self.link_power(link, false)?;
