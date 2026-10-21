@@ -247,6 +247,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
     }
 
     pub(super) fn require_routing_stopped(&self) -> Result<(), Error> {
+        // A failed stop can clear software `running` while DMA is still active.
+        if self.streams.iter().flatten().any(|stream| stream.poisoned) {
+            return Err(Error::NeedsReset);
+        }
         if self.streams.iter().flatten().any(|stream| stream.running) {
             return Err(Error::StreamRunning);
         }

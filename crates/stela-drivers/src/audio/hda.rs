@@ -2136,4 +2136,70 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn uncertain_stream_stop_blocks_other_routes_before_codec_or_mmio_writes() {
+        for dma_error in [false, true] {
+            let mut fixture = Fixture::new();
+            let model = analog_model();
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let first = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let second = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            controller.start(first).unwrap();
+            model.borrow_mut().stream_stop_stuck = true;
+            if dma_error {
+                model.borrow_mut().bytes[stream_base(first.descriptor_index()) + SD_STS] =
+                    SD_DESC_ERROR;
+                assert_eq!(
+                    controller.status(first),
+                    Err(Error::StreamDma {
+                        status: SD_DESC_ERROR
+                    })
+                );
+            } else {
+                assert_eq!(
+                    controller.stop(first),
+                    Err(Error::Timeout(Phase::StreamStop))
+                );
+            }
+            assert_ne!(
+                model.borrow().bytes[stream_base(first.descriptor_index()) + SD_CTL] & SD_RUN,
+                0
+            );
+            let commands = model.borrow().commands.len();
+            let writes = model.borrow().writes.len();
+            assert_eq!(
+                controller.configure_analog_route(
+                    &graph,
+                    &route,
+                    second,
+                    0,
+                    PinOptions::Playback {
+                        headphone: false,
+                        eapd: None
+                    }
+                ),
+                Err(Error::NeedsReset)
+            );
+            assert_eq!(model.borrow().commands.len(), commands);
+            assert_eq!(model.borrow().writes.len(), writes);
+        }
+    }
 }
