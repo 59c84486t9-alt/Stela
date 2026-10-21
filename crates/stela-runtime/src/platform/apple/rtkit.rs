@@ -151,7 +151,9 @@ pub trait Endpoint: Any {
     /// The AP sent `payload` to the enabled endpoint.
     fn receive(&mut self, payload: u64, outbox: &mut Vec<u64>) -> Result<(), &'static str>;
     /// Messages the enabled endpoint sends on its own, such as events
-    /// from the board, collected at each device advance.
+    /// from the board, collected at each device advance. Output already
+    /// appended is committed even if a later asynchronous operation fails;
+    /// the endpoint must retain only unfinished work for retry.
     fn poll(&mut self, _outbox: &mut Vec<u64>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -474,11 +476,12 @@ impl Firmware for RtKit {
                 continue;
             }
             let mut sent = Vec::new();
-            endpoint.poll(&mut sent)?;
+            let result = endpoint.poll(&mut sent);
             outbox.extend(sent.into_iter().map(|payload| Message {
                 endpoint: number,
                 payload,
             }));
+            result?;
         }
         Ok(())
     }

@@ -98,6 +98,8 @@ pub struct TransitionRequest {
 /// The coprocessor's software, emulated natively.
 pub trait Firmware: Any {
     /// The coprocessor starts running; messages it sends go to `outbox`.
+    /// Start/resume/receive output is provisional until Ok; a refusal must
+    /// retain retryable native state and must not commit its success ACK.
     fn start(&mut self, outbox: &mut Vec<Message>) -> Result<(), &'static str>;
     /// Halt CPU execution while retaining firmware state. Validate before
     /// changing state: a refusal leaves RUN and the mailbox untouched.
@@ -118,8 +120,9 @@ pub trait Firmware: Any {
     fn dma_pending(&self) -> bool {
         false
     }
-    /// Perform that queued DMA through `port`, pushing any resulting mailbox
-    /// messages to `outbox`. Reached from the owning device's transfer step.
+    /// Perform that queued DMA through `port`, pushing committed mailbox
+    /// messages to `outbox`. Earlier output remains committed if a later
+    /// transfer fails; retain unfinished native work for retry.
     fn dma(
         &mut self,
         _port: &mut Port<'_, '_>,
@@ -127,8 +130,9 @@ pub trait Firmware: Any {
     ) -> Result<(), &'static str> {
         Ok(())
     }
-    /// Messages the running coprocessor sends on its own, collected at each
-    /// device advance.
+    /// Committed asynchronous messages, collected at each device advance.
+    /// Output appended before a later error remains visible; retain only
+    /// unfinished native work so retry never duplicates an earlier event.
     fn poll(&mut self, _outbox: &mut Vec<Message>) -> Result<(), &'static str> {
         Ok(())
     }
@@ -324,10 +328,7 @@ impl Asc {
         if endpoint_word & !ENDPOINT != 0 {
             return Err("mailbox message bits above the endpoint are not modeled");
         }
-        let payload = self
-            .send0
-            .take()
-            .ok_or("mailbox send without its payload word")?;
+        let payload = self.send0.ok_or("mailbox send without its payload word")?;
         let message = Message {
             endpoint: endpoint_word as u8,
             payload,
@@ -351,7 +352,9 @@ impl Asc {
             },
             Err(reason) => Err(reason),
         };
-        self.deliver(result)
+        self.deliver(result)?;
+        self.send0 = None;
+        Ok(())
     }
 
     fn write_cpu_control(&mut self, value: u64) -> Result<(), &'static str> {
@@ -461,9 +464,10 @@ impl MmioDevice for Asc {
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         if self.running {
             let mut sent = Vec::new();
-            let result = self.firmware.poll(&mut sent).map(|()| sent);
-            self.deliver(result)
-                .map_err(|reason| refuse(NAME, 0, Width::Double, Direction::Read, reason))?;
+            let result = self.firmware.poll(&mut sent);
+            self.outbox.extend(sent);
+            self.update_lines(access);
+            result.map_err(|reason| refuse(NAME, 0, Width::Double, Direction::Read, reason))?;
         }
         self.update_lines(access);
         Ok(None)
@@ -832,6 +836,128 @@ mod tests {
                 .is_err()
         );
         assert_eq!(asc.firmware::<Retained>().unwrap().resumes, 0);
+    }
+
+    struct AtomicCommand {
+        refuse_start: bool,
+        refuse_resume: bool,
+        refuse_receive: bool,
+        value: u64,
+    }
+    impl Firmware for AtomicCommand {
+        fn start(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+            out.push(Message { endpoint: 0, payload: 0x11 });
+            if self.refuse_start { return Err("start refused"); }
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<(), &'static str> { Ok(()) }
+        fn resume(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+            out.push(Message { endpoint: 0, payload: 7 << 52 | 0x20 });
+            if self.refuse_resume { return Err("resume refused"); }
+            Ok(())
+        }
+        fn receive(&mut self, message: Message, out: &mut Vec<Message>) -> Result<(), &'static str> {
+            out.push(Message { endpoint: message.endpoint, payload: self.value + message.payload });
+            if self.refuse_receive { return Err("command refused"); }
+            self.value += message.payload;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn atomic_command_refusals_discard_tentative_acks_and_preserve_input_for_retry() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut asc = Asc::new(Box::new(AtomicCommand { refuse_start: true, refuse_resume: true, refuse_receive: true, value: 0 }), false, Lines::from_interrupts(LINES)).unwrap();
+        asc.write(I2A_CONTROL, Width::Word, 1, &mut access).unwrap();
+        assert!(asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).is_err());
+        assert!(!asc.running && !asc.halted && asc.cpu_control == 0);
+        assert!(asc.outbox.is_empty());
+        assert_eq!(asc.levels[2], Some(false));
+        asc.firmware_mut::<AtomicCommand>().unwrap().refuse_start = false;
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).unwrap();
+        assert_eq!(receive(&mut asc, &mut access).0, 0x11);
+        asc.write(A2I_SEND0, Width::Double, 5, &mut access).unwrap();
+        assert!(asc.write(A2I_SEND1, Width::Double, 0x20, &mut access).is_err());
+        assert_eq!(asc.send0, Some(5));
+        assert_eq!(asc.firmware::<AtomicCommand>().unwrap().value, 0);
+        assert!(asc.outbox.is_empty());
+        assert_eq!(asc.levels[2], Some(false));
+        asc.firmware_mut::<AtomicCommand>().unwrap().refuse_receive = false;
+        // Retry only SEND1: its staged payload was not consumed by refusal.
+        asc.write(A2I_SEND1, Width::Double, 0x20, &mut access).unwrap();
+        assert_eq!(asc.send0, None);
+        assert_eq!(asc.firmware::<AtomicCommand>().unwrap().value, 5);
+        assert_eq!(receive(&mut asc, &mut access).0, 5);
+        asc.write(CPU_CONTROL, Width::Word, 0, &mut access).unwrap();
+        assert!(asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).is_err());
+        assert!(!asc.running && asc.halted && asc.cpu_control == 0);
+        assert!(asc.outbox.is_empty());
+        asc.firmware_mut::<AtomicCommand>().unwrap().refuse_resume = false;
+        asc.write(CPU_CONTROL, Width::Word, RUN, &mut access).unwrap();
+        assert_eq!(receive(&mut asc, &mut access).0, 7 << 52 | 0x20);
+        assert!(asc.outbox.is_empty());
+    }
+
+    struct AsyncEndpoint {
+        value: u64,
+        issued: bool,
+        fail: bool,
+        polls: u32,
+    }
+    impl super::super::rtkit::Endpoint for AsyncEndpoint {
+        fn start(&mut self, _: &mut Vec<u64>) -> Result<(), &'static str> { Ok(()) }
+        fn receive(&mut self, _: u64, _: &mut Vec<u64>) -> Result<(), &'static str> { Err("no command contract") }
+        fn poll(&mut self, out: &mut Vec<u64>) -> Result<(), &'static str> {
+            self.polls += 1;
+            if !self.issued { self.issued = true; out.push(self.value); }
+            if self.fail { return Err("later async operation failed"); }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn rtkit_poll_preserves_both_prior_and_failing_endpoint_events_and_irqs() {
+        use super::super::rtkit::{Endpoint, Management, RtKit};
+        let endpoints = (0x20..=0x22).map(|number| (number, Box::new(AsyncEndpoint { value: u64::from(number) + 100, issued: false, fail: number == 0x21, polls: 0 }) as Box<dyn Endpoint>)).collect();
+        let rtkit = RtKit::new(endpoints, Management::Ordinary).unwrap();
+        let mut asc = Asc::booted(Box::new(rtkit), Lines::from_interrupts(LINES)).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let send = |asc: &mut Asc, payload, access: &mut Access<'_>| {
+            asc.write(A2I_SEND0, Width::Double, payload, access).unwrap();
+            asc.write(A2I_SEND1, Width::Double, 0, access).unwrap();
+        };
+        receive(&mut asc, &mut access); // Hello.
+        send(&mut asc, 2 << 52 | 12 | 12 << 16, &mut access);
+        receive(&mut asc, &mut access); // Roll call0.
+        send(&mut asc, 8 << 52 | 1, &mut access);
+        receive(&mut asc, &mut access); // Roll call1.
+        send(&mut asc, 8 << 52 | 1 << 51 | 1 << 32, &mut access);
+        assert_eq!(receive(&mut asc, &mut access).0, 7 << 52 | 0x20);
+        for number in 0x20..=0x22 { send(&mut asc, 5 << 52 | number << 32 | 2, &mut access); }
+        asc.write(I2A_CONTROL, Width::Word, 0, &mut access).unwrap();
+        assert!(asc.advance(&mut access).is_err());
+        assert_eq!(asc.outbox.len(), 2);
+        assert_eq!(asc.levels[2], Some(false)); // Delivery gated, events retained.
+        assert!(asc.read(I2A_RECV0, Width::Double, &mut access).is_err());
+        asc.write(I2A_CONTROL, Width::Word, 1, &mut access).unwrap();
+        assert_eq!(asc.levels[2], Some(true));
+        assert_eq!(receive(&mut asc, &mut access).0, 132);
+        assert_eq!(asc.levels[2], Some(true));
+        assert_eq!(receive(&mut asc, &mut access).0, 133);
+        assert_eq!(asc.levels[2], Some(false));
+        let rtkit = asc.firmware_mut::<RtKit>().unwrap();
+        assert_eq!(rtkit.endpoint_mut::<AsyncEndpoint>(0x22).unwrap().polls, 0);
+        rtkit.endpoint_mut::<AsyncEndpoint>(0x21).unwrap().fail = false;
+        asc.advance(&mut access).unwrap();
+        assert_eq!(asc.outbox.len(), 1); // Committed events were not replayed.
+        assert_eq!(receive(&mut asc, &mut access).0, 134);
+        let rtkit = asc.firmware_mut::<RtKit>().unwrap();
+        assert_eq!(rtkit.endpoint_mut::<AsyncEndpoint>(0x20).unwrap().polls, 2);
+        assert_eq!(rtkit.endpoint_mut::<AsyncEndpoint>(0x21).unwrap().polls, 2);
+        assert_eq!(rtkit.endpoint_mut::<AsyncEndpoint>(0x22).unwrap().polls, 1);
+        assert!(asc.outbox.is_empty());
     }
 
     struct PartialDma(bool);
