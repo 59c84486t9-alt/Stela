@@ -39,8 +39,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// format, and name the change here. `stela setup --update-stela` prepares a
 /// setup's bundles again when theirs are of another revision. Revision 0:
 /// the bundles of every loader before revisions were recorded; a
-/// `bundle.json` without `revision` is one.
-pub const REVISION: u32 = 0;
+/// `bundle.json` without `revision` is one. Revision 1: `/pram` `reg` and
+/// `/chosen` `embedded-panic-log-size` give XNU its panic buffer
+/// (`carveouts`).
+pub const REVISION: u32 = 1;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
