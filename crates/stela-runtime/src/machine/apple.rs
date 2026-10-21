@@ -1255,22 +1255,34 @@ impl AppleDevices {
         let irq = u16::try_from(placement.irq).map_err(|_| "SPMI AIC line above 65535")?;
         let mut controller =
             Spmi::with_configuration(AicInput::new(0, irq), placement.configuration);
+        // Construct/preflight every slave and global service before publishing any owner.
+        let mut primary = None;
         for pmu in &placement.pmus {
-            let model = Pmu::new(
-                pmu.windows.clone(),
-                pmu.rtc,
-                wall.filter(|_| pmu.rtc.is_some()),
-            );
-            // The primary PMU, the one with the RTC, interrupts the SMC.
-            if pmu.rtc.is_some() {
-                if self.sleep.pmu.is_some() {
-                    return Err("two PMUs hold an RTC".into());
-                }
-                self.sleep.pmu = Some(model.interrupt());
+            if (pmu.primary || pmu.interrupt.is_some()) && pmu.rtc.is_none() {
+                return Err("PMU global service/output requires a qualified RTC owner".into());
             }
-            controller
-                .attach(pmu.sid, Box::new(model))
+            let mut configuration =
+                pmu::Configuration::new(pmu.windows.clone(), pmu.rtc, pmu.alarm_monitor)
+                    .map_err(String::from)?;
+            if let Some(identity) = pmu.identity {
+                configuration = configuration
+                    .with_unqualified_identity(identity)
+                    .map_err(String::from)?;
+            }
+            let model = Pmu::configured(configuration, wall.filter(|_| pmu.rtc.is_some()))
                 .map_err(String::from)?;
+            if pmu.primary {
+                if self.sleep.pmu.is_some() || primary.is_some() {
+                    return Err("multiple primary PMU system-service owners".into());
+                }
+                primary = Some(model.interrupt());
+            }
+            if let Some(vector) = pmu.interrupt {
+                controller.attach_with_interrupt(pmu.sid, vector, Box::new(model))
+            } else {
+                controller.attach(pmu.sid, Box::new(model))
+            }
+            .map_err(String::from)?;
         }
         let id = self.bus.add(Box::new(controller));
         for (bank, &(base, bytes)) in placement.banks.iter().enumerate() {
@@ -1282,6 +1294,9 @@ impl AppleDevices {
             self.bus
                 .map(id, base, bytes, spmi::COUNTERS)
                 .map_err(|e| format!("SPMI counter placement: {e:?}"))?;
+        }
+        if let Some(primary) = primary {
+            self.sleep.pmu = Some(primary);
         }
         Ok(())
     }

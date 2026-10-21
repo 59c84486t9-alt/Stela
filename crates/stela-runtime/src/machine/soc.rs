@@ -1547,6 +1547,12 @@ pub struct Board {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpmiPmu {
     pub sid: u8,
+    /// Original is-primary controls global RTC service ownership, not register presence.
+    pub primary: bool,
+    /// PMU output's local edge vector, independently of the response vector.
+    pub interrupt: Option<u16>,
+    pub alarm_monitor: u8,
+    pub identity: Option<pmu::Window>,
     pub windows: Vec<pmu::Window>,
     pub rtc: Option<pmu::Rtc>,
 }
@@ -2802,7 +2808,16 @@ fn spmi_controllers(
         let mut pmus = Vec::new();
         for child in node.children().ok_or("SPMI children are malformed")? {
             if child.compatible(PMU) {
-                pmus.push(spmi_pmu(&child)?);
+                let pmu = spmi_pmu(&child)?;
+                if pmu.interrupt.is_some()
+                    && (child
+                        .property("interrupt-parent")
+                        .is_none_or(|bytes| bytes.len() != 4)
+                        || child.first_u32("interrupt-parent") != Some(local))
+                {
+                    return Err("PMU output is not parented by its own SPMI controller".into());
+                }
+                pmus.push(pmu);
             }
         }
         controllers.push(SpmiController {
@@ -2812,6 +2827,15 @@ fn spmi_controllers(
             irq,
             pmus,
         });
+    }
+    if controllers
+        .iter()
+        .flat_map(|controller| &controller.pmus)
+        .filter(|pmu| pmu.primary)
+        .count()
+        > 1
+    {
+        return Err("multiple primary PMU system-service owners".into());
     }
     Ok(controllers)
 }
@@ -2824,18 +2848,47 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
         .and_then(|sid| u8::try_from(sid).ok())
         .filter(|&sid| sid <= 0xf)
         .ok_or("PMU has no four-bit SPMI slave ID")?;
+    let primary = match node.property("is-primary") {
+        None => false,
+        Some(bytes) if bytes.len() == 4 => match node.first_u32("is-primary") {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err("PMU primary-service encoding is unqualified".into()),
+        },
+        _ => return Err("PMU is-primary is not one full32 word".into()),
+    };
+    let interrupt = match node.property("interrupts") {
+        None => None,
+        Some(bytes) if bytes.len() == 4 => Some(
+            node.first_u32("interrupts")
+                .and_then(|vector| u16::try_from(vector).ok())
+                .filter(|&vector| vector < 288)
+                .ok_or("PMU local interrupt vector exceeds the SPMI input bank")?,
+        ),
+        _ => return Err("PMU interrupt vector is not one full32 word".into()),
+    };
     let address = |value: u32| u16::try_from(value).map_err(|_| "PMU address above 16 bits");
     let pair = |name: &str| -> Result<Option<pmu::Window>, String> {
         match node.cells32(name).as_deref() {
             None => Ok(None),
-            Some(&[base, bytes]) => Ok(Some(pmu::Window {
-                base: address(base)?,
-                bytes: address(bytes)?,
-            })),
+            Some(&[base, bytes]) if node.property(name).is_some_and(|value| value.len() == 8) => {
+                Ok(Some(pmu::Window {
+                    base: address(base)?,
+                    bytes: address(bytes)?,
+                }))
+            }
             Some(_) => Err(format!("PMU {name} is not <base bytes>")),
         }
     };
-    let single = |name: &str| node.first_u32(name).map(address).transpose();
+    let single = |name: &str| -> Result<Option<u16>, String> {
+        if node.property(name).is_some_and(|bytes| bytes.len() != 4) {
+            return Err(format!("PMU {name} is not one full32 word"));
+        }
+        node.first_u32(name)
+            .map(address)
+            .transpose()
+            .map_err(String::from)
+    };
     let mut windows = Vec::new();
     for name in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
         windows.extend(pair(name)?);
@@ -2877,11 +2930,20 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
             let clock_offset = pair("info-clock_offset")?
                 .filter(|w| w.bytes == 6)
                 .ok_or("PMU RTC clock offset is not six bytes")?;
+            if node
+                .property("info-rtc_alarm_ctrl_en_mask")
+                .is_none_or(|bytes| bytes.len() != 4)
+            {
+                return Err("PMU alarm enable mask is not one full32 word".into());
+            }
             let alarm_enable = node
                 .first_u32("info-rtc_alarm_ctrl_en_mask")
                 .and_then(|mask| u8::try_from(mask).ok())
                 .ok_or("PMU RTC has no alarm enable mask")?;
             let bits = |name: &str| -> Result<Option<u8>, String> {
+                if node.property(name).is_some_and(|bytes| bytes.len() != 4) {
+                    return Err(format!("PMU {name} is not one full32 word"));
+                }
                 node.first_u32(name)
                     .map(|mask| {
                         u8::try_from(mask).map_err(|_| format!("PMU {name} exceeds a byte"))
@@ -2902,7 +2964,33 @@ fn spmi_pmu(node: &Node<'_>) -> Result<SpmiPmu, String> {
             })
         }
     };
-    Ok(SpmiPmu { sid, windows, rtc })
+    let alarm_monitor = if rtc.is_some() {
+        single("info-rtc_alarm_monitor_mask")?
+            .and_then(|mask| u8::try_from(mask).ok())
+            .ok_or("PMU RTC has no byte monitor mask")?
+    } else {
+        0
+    };
+    if (primary || interrupt.is_some()) && rtc.is_none() {
+        return Err("PMU global service/output requires a qualified RTC owner".into());
+    }
+    let identity = pair("info-id")?;
+    let configuration =
+        pmu::Configuration::new(windows.clone(), rtc, alarm_monitor).map_err(String::from)?;
+    if let Some(identity) = identity {
+        configuration
+            .with_unqualified_identity(identity)
+            .map_err(String::from)?;
+    }
+    Ok(SpmiPmu {
+        sid,
+        primary,
+        interrupt,
+        alarm_monitor,
+        identity,
+        windows,
+        rtc,
+    })
 }
 
 fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
@@ -5641,6 +5729,26 @@ mod tests {
         };
         let controllers = spmi_controllers(&io, &translate, 130).unwrap();
         assert_eq!(controllers.len(), 7);
+        assert_eq!(
+            controllers
+                .iter()
+                .flat_map(|c| &c.pmus)
+                .filter(|p| p.primary)
+                .count(),
+            1
+        );
+        assert_eq!(
+            controllers
+                .iter()
+                .flat_map(|c| &c.pmus)
+                .filter(|p| p.rtc.is_some())
+                .count(),
+            2
+        );
+        let mut devices = crate::machine::apple::AppleDevices::new();
+        for controller in &controllers {
+            devices.add_spmi(controller, None).unwrap();
+        }
         let mut bases = Vec::new();
         for controller in controllers {
             assert_eq!(controller.configuration.profile(), spmi::Profile::Gen1);
@@ -5656,8 +5764,9 @@ mod tests {
             assert!(!bases.contains(&base));
             bases.push(base);
         }
-        // This validates placement, not autonomous PMU IRQ/RTC service
-        // ownership or a whole-board admission claim.
+        // Both original RTC register banks mount while the single primary
+        // service owns the global alarm output. This does not qualify the
+        // SMC CLKM helper, autonomous sleep/wake, or whole-board admission.
     }
 
     #[test]
@@ -5694,6 +5803,8 @@ mod tests {
                     ("info-clock_offset", &cells(offset)),
                     ("info-rtc_alarm_ctrl", &cells(&[0xf800])),
                     ("info-rtc_alarm_ctrl_en_mask", &cells(&[0x40])),
+                    ("info-rtc_alarm_monitor_mask", &cells(&[1])),
+                    ("is-primary", &cells(&[1])),
                     ("info-rtc_alarm_offset", &cells(&[0xf808])),
                     ("info-rtc_alarm_event", &cells(&[0xf80c])),
                     ("info-rtc_irq_mask_offset", &cells(&[0xf80e])),
@@ -5736,6 +5847,9 @@ mod tests {
             panic!("one visible PMU");
         };
         assert_eq!(pmu.sid, 0xe);
+        assert!(pmu.primary);
+        assert_eq!(pmu.alarm_monitor, 1);
+        assert_eq!(pmu.interrupt, None);
         let window = |base, bytes| pmu::Window { base, bytes };
         assert_eq!(
             pmu.windows,
