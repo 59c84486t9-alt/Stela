@@ -421,6 +421,42 @@ address_layout(struct translator *t)
    return true;
 }
 
+static bool
+fixed_storage_type(struct translator *t, LLVMTypeRef type, unsigned depth,
+                   unsigned *budget)
+{
+   if (depth >= 64 || !*budget)
+      return fail(t, STELA_AIR_LIMIT, "GEP type-layout budget exceeded");
+   (*budget)--;
+   switch (LLVMGetTypeKind(type)) {
+   case LLVMArrayTypeKind:
+   case LLVMVectorTypeKind:
+      return fixed_storage_type(t, LLVMGetElementType(type), depth + 1, budget);
+   case LLVMStructTypeKind:
+      if (LLVMIsOpaqueStruct(type))
+         return fail(t, STELA_AIR_TYPE, "opaque GEP storage type");
+      for (unsigned i = 0; i < LLVMCountStructElementTypes(type); i++) {
+         if (!fixed_storage_type(t, LLVMStructGetTypeAtIndex(type, i), depth + 1, budget))
+            return false;
+      }
+      return true;
+   case LLVMIntegerTypeKind:
+   case LLVMPointerTypeKind:
+   case LLVMHalfTypeKind:
+   case LLVMFloatTypeKind:
+   case LLVMDoubleTypeKind:
+   case LLVMX86_FP80TypeKind:
+   case LLVMFP128TypeKind:
+   case LLVMPPC_FP128TypeKind:
+   case LLVMBFloatTypeKind:
+      return LLVMTypeIsSized(type) || fail(t, STELA_AIR_TYPE, "unsized GEP storage type");
+   default:
+      /* In particular, LLVM's fixed-size C DataLayout queries must not be
+       * called on scalable vectors or aggregates containing them. */
+      return fail(t, STELA_AIR_TYPE, "unsupported/scalable GEP storage type");
+   }
+}
+
 static nir_def *
 gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
 {
@@ -432,6 +468,9 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
       return NULL;
    }
    LLVMTypeRef type = LLVMGetGEPSourceElementType(inst);
+   unsigned type_budget = 4096;
+   if (!fixed_storage_type(t, type, 0, &type_budget))
+      return NULL;
    nir_def *address = base->def;
    unsigned operands = LLVMGetNumOperands(inst);
    for (unsigned i = 1; i < operands; i++) {
@@ -455,12 +494,14 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
          address = nir_iadd_imm(&t->b, address, LLVMOffsetOfElement(t->layout, type, field));
          type = LLVMStructGetTypeAtIndex(type, field);
       } else {
+         bool vector_element = false;
          if (i > 1) {
             LLVMTypeKind kind = LLVMGetTypeKind(type);
             if (kind != LLVMArrayTypeKind && kind != LLVMVectorTypeKind) {
                fail(t, STELA_AIR_TYPE, "unsupported GEP aggregate");
                return NULL;
             }
+            vector_element = kind == LLVMVectorTypeKind;
             type = LLVMGetElementType(type);
          }
          if (!LLVMTypeIsSized(type)) {
@@ -472,7 +513,20 @@ gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
             return NULL;
          offset = offset->bit_size == 1 ?
             nir_ineg(&t->b, nir_b2i64(&t->b, offset)) : nir_i2i64(&t->b, offset);
-         offset = nir_imul_imm(&t->b, offset, LLVMABISizeOfType(t->layout, type));
+         uint64_t stride;
+         if (vector_element) {
+            /* LLVM's getSequentialElementStride bit-packs vectors, even when
+             * the scalar element has a larger ABI allocation alignment.
+             * Arrays and the root pointer step retain allocation-size stride. */
+            stride = LLVMStoreSizeOfType(t->layout, type);
+            if (LLVMSizeOfTypeInBits(t->layout, type) != stride * 8) {
+               fail(t, STELA_AIR_TYPE, "non-byte-addressable GEP vector element");
+               return NULL;
+            }
+         } else {
+            stride = LLVMABISizeOfType(t->layout, type);
+         }
+         offset = nir_imul_imm(&t->b, offset, stride);
          address = nir_iadd(&t->b, address, offset);
       }
    }

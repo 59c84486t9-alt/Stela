@@ -66,9 +66,10 @@ expect_refusal(const char *body, const char *extra, unsigned budget,
 }
 
 static void
-constant_store(const char *body, uint64_t expected, uint64_t address)
+constant_store_layout(const char *prefix, const char *body,
+                      uint64_t expected, uint64_t address)
 {
-   LLVMMemoryBufferRef input = stela_air_test_bitcode(body, "");
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, stela_air_test_metadata, "");
    struct stela_air_error error;
    nir_shader *nir = translate(input, &test_nir_options, 100, &error);
    if (!nir)
@@ -100,6 +101,12 @@ constant_store(const char *body, uint64_t expected, uint64_t address)
 }
 
 static void
+constant_store(const char *body, uint64_t expected, uint64_t address)
+{
+   constant_store_layout(stela_air_test_prefix, body, expected, address);
+}
+
+static void
 constant_semantics(void)
 {
    /* Validate low-bit truncation, sign extension from i1, signed comparison,
@@ -121,6 +128,21 @@ constant_semantics(void)
    constant_store("%v = shl i16 1, 15\n%s = zext i16 %v to i32\nstore i32 %s, ptr addrspace(1) %out, align 4\nret void\n", 32768, 0x100000);
    constant_store("%address = getelementptr i32, ptr addrspace(1) %out, i1 true\nstore i32 17, ptr addrspace(1) %address, align 4\nret void\n", 17, 0xffffc);
    constant_store("%address = getelementptr <3 x i32>, ptr addrspace(1) %out, i32 1\nstore i32 23, ptr addrspace(1) %address, align 4\nret void\n", 23, 0x100010);
+   const char *overaligned =
+      "target datalayout = \"e-p:64:64-i32:64-i64:64-v64:64-n8:16:32\"\n"
+      "target triple = \"air64_v28-apple-macosx26.7.0\"\n"
+      "define void @kernel(i32 %tid, ptr addrspace(1) %out) {\n";
+   /* LLVM 23 getSequentialElementStride: vector elements use packed store
+    * size (+4 here), arrays/root steps use ABI allocation size (+8 here). */
+   constant_store_layout(overaligned,
+      "%address = getelementptr <2 x i32>, ptr addrspace(1) %out, i32 0, i32 1\n"
+      "store i32 37, ptr addrspace(1) %address, align 4\nret void\n", 37, 0x100004);
+   constant_store_layout(overaligned,
+      "%address = getelementptr [2 x <2 x i32>], ptr addrspace(1) %out, i32 0, i32 1, i32 1\n"
+      "store i32 41, ptr addrspace(1) %address, align 4\nret void\n", 41, 0x10000c);
+   constant_store_layout(overaligned,
+      "%address = getelementptr [2 x i32], ptr addrspace(1) %out, i32 0, i32 1\n"
+      "store i32 43, ptr addrspace(1) %address, align 4\nret void\n", 43, 0x100008);
 }
 
 static char *
@@ -181,6 +203,9 @@ tests(void)
    expect_refusal("ret void\n", "!air.function_constants = !{!3}\n", 100, STELA_AIR_METADATA);
    expect_refusal("%v = add i32 undef, 1\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("%address = inttoptr i64 1048576 to ptr addrspace(1)\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("%address = getelementptr <8 x i1>, ptr addrspace(1) %out, i32 0, i32 1\nret void\n", "", 100, STELA_AIR_VERIFY);
+   expect_refusal("%address = getelementptr <vscale x 4 x i32>, ptr addrspace(1) %out, i32 1\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("%address = getelementptr [2 x <vscale x 4 x i32>], ptr addrspace(1) %out, i32 1\nret void\n", "", 100, STELA_AIR_TYPE);
    const struct stela_air_options options = {.workgroup_size = {32, 1, 1}, .max_instructions = 100};
    const char malformed[] = "BC\xc0\xde\0\0\0\0";
    CHECK(!stela_air_to_nir(malformed, sizeof(malformed), "kernel", &test_nir_options, &options, &error));
