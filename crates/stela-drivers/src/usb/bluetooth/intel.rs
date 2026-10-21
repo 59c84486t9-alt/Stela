@@ -64,11 +64,18 @@ pub enum Error {
     },
     Timeout(&'static str),
     /// A later stage failed after genuine completed boots. No ready report is
-    /// returned; retain completed observations and the actual pending identity.
+    /// returned; retain completed observations and the latest parsed identity,
+    /// including a rejected later boot rather than substituting the prior IML.
     Stages {
         cause: Box<Error>,
         completed: Vec<StageObservation>,
         pending: Box<ControllerIdentity>,
+    },
+    /// A genuine boot produced this parsed identity, but validation rejected it.
+    /// This observation is never counted among successfully completed stages.
+    RejectedBoot {
+        cause: Box<Error>,
+        observation: Box<StageObservation>,
     },
     Cleanup {
         cause: Box<Error>,
@@ -1693,6 +1700,53 @@ pub(crate) mod tests {
                         assert!(hci.io.script.steps.is_empty());
                     }
                 }
+            }
+        }
+        #[test]
+        fn rejected_second_boot_retains_actual_pending_identity_without_crediting_stage() {
+            for contradictory_security in [false, true] {
+                let (device, catalog, mut script) = fixture_iml(0x1e, 1, true);
+                let payload = if contradictory_security {
+                    edit(&observation(0x1e, 1, 3, false), 0x2f, Some(&[0]))
+                } else {
+                    edit(
+                        &observation(0x1e, 1, 3, false),
+                        0x1f,
+                        Some(&10u32.to_le_bytes()),
+                    )
+                };
+                let actual =
+                    ControllerIdentity::Tlv(TlvIdentity::parse(&device, &payload).unwrap());
+                script.steps[13].events[0].1 = complete(READ_VERSION, &payload);
+                let mut hci = transport(device, script);
+                let Error::Stages {
+                    cause,
+                    completed,
+                    pending,
+                } = initialize(&mut hci, &catalog).unwrap_err()
+                else {
+                    panic!("completed IML retained")
+                };
+                assert_eq!(completed.len(), 1);
+                let Error::RejectedBoot { cause, observation } = *cause else {
+                    panic!("rejected boot retained separately")
+                };
+                assert!(matches!(*cause, Error::Protocol(_)));
+                assert_eq!(*pending, actual);
+                assert_eq!(observation.after, actual);
+                assert_ne!(completed[0].after, actual);
+                assert_eq!(observation.before, completed[0].after);
+                assert_eq!(observation.firmware.name, "intel/ibt-0190-0041-usb.sfi");
+                assert_eq!(
+                    observation.firmware.sha256,
+                    Sha256::digest(combined_image())[..]
+                );
+                assert_eq!(observation.boot_notification, [0, 1, 0, 0, 0, 0]);
+                assert_eq!(hci.state(), State::Closed);
+                assert_eq!(
+                    hci.io.script.steps.front().unwrap().command[..2],
+                    READ_BD_ADDR.to_le_bytes()
+                );
             }
         }
     }

@@ -21,10 +21,11 @@ impl<B: Io> Engine<'_, B> {
         }
         self.hci.intel_mode(true)?;
         let mut stages = Vec::new();
-        match self.upload_stages(provider, before, &mut stages) {
+        let mut pending = before.clone();
+        match self.upload_stages(provider, before, &mut stages, &mut pending) {
             Ok(report) => Ok(report),
             Err(cause) if !stages.is_empty() => Err(Error::Stages {
-                pending: Box::new(stages.last().unwrap().after.clone()),
+                pending: Box::new(pending),
                 completed: stages,
                 cause: Box::new(cause),
             }),
@@ -171,6 +172,7 @@ impl<B: Io> Engine<'_, B> {
         provider: &'p dyn Provider,
         initial_identity: ControllerIdentity,
         stages: &mut Vec<StageObservation>,
+        pending: &mut ControllerIdentity,
     ) -> Result<Report<'p>> {
         let mut before = initial_identity.clone();
         let mut images = Vec::new();
@@ -190,39 +192,8 @@ impl<B: Io> Engine<'_, B> {
                 self.hci.intel_mode(false)?;
             }
             let after = self.identity(before.parameters())?;
-            let expected_type = if prepared.intermediate { 2 } else { 3 };
-            let type_matches = match &after {
-                ControllerIdentity::Legacy(_) => after.is_operational(),
-                ControllerIdentity::Tlv(i) => i.image_type == expected_type,
-            };
-            if !before.same_hardware(&after)
-                || !type_matches
-                || (matches!(&before, ControllerIdentity::Tlv(_))
-                    || matches!(&before,ControllerIdentity::Legacy(i) if i.hardware_variant >= 0x11))
-                    && after.build() != Some(prepared.sfi.build)
-            {
-                return Err(Error::Protocol("postboot identity/version mismatch"));
-            }
-            if let (ControllerIdentity::Tlv(old), ControllerIdentity::Tlv(current)) =
-                (&before, &after)
-            {
-                current.validate_security(old)?;
-                if let Some(initial) = initial_bootloader.as_ref() {
-                    current.validate_security(initial)?;
-                }
-            }
-            if prepared.intermediate {
-                let (ControllerIdentity::Tlv(old), ControllerIdentity::Tlv(iml)) =
-                    (&before, &after)
-                else {
-                    unreachable!()
-                };
-                // Verify contradictory or missing effective observations before
-                // treating this IML as a source for the next stage's requirement.
-                iml.boot_requirements(Some(old))?;
-                initial_bootloader = Some(old.clone());
-            }
-            stages.push(StageObservation {
+            *pending = after.clone();
+            let observation = StageObservation {
                 before: before.clone(),
                 after: after.clone(),
                 firmware: prepared.image.into(),
@@ -234,7 +205,25 @@ impl<B: Io> Engine<'_, B> {
                 } else {
                     DsbrReport::new(self.dsbr)
                 },
-            });
+            };
+            if let Err(cause) = validate_boot(
+                &before,
+                &after,
+                prepared.intermediate,
+                prepared.sfi.build,
+                initial_bootloader.as_ref(),
+            ) {
+                return Err(Error::RejectedBoot {
+                    cause: Box::new(cause),
+                    observation: Box::new(observation),
+                });
+            }
+            if prepared.intermediate
+                && let ControllerIdentity::Tlv(old) = &before
+            {
+                initial_bootloader = Some(old.clone());
+            }
+            stages.push(observation);
             let applied = self.apply_dsbr(&after)?;
             stages.last_mut().unwrap().dsbr = applied;
             if applied.applied.is_some() {
@@ -262,7 +251,9 @@ impl<B: Io> Engine<'_, B> {
                     return Err(Error::Protocol("DDC completion length"));
                 }
             }
-            if self.identity(after.parameters())? != after || !self.events.is_empty() {
+            let final_identity = self.identity(after.parameters())?;
+            *pending = final_identity.clone();
+            if final_identity != after || !self.events.is_empty() {
                 return Err(Error::Protocol(
                     "identity changed/surplus completions during DDC configuration",
                 ));
@@ -290,4 +281,36 @@ impl<B: Io> Engine<'_, B> {
         }
         Err(Error::Protocol("Intel firmware stage bound exceeded"))
     }
+}
+
+fn validate_boot(
+    before: &ControllerIdentity,
+    after: &ControllerIdentity,
+    intermediate: bool,
+    build: [u8; 3],
+    initial: Option<&TlvIdentity>,
+) -> Result<()> {
+    let expected_type = if intermediate { 2 } else { 3 };
+    let type_matches = match after {
+        ControllerIdentity::Legacy(_) => after.is_operational(),
+        ControllerIdentity::Tlv(i) => i.image_type == expected_type,
+    };
+    if !before.same_hardware(after)
+        || !type_matches
+        || (matches!(before, ControllerIdentity::Tlv(_))
+            || matches!(before,ControllerIdentity::Legacy(i) if i.hardware_variant >= 0x11))
+            && after.build() != Some(build)
+    {
+        return Err(Error::Protocol("postboot identity/version mismatch"));
+    }
+    if let (ControllerIdentity::Tlv(old), ControllerIdentity::Tlv(current)) = (before, after) {
+        current.validate_security(old)?;
+        if let Some(initial) = initial {
+            current.validate_security(initial)?;
+        }
+        if intermediate {
+            current.boot_requirements(Some(old))?;
+        }
+    }
+    Ok(())
 }
