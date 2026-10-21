@@ -173,6 +173,19 @@ metadata_refusal(const char *before, const char *after, enum stela_air_error_kin
 }
 
 static void
+module_flag_test(const char *extra, enum stela_air_error_kind expected)
+{
+   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, extra);
+   struct stela_air_error error;
+   nir_shader *nir = translate(input, &test_nir_options, 100, &error);
+   if (error.kind != expected)
+      fprintf(stderr, "module flag wanted %u got %u: %s\n", expected, error.kind, error.detail);
+   CHECK(error.kind == expected && (nir != NULL) == (expected == STELA_AIR_OK));
+   ralloc_free(nir);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
 tests(void)
 {
    struct stela_air_error error;
@@ -186,7 +199,37 @@ tests(void)
    CHECK(!translate(input, &test_nir_options, 1, &error) && error.kind == STELA_AIR_LIMIT);
    LLVMDisposeMemoryBuffer(input);
    constant_semantics();
-   metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_METADATA);
+   metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
+   metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_TARGET);
+   metadata_refusal("i32 4, i32 0, i32 0", "i32 4, i32 1, i32 0", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11,!12,!13}\n"
+      "!11 = !{i32 1, !\"wchar_size\", i32 4}\n"
+      "!12 = !{i32 7, !\"frame-pointer\", i32 2}\n"
+      "!13 = !{i32 7, !\"air.max_device_buffers\", i32 31}\n", STELA_AIR_OK);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 7, !\"air.max_device_buffers\", i32 7}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 7, !\"air.max_device_buffers\", i32 0}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 1, !\"air.max_device_buffers\", i32 31}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 7, !\"air.future_semantics\", i32 31}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 1, !\"wchar_size\", i32 8}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11}\n"
+      "!11 = !{i32 7, !\"frame-pointer\", i32 3}\n", STELA_AIR_METADATA);
+   module_flag_test("!llvm.module.flags = !{!11,!12}\n"
+      "!11 = !{i32 7, !\"air.max_device_buffers\", i32 31}\n"
+      "!12 = !{i32 7, !\"air.max_device_buffers\", i32 32}\n", STELA_AIR_VERIFY);
+   char *disabled_fetch = replace_once(stela_air_test_metadata,
+      "air.compile.framebuffer_fetch_enable", "air.compile.framebuffer_fetch_disable");
+   input = stela_air_test_custom_bitcode(stela_air_test_prefix,
+      stela_air_test_store_body, disabled_fetch, "");
+   nir = translate(input, &test_nir_options, 100, &error);
+   CHECK(nir && error.kind == STELA_AIR_OK);
+   ralloc_free(nir);
+   LLVMDisposeMemoryBuffer(input);
+   free(disabled_fetch);
    metadata_refusal("air.read_write", "air.read", STELA_AIR_MEMORY);
    metadata_refusal("i32 7, i32 1", "i32 7, i32 2", STELA_AIR_METADATA);
    metadata_refusal("air.thread_position_in_grid", "air.threadgroup_position_in_grid", STELA_AIR_ARGUMENT);

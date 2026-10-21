@@ -44,6 +44,8 @@ struct translator {
    struct hash_table *values;
    const struct stela_air_options *options;
    struct stela_air_error *error;
+   unsigned air_minor;
+   unsigned max_device_buffers;
 };
 
 static bool
@@ -126,9 +128,60 @@ version_metadata(struct translator *t, const char *name, bool language)
    unsigned base = language ? 1 : 0;
    if (fields_count != base + 3 || (language && !md_string(fields[0], "Metal")) ||
        !md_uint(fields[base], &major) || !md_uint(fields[base + 1], &minor) ||
-       !md_uint(fields[base + 2], &patch) ||
-       major != (language ? 4 : 2) || minor != (language ? 0 : 8) || patch != 0)
-      return fail(t, STELA_AIR_METADATA, "unsupported %s (qualified AIR 2.8 / Metal 4.0)", name);
+       !md_uint(fields[base + 2], &patch) || patch != 0)
+      return fail(t, STELA_AIR_METADATA, "invalid %s", name);
+   bool supported = language ?
+      ((major == 1 && minor >= 1 && minor <= 2) ||
+       (major == 2 && minor <= 4) || (major == 3 && minor <= 2) ||
+       (major == 4 && minor <= 1)) : (major == 2 && (minor == 8 || minor == 9));
+   /* AIR 2.8 has only been observed with Metal 4.0 here. The AIR 2.9
+    * combinations below come from actual independent compiler requests. */
+   if (language && t->air_minor == 8)
+      supported &= major == 4 && minor == 0;
+   if (!supported)
+      return fail(t, STELA_AIR_METADATA, "unsupported %s %u.%u.%u", name, major, minor, patch);
+   if (!language)
+      t->air_minor = minor;
+   return true;
+}
+
+static bool
+module_flags(struct translator *t)
+{
+   /* These are the LLVM IR serialized behavior values, not the smaller C API
+    * LLVMModuleFlagBehavior enum (which does not expose Max in LLVM 23). */
+   enum { IR_FLAG_ERROR = 1, IR_FLAG_MAX = 7 };
+   const char *keys[] = {"wchar_size", "frame-pointer", "air.max_device_buffers",
+      "air.max_constant_buffers", "air.max_threadgroup_buffers", "air.max_textures",
+      "air.max_read_write_textures", "air.max_samplers"};
+   LLVMValueRef flags[AIR_MAX_METADATA_OPERANDS];
+   unsigned count, seen = 0;
+   if (!named_md(t, "llvm.module.flags", flags, &count))
+      return false;
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
+      unsigned field_count, behavior, value, key;
+      if (!md_node(t, flags[i], fields, &field_count) || field_count != 3 ||
+          !md_uint(fields[0], &behavior) || !md_uint(fields[2], &value))
+         return fail(t, STELA_AIR_METADATA, "unsupported module flag shape");
+      for (key = 0; key < ARRAY_SIZE(keys); key++) {
+         if (md_string(fields[1], keys[key]))
+            break;
+      }
+      if (key == ARRAY_SIZE(keys) || (seen & (1u << key)))
+         return fail(t, STELA_AIR_METADATA, "unsupported/duplicate module flag");
+      seen |= 1u << key;
+      if (behavior != (key == 0 ? IR_FLAG_ERROR : IR_FLAG_MAX) ||
+          (key == 0 && value != 4) || (key == 1 && value > 2) ||
+          (key >= 2 && !value))
+         return fail(t, STELA_AIR_METADATA, "unsupported module flag value: %s", keys[key]);
+      if (key == 2)
+         t->max_device_buffers = value;
+   }
+   /* No linking, CPU frame operations or source wchar operations occur in the
+    * implemented integer compute subset. Other resource kinds remain refused.
+    * Device-buffer location bounds are enforced below, never advertised as the
+    * hardware's actual Metal capability or silently removed from the input. */
    return true;
 }
 
@@ -140,7 +193,8 @@ module_metadata(struct translator *t)
       size_t size;
       const char *name = LLVMGetNamedMetadataName(node, &size);
       const char *allowed[] = {"air.version", "air.language_version",
-                              "air.compile_options", "air.kernel", "llvm.ident"};
+                              "air.compile_options", "air.kernel", "llvm.ident",
+                              "llvm.module.flags"};
       bool found = false;
       for (unsigned i = 0; i < ARRAY_SIZE(allowed); i++)
          found |= size == strlen(allowed[i]) && !memcmp(name, allowed[i], size);
@@ -149,7 +203,7 @@ module_metadata(struct translator *t)
                      (int)MIN2(size, 160), name);
    }
    if (!version_metadata(t, "air.version", false) ||
-       !version_metadata(t, "air.language_version", true))
+       !version_metadata(t, "air.language_version", true) || !module_flags(t))
       return false;
    LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS];
    unsigned count;
@@ -161,7 +215,8 @@ module_metadata(struct translator *t)
       if (!md_node(t, nodes[i], fields, &fields_count) || fields_count != 1 ||
           !(md_string(fields[0], "air.compile.denorms_disable") ||
             md_string(fields[0], "air.compile.fast_math_enable") ||
-            md_string(fields[0], "air.compile.framebuffer_fetch_enable")))
+            md_string(fields[0], "air.compile.framebuffer_fetch_enable") ||
+            md_string(fields[0], "air.compile.framebuffer_fetch_disable")))
          return fail(t, STELA_AIR_METADATA, "unsupported AIR compile option");
    }
    /* These options do not change the integer/buffer-only subset implemented
@@ -314,6 +369,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
                 locations != 1 || desc.index >= AIR_MAX_ARGUMENTS || buffer_indices[desc.index])
                return fail(t, STELA_AIR_METADATA, "unsupported/duplicate buffer location");
             buffer_indices[desc.index] = true;
+            if (t->max_device_buffers && desc.index >= t->max_device_buffers)
+               return fail(t, STELA_AIR_METADATA, "buffer location exceeds AIR module limit");
             has_location = true;
             f += 2;
          } else if (md_string(key, "air.address_space")) {
@@ -755,10 +812,9 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    }
    LLVMDisposeMessage(verification);
    const char *target = LLVMGetTarget(t.module);
-   const char *prefix = "air64_v28-apple-macosx";
    size_t asm_size;
    LLVMGetModuleInlineAsm(t.module, &asm_size);
-   if (strncmp(target, prefix, strlen(prefix)) || asm_size ||
+   if (strncmp(target, "air64_v", 7) || asm_size ||
        LLVMGetFirstGlobal(t.module) || LLVMGetFirstGlobalAlias(t.module) ||
        LLVMGetFirstGlobalIFunc(t.module)) {
       fail(&t, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
@@ -766,6 +822,12 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    }
    if (!address_layout(&t) || !module_metadata(&t))
       goto done;
+   char target_prefix[40];
+   snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
+   if (strncmp(target, target_prefix, strlen(target_prefix))) {
+      fail(&t, STELA_AIR_TARGET, "AIR version and target triple disagree");
+      goto done;
+   }
    LLVMValueRef fn = LLVMGetNamedFunction(t.module, entry);
    if (!fn || LLVMIsDeclaration(fn) || LLVMGetFunctionCallConv(fn) != LLVMCCallConv ||
        LLVMGetTypeKind(LLVMGetReturnType(LLVMGlobalGetValueType(fn))) != LLVMVoidTypeKind ||
