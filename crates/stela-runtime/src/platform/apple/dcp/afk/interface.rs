@@ -109,6 +109,7 @@ struct Interface {
     peer_open: bool,
     terminated: bool,
     next_sequence: u8,
+    staged: Option<CommandRequest>,
     commands: BTreeMap<u8, u64>,
 }
 
@@ -127,6 +128,7 @@ pub(super) struct Interfaces {
     services: BTreeMap<u16, Interface>,
     assemblies: BTreeMap<u16, Assembly>,
     received: Option<Received>,
+    next_service: u16,
 }
 
 impl Interfaces {
@@ -149,6 +151,7 @@ impl Interfaces {
                 peer_open: false,
                 terminated: false,
                 next_sequence: 0,
+                staged: None,
                 commands: BTreeMap::new(),
             },
         );
@@ -170,15 +173,21 @@ impl Interfaces {
     }
 
     pub fn reset(&mut self) -> Result<(), &'static str> {
+        // Cancellation is progress, not a rollback transaction: completed
+        // callbacks stay removed if a later owner refuses. Close no session
+        // until all cancellations succeed, so retry cannot close it twice.
+        for interface in self.services.values_mut() {
+            interface.cancel_commands()?;
+        }
         self.assemblies.clear();
         self.received = None;
         for interface in self.services.values_mut() {
-            interface.cancel_commands()?;
             interface.peer_open = false;
             interface.terminated = false;
             interface.service.transport_closed();
             interface.next_sequence = 0;
         }
+        self.next_service = 0;
         Ok(())
     }
 
@@ -191,43 +200,64 @@ impl Interfaces {
     pub fn quiescent(&self) -> bool {
         self.services
             .values()
-            .all(|interface| interface.commands.is_empty())
+            .all(|interface| interface.commands.is_empty() && interface.staged.is_none())
     }
 
     pub fn pending(&self) -> bool {
         self.services.values().any(|interface| {
-            !interface.terminated && interface.commands.len() < 256 && interface.service.pending()
+            !interface.terminated
+                && interface.commands.len() < 256
+                && (interface.staged.is_some() || interface.service.pending())
         })
     }
 
-    /// At most one request per service per pass. Full sequence spaces apply
-    /// backpressure to the producer without consuming another request.
+    /// Publish one owned request at a time. No later producer can fail after
+    /// an earlier publication was removed from its service. A round-robin
+    /// cursor prevents a continuously active interface starving the others.
     pub fn commands(&mut self) -> Result<Vec<(u16, Vec<u8>)>, &'static str> {
-        let mut packets = Vec::new();
-        for (&number, interface) in &mut self.services {
-            if interface.terminated || interface.commands.len() == 256 {
-                continue;
-            }
-            let Some(request) = interface.service.take_command() else {
-                continue;
-            };
-            let sequence = (0..=255)
-                .map(|offset| interface.next_sequence.wrapping_add(offset))
-                .find(|sequence| !interface.commands.contains_key(sequence))
-                .expect("unoccupied command sequence");
-            u32::try_from(request.payload.len())
-                .map_err(|_| "DCP AFKEPV2 local command length overflow")?;
-            interface.commands.insert(sequence, request.cookie);
-            interface.next_sequence = sequence.wrapping_add(1);
-            let mut packet = alloc::vec![0; 24];
-            packet[8] = request.packet_type;
-            packet[9] = COMMAND;
-            packet[17] = sequence;
-            packet[20..24].copy_from_slice(&request.reply_bytes.to_le_bytes());
-            packet.extend_from_slice(&request.payload);
-            packets.push((number, packet));
+        let candidate = self
+            .services
+            .range(self.next_service..)
+            .chain(self.services.range(..self.next_service))
+            .find(|(_, interface)| {
+                !interface.terminated
+                    && interface.commands.len() < 256
+                    && (interface.staged.is_some() || interface.service.pending())
+            })
+            .map(|(&number, _)| number);
+        let Some(number) = candidate else {
+            return Ok(Vec::new());
+        };
+        let interface = self.services.get_mut(&number).expect("selected service");
+        if interface.staged.is_none() {
+            interface.staged = interface.service.take_command();
         }
-        Ok(packets)
+        let Some(request) = &interface.staged else {
+            return Ok(Vec::new());
+        };
+        // The repeated AFKEPV2 total includes its 24 message/command bytes.
+        // Retain the producer-owned request on every validation refusal.
+        request
+            .payload
+            .len()
+            .checked_add(24)
+            .and_then(|length| u32::try_from(length).ok())
+            .ok_or("DCP AFKEPV2 local command length overflow")?;
+        let sequence = (0..=255)
+            .map(|offset| interface.next_sequence.wrapping_add(offset))
+            .find(|sequence| !interface.commands.contains_key(sequence))
+            .expect("unoccupied command sequence");
+        let mut packet = alloc::vec![0; 24];
+        packet[8] = request.packet_type;
+        packet[9] = COMMAND;
+        packet[17] = sequence;
+        packet[20..24].copy_from_slice(&request.reply_bytes.to_le_bytes());
+        packet.extend_from_slice(&request.payload);
+        interface.commands.insert(sequence, request.cookie);
+        interface.staged = None;
+        interface.next_sequence = sequence.wrapping_add(1);
+        self.next_service = number.wrapping_add(1);
+        Ok(alloc::vec![(number, packet)])
     }
 
     pub fn receive(
@@ -358,6 +388,10 @@ impl Interface {
     fn cancel_commands(&mut self) -> Result<(), &'static str> {
         // Original createErrorResponses (AP 0x94c04bc) settles each pending
         // command with OFFLINE before disconnect completes.
+        if let Some(request) = &self.staged {
+            self.service.complete(request.cookie, OFFLINE, Vec::new())?;
+            self.staged = None;
+        }
         while let Some((&sequence, &cookie)) = self.commands.first_key_value() {
             self.service.complete(cookie, OFFLINE, Vec::new())?;
             self.commands.remove(&sequence);
@@ -622,6 +656,35 @@ mod tests {
                 .push((cookie, status, bytes));
             Ok(())
         }
+    }
+
+    #[test]
+    fn local_publication_is_incremental_and_fair_across_service_owners() {
+        let producer = Rc::new(RefCell::new(Producer::default()));
+        producer.borrow_mut().requests.extend(10..14);
+        let mut interfaces = Interfaces::default();
+        for number in [1, 7] {
+            interfaces
+                .register(
+                    Descriptor {
+                        number,
+                        name: "client",
+                        properties: b"<dict/>\0".to_vec(),
+                    },
+                    Box::new(Client(producer.clone())),
+                )
+                .unwrap();
+        }
+        for (number, cookie) in [(1, 10u64), (7, 11), (1, 12), (7, 13)] {
+            let packets = interfaces.commands().unwrap();
+            assert_eq!(packets.len(), 1); // No later owner is consumed in this call.
+            assert_eq!(packets[0].0, number);
+            assert_eq!(&packets[0].1[24..], &cookie.to_le_bytes());
+            assert_eq!(producer.borrow().requests.len(), (13 - cookie) as usize);
+        }
+        assert!(interfaces.commands().unwrap().is_empty());
+        interfaces.reset().unwrap();
+        assert_eq!(producer.borrow().completions.len(), 4);
     }
 
     #[test]

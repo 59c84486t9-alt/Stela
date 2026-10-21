@@ -339,13 +339,15 @@ impl Afk {
                 Err("DCP AFK queue notification on an endpoint that has not started")
             }
             (SHUTDOWN, State::Started { .. }) => {
+                // Cancellation may refuse after earlier completions committed.
+                // Keep the transport retryable until every owner has settled.
+                self.interfaces.reset()?;
                 self.state = State::Stopped;
                 self.incoming.clear();
                 self.peer = lifecycle::PeerState::default();
                 self.accepted = None;
                 self.reply = None;
                 self.outgoing.clear();
-                self.interfaces.reset()?;
                 self.pause_completion = false;
                 self.sequence = 0;
                 self.transmit_full = false;
@@ -930,6 +932,103 @@ mod tests {
         assert_eq!(queued.get(), 2);
         assert!(!afk.pause_completion && afk.retained_idle());
         assert_eq!(read_word(&mut memory, rx + RING_HEADER + 0x100 + 24), 3); // PauseDone.
+    }
+
+    struct Cancelling {
+        cookie: u64,
+        queued: bool,
+        fail: Rc<Cell<bool>>,
+        effects: Rc<core::cell::RefCell<Vec<u64>>>,
+    }
+    impl interface::Service for Cancelling {
+        fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+            Err("no incoming commands")
+        }
+        fn transport_closed(&mut self) {
+            self.effects.borrow_mut().push(100 + self.cookie);
+        }
+        fn pending(&self) -> bool {
+            self.queued
+        }
+        fn take_command(&mut self) -> Option<interface::CommandRequest> {
+            core::mem::replace(&mut self.queued, false).then(|| interface::CommandRequest {
+                cookie: self.cookie,
+                packet_type: 0xc0,
+                payload: alloc::vec![7],
+                reply_bytes: 4,
+            })
+        }
+        fn complete(
+            &mut self,
+            cookie: u64,
+            status: i32,
+            bytes: Vec<u8>,
+        ) -> Result<(), &'static str> {
+            assert_eq!(cookie, self.cookie);
+            assert_eq!(status as u32, 0xe000_02d7);
+            assert!(bytes.is_empty());
+            if self.cookie == 2 && self.fail.replace(false) {
+                return Err("cancellation temporarily unavailable");
+            }
+            self.effects.borrow_mut().push(cookie);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn shutdown_retries_cancellation_progress_before_closing_any_session() {
+        let mut memory = Memory::default();
+        let mut afk = Afk::new(0x24, "bidirectional", Some(WINDOW));
+        let effects = Rc::new(core::cell::RefCell::new(Vec::new()));
+        let fail = Rc::new(Cell::new(true));
+        for (number, cookie) in [(7, 1), (9, 2)] {
+            afk.register(
+                interface::Descriptor {
+                    number,
+                    name: "cancelling",
+                    properties: b"<dict/>\0".to_vec(),
+                },
+                Box::new(Cancelling {
+                    cookie,
+                    queued: true,
+                    fail: fail.clone(),
+                    effects: effects.clone(),
+                }),
+            )
+            .unwrap();
+        }
+        let mut out = Vec::new();
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
+        afk.receive(message(GETBUF_ACK, 0x4000), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        afk.receive(message(START, 0), &mut out).unwrap();
+        for _ in 0..3 {
+            afk.dma(&mut memory, &mut out).unwrap();
+        }
+        assert!(!afk.interfaces.quiescent());
+        // Queued input/output also belong to the unfinished shutdown until
+        // cancellation succeeds; a refused callback must not discard them.
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        afk.reply = Some(Pending::new(7, alloc::vec![1]));
+        let sequence = afk.sequence;
+        out.clear();
+        assert_eq!(
+            afk.receive(message(SHUTDOWN, 0), &mut out),
+            Err("cancellation temporarily unavailable")
+        );
+        assert!(afk.started() && out.is_empty());
+        assert_eq!(&*effects.borrow(), &[1]); // Earlier completion stays settled.
+        assert_eq!(afk.sequence, sequence);
+        assert_eq!(afk.incoming.len(), 1);
+        assert!(afk.reply.is_some());
+        afk.receive(message(SHUTDOWN, 0), &mut out).unwrap();
+        assert_eq!(&*effects.borrow(), &[1, 2, 101, 102]);
+        assert_eq!(out, [message(SHUTDOWN_ACK, 0)]);
+        assert_eq!(afk.state, State::Stopped);
+        assert!(afk.interfaces.quiescent() && afk.retained_idle());
+        assert!(afk.incoming.is_empty() && afk.reply.is_none());
+        afk.start();
+        afk.receive(message(INIT, 0x100), &mut Vec::new()).unwrap();
     }
 
     struct Fault<'a> {
