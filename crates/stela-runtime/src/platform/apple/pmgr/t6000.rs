@@ -8,6 +8,8 @@
 //! access permissions, reset values, tuning, power state or command completion.
 //! A caller must still use an actual device owner for every physical effect.
 
+pub mod tunables;
+
 pub const COMPLEXES: usize = 3;
 pub const BRIDGE_COUNT: usize = 193;
 pub const BRIDGE_REG_INDEX: usize = 48;
