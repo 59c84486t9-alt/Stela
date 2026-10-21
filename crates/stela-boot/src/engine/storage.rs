@@ -140,6 +140,9 @@ pub unsafe fn open(
     for (address, warning) in &disks.warnings {
         output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
     }
+    for (location, error) in disks.bluetooth_failures() {
+        output::arguments(format_args!("BLUETOOTH FAILED {location}: {error}\n"));
+    }
     for (location, error) in &disks.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",

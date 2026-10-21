@@ -174,6 +174,9 @@ impl Prepared {
         for (address, warning) in &disks.warnings {
             output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
         }
+        for (location, error) in disks.bluetooth_failures() {
+            output::arguments(format_args!("BLUETOOTH FAILED {location}: {error}\n"));
+        }
         for device in &disks.devices {
             let id = device.identity();
             output::arguments(format_args!(

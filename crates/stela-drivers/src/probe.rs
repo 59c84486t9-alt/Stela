@@ -166,7 +166,8 @@ pub struct Disks {
     /// Complete descriptor inventories, including hubs and unbound devices.
     /// Retention does not grant hardware ownership or guest forwarding.
     pub usb_devices: Vec<xhci::Device>,
-    /// Raw USB HCI only; firmware readiness and guest forwarding are separate.
+    /// USB HCI transports with retained device-specific initialization results.
+    /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
@@ -179,6 +180,28 @@ pub struct Disks {
     pub usb_unused: Vec<(String, &'static str)>,
     /// ECAM windows that were not mapped, and so not scanned.
     pub unmapped: Vec<EcamWindow>,
+}
+
+impl Disks {
+    /// Retained failures from attempted native vendor initialization. Unknown
+    /// vendors remain raw, unverified transports; they are not failed attempts
+    /// of a backend implemented here.
+    pub fn bluetooth_failures(
+        &self,
+    ) -> impl Iterator<Item = (&str, &crate::usb::bluetooth::InitializationError)> {
+        self.bluetooth.iter().filter_map(|device| {
+            let Err(error) = device.initialization()? else {
+                return None;
+            };
+            if matches!(
+                error,
+                crate::usb::bluetooth::InitializationError::UnsupportedDevice { .. }
+            ) {
+                return None;
+            }
+            Some((device.binding().device().location.as_str(), error))
+        })
+    }
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
@@ -244,7 +267,15 @@ pub unsafe fn probe_with_provider(
                         );
                         disks.usb_inputs.extend(found.inputs);
                         disks.usb_devices.extend(found.devices);
-                        disks.bluetooth.extend(found.bluetooth);
+                        for mut device in found.bluetooth {
+                            // The retained result owns its evidence/errors;
+                            // no catalog borrow or firmware bytes escape.
+                            let _ = device.initialize_with_provider(
+                                firmware,
+                                crate::usb::bluetooth::intel::PlatformInputs::default(),
+                            );
+                            disks.bluetooth.push(device);
+                        }
                         disks
                             .links
                             .extend(found.links.into_iter().map(Adapter::Usb));
