@@ -1708,7 +1708,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     ) -> Result<(), DeviceError> {
         let current = self.current;
         let (devices, processors) = self.processor_write_parts();
-        let result = devices.write_with_processors(current, physical, bytes, value, now, processors);
+        let result =
+            devices.write_with_processors(current, physical, bytes, value, now, processors);
         self.watch(physical, bytes, result.is_ok().then_some(value), true);
         result
     }
