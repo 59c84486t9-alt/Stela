@@ -27,6 +27,7 @@ use crate::platform::apple::{
 use alloc::{format, string::String, vec::Vec};
 
 mod handoff;
+mod topology;
 pub use handoff::{
     BOOT_CLOCK_HZ, CHIP_REVISION, Carveout, DRAM_VENDOR, DramVendor, Evidence, HANDOFF_REGION,
     Handoff, IBOOT_PAGE_BYTES, PANIC_REGION_BYTES, PANIC_REGION_ID, PANIC_WINDOW_BYTES,
@@ -54,7 +55,7 @@ pub use handoff::{
 /// SoCs whose SPTM writes them ([`LOCKDOWN`]); the M4 and later SPTMs write
 /// none, so their boards map no lockdown block.
 /// `operating_points` is each cluster type's core clocks in MHz, lowest
-/// first, in `parts` order: the opp tables of Linux
+/// first, in each [`CoreType`]: the opp tables of Linux
 /// `arch/arm64/boot/dts/apple/t8112.dtsi` (`ecluster_opp`, `pcluster_opp`)
 /// and the other files [`M1_POINTS`] names, including the P states they
 /// leave disabled until CPU deep sleep. The highest paces the
@@ -65,32 +66,42 @@ pub use handoff::{
 /// `AppleT8112MemCacheController` driver starts from (`start` assumes 8 MiB
 /// before `readCacheSize`; `mccEnableCacheMode` powers at most 16 ways).
 /// `clusters` is each cluster type's PMGR registers
-/// (`platform::apple::cluster`), in `parts` order, where known, and
+/// (`platform::apple::cluster`), in E/P order on the T8112, where known, and
 /// `aon_fuses` the `/arm-io/pmgr` `reg` index of the always-on eFuses
 /// (`platform::apple::fuse`): the T8112's 26A434 `ApplePMGR::
 /// readPMGRAONFuseReg` reads `reg[36]`. `cpu_start` is the offset of the
 /// CPU start registers (`platform::apple::cpustart`) from `/arm-io/pmgr`
-/// `reg[0]` ([`CPU_START_T8112`] and its siblings). `caches` is each
-/// cluster type's caches ([`CoreCaches`]), in `parts` order, where known.
+/// `reg[0]` ([`CPU_START_T8112`] and its siblings). Each [`CoreType`] also
+/// holds its cache geometry ([`CoreCaches`]), where known.
 struct Soc {
     chip_id: u32,
     name: &'static str,
     pmgr: &'static str,
     chip: Chip,
-    parts: [(u8, u16); 2],
+    cores: &'static [CoreType],
     aic: Option<(&'static str, u64)>,
     dram_base: Option<u64>,
     lockdown: Option<[u64; 2]>,
-    operating_points: Option<[&'static [u32]; 2]>,
     memory_cache: Option<(u64, u32)>,
     clusters: Option<[CpuCluster; 2]>,
     aon_fuses: Option<usize>,
     cpu_start: Option<u64>,
-    caches: Option<[CoreCaches; 2]>,
     wake_masks: Option<WakeLayout>,
     power_banks: &'static [(usize, power::Kind)],
     dpe_reg: Option<usize>,
     bridge_fields: Option<&'static [&'static [(u64, u32)]]>,
+}
+
+/// One observed core type's CPU-identity requirements, independent of its
+/// physical cluster. Missing values are unknown requirements, never an
+/// invitation to inherit another core type's capabilities.
+#[derive(Debug, Clone, Copy)]
+pub struct CoreType {
+    pub cluster_type: u8,
+    pub midr_part: Option<u16>,
+    pub mpidr_aff2: Option<u8>,
+    pub operating_points: Option<&'static [u32]>,
+    caches: Option<CoreCaches>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +151,8 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
 /// - Inferred: the M3 Pro and Max, the M4 and M4 Pro and the M6, whose
 ///   26A434 DeviceTrees give their cores the same `apple,sawtooth` and
 ///   `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
+///   This inference applies only to the declared E/P descriptors; the M6
+///   M type has no inferred cache geometry.
 const L1_CACHES: [CoreCaches; 2] = [
     CoreCaches {
         instruction: cache(128 << 10, 8),
@@ -150,6 +163,49 @@ const L1_CACHES: [CoreCaches; 2] = [
         instruction: cache(192 << 10, 6),
         data: cache(128 << 10, 8),
         unified_ways: 16,
+    },
+];
+
+/// Established E/P identities and cache geometries used by the existing
+/// profiles. Other core types must supply their own explicit descriptor.
+const fn ep_cores(e_part: u16, p_part: u16, points: Option<[&'static [u32]; 2]>) -> [CoreType; 2] {
+    [
+        CoreType {
+            cluster_type: b'E',
+            midr_part: Some(e_part),
+            mpidr_aff2: Some(0),
+            operating_points: match points {
+                Some(points) => Some(points[0]),
+                None => None,
+            },
+            caches: Some(L1_CACHES[0]),
+        },
+        CoreType {
+            cluster_type: b'P',
+            midr_part: Some(p_part),
+            mpidr_aff2: Some(1),
+            operating_points: match points {
+                Some(points) => Some(points[1]),
+                None => None,
+            },
+            caches: Some(L1_CACHES[1]),
+        },
+    ]
+}
+
+/// Original J873GAP has six E cores and one mixed P2/M4 physical cluster.
+/// The historical per-cluster census copied the first PE's P type. The
+/// fresh per-PE ledger `isa/apple-board-interfaces.json` retains all types.
+/// The M type's hardware identity and L1 geometry remain unestablished.
+const M6_CORES: [CoreType; 3] = [
+    ep_cores(0x072, 0x073, None)[0],
+    ep_cores(0x072, 0x073, None)[1],
+    CoreType {
+        cluster_type: b'M',
+        midr_part: None,
+        mpidr_aff2: None,
+        operating_points: None,
+        caches: None,
     },
 ];
 
@@ -249,16 +305,14 @@ const M1_MAX: Soc = Soc {
     name: "Apple M1 Max",
     pmgr: "pmgr1,t6001",
     chip: Chip::AppleM1,
-    parts: [(b'E', 0x028), (b'P', 0x029)],
+    cores: &ep_cores(0x028, 0x029, Some(M1_PRO_POINTS)),
     aic: Some(("aic,2", 0xc000)),
     dram_base: Some(0x100_0000_0000),
     lockdown: Some(LOCKDOWN),
-    operating_points: Some(M1_PRO_POINTS),
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
     cpu_start: Some(CPU_START_T8103),
-    caches: Some(L1_CACHES),
     wake_masks: None,
     power_banks: &[],
     dpe_reg: None,
@@ -270,16 +324,14 @@ const M2_MAX: Soc = Soc {
     name: "Apple M2 Max",
     pmgr: "pmgr1,t6021",
     chip: Chip::AppleM2,
-    parts: [(b'E', 0x038), (b'P', 0x039)],
+    cores: &ep_cores(0x038, 0x039, Some(M2_PRO_POINTS)),
     aic: Some(("aic,2", 0xc000)),
     dram_base: Some(0x100_0000_0000),
     lockdown: Some(LOCKDOWN),
-    operating_points: Some(M2_PRO_POINTS),
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
     cpu_start: Some(CPU_START_T6020),
-    caches: Some(L1_CACHES),
     wake_masks: None,
     power_banks: &[],
     dpe_reg: None,
@@ -291,16 +343,14 @@ const M3_MAX: Soc = Soc {
     name: "Apple M3 Max",
     pmgr: "pmgr1,t6031",
     chip: Chip::AppleM3,
-    parts: [(b'E', 0x048), (b'P', 0x049)],
+    cores: &ep_cores(0x048, 0x049, None),
     aic: None,
     dram_base: None,
     lockdown: Some(LOCKDOWN),
-    operating_points: None,
     memory_cache: None,
     clusters: None,
     aon_fuses: None,
     cpu_start: Some(CPU_START_T6031),
-    caches: Some(L1_CACHES),
     wake_masks: None,
     power_banks: &[],
     dpe_reg: None,
@@ -313,16 +363,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M1",
         pmgr: "pmgr1,t8103",
         chip: Chip::AppleM1,
-        parts: [(b'E', 0x022), (b'P', 0x023)],
+        cores: &ep_cores(0x022, 0x023, Some(M1_POINTS)),
         aic: Some(("aic,1", AIC1_EVENT)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some(LOCKDOWN),
-        operating_points: Some(M1_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8103),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -333,16 +381,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M1 Pro",
         pmgr: "pmgr1,t6000",
         chip: Chip::AppleM1,
-        parts: [(b'E', 0x024), (b'P', 0x025)],
+        cores: &ep_cores(0x024, 0x025, Some(M1_PRO_POINTS)),
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: Some(LOCKDOWN),
-        operating_points: Some(M1_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8103),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -360,22 +406,24 @@ const SOCS: [Soc; 18] = [
         name: "Apple M2",
         pmgr: "pmgr1,t8112",
         chip: Chip::AppleM2,
-        parts: [(b'E', 0x032), (b'P', 0x033)],
+        cores: &ep_cores(
+            0x032,
+            0x033,
+            Some([
+                &[600, 912, 1284, 1752, 2004, 2256, 2424],
+                &[
+                    660, 924, 1188, 1452, 1704, 1968, 2208, 2400, 2568, 2724, 2868, 2988, 3096,
+                    3204, 3324, 3408, 3504,
+                ],
+            ]),
+        ),
         aic: Some(("aic,2", 0x8000)),
         dram_base: Some(0x8_0000_0000),
         lockdown: Some(LOCKDOWN),
-        operating_points: Some([
-            &[600, 912, 1284, 1752, 2004, 2256, 2424],
-            &[
-                660, 924, 1188, 1452, 1704, 1968, 2208, 2400, 2568, 2724, 2868, 2988, 3096, 3204,
-                3324, 3408, 3504,
-            ],
-        ]),
         memory_cache: Some((8 << 20, 16)),
         clusters: Some(T8112_CLUSTERS),
         aon_fuses: Some(36),
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         // setAPWakeupSources: RegMap 0x42 -> reg[4], kernel file
         // 0x2fa31bc..0x2fa3620. Compiled valid masks at 0x7957ec;
         // the DeviceTree does not carry this capability bitmap.
@@ -409,16 +457,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M2 Pro",
         pmgr: "pmgr1,t6020",
         chip: Chip::AppleM2,
-        parts: [(b'E', 0x034), (b'P', 0x035)],
+        cores: &ep_cores(0x034, 0x035, Some(M2_PRO_POINTS)),
         aic: Some(("aic,2", 0xc000)),
         dram_base: Some(0x100_0000_0000),
         lockdown: Some(LOCKDOWN),
-        operating_points: Some(M2_PRO_POINTS),
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T6020),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -436,16 +482,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M3",
         pmgr: "pmgr1,t8122",
         chip: Chip::AppleM3,
-        parts: [(b'E', 0x042), (b'P', 0x043)],
+        cores: &ep_cores(0x042, 0x043, None),
         aic: Some(("aic,3", 0x40000)),
         dram_base: None,
         lockdown: Some(LOCKDOWN),
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -456,16 +500,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M3 Pro",
         pmgr: "pmgr1,t6030",
         chip: Chip::AppleM3,
-        parts: [(b'E', 0x044), (b'P', 0x045)],
+        cores: &ep_cores(0x044, 0x045, None),
         aic: None,
         dram_base: None,
         lockdown: Some(LOCKDOWN),
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -492,16 +534,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M4",
         pmgr: "pmgr1,t8132",
         chip: Chip::AppleM4,
-        parts: [(b'E', 0x052), (b'P', 0x053)],
+        cores: &ep_cores(0x052, 0x053, None),
         aic: None,
         dram_base: None,
         lockdown: None,
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -512,16 +552,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M4 Pro",
         pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
-        parts: [(b'E', 0x054), (b'P', 0x055)],
+        cores: &ep_cores(0x054, 0x055, None),
         aic: None,
         dram_base: None,
         lockdown: None,
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T6031),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -532,16 +570,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M4 Max",
         pmgr: "pmgr1,t6041",
         chip: Chip::AppleM4,
-        parts: [(b'E', 0x058), (b'P', 0x059)],
+        cores: &ep_cores(0x058, 0x059, None),
         aic: None,
         dram_base: None,
         lockdown: None,
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T6031),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -552,16 +588,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M5",
         pmgr: "pmgr1,t8142",
         chip: Chip::AppleM5,
-        parts: [(b'E', 0x062), (b'P', 0x063)],
+        cores: &ep_cores(0x062, 0x063, None),
         aic: None,
         dram_base: None,
         lockdown: None,
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -572,16 +606,14 @@ const SOCS: [Soc; 18] = [
         name: "Apple M6",
         pmgr: "pmgr2,arch",
         chip: Chip::AppleM6,
-        parts: [(b'E', 0x072), (b'P', 0x073)],
+        cores: &M6_CORES,
         aic: None,
         dram_base: None,
         lockdown: None,
-        operating_points: None,
         memory_cache: None,
         clusters: None,
         aon_fuses: None,
         cpu_start: Some(CPU_START_T8112),
-        caches: Some(L1_CACHES),
         wake_masks: None,
         power_banks: &[],
         dpe_reg: None,
@@ -611,10 +643,19 @@ pub fn aic(chip_id: u32) -> Option<(&'static str, u64)> {
 
 /// Each cluster type's operating points in MHz, lowest first, as
 /// `(cluster-type, points)` on the SoC with `chip_id`, where known.
-pub fn operating_points(chip_id: u32) -> Option<[(u8, &'static [u32]); 2]> {
-    let soc = SOCS.iter().find(|soc| soc.chip_id == chip_id)?;
-    let points = soc.operating_points?;
-    Some([(soc.parts[0].0, points[0]), (soc.parts[1].0, points[1])])
+pub fn operating_points(chip_id: u32) -> Option<Vec<(u8, &'static [u32])>> {
+    let cores = core_types(chip_id)?;
+    let points: Vec<_> = cores
+        .iter()
+        .filter_map(|core| Some((core.cluster_type, core.operating_points?)))
+        .collect();
+    (!points.is_empty()).then_some(points)
+}
+
+/// The observed core types and their configured or unknown CPU requirements.
+/// The number of types does not define the number of physical clusters.
+pub fn core_types(chip_id: u32) -> Option<&'static [CoreType]> {
+    Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.cores)
 }
 
 /// The CPU of the SoC with `chip_id`, for the SoCs with a row.
@@ -630,23 +671,19 @@ pub fn name(chip_id: u32) -> Option<&'static str> {
 /// The MIDR_EL1 part number of `cluster_type`'s cores on the SoC with
 /// `chip_id`, the one [`cpus`] gives them.
 pub fn midr_part(chip_id: u32, cluster_type: u8) -> Option<u16> {
-    SOCS.iter()
-        .find(|soc| soc.chip_id == chip_id)?
-        .parts
+    core_types(chip_id)?
         .iter()
-        .find(|(kind, _)| *kind == cluster_type)
-        .map(|&(_, part)| part)
+        .find(|core| core.cluster_type == cluster_type)?
+        .midr_part
 }
 
 /// The level 1 instruction and data caches of `cluster_type`'s cores on the
 /// SoC with `chip_id`, the ones [`cpus`] gives them, where known.
 pub fn level1_caches(chip_id: u32, cluster_type: u8) -> Option<(Cache, Cache)> {
-    let soc = SOCS.iter().find(|soc| soc.chip_id == chip_id)?;
-    let index = soc
-        .parts
+    let caches = core_types(chip_id)?
         .iter()
-        .position(|(kind, _)| *kind == cluster_type)?;
-    let caches = soc.caches?[index];
+        .find(|core| core.cluster_type == cluster_type)?
+        .caches?;
     Some((caches.instruction, caches.data))
 }
 
@@ -725,15 +762,17 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
     if processors.is_empty() {
         return Err("the DeviceTree has no /cpus nodes".into());
     }
+    topology::validate(processors)?;
     let processors = processors
         .iter()
         .map(|processor| {
-            let index = soc
-                .parts
+            let core = soc
+                .cores
                 .iter()
-                .position(|(cluster_type, _)| *cluster_type == processor.cluster_type);
-            let part = index
-                .map(|index| u64::from(soc.parts[index].1))
+                .find(|core| core.cluster_type == processor.cluster_type);
+            let part = core
+                .and_then(|core| core.midr_part)
+                .map(u64::from)
                 .ok_or_else(|| {
                     format!(
                         "{} cluster type {} has no public MIDR part",
@@ -741,27 +780,35 @@ pub fn cpus(chip_id: u32, soc_name: &str, processors: &[Processor]) -> Result<Cp
                         char::from(processor.cluster_type)
                     )
                 })?;
+            let core = core.expect("a part requires a core descriptor");
+            let aff2 = core.mpidr_aff2.ok_or_else(|| {
+                format!(
+                    "{} cluster type {} has no public MPIDR mapping",
+                    soc.name,
+                    char::from(processor.cluster_type)
+                )
+            })?;
             if processor.reg & !MPIDR_CLUSTER_CORE != 0 {
                 return Err(format!(
                     "{} cpu reg {:#x} has no public MPIDR mapping",
                     soc.name, processor.reg
                 ));
             }
+            let caches = core.caches.ok_or_else(|| {
+                format!(
+                    "{} cluster type {} has no cache geometry",
+                    soc.name,
+                    char::from(processor.cluster_type)
+                )
+            })?;
             Ok(Identity {
                 midr: 0x61 << 24 | 1 << 20 | 0xf << 16 | part << 4,
-                mpidr: 0x8000_0000
-                    | u64::from(processor.cluster_type == b'P') << 16
-                    | u64::from(processor.reg),
-                clock: soc
+                mpidr: 0x8000_0000 | u64::from(aff2) << 16 | u64::from(processor.reg),
+                clock: core
                     .operating_points
-                    .zip(index)
-                    .and_then(|(points, index)| points[index].last())
+                    .and_then(|points| points.last())
                     .map(|&mhz| u64::from(mhz) * 1_000_000),
-                caches: soc
-                    .caches
-                    .zip(index)
-                    .map(|(caches, index)| core_caches(caches[index], processor))
-                    .transpose()?,
+                caches: Some(core_caches(caches, processor)?),
             })
         })
         .collect::<Result<_, String>>()?;
@@ -7505,5 +7552,68 @@ mod tests {
         let mut bad = ranges;
         bad[0].1 = u64::MAX;
         assert!(board(&tree(usb(&bad, 0xa4, &irqs))).is_err());
+    }
+    #[test]
+    fn core_requirements_keep_unknown_m6_capabilities_explicit() {
+        let cores = core_types(0x8152).unwrap();
+        assert_eq!(
+            cores
+                .iter()
+                .map(|core| core.cluster_type)
+                .collect::<Vec<_>>(),
+            b"EPM"
+        );
+        let medium = cores.iter().find(|core| core.cluster_type == b'M').unwrap();
+        assert_eq!(medium.midr_part, None);
+        assert_eq!(medium.mpidr_aff2, None);
+        assert_eq!(medium.operating_points, None);
+        assert!(medium.caches.is_none());
+        assert_eq!(midr_part(0x8152, b'M'), None);
+        assert_eq!(level1_caches(0x8152, b'M'), None);
+        assert_eq!(operating_points(0x8152), None);
+        // Three core types describe two physical clusters; there is no
+        // synthetic extra cluster or E/P fallback for an M PE.
+        let processors = [
+            Processor {
+                cluster_type: b'E',
+                reg: 0,
+                l2_bytes: Some(8 << 20),
+            },
+            Processor {
+                cluster_type: b'P',
+                reg: 0x100,
+                l2_bytes: Some(20 << 20),
+            },
+            Processor {
+                cluster_type: b'M',
+                reg: 0x102,
+                l2_bytes: Some(20 << 20),
+            },
+        ];
+        assert!(topology::validate(&processors).is_ok());
+        assert_eq!(
+            cpus(0x8152, "Apple M6", &processors),
+            Err("Apple M6 cluster type M has no public MIDR part".into())
+        );
+    }
+
+    #[test]
+    fn cpu_binding_rejects_aliasing_affinities_before_synthetic_type_bits() {
+        let processors = [
+            Processor {
+                cluster_type: b'E',
+                reg: 0,
+                l2_bytes: Some(4 << 20),
+            },
+            Processor {
+                cluster_type: b'P',
+                reg: 0,
+                l2_bytes: Some(4 << 20),
+            },
+        ];
+        assert_eq!(
+            cpus(0x8112, "Apple M2", &processors),
+            Err("duplicate CPU affinity reg 0x0".into())
+        );
     }
 }

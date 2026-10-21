@@ -15,13 +15,11 @@ pub(super) fn validate(processors: &[Processor]) -> Result<(), String> {
             if previous.reg == processor.reg {
                 return Err(format!("duplicate CPU affinity reg {:#x}", processor.reg));
             }
-            if previous.reg >> 8 == processor.reg >> 8 {
-                if previous.l2_bytes != processor.l2_bytes {
-                    return Err(format!(
-                        "CPU cluster {:#x} has conflicting l2-cache-size values",
-                        processor.reg >> 8
-                    ));
-                }
+            if previous.reg >> 8 == processor.reg >> 8 && previous.l2_bytes != processor.l2_bytes {
+                return Err(format!(
+                    "CPU cluster {:#x} has conflicting l2-cache-size values",
+                    processor.reg >> 8
+                ));
             }
         }
     }
@@ -42,7 +40,7 @@ mod tests {
 
     #[test]
     fn duplicate_affinities_cannot_be_hidden_by_different_cluster_types() {
-        for kind in [b'E', b'P'] {
+        for kind in *b"EP" {
             let processors = [pe(b'E', 0, Some(4 << 20)), pe(kind, 0, Some(4 << 20))];
             assert!(
                 validate(&processors)
