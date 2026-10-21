@@ -247,12 +247,12 @@ impl Realtek {
         };
         net.receive.initialize(true);
         net.transmit.initialize(false);
-        publish(&net.device, &net.receive, &net.transmit, revision, mac);
-        if net.device.read8(COMMAND) & ENABLE != ENABLE {
+        let hardware = Hardware::new(&net.device, &net.clock, revision, function.address.function);
+        if let Err(error) = publish(&hardware, &net.receive, &net.transmit, mac) {
             // Buffers remain boot-owned even if a disconnected/stuck device fails reset.
             let _ =
                 Hardware::new(&net.device, &net.clock, revision, function.address.function).reset();
-            return Err(BlockError::Timeout.into());
+            return Err(error.into());
         }
         Ok(net)
     }
@@ -326,21 +326,47 @@ fn station(low: u32, high: u32) -> Option<Mac> {
     let mac = Mac([a[0], a[1], a[2], a[3], b[0], b[1]]);
     (!mac.is_multicast() && mac.0 != [0; 6]).then_some(mac)
 }
-fn publish(r: &impl Registers, rx: &Ring, tx: &Ring, revision: Revision, mac: Mac) {
+fn publish<R: Registers, T: Timer>(
+    hw: &Hardware<'_, R, T>,
+    rx: &Ring,
+    tx: &Ring,
+    mac: Mac,
+) -> Result<(), BlockError> {
+    let r = hw.registers;
+    let revision = hw.revision;
     r.write8(CONFIG_LOCK, 0xc0);
-    r.write32(MAC4, u32::from(u16::from_le_bytes([mac.0[4], mac.0[5]])));
-    r.read8(COMMAND);
-    r.write32(
-        MAC0,
-        u32::from_le_bytes(mac.0[..4].try_into().expect("MAC low word")),
-    );
-    r.read8(COMMAND);
-    // Linux requires high-before-low descriptor base writes on some systems.
-    r.write32(TX_HIGH, (tx.descriptors.physical() >> 32) as u32);
-    r.write32(TX_LOW, tx.descriptors.physical() as u32);
-    r.write32(RX_HIGH, (rx.descriptors.physical() >> 32) as u32);
-    r.write32(RX_LOW, rx.descriptors.physical() as u32);
+    let result = (|| {
+        let low = u32::from_le_bytes(mac.0[..4].try_into().expect("MAC low word"));
+        let high = u32::from(u16::from_le_bytes([mac.0[4], mac.0[5]]));
+        r.write32(MAC4, high);
+        r.read8(COMMAND);
+        r.write32(MAC0, low);
+        r.read8(COMMAND);
+        if revision.version == 34 {
+            // Linux rtl_rar_exgmac_set: both EXGMAC address representations,
+            // including reserved bytes which may retain stale firmware state.
+            hw.eri_write(0xe0, 15, low)?;
+            hw.eri_write(0xe4, 15, high)?;
+            hw.eri_write(
+                0xf0,
+                15,
+                u32::from(u16::from_le_bytes([mac.0[0], mac.0[1]])) << 16,
+            )?;
+            hw.eri_write(
+                0xf4,
+                15,
+                u32::from_le_bytes(mac.0[2..].try_into().expect("MAC upper word")),
+            )?;
+        }
+        // Linux requires high-before-low descriptor base writes on some systems.
+        r.write32(TX_HIGH, (tx.descriptors.physical() >> 32) as u32);
+        r.write32(TX_LOW, tx.descriptors.physical() as u32);
+        r.write32(RX_HIGH, (rx.descriptors.physical() >> 32) as u32);
+        r.write32(RX_LOW, rx.descriptors.physical() as u32);
+        Ok(())
+    })();
     r.write8(CONFIG_LOCK, 0);
+    result?;
     r.read8(COMMAND);
     fence(Ordering::SeqCst);
     r.write8(COMMAND, ENABLE);
@@ -359,6 +385,14 @@ fn publish(r: &impl Registers, rx: &Ring, tx: &Ring, revision: Revision, mac: Ma
     );
     r.write16(INTERRUPT_MASK, 0);
     r.write16(INTERRUPT_STATUS, u16::MAX);
+    let command = r.read8(COMMAND);
+    if command == u8::MAX {
+        return Err(BlockError::Device { status: 255 });
+    }
+    if command & ENABLE != ENABLE {
+        return Err(BlockError::Timeout);
+    }
+    Ok(())
 }
 impl Link for Realtek {
     fn mac(&self) -> Mac {
