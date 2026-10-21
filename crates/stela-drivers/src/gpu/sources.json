@@ -86,7 +86,13 @@
           "to": "common/linux/Makefile"
         }
       ],
-      "scope": "Selected GPU source and headers; not a complete, buildable Linux kernel tree."
+      "scope": "Selected GPU source and headers; not a complete, buildable Linux kernel tree.",
+      "pruned_headers": {
+        "common_linux": 5217,
+        "amd": 53,
+        "method": "Conservative literal include closure across every retained AMD/Intel implementation, all AMD headers reachable from those implementations, all x86 architecture headers, asm-generic headers and compiler/linkage/export headers. All preprocessor branches are followed; matching AMD header basenames are retained conservatively. Unreferenced headers are removed; no GPU generation is excluded.",
+        "limits": "Generated architecture includes remain unresolved until the Stela platform port replaces the Linux build environment. This static audit is not compilation of AMDGPU/i915/xe."
+      }
     },
     {
       "name": "mesa",
@@ -164,7 +170,19 @@
         "src/gallium/frontends",
         "src/gallium/targets",
         "src/gallium/auxiliary/pipe-loader",
-        "src/gallium/auxiliary/target-helpers"
+        "src/gallium/auxiliary/target-helpers",
+        "src/mesa",
+        "src/amd/ci",
+        "src/intel/ci",
+        "src/nouveau/ci",
+        "src/amd/drm-shim",
+        "src/nouveau/drm-shim",
+        "src/intel/perf",
+        "src/intel/ds",
+        "src/intel/tools",
+        "src/intel/executor",
+        "src/intel/nullhw-layer",
+        "src/compiler/glsl (frontend, linker and tests; retained shared operation generator and software shader builtins)"
       ],
       "vendored_build_dependencies": [
         {

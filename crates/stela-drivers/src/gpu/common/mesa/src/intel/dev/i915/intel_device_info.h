@@ -27,6 +27,12 @@
 #include <stdbool.h>
 
 struct intel_device_info;
+struct drm_i915_query_topology_info;
+
+void
+intel_device_info_i915_update_from_topology(
+   struct intel_device_info *devinfo,
+   const struct drm_i915_query_topology_info *topology);
 
 bool
 intel_device_info_i915_get_info_from_fd(int fd,

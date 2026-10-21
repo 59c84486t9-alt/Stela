@@ -94,6 +94,7 @@ gfx10_format_table_c = custom_target(
 )
 
 amd_common_files = files(
+  'ac_compiler_info.c',
   'ac_binary.c',
   'ac_binary.h',
   'ac_cmdbuf.c',
@@ -228,6 +229,20 @@ endif
 idep_amd_generated_headers = declare_dependency(
   sources : [amdgfxregs_h, sid_tables_h, amd_packet_headers]
 )
+
+if with_stela_amd
+  libamd_compiler_support = static_library(
+    'amd_compiler_support',
+    files('ac_compiler_info.c', 'ac_shader_args.c', 'ac_shader_util.c', 'amd_family.c',
+          'ac_descriptors.c', 'ac_formats.c', 'nir/ac_nir.c',
+          'nir/ac_nir_lower_global_access.c', 'nir/ac_nir_opt_shared_append.c') +
+      [gfx10_format_table_c],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
+    dependencies : [idep_mesautil, idep_nir_headers, idep_amd_generated_headers],
+    c_args : [no_override_init_args],
+    gnu_symbol_visibility : 'hidden',
+  )
+endif
 
 libamd_common = static_library(
   'amd_common',

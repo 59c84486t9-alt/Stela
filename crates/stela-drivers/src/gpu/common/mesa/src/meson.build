@@ -13,7 +13,8 @@ if with_platform_android
 endif
 subdir('util')
 
-inc_mesa = include_directories('mesa')
+# The OpenGL core and state tracker have been removed from this driver fork.
+inc_mesa = []
 inc_src = include_directories('.')
 inc_gallium = include_directories('gallium/include')
 inc_gallium_aux = include_directories('gallium/auxiliary')
@@ -39,12 +40,7 @@ inc_radv_bvh = include_directories('amd/vulkan/bvh')
 inc_radv_tools = include_directories('amd/vulkan/tools')
 inc_vulkan_bvh = include_directories('vulkan/runtime/bvh')
 
-glsl_util_files = files(
-    'mesa/main/extensions_table.c',
-    'mesa/program/prog_parameter.c',
-    'mesa/program/symbol_table.c',
-    'mesa/program/dummy_errors.c',
-)
+glsl_util_files = []
 
 sha1_h = custom_target(
   'git_sha1.h',

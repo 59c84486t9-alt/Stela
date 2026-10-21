@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "compiler/nir/nir_builder.h"
+#include "probe_report.h"
 #include "nouveau/compiler/nak.h"
 #include "nouveau/headers/nv_device_info.h"
 #include "util/ralloc.h"
@@ -55,6 +56,9 @@ compile_store(unsigned sm)
       fprintf(stderr, "SM%u failed to compile the store shader\n", sm);
       result = 1;
    } else {
+      char target[16];
+      snprintf(target, sizeof(target), "sm%u", sm);
+      probe_compiled("nak", target, bin->code_size);
       printf("SM%u: %u bytes, %u instructions\n", sm, bin->code_size,
              bin->info.num_instrs);
       if (bin->asm_str)

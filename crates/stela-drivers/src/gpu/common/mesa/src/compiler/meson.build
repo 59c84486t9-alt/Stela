@@ -68,9 +68,7 @@ subdir('spirv')
 if with_clc
   subdir('clc')
 endif
-if with_gallium
-  subdir('glsl')
-endif
+# The shared type/operation generators remain; the GLSL API frontend is removed.
 subdir('isaspec')
 
 if with_nouveau_vk or with_tools.contains('etnaviv') or with_panfrost_rust or with_stela_nvidia

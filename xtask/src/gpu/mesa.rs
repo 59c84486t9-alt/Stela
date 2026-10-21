@@ -2,7 +2,7 @@
 use super::support::{capture, evidence_directory, source_binding};
 use crate::tools;
 use anyhow::{Context, Result, ensure};
-use object::{Object, read::archive::ArchiveFile};
+use object::{Object, ObjectSymbol, read::archive::ArchiveFile};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeSet,
@@ -19,10 +19,19 @@ const LIBRARIES: &[&str] = &[
     "src/nouveau/compiler/libnak_rs.a",
     "src/nouveau/nil/libnil.a",
     "src/amd/compiler/libaco.a",
+    "src/amd/common/libamd_compiler_support.a",
+    "src/intel/dev/libintel_dev.a",
     "src/intel/compiler/gen/libintel_compiler_gen.a",
     "src/intel/compiler/brw/libintel_compiler.a",
     "src/intel/compiler/elk/libintel_compiler_elk.a",
     "src/intel/compiler/jay/libintel_compiler_jay.a",
+];
+
+const PROBES: &[(&str, &str)] = &[
+    ("nak-codegen", "src/stela/stela_nak_probe"),
+    ("aco-codegen", "src/stela/stela_aco_probe"),
+    ("brw-codegen", "src/stela/stela_brw_probe"),
+    ("elk-codegen", "src/stela/stela_elk_probe"),
 ];
 
 fn tool(name: &str, local: &str) -> Result<PathBuf> {
@@ -52,6 +61,7 @@ fn inspect_archive(path: &Path) -> Result<Value> {
     let archive = ArchiveFile::parse(&*data)?;
     let mut formats = BTreeSet::new();
     let mut architectures = BTreeSet::new();
+    let mut undefined = BTreeSet::new();
     let mut count = 0;
     for member in archive.members() {
         let member = member?;
@@ -64,16 +74,79 @@ fn inspect_archive(path: &Path) -> Result<Value> {
         );
         formats.insert(format!("{:?}", object.format()));
         architectures.insert(format!("{:?}", object.architecture()));
+        for symbol in object.symbols().filter(|symbol| symbol.is_undefined()) {
+            let name = symbol.name()?;
+            if !name.is_empty() {
+                undefined.insert(name.to_owned());
+            }
+        }
         count += 1;
     }
     ensure!(count > 0, "{} contains no objects", path.display());
+    // The capability/format libraries must remain independent of Linux
+    // device access. Inspect actual objects rather than only Meson options.
+    if matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some("libamd_compiler_support.a" | "libintel_dev.a")
+    ) {
+        for name in &undefined {
+            let name = name.trim_start_matches('_');
+            ensure!(
+                !name.starts_with("drm") && name != "ioctl",
+                "{} depends on device I/O through {name}",
+                path.display()
+            );
+        }
+    }
     Ok(json!({
         "binding": tools::binding(path)?, "objects": count,
         "formats": formats, "architectures": architectures,
+        "undefined_symbols": undefined,
     }))
 }
 
-pub fn build(jobs: u16) -> Result<()> {
+fn parse_targets(log: &str, backend: &str) -> Result<Vec<Value>> {
+    let mut targets = Vec::new();
+    let mut names = BTreeSet::new();
+    for line in log.lines() {
+        let Some(record) = line.strip_prefix("STELA_GPU_TARGET ") else {
+            continue;
+        };
+        let record: Value = serde_json::from_str(record)?;
+        ensure!(
+            record["backend"] == backend,
+            "wrong backend in codegen record"
+        );
+        let name = record["target"]
+            .as_str()
+            .context("codegen record has no target")?;
+        ensure!(
+            !name.is_empty() && names.insert(name.to_owned()),
+            "empty or repeated codegen target"
+        );
+        match record["state"].as_str() {
+            Some("compiled") => ensure!(
+                record["bytes"].as_u64().is_some_and(|bytes| bytes > 0),
+                "compiled target has no emitted code"
+            ),
+            Some("unsupported") => ensure!(
+                record["reason"]
+                    .as_str()
+                    .is_some_and(|reason| !reason.is_empty()),
+                "unsupported target has no reason"
+            ),
+            _ => anyhow::bail!("unknown codegen target state"),
+        }
+        targets.push(record);
+    }
+    ensure!(
+        targets.iter().any(|record| record["state"] == "compiled"),
+        "codegen probe emitted no compiled targets"
+    );
+    Ok(targets)
+}
+
+pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
     let meson = tool("meson", "generators/bin")?;
     let ninja = tool("ninja", "generators/bin")?;
     let bindgen = tool("bindgen", "rust/bin")?;
@@ -126,10 +199,33 @@ pub fn build(jobs: u16) -> Result<()> {
         .arg(&build)
         .arg(format!("-j{jobs}"))
         .args(LIBRARIES)
-        .arg("src/stela/stela_nak_probe");
+        .args(PROBES.iter().map(|(_, binary)| binary));
     run(&mut compile, &evidence, "compile")?;
-    let mut probe = Command::new(build.join("src/stela/stela_nak_probe"));
-    run(&mut probe, &evidence, "nak-codegen")?;
+    let mut probes = Vec::new();
+    let mut unsupported = Vec::new();
+    let mut compiled = 0;
+    for (stage, binary) in PROBES {
+        let mut probe = Command::new(build.join(binary));
+        run(&mut probe, &evidence, stage)?;
+        let log = evidence.join(format!("{stage}.log"));
+        let backend = stage
+            .strip_suffix("-codegen")
+            .context("invalid probe stage")?;
+        let targets = parse_targets(&fs::read_to_string(&log)?, backend)?;
+        for target in &targets {
+            if target["state"] == "compiled" {
+                compiled += 1;
+            } else {
+                unsupported.push(target.clone());
+            }
+        }
+        probes.push(json!({
+            "stage": stage,
+            "output": tools::binding(&evidence.join(format!("{stage}.log")))?,
+            "binary": tools::binding(&build.join(binary))?,
+            "targets": targets,
+        }));
+    }
     let libraries = LIBRARIES
         .iter()
         .map(|name| inspect_archive(&build.join(name)))
@@ -139,7 +235,7 @@ pub fn build(jobs: u16) -> Result<()> {
         "compiler source changed during the build; rerun against a stable tree"
     );
     let receipt = json!({
-        "schema": 1, "stage": "native-host-shader-compiler-build",
+        "schema": 2, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
         "source_tree_sha256": hash,
@@ -148,11 +244,44 @@ pub fn build(jobs: u16) -> Result<()> {
         "meson": capture(Command::new(&meson).arg("--version"))?,
         "setup": format!("{setup:?}"), "compile": format!("{compile:?}"),
         "libraries": libraries,
-        "nvidia_codegen_probe": tools::binding(&evidence.join("nak-codegen.log"))?,
-        "probe_binary": tools::binding(&build.join("src/stela/stela_nak_probe"))?,
+        "codegen_probes": probes,
+        "unsupported_fixture_targets": unsupported,
     });
     File::create_new(evidence.join("compilers.json"))?
         .write_all(&serde_json::to_vec_pretty(&receipt)?)?;
-    println!("Built NVIDIA/AMD/Intel shader libraries; NVIDIA codegen probe passed.");
+    println!(
+        "Native shader compilers built: {compiled} fixture targets compiled, {} unsupported.",
+        unsupported.len()
+    );
+    for target in &unsupported {
+        println!(
+            "  unsupported {}/{}: {}",
+            target["backend"], target["target"], target["reason"]
+        );
+    }
+    ensure!(
+        !require_all_targets || unsupported.is_empty(),
+        "some compiler fixture targets remain unsupported; see {}",
+        evidence.join("compilers.json").display()
+    );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codegen_evidence_keeps_unsupported_targets_distinct_from_emitted_code() {
+        let good = "STELA_GPU_TARGET {\"backend\":\"brw\",\"target\":\"skl\",\"state\":\"compiled\",\"bytes\":112}\n";
+        let unsupported = "STELA_GPU_TARGET {\"backend\":\"brw\",\"target\":\"nvl\",\"state\":\"unsupported\",\"reason\":\"dispatch-qualification\"}\n";
+        let records =
+            parse_targets(&format!("compiler diagnostics\n{good}{unsupported}"), "brw").unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1]["state"], "unsupported");
+        assert!(parse_targets(unsupported, "brw").is_err());
+        assert!(parse_targets(&format!("{good}{good}"), "brw").is_err());
+        assert!(parse_targets(&good.replace("112", "0"), "brw").is_err());
+        assert!(parse_targets(good, "aco").is_err());
+    }
 }

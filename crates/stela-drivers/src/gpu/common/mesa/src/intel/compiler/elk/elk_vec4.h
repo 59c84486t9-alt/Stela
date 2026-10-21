@@ -14,7 +14,6 @@
 #include "elk_vec4_live_variables.h"
 #endif
 
-#include "compiler/glsl/ir.h"
 #include "compiler/nir/nir.h"
 
 

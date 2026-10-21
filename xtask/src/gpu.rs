@@ -15,6 +15,10 @@ pub enum Command {
         /// Maximum parallel native compiler processes.
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
         jobs: u16,
+        /// Fail if any fixture target reports an unsupported compiler path.
+        /// This still does not establish physical GPU or Metal support.
+        #[arg(long)]
+        require_all_targets: bool,
     },
     /// Compile NVIDIA's resource-manager and display cores as x86-64 ELF
     /// reference objects, retaining unresolved platform imports in a receipt.
@@ -27,7 +31,10 @@ pub enum Command {
 
 pub fn run(command: Command) -> Result<()> {
     match command {
-        Command::Compilers { jobs } => mesa::build(jobs),
+        Command::Compilers {
+            jobs,
+            require_all_targets,
+        } => mesa::build(jobs, require_all_targets),
         Command::Nvidia { jobs } => nvidia::build(jobs),
     }
 }
