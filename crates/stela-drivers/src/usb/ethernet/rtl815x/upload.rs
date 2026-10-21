@@ -76,7 +76,7 @@ impl<C: Control> Chip<C> {
         Ok(())
     }
 
-    fn sram_write(&mut self, address: u16, value: u16) -> Result<(), BlockError> {
+    pub(super) fn sram_write(&mut self, address: u16, value: u16) -> Result<(), BlockError> {
         self.phy_write(OCP_SRAM_ADDR, u32::from(address))?;
         self.phy_write(OCP_SRAM_DATA, u32::from(value))
     }
@@ -406,8 +406,8 @@ pub(crate) mod tests {
     /// asynchronous patch-ready, staged 2 KiB USB RAM download ownership and
     /// firmware version changes occur only after complete, ordered payloads.
     pub(crate) struct Hardware {
-        core: Model,
-        sram: BTreeMap<u16, u16>,
+        pub(crate) core: Model,
+        pub(crate) sram: BTreeMap<u16, u16>,
         pointer: u16,
         patch_pending: Option<(bool, usize)>,
         speed_expected: Vec<u8>,
@@ -551,7 +551,7 @@ pub(crate) mod tests {
             Ok(reply)
         }
     }
-    struct Io(Rc<RefCell<Hardware>>);
+    pub(crate) struct Io(pub(crate) Rc<RefCell<Hardware>>);
     impl Control for Io {
         fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError> {
             self.0.borrow_mut().request(request, output)

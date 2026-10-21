@@ -1,6 +1,7 @@
 //! Vendor USB Ethernet backends. Candidate interfaces become usable links only
 //! after exact chip identification and revision-specific initialization.
-//! RTL8152B revisions 02/07 are implemented; RTL8153/8156 remain explicit gaps.
+//! RTL8152B 02/07 and RTL8153A 03/04/05/06 have distinct implementations;
+//! RTL8153B/C and RTL8156 remain explicit startup gaps.
 pub mod firmware;
 mod framing;
 mod registers;
@@ -106,6 +107,7 @@ pub struct UsbEthernet {
     carrier: bool,
     closed: bool,
     stopped: bool,
+    pub firmware: Option<firmware::Receipt>,
     pub location: String,
 }
 
@@ -117,34 +119,38 @@ impl UsbEthernet {
         dma: &mut dyn DmaAllocator,
         provider: &dyn crate::firmware::Provider,
     ) -> Result<Self, Error> {
-        if firmware::load(provider, &device.descriptor, binding.revision)?.is_some() {
-            // Validation alone never substitutes for a revision's full power,
-            // PHY and firmware upload sequence. Those revisions stay refused.
-            return Err(Error::UnsupportedRevision(binding.revision));
-        }
+        let firmware = firmware::load(provider, &device.descriptor, binding.revision)?;
         let io = HostControl {
             controller: controller.clone(),
             slot: device.slot,
         };
-        let (chip, mac) = Chip::attach(
+        let (chip, mac) = Chip::attach_with_firmware(
             io,
             binding.revision,
-            device.speed <= super::xhci::LOW_SPEED || device.speed == super::xhci::FULL_SPEED,
+            device.speed,
+            firmware.as_ref().map(|(_, parsed)| parsed),
         )?;
+        let receive_bytes = chip.receive_bytes();
+        let family = if binding.revision.is_8153a() {
+            "RTL8153A"
+        } else {
+            "RTL8152B"
+        };
         Ok(Self {
             controller,
             slot: device.slot,
             binding,
             chip,
             mac,
-            receive: dma.allocate(framing::AGGREGATE, framing::AGGREGATE)?,
+            receive: dma.allocate(receive_bytes, receive_bytes)?,
             send: dma.allocate(2048, 2048)?,
             queued: None,
             pending: VecDeque::new(),
             carrier: false,
             closed: false,
             stopped: false,
-            location: format!("{} RTL8152B", device.location),
+            firmware: firmware.map(|(image, _)| firmware::Receipt::from_image(image)),
+            location: format!("{} {family}", device.location),
         })
     }
 

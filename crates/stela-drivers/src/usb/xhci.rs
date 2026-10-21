@@ -3555,6 +3555,225 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rtl8153a_missing_exact_firmware_never_creates_a_native_link() {
+        for revision in [0x5c10, 0x5c20, 0x5c30] {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing remains exclusive/live through all controller DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.slots[1].as_mut().unwrap().speed = HIGH_SPEED;
+            let config = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 2, 2, 0, 2, 0,
+            ];
+            let mut dev = configuration::tests::device(vec![config]);
+            dev.speed = HIGH_SPEED;
+            dev.descriptor[8..14].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81, 0x00, 0x30]);
+            dev.vendor_ethernet_revision = Some(revision);
+            configuration::select(&mut dev).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, dev, &mut dma, &mut found);
+            assert!(found.vendor_links.is_empty() && found.failures.is_empty());
+            assert_eq!(found.vendor_failures.len(), 1);
+            let ethernet::Error::Firmware { request, .. } = &found.vendor_failures[0].1 else {
+                panic!("{:?}", found.vendor_failures)
+            };
+            assert_eq!(
+                request.name,
+                ethernet::rtl815x::Revision(revision).firmware().unwrap()
+            );
+            assert_eq!(request.hardware, "usb:0bda:8153:3000");
+            assert_eq!(request.revision, format!("tcr-{revision:04x}"));
+            assert!(model.borrow().active[3].is_none() && model.borrow().outgoing.is_empty());
+        }
+    }
+
+    #[test]
+    fn rtl8153a_native_usb2_usb3_binding_uploads_exact_provider_and_retains_owned_receipt() {
+        use crate::{
+            firmware::{Catalog, Provenance, Provider, Resource, Target},
+            net::Link,
+        };
+        use sha2::{Digest, Sha256};
+        struct Recording {
+            catalog: Catalog,
+            requests: RefCell<Vec<(String, String, String)>>,
+        }
+        impl Provider for Recording {
+            fn load(
+                &self,
+                requirement: crate::firmware::Requirement<'_>,
+            ) -> Result<crate::firmware::Image<'_>, crate::firmware::Error> {
+                self.requests.borrow_mut().push((
+                    requirement.name.into(),
+                    requirement.target.hardware.into(),
+                    requirement.target.revision.into(),
+                ));
+                self.catalog.load(requirement)
+            }
+        }
+        for (revision, speed) in [0x5c00, 0x5c10, 0x5c20, 0x5c30]
+            .into_iter()
+            .flat_map(|revision| {
+                [HIGH_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS].map(|speed| (revision, speed))
+            })
+        {
+            let image = if revision == 0x5c00 {
+                Vec::new()
+            } else {
+                ethernet::firmware::tests::synthetic_upload(revision)
+            };
+            let name = ethernet::rtl815x::Revision(revision).firmware();
+            let revision_label = format!("tcr-{revision:04x}");
+            let digest: [u8; 32] = Sha256::digest(&image).into();
+            let catalog = if let Some(name) = name {
+                Catalog::from_handoff(vec![Resource {
+                    name,
+                    target: Target {
+                        driver: "usb-rtl815x",
+                        hardware: "usb:0bda:8153:3000",
+                        revision: &revision_label,
+                        board: None,
+                    },
+                    provenance: Provenance {
+                        source: "source-model-fixture",
+                        revision: "immutable-test",
+                        member: name,
+                        license: "synthetic",
+                    },
+                    expected_length: image.len(),
+                    expected_sha256: digest,
+                    bytes: image.clone(),
+                }])
+                .unwrap()
+            } else {
+                Catalog::from_handoff(Vec::new()).unwrap()
+            };
+            let provider = Recording {
+                catalog,
+                requests: RefCell::new(Vec::new()),
+            };
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: all DMA objects/model references die before this backing.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            controller.slots[1].as_mut().unwrap().speed = speed;
+            model.borrow_mut().ethernet_upload =
+                Some(ethernet::rtl815x::FirmwareModel::new(revision, &image));
+            let mut configuration = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 0x02, 2, 0, 2, 0,
+            ];
+            if speed >= SUPER_SPEED {
+                configuration = vec![
+                    9,
+                    2,
+                    44,
+                    0,
+                    1,
+                    7,
+                    0,
+                    0x80,
+                    50,
+                    9,
+                    4,
+                    0,
+                    0,
+                    2,
+                    0xff,
+                    0,
+                    0,
+                    0,
+                    7,
+                    5,
+                    0x81,
+                    2,
+                    0,
+                    4,
+                    0,
+                    6,
+                    SS_ENDPOINT_COMPANION,
+                    7,
+                    0,
+                    0,
+                    0,
+                    7,
+                    5,
+                    2,
+                    2,
+                    0,
+                    4,
+                    0,
+                    6,
+                    SS_ENDPOINT_COMPANION,
+                    7,
+                    0,
+                    0,
+                    0,
+                ];
+            }
+            let mut device = configuration::tests::device(vec![configuration]);
+            device.speed = speed;
+            device.descriptor[8..14].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81, 0x00, 0x30]);
+            controller.preflight_vendor_ethernet(&mut device).unwrap();
+            configuration::select(&mut device).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind_with_provider(&shared, device, &mut dma, &mut found, &provider);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert!(
+                found.vendor_failures.is_empty(),
+                "{:?}",
+                found.vendor_failures
+            );
+            assert_eq!(found.vendor_links.len(), 1);
+            assert_eq!(
+                provider.requests.borrow().len(),
+                usize::from(name.is_some())
+            );
+            let mut link = found.vendor_links.pop().unwrap();
+            if let Some(name) = name {
+                let receipt = link.firmware.as_ref().unwrap();
+                assert_eq!(receipt.request.name, name);
+                assert_eq!(receipt.request.hardware, "usb:0bda:8153:3000");
+                assert_eq!(receipt.request.revision, revision_label);
+                assert_eq!(receipt.sha256, digest);
+                assert_eq!(receipt.length, image.len());
+                assert_eq!(receipt.source_revision, "immutable-test");
+            } else {
+                assert!(link.firmware.is_none());
+            }
+            drop(provider); // Actual native link must not borrow the image/catalog.
+            assert!(link.carrier());
+            link.transmit(&[0x5a; 1514]).unwrap();
+            assert_eq!(model.borrow().outgoing[0].len(), 1522);
+            assert_eq!(link.receive().unwrap(), None);
+            let frames = if speed >= SUPER_SPEED { 21 } else { 1 };
+            let frame_size = if frames == 21 { 1500 } else { 60 };
+            let mut aggregate = Vec::new();
+            for value in 0..frames {
+                let mut packet = vec![0; 24 + frame_size + 4];
+                packet[..4].copy_from_slice(&((frame_size + 4) as u32).to_le_bytes());
+                packet[24..24 + frame_size].fill(value as u8);
+                aggregate.extend(packet);
+                aggregate.resize(aggregate.len().next_multiple_of(8), 0);
+            }
+            if frames == 21 {
+                assert!(aggregate.len() > 16384);
+            }
+            model.borrow_mut().incoming_events.push_back(aggregate);
+            for value in 0..frames {
+                assert_eq!(link.receive().unwrap(), Some(vec![value as u8; frame_size]));
+            }
+            link.stop().unwrap();
+            assert!(link.transmit(&[0; 60]).is_err());
+        }
+    }
+
+    #[test]
     fn bluetooth_binds_real_xhci_queues_moves_packets_and_stops_on_disconnect() {
         use crate::usb::bluetooth::{FirmwareStatus, Packet, State};
         for scenario in 0..3 {

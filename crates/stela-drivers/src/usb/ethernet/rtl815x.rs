@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Realtek Semiconductor Corp. All rights reserved.
-//! Linux r8152 register/OCP, RTL8152B init/up/PHY/enable/disable adaptation.
+//! Linux r8152 register/OCP and distinct RTL8152B/RTL8153A startup paths.
 //! Revision-specific implementations must be ready before configuration selection.
 use super::registers::*;
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
+mod rtl8153a;
 mod upload;
 #[cfg(test)]
 pub(crate) use upload::tests::Hardware as FirmwareModel;
+#[cfg(test)]
+pub(crate) use upload::tests::Io as FirmwareIo;
 
 const PLA: u16 = 0x0100;
 const USB: u16 = 0;
@@ -46,7 +49,11 @@ impl Revision {
     }
 
     pub fn implemented(self) -> bool {
-        matches!(self.0, 0x4c10 | 0x4800)
+        matches!(self.0, 0x4c10 | 0x4800) || self.is_8153a()
+    }
+
+    pub fn is_8153a(self) -> bool {
+        matches!(self.0, 0x5c00 | 0x5c10 | 0x5c20 | 0x5c30)
     }
 
     /// Exact Linux firmware request for audited RTL8153/8156 revisions. None
@@ -74,6 +81,7 @@ pub struct Chip<C> {
     accessible: bool,
     enabled: bool,
     initialized: bool,
+    usb_speed: u8,
 }
 
 impl<C: Control> Chip<C> {
@@ -83,19 +91,50 @@ impl<C: Control> Chip<C> {
     }
 
     pub fn attach(io: C, expected: Revision, full_speed: bool) -> Result<(Self, Mac), BlockError> {
+        Self::attach_with_firmware(
+            io,
+            expected,
+            if full_speed {
+                super::super::xhci::FULL_SPEED
+            } else {
+                super::super::xhci::HIGH_SPEED
+            },
+            None,
+        )
+    }
+
+    pub fn attach_with_firmware(
+        io: C,
+        expected: Revision,
+        speed: u8,
+        firmware: Option<&super::firmware::Firmware<'_>>,
+    ) -> Result<(Self, Mac), BlockError> {
         let mut chip = Self::probe(io, expected)?;
         if !chip.revision.implemented() {
             return Err(BlockError::Unsupported(
                 "RTL815x unimplemented or changed chip revision",
             ));
         }
+        if !(1..=5).contains(&speed)
+            || firmware.map(|image| image.revision())
+                != chip.revision.firmware().map(|_| chip.revision)
+        {
+            return Err(BlockError::Unsupported(
+                "RTL815x USB speed or required firmware identity",
+            ));
+        }
+        chip.usb_speed = speed;
         let first = chip.read(PLA, PLA_BACKUP, 4)?.to_le_bytes();
         let last = chip.read(PLA, PLA_BACKUP + 4, 4)?.to_le_bytes();
         let mac = Mac([first[0], first[1], first[2], first[3], last[0], last[1]]);
         if mac.0[0] & 1 != 0 || mac.0.iter().all(|b| *b == 0) {
             return Err(BlockError::Unsupported("RTL815x invalid station address"));
         }
-        chip.initialize(full_speed)?;
+        if chip.revision.is_8153a() {
+            chip.initialize_8153a(firmware)?;
+        } else {
+            chip.initialize(speed <= super::super::xhci::LOW_SPEED)?;
+        }
         // set_ethernet_addr: supported revisions restore the permanent backup
         // address into IDR under the configuration-write gate. Platform/OEM
         // MAC passthrough policy is not inferred from a retail product string.
@@ -126,7 +165,16 @@ impl<C: Control> Chip<C> {
             accessible: true,
             enabled: false,
             initialized: false,
+            usb_speed: 0,
         })
+    }
+
+    pub fn receive_bytes(&self) -> usize {
+        if self.revision.is_8153a() && self.usb_speed >= super::super::xhci::SUPER_SPEED {
+            32 * 1024
+        } else {
+            16 * 1024
+        }
     }
 
     fn transaction(&mut self, request: [u8; 8], data: &[u8]) -> Result<Vec<u8>, BlockError> {
@@ -214,6 +262,9 @@ impl<C: Control> Chip<C> {
     }
 
     fn aldps(&mut self, enable: bool) -> Result<(), BlockError> {
+        if self.revision.is_8153a() {
+            return self.aldps_8153a(enable);
+        }
         self.phy_write(
             OCP_ALDPS_CONFIG,
             ENPDNPS | LINKENA | DIS_SDSAVE | if enable { ENPWRSAVE } else { 0 },
@@ -387,6 +438,9 @@ impl<C: Control> Chip<C> {
                     0
                 },
             )?;
+            if self.revision.is_8153a() {
+                self.enable_8153a(status)?;
+            }
             self.modify(PLA, PLA_FMC, 2, FMC_FCR_MCU_EN, 0)?;
             self.modify(PLA, PLA_FMC, 2, 0, FMC_FCR_MCU_EN)?;
             self.modify(PLA, PLA_CR, 1, 0, CR_RE | CR_TE)?;
@@ -410,6 +464,9 @@ impl<C: Control> Chip<C> {
         self.poll(PLA, PLA_OOB_CTRL, 1, 0x30, 0x30, (1000, 1000))?;
         self.poll(PLA, PLA_TCR0, 2, TCR0_TX_EMPTY, TCR0_TX_EMPTY, (1000, 1000))?;
         self.nic_reset()?;
+        if self.revision.is_8153a() {
+            self.reset_bmu()?;
+        }
         self.aldps(true)
     }
 }
@@ -433,6 +490,7 @@ pub(crate) mod tests {
         pub fail_at: Option<usize>,
         pub short_at: Option<usize>,
         pub link: bool,
+        pub(crate) phy_status: u32,
         pub stuck_reset: bool,
         pub stuck_phy: bool,
         pub stuck_list: bool,
@@ -450,6 +508,7 @@ pub(crate) mod tests {
                 fail_at: None,
                 short_at: None,
                 link: true,
+                phy_status: 0x0a,
                 stuck_reset: false,
                 stuck_phy: false,
                 stuck_list: false,
@@ -463,6 +522,9 @@ pub(crate) mod tests {
             model.set(PLA, PLA_BACKUP, 4, 0x33221102);
             model.set(PLA, PLA_BACKUP + 4, 4, 0x5544);
             model.set(PLA, PLA_OOB_CTRL, 1, NOW_IS_OOB | LINK_LIST_READY | 0x30);
+            model.set(PLA, PLA_BOOT_CTRL, 2, AUTOLOAD_DONE);
+            model.set(PLA, OCP_PHY_STATUS, 2, PHY_STAT_LAN_ON);
+            model.set(PLA, 0xe000, 2, 0x0100);
             model
         }
 
@@ -520,7 +582,12 @@ pub(crate) mod tests {
                         }
                     }
                     if address == PLA_PHYSTATUS {
-                        self.set(PLA, PLA_PHYSTATUS, 2, if self.link { 0x0a } else { 0 });
+                        self.set(
+                            PLA,
+                            PLA_PHYSTATUS,
+                            2,
+                            if self.link { self.phy_status } else { 0 },
+                        );
                     }
                     let mut value = self.get(bank, mapped, 4);
                     if address == PLA_OOB_CTRL & !3 && self.stuck_list {
@@ -635,7 +702,7 @@ pub(crate) mod tests {
             ));
         }
         for revision in [
-            0x4c00, 0x5c00, 0x5c10, 0x6000, 0x6010, 0x7020, 0x7030, 0x7410, 0xffff,
+            0x4c00, 0x5c10, 0x6000, 0x6010, 0x7020, 0x7030, 0x7410, 0xffff,
         ] {
             let model = Rc::new(RefCell::new(Model::new(revision)));
             assert!(Chip::attach(Io(model.clone()), Revision(revision), false).is_err());
@@ -681,6 +748,7 @@ pub(crate) mod tests {
             accessible: true,
             enabled: false,
             initialized: false,
+            usb_speed: 0,
         };
         for bank in [USB, PLA] {
             for address in 0xc000..0xc020 {

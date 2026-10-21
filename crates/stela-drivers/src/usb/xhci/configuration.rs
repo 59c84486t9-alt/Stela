@@ -474,7 +474,7 @@ pub(super) mod tests {
     fn unsupported_or_unobserved_realtek_revision_preserves_compatible_cdc_choice() {
         let mut vendor = storage(7);
         vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
-        for revision in [None, Some(0x4c00), Some(0x5c10), Some(0x7030), Some(0x7410)] {
+        for revision in [None, Some(0x4c00), Some(0x6000), Some(0x7030), Some(0x7410)] {
             let mut device = device(vec![vendor.clone(), ecm(42)]);
             device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x56, 0x81]);
             device.vendor_ethernet_revision = revision;

@@ -44,6 +44,39 @@ pub struct Request {
     pub revision: String,
 }
 
+/// Owned upload provenance. No image bytes or borrowed Provider storage escape
+/// synchronous construction of an initialized native backend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    pub request: Request,
+    pub length: usize,
+    pub sha256: [u8; 32],
+    pub source: String,
+    pub source_revision: String,
+    pub member: String,
+    pub license: String,
+}
+
+impl Receipt {
+    pub(crate) fn from_image(image: resources::Image<'_>) -> Self {
+        let target = image.target();
+        let provenance = image.provenance();
+        Self {
+            request: Request {
+                name: image.name().into(),
+                hardware: target.hardware.into(),
+                revision: target.revision.into(),
+            },
+            length: image.bytes().len(),
+            sha256: image.sha256(),
+            source: provenance.source.into(),
+            source_revision: provenance.revision.into(),
+            member: provenance.member.into(),
+            license: provenance.license.into(),
+        }
+    }
+}
+
 impl Request {
     pub fn new(descriptor: &[u8; 18], revision: Revision) -> Option<Self> {
         Some(Self {

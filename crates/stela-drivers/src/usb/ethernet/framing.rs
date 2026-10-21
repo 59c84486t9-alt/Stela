@@ -5,7 +5,7 @@
 use crate::net::MAX_FRAME;
 use alloc::vec::Vec;
 
-pub const AGGREGATE: usize = 16 * 1024;
+pub const AGGREGATE: usize = 32 * 1024;
 const RX_DESCRIPTOR: usize = 24;
 const TX_DESCRIPTOR: usize = 8;
 const FCS: usize = 4;
@@ -123,5 +123,21 @@ mod tests {
         assert!(decode(&bytes).is_err());
         bytes[..4].copy_from_slice(&0x7fffu32.to_le_bytes());
         assert!(decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn superspeed_32k_aggregate_keeps_each_frame_and_rejects_over_limit() {
+        let mut bytes = Vec::new();
+        for value in 0..21 {
+            bytes.extend(packet(1500, value));
+            bytes.resize(bytes.len().next_multiple_of(8), 0);
+        }
+        assert!(bytes.len() > 16384 && bytes.len() < AGGREGATE);
+        let frames = decode(&bytes).unwrap();
+        assert_eq!(frames.len(), 21);
+        for (index, frame) in frames.iter().enumerate() {
+            assert_eq!(frame, &vec![index as u8; 1500]);
+        }
+        assert!(decode(&vec![0; AGGREGATE + 1]).is_err());
     }
 }
