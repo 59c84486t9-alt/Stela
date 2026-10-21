@@ -13,6 +13,7 @@ use alloc::{collections::BTreeSet, format, string::String, vec::Vec};
 
 mod records;
 use records::{Layout, Record};
+mod implicit;
 
 /// Bytes of one m1n1 `struct pmgr_device` record.
 pub(super) const PMGR_DEVICE: usize = records::BYTES;
@@ -52,9 +53,18 @@ pub struct PowerStates {
     pub registers: Vec<u64>,
     pub domains: Vec<Domain>,
     pub resources: Vec<PowerResource>,
+    /// Source-qualified requirements absent from the original gate arrays.
+    /// Keep the original inventory unchanged for admission and source review.
+    pub(crate) implicit: Vec<implicit::Requirement>,
 }
 
 impl PowerStates {
+    /// Original power gates plus independently qualified physical ownership.
+    /// Stable resource indices also identify the actual lifecycle owner.
+    pub(crate) fn power_requirements(&self) -> Result<Vec<Vec<DomainId>>, String> {
+        implicit::power_requirements(self)
+    }
+
     /// Apply the bundle's existing positive device-admission ledger to the
     /// matching prepared resource inventory. No node/property is removed.
     /// Missing evidence remains required. A hidden controller's registerless
@@ -63,7 +73,25 @@ impl PowerStates {
     pub fn apply_admission(&mut self, prepared: &[u8], hidden: &[String]) -> Result<usize, String> {
         let root = Node::root(prepared).ok_or("PMGR admission tree is invalid")?;
         let expected = inventory_with_nodes(&root)?;
+        let io = root.child("arm-io");
+        let pmgr = io.as_ref().unwrap_or(&root).child("pmgr");
+        let translate = |address| {
+            if expected.ranges.is_empty() {
+                return Some(address);
+            }
+            expected.ranges.iter().find_map(|&(child, parent, bytes)| {
+                (address >= child && address - child < bytes)
+                    .then(|| parent.checked_add(address - child))
+                    .flatten()
+            })
+        };
+        let implicit = pmgr
+            .as_ref()
+            .map(|pmgr| implicit::resolve(pmgr, &self.domains, &expected, &translate))
+            .transpose()?
+            .unwrap_or_default();
         if expected.resources.len() != self.resources.len()
+            || implicit != self.implicit
             || expected
                 .resources
                 .iter()
@@ -166,6 +194,7 @@ struct ResourceInventory<'a> {
     resources: Vec<PowerResource>,
     nodes: Vec<Node<'a>>,
     parents: Vec<Option<usize>>,
+    ranges: Vec<(u64, u64, u64)>,
 }
 
 impl ResourceInventory<'_> {
@@ -210,6 +239,7 @@ fn domain_id(device: u16) -> DomainId {
     DomainId { die: 0, device }
 }
 
+#[cfg(test)]
 fn inventory(root: &Node<'_>) -> Result<Vec<PowerResource>, String> {
     Ok(inventory_with_nodes(root)?.resources)
 }
@@ -422,6 +452,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         resources,
         nodes,
         parents,
+        ranges,
     })
 }
 
@@ -449,28 +480,33 @@ fn decode_power_states(
     translate: &dyn Fn(u64) -> Option<u64>,
 ) -> Result<PowerStates, String> {
     let table = decode_domain_table(node, translate)?;
-    let resources = inventory(root)?;
-    let consumers = resources
+    let inventory = inventory_with_nodes(root)?;
+    let implicit = implicit::resolve(node, &table.domains, &inventory, translate)?;
+    let states = PowerStates {
+        blocks: table.blocks,
+        registers: table.registers,
+        domains: table.domains,
+        resources: inventory.resources,
+        implicit,
+    };
+    let power = states.power_requirements()?;
+    let consumers = states
+        .resources
         .iter()
         .enumerate()
         .map(|(id, resource)| Consumer {
             id,
             name: &resource.name,
             clocks: &resource.clocks,
-            power: &resource.power,
+            power: &power[id],
             sinks: LifecycleSinks::default(),
             admission: resource.admission,
         })
         .collect::<Vec<_>>();
     // Validate the entire graph even when a broken record is unreferenced.
-    coverage::analyze(&table.domains, &consumers)
+    coverage::analyze(&states.domains, &consumers)
         .map_err(|error| format!("PMGR coverage: {error:?}"))?;
-    Ok(PowerStates {
-        blocks: table.blocks,
-        registers: table.registers,
-        domains: table.domains,
-        resources,
-    })
+    Ok(states)
 }
 
 struct DomainTable {

@@ -651,6 +651,7 @@ impl AppleDevices {
         self.bus
             .map(id, bank.physical, bank.bytes, 0)
             .map_err(|e| format!("GPIO placement: {e:?}"))?;
+        self.register_power_device(bank.physical, id, false)?;
         self.gpio = Some((bank.physical, nets));
         Ok(())
     }
@@ -686,6 +687,7 @@ impl AppleDevices {
         self.bus
             .map(id, aux.bank.physical, aux.bank.bytes, 0)
             .map_err(|e| format!("{} placement: {e:?}", aux.name))?;
+        self.register_power_device(aux.bank.physical, id, false)?;
         self.aux_gpios.push((aux.bank.phandle, nets));
         Ok(())
     }
@@ -1864,6 +1866,7 @@ impl AppleDevices {
                 devices.push(dart.0);
             }
         }
+        let power_requirements = states.power_requirements()?;
         let mut consumers = Vec::new();
         for (id, resource) in states.resources.iter().enumerate() {
             let connected = resource.owner.is_some_and(|owner| match owner {
@@ -1891,7 +1894,7 @@ impl AppleDevices {
                 id,
                 name: &resource.name,
                 clocks: &resource.clocks,
-                power: &resource.power,
+                power: &power_requirements[id],
                 admission: resource.admission,
                 sinks: if connected {
                     complete
@@ -2294,7 +2297,11 @@ impl AppleDevices {
         let (Controller::V1(id) | Controller::V2(id)) = device;
         self.bus
             .map(id, physical, span, 0)
-            .map_err(|error| format!("AIC placement: {error:?}"))
+            .map_err(|error| format!("AIC placement: {error:?}"))?;
+        if matches!(device, Controller::V2(_)) {
+            self.register_power_device(physical, id, false)?;
+        }
+        Ok(())
     }
 
     fn settle_phys(&mut self, cpu: CpuIndex, now: u64) {
@@ -3157,6 +3164,7 @@ mod tests {
         use super::super::soc::{PowerResource, PowerStates};
         let gate = coverage::DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![coverage::Domain {
@@ -3211,6 +3219,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let mut states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, supplies as u64 * 8)],
             registers: registers.clone(),
             domains: registers
@@ -3264,6 +3273,7 @@ mod tests {
         let bases = [UART, 0x2_3501_0000, 0x2_3510_4000];
         let id = DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![Domain {
@@ -3435,6 +3445,7 @@ mod tests {
         let registers = [supply, supply + 8];
         let ids = [1, 2].map(|device| DomainId { die: 0, device });
         let states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, 16)],
             registers: registers.into(),
             domains: registers
@@ -3498,6 +3509,7 @@ mod tests {
         let canonical = 0x2_3600_0000;
         let gate = DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![Domain {
@@ -3804,6 +3816,7 @@ mod tests {
         let supply = 0x2_3b70_8020;
         let id = coverage::DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             blocks: vec![(supply, 4)],
             registers: vec![supply],
             domains: vec![coverage::Domain {
@@ -4108,11 +4121,12 @@ mod tests {
         devices
             .add_ans(&placement, Box::new(RamDisk::new("backing", 16, 4096)))
             .unwrap();
-        assert_eq!(devices.power_devices.len(), 3);
+        assert_eq!(devices.power_devices.len(), 4);
         assert!(
             devices
                 .power_devices
                 .iter()
+                .filter(|bank| bank.physical != 0x2_3b0c_0000)
                 .all(|bank| bank.physical == WRAPPER)
         );
         connect_native_power(&mut devices, SUPPLY, &[("/arm-io/ans", WRAPPER)], true);
@@ -4290,8 +4304,8 @@ mod tests {
                 quiesced: false,
             })
             .unwrap();
-        assert_eq!(devices.power_devices.len(), 1);
-        assert_eq!(devices.power_devices[0].physical, WRAPPER);
+        assert_eq!(devices.power_devices.len(), 2);
+        assert_eq!(devices.power_devices[1].physical, WRAPPER);
         let supply = 0x2_3b70_0410;
         connect_native_power(&mut devices, supply, &[("/arm-io/pmp", WRAPPER)], false);
         // Its committed HELLO survives a real clock gate without restarting
@@ -4369,9 +4383,9 @@ mod tests {
             .add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 0))
             .unwrap();
         devices.add_gfx(&placement, false).unwrap();
-        assert_eq!(devices.power_devices.len(), 2);
-        assert_eq!(devices.power_devices[0].physical, WRAPPER);
-        assert_eq!(devices.power_devices[1].physical, SGX);
+        assert_eq!(devices.power_devices.len(), 3);
+        assert_eq!(devices.power_devices[1].physical, WRAPPER);
+        assert_eq!(devices.power_devices[2].physical, SGX);
         connect_native_power(
             &mut devices,
             SUPPLY,
@@ -5392,6 +5406,7 @@ mod tests {
         let supply = 0x23d280100;
         let id = DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             registers: vec![supply],
             blocks: vec![(supply, 4)],
             domains: vec![Domain {
@@ -5481,6 +5496,7 @@ mod tests {
         let supply = 0x23d280100;
         let id = DomainId { die: 0, device: 1 };
         let states = PowerStates {
+            implicit: Vec::new(),
             registers: vec![supply],
             blocks: vec![(supply, 4)],
             domains: vec![Domain {
@@ -5580,6 +5596,7 @@ mod tests {
         let base = placement.ranges[0].0;
         let supply = 0x23d280098;
         let states = PowerStates {
+            implicit: Vec::new(),
             registers: vec![supply, supply + 8],
             blocks: vec![(supply, 12)],
             domains: vec![
