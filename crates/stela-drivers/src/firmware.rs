@@ -116,7 +116,7 @@ pub enum ErrorKind {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "firmware {}: {:?}", self.name, self.kind)
+        write!(f, "firmware {:?}: {:?}", self.name, self.kind)
     }
 }
 
@@ -659,6 +659,16 @@ mod tests {
             rejected(vec![input]),
             ErrorKind::InvalidProvenance("license")
         );
+    }
+
+    #[test]
+    fn invalid_name_diagnostics_escape_control_characters() {
+        let mut input = resource();
+        input.name = "bad\n\0\x1b[31m";
+        let error = Catalog::from_handoff(vec![input]).err().unwrap();
+        let rendered = alloc::format!("{error}");
+        assert_eq!(rendered, "firmware \"bad\\n\\0\\u{1b}[31m\": InvalidName");
+        assert!(!rendered.chars().any(char::is_control));
     }
 
     #[test]
