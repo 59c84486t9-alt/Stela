@@ -1203,13 +1203,15 @@ fn locate_esp(host: &dyn Host, usb: &Path) -> Result<PathBuf> {
     let esp = match partition {
         Some(partition) => match &partition.mount {
             Some(mount) => mount.clone(),
-            None => bail!(
-                "{} is on the same disk as EFI partition {}, which is not mounted. Mount it \
-                 with `sudo diskutil mount {}` and run setup again.",
-                usb.display(),
-                partition.identifier,
-                partition.identifier
-            ),
+            // macOS leaves a USB's EFI partition unmounted.
+            None => host.mount(&partition.identifier).with_context(|| {
+                format!(
+                    "{} is on the same disk as EFI partition {}, which could not be mounted \
+                     (setup needs sudo)",
+                    usb.display(),
+                    partition.identifier
+                )
+            })?,
         },
         None => bail!(
             "{} is on a disk without an EFI partition. Erase the USB in Disk Utility with the \
@@ -2188,6 +2190,8 @@ mod tests {
         pub(super) cpu: Cpu,
         /// The partitions `unmount` unmounted, in order.
         pub(super) unmounted: std::cell::RefCell<Vec<String>>,
+        /// Where `mount` mounts a partition; others refuse.
+        pub(super) mountable: BTreeMap<String, PathBuf>,
     }
 
     impl FakeHost {
@@ -2203,6 +2207,7 @@ mod tests {
                 memory: 32 * GIB,
                 cpu: Cpu { entropy: true },
                 unmounted: Default::default(),
+                mountable: BTreeMap::new(),
             }
         }
 
@@ -2237,6 +2242,12 @@ mod tests {
                 .borrow_mut()
                 .push(partition.identifier.clone());
             Ok(())
+        }
+        fn mount(&self, identifier: &str) -> Result<PathBuf> {
+            self.mountable
+                .get(identifier)
+                .cloned()
+                .context("permission denied")
         }
         fn serial(&self, disk: &str) -> Result<Option<String>> {
             Ok(self.serials.get(disk).cloned())
@@ -2591,11 +2602,20 @@ mod tests {
             .to_string();
         assert!(error.contains("GUID Partition Map"), "{error}");
         let mut host = FakeHost::new(f.host.volumes.clone(), f.host.disks.clone());
+        // An unmounted EFI partition is mounted, or the error says why not.
         host.disks[1].partitions[0].mount = None;
         let error = setup(&environment(&host), command(&f, &f.data))
             .unwrap_err()
             .to_string();
-        assert!(error.contains("sudo diskutil mount disk5s1"), "{error}");
+        assert!(
+            error.contains("disk5s1, which could not be mounted"),
+            "{error}"
+        );
+        host.mountable.insert("disk5s1".into(), f.esp.clone());
+        let mut dry = command(&f, &f.data);
+        dry.dry_run = true;
+        let plan = setup(&environment(&host), dry).unwrap();
+        assert!(plan.contains(&f.esp.display().to_string()), "{plan}");
         let loader = f.esp.join(efi::LOADER);
         fs::create_dir_all(loader.parent().unwrap()).unwrap();
         fs::write(&loader, b"MZopencore").unwrap();

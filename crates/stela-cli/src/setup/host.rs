@@ -98,6 +98,8 @@ pub(crate) trait Host {
     /// Unmount `partition`'s volume, or every volume of the APFS container
     /// it backs.
     fn unmount(&self, partition: &PartitionInfo) -> Result<()>;
+    /// Mount the volume on partition `identifier` and return where.
+    fn mount(&self, identifier: &str) -> Result<PathBuf>;
     /// This computer's memory and CPU, for a disk it boots itself.
     fn memory_bytes(&self) -> Result<u64>;
     fn cpu(&self) -> Result<Cpu>;
@@ -221,6 +223,18 @@ impl Host for System {
                 .unwrap_or(&partition.identifier)
         );
         Ok(())
+    }
+
+    fn mount(&self, identifier: &str) -> Result<PathBuf> {
+        let status = Command::new("diskutil")
+            .args(["mount", identifier])
+            .status()
+            .context("cannot run diskutil")?;
+        ensure!(status.success(), "diskutil could not mount {identifier}");
+        let info = plist(Command::new("diskutil").args(["info", "-plist", identifier]))?;
+        let mount = text(&info, "MountPoint");
+        ensure!(!mount.is_empty(), "diskutil mounted {identifier} nowhere");
+        Ok(PathBuf::from(mount))
     }
 
     fn memory_bytes(&self) -> Result<u64> {
