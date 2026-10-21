@@ -186,7 +186,8 @@ impl AppleWdt {
             .ok()
             .filter(|&index| index < WATCHDOGS)?;
         let register = offset % STRIDE;
-        (register != BARK_TIME || index == 0).then_some((index, register))
+        (matches!(register, CUR_TIME | BITE_TIME | CTRL) || register == BARK_TIME && index == 0)
+            .then_some((index, register))
     }
 }
 
@@ -433,6 +434,30 @@ mod tests {
         let mut a = Access::new(0, 24 * second, &mut latch);
         w.advance(&mut a).unwrap();
         assert!(a.reset_request().is_some());
+    }
+
+    #[test]
+    fn holes_and_misaligned_offsets_never_alias_control_registers() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut wdt = AppleWdt::new(Some(IRQ), 0);
+        for offset in 0..WATCHDOGS as u64 * STRIDE {
+            if AppleWdt::decode(offset).is_some() {
+                continue;
+            }
+            assert!(wdt.read(offset, Width::Word, &mut access).is_err());
+            assert!(
+                wdt.write(offset, Width::Word, CTRL_RESET_EN.into(), &mut access)
+                    .is_err()
+            );
+            assert!(access.reset_request().is_none());
+        }
+        for watchdog in 0..WATCHDOGS as u64 {
+            assert_eq!(
+                wdt.read(watchdog * STRIDE + CTRL, Width::Word, &mut access),
+                Ok(0)
+            );
+        }
     }
 
     #[test]
