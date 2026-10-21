@@ -823,6 +823,9 @@ pub fn answer(
         // set_display_device(index) -> link status, not bool. The AP
         // wrapper (0x3d77988) passes this word to iomfb_status_from_link
         // (0x3d9cf30): 0 succeeds; 1 maps to kIOReturnError (0xe00002bc).
+        // Original T6000 restore FW 0x26aed0 ignores the index and returns
+        // success for its external trait (+0x4305); init 0x256310..2563e8
+        // sets that trait for types 2/3 and publishes "external".
         b"A411" => sized(IO_RETURN_SUCCESS.to_le_bytes().to_vec()),
         // do_create_default_frame_buffer: the DCP does NOT create one; the
         // boot framebuffer is inherited, so this is 0 and the AP skips the
