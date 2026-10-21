@@ -1,4 +1,5 @@
 //! Validated byte-resource ownership for the source-qualified RTC interface.
+use super::fault::FaultHistory;
 use super::{ALARM_BYTES, OFFSET_BYTES, Rtc, UPCOUNT_BYTES, Window};
 use alloc::vec::Vec;
 
@@ -9,6 +10,7 @@ pub struct Configuration {
     pub(super) rtc: Option<Rtc>,
     pub(super) monitor: u8,
     pub(super) identity: Option<Window>,
+    pub(super) fault_history: Option<FaultHistory>,
 }
 
 impl Configuration {
@@ -98,7 +100,59 @@ impl Configuration {
             rtc,
             monitor,
             identity: None,
+            fault_history: None,
         })
+    }
+    /// Configure the source's outside-scratch fault log with explicit cold or
+    /// retained history. No Apple reset value or physical fault producer is
+    /// inferred. A log inside scratch must remain that canonical storage owner.
+    pub fn with_fault_history(
+        mut self,
+        window: Window,
+        initial: Vec<u8>,
+    ) -> Result<Self, &'static str> {
+        let history = FaultHistory::new(window, initial)?;
+        if self.fault_history.is_some() || self.occupied().any(|other| overlaps(window, other)) {
+            return Err("PMU fault log duplicates or overlaps another register owner");
+        }
+        self.fault_history = Some(history);
+        Ok(self)
+    }
+
+    fn occupied(&self) -> impl Iterator<Item = Window> + '_ {
+        self.windows
+            .iter()
+            .copied()
+            .chain(self.identity)
+            .chain(self.rtc.into_iter().flat_map(|rtc| {
+                [
+                    Window {
+                        base: rtc.upcount,
+                        bytes: UPCOUNT_BYTES,
+                    },
+                    Window {
+                        base: rtc.clock_offset,
+                        bytes: OFFSET_BYTES,
+                    },
+                    Window {
+                        base: rtc.alarm_control,
+                        bytes: 1,
+                    },
+                    Window {
+                        base: rtc.alarm_offset,
+                        bytes: ALARM_BYTES,
+                    },
+                    Window {
+                        base: rtc.alarm_event,
+                        bytes: 1,
+                    },
+                    Window {
+                        base: rtc.irq_mask,
+                        bytes: 1,
+                    },
+                ]
+            }))
+            .chain(self.fault_history.iter().map(|history| history.window))
     }
     /// Retain the source's identity register extent without fabricating silicon
     /// identity bytes. Access stops explicitly until that separate contract exists.
@@ -107,28 +161,15 @@ impl Configuration {
         if identity.bytes == 0 || end > 0x10000 || self.identity.is_some() {
             return Err("PMU identity extent is empty, duplicated or exceeds 16 bits");
         }
-        let overlaps = |window: Window| {
-            u32::from(window.base) < end
-                && u32::from(identity.base) < u32::from(window.base) + u32::from(window.bytes)
-        };
-        if self.windows.iter().copied().any(overlaps) {
-            return Err("PMU identity overlaps storage");
-        }
-        if let Some(rtc) = self.rtc {
-            for (base, bytes) in [
-                (rtc.upcount, UPCOUNT_BYTES),
-                (rtc.clock_offset, OFFSET_BYTES),
-                (rtc.alarm_control, 1),
-                (rtc.alarm_offset, ALARM_BYTES),
-                (rtc.alarm_event, 1),
-                (rtc.irq_mask, 1),
-            ] {
-                if overlaps(Window { base, bytes }) {
-                    return Err("PMU identity overlaps RTC");
-                }
-            }
+        if self.occupied().any(|window| overlaps(identity, window)) {
+            return Err("PMU identity overlaps another register owner");
         }
         self.identity = Some(identity);
         Ok(self)
     }
+}
+
+fn overlaps(a: Window, b: Window) -> bool {
+    u32::from(a.base) < u32::from(b.base) + u32::from(b.bytes)
+        && u32::from(b.base) < u32::from(a.base) + u32::from(a.bytes)
 }

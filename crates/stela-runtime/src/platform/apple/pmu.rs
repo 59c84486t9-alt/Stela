@@ -34,10 +34,15 @@
 //! `checkRTCWakeEvent` (0x2ddb450) reports an RTC wake when every event-mask
 //! bit is set in the event register.
 //!
-//! The model maps exactly the windows the DeviceTree names. Scratchpads,
-//! fault logs and the PM setting are storage that holds the clean cold-boot
-//! value zero (no faults, no wake source, no LPM state), which the driver
-//! reads as such. The legacy scratchpad is 0x100 bytes, the boot keys'
+//! The model maps explicit register owners. Ordinary scratchpads and PM
+//! settings begin with declared zero storage; these are not observed Apple
+//! reset values. Outside-scratch fault logs require `with_fault_history` and
+//! every initial byte explicitly supplied. Only the source's complete captured
+//! snapshot acknowledgement is qualified; arbitrary W1C, unqualified partial
+//! writes,
+//! physical fault production and reset semantics remain unsupported. A log
+//! inside scratch shares its canonical bytes and source zero-clear behavior.
+//! The legacy scratchpad is 0x100 bytes, the boot keys'
 //! extent rounded to the 256-byte page at whose end the RTC block begins
 //! (inferred). The upcount follows the system counter and refuses writes;
 //! the clock offset starts at the host's wall time when the engine knows it
@@ -52,6 +57,7 @@
 //! unmasked; where it leads is the board's. Every other address NACKs.
 mod clock;
 mod config;
+mod fault;
 pub use clock::{RtcClock, RtcEpoch};
 pub use config::Configuration;
 
@@ -125,6 +131,7 @@ impl Interrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Byte {
     Storage,
+    Fault(u16),
     Upcount(u16),
     AlarmControl,
     AlarmEvent,
@@ -138,6 +145,7 @@ pub struct Pmu {
     clock: RtcClock,
     monitor: u8,
     identity: Option<Window>,
+    faults: Option<fault::FaultLog>,
     /// Bytes of every storage window, in window order.
     storage: Vec<Vec<u8>>,
     alarm_control: u8,
@@ -184,6 +192,7 @@ impl Pmu {
             rtc,
             monitor,
             identity,
+            fault_history,
         } = config;
         if let Some(rtc) = rtc {
             windows.push(Window {
@@ -204,6 +213,7 @@ impl Pmu {
             clock,
             monitor,
             identity,
+            faults: fault_history.map(Into::into),
             storage,
             alarm_control: 0,
             alarm_event: 0,
@@ -235,6 +245,11 @@ impl Pmu {
     }
 
     fn cell(&self, address: u16) -> Option<Byte> {
+        if let Some(faults) = &self.faults
+            && faults.window.contains(address)
+        {
+            return Some(Byte::Fault(address - faults.window.base));
+        }
         if let Some(rtc) = self.rtc {
             if address.wrapping_sub(rtc.upcount) < UPCOUNT_BYTES {
                 return Some(Byte::Upcount(address - rtc.upcount));
@@ -340,6 +355,13 @@ impl SpmiSlave for Pmu {
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
+        if cells.iter().any(|(_, cell)| matches!(cell, Byte::Fault(_))) {
+            self.faults
+                .as_ref()
+                .expect("fault owner")
+                .check_read()
+                .map_err(SlaveError::Unsupported)?;
+        }
         self.check_time(now)?;
         if self.rtc.is_some() {
             self.clock.publish(now).map_err(SlaveError::Unsupported)?;
@@ -359,10 +381,14 @@ impl SpmiSlave for Pmu {
         for ((at, cell), out) in cells.into_iter().zip(data.iter_mut()) {
             *out = match cell {
                 Byte::Storage | Byte::IrqMask => *self.byte(at),
+                Byte::Fault(offset) => self.faults.as_ref().expect("fault owner").byte(offset),
                 Byte::Upcount(i) => raw[usize::from(i)],
                 Byte::AlarmControl => self.alarm_control,
                 Byte::AlarmEvent => self.alarm_event,
             };
+        }
+        if let Some(faults) = &mut self.faults {
+            faults.capture(address, data.len());
         }
         Ok(())
     }
@@ -377,6 +403,14 @@ impl SpmiSlave for Pmu {
             .any(|&(_, cell)| matches!(cell, Byte::Upcount(_)))
         {
             return Err(SlaveError::Nack);
+        }
+        let acknowledge_faults = cells.iter().any(|(_, cell)| matches!(cell, Byte::Fault(_)));
+        if acknowledge_faults {
+            self.faults
+                .as_ref()
+                .expect("fault owner")
+                .check_acknowledge(address, data)
+                .map_err(SlaveError::Unsupported)?;
         }
         // Preflight the complete transfer before time, storage, event or output effects.
         if let Some(rtc) = self.rtc {
@@ -416,8 +450,15 @@ impl SpmiSlave for Pmu {
                     programmed = true;
                 }
                 Byte::AlarmEvent => self.alarm_event &= !value,
+                Byte::Fault(_) => {} // One complete snapshot is acknowledged below.
                 Byte::Upcount(_) => unreachable!(),
             }
+        }
+        if acknowledge_faults {
+            self.faults
+                .as_mut()
+                .expect("fault owner")
+                .acknowledge(address, data.len());
         }
         if programmed {
             self.armed = self.alarm_time().is_some_and(|time| time > now);
@@ -489,7 +530,7 @@ mod tests {
         Pmu::new(windows, Some(RTC), wall)
     }
 
-    fn maverick() -> Rtc {
+    pub(super) fn maverick() -> Rtc {
         Rtc {
             upcount: 0x1406,
             clock_offset: 0x1411,
@@ -879,6 +920,36 @@ mod tests {
         );
         for (offset, bytes, digest) in [
             (
+                0x2d53facusize,
+                208usize,
+                "aa7a73fd15abdeaf204380645aaedc18c853dd98711ce169dd673d845ad5f2c7",
+            ), // fault-log-count
+            (
+                0x1c85b2cusize,
+                224usize,
+                "da1639c284a54128a62d241ebf9b3f5b35aa9b0d924ccf18fffd28cfdb0a591f",
+            ), // spmi-long-wrappers
+            (
+                0x2d54ee4usize,
+                632usize,
+                "31e6d88dbfb049d96923baaa68e1568e5231b59a30416c638502105b0fc1d599",
+            ), // pmu-read-write-and-retry
+            (
+                0x2d4e5c4usize,
+                12usize,
+                "ed122dab0fa82ceea645c8407ec5262eaca8bb5c6dc6d2127a6624ac6da06d93",
+            ), // controller-mode
+            (
+                0x2d4e7acusize,
+                372usize,
+                "fe52ab77e84967db2b65e3507219bc51ea23fd0d0d04e28802c2b425766257eb",
+            ), // controller-chunk-lengths
+            (
+                0x2d55cf4usize,
+                492usize,
+                "9589a8ab2afc9a41eb886446c9fc1e9f6b6e3cdccf48f521dbd5c16e3593b7dc",
+            ), // complete-fault-log-consumer
+            (
                 0x2d53a24usize,
                 184usize,
                 "39f5200f3b2267cdae8f5e29ec5d4293b8e4c2957625cee6a2394b388c2e8469",
@@ -1052,7 +1123,7 @@ mod tests {
                     assert!(node.property("info-fw-sram").is_none());
                 }
                 let mut windows = Vec::new();
-                for key in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
+                for key in ["info-scrpad", "info-fault_shadow"] {
                     if let Some(pair) = node.cells32(key) {
                         windows.push(Window {
                             base: pair[0] as u16,
@@ -1092,11 +1163,26 @@ mod tests {
                 } else {
                     None
                 };
+                let log = node.cells32("info-fault_log").unwrap();
+                let log = Window {
+                    base: log[0] as u16,
+                    bytes: log[1] as u16,
+                };
+                assert_eq!(log.base, 0x1000);
+                assert_eq!(log.bytes, if rtc.is_some() { 10 } else { 1 });
                 let configuration = Configuration::new(windows, rtc, u8::from(rtc.is_some()))
+                    .unwrap()
+                    // This fixture declares empty virtual history, not an Apple
+                    // reset value or the live reference Mac's fault state.
+                    .with_fault_history(log, alloc::vec![0; usize::from(log.bytes)])
                     .unwrap()
                     .with_unqualified_identity(Window { base: 0, bytes: 10 })
                     .unwrap();
                 let mut model = Pmu::configured(configuration, None).unwrap();
+                let mut history = alloc::vec![0xff; usize::from(log.bytes)];
+                model.read(log.base, &mut history, 0).unwrap();
+                assert!(history.iter().all(|&byte| byte == 0));
+                model.write(log.base, &history, 0).unwrap();
                 assert!(matches!(
                     model.read(0, &mut [0; 10], 0),
                     Err(SlaveError::Unsupported(_))
