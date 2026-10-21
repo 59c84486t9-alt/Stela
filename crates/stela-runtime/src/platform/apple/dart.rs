@@ -463,15 +463,17 @@ mod tests {
             };
             {
                 let mut a = Access::new(0, 0, &mut sink);
+                let captured = models[0].read(error, Width::Word, &mut a).unwrap();
                 models[0]
-                    .write(error, Width::Word, 1 << 31, &mut a)
+                    .write(error, Width::Word, captured, &mut a)
                     .unwrap();
             }
             assert!(sink.is_asserted(Wire::Aic(irq)));
             {
                 let mut a = Access::new(0, 0, &mut sink);
+                let captured = models[1].read(error, Width::Word, &mut a).unwrap();
                 models[1]
-                    .write(error, Width::Word, 1 << 31, &mut a)
+                    .write(error, Width::Word, captured, &mut a)
                     .unwrap();
             }
             assert!(!sink.is_asserted(Wire::Aic(irq)));

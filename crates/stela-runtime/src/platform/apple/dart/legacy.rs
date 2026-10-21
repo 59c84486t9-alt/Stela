@@ -375,6 +375,40 @@ impl Dart {
             access.interrupts.set_level(Wire::Aic(irq), level);
         }
     }
+
+    fn acknowledge_error(&mut self, value: u32) -> Result<(), &'static str> {
+        if self.profile != Profile::T6000 {
+            if value != 0 && value & FLAG == 0 {
+                return Err("legacy DART code-only fault acknowledgement is not specified");
+            }
+            if value & FLAG != 0 {
+                self.error = 0;
+            }
+            return Ok(());
+        }
+        if value & FLAG != 0 {
+            // The original clear-all path reads ERROR and writes that exact
+            // captured word (SPTM270bb83c..bb840). It does not establish
+            // FLAG-only or stale/modified metadata acknowledgement effects.
+            if value != self.error {
+                return Err("T6000 DART acknowledgement is not its captured fault snapshot");
+            }
+            self.error = 0;
+        } else if value != 0 {
+            // SPTM270bbc64..bbc9c writes one selected code and reads back.
+            // Validate the entire write before changing the first capture.
+            if value & !T6000_ERROR_ACK_CODES != 0 || value.count_ones() != 1 {
+                return Err("unknown T6000 DART code acknowledgement");
+            }
+            if self.error & value != 0 {
+                self.error &= !value;
+                if self.error & T6000_ERROR_ACK_CODES == 0 {
+                    self.error = 0;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Iommu for Dart {
@@ -524,29 +558,7 @@ impl MmioDevice for Dart {
             COMMAND if self.profile == Profile::T6000 && value == 0 => {}
             COMMAND => return Err(fail("unknown legacy DART stream command")),
             SELECT => self.select = value & self.mask(),
-            ERROR => {
-                if value != 0 && value & FLAG == 0 {
-                    if self.profile != Profile::T6000 {
-                        return Err(fail(
-                            "legacy DART code-only fault acknowledgement is not specified",
-                        ));
-                    }
-                    // Original T6000 SPTM270bbc64..bbc9c writes one
-                    // selected code, then reads back before returning.
-                    if value & !T6000_ERROR_ACK_CODES != 0 || value.count_ones() != 1 {
-                        return Err(fail("unknown T6000 DART code acknowledgement"));
-                    }
-                    if self.error & value != 0 {
-                        self.error &= !value;
-                        if self.error & T6000_ERROR_ACK_CODES == 0 {
-                            self.error = 0;
-                        }
-                    }
-                }
-                if value & FLAG != 0 {
-                    self.error = 0;
-                }
-            }
+            ERROR => self.acknowledge_error(value).map_err(fail)?,
             CONFIG => {
                 if value & !LOCK != 0 {
                     return Err(fail("unknown legacy DART CONFIG bits"));
@@ -770,6 +782,97 @@ mod tests {
     }
 
     #[test]
+    fn remapped_partial_failure_and_unqualified_acknowledgements_preserve_the_first_capture() {
+        let (mut model, mut ram, mut sink) = remapped_t6000();
+        let first_address = IOVA + 0x80;
+        let first_capture = {
+            let mut access = Access::new(0, 0, &mut sink);
+            assert_eq!(
+                model.translate(
+                    &mut ram,
+                    2,
+                    first_address,
+                    first_address,
+                    false,
+                    &mut access
+                ),
+                Err(DmaError::Fault(NO_TTBR))
+            );
+            let captured = model.read(ERROR, Width::Word, &mut access).unwrap();
+            for bad in [
+                u64::from(FLAG),
+                captured ^ (1 << SID_SHIFT),
+                captured ^ u64::from(WRITE_ACCESS),
+                captured | 1 << 30,
+            ] {
+                assert!(model.write(ERROR, Width::Word, bad, &mut access).is_err());
+                assert_eq!(model.read(ERROR, Width::Word, &mut access), Ok(captured));
+            }
+            model.write(ERROR, Width::Word, 0, &mut access).unwrap();
+            model
+                .write(ERROR, Width::Word, u64::from(NO_PTE), &mut access)
+                .unwrap();
+            let mut port = Port {
+                iommu: &mut model,
+                stream: 5,
+                memory: &mut ram,
+                access: &mut access,
+            };
+            assert_eq!(
+                port.write(IOVA + PAGE - 2, &[0x21, 0x43, 0x65, 0x87]),
+                Err(DmaError::Unsupported(
+                    "T6000 remapped fault source-versus-context SID provenance"
+                ))
+            );
+            let mut bytes = [0; 2];
+            assert!(ram.read(FRAME + PAGE - 2, &mut bytes));
+            assert_eq!(bytes, [0x21, 0x43]);
+            assert!(ram.read(FRAME + PAGE, &mut bytes));
+            assert_eq!(bytes, [0, 0]);
+            assert_eq!(model.read(ERROR, Width::Word, &mut access), Ok(captured));
+            assert_eq!(
+                model.read(ERROR_ADDRESS[0], Width::Word, &mut access),
+                Ok(first_address)
+            );
+            captured
+        };
+        assert!(sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            model
+                .write(ERROR, Width::Word, first_capture, &mut access)
+                .unwrap();
+        }
+        assert!(!sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            assert_eq!(
+                model.translate(&mut ram, 1, IOVA, IOVA, true, &mut access),
+                Err(DmaError::Fault(NO_TTBR))
+            );
+            let next_capture = model.read(ERROR, Width::Word, &mut access).unwrap();
+            assert_ne!(first_capture, next_capture);
+            assert!(
+                model
+                    .write(ERROR, Width::Word, first_capture, &mut access)
+                    .is_err()
+            );
+            assert_eq!(
+                model.read(ERROR, Width::Word, &mut access),
+                Ok(next_capture)
+            );
+            assert_eq!(
+                model.read(ERROR_ADDRESS[0], Width::Word, &mut access),
+                Ok(IOVA)
+            );
+            model
+                .write(ERROR, Width::Word, u64::from(NO_TTBR), &mut access)
+                .unwrap();
+        }
+        assert!(!sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+    }
+
+    #[test]
     fn t6000_code_ack_clears_only_the_pending_code_and_updates_irq() {
         let (mut model, mut ram, mut sink) = setup(Profile::T6000);
         {
@@ -946,9 +1049,8 @@ mod tests {
                     model.translate(&mut ram, 1, IOVA, IOVA, is_write, &mut a),
                     Err(DmaError::Fault(fault))
                 );
-                model
-                    .write(ERROR, Width::Word, u64::from(FLAG), &mut a)
-                    .unwrap();
+                let captured = model.read(ERROR, Width::Word, &mut a).unwrap();
+                model.write(ERROR, Width::Word, captured, &mut a).unwrap();
             }
             // Only bytes0x10..0x1f are accessible. t8020 bit1 disables this
             // bound; t6000 bit1 means uncached and cannot bypass protection.
@@ -969,6 +1071,19 @@ mod tests {
                     Err(DmaError::Fault(REGION_FAULT))
                 }
             );
+            if profile == Profile::T6000 {
+                // Region7 is outside the original code-only ACK mask, but
+                // the clear-all path can acknowledge its captured snapshot.
+                let captured = model.read(ERROR, Width::Word, &mut a).unwrap();
+                assert!(
+                    model
+                        .write(ERROR, Width::Word, REGION_FAULT.into(), &mut a)
+                        .is_err()
+                );
+                assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(captured));
+                model.write(ERROR, Width::Word, captured, &mut a).unwrap();
+                assert_eq!(model.read(ERROR, Width::Word, &mut a), Ok(0));
+            }
         }
     }
 
@@ -987,9 +1102,8 @@ mod tests {
                     model.translate(&mut ram, sid, iova, iova, false, &mut a),
                     Err(DmaError::Fault(fault))
                 );
-                model
-                    .write(ERROR, Width::Word, u64::from(FLAG), &mut a)
-                    .unwrap();
+                let captured = model.read(ERROR, Width::Word, &mut a).unwrap();
+                model.write(ERROR, Width::Word, captured, &mut a).unwrap();
             }
             model.write(TTBR + 16, Width::Word, 0, &mut a).unwrap();
             assert_eq!(
