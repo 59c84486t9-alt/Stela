@@ -246,7 +246,11 @@ impl Dwc3 {
         if self.lifecycle.reset {
             return Err("DWC3 reset is asserted");
         }
-        if self.phy_reset { return Err("ATC PHY holds DWC3 controller reset"); }
+        // The recovered drivers release the physical PIPE reset before core
+        // initialization. They do not establish which AP registers remain
+        // accessible while it is held. This is an unsupported capability,
+        // not a claim that physical reset makes all MMIO inaccessible.
+        if self.phy_reset { return Err("DWC3 MMIO while physical ATC PHY reset is held is unqualified"); }
         Ok(())
     }
 
@@ -1369,6 +1373,28 @@ mod tests {
                 assert_eq!(dwc.rings[0].address, 0);
             }
         }
+    }
+
+    #[test]
+    fn software_core_reset_keeps_globals_readable_but_physical_reset_access_is_unqualified() {
+        let (mut dwc, _, _, mut latch) = setup();
+        let mut access = Access::new(0, 0, &mut latch);
+        let gctl = dwc.gctl;
+        write(&mut dwc, GCTL, gctl | CORE_RESET, &mut access);
+        assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
+        assert_eq!(dwc.read(GCTL, Width::Word, &mut access), Ok((gctl | CORE_RESET).into()));
+        write(&mut dwc, GUID, 0x1234, &mut access);
+        assert_eq!(dwc.read(GUID, Width::Word, &mut access), Ok(0x1234));
+        write(&mut dwc, GCTL, gctl, &mut access);
+        dwc.set_phy_state(true, false, true, false, &mut access);
+        for offset in [GSNPSID, GCTL, DCTL] {
+            assert!(matches!(dwc.read(offset, Width::Word, &mut access),
+                Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
+        }
+        assert!(matches!(dwc.write(GCTL, Width::Word, gctl.into(), &mut access),
+            Err(MmioError::Unsupported { reason, .. }) if reason.contains("unqualified")));
+        dwc.set_phy_state(false, true, true, false, &mut access);
+        assert_eq!(dwc.read(GSNPSID, Width::Word, &mut access), Ok(0x5533_300a));
     }
 
     #[test]
