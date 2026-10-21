@@ -17,7 +17,7 @@ use alloc::{
 use core::fmt;
 use serde::Deserialize;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 pub const MANIFEST_FILE: &str = "bundle.json";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// Guest DRAM is backed by 2 MiB host frames.
@@ -423,6 +423,14 @@ impl<'a> Verified<'a> {
                         "boot_args.Video.v_width" => u64_value(screen.width),
                         "boot_args.Video.v_height" => u64_value(screen.height),
                         "boot_args.Video.v_depth" => u64_value(screen.bits_per_pixel),
+                        "/arm-io/dispext0 framebuffer-width" => u32::try_from(screen.width)
+                            .map_err(|_| error("external framebuffer width exceeds u32"))?
+                            .to_le_bytes()
+                            .to_vec(),
+                        "/arm-io/dispext0 framebuffer-height" => u32::try_from(screen.height)
+                            .map_err(|_| error("external framebuffer height exceeds u32"))?
+                            .to_le_bytes()
+                            .to_vec(),
                         _ => return Err(error("unknown framebuffer field")),
                     })
                 }
@@ -595,7 +603,7 @@ mod tests {
         let sha = crate::sha256;
         format!(
             r#"{{
-  "schema_version": 1, "unknown_field": true,
+  "schema_version": 2, "unknown_field": true,
   "options": {{"dram_base": {BASE}, "dram_size": 1073741824, "phys_base": {BASE}}},
   "files": [
     {{"name": "kernel.img", "bytes": {kb}, "sha256": "{ks}"}},
@@ -654,14 +662,14 @@ mod tests {
                 .hidden_devices
                 .is_empty()
         );
-        let supplied = json.replacen("\"schema_version\": 1", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 1", 1);
+        let supplied = json.replacen("\"schema_version\": 2", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 2", 1);
         assert_eq!(
             Manifest::parse(supplied.as_bytes()).unwrap().hidden_devices,
             ["/arm-io/ave", "/ secure-root-prefix"]
         );
         let malformed = json.replacen(
-            "\"schema_version\": 1",
-            "\"hidden_devices\": [17], \"schema_version\": 1",
+            "\"schema_version\": 2",
+            "\"hidden_devices\": [17], \"schema_version\": 2",
             1,
         );
         assert!(Manifest::parse(malformed.as_bytes()).is_err());
@@ -710,6 +718,52 @@ mod tests {
         })?;
         assert!(image.kept.is_empty());
         assert_eq!(&ram[dt + 12..dt + 20], &0u64.to_le_bytes());
+        Ok(())
+    }
+
+    #[test]
+    fn external_pipe_geometry_uses_the_same_actual_framebuffer() -> Result<(), BundleError> {
+        let kernel = [0xaa; 100];
+        let tree = [0x11; 28];
+        let patches = format!(
+            r#"{PATCHES},
+        {{"source":"framebuffer","required":true,"region":"DeviceTree","file":"devicetree.adt","file_offset":20,"bytes":4,"encoding":"bytes","field":"/arm-io/dispext0 framebuffer-width","prepared_hex":""}},
+        {{"source":"framebuffer","required":true,"region":"DeviceTree","file":"devicetree.adt","file_offset":24,"bytes":4,"encoding":"bytes","field":"/arm-io/dispext0 framebuffer-height","prepared_hex":""}}"#
+        );
+        let manifest = Manifest::parse(manifest_with(&kernel, &tree, &patches).as_bytes())?;
+        let files: BTreeMap<&str, &[u8]> =
+            BTreeMap::from([("kernel.img", &kernel[..]), ("devicetree.adt", &tree[..])]);
+        let verified = manifest.verify(&|name| files.get(name).copied())?;
+        let mut ram = vec![0xff; FRAME_BYTES as usize];
+        let mut entropy = |bytes: &mut [u8]| {
+            bytes.fill(0x42);
+            Ok(())
+        };
+        // A visible display cannot retain physical-board geometry without a
+        // real backing resource when the native GOP is unavailable.
+        assert!(
+            verified
+                .load(&machine(), &mut entropy, &mut |pa, bytes| write_into(
+                    &mut ram, pa, bytes
+                ))
+                .is_err()
+        );
+        let screen = Machine {
+            framebuffer: Some(Framebuffer {
+                guest_pa: 0xc000_0000,
+                bytes: 0x80_0000,
+                row_bytes: 7680,
+                width: 1920,
+                height: 1080,
+                bits_per_pixel: 32,
+            }),
+            ..machine()
+        };
+        verified.load(&screen, &mut entropy, &mut |pa, bytes| {
+            write_into(&mut ram, pa, bytes)
+        })?;
+        assert_eq!(&ram[0x4014..0x4018], &1920u32.to_le_bytes());
+        assert_eq!(&ram[0x4018..0x401c], &1080u32.to_le_bytes());
         Ok(())
     }
 
@@ -839,7 +893,7 @@ mod tests {
         assert!(Manifest::parse(unsafe_name.as_bytes()).is_err());
         assert!(
             Manifest::parse(
-                json.replace("\"schema_version\": 1", "\"schema_version\": 2")
+                json.replace("\"schema_version\": 2", "\"schema_version\": 3")
                     .as_bytes()
             )
             .is_err()

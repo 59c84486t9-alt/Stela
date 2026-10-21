@@ -1051,20 +1051,24 @@ fn devices<'f>(
     // to the GOP framebuffer, mastering through its DART and reading swap
     // surfaces through the display pipe's; it needs a scanout, so it is
     // placed only when the firmware gave Stela a mode.
-    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref())
-        && let Some(screen) = cables.screen
-    {
+    if let Some(dcp) = board.and_then(|board| board.dcp.as_ref()) {
+        let screen = cables
+            .screen
+            .ok_or("visible external DCP requires one actual GOP scanout")?;
         let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
         let range = |(physical, bytes): (u64, u64)| Range { physical, bytes };
         devices.add_dcpext(
             range(dcp.wrapper),
             dcp.interrupts,
             dcp.quiesced,
+            dcp.role,
+            dcp.identity,
             alloc::boxed::Box::new(display::GopScanout::new(screen)),
-            (darts[dcp.iommu][0], dcp.stream as usize),
+            (darts[dcp.iommu][dcp.instance], dcp.stream as usize),
             dcp.window,
             dcp.surface
-                .map(|(iommu, stream)| (darts[iommu][0], stream as usize)),
+                .zip(dcp.surface_instance)
+                .map(|((iommu, stream), instance)| (darts[iommu][instance], stream as usize)),
         )?;
         let regions: Vec<(&'static str, Range)> = dcp
             .regions

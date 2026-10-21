@@ -4,8 +4,8 @@ use crate::platform::apple::dart::{self, Profile};
 use alloc::{format, string::String, vec::Vec};
 
 /// Every visible DART requirement, preserving separate translation windows.
-/// Modern t8110 paired capture retains its cacheless model; legacy UMMS,
-/// FPAD and unqualified DMA routing remain explicit requirements.
+/// Modern t8110 and qualified T6000 paired capture retain distinct cacheless
+/// owners; FPAD and unqualified DMA routing remain explicit requirements.
 pub(super) fn iommus(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
@@ -90,7 +90,7 @@ pub(super) fn iommu(
             (instances.len() as u32, 4)
         };
         match &descriptor[..4] {
-            b"TRAD" if apf.is_none() && number as usize == instances.len() => {
+            b"TRAD" if apf.is_none() && smmu.is_none() && number as usize == instances.len() => {
                 let physical = translate(offset)
                     .filter(|at| {
                         at.is_multiple_of(dart::DAPF_BYTES)
@@ -120,7 +120,12 @@ pub(super) fn iommu(
             b"FPAD" if instances.len() == 1 && number == 0 && apf.is_none() && smmu.is_none() => {
                 apf = Some((offset, bytes))
             }
-            b"UMMS" if !instances.is_empty() && number == 0 && apf.is_none() && smmu.is_none() => {
+            b"UMMS"
+                if instances.len() == 1
+                    && (profile != Profile::T8110 || number == 0)
+                    && apf.is_none()
+                    && smmu.is_none() =>
+            {
                 let physical = translate(offset)
                     .filter(|at| {
                         at.is_multiple_of(dart::DAPF_BYTES)
@@ -267,6 +272,13 @@ pub(super) fn iommu(
     if mappers.iter().any(|&(_, sid)| sid >= u32::from(streams)) {
         return Err(format!("{path} mapper SID exceeds its native DART profile"));
     }
+    if !remap.is_empty() && profile == Profile::T6000 {
+        for &(_, context) in &mappers {
+            profile
+                .mapper_input_stream(usize::from(streams), context as usize, &remap)
+                .map_err(|reason| format!("{path} {reason}"))?;
+        }
+    }
     if profile != Profile::T8110 && instances.len() > 1 && !mappers.is_empty() {
         return Err(format!(
             "{path} requires explicit legacy multi-instance DMA routing"
@@ -345,6 +357,21 @@ pub(super) fn legacy_requirements<'a>(
                     "requires unsupported legacy FPAD translation and appended-filter semantics",
                 );
             }
+            b"UMMS"
+                if profile == Profile::T6000
+                    && descriptors.len() == 24
+                    && &descriptors[..4] == b"TRAD"
+                    && &descriptors[12..16] == b"UMMS" =>
+            {
+                // The declared cacheless UMMS lacks lock capability. Original
+                // SPTM permits the differing TRAD/UMMS modes under this exact
+                // policy; preserve both source presence properties.
+                if property("never-lock") != Some(&[])
+                    || property("ignore-inconsistent-hw-locks") != Some(&[])
+                {
+                    return Err("requires qualified empty-presence UMMS lock policies");
+                }
+            }
             b"UMMS" => return Err("requires unsupported legacy UMMS capture semantics"),
             _ => return Err("requires an unknown legacy DART instance kind"),
         }
@@ -355,6 +382,11 @@ pub(super) fn legacy_requirements<'a>(
             || property(&format!("n-apfs-instance-{index}")).is_some()
     }) {
         return Err("requires unsupported legacy address-permission filter semantics");
+    }
+    for flag in ["never-lock", "ignore-inconsistent-hw-locks"] {
+        if property(flag).is_some_and(|bytes| !bytes.is_empty()) {
+            return Err("requires qualified empty-presence legacy lock policies");
+        }
     }
     let reg = property("reg").ok_or("has no legacy register windows")?;
     if reg.len() != descriptors.len() / 12 * 16 {
@@ -383,7 +415,28 @@ pub(super) fn legacy_requirements<'a>(
             return Err("has incomplete padded legacy remap entries");
         }
         if bytes.iter().any(|&byte| byte != 0) {
-            return Err("requires unsupported legacy SID remap routing");
+            if profile != Profile::T6000 {
+                return Err("requires unsupported legacy SID remap routing");
+            }
+            if descriptors
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .filter(|d| &d[..4] == b"TRAD")
+                .count()
+                != 1
+            {
+                return Err("requires explicit legacy multi-instance DMA remap routing");
+            }
+            let mut remaps = Vec::new();
+            for pair in bytes.as_chunks::<2>().0 {
+                if pair != &[0, 0] {
+                    remaps.push((pair[0], pair[1]));
+                }
+            }
+            // A nonzero padded record leaves at least one pair. Choosing its
+            // target validates every pair, including chains and duplicate SIDs.
+            profile.mapper_input_stream(streams as usize, usize::from(remaps[0].1), &remaps)?;
         }
     }
     if property("vm-base").is_some_and(|bytes| bytes.len() != 4) {
@@ -540,6 +593,80 @@ mod tests {
                 "{requirement}"
             );
             assert!(!super::super::models("dart,t8020", |key| node.property(key)));
+        }
+    }
+
+    #[test]
+    fn t6000_paired_capture_requires_its_exact_unlocked_policy_and_order() {
+        let descriptors = b"TRADDART\0\0\0\0UMMSSMMU\0\0\0\0";
+        let registers = [0x89304000, 0x4000, 0x89300000, 0x4000];
+        for flags in [
+            vec![],
+            vec![("never-lock", &[][..])],
+            vec![
+                ("never-lock", &[][..]),
+                ("ignore-inconsistent-hw-locks", &[1][..]),
+            ],
+        ] {
+            let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
+            assert!(iommu(&Node::root(&bytes).unwrap(), &Some).is_err());
+        }
+        let flags = [
+            ("never-lock", &[][..]),
+            ("ignore-inconsistent-hw-locks", &[][..]),
+        ];
+        let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
+        let bank = iommu(&Node::root(&bytes).unwrap(), &Some).unwrap();
+        assert_eq!(bank.instances.len(), 1);
+        assert_eq!(bank.instances[0].reg_index, 0);
+        assert_eq!(bank.smmu, Some((0x89300000, 0x4000)));
+        for descriptors in [
+            b"UMMSSMMU\0\0\0\0TRADDART\0\0\0\0".as_slice(),
+            b"TRADDART\0\0\0\0TRADDART\0\0\0\0",
+        ] {
+            let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
+            if &descriptors[..4] == b"UMMS" {
+                assert!(iommu(&Node::root(&bytes).unwrap(), &Some).is_err());
+            } else {
+                assert_eq!(
+                    iommu(&Node::root(&bytes).unwrap(), &Some)
+                        .unwrap()
+                        .instances
+                        .len(),
+                    2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn t6000_remaps_do_not_admit_an_unselected_translation_owner() {
+        let one = b"TRADDART\0\0\0\0";
+        let descriptors = [one.as_slice(), one].concat();
+        let bytes = legacy(
+            b"dart,t6000\0",
+            &descriptors,
+            &[0x89304000, 0x4000, 0x8930c000, 0x4000],
+            &[("remap", &[0, 1, 0, 0])],
+            &[],
+        );
+        let node = Node::root(&bytes).unwrap();
+        assert!(
+            iommu(&node, &Some)
+                .unwrap_err()
+                .contains("multi-instance DMA remap")
+        );
+        assert!(!super::super::models("dart,t6000", |key| node.property(key)));
+        for remap in [[5, 0, 0, 0], [0, 1, 1, 0], [5, 0, 5, 1]] {
+            let bytes = legacy(
+                b"dart,t6000\0",
+                one,
+                &[0x89304000, 0x4000],
+                &[("remap", &remap)],
+                &[],
+            );
+            let node = Node::root(&bytes).unwrap();
+            assert_eq!(iommu(&node, &Some).is_ok(), remap == [5, 0, 0, 0]);
         }
     }
 

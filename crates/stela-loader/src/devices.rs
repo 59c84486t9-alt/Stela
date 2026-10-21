@@ -279,6 +279,7 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     unmodeled_mappers(&tree.root, &mut mappers);
     let mut hidden = Vec::new();
     hide_unserved_clients(&mut tree.root, "", &mappers, &mut hidden);
+    hide_incomplete_external_outputs(tree, &mut hidden);
     let mut parents = Vec::new();
     client_providers(&tree.root, &mut parents);
     visit(&mut tree.root, "", &parents, &[], &mut hidden);
@@ -320,6 +321,70 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
     publish_gpu_ttbat(tree, &mut hidden);
     retire_hidden_service_identities(tree, &hidden);
     hidden
+}
+
+/// Admit the external controller, same-role expert and selected pipe as one
+/// source-backed graph. IOMMU failures above cannot leave an expert advertising
+/// a service for a controller that was removed. The final retirement pass also
+/// removes raw display-subsystem advertisements for a hidden pipe.
+fn hide_incomplete_external_outputs(tree: &mut DeviceTree, hidden: &mut Vec<String>) {
+    for profile in soc::EXTERNAL_OUTPUTS {
+        let paths = [profile.controller, profile.expert, profile.pipe]
+            .map(|name| format!("/arm-io/{name}"));
+        if tree.node(&paths[0]).is_none()
+            && tree.node(&paths[1]).is_none()
+            && tree
+                .node(&paths[2])
+                .is_none_or(|n| !named(n, profile.compatible))
+        {
+            continue;
+        }
+        let controller = tree.node(&paths[0]);
+        let expert = tree.node(&paths[1]);
+        let pipe = tree.node(&paths[2]);
+        let qualified = profile.admitted
+            && controller.is_some_and(|n| {
+                named(n, soc::ASC)
+                    && n.property("role")
+                        .is_some_and(|p| p.value == profile.role_property)
+                    && n.children.iter().filter(|c| named(c, soc::RTBUDDY)).count() == 1
+                    && n.children
+                        .iter()
+                        .find(|c| named(c, soc::RTBUDDY))
+                        .is_some_and(|nub| {
+                            profile.external_index.is_none_or(|index| {
+                                nub.property("external-index").and_then(|p| p.as_u32())
+                                    == Some(index)
+                            })
+                        })
+            })
+            && expert.is_some_and(|n| {
+                named(n, soc::DCP_EXPERT)
+                    && n.property("role")
+                        .is_some_and(|p| p.value == profile.role_property)
+                    && n.property("join-power-plane").and_then(|p| p.as_u32()) == Some(1)
+                    && n.property("reg").is_none()
+                    && soc::DCP_EXPERT_HARDWARE_FEATURES
+                        .iter()
+                        .all(|key| n.property(key).is_none())
+            })
+            && pipe.is_some_and(|n| {
+                named(n, profile.compatible)
+                    && profile
+                        .external_index
+                        .is_none_or(|_| n.property("external").and_then(|p| p.as_u32()) == Some(1))
+            });
+        if !qualified {
+            for path in paths {
+                if let Some(node) = tree.node_mut(&path)
+                    && node.remove_property(COMPATIBLE).is_some()
+                    && !hidden.contains(&path)
+                {
+                    hidden.push(path);
+                }
+            }
+        }
+    }
 }
 
 /// Retire a proven service-advertising class only after the admission pass

@@ -21,8 +21,8 @@ use crate::platform::apple::{
     agx,
     aic::{AIC3_IRQ_CFG, AicLayout},
     aic1::AIC1_EVENT,
-    amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dpe,
-    energy, fuse, gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
+    amcc, ans, asc, atc_phy, bridge, cluster, core_counters, coresight, cpm, cpustart, dart, dcp,
+    dpe, energy, fuse, gpio, i2c, nor, pmu, power, ptd, sart, smc, spi, spmi, wake,
 };
 use alloc::{format, string::String, vec::Vec};
 
@@ -1254,6 +1254,20 @@ const ROLE_MODELS: &[ModelClaim] = &[
         boot_properties: &[],
         admitted: true,
     },
+    ModelClaim {
+        compatible: ASC,
+        property: ("role", b"DCPEXT0\0"),
+        children: &[NATIVE_RTKIT],
+        boot_properties: &[],
+        admitted: T6000_EXTERNAL_OUTPUT_ADMITTED,
+    },
+    ModelClaim {
+        compatible: DCP_EXPERT,
+        property: ("role", b"DCPEXT0\0"),
+        children: &[],
+        boot_properties: &[],
+        admitted: T6000_EXTERNAL_OUTPUT_ADMITTED,
+    },
     // Its power expert ([`DCP_EXPERT`]), a register-less node that
     // `AppleDCPExpert` binds to. IOMFB waits for it before it makes a call.
     ModelClaim {
@@ -1321,6 +1335,7 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         DISPEXT,
     ]
     .contains(&name)
+        || T6000_EXTERNAL_OUTPUT_ADMITTED && name == DISPEXT_T6000
         || [GPIO_T6000, GPIO_S5L].contains(&name)
             && gpio_profile(&property) == Some(gpio::Profile::S5l8960x)
         || dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
@@ -1369,6 +1384,66 @@ pub const SEP_NUB: &str = "iop-nub,sep";
 /// Open row of section 8.6.
 pub const DCPEXT_ROLE: &[u8] = b"DCPEXT\0";
 pub const DISPEXT: &str = "dispext0,t8112";
+pub const DISPEXT_T6000: &str = "dispext0,t600x";
+/// One native GOP-backed external graph with qualified TRAD/UMMS ownership.
+/// This admits its resource contract; visible Recovery output still requires
+/// original firmware/kernel execution through that graph.
+pub const T6000_EXTERNAL_OUTPUT_ADMITTED: bool = true;
+
+/// A source-qualified external pipeline family, preserving native identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalOutput {
+    pub controller: &'static str,
+    pub role: &'static str,
+    pub role_property: &'static [u8],
+    pub expert: &'static str,
+    pub pipe: &'static str,
+    pub compatible: &'static str,
+    pub external_index: Option<u32>,
+    pub identity: dcp::ExternalIdentity,
+    pub admitted: bool,
+}
+
+pub const EXTERNAL_OUTPUTS: &[ExternalOutput] = &[
+    ExternalOutput {
+        controller: "dcpext",
+        role: "DCPEXT",
+        role_property: DCPEXT_ROLE,
+        expert: "dcpext-expert",
+        pipe: "dispext0",
+        compatible: DISPEXT,
+        external_index: None,
+        identity: dcp::ExternalIdentity::Unnumbered,
+        admitted: true,
+    },
+    ExternalOutput {
+        controller: "dcpext0",
+        role: "DCPEXT0",
+        role_property: b"DCPEXT0\0",
+        expert: "dcpext0-expert",
+        pipe: "dispext0",
+        compatible: DISPEXT_T6000,
+        external_index: Some(1),
+        identity: dcp::ExternalIdentity::Numbered(0),
+        admitted: T6000_EXTERNAL_OUTPUT_ADMITTED,
+    },
+];
+
+pub fn external_output(role: &[u8]) -> Option<&'static ExternalOutput> {
+    EXTERNAL_OUTPUTS
+        .iter()
+        .find(|p| p.admitted && p.role_property == role)
+}
+
+/// These features require native expert operations beyond RTKit power.
+pub const DCP_EXPERT_HARDWARE_FEATURES: &[&str] = &[
+    "require-pmgr-scratch",
+    "require-conditional-retention",
+    "require-force-wakeup",
+    "require-axi2af-reset",
+    "support-dynamic-sysfe-pg",
+    "support-psd-self-vote",
+];
 /// The coprocessor's power expert, `/arm-io/dcpext-expert` (`role` `DCPEXT`,
 /// `join-power-plane`, no `reg`). In the 26A434 J473AP kernelcache:
 /// - `UnifiedPipeline2::start` waits in `DCPPowerManager::wait_for_dcp_expert`,
@@ -1415,6 +1490,13 @@ pub struct SepDevice {
 /// `reg[0]` with a stable model name, and the DART streams it masters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcpController {
+    pub role: &'static str,
+    pub identity: dcp::ExternalIdentity,
+    /// Explicit sole-TRAD selection, checked before this ordinal is retained.
+    pub instance: usize,
+    /// OS mapper context, distinct from the incoming `stream` before remap.
+    pub mapper_context: u32,
+    pub surface_instance: Option<usize>,
     pub wrapper: (u64, u64),
     pub interrupts: [u32; 4],
     pub quiesced: bool,
@@ -4309,122 +4391,172 @@ fn sep_device(
     }))
 }
 
-/// The [`Board::darts`] index and stream of the mapper with `phandle`.
-fn mapper_stream(darts: &[Iommu], phandle: u32) -> Option<(usize, u32)> {
-    darts.iter().enumerate().find_map(|(index, dart)| {
-        dart.mappers
-            .iter()
-            .find(|(mapper, _)| *mapper == phandle)
-            .map(|&(_, stream)| (index, stream))
-    })
-}
-
-/// The `dcpext` coprocessor and the display apertures around it, when the
-/// DeviceTree shows a `dcpext` with `role` `DCPEXT`. The parse validates the
-/// shape the model needs and refuses a tree that does not match rather than
-/// guessing.
+/// One selected external coprocessor, its expert and pipe, with distinct
+/// incoming DMA stream and OS mapper context. Refuse incomplete graphs and
+/// ambiguous owners before retaining an instance ordinal.
 fn dcp_device(
     io: &Node<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
     darts: &[Iommu],
 ) -> Result<Option<DcpController>, String> {
-    let Some(node) = io
-        .child("dcpext")
-        .filter(|n| n.compatible(ASC) && n.property("role") == Some(DCPEXT_ROLE))
-    else {
+    let children = io.children().ok_or("DCP arm-io children are malformed")?;
+    let mut matches = children.iter().filter_map(|n| {
+        n.compatible(ASC)
+            .then(|| n.property("role").and_then(external_output))
+            .flatten()
+            .map(|profile| (n, profile))
+    });
+    let Some((node, profile)) = matches.next() else {
         return Ok(None);
     };
-    const PATH: &str = "/arm-io/dcpext";
+    if matches.next().is_some() {
+        return Err("one GOP resource cannot back two external pipelines".into());
+    }
+    let path = format!("/arm-io/{}", profile.controller);
+    let err = |reason: &str| format!("{path}: {reason}");
     let place = |offset: u64, bytes: u64| -> Result<(u64, u64), String> {
         if bytes == 0 {
-            return Err(format!("{PATH} aperture is empty"));
+            return Err(err("aperture is empty"));
         }
-        let physical =
-            translate(offset).ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))?;
-        let last = offset.checked_add(bytes - 1).and_then(translate);
-        if last != physical.checked_add(bytes - 1) {
-            return Err(format!(
-                "{PATH} register extent lies outside /arm-io ranges"
-            ));
+        let physical = translate(offset).ok_or_else(|| err("lies outside arm-io ranges"))?;
+        if offset.checked_add(bytes - 1).and_then(translate) != physical.checked_add(bytes - 1) {
+            return Err(err("aperture crosses arm-io ranges"));
         }
         Ok((physical, bytes))
     };
-    let reg = node.pairs("reg").unwrap_or_default();
-    let &(wrapper_off, wrapper_bytes) = reg
+    let nub = rtbuddy_nub(node, profile.role)?;
+    if profile
+        .external_index
+        .is_some_and(|index| nub.property("external-index") != Some(index.to_le_bytes().as_slice()))
+    {
+        return Err(err(
+            "RTBuddy external-index differs from its native output identity",
+        ));
+    }
+    let mut experts = children
+        .iter()
+        .filter(|n| n.compatible(DCP_EXPERT) && n.property("role") == Some(profile.role_property));
+    let expert = experts
+        .next()
+        .ok_or_else(|| err("required same-role DCP expert is absent"))?;
+    if experts.next().is_some() {
+        return Err(err("same-role DCP experts are ambiguous"));
+    }
+    if expert.property("reg").is_some()
+        || expert.property("join-power-plane") != Some(1u32.to_le_bytes().as_slice())
+        || DCP_EXPERT_HARDWARE_FEATURES
+            .iter()
+            .any(|flag| expert.property(flag).is_some())
+    {
+        return Err(err(
+            "DCP expert requires an unmodeled hardware power operation",
+        ));
+    }
+    let pipe = io
+        .child(profile.pipe)
+        .filter(|n| n.compatible(profile.compatible))
+        .ok_or_else(|| err("matching external display pipe is absent"))?;
+    if profile.external_index.is_some() && pipe.first_u32("external") != Some(1) {
+        return Err(err(
+            "selected external pipe lacks its original external marker",
+        ));
+    }
+    let wrapper = node
+        .pairs("reg")
+        .unwrap_or_default()
         .first()
-        .ok_or_else(|| format!("{PATH} has no register range"))?;
-    if wrapper_bytes < crate::platform::apple::asc::WRAPPER_BYTES {
-        return Err(format!("{PATH} has an incomplete ASC aperture"));
+        .copied()
+        .ok_or_else(|| err("ASC has no register range"))?;
+    if wrapper.1 < asc::WRAPPER_BYTES {
+        return Err(err("ASC aperture is incomplete"));
     }
-    let nub = node.child("iop-dcpext-nub");
-    if let Some(nub) = &nub {
-        awaited_nub(nub, "DCPEXT")?;
-    }
-    let quiesced = nub.is_some_and(|nub| nub.property("quiesced").is_some());
-    let irqs: [u32; 4] = node
+    let interrupts: [u32; 4] = node
         .cells32("interrupts")
         .unwrap_or_default()
-        .get(..4)
-        .and_then(|cells| cells.try_into().ok())
-        .ok_or_else(|| format!("{PATH} requires four mailbox interrupts"))?;
-    if irqs.iter().any(|&irq| u16::try_from(irq).is_err()) {
-        return Err(format!(
-            "{PATH} mailbox interrupt is outside the AIC encoding"
-        ));
+        .as_slice()
+        .try_into()
+        .ok()
+        .filter(|_| {
+            node.property("interrupts")
+                .is_some_and(|bytes| bytes.len() == 16)
+        })
+        .ok_or_else(|| err("ASC requires exactly four mailbox interrupts"))?;
+    if interrupts.iter().any(|&irq| u16::try_from(irq).is_err()) {
+        return Err(err("mailbox interrupt exceeds the AIC encoding"));
     }
-    // Each present display aperture's primary reg[0], by DeviceTree node name
-    // and the compatible the model keys on.
-    let mut regions = Vec::new();
-    for (name, model, model_name) in [
-        ("dispext0", DISPEXT, "dispext0"),
-        ("dptx-phy", DPTX_PHY, "dptx-phy"),
-        ("display-crossbar0", DISPLAY_CROSSBAR, "display-crossbar0"),
-    ] {
-        if let Some(child) = io.child(name).filter(|n| n.compatible(model)) {
-            let &(offset, bytes) = child
-                .pairs("reg")
-                .unwrap_or_default()
-                .first()
-                .ok_or_else(|| format!("/arm-io/{name} has no register range"))?;
-            regions.push((model_name, place(offset, bytes)?));
+    let route = |parent: u32| -> Result<(usize, usize, u32, u32), String> {
+        let mut found = darts.iter().enumerate().flat_map(|(index, dart)| {
+            dart.mappers
+                .iter()
+                .filter(move |(phandle, _)| *phandle == parent)
+                .map(move |&(_, context)| (index, dart, context))
+        });
+        let (index, dart, context) = found.next().ok_or_else(|| err("mapper is not mounted"))?;
+        if found.next().is_some() {
+            return Err(err("mapper ownership is ambiguous"));
         }
-    }
-    let parent = node
-        .first_u32("iommu-parent")
-        .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
-    let (iommu, stream) = mapper_stream(darts, parent)
-        .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
-    if stream >= u32::from(darts[iommu].streams) {
-        return Err(format!(
-            "{PATH} iommu-parent stream exceeds its DART's sid-count"
-        ));
-    }
-    let window = node.property("truncate-dvas").map(|_| darts[iommu].vm_base);
-    let surface = match io.child("dispext0").filter(|n| n.compatible(DISPEXT)) {
-        None => None,
-        Some(pipe) => {
-            let parent = pipe
-                .first_u32("iommu-parent")
-                .ok_or("/arm-io/dispext0 has no iommu-parent")?;
-            let (index, stream) = mapper_stream(darts, parent)
-                .ok_or("/arm-io/dispext0 iommu-parent is no modeled DART's mapper")?;
-            if stream >= u32::from(darts[index].streams) {
-                return Err(
-                    "/arm-io/dispext0 iommu-parent stream exceeds its DART's sid-count".into(),
-                );
-            }
-            Some((index, stream))
+        if dart.instances.len() != 1 {
+            return Err(err("DMA owner requires explicit multiple-TRAD selection"));
         }
+        if !dart.sids.is_empty() && !dart.sids.contains(&context) {
+            return Err(err("mapper context is absent from the original SID set"));
+        }
+        // DART owner supplies this pure join. It preserves mapper context0
+        // while returning incoming5 for the original remap5->0.
+        let input = dart
+            .profile
+            .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
+            .map_err(|reason| err(reason))?;
+        let input = u32::try_from(input).map_err(|_| err("DMA input stream overflows"))?;
+        Ok((index, 0, context, input))
     };
+    let (iommu, instance, mapper_context, stream) = route(
+        node.first_u32("iommu-parent")
+            .ok_or_else(|| err("controller has no iommu-parent"))?,
+    )?;
+    let (surface_iommu, surface_instance, _, surface_stream) = route(
+        pipe.first_u32("iommu-parent")
+            .ok_or_else(|| err("pipe has no surface iommu-parent"))?,
+    )?;
+    let primary = pipe
+        .pairs("reg")
+        .unwrap_or_default()
+        .first()
+        .copied()
+        .ok_or_else(|| err("pipe has no primary register aperture"))?;
+    let mut regions = alloc::vec![(profile.pipe, place(primary.0, primary.1)?)];
+    // Preserve existing optional J473 aperture placement. These physical-link
+    // services remain outside admission; they are not invented T6000 nodes.
+    if profile.identity == dcp::ExternalIdentity::Unnumbered {
+        for (name, compatible) in [
+            ("dptx-phy", DPTX_PHY),
+            ("display-crossbar0", DISPLAY_CROSSBAR),
+        ] {
+            if let Some(child) = io.child(name).filter(|n| n.compatible(compatible)) {
+                let reg = child
+                    .pairs("reg")
+                    .unwrap_or_default()
+                    .first()
+                    .copied()
+                    .ok_or_else(|| err("display aperture lacks reg"))?;
+                regions.push((name, place(reg.0, reg.1)?));
+            }
+        }
+    }
     Ok(Some(DcpController {
-        wrapper: place(wrapper_off, wrapper_bytes)?,
-        interrupts: irqs,
-        quiesced,
+        role: profile.role,
+        identity: profile.identity,
+        instance,
+        mapper_context,
+        surface_instance: Some(surface_instance),
+        wrapper: place(wrapper.0, wrapper.1)?,
+        interrupts,
+        quiesced: nub.property("quiesced").is_some(),
         regions,
         iommu,
         stream,
-        window,
-        surface,
+        window: node.property("truncate-dvas").map(|_| darts[iommu].vm_base),
+        surface: Some((surface_iommu, surface_stream)),
     }))
 }
 
@@ -7536,6 +7668,72 @@ mod tests {
         }
     }
     #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    fn original_j314s_external_output_preserves_native_routes_and_identity() {
+        let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset| {
+            ranges
+                .iter()
+                .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
+                .map(|(child, parent, _)| parent + (offset - child))
+        };
+        let darts = ["dart-dispext0", "dart-dcpext0"]
+            .map(|name| iommu(&io.child(name).unwrap(), &translate).unwrap());
+        assert_eq!(darts[0].instances.len(), 1);
+        assert_eq!(darts[0].smmu, Some((0x2_8930_0000, 0x4000)));
+        assert_eq!(darts[0].instances[0].physical, 0x2_8930_4000);
+        assert_eq!(darts[1].instances[0].physical, 0x2_8930_c000);
+        assert_eq!(darts[0].irq, 873);
+        assert_eq!(darts[1].irq, 873);
+        assert_eq!(darts[1].remap, [(5, 0)]);
+        let dcp = dcp_device(&io, &translate, &darts).unwrap().unwrap();
+        assert_eq!(dcp.role, "DCPEXT0");
+        assert_eq!(dcp.identity, dcp::ExternalIdentity::Numbered(0));
+        assert_eq!(
+            (dcp.iommu, dcp.instance, dcp.mapper_context, dcp.stream),
+            (1, 0, 0, 5)
+        );
+        assert_eq!((dcp.surface, dcp.surface_instance), (Some((0, 0)), Some(0)));
+        assert_eq!(dcp.wrapper, (0x2_89c0_0000, 0x6c000));
+        assert_eq!(dcp.regions, [("dispext0", (0x2_8800_0000, 0x3000000))]);
+        let mut devices = crate::machine::apple::AppleDevices::new();
+        for dart in darts {
+            let native = dart
+                .instances
+                .iter()
+                .map(|i| crate::machine::apple::Range {
+                    physical: i.physical,
+                    bytes: i.bytes,
+                })
+                .collect::<Vec<_>>();
+            let ids = devices
+                .add_dart_group_for_profile(
+                    dart.profile,
+                    &native,
+                    usize::from(dart.streams),
+                    Some(crate::platform::apple::interrupt::AicInput::new(
+                        0,
+                        dart.irq as u16,
+                    )),
+                    None,
+                )
+                .unwrap();
+            if let Some((physical, bytes)) = dart.smmu {
+                devices
+                    .add_dart_smmu(ids[0], crate::machine::apple::Range { physical, bytes })
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn dcp_placement_reads_the_wrapper_irqs_nub_and_display_apertures_without_admitting_it() {
         use crate::machine::adt::encode;
         const MODELED: [&str; 3] = [UART, WATCHDOG, "aic,2"];
@@ -7554,11 +7752,12 @@ mod tests {
         };
         let irqs = [0x242, 0x242, 0x245, 0x244];
         let build = |role: &[u8], quiesced: bool, with_regions: bool| {
-            let nub_props: Vec<(&str, &[u8])> = if quiesced {
+            let mut nub_props: Vec<(&str, &[u8])> = if quiesced {
                 vec![("name", b"iop-dcpext-nub\0"), ("quiesced", &[])]
             } else {
                 vec![("name", b"iop-dcpext-nub\0")]
             };
+            nub_props.push(("compatible", b"iop-nub,rtbuddy-v2\0"));
             let nub = encode(&nub_props, &[]);
             let mapper = encode(
                 &[
@@ -7627,7 +7826,16 @@ mod tests {
                 ],
                 &surface_mappers,
             );
-            let mut children = alloc::vec![dart, dcpext];
+            let expert = encode(
+                &[
+                    ("name", &z("dcpext-expert")),
+                    ("compatible", &z(DCP_EXPERT)),
+                    ("role", DCPEXT_ROLE),
+                    ("join-power-plane", &words(&[1])),
+                ],
+                &[],
+            );
+            let mut children = alloc::vec![dart, dcpext, expert];
             if with_regions {
                 children.push(pipe_dart);
                 children.push(encode(
@@ -7681,20 +7889,22 @@ mod tests {
                 ("display-crossbar0", (0x2_3c00_0000, 0x4000)),
             ]
         );
-        // A non-quiesced nub and an absent set of apertures still parse.
-        let bare = board(&build(DCPEXT_ROLE, false, false))
-            .unwrap()
-            .dcp
-            .unwrap();
-        assert!(!bare.quiesced);
-        assert!(bare.regions.is_empty());
-        assert_eq!(bare.surface, None);
+        // A native controller cannot be exposed without its actual pipe.
+        assert!(board(&build(DCPEXT_ROLE, false, false)).is_err());
         // DCPEXT and its pipe are admitted with a native nub; the PHY and
         // crossbar stay hidden, and a wrong role is not a DCP.
         let role = |key: &str| (key == "role").then_some(DCPEXT_ROLE);
         assert!(models(ASC, role));
         assert_eq!(model_children(ASC, role)[0].compatible, RTBUDDY);
         assert!(models(DISPEXT, |_| None));
+        let t6000_role = |key: &str| (key == "role").then_some(b"DCPEXT0\0".as_slice());
+        assert_eq!(models(ASC, t6000_role), T6000_EXTERNAL_OUTPUT_ADMITTED);
+        assert_eq!(
+            models(DISPEXT_T6000, |_| None),
+            T6000_EXTERNAL_OUTPUT_ADMITTED
+        );
+        assert!(external_output(b"DCPEXT1\0").is_none());
+
         assert!(!models(DPTX_PHY, |_| None) && !models(DISPLAY_CROSSBAR, |_| None));
         // Its power expert binds; the internal display's expert does not.
         assert!(models(DCP_EXPERT, role));

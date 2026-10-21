@@ -131,6 +131,8 @@ pub struct AppleDevices {
     gfx_masters: Vec<(DeviceId, DeviceId)>,
     sep_masters: Vec<SepMaster>,
     dcp_masters: Vec<DcpMaster>,
+    /// One wired-OR owner per physical DART input, across logical groups.
+    dart_irqs: Vec<(AicInput, dart::SharedIrq)>,
     usb_masters: Vec<UsbMaster>,
     cpu_start: Option<CpuStarter>,
     reset_vectors: Vec<Option<DeviceId>>,
@@ -462,6 +464,7 @@ impl AppleDevices {
             nor: None,
             sep_masters: Vec::new(),
             dcp_masters: Vec::new(),
+            dart_irqs: Vec::new(),
             usb_masters: Vec::new(),
             cpu_start: None,
             reset_vectors: Vec::new(),
@@ -1199,6 +1202,8 @@ impl AppleDevices {
         wrapper: Range,
         interrupts: [u32; 4],
         quiesced: bool,
+        role: &'static str,
+        identity: dcp::ExternalIdentity,
         scanout: Box<dyn Scanout>,
         (dart, stream): (DartId, usize),
         window: Option<u64>,
@@ -1207,7 +1212,8 @@ impl AppleDevices {
         if wrapper.bytes < asc::WRAPPER_BYTES {
             return Err("DCPEXT register aperture is incomplete".into());
         }
-        let mut coprocessor = dcp::Coprocessor::new(scanout, window).map_err(String::from)?;
+        let mut coprocessor =
+            dcp::Coprocessor::for_external(scanout, window, identity).map_err(String::from)?;
         if quiesced {
             coprocessor = coprocessor.quiesced();
         }
@@ -1217,7 +1223,7 @@ impl AppleDevices {
         )
         .map_err(String::from)?;
         let asc = self.bus.add(Box::new(wrap));
-        self.coprocessors.push(("DCPEXT", asc));
+        self.coprocessors.push((role, asc));
         self.dcp_masters.push(DcpMaster {
             asc,
             dart: dart.0,
@@ -1414,7 +1420,7 @@ impl AppleDevices {
         if ranges.is_empty() {
             return Err(MapError::Empty);
         }
-        self.place_dart_group(Dart::group(streams, irq, ranges.len()), ranges, apf)
+        self.place_dart_group(Dart::group(streams, irq, ranges.len()), ranges, apf, irq)
     }
 
     /// Select the actual DT register/table family before publishing windows.
@@ -1450,7 +1456,7 @@ impl AppleDevices {
             return Err("DART translation ranges must be aligned native 16 KiB windows".into());
         }
         let models = Dart::group_for_profile(profile, streams, irq, ranges.len())?;
-        self.place_dart_group(models, ranges, apf)
+        self.place_dart_group(models, ranges, apf, irq)
             .map_err(|error| format!("DART native placement: {error:?}"))
     }
 
@@ -1459,7 +1465,10 @@ impl AppleDevices {
         models: Vec<Dart>,
         ranges: &[Range],
         apf: Option<(u64, usize)>,
+        irq: Option<AicInput>,
     ) -> Result<Vec<DartId>, MapError> {
+        let mut models = models;
+        self.share_dart_irq(&mut models, irq);
         let mut ids = Vec::new();
         for (index, (mut dart, range)) in models.into_iter().zip(ranges).enumerate() {
             if index == 0
@@ -1478,6 +1487,26 @@ impl AppleDevices {
             ids.push(DartId(device));
         }
         Ok(ids)
+    }
+
+    /// Fresh models have no asserted source and were built with this exact
+    /// input. Bind before publishing any aperture, preserving all existing
+    /// groups on the physical wire when a later group is added.
+    fn share_dart_irq(&mut self, models: &mut [Dart], input: Option<AicInput>) {
+        let Some(input) = input else { return };
+        let shared = match self.dart_irqs.iter().find(|(key, _)| *key == input) {
+            Some((_, shared)) => shared.clone(),
+            None => {
+                let shared = dart::SharedIrq::new(input);
+                self.dart_irqs.push((input, shared.clone()));
+                shared
+            }
+        };
+        for model in models {
+            model
+                .bind_shared_irq(&shared)
+                .expect("fresh DART retains its declared inactive physical input");
+        }
     }
 
     /// Map the capture view of an existing DART, sharing its lifecycle.
@@ -1517,6 +1546,7 @@ impl AppleDevices {
         apf: Option<(u64, usize)>,
     ) -> Result<DartId, MapError> {
         let mut model = Dart::new(streams, irq);
+        self.share_dart_irq(core::slice::from_mut(&mut model), irq);
         if let Some((_, slices)) = apf {
             model = model.with_apf(slices);
         }
@@ -3715,11 +3745,104 @@ mod tests {
     }
 
     #[test]
+    fn mounted_t6000_groups_preserve_each_fault_on_the_same_physical_wire() {
+        use crate::platform::apple::interrupt::Wire;
+        let mut d = AppleDevices::new();
+        let input = AicInput::new(0, 873);
+        d.add_aic(0x2_3b0c_0000, 1152, AicLayout::aic2(0x8000, 16))
+            .unwrap();
+        let mut ids = Vec::new();
+        for base in [0x2_8930_4000, 0x2_8930_c000] {
+            ids.push(
+                d.add_dart_group_for_profile(
+                    dart::Profile::T6000,
+                    &[Range {
+                        physical: base,
+                        bytes: dart::DAPF_BYTES,
+                    }],
+                    16,
+                    Some(input),
+                    None,
+                )
+                .unwrap()[0],
+            );
+        }
+        assert_eq!(d.dart_irqs.len(), 1);
+        let mut ram = Ram::new(0, 0x4000);
+        for id in &ids {
+            let mut access = Access::new(0, 0, &mut d.latch);
+            assert!(
+                d.bus
+                    .device_mut::<Dart>(id.0)
+                    .unwrap()
+                    .translate(&mut ram, 0, 0, 0, false, &mut access)
+                    .is_err()
+            );
+        }
+        assert!(d.latch.is_asserted(Wire::Aic(input)));
+        d.write(0, 0x2_8930_4040, 4, 1, 0).unwrap();
+        assert!(d.latch.is_asserted(Wire::Aic(input)));
+        d.write(0, 0x2_8930_c040, 4, 1, 0).unwrap();
+        assert!(!d.latch.is_asserted(Wire::Aic(input)));
+    }
+
+    #[test]
+    fn t6000_paired_umms_shares_reset_and_invalidates_only_unknown_configuration() {
+        let mut d = AppleDevices::new();
+        let base = 0x2_8930_4000;
+        let umms = 0x2_8930_0000;
+        let id = d
+            .add_dart_group_for_profile(
+                dart::Profile::T6000,
+                &[Range {
+                    physical: base,
+                    bytes: dart::DAPF_BYTES,
+                }],
+                16,
+                None,
+                None,
+            )
+            .unwrap()[0];
+        d.add_dart_smmu(
+            id,
+            Range {
+                physical: umms,
+                bytes: dart::SMMU_BYTES,
+            },
+        )
+        .unwrap();
+        assert_eq!(d.read(0, umms, 4, 0), Ok(0));
+        assert_eq!(d.read(0, umms + 0x20, 4, 0), Ok(0));
+        d.write(0, umms + 0x20, 4, 1 << 31, 0).unwrap();
+        {
+            let mut a = Access::new(0, 0, &mut d.latch);
+            d.bus
+                .device_mut::<Dart>(id.0)
+                .unwrap()
+                .set_reset(true, &mut a);
+        }
+        assert!(d.read(0, base, 4, 0).is_err());
+        assert!(d.read(0, umms, 4, 0).is_err());
+        {
+            let mut a = Access::new(0, 0, &mut d.latch);
+            d.bus
+                .device_mut::<Dart>(id.0)
+                .unwrap()
+                .set_reset(false, &mut a);
+        }
+        assert_eq!(d.read(0, umms, 4, 0), Ok(0));
+        assert!(d.read(0, umms + 0x20, 4, 0).is_err());
+        d.write(0, umms + 0x20, 4, 0, 0).unwrap();
+        assert_eq!(d.read(0, umms + 0x20, 4, 0), Ok(0));
+        assert!(d.read(0, umms + 0x2000, 4, 0).is_err());
+    }
+
+    #[test]
     fn failed_smmu_placement_does_not_attach_or_publish_a_view() {
         let mut d = AppleDevices::new();
         let base = 0x2_3500_4000;
         let smmu = 0x2_7130_0000;
-        for profile in [dart::Profile::T8020, dart::Profile::T6000] {
+        for profile in [dart::Profile::T8020] {
             let legacy = d
                 .bus
                 .add(Box::new(Dart::for_profile(profile, 16, None).unwrap()));
@@ -4691,6 +4814,8 @@ mod tests {
             },
             [0x243, 0x242, 0x245, 0x244],
             false,
+            "DCPEXT",
+            dcp::ExternalIdentity::Unnumbered,
             Box::new(Screen(frames.clone())),
             (dart, 5),
             Some(RAM),
@@ -4798,6 +4923,8 @@ mod tests {
                 },
                 [0x242, 0x242, 0x245, 0x244],
                 true,
+                "DCPEXT",
+                dcp::ExternalIdentity::Unnumbered,
                 Box::new(Screen),
                 (dart, 5),
                 Some(0x8_0000_0000),

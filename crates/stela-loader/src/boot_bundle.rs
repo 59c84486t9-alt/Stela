@@ -33,7 +33,7 @@ use serde::Serialize;
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 /// The revision of what [`prepare`] writes within its schema: bump it in the
 /// commit that changes the content of a prepared bundle (a DeviceTree
 /// property, a region, a patch, a boot argument) without changing its
@@ -61,7 +61,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Revision 11: publish original T6000 AMCC and IOA lockdown maps.
 /// Revision 12: retain the qualified T6000 AP GPIO/SPI chip-select owner;
 /// auxiliary GPIO wake/restoration ownership remains unqualified.
-pub const REVISION: u32 = 12;
+/// Revision 13: bind selected external-pipe framebuffer geometry to the
+/// actual GOP framebuffer at load. Schema 2 adds these required named fields.
+pub const REVISION: u32 = 13;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -1619,6 +1621,48 @@ fn device_tree_patches(tree: &DeviceTree, region: &Region) -> Result<Vec<Patch>>
             prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + at.value_bytes]),
             rule: rule.into(),
         });
+    }
+    // Native IOMobileFramebufferAP::allocate_carveout reads these capacities
+    // (original mac13j VA 0xfffffe000ad95600..ad95638).
+    // The same runtime Framebuffer supplies Video and these scalar slots;
+    // never retain the physical board's 4096x2160 capacity for another GOP.
+    for profile in stela_runtime::machine::soc::EXTERNAL_OUTPUTS
+        .iter()
+        .filter(|p| p.admitted)
+    {
+        let path = format!("/arm-io/{}", profile.pipe);
+        let Some(pipe) = tree.node(&path).filter(|node| {
+            node.property("compatible").is_some_and(|p| {
+                p.value
+                    .split(|&b| b == 0)
+                    .any(|name| name == profile.compatible.as_bytes())
+            })
+        }) else {
+            continue;
+        };
+        let geometry = ["framebuffer-width", "framebuffer-height"];
+        if geometry.iter().all(|name| pipe.property(name).is_none()) {
+            continue;
+        }
+        for property in geometry {
+            let at = tree.locate(&path, property)?;
+            ensure!(
+                at.value_bytes == 4,
+                "{path} {property} is not one native u32"
+            );
+            patches.push(Patch {
+                source: PatchSource::Framebuffer,
+                required: true,
+                region: region.name.clone(),
+                file: region.file.clone(),
+                file_offset: at.value_offset as u64,
+                bytes: 4,
+                encoding: Encoding::Bytes,
+                field: format!("{path} {property}"),
+                prepared_hex: hex::encode(&bytes[at.value_offset..at.value_offset + 4]),
+                rule: "the actual single native GOP scanout dimensions, also used by boot_args.Video and the DCP".into(),
+            });
+        }
     }
     Ok(patches)
 }
