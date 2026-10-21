@@ -28,11 +28,7 @@ fn branch_target(bytes: &[u8], offset: usize) -> usize {
     offset.wrapping_add_signed(displacement)
 }
 
-#[test]
-#[ignore = "requires pinned original J473 iBoot and ADT; no Apple images are committed"]
-fn original_policy_covers_every_physical_domain_without_encoding_initial_values() {
-    use std::collections::BTreeSet;
-    let bytes = iboot();
+fn original_physical_ps() -> std::collections::BTreeSet<u64> {
     let path = std::env::var("STELA_TEST_PMGR_ADT").expect("pinned original J473 ADT path");
     let adt = std::fs::read(path).unwrap();
     assert_eq!(
@@ -51,7 +47,7 @@ fn original_policy_covers_every_physical_domain_without_encoding_initial_values(
     let placements = pmgr.cells32("ps-regs").unwrap();
     let registers = pmgr.pairs("reg").unwrap();
     let ranges = io.ranges().unwrap();
-    let mut physical = BTreeSet::new();
+    let mut physical = std::collections::BTreeSet::new();
     for record in records.as_chunks::<48>().0 {
         if record[0] & 0x10 != 0 {
             continue;
@@ -68,6 +64,15 @@ fn original_policy_covers_every_physical_domain_without_encoding_initial_values(
         physical.insert(parent + address - child);
     }
     assert_eq!(physical.len(), 153);
+    physical
+}
+
+#[test]
+#[ignore = "requires pinned original J473 iBoot and ADT; no Apple images are committed"]
+fn original_policy_covers_every_physical_domain_without_encoding_initial_values() {
+    use std::collections::BTreeSet;
+    let bytes = iboot();
+    let physical = original_physical_ps();
     assert_eq!(word(&bytes, 0x1b70f8), 254);
     let mut matched = BTreeSet::new();
     for index in 0..254 {
@@ -291,4 +296,149 @@ fn original_power_writer_samples_current_state_and_terminal_calls_are_separate()
     let packed = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
     assert_eq!(packed & ((1 << 51) - 1), 0x23d28c050);
     // These writes establish that path's effects, not OS handoff values.
+}
+
+fn llb() -> Vec<u8> {
+    let path = std::env::var("STELA_TEST_PMGR_LLB").expect("pinned original J473 LLB path");
+    let bytes = std::fs::read(path).unwrap();
+    assert_eq!(
+        hex::encode(Sha256::digest(&bytes)),
+        "d6c695d26e5d816a2ecd523c0be20a15307af24c404b1603d74a970b53e75e77"
+    );
+    bytes
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB and ADT; no Apple images are committed"]
+fn original_llb_reconfiguration_programs_retain_the_complete_physical_inventory() {
+    use std::collections::BTreeSet;
+    let bytes = llb();
+    let physical = original_physical_ps();
+    let policy: BTreeSet<u64> = (0..254)
+        .map(|index| quad(&bytes, 0x1a0a88 + index * 16) & ((1 << 51) - 1))
+        .filter(|address| physical.contains(address))
+        .collect();
+    assert_eq!(policy, physical);
+    let mut operands = BTreeSet::new();
+    let mut operand_rows = 0;
+    for (index, start, end, rows, digest) in [
+        (
+            0,
+            0x20ab10,
+            0x22c7e8,
+            5769,
+            "8fd47694fb73e640f0726e3b4288ff9bd2c09507551b8970cc1e2ea287b3af75",
+        ),
+        (
+            1,
+            0x22c7e8,
+            0x2434c8,
+            3892,
+            "cb15695f8d09321cbe7b1f2817820070a681cd99710f70b39425d115666070bd",
+        ),
+        (
+            3,
+            0x2434c8,
+            0x2475f0,
+            695,
+            "3c04b44cb659d21965506ee25ac65239ea213945d6b80fe95ac6cea2d4ae9304",
+        ),
+        (
+            4,
+            0x2475f0,
+            0x247b90,
+            60,
+            "ea440df41f177ff3108b1d2e178b2790c64811f64eaf44bc88f80b27955cc485",
+        ),
+    ] {
+        assert_eq!(
+            quad(&bytes, 0x160148 + index * 8),
+            0x1fc050000 + start as u64
+        );
+        assert_eq!(quad(&bytes, 0x160120 + index * 8), 0x1fc050000 + end as u64);
+        assert_eq!(word(&bytes, 0x1a30b4 + index * 4), rows);
+        assert_eq!(end - start, rows as usize * 24);
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+        for row in bytes[start..end].as_chunks::<24>().0 {
+            let address = quad(row, 8);
+            let physical_word = if physical.contains(&address) {
+                Some(address)
+            } else {
+                address
+                    .checked_sub(4)
+                    .filter(|address| physical.contains(address))
+            };
+            if let Some(address) = physical_word {
+                operands.insert(address);
+                operand_rows += 1;
+                // Both control and adjacent-auto operands remain raw program
+                // requirements. No physical fetch-write opcode occurs here.
+                assert_ne!(word(row, 0) >> 16, 7);
+            }
+        }
+    }
+    assert_eq!(word(&bytes, 0x1a30bc), 0); // type 2 has no serialized program
+    assert_eq!(quad(&bytes, 0x160130), quad(&bytes, 0x160158));
+    assert_eq!(operands.len(), 84);
+    assert_eq!(operand_rows, 475);
+    assert!(operands.contains(&0x23b700438));
+    assert!(operands.is_subset(&physical));
+    // The remaining 69 controls are still required; absence from these
+    // programs cannot establish their target/current state at OS handoff.
+    assert_eq!(physical.difference(&operands).count(), 69);
+}
+
+#[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_isp_sequence_emission_is_distinct_from_a_physical_write() {
+    let bytes = llb();
+    // Callback registrations identify opcode 0's emitter and opcode 7's
+    // separate fetch-write path. Preserve the original relocation words.
+    for (offset, opcode, callback) in [
+        (0x248b30, 0, 0x80400000000120ac),
+        (0x2491f0, 7, 0x80400000000120d0),
+    ] {
+        assert_eq!(quad(&bytes, offset), opcode);
+        assert_eq!(quad(&bytes, offset + 8), callback);
+    }
+    for (offset, opcode) in [
+        (0x120bc, 0x52800003), // emitter passes full32 width to the compiler
+        (0x120e0, 0xb9000022), // distinct fetch-write performs actual STR w2,[x1]
+        (0x13904, 0x79400260), // low16 sequence operand passed as callback arg0
+        (0x13908, 0xf9400661), // full address operand
+        (0x1390c, 0xb9401262), // value operand
+        (0x13910, 0xd63f091f), // registered callback, not raw data execution
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "LLB file {offset:#x}");
+    }
+    assert_eq!(branch_target(&bytes, 0x120c0), 0x10810);
+    assert_eq!(branch_target(&bytes, 0x120ec), 0x10810);
+    for (index, value) in [(655, 0x230f), (696, 0x2300)] {
+        let offset = 0x22c7e8 + index * 24;
+        assert_eq!(quad(&bytes, offset), 0x17); // sequence 23, opcode 0
+        assert_eq!(quad(&bytes, offset + 8), 0x23b700438);
+        assert_eq!(quad(&bytes, offset + 16), value);
+    }
+    // Both ISP writes belong to one construction-time conditional block.
+    // Bit13's source value remains a runtime input, not a board-name default.
+    assert_eq!(quad(&bytes, 0x230538), 0xab0017);
+    assert_eq!(quad(&bytes, 0x230540), 0x2000);
+    assert_eq!(quad(&bytes, 0x230548), 0);
+    assert_eq!(quad(&bytes, 0x230970), 0xb00017);
+    assert_eq!(quad(&bytes, 0x249170), 0xab);
+    assert_eq!(quad(&bytes, 0x249178), 0x8040000000013bfc);
+    assert_eq!(word(&bytes, 0x13c34), 0xf9401d08); // flags from context+38
+    assert_eq!(word(&bytes, 0x13c38), 0xea13011f); // test supplied mask
+    assert_eq!(word(&bytes, 0x13c3c), 0x1a9f07e0); // take block when nonzero
+    assert_eq!(branch_target(&bytes, 0x13c60), 0x136e4);
+    assert_eq!(branch_target(&bytes, 0x4dbe4), 0x16348);
+    assert_eq!(word(&bytes, 0x4dbe0), 0x528001c0); // query14
+    assert_eq!(word(&bytes, 0x4dbe8), 0x7100081f); // result2 clears bit13
+    // Constructor/first pass, then mode change and second compilation pass.
+    // Their existence does not prove either resulting program has executed.
+    assert_eq!(branch_target(&bytes, 0x4ecdc), 0x142c0);
+    assert_eq!(branch_target(&bytes, 0x4ecf4), 0x140ec);
+    assert_eq!(branch_target(&bytes, 0x4ecf8), 0x1413c);
+    assert_eq!(branch_target(&bytes, 0x4ed08), 0x14078);
+    assert_eq!(branch_target(&bytes, 0x4ed10), 0x140ec);
 }
