@@ -6,7 +6,12 @@
 //! MAC40 G1 and MAC42/44 G2/8411B PHY tuning from pinned r8169_phy_config.c.
 use super::{BlockError, Error, Hardware, PHY_PAGE, Registers, Script, Timer};
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
-    fn g_parameter(&self, parameter: u16, clear: u16, set: u16) -> Result<(), BlockError> {
+    pub(super) fn g_parameter(
+        &self,
+        parameter: u16,
+        clear: u16,
+        set: u16,
+    ) -> Result<(), BlockError> {
         let old = self.phy_read(PHY_PAGE)?;
         self.phy_write(PHY_PAGE, 0x0a43)?;
         let result = (|| {

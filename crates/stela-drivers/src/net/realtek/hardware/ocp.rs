@@ -90,7 +90,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.mac_ocp_write(address, (self.mac_ocp_read(address)? & !clear) | set)
     }
     pub fn initialize_modern(&self) -> Result<(), BlockError> {
-        if !matches!(self.revision.version, 40 | 42 | 44) {
+        if !matches!(self.revision.version, 40 | 42 | 44 | 46) {
             return Ok(());
         }
         let r = self.registers;

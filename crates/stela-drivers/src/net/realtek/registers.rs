@@ -35,6 +35,7 @@ pub(super) const DP_MDIO_GATE: usize = 0xd0;
 pub(super) const DP_MDIO_GATED: u32 = 1 << 17;
 pub(super) const PHY_OCP: usize = 0xb8;
 pub(super) const DLL_POWER: usize = 0xd0;
+pub(super) const MISC_1: usize = 0xf2;
 pub(super) const EFUSE_ACCESS: usize = 0xdc;
 pub(super) const DEBUG: usize = 0xd1;
 pub(super) const MCU: usize = 0xd3;

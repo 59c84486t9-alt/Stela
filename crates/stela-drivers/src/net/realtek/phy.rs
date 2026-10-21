@@ -13,6 +13,7 @@ mod d;
 mod e;
 mod f;
 mod g;
+mod h;
 
 const S: &[(u16, u16)] = &[
     (0x1f, 0x0001),
@@ -296,8 +297,10 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if !matches!(id, 0x001c_c800 | 0x001c_c912) {
             return Err(Error::UnsupportedPhy(id));
         }
-        if matches!(self.revision.version, 32 | 33 | 35 | 36 | 38 | 40 | 42 | 44)
-            && id != 0x001c_c800
+        if matches!(
+            self.revision.version,
+            32 | 33 | 35 | 36 | 38 | 40 | 42 | 44 | 46
+        ) && id != 0x001c_c800
         {
             // These E/F/8411 paths implement the internal FE/GE analogue path;
             // external PHY initialization remains outside these new revisions.
@@ -372,6 +375,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 40 | 42 | 44 => {
                     self.g(script.ok_or(Error::Script("RTL8168G/8411B requires firmware"))?)?
                 }
+                46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
@@ -379,7 +383,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 self.paged(1, 0x10, 0xffff, 0xf01b)?;
             }
             self.phy_reset()?;
-            if matches!(self.revision.version, 40 | 42 | 44) {
+            if matches!(self.revision.version, 40 | 42 | 44 | 46) {
                 // The generic PHY's AN EEE_ADV mapping is VEND2 a5d0.
                 // MAC40+ has actual direct PHY-OCP/C45 access. Clear it after
                 // reset, before restarting autonegotiation; no EEE advertised.
