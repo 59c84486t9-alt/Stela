@@ -72,7 +72,7 @@ use super::uat::{self, Uat};
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 const NAME: &str = "agx-sgx";
 
@@ -90,6 +90,22 @@ const ID_UNK18: u64 = 0xd0_4018;
 const ID_CLUSTERS: u64 = 0xd0_401c;
 
 const GATING_CONTROL: u64 = 0xd0_6030;
+const FENDER_SLEEP: u64 = 0xd0_4074;
+const FENDER_WAKE: u64 = 0xd0_6020;
+const GIFAF_IDLE_STATUS_G13_G14: u64 = 0xd6_1090;
+const GIFAF_IDLE_STATUS_G15: u64 = 0xd0_d090;
+const GIFAF_SLEEP_COMPLETE: u32 = 0x204;
+
+fn fender_sleep_supported(family: &Family) -> bool {
+    matches!(family.name, "G13G" | "G14G" | "G15G")
+}
+fn gifaf_status(family: &Family) -> Option<u64> {
+    match family.name {
+        "G13G" | "G14G" => Some(GIFAF_IDLE_STATUS_G13_G14),
+        "G15G" => Some(GIFAF_IDLE_STATUS_G15),
+        _ => None,
+    }
+}
 /// The dynamic-gating bits the Fender writes (bit 2 disables).
 const GATING_BITS: u32 = 0b110;
 
@@ -114,11 +130,23 @@ pub fn covers(family: &Family, banks: &[(u64, u64, u64)]) -> Result<(), &'static
     let mut registers = fixed
         .into_iter()
         .chain(family.core_masks.iter().copied())
-        .chain(family.mmu.configuration.iter().map(|&(offset, _)| offset));
+        .chain(family.mmu.configuration.iter().map(|&(offset, _)| offset))
+        .chain(
+            fender_sleep_supported(family)
+                .then_some([FENDER_SLEEP, FENDER_WAKE])
+                .into_iter()
+                .flatten(),
+        )
+        .chain(gifaf_status(family));
     let covered = |offset: u64| {
-        banks
-            .iter()
-            .any(|&(_, bytes, at)| (at..at + bytes).contains(&offset))
+        banks.iter().any(|&(_, bytes, at)| {
+            at.checked_add(bytes).is_some_and(|end| {
+                offset >= at
+                    && offset
+                        .checked_add(4)
+                        .is_some_and(|word_end| word_end <= end)
+            })
+        })
     };
     if registers.all(covered) {
         Ok(())
@@ -177,13 +205,67 @@ impl Identity {
 struct Native {
     gating: u32,
     available: bool,
+    sleep_request: u32,
+    wake: u32,
+    gpu_awake: Rc<Cell<bool>>,
 }
 impl Default for Native {
     fn default() -> Self {
         Self {
             gating: 0,
             available: true,
+            sleep_request: 0,
+            wake: 0,
+            gpu_awake: Rc::new(Cell::new(true)),
         }
+    }
+}
+
+impl Native {
+    fn read(&self, family: &Family, offset: u64) -> Result<u32, &'static str> {
+        match offset {
+            GATING_CONTROL => Ok(self.gating),
+            FENDER_SLEEP if fender_sleep_supported(family) => Ok(self.sleep_request),
+            FENDER_WAKE if fender_sleep_supported(family) => Ok(self.wake),
+            _ if gifaf_status(family) == Some(offset) => Ok(if self.gpu_awake.get() {
+                0
+            } else {
+                GIFAF_SLEEP_COMPLETE
+            }),
+            _ => Err("GFX native callback register read is not modeled"),
+        }
+    }
+    fn write(&mut self, family: &Family, offset: u64, value: u32) -> Result<(), &'static str> {
+        match offset {
+            GATING_CONTROL if value & !GATING_BITS == 0 => self.gating = value,
+            GATING_CONTROL => return Err("GPU gating control bit is not modeled"),
+            FENDER_SLEEP if fender_sleep_supported(family) => {
+                if value > 1 {
+                    return Err("GPU Fender sleep request is not zero or one");
+                }
+                self.sleep_request = value;
+                if value == 1 {
+                    // Execution is synchronous and no unit retains an in-flight
+                    // memory request at this hardware boundary. Completion is
+                    // visible only after the actual GPU agent has been gated.
+                    self.gpu_awake.set(false);
+                }
+            }
+            FENDER_WAKE if fender_sleep_supported(family) => {
+                if self.sleep_request != 0 {
+                    return Err(
+                        "GPU Fender wake while the sleep request remains asserted is not qualified",
+                    );
+                }
+                if value != 1 {
+                    return Err("GPU Fender wake operation is not modeled");
+                }
+                self.wake = value;
+                self.gpu_awake.set(true);
+            }
+            _ => return Err("GFX native callback register write is not modeled"),
+        }
+        Ok(())
     }
 }
 
@@ -200,6 +282,13 @@ pub struct FirmwarePower {
 impl FirmwarePower {
     pub(super) fn family(&self) -> &'static Family {
         self.family
+    }
+
+    pub(super) fn check_reset(&self) -> Result<(), &'static str> {
+        if !self.native.borrow().gpu_awake.get() {
+            return Err("GFX firmware reset while native GPU sleep retains restore ownership");
+        }
+        Ok(())
     }
 
     fn logical(&self, physical: u64) -> Result<u64, &'static str> {
@@ -226,7 +315,10 @@ impl FirmwarePower {
         if !self.native.borrow().available {
             return Err("GFX firmware PIO while PMGR inhibits SGX execution");
         }
-        if region.kind != super::pio::Kind::GFender {
+        if !matches!(
+            region.kind,
+            super::pio::Kind::GFender | super::pio::Kind::GmGifaf
+        ) {
             return Err("GFX native callback PIO region is not modeled");
         }
         let (va, expected) = region.word(offset, write)?;
@@ -241,7 +333,18 @@ impl FirmwarePower {
         if physical != expected {
             return Err("GFX firmware PIO translation disagrees with its AP physical descriptor");
         }
-        self.logical(physical)
+        let logical = self.logical(physical)?;
+        let kind_matches = match region.kind {
+            super::pio::Kind::GFender => {
+                matches!(logical, GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE)
+            }
+            super::pio::Kind::GmGifaf => gifaf_status(self.family) == Some(logical),
+            _ => false,
+        };
+        if !kind_matches {
+            return Err("GFX native callback PIO kind disagrees with its target register");
+        }
+        Ok(logical)
     }
 
     /// Read a source-qualified native callback register. Unknown registers
@@ -252,10 +355,8 @@ impl FirmwarePower {
         region: &super::pio::Region,
         offset: u32,
     ) -> Result<u32, &'static str> {
-        match self.target(port, region, offset, false)? {
-            GATING_CONTROL => Ok(self.native.borrow().gating),
-            _ => Err("GFX native callback register read is not modeled"),
-        }
+        let logical = self.target(port, region, offset, false)?;
+        self.native.borrow().read(self.family, logical)
     }
 
     pub fn write(
@@ -265,14 +366,8 @@ impl FirmwarePower {
         offset: u32,
         value: u32,
     ) -> Result<(), &'static str> {
-        match self.target(port, region, offset, true)? {
-            GATING_CONTROL if value & !GATING_BITS == 0 => {
-                self.native.borrow_mut().gating = value;
-                Ok(())
-            }
-            GATING_CONTROL => Err("GPU gating control bit is not modeled"),
-            _ => Err("GFX native callback register write is not modeled"),
-        }
+        let logical = self.target(port, region, offset, true)?;
+        self.native.borrow_mut().write(self.family, logical, value)
     }
 }
 
@@ -296,6 +391,9 @@ impl Sgx {
     pub fn new(gpu: &'static Gpu) -> Result<Self, &'static str> {
         let identity = gpu.admitted()?;
         let model = gpu.family.model()?;
+        let native = Rc::new(RefCell::new(Native::default()));
+        let mut uat = Uat::new(model.uat_output_bits);
+        uat.set_gpu_availability(Rc::clone(&native.borrow().gpu_awake));
         Ok(Self {
             lifecycle: LifecycleState {
                 powered: true,
@@ -308,12 +406,12 @@ impl Sgx {
             family: gpu.family,
             model,
             interrupt_enable: 0,
-            native: Rc::new(RefCell::new(Native::default())),
+            native,
             mmu_enabled: false,
             ttbat_page: 0,
             configuration: vec![0; gpu.family.mmu.configuration.len()],
             last_invalidate: 0,
-            uat: Uat::new(model.uat_output_bits),
+            uat,
         })
     }
 
@@ -427,7 +525,12 @@ impl Sgx {
             ID_COUNTS_2 => id.counts_2(),
             ID_UNK18 => 0,
             ID_CLUSTERS => id.clusters(identification),
-            GATING_CONTROL => self.native.borrow().gating,
+            GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE => {
+                return self.native.borrow().read(self.family, offset);
+            }
+            _ if gifaf_status(self.family) == Some(offset) => {
+                return self.native.borrow().read(self.family, offset);
+            }
             MMU_ENABLE => u32::from(self.mmu_enabled),
             _ if offset == mmu.ttbat => self.ttbat_page,
             _ if offset == mmu.invalidate => self.last_invalidate,
@@ -454,11 +557,8 @@ impl Sgx {
                     return Err("GPC host-interrupt status bit is not modeled");
                 }
             }
-            GATING_CONTROL => {
-                if value & !GATING_BITS != 0 {
-                    return Err("GPU gating control bit is not modeled");
-                }
-                self.native.borrow_mut().gating = value;
+            GATING_CONTROL | FENDER_SLEEP | FENDER_WAKE => {
+                self.native.borrow_mut().write(self.family, offset, value)?
             }
             _ if offset == mmu.invalidate => self.last_invalidate = value,
             _ if self.mmu_enabled && mmu_register => {
@@ -591,17 +691,21 @@ mod tests {
         sgx.write(offset, Width::Word, u64::from(value), &mut access)
     }
 
-    fn firmware_region(physical: u64, va: u64) -> super::super::pio::Region {
-        use super::super::pio::{Kind, Region};
+    fn firmware_region_at(
+        kind: super::super::pio::Kind,
+        physical: u64,
+        va: u64,
+    ) -> super::super::pio::Region {
+        use super::super::pio::Region;
         use super::super::ring::tests::Flat;
         let mut flat = Flat::new(0x1000, 0x2000);
-        let descriptor = 0x1000 + 0x640 + Kind::GFender as u64 * 0x28;
+        let descriptor = 0x1000 + 0x640 + kind as u64 * 0x28;
         flat.put_u64(descriptor, physical);
         flat.put_u64(descriptor + 8, va);
         flat.put_u32(descriptor + 0x10, 0xc000);
         flat.put_u32(descriptor + 0x14, 0xc000);
         flat.put_u32(descriptor + 0x20, 2);
-        Region::read(&mut flat, 0x1000, Kind::GFender).unwrap()
+        Region::read(&mut flat, 0x1000, kind).unwrap()
     }
 
     #[test]
@@ -624,7 +728,11 @@ mod tests {
             sgx.family = family;
             sgx.model = family.model().unwrap();
             let power = sgx.firmware_power(&[(physical, 0x4000000, 0)]).unwrap();
-            let region = firmware_region(physical + 0xd04000, 0x10000);
+            let region = firmware_region_at(
+                super::super::pio::Kind::GFender,
+                physical + 0xd04000,
+                0x10000,
+            );
             let mut ram = Ram::new(base, 0x10000);
             let [ttbr0, ttbr1] = uat::encode_gptbat(0, base + 0x4000, 0);
             ram.put_u64(base, ttbr0);
@@ -703,6 +811,97 @@ mod tests {
             };
             sgx.set_lifecycle(running, &mut Access::new(0, 0, &mut latch));
             assert_eq!(read(&mut sgx, GATING_CONTROL), Ok(4));
+
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let native_write =
+                |sgx: &mut Sgx, ram: &mut Ram, access: &mut Access<'_>, offset, value| {
+                    let mut view = sgx.uat().agent(uat::Agent::Firmware);
+                    let mut port = Port {
+                        iommu: &mut view,
+                        stream: 0,
+                        memory: ram,
+                        access,
+                    };
+                    power.write(&mut port, &region, offset, value)
+                };
+            let translate = |sgx: &mut Sgx, ram: &mut Ram, access: &mut Access<'_>, agent| {
+                use crate::platform::dma::Iommu;
+                sgx.uat()
+                    .agent(agent)
+                    .translate(ram, 0, 0x12030, 0x12033, false, access)
+            };
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_ok());
+            if !fender_sleep_supported(family) {
+                assert!(native_write(&mut sgx, &mut ram, &mut access, 0x74, 1).is_err());
+                assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_ok());
+                continue;
+            }
+            assert!(native_write(&mut sgx, &mut ram, &mut access, 0x74, 2).is_err());
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_ok());
+            native_write(&mut sgx, &mut ram, &mut access, 0x74, 1).unwrap();
+            assert!(
+                power
+                    .check_reset()
+                    .unwrap_err()
+                    .contains("restore ownership")
+            );
+            assert!(
+                matches!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu),
+                Err(crate::platform::dma::DmaError::Unsupported(reason)) if reason.contains("Fender sleep"))
+            );
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Firmware).is_ok());
+            assert!(
+                native_write(&mut sgx, &mut ram, &mut access, 0x2020, 1)
+                    .unwrap_err()
+                    .contains("remains asserted")
+            );
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_err());
+            // Clearing the request is distinct from waking the GPU. The
+            // original callback clears this request after polling completion.
+            native_write(&mut sgx, &mut ram, &mut access, 0x74, 0).unwrap();
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_err());
+            let status = gifaf_status(family).unwrap();
+            let status_pte = base + 0xc000 + 8 * 8;
+            ram.put_u64(
+                status_pte,
+                uat::encode_pte((physical + status) & !0x3fff, &flags),
+            );
+            // Account for the PIO base's sub-page offset; it is not a new
+            // physical range and must survive the source mapping unchanged.
+            let subpage = (status & !0xfff) & 0x3fff;
+            let gifaf = firmware_region_at(
+                super::super::pio::Kind::GmGifaf,
+                physical + (status & !0xfff),
+                0x20000 + subpage,
+            );
+            let native_status = |sgx: &mut Sgx, ram: &mut Ram, access: &mut Access<'_>| {
+                let mut view = sgx.uat().agent(uat::Agent::Firmware);
+                let mut port = Port {
+                    iommu: &mut view,
+                    stream: 0,
+                    memory: ram,
+                    access,
+                };
+                power.read(&mut port, &gifaf, 0x90)
+            };
+            assert_eq!(
+                native_status(&mut sgx, &mut ram, &mut access),
+                Ok(GIFAF_SLEEP_COMPLETE)
+            );
+            // A fault at the later wake PIO never clears retained inhibition.
+            ram.put_u64(pte, 0);
+            assert!(native_write(&mut sgx, &mut ram, &mut access, 0x2020, 1).is_err());
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_err());
+            assert_eq!(
+                native_status(&mut sgx, &mut ram, &mut access),
+                Ok(GIFAF_SLEEP_COMPLETE)
+            );
+            ram.put_u64(pte, uat::encode_pte(physical + 0xd04000, &flags));
+            native_write(&mut sgx, &mut ram, &mut access, 0x2020, 1).unwrap();
+            assert!(translate(&mut sgx, &mut ram, &mut access, uat::Agent::Gpu).is_ok());
+            assert_eq!(native_status(&mut sgx, &mut ram, &mut access), Ok(0));
+            assert_eq!(power.check_reset(), Ok(()));
         }
     }
 
@@ -712,6 +911,7 @@ mod tests {
         for banks in [
             vec![],
             vec![(0x204000000, 0x1000, 0)],
+            vec![(0x204000000, GIFAF_IDLE_STATUS_G13_G14 + 1, 0)],
             vec![(0x204000000, 0x4000000, 0), (0x204000004, 4, 0x5000000)],
             vec![(0x204000000, 0x4000000, 0), (0x304000000, 4, 4)],
             vec![(0x204000000, 0x4000000, 0), (u64::MAX, 2, 0x5000000)],

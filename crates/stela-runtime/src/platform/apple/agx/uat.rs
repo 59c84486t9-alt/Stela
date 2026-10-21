@@ -57,6 +57,8 @@
 
 use super::super::bus::Access as BusAccess;
 use crate::platform::dma::{DmaError, Iommu, Memory};
+use alloc::rc::Rc;
+use core::cell::Cell;
 
 /// Page shift and size (`UAT_PGBIT`/`UAT_PGSZ`).
 pub const PAGE_SHIFT: u32 = 14;
@@ -473,6 +475,7 @@ const FAULT_PERMISSION: u32 = 2;
 #[derive(Debug)]
 pub struct Uat {
     available: bool,
+    gpu_available: Rc<Cell<bool>>,
     /// The address field of an entry ([`output_mask`]).
     output: u64,
     ttbat: Option<u64>,
@@ -487,6 +490,7 @@ impl Uat {
     pub fn new(output_bits: u32) -> Self {
         Self {
             available: true,
+            gpu_available: Rc::new(Cell::new(true)),
             output: output_mask(output_bits),
             ttbat: None,
             shared_l2: None,
@@ -498,6 +502,12 @@ impl Uat {
     /// independently of its retained translation roots and mappings.
     pub(super) fn set_available(&mut self, available: bool) {
         self.available = available;
+    }
+
+    /// Native GPU power gates execution without preventing the firmware
+    /// agent from completing its retained wake/restore accesses.
+    pub(super) fn set_gpu_availability(&mut self, available: Rc<Cell<bool>>) {
+        self.gpu_available = available;
     }
 
     /// Whether `address` is a 16 KiB-aligned output address.
@@ -680,6 +690,11 @@ impl Iommu for AgentView<'_> {
         } else {
             (self.agent, stream)
         };
+        if agent == Agent::Gpu && !self.uat.gpu_available.get() {
+            return Err(DmaError::Unsupported(
+                "GPU DMA while native Fender sleep inhibits execution",
+            ));
+        }
         self.uat.walk(memory, agent, context, iova, write)
     }
 }

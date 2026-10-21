@@ -810,9 +810,13 @@ impl Coprocessor {
 
 impl Firmware for Coprocessor {
     fn check_reset(&self) -> Result<(), &'static str> {
+        if let Some(power) = &self.power {
+            power.check_reset()?;
+        }
         self.rtkit.check_reset()
     }
     fn reset(&mut self) -> Result<(), &'static str> {
+        self.check_reset()?;
         self.rtkit.reset()
     }
     fn start(&mut self, outbox: &mut Vec<Mail>) -> Result<(), &'static str> {
@@ -972,7 +976,7 @@ mod tests {
                 .iter()
                 .find(|gpu| gpu.family == family && gpu.admitted().is_ok())
                 .unwrap();
-            let sgx = Sgx::new(gpu).unwrap();
+            let mut sgx = Sgx::new(gpu).unwrap();
             let power = sgx.firmware_power(&[(0x204000000, 0x4000000, 0)]).unwrap();
             let mut firmware = Coprocessor::with_power(family, false, power.clone()).unwrap();
             let other = if family == &G14G { &G13G } else { &G14G };
@@ -1005,6 +1009,22 @@ mod tests {
                 Err("GFX initialized IOP sleep requires complete config-derived native callbacks")
             );
             assert!(outbox.is_empty());
+            if family == &G13G || family == &G14G {
+                use crate::platform::apple::bus::{Access, MmioDevice, Width};
+                use crate::platform::apple::interrupt::InterruptLatch;
+                let mut latch = InterruptLatch::new();
+                let mut access = Access::new(0, 0, &mut latch);
+                sgx.write(0xd04074, Width::Word, 1, &mut access).unwrap();
+                assert!(firmware.reset().unwrap_err().contains("restore ownership"));
+                assert_eq!(
+                    firmware.protocol.with(|state| state.initdata_va),
+                    Some(ROOT)
+                );
+                sgx.write(0xd04074, Width::Word, 0, &mut access).unwrap();
+                sgx.write(0xd06020, Width::Word, 1, &mut access).unwrap();
+                firmware.reset().unwrap();
+                assert_eq!(firmware.protocol.with(|state| state.initdata_va), None);
+            }
         }
     }
 
