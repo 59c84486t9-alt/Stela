@@ -93,6 +93,7 @@ pub(super) fn plan(
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
         bluetooth::CLASS => bluetooth::Binding::new(device, interface).map(Plan::Bluetooth),
+        0xff => ethernet::Binding::new(device, interface).map(Plan::VendorEthernet),
         _ => Err("no class driver for this interface"),
     }
 }
@@ -219,6 +220,7 @@ pub(super) mod tests {
     pub(crate) fn device(configurations: Vec<Vec<u8>>) -> Device {
         let count = configurations.len() as u8;
         Device {
+            vendor_ethernet_revision: None,
             slot: 1,
             speed: FULL_SPEED,
             location: "configuration model".into(),
@@ -296,6 +298,29 @@ pub(super) mod tests {
         let all = interfaces(&device.configuration);
         assert!(plan(&device, &all[0], &all).is_err());
         assert_eq!(device.configuration_value(), 19);
+    }
+
+    #[test]
+    fn unsupported_or_unobserved_realtek_revision_preserves_compatible_cdc_choice() {
+        let mut vendor = storage(7);
+        vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
+        for revision in [None, Some(0x4c00), Some(0x5c10), Some(0x7030), Some(0x7410)] {
+            let mut device = device(vec![vendor.clone(), ecm(42)]);
+            device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x56, 0x81]);
+            device.vendor_ethernet_revision = revision;
+            select(&mut device).unwrap();
+            assert_eq!(device.configuration_value(), 42);
+            assert_eq!(device.configurations.len(), 2);
+        }
+        let mut device = device(vec![vendor]);
+        device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
+        device.vendor_ethernet_revision = Some(0x4c10);
+        select(&mut device).unwrap();
+        let all = interfaces(&device.configuration);
+        assert!(matches!(
+            plan(&device, &all[0], &all),
+            Ok(Plan::VendorEthernet(_))
+        ));
     }
 
     #[test]

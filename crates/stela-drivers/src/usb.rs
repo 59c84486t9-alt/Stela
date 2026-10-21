@@ -4,6 +4,7 @@
 //! and CDC Ethernet adapters ([`cdc`]).
 pub mod bluetooth;
 pub mod cdc;
+pub mod ethernet;
 pub mod hid;
 pub mod storage;
 pub mod xhci;

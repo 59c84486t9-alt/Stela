@@ -458,6 +458,7 @@ mod tests {
         let length = configuration.len() as u16;
         configuration[2..4].copy_from_slice(&length.to_le_bytes());
         Device {
+            vendor_ethernet_revision: None,
             slot: 1,
             speed: xhci::FULL_SPEED,
             location: "model USB".into(),

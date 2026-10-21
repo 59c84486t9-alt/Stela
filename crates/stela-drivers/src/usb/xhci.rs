@@ -31,7 +31,7 @@
 //! and SuperSpeed port control, and no class driver here needs one),
 //! isochronous endpoints, streams, hubs more than five tiers deep, and
 //! controllers without 4 KiB pages. Hot plug after attach is not seen.
-use super::{bluetooth, cdc, hid, storage};
+use super::{bluetooth, cdc, ethernet, hid, storage};
 use crate::{
     Clock, Handoff,
     block::BlockError,
@@ -414,6 +414,10 @@ pub fn interfaces(configuration: &[u8]) -> Vec<Interface> {
 /// A device the controller addressed, with what it said about itself.
 #[derive(Clone, Debug)]
 pub struct Device {
+    /// Read-only vendor Ethernet chip identity observed before configuration
+    /// selection, matching Linux r8152's cfgselector preflight. None means no
+    /// verified identity; product IDs alone never select a vendor backend.
+    pub vendor_ethernet_revision: Option<u16>,
     pub slot: u8,
     pub speed: u8,
     /// Where it is: the controller's PCI function, root port and hub ports.
@@ -1066,6 +1070,9 @@ impl Controller {
             }
         }
         if !is_in {
+            if received != length {
+                return Err(BlockError::Unsupported("short USB control OUT transfer"));
+            }
             return Ok(Vec::new());
         }
         let state = self.slot(slot)?;
@@ -1486,6 +1493,17 @@ impl Controller {
     ) {
         match self.identify(attachment, location.clone(), dma) {
             Ok(mut device) => {
+                if ethernet::matches(&device.descriptor) {
+                    use ethernet::rtl815x::Revision;
+                    match self
+                        .control(device.slot, Revision::request(), &[])
+                        .and_then(|bytes| Revision::from_register(&bytes))
+                    {
+                        Ok(revision) => device.vendor_ethernet_revision = Some(revision.0),
+                        Err(error) => failures
+                            .push((format!("{location} RTL815x configuration preflight"), error)),
+                    }
+                }
                 if let Err(why) = configuration::select(&mut device) {
                     device.configuration.clear();
                     failures.push((
@@ -1569,6 +1587,7 @@ impl Controller {
         let product = self.string(slot, descriptor[15]);
         let serial = self.string(slot, descriptor[16]);
         let device = Device {
+            vendor_ethernet_revision: None,
             slot,
             speed: attachment.speed,
             location,
@@ -1834,6 +1853,7 @@ fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
 /// What the class drivers found on one controller.
 #[derive(Default)]
 pub struct Found {
+    pub vendor_links: Vec<ethernet::UsbEthernet>,
     pub disks: Vec<storage::UsbDisk>,
     pub inputs: Vec<hid::UsbInput>,
     pub links: Vec<cdc::UsbNet>,
@@ -1959,6 +1979,10 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
             }
             Plan::Ethernet(plan) => cdc::UsbNet::new(shared.clone(), &device, plan, dma)
                 .map(|link| found.links.push(link)),
+            Plan::VendorEthernet(binding) => {
+                ethernet::UsbEthernet::new(shared.clone(), &device, binding, dma)
+                    .map(|link| found.vendor_links.push(link))
+            }
             Plan::Bluetooth(binding) => {
                 bluetooth::UsbHci::attach(shared.clone(), &device, binding, dma)
                     .map(|transport| found.bluetooth.push(transport))
@@ -1978,6 +2002,8 @@ pub enum Plan {
     Hid(Endpoint),
     /// A CDC Ethernet adapter's interfaces and endpoints.
     Ethernet(cdc::Binding),
+    /// A vendor Ethernet adapter with an implemented observed chip revision.
+    VendorEthernet(ethernet::Binding),
     /// Legacy Bluetooth HCI interrupt and bulk endpoints.
     Bluetooth(bluetooth::Binding),
 }
@@ -1988,6 +2014,7 @@ impl Plan {
             Self::Storage(endpoints) => endpoints.to_vec(),
             Self::Hid(endpoint) => vec![*endpoint],
             Self::Ethernet(binding) => binding.endpoints(),
+            Self::VendorEthernet(binding) => binding.endpoints(),
             Self::Bluetooth(binding) => binding.endpoints(),
         }
     }
@@ -2329,6 +2356,8 @@ pub(crate) mod tests {
         descriptors: Vec<(u8, u8, Vec<u8>)>,
         configuration_value: u8,
         configuration_seen_before_endpoints: Vec<u8>,
+        short_control_out: bool,
+        ethernet: Option<ethernet::rtl815x::tests::Model>,
     }
     impl CancelModel {
         fn state(&self, dci: usize) -> u32 {
@@ -2343,13 +2372,14 @@ pub(crate) mod tests {
             }
         }
         fn event(&mut self, parameter: u64, code: u32, kind: u32, dci: u8, residual: usize) {
-            let address = self.events + (self.event_index * TRB) as u64;
+            let cycle = u32::from((self.event_index / RING_TRBS).is_multiple_of(2));
+            let address = self.events + ((self.event_index % RING_TRBS) * TRB) as u64;
             // SAFETY: all three fields are in the still-live test event ring.
             unsafe {
                 (address as *mut u64).write_volatile(parameter);
                 ((address + 8) as *mut u32).write_volatile(code << 24 | residual as u32);
                 ((address + 12) as *mut u32)
-                    .write_volatile(1 << 24 | u32::from(dci) << 16 | kind << 10 | CYCLE);
+                    .write_volatile(1 << 24 | u32::from(dci) << 16 | kind << 10 | cycle);
             }
             self.event_index += 1;
         }
@@ -2473,6 +2503,7 @@ pub(crate) mod tests {
             }
         }
         fn transfer(&mut self, dci: usize) {
+            self.indices[dci] %= RING_TRBS - 1;
             let at = self.rings[dci] + (self.indices[dci] * TRB) as u64;
             // SAFETY: a doorbell publishes a live transfer ring entry and any
             // data buffer encoded by that entry.
@@ -2504,7 +2535,9 @@ pub(crate) mod tests {
                 } else {
                     // SAFETY: the next Data TRB's buffer is live through this
                     // synchronous modeled control completion.
-                    let buffer = unsafe { ((at + TRB as u64) as *const u64).read_volatile() };
+                    let next = self.rings[dci]
+                        + (((self.indices[dci] + 1) % (RING_TRBS - 1)) * TRB) as u64;
+                    let buffer = unsafe { (next as *const u64).read_volatile() };
                     if request[0] == 0x80
                         && request[1] == GET_DESCRIPTOR
                         && let Some((_, _, bytes)) = self
@@ -2523,6 +2556,33 @@ pub(crate) mod tests {
                             );
                         }
                     }
+                    if request[1] == 5
+                        && matches!(request[0], 0xc0 | 0x40)
+                        && let Some(ethernet) = &mut self.ethernet
+                    {
+                        let output = if request[0] == 0x40 {
+                            // SAFETY: Data TRB refers to the live control buffer.
+                            unsafe { core::slice::from_raw_parts(buffer as *const u8, length) }
+                        } else {
+                            &[]
+                        };
+                        let reply = ethernet.request(request, output).unwrap();
+                        if request[0] == 0xc0 {
+                            received = reply.len();
+                            assert!(received <= length);
+                            // SAFETY: reply is bounded by this TD's requested buffer.
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    reply.as_ptr(),
+                                    buffer as *mut u8,
+                                    received,
+                                );
+                            }
+                        }
+                    }
+                    if request[0] & 0x80 == 0 && self.short_control_out {
+                        received = length - 1;
+                    }
                     unsafe { core::slice::from_raw_parts(buffer as *const u8, length).to_vec() }
                 };
                 if request[0] & 0x80 == 0 && request[1] != SET_CONFIGURATION {
@@ -2535,14 +2595,23 @@ pub(crate) mod tests {
                 } else {
                     if received < length {
                         self.event(
-                            at + TRB as u64,
+                            self.rings[dci]
+                                + (((self.indices[dci] + 1) % (RING_TRBS - 1)) * TRB) as u64,
                             SHORT_PACKET,
                             TRANSFER_EVENT,
                             1,
                             length - received,
                         );
                     }
-                    self.event(at + (trbs - 1) * TRB as u64, SUCCESS, TRANSFER_EVENT, 1, 0);
+                    self.event(
+                        self.rings[dci]
+                            + (((self.indices[dci] + trbs as usize - 1) % (RING_TRBS - 1)) * TRB)
+                                as u64,
+                        SUCCESS,
+                        TRANSFER_EVENT,
+                        1,
+                        0,
+                    );
                 }
                 self.indices[dci] += trbs as usize;
             } else {
@@ -2636,6 +2705,8 @@ pub(crate) mod tests {
             descriptors: Vec::new(),
             configuration_value: 0,
             configuration_seen_before_endpoints: Vec::new(),
+            short_control_out: false,
+            ethernet: None,
         }));
         model.borrow_mut().set_state(1, 1);
         controller.registers = Box::new(CancelRegisters(model.clone()));
@@ -3030,6 +3101,131 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn short_control_out_after_status_ack_fails_without_poisoning_completed_endpoint() {
+        let mut backing = vec![0u64; 64 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives all model DMA.
+        let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+        let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+        model.borrow_mut().short_control_out = true;
+        let request = setup(0x40, 5, 0xe810, 0x0188, 4);
+        assert_eq!(
+            controller.control(1, request, &[0; 4]),
+            Err(BlockError::Unsupported("short USB control OUT transfer"))
+        );
+        assert!(controller.endpoint_ready(1, 1).is_ok());
+        assert_eq!(model.borrow().indices[1], 3);
+        assert!(model.borrow().seen.is_empty());
+        model.borrow_mut().short_control_out = false;
+        assert!(controller.control(1, request, &[0; 4]).is_ok());
+        assert_eq!(model.borrow().indices[1], 6);
+        assert!(model.borrow().active[1].is_none());
+    }
+
+    #[test]
+    fn rtl8152b_binds_real_xhci_dma_moves_aggregates_wraps_and_quiesces() {
+        use crate::net::Link;
+        for scenario in 0..4 {
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives every controller/device/model DMA object.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+            model.borrow_mut().ethernet = Some(ethernet::rtl815x::tests::Model::new(0x4c10));
+            let configuration = vec![
+                9, 2, 32, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 0, 2,
+                0, 7, 5, 0x02, 2, 0, 2, 0,
+            ];
+            let mut device = configuration::tests::device(vec![configuration]);
+            device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
+            let bytes = controller
+                .control(1, setup(0xc0, 5, 0xe610, 0x100, 4), &[])
+                .unwrap();
+            device.vendor_ethernet_revision =
+                Some(((u32::from_le_bytes(bytes.try_into().unwrap()) >> 16) & 0x7cf0) as u16);
+            configuration::select(&mut device).unwrap();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, device, &mut dma, &mut found);
+            assert!(found.failures.is_empty(), "{:?}", found.failures);
+            assert_eq!(found.vendor_links.len(), 1);
+            assert_eq!(model.borrow().configuration_seen_before_endpoints, [7]);
+            let mut link = found.vendor_links.pop().unwrap();
+            assert_eq!(link.mac().0, [2, 0x11, 0x22, 0x33, 0x44, 0x55]);
+            assert!(link.carrier());
+            for value in 0..300 {
+                link.transmit(&[value as u8; 60]).unwrap();
+            }
+            assert_eq!(model.borrow().outgoing.len(), 300);
+            let packet = model.borrow().outgoing[299].clone();
+            assert_eq!(&packet[..8], &[60, 0, 0, 0xc0, 0, 0, 0, 0]);
+            assert_eq!(&packet[8..], &[299u16 as u8; 60]);
+            assert_eq!(link.receive().unwrap(), None);
+            assert!(model.borrow().active[3].is_some());
+            let mut aggregate = vec![0; 176];
+            aggregate[..4].copy_from_slice(&64u32.to_le_bytes());
+            aggregate[24..84].fill(0x5a);
+            aggregate[88..92].copy_from_slice(&64u32.to_le_bytes());
+            aggregate[112..172].fill(0x6a);
+            model.borrow_mut().incoming_events.push_back(aggregate);
+            assert_eq!(link.receive().unwrap(), Some(vec![0x5a; 60]));
+            assert_eq!(link.receive().unwrap(), Some(vec![0x6a; 60]));
+            assert_eq!(link.receive().unwrap(), None);
+            match scenario {
+                0 => {
+                    model.borrow_mut().ethernet.as_mut().unwrap().link = false;
+                    assert!(!link.carrier());
+                    assert!(model.borrow().active[3].is_none());
+                    model.borrow_mut().ethernet.as_mut().unwrap().link = true;
+                    assert!(link.carrier());
+                    link.transmit(&[1; 60]).unwrap();
+                    link.stop().unwrap();
+                    assert!(link.transmit(&[2; 60]).is_err());
+                }
+                1 => {
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                    assert!(link.stop().is_err());
+                    assert!(model.borrow().active[3].is_some());
+                    assert!(link.receive().is_err());
+                    assert!(link.transmit(&[0; 60]).is_err());
+                }
+                2 => {
+                    model.borrow_mut().connected = false;
+                    assert!(!link.carrier());
+                    assert!(link.receive().is_err());
+                    assert!(link.transmit(&[0; 60]).is_err());
+                    // Disconnect is not proof of DMA quiescence.
+                    assert!(model.borrow().active[3].is_some());
+                }
+                _ => {
+                    model.borrow_mut().halt_transfer = Some(4);
+                    model.borrow_mut().fail = Some((SET_DEQUEUE, CONTEXT_STATE_ERROR));
+                    assert!(link.transmit(&[0x77; 60]).is_err());
+                    let state = model.borrow();
+                    let at = state.rings[4] + (state.indices[4] * TRB) as u64;
+                    // SAFETY: the failed TD remains in the live ring.
+                    let (buffer, bytes) = unsafe {
+                        (
+                            (at as *const u64).read_volatile(),
+                            ((at + 8) as *const u32).read_volatile() as usize & 0x1ffff,
+                        )
+                    };
+                    drop(state);
+                    // SAFETY: model performs no DMA here; hardware still owns
+                    // this sentinel and the next attempt must not mutate it.
+                    let before =
+                        unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes).to_vec() };
+                    assert!(link.transmit(&[0x88; 60]).is_err());
+                    assert_eq!(
+                        unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes) },
+                        before
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn bluetooth_binds_real_xhci_queues_moves_packets_and_stops_on_disconnect() {
         use crate::usb::bluetooth::{FirmwareStatus, Packet, State};
         for scenario in 0..3 {
@@ -3040,6 +3236,7 @@ pub(crate) mod tests {
             let (controller, model) = unconfigured_cancellation_controller(&mut dma);
             let shared: Shared = Rc::new(RefCell::new(controller));
             let mut device = Device {
+                vendor_ethernet_revision: None,
                 slot: 1,
                 speed: FULL_SPEED,
                 location: "modeled physical HCI".into(),
