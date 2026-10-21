@@ -2,7 +2,7 @@
 //! the original PPP metadata without reading or running its pointees.
 
 use super::super::super::{ShaderState, WorkError};
-use super::super::{RenderPass, heap_sampler};
+use super::super::{FragmentInputs, heap_sampler};
 use crate::platform::apple::agx::{
     isa::machine::{Env, Fault, Memory, Program},
     stream::{
@@ -15,7 +15,7 @@ use alloc::vec::Vec;
 
 struct PipelineEnv<'a> {
     memory: &'a mut dyn Memory,
-    pass: &'a RenderPass,
+    pass: &'a FragmentInputs,
 }
 impl Memory for PipelineEnv<'_> {
     fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), Fault> {
@@ -74,7 +74,7 @@ pub struct FragmentPipeline {
 /// preshader.
 pub(super) fn load(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     words: &crate::platform::apple::agx::stream::ppp::FragmentShader,
     program: &mut Program,
 ) -> Result<FragmentPipeline, WorkError> {

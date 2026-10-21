@@ -12,7 +12,7 @@
 use super::channel::Kind;
 use super::exec::WorkError;
 use super::exec::compute::{self, Job};
-use super::exec::render::{self, GeometryInputs, RenderPass};
+use super::exec::render::{self, FragmentInputs, GeometryInputs, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
 use super::uat::CONTEXTS;
@@ -79,7 +79,7 @@ impl GeometryProduct {
     pub fn producer(&self) -> &Submission {
         &self.0.producer
     }
-    fn matches(&self, pass: &RenderPass) -> bool {
+    fn matches(&self, pass: &FragmentInputs) -> bool {
         self.0.pass.vm_slot == pass.vm_slot
             && self.0.pass.width == pass.width
             && self.0.pass.height == pass.height
@@ -90,7 +90,7 @@ enum JobKind {
     Compute(Job),
     Geometry(Box<GeometryInputs>),
     Fragment {
-        pass: Box<RenderPass>,
+        pass: Box<FragmentInputs>,
         product: GeometryProduct,
     },
 }
@@ -187,7 +187,7 @@ impl Execution {
     pub fn fragment_for_setup(
         submission: Submission,
         frame: &Frame,
-        pass: RenderPass,
+        pass: FragmentInputs,
         product: GeometryProduct,
     ) -> Result<Self, (WorkError, GeometryProduct)> {
         let key = match scene::Key::read(&submission, frame) {
@@ -210,7 +210,7 @@ impl Execution {
     /// source-qualified firmware consumer before calling this constructor.
     pub fn fragment(
         submission: Submission,
-        pass: RenderPass,
+        pass: FragmentInputs,
         product: GeometryProduct,
     ) -> Result<Self, (WorkError, GeometryProduct)> {
         if product.0.scene.is_some() {
@@ -224,7 +224,7 @@ impl Execution {
 
     fn fragment_inner(
         submission: Submission,
-        pass: RenderPass,
+        pass: FragmentInputs,
         product: GeometryProduct,
     ) -> Result<Self, (WorkError, GeometryProduct)> {
         let check = || {
@@ -570,14 +570,17 @@ mod tests {
         assert!(ta.run(&mut memory).is_err());
         // A mismatched 3D constructor returns the product without memory effects.
         let bad = RenderPass { width: 32, ..pass };
-        let Err((_, product)) = Execution::fragment(accepted(Kind::ThreeD), bad, product) else {
+        let Err((_, product)) =
+            Execution::fragment(accepted(Kind::ThreeD), bad.fragment_inputs(), product)
+        else {
             panic!("mismatched tiling accepted")
         };
         assert_eq!(memory.counts(), ta_counts);
-        let mut fragment = match Execution::fragment(accepted(Kind::ThreeD), pass, product) {
-            Ok(work) => work,
-            Err(_) => panic!("matching TA/3D product refused"),
-        };
+        let mut fragment =
+            match Execution::fragment(accepted(Kind::ThreeD), pass.fragment_inputs(), product) {
+                Ok(work) => work,
+                Err(_) => panic!("matching TA/3D product refused"),
+            };
         let result = fragment.run(&mut memory).unwrap();
         let ResultKind::Fragment(stats) = result else {
             panic!("3D phase result lost")
@@ -635,9 +638,12 @@ mod tests {
         let mut consumer = accepted(Kind::ThreeD);
         consumer.counter += 1;
         let wrong = scene_frame(&consumer, BASE + 0x6800);
-        let Err((error, product)) =
-            Execution::fragment_for_setup(consumer.clone(), &wrong, pass, product)
-        else {
+        let Err((error, product)) = Execution::fragment_for_setup(
+            consumer.clone(),
+            &wrong,
+            pass.fragment_inputs(),
+            product,
+        ) else {
             panic!("equal dimensions exchanged different scenes")
         };
         assert_eq!(
@@ -646,7 +652,9 @@ mod tests {
         );
         assert_eq!(memory.counts(), before);
         assert_eq!(product.producer(), &input);
-        let Err((error, product)) = Execution::fragment(consumer.clone(), pass, product) else {
+        let Err((error, product)) =
+            Execution::fragment(consumer.clone(), pass.fragment_inputs(), product)
+        else {
             panic!("legacy helper bypassed the source scene binding")
         };
         assert_eq!(
@@ -655,11 +663,15 @@ mod tests {
         );
         assert_eq!(memory.counts(), before);
         let correct = scene_frame(&consumer, BASE + 0x6000);
-        let mut fragment =
-            match Execution::fragment_for_setup(consumer.clone(), &correct, pass, product) {
-                Ok(owner) => owner,
-                Err(_) => panic!("matching source scene refused"),
-            };
+        let mut fragment = match Execution::fragment_for_setup(
+            consumer.clone(),
+            &correct,
+            pass.fragment_inputs(),
+            product,
+        ) {
+            Ok(owner) => owner,
+            Err(_) => panic!("matching source scene refused"),
+        };
         let outcome = fragment.run(&mut memory).unwrap();
         let counts = memory.counts();
         memory.fail_firmware_write = true;
@@ -682,7 +694,8 @@ mod tests {
         let before = memory.counts();
         let consumer = accepted(Kind::ThreeD);
         let frame = scene_frame(&consumer, BASE + 0x6000);
-        let Err((_, product)) = Execution::fragment_for_setup(consumer, &frame, pass, product)
+        let Err((_, product)) =
+            Execution::fragment_for_setup(consumer, &frame, pass.fragment_inputs(), product)
         else {
             panic!("helper product manufactured source authority")
         };

@@ -906,6 +906,7 @@ mod tests {
                 .is_err()
             );
             assert_eq!(power.native.borrow().work.render.writes, 0);
+            assert!(owner.three_d_zls_bindings(&input, lease).is_err());
             memory.ram.put_u64(DATA + 0x2518, 0x999f);
             mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
             mapping(&mut memory.ram, 0x4000, 0, false);
@@ -948,6 +949,51 @@ mod tests {
             })
             .unwrap();
             assert!(parameters.completed());
+            let zls = owner.three_d_zls_bindings(&input, lease).unwrap();
+            let shifted = owner.policy == Policy::G14G;
+            assert_eq!(zls.control, 0x800b);
+            assert_eq!(zls.pixels, 0x8009);
+            let source = |offset: u64| 0x8000 + offset / 8;
+            let expected =
+                |base, stride, meta, meta_stride| crate::platform::apple::agx::exec::render::Zls {
+                    base: source(base),
+                    stride: source(stride) as u32,
+                    meta: source(meta),
+                    meta_stride: source(meta_stride) as u32,
+                };
+            assert_eq!(
+                zls.depth.load,
+                if shifted {
+                    expected(0x70, 0xb0, 0xd0, 0xd8)
+                } else {
+                    expected(0x60, 0x80, 0xa0, 0xa8)
+                }
+            );
+            assert_eq!(
+                zls.depth.store,
+                if shifted {
+                    expected(0x78, 0xb8, 0xe0, 0xe8)
+                } else {
+                    expected(0x68, 0x88, 0xb0, 0xb8)
+                }
+            );
+            assert_eq!(
+                zls.stencil.load,
+                if shifted {
+                    expected(0x80, 0xc0, 0xf0, 0xf8)
+                } else {
+                    expected(0x70, 0x90, 0xc0, 0xc8)
+                }
+            );
+            assert_eq!(
+                zls.stencil.store,
+                if shifted {
+                    expected(0x88, 0xc8, 0x100, 0x108)
+                } else {
+                    expected(0x78, 0x98, 0xd0, 0xd8)
+                }
+            );
+            assert!(owner.three_d_zls_bindings(&other, lease).is_err());
             let expected = match owner.policy {
                 Policy::G13G => 61,
                 Policy::G13X => 60,
@@ -978,6 +1024,7 @@ mod tests {
                 )
                 .unwrap();
             assert!(!power.native.borrow().work.active());
+            assert!(owner.three_d_zls_bindings(&input, lease).is_err());
             assert_eq!(
                 power
                     .native
@@ -987,6 +1034,35 @@ mod tests {
                     .value(three_d::words(owner.policy)[0]),
                 Some(0x1310)
             );
+            // A new original source store with unqualified upper stride
+            // bits remains committed. Decoding must refuse, not truncate.
+            input.counter += 1;
+            let stride = if shifted { 0xb0 } else { 0x80 };
+            io(&mut sgx, &mut memory, |port| {
+                port.write(0x5000 + stride, &0x1_0000_0001u64.to_le_bytes())
+            })
+            .unwrap();
+            let mut wide = three_d::Parameters::new(&input, &frame, lease, owner.policy).unwrap();
+            io(&mut sgx, &mut memory, |port| {
+                wide.advance(&mut owner.three_d_parameter_access(port))
+            })
+            .unwrap();
+            let counts = (memory.reads, memory.writes);
+            assert!(owner.three_d_zls_bindings(&input, lease).is_err());
+            assert_eq!((memory.reads, memory.writes), counts);
+            assert_eq!(
+                power.native.borrow().work.render.value(
+                    crate::platform::apple::agx::work_decode::ta::Word::new(0x15400, 8)
+                ),
+                Some(0x1_0000_0001)
+            );
+            owner
+                .cancel_three_d_parameters(
+                    &input,
+                    lease,
+                    &crate::platform::apple::agx::work_decode::resources::Outcome::Aborted,
+                )
+                .unwrap();
         }
     }
     #[test]

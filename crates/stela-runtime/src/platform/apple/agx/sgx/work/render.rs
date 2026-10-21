@@ -5,7 +5,7 @@
 use super::FirmwareWork;
 use crate::platform::apple::agx::{
     channel::Kind,
-    exec::render::{GeometryInputs, SamplerHeap},
+    exec::render::{GeometryInputs, SamplerHeap, Zls, ZlsPair},
     work_decode::{
         Submission,
         resources::{Lease, Outcome},
@@ -45,6 +45,15 @@ impl Registers {
     pub(super) fn value(&self, word: Word) -> Option<u64> {
         self.committed(word)
     }
+}
+
+/// Source-committed 3D ZLS configuration, without start/completion authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZlsBindings {
+    pub control: u64,
+    pub pixels: u32,
+    pub depth: ZlsPair,
+    pub stencil: ZlsPair,
 }
 
 pub struct ParameterAccess<'a, 'p, 'm> {
@@ -97,6 +106,56 @@ impl FirmwareWork {
             .check()
             .map_err(|_| "GFX TA configuration has unsupported PPP clip/control inputs")?;
         Ok(inputs)
+    }
+    /// Decode independent load/store registers only after the actual 3D
+    /// parameter phase. Inactive bindings remain explicit source values.
+    pub fn three_d_zls_bindings(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+    ) -> Result<ZlsBindings, &'static str> {
+        self.available()?;
+        let native = self.power.native.borrow();
+        let registers = &native.work.render;
+        let run = registers
+            .run
+            .as_ref()
+            .ok_or("GFX 3D ZLS configuration has no native owner")?;
+        if run.submission != *submission
+            || run.lease != lease
+            || submission.command.kind != Kind::ThreeD
+            || run.next != run.words.len()
+        {
+            return Err("GFX 3D ZLS configuration requires its complete accepted parameter phase");
+        }
+        let word = |offset| {
+            registers
+                .committed(Word::new(offset, 8))
+                .ok_or("GFX 3D ZLS configuration word has not been programmed")
+        };
+        let scalar = |offset| {
+            u32::try_from(word(offset)?).map_err(|_| "GFX 3D ZLS scalar has unqualified upper bits")
+        };
+        let surface = |base, stride, meta, meta_stride| {
+            Ok::<_, &'static str>(Zls {
+                base: word(base)?,
+                stride: scalar(stride)?,
+                meta: word(meta)?,
+                meta_stride: scalar(meta_stride)?,
+            })
+        };
+        Ok(ZlsBindings {
+            control: word(0x15318)?,
+            pixels: scalar(0x15320)?,
+            depth: ZlsPair {
+                load: surface(0x15328, 0x15400, 0x153c0, 0x15410)?,
+                store: surface(0x15330, 0x15420, 0x153c8, 0x15430)?,
+            },
+            stencil: ZlsPair {
+                load: surface(0x15338, 0x15408, 0x153d0, 0x15418)?,
+                store: surface(0x15340, 0x15428, 0x153d8, 0x15438)?,
+            },
+        })
     }
     pub fn ta_parameter_access<'a, 'p, 'm>(
         &'a self,

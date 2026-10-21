@@ -40,7 +40,7 @@
 
 use super::super::{GROUP_BUDGET, ShaderState, WorkError};
 use super::geometry::{Binned, POSITION_WORDS, Primitive, Shape, Vertex, object, output};
-use super::{Program as PassProgram, RenderPass, Stats, heap_sampler, zls};
+use super::{FragmentInputs, Program as PassProgram, Stats, heap_sampler, zls};
 mod pipeline;
 mod primitive;
 use crate::platform::apple::agx::format::descriptor::{Pbe, Tiling};
@@ -195,7 +195,7 @@ type Visibility = BTreeMap<u32, (u32, u64)>;
 
 struct FragmentEnv<'a> {
     memory: &'a mut dyn Memory,
-    pass: &'a RenderPass,
+    pass: &'a FragmentInputs,
     tile: &'a mut Tile,
     lanes: [Lane; SIMD_WIDTH],
     positions: &'a [[f64; 2]; MAX_SAMPLES],
@@ -464,33 +464,32 @@ impl Env for FragmentEnv<'_> {
 }
 
 /// The depth and stencil surfaces the ZLS loads and stores.
+struct SurfacePair {
+    load: Option<Image>,
+    store: Option<Image>,
+}
 struct Surfaces {
-    depth: Option<Image>,
-    stencil: Option<Image>,
+    depth: SurfacePair,
+    stencil: SurfacePair,
 }
 
 fn surface(
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     zls: &super::Zls,
     format: Format,
-    bits: [u32; 4],
+    tiling_bit: u32,
+    compress_bit: u32,
     enabled: bool,
 ) -> Result<Option<Image>, WorkError> {
     if !enabled {
         return Ok(None);
     }
-    let [load_tiling, load_compress, store_tiling, store_compress] = bits.map(|b| pass.zls(b));
-    if load_tiling != store_tiling || load_compress != store_compress {
-        return Err(WorkError::Refused(
-            "ZLS loads and stores of one surface in different layouts",
-        ));
-    }
-    let tiling = if load_tiling {
+    let tiling = if pass.zls(tiling_bit) {
         Tiling::Twiddled
     } else {
         Tiling::Gpu
     };
-    let meta = if load_compress {
+    let meta = if pass.zls(compress_bit) {
         Some((zls.meta, zls.meta_layer_stride()?))
     } else {
         None
@@ -510,7 +509,7 @@ fn surface(
 }
 
 impl Surfaces {
-    fn new(pass: &RenderPass) -> Result<Self, WorkError> {
+    fn new(pass: &FragmentInputs) -> Result<Self, WorkError> {
         let depth_format = Format {
             channels: if pass.depth_16() {
                 channels::R16
@@ -531,30 +530,37 @@ impl Surfaces {
             srgb: false,
             srgb_2_channel: false,
         };
+        let pair =
+            |bindings: &super::ZlsPair, format: Format, [load, store, lt, lc, st, sc]: [u32; 6]| {
+                Ok::<_, WorkError>(SurfacePair {
+                    load: surface(pass, &bindings.load, format, lt, lc, pass.zls(load))?,
+                    store: surface(pass, &bindings.store, format, st, sc, pass.zls(store))?,
+                })
+            };
         Ok(Surfaces {
-            depth: surface(
-                pass,
+            depth: pair(
                 &pass.depth,
                 depth_format,
                 [
+                    zls::Z_LOAD,
+                    zls::Z_STORE,
                     zls::Z_LOAD_TILING,
                     zls::Z_LOAD_COMPRESS,
                     zls::Z_STORE_TILING,
                     zls::Z_STORE_COMPRESS,
                 ],
-                pass.zls(zls::Z_LOAD) || pass.zls(zls::Z_STORE),
             )?,
-            stencil: surface(
-                pass,
+            stencil: pair(
                 &pass.stencil,
                 stencil_format,
                 [
+                    zls::S_LOAD,
+                    zls::S_STORE,
                     zls::S_LOAD_TILING,
                     zls::S_LOAD_COMPRESS,
                     zls::S_STORE_TILING,
                     zls::S_STORE_COMPRESS,
                 ],
-                pass.zls(zls::S_LOAD) || pass.zls(zls::S_STORE),
             )?,
         })
     }
@@ -563,7 +569,7 @@ impl Surfaces {
     fn load(
         &self,
         memory: &mut dyn Memory,
-        pass: &RenderPass,
+        pass: &FragmentInputs,
         tile: &mut Tile,
     ) -> Result<(), WorkError> {
         let clear_depth = if pass.depth_16() {
@@ -578,8 +584,8 @@ impl Surfaces {
         tile.zs.fill(clear);
         let (zw, zh) = pass.zls_size();
         for (image, bit, depth) in [
-            (&self.depth, zls::Z_LOAD, true),
-            (&self.stencil, zls::S_LOAD, false),
+            (&self.depth.load, zls::Z_LOAD, true),
+            (&self.stencil.load, zls::S_LOAD, false),
         ] {
             let Some(image) = image.as_ref().filter(|_| pass.zls(bit)) else {
                 continue;
@@ -611,13 +617,13 @@ impl Surfaces {
     fn store(
         &self,
         memory: &mut dyn Memory,
-        pass: &RenderPass,
+        pass: &FragmentInputs,
         tile: &Tile,
     ) -> Result<(), WorkError> {
         let (zw, zh) = pass.zls_size();
         for (image, bit, depth) in [
-            (&self.depth, zls::Z_STORE, true),
-            (&self.stencil, zls::S_STORE, false),
+            (&self.depth.store, zls::Z_STORE, true),
+            (&self.stencil.store, zls::S_STORE, false),
         ] {
             let Some(image) = image.as_ref().filter(|_| pass.zls(bit)) else {
                 continue;
@@ -660,7 +666,7 @@ fn image_error(error: ImageError) -> WorkError {
 /// A background or end-of-tile program's state.
 fn load_program(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     program: &PassProgram,
     cache: &mut Program,
 ) -> Result<ShaderState, WorkError> {
@@ -679,7 +685,7 @@ fn load_program(
     Ok(state)
 }
 
-fn empty_tile(pass: &RenderPass) -> Tile {
+fn empty_tile(pass: &FragmentInputs) -> Tile {
     let size = [pass.tile.0, pass.tile.1];
     let count = (size[0] * size[1] * pass.samples) as usize;
     Tile {
@@ -702,7 +708,7 @@ fn empty_tile(pass: &RenderPass) -> Tile {
 
 fn env<'a>(
     memory: &'a mut dyn Memory,
-    pass: &'a RenderPass,
+    pass: &'a FragmentInputs,
     tile: &'a mut Tile,
     positions: &'a [[f64; 2]; MAX_SAMPLES],
     visibility: &'a mut Visibility,
@@ -725,10 +731,11 @@ fn env<'a>(
 /// Run the fragment half of `pass` over `binned`.
 pub fn run(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     binned: &Binned,
     stats: &mut Stats,
 ) -> Result<(), WorkError> {
+    pass.check()?;
     let positions = coverage::sample_positions(pass.multisample_control, pass.samples);
     let surfaces = Surfaces::new(pass)?;
     let mut program = Program::default();
@@ -814,7 +821,7 @@ pub fn run(
 }
 
 struct Context<'a> {
-    pass: &'a RenderPass,
+    pass: &'a FragmentInputs,
     positions: &'a [[f64; 2]; MAX_SAMPLES],
 }
 
@@ -1223,4 +1230,152 @@ fn coefficients(
         }
     }
     Ok(registers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{RenderPass, Zls, ZlsPair};
+    use super::*;
+    use crate::platform::apple::agx::isa::machine::tests::Flat;
+
+    #[test]
+    fn independent_zls_pairs_retain_layout_metadata_layers_and_samples() {
+        for samples in [1, 2, 4] {
+            for short in [false, true] {
+                let control = [
+                    zls::Z_LOAD,
+                    zls::Z_STORE,
+                    zls::S_LOAD,
+                    zls::S_STORE,
+                    zls::Z_LOAD_TILING,
+                    zls::S_STORE_TILING,
+                    zls::Z_LOAD_COMPRESS,
+                    zls::Z_STORE_COMPRESS,
+                    zls::S_LOAD_COMPRESS,
+                    zls::S_STORE_COMPRESS,
+                ]
+                .into_iter()
+                .fold(0u64, |a, b| a | 1 << b)
+                    | (if short {
+                        zls::FORMAT_16
+                    } else {
+                        zls::FORMAT_32F
+                    }) << zls::Z_FORMAT;
+                let binding = |base, meta, lines: u32| Zls {
+                    base,
+                    stride: 1,
+                    meta,
+                    meta_stride: lines << 14,
+                };
+                let mut pass = RenderPass {
+                    width: 16,
+                    height: 16,
+                    layers: 2,
+                    samples,
+                    tile: (16, 16),
+                    sample_bytes: 4,
+                    zls_control: control,
+                    zls_pixels: 15 | 15 << 15,
+                    ..RenderPass::default()
+                }
+                .fragment_inputs();
+                pass.depth = ZlsPair {
+                    load: binding(0x2000, 0x22000, 0),
+                    store: binding(0xa000, 0x23000, 1),
+                };
+                pass.stencil = ZlsPair {
+                    load: binding(0x12000, 0x24000, 2),
+                    store: binding(0x1a000, 0x25000, 3),
+                };
+                let surfaces = Surfaces::new(&pass).unwrap();
+                let mut memory = Flat::new(0x1000, 0x30000);
+                let mode = if short { 0x3f } else { 0x7f };
+                // Native load metadata remains independent of the two store
+                // maps, whose solid zero tiles must expand when written.
+                for layer in 0..2 {
+                    memory.put(0x22000 + layer * 128, &[mode; 128]);
+                    memory.put(0x23000 + layer * 256, &[if short { 1 } else { 3 }; 128]);
+                    memory.put(0x24000 + layer * 384, &[0x1f; 128]);
+                    memory.put(0x25000 + layer * 512, &[0x60; 128]);
+                }
+                let value = |layer, sample| (f64::from(1 + layer + sample)) / 8.0;
+                for layer in 0..2 {
+                    for y in 0..16 {
+                        for x in 0..16 {
+                            for sample in 0..samples {
+                                let at = At::new(0, x, y, layer, sample);
+                                surfaces
+                                    .depth
+                                    .load
+                                    .as_ref()
+                                    .unwrap()
+                                    .write(&mut memory, at, [value(layer, sample), 0.0, 0.0, 0.0])
+                                    .unwrap();
+                                surfaces
+                                    .stencil
+                                    .load
+                                    .as_ref()
+                                    .unwrap()
+                                    .write(
+                                        &mut memory,
+                                        at,
+                                        [f64::from(10 + layer + sample), 0.0, 0.0, 0.0],
+                                    )
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
+                let depth_input = memory.get(0x2000, 0x8000).to_vec();
+                let stencil_input = memory.get(0x12000, 0x8000).to_vec();
+                let depth_meta = memory.get(0x22000, 0x200).to_vec();
+                let stencil_meta = memory.get(0x24000, 0x300).to_vec();
+                for layer in 0..2 {
+                    let mut tile = empty_tile(&pass);
+                    tile.layer = layer;
+                    surfaces.load(&mut memory, &pass, &mut tile).unwrap();
+                    // No draw is needed to prove real load -> tile -> store
+                    // direction, with independently programmed native images.
+                    surfaces.store(&mut memory, &pass, &tile).unwrap();
+                    for (x, y) in [(0, 0), (3, 7), (15, 15)] {
+                        for sample in 0..samples {
+                            let at = At::new(0, x, y, layer, sample);
+                            let depth = surfaces
+                                .depth
+                                .store
+                                .as_ref()
+                                .unwrap()
+                                .read(&mut memory, at)
+                                .unwrap();
+                            assert!((depth.value[0] - value(layer, sample)).abs() < 1.0 / 65535.0);
+                            let stencil = surfaces
+                                .stencil
+                                .store
+                                .as_ref()
+                                .unwrap()
+                                .read(&mut memory, at)
+                                .unwrap();
+                            assert_eq!(stencil.value[0], f64::from(10 + layer + sample));
+                        }
+                    }
+                }
+                assert_eq!(memory.get(0x2000, 0x8000), depth_input);
+                assert_eq!(memory.get(0x12000, 0x8000), stencil_input);
+                assert_eq!(memory.get(0x22000, 0x200), depth_meta);
+                assert_eq!(memory.get(0x24000, 0x300), stencil_meta);
+                assert_eq!(memory.get(0x23000, 8), &[mode; 8]);
+                assert_eq!(memory.get(0x25000, 8), &[0x1f; 8]);
+                // A disabled direction must not acquire an invented surface
+                // or validate/read its deliberately unqualified binding.
+                pass.zls_control &= !((1 << zls::Z_LOAD) | (1 << zls::S_STORE));
+                pass.depth.load.stride = 0;
+                pass.stencil.store.stride = 0;
+                let partial = Surfaces::new(&pass).unwrap();
+                assert!(partial.depth.load.is_none());
+                assert!(partial.depth.store.is_some());
+                assert!(partial.stencil.load.is_some());
+                assert!(partial.stencil.store.is_none());
+            }
+        }
+    }
 }

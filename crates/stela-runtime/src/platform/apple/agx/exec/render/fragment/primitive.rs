@@ -3,7 +3,7 @@
 //! reading these arrays or guessing the later fragment depth format.
 
 use super::super::{
-    RenderPass,
+    FragmentInputs,
     geometry::{Binned, Primitive, Shape},
 };
 use crate::platform::apple::agx::{
@@ -16,7 +16,7 @@ const DEPTH_BIAS_BYTES: u64 = 12;
 
 pub(super) fn prepare(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     binned: &Binned,
 ) -> Result<Vec<Primitive>, WorkError> {
     let mut result = Vec::new();
@@ -98,6 +98,7 @@ fn entry(base: u64, index: u64, bytes: u64) -> Result<u64, WorkError> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::RenderPass;
     use super::*;
     use crate::platform::apple::agx::{
         exec::render::geometry::{DepthBiasBasis, DrawState, Uvs, Vertex},
@@ -205,7 +206,8 @@ mod tests {
             scissors: 0x1000,
             depth_biases: 0x1100,
             ..RenderPass::default()
-        };
+        }
+        .fragment_inputs();
         for (format, expected) in [
             (super::super::super::zls::FORMAT_32F, 2.0),
             (super::super::super::zls::FORMAT_16, 3.75),
@@ -258,7 +260,8 @@ mod tests {
             layers: 1,
             scissors: u64::MAX - 14,
             ..RenderPass::default()
-        };
+        }
+        .fragment_inputs();
         assert!(prepare(&mut memory, &pass, &binned).is_err());
         assert!(memory.reads.is_empty());
     }

@@ -14,11 +14,12 @@
 //!   end-of-tile program stores the tilebuffer through its PBEs and the ZLS
 //!   stores depth and stencil.
 //!
-//! The pass parameters are the register values a 3D command carries
-//! (Public: Asahi's `drm_asahi_cmd_render` and Mesa `hk_queue.c`, which
-//! fill them from `cmdbuf.xml` packs). How the firmware's own 3D command
-//! names them is FW-8 (Blocked), so [`RenderPass`] is the engine's input
-//! and nothing builds one from a firmware record yet.
+//! Each phase takes its own typed inputs. Native parameter components
+//! bind original fixed TA/3D stores; full stock start/finalize authority is
+//! still required before execution. [`RenderPass`] is the legacy whole-pass
+//! helper, explicitly adapted to both phases. Public register meanings are
+//! corroborated by Asahi's `drm_asahi_cmd_render` and Mesa `hk_queue.c` /
+//! `cmdbuf.xml`; original byte/field qualification is in the research matrix.
 
 pub mod fragment;
 pub mod geometry;
@@ -78,6 +79,41 @@ impl GeometryInputs {
         }
         check_ppp(self.ppp_control)
     }
+}
+
+/// Independent original ZLS load/store bindings. Native firmware programs
+/// their bases, layer strides and compression metadata separately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZlsPair {
+    pub load: Zls,
+    pub store: Zls,
+}
+
+/// 3D inputs only. VDM/vertex control belongs to the retained TA product.
+/// No default can manufacture native layers, samples or surface bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentInputs {
+    pub usc_base: u64,
+    pub vm_slot: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub samples: u32,
+    pub tile: (u32, u32),
+    pub sample_bytes: u32,
+    pub multisample_control: u32,
+    pub background: Program,
+    pub end_of_tile: Program,
+    pub zls_control: u64,
+    pub zls_pixels: u32,
+    pub depth: ZlsPair,
+    pub stencil: ZlsPair,
+    pub depth_clear: u32,
+    pub background_values: u32,
+    pub scissors: u64,
+    pub depth_biases: u64,
+    pub visibility: u64,
+    pub sampler_heap: Option<SamplerHeap>,
 }
 
 /// The parameters of one render pass.
@@ -232,6 +268,46 @@ impl RenderPass {
             ),
         }
     }
+    /// The legacy whole-pass helper explicitly uses one surface for both
+    /// directions. Original native consumers construct independent pairs.
+    pub fn fragment_inputs(&self) -> FragmentInputs {
+        FragmentInputs {
+            usc_base: self.usc_base,
+            vm_slot: self.vm_slot,
+            width: self.width,
+            height: self.height,
+            layers: self.layers,
+            samples: self.samples,
+            tile: self.tile,
+            sample_bytes: self.sample_bytes,
+            multisample_control: self.multisample_control,
+            background: self.background,
+            end_of_tile: self.end_of_tile,
+            zls_control: self.zls_control,
+            zls_pixels: self.zls_pixels,
+            depth_clear: self.depth_clear,
+            background_values: self.background_values,
+            scissors: self.scissors,
+            depth_biases: self.depth_biases,
+            visibility: self.visibility,
+            depth: ZlsPair {
+                load: self.depth,
+                store: self.depth,
+            },
+            stencil: ZlsPair {
+                load: self.stencil,
+                store: self.stencil,
+            },
+            sampler_heap: self.geometry_inputs().sampler_heap,
+        }
+    }
+    pub(crate) fn check(&self) -> Result<(), WorkError> {
+        check_ppp(self.ppp_control)?;
+        self.fragment_inputs().check()
+    }
+}
+
+impl FragmentInputs {
     pub fn zls(&self, bit: u32) -> bool {
         field(self.zls_control, bit, 1) != 0
     }
@@ -263,7 +339,6 @@ impl RenderPass {
         if self.width == 0 || self.height == 0 || self.layers == 0 {
             return Err(WorkError::Refused("an empty framebuffer"));
         }
-        check_ppp(self.ppp_control)?;
         let known = [
             (zls::Z_LOAD_TILING, 8),
             (zls::S_LOAD, 2),
@@ -310,22 +385,20 @@ pub fn run(memory: &mut dyn Memory, pass: &RenderPass) -> Result<Stats, WorkErro
     pass.check()?;
     let mut stats = Stats::default();
     let binned = geometry::run(memory, &pass.geometry_inputs(), &mut stats)?;
-    fragment::run(memory, pass, &binned, &mut stats)?;
+    fragment::run(memory, &pass.fragment_inputs(), &binned, &mut stats)?;
     Ok(stats)
 }
 
 /// Entry `index` of the pass's sampler heap.
 pub(crate) fn heap_sampler(
     memory: &mut dyn Memory,
-    pass: &RenderPass,
+    pass: &FragmentInputs,
     index: u32,
 ) -> Result<[u8; 8], &'static str> {
     heap_sampler_at(
         memory,
-        SamplerHeap {
-            base: pass.sampler_heap,
-            entries: pass.sampler_count,
-        },
+        pass.sampler_heap
+            .ok_or("3D sampler heap input is not qualified")?,
         index,
     )
 }
@@ -596,6 +669,7 @@ mod tests {
         writes: usize,
         marker_writes: usize,
         last_write: Option<u64>,
+        fail_write: Option<u64>,
         fragment_reads: Vec<u64>,
     }
     const MARKER: u64 = BASE + 0x3f800;
@@ -639,6 +713,9 @@ mod tests {
         ) -> Result<(), crate::platform::dma::DmaError> {
             self.writes += 1;
             self.last_write = Some(address);
+            if self.fail_write == Some(address) {
+                return Err(crate::platform::dma::DmaError::Memory);
+            }
             if address == MARKER {
                 self.marker_writes += 1;
             }
@@ -753,6 +830,7 @@ mod tests {
                 writes: 0,
                 marker_writes: 0,
                 last_write: None,
+                fail_write: None,
                 fragment_reads: Vec::new(),
             };
             let mut geometry = Execution::geometry(accepted(Kind::Ta, pass.vm_slot), pass).unwrap();
@@ -770,7 +848,7 @@ mod tests {
             };
             let mut fragment = match Execution::fragment(
                 accepted(Kind::ThreeD, pass.vm_slot),
-                fragment_pass,
+                fragment_pass.fragment_inputs(),
                 product,
             ) {
                 Ok(owner) => owner,
@@ -831,6 +909,7 @@ mod tests {
                 writes: 0,
                 marker_writes: 0,
                 last_write: None,
+                fail_write: None,
                 fragment_reads: Vec::new(),
             };
             // No scissors, depth format, tile, sample or layer fields are
@@ -856,9 +935,12 @@ mod tests {
                 ],
             );
             let product = geometry.take_geometry().unwrap();
-            let mut fragment =
-                Execution::fragment(accepted(Kind::ThreeD, pass.vm_slot), pass, product)
-                    .unwrap_or_else(|_| panic!("matching TA product refused"));
+            let mut fragment = Execution::fragment(
+                accepted(Kind::ThreeD, pass.vm_slot),
+                pass.fragment_inputs(),
+                product,
+            )
+            .unwrap_or_else(|_| panic!("matching TA product refused"));
             let error = fragment.run(&mut memory).unwrap_err();
             let counts = (memory.reads, memory.writes);
             memory.blocked = None;
@@ -867,12 +949,64 @@ mod tests {
             assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
             // A separate fresh invocation actually consumes the late arrays.
             let mut stats = Stats::default();
-            fragment::run(&mut memory, &pass, &binned, &mut stats).unwrap();
+            fragment::run(&mut memory, &pass.fragment_inputs(), &binned, &mut stats).unwrap();
             let pixel = |x, y| BASE + IMAGE + 4 * (y * u64::from(SIZE) + x);
             assert_eq!(memory.flat.get(pixel(10, 10), 4), &[255, 0, 0, 255]);
             let clear = CLEAR.map(|x| unorm8(f64::from(x)) as u8);
             assert_eq!(memory.flat.get(pixel(2, 2), 4), &clear);
         }
+    }
+
+    #[test]
+    fn independent_zls_store_fault_preserves_committed_pixels_and_terminal_3d_owner() {
+        use crate::platform::apple::agx::{channel::Kind, work::Execution};
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let (mut flat, pass) = scene(
+            &[
+                vertex(-1.0, -1.0, 0.25, red),
+                vertex(3.0, -1.0, 0.25, red),
+                vertex(-1.0, 3.0, 0.25, red),
+            ],
+            1 << 24,
+            0,
+            1 << zls::Z_LOAD | 1 << zls::Z_STORE,
+        );
+        for i in 0..SIZE * SIZE {
+            flat.put(BASE + DEPTH + 4 * u64::from(i), &0.75f32.to_le_bytes());
+        }
+        let output = BASE + 0x28000;
+        let mut memory = StagedMemory {
+            flat,
+            blocked: None,
+            reads: 0,
+            writes: 0,
+            marker_writes: 0,
+            last_write: None,
+            fail_write: Some(output + 4),
+            fragment_reads: Vec::new(),
+        };
+        let mut ta = Execution::geometry(accepted(Kind::Ta, pass.vm_slot), pass).unwrap();
+        ta.run(&mut memory).unwrap();
+        let mut inputs = pass.fragment_inputs();
+        inputs.depth.store.base = output;
+        let mut work = Execution::fragment(
+            accepted(Kind::ThreeD, pass.vm_slot),
+            inputs,
+            ta.take_geometry().unwrap(),
+        )
+        .unwrap_or_else(|_| panic!("matching geometry refused"));
+        let error = work.run(&mut memory).unwrap_err();
+        assert_eq!(memory.last_write, Some(output + 4));
+        assert_eq!(memory.flat.get(output, 4), &0.25f32.to_le_bytes());
+        assert_eq!(memory.flat.get(BASE + DEPTH, 4), &0.75f32.to_le_bytes());
+        assert_eq!(memory.flat.get(BASE + IMAGE, 4), &[255, 0, 0, 255]);
+        let counts = (memory.reads, memory.writes);
+        memory.fail_write = None;
+        memory.flat.put(output, &0.5f32.to_le_bytes());
+        assert_eq!(work.run(&mut memory), Err(error));
+        assert_eq!((memory.reads, memory.writes), counts);
+        assert_eq!(memory.flat.get(output, 4), &0.5f32.to_le_bytes());
+        assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
     }
 
     #[test]
