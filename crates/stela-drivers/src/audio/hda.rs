@@ -3303,6 +3303,30 @@ mod tests {
     }
 
     #[test]
+    fn alc269_companion_dsp_or_unknown_companion_identity_refuses_before_any_codec_mutation() {
+        for identity in [0x10ec5505, 0x12345678, u32::MAX] {
+            let mut fixture = Fixture::new();
+            let model = realtek_desktop_model(0x10ec0269);
+            model.borrow_mut().parameters.insert((0x51, 0), identity);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let before = model.borrow().commands.len();
+            assert_eq!(
+                controller.initialize_realtek_alc269_common(&graph),
+                Err(Error::UnsupportedTopology)
+            );
+            assert!(
+                model.borrow().commands[before..]
+                    .iter()
+                    .all(|command| (command >> 16) & 15 >= 8)
+            );
+            assert!(model.borrow().power_ready.is_empty());
+            assert!(model.borrow().coefficient_indexes.is_empty());
+            assert!(!controller.routing_failed);
+        }
+    }
+
+    #[test]
     fn alc269_unknown_variant_failed_revision_and_literal_readback_refuse_and_gate_partial_state() {
         for fault in 0..3 {
             let mut fixture = Fixture::new();

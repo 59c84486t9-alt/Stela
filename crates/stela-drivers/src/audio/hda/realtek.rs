@@ -254,6 +254,12 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         let (codec_id, revision_id, subsystem_id, vendor_power) =
             self.realtek_common_identity(graph)?;
+        // alc269_probe replaces the ordinary init hook when node51 identifies
+        // an ALC5505 DSP. No companion/DSP owner is supplied by this entry;
+        // refuse that and opaque nonzero replies before power/index writes.
+        if self.realtek_parameter(graph.address, 0x51, 0)? != 0 {
+            return Err(Error::UnsupportedTopology);
+        }
         let result = (|| {
             self.power_d0(graph.address, 1)?;
             if vendor_power {
