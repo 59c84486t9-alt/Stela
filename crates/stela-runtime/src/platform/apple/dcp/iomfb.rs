@@ -15,14 +15,16 @@
 //! 8 is the requirement matrix, row by row with its source.
 //!
 //! `A401 start_signal` nests `D120 start_hardware_boot` into the AP before it
-//! answers, as the firmware does (the AP's D120 handler calls
-//! `set_create_DFB`, `do_create_default_frame_buffer`, `setup_video_limits`,
-//! `flush_supportsPower`, `late_init_signal` and `setDisplayRefreshProperties`
-//! back, which re-enter [`Methods::call`]). The model inherits the boot
-//! framebuffer rather than allocating a new default one: `A454
-//! do_create_default_frame_buffer` answers 0. The pipe's config frame size
-//! starts unset (`A103` answers 0 x 0), so the AP's `start_hardware_boot`
-//! sets it to the display size (`A104`) and programs it (`A105`).
+//! answers, as the firmware does (the AP's D120 handler,
+//! `UnifiedPipeline2::start_hardware_boot` 0x2a5d7cc, calls
+//! `set_create_DFB`, `do_create_default_frame_buffer`, the config frame size
+//! methods, `flush_supportsPower`, `apt_supported`, `late_init_signal`,
+//! `headless` and `setDisplayRefreshProperties` back, which re-enter
+//! [`Methods::call`]). The model inherits the boot framebuffer rather than
+//! allocating a new default one: `A454 do_create_default_frame_buffer`
+//! answers 0. The pipe's config frame size starts unset (`A103` answers
+//! 0 x 0), so the AP's `start_hardware_boot` sets it to the display size
+//! (`A104`) and programs it (`A105`).
 //!
 //! Once started, the coprocessor publishes its one mode on the IOMFB service
 //! (`D126`..`D128 setDCPAVPropStart/Chunk/End` with the keys `TimingElements`
@@ -724,6 +726,21 @@ pub fn answer(
         b"A478" => sized(Vec::new()),
         // setDisplayRefreshProperties: success (out=4).
         b"A475" => sized(bool_reply(true)),
+        // apt_supported (UPPipeAP_H13P::late_init 0x2a4e98c): false. The
+        // firmware answers pipe word +0x42c == 1 (restore 0x2bcad0, normal
+        // 0x2bf884), which its init sets only to 3 or 0 (0x2c84b0, 0x2c8724).
+        b"A035" => sized(bool_reply(false)),
+        // setSharedEventMemBlockSize(u32, u32) (UnifiedPipeline2::start
+        // 0x2a5e02c): no output; the firmware only records the sizes in its
+        // shared-event block (restore 0x1becd8, normal 0x1bf20c).
+        b"A465" => sized(Vec::new()),
+        // isKeepOnScreen (swapping_client_did_start 0x3d67534): false, the
+        // firmware's byte +0x4304, which nothing sets (restore 0x1c8f30).
+        b"A485" => sized(bool_reply(false)),
+        // get_shared_disp_state (get_ap_shared_disp_state 0x3d6247c, asked
+        // once AppleClamshellState exists): false, the pipe's byte +0x2ba8,
+        // which nothing sets (restore 0x2c01d0, normal 0x2c2fb4).
+        b"A489" => sized(bool_reply(false)),
         _ => Err("DCP method is not modeled for the one fixed monitor"),
     }
 }
@@ -864,6 +881,19 @@ mod tests {
         returned(methods.call(*b"A104", &other, 0));
         assert!(methods.call(*b"A105", &[], 0).is_err());
         assert!(methods.last_refusal().unwrap().contains("A105"));
+    }
+
+    #[test]
+    fn the_pipe_start_up_queries_answer_as_the_j473_firmware_does() {
+        let mut methods = methods();
+        // apt_supported, isKeepOnScreen, get_shared_disp_state: false.
+        for tag in [*b"A035", *b"A485", *b"A489"] {
+            assert_eq!(returned(methods.call(tag, &[], 4)), [0; 4]);
+        }
+        // setSharedEventMemBlockSize(u32, u32): no output.
+        let sizes = Packed::new().u32(0x4000).u32(0x40).finish(8).unwrap();
+        assert!(returned(methods.call(*b"A465", &sizes, 0)).is_empty());
+        assert!(methods.last_refusal().is_none());
     }
 
     #[test]
