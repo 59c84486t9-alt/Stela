@@ -32,6 +32,7 @@
 //! reset vector is the board's (`Devices::reset_vector`), and the board
 //! learns of each power-down and power-up (`Devices::processor_power`).
 mod retained;
+mod transaction;
 use super::{
     Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
@@ -47,6 +48,8 @@ pub use retained::{
     PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, Processors,
 };
+use transaction::NativeProcessorState;
+pub use transaction::{ProcessorWrite, SettledProcessorWrite};
 
 /// Blocks a PE runs before the next PE that can run gets its turn.
 pub(super) const QUANTUM: u64 = 1 << 14;
@@ -123,6 +126,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &mut self,
         bindings: &[ProcessorBinding],
     ) -> Result<(), ProcessorPowerError> {
+        check_owners(&self.processor_power, self.current, &self.peers)?;
         let plan = self.processor_power.prepare_bindings(bindings)?;
         self.settle_processor_power(plan)
     }
@@ -131,6 +135,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &self,
         changes: &[ProcessorChange],
     ) -> Result<PreparedProcessorPower, ProcessorPowerError> {
+        check_owners(&self.processor_power, self.current, &self.peers)?;
         self.processor_power.prepare(changes)
     }
 
@@ -141,36 +146,46 @@ impl<H: Host, D: Devices> Machine<H, D> {
         &mut self,
         plan: PreparedProcessorPower,
     ) -> Result<(), ProcessorPowerError> {
-        let changes = self.processor_power.settle(plan)?;
-        if changes.is_empty() {
-            return Ok(());
-        }
-        let host = self.host.counter();
-        self.clock.end_slice(host, self.statistics.blocks);
-        let now = self.clock.read(host);
-        let mut current_changed = false;
-        for change in changes {
-            match &mut self.peers[change.pe] {
-                Peer::Running => {
-                    pause_cpu(&mut self.cpu, self.waiting, now, change.paused);
-                    current_changed = true;
-                }
-                Peer::Parked(parked) => {
-                    pause_cpu(&mut parked.cpu, parked.waiting, now, change.paused);
-                }
-                Peer::Off => {}
-            }
-        }
-        // End the old runnable-share accounting even when only parked PEs
-        // changed. The scheduler starts the next slice with the new share.
-        self.slice_end = self.statistics.blocks;
-        if current_changed {
-            self.device_lines = None;
-            // Only derived host dispatch/shadow state is discarded. This is
-            // not guest cache maintenance or a cluster state reset.
-            self.translations_changed();
-        }
-        Ok(())
+        self.processor_write()
+            .settle(plan)
+            .map(|_settled: SettledProcessorWrite<'_>| ())
+    }
+
+    /// Borrow the actual scheduler and native-dispatch owners for one complete
+    /// synchronous transaction. Its consuming apply cannot queue work for later.
+    pub fn processor_write(&mut self) -> ProcessorWrite<'_> {
+        self.processor_write_parts().1
+    }
+
+    /// Split the device receiver from the actual execution owners without a
+    /// move, copied snapshot, unsafe alias or a borrow of the complete Machine.
+    pub(super) fn processor_write_parts(&mut self) -> (&mut D, ProcessorWrite<'_>) {
+        let processors = ProcessorWrite {
+            processors: &mut self.processor_power,
+            current: self.current,
+            cpu: &mut self.cpu,
+            peers: &mut self.peers,
+            waiting: self.waiting,
+            clock: &mut self.clock,
+            slice_end: &mut self.slice_end,
+            native: NativeProcessorState {
+                host: &mut self.host,
+                statistics: &mut self.statistics,
+                translation_generation: &mut self.translation_generation,
+                timers: &mut self.timers,
+                floating_point: &mut self.floating_point,
+                memory_checks: &mut self.memory_checks,
+                native_system: &mut self.native_system,
+                debug: &mut self.debug,
+                pointer: &mut self.pointer,
+                mirrors: &mut self.mirrors,
+                device_lines: &mut self.device_lines,
+                watch: &mut self.watch,
+                tag_checks: &mut self.tag_checks,
+                prediction_context: &mut self.prediction_context,
+            },
+        };
+        (&mut self.devices, processors)
     }
 
     pub(super) fn processor_paused(&self, pe: usize) -> bool {
@@ -635,6 +650,33 @@ impl<H: Host, D: Devices> Machine<H, D> {
     }
 }
 
+/// Check the actual scheduler ownership before a checked participant plan can
+/// mutate its inventory, the clock or any live/parked Cpu. An off PE has no
+/// invented Cpu to settle; exactly one slot must refer to the live Cpu.
+fn check_owners(
+    processors: &Processors,
+    current: usize,
+    peers: &[Peer],
+) -> Result<(), ProcessorPowerError> {
+    if peers.len() != processors.count() {
+        return Err(ProcessorPowerError::OwnerCount {
+            expected: processors.count(),
+            actual: peers.len(),
+        });
+    }
+    if !matches!(peers.get(current), Some(Peer::Running)) {
+        return Err(ProcessorPowerError::MissingLiveOwner(current));
+    }
+    if let Some(pe) = peers
+        .iter()
+        .enumerate()
+        .find_map(|(pe, peer)| (pe != current && matches!(peer, Peer::Running)).then_some(pe))
+    {
+        return Err(ProcessorPowerError::UnexpectedLiveOwner(pe));
+    }
+    Ok(())
+}
+
 /// Preserve architectural state and pending status while stopping only the
 /// declared core accounting. The system counter and timer comparators remain
 /// global. Local reservations can be lost at any time (as at a PE switch).
@@ -686,6 +728,46 @@ mod tests {
         power: Vec<(usize, bool)>,
         /// Something outside the board can still wake a PE.
         host_wake: bool,
+    }
+
+    impl Board {
+        /// Same synchronous call order required of the real PMGR adapter.
+        fn retained_write(
+            &mut self,
+            processors: ProcessorWrite<'_>,
+            changes: &[ProcessorChange],
+            refuse_native: bool,
+            events: &mut Vec<&'static str>,
+        ) -> Result<(), DeviceError> {
+            events.push("native preflight");
+            if refuse_native {
+                return Err(DeviceError::TransferRefused(
+                    "native preflight refused".into(),
+                ));
+            }
+            let settled = processors.apply(changes).map_err(|why| {
+                DeviceError::TransferRefused(alloc::format!("processor transaction: {why:?}"))
+            })?;
+            // These are actual owners, still exclusively borrowed through ACK.
+            assert_eq!(settled.paused(0), Some(true));
+            assert_eq!(settled.paused(1), Some(true));
+            assert!(settled.owners.cpu.monitor.is_none());
+            let Peer::Parked(peer) = &settled.owners.peers[1] else {
+                panic!("actual parked owner")
+            };
+            assert!(peer.cpu.monitor.is_none());
+            assert!(settled.owners.native.timers.is_none());
+            assert!(settled.owners.native.device_lines.is_none());
+            assert_eq!(
+                *settled.owners.native.mirrors,
+                super::super::Mirrors::default()
+            );
+            assert!(settled.owners.native.prediction_context.is_some());
+            events.push("CPU and native dispatch settled");
+            events.push("native commit");
+            events.push("controller ACK");
+            Ok(())
+        }
     }
 
     impl Devices for Board {
@@ -917,6 +999,302 @@ mod tests {
         assert_eq!(machine.slice_end, 123);
         assert_eq!(machine.processors().paused(0), Some(false));
         assert_eq!(machine.statistics.switches, 0);
+    }
+
+    #[test]
+    fn every_actual_owner_is_preflighted_before_any_retained_transaction_effect() {
+        for broken in 0..3 {
+            let mut machine = pair();
+            machine
+                .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
+                .unwrap();
+            let plan = machine
+                .prepare_processor_power(&[ProcessorChange {
+                    domain: 1,
+                    state: RETAINED_GATED,
+                }])
+                .unwrap();
+            machine.cpu.monitor = Some(Reservation {
+                granule: BASE,
+                bytes: [0; RESERVATION_GRANULE as usize],
+            });
+            machine.host.now = 100;
+            machine.slice_end = 123;
+            let expected = match broken {
+                0 => {
+                    machine.peers.pop();
+                    ProcessorPowerError::OwnerCount {
+                        expected: 2,
+                        actual: 1,
+                    }
+                }
+                1 => {
+                    machine.peers[0] = Peer::Off;
+                    ProcessorPowerError::MissingLiveOwner(0)
+                }
+                _ => {
+                    machine.peers[1] = Peer::Running;
+                    ProcessorPowerError::UnexpectedLiveOwner(1)
+                }
+            };
+            assert_eq!(machine.settle_processor_power(plan), Err(expected.clone()));
+            assert_eq!(
+                machine
+                    .prepare_processor_power(&[ProcessorChange {
+                        domain: 1,
+                        state: RETAINED_GATED,
+                    }])
+                    .unwrap_err(),
+                expected
+            );
+            assert!(machine.cpu.monitor.is_some());
+            assert_eq!(machine.processors().paused(0), Some(false));
+            assert_eq!(machine.slice_end, 123);
+            assert_eq!(machine.statistics.translation_changes, 0);
+        }
+    }
+
+    #[test]
+    fn synchronous_write_settles_actual_pe_and_native_owners_before_controller_ack() {
+        let mut machine = pair();
+        machine
+            .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
+            .unwrap();
+        let mut originals = Vec::new();
+        for pe in 0..2 {
+            let cpu = if pe == 0 {
+                &mut machine.cpu
+            } else {
+                let Peer::Parked(peer) = &mut machine.peers[pe] else {
+                    panic!("parked PE")
+                };
+                &mut peer.cpu
+            };
+            cpu.state.x[3] = 0x1234 + pe as u64;
+            cpu.monitor = Some(Reservation {
+                granule: BASE,
+                bytes: [0; RESERVATION_GRANULE as usize],
+            });
+            originals.push(cpu.state.clone());
+        }
+        machine.timers = Some(Some(100));
+        machine.device_lines = Some((
+            Lines {
+                irq: true,
+                fiq: false,
+            },
+            100,
+        ));
+        machine.mirrors[0] = stela_compiler::x86_64::register_read::Cell {
+            readable: 1,
+            value: 0x1234,
+        };
+        machine.prediction_context = None;
+        let old_generation = machine.translation_generation;
+        let old_regimes = machine.host.regimes.len();
+        let mut events = Vec::new();
+        let (devices, processors) = machine.processor_write_parts();
+        devices
+            .retained_write(
+                processors,
+                &[
+                    ProcessorChange {
+                        domain: 1,
+                        state: RETAINED_GATED,
+                    },
+                    ProcessorChange {
+                        domain: 2,
+                        state: RETAINED_GATED,
+                    },
+                ],
+                false,
+                &mut events,
+            )
+            .unwrap();
+        assert_eq!(
+            events,
+            [
+                "native preflight",
+                "CPU and native dispatch settled",
+                "native commit",
+                "controller ACK"
+            ]
+        );
+        assert_eq!(machine.cpu.state, originals[0]);
+        assert_eq!(parked(&machine, 1).state, originals[1]);
+        assert_eq!(machine.translation_generation, old_generation + 1);
+        assert_eq!(machine.host.regimes.len(), old_regimes + 1);
+        assert_eq!(machine.runnable(), 0);
+        assert!(
+            machine.devices.power.len() == 1,
+            "no new reset/power notification"
+        );
+    }
+
+    #[test]
+    fn refused_or_unused_synchronous_access_cannot_leave_a_partial_cpu_batch_or_ack() {
+        for refusal in 0..3 {
+            let mut machine = pair();
+            machine
+                .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
+                .unwrap();
+            machine.cpu.monitor = Some(Reservation {
+                granule: BASE,
+                bytes: [0; RESERVATION_GRANULE as usize],
+            });
+            machine.slice_end = 123;
+            let old_generation = machine.translation_generation;
+            let old_regimes = machine.host.regimes.len();
+            let mut events = Vec::new();
+            let mut changes = vec![
+                ProcessorChange {
+                    domain: 1,
+                    state: RETAINED_GATED,
+                },
+                ProcessorChange {
+                    domain: 2,
+                    state: RETAINED_GATED,
+                },
+            ];
+            if refusal == 1 {
+                changes[1].domain = 999;
+            }
+            let (devices, processors) = machine.processor_write_parts();
+            if refusal == 2 {
+                let _unused = processors;
+            } else {
+                assert!(matches!(
+                    devices.retained_write(processors, &changes, refusal == 0, &mut events),
+                    Err(DeviceError::TransferRefused(_))
+                ));
+                assert_eq!(events, ["native preflight"]);
+            }
+            assert!(machine.cpu.monitor.is_some());
+            assert_eq!(machine.processors().paused(0), Some(false));
+            assert_eq!(machine.processors().paused(1), Some(false));
+            assert_eq!(machine.slice_end, 123);
+            assert_eq!(machine.translation_generation, old_generation);
+            assert_eq!(machine.host.regimes.len(), old_regimes);
+        }
+    }
+
+    #[test]
+    fn native_dispatch_preflight_failure_precedes_participant_clock_and_cpu_changes() {
+        for field in [
+            "translation generation",
+            "translation changes",
+            "prediction isolations",
+        ] {
+            let mut machine = pair();
+            machine.bind_processor_power(&[core_binding(1, 0)]).unwrap();
+            machine.cpu.monitor = Some(Reservation {
+                granule: BASE,
+                bytes: [0; RESERVATION_GRANULE as usize],
+            });
+            machine.slice_end = 123;
+            match field {
+                "translation generation" => machine.translation_generation = u64::MAX,
+                "translation changes" => machine.statistics.translation_changes = u64::MAX,
+                _ => {
+                    machine.prediction_context = None;
+                    machine.statistics.prediction_isolations = u64::MAX;
+                }
+            }
+            let before_generation = machine.translation_generation;
+            let before_regimes = machine.host.regimes.len();
+            let mut expected_clock = machine.clock;
+            machine.host.now = 100;
+            let result = machine.processor_write().apply(&[ProcessorChange {
+                domain: 1,
+                state: RETAINED_GATED,
+            }]);
+            assert!(
+                matches!(result, Err(ProcessorPowerError::NativeStateExhausted(actual)) if actual == field)
+            );
+            assert!(machine.cpu.monitor.is_some());
+            assert_eq!(machine.processors().paused(0), Some(false));
+            assert_eq!(machine.slice_end, 123);
+            assert_eq!(machine.translation_generation, before_generation);
+            assert_eq!(machine.host.regimes.len(), before_regimes);
+            assert_eq!(machine.clock.read(100), expected_clock.read(100));
+        }
+    }
+
+    #[test]
+    fn borrowed_native_settlement_matches_full_canonical_regime_invalidation() {
+        fn populated() -> Machine<FakeHost, Board> {
+            let mut machine = pair();
+            machine.bind_processor_power(&[core_binding(1, 0)]).unwrap();
+            machine.timers = Some(Some(100));
+            machine.floating_point = Some(Some(1));
+            let _ = machine.memory_checks();
+            let _ = machine.native_system();
+            let _ = machine.debug_mode();
+            machine.mirrors[0] = stela_compiler::x86_64::register_read::Cell {
+                readable: 1,
+                value: 7,
+            };
+            machine.device_lines = Some((
+                Lines {
+                    irq: true,
+                    fiq: true,
+                },
+                100,
+            ));
+            machine.watch.ranges[0] = (0x1000, 0x1fff);
+            machine.watch.pass = [Some(0x1000), None];
+            machine.tag_checks = [true, true];
+            machine.prediction_context = None;
+            machine.pointer.open(super::super::pointer::PointerInputs {
+                keys: [[1, 2]; 5],
+                version: crate::pauth::Version::Classic,
+                tcr: 17,
+            });
+            assert!(machine.pointer.is_open());
+            machine
+        }
+        let mut expected = populated();
+        let mut actual = populated();
+        expected.translations_changed();
+        let _settled = actual
+            .processor_write()
+            .apply(&[ProcessorChange {
+                domain: 1,
+                state: RETAINED_GATED,
+            }])
+            .unwrap();
+        assert!(
+            actual.timers == expected.timers && actual.floating_point == expected.floating_point
+        );
+        assert!(
+            actual.memory_checks == expected.memory_checks
+                && actual.native_system == expected.native_system
+        );
+        assert!(actual.debug.is_none() && expected.debug.is_none());
+        assert!(!actual.pointer.is_open() && !expected.pointer.is_open());
+        assert_eq!(*actual.mirrors, *expected.mirrors);
+        assert_eq!(actual.device_lines, expected.device_lines);
+        assert_eq!(actual.watch, expected.watch);
+        assert_eq!(actual.tag_checks, expected.tag_checks);
+        assert!(actual.prediction_context == expected.prediction_context);
+        assert_eq!(
+            actual.translation_generation,
+            expected.translation_generation
+        );
+        assert_eq!(
+            actual.statistics.translation_changes,
+            expected.statistics.translation_changes
+        );
+        assert_eq!(
+            actual.statistics.prediction_isolations,
+            expected.statistics.prediction_isolations
+        );
+        assert_eq!(actual.host.regimes, expected.host.regimes);
+        assert_eq!(actual.host.isolations, expected.host.isolations);
+        assert_eq!(
+            actual.host.code_invalidations,
+            expected.host.code_invalidations
+        );
     }
 
     #[test]

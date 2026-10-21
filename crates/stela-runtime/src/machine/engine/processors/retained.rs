@@ -50,6 +50,10 @@ pub enum ProcessorPowerError {
     StalePlan,
     MembershipChanged,
     RevisionExhausted,
+    OwnerCount { expected: usize, actual: usize },
+    MissingLiveOwner(usize),
+    UnexpectedLiveOwner(usize),
+    NativeStateExhausted(&'static str),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +77,33 @@ pub struct PreparedProcessorPower {
 pub(super) struct PauseChange {
     pub pe: usize,
     pub paused: bool,
+}
+
+/// A checked exclusive lease over the actual participant inventory. While
+/// native-dispatch preflight runs, no caller can replace its revision or
+/// membership. Dropping it without commit has no effect.
+pub(super) struct Settlement<'a> {
+    processors: &'a mut Processors,
+    after: BTreeMap<u64, Domain>,
+    paused: Vec<bool>,
+    changes: Vec<PauseChange>,
+}
+
+impl Settlement<'_> {
+    pub(super) fn changes(&self) -> &[PauseChange] {
+        &self.changes
+    }
+
+    pub(super) fn paused(&self, pe: usize) -> bool {
+        self.paused[pe]
+    }
+
+    pub(super) fn commit(self) -> Vec<PauseChange> {
+        self.processors.domains = self.after;
+        self.processors.paused = self.paused;
+        self.processors.revision += 1;
+        self.changes
+    }
 }
 
 /// Scheduler-owned participant inventory. No binding means no lifecycle
@@ -218,10 +249,10 @@ impl Processors {
         Ok(())
     }
 
-    pub(super) fn settle(
+    pub(super) fn settlement(
         &mut self,
         plan: PreparedProcessorPower,
-    ) -> Result<Vec<PauseChange>, ProcessorPowerError> {
+    ) -> Result<Settlement<'_>, ProcessorPowerError> {
         self.check(&plan)?;
         let mut paused = vec![false; self.count];
         for domain in plan.after.values() {
@@ -237,10 +268,20 @@ impl Processors {
             .filter(|&(pe, paused)| self.paused[pe] != *paused)
             .map(|(pe, &paused)| PauseChange { pe, paused })
             .collect();
-        self.domains = plan.after;
-        self.paused = paused;
-        self.revision += 1;
-        Ok(changes)
+        Ok(Settlement {
+            processors: self,
+            after: plan.after,
+            paused,
+            changes,
+        })
+    }
+
+    #[cfg(test)]
+    fn settle(
+        &mut self,
+        plan: PreparedProcessorPower,
+    ) -> Result<Vec<PauseChange>, ProcessorPowerError> {
+        Ok(self.settlement(plan)?.commit())
     }
 }
 
@@ -284,6 +325,34 @@ mod tests {
         ));
         assert_eq!(processors.domain_count(), 0);
         assert_eq!(processors.paused(1), None);
+    }
+
+    #[test]
+    fn abandoning_the_checked_lease_keeps_the_revision_and_inventory_unchanged() {
+        let mut processors = Processors::new(2).unwrap();
+        let bind = processors
+            .prepare_bindings(&[core(1, 0), core(2, 1)])
+            .unwrap();
+        processors.settle(bind).unwrap();
+        let changes = [ProcessorChange {
+            domain: 1,
+            state: GATED,
+        }];
+        let abandoned = processors.prepare(&changes).unwrap();
+        let still_valid = processors.prepare(&changes).unwrap();
+        let lease = processors.settlement(abandoned).unwrap();
+        assert_eq!(
+            lease.changes(),
+            [PauseChange {
+                pe: 0,
+                paused: true
+            }]
+        );
+        drop(lease);
+        assert_eq!(processors.paused(0), Some(false));
+        processors.settle(still_valid).unwrap();
+        assert_eq!(processors.paused(0), Some(true));
+        assert_eq!(processors.paused(1), Some(false));
     }
 
     #[test]
