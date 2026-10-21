@@ -45,6 +45,7 @@ impl Chunk {
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
         data: &[u8],
+        direction: Direction,
     ) -> Result<Self, Error> {
         if data.is_empty() || data.len() > 32768 {
             return Err(Error::PayloadSize);
@@ -60,7 +61,7 @@ impl Chunk {
                 return Err(Error::AllocationContract);
             }
             let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
-            let mapping = DmaMapping::map(domain.clone(), pages, Direction::ToDevice, u64::MAX)?;
+            let mapping = DmaMapping::map(domain.clone(), pages, direction, u64::MAX)?;
             let region = Region {
                 address: mapping.address()?,
                 bytes: data.len(),
@@ -124,10 +125,11 @@ impl Bank {
         sections: &[Section<'_>],
         source: &dyn PageSource,
         domain: &Arc<dyn DmaDomain>,
+        direction: Direction,
     ) -> Result<Self, Error> {
         let mut bank = Self::default();
         for section in sections {
-            let chunk = Chunk::allocate(source, domain.clone(), section.data)?;
+            let chunk = Chunk::allocate(source, domain.clone(), section.data, direction)?;
             bank.regions.push(chunk.region);
             bank.chunks.push(chunk);
         }
@@ -179,9 +181,9 @@ impl MappedFirmware {
     ) -> Result<Self, Error> {
         let domain = domain.ok_or(DmaError::IommuUnavailable)?;
         Ok(Self {
-            lmac: Bank::prepare(plan.lmac(), source, &domain)?,
-            umac: Bank::prepare(plan.umac(), source, &domain)?,
-            paging: Bank::prepare(plan.paging(), source, &domain)?,
+            lmac: Bank::prepare(plan.lmac(), source, &domain, Direction::ToDevice)?,
+            umac: Bank::prepare(plan.umac(), source, &domain, Direction::ToDevice)?,
+            paging: Bank::prepare(plan.paging(), source, &domain, Direction::Bidirectional)?,
             state: State::Prepared,
         })
     }
@@ -344,6 +346,7 @@ mod tests {
         unmap_fail: Option<usize>,
         bad_boundaries: usize,
         live: BTreeMap<u64, CpuMapping>,
+        permissions: BTreeMap<u64, Direction>,
         copied: Vec<Vec<u8>>,
         directions: Vec<Direction>,
     }
@@ -378,6 +381,7 @@ mod tests {
             r.live
                 .insert(id, pages.cpu_mapping(CacheAttribute::WriteBack).unwrap());
             r.directions.push(direction);
+            r.permissions.insert(id, direction);
             Ok(DomainMapping {
                 id,
                 address,
@@ -392,6 +396,7 @@ mod tests {
                 return Err(DmaError::InvalidationFailed);
             }
             assert!(r.live.remove(&mapping.id).is_some());
+            r.permissions.remove(&mapping.id);
             Ok(())
         }
         unsafe fn sync_for_device(
@@ -406,7 +411,7 @@ mod tests {
             if r.sync_fail == Some(index) {
                 return Err(DmaError::VisibilityFailed);
             }
-            assert_eq!(direction, Direction::ToDevice);
+            assert_eq!(Some(&direction), r.permissions.get(&mapping.id));
             assert_eq!(range.start, 0);
             let cpu = r.live.get(&mapping.id).unwrap();
             let ptr = cpu.address(range.start, range.len()).unwrap();
@@ -472,7 +477,15 @@ mod tests {
             let r = domain.records.lock().unwrap();
             assert_eq!(r.maps, 4);
             assert_eq!(r.syncs, 4);
-            assert_eq!(r.directions, vec![Direction::ToDevice; 4]);
+            assert_eq!(
+                r.directions,
+                vec![
+                    Direction::ToDevice,
+                    Direction::ToDevice,
+                    Direction::Bidirectional,
+                    Direction::Bidirectional
+                ]
+            );
             let expected: Vec<_> = plan
                 .lmac()
                 .iter()
@@ -493,6 +506,21 @@ mod tests {
         }
         assert_eq!(domain.records.lock().unwrap().live.len(), 2);
         assert_eq!(source.released.load(Ordering::Relaxed), 2);
+        {
+            let r = domain.records.lock().unwrap();
+            for (id, cpu) in &r.live {
+                assert_eq!(r.permissions.get(id), Some(&Direction::Bidirectional));
+                let pointer = cpu.address(0, 8).unwrap();
+                // SAFETY: model device owns live bidirectional paging after
+                // exposure/ALIVE; the driver never reads these pages as CPU.
+                unsafe {
+                    pointer
+                        .as_ptr()
+                        .cast::<u64>()
+                        .write_volatile(0x656469766564);
+                }
+            }
+        }
         // SAFETY: no actual device or asynchronous IRQ worker exists.
         unsafe {
             mapped.release_after_stop().unwrap();
