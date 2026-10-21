@@ -2093,4 +2093,47 @@ mod tests {
         controller.read_pcm(capture, 0, &mut bytes).unwrap();
         assert_ne!(bytes, [0xa5; 256]);
     }
+    #[test]
+    fn zero_widget_power_states_inherit_function_group_but_zero_group_refuses() {
+        for group_states in [1, 0] {
+            let mut fixture = Fixture::new();
+            let model = analog_model();
+            model
+                .borrow_mut()
+                .parameters
+                .insert((1, 0x0f), group_states);
+            model.borrow_mut().parameters.insert((2, 0x0f), 0);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            assert_eq!(graph.widget(2).unwrap().power_states, Some(group_states));
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let before = model.borrow().commands.len();
+            let result = controller.configure_analog_route(
+                &graph,
+                &route,
+                stream,
+                0,
+                PinOptions::Playback {
+                    headphone: false,
+                    eapd: None,
+                },
+            );
+            if group_states == 0 {
+                assert_eq!(result, Err(Error::UnsupportedTopology));
+                assert_eq!(model.borrow().commands.len(), before);
+            } else {
+                result.unwrap();
+                assert!(model.borrow().power_ready.contains_key(&2));
+            }
+        }
+    }
 }

@@ -140,6 +140,7 @@ pub struct Widget {
     pub pcm: PcmCapabilities,
     pub input_amplifier: Option<u32>,
     pub output_amplifier: Option<u32>,
+    /// Effective declared widget states; zero raw capability inherits its FG.
     pub power_states: Option<u32>,
     pub pin_capabilities: Option<u32>,
     pub pin_default: Option<u32>,
@@ -281,7 +282,14 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                     return Err(Error::InvalidConnectionList);
                 }
                 let power_states = if capabilities & WCAP_POWER != 0 {
-                    Some(self.parameter(address, widget, PAR_POWER)?)
+                    let states = self.parameter(address, widget, PAR_POWER)?;
+                    // HDA 1.0a §7.3.4.12: optional widget parameter returning
+                    // zero inherits the required function-group power states.
+                    Some(if states == 0 {
+                        group.power_states.unwrap_or(0)
+                    } else {
+                        states
+                    })
                 } else {
                     None
                 };
