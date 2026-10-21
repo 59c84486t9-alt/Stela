@@ -174,7 +174,7 @@ type Entry = unsafe extern "sysv64" fn(*mut GuestState, *mut ExecutionContext);
 /// An installed leaf and what its memory accesses require of the PE.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Leaf {
-    code: NativeCode,
+    pub(super) code: NativeCode,
     memory: MemoryRequirements,
 }
 
@@ -779,7 +779,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let code = match self.host.install(native) {
             Ok(code) => code,
             Err(InstallError::Full) => {
-                self.discard_code();
+                self.reclaim_code();
                 self.host
                     .install(native)
                     .map_err(|_| String::from("the leaf exceeds the code arena"))?

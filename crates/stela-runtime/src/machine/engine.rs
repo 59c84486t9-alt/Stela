@@ -318,8 +318,16 @@ pub trait Host {
     fn patch(&mut self, code: NativeCode, bytes: &[u8]);
     /// Free every installed block.
     fn discard_code(&mut self);
+    /// Free the oldest part of the code arena for new code, as a ring
+    /// does, and return the host addresses it held: the engine forgets
+    /// every block and leaf there before installing more. `None` from a
+    /// host whose arena is one part, for which the engine discards every
+    /// block instead.
+    fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
+        None
+    }
     /// Whether the memory the engine's own data takes runs low. Installed
-    /// blocks' metadata is most of it, so the engine then discards them as
+    /// blocks' metadata is most of it, so the engine then reclaims code as
     /// when the code arena fills.
     fn memory_low(&self) -> bool {
         false
@@ -816,6 +824,8 @@ pub struct Statistics {
     pub system_exits: u64,
     pub device_accesses: u64,
     pub code_discards: u64,
+    /// Parts of the code arena reclaimed for new code, oldest first.
+    pub code_evictions: u64,
     /// Pages of compiled code an IC IVAU made stale.
     pub code_invalidations: u64,
     pub waits: u64,
@@ -858,6 +868,7 @@ impl core::ops::AddAssign for Statistics {
             system_exits,
             device_accesses,
             code_discards,
+            code_evictions,
             code_invalidations,
             waits,
             switches,
@@ -888,6 +899,7 @@ impl core::ops::AddAssign for Statistics {
             (&mut self.system_exits, system_exits),
             (&mut self.device_accesses, device_accesses),
             (&mut self.code_discards, code_discards),
+            (&mut self.code_evictions, code_evictions),
             (&mut self.code_invalidations, code_invalidations),
             (&mut self.waits, waits),
             (&mut self.switches, switches),
@@ -1125,6 +1137,8 @@ pub struct Machine<H: Host, D: Devices> {
     exit_words: BTreeMap<u32, u64>,
     target: TargetCpu,
     blocks: Vec<Block>,
+    /// Slots of `blocks` whose code was reclaimed, for new blocks.
+    free_blocks: Vec<usize>,
     /// The fault recovery tables of the blocks that have entries, by block
     /// index: where their regions keep guest GPRs out of the frame across a
     /// faultable access, which a native fault applies first. Kept apart
@@ -1305,6 +1319,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             exit_words: BTreeMap::new(),
             target,
             blocks: Vec::new(),
+            free_blocks: Vec::new(),
             fault_recovery: BTreeMap::new(),
             index: BTreeMap::new(),
             code_pages: BTreeMap::new(),
@@ -1723,10 +1738,63 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.statistics.code_invalidations += 1;
     }
 
+    /// Make room in the code arena: reclaim its oldest part, or discard
+    /// every block on a host whose arena is one part.
+    fn reclaim_code(&mut self) {
+        match self.host.reclaim_code() {
+            Some(range) => self.evict_code(range),
+            None => self.discard_code(),
+        }
+    }
+
+    /// Forget the blocks and leaves whose code lies in `range`, which the
+    /// host reclaimed. A block of the same page may chain into an evicted
+    /// one, so an evicted block's page is forgotten whole, as an IC IVAU
+    /// forgets it: its other blocks become unreachable and are freed when
+    /// their own code is reclaimed. A block no longer indexed has no live
+    /// chain into it, as its page was forgotten whole then.
+    fn evict_code(&mut self, range: core::ops::Range<usize>) {
+        let evicted: Vec<usize> = (0..self.blocks.len())
+            .filter(|&slot| range.contains(&self.blocks[slot].code.0))
+            .collect();
+        for &slot in &evicted {
+            let block = &self.blocks[slot];
+            if self.index.get(&(block.pc, block.physical, block.variant)) != Some(&slot) {
+                continue;
+            }
+            let page = block.physical & !(FETCH_PAGE - 1);
+            for key in self.code_pages.remove(&page).unwrap_or_default() {
+                self.index.remove(&key);
+            }
+        }
+        for &slot in &evicted {
+            let block = &mut self.blocks[slot];
+            if block.taken != 0 {
+                *self.exit_words.entry(block.terminal.1).or_default() += block.taken;
+            }
+            block.code = NativeCode(0);
+            block.taken = 0;
+            block.dynamic_site = None;
+            block.source_map = Vec::new();
+            block.successors = Vec::new();
+            self.fault_recovery.remove(&slot);
+            self.free_blocks.push(slot);
+        }
+        self.scalable_leaves
+            .retain(|_, leaf| !range.contains(&leaf.code.0));
+        if !evicted.is_empty() {
+            // The jump cache and lookup entries hold no generation per
+            // block.
+            self.code_generation += 1;
+            self.statistics.code_evictions += 1;
+        }
+    }
+
     fn discard_code(&mut self) {
         self.exit_words = self.exit_words();
         self.host.discard_code();
         self.blocks.clear();
+        self.free_blocks.clear();
         self.fault_recovery.clear();
         self.index.clear();
         self.code_pages.clear();
@@ -2785,13 +2853,11 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let current = self.current_variant(single, guarded);
         let variant = self.page_variant(current, physical);
         let el = self.cpu.pstate.el | u8::from(self.cpu.pstate.guarded) << 4;
-        self.chain.context = self.context(
-            el,
-            Variant {
-                guarded_page: false,
-                ..current
-            },
-        );
+        let context = Variant {
+            guarded_page: false,
+            ..current
+        };
+        self.chain.context = self.context(el, context);
         let slot = (pc / INSTRUCTION) as usize % JUMP_CACHE;
         if let Some(entry) = self.jump[slot]
             && entry.pc == pc
@@ -2804,10 +2870,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
         }
         let index = match self.index.get(&(pc, physical, variant)) {
             Some(&index) => index,
-            None => match self.compile(pc, physical, variant)? {
-                Fetched::Block(index) => index,
-                other => return Ok(other),
-            },
+            None => {
+                let generation = self.code_generation;
+                let compiled = self.compile(pc, physical, variant)?;
+                // Compiling may have reclaimed code, whose lookup entries
+                // the old context still names: the thunks look up in a new
+                // one.
+                if self.code_generation != generation {
+                    self.chain.context = self.context(el, context);
+                }
+                match compiled {
+                    Fetched::Block(index) => index,
+                    other => return Ok(other),
+                }
+            }
         };
         self.jump[slot] = Some(JumpEntry {
             pc,
@@ -3044,12 +3120,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         let last = compiled.source_bytes - INSTRUCTION as usize;
         let terminal = u32::from_le_bytes(source[last..last + 4].try_into().expect("a word"));
         if !self.blocks.is_empty() && self.host.memory_low() {
-            self.discard_code();
+            self.reclaim_code();
         }
         let code = match self.host.install(&compiled.native.x86_64_code) {
             Ok(code) => code,
             Err(InstallError::Full) => {
-                self.discard_code();
+                self.reclaim_code();
                 self.host
                     .install(&compiled.native.x86_64_code)
                     .map_err(|_| {
@@ -3094,11 +3170,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 terminal,
             ));
         }
-        if !compiled.fault_recovery.is_empty() {
-            self.fault_recovery
-                .insert(self.blocks.len(), compiled.fault_recovery);
-        }
-        self.blocks.push(Block {
+        let block = Block {
             pc,
             physical,
             code,
@@ -3117,8 +3189,20 @@ impl<H: Host, D: Devices> Machine<H, D> {
             taken: 0,
             source_bytes: compiled.source_bytes,
             source_hash: source_hash(&source[..compiled.source_bytes]),
-        });
-        let index = self.blocks.len() - 1;
+        };
+        let index = match self.free_blocks.pop() {
+            Some(slot) => {
+                self.blocks[slot] = block;
+                slot
+            }
+            None => {
+                self.blocks.push(block);
+                self.blocks.len() - 1
+            }
+        };
+        if !compiled.fault_recovery.is_empty() {
+            self.fault_recovery.insert(index, compiled.fault_recovery);
+        }
         self.index.insert((pc, physical, variant), index);
         self.code_pages
             .entry(physical & !(FETCH_PAGE - 1))
@@ -5357,6 +5441,11 @@ mod tests {
         translation_helper: Option<u64>,
         /// What [`Host::memory_low`] answers.
         pub(super) memory_low: bool,
+        /// Installs per part of a code arena of two parts reclaimed in
+        /// turn, and its parts' code addresses, oldest first; `None` for an
+        /// arena of one part.
+        pub(super) ring: Option<usize>,
+        parts: Vec<core::ops::Range<usize>>,
     }
 
     impl Host for FakeHost {
@@ -5387,8 +5476,31 @@ mod tests {
             }
         }
         fn install(&mut self, code: &[u8]) -> Result<NativeCode, InstallError> {
+            if let Some(installs) = self.ring {
+                let next = self.installed.len() + 1;
+                let part = match self.parts.last_mut() {
+                    Some(part) => part,
+                    None => {
+                        self.parts.push(next..next);
+                        self.parts.last_mut().unwrap()
+                    }
+                };
+                if part.len() == installs {
+                    return Err(InstallError::Full);
+                }
+                part.end += 1;
+            }
             self.installed.push(code.to_vec());
             Ok(NativeCode(self.installed.len()))
+        }
+        fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
+            self.ring?;
+            let next = self.installed.len() + 1;
+            self.parts.push(next..next);
+            Some(match self.parts.len() > 2 {
+                true => self.parts.remove(0),
+                false => 0..0,
+            })
         }
         fn patch(&mut self, code: NativeCode, bytes: &[u8]) {
             self.patches.push((code.0, bytes.to_vec()));
@@ -5554,6 +5666,8 @@ mod tests {
             placement: mmu::placement::Placement::FiveLevel,
             translation_helper: None,
             memory_low: false,
+            ring: None,
+            parts: Vec::new(),
         };
         let profile = CpuProfile {
             name: "test",
@@ -6381,6 +6495,55 @@ mod tests {
         assert!(machine.lines().fiq);
         machine.system_instruction(MRS_X7_PMCR0).unwrap();
         assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
+    }
+
+    #[test]
+    fn a_full_arena_reclaims_its_oldest_part_and_forgets_those_pages() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; 4 * FETCH_PAGE as usize / 4]);
+        machine.host.ring = Some(2);
+        let base = machine.cpu.pc;
+        let page = |n: u64| base + n * FETCH_PAGE;
+        let pcs = [page(0), page(1), page(0) + 4, page(2), page(3), page(1) + 8];
+        let mut slots = Vec::new();
+        for pc in pcs {
+            let Ok(Fetched::Block(slot)) = machine.fetch_block(pc, false) else {
+                panic!("a block at {pc:#x}")
+            };
+            slots.push(slot);
+        }
+        // The parts held pages 0 and 1, then page 0 again and page 2; page
+        // 3 needed the first part back, whose reclaim forgot pages 0 and 1
+        // whole, page 0's block in the second part too, and whose slots
+        // took the next blocks.
+        let left: Vec<u64> = machine.index.keys().map(|&(pc, ..)| pc).collect();
+        assert_eq!(left, [page(1) + 8, page(2), page(3)]);
+        assert_eq!(machine.statistics.code_evictions, 1);
+        assert_eq!(machine.statistics.code_discards, 0);
+        assert_eq!(machine.blocks.len(), 4);
+        assert_eq!(&slots[4..], [1, 0]);
+    }
+
+    #[test]
+    fn a_fetch_that_reclaims_code_looks_up_in_a_new_context() {
+        const RET: u32 = 0xd65f_03c0;
+        let mut machine = machine(&vec![RET; 3 * FETCH_PAGE as usize / 4]);
+        machine.host.ring = Some(1);
+        let base = machine.cpu.pc;
+        assert!(machine.fetch_block(base, false).is_ok());
+        let first = machine.chain.context;
+        assert!(machine.fetch_block(base + FETCH_PAGE, false).is_ok());
+        assert_eq!(machine.chain.context, first);
+        // The third part reclaims the first, whose block a lookup entry of
+        // the first context names.
+        let pc = base + 2 * FETCH_PAGE;
+        assert!(machine.fetch_block(pc, false).is_ok());
+        assert_eq!(machine.statistics.code_evictions, 1);
+        assert_ne!(machine.chain.context, first);
+        assert_eq!(
+            machine.targets[chain::lookup_slot(pc)].context,
+            machine.chain.context
+        );
     }
 
     #[test]

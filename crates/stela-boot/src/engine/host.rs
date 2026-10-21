@@ -156,6 +156,9 @@ pub struct State {
     tag_checks: [bool; 2],
     code_physical: u64,
     code_bytes: u64,
+    /// The arena's part new code goes to, and the offset after the code
+    /// installed last.
+    code_unit: u64,
     code_used: u64,
     recorded: Option<Recorded>,
     native: bool,
@@ -288,6 +291,7 @@ pub unsafe fn install(config: Config) -> Result<(), &'static str> {
             tag_checks: [false; 2],
             code_physical: config.code_physical,
             code_bytes: config.code_bytes,
+            code_unit: 0,
             code_used: 0,
             recorded: None,
             native: false,
@@ -684,6 +688,15 @@ pub fn stray_interrupt(_vector: u8) {
 /// The engine's handle; all state is in [`STATE`].
 pub struct BareHost;
 
+/// The parts of the code arena, reclaimed for new code oldest first: the
+/// code of the most recent seven eighths of the run is kept, and only the
+/// oldest eighth's blocks compile again when they next run.
+const CODE_UNITS: u64 = 8;
+
+fn code_unit_bytes(state: &State) -> u64 {
+    state.code_bytes / CODE_UNITS / 16 * 16
+}
+
 impl Host for BareHost {
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool {
         // The engine reads guest RAM only once its translation allowed it.
@@ -713,7 +726,7 @@ impl Host for BareHost {
         let state = state();
         let offset = state.code_used.next_multiple_of(16);
         let end = offset + code.len() as u64;
-        if end > state.code_bytes {
+        if end > (state.code_unit + 1) * code_unit_bytes(state) {
             return Err(InstallError::Full);
         }
         // SAFETY: arena bytes through the writable physmap alias.
@@ -734,8 +747,8 @@ impl Host for BareHost {
         let state = state();
         let offset = code.0 as u64 - layout::code();
         assert!(
-            offset + bytes.len() as u64 <= state.code_used,
-            "a patch outside the installed code"
+            offset + bytes.len() as u64 <= state.code_bytes,
+            "a patch outside the code arena"
         );
         // SAFETY: installed arena bytes through the writable physmap alias.
         unsafe {
@@ -750,7 +763,18 @@ impl Host for BareHost {
     }
 
     fn discard_code(&mut self) {
-        state().code_used = 0;
+        let state = state();
+        state.code_unit = 0;
+        state.code_used = 0;
+    }
+
+    fn reclaim_code(&mut self) -> Option<core::ops::Range<usize>> {
+        let state = state();
+        let unit = code_unit_bytes(state);
+        state.code_unit = (state.code_unit + 1) % CODE_UNITS;
+        state.code_used = state.code_unit * unit;
+        let start = (layout::code() + state.code_used) as usize;
+        Some(start..start + unit as usize)
     }
 
     fn memory_low(&self) -> bool {

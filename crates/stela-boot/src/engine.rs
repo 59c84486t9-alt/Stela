@@ -2160,7 +2160,8 @@ fn run(
             let heap = crate::ALLOCATOR.usage();
             output::arguments(format_args!(
                 "BEAT blocks={blocks} pc={:#x} {}{} lr={:#x} ticks/block={} native={}% \
-                 compiled={} discards={} chained={}% exceptions={} interrupts={} waits={} \
+                 compiled={} discards={} evictions={} chained={}% exceptions={} interrupts={} \
+                 waits={} \
                  heap={}M/{}M carved={}M peak={}M largest={}M\n",
                 cpu.pc,
                 level_name(cpu.pstate.guarded),
@@ -2170,6 +2171,7 @@ fn run(
                 (native - beat.1) * 100 / elapsed.max(1),
                 compiled - beat.3,
                 machine.statistics.code_discards,
+                machine.statistics.code_evictions,
                 (chained - beat.4) * 100 / (blocks - beat.2).max(1),
                 events.0 - beat.5.0,
                 events.1 - beat.5.1,
