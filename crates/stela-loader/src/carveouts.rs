@@ -402,7 +402,7 @@ mod tests {
             "20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03"
         );
         let mut original = Vec::new();
-        for record in input[0x1ffce8..0x1ffce8 + 112 * 64].chunks_exact(64) {
+        for record in input[0x1ffce8..0x1ffce8 + 112 * 64].as_chunks::<64>().0 {
             let word = |offset| u64::from_le_bytes(record[offset..offset + 8].try_into().unwrap());
             let (base, bytes, attributes) = (word(0), word(16), word(24));
             if base == u64::MAX && bytes > 0 && bytes != u64::MAX && attributes >> 16 == 0x80000009
