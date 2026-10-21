@@ -1109,8 +1109,11 @@ impl AppleDevices {
             .first()
             .ok_or("SGX has no canonical register aperture")?
             .0;
-        let coprocessor =
-            GfxCoprocessor::with_observe(placement.gpu.family, observe).map_err(String::from)?;
+        let sgx = Sgx::handed_off(placement.gpu, placement.ttbat, placement.shared_l2)
+            .map_err(String::from)?;
+        let power = sgx.firmware_power(&placement.sgx).map_err(String::from)?;
+        let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, observe, power)
+            .map_err(String::from)?;
         let wrapper = Asc::booted(
             Box::new(coprocessor),
             AscLines::from_interrupts(placement.interrupts.map(|n| AicInput::new(0, n))),
@@ -1124,10 +1127,7 @@ impl AppleDevices {
         // T8112's 64 MiB `sgx` window spans the `gfx-asc` wrapper and a PMGR
         // fabric bridge; each physical byte has one owner, so each bank owns
         // only what the smaller banks placed before it leave.
-        let block = self.bus.add(Box::new(
-            Sgx::handed_off(placement.gpu, placement.ttbat, placement.shared_l2)
-                .map_err(String::from)?,
-        ));
+        let block = self.bus.add(Box::new(sgx));
         for &(base, bytes, offset) in &placement.sgx {
             self.bus
                 .map_gaps(block, base, bytes, offset)
