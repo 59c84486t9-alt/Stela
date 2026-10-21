@@ -46,7 +46,8 @@ enum stela_amd_vm_cpu_status {
 
 /* Numeric bounds and DMA-array indices are checked before any callback or
  * destination write. All callbacks are mandatory; no successful defaults.
- * Pointers and context must satisfy their C lifetime/alignment contracts; written\n * must not alias inputs, context or destination memory.
+ * Pointers and context must satisfy their C lifetime/alignment contracts; written
+ * must not alias inputs, context or destination memory.
  * Zero entries succeed without callbacks. Error results write zero entries.
  * On success the native owner still must complete the retained TLB-sequence,
  * memory-ordering, reset-lock and HDP/TLB commit before hardware may use changes.

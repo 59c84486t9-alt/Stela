@@ -19,6 +19,8 @@ ram-disk = []
 nvidia-port = ["dep:cc"]
 # Native Xe command/page-table support; not an initialized Intel GPU driver.
 intel-port = ["dep:cc"]
+# Native CPU page-entry updates; requires the real GPU mapping/GMC owner.
+amd-port = ["dep:cc"]
 # Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
 amd-commands = []
 # Shared Metal library input validation, independent of a physical GPU backend.

@@ -4,11 +4,23 @@ mod amd;
 #[cfg(feature = "intel-port")]
 #[path = "build/intel.rs"]
 mod intel;
-#[cfg(any(feature = "nvidia-port", feature = "intel-port"))]
+#[cfg(any(feature = "nvidia-port", feature = "intel-port", feature = "amd-port"))]
 #[path = "build/native.rs"]
 mod native;
 
 fn main() {
+    #[cfg(feature = "amd-port")]
+    {
+        let mut build = native::configure();
+        build.file("src/gpu/amd/stela/vm_cpu.c").std("c11");
+        for path in [
+            "src/gpu/amd/stela",
+            "src/gpu/amd/amdgpu/amdgpu_vm_cpu_entries.h",
+        ] {
+            println!("cargo:rerun-if-changed={path}");
+        }
+        build.compile("stela-amd-port");
+    }
     #[cfg(feature = "amd-commands")]
     amd::build();
     #[cfg(feature = "nvidia-port")]

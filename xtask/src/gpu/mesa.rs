@@ -164,6 +164,16 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
     let path = env::join_paths(paths)?;
     let gpu = tools::root().join("crates/stela-drivers/src/gpu");
     let source = gpu.join("common/mesa");
+    let external_inputs = || -> Result<Vec<Value>> {
+        if llvm_library.is_none() {
+            return Ok(Vec::new());
+        }
+        ["air_brw_probe.c", "air_elk_probe.c"]
+            .iter()
+            .map(|name| tools::binding(&gpu.join("intel/stela/tests").join(name)))
+            .collect()
+    };
+    let external_sources = external_inputs()?;
     let build = tools::root().join(".stela/gpu/build/mesa-host");
     let evidence = evidence_directory()?;
     let hash = source_binding(&source)?;
@@ -215,7 +225,9 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         compile.args([
             "src/stela/stela_air_test",
             "src/stela/stela_air_brw_probe",
+            "src/stela/stela_air_elk_probe",
             "src/stela/stela_air_aco_probe",
+            "src/stela/stela_air_ssbo_test",
             "src/stela/stela_nv_compute_probe",
         ]);
     }
@@ -257,6 +269,7 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         for (backend, binary) in [
             ("air-nak", "src/stela/stela_air_test"),
             ("air-brw", "src/stela/stela_air_brw_probe"),
+            ("air-elk", "src/stela/stela_air_elk_probe"),
             ("air-aco", "src/stela/stela_air_aco_probe"),
         ] {
             run(&mut Command::new(build.join(binary)), &evidence, backend)?;
@@ -281,6 +294,14 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         }
         // Bind the actual development-host compiler binary, not just its path.
         air_probes.push(json!({"llvm_library": tools::binding(library)?}));
+        let binary = build.join("src/stela/stela_air_ssbo_test");
+        run(&mut Command::new(&binary), &evidence, "air-ssbo")?;
+        air_probes.push(json!({
+            "stage": "air-ssbo-semantics-and-bounds",
+            "binary": tools::binding(&binary)?,
+            "output": tools::binding(&evidence.join("air-ssbo.log"))?,
+            "hardware_executed": false,
+        }));
         let binary = build.join("src/stela/stela_nv_compute_probe");
         run(&mut Command::new(&binary), &evidence, "nvidia-compute")?;
         air_probes.push(json!({
@@ -298,6 +319,10 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         source_binding(&source)? == hash,
         "compiler source changed during the build; rerun against a stable tree"
     );
+    ensure!(
+        external_inputs()? == external_sources,
+        "external Intel AIR probe source changed during the build"
+    );
     let receipt = json!({
         "schema": 2, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
@@ -305,6 +330,7 @@ pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) 
         "air_compute_compiler_subset": llvm_library.is_some(),
         "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
+        "external_probe_sources": external_sources,
         "origin": serde_json::from_slice::<Value>(&fs::read(gpu.join("sources.json"))?)?,
         "host": {"os": env::consts::OS, "arch": env::consts::ARCH},
         "meson": capture(Command::new(&meson).arg("--version"))?,

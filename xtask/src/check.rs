@@ -76,7 +76,7 @@ pub fn run(fix: bool) -> Result<()> {
         "-p",
         "stela-drivers",
         "--features",
-        "nvidia-port,intel-port",
+        "nvidia-port,intel-port,amd-port",
         "--target",
         BOOT_TARGET,
         "--locked",

@@ -43,6 +43,15 @@ if stela_air_llvm != ''
     build_rpath : fs.parent(stela_air_llvm),
   )
   test('stela_air_to_nir', stela_air_test, suite : 'stela')
+  stela_air_ssbo_test = executable(
+    'stela_air_ssbo_test',
+    'air_ssbo_test.c',
+    include_directories : [inc_include, inc_src],
+    dependencies : [idep_stela_air],
+    c_args : ['-Werror'],
+    build_rpath : fs.parent(stela_air_llvm),
+  )
+  test('stela_air_ssbo', stela_air_ssbo_test, suite : 'stela')
   if with_stela_amd
     stela_air_aco_probe = executable(
       'stela_air_aco_probe',
@@ -65,6 +74,17 @@ if stela_air_llvm != ''
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_air_brw', stela_air_brw_probe, suite : 'stela')
+    stela_air_elk_probe = executable(
+      'stela_air_elk_probe',
+      '../../../../intel/stela/tests/air_elk_probe.c',
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_stela_air, idep_intel_compiler_elk,
+                      idep_intel_compiler_gen, idep_intel_dev],
+      link_with : [libisl],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+    test('stela_air_elk', stela_air_elk_probe, suite : 'stela')
   endif
 endif
 
