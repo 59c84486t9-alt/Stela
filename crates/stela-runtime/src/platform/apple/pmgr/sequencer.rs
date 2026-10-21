@@ -8,8 +8,9 @@
 //!
 //! The owning controller must qualify its trigger before claiming effects,
 //! release its mutable borrow, route each claimed write through the existing
-//! checked RAM/MMIO boundary, then finish with the actual result. A failure
-//! must mean no effect for that individual write; earlier writes stay committed.
+//! checked RAM/MMIO boundary, then finish with its typed effect outcome. Only a
+//! positively proven no-effect refusal permits retry. Uncertain or partial
+//! effects quarantine the cursor; earlier committed writes remain recorded.
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
@@ -39,6 +40,9 @@ pub enum Error {
     SramAlreadyOwned,
     Suspended,
     InFlight,
+    NotDispatched,
+    AlreadyDispatched,
+    UncertainEffects,
     StaleClaim,
     TicketExhausted,
     TruncatedPacket,
@@ -72,10 +76,28 @@ impl WriteClaim {
     }
 }
 
+/// Classification supplied by the checked physical route, never inferred from
+/// a generic error. An error may follow committed MMIO or partial RAM effects.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RouteOutcome<E> {
+    Committed,
+    /// The route positively established that this individual write had no effect.
+    NoEffect(E),
+    /// Effects may have occurred. Retry and cancellation are no longer safe.
+    Uncertain(E),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum FinishError<E> {
-    Ownership(Error),
-    Routed(E),
+    /// Preserve even a misrouted result for the caller's ownership diagnosis.
+    Ownership(Error, RouteOutcome<E>),
+    NoEffect(E),
+    Uncertain(E),
+}
+
+struct InFlight {
+    ticket: u64,
+    dispatched: bool,
 }
 
 struct Sram {
@@ -103,7 +125,8 @@ pub struct PacketCursor {
     sram: Option<Sram>,
     pc: usize,
     packet: Option<Packet>,
-    in_flight: Option<u64>,
+    in_flight: Option<InFlight>,
+    uncertain: Option<PhysicalWrite>,
     ticket: u64,
     committed_writes: u64,
     suspended: bool,
@@ -162,8 +185,8 @@ impl PacketCursor {
             .map(|packet| (packet.committed, packet.writes.len()))
     }
 
-    /// Retained suspension blocks new claims; an already routed store must
-    /// still be finished exactly once, preserving its actual committed effect.
+    /// Retained suspension blocks new claims and dispatch; an already routed
+    /// store must still finish exactly once, preserving its actual effect.
     pub fn set_suspended(&mut self, suspended: bool) {
         self.suspended = suspended;
     }
@@ -172,6 +195,9 @@ impl PacketCursor {
     /// exposing its first effect. A nested service call cannot claim it again.
     /// No end/unknown instruction is treated as successful retirement.
     pub fn begin_write(&mut self) -> Result<WriteClaim, Error> {
+        if self.uncertain.is_some() {
+            return Err(Error::UncertainEffects);
+        }
         if self.in_flight.is_some() {
             return Err(Error::InFlight);
         }
@@ -185,7 +211,10 @@ impl PacketCursor {
         let ticket = self.ticket.checked_add(1).ok_or(Error::TicketExhausted)?;
         // One generation for every claim, including retries of identical data.
         self.ticket = ticket;
-        self.in_flight = Some(ticket);
+        self.in_flight = Some(InFlight {
+            ticket,
+            dispatched: false,
+        });
         let packet = self.packet.as_ref().expect("validated write packet");
         Ok(WriteClaim {
             owner: self.owner.clone(),
@@ -195,33 +224,79 @@ impl PacketCursor {
     }
 
     fn check_claim(&self, claim: &WriteClaim) -> Result<(), Error> {
-        if Rc::ptr_eq(&claim.owner, &self.owner) && self.in_flight == Some(claim.ticket) {
+        if self.uncertain.is_some() {
+            return Err(Error::UncertainEffects);
+        }
+        if Rc::ptr_eq(&claim.owner, &self.owner)
+            && self
+                .in_flight
+                .as_ref()
+                .is_some_and(|state| state.ticket == claim.ticket)
+        {
             Ok(())
         } else {
             Err(Error::StaleClaim)
         }
     }
 
-    /// Cancel only exclusive service ownership before dispatch, or after a
-    /// checked refusal with no effect. This retains the packet and committed
-    /// prefix; it does not cancel hardware work or permit SRAM replacement.
+    /// Mark exclusive ownership as dispatched immediately before calling the
+    /// physical route. A second dispatch or cancellation is then forbidden.
+    /// Inspection via `WriteClaim::write` alone does not dispatch an effect.
+    pub fn dispatch_write(&mut self, claim: &WriteClaim) -> Result<PhysicalWrite, Error> {
+        self.check_claim(claim)?;
+        let state = self.in_flight.as_mut().expect("checked claim");
+        if state.dispatched {
+            return Err(Error::AlreadyDispatched);
+        }
+        if self.suspended {
+            return Err(Error::Suspended);
+        }
+        state.dispatched = true;
+        Ok(claim.write)
+    }
+
+    /// Cancel exclusive ownership only before dispatch. A proven no-effect
+    /// outcome releases its claim through `finish_write`; an uncertain effect
+    /// cannot be cancelled. Neither operation clears an earlier committed prefix.
     pub fn cancel_claim(&mut self, claim: &WriteClaim) -> Result<(), Error> {
         self.check_claim(claim)?;
+        if self.in_flight.as_ref().expect("checked claim").dispatched {
+            return Err(Error::AlreadyDispatched);
+        }
         self.in_flight = None;
         Ok(())
     }
 
-    /// Preserve the actual routed error type. A successful store retires only
-    /// this write; it never acknowledges controller completion. A refused store
-    /// releases its claim for retry without replaying the committed prefix.
+    /// The uncertain physical store is retained for diagnosis. There is no
+    /// retry, image replacement or reset API that can erase this uncertainty.
+    pub fn uncertain_write(&self) -> Option<PhysicalWrite> {
+        self.uncertain
+    }
+
+    /// Preserve the actual routed error type and committed prefix. Only a
+    /// positively proven no-effect outcome releases the current write for retry.
+    /// An uncertain/partial result permanently quarantines further claims.
+    /// Success retires this write, never the controller or the native program.
     pub fn finish_write<E>(
         &mut self,
         claim: &WriteClaim,
-        result: Result<(), E>,
+        outcome: RouteOutcome<E>,
     ) -> Result<(), FinishError<E>> {
-        self.check_claim(claim).map_err(FinishError::Ownership)?;
+        if let Err(error) = self.check_claim(claim) {
+            return Err(FinishError::Ownership(error, outcome));
+        }
+        if !self.in_flight.as_ref().expect("checked claim").dispatched {
+            return Err(FinishError::Ownership(Error::NotDispatched, outcome));
+        }
         self.in_flight = None;
-        result.map_err(FinishError::Routed)?;
+        match outcome {
+            RouteOutcome::NoEffect(error) => return Err(FinishError::NoEffect(error)),
+            RouteOutcome::Uncertain(error) => {
+                self.uncertain = Some(claim.write);
+                return Err(FinishError::Uncertain(error));
+            }
+            RouteOutcome::Committed => {}
+        }
         let packet = self.packet.as_mut().expect("claim owns a write packet");
         packet.committed += 1;
         self.committed_writes += 1;
@@ -304,11 +379,12 @@ fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::bus::{Access, Bus, MmioError};
+    use crate::platform::apple::bus::{Access, Bus, Direction, MmioDevice, MmioError};
     use crate::platform::apple::interrupt::InterruptLatch;
     use crate::platform::apple::pmgr::{ACTIVE, Pmgr, PowerState};
     use crate::platform::dma::{Memory, tests::Ram};
     use alloc::boxed::Box;
+    use core::cell::Cell;
 
     const SRAM: u64 = 0x23df05200;
 
@@ -338,22 +414,25 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let claim = cursor.begin_write().unwrap();
-        let write = claim.write();
+        let write = cursor.dispatch_write(&claim).unwrap();
         cursor
-            .finish_write(
-                &claim,
-                bus.write(write.address, write.width, write.value, &mut access),
-            )
+            .finish_write(&claim, {
+                bus.write(write.address, write.width, write.value, &mut access)
+                    .unwrap();
+                RouteOutcome::<MmioError>::Committed
+            })
             .unwrap();
         assert_eq!(bus.read(0x1000, Width::Word, &mut access), Ok(0x100000ff));
         assert_eq!(cursor.packet_pc(), Some(SRAM));
         assert_eq!(cursor.packet_progress(), Some((1, 2)));
         let failed = cursor.begin_write().unwrap();
-        let write = failed.write();
+        let write = cursor.dispatch_write(&failed).unwrap();
         let result = bus.write(write.address, write.width, write.value, &mut access);
+        // Unmapped is established by Bus before any target device is called.
+        assert!(matches!(result, Err(MmioError::Unmapped { .. })));
         assert_eq!(
-            cursor.finish_write(&failed, result),
-            Err(FinishError::Routed(MmioError::Unmapped {
+            cursor.finish_write(&failed, RouteOutcome::NoEffect(result.unwrap_err())),
+            Err(FinishError::NoEffect(MmioError::Unmapped {
                 address: 0x1008,
                 width: Width::Word
             }))
@@ -373,15 +452,19 @@ mod tests {
         let retry = cursor.begin_write().unwrap();
         assert_eq!(retry.write(), failed.write());
         assert_eq!(
-            cursor.finish_write::<MmioError>(&failed, Ok(())),
-            Err(FinishError::Ownership(Error::StaleClaim))
+            cursor.finish_write::<MmioError>(&failed, RouteOutcome::Committed),
+            Err(FinishError::Ownership(
+                Error::StaleClaim,
+                RouteOutcome::Committed
+            ))
         );
-        let write = retry.write();
+        let write = cursor.dispatch_write(&retry).unwrap();
         cursor
-            .finish_write(
-                &retry,
-                bus.write(write.address, write.width, write.value, &mut access),
-            )
+            .finish_write(&retry, {
+                bus.write(write.address, write.width, write.value, &mut access)
+                    .unwrap();
+                RouteOutcome::<MmioError>::Committed
+            })
             .unwrap();
         assert_eq!(cursor.committed_writes(), 2);
         assert_eq!(cursor.packet_pc(), Some(SRAM + 16));
@@ -409,14 +492,16 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let claim = cursor.begin_write().unwrap();
-        let write = claim.write();
+        let write = cursor.dispatch_write(&claim).unwrap();
         let error = bus
             .write(write.address, write.width, write.value, &mut access)
             .unwrap_err();
         assert!(matches!(error, MmioError::Unsupported { .. }));
+        // This particular PMGR coverage preflight precedes every state effect;
+        // Unsupported from an arbitrary device would not establish no effect.
         assert_eq!(
-            cursor.finish_write(&claim, Err(error)),
-            Err(FinishError::Routed(error))
+            cursor.finish_write(&claim, RouteOutcome::NoEffect(error)),
+            Err(FinishError::NoEffect(error))
         );
         assert_eq!(bus.read(0x1000, Width::Word, &mut access), Ok(0xff));
         assert_eq!(cursor.packet_pc(), Some(SRAM));
@@ -456,14 +541,18 @@ mod tests {
             },
         ] {
             let claim = cursor.begin_write().unwrap();
-            let write = claim.write();
+            let write = cursor.dispatch_write(&claim).unwrap();
             assert_eq!(write, expected);
             let data = write.value.to_le_bytes();
             let result = ram.write(write.address, &data[..write.width.bytes() as usize]);
             cursor
                 .finish_write(
                     &claim,
-                    result.then_some(()).ok_or("RAM refused entire write"),
+                    if result {
+                        RouteOutcome::Committed
+                    } else {
+                        RouteOutcome::NoEffect("RAM refused entire write")
+                    },
                 )
                 .unwrap();
         }
@@ -483,7 +572,7 @@ mod tests {
             AddressFormat::HighWord,
         );
         let claim = cursor.begin_write().unwrap();
-        let write = claim.write();
+        let write = cursor.dispatch_write(&claim).unwrap();
         assert_eq!(
             write,
             PhysicalWrite {
@@ -502,18 +591,25 @@ mod tests {
         assert_eq!(
             cursor.finish_write(
                 &claim,
-                result
-                    .then_some(())
-                    .ok_or(crate::platform::dma::DmaError::Memory)
+                if result {
+                    RouteOutcome::Committed
+                } else {
+                    RouteOutcome::NoEffect(crate::platform::dma::DmaError::Memory)
+                }
             ),
-            Err(FinishError::Routed(crate::platform::dma::DmaError::Memory))
+            Err(FinishError::NoEffect(
+                crate::platform::dma::DmaError::Memory
+            ))
         );
         assert_eq!(cursor.committed_writes(), 0);
         let retry = cursor.begin_write().unwrap();
         assert_eq!(retry.write(), write);
         let mut ram = Ram::new(0x2000001000, 32);
+        cursor.dispatch_write(&retry).unwrap();
         assert!(ram.write(write.address, &write.value.to_le_bytes()));
-        cursor.finish_write::<()>(&retry, Ok(())).unwrap();
+        cursor
+            .finish_write::<()>(&retry, RouteOutcome::Committed)
+            .unwrap();
         assert_eq!(&ram.bytes[4..12], &write.value.to_le_bytes());
         assert_eq!(cursor.packet_pc(), Some(SRAM + 24));
     }
@@ -526,18 +622,27 @@ mod tests {
         assert!(matches!(a.begin_write(), Err(Error::InFlight)));
         let other = b.begin_write().unwrap();
         assert_eq!(
-            b.finish_write::<()>(&old, Ok(())),
-            Err(FinishError::Ownership(Error::StaleClaim))
+            b.finish_write::<()>(&old, RouteOutcome::Committed),
+            Err(FinishError::Ownership(
+                Error::StaleClaim,
+                RouteOutcome::Committed
+            ))
         );
         a.cancel_claim(&old).unwrap();
         let new = a.begin_write().unwrap();
         assert_eq!(a.cancel_claim(&old), Err(Error::StaleClaim));
         assert_eq!(
-            a.finish_write::<()>(&old, Ok(())),
-            Err(FinishError::Ownership(Error::StaleClaim))
+            a.finish_write::<()>(&old, RouteOutcome::Committed),
+            Err(FinishError::Ownership(
+                Error::StaleClaim,
+                RouteOutcome::Committed
+            ))
         );
-        a.finish_write::<()>(&new, Ok(())).unwrap();
-        b.finish_write::<()>(&other, Ok(())).unwrap();
+        a.dispatch_write(&new).unwrap();
+        a.finish_write::<()>(&new, RouteOutcome::Committed).unwrap();
+        b.dispatch_write(&other).unwrap();
+        b.finish_write::<()>(&other, RouteOutcome::Committed)
+            .unwrap();
         assert_eq!(a.committed_writes(), 1);
         assert_eq!(b.committed_writes(), 1);
     }
@@ -547,11 +652,17 @@ mod tests {
         let mut cursor = cursor(&[0x105, 0, 0xf, 4, 0], AddressFormat::Compact);
         let claim = cursor.begin_write().unwrap();
         cursor.set_suspended(true);
+        assert_eq!(cursor.dispatch_write(&claim), Err(Error::Suspended));
+        cursor.set_suspended(false);
+        cursor.dispatch_write(&claim).unwrap();
+        cursor.set_suspended(true);
         assert_eq!(
             cursor.install_sram(SRAM, &[0; 4], AddressFormat::Compact),
             Err(Error::SramAlreadyOwned)
         );
-        cursor.finish_write::<()>(&claim, Ok(())).unwrap();
+        cursor
+            .finish_write::<()>(&claim, RouteOutcome::Committed)
+            .unwrap();
         assert!(matches!(cursor.begin_write(), Err(Error::Suspended)));
         assert_eq!(cursor.packet_progress(), Some((1, 2)));
         cursor.set_suspended(false);
@@ -562,6 +673,129 @@ mod tests {
             cursor.install_sram(SRAM, &[0; 4], AddressFormat::Compact),
             Err(Error::SramAlreadyOwned)
         );
+    }
+
+    #[test]
+    fn dispatched_partial_mmio_error_quarantines_current_store_without_replay() {
+        struct PartialDevice(Rc<Cell<u64>>);
+        impl MmioDevice for PartialDevice {
+            fn name(&self) -> &'static str {
+                "partial-effect test device"
+            }
+            fn read(&mut self, _: u64, _: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+                Ok(self.0.get())
+            }
+            fn write(
+                &mut self,
+                offset: u64,
+                width: Width,
+                _: u64,
+                _: &mut Access<'_>,
+            ) -> Result<(), MmioError> {
+                self.0.set(self.0.get() + 1);
+                Err(MmioError::Unsupported {
+                    device: self.name(),
+                    offset,
+                    width,
+                    direction: Direction::Write,
+                    reason: "failure after committed device effect",
+                })
+            }
+        }
+        let mut cursor = cursor(&[0x109, 0x00020100, 0xf, 4, 0xf, 0], AddressFormat::Compact);
+        let mut bus = Bus::new();
+        let pmgr = bus.add(Box::new(
+            Pmgr::new([PowerState {
+                address: 0x1000,
+                initial: ACTIVE,
+            }])
+            .unwrap(),
+        ));
+        bus.map(pmgr, 0x1000, 4, 0x1000).unwrap();
+        let effects = Rc::new(Cell::new(0));
+        let partial = bus.add(Box::new(PartialDevice(effects.clone())));
+        bus.map(partial, 0x1004, 4, 0).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let prefix = cursor.begin_write().unwrap();
+        let write = cursor.dispatch_write(&prefix).unwrap();
+        bus.write(write.address, write.width, write.value, &mut access)
+            .unwrap();
+        cursor
+            .finish_write::<()>(&prefix, RouteOutcome::Committed)
+            .unwrap();
+        let claim = cursor.begin_write().unwrap();
+        let write = cursor.dispatch_write(&claim).unwrap();
+        assert_eq!(cursor.dispatch_write(&claim), Err(Error::AlreadyDispatched));
+        assert_eq!(cursor.cancel_claim(&claim), Err(Error::AlreadyDispatched));
+        assert!(matches!(cursor.begin_write(), Err(Error::InFlight)));
+        let error = bus
+            .write(write.address, write.width, write.value, &mut access)
+            .unwrap_err();
+        assert_eq!(effects.get(), 1);
+        assert_eq!(
+            cursor.finish_write(&claim, RouteOutcome::Uncertain(error)),
+            Err(FinishError::Uncertain(error))
+        );
+        assert_eq!(cursor.uncertain_write(), Some(write));
+        assert_eq!(cursor.committed_writes(), 1);
+        assert_eq!(cursor.packet_progress(), Some((1, 3)));
+        assert_eq!(cursor.packet_pc(), Some(SRAM));
+        for _ in 0..2 {
+            assert!(matches!(cursor.begin_write(), Err(Error::UncertainEffects)));
+            assert_eq!(cursor.dispatch_write(&claim), Err(Error::UncertainEffects));
+            assert_eq!(cursor.cancel_claim(&claim), Err(Error::UncertainEffects));
+        }
+        let diagnostic = alloc::string::String::from("retain original routed diagnostic");
+        assert_eq!(
+            cursor.finish_write(&claim, RouteOutcome::Uncertain(diagnostic.clone())),
+            Err(FinishError::Ownership(
+                Error::UncertainEffects,
+                RouteOutcome::Uncertain(diagnostic)
+            ))
+        );
+        cursor.set_suspended(false);
+        assert!(matches!(cursor.begin_write(), Err(Error::UncertainEffects)));
+        assert_eq!(effects.get(), 1);
+        assert_eq!(bus.read(0x1000, Width::Word, &mut access), Ok(0xff));
+        assert_eq!(
+            cursor.install_sram(SRAM, &[0; 4], AddressFormat::Compact),
+            Err(Error::SramAlreadyOwned)
+        );
+    }
+
+    #[test]
+    fn only_undispatched_or_proven_no_effect_claims_can_release_ownership() {
+        let mut cursor = cursor(&[0x101, 0, 0xf, 0], AddressFormat::Compact);
+        let claim = cursor.begin_write().unwrap();
+        assert_eq!(
+            cursor.finish_write::<()>(&claim, RouteOutcome::Committed),
+            Err(FinishError::Ownership(
+                Error::NotDispatched,
+                RouteOutcome::Committed
+            ))
+        );
+        cursor.cancel_claim(&claim).unwrap();
+        let dispatched = cursor.begin_write().unwrap();
+        cursor.dispatch_write(&dispatched).unwrap();
+        assert_eq!(
+            cursor.cancel_claim(&dispatched),
+            Err(Error::AlreadyDispatched)
+        );
+        assert_eq!(
+            cursor.finish_write(
+                &dispatched,
+                RouteOutcome::NoEffect("preflight proved no effect")
+            ),
+            Err(FinishError::NoEffect("preflight proved no effect"))
+        );
+        assert_eq!(cursor.cancel_claim(&dispatched), Err(Error::StaleClaim));
+        assert_eq!(cursor.uncertain_write(), None);
+        assert_eq!(cursor.committed_writes(), 0);
+        let retry = cursor.begin_write().unwrap();
+        assert_eq!(retry.write(), dispatched.write());
+        cursor.cancel_claim(&retry).unwrap();
+        assert_eq!(cursor.dispatch_write(&retry), Err(Error::StaleClaim));
     }
 
     #[test]
@@ -639,12 +873,14 @@ mod tests {
         let mut ram = Ram::new(0x1000, 64);
         for index in 0..16 {
             let claim = cursor.begin_write().unwrap();
-            let write = claim.write();
+            let write = cursor.dispatch_write(&claim).unwrap();
             assert_eq!(write.address, 0x1000 + index * 4);
             assert_eq!(write.value, 0x80 + index);
             assert_eq!(write.width, Width::Word);
             assert!(ram.write(write.address, &write.value.to_le_bytes()[..4]));
-            cursor.finish_write::<()>(&claim, Ok(())).unwrap();
+            cursor
+                .finish_write::<()>(&claim, RouteOutcome::Committed)
+                .unwrap();
             assert_eq!(cursor.committed_writes(), index + 1);
         }
         assert_eq!(cursor.packet_pc(), Some(SRAM + 21 * 4));
