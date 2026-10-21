@@ -3,6 +3,7 @@
 //! All bus masters keep the same [`Dart`] DMA and lifecycle boundary.
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
 mod descriptor;
+pub mod gen3;
 mod legacy;
 pub mod smmu;
 mod t8110;
