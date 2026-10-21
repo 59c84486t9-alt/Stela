@@ -75,8 +75,13 @@ pub const EXTERNAL_DISKS_OPTION: &str = "--external-disks";
 
 /// Apple T8112 DRAM base (Asahi Linux T8112 notes; the DeviceTree `/memory`).
 const DRAM_BASE: u64 = 0x8_0000_0000;
-const DEFAULT_RAM: u64 = 4 << 30;
-/// The most of the engine heap (`system::HEAP_BYTES`) `--storage-ram` may
+/// The guest DRAM asked for without `--ram-bytes`, and the least a smaller
+/// host may shrink a larger request to.
+pub(crate) const DEFAULT_RAM: u64 = 4 << 30;
+/// The most guest DRAM bytes, which a host with less free RAM shrinks to
+/// whole GiB.
+pub(crate) const RAM_OPTION: &str = "--ram-bytes";
+/// The most of the engine heap (at least 512 MiB) `--storage-ram` may
 /// take for written blocks; a restore or recovery boot writes far less.
 const RAM_STORAGE_LIMIT: usize = 64 << 20;
 const LARGE: u64 = 2 * 1024 * 1024;
@@ -236,7 +241,7 @@ impl Base {
     }
 }
 
-fn number(value: &str) -> Result<u64, &'static str> {
+pub(crate) fn number(value: &str) -> Result<u64, &'static str> {
     match value.strip_prefix("0x") {
         Some(hex) => u64::from_str_radix(&hex.replace('_', ""), 16),
         None => value.parse(),
@@ -493,7 +498,7 @@ impl Options {
                     options.dram_base = value;
                     options.dram_explicit = true;
                 }
-                "--ram-bytes" => options.ram_bytes = value,
+                RAM_OPTION => options.ram_bytes = value,
                 "--load" => options.load = value,
                 "--entry" => options.entry = value,
                 "--x0" => options.x0 = value,
@@ -671,11 +676,30 @@ unsafe fn write_msr(msr: u32, value: u64) {
     }
 }
 
-/// Assign guest DRAM from the free host ranges, lowest first.
-fn guest_ram(handoff: &Handoff, options: &Options) -> Result<Vec<RamRange>, &'static str> {
+/// Assign guest DRAM from the free host ranges, lowest first: the bytes
+/// asked for, or on a host with less free RAM what it has in whole GiB, down
+/// to [`DEFAULT_RAM`] (`docs/design/system.md#memory-sizing`).
+fn guest_ram(handoff: &Handoff, options: &mut Options) -> Result<Vec<RamRange>, &'static str> {
+    const GIB: u64 = 1 << 30;
+    let regions = &handoff.guest[..handoff.guest_count];
+    let available: u64 = regions.iter().map(|region| region.bytes).sum();
+    let requested = options.ram_bytes;
+    if available < requested {
+        if available < requested.min(DEFAULT_RAM) {
+            output::arguments(format_args!(
+                "guest DRAM requested={requested:#x} available={available:#x}\n"
+            ));
+            return Err("not enough free host RAM for the requested guest DRAM");
+        }
+        options.ram_bytes = (available / GIB * GIB).max(requested.min(DEFAULT_RAM));
+        output::arguments(format_args!(
+            "guest DRAM shrunk from {requested:#x} to {:#x}: the host has {available:#x} free\n",
+            options.ram_bytes
+        ));
+    }
     let mut ranges = Vec::new();
     let mut assigned = 0;
-    for region in &handoff.guest[..handoff.guest_count] {
+    for region in regions {
         if assigned == options.ram_bytes {
             break;
         }
@@ -686,13 +710,6 @@ fn guest_ram(handoff: &Handoff, options: &Options) -> Result<Vec<RamRange>, &'st
             bytes,
         });
         assigned += bytes;
-    }
-    if assigned < options.ram_bytes {
-        output::arguments(format_args!(
-            "guest DRAM requested={:#x} available={assigned:#x}\n",
-            options.ram_bytes
-        ));
-        return Err("not enough free host RAM for the requested guest DRAM");
     }
     Ok(ranges)
 }
@@ -1409,11 +1426,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     );
     crate::status::replay(&handoff.history[..handoff.history_bytes]);
     output::arguments(format_args!(
-        "STELA SYSTEM ENGINE window={:#x} placement={:?} tsc_hz={} guest_ranges={}\n",
+        "STELA SYSTEM ENGINE window={:#x} placement={:?} tsc_hz={} guest_ranges={} \
+         heap={}M code={}M pool={}M\n",
         layout::window(),
         handoff.placement,
         handoff.tsc_hz,
-        handoff.guest_count
+        handoff.guest_count,
+        handoff.heap.bytes >> 20,
+        handoff.code.bytes >> 20,
+        handoff.pool.bytes >> 20,
     ));
     // SAFETY: the options were left allocated by the loader.
     let text = unsafe {
@@ -1558,7 +1579,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             }
         };
     }
-    let ram = match guest_ram(handoff, &options) {
+    let ram = match guest_ram(handoff, &mut options) {
         Ok(ram) => ram,
         Err(error) => output::fatal(error),
     };

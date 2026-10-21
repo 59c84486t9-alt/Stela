@@ -17,7 +17,11 @@ use crate::{
     tables::{self, Frames, LARGE, NX, PAGE, PRESENT, UNCACHED, WRITABLE, WRITE_COMBINING},
 };
 use alloc::{format, string::String, vec::Vec};
-use core::{arch::asm, cell::UnsafeCell, ops::Range};
+use core::{
+    arch::asm,
+    cell::UnsafeCell,
+    ops::{Range, RangeInclusive},
+};
 use stela_runtime::{
     machine::mmu::placement::Placement,
     pc::{self, gpt::Guid},
@@ -29,10 +33,22 @@ use uefi::{
     proto::loaded_image::LoadedImage,
 };
 
-const HEAP_BYTES: u64 = 1024 * 1024 * 1024;
 const STACK_BYTES: u64 = 2 * 1024 * 1024;
-const CODE_BYTES: u64 = 128 * 1024 * 1024;
-const POOL_BYTES: u64 = 256 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
+/// The bounds of the parts of Stela's memory sized from host RAM
+/// ([`Sizes::for_host`]).
+const HEAP_BYTES: RangeInclusive<u64> = 512 * MIB..=2048 * MIB;
+const CODE_BYTES: RangeInclusive<u64> = 128 * MIB..=512 * MIB;
+const POOL_BYTES: RangeInclusive<u64> = 64 * MIB..=2048 * MIB;
+/// Guest DRAM bytes per byte of the shadow page-table pool: room for each
+/// of the host's 8 roots to map all of guest DRAM once in 4 KiB pages (8
+/// bytes per page). An exhausted half resets and refills; a 26A434 restore
+/// boot's halves held at most 2 MiB at once.
+const POOL_SHARE: u64 = 64;
+/// Host RAM left for the loader's own tables and pages after the sizing.
+const RESERVE_BYTES: u64 = 256 * MIB;
+/// The code arena divides into parts of whole 2 MiB pages.
+const CODE_ALIGNMENT: u64 = 16 * MIB;
 const BELOW_4G: u64 = 0xffff_f000;
 const RELOCATION_DIRECTORY: usize = 5;
 const IMAGE_REL_BASED_ABSOLUTE: u16 = 0;
@@ -104,6 +120,58 @@ fn allocate(bytes: u64) -> Result<Region, &'static str> {
         physical: firmware::pages(bytes.div_ceil(PAGE) as usize)? as u64,
         bytes,
     })
+}
+
+/// The engine heap, native code arena and page-table pool, sized at boot
+/// from the host RAM free for them and the guest DRAM asked for
+/// (`docs/design/system.md#memory-sizing`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sizes {
+    heap: u64,
+    code: u64,
+    pool: u64,
+}
+
+impl Sizes {
+    /// The pool scales with the guest DRAM it maps; the heap and arena take
+    /// a share of what the guest and pool leave, between their bounds. On a
+    /// host too small for the guest the parts keep their least sizes and the
+    /// guest gets what remains.
+    fn for_host(free: u64, guest: u64) -> Self {
+        let clamp = |bytes: u64, bounds: RangeInclusive<u64>, alignment: u64| {
+            (bytes / alignment * alignment).clamp(*bounds.start(), *bounds.end())
+        };
+        let pool = clamp(guest / POOL_SHARE, POOL_BYTES, LARGE);
+        let spare = free.saturating_sub(guest + pool + RESERVE_BYTES);
+        Self {
+            heap: clamp(spare / 2, HEAP_BYTES, LARGE),
+            code: clamp(spare / 8, CODE_BYTES, CODE_ALIGNMENT),
+            pool,
+        }
+    }
+}
+
+/// The host RAM the guest and Stela's parts may take: the free and boot
+/// services ranges in whole 2 MiB pages, as the guest's ranges are found
+/// after boot services end.
+fn free_ram() -> Result<u64, &'static str> {
+    let map = boot::memory_map(MemoryType::LOADER_DATA).map_err(|_| "no memory map")?;
+    Ok(map
+        .entries()
+        .filter(|entry| {
+            matches!(
+                entry.ty,
+                MemoryType::CONVENTIONAL
+                    | MemoryType::BOOT_SERVICES_CODE
+                    | MemoryType::BOOT_SERVICES_DATA
+            )
+        })
+        .map(|entry| {
+            let start = entry.phys_start.next_multiple_of(LARGE);
+            let end = (entry.phys_start + entry.page_count * PAGE) & !(LARGE - 1);
+            end.saturating_sub(start)
+        })
+        .sum())
 }
 
 fn read32(base: usize, offset: usize) -> usize {
@@ -452,10 +520,16 @@ fn load(
         snapshot.bytes,
         layout::image().wrapping_sub(image.start as u64),
     )?;
-    let heap = allocate(HEAP_BYTES)?;
+    let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let guest = match option(text, crate::engine::RAM_OPTION) {
+        Some(bytes) => crate::engine::number(bytes)?,
+        None => crate::engine::DEFAULT_RAM,
+    };
+    let sizes = Sizes::for_host(free_ram()?, guest);
+    let heap = allocate(sizes.heap)?;
     let stack = allocate(STACK_BYTES)?;
-    let code = allocate(CODE_BYTES)?;
-    let pool = allocate(POOL_BYTES)?;
+    let code = allocate(sizes.code)?;
+    let pool = allocate(sizes.pool)?;
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let root = low_page(MemoryType::LOADER_DATA)?;
