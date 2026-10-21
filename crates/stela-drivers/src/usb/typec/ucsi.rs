@@ -14,6 +14,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
 
 pub mod acpi;
+pub mod ccg;
 mod wire;
 use wire::*;
 pub use wire::{Capability, Cci, ConnectorNumber, ConnectorStatus, Version};
@@ -43,6 +44,9 @@ pub enum TransportError {
     Mapping,
     Bounds { offset: usize, bytes: usize },
     Dsm { function: u64, status: u64 },
+    DsmNoResult { function: u64 },
+    I2c(crate::bus::i2c::Error),
+    UnsupportedTransportVersion(u16),
     Io(u64),
 }
 

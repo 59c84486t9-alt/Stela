@@ -20,6 +20,8 @@ pub const DSM_UUID: [u8; 16] = [
 /// Evaluates this actual PNP0CA0 device's _DSM, with the specified UUID and
 /// revision. The provider must retain its namespace handle and return real
 /// firmware errors. Evaluation includes the required empty arguments package.
+/// A missing result object must return `DsmNoResult`, as Linux rejects a null
+/// `_DSM` object even when the AML evaluation status itself reports success.
 pub trait Dsm {
     fn evaluate(
         &mut self,
