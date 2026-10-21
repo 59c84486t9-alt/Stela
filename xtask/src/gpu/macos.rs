@@ -156,7 +156,7 @@ pub fn build() -> Result<()> {
         &receipt,
         serde_json::to_vec_pretty(&json!({
             "schema": 1,
-            "scope": "IOKit CPU allocation adapter for native vendor ports",
+            "scope": "IOKit CPU allocation helper for the macOS-facing frontend",
             "limits": "Compilation and relocatable linking only; not a loadable kext or macOS 27 ABI qualification, device initialization, DMA or Metal execution.",
             "sdk": { "path": sdk_root, "version": sdk_version.trim() },
             "compiler": compiler,

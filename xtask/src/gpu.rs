@@ -10,7 +10,7 @@ mod support;
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Compile the IOKit allocation adapter against macOS kernel headers for
+    /// Compile the macOS-facing IOKit helper against kernel headers for
     /// arm64e, arm64 and x86-64; inspect its remaining IOKit service imports.
     Macos,
     /// Build NVIDIA, AMD and Intel shader compiler libraries for this host
