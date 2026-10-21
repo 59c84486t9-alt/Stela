@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright (C) 2020-2026 Intel Corporation
-//! Bare-TLV AX210 PNVM SKU/hardware selection from pinned fw/pnvm.c.
+//! Bare-TLV PNVM and reduced-power SKU selection from pinned fw/{pnvm,uefi}.c.
 //! Selection is not calibration, regulatory permission or PNVM upload/ACK.
-use super::{
-    firmware::{Family, Tlv},
-    identity::Profile,
-};
+use super::{firmware::Tlv, identity::Profile};
 use alloc::vec::Vec;
 use core::ops::Range;
 const SKU: u32 = 64;
@@ -20,18 +17,24 @@ pub enum Error {
     Limit,
     Length { kind: u32 },
     MissingSku,
-    MissingVersion,
     MissingHardware,
     Empty,
     DuplicateVersion,
-    UnsupportedFamily,
     UnknownSku,
     NoHardwareMatch,
-    MemoryDescriptorRequired,
+    MemoryDescriptorSize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChunkKind {
+    SectionMarker(u32),
+    /// Retained source metadata, never a host physical/DMA address.
+    MemoryDescriptor {
+        address: u32,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chunk<'a> {
-    pub marker: u32,
+    pub kind: ChunkKind,
     pub data: &'a [u8],
     pub tlv_index: usize,
 }
@@ -48,12 +51,39 @@ pub struct Pnvm<'a> {
 #[derive(Debug)]
 pub struct Selection<'a> {
     sku: [u32; 3],
-    version: u32,
+    version: Option<u32>,
     hardware: [u16; 2],
     chunks: Vec<Chunk<'a>>,
 }
 fn word(bytes: &[u8]) -> u32 {
     u32::from_le_bytes(bytes[..4].try_into().expect("checked word"))
+}
+/// Reduced-power packages have SKU-scoped MEM_DESC payloads, with no PNVM
+/// hardware/version requirement. Actual ALIVE selection remains mandatory.
+#[derive(Debug)]
+pub struct ReducedPower<'a> {
+    pub sku: [u32; 3],
+    chunks: Vec<Chunk<'a>>,
+}
+impl<'a> ReducedPower<'a> {
+    pub fn chunks(&self) -> &[Chunk<'a>] {
+        &self.chunks
+    }
+}
+fn memory_chunk<'a>(tlv: &Tlv<'a>, index: usize) -> Result<Chunk<'a>, Error> {
+    if word(&tlv.data[4..]) as usize != tlv.data.len() - 8 {
+        return Err(Error::MemoryDescriptorSize);
+    }
+    if tlv.data.len() == 8 {
+        return Err(Error::Empty);
+    }
+    Ok(Chunk {
+        kind: ChunkKind::MemoryDescriptor {
+            address: word(tlv.data),
+        },
+        data: &tlv.data[8..],
+        tlv_index: index,
+    })
 }
 impl<'a> Pnvm<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, Error> {
@@ -86,6 +116,7 @@ impl<'a> Pnvm<'a> {
             let minimum = match kind {
                 SKU => 12,
                 HW | VERSION | SECTION => 4,
+                MEM_DESC => 8,
                 _ => 0,
             };
             if len < minimum {
@@ -124,6 +155,36 @@ impl<'a> Pnvm<'a> {
     pub fn sku_ids(&self) -> impl Iterator<Item = [u32; 3]> + '_ {
         self.groups.iter().map(|g| g.sku)
     }
+    pub fn select_reduced_power(&self, observed_sku: [u32; 3]) -> Result<ReducedPower<'a>, Error> {
+        let mut found = false;
+        for group in &self.groups {
+            if group.sku != observed_sku {
+                continue;
+            }
+            found = true;
+            let mut chunks = Vec::new();
+            for index in group.tlvs.clone() {
+                let tlv = &self.tlvs[index];
+                if tlv.kind == MEM_DESC {
+                    if chunks.len() == 64 {
+                        return Err(Error::Limit);
+                    }
+                    chunks.push(memory_chunk(tlv, index)?);
+                }
+            }
+            if !chunks.is_empty() {
+                return Ok(ReducedPower {
+                    sku: observed_sku,
+                    chunks,
+                });
+            }
+        }
+        Err(if found {
+            Error::Empty
+        } else {
+            Error::UnknownSku
+        })
+    }
     /// `observed_sku` must be the actual ALIVE notification's three SKU words;
     /// there is no first-board/default/zero-SKU fallback. The eventual transport
     /// must also bind that notification to its current reset/firmware epoch.
@@ -132,9 +193,6 @@ impl<'a> Pnvm<'a> {
         profile: &Profile,
         observed_sku: [u32; 3],
     ) -> Result<Selection<'a>, Error> {
-        if profile.family() != Family::Ax210 {
-            return Err(Error::UnsupportedFamily);
-        }
         let observed = profile.observed();
         let hardware = [
             ((observed.hardware_revision & 0xfff0) >> 4) as u16,
@@ -150,7 +208,6 @@ impl<'a> Pnvm<'a> {
             let mut seen_hw = false;
             let mut version = None;
             let mut chunks = Vec::new();
-            let mut mem_desc = false;
             for index in group.tlvs.clone() {
                 let tlv = &self.tlvs[index];
                 match tlv.kind {
@@ -179,12 +236,17 @@ impl<'a> Pnvm<'a> {
                             return Err(Error::Empty);
                         }
                         chunks.push(Chunk {
-                            marker,
+                            kind: ChunkKind::SectionMarker(marker),
                             data: &tlv.data[4..],
                             tlv_index: index,
                         });
                     }
-                    MEM_DESC => mem_desc = true,
+                    MEM_DESC => {
+                        if chunks.len() == 64 {
+                            return Err(Error::Limit);
+                        }
+                        chunks.push(memory_chunk(tlv, index)?);
+                    }
                     _ => {}
                 }
             }
@@ -194,10 +256,6 @@ impl<'a> Pnvm<'a> {
             if !matched {
                 continue;
             }
-            if mem_desc {
-                return Err(Error::MemoryDescriptorRequired);
-            }
-            let version = version.ok_or(Error::MissingVersion)?;
             if chunks.is_empty() {
                 return Err(Error::Empty);
             }
@@ -219,7 +277,7 @@ impl<'a> Selection<'a> {
     pub fn sku(&self) -> [u32; 3] {
         self.sku
     }
-    pub fn version(&self) -> u32 {
+    pub fn version(&self) -> Option<u32> {
         self.version
     }
     pub fn hardware(&self) -> [u16; 2] {
@@ -287,10 +345,10 @@ mod tests {
             let selected = pnvm.select(&profile(), [sku, 0, 0]).unwrap();
             assert_eq!(selected.sku(), [sku, 0, 0]);
             assert_eq!(selected.hardware(), [0x42, 0x10d]);
-            assert_eq!(selected.version(), 0x04030201);
+            assert_eq!(selected.version(), Some(0x04030201));
             assert_eq!(selected.chunks().len(), 1);
             let chunk = selected.chunks()[0];
-            assert_eq!(chunk.marker, 0xcafedead);
+            assert_eq!(chunk.kind, ChunkKind::SectionMarker(0xcafedead));
             assert_eq!(chunk.data, &[sku as u8, 20, 30]);
             assert_eq!(
                 chunk.data.as_ptr(),
@@ -334,7 +392,13 @@ mod tests {
                 assert!(Pnvm::parse(&bytes[..end]).is_err(), "truncation {end}");
             }
         }
-        for (kind, length) in [(SKU, 11), (HW, 3), (VERSION, 3), (SECTION, 3)] {
+        for (kind, length) in [
+            (SKU, 11),
+            (HW, 3),
+            (VERSION, 3),
+            (SECTION, 3),
+            (MEM_DESC, 7),
+        ] {
             let mut bytes = Vec::new();
             tlv(&mut bytes, kind, &vec![0; length]);
             assert!(matches!(Pnvm::parse(&bytes),Err(Error::Length{kind:got}) if got==kind));
@@ -354,7 +418,7 @@ mod tests {
                 .unwrap()
                 .select(&profile(), [0; 3])
                 .unwrap_err(),
-            Error::MemoryDescriptorRequired
+            Error::MemoryDescriptorSize
         );
         let mut duplicate = fixture();
         tlv(&mut duplicate, VERSION, &[1, 2, 3, 4]);
@@ -365,6 +429,128 @@ mod tests {
                 .unwrap_err(),
             Error::DuplicateVersion
         );
+    }
+    fn memory_fixture() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for sku in [1u32, 2] {
+            let mut id = sku.to_le_bytes().to_vec();
+            id.resize(12, 0);
+            tlv(&mut bytes, SKU, &id);
+            // Reduced-power has no HW/version gate and ignores SEC_RT payloads.
+            tlv(&mut bytes, SECTION, &[0, 0, 0, 0, 0xaa]);
+            for address in [0xfffffff0u32, 0x12345678] {
+                let mut desc = address.to_le_bytes().to_vec();
+                desc.extend(3u32.to_le_bytes());
+                desc.extend([sku as u8, 0xaa, 0xbb]);
+                tlv(&mut bytes, MEM_DESC, &desc);
+            }
+        }
+        bytes
+    }
+    #[test]
+    fn inline_memory_descriptors_preserve_addresses_and_reduced_power_ignores_pnvm_metadata() {
+        let bytes = memory_fixture();
+        let parsed = Pnvm::parse(&bytes).unwrap();
+        for sku in [1, 2] {
+            let selection = parsed.select_reduced_power([sku, 0, 0]).unwrap();
+            assert_eq!(selection.sku, [sku, 0, 0]);
+            assert_eq!(selection.chunks().len(), 2);
+            for (chunk, address) in selection.chunks().iter().zip([0xfffffff0, 0x12345678]) {
+                assert_eq!(chunk.kind, ChunkKind::MemoryDescriptor { address });
+                assert_eq!(chunk.data, [sku as u8, 0xaa, 0xbb]);
+                assert_eq!(
+                    chunk.data.as_ptr(),
+                    parsed.tlvs()[chunk.tlv_index].data[8..].as_ptr()
+                );
+            }
+        }
+        assert_eq!(
+            parsed.select_reduced_power([0; 3]).unwrap_err(),
+            Error::UnknownSku
+        );
+        let mut bios = Vec::new();
+        tlv(&mut bios, SKU, &[0; 12]);
+        tlv(&mut bios, HW, &[0x34, 0, 0x0a, 1]);
+        tlv(
+            &mut bios,
+            MEM_DESC,
+            &[0xf0, 0xff, 0xff, 0xff, 1, 0, 0, 0, 0x55],
+        );
+        let mut observed = profile().observed();
+        observed.device = 0x2723;
+        observed.hardware_revision = 0x340;
+        observed.radio_id = 0x10a000;
+        let parsed = Pnvm::parse(&bios).unwrap();
+        let selection = parsed
+            .select(&Profile::select(observed).unwrap(), [0; 3])
+            .unwrap();
+        assert_eq!(selection.version(), None);
+        assert_eq!(selection.chunks()[0].data, [0x55]);
+        for length in [0u32, 2, u32::MAX] {
+            let mut bad = bios.clone();
+            let at = parsed.tlvs().last().unwrap().range.start + 12;
+            bad[at..at + 4].copy_from_slice(&length.to_le_bytes());
+            let bad = Pnvm::parse(&bad).unwrap();
+            assert_eq!(
+                bad.select_reduced_power([0; 3]).unwrap_err(),
+                Error::MemoryDescriptorSize
+            );
+        }
+    }
+    #[test]
+    #[ignore = "requires unchanged Linux UEFI helper trace; see THIRD_PARTY.md"]
+    fn unchanged_linux_inline_descriptor_and_reduced_power_oracle() {
+        extern crate std;
+        use core::fmt::Write;
+        use sha2::{Digest, Sha256};
+        let trace =
+            std::fs::read(std::env::var("STELA_IWLWIFI_UEFI_ORACLE").expect("UEFI trace")).unwrap();
+        let digest: alloc::string::String = Sha256::digest(&trace)
+            .iter()
+            .map(|b| alloc::format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest,
+            "4e817e80eba3b908dfb582936cfd6050ffef94f5274dda863ea0a2bd3eddd0f5"
+        );
+        let bytes = memory_fixture();
+        let parsed = Pnvm::parse(&bytes).unwrap();
+        let mut actual = alloc::string::String::new();
+        for sku in 0..=2 {
+            match parsed.select_reduced_power([sku, 0, 0]) {
+                Ok(selected) => {
+                    writeln!(actual, "case {sku} ok {}", selected.chunks().len()).unwrap();
+                    for chunk in selected.chunks() {
+                        let ChunkKind::MemoryDescriptor { address } = chunk.kind else {
+                            panic!()
+                        };
+                        let fnv = chunk.data.iter().fold(0xcbf29ce484222325u64, |h, b| {
+                            (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
+                        });
+                        writeln!(actual, "chunk {address:x} {} {fnv:016x}", chunk.data.len())
+                            .unwrap();
+                    }
+                }
+                Err(Error::UnknownSku) => writeln!(actual, "case {sku} missing 0").unwrap(),
+                other => panic!("unexpected selection {other:?}"),
+            }
+        }
+        for n in 0..=64 {
+            let mut bytes = Vec::new();
+            tlv(&mut bytes, SKU, &[0; 12]);
+            for _ in 0..=n {
+                tlv(&mut bytes, MEM_DESC, &[0, 0, 0, 0, 1, 0, 0, 0, 0xaa]);
+            }
+            match Pnvm::parse(&bytes).unwrap().select_reduced_power([0; 3]) {
+                Ok(selected) => {
+                    assert_eq!(selected.chunks().len(), n + 1);
+                    writeln!(actual, "limit {n} ok {}", n + 1).unwrap();
+                }
+                Err(Error::Limit) => writeln!(actual, "limit {n} invalid {n}").unwrap(),
+                other => panic!("unexpected limit {other:?}"),
+            }
+        }
+        assert_eq!(actual.as_bytes(), trace);
     }
     #[test]
     fn payload_count_and_image_tlv_budgets_are_bounded() {
@@ -439,7 +625,7 @@ mod tests {
                     let selection = pnvm.select(&profile(), [sku, 0, 0]).unwrap();
                     assert_eq!(
                         selection.version(),
-                        u32::from_str_radix(fields[3], 16).unwrap()
+                        Some(u32::from_str_radix(fields[3], 16).unwrap())
                     );
                     assert_eq!(selection.chunks().len(), fields[4].parse().unwrap());
                     for chunk in selection.chunks() {
@@ -450,7 +636,10 @@ mod tests {
                             (h ^ u64::from(*b)).wrapping_mul(0x100000001b3)
                         });
                         assert_eq!(fnv, u64::from_str_radix(fields[2], 16).unwrap());
-                        assert_eq!(chunk.marker, u32::from_str_radix(fields[3], 16).unwrap());
+                        assert_eq!(
+                            chunk.kind,
+                            ChunkKind::SectionMarker(u32::from_str_radix(fields[3], 16).unwrap())
+                        );
                     }
                     matches += 1;
                 }
