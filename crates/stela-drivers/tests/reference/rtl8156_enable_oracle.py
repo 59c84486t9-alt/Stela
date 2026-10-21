@@ -12,7 +12,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-source,out=map(Path,sys.argv[1:])
+source,out=map(Path,sys.argv[1:3])
+b_mode=len(sys.argv)==4 and sys.argv[3]=="--rtl8156b"
 assert hashlib.sha256(source.read_bytes()).hexdigest()=="9d766f203c7fdabe6449e8dd2b9e5dd4fccfa20a62aa5dbf00d64c0c475c5a9f"
 text=source.read_text();out.mkdir(parents=True,exist_ok=True)
 def function(name):
@@ -71,6 +72,9 @@ for(unsigned r=0;r<2;r++)for(unsigned s=0;s<4;s++)for(unsigned p=0;p<8;p++){
  for(unsigned j=0;j<11;j++)printf(" %u",registers[banks[j]][addresses[j]]);puts("");
 }return 0;}
 '''
+if b_mode:
+    main=main.replace("r<2", "r<3").replace("RTL_VER_10+r", "(unsigned[]){RTL_VER_12,RTL_VER_13,RTL_VER_15}[r]").replace("0x7020+r*0x10", "(unsigned[]){0x7400,0x7410,0x7420}[r]")
+    main=main.replace("USB_FW_TASK,PLA_EEEP_CR};", "USB_FW_TASK,PLA_EEEP_CR,USB_RX_AGGR_NUM};").replace("0,0,0,1,1,0,1,1,1,0,1};", "0,0,0,1,1,0,1,1,1,0,1,0};").replace("j<11", "j<12")
 unit=out/"linux-rtl8156-enable.c";unit.write_text(prelude+"\n"+"\n".join(defines)+"\n"+version+"\n"+speeds+"\n"+"\n".join(function(n)for n in names)+main)
 exe=out/"linux-rtl8156-enable"
 subprocess.run(["cc","-std=gnu11","-O1","-g","-fsanitize=address,undefined",str(unit),"-o",str(exe)],check=True)

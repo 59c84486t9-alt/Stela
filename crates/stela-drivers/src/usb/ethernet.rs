@@ -1,8 +1,8 @@
 //! Vendor USB Ethernet backends. Candidate interfaces become usable links only
 //! after exact chip identification and revision-specific initialization.
 //! RTL8152B 02/07, RTL8153A 03/04/05/06, RTL8153B 08/09, RTL8153C 14
-//! and RTL8156A 10/11 have distinct implementations; RTL8156B remains an
-//! explicit startup gap.
+//! and RTL8156A 10/11 and RTL8156B 12/13/15 have distinct implementations.
+//! Revision15 follows the donor's gigabit capability policy.
 pub mod firmware;
 mod framing;
 mod registers;
@@ -140,6 +140,10 @@ impl UsbEthernet {
             "RTL8153C"
         } else if binding.revision.is_8156a() {
             "RTL8156A"
+        } else if binding.revision.0 == 0x7420 {
+            "RTL815x tcr-7420 (gigabit)"
+        } else if binding.revision.is_8156b() {
+            "RTL8156B"
         } else {
             "RTL8152B"
         };

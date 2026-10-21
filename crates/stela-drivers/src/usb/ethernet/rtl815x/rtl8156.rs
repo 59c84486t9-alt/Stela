@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (c) 2014 Realtek Semiconductor Corp. All rights reserved.
-//! RTL8156A10/11 power/PHY/up/enable. Later8156B revisions retain refusal
-//! until their separate flash and analogue tuning is complete.
+//! Donor-shared RTL8156 power/up/enable with distinct A/B PHY callbacks.
 use super::super::firmware::Firmware;
 use super::*;
 
@@ -33,7 +32,7 @@ impl<C: Control> Chip<C> {
         let value = self.sram2_read(address)?;
         self.phy_write(OCP_SRAM2_DATA, u32::from((value & !clear) | set))
     }
-    fn phy_read(&mut self, address: u32) -> Result<u32, BlockError> {
+    pub(super) fn phy_read(&mut self, address: u32) -> Result<u32, BlockError> {
         let mapped = self.phy_address(address)?;
         self.read(PLA, mapped, 2)
     }
@@ -119,34 +118,52 @@ impl<C: Control> Chip<C> {
         self.u2p3(true)
     }
 
-    fn autoneg_8156a(&mut self) -> Result<(), BlockError> {
+    fn hardware_phy_8156(&mut self, firmware: Option<&Firmware<'_>>) -> Result<(), BlockError> {
+        if self.revision.is_8156a() {
+            self.hardware_phy_8156a(firmware)
+        } else if self.revision.is_8156b() {
+            self.hardware_phy_8156b(firmware)
+        } else {
+            Err(BlockError::Unsupported("RTL8156 exact PHY callback"))
+        }
+    }
+
+    fn autoneg_8156(&mut self) -> Result<(), BlockError> {
         self.phy_modify(MII_ADVERTISE, 0x01e0, ADVERTISE_10_100_PAUSE)?;
         self.phy_modify(OCP_BASE_MII + 18, 0x0300, 0x0200)?;
         // rtl8152_probe advertises 2.5G only at SuperSpeed/Plus. USB2 remains
         // gigabit-advertising even though the same PHY could negotiate 2.5G.
-        self.phy_modify(
-            OCP_10GBT_CTRL,
-            MDIO_ADV_MULTIGIG_MASK,
-            if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
-                MDIO_ADV_2500
-            } else {
-                0
-            },
-        )?;
+        if self.revision.supports_2500() {
+            self.phy_modify(
+                OCP_10GBT_CTRL,
+                MDIO_ADV_MULTIGIG_MASK,
+                if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
+                    MDIO_ADV_2500
+                } else {
+                    0
+                },
+            )?;
+        }
         self.phy_write(MII_BMCR, BMCR_ANENABLE_RESTART | BMCR_RESET)?;
         let mapped = self.phy_address(MII_BMCR)?;
         self.io.delay_us(20_000);
         self.poll(PLA, mapped, 2, BMCR_RESET, 0, (50, 20_000))
     }
 
-    pub(super) fn initialize_8156a(
+    pub(super) fn initialize_8156(
         &mut self,
         firmware: Option<&Firmware<'_>>,
     ) -> Result<(), BlockError> {
         self.modify(USB, USB_ECM_OP, 1, EN_ALL_SPEED, 0)?;
         self.write(USB, USB_SPEED_OPTION, 2, 0)?;
         self.modify(USB, USB_ECM_OPTION, 2, 0, BYPASS_MAC_RESET)?;
+        if self.revision.is_8156b() {
+            self.modify(USB, USB_U2P3_CTRL, 2, 0, RX_DETECT8)?;
+        }
         self.u1u2_8153b(false)?;
+        if matches!(self.revision.0, 0x7410 | 0x7420) {
+            self.wait_flash_8156b()?;
+        }
         self.poll(
             PLA,
             PLA_BOOT_CTRL,
@@ -157,6 +174,9 @@ impl<C: Control> Chip<C> {
         )?;
         if self.phy_state(None)? == PHY_STAT_EXT_INIT {
             self.phy_modify(0xa468, (1 << 3) | (1 << 1), 0)?;
+            if self.revision.is_8156b() {
+                self.phy_modify(0xa466, 1, 0)?;
+            }
         }
         let mapped = self.phy_address(MII_BMCR)?;
         let bmcr = self.read(PLA, mapped, 2)?;
@@ -171,9 +191,12 @@ impl<C: Control> Chip<C> {
         self.modify(USB, USB_MISC_0, 2, PCUT_STATUS, 0)?;
         self.modify(USB, USB_POWER_CUT, 1, UPS_EN | USP_PREWAKE, 0)?;
         self.modify(USB, USB_MISC_2, 1, UPS_FORCE_PWR_DOWN, 0)?;
+        if matches!(self.revision.0, 0x7410 | 0x7420) {
+            self.modify(USB, USB_UPHY_XTAL, 2, OOBS_POLLING, 0)?;
+        }
         if self.read(USB, USB_MISC_0, 2)? & PCUT_STATUS != 0 {
-            self.hardware_phy_8156a(firmware)?;
-            self.autoneg_8156a()?;
+            self.hardware_phy_8156(firmware)?;
+            self.autoneg_8156()?;
         }
         self.queue_wake_off()?;
         self.write(PLA, PLA_CRWECR, 1, 0xc0)?;
@@ -181,6 +204,17 @@ impl<C: Control> Chip<C> {
         self.write(PLA, PLA_CRWECR, 1, 0)?;
         if self.usb_speed >= super::super::super::xhci::SUPER_SPEED {
             self.u1u2_8153b(true)?;
+        }
+        if self.revision.is_8156b() {
+            self.modify(PLA, PLA_RCR, 2, SLOT_EN, 0)?;
+            self.modify(PLA, PLA_CPCR, 2, 0, FLOW_CTRL_EN)?;
+            self.write(USB, USB_FC_TIMER, 2, CTRL_TIMER_EN | (600 / 8))?;
+            let mut control = self.read(USB, USB_FW_CTRL, 2)?;
+            if self.read(PLA, PLA_POL_GPIO_CTRL, 2)? & DACK_DET_EN == 0 {
+                control |= FLOW_CTRL_PATCH_2;
+            }
+            self.write(USB, USB_FW_CTRL, 2, control & !AUTO_SPEEDUP)?;
+            self.modify(USB, USB_FW_TASK, 2, 0, FC_PATCH_TASK)?;
         }
         self.write(PLA, PLA_MAC_PWR_CTRL, 2, 0x0403)?;
         self.modify(
@@ -205,15 +239,17 @@ impl<C: Control> Chip<C> {
                 },
         )?;
         self.modify(USB, USB_USB_CTRL, 2, RX_AGG_DISABLE | RX_ZERO_EN, 0)?;
-        self.modify(USB, USB_BMU_CONFIG, 1, 0, ACT_ODMA)?;
+        if self.revision.is_8156a() {
+            self.modify(USB, USB_BMU_CONFIG, 1, 0, ACT_ODMA)?;
+        }
         let force = self.phy_read(0xa5b4)?;
         if force & (1 << 15) != 0 {
             self.phy_write(0xa5b4, force & !(1 << 15))?;
         }
         self.modify(PLA, PLA_RSTTALLY, 2, 0, TALLY_RESET)?;
-        self.hardware_phy_8156a(firmware)?;
-        self.autoneg_8156a()?;
-        self.up_8156a()
+        self.hardware_phy_8156(firmware)?;
+        self.autoneg_8156()?;
+        self.up_8156()
     }
 
     pub(super) fn flow_control_8156(&mut self) -> Result<(), BlockError> {
@@ -221,7 +257,7 @@ impl<C: Control> Chip<C> {
         self.write(PLA, PLA_RX_FIFO_EMPTY, 2, 1024)
     }
 
-    fn up_8156a(&mut self) -> Result<(), BlockError> {
+    fn up_8156(&mut self) -> Result<(), BlockError> {
         self.u1u2_8153b(false)?;
         self.u2p3(false)?;
         self.aldps(false)?;
@@ -242,7 +278,9 @@ impl<C: Control> Chip<C> {
         self.flow_control_8156()?;
         self.write(PLA, PLA_TXFIFO_CTRL, 2, 512 / 64)?;
         self.write(PLA, PLA_TXFIFO_FULL, 2, 2048 / 16)?;
-        self.modify(USB, USB_BMU_CONFIG, 2, 0, ACT_ODMA)?;
+        if self.revision.is_8156a() {
+            self.modify(USB, USB_BMU_CONFIG, 2, 0, ACT_ODMA)?;
+        }
         self.modify(PLA, PLA_RXFIFO_FULL, 2, RXFIFO_FULL_MASK, 8)?;
         self.modify(PLA, PLA_MAC_PWR_CTRL3, 2, PLA_MCU_SPDWN_EN, 0)?;
         self.modify(USB, USB_SPEED_OPTION, 2, RG_PWRDN_EN | ALL_SPEED_OFF, 0)?;
@@ -256,7 +294,10 @@ impl<C: Control> Chip<C> {
         Ok(())
     }
 
-    pub(super) fn enable_8156a(&mut self, status: u32) -> Result<(), BlockError> {
+    pub(super) fn enable_8156(&mut self, status: u32) -> Result<(), BlockError> {
+        if self.revision.is_8156b() {
+            self.modify(USB, USB_RX_AGGR_NUM, 2, RX_AGGR_NUM_MASK, 0)?;
+        }
         self.write(USB, USB_RX_EARLY_TIMEOUT, 2, 640 / 8)?;
         self.write(USB, USB_RX_EXTRA_AGGR_TMR, 2, 15000 / 8)?;
         self.write(
@@ -291,10 +332,12 @@ impl<C: Control> Chip<C> {
                 IDLE_SPDWN_EN
             },
         )?;
-        if status & PHYSTATUS_1000 != 0 {
-            self.write(PLA, PLA_EEE_TXTWSYS, 2, 0x11)?;
-        } else if status & PHYSTATUS_500 != 0 {
-            self.write(PLA, PLA_EEE_TXTWSYS, 2, 0x3d)?;
+        if self.revision.is_8156a() {
+            if status & PHYSTATUS_1000 != 0 {
+                self.write(PLA, PLA_EEE_TXTWSYS, 2, 0x11)?;
+            } else if status & PHYSTATUS_500 != 0 {
+                self.write(PLA, PLA_EEE_TXTWSYS, 2, 0x3d)?;
+            }
         }
         if self.usb_speed == super::super::super::xhci::HIGH_SPEED {
             self.modify(

@@ -411,6 +411,10 @@ pub(crate) mod tests {
         pub(crate) sram2: BTreeMap<u16, u16>,
         pointer2: u16,
         pub(crate) mdi: [u16; 4],
+        pub(crate) dsp: BTreeMap<u16, u16>,
+        dsp_pointer: u16,
+        pub(crate) flash_pending: Option<usize>,
+        pub(crate) stuck_flash: bool,
         pointer: u16,
         patch_pending: Option<(bool, usize)>,
         speed_expected: Vec<u8>,
@@ -419,7 +423,7 @@ pub(crate) mod tests {
         staged: usize,
         speed_pending: usize,
         pub(crate) stuck_patch: bool,
-        stuck_speed: bool,
+        pub(crate) stuck_speed: bool,
         wrong_version: bool,
         pub(crate) efuse: u32,
         pub(crate) phy_states: alloc::collections::VecDeque<u32>,
@@ -434,6 +438,10 @@ pub(crate) mod tests {
                 sram2: BTreeMap::new(),
                 pointer2: 0,
                 mdi: [0; 4],
+                dsp: BTreeMap::new(),
+                dsp_pointer: 0,
+                flash_pending: None,
+                stuck_flash: false,
                 pointer: 0,
                 patch_pending: None,
                 speed_expected: Vec::new(),
@@ -491,6 +499,20 @@ pub(crate) mod tests {
                     _ => 0,
                 };
             let read = request[0] == 0xc0;
+            if read
+                && bank == USB
+                && mapped == USB_GPHY_CTRL
+                && !self.stuck_flash
+                && let Some(remaining) = &mut self.flash_pending
+            {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    self.flash_pending = None;
+                    let value = self.core.get(USB, USB_GPHY_CTRL, 2);
+                    self.core
+                        .set(USB, USB_GPHY_CTRL, 2, value | GPHY_PATCH_DONE);
+                }
+            }
             if read && bank == PLA {
                 // SRAM2 data is the upper half of the aligned four-byte read.
                 if mapped == OCP_SRAM2_ADDR {
@@ -552,7 +574,9 @@ pub(crate) mod tests {
                 if target == PLA_POL_GPIO_CTRL && self.speed_pending != 0 && !self.stuck_speed {
                     self.speed_pending -= 1;
                     if self.speed_pending == 0 {
-                        self.core.set(PLA, PLA_POL_GPIO_CTRL, 2, 0);
+                        let gpio = self.core.get(PLA, PLA_POL_GPIO_CTRL, 2);
+                        self.core
+                            .set(PLA, PLA_POL_GPIO_CTRL, 2, gpio & !POL_GPHY_PATCH);
                         if self.speed_received.len() == self.speed_expected.len()
                             && !self.wrong_version
                         {
@@ -568,6 +592,21 @@ pub(crate) mod tests {
                 self.core.set(USB, USB_MISC_0, 2, PCUT_STATUS);
             }
             if !read && bank == PLA {
+                if target == 0xb88e {
+                    self.dsp_pointer = self.core.get(PLA, 0xb88e, 2) as u16;
+                }
+                if target == 0xb890
+                    && (self.core.get(PLA, PLA_TCR0, 4) >> 16 & VERSION_MASK) == 0x7400
+                {
+                    assert_eq!(
+                        self.core.get(PLA, OCP_PHY_PATCH_STAT, 2) & PATCH_READY,
+                        PATCH_READY
+                    );
+                    assert_eq!(self.core.get(PLA, 0xb896, 2) & 1, 0);
+                    self.dsp
+                        .insert(self.dsp_pointer, self.core.get(PLA, 0xb890, 2) as u16);
+                }
+
                 if target == OCP_SRAM2_ADDR {
                     self.pointer2 = self.core.get(PLA, OCP_SRAM2_ADDR, 2) as u16;
                 }
