@@ -294,18 +294,22 @@ mod tests {
         let mut descriptor = [18, 1, 0, 2, 0xe0, 1, 1, 64, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1];
         descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
         descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+        let configuration = vec![
+            9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 2, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0,
+            1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
+        ];
         let device = Device {
             slot: 1,
             speed: FULL_SPEED,
             location: "Realtek stateful HCI model".into(),
             descriptor,
-            configuration: vec![
-                9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 2, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0,
-                1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
-            ],
+            configurations: vec![configuration.clone()],
+            configuration,
             manufacturer: None,
             product: None,
             serial: None,
+            vendor_ethernet_revision: None,
+            vendor_ethernet_tcr: None,
         };
         let hardware = match project {
             Project::Rtl8761Bu => "usb:0bda:8771:0100",
