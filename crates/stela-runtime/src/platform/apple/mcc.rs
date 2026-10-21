@@ -8,6 +8,9 @@ use super::bus::{
 use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
+pub mod policy;
+use policy::CacheResource;
+
 const NAME: &str = "t6000-mcc";
 pub const APERTURE_BYTES: u64 = 0x1000000;
 pub const PLANES: u8 = 4;
@@ -23,6 +26,7 @@ const BROADCAST: u64 = 0x10000c;
 const GROUP_QUOTA: u64 = 0xa000;
 const GROUPS: u8 = 32;
 const QUOTA_UNITS: u64 = 0x3f;
+const QUOTA_FIELDS: u64 = 0x017f_003f;
 const DCS_GATING: u64 = 0x10;
 const DCS_DRAIN: u64 = 0xa40;
 const DRAM_CONFIG: u64 = 0x13cc;
@@ -68,6 +72,19 @@ pub enum RequestKind {
     DramConfiguration {
         channel: u8,
     },
+    Persistence {
+        dsid: u8,
+        raw: u8,
+        broadcast: bool,
+    },
+    PersistenceAuxiliaryClear {
+        dsid: u8,
+        broadcast: bool,
+    },
+    Deprioritize {
+        dsid: u8,
+        broadcast: bool,
+    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Request {
@@ -89,6 +106,10 @@ enum Role {
     DcsGating(u8),
     Dram(u8),
     Drain,
+    QuotaUse(u8),
+    Persistence(u8),
+    PersistenceAuxiliary(u8),
+    DsidCommand(u8),
 }
 
 fn role(offset: u64) -> Result<Role, &'static str> {
@@ -110,6 +131,9 @@ fn role(offset: u64) -> Result<Role, &'static str> {
         SHARED_GATING => return Ok(Role::MccGating),
         BROADCAST => return Ok(Role::Broadcast),
         _ => {}
+    }
+    if let Some(role) = policy::role(offset) {
+        return Ok(role);
     }
     if (DCS_BASE..DCS_BASE + u64::from(CHANNELS) * DCS_STRIDE).contains(&offset) {
         let channel = ((offset - DCS_BASE) / DCS_STRIDE) as u8;
@@ -146,6 +170,7 @@ pub enum Origin {
 
 struct State {
     origin: Origin,
+    resource: CacheResource,
     apertures: u8,
     lifecycle: LifecycleState,
     words: BTreeMap<(u8, u64), Observation>,
@@ -237,7 +262,9 @@ impl Controller {
             if word.aperture >= apertures {
                 return Err("MCC observation names an absent aperture");
             }
-            role(word.offset)?;
+            if policy::exclusive(role(word.offset)?) {
+                return Err("retained MCC policy/accounting requires its actual resource owner");
+            }
             if word.value > u64::from(u32::MAX) || word.known > u64::from(u32::MAX) {
                 return Err("MCC observation exceeds its original 32-bit register");
             }
@@ -254,6 +281,7 @@ impl Controller {
         }
         Ok(Self(Rc::new(RefCell::new(State {
             origin: Origin::RetainedObservation,
+            resource: CacheResource::Unqualified,
             apertures,
             lifecycle,
             words,
@@ -274,7 +302,11 @@ impl Controller {
     /// AMCC lock planes in these same apertures. This does not admit any of the
     /// other MCC/performance effects in the source protocol matrix.
     pub fn register_offsets(&self) -> Vec<u64> {
-        offsets()
+        let mut offsets = offsets();
+        if self.0.borrow().resource == CacheResource::Cacheless {
+            offsets.extend(policy::offsets());
+        }
+        offsets
     }
     pub fn origin(&self) -> Origin {
         self.0.borrow().origin
@@ -296,6 +328,11 @@ pub struct View {
 }
 impl Lifecycle for View {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
+        let _exclusive = self
+            .controller
+            .0
+            .try_borrow_mut()
+            .map_err(|_| "MCC resource/policy is borrowed by its actual consumer")?;
         if proposed.reset || (!proposed.powered && !proposed.retention) {
             return Err("MCC/DCS native reset, loss and cancellation are unqualified");
         }
@@ -320,7 +357,14 @@ impl MmioDevice for View {
         if width != Width::Word {
             return Err(fail("MCC register requires an original 32-bit access"));
         }
-        role(offset).map_err(fail)?;
+        if matches!(
+            role(offset).map_err(fail)?,
+            Role::DsidCommand(_) | Role::Persistence(_) | Role::PersistenceAuxiliary(_)
+        ) {
+            return Err(fail(
+                "MCC persistence/DSID write-alias readback is unqualified",
+            ));
+        }
         let word = state
             .words
             .get(&(self.aperture, offset))
@@ -340,7 +384,11 @@ impl MmioDevice for View {
         access: &mut Access<'_>,
     ) -> Result<(), MmioError> {
         let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
-        let mut state = self.controller.0.borrow_mut();
+        let mut state = self
+            .controller
+            .0
+            .try_borrow_mut()
+            .map_err(|_| fail("MCC resource/policy is borrowed by its actual consumer"))?;
         state.accessible().map_err(fail)?;
         if width != Width::Word {
             return Err(fail("MCC register requires an original 32-bit access"));
@@ -351,6 +399,17 @@ impl MmioDevice for View {
             .get(&(self.aperture, offset))
             .ok_or_else(|| fail("MCC register has no actual backing"))?;
         let written = value as u32;
+        if state.resource == CacheResource::Cacheless
+            && (policy::exclusive(role) || matches!(role, Role::Quota(_) | Role::Ways(_)))
+        {
+            return policy::apply(&mut state, self.aperture, offset, role, written, access.now)
+                .map_err(fail);
+        }
+        if policy::exclusive(role) {
+            return Err(fail(
+                "MCC policy/accounting has no qualified resource owner",
+            ));
+        }
         if matches!(role, Role::Status) {
             return Err(fail("write to actual cache power status"));
         }
@@ -411,12 +470,18 @@ impl MmioDevice for View {
             Role::MccGating => RequestKind::MccGating,
             Role::DcsGating(channel) => RequestKind::DcsGating { channel },
             Role::Dram(channel) => RequestKind::DramConfiguration { channel },
-            Role::Broadcast | Role::Status | Role::Drain => unreachable!(),
+            Role::Broadcast
+            | Role::Status
+            | Role::Drain
+            | Role::QuotaUse(_)
+            | Role::Persistence(_)
+            | Role::PersistenceAuxiliary(_)
+            | Role::DsidCommand(_) => unreachable!(),
         };
         let pending_fields = match kind {
             RequestKind::Quota { .. } | RequestKind::MccGating | RequestKind::DcsGating { .. } => {
                 let fields = match kind {
-                    RequestKind::Quota { .. } => 0x017f_003f,
+                    RequestKind::Quota { .. } => QUOTA_FIELDS,
                     RequestKind::MccGating => 0x3000_0000u64,
                     _ => 0x1100,
                 };
