@@ -5,6 +5,7 @@
  * compiler dispatch, push-size and Intel SLM policy functions are called.
  */
 #include "legacy_compute_internal.h"
+#include "fp_controls.h"
 #include "intel/common/intel_compute_slm.h"
 #include "util/u_math.h"
 #include <string.h>
@@ -31,6 +32,9 @@ static int validate_program(const struct intel_device_info *device, mesa_shader_
     }
     if (size > 1024)
         return -22;
+    int fp_status = stela_intel_fp_controls(device, info);
+    if (fp_status)
+        return fp_status;
     /* ELK has no uses_sampler flag. Preserve actual shader resource metadata
      * rather than assuming absent sampler state means no sampler instructions.
      * Binding table is an explicit SSBO-only prefix for this bounded adapter.

@@ -19,7 +19,7 @@ static void compiler_log(void *data, unsigned *id, const char *format, ...)
 }
 
 static void check_plan(const struct brw_compiler *compiler, const struct isl_device *isl,
-                       const struct brw_cs_prog_data *program)
+                       const struct brw_cs_prog_data *program, const struct shader_info *shader)
 {
     const struct intel_device_info *device = isl->info;
     const uint32_t groups[] = {19, 23, 29};
@@ -30,7 +30,7 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
     };
     for (uint32_t variable_slm = 0; variable_slm <= 4096; variable_slm += 1024) {
         struct stela_intel_compute_plan plan;
-        assert(stela_intel_compute_plan(compiler, isl, program, &placement, groups, variable_slm, &plan) == 0);
+        assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups, variable_slm, &plan) == 0);
         struct intel_cs_dispatch_info info = brw_cs_get_dispatch_info(device, program, NULL);
         uint32_t slm = program->base.total_shared + variable_slm;
         assert(plan.dispatch.gfx_verx10 == device->verx10);
@@ -85,7 +85,7 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
         struct brw_cs_prog_data bad = *program;
         memcpy((char *)&bad + cases[i].offset, &cases[i].value, 4);
         plan = before;
-        assert(stela_intel_compute_plan(compiler, isl, &bad, &placement, groups, 0, &plan) == cases[i].status);
+        assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == cases[i].status);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     for (unsigned i = 0; i < 9; ++i) {
@@ -102,27 +102,27 @@ static void check_plan(const struct brw_compiler *compiler, const struct isl_dev
         case 8: bad.binding_table_entries = UINT32_MAX; break;
         }
         plan = before;
-        assert(stela_intel_compute_plan(compiler, isl, program, &bad, groups, 0, &plan) == -22);
+        assert(stela_intel_compute_plan(compiler, isl, program, shader, &bad, groups, 0, &plan) == -22);
         assert(!memcmp(&plan, &before, sizeof(plan)));
     }
     struct brw_cs_prog_data bad = *program;
     bad.uses_sampler = true;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
     bad = *program; bad.uses_btd_stack_ids = true;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
     bad = *program; bad.base.push_sizes[0] = 32;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -95);
     bad = *program;
     unsigned selected = brw_cs_get_dispatch_info(device, program, NULL).simd_size / 16;
     bad.prog_offset[selected] = 1;
-    assert(stela_intel_compute_plan(compiler, isl, &bad, &placement, groups, 0, &plan) == -22);
-    assert(stela_intel_compute_plan(compiler, isl, program, &placement, groups, UINT32_MAX, &plan) == -22);
+    assert(stela_intel_compute_plan(compiler, isl, &bad, shader, &placement, groups, 0, &plan) == -22);
+    assert(stela_intel_compute_plan(compiler, isl, program, shader, &placement, groups, UINT32_MAX, &plan) == -22);
     struct intel_device_info held = *device; held.verx10 = 350; held.ver = 35;
     struct isl_device held_isl = *isl; held_isl.info = &held;
     struct brw_compiler held_compiler = *compiler; held_compiler.devinfo = &held;
-    assert(stela_intel_compute_plan(&held_compiler, &held_isl, program, &placement, groups, 0, &plan) == -95);
-    assert(stela_intel_compute_plan(&held_compiler, isl, program, &placement, groups, 0, &plan) == -22);
-    assert(stela_intel_compute_plan(NULL, isl, program, &placement, groups, 0, &plan) == -22);
+    assert(stela_intel_compute_plan(&held_compiler, &held_isl, program, shader, &placement, groups, 0, &plan) == -95);
+    assert(stela_intel_compute_plan(&held_compiler, isl, program, shader, &placement, groups, 0, &plan) == -22);
+    assert(stela_intel_compute_plan(NULL, isl, program, shader, &placement, groups, 0, &plan) == -22);
 }
 
 static void compile_program(const char *platform, bool barrier)
@@ -168,7 +168,7 @@ static void compile_program(const char *platform, bool barrier)
     unsigned sends;
     assert(validate_intel_code(&device, context, code, data.base.program_size, platform, &sends));
     assert(data.uses_barrier == barrier);
-    check_plan(compiler, &isl, &data);
+    check_plan(compiler, &isl, &data, &b.shader->info);
     printf("Actual BRW program->hosted policy->native walker %s barrier=%u: %u bytes, validated\n",
            platform, barrier, data.base.program_size);
     ralloc_free(b.shader); ralloc_free(context);

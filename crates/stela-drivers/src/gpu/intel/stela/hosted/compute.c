@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "compute.h"
+#include "fp_controls.h"
 #include "intel/common/intel_common.h"
 #include "intel/common/intel_compute_slm.h"
 #include "intel/compiler/brw/brw_reg.h"
@@ -7,12 +8,13 @@
 
 int stela_intel_compute_plan(const struct brw_compiler *compiler, const struct isl_device *isl,
                              const struct brw_cs_prog_data *program,
+                             const struct shader_info *shader,
                              const struct stela_intel_compute_placement *placement,
                              const uint32_t groups[3], uint32_t variable_slm_bytes,
                              struct stela_intel_compute_plan *output)
 {
     if (!compiler || !isl || !isl->info || compiler->devinfo != isl->info ||
-        !program || !placement || !groups || !output ||
+        !program || !shader || !placement || !groups || !output ||
         !isl->buffer_fill_state_s || !isl->max_buffer_size)
         return -22;
     const struct intel_device_info *device = isl->info;
@@ -22,13 +24,19 @@ int stela_intel_compute_plan(const struct brw_compiler *compiler, const struct i
     }
     if (!device->slice_masks || !device->subslice_total || !device->num_thread_per_eu ||
         !device->max_cs_threads || !device->max_cs_workgroup_threads ||
-        program->base.stage != MESA_SHADER_COMPUTE || !program->base.program_size ||
+        program->base.stage != MESA_SHADER_COMPUTE || shader->stage != program->base.stage ||
+        !program->base.program_size ||
         !program->prog_mask || (program->prog_mask & ~7u) ||
         (program->prog_spilled & ~program->prog_mask) ||
         !program->base.grf_used)
         return -22;
     if (program->uses_sampler || program->uses_btd_stack_ids || program->base.ray_queries)
         return -95;
+    if (shader->workgroup_size_variable)
+        return -95;
+    int fp_status = stela_intel_fp_controls(device, shader);
+    if (fp_status)
+        return fp_status;
     if (intel_use_jay(device, MESA_SHADER_COMPUTE) &&
         (program->prog_mask & (program->prog_mask - 1)))
         return -22;
@@ -36,7 +44,8 @@ int stela_intel_compute_plan(const struct brw_compiler *compiler, const struct i
     for (unsigned i = 0; i < 3; ++i) {
         if (!program->local_size[i])
             return -95; /* Variable workgroups need their real specialization. */
-        if (program->local_size[i] > 1024 || !groups[i])
+        if (program->local_size[i] > 1024 || !groups[i] ||
+            program->local_size[i] != shader->workgroup_size[i])
             return -22;
         group_size *= program->local_size[i];
         if ((program->prog_mask & (1u << i)) &&

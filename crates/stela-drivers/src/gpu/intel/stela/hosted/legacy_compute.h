@@ -63,8 +63,10 @@ struct stela_intel_legacy_plan {
  *
  * Only no-push or the original one-dword per-thread subgroup payload is
  * implemented. Other uniforms, samplers, workgroup-count bindings, ray-stack,
- * dynamic workgroups and modern walkers fail explicitly. All host pointers
- * stay in this process. Only validated byte/resource references may cross the
+ * dynamic workgroups and modern walkers fail explicitly.
+ * FP32 requires explicit qualified RTE+FTZ or (Gen8+) RTE+preserve controls;
+ * Gen7/7.5 preserve, other widths and unknown/conflicting modes are refused.
+ * All host pointers stay in this process. Only validated byte/resource references may cross the
  * native boundary. Errors (invalid -22, unsupported -95) leave output intact.
  */
 int stela_intel_legacy_brw_plan(const struct brw_compiler *, const struct isl_device *,

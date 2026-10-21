@@ -3,6 +3,7 @@
 #define STELA_INTEL_HOSTED_COMPUTE_H
 
 #include "../compute_dispatch.h"
+#include "compiler/shader_info.h"
 #include "intel/compiler/brw/brw_compiler.h"
 #include "intel/isl/isl.h"
 
@@ -43,7 +44,9 @@ struct stela_intel_compute_plan {
 /* Hosted buffer-only, fixed-workgroup BRW producer. compiler->devinfo and
  * isl->info must be the same actual initialized device object, with valid
  * topology/cache configuration. program must be the actual matching compiled
- * compute result; uploaded code must include its relocations/constant data and
+ * compute result and shader_info must be its matching actual shader stage,
+ * workgroup and floating-point environment. Uploaded code must include its
+ * relocations/constant data and
  * preserve the caller's binary/source provenance. All pointer lifetimes stay
  * in this process. Only the scalar plan and owned native resource references
  * may cross the execution boundary.
@@ -54,6 +57,8 @@ struct stela_intel_compute_plan {
  * stays disabled following Iris defaults. Sampler/ray-stack/push-bearing and
  * variable-workgroup programs require their own resource/payload paths and
  * fail explicitly; Gen35's existing qualification hold remains in force.
+ * Integer shaders may have default mode; FP32 requires explicit qualified
+ * RTE+preserve/FTZ controls. Other widths, unknown or conflicting modes fail.
  *
  * The native owner must apply returned CFE/scratch/SLM/async requirements and
  * actual device cache/L3/workaround/VRT policy before dispatch, retain all
@@ -64,6 +69,7 @@ struct stela_intel_compute_plan {
  */
 int stela_intel_compute_plan(const struct brw_compiler *, const struct isl_device *,
                              const struct brw_cs_prog_data *,
+                             const struct shader_info *,
                              const struct stela_intel_compute_placement *,
                              const uint32_t groups[3], uint32_t variable_slm_bytes,
                              struct stela_intel_compute_plan *);
