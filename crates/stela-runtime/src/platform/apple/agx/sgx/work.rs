@@ -84,10 +84,13 @@ struct Run {
 
 #[derive(Default)]
 pub(super) struct Registers {
-    control: u64,
-    context_mask: u64,
-    legacy_mask: u64,
-    legacy_setup: u64,
+    // No original reset/capture authority currently defines these words.
+    // Unknown is distinct from a readable hardware zero. The other arrays
+    // are storage only: phase masks require source writes before use.
+    control: Option<u64>,
+    context_mask: Option<u64>,
+    legacy_mask: Option<u64>,
+    legacy_setup: Option<u64>,
     context: u32,
     setup: u64,
     resource: u64,
@@ -137,8 +140,12 @@ impl Registers {
 
     fn read(&self, register: Register) -> Result<u64, &'static str> {
         match register {
-            Register::Control => Ok(self.control),
-            Register::ContextMask => Ok(self.context_mask),
+            Register::Control => self
+                .control
+                .ok_or("GFX CL native control initial value is not qualified"),
+            Register::ContextMask => self
+                .context_mask
+                .ok_or("GFX CL native context-mask initial value is not qualified"),
             _ => Err("GFX CL native readback is not an original modeled operation"),
         }
     }
@@ -158,8 +165,8 @@ impl Registers {
             return Err("GFX CL native configuration changed after submission");
         }
         match register {
-            Register::Control if value == self.control | 1 => {
-                self.control = value;
+            Register::Control if self.control.is_some_and(|old| value == old | 1) => {
+                self.control = Some(value);
                 run.programmed |= 1;
             }
             Register::Context
@@ -169,17 +176,19 @@ impl Registers {
                 run.programmed |= 2;
             }
             Register::ContextMask
-                if (value ^ self.context_mask) & !(1u64 << run.submission.context) == 0 =>
+                if self
+                    .context_mask
+                    .is_some_and(|old| (value ^ old) & !(1u64 << run.submission.context) == 0) =>
             {
-                self.context_mask = value;
+                self.context_mask = Some(value);
                 run.programmed |= 4;
             }
-            Register::LegacyMask if policy == Policy::G13X && value == self.context_mask => {
-                self.legacy_mask = value;
+            Register::LegacyMask if policy == Policy::G13X && Some(value) == self.context_mask => {
+                self.legacy_mask = Some(value);
                 run.programmed |= 0x20;
             }
             Register::LegacySetup if policy == Policy::G13X && value == 0x100 => {
-                self.legacy_setup = value;
+                self.legacy_setup = Some(value);
                 run.programmed |= 0x40;
             }
             Register::Setup if value == 0x100 => {
@@ -225,6 +234,9 @@ impl Registers {
         let controls = if policy == Policy::G13X { 0x7f } else { 0x1f };
         if run.parameter_mask != parameters || run.programmed != controls {
             return Err("GFX CL submit precedes complete native parameter/context programming");
+        }
+        if self.control != Some(1) {
+            return Err("GFX CL captured native control mode is not qualified");
         }
         if self.resource != 0 {
             return Err("GFX CL native buffer-cache resource configuration is not qualified");
@@ -694,14 +706,20 @@ mod tests {
             access: &mut access,
         })
     }
+    fn captured_rmw(owner: &FirmwareWork) {
+        let mut native = owner.power.native.borrow_mut();
+        native.work.control = Some(0);
+        native.work.context_mask = Some(1 << 9);
+    }
     fn program(owner: &FirmwareWork, sgx: &mut Sgx, memory: &mut TraceRam) {
+        captured_rmw(owner);
         let mut words = alloc::vec![(Register::Control, 1), (Register::Context, (5 << 8) | 3)];
         if owner.policy == Policy::G13X {
             words.push((Register::LegacySetup, 0x100));
         }
-        words.push((Register::ContextMask, 1 << 5));
+        words.push((Register::ContextMask, 1 << 9 | 1 << 5));
         if owner.policy == Policy::G13X {
-            words.push((Register::LegacyMask, 1 << 5));
+            words.push((Register::LegacyMask, 1 << 9 | 1 << 5));
         }
         for (index, value) in [0, 0x2000, 0, 0, 0, 0, 0, 0x8c60, 0, 0, 0, 1, 0]
             .into_iter()
@@ -926,6 +944,7 @@ mod tests {
             let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
                 .unwrap()
                 .unwrap();
+            captured_rmw(&owner);
             let mut program = Parameters::new(&input, &frame, LEASE, owner.policy).unwrap();
             mapping(&mut memory.ram, VA + 0x14000, SGX + 0x24000, true);
             assert_eq!(
@@ -933,7 +952,7 @@ mod tests {
                     .advance(&mut owner.parameter_access(port))),
                 Err("GFX CL PIO translation disagrees with its actual SGX bank")
             );
-            assert_eq!(power.native.borrow().work.control, 1);
+            assert_eq!(power.native.borrow().work.control, Some(1));
             assert_eq!(power.native.borrow().work.context, 0x503);
             assert_eq!(
                 power
@@ -1022,6 +1041,171 @@ mod tests {
             // Neither source phase completes the original AP command.
             assert!(power.native.borrow().work.active());
         }
+    }
+
+    #[test]
+    fn unknown_native_rmw_words_never_manufacture_reset_readbacks_or_erase_independent_writes() {
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            let mut sgx = gpu(family);
+            let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+            let mcc = cache();
+            let owner = power
+                .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+                .unwrap();
+            let mut memory = ram();
+            owner.begin(&submission(), LEASE).unwrap();
+            for (register, reason) in [
+                (Register::Control, "control initial value"),
+                (Register::ContextMask, "context-mask initial value"),
+            ] {
+                assert!(
+                    io(&mut sgx, &mut memory, |port| owner.read(port, register))
+                        .unwrap_err()
+                        .contains(reason)
+                );
+            }
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner.write(
+                    port,
+                    Register::Control,
+                    1
+                ))
+                .is_err()
+            );
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner.write(
+                    port,
+                    Register::ContextMask,
+                    1 << 5
+                ))
+                .is_err()
+            );
+            // Complete independent native stores retain their values and
+            // phase even though the earlier RMW source remains unqualified.
+            io(&mut sgx, &mut memory, |port| {
+                owner.write(port, Register::Context, 0x503)
+            })
+            .unwrap();
+            io(&mut sgx, &mut memory, |port| {
+                owner.write(port, Register::Parameter(1), 0x2000)
+            })
+            .unwrap();
+            assert!(
+                io(&mut sgx, &mut memory, |port| owner
+                    .read(port, Register::Control))
+                .is_err()
+            );
+            let input = submission();
+            let mut source = Flat::new(0x1000, 0x4000);
+            source.put_u32(input.stream, 11);
+            source.put_u64(input.stream + 0xc, 0x2000);
+            source.put_u32(input.stream + 0x24, input.context);
+            let frame = input.cursor().next(&mut source).unwrap().unwrap();
+            let mut program = crate::platform::apple::agx::work_decode::cl::Parameters::new(
+                &input,
+                &frame,
+                LEASE,
+                owner.policy,
+            )
+            .unwrap();
+            assert!(
+                io(&mut sgx, &mut memory, |port| program
+                    .advance(&mut owner.parameter_access(port)))
+                .unwrap_err()
+                .contains("control initial value")
+            );
+            let native = power.native.borrow();
+            assert_eq!(native.work.control, None);
+            assert_eq!(native.work.context_mask, None);
+            assert_eq!(native.work.legacy_mask, None);
+            assert_eq!(native.work.legacy_setup, None);
+            assert_eq!(native.work.context, 0x503);
+            assert_eq!(native.work.parameters[1], 0x2000);
+            let run = native.work.run.as_ref().unwrap();
+            assert_eq!(run.programmed, 2);
+            assert_eq!(run.parameter_mask, 1 << 1);
+            assert_eq!((memory.reads, memory.writes), (0, 0));
+            assert!(run.backend.is_none());
+        }
+    }
+
+    #[test]
+    fn captured_unqualified_control_flags_are_preserved_but_never_executed() {
+        let mut sgx = gpu(&generation::G14G);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let owner = power
+            .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+            .unwrap();
+        owner.begin(&submission(), LEASE).unwrap();
+        let mut memory = ram();
+        program(&owner, &mut sgx, &mut memory);
+        // A capture can establish bits without establishing their effect.
+        power.native.borrow_mut().work.control = Some(0x41);
+        assert_eq!(
+            io(&mut sgx, &mut memory, |port| owner.write(
+                port,
+                Register::Submit,
+                1
+            )),
+            Err("GFX CL captured native control mode is not qualified")
+        );
+        assert_eq!(power.native.borrow().work.control, Some(0x41));
+        assert_eq!(owner.outcome(), Ok(None));
+        assert_eq!((memory.reads, memory.writes), (0, 0));
+    }
+
+    #[test]
+    fn unknown_later_mask_preserves_the_committed_source_control_phase() {
+        let mut sgx = gpu(&generation::G14G);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let owner = power
+            .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+            .unwrap();
+        let input = submission();
+        let mut source = Flat::new(0x1000, 0x4000);
+        source.put_u32(input.stream, 11);
+        source.put_u64(input.stream + 0xc, 0x2000);
+        source.put_u32(input.stream + 0x24, input.context);
+        let frame = input.cursor().next(&mut source).unwrap().unwrap();
+        let mut program = crate::platform::apple::agx::work_decode::cl::Parameters::new(
+            &input,
+            &frame,
+            LEASE,
+            owner.policy,
+        )
+        .unwrap();
+        // Only this captured word is known. There is no mask capture.
+        power.native.borrow_mut().work.control = Some(0x40);
+        let mut memory = ram();
+        assert!(
+            io(&mut sgx, &mut memory, |port| program
+                .advance(&mut owner.parameter_access(port)))
+            .unwrap_err()
+            .contains("context-mask initial value")
+        );
+        assert_eq!(power.native.borrow().work.control, Some(0x41));
+        assert_eq!(power.native.borrow().work.context, 0x500);
+        assert_eq!(
+            power.native.borrow().work.run.as_ref().unwrap().programmed,
+            3
+        );
+        // Losing later capture authority cannot replay the already committed
+        // control phase. Retry still reaches only the unknown mask read.
+        power.native.borrow_mut().work.control = None;
+        assert!(
+            io(&mut sgx, &mut memory, |port| program
+                .advance(&mut owner.parameter_access(port)))
+            .unwrap_err()
+            .contains("context-mask initial value")
+        );
+        assert_eq!(power.native.borrow().work.control, None);
+        assert_eq!(
+            power.native.borrow().work.run.as_ref().unwrap().programmed,
+            3
+        );
+        assert_eq!((memory.reads, memory.writes), (0, 0));
     }
 
     #[test]
