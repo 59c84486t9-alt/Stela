@@ -1256,7 +1256,7 @@ pub const DISPEXT: &str = "dispext0,t8112";
 ///   (`_changeDCPPowerStateInternal`, 0x22f8928), whose RTKit power messages
 ///   the coprocessor model answers.
 ///
-/// The internal display's `dcp0-expert` (`role` `DCP`) stays hidden with its
+/// The primary display pipe's `dcp0-expert` (`role` `DCP`) stays hidden with its
 /// unmodeled coprocessor.
 pub const DCP_EXPERT: &str = "dcp-expert-v1";
 pub const DPTX_PHY: &str = "dptx-phy,t8112";

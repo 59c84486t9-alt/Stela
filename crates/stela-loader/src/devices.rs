@@ -61,6 +61,12 @@
 //! a client without its provider gets `AAPL,ignore`, which XNU's
 //! `IODTFindMatchingEntries` skips. Its name, phandle and properties remain
 //! available as DeviceTree data. Optional functions are not dependencies.
+//!
+//! A final pass also retires audited service-advertising `device_type`
+//! values on hidden devices: raw DeviceTree display discovery does not
+//! honor `compatible` or `AAPL,ignore`. The existing admission ledger keeps
+//! the hidden paths; original inputs retain the removed identity bytes.
+//! Structural and unaudited type metadata remain.
 use crate::apple_device_tree::{DeviceTree, Node};
 use alloc::{format, string::String, vec::Vec};
 use stela_runtime::machine::soc;
@@ -74,6 +80,11 @@ const DEVICE_TYPE: &str = "device_type";
 const IOMMU_PARENT: &str = "iommu-parent";
 const NO_PMU: &str = "no-pmu";
 const IGNORE: &str = "AAPL,ignore";
+/// Raw DeviceTree consumers use these physical display classes as service
+/// advertisements even after `compatible` is removed. Only audited class
+/// identities are retired; unknown `device_type` metadata stays intact.
+/// See `installer-warnings.md#display-service-admission` for both consumers.
+const SERVICE_IDENTITIES: &[&[u8]] = &[b"display-subsystem\0", b"ext-display-subsystem\0"];
 /// Required functions of name-matched hardware classes, not optional
 /// callbacks inferred from arbitrary `function-*` properties. The original
 /// AMFM requires its PCIe platform function. Other WLAN interfaces need
@@ -276,7 +287,30 @@ pub fn hide_unmodeled(tree: &mut DeviceTree) -> Vec<String> {
         }
     }
     publish_gpu_ttbat(tree, &mut hidden);
+    retire_hidden_service_identities(tree, &hidden);
     hidden
+}
+
+/// Retire a proven service-advertising class only after the admission pass
+/// has established that its physical device is unavailable. The path ledger
+/// stays unchanged; the original input and its source provenance retain the
+/// identity bytes separately from this prepared tree. Names and phandles
+/// stay usable by metadata readers; structural and unaudited types stay intact.
+fn retire_hidden_service_identities(tree: &mut DeviceTree, hidden: &[String]) {
+    for path in hidden {
+        if structural(path) {
+            continue;
+        }
+        let Some(node) = tree.node_mut(path) else {
+            continue;
+        };
+        if node
+            .property(DEVICE_TYPE)
+            .is_some_and(|property| SERVICE_IDENTITIES.contains(&property.value.as_slice()))
+        {
+            node.remove_property(DEVICE_TYPE);
+        }
+    }
 }
 
 fn required_service(node: &Node) -> Option<&'static str> {
@@ -792,6 +826,108 @@ mod tests {
             .unwrap();
         assert!(hide_unmodeled(&mut absent).is_empty());
         assert!(absent.property("/wlan", COMPATIBLE).is_some());
+    }
+
+    fn typed(mut node: Node, kind: &[u8]) -> Node {
+        node.set_property(DEVICE_TYPE, kind.to_vec()).unwrap();
+        node
+    }
+
+    #[test]
+    fn only_hidden_audited_service_classes_retire_their_raw_tree_identity() {
+        let original = typed(
+            phandle(node("unavailable", Some(b"unmodeled-display\0"), vec![]), 9),
+            b"display-subsystem\0",
+        );
+        let mut tree = DeviceTree {
+            root: node(
+                "",
+                None,
+                vec![
+                    original.clone(),
+                    typed(
+                        node("admitted", Some(soc::DISPEXT.as_bytes()), vec![]),
+                        b"ext-display-subsystem\0",
+                    ),
+                    typed(
+                        node("unmodeled", Some(b"unknown\0"), vec![]),
+                        b"unaudited-device\0",
+                    ),
+                ],
+            ),
+        };
+        let hidden = hide_unmodeled(&mut tree);
+        assert_eq!(hidden, ["/unavailable", "/unmodeled"]);
+        assert!(tree.property("/unavailable", DEVICE_TYPE).is_none());
+        let mut expected = original.clone();
+        expected.remove_property(COMPATIBLE);
+        expected.remove_property(DEVICE_TYPE);
+        // Retirement preserves names, phandles, remaining property order
+        // and every other datum. The original input remains unchanged.
+        assert_eq!(tree.node("/unavailable").unwrap(), &expected);
+        assert_eq!(
+            tree.property("/admitted", DEVICE_TYPE).unwrap().value,
+            b"ext-display-subsystem\0"
+        );
+        assert!(tree.property("/admitted", COMPATIBLE).is_some());
+        assert_eq!(
+            tree.property("/unmodeled", DEVICE_TYPE).unwrap().value,
+            b"unaudited-device\0"
+        );
+        assert!(hide_unmodeled(&mut tree).is_empty());
+    }
+
+    #[test]
+    fn identity_retirement_requires_a_hidden_ledger_entry_and_preserves_structural_metadata() {
+        let mut tree = DeviceTree {
+            root: typed(
+                node(
+                    "",
+                    None,
+                    vec![
+                        typed(
+                            node(
+                                "arm-io",
+                                None,
+                                vec![typed(
+                                    node("unavailable", None, vec![]),
+                                    b"ext-display-subsystem\0",
+                                )],
+                            ),
+                            b"display-subsystem\0",
+                        ),
+                        node(
+                            "cpus",
+                            None,
+                            vec![typed(node("cpu0", None, vec![]), b"display-subsystem\0")],
+                        ),
+                        typed(node("memory", None, vec![]), b"memory\0"),
+                        typed(node("metadata", None, vec![]), b"display-subsystem\0"),
+                    ],
+                ),
+                b"display-subsystem\0",
+            ),
+        };
+        let original = tree.clone();
+        let mut ledger = vec![
+            "/".into(),
+            "/arm-io".into(),
+            "/cpus/cpu0".into(),
+            "/memory".into(),
+        ];
+        retire_hidden_service_identities(&mut tree, &ledger);
+        assert_eq!(tree, original);
+        ledger.push("/arm-io/unavailable".into());
+        retire_hidden_service_identities(&mut tree, &ledger);
+        assert!(tree.property("/arm-io/unavailable", DEVICE_TYPE).is_none());
+        assert_eq!(
+            tree.property("/metadata", DEVICE_TYPE).unwrap().value,
+            b"display-subsystem\0"
+        );
+        assert_eq!(ledger.last().unwrap(), "/arm-io/unavailable");
+        let prior = ledger.clone();
+        retire_hidden_service_identities(&mut tree, &ledger);
+        assert_eq!(ledger, prior);
     }
 
     #[test]
