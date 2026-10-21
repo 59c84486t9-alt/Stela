@@ -144,6 +144,8 @@ pub struct Methods {
     completed: VecDeque<u32>,
     /// A callback is out and not answered yet.
     in_flight: bool,
+    /// The AP shut the link down (`link_shutdown_signal`).
+    shut_down: bool,
 }
 
 impl Methods {
@@ -167,6 +169,7 @@ impl Methods {
             outgoing: VecDeque::new(),
             completed: VecDeque::new(),
             in_flight: false,
+            shut_down: false,
         }
     }
 
@@ -354,6 +357,12 @@ impl Service for Methods {
         };
         if row.input as usize != input.len() || row.output != output {
             return self.refuse(tag, "call sizes differ from the interface's record");
+        }
+        if self.shut_down {
+            return self.refuse(
+                tag,
+                "the AP shut the DCP link down; restarting the coprocessor is not modeled",
+            );
         }
         let mut fields = Fields::new(input);
         match &tag {
@@ -543,6 +552,30 @@ impl Service for Methods {
                 self.frames.clear();
                 let packed = Packed::new().u32(IO_RETURN_SUCCESS).finish(output);
                 self.reply(tag, packed)
+            }
+            // link_shutdown_signal(bool hibernate, bool): the AP's
+            // DCPPowerManager::set_power_state (0x3d852c0) sends it for
+            // power state 0 once the link is idle, then waits for its own
+            // streams and cuts the DCP's power and DART; no method follows.
+            // The firmware (restore 0x191390, normal 0x191594) reads only
+            // the first byte. 1 also saves the pipe for hibernation
+            // (0x191434, 0x1884a4). Otherwise it stops the pipe (0x27c99c),
+            // tears its AP link down (0x1871f0) and answers nothing. The
+            // model's pipe stops: no queued swap is presented or completed
+            // and no callback follows.
+            b"A500" => {
+                if fields.u8()? == 1 {
+                    return self.refuse(
+                        tag,
+                        "link_shutdown_signal saves the pipe for hibernation, which is not modeled",
+                    );
+                }
+                self.shut_down = true;
+                self.open_swap = None;
+                self.frames.clear();
+                self.outgoing.clear();
+                self.completed.clear();
+                Ok(Step::Return(Vec::new()))
             }
             _ => match answer(&tag, input, output, self.mode()) {
                 Ok(bytes) => Ok(Step::Return(bytes)),
@@ -894,6 +927,29 @@ mod tests {
         let sizes = Packed::new().u32(0x4000).u32(0x40).finish(8).unwrap();
         assert!(returned(methods.call(*b"A465", &sizes, 0)).is_empty());
         assert!(methods.last_refusal().is_none());
+    }
+
+    #[test]
+    fn link_shutdown_stops_the_pipe_and_hibernation_refuses() {
+        // Hibernation (first byte 1) refuses and leaves the link up.
+        let mut hibernating = methods();
+        assert!(hibernating.call(*b"A500", &[1, 1, 0xaa, 0xaa], 0).is_err());
+        assert_eq!(returned(hibernating.call(*b"A035", &[], 4)), [0; 4]);
+        // set_power_state's link_shutdown_signal(false, true), padded 0xaaaa,
+        // with the published mode's callbacks still queued.
+        let mut methods = methods();
+        started(&mut methods);
+        assert!(methods.callback_pending());
+        assert!(returned(methods.call(*b"A500", &[0, 1, 0xaa, 0xaa], 0)).is_empty());
+        assert!(!methods.callback_pending() && methods.take_callback().is_none());
+        // The link is down: nothing more is served.
+        assert!(methods.call(*b"A035", &[], 4).is_err());
+        assert!(
+            methods
+                .last_refusal()
+                .unwrap()
+                .contains("shut the DCP link down")
+        );
     }
 
     #[test]
