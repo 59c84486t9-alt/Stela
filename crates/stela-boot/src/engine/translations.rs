@@ -45,6 +45,12 @@ const CONFIG_LIMIT: usize = 256;
 /// name the FAT32 reader finds.
 const NAME_BYTES: usize = 4;
 const PACK_EXTENSION: &str = "pak";
+/// A blank, preallocated pack file `stela setup` keeps beside the packs: a
+/// new translator's pack takes it by rename. The boot never grows a file,
+/// which the firmware does by writing every byte.
+const SPARE: &str = "spare.bin";
+/// The pack is read in steps of this many bytes, each shown as progress.
+const PROGRESS_STEP: usize = 16 << 20;
 /// The largest pack the boot holds in memory and writes: the bound of
 /// `store.cfg` is cut to it.
 const MAX_PACK_BYTES: u64 = 512 << 20;
@@ -55,8 +61,8 @@ const PLACEMENT_BYTES: usize = 64;
 /// The pack file holds the bound's bytes and its volume's partition is
 /// known: the engine may rewrite it.
 const WRITABLE: u32 = 1;
-/// The words of the buffer a grown file's `FileInfo` is built in: its fixed
-/// fields and an 8.3 name.
+/// The words of the buffer a renamed file's `FileInfo` is built in: its
+/// fixed fields and an 8.3 name.
 const FILE_INFO_WORDS: usize = 64;
 
 /// The pack file's path, with `separator` between components.
@@ -149,20 +155,25 @@ pub fn read() -> Option<(Region, bool)> {
         };
         let bound = bound.min(MAX_PACK_BYTES);
         let path = pack_path(&translator, "\\");
-        // A read-only volume's pack is read and never written.
-        let (mut file, writable) = match open(&mut root, &path, FileMode::CreateReadWrite) {
-            Some(file) => (file, true),
-            None => match open(&mut root, &path, FileMode::Read) {
-                Some(file) => (file, false),
-                None => {
-                    output::arguments(format_args!("TRANSLATIONS {path} cannot be opened\n"));
-                    return None;
-                }
-            },
-        };
+        if open(&mut root, &path, FileMode::Read).is_none() {
+            claim_spare(&mut root, &translator);
+        }
+        // A read-only volume's pack is read and never written; a missing
+        // one leaves the boot's translations in memory.
+        let opened = open(&mut root, &path, FileMode::ReadWrite)
+            .map(|file| (file, true))
+            .or_else(|| open(&mut root, &path, FileMode::Read).map(|file| (file, false)));
         let partition = partition(handle);
-        let allocated = writable && allocate(&mut file, bound);
-        let pack = read_pack(&mut file, &translator, bound);
+        let (pack, allocated) = match opened {
+            Some((mut file, writable)) => {
+                let allocated = writable
+                    && file
+                        .get_boxed_info::<FileInfo>()
+                        .is_ok_and(|info| info.file_size() >= bound);
+                (read_pack(&mut file, &translator, bound), allocated)
+            }
+            None => (None, false),
+        };
         output::arguments(format_args!(
             "TRANSLATIONS {path} bound={bound} pack={} allocated={allocated} partition={}\n",
             pack.as_ref().map_or(0, Vec::len),
@@ -194,32 +205,41 @@ pub fn read() -> Option<(Region, bool)> {
     None
 }
 
-/// Grow `file` to `bound` bytes: whether it holds them.
-fn allocate(file: &mut RegularFile, bound: u64) -> bool {
-    let Ok(info) = file.get_boxed_info::<FileInfo>() else {
-        return false;
+/// Give `translator` the spare pack file by renaming it, when the store
+/// has one: the file keeps its preallocated clusters.
+fn claim_spare(root: &mut Directory, translator: &Digest) {
+    let Some(mut file) = open(root, &format!("{DIRECTORY}\\{SPARE}"), FileMode::ReadWrite) else {
+        return;
     };
-    if info.file_size() >= bound {
-        return true;
-    }
+    let Ok(info) = file.get_boxed_info::<FileInfo>() else {
+        return;
+    };
+    let Ok(name) = CString16::try_from(pack_path(translator, "/").rsplit('/').next().unwrap_or(""))
+    else {
+        return;
+    };
     let mut storage = vec![0u64; FILE_INFO_WORDS];
     // SAFETY: the words' bytes, 8-byte aligned as FileInfo requires.
     let bytes = unsafe {
         core::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), storage.len() * 8)
     };
-    let Ok(grown) = FileInfo::new(
+    let Ok(renamed) = FileInfo::new(
         bytes,
-        bound,
+        info.file_size(),
         info.physical_size(),
         *info.create_time(),
         *info.last_access_time(),
         *info.modification_time(),
         info.attribute(),
-        info.file_name(),
+        &name,
     ) else {
-        return false;
+        return;
     };
-    file.set_info(grown).is_ok() && file.flush().is_ok()
+    let claimed = file.set_info(renamed).is_ok() && file.flush().is_ok();
+    output::arguments(format_args!(
+        "TRANSLATIONS spare {} as {name}\n",
+        if claimed { "taken" } else { "refused" }
+    ));
 }
 
 /// The pack at the start of `file`, when its index is valid and it fits
@@ -235,7 +255,12 @@ fn read_pack(file: &mut RegularFile, translator: &Digest, bound: u64) -> Option<
         return None;
     }
     bytes.resize(length as usize, 0);
-    read_at(file, prefix as u64, &mut bytes[prefix..])?;
+    let total = bytes.len() >> 20;
+    for (index, part) in bytes[prefix..].chunks_mut(PROGRESS_STEP).enumerate() {
+        read_at(file, (prefix + index * PROGRESS_STEP) as u64, part)?;
+        let done = (prefix + index * PROGRESS_STEP + part.len()) >> 20;
+        crate::status::progress(&format!("{done} of {total} MB"));
+    }
     Some(bytes)
 }
 

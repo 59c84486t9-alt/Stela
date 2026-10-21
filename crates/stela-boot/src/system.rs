@@ -292,7 +292,12 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
     crate::status::begin("Opening the translation cache");
     let translations = crate::engine::translations::read();
     match &translations {
-        Some((store, _)) => crate::status::done(&format!("{} MB", store.bytes >> 20)),
+        Some((store, true)) => crate::status::done(&format!("{} MB", store.bytes >> 20)),
+        Some((store, false)) => crate::status::warn(&format!(
+            "{} MB; new translations stay in memory this boot: `stela setup --repair` prepares \
+             the file",
+            store.bytes >> 20
+        )),
         None => crate::status::done("none on this USB"),
     }
     if files.len() < MAX_FILES

@@ -7,7 +7,14 @@
 //! ```text
 //! EFI/stela/store/store.cfg      `bytes N`: one pack's bound
 //! EFI/stela/store/XXXXXXXX.pak   one pack per translator id
+//! EFI/stela/store/spare.bin      a blank pack file of the bound
 //! ```
+//!
+//! `stela.efi` never grows a file: the firmware grows one by writing every
+//! byte, minutes over USB. A new translator's first boot takes the spare by
+//! renaming it to its pack's name, and setup prepares the next spare
+//! whenever it publishes the store, an update included. A pack that is
+//! still blank is sound: its translator has not written it yet.
 //!
 //! Every name is an 8.3 name, which `stela.efi`'s own FAT32 reader finds
 //! after boot services end to rewrite its pack in place: a pack is named by
@@ -38,6 +45,8 @@ pub(super) const DIRECTORY: &str = "EFI/stela/store";
 pub(super) const CONFIG: &str = "store.cfg";
 const BYTES_KEY: &str = "bytes";
 const PACK_EXTENSION: &str = "pak";
+/// The blank pack file a new translator's pack takes by rename.
+pub(super) const SPARE: &str = "spare.bin";
 /// The translator id bytes a pack's file name holds.
 const NAME_BYTES: usize = 4;
 /// A pack's leading bytes: magic, schema, record count, translator id.
@@ -74,7 +83,7 @@ impl Store {
         format!("{BYTES_KEY} {}\n", self.pack_bytes)
     }
 
-    /// Create the directory and write `store.cfg`.
+    /// Create the directory, write `store.cfg` and prepare the spare.
     pub(super) fn publish(&self) -> Result<()> {
         let directory = self.directory();
         fs::create_dir_all(&directory)
@@ -83,7 +92,33 @@ impl Store {
             &directory.join(CONFIG),
             self.config_text().as_bytes(),
             false,
-        )
+        )?;
+        self.prepare_spare()
+    }
+
+    /// Whether the spare holds the bound's bytes.
+    pub(super) fn spare_ready(&self) -> bool {
+        fs::metadata(self.directory().join(SPARE)).is_ok_and(|m| m.len() >= self.pack_bytes)
+    }
+
+    /// Allocate the spare at the bound: FAT32 has no sparse files, so the
+    /// volume gives it zeroed clusters now, on the Mac.
+    fn prepare_spare(&self) -> Result<()> {
+        if self.spare_ready() {
+            return Ok(());
+        }
+        let path = self.directory().join(SPARE);
+        let file =
+            fs::File::create(&path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.set_len(self.pack_bytes)
+            .and_then(|()| file.sync_all())
+            .with_context(|| {
+                format!(
+                    "cannot allocate {} bytes for {}",
+                    self.pack_bytes,
+                    path.display()
+                )
+            })
     }
 
     /// Whether `store.cfg` says what the record does.
@@ -158,6 +193,13 @@ impl Store {
                 self.pack_bytes
             ));
         }
+        if !self.spare_ready() {
+            repairs.push(format!(
+                "prepare {} ({} bytes)",
+                self.directory().join(SPARE).display(),
+                self.pack_bytes
+            ));
+        }
         for pack in self.stale() {
             repairs.push(format!(
                 "remove {}{}",
@@ -214,6 +256,10 @@ fn check(path: &Path, bytes: u64, bound: u64) -> Result<(), String> {
     fs::File::open(path)
         .and_then(|mut file| file.read_exact(&mut header))
         .map_err(|_| "is shorter than a pack header".to_string())?;
+    // A spare its translator took and has not written yet.
+    if header.iter().all(|&byte| byte == 0) {
+        return Ok(());
+    }
     if &header[..PACK_MAGIC.len()] != PACK_MAGIC {
         return Err("is not a STLTPACK pack".into());
     }
@@ -236,7 +282,7 @@ pub(super) fn pack_name(id: &[u8]) -> String {
 }
 
 /// The bytes a store of `pack_bytes` needs on its volume: the kept packs
-/// and one rewrite beside them, and a margin.
+/// and the spare beside them, and a margin.
 pub(super) fn needed_bytes(pack_bytes: u64) -> u64 {
     pack_bytes * (PACKS_KEPT as u64 + 1) + MARGIN
 }
@@ -379,6 +425,20 @@ pub(super) mod tests {
         };
         store.publish().unwrap();
         assert!(store.config_intact());
+        assert!(store.spare_ready());
+        assert!(store.repairs().is_empty(), "{:?}", store.repairs());
+        // A spare taken under a pack's name is sound until it is written.
+        let blank = store.directory().join(pack_name(&[8u8; 32]));
+        fs::rename(store.directory().join(SPARE), &blank).unwrap();
+        assert!(!store.spare_ready());
+        assert!(
+            store.repairs()[0].starts_with("prepare "),
+            "{:?}",
+            store.repairs()
+        );
+        assert_eq!(store.packs()[0].problem, None);
+        fs::remove_file(&blank).unwrap();
+        store.publish().unwrap();
         assert_eq!(
             fs::read_to_string(store.directory().join(CONFIG)).unwrap(),
             "bytes 4096\n"

@@ -322,6 +322,8 @@ pub(super) fn update_stela(
     prune(&mut record)?;
     if let Some(store) = &record.translations {
         store.prune()?;
+        // The new translator's first boot takes the spare.
+        store.publish()?;
     }
     write_record(&esp, &record)?;
     text.push_str("Done. Undo with: stela setup --rollback\n");

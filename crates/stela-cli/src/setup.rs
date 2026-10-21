@@ -3390,9 +3390,10 @@ mod tests {
         assert!(!written[0].exists() && written[1..].iter().all(|path| path.exists()));
         assert_eq!(
             fs::read_dir(&packs).unwrap().count(),
-            4,
-            "store.cfg and three packs"
+            5,
+            "store.cfg, three packs and the spare"
         );
+        assert!(packs.join(translations::SPARE).exists());
         assert_eq!(fs::read(&tool).unwrap(), efi_image(b"stela-2"));
         // Only the loader changed: stela.cfg stays.
         assert_eq!(fs::read(f.esp.join(efi::OPTIONS)).unwrap(), config);
