@@ -5,4 +5,5 @@ pub mod dma;
 pub mod i2c;
 pub(crate) mod mmio;
 pub mod pci;
+pub mod smbus;
 pub mod virtio;
