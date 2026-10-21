@@ -646,7 +646,10 @@ mod tests {
             dma(&mut coprocessor, &mut ram).unwrap();
             iop_power(&mut coprocessor, 0x220).unwrap();
             assert!(quiesced(&coprocessor.link));
-            assert_eq!(iop_power(&mut coprocessor, 0), Err("DCP IOP memory-loss power transition is not modeled"));
+            assert_eq!(
+                iop_power(&mut coprocessor, 0),
+                Err("DCP IOP memory-loss power transition is not modeled")
+            );
             iop_power(&mut coprocessor, 0x220).unwrap();
             assert!(quiesced(&coprocessor.link));
         }
@@ -712,9 +715,13 @@ mod tests {
         );
         // A CPU stop cannot abandon a queued DMA/RPC message.
         assert!(asc.write(0x44, Width::Word, 0, &mut access).is_err());
-        asc.write(0x8800, Width::Double, 6 << 52 | 0x201, &mut access).unwrap();
+        asc.write(0x8800, Width::Double, 6 << 52 | 0x201, &mut access)
+            .unwrap();
         assert!(asc.write(0x8808, Width::Double, 0, &mut access).is_err());
-        assert_eq!(asc.firmware::<Coprocessor>().unwrap().rtkit.iop_power(), 0x20);
+        assert_eq!(
+            asc.firmware::<Coprocessor>().unwrap().rtkit.iop_power(),
+            0x20
+        );
         assert!(asc.read(0x8830, Width::Double, &mut access).is_err());
         with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
         take(&mut asc, &mut access);
@@ -1020,17 +1027,38 @@ mod tests {
         assert!(!coprocessor.dma_pending() && !coprocessor.retained_idle());
         let heap = coprocessor.link.borrow().heap();
         let mut no_ack = Vec::new();
-        assert_eq!(coprocessor.receive(Message { endpoint: 0, payload: 6 << 52 | 0x201 }, &mut no_ack), Err("DCP IOP sleep with unfinished RPC, scanout or AFK work"));
+        assert_eq!(
+            coprocessor.receive(
+                Message {
+                    endpoint: 0,
+                    payload: 6 << 52 | 0x201
+                },
+                &mut no_ack
+            ),
+            Err("DCP IOP sleep with unfinished RPC, scanout or AFK work")
+        );
         assert!(no_ack.is_empty());
         assert_eq!(coprocessor.rtkit.iop_power(), 0x20);
         assert!(coprocessor.stop().is_err());
-        assert!(endpoint.start(&mut no_ack).is_err());
-        assert!(no_ack.is_empty());
+        let mut no_endpoint_ack = Vec::new();
+        assert!(endpoint.start(&mut no_endpoint_ack).is_err());
+        assert!(no_endpoint_ack.is_empty());
         assert_eq!(coprocessor.link.borrow().heap(), heap);
-        endpoint.receive(link::Word::Rpc(callback.answer()).encode(), &mut Vec::new()).unwrap();
+        endpoint
+            .receive(link::Word::Rpc(callback.answer()).encode(), &mut Vec::new())
+            .unwrap();
         assert!(dma(&mut coprocessor, &mut ram).unwrap().is_empty());
         assert!(coprocessor.retained_idle());
-        assert_eq!(coprocessor.receive(Message { endpoint: 0, payload: 6 << 52 }, &mut no_ack), Err("DCP IOP memory-loss power transition is not modeled"));
+        assert_eq!(
+            coprocessor.receive(
+                Message {
+                    endpoint: 0,
+                    payload: 6 << 52
+                },
+                &mut no_ack
+            ),
+            Err("DCP IOP memory-loss power transition is not modeled")
+        );
         assert!(no_ack.is_empty());
         assert_eq!(coprocessor.rtkit.iop_power(), 0x20);
     }
