@@ -31,6 +31,7 @@
 //! core's own timers, performance monitor and vGIC went down with it. Its
 //! reset vector is the board's (`Devices::reset_vector`), and the board
 //! learns of each power-down and power-up (`Devices::processor_power`).
+mod retained;
 use super::{
     Devices, Host, Machine, RequirementKind, Start, Step, Stop, Wait, WaitKind, interrupt_pending,
     system, timer,
@@ -42,6 +43,10 @@ use crate::machine::{
     registers::Lines,
 };
 use alloc::{boxed::Box, vec::Vec};
+pub use retained::{
+    PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
+    ProcessorTarget, Processors,
+};
 
 /// Blocks a PE runs before the next PE that can run gets its turn.
 pub(super) const QUANTUM: u64 = 1 << 14;
@@ -92,8 +97,9 @@ pub enum PeerState<'a> {
     /// Powered down by a WFI in CYC_OVRD's power-down mode; its state is
     /// lost.
     Down,
-    /// Out of reset but not running: its state, and whether it waits in
-    /// WFI (`Some(true)`) or WFE (`Some(false)`).
+    /// Out of reset but not running, including a retained clock/quiesce
+    /// pause: its state, and whether it waits in WFI (`Some(true)`) or WFE
+    /// (`Some(false)`).
     Parked {
         cpu: &'a Cpu,
         wfi: Option<bool>,
@@ -101,6 +107,74 @@ pub enum PeerState<'a> {
 }
 
 impl<H: Host, D: Devices> Machine<H, D> {
+    /// Qualified retained participants, separate from the live/parked Cpu
+    /// ownership slots. An unbound inventory grants no PMGR support credit.
+    pub fn processors(&self) -> &Processors {
+        &self.processor_power
+    }
+
+    /// Bind positively identified owners with an explicit handoff state.
+    /// Every binding is checked before any participant or CPU changes.
+    pub fn bind_processor_power(
+        &mut self,
+        bindings: &[ProcessorBinding],
+    ) -> Result<(), ProcessorPowerError> {
+        let plan = self.processor_power.prepare_bindings(bindings)?;
+        self.settle_processor_power(plan)
+    }
+
+    pub fn prepare_processor_power(
+        &self,
+        changes: &[ProcessorChange],
+    ) -> Result<PreparedProcessorPower, ProcessorPowerError> {
+        self.processor_power.prepare(changes)
+    }
+
+    /// Commit at one instruction boundary, before a controller acknowledges
+    /// its request. Stale/replaced plans refuse before any CPU or clock effect.
+    /// No production PMGR resolver/bridge is enabled by this independent API.
+    pub fn settle_processor_power(
+        &mut self,
+        plan: PreparedProcessorPower,
+    ) -> Result<(), ProcessorPowerError> {
+        let changes = self.processor_power.settle(plan)?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let host = self.host.counter();
+        self.clock.end_slice(host, self.statistics.blocks);
+        let now = self.clock.read(host);
+        let mut current_changed = false;
+        for change in changes {
+            match &mut self.peers[change.pe] {
+                Peer::Running => {
+                    pause_cpu(&mut self.cpu, self.waiting, now, change.paused);
+                    current_changed = true;
+                }
+                Peer::Parked(parked) => {
+                    pause_cpu(&mut parked.cpu, parked.waiting, now, change.paused);
+                }
+                Peer::Off => {}
+            }
+        }
+        // End the old runnable-share accounting even when only parked PEs
+        // changed. The scheduler starts the next slice with the new share.
+        self.slice_end = self.statistics.blocks;
+        if current_changed {
+            self.device_lines = None;
+            // Only derived host dispatch/shadow state is discarded. This is
+            // not guest cache maintenance or a cluster state reset.
+            self.translations_changed();
+        }
+        Ok(())
+    }
+
+    pub(super) fn processor_paused(&self, pe: usize) -> bool {
+        self.processor_power
+            .paused(pe)
+            .expect("one retained slot per PE")
+    }
+
     /// The number of the running PE.
     pub fn processor(&self) -> usize {
         self.current
@@ -112,6 +186,10 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .iter()
             .map(|peer| match peer {
                 Peer::Running if down(self.waiting) => PeerState::Down,
+                Peer::Running if self.processor_paused(self.current) => PeerState::Parked {
+                    cpu: &self.cpu,
+                    wfi: self.waiting.map(|wait| wait.kind == WaitKind::Interrupt),
+                },
                 Peer::Running => PeerState::Running,
                 Peer::Off => PeerState::Off,
                 Peer::Parked(parked) if down(parked.waiting) => PeerState::Down,
@@ -140,7 +218,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// limit, or that only the host's inputs can end, returns to the host.
     pub(super) fn schedule(&mut self) -> Step {
         self.take_starts()?;
-        if self.waiting.is_none()
+        if !self.processor_paused(self.current)
+            && self.waiting.is_none()
             && self.statistics.blocks < self.slice_end
             && (self.peers.len() < 2 || self.now() < self.slice_deadline)
         {
@@ -216,11 +295,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// those out of reset and not waiting for an interrupt. A PE in WFE
     /// spins, so it shares the round.
     fn runnable(&self) -> u64 {
-        let parked = self.peers.iter().filter(|peer| {
+        let parked = self.peers.iter().enumerate().filter(|(pe, peer)| {
+            if self.processor_paused(*pe) {
+                return false;
+            }
             matches!(peer, Peer::Parked(parked)
                 if parked.waiting.is_none_or(|wait| wait.kind != WaitKind::Interrupt))
         });
-        1 + parked.count() as u64
+        u64::from(!self.processor_paused(self.current)) + parked.count() as u64
     }
 
     /// Whether PE `pe` can run: it is running or preempted, or a WFI it waits
@@ -230,6 +312,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// powered-down PE wakes when a device line its CYC_OVRD enables
     /// asserts.
     fn ready(&mut self, pe: usize, now: u64) -> bool {
+        if self.processor_paused(pe) {
+            return false;
+        }
         if pe == self.current {
             return match self.waiting {
                 None => true,
@@ -329,7 +414,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             })
         };
         let mut deadlines = Vec::new();
-        if !down(self.waiting) {
+        if !self.processor_paused(self.current) && !down(self.waiting) {
             deadlines.extend([
                 self.timer_deadline(),
                 self.cpu.pmu.as_ref().and_then(|monitor| monitor.deadline()),
@@ -337,8 +422,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 timeout(self.waiting),
             ]);
         }
-        for peer in &self.peers {
+        for (pe, peer) in self.peers.iter().enumerate() {
             if let Peer::Parked(parked) = peer
+                && !self.processor_paused(pe)
                 && !down(parked.waiting)
             {
                 deadlines.push(timer::deadline(&parked.cpu));
@@ -526,6 +612,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             cpu.apple.impdef.join(&peer.apple.impdef);
         }
         cpu.memory_lock = self.cpu.memory_lock;
+        let now = self.now();
+        pause_cpu(&mut cpu, None, now, self.processor_paused(pe));
         if pe == self.current {
             self.cpu = cpu;
             self.waiting = None;
@@ -540,6 +628,29 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }));
         }
         self.devices.processor_power(pe, true);
+    }
+}
+
+/// Preserve architectural state and pending status while stopping only the
+/// declared core accounting. The system counter and timer comparators remain
+/// global. Local reservations can be lost at any time (as at a PE switch).
+fn pause_cpu(cpu: &mut Cpu, waiting: Option<Wait>, now: u64, paused: bool) {
+    let waiting = paused || waiting.is_some();
+    if let Some(pmu) = cpu.pmu.as_mut() {
+        pmu.sync(
+            now,
+            cpu.retired,
+            crate::machine::pmu::Context {
+                el: cpu.pstate.el,
+                waiting,
+            },
+        );
+    }
+    if let Some(amu) = cpu.amu.as_mut() {
+        amu.sync(now, cpu.retired, waiting);
+    }
+    if paused {
+        cpu.monitor = None;
     }
 }
 
@@ -654,6 +765,410 @@ mod tests {
             Peer::Parked(parked) => &parked.cpu,
             _ => panic!("PE {pe} is not parked"),
         }
+    }
+
+    const RETAINED_ACTIVE: crate::platform::apple::bus::LifecycleState =
+        crate::platform::apple::bus::LifecycleState {
+            powered: true,
+            clocked: true,
+            quiesced: false,
+            reset: false,
+            retention: false,
+        };
+    const RETAINED_GATED: crate::platform::apple::bus::LifecycleState =
+        crate::platform::apple::bus::LifecycleState {
+            clocked: false,
+            ..RETAINED_ACTIVE
+        };
+
+    fn core_binding(domain: u64, pe: usize) -> ProcessorBinding {
+        ProcessorBinding {
+            domain,
+            target: ProcessorTarget::Core { pe },
+            initial: RETAINED_ACTIVE,
+        }
+    }
+
+    fn power_change(
+        machine: &mut Machine<FakeHost, Board>,
+        domain: u64,
+        state: crate::platform::apple::bus::LifecycleState,
+    ) {
+        let plan = machine
+            .prepare_processor_power(&[ProcessorChange { domain, state }])
+            .unwrap();
+        machine.settle_processor_power(plan).unwrap();
+    }
+
+    #[test]
+    fn retained_gates_pause_live_and_parked_owners_without_consuming_pending_state() {
+        let mut machine = pair();
+        machine
+            .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
+            .unwrap();
+        machine.cpu.state.x[5] = 0x1234;
+        machine.cpu.state.v[3] = [0x1234, 0x5678];
+        machine.cpu.state.fpcr = 1 << 25;
+        machine.cpu.state.fpsr = 1 << 27;
+        let state = machine.cpu.state.clone();
+        machine.cpu.amx.registers = Some(Box::new(stela_compiler::amx::AmxRegisters::zeroed()));
+        machine.cpu.amx.registers.as_mut().unwrap().z[42] = [0xa5; 64];
+        let amx = machine.cpu.amx.registers.clone();
+        machine.cpu.event = true;
+        machine.cpu.monitor = Some(Reservation {
+            granule: BASE,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        });
+        let cluster = machine.cpu.ctrr.clone();
+        let Peer::Parked(other) = &mut machine.peers[1] else {
+            panic!("PE1 parked")
+        };
+        other.cpu.state.x[5] = 0x5678;
+        other.cpu.state.v[7] = [0x9abc, 0xdef0];
+        let other_state = other.cpu.state.clone();
+        other.cpu.event = true;
+        other.cpu.monitor = Some(Reservation {
+            granule: BASE,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        });
+        let other_cluster = other.cpu.ctrr.clone();
+        let plan = machine
+            .prepare_processor_power(&[
+                ProcessorChange {
+                    domain: 1,
+                    state: RETAINED_GATED,
+                },
+                ProcessorChange {
+                    domain: 2,
+                    state: crate::platform::apple::bus::LifecycleState {
+                        quiesced: true,
+                        ..RETAINED_ACTIVE
+                    },
+                },
+            ])
+            .unwrap();
+        assert!(
+            machine.cpu.monitor.is_some(),
+            "preflight never clears reservations"
+        );
+        machine.settle_processor_power(plan).unwrap();
+        machine.devices.irq = [true, true];
+        assert_eq!(machine.runnable(), 0);
+        assert!(!machine.ready(0, 100) && !machine.ready(1, 100));
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        assert_eq!(machine.cpu.state.x[5], 0x1234);
+        assert_eq!(machine.cpu.state, state);
+        assert_eq!(parked(&machine, 1).state, other_state);
+        assert!(machine.cpu.amx.registers == amx);
+        assert!(machine.cpu.event && parked(&machine, 1).event);
+        assert!(machine.cpu.monitor.is_none() && parked(&machine, 1).monitor.is_none());
+        assert!(alloc::rc::Rc::ptr_eq(&cluster, &machine.cpu.ctrr));
+        assert!(alloc::rc::Rc::ptr_eq(
+            &other_cluster,
+            &parked(&machine, 1).ctrr
+        ));
+        assert!(matches!(machine.peer_states()[0], PeerState::Parked { .. }));
+        power_change(&mut machine, 2, RETAINED_ACTIVE);
+        machine.schedule().unwrap();
+        assert_eq!(
+            (machine.processor(), machine.cpu.pc, machine.cpu.state.x[5]),
+            (1, START, 0x5678)
+        );
+        assert!(machine.interrupt_pending());
+        power_change(&mut machine, 1, RETAINED_ACTIVE);
+        machine.schedule().unwrap();
+        assert_eq!(
+            (machine.processor(), machine.cpu.pc, machine.cpu.state.x[5]),
+            (0, BASE, 0x1234)
+        );
+        assert_eq!(
+            machine.devices.power,
+            [(1, true)],
+            "retained edges never request reset"
+        );
+    }
+
+    #[test]
+    fn a_stale_settlement_cannot_touch_cpu_reservations_or_clock_accounting() {
+        let mut machine = pair();
+        machine.bind_processor_power(&[core_binding(1, 0)]).unwrap();
+        let stale = machine
+            .prepare_processor_power(&[ProcessorChange {
+                domain: 1,
+                state: RETAINED_GATED,
+            }])
+            .unwrap();
+        power_change(&mut machine, 1, RETAINED_ACTIVE);
+        machine.cpu.monitor = Some(Reservation {
+            granule: BASE,
+            bytes: [0; RESERVATION_GRANULE as usize],
+        });
+        machine.slice_end = 123;
+        machine.host.now = 100;
+        assert_eq!(
+            machine.settle_processor_power(stale),
+            Err(ProcessorPowerError::StalePlan)
+        );
+        assert!(machine.cpu.monitor.is_some());
+        assert_eq!(machine.slice_end, 123);
+        assert_eq!(machine.processors().paused(0), Some(false));
+        assert_eq!(machine.statistics.switches, 0);
+    }
+
+    #[test]
+    fn paused_timer_events_and_timeouts_remain_pending_without_idle_skip_spinning() {
+        let mut machine = pair();
+        machine.clock.follow_host();
+        machine
+            .bind_processor_power(&[core_binding(1, 0), core_binding(2, 1)])
+            .unwrap();
+        machine.cpu.registers.set(Register::CNTHP_CTL_EL2, 0, 1);
+        machine.cpu.registers.set(Register::CNTHP_CVAL_EL2, 0, 10);
+        machine.cpu.registers.set(Register::CNTKCTL_EL1, 0, 1 << 2);
+        machine.event_sample = Some(0);
+        machine.waiting = Some(Wait {
+            kind: WaitKind::Event,
+            timeout: Some(super::super::Timeout {
+                limit: 7,
+                offset: 0,
+            }),
+            down: false,
+        });
+        let Peer::Parked(other) = &mut machine.peers[1] else {
+            panic!("PE1 parked")
+        };
+        other.cpu.registers.set(Register::CNTHP_CTL_EL2, 0, 1);
+        other.cpu.registers.set(Register::CNTHP_CVAL_EL2, 0, 15);
+        other.waiting = Some(Wait {
+            kind: WaitKind::Interrupt,
+            timeout: None,
+            down: false,
+        });
+        let plan = machine
+            .prepare_processor_power(&[
+                ProcessorChange {
+                    domain: 1,
+                    state: RETAINED_GATED,
+                },
+                ProcessorChange {
+                    domain: 2,
+                    state: RETAINED_GATED,
+                },
+            ])
+            .unwrap();
+        machine.settle_processor_power(plan).unwrap();
+        machine.host.now = 20;
+        machine.set_idle_skip(true);
+        assert_eq!(machine.next_deadline(20), None);
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        assert_eq!(
+            machine.statistics.waits, 0,
+            "expired paused deadlines are not wake sources"
+        );
+        assert_eq!(machine.cpu.read(Register::CNTHP_CVAL_EL2), 10);
+        assert_eq!(machine.event_sample, Some(0), "event history is retained");
+        power_change(&mut machine, 1, RETAINED_ACTIVE);
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 0);
+        assert_eq!(machine.cpu.pc, BASE + 4, "the original wait completes once");
+        assert!(machine.waiting.is_none());
+        assert!(machine.cpu.event && timer::asserted(&machine.cpu, 20));
+    }
+
+    #[test]
+    fn retained_monitors_exclude_pause_time_and_preserve_fractional_cycles_and_pmi() {
+        use crate::machine::{
+            amu::Amu,
+            pmu::{self, Context, Pmu},
+        };
+        let mut machine = board(&[], Board::default(), alloc::vec![identity(0)]);
+        machine.clock.follow_host();
+        machine.cpu.retired = 10;
+        let context = Context {
+            el: 1,
+            waiting: false,
+        };
+        let seed = (1 << 63) | 10;
+        let mut monitor = Pmu::new(36_000_000, 24_000_000);
+        monitor.write(pmu::PMCR1, 1 << 16, 0, 10, context).unwrap();
+        monitor
+            .write(pmu::PMCR1_ALTERNATE, 1 << 16, 0, 10, context)
+            .unwrap();
+        monitor.write(pmu::PMC[0], seed, 0, 10, context).unwrap();
+        monitor
+            .write(pmu::PMCR0, 1 | 4 << 8 | 1 << 12, 0, 10, context)
+            .unwrap();
+        machine.cpu.pmu = Some(monitor);
+        let mut amu = Amu::new(36_000_000, 24_000_000);
+        amu.set_enables(7, true, 0, 10);
+        machine.cpu.amu = Some(amu);
+        machine.bind_processor_power(&[core_binding(1, 0)]).unwrap();
+        machine.host.now = 1;
+        power_change(&mut machine, 1, RETAINED_GATED);
+        machine.host.now = 1000;
+        machine.sync_monitor();
+        let monitor = machine.cpu.pmu.as_mut().unwrap();
+        assert_eq!(
+            monitor
+                .read(
+                    pmu::PMC[0],
+                    1000,
+                    10,
+                    Context {
+                        waiting: true,
+                        ..context
+                    }
+                )
+                .unwrap(),
+            seed + 1
+        );
+        assert!(monitor.asserted(1000, 10), "pending PMI is retained");
+        let amu = machine.cpu.amu.as_ref().unwrap();
+        assert_eq!(
+            (
+                amu.count(0, 1000, 10),
+                amu.count(1, 1000, 10),
+                amu.count(2, 1000, 10)
+            ),
+            (1, 1, 0)
+        );
+        power_change(&mut machine, 1, RETAINED_ACTIVE);
+        machine.host.now = 1001;
+        let monitor = machine.cpu.pmu.as_mut().unwrap();
+        assert_eq!(
+            monitor.read(pmu::PMC[0], 1001, 10, context).unwrap(),
+            seed + 3
+        );
+        let amu = machine.cpu.amu.as_ref().unwrap();
+        assert_eq!(
+            (
+                amu.count(0, 1001, 10),
+                amu.count(1, 1001, 10),
+                amu.count(2, 1001, 10)
+            ),
+            (3, 2, 0)
+        );
+        assert_eq!(machine.cpu.retired, 10);
+    }
+
+    #[test]
+    fn a_start_cannot_bypass_a_retained_clock_blocker() {
+        let mut machine = board(&[], Board::default(), alloc::vec![identity(0), identity(1)]);
+        let mut binding = core_binding(1, 1);
+        binding.initial = RETAINED_GATED;
+        machine.bind_processor_power(&[binding]).unwrap();
+        machine
+            .start(Start {
+                cpu: 1,
+                address: START,
+            })
+            .unwrap();
+        assert!(!machine.ready(1, 0));
+        machine.schedule().unwrap();
+        assert_eq!(machine.processor(), 0);
+        power_change(&mut machine, 1, RETAINED_ACTIVE);
+        machine.schedule().unwrap();
+        assert_eq!((machine.processor(), machine.cpu.pc), (1, START));
+        assert_eq!(machine.devices.power, [(1, true)]);
+    }
+
+    #[test]
+    fn all_eight_pe_and_cluster_participants_preflight_and_settle_together() {
+        use super::super::tests::board_on;
+        let identities = (0..8)
+            .map(|pe| Identity {
+                midr: 0x611f_0320,
+                mpidr: 0x8000_0000 | (pe / 4) << 16 | (pe / 4) << 8 | (pe % 4),
+                clock: None,
+                caches: None,
+            })
+            .collect();
+        let mut machine = board_on(
+            crate::machine::Chip::AppleM2,
+            &[],
+            super::super::NoDevices,
+            identities,
+        );
+        for pe in 1..8 {
+            machine
+                .start(Start {
+                    cpu: pe,
+                    address: START + pe as u64 * 4,
+                })
+                .unwrap();
+            let Peer::Parked(other) = &mut machine.peers[pe] else {
+                panic!("started PE parked")
+            };
+            other.cpu.state.x[5] = pe as u64;
+        }
+        let mut bindings: Vec<_> = (0..8).map(|pe| core_binding(pe as u64 + 1, pe)).collect();
+        for (domain, members) in [(9, alloc::vec![0, 1, 2, 3]), (10, alloc::vec![4, 5, 6, 7])] {
+            bindings.push(ProcessorBinding {
+                domain,
+                target: ProcessorTarget::Cluster { members },
+                initial: RETAINED_ACTIVE,
+            });
+        }
+        machine.bind_processor_power(&bindings).unwrap();
+        assert_eq!(machine.processors().domain_count(), 10);
+        assert_eq!(machine.runnable(), 8);
+        let good = ProcessorChange {
+            domain: 9,
+            state: RETAINED_GATED,
+        };
+        assert!(
+            machine
+                .prepare_processor_power(&[
+                    good,
+                    ProcessorChange {
+                        domain: 7,
+                        state: crate::platform::apple::bus::LifecycleState {
+                            reset: true,
+                            ..RETAINED_ACTIVE
+                        }
+                    }
+                ])
+                .is_err()
+        );
+        assert_eq!(machine.runnable(), 8);
+        let plan = machine
+            .prepare_processor_power(&[
+                good,
+                ProcessorChange {
+                    domain: 10,
+                    state: RETAINED_GATED,
+                },
+            ])
+            .unwrap();
+        machine.settle_processor_power(plan).unwrap();
+        assert_eq!(machine.runnable(), 0);
+        assert!((0..8).all(|pe| machine.processors().paused(pe) == Some(true)));
+        assert_eq!(machine.schedule(), Err(Stop::Idle));
+        let plan = machine
+            .prepare_processor_power(&[ProcessorChange {
+                domain: 9,
+                state: RETAINED_ACTIVE,
+            }])
+            .unwrap();
+        machine.settle_processor_power(plan).unwrap();
+        assert_eq!(machine.runnable(), 4);
+        machine.schedule().unwrap();
+        assert_eq!((machine.processor(), machine.cpu.state.x[5]), (1, 1));
+        let plan = machine
+            .prepare_processor_power(&[
+                ProcessorChange {
+                    domain: 10,
+                    state: RETAINED_ACTIVE,
+                },
+                ProcessorChange {
+                    domain: 7,
+                    state: RETAINED_GATED,
+                },
+            ])
+            .unwrap();
+        machine.settle_processor_power(plan).unwrap();
+        assert_eq!(machine.runnable(), 7);
+        assert_eq!(machine.processors().paused(6), Some(true));
     }
 
     #[test]
@@ -1063,38 +1578,53 @@ mod tests {
         const ADD_X0: u32 = 0x9100_0400;
         const IC_IVAU_X0: u32 = 0xd50b_7520;
         let code = 0x1000;
-        let mut machine = pair();
-        machine.host.ram[code..code + 4].copy_from_slice(&RET.to_le_bytes());
-        let compiled = |machine: &mut Machine<FakeHost, Board>| {
-            let Ok(super::super::Fetched::Block(index)) =
-                machine.fetch_block(BASE + code as u64, false)
-            else {
-                panic!("no block at the code");
+        for retained_pause in [false, true] {
+            let mut machine = pair();
+            machine.host.ram[code..code + 4].copy_from_slice(&RET.to_le_bytes());
+            let compiled = |machine: &mut Machine<FakeHost, Board>| {
+                let Ok(super::super::Fetched::Block(index)) =
+                    machine.fetch_block(BASE + code as u64, false)
+                else {
+                    panic!("no block at the code");
+                };
+                (
+                    machine.blocks[index].source_hash,
+                    machine.statistics.compiled,
+                )
             };
-            (
-                machine.blocks[index].source_hash,
-                machine.statistics.compiled,
-            )
-        };
-        let (old, count) = compiled(&mut machine);
-        // PE 1, in the same regime, runs the shared compiled block.
-        turn(&mut machine, 1);
-        machine.cpu.pstate = Pstate::reset(1);
-        assert_eq!(compiled(&mut machine), (old, count));
-        // It rewrites the code: until it invalidates the instruction cache
-        // to the PoU the old block may still run, as stale instructions may.
-        machine.host.ram[code..code + 8]
-            .copy_from_slice(&[ADD_X0.to_le_bytes(), RET.to_le_bytes()].concat());
-        assert_eq!(compiled(&mut machine), (old, count));
-        machine.cpu.state.x[0] = BASE + code as u64;
-        machine.system_instruction(IC_IVAU_X0).unwrap();
-        // The host hears of it for PEs it runs in machines of their own.
-        assert_eq!(machine.host.code_invalidations, [Some(BASE + code as u64)]);
-        // The invalidation is broadcast: PE 0 compiles the new code.
-        turn(&mut machine, 0);
-        let (new, recompiled) = compiled(&mut machine);
-        assert_ne!(new, old);
-        assert_eq!(recompiled, count + 1);
+            let (old, count) = compiled(&mut machine);
+            // PE 1, in the same regime, runs the shared compiled block.
+            if retained_pause {
+                machine.bind_processor_power(&[core_binding(1, 0)]).unwrap();
+                power_change(&mut machine, 1, RETAINED_GATED);
+                machine.schedule().unwrap();
+                assert_eq!(machine.processor(), 1);
+            } else {
+                turn(&mut machine, 1);
+            }
+            machine.cpu.pstate = Pstate::reset(1);
+            assert_eq!(compiled(&mut machine), (old, count));
+            // It rewrites the code: until it invalidates the instruction cache
+            // to the PoU the old block may still run, as stale instructions may.
+            machine.host.ram[code..code + 8]
+                .copy_from_slice(&[ADD_X0.to_le_bytes(), RET.to_le_bytes()].concat());
+            assert_eq!(compiled(&mut machine), (old, count));
+            machine.cpu.state.x[0] = BASE + code as u64;
+            machine.system_instruction(IC_IVAU_X0).unwrap();
+            // The host hears of it for PEs it runs in machines of their own.
+            assert_eq!(machine.host.code_invalidations, [Some(BASE + code as u64)]);
+            // The invalidation is broadcast: PE 0 compiles the new code.
+            if retained_pause {
+                power_change(&mut machine, 1, RETAINED_ACTIVE);
+                machine.schedule().unwrap();
+                assert_eq!(machine.processor(), 0);
+            } else {
+                turn(&mut machine, 0);
+            }
+            let (new, recompiled) = compiled(&mut machine);
+            assert_ne!(new, old);
+            assert_eq!(recompiled, count + 1);
+        }
     }
 
     #[test]

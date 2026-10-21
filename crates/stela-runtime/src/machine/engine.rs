@@ -49,7 +49,10 @@ use pointer::{PointerInputs, PointerOperation, PointerResult};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};
-pub use processors::PeerState;
+pub use processors::{
+    PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
+    ProcessorTarget, Processors,
+};
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,
     aarch64::{
@@ -1222,6 +1225,8 @@ pub struct Machine<H: Host, D: Devices> {
     waiting: Option<Wait>,
     /// Every PE by number; the running one's state is `cpu`.
     peers: Vec<processors::Peer>,
+    /// Explicitly qualified retained core/cluster clock and quiesce inputs.
+    processor_power: Processors,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
     /// Host trace points, ascending (`set_traces`), and the hits not yet
@@ -1316,6 +1321,8 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .admit_table(identification::withheld(profile.chip, &profile.fixed))
             .unwrap_or_else(|reason| panic!("the profile has no admit table: {reason}"));
         let admit_table = Arc::new(admit_table);
+        let processor_power = Processors::new(profile.processors.len().max(1))
+            .expect("a CPU profile has at least its boot PE");
         let mut machine = Self {
             cpu,
             host,
@@ -1358,6 +1365,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             current: 0,
             waiting: None,
             peers: Vec::new(),
+            processor_power,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
@@ -1921,7 +1929,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn sync_monitor(&mut self) {
         let context = pmu::Context {
             el: self.cpu.pstate.el,
-            waiting: self.waiting.is_some(),
+            waiting: self.waiting.is_some() || self.processor_paused(self.current),
         };
         let retired = self.cpu.retired;
         let pmu_timed = self.cpu.pmu.as_ref().map(|monitor| monitor.timed());
