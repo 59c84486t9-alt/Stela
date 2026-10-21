@@ -2219,10 +2219,11 @@ pub struct Iommu {
     /// `UMMS` after its TRAD instances (J473AP `dart-dispext0`).
     /// `AppleT8110DART::_smmuSetupInstance` (26A434 KC file 0x2f12b64) maps
     /// that numbered `reg` entry and records it, and `_smmuSetup` (0x2f12af0)
-    /// only marks the DART as having one; the driver reads it only to capture
-    /// state after a DART fault (`_smmuCaptureHardwareState` 0x2f1a3ec,
-    /// `_smmuCaptureRegs` 0x2f1d2b4). Placed as a block whose every access
-    /// refuses by name.
+    /// marks the DART as having one. The kernel reads it for fault capture
+    /// (`_smmuCaptureHardwareState` 0x2f1a3ec, `_smmuCaptureRegs` 0x2f1d2b4),
+    /// and SPTM validates its capture count during startup (file 0xcabb8).
+    /// The paired native cacheless view reports zero capture words and shares
+    /// its DART's lifecycle; absent selector/data accesses refuse by name.
     pub smmu: Option<(u64, u64)>,
 }
 
