@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! HDA register encodings from Linux include/sound/hda_register.h.
 use super::super::Error;
+use super::{Config, ResetPolicy};
 use crate::bus::mmio::Mmio;
 
 pub(super) const GCAP: usize = 0x00;
@@ -64,6 +65,16 @@ pub(super) fn stream_base(index: u8) -> usize {
 /// Native access widths matter: SD_CTL occupies three bytes and the fourth
 /// byte is W1C status. Never implement byte writes through a dword RMW.
 pub trait Registers {
+    /// Generic mappings cannot perform an identity-required native PCI reset.
+    fn validate_config(&self, config: &Config) -> Result<(), Error> {
+        if config.reset_policy != ResetPolicy::Generic {
+            return Err(Error::InvalidConfiguration);
+        }
+        Ok(())
+    }
+    fn reset_clock_gate(&mut self, _enabled: bool) -> Result<(), Error> {
+        Err(Error::InvalidConfiguration)
+    }
     fn read8(&mut self, offset: usize) -> u8;
     fn read16(&mut self, offset: usize) -> u16;
     fn read32(&mut self, offset: usize) -> u32;

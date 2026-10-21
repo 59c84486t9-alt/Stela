@@ -14,11 +14,17 @@
 //! Platform ACPI power resources, firmware/AML/SMM arbitration and coherent DMA
 //! mappings remain prerequisites. DSP/GPU controllers require additional owners
 //! and are deliberately absent from this attachment table.
-use super::{Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy};
+use super::{
+    Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy, Registers, ResetPolicy,
+    StreamTagPolicy,
+};
 use crate::bus::{
     i2c::Timer,
-    pci::{Bar, ConfigSpace, Function},
+    pci::{Address, Bar, ConfigSpace, Function},
 };
+
+mod registers;
+pub use registers::PciRegisters;
 
 pub const CLASS: [u8; 3] = [0x04, 0x03, 0x00];
 const INTEL: u16 = 0x8086;
@@ -42,6 +48,8 @@ const CAP_MSIX: u8 = 0x11;
 const CAP_PCIE: u8 = 0x10;
 const SCH_HDA_DEVC: u16 = 0x78;
 const SCH_NOSNOOP: u16 = 1 << 11;
+const CGCTL: u16 = 0x48;
+const CGCTL_MISCBDCGE: u32 = 1 << 6;
 const MSI_ADDRESS_64: u16 = 1 << 7;
 const MSI_VECTOR_MASK: u16 = 1 << 8;
 const PM_STATE: u16 = 3;
@@ -152,6 +160,8 @@ pub struct Identity {
     pub vendor: u16,
     pub device: u16,
     pub corb_reset: CorbReset,
+    pub reset_policy: ResetPolicy,
+    pub stream_tag_policy: StreamTagPolicy,
     /// Explicit platform ceiling, independent of GCAP. ATI uses a conservative
     /// 32-bit policy without companion-SMBus stepping evidence; AMD uses 40 bits.
     pub dma_address_bits: u8,
@@ -230,6 +240,8 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         vendor,
         device,
         corb_reset: CorbReset::Handshake,
+        reset_policy: ResetPolicy::Generic,
+        stream_tag_policy: StreamTagPolicy::Global,
         dma_address_bits,
         position_policy,
         probe_policy,
@@ -290,6 +302,7 @@ fn check_subsystem<C: ConfigSpace>(
 #[derive(Debug)]
 pub struct Prepared {
     identity: Identity,
+    address: Address,
     base: u64,
     bytes: u64,
 }
@@ -302,6 +315,8 @@ impl Prepared {
     pub fn config(&self) -> Config {
         Config {
             corb_reset: self.identity.corb_reset,
+            reset_policy: self.identity.reset_policy,
+            stream_tag_policy: self.identity.stream_tag_policy,
             dma_address_bits: self.identity.dma_address_bits,
             position_policy: self.identity.position_policy,
             probe_policy: self.identity.probe_policy,
@@ -318,6 +333,9 @@ impl Prepared {
     /// owned and remain mapped until controller shutdown succeeds. Retain PCI
     /// ownership, power and decode established by `prepare` for that lifetime.
     pub unsafe fn claim_mmio(self) -> Result<MmioRegisters, super::super::Error> {
+        if self.identity.reset_policy != ResetPolicy::Generic {
+            return Err(super::super::Error::InvalidConfiguration);
+        }
         unsafe { MmioRegisters::claim(self.base, self.bytes) }
     }
 }
@@ -497,6 +515,7 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
         return Err(AttachError::Ownership);
     }
     let selected = identify(function)?;
+    let address = function.address;
     let config = function.config();
     let id = config.read32(PCI_ID);
     let class = config.read32(PCI_CLASS);
@@ -608,6 +627,7 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
         }
         Ok(Prepared {
             identity: selected,
+            address,
             base,
             bytes,
         })
@@ -619,7 +639,7 @@ pub unsafe fn prepare_with_board<C: ConfigSpace>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::bus::pci::Address;
     use alloc::{rc::Rc, vec::Vec};
@@ -803,6 +823,19 @@ mod tests {
                 wide: false,
             },
         )
+    }
+
+    /// Internal pre-admission profile fixture; no public table selects it yet.
+    pub(in crate::audio::hda) fn modern_prepared_model(address: Address) -> Prepared {
+        let mut selected = identity(INTEL, 0x8c20, CLASS).unwrap();
+        selected.reset_policy = ResetPolicy::IntelClockGate;
+        selected.stream_tag_policy = StreamTagPolicy::PerDirection;
+        Prepared {
+            identity: selected,
+            address,
+            base: 0xfebf_0000,
+            bytes: 0x4000,
+        }
     }
 
     fn set_identity(function: &mut Function<Model>, vendor: u16, device: u16) {

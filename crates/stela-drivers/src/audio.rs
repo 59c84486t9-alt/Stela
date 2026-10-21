@@ -84,6 +84,9 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidConfiguration,
+    PciResetControl {
+        offset: u16,
+    },
     RegisterUnavailable {
         offset: usize,
     },
