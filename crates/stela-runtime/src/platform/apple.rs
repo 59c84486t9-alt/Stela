@@ -41,6 +41,7 @@ pub mod lockdown;
 pub mod mxwrap;
 pub mod nhi;
 pub mod nor;
+pub mod pcie;
 pub mod perf;
 pub mod pmgr;
 pub mod pmp;
