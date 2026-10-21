@@ -1,0 +1,198 @@
+/* SPDX-License-Identifier: MIT */
+/* Original AIR fixture -> shared AIR/NIR frontend -> retained AMD ACO backend.
+ * CPU compilation only: no initialized GPU, mappings or submission are claimed.
+ */
+#include "air_to_nir.h"
+#include "air_test_fixture.h"
+#include "probe_report.h"
+#include "amd/compiler/aco_interface.h"
+#include "amd/common/ac_binary.h"
+#include "amd/common/ac_gpu_info.h"
+#include "amd/common/ac_shader_args.h"
+#include "amd/common/nir/ac_nir.h"
+#include "util/ralloc.h"
+
+#define CHECK(condition) do { if (!(condition)) { \
+   fprintf(stderr, "%s:%u: %s\n", __func__, __LINE__, #condition); exit(1); \
+} } while (0)
+
+struct binding {
+   struct ac_shader_args args;
+   struct ac_arg buffer;
+   unsigned count;
+};
+
+struct binary {
+   unsigned code_dw;
+   unsigned exec_size;
+   struct ac_shader_config config;
+};
+
+static nir_def *
+bind_buffer(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   struct binding *binding = data;
+   CHECK(buffer->argument == 1 && buffer->index == 7 && buffer->address_space == 1);
+   CHECK(buffer->access == STELA_AIR_READ_WRITE && buffer->type_size == 4 && buffer->type_alignment == 4);
+   binding->count++;
+   /* Explicit native fixture ABI: device buffer VA in user SGPRs 0:1. Never
+    * replace an AIR resource with a fixed address or a fabricated thread ID. */
+   return nir_pack_64_2x32(b, ac_nir_load_arg(b, &binding->args, binding->buffer));
+}
+
+static void
+capture_binary(void **private, const struct ac_shader_config *config,
+               const char *ir, unsigned ir_size, const char *assembly,
+               unsigned assembly_size, struct amd_stats *stats,
+               uint32_t exec_size, const uint32_t *code, uint32_t code_dw,
+               const struct aco_symbol *symbols, unsigned num_symbols,
+               const struct ac_shader_debug_info *debug_info, unsigned debug_count)
+{
+   struct binary *binary = *private;
+   CHECK(config && code && code_dw && exec_size && exec_size <= code_dw * sizeof(*code));
+   CHECK(!num_symbols); /* No unresolved relocations are accepted by this fixture. */
+   binary->code_dw = code_dw;
+   binary->exec_size = exec_size;
+   binary->config = *config;
+   if (assembly && assembly_size) {
+      if (!assembly[assembly_size - 1])
+         assembly_size--;
+      fwrite(assembly, 1, assembly_size, stdout);
+   }
+}
+
+static void
+compute_args(struct binding *binding, const struct radeon_info *gpu)
+{
+   /* Hardware system SGPRs follow enabled user SGPRs. On GFX12+ the retained
+    * lowering reads workgroup IDs from the actual architectural TTMP inputs. */
+   ac_add_arg(&binding->args, AC_ARG_SGPR, 2, AC_ARG_CONST_ADDR, &binding->buffer);
+   for (unsigned axis = 0; axis < 3; axis++) {
+      if (gpu->gfx_level >= GFX12)
+         binding->args.workgroup_ids[axis].used = true;
+      else
+         ac_add_arg(&binding->args, AC_ARG_SGPR, 1, AC_ARG_VALUE, &binding->args.workgroup_ids[axis]);
+   }
+   if (gpu->gfx_level < GFX11)
+      ac_add_arg(&binding->args, AC_ARG_SGPR, 1, AC_ARG_VALUE, &binding->args.scratch_offset);
+   if (gpu->compiler_info.local_invocation_ids_packed) {
+      ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_ids_packed);
+   } else {
+      ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_id_x);
+      ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_id_y);
+      ac_add_arg(&binding->args, AC_ARG_VGPR, 1, AC_ARG_VALUE, &binding->args.local_invocation_id_z);
+   }
+}
+
+static bool
+compile_target(LLVMMemoryBufferRef input, enum radeon_family family, bool graphics, unsigned wave)
+{
+   struct radeon_info gpu = {
+      .gfx_level = ac_get_gfx_level(family), .family = family, .has_graphics = graphics,
+   };
+   ac_fill_compiler_info(&gpu, NULL, false);
+   char target[64];
+   snprintf(target, sizeof(target), "%s.wave%u", ac_get_family_name(family), wave);
+   if (!aco_is_gpu_supported(&gpu)) {
+      probe_unsupported("air-aco", target, graphics ? "compiler-gfx-level-unsupported" : "requires-cdna-compiler-backend");
+      return true;
+   }
+   nir_shader_compiler_options nir_options;
+   ac_nir_set_options(&gpu.compiler_info, false, &nir_options);
+   struct binding binding = {0};
+   compute_args(&binding, &gpu);
+   const struct stela_air_options air_options = {
+      .workgroup_size = {32, 1, 1}, .max_instructions = 100,
+      .bind_buffer = bind_buffer, .binding_data = &binding,
+   };
+   struct stela_air_error error;
+   nir_shader *shader = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
+                                        "kernel", &nir_options, &air_options, &error);
+   if (!shader) {
+      fprintf(stderr, "%s AIR refused: %u %s\n", target, error.kind, error.detail);
+      return false;
+   }
+   CHECK(binding.count == 1 && error.kind == STELA_AIR_OK);
+   unsigned loads = 0, stores = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+            if (intrinsic->intrinsic == nir_intrinsic_load_global) {
+               CHECK(!nir_src_is_const(intrinsic->src[0]));
+               loads++;
+            } else if (intrinsic->intrinsic == nir_intrinsic_store_global) {
+               CHECK(!nir_src_is_const(intrinsic->src[0]) && !nir_src_is_const(intrinsic->src[1]));
+               stores++;
+            }
+         }
+      }
+   }
+   CHECK(loads == 1 && stores == 1);
+   CHECK(shader->info.workgroup_size[0] == 32 && shader->info.workgroup_size[1] == 1 &&
+         shader->info.workgroup_size[2] == 1);
+   /* Reuse AMD's generation-specific system-value lowering rather than
+    * implementing packed VGPR or TTMP decoding in the Metal frontend. */
+   const ac_nir_lower_intrinsics_to_args_options args_options = {
+      .gfx_level = gpu.gfx_level, .hw_stage = AC_HW_COMPUTE_SHADER,
+      .wave_size = wave, .workgroup_size = 32,
+   };
+   ac_nir_lower_intrinsics_to_args(shader, &binding.args, &args_options);
+   ac_nir_lower_global_access(shader, gpu.gfx_level);
+   nir_lower_int64(shader);
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(shader);
+      progress |= nir_opt_copy_prop(shader);
+      progress |= nir_opt_algebraic(shader);
+      progress |= nir_opt_dce(shader);
+   } while (progress);
+   nir_lower_alu_width(shader, ac_nir_opt_vectorize_cb, &gpu.gfx_level);
+   nir_lower_load_const_to_scalar(shader);
+   nir_opt_copy_prop(shader);
+   nir_opt_dce(shader);
+   nir_shader_gather_info(shader, nir_shader_get_entrypoint(shader));
+   nir_validate_shader(shader, "AIR to AMD compute ABI");
+   const struct aco_compiler_options options = {
+      .compiler_info = &gpu.compiler_info, .family = family, .gfx_level = gpu.gfx_level,
+      .record_asm = true,
+   };
+   const struct aco_shader_info info = {
+      .hw_stage = AC_HW_COMPUTE_SHADER, .wave_size = wave, .workgroup_size = 32,
+   };
+   struct binary binary = {0};
+   void *private = &binary;
+   aco_compile_shader(&options, &info, 1, &shader, &binding.args, capture_binary, &private);
+   ralloc_free(shader);
+   CHECK(binary.code_dw && binary.exec_size && binary.config.num_vgprs);
+   printf("AIR kernel %s: user-sgpr=0:1 buffer[7], sgprs=%u vgprs=%u scratch=%u bytes=%u\n",
+          target, binary.config.num_sgprs, binary.config.num_vgprs,
+          binary.config.scratch_bytes_per_wave, binary.exec_size);
+   probe_compiled("air-aco", target, binary.exec_size);
+   return true;
+}
+
+int
+main(void)
+{
+   const struct { enum radeon_family family; bool graphics; } targets[] = {
+      {CHIP_TAHITI, true}, {CHIP_BONAIRE, true}, {CHIP_CARRIZO, true},
+      {CHIP_RAVEN, true}, {CHIP_NAVI10, true}, {CHIP_REMBRANDT, true},
+      {CHIP_NAVI31, true}, {CHIP_STRIX1, true}, {CHIP_GFX1170, true},
+      {CHIP_GFX1201, true}, {CHIP_GFX1210, true},
+      {CHIP_MI100, false}, {CHIP_MI200, false}, {CHIP_GFX940, false},
+   };
+   glsl_type_singleton_init_or_ref();
+   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
+   bool ok = true;
+   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
+      ok &= compile_target(input, targets[i].family, targets[i].graphics, 64);
+      if (ac_get_gfx_level(targets[i].family) >= GFX10)
+         ok &= compile_target(input, targets[i].family, targets[i].graphics, 32);
+   }
+   LLVMDisposeMemoryBuffer(input);
+   glsl_type_singleton_decref();
+   return !ok;
+}
