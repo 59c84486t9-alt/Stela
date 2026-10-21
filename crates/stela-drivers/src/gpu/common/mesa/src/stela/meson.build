@@ -177,6 +177,22 @@ if with_stela_nvidia
     c_args : ['-Werror'],
   )
   test('stela_nv_image_copy', stela_nv_image_copy_probe, suite : 'stela')
+  stela_nv_sampler = static_library(
+    'stela_nv_sampler',
+    '../../../../nvidia/stela/hosted/sampler.c',
+    include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+    dependencies : [idep_nil, idep_mesautil, dep_m],
+    c_args : ['-Werror'],
+  )
+  stela_nv_sampler_probe = executable(
+    'stela_nv_sampler_probe',
+    '../../../../nvidia/stela/tests/sampler.c',
+    include_directories : [inc_include, inc_src, include_directories('../nouveau/headers')],
+    dependencies : [idep_nil, idep_mesautil, dep_m],
+    link_with : [stela_nv_sampler, stela_nv_image],
+    c_args : ['-Werror'],
+  )
+  test('stela_nv_sampler', stela_nv_sampler_probe, suite : 'stela')
   stela_nv_compute = static_library(
     'stela_nv_compute',
     ['nvidia_compute.c', stela_nv_compute_headers],
@@ -197,6 +213,18 @@ if with_stela_nvidia
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_nv_compute', stela_nv_compute_probe, suite : 'stela')
+    # Explicit retained raw inputs and a fresh artifact directory are supplied
+    # by xtask. A missing fixture must never select a synthetic replacement.
+    stela_nv_air_threadgroup_probe = executable(
+      'stela_nv_air_threadgroup_probe',
+      '../../../../nvidia/stela/tests/air_threadgroup.c',
+      include_directories : [inc_include, inc_src,
+                             include_directories('../nouveau/headers', '../nouveau/headers/nvidia/classes')],
+      dependencies : [idep_stela_air, idep_nak, idep_mesautil],
+      link_with : [stela_nv_compute, _libnak_rs],
+      c_args : ['-Werror'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
   endif
   stela_nak_probe = executable(
     'stela_nak_probe',
@@ -251,6 +279,23 @@ if with_stela_intel
     c_args : ['-Werror'],
   )
   test('stela_intel_image', stela_intel_image_probe, suite : 'stela')
+  stela_intel_image_copy = static_library(
+    'stela_intel_image_copy',
+    '../../../../intel/stela/hosted/image_copy.c',
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [stela_intel_surface, libisl],
+    c_args : ['-Werror'],
+  )
+  stela_intel_image_copy_probe = executable(
+    'stela_intel_image_copy_probe',
+    '../../../../intel/stela/tests/image_copy.c',
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [dep_m, idep_mesautil, idep_intel_dev],
+    link_with : [stela_intel_image_copy, libisl],
+    c_args : ['-Werror'],
+  )
+  test('stela_intel_image_copy', stela_intel_image_copy_probe, suite : 'stela')
 
   stela_intel_sampler = static_library(
     'stela_intel_sampler',
@@ -415,6 +460,36 @@ if with_stela_intel
       build_rpath : fs.parent(stela_air_llvm),
     )
     test('stela_intel_fp_controls', stela_intel_fp_controls_probe, suite : 'stela')
+    stela_intel_threadgroup_bits = custom_target(
+      'stela_intel_threadgroup_bits',
+      input : ['../intel/genxml/gen_bits_header.py',
+               '../intel/genxml/gen70.xml', '../intel/genxml/gen75.xml',
+               '../intel/genxml/gen80.xml', '../intel/genxml/gen90.xml',
+               '../intel/genxml/gen110.xml', '../intel/genxml/gen120.xml',
+               '../intel/genxml/gen125.xml', '../intel/genxml/xe2.xml',
+               '../intel/genxml/xe3.xml', '../intel/genxml/xe3p.xml'],
+      output : 'threadgroup_bits.h',
+      command : [prog_python, '@INPUT0@', '--include-symbols',
+        'COMPUTE_WALKER::body,COMPUTE_WALKER_BODY::Interface Descriptor,INTERFACE_DESCRIPTOR_DATA::Shared Local Memory Size,INTERFACE_DESCRIPTOR_DATA::Number Of Barriers,INTERFACE_DESCRIPTOR_DATA::Number of Threads in GPGPU Thread Group,INTERFACE_DESCRIPTOR_DATA::Preferred SLM Allocation Size,INTERFACE_DESCRIPTOR_DATA::Barrier Enable',
+        '-o', '@OUTPUT@', '@INPUT1@', '@INPUT2@', '@INPUT3@', '@INPUT4@', '@INPUT5@',
+        '@INPUT6@', '@INPUT7@', '@INPUT8@', '@INPUT9@', '@INPUT10@'],
+      depend_files : gen_pack_header_deps,
+    )
+    stela_intel_air_threadgroup_probe = executable(
+      'stela_intel_air_threadgroup_probe',
+      ['../../../../intel/stela/tests/air_threadgroup.c',
+       '../../../../intel/stela/tests/air_threadgroup_elk.c',
+       '../../../../intel/stela/tests/legacy_elk_validate.c', stela_intel_threadgroup_bits],
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                      idep_intel_compiler_elk, idep_intel_compiler_gen,
+                      idep_intel_dev, idep_mesautil],
+      link_with : [stela_intel_compute_policy, stela_intel_compute_native,
+                   stela_intel_legacy_compute, libisl],
+      c_args : ['-Werror'],
+      link_args : stela_intel_policy_gc,
+      build_rpath : fs.parent(stela_air_llvm),
+    )
   endif
   stela_intel_compute_packet_probe = executable(
     'stela_intel_compute_packet_probe',
@@ -507,7 +582,8 @@ if with_stela_amd
   test('stela_amd_buffer', stela_amd_buffer_probe, suite : 'stela')
   stela_amd_image = static_library(
     'stela_amd_image',
-    ['../../../../amd/stela/image.c', '../../../../amd/stela/image_resource.c'],
+    ['../../../../amd/stela/image.c', '../../../../amd/stela/image_resource.c',
+     '../../../../amd/stela/image_copy.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
     dependencies : [idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_surface, stela_amd_buffer, libamd_compiler_support],
@@ -531,6 +607,15 @@ if with_stela_amd
     c_args : cpp_args_addrlib + ['-Werror'],
   )
   test('stela_amd_image_resource', stela_amd_image_resource_probe, suite : 'stela')
+  stela_amd_image_copy_probe = executable(
+    'stela_amd_image_copy_probe',
+    ['../../../../amd/tests/image_copy_test.c', '../amd/common/amdgpu_devices.c'],
+    include_directories : [inc_include, inc_src, inc_amd, inc_amd_common, inc_gallium],
+    dependencies : [idep_mesautil, idep_amd_generated_headers],
+    link_with : [stela_amd_image],
+    c_args : cpp_args_addrlib + ['-Werror'],
+  )
+  test('stela_amd_image_copy', stela_amd_image_copy_probe, suite : 'stela')
   stela_amd_commands = static_library(
     'stela_amd_commands',
     'amd_commands.c',
@@ -541,7 +626,8 @@ if with_stela_amd
 
   stela_amd_compute = static_library(
     'stela_amd_compute',
-    ['../../../../amd/stela/compute.c', '../../../../amd/stela/compute_policy.c'],
+    ['../../../../amd/stela/compute.c', '../../../../amd/stela/compute_policy.c',
+     '../../../../amd/stela/llvm_compute.c'],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_nir_headers, idep_mesautil, idep_amd_generated_headers],
     link_with : [stela_amd_buffer, stela_amd_commands, libamd_compiler_support],
@@ -557,6 +643,20 @@ if with_stela_amd
     c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=' + (with_stela_amd_llvm ? '1' : '0')],
   )
   test('stela_amd_compute', stela_amd_compute_probe, suite : 'stela')
+  if stela_air_llvm != '' and with_stela_amd_llvm
+    stela_amd_air_threadgroup_probe = executable(
+      'stela_amd_air_threadgroup_probe',
+      '../../../../amd/tests/air_shared_test.c',
+      include_directories : [inc_include, inc_src, inc_amd, inc_amd_common,
+                             include_directories('.')],
+      dependencies : [idep_nir, idep_aco, idep_mesautil, dep_llvm,
+                      idep_amd_generated_headers],
+      link_with : [stela_air, stela_amd_compute, stela_amd_llvm_float,
+                   libamd_common_llvm, libamd_compiler_support, libamd_command_support],
+      c_args : ['-Werror', '-DSTELA_AMD_TEST_LLVM=1'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
+  endif
 
   stela_amd_commands_probe = executable(
     'stela_amd_commands_probe',

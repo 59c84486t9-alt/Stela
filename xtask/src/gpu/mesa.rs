@@ -13,6 +13,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod threadgroup;
+
 const LIBRARIES: &[&str] = &[
     "src/stela/libstela_apple_source.a",
     "src/compiler/nir/libnir.a",
@@ -21,6 +23,7 @@ const LIBRARIES: &[&str] = &[
     "src/nouveau/nil/libnil.a",
     "src/stela/libstela_nv_compute.a",
     "src/stela/libstela_nv_image.a",
+    "src/stela/libstela_nv_sampler.a",
     "src/amd/compiler/libaco.a",
     "src/amd/common/libamd_compiler_support.a",
     "src/amd/common/libamd_command_support.a",
@@ -32,6 +35,7 @@ const LIBRARIES: &[&str] = &[
     "src/amd/addrlib/libaddrlib.a",
     "src/stela/libstela_amd_compute.a",
     "src/stela/libstela_intel_surface.a",
+    "src/stela/libstela_intel_image_copy.a",
     "src/stela/libstela_intel_sampler.a",
     "src/stela/libstela_intel_compute_native.a",
     "src/stela/libstela_intel_compute_policy.a",
@@ -120,6 +124,8 @@ fn inspect_archive(path: &Path) -> Result<Value> {
                 | "libstela_amd_surface.a"
                 | "libstela_amd_image.a"
                 | "libstela_intel_surface.a"
+                | "libstela_intel_image_copy.a"
+                | "libstela_nv_sampler.a"
         )
     ) {
         for name in &undefined {
@@ -158,7 +164,7 @@ fn inspect_archive(path: &Path) -> Result<Value> {
     }))
 }
 
-fn snapshot_air_inputs(inputs: &[PathBuf], evidence: &Path) -> Result<Vec<Value>> {
+fn snapshot_air_inputs(inputs: &[PathBuf], evidence: &Path, prefix: &str) -> Result<Vec<Value>> {
     const MAX_BYTES: u64 = 64 * 1024 * 1024;
     inputs
         .iter()
@@ -179,7 +185,7 @@ fn snapshot_air_inputs(inputs: &[PathBuf], evidence: &Path) -> Result<Vec<Value>
                 bytes.len() <= MAX_BYTES as usize && bytes.starts_with(b"BC\xc0\xde"),
                 "AIR input must contain bounded raw LLVM bitcode, not a wrapper or archive"
             );
-            let snapshot = evidence.join(format!("air-input-{index}.bc"));
+            let snapshot = evidence.join(format!("{prefix}-{index}.bc"));
             File::create_new(&snapshot)?.write_all(&bytes)?;
             Ok(json!({"original_path": original, "snapshot": tools::binding(&snapshot)?}))
         })
@@ -335,18 +341,35 @@ fn llvm_development_files(config: &Path, library: &Path) -> Result<Value> {
     }))
 }
 
-pub fn build(
-    jobs: u16,
-    require_all_targets: bool,
-    llvm_library: Option<&Path>,
-    llvm_config: Option<&Path>,
-    air_inputs: &[PathBuf],
-    entry: Option<&str>,
-    fp_profile: super::AirFpProfile,
-) -> Result<()> {
+pub struct BuildOptions<'a> {
+    pub jobs: u16,
+    pub require_all_targets: bool,
+    pub llvm_library: Option<&'a Path>,
+    pub llvm_config: Option<&'a Path>,
+    pub air_inputs: &'a [PathBuf],
+    pub entry: Option<&'a str>,
+    pub fp_profile: super::AirFpProfile,
+    pub threadgroup_inputs: &'a [PathBuf],
+}
+
+pub fn build(options: BuildOptions<'_>) -> Result<()> {
+    let BuildOptions {
+        jobs,
+        require_all_targets,
+        llvm_library,
+        llvm_config,
+        air_inputs,
+        entry,
+        fp_profile,
+        threadgroup_inputs,
+    } = options;
     ensure!(
         air_inputs.is_empty() || (llvm_library.is_some() && entry.is_some()),
         "raw AIR inputs require --llvm-library and --entry"
+    );
+    ensure!(
+        threadgroup_inputs.is_empty() || (threadgroup_inputs.len() == 3 && llvm_library.is_some()),
+        "threadgroup fixtures require exactly three raw inputs and --llvm-library"
     );
     let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
     let llvm_config = llvm_config.map(fs::canonicalize).transpose()?;
@@ -360,6 +383,14 @@ pub fn build(
                     .context("--llvm-config requires --llvm-library")?,
             )
         })
+        .transpose()?;
+    // Original ACO optionally invokes this original disassembler through PATH.
+    // Bind its actual bytes rather than treating a successful IR fallback as
+    // evidence that emitted machine code was decoded.
+    let clrx_disassembler = llvm_sdk
+        .as_ref()
+        .and_then(|_| tools::which("clrxdisasm"))
+        .map(|path| tools::binding(&path))
         .transpose()?;
     let meson = tool("meson", "generators/bin")?;
     let ninja = tool("ninja", "generators/bin")?;
@@ -385,6 +416,11 @@ pub fn build(
             "nvidia/stela/hosted/copy.c",
             "nvidia/stela/hosted/copy.h",
             "nvidia/stela/tests/copy.c",
+            "nvidia/stela/hosted/sampler.c",
+            "nvidia/stela/hosted/sampler.h",
+            "nvidia/stela/tests/sampler.c",
+            "nvidia/stela/tests/sampler_cases.h",
+            "nvidia/stela/tests/sampler_donor.h",
             "amd/stela/buffer.c",
             "amd/stela/buffer.h",
             "amd/tests/buffer_test.c",
@@ -399,10 +435,16 @@ pub fn build(
             "amd/stela/image_resource.h",
             "amd/tests/image_resource_test.c",
             "amd/tests/image_test.c",
+            "amd/stela/image_copy.c",
+            "amd/stela/image_copy.h",
+            "amd/tests/image_copy_test.c",
+            "amd/tests/image_fixture.h",
             "amd/stela/compute.c",
             "amd/stela/compute.h",
             "amd/stela/compute_policy.c",
             "amd/stela/compute_policy.h",
+            "amd/stela/llvm_compute.c",
+            "amd/stela/llvm_compute.h",
             "amd/tests/compute_test.c",
             "amd/tests/compute_policy_reference.h",
             "intel/stela/hosted/surface.c",
@@ -411,6 +453,9 @@ pub fn build(
             "intel/stela/hosted/image.c",
             "intel/stela/hosted/image.h",
             "intel/stela/tests/image.c",
+            "intel/stela/hosted/image_copy.c",
+            "intel/stela/hosted/image_copy.h",
+            "intel/stela/tests/image_copy.c",
             "intel/stela/hosted/sampler.c",
             "intel/stela/hosted/sampler.h",
             "intel/stela/hosted/sampler_internal.h",
@@ -472,6 +517,10 @@ pub fn build(
                 "intel/stela/tests/fp_controls.c",
                 "intel/stela/tests/fp_controls_elk.c",
                 "intel/stela/tests/fp_controls_elk.h",
+                "intel/stela/tests/air_threadgroup.c",
+                "intel/stela/tests/air_threadgroup_elk.c",
+                "intel/stela/tests/air_threadgroup_elk.h",
+                "nvidia/stela/tests/air_threadgroup.c",
                 "amd/tests/air_probe_input.h",
             ]);
         }
@@ -481,6 +530,8 @@ pub fn build(
                 "amd/stela/llvm_float.c",
                 "amd/stela/llvm_float.h",
                 "amd/tests/llvm_float_test.c",
+                "amd/tests/air_shared_test.c",
+                "amd/tests/llvm_compute_reference.h",
             ]);
         }
         paths
@@ -504,7 +555,9 @@ pub fn build(
     };
     let build = tools::root().join(".stela/gpu/build").join(cache);
     let evidence = evidence_directory()?;
-    let input_snapshots = snapshot_air_inputs(air_inputs, &evidence)?;
+    let input_snapshots = snapshot_air_inputs(air_inputs, &evidence, "air-input")?;
+    let threadgroup_snapshots =
+        snapshot_air_inputs(threadgroup_inputs, &evidence, "threadgroup-input")?;
     let hash = source_binding(&source)?;
     let mut setup = Command::new(&meson);
     setup
@@ -576,15 +629,18 @@ pub fn build(
         "src/stela/stela_apple_source_test",
         "src/stela/stela_nv_image_probe",
         "src/stela/stela_nv_image_copy_probe",
+        "src/stela/stela_nv_sampler_probe",
         "src/stela/stela_amd_commands_probe",
         "src/stela/stela_amd_buffer_probe",
         "src/stela/stela_amd_sampler_probe",
         "src/stela/stela_amd_surface_probe",
         "src/stela/stela_amd_image_probe",
         "src/stela/stela_amd_image_resource_probe",
+        "src/stela/stela_amd_image_copy_probe",
         "src/stela/stela_amd_compute_probe",
         "src/stela/stela_intel_surface_probe",
         "src/stela/stela_intel_image_probe",
+        "src/stela/stela_intel_image_copy_probe",
         "src/stela/stela_intel_sampler_probe",
         "src/stela/stela_intel_compute_program_probe",
         "src/stela/stela_intel_legacy_compute_program_probe",
@@ -603,6 +659,8 @@ pub fn build(
             "src/stela/stela_air_ssbo_test",
             "src/stela/stela_nv_compute_probe",
             "src/stela/stela_intel_fp_controls_probe",
+            "src/stela/stela_nv_air_threadgroup_probe",
+            "src/stela/stela_intel_air_threadgroup_probe",
         ]);
         if !input_snapshots.is_empty() {
             compile.arg("src/stela/stela_air_input_nak_probe");
@@ -610,6 +668,7 @@ pub fn build(
         if llvm_sdk.is_some() {
             compile.arg("src/stela/stela_air_amd_llvm_probe");
             compile.arg("src/stela/stela_amd_llvm_float_probe");
+            compile.arg("src/stela/stela_amd_air_threadgroup_probe");
         }
     }
     run(&mut compile, &evidence, "compile")?;
@@ -633,14 +692,17 @@ pub fn build(
     let mut resource_stages = vec![
         "nv_image",
         "nv_image_copy",
+        "nv_sampler",
         "amd_buffer",
         "amd_sampler",
         "amd_surface",
         "amd_image",
         "amd_image_resource",
+        "amd_image_copy",
         "amd_compute",
         "intel_surface",
         "intel_image",
+        "intel_image_copy",
         "intel_sampler",
         "intel_compute_program",
         "intel_legacy_compute_program",
@@ -827,6 +889,12 @@ pub fn build(
             "AIR snapshot changed during compilation"
         );
     }
+    let threadgroups = threadgroup::run(
+        &build,
+        &evidence,
+        &threadgroup_snapshots,
+        llvm_sdk.is_some(),
+    )?;
     let libraries = library_paths
         .iter()
         .map(|name| inspect_archive(&build.join(name)))
@@ -848,6 +916,13 @@ pub fn build(
             "LLVM development inputs changed during the build"
         );
     }
+    if let Some(binding) = &clrx_disassembler {
+        let path = binding["path"].as_str().context("missing CLRX tool path")?;
+        ensure!(
+            tools::binding(Path::new(path))? == *binding,
+            "CLRX disassembler changed during compiler qualification"
+        );
+    }
     let mut stderr_paths = fs::read_dir(&evidence)?
         .map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -867,12 +942,16 @@ pub fn build(
         "source_compiler_boundary": source_compiler_boundary,
         "air_compute_compiler_subset": llvm_library.is_some(),
         "amd_llvm_development_files": llvm_sdk,
+        "optional_clrx_disassembler": clrx_disassembler,
         "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
         "stderr_logs": stderr_logs,
         "external_probe_sources": external_sources,
         "resource_probes": resource_probes,
         "original_air_inputs": input_snapshots,
+        "threadgroup_inputs": threadgroup_snapshots,
+        "threadgroup_probes": threadgroups.probes,
+        "unsupported_threadgroup_targets": threadgroups.unsupported,
         "air_fp_profile": fp_profile.name(),
         "original_air_probes": original_input_probes,
         "unsupported_input_targets": original_unsupported,
@@ -909,7 +988,10 @@ pub fn build(
         );
     }
     ensure!(
-        !require_all_targets || (unsupported.is_empty() && original_unsupported.is_empty()),
+        !require_all_targets
+            || (unsupported.is_empty()
+                && original_unsupported.is_empty()
+                && threadgroups.unsupported.is_empty()),
         "some compiler fixture targets remain unsupported; see {}",
         evidence.join("compilers.json").display()
     );
@@ -943,7 +1025,8 @@ mod tests {
         fs::create_dir(&evidence).unwrap();
         let bytes = b"BC\xc0\xdeoriginal";
         fs::write(&input, bytes).unwrap();
-        let records = snapshot_air_inputs(std::slice::from_ref(&input), &evidence).unwrap();
+        let records =
+            snapshot_air_inputs(std::slice::from_ref(&input), &evidence, "air-input").unwrap();
         fs::write(&input, b"changed").unwrap();
         let snapshot = records[0]["snapshot"]["path"].as_str().unwrap();
         assert_eq!(fs::read(snapshot).unwrap(), bytes);
@@ -951,12 +1034,14 @@ mod tests {
             records[0]["snapshot"]["sha256"],
             stela_runtime::sha256(bytes)
         );
-        assert!(snapshot_air_inputs(std::slice::from_ref(&input), temp.path()).is_err());
+        assert!(
+            snapshot_air_inputs(std::slice::from_ref(&input), temp.path(), "air-input").is_err()
+        );
         File::create(&input)
             .unwrap()
             .set_len(64 * 1024 * 1024 + 1)
             .unwrap();
-        assert!(snapshot_air_inputs(&[input], temp.path()).is_err());
+        assert!(snapshot_air_inputs(&[input], temp.path(), "air-input").is_err());
     }
 
     #[test]
