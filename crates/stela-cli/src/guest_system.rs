@@ -160,9 +160,17 @@ pub(crate) fn kernel_versions(roots: &[PathBuf]) -> Result<BTreeMap<String, Stri
         };
         let receipt: install::Receipt = serde_json::from_slice(&bytes)
             .with_context(|| format!("{} is not an install receipt", path.display()))?;
-        if receipt.kind == install::KIND && !receipt.kernels.is_empty() {
-            return Ok(receipt
-                .kernels
+        if receipt.kind == install::KIND {
+            let kernels = if receipt.kernels.is_empty() {
+                install::metadata::read(root.parent().context("guest root has no parent")?, &bytes)?
+                    .unwrap_or_default()
+            } else {
+                receipt.kernels
+            };
+            if kernels.is_empty() {
+                continue;
+            }
+            return Ok(kernels
                 .into_iter()
                 .map(|kernel| (kernel.product_type, kernel.version))
                 .collect());
@@ -256,6 +264,12 @@ impl InstallSystem {
             return crate::apps::remove_service(self.dry_run);
         }
         if let Some(root) = layout.installed()? {
+            let found = find_ipsw();
+            install::metadata::refresh(
+                &layout,
+                self.ipsw.as_deref().or(found.as_deref()),
+                self.dry_run,
+            )?;
             println!(
                 "The macOS {PINNED_VERSION} ({PINNED_BUILD}) system files are installed in {}.",
                 root.display()

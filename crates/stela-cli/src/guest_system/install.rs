@@ -2,6 +2,8 @@
 //! guest roots extracted earlier (development). Everything is written into
 //! the layout's staging directory and renamed into place last, so an
 //! install is either complete, with its receipt, or absent.
+pub(super) mod metadata;
+
 use super::{Layout, PINNED_VERSION, available_bytes, gigabytes};
 use crate::restore::{self, aea, components, disk, payload::file_sha256};
 use crate::setup::PINNED_MODEL;
@@ -69,8 +71,15 @@ const PARTS: [Part; 2] = [
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum Source {
-    Ipsw { file_name: String, bytes: u64 },
-    Imported { roots: Vec<PathBuf> },
+    Ipsw {
+        file_name: String,
+        bytes: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sha256: Option<String>,
+    },
+    Imported {
+        roots: Vec<PathBuf>,
+    },
 }
 
 /// One member an install read.
@@ -191,6 +200,7 @@ pub(super) fn from_ipsw(
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default(),
                 bytes: fs::metadata(ipsw)?.len(),
+                sha256: Some(file_sha256(ipsw)?.1),
             },
             members,
             files,
