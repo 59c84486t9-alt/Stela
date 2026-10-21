@@ -16,6 +16,8 @@
 //! actual state stays at the target. Other states, device reset and
 //! quiescing through DEV_DISABLE are refused until a model connects them to
 //! the device models. Parent domains are not checked.
+pub mod coverage;
+
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use alloc::collections::{BTreeMap, BTreeSet};
 #[cfg(not(feature = "std"))]
