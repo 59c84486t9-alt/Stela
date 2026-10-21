@@ -118,6 +118,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
                     || net::virtio::matches(&function)
                     || net::igc::matches(&function)
                     || net::e1000e::matches(&function)
+                    || net::igb::matches(&function)
                     || function.class == nvme::CLASS
                     || function.class == ahci::CLASS
                     || function.class == xhci::CLASS;
@@ -161,6 +162,9 @@ impl Prepared {
         }
         for (address, error) in &disks.failures {
             output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
+        }
+        for (address, warning) in &disks.warnings {
+            output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
         }
         for device in &disks.devices {
             let id = device.identity();

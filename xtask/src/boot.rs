@@ -290,6 +290,8 @@ enum NetworkModel {
     Virtio,
     /// Intel 82574L, PCI ID 8086:10d3.
     E1000e,
+    /// Intel 82576, PCI ID 8086:10c9.
+    Igb,
 }
 
 impl NetworkModel {
@@ -297,6 +299,7 @@ impl NetworkModel {
         match self {
             Self::Virtio => "virtio-net-pci",
             Self::E1000e => "e1000e",
+            Self::Igb => "igb",
         }
     }
 }
@@ -717,9 +720,9 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         let port = lan::listen(output.join("network.log")).context("start the network peer")?;
         let model = arguments.network_model.unwrap_or(NetworkModel::Virtio);
         let bus = match model {
-            NetworkModel::E1000e => {
-                // Exercise the real driver's upstream bridge discovery and
-                // endpoint/parent ASPM workaround, not just a root-bus NIC.
+            NetworkModel::E1000e | NetworkModel::Igb => {
+                // Exercise physical NIC drivers behind a PCIe bridge. For
+                // e1000e this also checks the endpoint/parent ASPM workaround.
                 command.args([
                     "-device",
                     "pcie-root-port,id=host-net-port,chassis=1,bus=pcie.0",
@@ -928,6 +931,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         match arguments.network_model.unwrap_or(NetworkModel::Virtio) {
             NetworkModel::Virtio => "virtio-net",
             NetworkModel::E1000e => "e1000e",
+            NetworkModel::Igb => "igb",
         }
     };
     let network = network_check_url.map(|_| {
@@ -1266,6 +1270,7 @@ mod tests {
         for (argument, expected) in [
             ("virtio", NetworkModel::Virtio),
             ("e1000e", NetworkModel::E1000e),
+            ("igb", NetworkModel::Igb),
         ] {
             let cli = crate::Cli::try_parse_from([
                 "xtask",

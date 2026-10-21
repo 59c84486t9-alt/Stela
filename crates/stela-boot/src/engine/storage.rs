@@ -137,6 +137,9 @@ pub unsafe fn open(
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
+    for (address, warning) in &disks.warnings {
+        output::arguments(format_args!("HOST WARNING pci={address}: {warning}\n"));
+    }
     for (location, error) in &disks.usb_failures {
         output::arguments(format_args!(
             "USB FAILED {location}: {}\n",

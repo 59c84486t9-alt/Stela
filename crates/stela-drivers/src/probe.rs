@@ -9,7 +9,7 @@ use crate::{
         pci::{Address, EcamWindow, Function},
     },
     input::{self, virtio::VirtioInput},
-    net::{self, Link, LinkError, Mac, e1000e::E1000e, igc::Igc, virtio::VirtioNet},
+    net::{self, Link, LinkError, Mac, e1000e::E1000e, igb::Igb, igc::Igc, virtio::VirtioNet},
     storage::{ahci, nvme, virtio},
     usb::{cdc::UsbNet, hid::UsbInput, xhci},
 };
@@ -20,6 +20,7 @@ pub enum Adapter {
     Virtio(VirtioNet),
     Igc(Igc),
     E1000e(E1000e),
+    Igb(Igb),
     Usb(UsbNet),
 }
 
@@ -30,6 +31,7 @@ impl Adapter {
             Self::Virtio(_) => "virtio-net",
             Self::Igc(_) => "igc",
             Self::E1000e(_) => "e1000e",
+            Self::Igb(_) => "igb",
             Self::Usb(_) => "usb-cdc",
         }
     }
@@ -40,6 +42,7 @@ impl Adapter {
             Self::Virtio(device) => &device.location,
             Self::Igc(device) => &device.location,
             Self::E1000e(device) => &device.location,
+            Self::Igb(device) => &device.location,
             Self::Usb(device) => &device.location,
         }
     }
@@ -51,6 +54,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.mac(),
             Self::Igc(device) => device.mac(),
             Self::E1000e(device) => device.mac(),
+            Self::Igb(device) => device.mac(),
             Self::Usb(device) => device.mac(),
         }
     }
@@ -59,6 +63,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.carrier(),
             Self::Igc(device) => device.carrier(),
             Self::E1000e(device) => device.carrier(),
+            Self::Igb(device) => device.carrier(),
             Self::Usb(device) => device.carrier(),
         }
     }
@@ -67,6 +72,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.transmit(frame),
             Self::Igc(device) => device.transmit(frame),
             Self::E1000e(device) => device.transmit(frame),
+            Self::Igb(device) => device.transmit(frame),
             Self::Usb(device) => device.transmit(frame),
         }
     }
@@ -75,6 +81,7 @@ impl Link for Adapter {
             Self::Virtio(device) => device.receive(),
             Self::Igc(device) => device.receive(),
             Self::E1000e(device) => device.receive(),
+            Self::Igb(device) => device.receive(),
             Self::Usb(device) => device.receive(),
         }
     }
@@ -91,6 +98,8 @@ pub struct Disks {
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, BlockError)>,
+    /// Nonfatal initialization diagnostics, including adapters not selected.
+    pub warnings: Vec<(Address, &'static str)>,
     /// USB devices that failed to enumerate or bind, by location.
     pub usb_failures: Vec<(String, BlockError)>,
     /// USB interfaces no driver here takes, and why.
@@ -100,7 +109,7 @@ pub struct Disks {
 }
 
 /// Enumerate PCI and bring up every virtio-blk, NVMe and AHCI controller,
-/// every virtio-input device, every virtio-net, Intel I225/I226 and 82574L adapter,
+/// every virtio-input device, every virtio-net and supported Intel Ethernet adapter,
 /// and every xHCI
 /// controller with the USB disks, keyboards, pointers and Ethernet
 /// adapters on it.
@@ -167,6 +176,28 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                 // functions and controllers after ExitBootServices.
                 match unsafe { E1000e::new(&mut function, handoff, dma) } {
                     Ok(device) => disks.links.push(Adapter::E1000e(device)),
+                    Err(error) => disks.failures.push((address, error)),
+                }
+                continue;
+            } else if net::igb::matches(&function) {
+                // SAFETY: as for e1000e, the caller granted exclusive ownership
+                // of the mapped PCI functions and their controllers.
+                match unsafe { Igb::new(&mut function, handoff, dma) } {
+                    Ok(device) => {
+                        if device.warnings.nvm_autoload_timeout {
+                            disks.warnings.push((
+                                address,
+                                "igb NVM autoload completion timed out; NVM contents validated",
+                            ));
+                        }
+                        if device.warnings.phy_configuration_timeout {
+                            disks.warnings.push((
+                                address,
+                                "igb PHY configuration completion timed out; PHY transactions validated",
+                            ));
+                        }
+                        disks.links.push(Adapter::Igb(device));
+                    }
                     Err(error) => disks.failures.push((address, error)),
                 }
                 continue;
