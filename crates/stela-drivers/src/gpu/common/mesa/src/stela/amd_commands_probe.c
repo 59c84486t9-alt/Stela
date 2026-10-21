@@ -149,9 +149,11 @@ pipeline(void)
 }
 
 static bool
-check_target(enum amd_gfx_level level, enum radeon_family family, bool graphics, bool packed)
+check_target(enum amd_gfx_level level, enum radeon_family family, bool graphics, bool packed,
+             uint32_t cu_mask)
 {
-   const struct radeon_info info = gpu(level, family, graphics, packed);
+   struct radeon_info info = gpu(level, family, graphics, packed);
+   info.spi_cu_en = cu_mask;
    struct stela_amd_compute_pipeline shader = pipeline();
    shader.wave_size = level >= GFX10 ? 32 : 64;
    if (level >= GFX10 || (!graphics && family >= CHIP_GFX940))
@@ -164,9 +166,9 @@ check_target(enum amd_gfx_level level, enum radeon_family family, bool graphics,
    CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_OK);
    CHECK(written && decode(&decoded, words, written));
    CHECK(check_register(&decoded, 0xb834, 0x12));
-   CHECK(check_register(&decoded, 0xb858, 0x00f300f3));
+   CHECK(check_register(&decoded, 0xb858, (cu_mask & 0xffff) * 0x10001));
    if (level >= GFX12)
-      CHECK(check_register(&decoded, 0xb88c, 0x00f300f3));
+      CHECK(check_register(&decoded, 0xb88c, (cu_mask & 0xffff) * 0x10001));
    if (!graphics && family >= CHIP_GFX940)
       CHECK(check_register(&decoded, 0xb8b4, 0));
 
@@ -204,7 +206,8 @@ check_target(enum amd_gfx_level level, enum radeon_family family, bool graphics,
       CHECK(check_register(&decoded, 0xb81c + i * 4, shader.block_size[i]));
    CHECK(!(decoded.initiator & (1u << 1)));
    CHECK(!(decoded.initiator & (1u << 6))); /* ORDER_MODE */
-   printf("PM4 target gfx=%u family=%u graphics=%u packed=%u validated\n", level, family, graphics, packed);
+   printf("PM4 target gfx=%u family=%u graphics=%u packed=%u cu_mask=%08x validated\n",
+          level, family, graphics, packed, cu_mask);
    return true;
 }
 
@@ -280,6 +283,10 @@ check_preamble_and_limits(void)
    CHECK(written > 0);
    CHECK(stela_amd_compute_preamble(&info, &preamble, words, written - 1, &written) == STELA_AMD_COMMAND_BUFFER_TOO_SMALL);
    CHECK(!memcmp(words, before, sizeof(words)));
+   info.spi_cu_en = 0;
+   CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
+   CHECK(written == 0 && !memcmp(words, before, sizeof(words)));
+   info.spi_cu_en = 0x00f3;
    preamble.gfx11.compute_dispatch_interleave = 63;
    CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
    preamble.gfx11.compute_dispatch_interleave = 256;
@@ -331,12 +338,17 @@ main(void)
       {GFX11_7, CHIP_GFX1170, true}, {GFX12, CHIP_GFX1200, true},
       {GFX12_1, CHIP_GFX1210, true},
    };
+   const uint32_t masks[] = {0x00f3, UINT32_MAX};
    for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
-      if (!check_target(targets[i].level, targets[i].family, targets[i].graphics, false))
-         return 1;
-      if (targets[i].level >= GFX11 &&
-          !check_target(targets[i].level, targets[i].family, targets[i].graphics, true))
-         return 1;
+      for (unsigned m = 0; m < ARRAY_SIZE(masks); m++) {
+         if (!check_target(targets[i].level, targets[i].family, targets[i].graphics,
+                           false, masks[m]))
+            return 1;
+         if (targets[i].level >= GFX11 &&
+             !check_target(targets[i].level, targets[i].family, targets[i].graphics,
+                           true, masks[m]))
+            return 1;
+      }
    }
    if (!check_failures_and_workaround() || !check_preamble_and_limits())
       return 1;

@@ -21,8 +21,10 @@ validate_device(const struct radeon_info *info)
       return STELA_AMD_COMMAND_INVALID;
    if (info->gfx_level < GFX6 || info->gfx_level >= NUM_GFX_VERSIONS)
       return STELA_AMD_COMMAND_UNSUPPORTED;
+   /* Mesa uses UINT32_MAX when AMD_CU_MASK is unset. The retained PM4
+    * helpers apply the hardware register-field masks; do not truncate the
+    * device-info policy mask before passing it to those original helpers. */
    if (!info->max_se || info->max_se > AMD_MAX_SE || !info->spi_cu_en ||
-       info->spi_cu_en > UINT16_MAX ||
        (info->address32_hi > UINT16_MAX && info->address32_hi < 0xffff8000))
       return STELA_AMD_COMMAND_INVALID;
    return STELA_AMD_COMMAND_OK;
