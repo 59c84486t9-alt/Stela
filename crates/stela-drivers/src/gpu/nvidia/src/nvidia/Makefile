@@ -22,7 +22,7 @@ GET_COMPILER_TYPE = \
 ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
 ifeq ($(TARGET_OS),Stela)
-ALL_SRCS += ../../stela/pci.c ../../stela/memory.c
+ALL_SRCS += ../../stela/pci.c ../../stela/memory.c ../../stela/stela_ram_mapping.c
 CFLAGS += -I ../../stela
 endif
 
@@ -201,6 +201,15 @@ CFLAGS += $(CONDITIONAL_CFLAGS)
 
 CC_ONLY_CFLAGS += --std=gnu11
 CXX_ONLY_CFLAGS += --std=gnu++11
+
+ifeq ($(TARGET_OS),Stela)
+# The vendor object rules discard source directories. Refuse collisions across
+# the complete source list instead of silently replacing an RM implementation.
+STELA_OBJECT_BASENAMES := $(notdir $(basename $(ALL_SRCS)))
+ifneq ($(words $(STELA_OBJECT_BASENAMES)),$(words $(sort $(STELA_OBJECT_BASENAMES))))
+$(error duplicate NVIDIA Stela object basenames: $(sort $(foreach name,$(STELA_OBJECT_BASENAMES),$(if $(word 2,$(filter $(name),$(STELA_OBJECT_BASENAMES))),$(name)))))
+endif
+endif
 
 OBJS = $(call BUILD_OBJECT_LIST,$(ALL_SRCS))
 

@@ -54,13 +54,16 @@ fn nvidia() {
         .define("NV_STELA", None)
         .file(format!("{source}/stela/pci.c"))
         .file(format!("{source}/stela/memory.c"))
+        .file(format!("{source}/stela/stela_ram_mapping.c"))
         .include(format!("{source}/stela"))
         .include(format!("{source}/src/common/sdk/nvidia/inc"))
         .include(format!("{source}/src/nvidia/arch/nvalloc/unix/include"))
+        .include(format!("{source}/src/nvidia/arch/nvalloc/common/inc"))
         .include(format!("{source}/src/nvidia/inc/kernel"));
     println!("cargo:rerun-if-changed={source}/stela");
     println!("cargo:rerun-if-changed={source}/src/common/sdk/nvidia/inc");
     println!("cargo:rerun-if-changed={source}/src/nvidia/arch/nvalloc/unix/include");
+    println!("cargo:rerun-if-changed={source}/src/nvidia/arch/nvalloc/common/inc");
     println!("cargo:rerun-if-changed={source}/src/nvidia/inc/kernel/os");
     build.compile("stela-nvidia-port");
 }

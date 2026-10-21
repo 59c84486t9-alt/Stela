@@ -16,13 +16,23 @@ struct Header {
     layout: Layout,
 }
 
+pub(super) const ALIGNMENT: usize = align_of::<Header>();
+
 // Internal result tags mirror stela/memory.h, not NVIDIA's status namespace.
 #[repr(u32)]
 #[derive(Debug, Eq, PartialEq)]
-enum AllocationStatus {
+pub(super) enum AllocationStatus {
     Success = 0,
     InvalidSize = 1,
     OutOfMemory = 2,
+}
+
+/// CPU metadata from the existing global heap, with the unsized free prefix.
+pub(super) fn allocate(bytes: u64) -> Result<NonNull<c_void>, AllocationStatus> {
+    allocate_with(bytes, |layout| {
+        // SAFETY: a nonzero checked layout, forwarded to the common allocator.
+        unsafe { alloc(layout) }
+    })
 }
 
 fn allocate_with(
@@ -50,10 +60,7 @@ fn allocate_with(
 /// `out` must be a writable native pointer slot, owned by the C shim.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_nvidia_alloc(bytes: u64, out: *mut *mut c_void) -> AllocationStatus {
-    let result = allocate_with(bytes, |layout| {
-        // SAFETY: a nonzero checked layout, forwarded to the common allocator.
-        unsafe { alloc(layout) }
-    });
+    let result = allocate(bytes);
     let (pointer, status) = match result {
         Ok(pointer) => (pointer.as_ptr(), AllocationStatus::Success),
         Err(status) => (ptr::null_mut(), status),
@@ -75,13 +82,21 @@ unsafe fn free_with(pointer: *mut c_void, release: impl FnOnce(*mut u8, Layout))
 }
 
 /// # Safety
+/// Return only this allocator's live pointer, once, after all uses stop, in the
+/// same heap's supported owner-established execution context.
+pub(super) unsafe fn free(pointer: *mut c_void) {
+    // SAFETY: the native C/RM caller satisfies the contract above; `free_with`
+    // recovers the same pointer/layout originally obtained from this heap.
+    unsafe { free_with(pointer, |base, layout| dealloc(base, layout)) }
+}
+
+/// # Safety
 /// Return only a live `stela_nvidia_alloc` pointer, once, after all uses stop.
 /// The same heap and supported owner-established execution context must remain.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn stela_nvidia_free(pointer: *mut c_void) {
-    // SAFETY: the native C/RM caller satisfies the contract above; `free_with`
-    // recovers the same pointer/layout originally obtained from this heap.
-    unsafe { free_with(pointer, |base, layout| dealloc(base, layout)) }
+    // SAFETY: the C/RM caller returns exactly this allocator's pointer.
+    unsafe { free(pointer) }
 }
 
 #[cfg(test)]

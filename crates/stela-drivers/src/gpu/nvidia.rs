@@ -1,8 +1,9 @@
-//! Native NVIDIA OS hooks for PCI configuration and CPU metadata allocation;
+//! Native NVIDIA OS hooks for PCI configuration, CPU metadata and RAM views;
 //! enabling this port does not initialize a GPU or expose a Metal device.
 use crate::bus::pci::ConfigSpace;
 use core::{ffi::c_void, marker::PhantomData, marker::PhantomPinned, pin::Pin};
 
+pub mod allocation;
 mod memory;
 
 const PCI_CONFIG_BYTES: u32 = 4096;
