@@ -130,6 +130,10 @@ pub struct Run {
     /// The built-in image and options to run when no module is given.
     #[arg(long, value_enum, default_value_t = Scenario::Smoke)]
     scenario: Scenario,
+    /// QEMU CPU model/properties. System mode defaults to an explicit Intel
+    /// model: QEMU's AMD models lack the required AMD routing-control MSRs.
+    #[arg(long)]
+    cpu: Option<String>,
     /// Guest machine memory for QEMU; defaults to 1G, 8G for system mode
     /// and 12G with a boot bundle.
     #[arg(long)]
@@ -447,6 +451,19 @@ fn process_image(_pid: u32) -> Option<PathBuf> {
     None
 }
 
+fn qemu_cpu(requested: Option<&str>, no_la57: bool, system: bool) -> String {
+    let model = requested.unwrap_or(if system {
+        "max,vendor=GenuineIntel"
+    } else {
+        "qemu64"
+    });
+    if no_la57 {
+        format!("{model},la57=off")
+    } else {
+        model.into()
+    }
+}
+
 fn launch(arguments: Run) -> Result<ExitCode> {
     let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
         MAX_LONG_TIMEOUT_SECONDS
@@ -655,18 +672,16 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let mut command = Process::new(&qemu);
     // A USB's startup choices take a keyboard, and its setup writes the boot
     // log. System mode places the guest beside the window with LA57, which
-    // `max` provides unless `--no-la57` hides it.
-    let max = if arguments.no_la57 {
-        "max,la57=off"
+    // the selected CPU exposes unless `--no-la57` hides it.
+    let cpu = qemu_cpu(
+        arguments.cpu.as_deref(),
+        arguments.no_la57,
+        usb || system || arguments.native_dma_check,
+    );
+    let (keyboard, access) = if usb {
+        ("on", "readonly=off,file=fat:rw:")
     } else {
-        "max"
-    };
-    let (keyboard, cpu, access) = if usb {
-        ("on", max, "readonly=off,file=fat:rw:")
-    } else if system || arguments.native_dma_check {
-        ("off", max, "readonly=on,file=fat:")
-    } else {
-        ("off", "qemu64", "readonly=on,file=fat:")
+        ("off", "readonly=on,file=fat:")
     };
     // A USB image carries the boot bundle that `stela setup` wrote.
     let bundle = arguments.bundle.is_some() || preboot.is_some() || arguments.usb_image.is_some();
@@ -683,7 +698,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .arg(format!(
             "q35,smm=off,sata=off,usb=off,smbus=off,hpet=off,i8042={keyboard},vmport=off"
         ))
-        .args(["-accel", "tcg,thread=single", "-cpu", cpu, "-smp", "1"])
+        .args(["-accel", "tcg,thread=single", "-cpu", &cpu, "-smp", "1"])
         .args(
             arguments
                 .icount
@@ -1363,6 +1378,17 @@ fn native_level_verified(serial: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_selection_records_an_explicit_model_and_keeps_baseline_overrides() {
+        assert_eq!(qemu_cpu(None, false, true), "max,vendor=GenuineIntel");
+        assert_eq!(qemu_cpu(None, false, false), "qemu64");
+        assert_eq!(qemu_cpu(Some("Nehalem"), true, true), "Nehalem,la57=off");
+        assert_eq!(
+            qemu_cpu(Some("max,vendor=AuthenticAMD"), false, true),
+            "max,vendor=AuthenticAMD"
+        );
+    }
 
     #[test]
     fn run_report_keeps_graceful_requirements_and_the_first_guest_panic() {

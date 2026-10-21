@@ -151,6 +151,15 @@ pub(super) fn verify_writeback(
         }
         u64::from(low) | u64::from(high) << 32
     }
+    let vendor = __cpuid(0);
+    if [vendor.ebx, vendor.edx, vendor.ecx] == [0x6874_7541, 0x6974_6e65, 0x444d_4163] {
+        return verify_amd_writeback(cpu, start, bytes, table_offset);
+    }
+    // This decoder is qualified against Intel's architectural controls. Other
+    // vendors need their own routing qualification, not an Intel fallback.
+    if [vendor.ebx, vendor.edx, vendor.ecx] != [0x756e_6547, 0x4965_6e69, 0x6c65_746e] {
+        return Err(MemoryError::CacheAttributeUnavailable);
+    }
     // SAFETY: CPUID is available on the declared x86-64 host baseline.
     let features = __cpuid(1).edx;
     if features & (1 << 12 | 1 << 16) != (1 << 12 | 1 << 16) {
@@ -220,6 +229,58 @@ pub(super) fn verify_writeback(
         variables,
     }
     .writeback(start, bytes)
+}
+
+/// AMD's effective DRAM routing is additional to the common PAT/MTRR fields.
+/// Reuse the one native capture/query owner, including fixed-attribute visibility
+/// restoration. A captured image alone is never a live cache-policy grant.
+#[cfg(not(test))]
+fn verify_amd_writeback(
+    cpu: u64,
+    physical: u64,
+    bytes: usize,
+    table_offset: u64,
+) -> Result<(), MemoryError> {
+    use crate::native_smp::{firmware, memory_types::Image};
+    fn unavailable<E>(_: E) -> MemoryError { MemoryError::CacheAttributeUnavailable }
+    // SAFETY: initialize's contract excludes migration, root/cache writers
+    // and IRQ allocation. This is the actual current CPL0 processor; observe
+    // restores AMD's read-visibility control without changing routing.
+    let before = unsafe { firmware::observe() }.map_err(unavailable)?;
+    let image = Image::from_snapshot(&before).map_err(unavailable)?;
+    image
+        .writeback_ram(physical, bytes as u64)
+        .map_err(unavailable)?;
+    if !before.pat_valid || before.apic_id().is_none() {
+        return Err(MemoryError::CacheAttributeUnavailable);
+    }
+    verify_mappings(
+        cpu,
+        physical,
+        bytes,
+        before.cr3 & ADDRESS,
+        if before.cr4 & (1 << 12) != 0 { 5 } else { 4 },
+        before.pat,
+        |table, index| {
+            let address = table_offset
+                .checked_add(table)?
+                .checked_add(index as u64 * 8)?;
+            // SAFETY: initialize pins each actual root-reachable table page;
+            // the index stays inside its readable 4 KiB mapping.
+            Some(unsafe { (address as *const u64).read_volatile() })
+        },
+    )?;
+    // SAFETY: the same actor-local exclusion remains held through validation.
+    let after = unsafe { firmware::observe() }.map_err(unavailable)?;
+    if before.apic_id() != after.apic_id()
+        || before.cr0 != after.cr0
+        || before.cr3 != after.cr3
+        || before.cr4 != after.cr4
+        || before.efer != after.efer
+    {
+        return Err(MemoryError::CacheAttributeUnavailable);
+    }
+    before.same_memory_types(&after).map_err(unavailable)
 }
 
 #[cfg(test)]
