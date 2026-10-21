@@ -207,7 +207,7 @@ struct Iomfb(Shared);
 
 impl Endpoint for Iomfb {
     fn start(&mut self, outbox: &mut Vec<u64>) -> Result<(), &'static str> {
-        outbox.push(self.0.borrow_mut().start());
+        outbox.push(self.0.borrow_mut().start()?);
         Ok(())
     }
 
@@ -307,6 +307,12 @@ impl Coprocessor {
         self.link.borrow().service().mode()
     }
 
+    fn retained_idle(&self) -> bool {
+        self.link.borrow().retained_idle()
+            && !self.frame_pending()
+            && self.afk.iter().all(|afk| afk.borrow().retained_idle())
+    }
+
     /// The next display-log entry.
     pub fn take_log(&mut self) -> Option<Log> {
         if let Some(entry) = self.link.borrow_mut().service_mut().take_log() {
@@ -343,10 +349,7 @@ impl Firmware for Coprocessor {
         self.rtkit.start(outbox)
     }
     fn stop(&mut self) -> Result<(), &'static str> {
-        if self.link.borrow().pending()
-            || self.frame_pending()
-            || self.afk.iter().any(|afk| !afk.borrow().retained_idle())
-        {
+        if !self.retained_idle() {
             return Err("DCP CPU stop with unfinished RPC, scanout or AFK work");
         }
         self.rtkit.stop()
@@ -363,6 +366,15 @@ impl Firmware for Coprocessor {
         Ok(())
     }
     fn receive(&mut self, message: Message, outbox: &mut Vec<Message>) -> Result<(), &'static str> {
+        if message.endpoint == 0 && message.payload >> 52 & 0xf == 6 {
+            let fields = message.payload & !(0xf << 52);
+            if fields == 0 {
+                return Err("DCP IOP memory-loss power transition is not modeled");
+            }
+            if matches!(fields, 0x201 | 0x202) && !self.retained_idle() {
+                return Err("DCP IOP sleep with unfinished RPC, scanout or AFK work");
+            }
+        }
         let previous = self.rtkit.iop_power();
         self.rtkit.receive(message, outbox)?;
         // Firmware 0x257f8 decodes wire 0x201/0x202 to internal state 8
@@ -634,7 +646,7 @@ mod tests {
             dma(&mut coprocessor, &mut ram).unwrap();
             iop_power(&mut coprocessor, 0x220).unwrap();
             assert!(quiesced(&coprocessor.link));
-            iop_power(&mut coprocessor, 0).unwrap();
+            assert_eq!(iop_power(&mut coprocessor, 0), Err("DCP IOP memory-loss power transition is not modeled"));
             iop_power(&mut coprocessor, 0x220).unwrap();
             assert!(quiesced(&coprocessor.link));
         }
@@ -700,6 +712,10 @@ mod tests {
         );
         // A CPU stop cannot abandon a queued DMA/RPC message.
         assert!(asc.write(0x44, Width::Word, 0, &mut access).is_err());
+        asc.write(0x8800, Width::Double, 6 << 52 | 0x201, &mut access).unwrap();
+        assert!(asc.write(0x8808, Width::Double, 0, &mut access).is_err());
+        assert_eq!(asc.firmware::<Coprocessor>().unwrap().rtkit.iop_power(), 0x20);
+        assert!(asc.read(0x8830, Width::Double, &mut access).is_err());
         with_port(&mut ram, |port| asc.service_dma(port)).unwrap();
         take(&mut asc, &mut access);
         send(&mut asc, &mut access, 0, 6 << 52 | 0x201);
@@ -999,6 +1015,24 @@ mod tests {
         let header_at = 0x4000 + callback.stream.calls() as usize;
         let header = link::Header::parse(ram.bytes[header_at..header_at + 12].try_into().unwrap());
         assert_eq!((&header.tag, header.input), (b"D594", 0x730));
+        // Waiting for the AP is not runnable DMA, but still owns the stream
+        // and its one-shot completion. Power/reset must not abandon it.
+        assert!(!coprocessor.dma_pending() && !coprocessor.retained_idle());
+        let heap = coprocessor.link.borrow().heap();
+        let mut no_ack = Vec::new();
+        assert_eq!(coprocessor.receive(Message { endpoint: 0, payload: 6 << 52 | 0x201 }, &mut no_ack), Err("DCP IOP sleep with unfinished RPC, scanout or AFK work"));
+        assert!(no_ack.is_empty());
+        assert_eq!(coprocessor.rtkit.iop_power(), 0x20);
+        assert!(coprocessor.stop().is_err());
+        assert!(endpoint.start(&mut no_ack).is_err());
+        assert!(no_ack.is_empty());
+        assert_eq!(coprocessor.link.borrow().heap(), heap);
+        endpoint.receive(link::Word::Rpc(callback.answer()).encode(), &mut Vec::new()).unwrap();
+        assert!(dma(&mut coprocessor, &mut ram).unwrap().is_empty());
+        assert!(coprocessor.retained_idle());
+        assert_eq!(coprocessor.receive(Message { endpoint: 0, payload: 6 << 52 }, &mut no_ack), Err("DCP IOP memory-loss power transition is not modeled"));
+        assert!(no_ack.is_empty());
+        assert_eq!(coprocessor.rtkit.iop_power(), 0x20);
     }
 
     #[test]
