@@ -1272,8 +1272,11 @@ fn from_disk(
     options: &Options,
 ) -> Vec<(String, Vec<u8>)> {
     crate::status::begin("Reading macOS's boot files from its disk");
+    // The kernel's text on the screen and on the debug UART, which the
+    // boot log records, as setup's bundles have it.
     let defaults = boot_bundle::Options {
         ecid: options.ecid,
+        boot_args: "-v serial=3 serial-device-name=uart0".into(),
         ..boot_bundle::Options::default()
     };
     let result = if options.upgrade {

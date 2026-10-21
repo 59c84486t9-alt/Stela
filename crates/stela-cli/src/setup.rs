@@ -1370,6 +1370,11 @@ pub(crate) fn fetch_image(directory: &Path, build: &str, model: &str) -> Result<
     Ok(path)
 }
 
+/// The console boot-args of the bundles setup prepares: the kernel's text
+/// on the screen (`-v`) and on the debug UART, which the engine records in
+/// the boot log as `GUEST|` lines, so a run on a PC can be read afterwards.
+const CONSOLE_BOOT_ARGS: &str = "--boot-args=-v serial=3 serial-device-name=uart0";
+
 /// `stela boot prepare --recovery` for the IPSW, model and machine into
 /// `output`, then the engine's own board check of the prepared DeviceTree
 /// (`machine::soc::board`), so a model the engine cannot run is refused
@@ -1383,6 +1388,7 @@ fn prepare_recovery(ipsw: &Path, model: &str, ecid: Option<Ecid>, output: &Path)
         "--recovery",
         "--output",
         output.to_str().context("temporary path is not UTF-8")?,
+        CONSOLE_BOOT_ARGS,
     ]
     .map(str::to_owned)
     .into();
@@ -1425,6 +1431,7 @@ fn prepare_ramdisk(
         "--restore",
         "--output",
         output.to_str().context("temporary path is not UTF-8")?,
+        CONSOLE_BOOT_ARGS,
     ]
     .map(str::to_owned)
     .into();
