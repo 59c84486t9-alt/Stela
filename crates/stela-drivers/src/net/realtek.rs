@@ -13,7 +13,7 @@
 //! This slice implements MAC versions 02..06 (8169S/SB/SC, 8110S/SB/SC),
 //! 17..26 (8168B/C/CP/D, 8111B/C/CP/D), 28/31 (8168DP/8111DP), 32..36 (8168E/E-VL/F,
 //! 8111E/E-VL/F), 38 (RTL8411), 40/42 (8168G/8111G), 44 (RTL8411B) and
-//! 46 (8168H/8111H and 8168M).
+//! 46 (8168H/8111H and 8168M), 51 (8168EP/8111EP) and 52 (8168FP/8117).
 //! PHY IDs `001c:c800` (internal FE/GE) and `001c:c912` (RTL8211B) are accepted only
 //! with actual copper-gigabit capabilities. Versions 25/26 require their exact
 //! `rtl_nic/rtl8168d-1.fw`/`rtl_nic/rtl8168d-2.fw` resource and matching PHY
@@ -28,6 +28,9 @@
 //! their exact PHY/start paths; MAC44 retains the donor's licensed RX fix.
 //! MAC46 adds real ADC-bias calibration and saw-count timer programming;
 //! EEE advertisement and MAC TX-LPI are cleared, including on link-up.
+//! MAC51/52 use the exact EP/FP OOB ERI namespace and bounded CMAC ownership.
+//! MAC52 XID54a requires MAC-only `rtl_nic/rtl8168fp-3.fw` after MAC tuning;
+//! XID54b and MAC51 require none. Their PHY/EPHY/start paths stay distinct.
 //! MAC28/31 use the DP MDIO gate and bounded initial DASH driver-start
 //! notification/acknowledgement. Their integrated RTL8211B identity erratum
 //! is an observable classification correction; MDIO returns actual values.
@@ -264,6 +267,7 @@ impl Realtek {
         hardware.initialize_modern()?;
         hardware.reset()?;
         hardware.dp_start()?;
+        hardware.ep_start()?;
         if revision.version <= 6 {
             function.config().write16(0x0c, 0x4008); // Linux cache-line/latency values, narrow config write.
             device.write8(0x82, 1);
@@ -276,7 +280,7 @@ impl Realtek {
             .transpose()?;
         let warning = hardware.configure_phy(script.as_ref(), subsystem == 0xe000_1458)?;
         hardware.reset()?; // Linux resets the MAC again after PHY initialization.
-        hardware.configure_mac()?;
+        hardware.configure_mac(script.as_ref())?;
         if revision.version == 28 {
             // The exact DP4 start branch enables CLKREQ after EPHY setup.
             // ASPM link states remain disabled by the shared PCI boundary.
@@ -341,7 +345,7 @@ impl RuntimeLink {
             Err(BlockError::Device { status: 255 })
         } else if self.status != Some(status)
             && status & 2 != 0
-            && matches!(hw.revision.version, 34..=36 | 38 | 46)
+            && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52)
         {
             link_patch(hw, status)
         } else {
@@ -403,7 +407,7 @@ fn link_patch<R: Registers, T: Timer>(
     hw: &Hardware<'_, R, T>,
     status: u8,
 ) -> Result<(), BlockError> {
-    if hw.revision.version == 46 {
+    if matches!(hw.revision.version, 46 | 51 | 52) {
         // EEE stays disabled, including stale MAC TX-LPI state at link-up.
         hw.registers.write8(0x1b, hw.mmio8(0x1b)? & !7);
         return hw.eri_modify(0x1b0, 3, 0);
@@ -430,8 +434,10 @@ fn link_patch<R: Registers, T: Timer>(
     Ok(())
 }
 fn read_station<R: Registers, T: Timer>(hw: &Hardware<'_, R, T>) -> Result<Mac, BlockError> {
-    if matches!(hw.revision.version, 35 | 36 | 38 | 40 | 42 | 44 | 46)
-        && let Some(mac) = station(hw.eri_read(0xe0)?, hw.eri_read(0xe4)?)
+    if matches!(
+        hw.revision.version,
+        35 | 36 | 38 | 40 | 42 | 44 | 46 | 51 | 52
+    ) && let Some(mac) = station(hw.eri_read(0xe0)?, hw.eri_read(0xe4)?)
     {
         return Ok(mac);
     }
@@ -492,7 +498,7 @@ fn publish<R: Registers, T: Timer>(
     let rxconfig = match revision.version {
         2..=17 => (7 << 13) | (7 << 8),
         25 | 26 | 28 | 31 | 32 | 33 => (1 << 15) | (7 << 8),
-        40 | 42 | 44 | 46 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
+        40 | 42 | 44 | 46 | 51 | 52 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
         _ => (1 << 15) | (1 << 14) | (7 << 8),
     };
     // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
@@ -571,6 +577,9 @@ mod tests {
         phy: BTreeMap<(u16, u16), u16>,
         ephy: [u16; 32],
         eri: BTreeMap<u16, u32>,
+        oob: BTreeMap<u16, u32>,
+        ep_ready_at: Option<u64>,
+        cmac_ready_at: Option<u64>,
         mac: BTreeMap<u16, u16>,
         phy_ocp: BTreeMap<u16, u16>,
         dp_ocp: BTreeMap<u16, u32>,
@@ -607,6 +616,10 @@ mod tests {
         dp_ready_delay: Option<u64>,
         fail_dp_at: usize,
         h_adc: Option<(u16, u16)>,
+        ep_mode: Option<u8>,
+        ep_ready_delay: Option<u64>,
+        cmac_ready_delay: Option<u64>,
+        fail_mac_address: Option<u16>,
     }
     impl Model {
         fn ready(time: &Time) -> Self {
@@ -639,6 +652,10 @@ mod tests {
                 dp_ready_delay: Some(20_000),
                 fail_dp_at: usize::MAX,
                 h_adc: None,
+                ep_mode: None,
+                ep_ready_delay: Some(20_000),
+                cmac_ready_delay: Some(75_000),
+                fail_mac_address: None,
             }
         }
         fn dp(time: &Time, version: u8, dash: bool) -> Self {
@@ -675,6 +692,17 @@ mod tests {
             }
             model
         }
+        fn ep(time: &Time, version: u8, dash: bool) -> Self {
+            let mut model = Self::modern(time);
+            model.ep_mode = Some(version);
+            {
+                let mut s = model.state.borrow_mut();
+                s.bytes[IBCR0] = 0x85;
+                s.bytes[IBCR2] = 0x85;
+                s.oob.insert(0x128, u32::from(dash));
+            }
+            model
+        }
         fn raw32(s: &State, o: usize) -> u32 {
             u32::from_le_bytes(s.bytes[o..o + 4].try_into().unwrap())
         }
@@ -682,6 +710,14 @@ mod tests {
             s.bytes[o..o + 4].copy_from_slice(&v.to_le_bytes());
         }
         fn complete(&self, s: &mut State) {
+            if s.ep_ready_at.is_some_and(|at| self.time.now() >= at) {
+                *s.oob.entry(0x124).or_default() |= 1;
+                s.ep_ready_at = None;
+            }
+            if s.cmac_ready_at.is_some_and(|at| self.time.now() >= at) {
+                s.bytes[IBISR0] |= 0x20;
+                s.cmac_ready_at = None;
+            }
             if let Some((at, reg)) = s.dp_ready_at
                 && self.time.now() >= at
             {
@@ -766,8 +802,20 @@ mod tests {
                 }
                 ERI_ADDRESS => {
                     let reg = (command & 0xfff) as u16;
+                    let oob = command & 0x30000 == 0x20000;
+                    if oob {
+                        assert_eq!(
+                            command & 0x7ffc_0000,
+                            if self.ep_mode == Some(52) {
+                                0x3dc0_0000
+                            } else {
+                                0
+                            }
+                        );
+                    }
                     if write {
-                        let mut value = *s.eri.get(&reg).unwrap_or(&0);
+                        let mut value =
+                            *(if oob { &s.oob } else { &s.eri }).get(&reg).unwrap_or(&0);
                         let data = Self::raw32(s, ERI_DATA);
                         for byte in 0..4 {
                             if command & (1 << (12 + byte)) != 0 {
@@ -775,10 +823,26 @@ mod tests {
                                     (value & !(0xff << (byte * 8))) | (data & (0xff << (byte * 8)));
                             }
                         }
-                        s.eri.insert(reg, value);
+                        if oob {
+                            s.oob.insert(reg, value);
+                            if reg == 0x30
+                                && value & 1 != 0
+                                && s.oob.get(&0x180).is_some_and(|v| *v & 0xff == 5)
+                                && s.oob[&0x128] & 1 != 0
+                            {
+                                s.ep_ready_at =
+                                    self.ep_ready_delay.map(|delay| self.time.now() + delay);
+                            }
+                        } else {
+                            s.eri.insert(reg, value);
+                        }
                         command & !ACCESS
                     } else {
-                        Self::store32(s, ERI_DATA, *s.eri.get(&reg).unwrap_or(&0));
+                        Self::store32(
+                            s,
+                            ERI_DATA,
+                            *(if oob { &s.oob } else { &s.eri }).get(&reg).unwrap_or(&0),
+                        );
                         command | ACCESS
                     }
                 }
@@ -854,8 +918,23 @@ mod tests {
     }
     impl Registers for Model {
         fn read8(&self, o: usize) -> u8 {
+            if self.failed_read == Some(o) {
+                return u8::MAX;
+            }
             let mut s = self.state.borrow_mut();
             self.complete(&mut s);
+            if o == COMMAND
+                && self.fail_mac_address.is_some_and(|address| {
+                    s.writes
+                        .iter()
+                        .rfind(|(r, _, _)| *r == MAC_OCP)
+                        .is_some_and(|(_, v, _)| {
+                            *v & ACCESS != 0 && (*v >> 15) as u16 & !1 == address
+                        })
+                })
+            {
+                return u8::MAX;
+            }
             if o == COMMAND && s.bytes[o] == ENABLE {
                 return self.command_readback.unwrap_or(s.bytes[o]);
             }
@@ -878,7 +957,14 @@ mod tests {
             let mut s = self.state.borrow_mut();
             self.complete(&mut s);
             s.writes.push((o, u32::from(v), 1));
+            if self.ep_mode.is_some() && o == IBISR0 {
+                s.bytes[o] &= !v; // W1C management status.
+                return;
+            }
             s.bytes[o] = v;
+            if self.ep_mode.is_some() && o == IBCR2 && v & 1 == 0 {
+                s.cmac_ready_at = self.cmac_ready_delay.map(|delay| self.time.now() + delay);
+            }
             if o == COMMAND && v & RESET != 0 {
                 s.reset_mac_at = Some(self.time.now() + 300);
             }
@@ -957,6 +1043,8 @@ mod tests {
             28 => 0x28a,
             31 => 0x28b,
             46 => 0x541,
+            51 => 0x502,
+            52 => 0x54a,
             32 => 0x2c1,
             33 => 0x2c0,
             35 => 0x480,
@@ -1060,7 +1148,7 @@ mod tests {
             let time = Time::default();
             let mut model = Model::ready(&time);
             model.fault = Some(port);
-            let hw = Hardware::new(&model, &time, revision(34), 3);
+            let mut hw = Hardware::new(&model, &time, revision(34), 3);
             let result = match port {
                 PHY_ACCESS => hw.phy_read(2).map(|_| ()),
                 EPHY_ACCESS => hw.ephy(1, 0, 1),
@@ -1071,7 +1159,10 @@ mod tests {
             assert_eq!(result, Err(BlockError::Timeout));
             assert!(time.now() <= 10_000);
             if port != PHY_ACCESS {
-                assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+                assert_eq!(
+                    hw.configure_mac(None),
+                    Err(Error::Device(BlockError::Timeout))
+                );
                 assert_eq!(model.read8(CONFIG_LOCK), 0);
             }
         }
@@ -1102,9 +1193,9 @@ mod tests {
         for version in [2, 3, 4, 5, 6, 17, 18, 19, 20, 21, 22, 23, 24, 34] {
             let time = Time::default();
             let model = Model::ready(&time);
-            let hw = Hardware::new(&model, &time, revision(version), 2);
+            let mut hw = Hardware::new(&model, &time, revision(version), 2);
             hw.reset().unwrap();
-            hw.configure_mac().unwrap();
+            hw.configure_mac(None).unwrap();
             let s = model.state.borrow();
             assert_eq!(s.bytes[CONFIG_LOCK], 0);
             assert_eq!(
@@ -1557,15 +1648,15 @@ mod tests {
             let model = Model::ready(&time);
             model.state.borrow_mut().bytes[CONFIG3] = 0xff;
             model.state.borrow_mut().bytes[CONFIG4] = 0xff;
-            let hw = Hardware::new(&model, &time, revision(version), 0);
-            hw.configure_mac().unwrap();
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.configure_mac(None).unwrap();
             assert_eq!(model.read8(CONFIG3) & 4, 0);
             assert_eq!(model.read8(CONFIG4) & 2, 0);
             assert_eq!(model.read8(CONFIG_LOCK), 0);
             publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])).unwrap();
             assert_eq!(model.read32(RX_CONFIG), (1 << 15) | (7 << 8) | 0x0e);
         }
-        for xid in [0x502, 0x54a, 0x54b, 0x609, 0x64a] {
+        for xid in [0x609, 0x64a] {
             assert!(!revision::detect(xid << 20).unwrap().implemented());
         }
     }
@@ -1677,8 +1768,8 @@ mod tests {
                 s.bytes[0x1b] = 0xff;
                 s.eri.insert(0x1b0, 0xffff);
             }
-            let hw = Hardware::new(&model, &time, revision(version), 0);
-            hw.configure_mac().unwrap();
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.configure_mac(None).unwrap();
             let s = model.state.borrow();
             assert_eq!(s.bytes[CONFIG_LOCK], 0);
             assert_eq!(s.bytes[CONFIG5] & 9, 0);
@@ -1777,8 +1868,11 @@ mod tests {
                 let time = Time::default();
                 let mut model = Model::ready(&time);
                 model.fault = Some(port);
-                let hw = Hardware::new(&model, &time, revision(version), 0);
-                assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+                let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(
+                    hw.configure_mac(None),
+                    Err(Error::Device(BlockError::Timeout))
+                );
                 let s = model.state.borrow();
                 assert_eq!(s.bytes[CONFIG_LOCK], 0);
                 assert!(
@@ -1897,8 +1991,8 @@ mod tests {
                 s.bytes[CONFIG4] = 0xff;
                 s.bytes[CONFIG5] = 0xff;
             }
-            let hw = Hardware::new(&model, &time, revision(version), 0);
-            hw.configure_mac().unwrap();
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.configure_mac(None).unwrap();
             {
                 let s = model.state.borrow();
                 assert_eq!(s.ephy[0], 0xfdff);
@@ -1956,8 +2050,11 @@ mod tests {
                 let time = Time::default();
                 let mut model = Model::ready(&time);
                 model.fault = Some(port);
-                let hw = Hardware::new(&model, &time, revision(version), 0);
-                assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+                let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(
+                    hw.configure_mac(None),
+                    Err(Error::Device(BlockError::Timeout))
+                );
                 assert_eq!(model.read8(CONFIG_LOCK), 0);
             }
         }
@@ -2159,9 +2256,9 @@ mod tests {
                     .extend([(0xcc, 0xaabb_ccdd), (0xd0, 0x1122_3344), (0x1b0, 0xffff)]);
                 s.mac.insert(0xc0ac, 0x8000);
             }
-            let hw = Hardware::new(&model, &time, revision(version), 0);
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
             hw.initialize_modern().unwrap();
-            hw.configure_mac().unwrap();
+            hw.configure_mac(None).unwrap();
             {
                 let s = model.state.borrow();
                 assert_eq!(s.bytes[CONFIG_LOCK], 0);
@@ -2239,7 +2336,10 @@ mod tests {
                         Err(Error::Device(BlockError::Timeout))
                     );
                 } else {
-                    assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+                    assert_eq!(
+                        hw.configure_mac(None),
+                        Err(Error::Device(BlockError::Timeout))
+                    );
                     assert_eq!(model.read8(CONFIG_LOCK), 0);
                 }
                 assert!(
@@ -2408,7 +2508,7 @@ mod tests {
             hw.dp_start().unwrap();
             hw.configure_phy(None, false).unwrap();
             hw.reset().unwrap();
-            hw.configure_mac().unwrap();
+            hw.configure_mac(None).unwrap();
             {
                 let s = model.state.borrow();
                 assert_eq!(s.eri[&0xe8], 0xdead_be05);
@@ -2501,8 +2601,11 @@ mod tests {
             } else {
                 CSI_ADDRESS
             });
-            let hw = Hardware::new(&model, &time, revision(version), 0);
-            assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.configure_mac(None),
+                Err(Error::Device(BlockError::Timeout))
+            );
             assert_eq!(model.read8(CONFIG_LOCK), 0);
             assert!(
                 !model
@@ -2658,9 +2761,9 @@ mod tests {
                 ]);
                 s.eri.extend([(0x5f0, 0xabcd_0000), (0x1b0, 0x1003)]);
             }
-            let hw = Hardware::new(&model, &time, revision(46), 0);
+            let mut hw = Hardware::new(&model, &time, revision(46), 0);
             hw.initialize_modern().unwrap();
-            hw.configure_mac().unwrap();
+            hw.configure_mac(None).unwrap();
             {
                 let s = model.state.borrow();
                 assert_eq!(s.ephy[0x1e], 0xf7ff);
@@ -2730,21 +2833,315 @@ mod tests {
             Err(Error::Device(BlockError::Device { status: u32::MAX }))
         );
         assert_ne!(model.state.borrow().phy_ocp[&0xa400], 0x1200);
-        let time = Time::default();
-        let mut model = Model::modern(&time);
-        model.fail_eri_at = 2;
-        model.state.borrow_mut().bytes[PHY_STATUS] = 0x12;
-        let mut link = RuntimeLink::default();
-        {
-            let hw = Hardware::new(&model, &time, revision(46), 0);
+        for version in [46, 51, 52] {
+            let time = Time::default();
+            let mut model = Model::modern(&time);
+            model.fail_eri_at = 2;
+            model.state.borrow_mut().bytes[PHY_STATUS] = 0x12;
+            let mut link = RuntimeLink::default();
+            {
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(link.update(&hw), Err(BlockError::Timeout));
+            }
+            let writes = model.state.borrow().writes.len();
+            model.fail_eri_at = usize::MAX;
+            time.delay(50_000);
+            model.read32(ERI_ADDRESS);
+            let hw = Hardware::new(&model, &time, revision(version), 0);
             assert_eq!(link.update(&hw), Err(BlockError::Timeout));
+            assert_eq!(model.state.borrow().writes.len(), writes);
         }
-        let writes = model.state.borrow().writes.len();
-        model.fail_eri_at = usize::MAX;
-        time.delay(50_000);
-        model.read32(ERI_ADDRESS);
-        let hw = Hardware::new(&model, &time, revision(46), 0);
-        assert_eq!(link.update(&hw), Err(BlockError::Timeout));
-        assert_eq!(model.state.borrow().writes.len(), writes);
+    }
+
+    #[test]
+    fn ep_cmac_stop_acknowledges_w1c_before_shared_fifo_and_is_bounded_on_failure() {
+        for version in [51, 52] {
+            let time = Time::default();
+            let model = Model::ep(&time, version, false);
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.initialize_modern().unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.bytes[IBCR0], 0x84);
+            assert_eq!(s.bytes[IBCR2], 0x84);
+            assert_eq!(s.bytes[IBISR0] & 0x20, 0);
+            let at = |reg| s.writes.iter().position(|(r, _, _)| *r == reg).unwrap();
+            assert!(at(IBCR2) < at(IBISR0));
+            assert!(at(IBISR0) < at(IBCR0));
+            assert!(at(IBCR0) < at(MISC));
+            assert!(time.now() >= 100_000);
+            drop(s);
+            let time = Time::default();
+            let mut model = Model::ep(&time, version, false);
+            model.cmac_ready_delay = None;
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(hw.initialize_modern(), Err(BlockError::Timeout));
+            assert_eq!(time.now(), 100_000_000);
+            assert_eq!(model.state.borrow().writes, [(IBCR2, 0x84, 1)]);
+            let time = Time::default();
+            let mut model = Model::ep(&time, version, false);
+            model.failed_read = Some(IBISR0);
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.initialize_modern(),
+                Err(BlockError::Device { status: 255 })
+            );
+            assert_eq!(model.state.borrow().writes, [(IBCR2, 0x84, 1)]);
+        }
+    }
+
+    #[test]
+    fn ep_oob_namespace_fp_base_masks_and_conditional_ack_are_real_and_fallible() {
+        for version in [51, 52] {
+            for enabled in [false, true] {
+                let time = Time::default();
+                let model = Model::ep(&time, version, enabled);
+                {
+                    let mut s = model.state.borrow_mut();
+                    s.oob.extend([(0x180, 0xaabb_cc00), (0x30, 0x7654_3202)]);
+                    s.eri.extend([(0x180, 0x1122_3344), (0x30, 0x5566_7788)]);
+                }
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                hw.ep_start().unwrap();
+                let s = model.state.borrow();
+                assert_eq!(s.oob[&0x180], 0xaabb_cc05);
+                assert_eq!(s.oob[&0x30], 0x7654_3203);
+                assert_eq!(s.eri[&0x180], 0x1122_3344);
+                assert_eq!(s.eri[&0x30], 0x5566_7788);
+                assert_eq!(s.oob.get(&0x124).copied().unwrap_or(0) & 1 != 0, enabled);
+                assert!(
+                    !s.writes.iter().any(|(r, _, _)| matches!(
+                        *r,
+                        PHY_OCP | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW
+                    ))
+                );
+            }
+            let time = Time::default();
+            let mut model = Model::ep(&time, version, true);
+            model.ep_ready_delay = None;
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(hw.ep_start(), Err(BlockError::Timeout));
+            assert!(time.now() < 310_000);
+            assert_eq!(model.state.borrow().oob[&0x180] & 0xff, 5);
+            for port in [ERI_ADDRESS, ERI_DATA] {
+                let time = Time::default();
+                let mut model = Model::ep(&time, version, true);
+                model.failed_read = Some(port);
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(hw.ep_start(), Err(BlockError::Device { status: u32::MAX }));
+            }
+        }
+    }
+
+    #[test]
+    fn ep_and_fp_phy_masks_and_pwm_paths_are_distinct_without_early_mac_firmware() {
+        for version in [51, 52] {
+            let time = Time::default();
+            let model = Model::ep(&time, version, false);
+            {
+                let mut s = model.state.borrow_mut();
+                for address in [0x8084, 0x80f3, 0x80d7, 0x808b, 0x809b, 0x80ad, 0x80b0] {
+                    s.g_parameters.insert(address, 0xffff);
+                }
+                s.phy_ocp
+                    .extend([(0xbcc8, 0xffff), (0xc422, 0xffff), (0xa430, 0xffff)]);
+            }
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(hw.configure_phy(None, false).unwrap(), None);
+            let s = model.state.borrow();
+            assert_eq!(s.phy_ocp[&0xa400], 0x1200);
+            assert_eq!(s.phy_ocp[&0xa5d0], 0);
+            assert!(!s.writes.iter().any(|(r, _, _)| *r == MAC_OCP));
+            if version == 51 {
+                assert_eq!(s.g_parameters[&0x80f3], 0x8bff);
+                assert_eq!(s.g_parameters[&0x80d7], 0x84ff);
+                assert_eq!(s.g_parameters[&0x8084], 0x9fff);
+                assert_eq!(s.phy_ocp[&0xc422], 0xdfff);
+                assert_eq!(s.phy_ocp[&0xbcc8], 0xfeff);
+                assert_eq!(s.phy_ocp[&0xbc84], 0xed);
+                assert_eq!(s.phy_ocp[&0xbcd8], 0x1065);
+            } else {
+                assert_eq!(s.g_parameters[&0x808b], 0xcbff);
+                assert_eq!(s.g_parameters[&0x809b], 0xb7ff);
+                assert_eq!(s.g_parameters[&0x80ad], 0x9fff);
+                assert_eq!(s.g_parameters[&0x80b0], 0x93ff);
+                assert_eq!(s.g_parameters[&0x8011] & 0x800, 0x800);
+                assert_eq!(s.g_parameters[&0x8016] & 0x400, 0x400);
+                assert_eq!(s.phy_ocp[&0xa4a2] & 0x200, 0x200);
+                assert_eq!(s.phy_ocp[&0xa428] & 0x80, 0x80);
+                assert!(!s.phy_ocp.contains_key(&0xbcd8));
+            }
+        }
+    }
+
+    #[test]
+    fn fp_mac_only_firmware_executes_after_mac_pulse_before_exit_l1_and_dma() {
+        let bytes: Vec<_> = [0x4000_0001u32, 0x801f_0e00, 0x80d6_a55a]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let script = Script::parse(&bytes).unwrap();
+        for xid in [0x54a, 0x54b] {
+            let time = Time::default();
+            let model = Model::ep(&time, 52, false);
+            model.state.borrow_mut().ephy.fill(0xabcd);
+            let rev = revision::detect(xid << 20).unwrap();
+            let mut hw = Hardware::new(&model, &time, rev, 0);
+            hw.initialize_modern().unwrap();
+            hw.ep_start().unwrap();
+            hw.configure_phy(Some(&script), false).unwrap();
+            assert!(!model.state.borrow().mac.contains_key(&0xe0d6));
+            hw.configure_mac(Some(&script)).unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.ephy[0x19], 0xbb8d);
+            let ephy: Vec<_> = s
+                .writes
+                .iter()
+                .filter(|(r, v, _)| *r == EPHY_ACCESS && *v & ACCESS != 0)
+                .collect();
+            assert_eq!(ephy.len(), 2); // Donor19/59 both encode wire register19.
+            assert_eq!(s.mac[&0xea80], 3);
+            if xid == 0x54a {
+                assert_eq!(s.mac[&0xe0d6], 0xa55a);
+                let at = |value| {
+                    s.writes
+                        .iter()
+                        .position(|(r, v, _)| *r == MAC_OCP && *v == value)
+                        .unwrap()
+                };
+                assert!(at(0xf31f_0000) < at(0xf06b_a55a)); // E63E reset pulse before script.
+                assert!(at(0xf06b_a55a) < at(0xe056_1f80)); // Script before exit-L1 C0AC.
+            } else {
+                assert!(!s.mac.contains_key(&0xe0d6));
+            }
+            assert_eq!(s.bytes[CONFIG_LOCK], 0);
+            assert!(
+                !s.writes
+                    .iter()
+                    .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+            );
+        }
+    }
+
+    #[test]
+    fn ep_failed_notification_and_fp_missing_or_failed_mac_firmware_never_publish_dma() {
+        for version in [51, 52] {
+            for nth in 1..=4 {
+                let time = Time::default();
+                let mut model = Model::ep(&time, version, true);
+                model.fail_eri_at = nth;
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(hw.ep_start(), Err(BlockError::Timeout));
+                assert!(
+                    !model.state.borrow().writes.iter().any(|(r, _, _)| matches!(
+                        *r,
+                        PHY_OCP | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW
+                    ))
+                );
+                assert!(time.now() < 20_000);
+            }
+        }
+        let bytes: Vec<_> = [0x4000_0001u32, 0x801f_0e00, 0x80d6_a55a]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let script = Script::parse(&bytes).unwrap();
+        for fault in 0..3 {
+            let time = Time::default();
+            let mut model = Model::ep(&time, 52, false);
+            if fault == 1 {
+                model.fail_mac_address = Some(0xe0d6);
+            }
+            if fault == 2 {
+                model.stuck_phy_reset = true;
+                model.state.borrow_mut().phy_ocp.insert(0xa400, PHY_RESET);
+            }
+            let mut hw = Hardware::new(&model, &time, revision(52), 0);
+            let result = hw.configure_mac(if fault == 0 { None } else { Some(&script) });
+            assert_eq!(
+                result,
+                Err(match fault {
+                    0 => Error::Script("RTL8117 requires MAC firmware"),
+                    1 => Error::Device(BlockError::Device { status: 255 }),
+                    _ => Error::Device(BlockError::Timeout),
+                })
+            );
+            let s = model.state.borrow();
+            assert_eq!(s.bytes[CONFIG_LOCK], 0);
+            assert!(!s.mac.contains_key(&0xc0ac));
+            assert!(
+                !s.writes.iter().any(|(r, _, _)| matches!(
+                    *r,
+                    RX_MAXIMUM | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn ep_fp_mac_masks_and_actual_ring_publication_follow_complete_backend_setup() {
+        use crate::bus::dma::RegionAllocator;
+        for xid in [0x502, 0x54b] {
+            let rev = revision::detect(xid << 20).unwrap();
+            let time = Time::default();
+            let model = Model::ep(&time, rev.version, true);
+            {
+                let mut s = model.state.borrow_mut();
+                s.ephy.fill(0xffff);
+                s.eri
+                    .extend([(0xcc, 0xaabb_ccdd), (0xd0, 0x1122_3344), (0x1b0, 0x1003)]);
+                s.mac
+                    .extend([(0xd3e2, 0xffff), (0xd3e4, 0xffff), (0xe860, 0x1234)]);
+            }
+            let mut hw = Hardware::new(&model, &time, rev, 0);
+            hw.initialize_modern().unwrap();
+            hw.ep_start().unwrap();
+            hw.configure_phy(None, false).unwrap();
+            hw.configure_mac(None).unwrap();
+            {
+                let s = model.state.borrow();
+                assert_eq!(s.eri[&0xcc], 0xaabb_cc2f);
+                assert_eq!(s.eri[&0xd0], 0x1122_335f);
+                assert_eq!(s.eri[&0x1b0] & 3, 0);
+                if rev.version == 51 {
+                    assert_eq!(s.ephy[0], 0xffff);
+                    assert_eq!(s.ephy[0xd], 0xfeff);
+                    assert_eq!(s.ephy[0x19], 0x7fde);
+                    assert_eq!(s.mac[&0xd3e2], 0xf271);
+                    assert_eq!(s.mac[&0xd3e4], 0xff00);
+                    assert_eq!(s.mac[&0xe860], 0x12b4);
+                    assert_eq!(s.eri[&0x2fc], 1);
+                } else {
+                    assert_eq!(s.eri[&0xd4] & 0x10, 0x10);
+                }
+                assert_eq!(s.writes.iter().filter(|(r, _, _)| *r == IBISR0).count(), 2);
+                assert!(
+                    !s.writes
+                        .iter()
+                        .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+                );
+            }
+            let mut backing = vec![0u64; 40_000];
+            let base = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives descriptor access and has no other accesses.
+            let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+            let mut rx = Ring::new(&mut dma, true).unwrap();
+            let mut tx = Ring::new(&mut dma, true).unwrap();
+            rx.initialize(true);
+            tx.initialize(false);
+            publish(&hw, &rx, &tx, read_station(&hw).unwrap()).unwrap();
+            assert_eq!(
+                model.read32(RX_CONFIG),
+                (1 << 15) | (1 << 14) | (1 << 11) | (7 << 8) | 0xe
+            );
+            for id in [0xc912, 0xc913] {
+                let model = Model::ep(&time, rev.version, false);
+                model.state.borrow_mut().phy_ocp.insert(0xa406, id);
+                let mut hw = Hardware::new(&model, &time, rev, 0);
+                assert_eq!(
+                    hw.configure_phy(None, false),
+                    Err(Error::UnsupportedPhy(0x001c_0000 | u32::from(id)))
+                );
+            }
+        }
     }
 }

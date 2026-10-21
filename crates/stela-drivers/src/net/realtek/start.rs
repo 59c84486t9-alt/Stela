@@ -4,8 +4,9 @@
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
 //! MAC startup branches from pinned r8169_main.c, before DMA is published.
-use super::{Registers, Timer, hardware::Hardware, registers::*};
+use super::{Error, Registers, Timer, firmware::Script, hardware::Hardware, registers::*};
 use crate::block::BlockError;
+mod ep;
 mod g;
 mod h;
 
@@ -22,7 +23,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.registers
             .write8(CONFIG3, self.registers.read8(CONFIG3) & !1);
     }
-    pub fn configure_mac(&self) -> Result<(), BlockError> {
+    pub fn configure_mac(&mut self, script: Option<&Script<'_>>) -> Result<(), Error> {
         let r = self.registers;
         r.write8(CONFIG_LOCK, 0xc0);
         let result = (|| {
@@ -175,6 +176,18 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     }
                     40 | 42 | 44 => self.g_start()?,
                     46 => self.h_start()?,
+                    51 | 52 => {
+                        self.ep_mac()?;
+                        // FP's donor MAC-only firmware runs at the tail of
+                        // rtl_hw_start_8117, before exit-L1/RX maximum/lock/DMA.
+                        if self.revision.version == 52 && self.revision.firmware.is_some() {
+                            self.apply_firmware(
+                                script.ok_or(Error::Script("RTL8117 requires MAC firmware"))?,
+                            )?;
+                        }
+                        self.mac_ocp_modify(0xc0ac, 0, 0x1f80)?;
+                        self.eri_modify(0x1b0, 3, 0)?;
+                    }
                     34 => {
                         self.latency()?;
                         self.ephys(&[
@@ -203,7 +216,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     _ => {
                         return Err(BlockError::Unsupported(
                             "unimplemented Realtek MAC start revision",
-                        ));
+                        )
+                        .into());
                     }
                 }
                 // Disable jumbo mode, including stale UNDI configuration.

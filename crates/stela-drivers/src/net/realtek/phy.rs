@@ -11,6 +11,7 @@ use super::{Error, Registers, Timer, Warning, firmware::Script, hardware::Hardwa
 use crate::block::BlockError;
 mod d;
 mod e;
+mod ep;
 mod f;
 mod g;
 mod h;
@@ -224,7 +225,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         let restore = self.phy_write(PHY_PAGE, old);
         result.and(restore)
     }
-    fn apply_firmware(&mut self, script: &Script<'_>) -> Result<(), Error> {
+    pub(super) fn apply_firmware(&mut self, script: &Script<'_>) -> Result<(), Error> {
         let timer = self.timer;
         script.execute(self, timer)?;
         // Linux r8169_apply_firmware restores the shared OCP base and then
@@ -299,7 +300,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         }
         if matches!(
             self.revision.version,
-            32 | 33 | 35 | 36 | 38 | 40 | 42 | 44 | 46
+            32 | 33 | 35 | 36 | 38 | 40 | 42 | 44 | 46 | 51 | 52
         ) && id != 0x001c_c800
         {
             // These E/F/8411 paths implement the internal FE/GE analogue path;
@@ -376,6 +377,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.g(script.ok_or(Error::Script("RTL8168G/8411B requires firmware"))?)?
                 }
                 46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
+                51 => self.ep_phy()?,
+                52 => self.fp_phy()?, // XID54a's MAC firmware executes after MAC setup.
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
@@ -383,7 +386,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 self.paged(1, 0x10, 0xffff, 0xf01b)?;
             }
             self.phy_reset()?;
-            if matches!(self.revision.version, 40 | 42 | 44 | 46) {
+            if matches!(self.revision.version, 40 | 42 | 44 | 46 | 51 | 52) {
                 // The generic PHY's AN EEE_ADV mapping is VEND2 a5d0.
                 // MAC40+ has actual direct PHY-OCP/C45 access. Clear it after
                 // reset, before restarting autonegotiation; no EEE advertised.

@@ -90,8 +90,11 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.mac_ocp_write(address, (self.mac_ocp_read(address)? & !clear) | set)
     }
     pub fn initialize_modern(&self) -> Result<(), BlockError> {
-        if !matches!(self.revision.version, 40 | 42 | 44 | 46) {
+        if !matches!(self.revision.version, 40 | 42 | 44 | 46 | 51 | 52) {
             return Ok(());
+        }
+        if matches!(self.revision.version, 51 | 52) {
+            self.ep_stop_cmac()?;
         }
         let r = self.registers;
         r.write32(MISC, self.mmio32(MISC)? | RXDV_GATED); // RXDV gate.

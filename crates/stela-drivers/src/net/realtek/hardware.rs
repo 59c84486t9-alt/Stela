@@ -8,6 +8,7 @@ use super::{Registers, Revision, Timer, firmware::ScriptIo, registers::*};
 use crate::block::BlockError;
 use core::cell::Cell;
 mod dp;
+mod ep;
 mod ocp;
 
 pub(super) struct Hardware<'a, R, T> {
