@@ -6,7 +6,7 @@ use core::{
     cell::UnsafeCell,
     marker::PhantomData,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 const GS_BASE: u32 = 0xc000_0101;
@@ -19,6 +19,7 @@ pub(crate) struct Local {
     handler: extern "sysv64" fn(&mut super::super::interrupts::Frame),
     state: UnsafeCell<Option<State>>,
     interrupted: AtomicBool,
+    doorbells: AtomicU64,
 }
 
 impl Local {
@@ -29,12 +30,14 @@ impl Local {
             handler: super::super::interrupts::interrupt,
             state: UnsafeCell::new(None),
             interrupted: AtomicBool::new(false),
+            doorbells: AtomicU64::new(0),
         }
     }
 }
 
 /// A CPU-local state allocation. It cannot migrate or be shared with another
 /// host processor. The owner must outlive every local native call and handler.
+#[must_use = "retain the physical native host owner through every call and handler"]
 pub(crate) struct Owner {
     local: NonNull<Local>,
     _pinned: PhantomData<*mut ()>,
@@ -124,6 +127,17 @@ pub(super) fn state() -> &'static mut State {
 pub(super) fn interrupt() {
     // SAFETY: one processor owns this record for the handler's whole lifetime.
     unsafe { &(*current()).interrupted }.store(true, Ordering::Release);
+}
+
+pub(super) fn doorbell_counter() -> &'static AtomicU64 {
+    // SAFETY: descriptor/local storage is permanently pinned through parked
+    // NMI/MCE entry. Only the current physical processor selects this record.
+    unsafe { &(*current()).doorbells }
+}
+
+pub(super) fn doorbell() {
+    doorbell_counter().fetch_add(1, Ordering::Release);
+    interrupt();
 }
 
 pub(super) fn clear_interrupt() {

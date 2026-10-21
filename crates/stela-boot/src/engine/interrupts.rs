@@ -10,6 +10,8 @@ use crate::output;
 use core::arch::{asm, global_asm};
 
 pub const TIMER_VECTOR: u8 = 0x40;
+/// Native worker doorbell; host-device IRQs own 0x50..=0x5f.
+pub(crate) const NATIVE_WAKE_VECTOR: u8 = 0x60;
 pub const SPURIOUS_VECTOR: u8 = 0xff;
 const CODE_SELECTOR: u16 = 0x08;
 const DATA_SELECTOR: u16 = 0x10;
@@ -90,6 +92,15 @@ impl Tables {
     }
 }
 
+impl Tables {
+    pub(crate) fn matches(&self, observed: Observation) -> bool {
+        observed.gdt == &raw const self.gdt as u64
+            && observed.idt == &raw const self.idt as u64
+            && observed.gs == &raw const self.local as u64
+            && observed.task == TSS_SELECTOR
+    }
+}
+
 // The BSP needs descriptors before its engine heap is installed. APs use their
 // own separately pinned Tables; they never modify this bootstrap allocation.
 static mut BSP_TABLES: Tables = Tables::new();
@@ -144,6 +155,7 @@ global_asm!(
 // then the vector, and join the common path. The table lists them in order.
 macro_rules! vectors {
     ($($vector:literal $error:ident),* $(,)?) => {
+        const VECTOR_NUMBERS: &[usize] = &[$($vector),*];
         global_asm!(
             $(
                 concat!(".global stela_vector_", stringify!($vector)),
@@ -176,11 +188,11 @@ vectors!(
     64 none,
     80 none, 81 none, 82 none, 83 none, 84 none, 85 none, 86 none, 87 none,
     88 none, 89 none, 90 none, 91 none, 92 none, 93 none, 94 none, 95 none,
-    255 none,
+    96 none, 255 none,
 );
 
 unsafe extern "C" {
-    static stela_vector_table: [usize; 82];
+    static stela_vector_table: [usize; VECTOR_NUMBERS.len()];
 }
 
 fn gate(handler: usize, ist: u8) -> [u64; 2] {
@@ -255,12 +267,7 @@ pub(crate) unsafe fn install_on(
         host::local::activate(&mut tables.local, handler);
         let idt = &raw mut tables.idt;
         let table = &stela_vector_table;
-        for (index, &handler) in table.iter().enumerate() {
-            let vector = match index {
-                65..=80 => index + 15,
-                81 => 255,
-                _ => index,
-            };
+        for (&vector, &handler) in VECTOR_NUMBERS.iter().zip(table) {
             // Double fault, NMI and machine check use their own stack.
             let ist = if matches!(vector, 2 | 8 | 18) { 2 } else { 1 };
             (*idt)[vector] = gate(handler, ist);
@@ -288,9 +295,47 @@ pub extern "sysv64" fn interrupt(frame: &mut Frame) {
         14 => host::page_fault(frame, cr2()),
         13 | 6 => host::native_exception(frame),
         TIMER_VECTOR => host::timer_interrupt(),
+        NATIVE_WAKE_VECTOR => host::wake_interrupt(),
         SPURIOUS_VECTOR => {}
         vector @ 32.. => host::stray_interrupt(vector),
         _ => fatal(frame),
+    }
+}
+
+/// Actual processor-local descriptor/control observations, for validating the
+/// owned AP startup path. These numbers do not grant a native frame lease.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Observation {
+    pub rsp: u64,
+    pub gdt: u64,
+    pub idt: u64,
+    pub task: u16,
+    pub gs: u64,
+}
+
+/// # Safety
+/// CPL0 with this processor's permanently pinned descriptor/GS storage active.
+/// The private tables cannot be changed concurrently with these observations.
+pub(crate) unsafe fn observe() -> Observation {
+    let mut gdt = Pointer { limit: 0, base: 0 };
+    let mut idt = Pointer { limit: 0, base: 0 };
+    let (rsp, task): (u64, u16);
+    let (low, high): (u32, u32);
+    // SAFETY: caller is the owning CPL0 processor with stable private tables.
+    unsafe {
+        asm!("sgdt [{}]", in(reg) &mut gdt, options(nostack, preserves_flags));
+        asm!("sidt [{}]", in(reg) &mut idt, options(nostack, preserves_flags));
+        asm!("str {0:x}", out(reg) task, options(nostack, preserves_flags));
+        asm!("mov {}, rsp", out(reg) rsp, options(nostack, preserves_flags));
+        asm!("rdmsr", in("ecx") 0xc000_0101u32, out("eax") low, out("edx") high,
+            options(nostack, preserves_flags));
+    }
+    Observation {
+        rsp,
+        gdt: gdt.base,
+        idt: idt.base,
+        task,
+        gs: u64::from(low) | u64::from(high) << 32,
     }
 }
 

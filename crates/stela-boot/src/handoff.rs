@@ -153,6 +153,10 @@ pub struct Handoff {
     pub tsc_hz: u64,
     /// IA32_APIC_BASE as the firmware left it.
     pub apic_base: u64,
+    /// Immutable copied UEFI processor identities and per-physical-core raw
+    /// CPUID/control observations; absent unless native cores were requested.
+    pub native_processors: Region,
+    pub native_resources: crate::native_smp::resources::Resources,
     /// The firmware's real-time clock as Unix seconds, read at TSC
     /// `wall_tsc`; `None` when the firmware has no valid time.
     pub wall_seconds: Option<u64>,

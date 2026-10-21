@@ -672,6 +672,19 @@ pub fn timer_interrupt() {
     state().apic.eoi();
 }
 
+/// An idle-worker doorbell only. Stop requests live in generation-bound
+/// mailboxes; delivery cannot authorize native-frame recovery or settlement.
+pub(crate) fn wake_interrupt() {
+    state().apic.eoi();
+    // Release publication follows actual EOI; startup evidence cannot race
+    // ahead of retirement of the directed interrupt at this physical LAPIC.
+    local::doorbell();
+}
+
+pub(crate) fn doorbell_counter() -> &'static core::sync::atomic::AtomicU64 {
+    local::doorbell_counter()
+}
+
 pub fn stray_interrupt(_vector: u8) {
     let state = state();
     state.stray += 1;

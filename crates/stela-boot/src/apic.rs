@@ -19,6 +19,26 @@ pub const LVT_LINT0: u32 = 0x350;
 pub const INITIAL: u32 = 0x380;
 pub const CURRENT: u32 = 0x390;
 pub const DIVIDE: u32 = 0x3e0;
+const ID: u32 = 0x20;
+const ICR_LOW: u32 = 0x300;
+const ICR_HIGH: u32 = 0x310;
+const ICR_PENDING: u32 = 1 << 12;
+const ICR_LEVEL_ASSERT: u32 = 1 << 14;
+const ICR_INIT: u32 = 5 << 8;
+const ICR_STARTUP: u32 = 6 << 8;
+const INIT_WAIT_US: u64 = 10_000;
+const SIPI_WAIT_US: u64 = 200;
+const DELIVERY_WAIT_US: u64 = 10_000;
+const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupError {
+    ClockUnavailable,
+    DestinationTooWide,
+    BootstrapDestination,
+    InvalidVector,
+    DeliveryTimeout,
+}
 pub const LVT_MASKED: u32 = 1 << 16;
 pub const TIMER_PERIODIC: u32 = 1 << 17;
 const SOFTWARE_ENABLE: u32 = 1 << 8;
@@ -96,6 +116,111 @@ impl Apic {
 
     pub fn eoi(&self) {
         self.write(EOI, 0);
+    }
+
+    pub(crate) fn id(&self) -> u32 {
+        let value = self.read(ID);
+        if self.x2 { value } else { value >> 24 }
+    }
+
+    fn wait_delivery(&self, tsc_hz: u64) -> Result<(), StartupError> {
+        let started = rdtsc();
+        let limit = tsc_hz
+            .div_ceil(MICROSECONDS_PER_SECOND)
+            .checked_mul(DELIVERY_WAIT_US)
+            .filter(|ticks| *ticks != 0)
+            .ok_or(StartupError::ClockUnavailable)?;
+        while self.read(ICR_LOW) & ICR_PENDING != 0 {
+            if rdtsc().wrapping_sub(started) >= limit {
+                return Err(StartupError::DeliveryTimeout);
+            }
+            core::hint::spin_loop();
+        }
+        Ok(())
+    }
+
+    fn send(&self, destination: u32, command: u32, tsc_hz: u64) -> Result<(), StartupError> {
+        self.wait_delivery(tsc_hz)?;
+        if self.x2 {
+            // SAFETY: the local x2APIC ICR, with a physical destination and
+            // an explicitly constructed INIT or STARTUP command.
+            unsafe {
+                asm!("wrmsr", in("ecx") X2APIC_MSRS + (ICR_LOW >> 4),
+                    in("eax") command, in("edx") destination,
+                    options(nostack, preserves_flags));
+            }
+        } else {
+            let destination =
+                u8::try_from(destination).map_err(|_| StartupError::DestinationTooWide)?;
+            self.write(ICR_HIGH, u32::from(destination) << 24);
+            self.write(ICR_LOW, command);
+        }
+        self.wait_delivery(tsc_hz)
+    }
+
+    /// Start one enabled AP at its owned SIPI page after ExitBootServices.
+    /// Intel SDM Vol. 3A, multiprocessor initialization: directed INIT,
+    /// 10 ms, STARTUP, 200 us, second STARTUP for integrated local APICs.
+    /// This reports delivery only; the caller must separately verify the AP's
+    /// identity, entry acknowledgement and stopped/executor lifetime.
+    ///
+    /// # Safety
+    /// The caller owns the destination processor after firmware shutdown. Its
+    /// complete trampoline, tables, stack and argument stay pinned and visible;
+    /// interrupts are disabled and no other ICR sender runs on this processor.
+    pub(crate) unsafe fn startup(
+        &self,
+        destination: u32,
+        vector: u8,
+        tsc_hz: u64,
+    ) -> Result<(), StartupError> {
+        if tsc_hz == 0
+            || tsc_hz
+                .div_ceil(MICROSECONDS_PER_SECOND)
+                .checked_mul(INIT_WAIT_US)
+                .is_none()
+        {
+            return Err(StartupError::ClockUnavailable);
+        }
+        if destination == self.id() {
+            return Err(StartupError::BootstrapDestination);
+        }
+        if !self.x2 && destination > u32::from(u8::MAX) {
+            return Err(StartupError::DestinationTooWide);
+        }
+        if vector == 0 {
+            return Err(StartupError::InvalidVector);
+        }
+        self.send(destination, ICR_INIT | ICR_LEVEL_ASSERT, tsc_hz)?;
+        let wait = |microseconds| {
+            let started = rdtsc();
+            let ticks = tsc_hz.div_ceil(MICROSECONDS_PER_SECOND) * microseconds;
+            while rdtsc().wrapping_sub(started) < ticks {
+                core::hint::spin_loop();
+            }
+        };
+        wait(INIT_WAIT_US);
+        self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)?;
+        wait(SIPI_WAIT_US);
+        self.send(destination, ICR_STARTUP | u32::from(vector), tsc_hz)
+    }
+
+    /// Send one fixed physical doorbell. This acknowledges ICR delivery only,
+    /// never a returned native frame, stopped generation or controller effect.
+    ///
+    /// # Safety
+    /// The destination owns this reserved vector and a live private IDT/IST.
+    /// The caller exclusively owns the local ICR with interrupts disabled.
+    pub(crate) unsafe fn notify(
+        &self,
+        destination: u32,
+        vector: u8,
+        tsc_hz: u64,
+    ) -> Result<(), StartupError> {
+        if vector < 32 || vector == u8::MAX {
+            return Err(StartupError::InvalidVector);
+        }
+        self.send(destination, u32::from(vector), tsc_hz)
     }
 
     /// Mask the legacy PICs, enable the APIC with `spurious` as its

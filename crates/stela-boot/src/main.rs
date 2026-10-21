@@ -48,6 +48,7 @@ mod log_file;
 pub mod native_dma;
 pub mod native_irq;
 pub mod native_memory;
+mod native_smp;
 mod output;
 mod paging;
 mod payload;

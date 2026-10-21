@@ -1,0 +1,426 @@
+//! Copy processor identity/capabilities while UEFI MP Services still owns APs.
+//! Every callback returns before ExitBootServices; persistent executors use
+//! Stela's own INIT/SIPI entry, stacks and control memory afterward.
+use super::topology::{self, Cpuid, Location, Msr, Processor, Snapshot};
+use crate::{handoff::Region, tables::PAGE};
+use alloc::vec::Vec;
+use core::{
+    arch::{
+        asm,
+        x86_64::{__cpuid, __cpuid_count},
+    },
+    cell::UnsafeCell,
+    ffi::c_void,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+};
+use uefi::{
+    boot::{self, AllocateType, MemoryType},
+    proto::pi::mp::{CPU_V2_EXTENDED_TOPOLOGY, MpServices},
+};
+
+const MAGIC: u64 = 0x5354_4c53_4d50_3031;
+const VERSION: u32 = 1;
+const EFER: u32 = 0xc000_0080;
+const PAT: u32 = 0x277;
+const APIC_BASE: u32 = 0x1b;
+const MTRR_CAP: u32 = 0xfe;
+const MTRR_DEFAULT: u32 = 0x2ff;
+const MTRR_VARIABLE_BASE: u32 = 0x200;
+const TSC_ADJUST: u32 = 0x3b;
+const MAX_VARIABLE_MTRRS: usize = 16;
+const CR4_OSXSAVE: u64 = 1 << 18;
+
+#[repr(C)]
+pub(crate) struct Capture {
+    pub magic: u64,
+    pub version: u32,
+    pub processor_count: u32,
+    pub core_count: u32,
+    pub enabled_count: u32,
+    pub processors: [Processor; topology::MAX_PROCESSORS],
+    pub selected: [u32; topology::MAX_CORES],
+    pub snapshots: [Snapshot; topology::MAX_CORES],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Error {
+    NoMpServices,
+    ProcessorInventory,
+    Topology(topology::Refusal),
+    CoreCount,
+    WrongBootstrapProcessor,
+    SnapshotCapacity,
+    SnapshotCallback,
+    SnapshotTimeout,
+    ProcessorIdentity,
+    Memory,
+}
+
+impl Error {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::NoMpServices => "native cores need UEFI MP Services source identity",
+            Self::ProcessorInventory => "native processor inventory is invalid",
+            Self::Topology(_) => "native physical-core topology is ambiguous or exceeds capacity",
+            Self::CoreCount => "requested native count exceeds available physical cores",
+            Self::WrongBootstrapProcessor => {
+                "native BSP differs from the firmware processor identity"
+            }
+            Self::SnapshotCapacity => "native per-core source observations exceed capacity",
+            Self::SnapshotCallback => "firmware AP callback did not publish its source observation",
+            Self::SnapshotTimeout => "firmware AP source observation did not finish before timeout",
+            Self::ProcessorIdentity => {
+                "native observed CPUID identity differs from firmware identity"
+            }
+            Self::Memory => "native source record allocation or extent is invalid",
+        }
+    }
+}
+
+unsafe fn read_msr(index: u32) -> u64 {
+    let (low, high): (u32, u32);
+    // SAFETY: caller checks that this known architectural MSR is implemented.
+    unsafe {
+        asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
+    };
+    (u64::from(high) << 32) | u64::from(low)
+}
+
+fn cpuid(leaf: u32, subleaf: u32) -> Cpuid {
+    let result = __cpuid_count(leaf, subleaf);
+    Cpuid {
+        leaf,
+        subleaf,
+        eax: result.eax,
+        ebx: result.ebx,
+        ecx: result.ecx,
+        edx: result.edx,
+    }
+}
+
+fn push(snapshot: &mut Snapshot, record: Cpuid) -> Result<(), Error> {
+    let slot = snapshot
+        .records
+        .get_mut(snapshot.count as usize)
+        .ok_or(Error::SnapshotCapacity)?;
+    *slot = record;
+    snapshot.count += 1;
+    Ok(())
+}
+
+fn push_msr(snapshot: &mut Snapshot, index: u32, value: u64) -> Result<(), Error> {
+    let slot = snapshot
+        .msrs
+        .get_mut(snapshot.msr_count as usize)
+        .ok_or(Error::SnapshotCapacity)?;
+    *slot = Msr { index, value };
+    snapshot.msr_count += 1;
+    Ok(())
+}
+
+/// # Safety
+/// Runs at CPL0 on this actual processor, either in a joined firmware
+/// callback or under its owned native executor. No CPU feature is cached from
+/// another processor, and unsupported leaves/MSRs are not probed.
+pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
+    let mut snapshot = Snapshot::default();
+    let maximum = __cpuid(0).eax;
+    let extended = __cpuid(0x8000_0000).eax;
+    for leaf in [
+        0,
+        1,
+        6,
+        7,
+        0x15,
+        0x16,
+        0x8000_0000,
+        0x8000_0001,
+        0x8000_0007,
+        0x8000_0008,
+        0x8000_001e,
+    ] {
+        if leaf
+            <= if leaf & 0x8000_0000 == 0 {
+                maximum
+            } else {
+                extended
+            }
+        {
+            push(&mut snapshot, cpuid(leaf, 0))?;
+        }
+    }
+    for leaf in [0xb, 0x1f, 0x8000_0026] {
+        if leaf
+            > if leaf & 0x8000_0000 == 0 {
+                maximum
+            } else {
+                extended
+            }
+        {
+            continue;
+        }
+        for subleaf in 0..8 {
+            let record = cpuid(leaf, subleaf);
+            push(&mut snapshot, record)?;
+            if record.ebx == 0 || record.ecx >> 8 & 0xff == 0 {
+                break;
+            }
+            if subleaf == 7 {
+                return Err(Error::SnapshotCapacity);
+            }
+        }
+    }
+    let basic = snapshot.get(1, 0).ok_or(Error::ProcessorIdentity)?;
+    if maximum >= 0xd && basic.ecx & (1 << 26) != 0 {
+        let xstate = cpuid(0xd, 0);
+        push(&mut snapshot, xstate)?;
+        push(&mut snapshot, cpuid(0xd, 1))?;
+        let components = u64::from(xstate.eax) | (u64::from(xstate.edx) << 32);
+        for subleaf in [2, 5, 6, 7, 9, 17, 18] {
+            if components & (1u64 << subleaf) != 0 {
+                push(&mut snapshot, cpuid(0xd, subleaf))?;
+            }
+        }
+    }
+    // SAFETY: CPL0 observation; these controls and EFER exist in x86-64.
+    unsafe {
+        asm!("mov {}, cr0",out(reg) snapshot.cr0,options(nomem,nostack,preserves_flags));
+        asm!("mov {}, cr3",out(reg) snapshot.cr3,options(nomem,nostack,preserves_flags));
+        asm!("mov {}, cr4",out(reg) snapshot.cr4,options(nomem,nostack,preserves_flags));
+        snapshot.efer = read_msr(EFER);
+        if basic.edx & (1 << 9) != 0 {
+            snapshot.apic_base = read_msr(APIC_BASE);
+        }
+        if basic.edx & (1 << 16) != 0 {
+            snapshot.pat = read_msr(PAT);
+            snapshot.pat_valid = true;
+        }
+        if basic.edx & (1 << 12) != 0 {
+            let cap = read_msr(MTRR_CAP);
+            let variables = (cap & 0xff) as usize;
+            if variables > MAX_VARIABLE_MTRRS {
+                return Err(Error::SnapshotCapacity);
+            }
+            push_msr(&mut snapshot, MTRR_CAP, cap)?;
+            push_msr(&mut snapshot, MTRR_DEFAULT, read_msr(MTRR_DEFAULT))?;
+            if cap & (1 << 8) != 0 {
+                for index in [
+                    0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
+                ] {
+                    push_msr(&mut snapshot, index, read_msr(index))?;
+                }
+            }
+            for offset in 0..variables as u32 * 2 {
+                let index = MTRR_VARIABLE_BASE + offset;
+                push_msr(&mut snapshot, index, read_msr(index))?;
+            }
+        }
+        if snapshot
+            .get(7, 0)
+            .is_some_and(|record| record.ebx & (1 << 1) != 0)
+        {
+            push_msr(&mut snapshot, TSC_ADJUST, read_msr(TSC_ADJUST))?;
+        }
+        if basic.ecx & ((1 << 26) | (1 << 27)) == (1 << 26) | (1 << 27)
+            && snapshot.cr4 & CR4_OSXSAVE != 0
+        {
+            let (low, high): (u32, u32);
+            asm!("xgetbv",in("ecx") 0u32,out("eax") low,out("edx") high,options(nomem,nostack,preserves_flags));
+            snapshot.xcr0 = u64::from(low) | (u64::from(high) << 32);
+            snapshot.xcr0_valid = true;
+        }
+    }
+    Ok(snapshot)
+}
+
+struct Callback {
+    observation: UnsafeCell<Option<Result<Snapshot, Error>>>,
+    complete: AtomicBool,
+}
+
+extern "efiapi" fn observe_ap(argument: *mut c_void) {
+    // SAFETY: blocking StartupThisAP retains this one callback record until
+    // it returns or the firmware terminates the timed-out callback.
+    unsafe {
+        let callback = &*argument.cast::<Callback>();
+        *callback.observation.get() = Some(observe());
+        callback.complete.store(true, Ordering::Release);
+    }
+}
+
+pub(crate) fn capture(requested: usize) -> Result<Region, Error> {
+    let handle = boot::get_handle_for_protocol::<MpServices>().map_err(|_| Error::NoMpServices)?;
+    let mp =
+        boot::open_protocol_exclusive::<MpServices>(handle).map_err(|_| Error::NoMpServices)?;
+    let count = mp
+        .get_number_of_processors()
+        .map_err(|_| Error::ProcessorInventory)?;
+    if count.total == 0 || count.total > topology::MAX_PROCESSORS || count.enabled > count.total {
+        return Err(Error::ProcessorInventory);
+    }
+    let mut processors = Vec::with_capacity(count.total);
+    // Either the complete inventory uses V2 coordinates or it uses legacy
+    // coordinates; mixing flattened and hierarchical core keys refuses.
+    let extended = mp.get_processor_info(CPU_V2_EXTENDED_TOPOLOGY).is_ok();
+    for number in 0..count.total {
+        let info = mp
+            .get_processor_info(
+                number
+                    | if extended {
+                        CPU_V2_EXTENDED_TOPOLOGY
+                    } else {
+                        0
+                    },
+            )
+            .map_err(|_| Error::ProcessorInventory)?;
+        let mut flags = 0;
+        if info.is_bsp() {
+            flags |= topology::BSP;
+        }
+        if info.is_enabled() {
+            flags |= topology::ENABLED;
+        }
+        if info.is_healthy() {
+            flags |= topology::HEALTHY;
+        }
+        let (location, thread) = if extended {
+            let value = info.extended_information;
+            (
+                Location {
+                    package: value.package,
+                    module: value.module,
+                    tile: value.tile,
+                    die: value.die,
+                    core: value.core,
+                },
+                value.thread,
+            )
+        } else {
+            let value = info.location;
+            (
+                Location {
+                    package: value.package,
+                    core: value.core,
+                    ..Location::default()
+                },
+                value.thread,
+            )
+        };
+        processors.push(Processor {
+            processor_number: number as u32,
+            apic_id: info.processor_id,
+            flags,
+            topology_version: if extended { 2 } else { 1 },
+            location,
+            thread,
+        });
+    }
+    let selected = topology::select(&processors).map_err(Error::Topology)?;
+    if requested == 0 || requested > selected.len() {
+        return Err(Error::CoreCount);
+    }
+    if mp.who_am_i().map_err(|_| Error::WrongBootstrapProcessor)?
+        != processors[selected[0]].processor_number as usize
+    {
+        return Err(Error::WrongBootstrapProcessor);
+    }
+    let mut snapshots = Vec::with_capacity(selected.len());
+    for (slot, &index) in selected.iter().enumerate() {
+        let snapshot = if slot == 0 {
+            // SAFETY: UEFI executes the loader at CPL0 on the recorded BSP.
+            unsafe { observe() }?
+        } else {
+            let mut callback = Callback {
+                observation: UnsafeCell::new(None),
+                complete: AtomicBool::new(false),
+            };
+            mp.startup_this_ap(
+                processors[index].processor_number as usize,
+                observe_ap,
+                (&raw mut callback).cast(),
+                None,
+                Some(Duration::from_millis(500)),
+            )
+            .map_err(|_| Error::SnapshotTimeout)?;
+            if !callback.complete.load(Ordering::Acquire) {
+                return Err(Error::SnapshotCallback);
+            }
+            callback
+                .observation
+                .into_inner()
+                .ok_or(Error::SnapshotCallback)??
+        };
+        if !snapshot.matches(processors[index]) {
+            return Err(Error::ProcessorIdentity);
+        }
+        snapshots.push(snapshot);
+    }
+    let pages = size_of::<Capture>().div_ceil(PAGE as usize);
+    let memory = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pages)
+        .map_err(|_| Error::Memory)?;
+    let raw = memory.as_ptr().cast::<Capture>();
+    // SAFETY: fresh owned firmware pages; all-zero is valid for this closed
+    // record of integers/booleans/arrays. No large intermediate sits on a UEFI
+    // stack. All protocol/callback/Vec borrows end before ExitBootServices.
+    unsafe {
+        memory.as_ptr().write_bytes(0, pages * PAGE as usize);
+        let capture = &mut *raw;
+        capture.magic = MAGIC;
+        capture.version = VERSION;
+        capture.processor_count = processors.len() as u32;
+        capture.enabled_count = count.enabled as u32;
+        capture.core_count = selected.len() as u32;
+        capture.processors[..processors.len()].copy_from_slice(&processors);
+        for (slot, &index) in selected.iter().enumerate() {
+            capture.selected[slot] = index as u32;
+            capture.snapshots[slot] = snapshots[slot];
+        }
+    }
+    Ok(Region {
+        physical: memory.as_ptr() as u64,
+        bytes: (pages * PAGE as usize) as u64,
+    })
+}
+
+/// # Safety
+/// This is the loader's immutable owned record, mapped in the engine physmap.
+pub(crate) unsafe fn captured(region: Region) -> Result<&'static Capture, Error> {
+    if region.bytes != (size_of::<Capture>() as u64).next_multiple_of(PAGE)
+        || region.physical == 0
+        || !region.physical.is_multiple_of(PAGE)
+    {
+        return Err(Error::Memory);
+    }
+    // SAFETY: caller retains the exact loader allocation and its physmap.
+    let capture = unsafe { &*(crate::layout::physical(region.physical) as *const Capture) };
+    if capture.magic != MAGIC
+        || capture.version != VERSION
+        || capture.processor_count as usize > topology::MAX_PROCESSORS
+        || capture.core_count == 0
+        || capture.core_count as usize > topology::MAX_CORES
+    {
+        return Err(Error::ProcessorInventory);
+    }
+    let processors = &capture.processors[..capture.processor_count as usize];
+    let selected = topology::select(processors).map_err(Error::Topology)?;
+    if selected.len() != capture.core_count as usize
+        || capture.enabled_count as usize
+            != processors
+                .iter()
+                .filter(|processor| processor.flags & topology::ENABLED != 0)
+                .count()
+    {
+        return Err(Error::ProcessorInventory);
+    }
+    for (slot, &selected_index) in selected.iter().enumerate() {
+        let index = capture.selected[slot] as usize;
+        if selected_index != index
+            || capture.snapshots[slot].msr_count as usize > topology::MAX_MSRS
+            || !capture.snapshots[slot].matches(capture.processors[index])
+        {
+            return Err(Error::ProcessorIdentity);
+        }
+    }
+    Ok(capture)
+}

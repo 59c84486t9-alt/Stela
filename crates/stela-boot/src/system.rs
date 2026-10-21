@@ -33,7 +33,7 @@ use uefi::{
     proto::loaded_image::LoadedImage,
 };
 
-const STACK_BYTES: u64 = 2 * 1024 * 1024;
+use crate::native_smp::resources::{Resources as NativeResources, STACK_BYTES, STACK_STRIDE};
 const MIB: u64 = 1024 * 1024;
 /// The bounds of the parts of Stela's memory sized from host RAM
 /// ([`Sizes::for_host`]).
@@ -529,15 +529,48 @@ fn load(
         layout::image().wrapping_sub(image.start as u64),
     )?;
     let text = core::str::from_utf8(&options).map_err(|_| "stela.cfg is not UTF-8")?;
+    let native_cores = crate::native_smp::requested(text)?;
+    let native_processors = match native_cores {
+        Some(count) => crate::native_smp::firmware::capture(count)
+            .map_err(crate::native_smp::firmware::Error::message)?,
+        None => Region::default(),
+    };
     let guest = match option(text, crate::engine::RAM_OPTION) {
         Some(bytes) => crate::engine::number(bytes)?,
         None => crate::engine::DEFAULT_RAM,
     };
     let sizes = Sizes::for_host(free_ram()?, guest);
     let heap = allocate(sizes.heap)?;
-    let stack = allocate(STACK_BYTES)?;
+    let cores = native_cores.unwrap_or(1);
+    let mut native_resources = NativeResources {
+        cores: cores as u32,
+        stacks: allocate(STACK_BYTES * cores as u64)?,
+        ..NativeResources::default()
+    };
+    if cores > 1 {
+        let page = boot::allocate_pages(
+            AllocateType::MaxAddress(0x9f000),
+            MemoryType::LOADER_CODE,
+            1,
+        )
+        .map_err(|_| "no owned SIPI page below 1 MiB")?;
+        let physical = page.as_ptr() as u64;
+        if physical < PAGE {
+            return Err("SIPI page overlaps real-mode vector table");
+        }
+        // SAFETY: the allocation is owned by Stela through every AP's lifetime.
+        unsafe {
+            page.as_ptr().write_bytes(0, PAGE as usize);
+        }
+        native_resources.sipi = physical;
+    }
+    let stack = Region {
+        physical: native_resources.stacks.physical,
+        bytes: STACK_BYTES,
+    };
     let code = allocate(sizes.code)?;
     let pool = allocate(sizes.pool)?;
+    crate::native_smp::resources::partition(cores, cores - 1, code.bytes, pool.bytes)?;
     let handoff_page = allocate(size_of::<Handoff>() as u64)?;
     let trampoline = low_page(MemoryType::LOADER_CODE)?;
     let root = low_page(MemoryType::LOADER_DATA)?;
@@ -551,12 +584,15 @@ fn load(
     let power = host_power();
 
     let mut frames = FirmwareFrames;
-    let image_rights: Vec<(u64, u64, u64)> = image
+    let mut image_rights: Vec<(u64, u64, u64)> = image
         .sections
         .iter()
         .map(|&(start, end, rights)| (start as u64, end as u64, rights))
         .chain(core::iter::once((trampoline, trampoline + PAGE, PRESENT)))
         .collect();
+    if native_resources.sipi != 0 {
+        image_rights.push((native_resources.sipi, native_resources.sipi + PAGE, PRESENT));
+    }
     identity(&mut frames, root, &ram, &image_rights)?;
     if let Some(storage) = &storage {
         map_devices(&mut frames, root, &ram, &storage.mapped)?;
@@ -599,14 +635,16 @@ fn load(
         heap.bytes,
         data,
     )?;
-    tables::map_range(
-        &mut frames,
-        root,
-        layout::stack() + PAGE,
-        stack.physical,
-        stack.bytes,
-        data,
-    )?;
+    for slot in 0..cores {
+        tables::map_range(
+            &mut frames,
+            root,
+            layout::stack() + slot as u64 * STACK_STRIDE + PAGE,
+            native_resources.stacks.physical + slot as u64 * STACK_BYTES,
+            STACK_BYTES,
+            data,
+        )?;
+    }
     tables::map_range(
         &mut frames,
         root,
@@ -654,14 +692,16 @@ fn load(
     }
     // The bounce slot's leaf entries, which the translation helper points
     // at guest frames; until then they map a scratch page.
-    let scratch = allocate(PAGE)?.physical;
-    let mut bounce = [0; 2];
-    for (index, slot) in bounce.iter_mut().enumerate() {
-        let address = layout::bounce() + index as u64 * PAGE;
-        tables::map_page(&mut frames, root, address, scratch, data)?;
-        let entry = tables::entry(&mut frames, root, address, 0, false)?;
-        *slot = entry.ok_or("bounce slot unmapped")? as u64;
+    for slot in 0..cores {
+        for index in 0..2 {
+            let scratch = allocate(PAGE)?.physical;
+            let address = layout::bounce() + (slot * 2 + index) as u64 * PAGE;
+            tables::map_page(&mut frames, root, address, scratch, data)?;
+            let entry = tables::entry(&mut frames, root, address, 0, false)?;
+            native_resources.bounce[slot][index] = entry.ok_or("bounce slot unmapped")? as u64;
+        }
     }
+    let bounce = native_resources.bounce[0];
 
     let options_region = Region {
         physical: options.as_ptr() as u64,
@@ -745,6 +785,8 @@ fn load(
             log_partition: log.map(|guid| guid.0),
             tsc_hz,
             apic_base,
+            native_processors,
+            native_resources,
             wall_seconds,
             wall_tsc,
             guest,

@@ -11,7 +11,7 @@ pub(crate) mod bundle;
 mod console_lines;
 mod display;
 mod erase;
-mod host;
+pub(crate) mod host;
 mod input;
 pub(crate) mod install;
 pub(crate) mod interrupts;
@@ -159,6 +159,10 @@ struct Options {
     input: bool,
     /// Opt-in diagnostic of actual native pinned RAM in the shared window.
     native_memory_check: bool,
+    /// Fixed physical native executors; never counts SMT siblings.
+    native_cores: Option<usize>,
+    /// Qualify owned AP startup/host resources, then stop before guest entry.
+    native_bootstrap_check: bool,
     /// The user opted in to Apple's signing server (`--tss`, `stela setup
     /// --tss`): the restore host may send this machine's ECID and component
     /// hashes to gs.apple.com for the recoveryOS LocalPolicy, over the host
@@ -289,6 +293,8 @@ impl Options {
             idle_skip: false,
             input: false,
             native_memory_check: false,
+            native_cores: crate::native_smp::requested(text)?,
+            native_bootstrap_check: false,
             tss: false,
             ecid: None,
             network_check: None,
@@ -309,6 +315,17 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--native-bootstrap-check" {
+                if options.native_bootstrap_check {
+                    return Err("duplicate native bootstrap check");
+                }
+                options.native_bootstrap_check = true;
+                continue;
+            }
+            if name == crate::native_smp::OPTION {
+                words.next().ok_or("missing native physical-core count")?;
+                continue;
+            }
             if name == "--native-memory-check" {
                 options.native_memory_check = true;
                 continue;
@@ -1492,6 +1509,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Ok(options) => options,
         Err(error) => output::fatal(error),
     };
+    // SAFETY: the loader handoff and all reservations stay pinned in the physmap.
+    let native_processors = unsafe { crate::native_smp::validate(handoff, options.native_cores) }
+        .unwrap_or_else(|error| output::fatal(error));
+    if options.native_bootstrap_check && options.native_cores.is_none() {
+        output::fatal("native bootstrap check needs an explicit physical-core count");
+    }
+    if options.native_cores.is_some_and(|cores| cores > 1) && !options.native_bootstrap_check {
+        output::fatal("parallel SystemMode shared-memory execution is not admitted yet");
+    }
     if options.native_memory_check {
         match crate::native_memory::verify() {
             Ok(()) => output::arguments(format_args!(
@@ -1779,15 +1805,24 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         }
         None => (None, None, None, None),
     };
+    let partition = crate::native_smp::resources::partition(
+        handoff.native_resources.cores as usize,
+        0,
+        handoff.code.bytes,
+        handoff.pool.bytes,
+    )
+    .unwrap_or_else(|error| output::fatal(error));
+    let native_tsc_base = host::rdtsc();
+    let worker_ram = options.native_bootstrap_check.then(|| ram.clone());
     let config = Config {
         ram,
         pool_physical: handoff.pool.physical,
-        pool_bytes: handoff.pool.bytes,
+        pool_bytes: partition.pool_bytes,
         window_root: handoff.root,
         code_virtual: layout::code(),
         code_physical: handoff.code.physical,
-        code_bytes: handoff.code.bytes,
-        tsc_base: host::rdtsc(),
+        code_bytes: partition.code_bytes,
+        tsc_base: native_tsc_base,
         tsc_hz: handoff.tsc_hz,
         apic_base: handoff.apic_base,
         placement: handoff.placement,
@@ -1798,6 +1833,59 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let mut host_owner =
         unsafe { host::install(config) }.unwrap_or_else(|error| output::fatal(error));
     let apic_hz = host::statistics().apic_hz;
+    if options.native_bootstrap_check {
+        // SAFETY: source-qualified physical roster and loader reservations,
+        // interrupts disabled, BSP Host installed. Guest entry is excluded.
+        let executors = unsafe {
+            crate::native_smp::executor::start(
+                handoff,
+                native_processors.expect("validated native roster"),
+                worker_ram.as_deref().expect("native worker RAM metadata"),
+                native_tsc_base,
+            )
+        }
+        .unwrap_or_else(|error| {
+            output::arguments(format_args!("CHECK native-bootstrap FAIL {error:?}\n"));
+            output::fatal("owned native AP bootstrap refused")
+        });
+        let sender = crate::apic::Apic::new(
+            handoff.apic_base,
+            layout::physical(handoff.apic_base & crate::apic::BASE_ADDRESS),
+        );
+        for processor in executors.processors() {
+            // SAFETY: BSP owns its ICR, physical AP/private descriptors ready.
+            let doorbells = unsafe { processor.check_doorbell(&sender, handoff.tsc_hz) }
+                .unwrap_or_else(|_| output::fatal("native AP doorbell did not complete"));
+            let observed = processor.observation();
+            let descriptors = processor.descriptors();
+            output::arguments(format_args!(
+                "NATIVE DESCRIPTORS slot={} rsp={:#x} gdt={:#x} idt={:#x} tr={:#x} gs={:#x} retained=boot-lifetime\n",
+                processor.slot(),
+                descriptors.rsp,
+                descriptors.gdt,
+                descriptors.idt,
+                descriptors.task,
+                descriptors.gs,
+            ));
+            output::arguments(format_args!(
+                "NATIVE HOST slot={} apic={:#x} cr3={:#x} cr0={:#x} cr4={:#x} efer={:#x} pat={:#x} doorbells={}\n",
+                processor.slot(),
+                processor.apic_id(),
+                observed.cr3,
+                observed.cr0,
+                observed.cr4,
+                observed.efer,
+                observed.pat,
+                doorbells,
+            ));
+        }
+        output::arguments(format_args!(
+            "CHECK native-bootstrap PASS physical_cores={} owned_APs={}; guest SMP execution unqualified\n",
+            options.native_cores.expect("validated native count"),
+            executors.processors().len(),
+        ));
+        output::terminate(0x10);
+    }
     let mut bare = host_owner.host();
     let target = target();
     let speculation = speculation::probe();
