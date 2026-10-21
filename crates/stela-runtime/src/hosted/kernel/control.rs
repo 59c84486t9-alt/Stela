@@ -34,6 +34,9 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
+mod exception;
+pub(crate) use exception::ExceptionState;
+
 /// `kern_return_t` values these routines answer.
 pub(crate) const KERN_SUCCESS: u32 = 0;
 pub(crate) const KERN_INVALID_ARGUMENT: u32 = 4;

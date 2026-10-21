@@ -171,11 +171,20 @@ pub(super) fn send(
             }
             (_, routine) => routine,
         };
-        let Some(request) = request(name, arguments)
+        let Some(mut request) = request(name, arguments)
             .with_context(|| format!("message {id} to kernel object {port:#x}"))?
         else {
             return forward_send(kernel, name, index, arguments);
         };
+        if routine.is_some_and(|routine| {
+            matches!(
+                routine.name,
+                "task_register_hardened_exception_handler" | "thread_adopt_exception_handler"
+            )
+        }) && let Err(status) = admit_exception_header(kernel, name, &mut request)?
+        {
+            return Ok(u64::from(status));
+        }
         let body = Request {
             body: &request.body,
         };
@@ -1007,6 +1016,19 @@ struct Sent {
     reply_port: u32,
     voucher: u32,
     body: Vec<u8>,
+    admitted_reply: std::cell::Cell<Option<ReplyRight>>,
+}
+
+/// An actual copied-in reply right, released on every non-reply exit.
+struct ReplyRight {
+    name: u32,
+    disposition: u32,
+}
+
+impl Drop for ReplyRight {
+    fn drop(&mut self) {
+        server::release_send(self.name);
+    }
 }
 
 /// The request a send carries, or `None` when its header or body is
@@ -1048,6 +1070,7 @@ fn request(name: &str, arguments: &[u64]) -> Result<Option<Sent>> {
         reply_port,
         voucher,
         body,
+        admitted_reply: std::cell::Cell::new(None),
     }))
 }
 
@@ -1064,9 +1087,19 @@ fn answer(
 ) -> Result<u64> {
     let disposition = (request.bits >> 8) & 0x1f;
     if request.reply_port != 0 && disposition != 0 {
-        let right = carry_reply_right(kernel, name, request.reply_port, disposition)?;
+        let mut right = match request.admitted_reply.take() {
+            Some(right) => right,
+            None => {
+                let (port, disposition) =
+                    carry_reply_right(kernel, name, request.reply_port, disposition)?;
+                ReplyRight {
+                    name: port,
+                    disposition,
+                }
+            }
+        };
         let mut body = Vec::new();
-        let mut bits = right.1;
+        let mut bits = right.disposition;
         // A port array's names stay in place until the reply is sent.
         let mut _kept = Vec::new();
         match reply {
@@ -1106,7 +1139,7 @@ fn answer(
         }
         let size = HEADER_BYTES as u32 + body.len() as u32;
         let mut message = Vec::with_capacity(size as usize);
-        for word in [bits, size, right.0, 0, 0, id + mig::REPLY_OFFSET] {
+        for word in [bits, size, right.name, 0, 0, id + mig::REPLY_OFFSET] {
             message.extend(word.to_le_bytes());
         }
         message.extend(body);
@@ -1114,6 +1147,7 @@ fn answer(
         if sent != 0 {
             bail!("{name}: the reply to message {id} could not be sent: {sent:#x}");
         }
+        right.name = 0; // The successful reply consumed this right.
     } else if let Reply::Complex { descriptors, .. } | Reply::Descriptors(descriptors) = &reply {
         // No reply is sent: the kernel destroys it, and the rights it
         // carries with it.
@@ -1141,6 +1175,18 @@ fn carry_reply_right(
     disposition: u32,
 ) -> Result<(u32, u32)> {
     let relay = relay(kernel, name)?;
+    carry_reply_at(relay, reply_port, disposition)?.map_err(|status| {
+        anyhow::anyhow!(
+            "{name}: the reply right could not be carried to the relay port: {status:#x}"
+        )
+    })
+}
+
+fn carry_reply_at(
+    relay: u32,
+    reply_port: u32,
+    disposition: u32,
+) -> Result<std::result::Result<(u32, u32), u32>> {
     let mut carrier = Vec::with_capacity(HEADER_BYTES as usize);
     for word in [
         MACH_MSG_TYPE_MAKE_SEND | disposition << 8,
@@ -1154,17 +1200,59 @@ fn carry_reply_right(
     }
     let status = host_message(&mut carrier, SEND, HEADER_BYTES as u32, 0, 0);
     if status != 0 {
-        bail!("{name}: the reply right could not be carried to the relay port: {status:#x}");
+        return Ok(Err(status as u32));
     }
     let mut received = vec![0u8; RELAY_BUFFER_BYTES];
     let status = host_message(&mut received, RECEIVE, 0, RELAY_BUFFER_BYTES as u32, relay);
     if status != 0 {
-        bail!("{name}: the reply right could not be received from the relay port: {status:#x}");
+        bail!("the reply right could not be received from the relay port: {status:#x}");
     }
     let word = |at: usize| u32::from_le_bytes(received[at..at + 4].try_into().unwrap());
     // The received header names the carried right as its remote port, its
     // bits' remote field the right's type, which is how a reply moves it.
-    Ok((word(8), word(0) & 0x1f))
+    Ok(Ok((word(8), word(0) & 0x1f)))
+}
+
+/// Irreversible exception operations admit the qualified header before
+/// entering their handlers. XNU measures descriptor layouts first, copies
+/// the header rights next, then copies body rights. Non-port layouts and
+/// other header policies need separate contracts before any right moves.
+fn admit_exception_header(
+    kernel: &mut Kernel,
+    routine: &str,
+    request: &mut Sent,
+) -> Result<std::result::Result<(), u32>> {
+    const COPY_SEND: u32 = 19;
+    const MAKE_SEND_ONCE: u32 = 21;
+    const HEADER_FIELDS: u32 = MACH_MSGH_BITS_COMPLEX | 0x001f_1f1f;
+    let local = (request.bits >> 8) & 0x1f;
+    if request.bits & !HEADER_FIELDS != 0
+        || request.bits & 0x1f != COPY_SEND
+        || !matches!(local, 0 | MAKE_SEND_ONCE)
+        || request.voucher != 0
+        || (request.bits >> 16) & 0x1f != 0
+    {
+        unsupported::refuse!(
+            Failure::Kern(MACH_SEND_INVALID_OPTIONS),
+            "{routine}: hardened exception admission requires COPY_SEND destination, \
+             MAKE_SEND_ONCE or absent reply, and no voucher"
+        );
+    }
+    if request.bits & MACH_MSGH_BITS_COMPLEX != 0 {
+        port_layout(routine, &request.body)?;
+    }
+    let relay = relay(kernel, routine)?;
+    match carry_reply_at(relay, request.reply_port, local)? {
+        Ok((name, disposition)) => {
+            if name != 0 {
+                request
+                    .admitted_reply
+                    .set(Some(ReplyRight { name, disposition }));
+            }
+            Ok(Ok(()))
+        }
+        Err(status) => Ok(Err(status)),
+    }
 }
 
 /// The port only the hosted kernel receives on, which carries rights.
@@ -1234,6 +1322,87 @@ pub(super) fn carry_port(
     Ok(Ok((carried, received[at + 10])))
 }
 
+/// A malformed port-only complex MIG request still undergoes native
+/// copyin before its server rejects it. Carry every descriptor in
+/// one message, then destroy the received message: moved rights retire,
+/// copied rights balance, and failed copyin uses the kernel's prefix
+/// cleanup (already copied MOVE rights are destroyed, not returned).
+/// Non-port layouts require their own memory/guard contracts first.
+pub(super) fn discard_ports(
+    kernel: &mut Kernel,
+    routine: &str,
+    body: &[u8],
+) -> Result<std::result::Result<(), u32>> {
+    port_layout(routine, body)?;
+    let relay = relay(kernel, routine)?;
+    discard_port_body(relay, body)
+}
+
+fn port_layout(routine: &str, body: &[u8]) -> Result<()> {
+    let count = body
+        .get(..4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+    let Some(count) = count else {
+        // No descriptor count: no rights can be claimed as consumed.
+        unsupported::refuse!(
+            Failure::Kern(server::MIG_BAD_ARGUMENTS),
+            "{routine}: a complex request without its descriptor-count layout"
+        );
+    };
+    let mut offset = 4usize;
+    for _ in 0..count {
+        let Some(descriptor) = body.get(offset..offset + PORT_DESCRIPTOR_BYTES as usize) else {
+            unsupported::refuse!(
+                Failure::Kern(server::MIG_BAD_ARGUMENTS),
+                "{routine}: a complex request with a truncated descriptor layout"
+            );
+        };
+        if descriptor[11] != 0 {
+            unsupported::refuse!(
+                Failure::Kern(server::MIG_BAD_ARGUMENTS),
+                "{routine}: malformed complex request cleanup for a non-port descriptor"
+            );
+        }
+        offset += PORT_DESCRIPTOR_BYTES as usize;
+    }
+    Ok(())
+}
+
+/// `body` has a fully validated port-descriptor layout. Raw dispositions
+/// and rights remain the native kernel's to validate in source order.
+fn discard_port_body(relay: u32, body: &[u8]) -> Result<std::result::Result<(), u32>> {
+    unsafe extern "C" {
+        fn mach_msg_destroy(message: *mut u32);
+    }
+    let size = (HEADER_BYTES as usize + body.len()) as u32;
+    let mut carrier = Vec::with_capacity(size as usize + RELAY_BUFFER_BYTES);
+    for word in [
+        MACH_MSGH_BITS_COMPLEX | MACH_MSG_TYPE_MAKE_SEND,
+        size,
+        relay,
+        0,
+        0,
+        0,
+    ] {
+        carrier.extend(word.to_le_bytes());
+    }
+    carrier.extend(body);
+    let status = host_message(&mut carrier, SEND, size, 0, 0);
+    if status != 0 {
+        return Ok(Err(status as u32));
+    }
+    carrier.resize(size as usize + RELAY_BUFFER_BYTES, 0);
+    let capacity = carrier.len() as u32;
+    let status = host_message(&mut carrier, RECEIVE, 0, capacity, relay);
+    if status != 0 {
+        bail!("a rejected request's carried ports could not be received: {status:#x}");
+    }
+    // SAFETY: this complete received native message owns its descriptors;
+    // destruction releases exactly those rights and no sender references.
+    unsafe { mach_msg_destroy(carrier.as_mut_ptr().cast()) };
+    Ok(Ok(()))
+}
+
 /// The hosted kernel's own message operation, through the host library,
 /// which selects the host kernel's current message trap and options.
 fn host_message(
@@ -1261,6 +1430,7 @@ fn host_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hosted::host;
     use crate::hosted::memory::{PAGE_BYTES, PAGE_MASK, Protection};
 
     #[test]
@@ -1324,6 +1494,166 @@ mod tests {
             // SAFETY: the rights this value made.
             unsafe { darwin::mach_port_destruct(crate::hosted::host::task(), self.0, -1, 0) };
         }
+    }
+
+    fn send_refs(name: u32) -> u32 {
+        unsafe extern "C" {
+            fn mach_port_get_refs(task: u32, name: u32, right: u32, refs: *mut u32) -> i32;
+        }
+        let mut refs = 0;
+        // SAFETY: a local output word and a name of this test's space.
+        unsafe { mach_port_get_refs(host::task(), name, 0, &mut refs) };
+        refs
+    }
+
+    fn port_body(descriptors: &[(u32, u8)]) -> Vec<u8> {
+        let mut body = (descriptors.len() as u32).to_le_bytes().to_vec();
+        for &(name, disposition) in descriptors {
+            body.extend(server::Descriptor::Port { name, disposition }.bytes());
+        }
+        body.extend(server::NDR_RECORD);
+        body
+    }
+
+    fn restore_send(port: &Port) {
+        // SAFETY: make the reference this test's MOVE consumed, so Port's
+        // destructor again owns exactly one send and its receive right.
+        assert_eq!(
+            unsafe {
+                darwin::mach_port_insert_right(
+                    host::task(),
+                    port.0,
+                    port.0,
+                    MACH_MSG_TYPE_MAKE_SEND,
+                )
+            },
+            0
+        );
+    }
+
+    #[test]
+    fn unqualified_complex_layouts_refuse_before_any_port_is_consumed() {
+        let moved = Port::new();
+        let complete = port_body(&[(moved.0, server::MOVE_SEND)]);
+        assert!(port_layout("exception test", &complete).is_ok());
+        for count in 0..16 {
+            assert!(port_layout("exception test", &complete[..count]).is_err());
+            assert_eq!(send_refs(moved.0), 1);
+        }
+        let mut non_port = complete;
+        non_port[15] = OOL_DESCRIPTOR;
+        assert!(port_layout("exception test", &non_port).is_err());
+        assert_eq!(send_refs(moved.0), 1);
+    }
+
+    #[test]
+    fn rejected_complex_port_requests_retire_moves_and_balance_copies() {
+        let relay = Port::new();
+        let moved = Port::new();
+        let copied = Port::new();
+        let body = port_body(&[(moved.0, server::MOVE_SEND), (copied.0, server::COPY_SEND)]);
+        assert_eq!(discard_port_body(relay.0, &body).unwrap(), Ok(()));
+        assert_eq!((send_refs(moved.0), send_refs(copied.0)), (0, 1));
+        restore_send(&moved);
+        let empty = port_body(&[]);
+        assert_eq!(discard_port_body(relay.0, &empty).unwrap(), Ok(()));
+    }
+
+    #[test]
+    fn failed_complex_port_copyin_cleans_the_completed_prefix() {
+        const INVALID_NAME: u32 = 0xdead_beef;
+        const MACH_SEND_INVALID_RIGHT: u32 = 0x1000_000a;
+        let relay = Port::new();
+        let moved = Port::new();
+        let copied = Port::new();
+        for (descriptors, expected_refs) in [
+            (
+                vec![
+                    (INVALID_NAME, server::MOVE_SEND),
+                    (moved.0, server::MOVE_SEND),
+                ],
+                (1, 1),
+            ),
+            (
+                vec![
+                    (copied.0, server::COPY_SEND),
+                    (INVALID_NAME, server::MOVE_SEND),
+                ],
+                (1, 1),
+            ),
+            (
+                vec![
+                    (moved.0, server::MOVE_SEND),
+                    (INVALID_NAME, server::MOVE_SEND),
+                ],
+                (0, 1),
+            ),
+        ] {
+            assert_eq!(
+                discard_port_body(relay.0, &port_body(&descriptors)).unwrap(),
+                Err(MACH_SEND_INVALID_RIGHT)
+            );
+            assert_eq!((send_refs(moved.0), send_refs(copied.0)), expected_refs);
+        }
+        restore_send(&moved);
+    }
+
+    #[test]
+    fn exception_reply_admission_precedes_body_copyin_and_retires_on_failure() {
+        const MAKE_SEND_ONCE: u32 = 21;
+        const INVALID_NAME: u32 = 0xdead_beef;
+        const INVALID_REPLY: u32 = 0x1000_0009;
+        const INVALID_HEADER: u32 = 0x1000_0010;
+        let relay = Port::new();
+        let reply = Port::new();
+        let moved = Port::new();
+        assert_eq!(
+            carry_reply_at(relay.0, INVALID_NAME, MAKE_SEND_ONCE).unwrap(),
+            Err(INVALID_REPLY)
+        );
+        assert_eq!(
+            carry_reply_at(relay.0, reply.0, 0).unwrap(),
+            Err(INVALID_HEADER)
+        );
+        // Failed header admission has not touched body references.
+        assert_eq!(send_refs(moved.0), 1);
+        assert_eq!(carry_reply_at(relay.0, 0, 0).unwrap(), Ok((0, 0)));
+        let (name, disposition) = carry_reply_at(relay.0, reply.0, MAKE_SEND_ONCE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(disposition, 18); // MACH_MSG_TYPE_MOVE_SEND_ONCE.
+        let owned = ReplyRight { name, disposition };
+        assert_eq!(
+            discard_port_body(
+                relay.0,
+                &port_body(&[
+                    (moved.0, server::MOVE_SEND),
+                    (INVALID_NAME, server::MOVE_SEND)
+                ])
+            )
+            .unwrap(),
+            Err(0x1000_000a)
+        );
+        assert_eq!(send_refs(moved.0), 0);
+        drop(owned);
+        // Destroying the copied-in reply right emits exactly the native
+        // send-once notification; the abandoned right cannot be replied on.
+        let mut notification = vec![0u8; RELAY_BUFFER_BYTES];
+        assert_eq!(
+            host_message(
+                &mut notification,
+                RECEIVE | 0x100, // MACH_RCV_TIMEOUT, zero wait.
+                0,
+                RELAY_BUFFER_BYTES as u32,
+                reply.0
+            ),
+            0
+        );
+        assert_eq!(
+            u32::from_le_bytes(notification[20..24].try_into().unwrap()),
+            71
+        );
+        restore_send(&moved);
     }
 
     const MACH_MSG_TYPE_COPY_SEND: u32 = 19;

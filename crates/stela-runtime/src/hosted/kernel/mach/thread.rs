@@ -164,7 +164,13 @@ pub(super) fn serve(
         ("thread_get_exception_ports_info", false) => {
             exception::info(kernel, request, Target::Thread(port))?
         }
-        ("thread_adopt_exception_handler", true) => exception::adopt(kernel, request)?,
+        ("thread_adopt_exception_handler", complex) => {
+            if complex {
+                exception::adopt(kernel, request, port)?
+            } else {
+                Reply::Failure(MIG_BAD_ARGUMENTS)
+            }
+        }
         ("thread_convert_thread_state", false) => convert(kernel, request)?,
         ("thread_suspend2", false) => {
             if !request.body.is_empty() {

@@ -365,6 +365,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     (Object::Task, "task_get_exception_ports_from_user", None),
     (Object::Task, "task_get_exception_ports_info", None),
     (
+        Object::Task,
+        "task_register_hardened_exception_handler",
+        Some(HARDENED_EXCEPTION_LIMITS),
+    ),
+    (
         Object::Thread,
         "thread_terminate_from_user",
         Some(
@@ -402,7 +407,11 @@ pub(crate) const SERVED: &[(Object, &str, Option<&str>)] = &[
     ),
     (Object::Thread, "thread_get_exception_ports_from_user", None),
     (Object::Thread, "thread_get_exception_ports_info", None),
-    (Object::Thread, "thread_adopt_exception_handler", None),
+    (
+        Object::Thread,
+        "thread_adopt_exception_handler",
+        Some(HARDENED_EXCEPTION_LIMITS),
+    ),
     (Object::Thread, "_kernelrpc_thread_policy", None),
     (Object::Thread, "_kernelrpc_thread_policy_set", None),
     (Object::Thread, "thread_policy_get", None),
@@ -431,6 +440,14 @@ const THREAD_EXCEPTION_PORT_LIMITS: &str = "a guest exception delivered with EXC
      MACH_EXCEPTION_BACKTRACE_PREFERRED stops the run, and delivery carries no voucher; the host \
      kernel's EXC_CRASH, EXC_RESOURCE and EXC_GUARD reports pass the thread's ports for the \
      task's; a platform-restricted task's policy violation stops the run";
+
+const HARDENED_EXCEPTION_LIMITS: &str = "registration and adoption use actual native kernel port \
+    resources with ARM flavors kept separately; a native resource-policy divergence or guest \
+    policy requiring fatal guard delivery stops the run; delivery retains the exception family's \
+    read-port, voucher, backtrace and host-report limits, and changing a reply's general-state \
+    encoding is refused; header admission requires COPY_SEND destination, MAKE_SEND_ONCE or absent \
+    reply and no voucher; truncated/non-port complex descriptor layouts stop before admission; \
+    fork, exec and spawn after registration are refused";
 
 /// Task routines whose answer is the arm64 kernel's: the request is
 /// forwarded to the task port, which is the host task's. They suspend,
@@ -782,6 +799,13 @@ pub(super) fn serve(
         (Object::Task, "task_get_exception_ports_info", false) => {
             super::exception::info(kernel, request, super::exception::Target::Task)?
         }
+        (Object::Task, "task_register_hardened_exception_handler", complex) => {
+            if complex {
+                super::exception::register(kernel, request)?
+            } else {
+                Reply::Failure(MIG_BAD_ARGUMENTS)
+            }
+        }
         (Object::Task, _, _) => return super::vm::serve(kernel, routine, complex, request),
         (Object::Thread, _, _) => {
             return super::thread::serve(kernel, port, routine, complex, request);
@@ -791,7 +815,7 @@ pub(super) fn serve(
 }
 
 /// A routine whose only out argument is its `kern_return_t`.
-fn status(code: u32) -> Reply {
+pub(super) fn status(code: u32) -> Reply {
     if code == control::KERN_SUCCESS {
         Reply::Success(Vec::new())
     } else {
@@ -1048,12 +1072,6 @@ pub(crate) const REFUSED: &[(Object, &str, &str)] = &[
         Object::Task,
         "task_map_kcdata_object_64",
         "a kcdata object is the host kernel's report, mapped in 4 KiB host pages",
-    ),
-    (
-        Object::Task,
-        "task_register_hardened_exception_handler",
-        "whether its port was made an exception port (MPO_EXCEPTION_PORT) is known only to the \
-         host kernel, and hardened exception delivery is not implemented",
     ),
 ];
 

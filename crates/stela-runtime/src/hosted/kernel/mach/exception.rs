@@ -81,6 +81,9 @@ const VALID_FLAVORS: [u32; 14] = [1, 2, 3, 4, 5, 6, 7, 9, 10, 14, 15, 16, 17, 27
 const REPLY_ENTRIES: usize = 32;
 const KERN_INVALID_RIGHT: u32 = 17;
 const KERN_DENIED: u32 = 53;
+
+mod hardened;
+pub(super) use hardened::{adopt, register};
 /// `MIG_TYPE_ERROR`: a request's right is not the routine's type.
 const MIG_TYPE_ERROR: u32 = (-300i32) as u32;
 /// Received rights' dispositions: `MACH_MSG_TYPE_PORT_RECEIVE` and
@@ -136,6 +139,7 @@ unsafe extern "C" {
 struct Action {
     behavior: u32,
     flavor: u32,
+    hardened: Option<u32>,
 }
 
 /// One object's actions: the never-started host thread whose exception
@@ -143,6 +147,7 @@ struct Action {
 #[derive(Debug)]
 struct Holder {
     thread: u32,
+    owner_pid: libc::pid_t,
     actions: [Action; EXC_TYPES_COUNT],
 }
 
@@ -152,11 +157,13 @@ pub(crate) struct ExceptionPorts(Mutex<State>);
 
 /// The task level's holder before this process sets its own actions: the
 /// host task, whose inherited actions [`ExceptionPorts::actions`] reads.
-const INHERITED: Holder = Holder {
+static INHERITED: Holder = Holder {
     thread: 0,
+    owner_pid: 0,
     actions: [Action {
         behavior: 0,
         flavor: 0,
+        hardened: None,
     }; EXC_TYPES_COUNT],
 };
 
@@ -166,6 +173,8 @@ struct State {
     task: Option<Holder>,
     /// Whether this process changed them from those it inherited.
     changed: bool,
+    /// The one kernel-backed frozen task registration.
+    hardened: Option<hardened::Registration>,
     /// The actions of the threads that have any, by thread port.
     threads: BTreeMap<u32, Holder>,
 }
@@ -302,6 +311,8 @@ impl Holder {
         }
         Ok(Self {
             thread,
+            // SAFETY: getpid has no pointer arguments.
+            owner_pid: unsafe { libc::getpid() },
             actions: [Action::default(); EXC_TYPES_COUNT],
         })
     }
@@ -324,6 +335,7 @@ impl Holder {
                 holder.actions[slot] = Action {
                     behavior: group.behavior,
                     flavor,
+                    hardened: None,
                 };
             }
             if group.name != 0 {
@@ -354,7 +366,9 @@ impl Holder {
                 (Some(_), MACH_PORT_DEAD) if distinct_dead => Identity::Dead(slot),
                 (Some(group), _) => Identity::Group(group),
             };
-            let Action { behavior, flavor } = self.actions[slot];
+            let Action {
+                behavior, flavor, ..
+            } = self.actions[slot];
             if let Some((_, entry)) = entries.iter_mut().find(|(other, entry)| {
                 *other == identity && entry.behavior == behavior && entry.flavor == flavor
             }) {
@@ -388,6 +402,20 @@ impl Holder {
             }
         }
         Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+    }
+}
+
+impl Drop for Holder {
+    fn drop(&mut self) {
+        // A fork child inherited the Rust state, not the holder threads
+        // or their port names. Never act on those names in its new space.
+        // SAFETY: getpid has no pointer arguments.
+        if self.thread != 0 && self.owner_pid == unsafe { libc::getpid() } {
+            // SAFETY: this holder owns a never-started thread and its
+            // control-port send right. Termination releases all actions.
+            unsafe { thread_terminate(self.thread) };
+            release_send(self.thread);
+        }
     }
 }
 
@@ -453,6 +481,9 @@ impl ExceptionPorts {
                     name: group.name,
                     behavior,
                     flavor,
+                    hardened: (!inherited)
+                        .then_some(holder.actions[exception].hardened)
+                        .flatten(),
                 });
             }
         }
@@ -462,11 +493,7 @@ impl ExceptionPorts {
     /// The guest thread of port `thread` ended: its actions' rights are
     /// released (`ipc_thread_terminate`).
     pub(crate) fn thread_ended(&self, thread: u32) {
-        if let Some(holder) = self.lock().threads.remove(&thread) {
-            // SAFETY: the holder thread never started; ending it releases
-            // the rights its exception ports hold.
-            unsafe { thread_terminate(holder.thread) };
-        }
+        drop(self.lock().threads.remove(&thread));
     }
 }
 
@@ -536,6 +563,18 @@ fn validate(
     {
         return Ok(Err(KERN_INVALID_ARGUMENT));
     }
+    policy(kernel, routine, mask, name, behavior, false)
+}
+
+fn policy(
+    kernel: &Kernel,
+    routine: &str,
+    mask: u32,
+    name: u32,
+    behavior: u32,
+    hardened: bool,
+) -> Result<std::result::Result<(), u32>> {
+    let base = behavior & !MACH_EXCEPTION_MASK;
     let executable = lock(&kernel.process.executable);
     let Some(signature) = executable.signature.as_ref() else {
         return Ok(Ok(()));
@@ -548,10 +587,10 @@ fn validate(
         base,
         EXCEPTION_IDENTITY_PROTECTED | EXCEPTION_STATE | EXCEPTION_STATE_IDENTITY_PROTECTED
     );
-    if signature.entitled(ONLY_ONE_EXCEPTION_PORT) || (valid(name) && !protected) {
+    if (!hardened && signature.entitled(ONLY_ONE_EXCEPTION_PORT)) || (valid(name) && !protected) {
         unsupported::refuse!(
             Failure::Kern(KERN_DENIED),
-            "{routine}: behavior {behavior:#x} breaking this platform-restricted task's \
+            "{routine}: behavior {behavior:#x}, mask {mask:#x} breaking this platform-restricted task's \
              exception policy, whose fatal EXC_GUARD (kGUARD_EXC_EXCEPTION_BEHAVIOR_ENFORCE) \
              ends the task"
         );
@@ -575,7 +614,11 @@ pub(super) fn carried_send(
         request.body.get(14),
         request.body.get(15),
     ) else {
-        // The server's check of the request's one descriptor.
+        // The kernel first copies in the complete complex request, then
+        // the MIG server rejects its one-port descriptor layout.
+        if let Err(status) = super::message::discard_ports(kernel, routine, request.body)? {
+            return Ok(Err(Reply::NotSent(status)));
+        }
         return Ok(Err(Reply::Failure(MIG_BAD_ARGUMENTS)));
     };
     let (name, received) = match super::message::carry_port(kernel, routine, name, disposition)? {
@@ -706,7 +749,11 @@ fn set_carried(
         return Ok(Reply::Failure(status));
     }
     for slot in bits(mask) {
-        holder.actions[slot] = Action { behavior, flavor };
+        holder.actions[slot] = Action {
+            behavior,
+            flavor,
+            hardened: None,
+        };
     }
     if mask != 0 && target == Target::Task {
         state.changed = true;
@@ -811,19 +858,6 @@ pub(super) fn info(kernel: &Kernel, request: &Request, target: Target) -> Result
     Ok(Reply::Success(body))
 }
 
-/// `thread_adopt_exception_handler(exc_port; exc_mask, behavior_mask,
-/// flavor_mask)`: a task's exception ports are frozen only by
-/// `task_register_hardened_exception_handler`, which stops the run, so
-/// adoption is refused (`KERN_DENIED`), the port released.
-pub(super) fn adopt(kernel: &mut Kernel, request: &Request) -> Result<Reply> {
-    let name = match carried_send(kernel, "thread_adopt_exception_handler", request, 36)? {
-        Ok(name) => name,
-        Err(reply) => return Ok(reply),
-    };
-    release_send(name);
-    Ok(Reply::Failure(KERN_DENIED))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -878,6 +912,7 @@ mod tests {
             holder.actions[slot] = Action {
                 behavior: EXCEPTION_DEFAULT,
                 flavor: 6,
+                hardened: None,
             };
         }
         // EXC_CRASH's action differs only in behavior: its own entry.

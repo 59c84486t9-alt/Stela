@@ -73,6 +73,7 @@ pub(super) struct Action {
     pub(super) name: u32,
     pub(super) behavior: u32,
     pub(super) flavor: Result<u32, u32>,
+    pub(super) hardened: Option<u32>,
 }
 
 /// A guest exception: its type and the codes the kernel raises it with
@@ -322,6 +323,7 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
         name,
         behavior,
         flavor,
+        hardened,
     } = action;
     if behavior & MACH_EXCEPTION_BACKTRACE_PREFERRED != 0 {
         unsupported::refuse!(
@@ -362,8 +364,16 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
         Err(_) => 0,
     };
     let old = if with_state {
-        match control::get_state(&state, flavor, control::THREAD_STATE_MAX, signer)? {
-            Ok(words) => Some(words),
+        match control::ExceptionState::capture(
+            &state,
+            flavor,
+            signer,
+            hardened.is_some(),
+            (kind == EXCEPTION_STATE_IDENTITY_PROTECTED)
+                .then_some(hardened)
+                .flatten(),
+        )? {
+            Ok(snapshot) => Some(snapshot),
             Err(code) => return Ok(code),
         }
     } else {
@@ -411,7 +421,7 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
         &ports,
         thread_id,
         exception,
-        old.as_deref().map(|words| (flavor, words)),
+        old.as_ref().map(|snapshot| (flavor, snapshot.words())),
     );
     let (code, new) = rpc(kernel, name, id, !ports.is_empty(), &body, with_state)?;
     let Some((flavor, words)) = new else {
@@ -420,7 +430,10 @@ fn raise(kernel: &Kernel, pe: &mut Pe, exception: Exception, action: Action) -> 
     // `thread_setstatus_from_user` of the reply's state, over a state the
     // handler set meanwhile.
     let state = user_state(kernel, pe);
-    Ok(match control::set_state(&state, flavor, &words, signer)? {
+    let snapshot = old
+        .as_ref()
+        .expect("state reply belongs to a state request");
+    Ok(match snapshot.apply(&state, flavor, &words, signer)? {
         Ok(state) => {
             set_user_state(kernel, pe, state);
             darwin::KERN_SUCCESS
