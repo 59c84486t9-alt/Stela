@@ -110,7 +110,9 @@ impl Tables {
             "gen3 DART incoming stream is outside its native bounds",
         ))?;
         if !stream.enabled {
-            return Err(DmaError::Unsupported("gen3 DART disabled-stream fault classification").into());
+            return Err(
+                DmaError::Unsupported("gen3 DART disabled-stream fault classification").into(),
+            );
         }
         if stream.config & TRANSLATE == 0 {
             return Err(DmaError::Unsupported("gen3 DART untranslated or bypass stream").into());
@@ -121,7 +123,10 @@ impl Tables {
         let context = stream.config & CONTEXT != 0;
         let va_bits = if context { 42 } else { 36 };
         if iova >> va_bits != 0 {
-            return Err(DmaError::Unsupported("gen3 DART address context is outside the recovered table form").into());
+            return Err(DmaError::Unsupported(
+                "gen3 DART address context is outside the recovered table form",
+            )
+            .into());
         }
         if stream.ttbr & TTBR_VALID == 0 {
             return Err(WalkError::Fault(Code::Invalid, Level::Ttbr));
@@ -145,9 +150,7 @@ impl Tables {
         let offset = iova & (PAGE - 1);
         let first_unit = leaf >> 52 & 0xfff;
         let last_unit = leaf >> 40 & 0xfff;
-        if offset / SUBPAGE_UNIT < first_unit
-            || (last & (PAGE - 1)) / SUBPAGE_UNIT > last_unit
-        {
+        if offset / SUBPAGE_UNIT < first_unit || (last & (PAGE - 1)) / SUBPAGE_UNIT > last_unit {
             return Err(WalkError::Fault(Code::Region, Level::Pte));
         }
         Ok(target + offset)
@@ -218,7 +221,10 @@ impl Iommu for Tables {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::{apple::interrupt::InterruptLatch, dma::{Port, tests::Ram}};
+    use crate::platform::{
+        apple::interrupt::InterruptLatch,
+        dma::{Port, tests::Ram},
+    };
 
     const ROOT: u64 = 0x8_0000_0000;
     const CTE: u64 = ROOT + PAGE;
@@ -237,20 +243,38 @@ mod tests {
         ram.put_u64(ROOT + 8, entry(CTE));
         ram.put_u64(CTE + 8, entry(LEAF));
         ram.put_u64(LEAF + 8, entry(FRAME) | 0xfff << 40);
-        tables.configure(255, TRANSLATE | CONTEXT, (ROOT >> 12) as u32 | 1).unwrap();
+        tables
+            .configure(255, TRANSLATE | CONTEXT, (ROOT >> 12) as u32 | 1)
+            .unwrap();
         tables.set_enabled(255, true).unwrap();
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
-        let mut port = Port { iommu: &mut tables, stream: 255, memory: &mut ram, access: &mut a };
+        let mut port = Port {
+            iommu: &mut tables,
+            stream: 255,
+            memory: &mut ram,
+            access: &mut a,
+        };
         port.write(IOVA + 7, &[1, 2, 3, 4]).unwrap();
-        assert_eq!(port.write(IOVA + PAGE - 2, &[9, 8, 7, 6]), Err(DmaError::Fault(0x3000)));
+        assert_eq!(
+            port.write(IOVA + PAGE - 2, &[9, 8, 7, 6]),
+            Err(DmaError::Fault(0x3000))
+        );
         let mut bytes = [0; 4];
         assert!(ram.read(FRAME + 7, &mut bytes));
         assert_eq!(bytes, [1, 2, 3, 4]);
         assert!(ram.read(FRAME + PAGE - 2, &mut bytes));
         assert_eq!(bytes, [9, 8, 0, 0]);
         assert_eq!(tables.faults().pending(7), Ok(1 << 31));
-        assert_eq!(tables.faults().record(255).unwrap(), Some(Record { code: Code::Invalid, level: Level::Pte, write: true, address: IOVA + PAGE }));
+        assert_eq!(
+            tables.faults().record(255).unwrap(),
+            Some(Record {
+                code: Code::Invalid,
+                level: Level::Pte,
+                write: true,
+                address: IOVA + PAGE,
+            })
+        );
         tables.acknowledge_faults(7, 1 << 31).unwrap();
         assert_eq!(tables.faults().pending(7), Ok(0));
     }
@@ -264,15 +288,33 @@ mod tests {
         tables.configure(1, TRANSLATE | CONTEXT, 0).unwrap();
         tables.set_enabled(1, true).unwrap();
         for (class, install) in [(0x0000, 0), (0x1000, 1), (0x2000, 2), (0x3000, 3)] {
-            if install == 1 { tables.configure(1, TRANSLATE | CONTEXT, (ROOT >> 12) as u32 | 1).unwrap(); }
-            if install == 2 { ram.put_u64(ROOT + 8, entry(CTE)); }
-            if install == 3 { ram.put_u64(CTE + 8, entry(LEAF)); }
-            assert_eq!(tables.translate(&mut ram, 1, IOVA, IOVA, false, &mut a), Err(DmaError::Fault(class)));
+            if install == 1 {
+                tables
+                    .configure(1, TRANSLATE | CONTEXT, (ROOT >> 12) as u32 | 1)
+                    .unwrap();
+            }
+            if install == 2 {
+                ram.put_u64(ROOT + 8, entry(CTE));
+            }
+            if install == 3 {
+                ram.put_u64(CTE + 8, entry(LEAF));
+            }
+            assert_eq!(
+                tables.translate(&mut ram, 1, IOVA, IOVA, false, &mut a),
+                Err(DmaError::Fault(class))
+            );
             tables.acknowledge_faults(0, 2).unwrap();
         }
-        for (attributes, write, class) in [(NO_READ | 0xfff << 40, false, 2), (NO_WRITE | 0xfff << 40, true, 1), (4 << 52 | 7 << 40, false, 7)] {
+        for (attributes, write, class) in [
+            (NO_READ | 0xfff << 40, false, 2),
+            (NO_WRITE | 0xfff << 40, true, 1),
+            (4 << 52 | 7 << 40, false, 7),
+        ] {
             ram.put_u64(LEAF + 8, entry(FRAME) | attributes);
-            assert_eq!(tables.translate(&mut ram, 1, IOVA, IOVA, write, &mut a), Err(DmaError::Fault(class)));
+            assert_eq!(
+                tables.translate(&mut ram, 1, IOVA, IOVA, write, &mut a),
+                Err(DmaError::Fault(class))
+            );
             tables.acknowledge_faults(0, 2).unwrap();
         }
     }
@@ -283,19 +325,39 @@ mod tests {
         let mut ram = Ram::new(ROOT, (5 * PAGE) as usize);
         ram.put_u64(ROOT + 8, entry(LEAF));
         ram.put_u64(LEAF + 8, entry(FRAME) | 0xfff << 40);
-        tables.configure(0, TRANSLATE, (ROOT >> 12) as u32 | 1).unwrap();
+        tables
+            .configure(0, TRANSLATE, (ROOT >> 12) as u32 | 1)
+            .unwrap();
         tables.set_enabled(0, true).unwrap();
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
         let iova = IOVA & ((1 << 36) - 1);
-        for (config, ttbr) in [(TRANSLATE | 1 << 7, 1), (TRANSLATE | 1 << 16, 1), (TRANSLATE, 3)] {
+        for (config, ttbr) in [
+            (TRANSLATE | 1 << 7, 1),
+            (TRANSLATE | 1 << 16, 1),
+            (TRANSLATE, 3),
+        ] {
             assert!(tables.configure(0, config, ttbr).is_err());
-            assert_eq!(tables.translate(&mut ram, 0, iova, iova, false, &mut a), Ok(FRAME));
+            assert_eq!(
+                tables.translate(&mut ram, 0, iova, iova, false, &mut a),
+                Ok(FRAME)
+            );
         }
-        assert!(matches!(tables.translate(&mut ram, 0, iova | 1 << 36, iova | 1 << 36, false, &mut a), Err(DmaError::Unsupported(_))));
-        assert!(matches!(tables.translate(&mut ram, 1, iova, iova, false, &mut a), Err(DmaError::Unsupported(_))));
+        assert!(matches!(
+            tables.translate(&mut ram, 0, iova | 1 << 36, iova | 1 << 36, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
+        assert!(matches!(
+            tables.translate(&mut ram, 1, iova, iova, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
         assert_eq!(tables.faults().pending(0), Ok(0));
-        let mut port = Port { iommu: &mut tables, stream: 0, memory: &mut ram, access: &mut a };
+        let mut port = Port {
+            iommu: &mut tables,
+            stream: 0,
+            memory: &mut ram,
+            access: &mut a,
+        };
         port.write(iova, &[4, 3, 2, 1]).unwrap();
         let mut bytes = [0; 4];
         port.read(iova, &mut bytes).unwrap();
@@ -312,13 +374,22 @@ mod tests {
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
         tables.set_enabled(0, true).unwrap();
-        assert!(matches!(tables.translate(&mut ram, 0, 0, 0, false, &mut a), Err(DmaError::Unsupported(_))));
+        assert!(matches!(
+            tables.translate(&mut ram, 0, 0, 0, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
         assert!(tables.configure(0, TRANSLATE | 1 << 7, 1).is_err());
         assert!(tables.configure(0, TRANSLATE | 1 << 16, 1).is_err());
         tables.configure(0, TRANSLATE, 1).unwrap();
-        assert!(matches!(tables.translate(&mut ram, 0, IOVA, IOVA, false, &mut a), Err(DmaError::Unsupported(_))));
+        assert!(matches!(
+            tables.translate(&mut ram, 0, IOVA, IOVA, false, &mut a),
+            Err(DmaError::Unsupported(_))
+        ));
         tables.set_quiesced(true);
-        assert_eq!(tables.translate(&mut ram, 0, 0, 0, false, &mut a), Err(DmaError::Unsupported("gen3 DART DMA is quiesced")));
+        assert_eq!(
+            tables.translate(&mut ram, 0, 0, 0, false, &mut a),
+            Err(DmaError::Unsupported("gen3 DART DMA is quiesced"))
+        );
         assert_eq!(tables.faults().pending(0), Ok(0));
     }
 }

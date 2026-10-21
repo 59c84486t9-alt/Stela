@@ -5,8 +5,8 @@
 //! fault code and table level are recovered; its access-type header fields,
 //! auxiliary AXI data and secondary-capture behavior are not. This component
 //! retains direction as typed state and never fabricates a complete header.
-use alloc::{vec, vec::Vec};
 use crate::platform::apple::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use alloc::{vec, vec::Vec};
 
 const PENDING: u64 = 0x4000;
 const RECORDS: u64 = 0x8000;
@@ -104,6 +104,11 @@ impl Capture {
             .pending
             .get_mut(word)
             .ok_or("gen3 DART fault bitmap word is outside its native bounds")?;
+        let streams = (self.records.len() - word * 32).min(32);
+        let valid = u32::MAX >> (32 - streams);
+        if bits & !valid != 0 {
+            return Err("gen3 DART fault acknowledgement names an out-of-profile SID");
+        }
         *pending &= !bits;
         for sid in word * 32..self.records.len().min((word + 1) * 32) {
             if bits & (1 << (sid % 32)) != 0 {
@@ -136,7 +141,8 @@ impl MmioDevice for Capture {
             let sid = usize::try_from(relative / RECORD_BYTES)
                 .map_err(|_| fail("gen3 DART fault SID is outside its native bounds"))?;
             let record = self.record(sid).map_err(fail)?;
-            let record = record.ok_or_else(|| fail("gen3 DART historical fault readback is unqualified"))?;
+            let record = record
+                .ok_or_else(|| fail("gen3 DART historical fault readback is unqualified"))?;
             return match relative % RECORD_BYTES {
                 ADDRESS_LOW => Ok(u64::from(record.address as u32)),
                 ADDRESS_HIGH => Ok(record.address >> 32),
@@ -147,13 +153,21 @@ impl MmioDevice for Capture {
         Err(fail("unknown gen3 DART fault register"))
     }
 
-    fn write(&mut self, offset: u64, width: Width, value: u64, _: &mut Access<'_>) -> Result<(), MmioError> {
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        _: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
         let fail = |reason| refuse("dart-gen3-fault", offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
             return Err(fail("gen3 DART fault registers are aligned 32-bit words"));
         }
         if let Some(word) = offset.checked_sub(PENDING).filter(|offset| *offset < 32) {
-            return self.acknowledge((word / 4) as usize, value as u32).map_err(fail);
+            return self
+                .acknowledge((word / 4) as usize, value as u32)
+                .map_err(fail);
         }
         Err(fail("unknown gen3 DART fault write or unrecovered acknowledgement"))
     }
@@ -205,11 +219,27 @@ mod tests {
         let mut capture = Capture::new(64).unwrap();
         let mut sink = InterruptLatch::new();
         let mut a = Access::new(0, 0, &mut sink);
-        capture.capture(33, Record { code: Code::Read, level: Level::Pte, write: false, address: 0x12_3456_789a }).unwrap();
+        capture
+            .capture(
+                33,
+                Record {
+                    code: Code::Read,
+                    level: Level::Pte,
+                    write: false,
+                    address: 0x12_3456_789a,
+                },
+            )
+            .unwrap();
         let record = RECORDS + 33 * RECORD_BYTES;
         assert_eq!(capture.read(PENDING + 4, Width::Word, &mut a), Ok(2));
-        assert_eq!(capture.read(record + ADDRESS_LOW, Width::Word, &mut a), Ok(0x3456_789a));
-        assert_eq!(capture.read(record + ADDRESS_HIGH, Width::Word, &mut a), Ok(0x12));
+        assert_eq!(
+            capture.read(record + ADDRESS_LOW, Width::Word, &mut a),
+            Ok(0x3456_789a)
+        );
+        assert_eq!(
+            capture.read(record + ADDRESS_HIGH, Width::Word, &mut a),
+            Ok(0x12)
+        );
         for offset in [record, record + 4, record + 0x10, record + 0x14] {
             assert!(capture.read(offset, Width::Word, &mut a).is_err());
         }
@@ -218,5 +248,22 @@ mod tests {
         capture.write(PENDING + 4, Width::Word, 2, &mut a).unwrap();
         assert_eq!(capture.read(PENDING + 4, Width::Word, &mut a), Ok(0));
         assert!(capture.read(record + ADDRESS_LOW, Width::Word, &mut a).is_err());
+    }
+
+    #[test]
+    fn reserved_acknowledgement_bits_cannot_clear_a_valid_capture() {
+        let mut capture = Capture::new(19).unwrap();
+        let record = Record {
+            code: Code::Read,
+            level: Level::Pte,
+            write: false,
+            address: 1,
+        };
+        capture.capture(18, record).unwrap();
+        assert!(capture.acknowledge(0, (1 << 18) | (1 << 19)).is_err());
+        assert_eq!(capture.pending(0), Ok(1 << 18));
+        assert_eq!(capture.record(18), Ok(Some(record)));
+        capture.acknowledge(0, 1 << 18).unwrap();
+        assert_eq!(capture.record(18), Ok(None));
     }
 }
