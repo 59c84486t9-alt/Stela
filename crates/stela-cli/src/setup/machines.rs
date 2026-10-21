@@ -16,9 +16,9 @@
 //! bundle serves it; every further install needs its own bundle, prepared
 //! from the active build's restore image.
 use super::{
-    Environment, Prepared, Setup, TSS_REQUIRED, apply_install, bundle, check_installed_efi,
-    check_space, copy_bundles, describe_install, ecid::Ecid, installed, plan_install,
-    prepare_bundles, publish, read_record, tss_note, write_record,
+    Environment, Prepared, Setup, TSS_REQUIRED, apply_install, bundle, check_bundle_revision,
+    check_installed_efi, check_space, copy_bundles, describe_install, ecid::Ecid, installed,
+    plan_install, prepare_bundles, publish, read_record, tss_note, write_record,
 };
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,7 @@ pub(super) fn machine_ecid(
 pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<String> {
     let record = read_record(environment, &command.usb)?;
     check_installed_efi(environment, &record)?;
+    check_bundle_revision(environment, &record)?;
     super::update::ready(&record, |_| false)?;
     if let Some(model) = &command.model {
         ensure!(
@@ -255,7 +256,7 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
                 &record.volume,
                 &bundle.build,
                 bundle.ecid,
-                record.bundle_schema
+                record.generation()
             )
             .display(),
             bundle.bytes as f64 / 1e9

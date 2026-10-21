@@ -31,7 +31,16 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;
 use stela_runtime::sha256;
 
+/// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
 pub const SCHEMA_VERSION: u32 = 1;
+/// The revision of what [`prepare`] writes within its schema: bump it in the
+/// commit that changes the content of a prepared bundle (a DeviceTree
+/// property, a region, a patch, a boot argument) without changing its
+/// format, and name the change here. `stela setup --update-stela` prepares a
+/// setup's bundles again when theirs are of another revision. Revision 0:
+/// the bundles of every loader before revisions were recorded; a
+/// `bundle.json` without `revision` is one.
+pub const REVISION: u32 = 0;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.
 const VIRT_BASE: u64 = 0xfffffe0010000000;
@@ -319,6 +328,8 @@ pub struct PlaceholderDecision {
 #[derive(Debug, Clone, Serialize)]
 pub struct Manifest {
     pub schema_version: u32,
+    /// [`REVISION`].
+    pub revision: u32,
     pub target: Target,
     pub options: Options,
     pub sources: Vec<Source>,
@@ -1189,6 +1200,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     );
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
+        revision: REVISION,
         target: inputs.target.clone(),
         options: options.clone(),
         sources,
@@ -1981,7 +1993,9 @@ mod tests {
                 .iter()
                 .any(|d| d.property == "boot-manifest-hash")
         );
-        // The mount's reader accepts the manifest and reproduces the layout.
+        // The mount's reader accepts the manifest, revision and all, and
+        // reproduces the layout.
+        assert_eq!(manifest.revision, REVISION);
         let json = serde_json::to_vec(manifest)?;
         let consumed = stela_runtime::boot_bundle::Manifest::parse(&json)?;
         let verified = consumed.verify(&|name| Some(file(name).as_slice()))?;

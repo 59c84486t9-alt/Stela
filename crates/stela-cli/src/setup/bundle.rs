@@ -1,19 +1,20 @@
 //! The boot bundles on the USB: one for each macOS build setup keeps, each
-//! Stela machine (its ECID is in the bundle's `/chosen`), boot-bundle
-//! schema (`stela_runtime::boot_bundle::SCHEMA_VERSION` of the `stela.efi`
-//! that reads it) and [`Kind`], in `EFI/stela/boot/<build>/<leaf>` of the
-//! bundle volume:
+//! Stela machine (its ECID is in the bundle's `/chosen`), [`Generation`]
+//! (the boot-bundle schema `stela.efi` reads it with, and the revision of
+//! the loader that prepared it) and [`Kind`], in
+//! `EFI/stela/boot/<build>/<leaf>` of the bundle volume:
 //!
 //! - `recovery`: a recoveryOS bundle from before machines had ECIDs, schema
-//!   1;
-//! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1;
+//!   1, revision 0;
+//! - `recovery-<ECID>`: a machine's recoveryOS bundle, schema 1, revision 0;
 //! - `restore-<ECID>`: a machine's restore bundle (`stela boot prepare
 //!   --restore`), which the Install macOS (Stela) choice boots;
 //! - `update-<ECID>`: a machine's update restore bundle (`stela boot
 //!   prepare --restore --update`), which the Update macOS (Stela) choice
 //!   boots;
-//! - any of these with `-s<schema>` for another schema, so a Stela update
-//!   that reads a new schema adds its bundles beside the old ones and its
+//! - any of these with `-s<schema>` for another schema and `-r<revision>`
+//!   for another revision, so a Stela update that reads a new schema or
+//!   prepares a new revision adds its bundles beside the old ones and its
 //!   rollback finds them.
 //!
 //! A bundle is copied to a `.partial` sibling and renamed into place, so an
@@ -36,6 +37,34 @@ pub(super) const MANIFEST: &str = "bundle.json";
 const LEGACY_LEAF: &str = "recovery";
 /// The schema bundles without a suffix have.
 const FIRST_SCHEMA: u32 = 1;
+/// The revision bundles without a suffix have, and that of a `bundle.json`
+/// without one.
+const FIRST_REVISION: u32 = 0;
+
+/// What a bundle's content is: its boot-bundle schema, the format
+/// `stela.efi` reads (`stela_runtime::boot_bundle::SCHEMA_VERSION`), and its
+/// revision, that of the loader that prepared it
+/// (`stela_loader::boot_bundle::REVISION`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Generation {
+    pub(super) schema: u32,
+    pub(super) revision: u32,
+}
+
+impl Generation {
+    /// Schema 1, revision 0: every bundle from before setups recorded
+    /// revisions.
+    pub(super) const FIRST: Self = Self {
+        schema: FIRST_SCHEMA,
+        revision: FIRST_REVISION,
+    };
+}
+
+impl std::fmt::Display for Generation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "schema {} revision {}", self.schema, self.revision)
+    }
+}
 
 /// What a bundle boots.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -83,6 +112,9 @@ pub(super) struct Bundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) ecid: Option<Ecid>,
     pub(super) schema: u32,
+    /// Revision 0 for a bundle an older setup wrote without recording it.
+    #[serde(default)]
+    pub(super) revision: u32,
     /// SHA-256 of its `bundle.json`; empty for a bundle an older setup
     /// wrote without recording it.
     #[serde(default)]
@@ -92,9 +124,17 @@ pub(super) struct Bundle {
 }
 
 impl Bundle {
-    /// Whether it is the recoveryOS bundle of `build`, `ecid` and `schema`.
-    pub(super) fn same(&self, build: &str, ecid: Option<Ecid>, schema: u32) -> bool {
-        self.same_kind(Kind::Recovery, build, ecid, schema)
+    pub(super) fn generation(&self) -> Generation {
+        Generation {
+            schema: self.schema,
+            revision: self.revision,
+        }
+    }
+
+    /// Whether it is the recoveryOS bundle of `build`, `ecid` and
+    /// `generation`.
+    pub(super) fn same(&self, build: &str, ecid: Option<Ecid>, generation: Generation) -> bool {
+        self.same_kind(Kind::Recovery, build, ecid, generation)
     }
 
     pub(super) fn same_kind(
@@ -102,31 +142,37 @@ impl Bundle {
         kind: Kind,
         build: &str,
         ecid: Option<Ecid>,
-        schema: u32,
+        generation: Generation,
     ) -> bool {
-        self.kind == kind && self.build == build && self.ecid == ecid && self.schema == schema
+        self.kind == kind
+            && self.build == build
+            && self.ecid == ecid
+            && self.generation() == generation
     }
 
     /// Its directory on `volume`.
     pub(super) fn directory(&self, volume: &Path) -> PathBuf {
-        directory_of(self.kind, volume, &self.build, self.ecid, self.schema)
+        directory_of(self.kind, volume, &self.build, self.ecid, self.generation())
     }
 }
 
 /// A recoveryOS bundle's leaf.
 #[cfg(test)]
-pub(super) fn leaf(ecid: Option<Ecid>, schema: u32) -> String {
-    leaf_of(Kind::Recovery, ecid, schema)
+pub(super) fn leaf(ecid: Option<Ecid>, generation: Generation) -> String {
+    leaf_of(Kind::Recovery, ecid, generation)
 }
 
-pub(super) fn leaf_of(kind: Kind, ecid: Option<Ecid>, schema: u32) -> String {
+pub(super) fn leaf_of(kind: Kind, ecid: Option<Ecid>, generation: Generation) -> String {
     let prefix = kind.prefix();
     let mut leaf = match ecid {
         Some(ecid) => format!("{prefix}-{}", ecid.digits()),
         None => prefix.into(),
     };
-    if schema != FIRST_SCHEMA {
-        leaf.push_str(&format!("-s{schema}"));
+    if generation.schema != FIRST_SCHEMA {
+        leaf.push_str(&format!("-s{}", generation.schema));
+    }
+    if generation.revision != FIRST_REVISION {
+        leaf.push_str(&format!("-r{}", generation.revision));
     }
     leaf
 }
@@ -137,8 +183,13 @@ pub(super) fn build_directory(volume: &Path, build: &str) -> PathBuf {
 }
 
 /// The recoveryOS bundle's directory on `volume`.
-pub(super) fn directory(volume: &Path, build: &str, ecid: Option<Ecid>, schema: u32) -> PathBuf {
-    directory_of(Kind::Recovery, volume, build, ecid, schema)
+pub(super) fn directory(
+    volume: &Path,
+    build: &str,
+    ecid: Option<Ecid>,
+    generation: Generation,
+) -> PathBuf {
+    directory_of(Kind::Recovery, volume, build, ecid, generation)
 }
 
 pub(super) fn directory_of(
@@ -146,21 +197,26 @@ pub(super) fn directory_of(
     volume: &Path,
     build: &str,
     ecid: Option<Ecid>,
-    schema: u32,
+    generation: Generation,
 ) -> PathBuf {
-    build_directory(volume, build).join(leaf_of(kind, ecid, schema))
+    build_directory(volume, build).join(leaf_of(kind, ecid, generation))
 }
 
 /// The recoveryOS bundle's directory as `stela.cfg` names it on the
 /// firmware's volume.
-pub(super) fn firmware_path(build: &str, ecid: Option<Ecid>, schema: u32) -> String {
-    firmware_path_of(Kind::Recovery, build, ecid, schema)
+pub(super) fn firmware_path(build: &str, ecid: Option<Ecid>, generation: Generation) -> String {
+    firmware_path_of(Kind::Recovery, build, ecid, generation)
 }
 
-pub(super) fn firmware_path_of(kind: Kind, build: &str, ecid: Option<Ecid>, schema: u32) -> String {
+pub(super) fn firmware_path_of(
+    kind: Kind,
+    build: &str,
+    ecid: Option<Ecid>,
+    generation: Generation,
+) -> String {
     format!(
         "\\EFI\\stela\\boot\\{build}\\{}",
-        leaf_of(kind, ecid, schema)
+        leaf_of(kind, ecid, generation)
     )
 }
 
@@ -168,6 +224,8 @@ pub(super) fn firmware_path_of(kind: Kind, build: &str, ecid: Option<Ecid>, sche
 #[derive(Deserialize)]
 struct Listing {
     schema_version: u32,
+    #[serde(default)]
+    revision: u32,
     #[serde(default)]
     files: Vec<Listed>,
 }
@@ -179,10 +237,13 @@ struct Listed {
     sha256: String,
 }
 
-/// The schema a bundle directory's `bundle.json` declares.
-pub(super) fn schema(directory: &Path) -> Result<u32> {
+/// The generation a bundle directory's `bundle.json` declares.
+pub(super) fn generation(directory: &Path) -> Result<Generation> {
     let listing: Listing = stela_runtime::read_json(&directory.join(MANIFEST))?;
-    Ok(listing.schema_version)
+    Ok(Generation {
+        schema: listing.schema_version,
+        revision: listing.revision,
+    })
 }
 
 /// Bytes of the files in a prepared bundle directory.
@@ -386,62 +447,101 @@ pub(super) fn verify(directory: &Path, manifest_sha256: &str) -> Vec<String> {
 pub(super) mod tests {
     use super::*;
 
-    /// A bundle directory of one file, listed in a schema `schema`
-    /// `bundle.json`.
-    pub(in super::super) fn write(directory: &Path, schema: u32, contents: &[u8]) -> Result<()> {
+    pub(in super::super) fn of(schema: u32, revision: u32) -> Generation {
+        Generation { schema, revision }
+    }
+
+    /// A bundle directory of one file, listed in a `bundle.json` of
+    /// `generation`, which names no revision for revision 0, as those of
+    /// loaders before revisions do not.
+    pub(in super::super) fn write(
+        directory: &Path,
+        generation: Generation,
+        contents: &[u8],
+    ) -> Result<()> {
         use sha2::{Digest, Sha256};
         fs::create_dir_all(directory)?;
         fs::write(directory.join("ramdisk.img"), contents)?;
-        let listing = serde_json::json!({
-            "schema_version": schema,
+        let mut listing = serde_json::json!({
+            "schema_version": generation.schema,
             "files": [{
                 "name": "ramdisk.img",
                 "bytes": contents.len(),
                 "sha256": hex::encode(Sha256::digest(contents)),
             }],
         });
+        if generation.revision != FIRST_REVISION {
+            listing["revision"] = generation.revision.into();
+        }
         stela_runtime::write_json(&directory.join(MANIFEST), &listing)
     }
 
     #[test]
-    fn bundles_are_named_by_machine_and_schema() {
-        assert_eq!(leaf(None, 1), "recovery");
-        assert_eq!(leaf(Some(Ecid(0xab)), 1), "recovery-00000000000000AB");
-        assert_eq!(leaf(Some(Ecid(0xab)), 2), "recovery-00000000000000AB-s2");
-        assert_eq!(leaf(None, 3), "recovery-s3");
+    fn bundles_are_named_by_machine_schema_and_revision() {
+        assert_eq!(leaf(None, Generation::FIRST), "recovery");
         assert_eq!(
-            leaf_of(Kind::Restore, Some(Ecid(0xab)), 2),
+            leaf(Some(Ecid(0xab)), Generation::FIRST),
+            "recovery-00000000000000AB"
+        );
+        assert_eq!(
+            leaf(Some(Ecid(0xab)), of(2, 0)),
+            "recovery-00000000000000AB-s2"
+        );
+        assert_eq!(leaf(None, of(3, 0)), "recovery-s3");
+        assert_eq!(
+            leaf(Some(Ecid(0xab)), of(1, 4)),
+            "recovery-00000000000000AB-r4"
+        );
+        assert_eq!(leaf(None, of(2, 1)), "recovery-s2-r1");
+        assert_eq!(
+            leaf_of(Kind::Restore, Some(Ecid(0xab)), of(2, 0)),
             "restore-00000000000000AB-s2"
         );
         assert_eq!(
-            firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), 1),
+            firmware_path_of(Kind::Restore, "26A434", Some(Ecid(1)), Generation::FIRST),
             "\\EFI\\stela\\boot\\26A434\\restore-0000000000000001"
         );
         assert_eq!(
-            firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), 1),
-            "\\EFI\\stela\\boot\\26A434\\update-0000000000000001"
+            firmware_path_of(Kind::Update, "26A434", Some(Ecid(1)), of(1, 2)),
+            "\\EFI\\stela\\boot\\26A434\\update-0000000000000001-r2"
         );
         assert_eq!(
-            firmware_path("26A434", Some(Ecid(1)), 1),
+            firmware_path("26A434", Some(Ecid(1)), Generation::FIRST),
             "\\EFI\\stela\\boot\\26A434\\recovery-0000000000000001"
         );
+    }
+
+    #[test]
+    fn a_bundle_json_without_a_revision_is_revision_0() {
+        let dir = tempfile::tempdir().unwrap();
+        // As every loader before revisions wrote it.
+        let listing = serde_json::json!({"schema_version": 1, "files": []});
+        stela_runtime::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
+        assert_eq!(generation(dir.path()).unwrap(), Generation::FIRST);
+        let listing = serde_json::json!({"schema_version": 1, "revision": 3, "files": []});
+        stela_runtime::write_json(&dir.path().join(MANIFEST), &listing).unwrap();
+        assert_eq!(generation(dir.path()).unwrap(), of(1, 3));
+        // So is a bundle an older setup recorded.
+        let kept: Bundle =
+            serde_json::from_str(r#"{"build": "B", "schema": 1, "manifest_sha256": ""}"#).unwrap();
+        assert_eq!(kept.generation(), Generation::FIRST);
     }
 
     #[test]
     fn installed_bundles_verify_and_damage_is_found() {
         let dir = tempfile::tempdir().unwrap();
         let prepared = dir.path().join("prepared");
-        write(&prepared, 1, &[0x5a; 4096]).unwrap();
+        write(&prepared, Generation::FIRST, &[0x5a; 4096]).unwrap();
         let destination = dir.path().join("boot/B/recovery");
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         let digest = install(&prepared, &destination).unwrap();
         assert!(verify(&destination, &digest).is_empty());
-        assert_eq!(schema(&destination).unwrap(), 1);
+        assert_eq!(generation(&destination).unwrap(), Generation::FIRST);
         // A second install replaces it whole.
-        write(&prepared, 2, &[0x33; 100]).unwrap();
+        write(&prepared, of(2, 1), &[0x33; 100]).unwrap();
         let second = install(&prepared, &destination).unwrap();
         assert_ne!(second, digest);
-        assert_eq!(schema(&destination).unwrap(), 2);
+        assert_eq!(generation(&destination).unwrap(), of(2, 1));
         assert!(!dir.path().join("boot/B/recovery.partial").exists());
         assert!(!verify(&destination, &digest).is_empty());
         fs::write(destination.join("ramdisk.img"), [0x34; 100]).unwrap();
@@ -461,7 +561,7 @@ pub(super) mod tests {
         let build = dir.path().join("boot/B");
         let destination = build.join("recovery");
         fs::create_dir_all(&build).unwrap();
-        write(&prepared, 1, &[0x5a; 4096]).unwrap();
+        write(&prepared, Generation::FIRST, &[0x5a; 4096]).unwrap();
         let first = install(&prepared, &destination).unwrap();
         let (partial, previous) = siblings(&destination).unwrap();
         let half = |path: &Path| {
@@ -491,7 +591,7 @@ pub(super) mod tests {
         // An install after any of these replaces the bundle whole.
         half(&partial);
         fs::rename(&destination, &previous).unwrap();
-        write(&prepared, 2, &[0x33; 100]).unwrap();
+        write(&prepared, of(2, 0), &[0x33; 100]).unwrap();
         let second = install(&prepared, &destination).unwrap();
         assert!(verify(&destination, &second).is_empty());
         assert!(leftovers(&build).is_empty());

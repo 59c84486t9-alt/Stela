@@ -9,11 +9,17 @@
 //!   hexadecimal digits of its SHA-256); the USB's boot loader is replaced
 //!   atomically by the new one. A new `stela.efi` must carry this `stela`'s
 //!   mount interface. When it reads another boot-bundle schema than the
-//!   setup's bundles have, the update prepares every machine's bundle of
-//!   the active build at the new schema (from `--ipsw` or `--fetch`) beside
-//!   the old ones, which its rollback boots again. Stela keeps no
-//!   translation cache on disk (translations live in memory for one boot,
-//!   and the Cache partition is unused), so an update invalidates none.
+//!   setup's bundles have, or this `stela` prepares another bundle revision
+//!   (`stela_loader::boot_bundle::REVISION`) than theirs, the update
+//!   prepares the active build's bundles for every machine again (the
+//!   recoveryOS ones, and the restore ones while the setup has the build's
+//!   install medium) at the new schema and revision, from `--ipsw` or
+//!   `--fetch`, beside the old ones, which its rollback boots again; this
+//!   makes it an update even with the same `stela.efi`.
+//!   Bundles of a generation that no kept version boots are removed. Stela
+//!   keeps no translation cache on disk (translations live in memory for
+//!   one boot, and the Cache partition is unused), so an update invalidates
+//!   none.
 //! - macOS: an installed macOS updates itself: Software Update stages the
 //!   new system on the container's Update volume and sets `boot-command
 //!   upgrade`, which `stela.efi` boots from that volume as iBEC would
@@ -29,9 +35,9 @@
 //!
 //! Neither touches the installed disks' partitions.
 use super::{
-    Environment, LOADER_PATH, MEDIA_KEPT, Record, apply_install, bundle, check_space, copy_bundles,
-    describe_install, first_schema, plan_install, prepare_bundles, publish, read_efi,
-    restore_bundles, write_record,
+    Environment, LOADER_PATH, MEDIA_KEPT, Prepared, Record, apply_install, bundle,
+    check_bundle_revision, check_space, copy_bundles, describe_install, first_schema, plan_install,
+    prepare_bundles, prepare_kind, publish, read_efi, restore_bundles, write_record,
 };
 use crate::efi;
 use anyhow::{Context, Result, bail, ensure};
@@ -54,7 +60,9 @@ pub(super) const KEEP: usize = 3;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(super) enum Change {
-    /// `stela.efi` versions, and the bundle schemas they read.
+    /// `stela.efi` versions, and the generations of the bundles they boot:
+    /// the schemas they read and the revisions of the bundles, 0 for an
+    /// update recorded before revisions.
     Stela {
         from: String,
         to: String,
@@ -62,9 +70,38 @@ pub(super) enum Change {
         from_schema: u32,
         #[serde(default = "first_schema")]
         to_schema: u32,
+        #[serde(default)]
+        from_revision: u32,
+        #[serde(default)]
+        to_revision: u32,
     },
     /// recoveryOS builds.
     Os { from: String, to: String },
+}
+
+impl Change {
+    /// The bundle generations a Stela update goes from and to.
+    fn generations(&self) -> Option<(bundle::Generation, bundle::Generation)> {
+        match *self {
+            Self::Stela {
+                from_schema,
+                to_schema,
+                from_revision,
+                to_revision,
+                ..
+            } => Some((
+                bundle::Generation {
+                    schema: from_schema,
+                    revision: from_revision,
+                },
+                bundle::Generation {
+                    schema: to_schema,
+                    revision: to_revision,
+                },
+            )),
+            Self::Os { .. } => None,
+        }
+    }
 }
 
 pub(super) fn version_id(image: &[u8]) -> String {
@@ -105,14 +142,14 @@ fn activate_stela(esp: &Path, id: &str) -> Result<()> {
 }
 
 /// Point `stela.cfg` at `build`'s recoveryOS, which must have a bundle for
-/// every machine at the active schema.
+/// every machine of the active generation.
 fn activate_build(record: &mut Record, build: &str) -> Result<()> {
     let missing = record.missing_bundles(build);
     ensure!(
         missing.is_empty(),
-        "recoveryOS {build} has no schema {} bundle for {}; prepare them with `stela setup \
+        "recoveryOS {build} has no {} bundle for {}; prepare them with `stela setup \
          --repair --ipsw` of that build after activating it, or keep the current build",
-        record.bundle_schema,
+        record.generation(),
         missing
             .iter()
             .map(|ecid| ecid.map_or_else(|| "the setup".into(), |e| format!("ECID {e}")))
@@ -150,6 +187,7 @@ fn prune(record: &mut Record) -> Result<()> {
     };
     let history: Vec<Change> = record.history.iter().filter(|c| kept(c)).cloned().collect();
     record.history = history;
+    remove_unbooted_bundles(record)?;
     // The media of the newest kept builds, the active one's first.
     let newest: Vec<String> = record
         .recovery_builds
@@ -169,6 +207,23 @@ fn prune(record: &mut Record) -> Result<()> {
         remove_medium(&medium)?;
     }
     Ok(())
+}
+
+/// Remove the bundles of generations that neither the active `stela.efi`
+/// nor one a kept update rolls back to boots.
+fn remove_unbooted_bundles(record: &mut Record) -> Result<()> {
+    let booted: Vec<bundle::Generation> = record
+        .history
+        .iter()
+        .filter_map(|change| change.generations().map(|(from, _)| from))
+        .chain([record.generation()])
+        .collect();
+    let (kept, stale): (Vec<_>, Vec<_>) = record
+        .bundles
+        .drain(..)
+        .partition(|b| booted.contains(&b.generation()));
+    record.bundles = kept;
+    super::remove_bundles(record, &stale)
 }
 
 /// Delete a medium the record no longer names.
@@ -200,7 +255,7 @@ pub(super) fn ready(record: &Record, allowed: impl Fn(&Change) -> bool) -> Resul
 }
 
 /// Replace `stela.efi` with `image_path`, preparing bundles of its schema
-/// from `ipsw` when it reads another one.
+/// and this `stela`'s revision from `ipsw` when the setup's are of another.
 pub(super) fn update_stela(
     environment: &Environment<'_>,
     mut record: Record,
@@ -210,7 +265,7 @@ pub(super) fn update_stela(
 ) -> Result<String> {
     let image = read_efi(environment, image_path)?;
     let to = version_id(&image);
-    let to_schema = environment.interface.bundle_schema;
+    let to_generation = environment.generation();
     ready(
         &record,
         |pending| matches!(pending, Change::Stela { to: t, .. } if *t == to),
@@ -218,66 +273,113 @@ pub(super) fn update_stela(
     let esp = record.esp.clone();
     let current = fs::read(esp.join(LOADER_PATH))
         .with_context(|| format!("{} has no {LOADER_PATH}", esp.display()))?;
-    let (from, from_schema) = match &record.pending {
-        Some(Change::Stela {
-            from, from_schema, ..
-        }) => (from.clone(), *from_schema),
-        _ => (version_id(&current), record.bundle_schema),
+    let (from, from_generation) = match &record.pending {
+        Some(pending @ Change::Stela { from, .. }) => (
+            from.clone(),
+            pending.generations().expect("a Stela update").0,
+        ),
+        _ => (version_id(&current), record.generation()),
     };
     let mut text = String::new();
     writeln!(text, "Stela update on {}:", esp.display())?;
-    if from == to && record.pending.is_none() && from_schema == to_schema {
+    if from == to && record.pending.is_none() && from_generation == to_generation {
         writeln!(text, "  stela.efi      version {to} is already installed")?;
         return Ok(text);
     }
-    writeln!(text, "  stela.efi      version {from} -> {to}")?;
-    writeln!(
-        text,
-        "  keeps          {} and {}",
-        version_path(&esp, &from).display(),
-        version_path(&esp, &to).display()
-    )?;
-    // Bundles of the new schema for every machine of the active build.
+    if from == to {
+        writeln!(text, "  stela.efi      version {to} stays")?;
+    } else {
+        writeln!(text, "  stela.efi      version {from} -> {to}")?;
+        writeln!(
+            text,
+            "  keeps          {} and {}",
+            version_path(&esp, &from).display(),
+            version_path(&esp, &to).display()
+        )?;
+    }
+    // Bundles of the new generation for every machine of the active build,
+    // restore ones too while it has an install medium.
     let mut next = record.clone();
-    next.bundle_schema = to_schema;
+    next.bundle_schema = to_generation.schema;
+    next.bundle_revision = to_generation.revision;
     let missing = next.missing_bundles(&record.build);
-    let prepared = if missing.is_empty() {
+    let missing_restore = match from_generation == to_generation {
+        true => Vec::new(),
+        false => next.missing_restore_bundles(),
+    };
+    let prepared = if missing.is_empty() && missing_restore.is_empty() {
         Vec::new()
     } else {
         let Some(ipsw) = ipsw else {
             bail!(
-                "stela.efi {to} reads boot-bundle schema {to_schema}, and this setup's recoveryOS \
-                 bundles have schema {from_schema}: pass the macOS {} restore image with --ipsw \
-                 or --fetch so the update prepares new ones",
+                "this stela and stela.efi {to} boot bundles of {to_generation}, and this \
+                 setup's are {from_generation}: pass the macOS {} restore image with --ipsw or \
+                 --fetch so the update prepares new ones",
                 record.build
             );
         };
-        let (_, _, prepared) = prepare_bundles(
-            environment,
-            ipsw,
-            &record.model,
-            Some(&record.build),
-            &missing,
-        )?;
+        let mut prepared: Vec<Prepared> = Vec::new();
+        if !missing.is_empty() {
+            prepared.extend(
+                prepare_bundles(
+                    environment,
+                    ipsw,
+                    &record.model,
+                    Some(&record.build),
+                    &missing,
+                )?
+                .2,
+            );
+        }
+        for kind in bundle::RESTORE_KINDS {
+            let ecids: Vec<_> = missing_restore
+                .iter()
+                .filter(|(k, _)| *k == kind)
+                .map(|&(_, ecid)| ecid)
+                .collect();
+            if !ecids.is_empty() {
+                let (_, _, restore) = prepare_kind(
+                    environment,
+                    kind,
+                    ipsw,
+                    &record.model,
+                    Some(&record.build),
+                    &ecids,
+                )?;
+                prepared.extend(restore);
+            }
+        }
         check_space(environment.host, &record.volume, &prepared)?;
         prepared
     };
     for bundle in &prepared {
         writeln!(
             text,
-            "  recoveryOS     {} (schema {to_schema}, {:.1} GB); the schema {from_schema} \
-             bundles stay for rollback",
-            bundle::directory(&record.volume, &bundle.build, bundle.ecid, to_schema).display(),
+            "  {:<14} {} ({to_generation}, {:.1} GB); the {from_generation} bundles stay for \
+             rollback",
+            bundle.kind.label(),
+            bundle::directory_of(
+                bundle.kind,
+                &record.volume,
+                &bundle.build,
+                bundle.ecid,
+                to_generation
+            )
+            .display(),
             bundle.bytes as f64 / 1e9
         )?;
     }
     match &record.translations {
         Some(store) => {
-            writeln!(
-                text,
-                "  translations   {}; the new stela.efi translates anew into its own pack",
-                store.describe()
-            )?;
+            if from == to {
+                writeln!(text, "  translations   {}", store.describe())?;
+            } else {
+                writeln!(
+                    text,
+                    "  translations   {}; the new stela.efi translates anew into its own pack",
+                    store.describe()
+                )?;
+            }
             for pack in store.stale() {
                 writeln!(text, "  remove         {}", pack.path.display())?;
             }
@@ -295,15 +397,11 @@ pub(super) fn update_stela(
         if !record.stela_versions.contains(&kept) {
             record.stela_versions.push(kept);
         }
-        record.pending = Some(Change::Stela {
-            from: from.clone(),
-            to: to.clone(),
-            from_schema,
-            to_schema,
-        });
+        record.pending = Some(stela_change(&from, &to, from_generation, to_generation));
         write_record(&esp, &record)?;
     }
-    record.bundle_schema = to_schema;
+    record.bundle_schema = to_generation.schema;
+    record.bundle_revision = to_generation.revision;
     copy_bundles(&mut record, &prepared)?;
     write_record(&esp, &record)?;
     store_version(&esp, &image)?;
@@ -312,12 +410,9 @@ pub(super) fn update_stela(
     record.stela_version = Some(to.clone());
     record.stela_versions.retain(|id| *id != to);
     record.stela_versions.push(to.clone());
-    record.history.push(Change::Stela {
-        from,
-        to,
-        from_schema,
-        to_schema,
-    });
+    record
+        .history
+        .push(stela_change(&from, &to, from_generation, to_generation));
     record.pending = None;
     prune(&mut record)?;
     if let Some(store) = &record.translations {
@@ -330,6 +425,22 @@ pub(super) fn update_stela(
     Ok(text)
 }
 
+fn stela_change(
+    from: &str,
+    to: &str,
+    from_generation: bundle::Generation,
+    to_generation: bundle::Generation,
+) -> Change {
+    Change::Stela {
+        from: from.into(),
+        to: to.into(),
+        from_schema: from_generation.schema,
+        to_schema: to_generation.schema,
+        from_revision: from_generation.revision,
+        to_revision: to_generation.revision,
+    }
+}
+
 /// Add `ipsw`'s recoveryOS for every machine and boot it for System
 /// Recovery.
 pub(super) fn update_os(
@@ -338,6 +449,7 @@ pub(super) fn update_os(
     ipsw: &Path,
     dry_run: bool,
 ) -> Result<String> {
+    check_bundle_revision(environment, &record)?;
     let (product_version, build) = crate::restore::payload::identity(ipsw, &record.model)?;
     ready(
         &record,
@@ -381,7 +493,7 @@ pub(super) fn update_os(
         writeln!(
             text,
             "  recoveryOS     {} ({:.1} GB); {from}'s stays for rollback",
-            bundle::directory(&record.volume, &build, bundle.ecid, record.bundle_schema).display(),
+            bundle::directory(&record.volume, &build, bundle.ecid, record.generation()).display(),
             bundle.bytes as f64 / 1e9
         )?;
     }
@@ -480,30 +592,19 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
     }
     let esp = record.esp.clone();
     match &change {
-        Change::Stela {
-            from,
-            to,
-            from_schema,
-            to_schema,
-        } => {
+        Change::Stela { from, to, .. } => {
+            let (from_generation, _) = change.generations().expect("a Stela update");
             activate_stela(&esp, from)?;
             record.stela_version = Some(from.clone());
-            record.stela_versions.retain(|id| id != to);
-            record.bundle_schema = *from_schema;
+            record.bundle_schema = from_generation.schema;
+            record.bundle_revision = from_generation.revision;
             publish(&mut record)?;
             let directory = esp.join(VERSIONS).join(to);
-            if *to != *from && directory.is_dir() {
-                fs::remove_dir_all(directory)?;
-            }
-            if from_schema != to_schema {
-                let stale: Vec<bundle::Bundle> = record
-                    .bundles
-                    .iter()
-                    .filter(|b| b.schema == *to_schema)
-                    .cloned()
-                    .collect();
-                record.bundles.retain(|b| b.schema != *to_schema);
-                super::remove_bundles(&record, &stale)?;
+            if *to != *from {
+                record.stela_versions.retain(|id| id != to);
+                if directory.is_dir() {
+                    fs::remove_dir_all(directory)?;
+                }
             }
         }
         Change::Os { from, to } => {
@@ -539,6 +640,9 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
     } else {
         record.history.pop();
     }
+    // The bundles the undone update prepared, unless an earlier one boots
+    // them.
+    remove_unbooted_bundles(&mut record)?;
     write_record(&esp, &record)?;
     text.push_str("Done.\n");
     Ok(text)

@@ -4,7 +4,8 @@
 //! record and any pending update, the installed `stela.efi` against its
 //! kept version and this `stela`'s mount interface, the USB's boot loader,
 //! `stela.cfg` and the startup choices against the record, every recoveryOS
-//! and restore bundle file against its `bundle.json`, the install medium's
+//! and restore bundle file against its `bundle.json` and the active ones'
+//! revision against the one this `stela` prepares, the install medium's
 //! manifest and pieces, and for each install its
 //! partitions (still the recorded ones), the systems on its Apple region,
 //! its NVRAM (what the next boot will be, and a failed update's
@@ -20,8 +21,9 @@
 //! ECID (`machines::machine_ecid`).
 use super::{
     CHOICES_PATH, Environment, LOADER_PATH, RECORD, Record, Setup, apply_install, bundle,
-    check_space, copy_bundles, describe_install, ecid::Ecid, host::Host, installed, machines,
-    plan_install, prepare_bundles, publish, read_record, state, update, write_record,
+    check_bundle_revision, check_space, copy_bundles, describe_install, ecid::Ecid, host::Host,
+    installed, machines, plan_install, prepare_bundles, publish, read_record, revision_mismatch,
+    state, update, write_record,
 };
 use crate::efi;
 use anyhow::{Result, bail};
@@ -221,10 +223,10 @@ fn efi_status(environment: &Environment<'_>, record: &Record, report: &mut Repor
     }
 }
 
-fn bundle_status(record: &Record, report: &mut Report) {
+fn bundle_status(environment: &Environment<'_>, record: &Record, report: &mut Report) {
     for kept in &record.bundles {
         let directory = kept.directory(&record.volume);
-        let role = if kept.build == record.build && kept.schema == record.bundle_schema {
+        let role = if kept.build == record.build && kept.generation() == record.generation() {
             "active"
         } else {
             "kept for rollback"
@@ -233,9 +235,9 @@ fn bundle_status(record: &Record, report: &mut Report) {
         report.line(
             kept.kind.label(),
             format!(
-                "{} ({role}, schema {}{}): {}",
+                "{} ({role}, {}{}): {}",
                 directory.display(),
-                kept.schema,
+                kept.generation(),
                 kept.ecid
                     .map(|ecid| format!(", ECID {ecid}"))
                     .unwrap_or_default(),
@@ -257,6 +259,9 @@ fn bundle_status(record: &Record, report: &mut Report) {
         for (_, what) in bundle::leftovers(&directory) {
             report.problem(format!("{what}: `stela setup --repair` puts it right"));
         }
+    }
+    if let Some(reason) = revision_mismatch(environment, record) {
+        report.problem(reason);
     }
     for ecid in record.missing_bundles(&record.build) {
         report.problem(format!(
@@ -488,7 +493,7 @@ pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String
         },
     );
     efi_status(environment, &record, &mut report);
-    bundle_status(&record, &mut report);
+    bundle_status(environment, &record, &mut report);
     translations_status(&record, &mut report);
     for install in &record.installs {
         install_status(environment, &record, install, &mut report);
@@ -544,6 +549,9 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     }
     // Machines without an ECID get one; their bundles are prepared again.
     let ipsw = command.optional_image()?;
+    if ipsw.is_some() {
+        check_bundle_revision(environment, &record)?;
+    }
     let mut notes = Vec::new();
     let mut assigned: Vec<(String, Ecid)> = Vec::new();
     if ipsw.is_some() {
@@ -595,8 +603,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
     // The active build's bundles: all again with an image, else the damaged.
     let mut needed: Vec<Option<Ecid>> = Vec::new();
     for ecid in record.machines() {
-        let directory =
-            bundle::directory(&record.volume, &record.build, ecid, record.bundle_schema);
+        let directory = bundle::directory(&record.volume, &record.build, ecid, record.generation());
         let digest = record
             .bundle(&record.build, ecid)
             .map(|b| b.manifest_sha256.clone());
@@ -635,7 +642,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
                 &record.volume,
                 &bundle.build,
                 bundle.ecid,
-                record.bundle_schema
+                record.generation()
             )
             .display()
         )?;

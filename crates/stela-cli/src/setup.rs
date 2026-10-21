@@ -38,7 +38,9 @@
 //! `--next-boot`.
 //!
 //! An existing setup is updated in place (`setup::update`): `--update-stela`
-//! installs a new `stela.efi`, `--update-os` a new macOS build's recoveryOS
+//! installs a new `stela.efi` and prepares the boot bundles again when it
+//! reads another schema or this `stela` prepares another bundle revision
+//! than theirs, `--update-os` a new macOS build's recoveryOS
 //! and, for installs, its install medium and restore bundles, and
 //! `--rollback` undoes the last update or finishes undoing an
 //! interrupted one. Every path takes `--dry-run`. A `stela.efi` whose mount
@@ -215,7 +217,8 @@ pub(crate) struct Setup {
     chooser_timeout: Option<u32>,
     /// Replace `stela.efi` (`--efi`, or the one beside `stela`) on an
     /// existing setup, keeping the old one for `--rollback`; `--ipsw` or
-    /// `--fetch` lets it prepare bundles of a new bundle schema.
+    /// `--fetch` lets it prepare the boot bundles again when it reads a new
+    /// bundle schema or this `stela` prepares a new bundle revision.
     #[arg(long)]
     update_stela: bool,
     /// Add a new macOS build's recoveryOS (`--ipsw` or `--fetch`) to an
@@ -369,6 +372,10 @@ struct Record {
     /// Schema 4: the boot-bundle schema the active `stela.efi` reads.
     #[serde(default = "first_schema")]
     bundle_schema: u32,
+    /// Schema 7: the revision of the active bundles, those of the loader
+    /// that prepared them (`stela_loader::boot_bundle::REVISION`); 0 before.
+    #[serde(default)]
+    bundle_revision: u32,
     /// Schema 4: every recoveryOS bundle setup wrote.
     #[serde(default)]
     bundles: Vec<bundle::Bundle>,
@@ -400,7 +407,7 @@ fn first_schema() -> u32 {
 }
 
 const RECORD_KIND: &str = "stela_setup";
-const RECORD_SCHEMA: u32 = 6;
+const RECORD_SCHEMA: u32 = 7;
 
 impl Record {
     /// Bring an older schema's record to this one: its installed disk
@@ -425,11 +432,13 @@ impl Record {
                 builds.push(self.build.clone());
             }
             for build in builds {
-                if bundle::directory(&self.volume, &build, None, 1).is_dir() {
+                let first = bundle::Generation::FIRST;
+                if bundle::directory(&self.volume, &build, None, first).is_dir() {
                     self.bundles.push(bundle::Bundle {
                         build,
                         ecid: None,
-                        schema: 1,
+                        schema: first.schema,
+                        revision: first.revision,
                         manifest_sha256: String::new(),
                         kind: Kind::Recovery,
                     });
@@ -478,9 +487,17 @@ impl Record {
         }
     }
 
+    /// The generation of the active bundles.
+    fn generation(&self) -> bundle::Generation {
+        bundle::Generation {
+            schema: self.bundle_schema,
+            revision: self.bundle_revision,
+        }
+    }
+
     /// The recoveryOS bundle of `ecid`'s machine for the active build.
     fn recovery(&self, ecid: Option<Ecid>) -> String {
-        bundle::firmware_path(&self.build, ecid, self.bundle_schema)
+        bundle::firmware_path(&self.build, ecid, self.generation())
     }
 
     fn line(&self, text: String) -> String {
@@ -514,7 +531,7 @@ impl Record {
     fn restore_bundle(&self, kind: Kind, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
         self.bundles
             .iter()
-            .find(|b| b.same_kind(kind, &self.build, ecid, self.bundle_schema))
+            .find(|b| b.same_kind(kind, &self.build, ecid, self.generation()))
     }
 
     /// The install medium of `build`.
@@ -558,7 +575,7 @@ impl Record {
         if !self.tss {
             return None;
         }
-        let restore = bundle::firmware_path_of(kind, &self.build, install.ecid, self.bundle_schema);
+        let restore = bundle::firmware_path_of(kind, &self.build, install.ecid, self.generation());
         let base = install.disk.recovery_options(
             &restore,
             BundleOptions::default().dram_size,
@@ -669,11 +686,11 @@ impl Record {
             .transpose()
     }
 
-    /// The bundle of `build` for `ecid`'s machine at the active schema.
+    /// The bundle of `build` for `ecid`'s machine of the active generation.
     fn bundle(&self, build: &str, ecid: Option<Ecid>) -> Option<&bundle::Bundle> {
         self.bundles
             .iter()
-            .find(|b| b.same(build, ecid, self.bundle_schema))
+            .find(|b| b.same(build, ecid, self.generation()))
     }
 
     /// Bundle keys of `build` that the machines need and the record or the
@@ -683,7 +700,7 @@ impl Record {
             .into_iter()
             .filter(|&ecid| {
                 self.bundle(build, ecid).is_none()
-                    || !bundle::directory(&self.volume, build, ecid, self.bundle_schema)
+                    || !bundle::directory(&self.volume, build, ecid, self.generation())
                         .join(bundle::MANIFEST)
                         .is_file()
             })
@@ -804,6 +821,19 @@ struct Environment<'a> {
     piece_bytes: u64,
     /// The mount interface this `stela` writes for.
     interface: Interface,
+    /// The revision of the bundles this `stela` prepares
+    /// (`stela_loader::boot_bundle::REVISION`).
+    bundle_revision: u32,
+}
+
+impl Environment<'_> {
+    /// The generation of the bundles this `stela` prepares.
+    fn generation(&self) -> bundle::Generation {
+        bundle::Generation {
+            schema: self.interface.bundle_schema,
+            revision: self.bundle_revision,
+        }
+    }
 }
 
 /// The `stela.efi` at `path`, which must be a UEFI application with this
@@ -845,11 +875,44 @@ fn check_installed_efi(environment: &Environment<'_>, record: &Record) -> Result
     Ok(())
 }
 
+/// Refuse to prepare bundles for `record` when its active ones are of
+/// another revision than this `stela` prepares: `--update-stela` prepares
+/// them all at this one, keeping the old ones for its rollback.
+fn check_bundle_revision(environment: &Environment<'_>, record: &Record) -> Result<()> {
+    match revision_mismatch(environment, record) {
+        Some(reason) => bail!("{reason}"),
+        None => Ok(()),
+    }
+}
+
+/// Why `record`'s active bundles are not of the revision this `stela`
+/// prepares, with the command that brings them to it.
+fn revision_mismatch(environment: &Environment<'_>, record: &Record) -> Option<String> {
+    let (theirs, ours) = (record.bundle_revision, environment.bundle_revision);
+    if theirs == ours {
+        return None;
+    }
+    Some(if theirs < ours {
+        format!(
+            "this setup's boot bundles are revision {theirs}, and this stela prepares revision \
+             {ours}: prepare them again with `stela setup --update-stela` and the macOS {} \
+             restore image (--ipsw or --fetch)",
+            record.build
+        )
+    } else {
+        format!(
+            "this setup's boot bundles are revision {theirs}, newer than the revision {ours} \
+             this stela prepares: use the stela that prepared them"
+        )
+    })
+}
+
 /// A boot bundle prepared on this computer, not yet copied.
 struct Prepared {
     build: String,
     ecid: Option<Ecid>,
     kind: Kind,
+    generation: bundle::Generation,
     directory: tempfile::TempDir,
     bytes: u64,
 }
@@ -900,17 +963,18 @@ fn prepare_kind(
         };
         prepare(ipsw, model, ecid, &output)
             .with_context(|| format!("preparing the {} boot bundle", kind.label()))?;
-        let schema = bundle::schema(&output)?;
+        let generation = bundle::generation(&output)?;
         ensure!(
-            schema == environment.interface.bundle_schema,
-            "the prepared bundle has schema {schema}, not the {} this stela's stela.efi reads",
-            environment.interface.bundle_schema
+            generation == environment.generation(),
+            "the prepared bundle is {generation}, not the {} this stela and its stela.efi use",
+            environment.generation()
         );
         let bytes = bundle::bytes(&output)?;
         prepared.push(Prepared {
             build: found.clone(),
             ecid,
             kind,
+            generation,
             directory,
             bytes,
         });
@@ -918,16 +982,22 @@ fn prepare_kind(
     Ok((product_version, found, prepared))
 }
 
-/// Copy prepared bundles to the record's volume and record them.
+/// Copy prepared bundles to the record's volume and record them, as
+/// bundles of its active generation.
 fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result<()> {
+    let generation = record.generation();
     for bundle in prepared {
-        let schema = record.bundle_schema;
+        ensure!(
+            bundle.generation == generation,
+            "a {} bundle cannot be one of this setup's {generation} bundles",
+            bundle.generation
+        );
         let destination = bundle::directory_of(
             bundle.kind,
             &record.volume,
             &bundle.build,
             bundle.ecid,
-            schema,
+            generation,
         );
         fs::create_dir_all(destination.parent().unwrap())?;
         let digest = bundle::install(&bundle.path(), &destination)?;
@@ -940,11 +1010,12 @@ fn copy_bundles(record: &mut Record, prepared: &[Prepared]) -> Result<()> {
         );
         record
             .bundles
-            .retain(|b| !b.same_kind(bundle.kind, &bundle.build, bundle.ecid, schema));
+            .retain(|b| !b.same_kind(bundle.kind, &bundle.build, bundle.ecid, generation));
         record.bundles.push(bundle::Bundle {
             build: bundle.build.clone(),
             ecid: bundle.ecid,
-            schema,
+            schema: generation.schema,
+            revision: generation.revision,
             manifest_sha256: digest,
             kind: bundle.kind,
         });
@@ -980,6 +1051,7 @@ impl Setup {
             inventory: &|ipsw, model| restore::payload::inventory(ipsw, model, true, None, None),
             piece_bytes: stela_runtime::payload::PIECE_BYTES,
             interface: mount_interface::CURRENT,
+            bundle_revision: stela_loader::boot_bundle::REVISION,
         };
         print!("{}", self.dispatch(&environment)?);
         Ok(())
@@ -1574,7 +1646,7 @@ fn describe_install(record: &Record, plan: &InstallPlan, text: &mut String) -> R
                 &record.volume,
                 &bundle.build,
                 bundle.ecid,
-                record.bundle_schema
+                record.generation()
             )
             .display(),
             bundle.bytes as f64 / 1e9
@@ -1788,6 +1860,7 @@ fn plan(environment: &Environment<'_>, command: &Setup, ipsw: PathBuf) -> Result
         installs,
         default_install: None,
         bundle_schema: environment.interface.bundle_schema,
+        bundle_revision: environment.bundle_revision,
         bundles: Vec::new(),
         tss: command.tss,
         chooser_timeout: command.chooser_timeout,
@@ -1902,7 +1975,7 @@ fn describe(plan: &Plan) -> Result<String> {
                 &record.volume,
                 &prepared.build,
                 prepared.ecid,
-                record.bundle_schema
+                record.generation()
             )
             .display(),
             prepared.bytes as f64 / 1e9
@@ -2422,23 +2495,31 @@ mod tests {
         }
     }
 
+    /// The generation of the bundles this tree prepares.
+    fn current() -> bundle::Generation {
+        bundle::Generation {
+            schema: mount_interface::CURRENT.bundle_schema,
+            revision: stela_loader::boot_bundle::REVISION,
+        }
+    }
+
     /// A stand-in for `boot prepare --recovery`: the synthetic IPSW has no
     /// kernel to prepare. The bundle's byte names the machine.
     fn fake_prepare(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8);
-        bundle::tests::write(output, 1, &[byte; 4096])
+        bundle::tests::write(output, current(), &[byte; 4096])
     }
 
     /// A stand-in for `boot prepare --restore`.
     fn fake_prepare_restore(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0xa5;
-        bundle::tests::write(output, 1, &[byte; 2048])
+        bundle::tests::write(output, current(), &[byte; 2048])
     }
 
     /// A stand-in for `boot prepare --restore --update`.
     fn fake_prepare_update(_: &Path, _: &str, ecid: Option<Ecid>, output: &Path) -> Result<()> {
         let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ 0x3c;
-        bundle::tests::write(output, 1, &[byte; 1024])
+        bundle::tests::write(output, current(), &[byte; 1024])
     }
 
     /// The synthetic IPSW's inventory: it names no AEA member to fetch a
@@ -2456,6 +2537,41 @@ mod tests {
             inventory: &fake_inventory,
             piece_bytes: medium::tests::PIECE_BYTES,
             interface: mount_interface::CURRENT,
+            bundle_revision: stela_loader::boot_bundle::REVISION,
+        }
+    }
+
+    /// Stand-ins for the recoveryOS, restore and update restore `boot
+    /// prepare` of a stela whose loader prepares `revision`; each bundle's
+    /// byte names its machine, kind and revision.
+    fn preparers(revision: u32) -> [Box<Prepare>; 3] {
+        let of = |kind: u8, bytes: usize| -> Box<Prepare> {
+            Box::new(
+                move |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
+                    let byte = ecid.map_or(0x5a, |e| e.0 as u8) ^ kind ^ revision as u8;
+                    let generation = bundle::Generation {
+                        revision,
+                        ..current()
+                    };
+                    bundle::tests::write(output, generation, &vec![byte; bytes])
+                },
+            )
+        };
+        [of(0, 4096), of(0xa5, 2048), of(0x3c, 1024)]
+    }
+
+    /// The environment of a stela whose loader prepares `revision`.
+    fn environment_at<'a>(
+        host: &'a FakeHost,
+        preparers: &'a [Box<Prepare>; 3],
+        revision: u32,
+    ) -> Environment<'a> {
+        Environment {
+            prepare: &*preparers[0],
+            prepare_restore: &*preparers[1],
+            prepare_update: &*preparers[2],
+            bundle_revision: revision,
+            ..environment(host)
         }
     }
 
@@ -2485,7 +2601,7 @@ mod tests {
     /// The active build's bundle of `ecid`'s machine.
     fn bundle_of(f: &Fixture, ecid: Option<Ecid>) -> PathBuf {
         let record = record(f);
-        bundle::directory(&record.volume, &record.build, ecid, record.bundle_schema)
+        bundle::directory(&record.volume, &record.build, ecid, record.generation())
     }
 
     #[test]
@@ -2512,10 +2628,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
             format!(
-                "--system --bundle \\EFI\\stela\\boot\\{}\\recovery-{} --ram-bytes \
+                "--system --bundle \\EFI\\stela\\boot\\{}\\{} --ram-bytes \
                  0x200000000\n",
                 restore::payload::SYNTHETIC_BUILD,
-                ecid.digits()
+                bundle::leaf(Some(ecid), current())
             )
         );
         let bundle = bundle_of(&f, Some(ecid));
@@ -2678,7 +2794,7 @@ mod tests {
         efi::add_mount(&f.esp, &f.efi, None, Some("--system\n")).unwrap();
         fs::write(f.esp.join(efi::LOADER), b"MZstela-old").unwrap();
         let legacy = f.esp.join("EFI/stela/boot/STELA1/recovery");
-        bundle::tests::write(&legacy, 1, b"old").unwrap();
+        bundle::tests::write(&legacy, bundle::Generation::FIRST, b"old").unwrap();
         let disk = installed::InstalledDisk {
             apple_region: REGION.into(),
             apple_region_serial: SERIAL.into(),
@@ -3006,9 +3122,9 @@ mod tests {
         assert_eq!(record.ecid, Some(ecid));
         let region = format!("{SERIAL}:{REGION_GUID}");
         let recovery = format!(
-            "\\EFI\\stela\\boot\\{}\\recovery-{}",
+            "\\EFI\\stela\\boot\\{}\\{}",
             restore::payload::SYNTHETIC_BUILD,
-            ecid.digits()
+            bundle::leaf(Some(ecid), current())
         );
         let line = format!(
             "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --preboot {region} \
@@ -3056,10 +3172,10 @@ mod tests {
             choices.entries[2].options,
             format!(
                 "--system --storage {region} --nor {SERIAL}:{NOR_GUID} --bundle \
-                 \\EFI\\stela\\boot\\{build}\\restore-{} --ram-bytes 0x200000000 --ecid {ecid} \
+                 \\EFI\\stela\\boot\\{build}\\{} --ram-bytes 0x200000000 --ecid {ecid} \
                  --install \\EFI\\stela\\install\\{build}\\payload.json --install-source \
                  {STELA_GUID} --tss",
-                ecid.digits()
+                bundle::leaf_of(Kind::Restore, Some(ecid), current())
             )
         );
         let restore_bundle = record.restore_bundle(Kind::Restore, Some(ecid)).unwrap();
@@ -3380,7 +3496,7 @@ mod tests {
             &record2.volume,
             &record2.build,
             Some(second),
-            record2.bundle_schema,
+            record2.generation(),
         );
         assert!(choices().entries[6].options.contains(&format!(
             "--bundle \\EFI\\stela\\boot\\{}\\restore-{}",
@@ -3539,17 +3655,17 @@ mod tests {
             bundle_schema: 2,
             ..mount_interface::CURRENT
         };
-        let prepare = |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
-            bundle::tests::write(output, 2, &[ecid.map_or(0, |e| e.0 as u8) ^ 0xff; 64])
+        let schema2 = bundle::Generation {
+            schema: 2,
+            ..current()
+        };
+        let prepare = move |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
+            bundle::tests::write(output, schema2, &[ecid.map_or(0, |e| e.0 as u8) ^ 0xff; 64])
         };
         let environment = Environment {
-            host: &f.host,
             prepare: &prepare,
-            prepare_restore: &fake_prepare_restore,
-            prepare_update: &fake_prepare_update,
-            inventory: &fake_inventory,
-            piece_bytes: medium::tests::PIECE_BYTES,
             interface: newer,
+            ..environment(&f.host)
         };
         let new = f._dir.path().join("new.efi");
         let mut image = b"MZstela-3".to_vec();
@@ -3570,14 +3686,210 @@ mod tests {
         let record2 = record(&f);
         assert_eq!(record2.bundle_schema, 2);
         let migrated = bundle_of(&f, ecid);
-        assert!(migrated.ends_with(format!("recovery-{}-s2", ecid.unwrap().digits())));
-        assert!(options().contains("-s2 "), "{}", options());
+        let leaf = bundle::leaf(ecid, schema2);
+        assert!(migrated.ends_with(&leaf) && leaf.contains("-s2"), "{leaf}");
+        assert!(options().contains(&format!("{leaf} ")), "{}", options());
         // The old bundle stays for the rollback, which boots it again.
         assert!(old.join("bundle.json").is_file());
         rerun(&f, |c| c.rollback = true).unwrap();
         assert_eq!(options(), first);
         assert!(!migrated.exists());
         assert_eq!(record(&f).bundle_schema, 1);
+    }
+
+    #[test]
+    fn a_stela_update_prepares_the_bundles_of_a_new_revision_and_rolls_back() {
+        // A setup with an install, made before setups recorded revisions.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &[], &[]);
+        let (older, newer) = (preparers(0), preparers(1));
+        let old = environment_at(&f.host, &older, 0);
+        setup(&old, installed_command(&f)).unwrap();
+        let path = f.esp.join(RECORD);
+        let mut json: serde_json::Value = stela_runtime::read_json(&path).unwrap();
+        json["schema_version"] = 6.into();
+        json.as_object_mut().unwrap().remove("bundle_revision");
+        for kept in json["bundles"].as_array_mut().unwrap() {
+            kept.as_object_mut().unwrap().remove("revision");
+        }
+        stela_runtime::write_json(&path, &json).unwrap();
+        let first = record(&f);
+        assert_eq!(first.bundle_revision, 0);
+        let ecid = first.installs[0].ecid;
+        let options = || fs::read_to_string(f.esp.join(efi::OPTIONS)).unwrap();
+        let choices = || fs::read_to_string(f.esp.join(CHOICES_PATH)).unwrap();
+        let (first_options, first_choices) = (options(), choices());
+        let directories = |revision: u32| -> Vec<PathBuf> {
+            let generation = bundle::Generation {
+                revision,
+                ..current()
+            };
+            [Kind::Recovery, Kind::Restore, Kind::Update]
+                .map(|kind| {
+                    bundle::directory_of(kind, &first.volume, &first.build, ecid, generation)
+                })
+                .into()
+        };
+        // A later stela prepares revision 1, with the same stela.efi.
+        let new = environment_at(&f.host, &newer, 1);
+        let run = |configure: &dyn Fn(&mut Setup)| {
+            let mut command = command(&f, &f.esp);
+            command.ipsw = None;
+            command.model = None;
+            configure(&mut command);
+            command.dispatch(&new)
+        };
+        let status = run(&|c| c.status = true).unwrap_err().to_string();
+        assert!(
+            status.contains("boot bundles are revision 0, and this stela prepares revision 1"),
+            "{status}"
+        );
+        assert!(status.contains("--update-stela"), "{status}");
+        // Other changes that prepare bundles wait for the update.
+        let repair = run(&|c| {
+            c.repair = true;
+            c.ipsw = Some(f.ipsw.clone());
+        });
+        assert!(
+            repair.unwrap_err().to_string().contains("--update-stela"),
+            "the repair is refused"
+        );
+        let update = |ipsw: bool, dry_run: bool| {
+            run(&|c| {
+                c.update_stela = true;
+                c.ipsw = ipsw.then(|| f.ipsw.clone());
+                c.dry_run = dry_run;
+            })
+        };
+        let refusal = update(false, false).unwrap_err().to_string();
+        assert!(refusal.contains("schema 1 revision 1"), "{refusal}");
+        assert!(refusal.contains("--ipsw or --fetch"), "{refusal}");
+        let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
+        let plan = update(true, true).unwrap();
+        assert!(!plan.contains("is already installed"), "{plan}");
+        for directory in directories(1) {
+            assert!(plan.contains(&directory.display().to_string()), "{plan}");
+        }
+        assert_eq!((snapshot(&f.esp), snapshot(&stela_volume(&f))), before);
+        update(true, false).unwrap();
+        let updated = record(&f);
+        assert_eq!(updated.bundle_revision, 1);
+        assert_eq!(updated.stela_version, first.stela_version);
+        for (old, new) in directories(0).iter().zip(directories(1)) {
+            assert_eq!(bundle::generation(&new).unwrap().revision, 1);
+            // The revision 0 bundles stay for the rollback.
+            assert_eq!(bundle::generation(old).unwrap().revision, 0);
+        }
+        let [recovery, restore, update_restore] = &directories(1)[..] else {
+            unreachable!()
+        };
+        let leaf = |directory: &Path| {
+            directory
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert!(
+            options().contains(&format!("{} ", leaf(recovery))),
+            "{}",
+            options()
+        );
+        for directory in [restore, update_restore] {
+            assert!(choices().contains(&leaf(directory)), "{}", choices());
+        }
+        assert!(
+            run(&|c| c.status = true)
+                .unwrap()
+                .contains("No problems found.")
+        );
+        // Bundles of the current revision are left alone: a new stela.efi
+        // needs no restore image, and the same one is no update.
+        assert!(update(false, false).unwrap().contains("already installed"));
+        // Going back to the earlier stela boots its kept bundles, and undoing
+        // that keeps them for the first update's rollback.
+        let mut back = command(&f, &f.esp);
+        (back.ipsw, back.model, back.update_stela) = (None, None, true);
+        back.dispatch(&old).unwrap();
+        assert_eq!(record(&f).bundle_revision, 0);
+        run(&|c| c.rollback = true).unwrap();
+        assert_eq!(record(&f).bundles, updated.bundles);
+        let new_efi = f._dir.path().join("new.efi");
+        fs::write(&new_efi, efi_image(b"stela-2")).unwrap();
+        let report = run(&|c| {
+            c.update_stela = true;
+            c.efi = Some(new_efi.clone());
+        })
+        .unwrap();
+        assert!(!report.contains("stay for rollback"), "{report}");
+        assert_eq!(record(&f).bundles, updated.bundles);
+        // Each rollback undoes one update: the second boots the revision 0
+        // bundles again and removes the revision 1 ones.
+        run(&|c| c.rollback = true).unwrap();
+        assert_eq!(record(&f).bundles, updated.bundles);
+        run(&|c| c.rollback = true).unwrap();
+        let rolled = record(&f);
+        assert_eq!(rolled.bundle_revision, 0);
+        assert_eq!(rolled.stela_version, first.stela_version);
+        assert!(
+            rolled
+                .stela_versions
+                .contains(first.stela_version.as_ref().unwrap())
+        );
+        assert_eq!((options(), choices()), (first_options, first_choices));
+        assert!(directories(1).iter().all(|d| !d.exists()));
+        assert!(
+            directories(0)
+                .iter()
+                .all(|d| d.join(bundle::MANIFEST).is_file())
+        );
+        let mut status = command(&f, &f.esp);
+        (status.ipsw, status.model, status.status) = (None, None, true);
+        assert!(
+            status
+                .dispatch(&old)
+                .is_ok_and(|text| text.contains("No problems found.")),
+            "the earlier stela finds its setup as it left it"
+        );
+    }
+
+    #[test]
+    fn stela_updates_remove_bundles_no_kept_version_boots() {
+        let f = fixture(64 * GIB, false);
+        let preparers: Vec<_> = (0..4).map(preparers).collect();
+        setup(
+            &environment_at(&f.host, &preparers[0], 0),
+            command(&f, &f.esp),
+        )
+        .unwrap();
+        let ecid = record(&f).ecid;
+        let directory = |revision: u32| {
+            let record = record(&f);
+            let generation = bundle::Generation {
+                revision,
+                ..current()
+            };
+            bundle::directory(&record.volume, &record.build, ecid, generation)
+        };
+        for revision in 1..4 {
+            let image = f._dir.path().join(format!("stela-{revision}.efi"));
+            fs::write(&image, efi_image(format!("stela-{revision}").as_bytes())).unwrap();
+            let mut command = command(&f, &f.esp);
+            command.model = None;
+            command.update_stela = true;
+            command.efi = Some(image);
+            let environment = environment_at(&f.host, &preparers[revision as usize], revision);
+            command.dispatch(&environment).unwrap();
+        }
+        // Four versions: the first is no longer kept, nor are its bundles.
+        let record = record(&f);
+        assert_eq!(record.stela_versions.len(), update::KEEP);
+        assert_eq!(record.history.len(), update::KEEP - 1);
+        assert!(!directory(0).exists());
+        for revision in 1..4 {
+            assert!(directory(revision).join(bundle::MANIFEST).is_file());
+        }
+        assert_eq!(record.bundles.len(), 3);
     }
 
     #[test]
@@ -3603,14 +3915,14 @@ mod tests {
         assert!(report.contains("Reinstall macOS"), "{report}");
         assert!(report.contains("Update volume"), "{report}");
         assert!(options().contains("\\boot\\STELA2\\recovery-"));
-        let leaf = bundle::leaf(ecid, 1);
+        let leaf = bundle::leaf(ecid, current());
         assert!(
             f.esp
                 .join(format!("EFI/stela/boot/STELA2/{leaf}/bundle.json"))
                 .is_file()
         );
         // The old build stays for rollback.
-        let old = bundle::directory(&f.esp, restore::payload::SYNTHETIC_BUILD, ecid, 1);
+        let old = bundle::directory(&f.esp, restore::payload::SYNTHETIC_BUILD, ecid, current());
         assert!(old.join("bundle.json").is_file());
         rerun(&f, |c| c.rollback = true).unwrap();
         assert_eq!(options(), first);
@@ -4236,9 +4548,9 @@ mod tests {
         let ecid = record.installs[0].ecid.unwrap();
         let region = format!("{SERIAL}:{REGION_GUID}");
         let recovery = format!(
-            "\\EFI\\stela\\boot\\{}\\recovery-{}",
+            "\\EFI\\stela\\boot\\{}\\{}",
             restore::payload::SYNTHETIC_BUILD,
-            ecid.digits()
+            bundle::leaf(Some(ecid), current())
         );
         assert_eq!(
             fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap(),
