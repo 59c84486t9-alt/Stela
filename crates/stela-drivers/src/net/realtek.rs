@@ -34,7 +34,7 @@
 //! MAC51/52 use the exact EP/FP OOB ERI namespace and bounded CMAC ownership.
 //! MAC52 XID54a requires MAC-only `rtl_nic/rtl8168fp-3.fw` after MAC tuning;
 //! XID54b and MAC51 require none. Their PHY/EPHY/start paths stay distinct.
-//! MAC61/63/64/65 (RTL8125A/B/D/K/9151A/CP) require a checked BAR through 0x604a, their exact
+//! MAC61/63/64/65/66 (RTL8125A/B/D/K/9151A/CP/BP) require a checked BAR through 0x604a, their exact
 //! revision firmware, a validated internal NBASE PHY and real 2.5G
 //! capability. Their distinct FIFO/IRQ/doorbell/RX/EPHY and legacy descriptor
 //! setup precede DMA. Carrier uses actual polled PHY BMCR/BMSR with a 10 ms
@@ -43,7 +43,7 @@
 //! notification/acknowledgement. Their integrated RTL8211B identity erratum
 //! is an observable classification correction; MDIO returns actual values.
 //! Failed DP command ports require reset/reinitialization, without retries.
-//! Later 8125 and 8126 MAC versions are identified for diagnostics
+//! Extended-XID 8125 and 8126 MAC versions are identified for diagnostics
 //! but **refused** until their complete MAC/PHY initialization is implemented.
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
 //! variants, SFP/TBI, DASH stop/release and power lifecycle, suspend/resume,
@@ -403,7 +403,7 @@ impl RuntimeLink {
             Err(BlockError::Device { status: 255 })
         } else if self.status != Some(status)
             && status & 2 != 0
-            && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52 | 61 | 63..=65)
+            && matches!(hw.revision.version, 34..=36 | 38 | 46 | 51 | 52 | 61 | 63..=66)
         {
             link_patch(hw, status)
         } else {
@@ -592,7 +592,7 @@ fn publish<R: Registers, T: Timer>(
         25 | 26 | 28 | 31 | 32 | 33 => (1 << 15) | (7 << 8),
         40 | 42 | 44 | 46 | 51 | 52 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
         61 => (8 << 27) | (7 << 8),
-        63..=65 => (8 << 27) | (7 << 8) | (1 << 11),
+        63..=66 => (8 << 27) | (7 << 8) | (1 << 11),
         _ => (1 << 15) | (1 << 14) | (7 << 8),
     };
     // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
@@ -1193,6 +1193,7 @@ mod tests {
             63 => 0x641,
             64 => 0x688,
             65 => 0x708,
+            66 => 0x681,
             32 => 0x2c1,
             33 => 0x2c0,
             35 => 0x480,
@@ -1229,6 +1230,7 @@ mod tests {
             (0x68a, 64, Some("rtl_nic/rtl8125k-1.fw")),
             (0x68b, 64, Some("rtl_nic/rtl9151a-1.fw")),
             (0x708, 65, Some("rtl_nic/rtl8125cp-1.fw")),
+            (0x681, 66, Some("rtl_nic/rtl8125bp-2.fw")),
             (0x649, 70, Some("rtl_nic/rtl8126a-2.fw")),
             (0x64a, 70, Some("rtl_nic/rtl8126a-3.fw")),
             (0x980, 6, None),
@@ -1236,7 +1238,7 @@ mod tests {
             let r = revision::detect(xid << 20).unwrap();
             assert_eq!((r.version, r.firmware), (version, fw));
             assert_eq!(u32::from(r.xid), xid);
-            if version >= 61 && !matches!(version, 61 | 63..=65) {
+            if version >= 61 && !matches!(version, 61 | 63..=66) {
                 assert!(!r.implemented());
             }
         }
@@ -1810,7 +1812,7 @@ mod tests {
             publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])).unwrap();
             assert_eq!(model.read32(RX_CONFIG), (1 << 15) | (7 << 8) | 0x0e);
         }
-        for xid in [0x681, 0x649, 0x64a] {
+        for xid in [0x649, 0x64a] {
             assert!(!revision::detect(xid << 20).unwrap().implemented());
         }
     }
@@ -3307,7 +3309,7 @@ mod tests {
         assert_eq!(register_aperture(0x8125), 0x604a);
         assert_eq!(register_aperture(0x8126), 0x604a);
         assert_eq!(register_aperture(0x8168), 256);
-        for version in [61, 63, 64, 65] {
+        for version in [61, 63, 64, 65, 66] {
             let time = Time::default();
             let model = Model::nbase(&time);
             let hw = Hardware::new(&model, &time, revision(version), 0);
@@ -3328,7 +3330,7 @@ mod tests {
 
     #[test]
     fn nbase_initial_fifo_and_new_b_shared_status_require_real_completion() {
-        for version in [61, 63, 64, 65] {
+        for version in [61, 63, 64, 65, 66] {
             let time = Time::default();
             let model = Model::nbase(&time);
             Model::store32(&mut model.state.borrow_mut(), TX_CONFIG, 0); // No old TXCFG_EMPTY condition.
@@ -3579,7 +3581,7 @@ mod tests {
 
     #[test]
     fn nbase_backup_station_and_runtime_tx_lpi_failure_do_not_guess_recovery() {
-        for version in [61, 63, 64, 65] {
+        for version in [61, 63, 64, 65, 66] {
             let time = Time::default();
             let model = Model::nbase(&time);
             let hw = Hardware::new(&model, &time, revision(version), 0);
@@ -3620,7 +3622,7 @@ mod tests {
 
     #[test]
     fn nbase_polled_carrier_preserves_latch_low_an_restart_and_cache_expiry() {
-        for version in [61, 63, 64, 65] {
+        for version in [61, 63, 64, 65, 66] {
             let time = Time::default();
             let model = Model::nbase(&time);
             {
@@ -3754,7 +3756,7 @@ mod tests {
     fn nbase_d_cp_id_capability_external_and_required_firmware_failures_are_explicit() {
         let bytes = 0x8016_a55au32.to_le_bytes();
         let script = Script::parse(&bytes).unwrap();
-        for version in [64, 65] {
+        for version in [64, 65, 66] {
             for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
                 for rejected in 0..4 {
                     let time = Time::default();
@@ -3794,7 +3796,7 @@ mod tests {
     fn nbase_d_cp_required_command_failures_abort_before_enable_or_dma() {
         let bytes = 0x8016_a55au32.to_le_bytes();
         let script = Script::parse(&bytes).unwrap();
-        for version in [64, 65] {
+        for version in [64, 65, 66] {
             for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
                 let time = Time::default();
                 let model = Model::nbase(&time);
@@ -3849,9 +3851,9 @@ mod tests {
     }
 
     #[test]
-    fn nbase_d_cp_mac_has_no_ephy_table_and_publishes_source_rx_and_legacy_dma() {
+    fn nbase_d_cp_bp_mac_has_no_ephy_table_and_publishes_source_rx_and_legacy_dma() {
         use crate::bus::dma::RegionAllocator;
-        for xid in [0x688, 0x689, 0x68a, 0x68b, 0x708] {
+        for xid in [0x688, 0x689, 0x68a, 0x68b, 0x708, 0x681] {
             let revision = revision::detect(xid << 20).unwrap();
             let time = Time::default();
             let model = Model::nbase(&time);
@@ -3893,7 +3895,7 @@ mod tests {
     }
     #[test]
     fn csi_failed_data_read_does_not_publish_a_fabricated_config_value() {
-        for version in [34, 61, 63, 64, 65] {
+        for version in [34, 61, 63, 64, 65, 66] {
             let time = Time::default();
             let mut model = Model::nbase(&time);
             model.failed_read = Some(CSI_DATA);
@@ -3907,6 +3909,113 @@ mod tests {
             assert!(!s.writes.iter().any(|(r, v, _)| *r == CSI_DATA
                 || (*r == CSI_ADDRESS && *v & ACCESS != 0)
                 || matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW)));
+        }
+    }
+    #[test]
+    fn nbase_bp_phy_preserves_distinct_indirect_masks_and_does_not_inherit_cp() {
+        let bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&bytes).unwrap();
+        for id in [0xc800, 0xc840, 0xc841, 0xc862, 0xc890] {
+            let time = Time::default();
+            let model = Model::nbase(&time);
+            {
+                let mut s = model.state.borrow_mut();
+                s.phy_ocp.insert(0xa406, id);
+                s.g_parameters.extend([(0x8010, 0xabcd), (0x8174, 0xa123)]);
+                s.n_parameters.extend([(0x8088, 0x1278), (0x808f, 0x34ab)]);
+            }
+            let mut hw = Hardware::new(&model, &time, revision(66), 0);
+            assert_eq!(hw.configure_phy(Some(&script), false).unwrap(), None);
+            let s = model.state.borrow();
+            assert_eq!(s.g_parameters[&0x8010], 0xa3cd);
+            assert_eq!(s.g_parameters[&0x8174], 0x9923);
+            assert_eq!(s.n_parameters[&0x8088], 0x9078);
+            assert_eq!(s.n_parameters[&0x808f], 0x90ab);
+            assert!(!s.g_parameters.contains_key(&0x81b8));
+            assert!(!s.n_parameters.contains_key(&0x807f));
+            assert_eq!(s.phy_ocp[&0xa400], 0x1200);
+            assert_eq!(s.phy_ocp[&NBASE_AN_CONTROL] & 0x1180, 0x80);
+            assert_eq!(s.phy_ocp[&PHY_OCP_EEE_ADV], 0);
+            assert_eq!(s.phy_ocp[&NBASE_EEE_ADV2], 0);
+            let first = |reg, value| {
+                s.writes
+                    .iter()
+                    .position(|(r, v, _)| {
+                        *r == PHY_OCP && *v == (ACCESS | (u32::from(reg) << 15) | u32::from(value))
+                    })
+                    .unwrap()
+            };
+            assert!(first(0xa42cu16, 0xa55au16) < first(0xa436, 0x8010));
+        }
+    }
+
+    #[test]
+    fn nbase_bp_management_uses_its_own_namespace_mask_order_and_no_ep_ack_loop() {
+        for enabled in [false, true] {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.ep_mode = Some(66);
+            model.ep_ready_delay = None;
+            {
+                let mut s = model.state.borrow_mut();
+                s.oob.extend([
+                    (0x128, u32::from(enabled)),
+                    (0x14, 0xaabb_cc77),
+                    (0x18, 0x1234_5678),
+                    (0x10, 0x8765_4321),
+                ]);
+                s.eri.extend([
+                    (0x14, 0x1111_2222),
+                    (0x18, 0x3333_4444),
+                    (0x10, 0x5555_6666),
+                ]);
+            }
+            let hw = Hardware::new(&model, &time, revision(66), 0);
+            hw.initialize_modern().unwrap();
+            hw.reset().unwrap();
+            hw.ep_start().unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.oob[&0x14], 0xaabb_cc05);
+            assert_eq!(s.oob[&0x18], 0x1234_5600);
+            assert_eq!(s.oob[&0x10], 0x8765_4301);
+            assert_eq!(s.eri[&0x14], 0x1111_2222);
+            assert_eq!(s.eri[&0x18], 0x3333_4444);
+            assert_eq!(s.eri[&0x10], 0x5555_6666);
+            let commands: Vec<_> = s
+                .writes
+                .iter()
+                .filter_map(|(r, v, _)| (*r == ERI_ADDRESS).then_some(*v))
+                .collect();
+            assert_eq!(
+                commands,
+                vec![0x0002_f128, 0x8002_1014, 0x8002_1018, 0x8002_1010]
+            );
+            assert!(!s.writes.iter().any(|(r, _, _)| matches!(
+                *r,
+                IBCR0 | IBCR2 | IBISR0 | PHY_OCP | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW
+            )));
+            assert!(time.now() < 10_000);
+        }
+        for nth in 1..=4 {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.fail_eri_at = nth;
+            let hw = Hardware::new(&model, &time, revision(66), 0);
+            assert_eq!(hw.ep_start(), Err(BlockError::Timeout));
+            let s = model.state.borrow();
+            assert_eq!(s.eri_commands, nth);
+            assert!(
+                !s.writes
+                    .iter()
+                    .any(|(r, _, _)| matches!(*r, PHY_OCP | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+            );
+        }
+        for port in [ERI_ADDRESS, ERI_DATA] {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.failed_read = Some(port);
+            let hw = Hardware::new(&model, &time, revision(66), 0);
+            assert_eq!(hw.ep_start(), Err(BlockError::Device { status: u32::MAX }));
         }
     }
 }

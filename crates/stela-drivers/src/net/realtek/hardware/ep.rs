@@ -3,7 +3,7 @@
 // Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
-//! Exact EP/FP OOB ERI address encoding and CMAC ownership from pinned Linux.
+//! Exact EP/FP/BP OOB ERI encoding and EP/FP CMAC ownership from pinned Linux.
 use super::super::registers::*;
 use super::{BlockError, Hardware, Registers, Timer};
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
@@ -53,10 +53,17 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         Ok(())
     }
     pub fn ep_start(&self) -> Result<(), BlockError> {
-        if !matches!(self.revision.version, 51 | 52) {
+        if !matches!(self.revision.version, 51 | 52 | 66) {
             return Ok(());
         }
         let enabled = self.ep_read(0x128)? & 1 != 0;
+        if self.revision.version == 66 {
+            // DASH_25_BP uses three byte-masked writes, with no source ACK loop
+            // or EP/FP CMAC stop. Each command still requires real completion.
+            self.ep_write(0x14, 1, 5)?;
+            self.ep_write(0x18, 1, 0)?;
+            return self.ep_write(0x10, 1, 1);
+        }
         self.ep_write(0x180, 1, 5)?;
         self.ep_write(0x30, 1, self.ep_read(0x30)? | 1)?;
         if enabled {

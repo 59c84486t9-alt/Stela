@@ -3,7 +3,7 @@
 // Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
-//! Exact A2/B/D/K/9151A/CP RTL8125 MAC start and legacy descriptor selection from pinned Linux.
+//! Exact A2/B/D/K/9151A/CP/BP RTL8125 MAC start and legacy descriptor selection from pinned Linux.
 use super::super::registers::*;
 use super::{BlockError, Hardware, Registers, Timer};
 const A_EPHY: &[(u8, u16, u16)] = &[
@@ -30,7 +30,7 @@ const B_EPHY: &[(u8, u16, u16)] = &[
 ];
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     pub(super) fn nbase_mac(&self) -> Result<(), BlockError> {
-        if !matches!(self.revision.version, 61 | 63..=65) {
+        if !matches!(self.revision.version, 61 | 63..=66) {
             return Err(BlockError::Unsupported(
                 "unimplemented Realtek NBASE MAC start",
             ));
@@ -55,7 +55,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         } else if self.revision.version == 63 {
             B_EPHY
         } else {
-            &[] // D/K/9151A/CP have no donor EPHY table.
+            &[] // D/K/9151A/CP/BP have no donor EPHY table.
         };
         for &(address, clear, set) in entries {
             // Retain source offsets and both transactions for aliases. The
