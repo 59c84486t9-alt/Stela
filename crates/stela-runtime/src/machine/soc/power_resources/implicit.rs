@@ -63,7 +63,13 @@ pub(super) fn resolve(
     inventory: &ResourceInventory<'_>,
     translate: &dyn Fn(u64) -> Option<u64>,
 ) -> Result<Vec<Requirement>, String> {
-    if !pmgr.compatible("pmgr1,t8112") {
+    // A fallback list containing another PMGR profile does not establish
+    // this exact physical association.
+    if pmgr
+        .property("compatible")
+        .map(|raw| raw.strip_suffix(&[0]).unwrap_or(raw))
+        != Some(b"pmgr1,t8112".as_slice())
+    {
         return Ok(Vec::new());
     }
     let mut requirements = Vec::new();
@@ -274,7 +280,14 @@ mod tests {
 
     #[test]
     fn another_soc_aperture_geometry_compatible_or_domain_cannot_inherit_a_binding() {
-        for compatible in ["pmgr1,t8103", "pmgr1,t6000", "pmgr1,t6020", "pmgr1,t8122"] {
+        for compatible in [
+            "pmgr1,t8103",
+            "pmgr1,t6000",
+            "pmgr1,t6020",
+            "pmgr1,t8122",
+            "pmgr1,t8103\0pmgr1,t8112",
+            "pmgr1,t8112\0pmgr1,t8103",
+        ] {
             assert!(
                 states(&fixture(), compatible, domains())
                     .unwrap()
