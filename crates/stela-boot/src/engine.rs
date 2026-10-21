@@ -739,6 +739,11 @@ impl ConsoleSink for GuestConsole {
         if byte == b'\n' || self.0.len() == 200 {
             let line = String::from_utf8_lossy(&self.0);
             output::arguments(format_args!("GUEST| {line}\n"));
+            if !line.trim().is_empty()
+                && let Ok(mut last) = GUEST_LINE.0.try_borrow_mut()
+            {
+                *last = Some(line.clone().into_owned());
+            }
             // `panic(cpu N caller ADDRESS): MESSAGE`
             if let Some((_, message)) = line
                 .strip_prefix("panic(")
@@ -1291,6 +1296,27 @@ fn stop_here(text: &str, code: u32) -> ! {
     output::terminate(code)
 }
 
+/// The guest's last console line since the run loop showed one.
+static GUEST_LINE: output::Global<Option<String>> = output::Global(RefCell::new(None));
+
+/// The most a running step's detail shows of a guest line.
+const GLIMPSE_CHARS: usize = 96;
+
+/// `line` as the running step's detail: a restore step by its name, else
+/// the line itself, shortened.
+fn glimpse(line: &str) -> String {
+    // `[08:34:20.0721-GMT]{5>7} CHECKPOINT BEGIN: RESTORED:[0x067C] fdr_create`
+    if let Some((_, step)) = line.split_once("CHECKPOINT BEGIN: ") {
+        let name = step.rsplit_once(']').map_or(step, |(_, name)| name);
+        return format!("installer: {}", name.trim().replace('_', " "));
+    }
+    let line = line.trim();
+    match line.char_indices().nth(GLIMPSE_CHARS) {
+        Some((end, _)) => format!("{}...", &line[..end]),
+        None => String::from(line),
+    }
+}
+
 /// The first kernel panic line the guest printed, which names a stop
 /// better than how the machine went down after it.
 static GUEST_PANIC: output::Global<Option<String>> = output::Global(RefCell::new(None));
@@ -1660,17 +1686,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let speculation = speculation::probe();
     let mut read_only_region = None;
     // A bundle's kernel gets a framebuffer the size of the firmware's mode.
-    let mut display = handoff
+    let framebuffer = handoff
         .screen
         .filter(|_| options.bundle)
         .and_then(|screen| {
-            let screen = screen.relocated(layout::physical(screen.base as u64) as usize);
-            display::Display::new(screen, options.dram_base + options.ram_bytes)
+            display::boot_framebuffer(screen.resolution(), options.dram_base + options.ram_bytes)
         });
     let (entry, x0) = if options.bundle {
         crate::status::begin("Loading macOS into memory");
         let files = &handoff.files[..handoff.file_count];
-        let framebuffer = display.as_ref().map(display::Display::framebuffer);
         let (dram_base, ram_bytes) = (options.dram_base, options.ram_bytes);
         let loaded = match &built {
             Some(built) => {
@@ -1690,9 +1714,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             loaded.regions, loaded.patches, loaded.kept, loaded.dram_base
         ));
         read_only_region = loaded.read_only_region;
-        if let Some(display) = &display {
-            display.clear(&mut bare);
-        }
         crate::status::done("");
         (loaded.pc, loaded.x0)
     } else {
@@ -1939,7 +1960,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     let stop = run(
         &mut machine,
         options.budget,
-        display.as_mut(),
         handoff.tsc_hz,
         restore.as_mut(),
         host_input.as_mut(),
@@ -1965,15 +1985,14 @@ const WAIT_POLLS_PER_SECOND: u64 = 20;
 /// Seconds between heartbeats, which locate a guest that runs without output.
 const BEAT_SECONDS: u64 = 10;
 
-/// Run up to `budget` blocks (0: no limit), showing the guest framebuffer
-/// about twice a second and at the stop, reporting the PE's position
+/// Run up to `budget` blocks (0: no limit), showing what macOS prints last
+/// as the running step's detail, reporting the PE's position
 /// every [`BEAT_SECONDS`], and making ANS namespace erases durable on the
 /// host between slices and before the stop ([`erase`]).
 #[allow(clippy::too_many_arguments)]
 fn run(
     machine: &mut Machine<BareHost, AppleDevices>,
     budget: u64,
-    mut display: Option<&mut display::Display>,
     tsc_hz: u64,
     mut restore: Option<&mut restore::Experiment>,
     mut host_input: Option<&mut input::HostInput>,
@@ -1981,9 +2000,8 @@ fn run(
     mut host_nor: Option<&mut nor::HostNor>,
     host_power: &mut power::HostPowerControl,
 ) -> Stop {
-    let mut shown = host::rdtsc();
     let mut beat = (
-        shown,
+        host::rdtsc(),
         host::native_ticks(),
         machine.statistics.blocks,
         machine.statistics.compiled,
@@ -2018,6 +2036,14 @@ fn run(
             budget.min(slice)
         };
         let stop = machine.run(limit);
+        if let Some(line) = GUEST_LINE
+            .0
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut line| line.take())
+        {
+            crate::status::progress(&glimpse(&line));
+        }
         crate::status::tick();
         unmodeled_report(machine);
         sep_observation_report(machine);
@@ -2113,12 +2139,6 @@ fn run(
             machine.exclude_host_time(|devices| host_erase.finish(devices));
         }
         let now = host::rdtsc();
-        if let Some(display) = display.as_deref_mut()
-            && (!sliced || now - shown >= tsc_hz / 2)
-        {
-            display.show(&mut machine.host);
-            shown = host::rdtsc();
-        }
         if !sliced {
             return stop;
         }

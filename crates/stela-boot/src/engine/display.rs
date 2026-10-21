@@ -1,24 +1,21 @@
-//! The guest's framebuffer, shown on the firmware's.
+//! The guest's display on the firmware's framebuffer.
 //!
 //! iBoot hands XNU a linear framebuffer through `boot_args.Video` and the
 //! DeviceTree's `/vram`; XNU's boot console and verbose output draw into it.
 //! The mount gives the guest one of the firmware mode's size, 32 bits per
 //! pixel, at the top of guest DRAM, outside the range the kernel manages
-//! (`stela_runtime::boot_bundle::Machine`), and copies it to the firmware's
-//! framebuffer between engine slices. XNU's 32-bit pixels are x8r8g8b8 with
-//! blue in the low byte (public XNU `osfmk/console/video_console.c`), GOP's
-//! BGR order; an RGB or channel-mask mode re-encodes each pixel.
-use super::host::BareHost;
+//! (`stela_runtime::boot_bundle::Machine`), and shows only the frames the
+//! modeled DCP presents. XNU's 32-bit pixels are x8r8g8b8 with blue in the
+//! low byte (public XNU `osfmk/console/video_console.c`), GOP's BGR order;
+//! an RGB or channel-mask mode re-encodes each pixel.
 use crate::console::{self, Framebuffer};
 use crate::output;
-use alloc::vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use stela_runtime::boot_bundle;
 use stela_runtime::machine::apple::{DisplayLog, Scanout, ScanoutFormat, ScanoutMode};
-use stela_runtime::{boot_bundle, machine::Host};
 
-/// Whether the DCP model has presented a swap. From then on the display
-/// pipe scans out the swapped surfaces, not iBoot's boot framebuffer, so the
-/// boot-framebuffer copy stops overwriting them.
+/// Whether the DCP model has presented a swap: the first one takes the
+/// screen from Stela's console.
 static DCP_PRESENTED: AtomicBool = AtomicBool::new(false);
 
 /// The host scanout the modeled DCP presents completed swaps to: the UEFI GOP
@@ -74,72 +71,24 @@ const BYTES_PER_PIXEL: u64 = 4;
 /// The guest framebuffer is whole 16 KiB pages.
 const PAGE: u64 = 0x4000;
 
-pub struct Display {
-    screen: Framebuffer,
-    guest: boot_bundle::Framebuffer,
-    shown: bool,
-}
-
-impl Display {
-    /// A guest framebuffer the size of `screen`, ending at `dram_end`.
-    pub fn new(screen: Framebuffer, dram_end: u64) -> Option<Self> {
-        let (width, height) = screen.resolution();
-        let (width, height) = (width as u64, height as u64);
-        let row_bytes = width * BYTES_PER_PIXEL;
-        let bytes = (row_bytes * height).next_multiple_of(PAGE);
-        let guest_pa = dram_end.checked_sub(bytes)?;
-        Some(Self {
-            screen,
-            guest: boot_bundle::Framebuffer {
-                guest_pa,
-                bytes,
-                row_bytes,
-                width,
-                height,
-                bits_per_pixel: BYTES_PER_PIXEL * 8,
-            },
-            shown: false,
-        })
-    }
-
-    pub fn framebuffer(&self) -> boot_bundle::Framebuffer {
-        self.guest
-    }
-
-    /// Clear the guest framebuffer, whose RAM held the host's data, so the
-    /// screen changes hands only once the guest draws.
-    pub fn clear(&self, host: &mut BareHost) {
-        let row = vec![0; self.guest.row_bytes as usize];
-        for y in 0..self.guest.height {
-            host.write_ram(self.guest.guest_pa + y * self.guest.row_bytes, &row);
-        }
-    }
-
-    /// Copy the guest framebuffer to the screen. The mount's text console
-    /// keeps the screen until the guest has drawn a pixel; once the DCP
-    /// model presents swaps, it owns the screen.
-    pub fn show(&mut self, host: &mut BareHost) {
-        if DCP_PRESENTED.load(Ordering::Relaxed) {
-            return;
-        }
-        let mut row = vec![0; self.guest.row_bytes as usize];
-        if !self.shown {
-            let drawn = (0..self.guest.height).any(|y| {
-                host.read_ram(self.guest.guest_pa + y * self.guest.row_bytes, &mut row)
-                    && row.iter().any(|&byte| byte != 0)
-            });
-            if !drawn {
-                return;
-            }
-            console::release();
-            self.shown = true;
-        }
-        for y in 0..self.guest.height {
-            let address = self.guest.guest_pa + y * self.guest.row_bytes;
-            if !host.read_ram(address, &mut row) {
-                return;
-            }
-            self.screen.show_row(y as usize, &row);
-        }
-    }
+/// The kernel's boot framebuffer for a `width` by `height` screen, ending at
+/// `dram_end`. Nothing copies it to the screen: the kernel's boot console
+/// and verbose text there reach the boot log through the debug UART, and
+/// Stela's own console keeps the screen until the DCP presents macOS's
+/// first frame ([`GopScanout`]).
+pub fn boot_framebuffer(
+    (width, height): (usize, usize),
+    dram_end: u64,
+) -> Option<boot_bundle::Framebuffer> {
+    let (width, height) = (width as u64, height as u64);
+    let row_bytes = width * BYTES_PER_PIXEL;
+    let bytes = (row_bytes * height).next_multiple_of(PAGE);
+    Some(boot_bundle::Framebuffer {
+        guest_pa: dram_end.checked_sub(bytes)?,
+        bytes,
+        row_bytes,
+        width,
+        height,
+        bits_per_pixel: BYTES_PER_PIXEL * 8,
+    })
 }
