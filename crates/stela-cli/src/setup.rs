@@ -3837,21 +3837,27 @@ mod tests {
     fn a_stela_update_to_a_new_bundle_schema_prepares_new_bundles_and_rolls_back() {
         let f = fixture(64 * GIB, false);
         setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let old_schema = record(&f).bundle_schema;
+        let next_schema = old_schema.checked_add(1).unwrap();
         let ecid = record(&f).ecid;
         let old = bundle_of(&f, ecid);
         let options = || fs::read_to_string(f.esp.join("EFI/stela/stela.cfg")).unwrap();
         let first = options();
-        // A later stela and stela.efi read schema 2.
+        // A later stela and stela.efi read the next schema.
         let newer = mount_interface::Interface {
-            bundle_schema: 2,
+            bundle_schema: next_schema,
             ..mount_interface::CURRENT
         };
-        let schema2 = bundle::Generation {
-            schema: 2,
+        let next_generation = bundle::Generation {
+            schema: next_schema,
             ..current()
         };
         let prepare = move |_: &Path, _: &str, ecid: Option<Ecid>, output: &Path| {
-            bundle::tests::write(output, schema2, &[ecid.map_or(0, |e| e.0 as u8) ^ 0xff; 64])
+            bundle::tests::write(
+                output,
+                next_generation,
+                &[ecid.map_or(0, |e| e.0 as u8) ^ 0xff; 64],
+            )
         };
         let environment = Environment {
             prepare: &prepare,
@@ -3871,21 +3877,24 @@ mod tests {
             command.dispatch(&environment)
         };
         let error = update(false).unwrap_err().to_string();
-        assert!(error.contains("schema 2"), "{error}");
+        assert!(error.contains(&format!("schema {next_schema}")), "{error}");
         assert!(error.contains("--ipsw"), "{error}");
         update(true).unwrap();
         let record2 = record(&f);
-        assert_eq!(record2.bundle_schema, 2);
+        assert_eq!(record2.bundle_schema, next_schema);
         let migrated = bundle_of(&f, ecid);
-        let leaf = bundle::leaf(ecid, schema2);
-        assert!(migrated.ends_with(&leaf) && leaf.contains("-s2"), "{leaf}");
+        let leaf = bundle::leaf(ecid, next_generation);
+        assert!(
+            migrated.ends_with(&leaf) && leaf.contains(&format!("-s{next_schema}")),
+            "{leaf}"
+        );
         assert!(options().contains(&format!("{leaf} ")), "{}", options());
         // The old bundle stays for the rollback, which boots it again.
         assert!(old.join("bundle.json").is_file());
         rerun(&f, |c| c.rollback = true).unwrap();
         assert_eq!(options(), first);
         assert!(!migrated.exists());
-        assert_eq!(record(&f).bundle_schema, 1);
+        assert_eq!(record(&f).bundle_schema, old_schema);
     }
 
     #[test]
@@ -3953,7 +3962,10 @@ mod tests {
             })
         };
         let refusal = update(false, false).unwrap_err().to_string();
-        assert!(refusal.contains("schema 1 revision 1"), "{refusal}");
+        assert!(
+            refusal.contains(&format!("schema {} revision 1", current().schema)),
+            "{refusal}"
+        );
         assert!(refusal.contains("--ipsw or --fetch"), "{refusal}");
         let before = (snapshot(&f.esp), snapshot(&stela_volume(&f)));
         let plan = update(true, true).unwrap();
