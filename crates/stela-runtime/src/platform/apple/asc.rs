@@ -55,6 +55,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::any::Any;
 
+pub mod entry;
+pub use entry::{Auxiliary, EntryHandoff};
+
 const NAME: &str = "asc";
 
 const CPU_CONTROL: u64 = 0x44;
@@ -182,6 +185,7 @@ impl Lines {
 }
 
 pub struct Asc {
+    auxiliary: Auxiliary,
     firmware: Box<dyn Firmware>,
     lifecycle: LifecycleState,
     running: bool,
@@ -219,6 +223,7 @@ impl Asc {
             firmware.start(&mut outbox)?;
         }
         Ok(Self {
+            auxiliary: Auxiliary::unknown(running),
             firmware,
             lifecycle: LifecycleState {
                 powered: true,
@@ -264,6 +269,21 @@ impl Asc {
         asc.a2i_control = CONTROL_ENABLE;
         asc.outbox_enabled = true;
         Ok(asc)
+    }
+
+    /// The ASCv4 provider's second register aperture. It shares this owner's
+    /// lifecycle; do not bind a second PMGR lifecycle owner to the handle.
+    /// Native protocol firmware does not imply an ARM entry-register value.
+    pub fn auxiliary(&self) -> Auxiliary {
+        self.auxiliary.clone()
+    }
+
+    /// Install a boot owner's explicit firmware-resource and register handoff.
+    /// The caller owns the backing bytes and their original image identity.
+    /// This never loads or executes ARM firmware, or derives an entry from a
+    /// native Rust implementation address.
+    pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
+        self.auxiliary.establish(handoff)
     }
 
     /// Read-only mailbox state for boot diagnostics.
@@ -416,6 +436,7 @@ impl Asc {
             self.halted = true;
         }
         if run && !self.running {
+            self.auxiliary.check_start()?;
             let mut started = Vec::new();
             let result = if self.halted {
                 self.firmware.resume(&mut started)
@@ -428,6 +449,7 @@ impl Asc {
             self.halted = false;
         }
         self.cpu_control = value;
+        self.auxiliary.set_running(self.running);
         Ok(())
     }
 }
@@ -459,6 +481,7 @@ impl Lifecycle for Asc {
             self.outbox_enabled = false;
         }
         self.lifecycle = proposed;
+        self.auxiliary.set_lifecycle(proposed);
         // Retained gates freeze execution; neither they nor gate release
         // synthesize a firmware sleep/wake message or alter FIFO ownership.
         self.update_lines(access);
