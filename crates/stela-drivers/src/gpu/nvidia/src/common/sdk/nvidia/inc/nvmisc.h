@@ -789,7 +789,7 @@ nvGetNthSetBitIndex32(NvU32 mask, NvU32 n)
 
 // Returns the offset (in bytes) of 'member' in struct 'type'.
 #ifndef NV_OFFSETOF
-    #if defined(__GNUC__) && (__GNUC__ > 3)
+    #if defined(__clang__) || (defined(__GNUC__) && (__GNUC__ > 3))
         #define NV_OFFSETOF(type, member)   ((NvUPtr) __builtin_offsetof(type, member))
     #else
         #define NV_OFFSETOF(type, member)    ((NvUPtr) &(((type *)0)->member))

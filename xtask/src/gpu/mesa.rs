@@ -18,8 +18,11 @@ const LIBRARIES: &[&str] = &[
     "src/nouveau/compiler/libnak.a",
     "src/nouveau/compiler/libnak_rs.a",
     "src/nouveau/nil/libnil.a",
+    "src/stela/libstela_nv_compute.a",
     "src/amd/compiler/libaco.a",
     "src/amd/common/libamd_compiler_support.a",
+    "src/amd/common/libamd_command_support.a",
+    "src/stela/libstela_amd_commands.a",
     "src/intel/dev/libintel_dev.a",
     "src/intel/compiler/gen/libintel_compiler_gen.a",
     "src/intel/compiler/brw/libintel_compiler.a",
@@ -146,7 +149,8 @@ fn parse_targets(log: &str, backend: &str) -> Result<Vec<Value>> {
     Ok(targets)
 }
 
-pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
+pub fn build(jobs: u16, require_all_targets: bool, llvm_library: Option<&Path>) -> Result<()> {
+    let llvm_library = llvm_library.map(fs::canonicalize).transpose()?;
     let meson = tool("meson", "generators/bin")?;
     let ninja = tool("ninja", "generators/bin")?;
     let bindgen = tool("bindgen", "rust/bin")?;
@@ -187,6 +191,12 @@ pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
             "-Dbuild-tests=false",
             "-Dintel-elk=true",
         ]);
+    setup.arg(format!(
+        "-Dstela-air-llvm-library={}",
+        llvm_library
+            .as_ref()
+            .map_or_else(String::new, |path| path.display().to_string())
+    ));
     if build.join("meson-private/coredata.dat").is_file() {
         setup.arg("--reconfigure");
     }
@@ -200,7 +210,21 @@ pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
         .arg(format!("-j{jobs}"))
         .args(LIBRARIES)
         .args(PROBES.iter().map(|(_, binary)| binary));
+    compile.arg("src/stela/stela_amd_commands_probe");
+    if llvm_library.is_some() {
+        compile.args([
+            "src/stela/stela_air_test",
+            "src/stela/stela_air_brw_probe",
+            "src/stela/stela_air_aco_probe",
+            "src/stela/stela_nv_compute_probe",
+        ]);
+    }
     run(&mut compile, &evidence, "compile")?;
+    run(
+        &mut Command::new(build.join("src/stela/stela_amd_commands_probe")),
+        &evidence,
+        "amd-commands",
+    )?;
     let mut probes = Vec::new();
     let mut unsupported = Vec::new();
     let mut compiled = 0;
@@ -226,6 +250,46 @@ pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
             "targets": targets,
         }));
     }
+    let mut air_probes = Vec::new();
+    let compiler_unsupported = unsupported.len();
+    let mut air_compiled = 0;
+    if let Some(library) = &llvm_library {
+        for (backend, binary) in [
+            ("air-nak", "src/stela/stela_air_test"),
+            ("air-brw", "src/stela/stela_air_brw_probe"),
+            ("air-aco", "src/stela/stela_air_aco_probe"),
+        ] {
+            run(&mut Command::new(build.join(binary)), &evidence, backend)?;
+            let log = evidence.join(format!("{backend}.log"));
+            let targets = parse_targets(&fs::read_to_string(&log)?, backend)?;
+            air_compiled += targets
+                .iter()
+                .filter(|record| record["state"] == "compiled")
+                .count();
+            unsupported.extend(
+                targets
+                    .iter()
+                    .filter(|record| record["state"] == "unsupported")
+                    .cloned(),
+            );
+            air_probes.push(json!({
+                "stage": backend,
+                "binary": tools::binding(&build.join(binary))?,
+                "output": tools::binding(&log)?,
+                "targets": targets,
+            }));
+        }
+        // Bind the actual development-host compiler binary, not just its path.
+        air_probes.push(json!({"llvm_library": tools::binding(library)?}));
+        let binary = build.join("src/stela/stela_nv_compute_probe");
+        run(&mut Command::new(&binary), &evidence, "nvidia-compute")?;
+        air_probes.push(json!({
+            "stage": "nvidia-compute-descriptor-and-launch",
+            "binary": tools::binding(&binary)?,
+            "output": tools::binding(&evidence.join("nvidia-compute.log"))?,
+            "hardware_executed": false,
+        }));
+    }
     let libraries = LIBRARIES
         .iter()
         .map(|name| inspect_archive(&build.join(name)))
@@ -238,20 +302,27 @@ pub fn build(jobs: u16, require_all_targets: bool) -> Result<()> {
         "schema": 2, "stage": "native-host-shader-compiler-build",
         "stela_platform_port": false, "hardware_executed": false,
         "metal_frontend": false,
+        "air_compute_compiler_subset": llvm_library.is_some(),
+        "air_codegen_probes": air_probes,
         "source_tree_sha256": hash,
         "origin": serde_json::from_slice::<Value>(&fs::read(gpu.join("sources.json"))?)?,
         "host": {"os": env::consts::OS, "arch": env::consts::ARCH},
         "meson": capture(Command::new(&meson).arg("--version"))?,
         "setup": format!("{setup:?}"), "compile": format!("{compile:?}"),
         "libraries": libraries,
+        "amd_command_probe": {
+            "binary": tools::binding(&build.join("src/stela/stela_amd_commands_probe"))?,
+            "output": tools::binding(&evidence.join("amd-commands.log"))?,
+            "hardware_executed": false,
+        },
         "codegen_probes": probes,
         "unsupported_fixture_targets": unsupported,
     });
     File::create_new(evidence.join("compilers.json"))?
         .write_all(&serde_json::to_vec_pretty(&receipt)?)?;
     println!(
-        "Native shader compilers built: {compiled} fixture targets compiled, {} unsupported.",
-        unsupported.len()
+        "Native compiler fixtures: {compiled} compiled, {compiler_unsupported} unsupported; AIR fixtures: {air_compiled} compiled, {} unsupported.",
+        unsupported.len() - compiler_unsupported
     );
     for target in &unsupported {
         println!(

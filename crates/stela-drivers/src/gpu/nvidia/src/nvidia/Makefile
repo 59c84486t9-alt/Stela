@@ -21,6 +21,10 @@ GET_COMPILER_TYPE = \
 # and the NVIDIA ID string
 ALL_SRCS = $(SRCS) $(SRCS_CXX)
 ALL_SRCS += $(NVIDSTRING)
+ifeq ($(TARGET_OS),Stela)
+ALL_SRCS += ../../stela/pci.c
+CFLAGS += -I ../../stela
+endif
 
 SRC_COMMON = ../common
 CONDITIONAL_CFLAGS :=
@@ -211,7 +215,21 @@ $(foreach src, $(ALL_SRCS), $(eval $(call DEFINE_OBJECT_RULE,TARGET,$(src))))
 NV_KERNEL_O = $(OUTPUTDIR)/nv-kernel.o
 
 .PHONY: all
+ifeq ($(TARGET_OS),Stela)
+ifneq ($(TARGET_ARCH),x86_64)
+$(error Stela currently targets x86_64 physical GPU backends)
+endif
+NV_KERNEL_A = $(OUTPUTDIR)/libnv-kernel.a
+all: $(NV_KERNEL_A)
+
+# COFF objects use the UEFI target's native Win64 C ABI. Keep an archive for
+# Rust's final link; an ELF partial link is not loadable native Stela code.
+$(NV_KERNEL_A): $(OBJS)
+	$(RM) $@
+	$(call quiet_cmd,AR) rcs $@ $(OBJS)
+else
 all: $(NV_KERNEL_O)
+endif
 
 LINKER_SCRIPT = nv-kernel.ld
 

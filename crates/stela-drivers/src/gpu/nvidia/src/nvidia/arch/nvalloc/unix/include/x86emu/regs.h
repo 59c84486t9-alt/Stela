@@ -40,6 +40,7 @@
 #define __X86EMU_REGS_H
 
 #include "x86emu/debug.h"
+#include "nvtypes.h"
 
 /*---------------------- Macros and type definitions ----------------------*/
 
@@ -303,8 +304,9 @@ private                 - private data pointer
 x86                     - X86 registers
 ****************************************************************************/
 typedef struct {
-        unsigned long   mem_base;
-        unsigned long   mem_size;
+        /* Host addresses/lengths must remain pointer-sized on LLP64 too. */
+        NvUPtr          mem_base;
+        NvLength        mem_size;
         void*           private;
         X86EMU_regs             x86;
         } X86EMU_sysEnv;

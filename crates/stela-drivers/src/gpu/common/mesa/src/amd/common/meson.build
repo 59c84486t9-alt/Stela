@@ -237,7 +237,8 @@ if with_stela_amd
     'amd_compiler_support',
     files('ac_compiler_info.c', 'ac_shader_args.c', 'ac_shader_util.c', 'amd_family.c',
           'ac_descriptors.c', 'ac_formats.c', 'nir/ac_nir.c',
-          'nir/ac_nir_lower_global_access.c', 'nir/ac_nir_opt_shared_append.c') +
+          'nir/ac_nir_lower_global_access.c', 'nir/ac_nir_lower_intrinsics_to_args.c',
+          'nir/ac_nir_opt_shared_append.c') +
       [gfx10_format_table_c],
     include_directories : [inc_include, inc_src, inc_amd, inc_amd_common],
     dependencies : [idep_mesautil, idep_nir_headers, idep_amd_generated_headers],

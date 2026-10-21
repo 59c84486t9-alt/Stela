@@ -6,6 +6,15 @@ use crate::bus::pci::{Address, ConfigSpace, Function};
 #[cfg(feature = "nvidia-port")]
 pub mod nvidia;
 
+#[cfg(feature = "intel-port")]
+pub mod intel;
+
+#[cfg(feature = "metal")]
+pub mod metal;
+
+#[cfg(feature = "amd-commands")]
+pub mod amd;
+
 /// PCI base class for VGA, 3D and other display controllers.
 const DISPLAY_CLASS: u8 = 0x03;
 const NVIDIA_VENDOR: u16 = 0x10de;

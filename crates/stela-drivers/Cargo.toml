@@ -17,6 +17,15 @@ workspace = true
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.
 nvidia-port = ["dep:cc"]
+# Native Xe command/page-table support; not an initialized Intel GPU driver.
+intel-port = ["dep:cc"]
+# Hosted AMD encoder build; its C runtime is not yet ported to UEFI.
+amd-commands = []
+# Shared Metal library input validation, independent of a physical GPU backend.
+metal = ["dep:sha2"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false, optional = true }
 
 [build-dependencies]
 cc = { version = "1", optional = true }

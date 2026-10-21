@@ -2,6 +2,7 @@
 //! platform port into Stela or executing work on a physical GPU.
 use anyhow::Result;
 use clap::Subcommand;
+use std::path::PathBuf;
 
 mod macos;
 mod mesa;
@@ -23,10 +24,16 @@ pub enum Command {
         /// This still does not establish physical GPU or Metal support.
         #[arg(long)]
         require_all_targets: bool,
+        /// Also compile the shared AIR frontend and its vendor codegen probes
+        /// against this native LLVM 23 shared library. No GPU work is submitted.
+        #[arg(long)]
+        llvm_library: Option<PathBuf>,
     },
-    /// Compile NVIDIA's resource-manager and display cores as x86-64 ELF
-    /// reference objects, retaining unresolved platform imports in a receipt.
+    /// Compile NVIDIA's resource-manager and display cores for native Stela
+    /// or as Linux reference objects, retaining unresolved platform imports.
     Nvidia {
+        #[arg(long, value_enum, default_value_t = nvidia::Target::Stela)]
+        target: nvidia::Target,
         /// Maximum parallel native compiler processes.
         #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(1..))]
         jobs: u16,
@@ -39,7 +46,8 @@ pub fn run(command: Command) -> Result<()> {
         Command::Compilers {
             jobs,
             require_all_targets,
-        } => mesa::build(jobs, require_all_targets),
-        Command::Nvidia { jobs } => nvidia::build(jobs),
+            llvm_library,
+        } => mesa::build(jobs, require_all_targets, llvm_library.as_deref()),
+        Command::Nvidia { jobs, target } => nvidia::build(jobs, target),
     }
 }

@@ -51,6 +51,12 @@
 /*****************************************************************************/
 /* Define all OS/CPU-Chip related symbols */
 
+#if defined(NV_STELA)
+/* Stela supplies the existing abstract Unix kernel OS interface. This selects
+ * neither Linux services nor the build host's macOS/Windows environment. */
+#   define NV_UNIX
+#else
+
 /* ***** WINDOWS variations */
 #if defined(_WIN32) || defined(_WIN16)
 #   define NV_WINDOWS
@@ -132,6 +138,8 @@
 #    define NV_INTEGRITY
 #  endif
 #endif
+
+#endif /* !NV_STELA: automatic host OS detection */
 
 /* ***** Processor type variations */
 
@@ -268,6 +276,12 @@
  */
 
 #define NV_IS_MODS 0
+
+#if defined(NV_STELA)
+#define NVOS_IS_STELA 1
+#else
+#define NVOS_IS_STELA 0
+#endif
 
 #define NVOS_IS_WINDOWS 0
 #if defined(NV_WINDOWS_CE)

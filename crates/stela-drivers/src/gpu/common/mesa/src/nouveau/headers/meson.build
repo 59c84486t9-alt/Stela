@@ -76,6 +76,7 @@ hwref_gens = [
 flat_nv_classes = ''
 
 cl_generated = []
+stela_nv_compute_headers = []
 foreach cl : nv_classes
   prev_cl_h = []
   prev_cl_args = []
@@ -98,6 +99,9 @@ foreach cl : nv_classes
     command : [prog_python, '@INPUT0@', '--in-h', '@INPUT1@', prev_cl_args,
                '--out-h', '@OUTPUT0@', '--out-c', '@OUTPUT1@'],
   )
+  if ['cla0c0', 'clc6c0'].contains(cl)
+    stela_nv_compute_headers += [cl_generated[-1][0]]
+  endif
 endforeach
 
 nv_push_class_dump_h = custom_target(

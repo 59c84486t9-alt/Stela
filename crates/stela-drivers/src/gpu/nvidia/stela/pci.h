@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include "nvtypes.h"
 
+#if !NVOS_IS_STELA || !NVOS_IS_UNIX || NVOS_IS_LINUX || NVOS_IS_MACINTOSH
+#error "native PCI hooks must select Stela's OS interface"
+#endif
+
 /* Native, same-CPU ABI, mirrored by nvidia::PciHandle. The physical device's
  * owner pins this handle and keeps its configuration space exclusively borrowed
  * until all RM users stop. Calls are serialized; neither callback may reenter

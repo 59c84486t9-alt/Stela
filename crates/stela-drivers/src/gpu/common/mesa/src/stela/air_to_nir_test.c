@@ -4,6 +4,8 @@
 #include "llvm-c/Core.h"
 #include "llvm-c/IRReader.h"
 #include "util/ralloc.h"
+#include "util/blake3/blake3.h"
+#include "probe_report.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -194,6 +196,22 @@ tests(void)
 
 #ifdef STELA_AIR_TEST_NAK
 static void
+digest(const void *bytes, size_t size, char out[2 * BLAKE3_OUT_LEN + 1])
+{
+   blake3_hasher hasher;
+   uint8_t hash[BLAKE3_OUT_LEN];
+   blake3_hasher_init(&hasher);
+   blake3_hasher_update(&hasher, bytes, size);
+   blake3_hasher_finalize(&hasher, hash, sizeof(hash));
+   static const char hex[] = "0123456789abcdef";
+   for (unsigned i = 0; i < sizeof(hash); i++) {
+      out[2 * i] = hex[hash[i] >> 4];
+      out[2 * i + 1] = hex[hash[i] & 15];
+   }
+   out[2 * BLAKE3_OUT_LEN] = 0;
+}
+
+static void
 nak_codegen(void)
 {
    const unsigned targets[] = {75, 80, 86, 89, 90, 100, 120};
@@ -216,6 +234,15 @@ nak_codegen(void)
       struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
       CHECK(bin && bin->code && bin->code_size && bin->info.num_instrs > 2);
       CHECK(bin->info.sm == targets[i] && bin->info.stage == MESA_SHADER_COMPUTE);
+      char target[16], input_hash[2 * BLAKE3_OUT_LEN + 1], code_hash[2 * BLAKE3_OUT_LEN + 1];
+      snprintf(target, sizeof(target), "sm%u", targets[i]);
+      digest(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
+      digest(bin->code, bin->code_size, code_hash);
+      probe_compiled("air-nak", target, bin->code_size);
+      printf("STELA_AIR_NVIDIA_OUTPUT {\"target\":\"%s\",\"entry\":\"kernel\","
+             "\"input_blake3\":\"%s\",\"code_blake3\":\"%s\",\"workgroup\":[32,1,1],"
+             "\"buffer_index\":7,\"fixture_va\":1048576,\"hardware_executed\":false}\n",
+             target, input_hash, code_hash);
       printf("AIR->LLVM->NIR->NAK SM%u: %u bytes, %u instructions\n", targets[i], bin->code_size, bin->info.num_instrs);
       if (bin->asm_str)
          puts(bin->asm_str);

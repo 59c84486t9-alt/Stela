@@ -256,7 +256,19 @@ $(foreach src, $(ALL_SRCS), $(eval $(call DEFINE_OBJECT_RULE,TARGET,$(src))))
 NV_MODESET_KERNEL_O = $(OUTPUTDIR)/nv-modeset-kernel.o
 
 .PHONY: all
+ifeq ($(TARGET_OS),Stela)
+ifneq ($(TARGET_ARCH),x86_64)
+$(error Stela currently targets x86_64 physical GPU backends)
+endif
+NV_MODESET_KERNEL_A = $(OUTPUTDIR)/libnv-modeset-kernel.a
+all: $(NV_MODESET_KERNEL_A)
+
+$(NV_MODESET_KERNEL_A): $(OBJS)
+	$(RM) $@
+	$(call quiet_cmd,AR) rcs $@ $(OBJS)
+else
 all: $(NV_MODESET_KERNEL_O)
+endif
 
 $(NV_MODESET_KERNEL_O): $(OBJS) $(LINKER_DEPS)
 	$(call quiet_cmd,LD) $(LDFLAGS) $(EXTRA_LINKER_ARGS) -r \

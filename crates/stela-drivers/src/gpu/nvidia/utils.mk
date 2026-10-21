@@ -127,6 +127,11 @@ ifeq ($(TARGET_OS),Linux)
   CFLAGS += -DNV_LINUX
 endif
 
+ifeq ($(TARGET_OS),Stela)
+  CFLAGS += -DNV_STELA --target=x86_64-unknown-windows -mno-incremental-linker-compatible
+  CFLAGS += -Werror=int-to-pointer-cast -Werror=pointer-to-int-cast -Werror=bitfield-constant-conversion
+endif
+
 ifeq ($(TARGET_OS),FreeBSD)
   CFLAGS += -DNV_BSD
 endif
@@ -546,6 +551,7 @@ endef
 ##############################################################################
 
 NVIDSTRING = $(OUTPUTDIR)/g_nvid_string.c
+NV_BUILD_STAMP ?= `$(DATE)`
 
 ifeq ($(DEBUG),1)
   NVIDSTRING_BUILD_TYPE_STRING = Debug Build
@@ -565,7 +571,7 @@ define GENERATE_NVIDSTRING
   # g_nvid_string.c depends on all objects except g_nvid_string.o, and version.mk
   $(NVIDSTRING): $$(filter-out $$(call BUILD_OBJECT_LIST,$$(NVIDSTRING)), $(3)) $$(VERSION_MK)
 	$(at_if_quiet)$$(MKDIR) $$(dir $$@)
-	$(at_if_quiet)$$(ECHO) "const char $(1)[] = \"nvidia id: $$($$(strip $(1))_BUILD_NVID)  `$$(DATE)`\";" > $$@
+	$(at_if_quiet)$$(ECHO) "const char $(1)[] = \"nvidia id: $$($$(strip $(1))_BUILD_NVID)  $$(NV_BUILD_STAMP)\";" > $$@
 	$(at_if_quiet)$$(ECHO) "const char *const p$$(strip $(1)) = $(1) + 11;" >> $$@;
 endef
 
@@ -607,6 +613,14 @@ ifdef LD_TARGET_EMULATION_FLAG_$(TARGET_OS)_$(TARGET_ARCH)
   LD_TARGET_EMULATION_FLAG = $(if $(LD_IS_LLD), -m $(LD_TARGET_EMULATION_FLAG_$(TARGET_OS)_$(TARGET_ARCH)))
 endif
 
+ifeq ($(TARGET_OS),Stela)
+define READ_ONLY_OBJECT_FROM_FILE_RULE
+  $$(OUTPUTDIR)/$$(notdir $(1)).o: $(1)
+	$(at_if_quiet)$$(MKDIR) $$(OUTPUTDIR)
+	$(at_if_quiet)$$(PRINTF) '.section .rdata,"dr"\n.globl _binary_$(subst -,_,$(subst .,_,$(notdir $(1))))_start\n_binary_$(subst -,_,$(subst .,_,$(notdir $(1))))_start:\n.incbin "$(abspath $(1))"\n.globl _binary_$(subst -,_,$(subst .,_,$(notdir $(1))))_end\n_binary_$(subst -,_,$(subst .,_,$(notdir $(1))))_end:\n' > $$@.S
+	$(call quiet_cmd,CC) --target=x86_64-unknown-windows -c -x assembler $$@.S -o $$@
+endef
+else
 define READ_ONLY_OBJECT_FROM_FILE_RULE
   $$(OUTPUTDIR)/$$(notdir $(1)).o: $(1)
 	$(at_if_quiet)$$(MKDIR) $$(OUTPUTDIR)
@@ -618,6 +632,7 @@ define READ_ONLY_OBJECT_FROM_FILE_RULE
 	    --rename-section .data=.rodata,contents,alloc,load,data,readonly \
 	    $$@
 endef
+endif
 
 define BINARY_DATA_HEADER_RULE
   $$(OUTPUTDIR)/$(notdir $(1)).h:

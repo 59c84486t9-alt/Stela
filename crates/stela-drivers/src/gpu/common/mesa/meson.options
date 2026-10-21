@@ -922,3 +922,9 @@ option(
   value : [],
   description : 'Build native shader compiler libraries without graphics API frontends or device I/O',
 )
+option(
+  'stela-air-llvm-library',
+  type : 'string',
+  value : '',
+  description : 'Absolute LLVM 23 shared-library path for the optional native AIR compiler; empty disables it',
+)

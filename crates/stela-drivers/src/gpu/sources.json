@@ -222,6 +222,24 @@
           "patch_directory": "unicode-ident-1-rs"
         }
       ]
+    },
+    {
+      "name": "llvm-c-air-headers",
+      "url": "https://github.com/llvm/llvm-project.git",
+      "ref": "llvmorg-23.1.1",
+      "commit": "6dfe1677ab8dffbc6ec13d53a1e0215d75147689",
+      "license": "Apache-2.0 WITH LLVM-exception",
+      "imports": [
+        {
+          "from": "llvm/include/llvm-c (selected declarations)",
+          "to": "common/mesa/src/stela/llvm/include/llvm-c"
+        },
+        {
+          "from": "llvm/LICENSE.TXT",
+          "to": "common/mesa/src/stela/llvm/LICENSE.TXT"
+        }
+      ],
+      "scope": "AIR user-space compiler C declarations only; no LLVM implementation. Exact file hashes and two generated-configuration dependency removals are recorded in common/mesa/src/stela/llvm/README.md. Runtime LLVM major 23 is required and separately bound in build receipts."
     }
   ]
 }

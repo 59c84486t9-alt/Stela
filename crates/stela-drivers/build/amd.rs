@@ -23,10 +23,20 @@ pub fn build() {
     let source = manifest.join("src/gpu/common/mesa");
     let build = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"))
         .join("mesa-amd-commands");
-    let meson = tool("STELA_MESON", "meson");
-    let ninja = tool("STELA_NINJA", "ninja");
+    let local = manifest.join("../../.tools/gpu/generators/bin");
+    let mut paths = env::split_paths(&env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    if local.is_dir() {
+        paths.push(local);
+    }
+    let path = env::join_paths(&paths).expect("native tool paths must form a valid PATH");
+    let meson = tool("STELA_MESON", "meson", &paths);
+    let ninja = tool("STELA_NINJA", "ninja", &paths);
     let mut setup = Command::new(meson);
-    setup.arg("setup").env("NINJA", &ninja);
+    setup
+        .arg("setup")
+        .env("NINJA", &ninja)
+        .env("PATH", &path)
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     if build.join("meson-private/coredata.dat").is_file() {
         // Cargo reruns this hook only for changed inputs. Reconfigure alone
         // does not adopt changed CC/CFLAGS in Meson's cached machine state.
@@ -55,6 +65,9 @@ pub fn build() {
     setup.arg(&build).arg(&source);
     run(&mut setup);
     let mut compile = Command::new(ninja);
+    compile
+        .env("PATH", &path)
+        .env("PYTHONDONTWRITEBYTECODE", "1");
     compile.arg("-C").arg(&build).args([
         "src/stela/libstela_amd_commands.a",
         "src/amd/common/libamd_command_support.a",
@@ -81,9 +94,16 @@ pub fn build() {
     }
 }
 
-fn tool(variable: &str, default: &str) -> OsString {
+fn tool(variable: &str, default: &str, paths: &[PathBuf]) -> OsString {
     println!("cargo:rerun-if-env-changed={variable}");
-    env::var_os(variable).unwrap_or_else(|| default.into())
+    env::var_os(variable).unwrap_or_else(|| {
+        paths
+            .iter()
+            .map(|directory| directory.join(default))
+            .find(|candidate| candidate.is_file())
+            .map(PathBuf::into_os_string)
+            .unwrap_or_else(|| default.into())
+    })
 }
 
 fn run(command: &mut Command) {

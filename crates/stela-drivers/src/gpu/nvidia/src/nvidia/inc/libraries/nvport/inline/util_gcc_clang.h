@@ -108,7 +108,7 @@
     __asm__ __volatile__ ("nop");
 #endif
 
-#if (__GNUC__ < 4) || (NVCPU_IS_ARM) || (NVCPU_IS_X86 && PORT_IS_KERNEL_BUILD) || (NVCPU_IS_RISCV64)
+#if (!defined(__clang__) && defined(__GNUC__) && (__GNUC__ < 4)) || (NVCPU_IS_ARM) || (NVCPU_IS_X86 && PORT_IS_KERNEL_BUILD) || (NVCPU_IS_RISCV64)
 #define PORT_UTIL_CLZ_CTX_NOT_DEFINED 1
 #else
 PORT_UTIL_INLINE NvU32 portUtilCountLeadingZeros64(NvU64 n)

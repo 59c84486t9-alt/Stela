@@ -54,7 +54,9 @@ typedef struct
     // the priority ordering should be GPUS > GROUP_DEVICE > GROUP_SUBDEVICE
     //
     NvU32 bLockSema:1;
-    WorkItemFlagsApiLock apiLock:NV_BITFIELD_SIZE_64(WORKITEM_FLAGS_API_LOCK_ENUM_LAST);
+    // Explicit unsigned storage: a signed two-bit enum truncates READ_ONLY (2)
+    // to -2 on the native COFF ABI. Keep the existing packed flag layout.
+    NvU32 apiLock:NV_BITFIELD_SIZE_64(WORKITEM_FLAGS_API_LOCK_ENUM_LAST);
     NvU32 bLockGpus:1;
     NvU32 bLockGpuGroupDevice:1;
     NvU32 bLockGpuGroupSubdevice:1;
