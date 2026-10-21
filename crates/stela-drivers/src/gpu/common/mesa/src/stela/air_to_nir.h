@@ -117,9 +117,11 @@ struct stela_air_options {
  * Failure returns NULL, destroys partial NIR, and reports an explicit error.
  * The caller retains input bytes/digest/build ID and records the exact selected
  * target, workgroup specialization and argument mapping alongside vendor output.
- * Conditional support is bounded acyclic structured diamonds/triangles with
- * exact two-edge integer/FP32 scalar/vector PHIs, one final return, <=128 blocks/merge PHIs
- * and <=32 nested conditionals. Loops, pointer PHIs and general CFGs are refused.
+ * Structured diamonds/triangles and pre-tested natural loops retain exact
+ * integer/FP32 scalar/vector PHIs. Loops require one unconditional preheader,
+ * one distinct unconditional latch and one header exit; iterations are uncapped.
+ * One final return, <=128 blocks/header-or-merge PHIs and <=32 nested constructs.
+ * Nested/multi-latch/body-exit loops, pointer PHIs and general CFGs are refused.
  * LLVM is a native compiler library, not a hostile-input sandbox.
  */
 nir_shader *stela_air_to_nir(const void *bitcode, size_t size, const char *entry,

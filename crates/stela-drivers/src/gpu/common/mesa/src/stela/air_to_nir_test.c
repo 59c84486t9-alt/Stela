@@ -401,6 +401,183 @@ conditional_semantics(void)
 }
 
 static void
+specialize_loop(nir_shader *nir, uint32_t tid)
+{
+   /* Original NIR unrolling is a test oracle for finite specialized inputs.
+    * Translation/codegen keeps the dynamic loop and never applies this cap. */
+   static const nir_shader_compiler_options options = {.max_unroll_iterations = 16};
+   specialize_invocation(nir, tid);
+   nir->options = &options;
+   bool progress;
+   do {
+      progress = nir_opt_loop_unroll(nir);
+      progress |= nir_opt_constant_folding(nir);
+      progress |= nir_opt_dead_cf(nir);
+      progress |= nir_opt_remove_phis(nir);
+      progress |= nir_opt_copy_prop(nir);
+      progress |= nir_opt_dce(nir);
+   } while (progress);
+   nir_validate_shader(nir, "AIR specialized natural-loop effects");
+}
+
+static const char *loop_body =
+   "entry:\n%count = add i32 %tid, 0\nbr label %header\n"
+   "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+   "%x = phi i32 [1, %entry], [%y, %latch]\n"
+   "%y = phi i32 [2, %entry], [%sum, %latch]\n"
+   "%vec = phi <2 x i32> [<i32 3, i32 5>, %entry], [%vnext, %latch]\n"
+   "%flag = phi i1 [false, %entry], [%fnext, %latch]\n"
+   "%last = phi i32 [99, %entry], [%chosen, %latch]\n"
+   "store i32 %i, ptr addrspace(1) %out, align 4\n"
+   "%more = icmp ult i32 %i, %count\nbr i1 %more, label %body, label %exit\n"
+   "body:\n%bit = and i32 %i, 1\n%even = icmp eq i32 %bit, 0\n"
+   "br i1 %even, label %left, label %right\n"
+   "left:\n%lp = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+   "store i32 %x, ptr addrspace(1) %lp, align 4\nbr label %latch\n"
+   "right:\n%rp = getelementptr i32, ptr addrspace(1) %out, i32 2\n"
+   "store i32 %y, ptr addrspace(1) %rp, align 4\nbr label %latch\n"
+   "latch:\n%chosen = phi i32 [%x, %left], [%y, %right]\n"
+   "%next = add i32 %i, 1\n%sum = add i32 %x, %y\n"
+   "%vnext = add <2 x i32> %vec, <i32 1, i32 2>\n%fnext = xor i1 %flag, true\n"
+   "br label %header\n"
+   "exit:\n%xp = getelementptr i32, ptr addrspace(1) %out, i32 3\n"
+   "store i32 %x, ptr addrspace(1) %xp, align 4\n"
+   "%yp = getelementptr i32, ptr addrspace(1) %out, i32 4\n"
+   "store i32 %y, ptr addrspace(1) %yp, align 4\n"
+   "%v0 = extractelement <2 x i32> %vec, i32 0\n"
+   "%v0p = getelementptr i32, ptr addrspace(1) %out, i32 5\n"
+   "store i32 %v0, ptr addrspace(1) %v0p, align 4\n"
+   "%v1 = extractelement <2 x i32> %vec, i32 1\n"
+   "%v1p = getelementptr i32, ptr addrspace(1) %out, i32 6\n"
+   "store i32 %v1, ptr addrspace(1) %v1p, align 4\n"
+   "%flag32 = zext i1 %flag to i32\n"
+   "%fp = getelementptr i32, ptr addrspace(1) %out, i32 7\n"
+   "store i32 %flag32, ptr addrspace(1) %fp, align 4\n"
+   "%lastp = getelementptr i32, ptr addrspace(1) %out, i32 8\n"
+   "store i32 %last, ptr addrspace(1) %lastp, align 4\nret void\n";
+
+static void
+loop_semantics(void)
+{
+   /* Independently tabulated simultaneous state (x'=y, y'=x+y). A sequential
+    * PHI substitution would produce different state after the first trip. */
+   const uint32_t x[] = {1, 2, 3, 5, 8}, y[] = {2, 3, 5, 8, 13};
+   for (unsigned trips = 0; trips < ARRAY_SIZE(x); trips++) {
+      nir_shader *nir = translate_body(loop_body);
+      unsigned loops = 0;
+      nir_foreach_function_impl(impl, nir) {
+         foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+            if (node->type == nir_cf_node_loop)
+               loops++;
+         }
+      }
+      CHECK(loops == 1); /* Production NIR retains real dynamic control flow. */
+      specialize_loop(nir, trips);
+      uint64_t addresses[15];
+      uint32_t values[15];
+      unsigned effects = 0;
+      for (unsigned i = 0; i <= trips; i++) {
+         addresses[effects] = 0x100000;
+         values[effects++] = i; /* Header runs once even for zero trips. */
+         if (i < trips) {
+            addresses[effects] = (i & 1) ? 0x100008 : 0x100004;
+            values[effects++] = (i & 1) ? y[i] : x[i];
+         }
+      }
+      uint32_t last = trips ? ((trips & 1) ? x[trips - 1] : y[trips - 1]) : 99;
+      const uint32_t final[] = {x[trips], y[trips], 3 + trips, 5 + 2 * trips, trips & 1, last};
+      for (unsigned i = 0; i < ARRAY_SIZE(final); i++) {
+         addresses[effects] = 0x10000c + 4 * i;
+         values[effects++] = final[i];
+      }
+      check_stores(nir, addresses, values, effects);
+      ralloc_free(nir);
+   }
+   const char *sequential =
+      "entry:\n%n = and i32 %tid, 3\nbr label %h1\n"
+      "h1:\n%i = phi i32 [0, %entry], [%inext, %l1]\n"
+      "%x = phi i32 [%xnext, %l1], [10, %entry]\n"
+      "%c1 = icmp ult i32 %i, %n\nbr i1 %c1, label %l1, label %between\n"
+      "l1:\n%inext = add i32 %i, 1\n%xnext = add i32 %x, 1\nbr label %h1\n"
+      "between:\n%first = phi i32 [%x, %h1]\n"
+      "store i32 %first, ptr addrspace(1) %out, align 4\nbr label %h2\n"
+      "h2:\n%j = phi i32 [0, %between], [%jnext, %l2]\n"
+      "%r = phi i32 [%first, %between], [%rnext, %l2]\n"
+      "%c2 = icmp ult i32 %j, %n\nbr i1 %c2, label %l2, label %exit\n"
+      "l2:\n%jnext = add i32 %j, 1\n%rnext = add i32 %r, 2\nbr label %h2\n"
+      "exit:\n%p = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 %r, ptr addrspace(1) %p, align 4\nret void\n";
+   for (unsigned trips = 0; trips < 4; trips++) {
+      nir_shader *nir = translate_body(sequential);
+      specialize_loop(nir, trips);
+      const uint64_t addresses[] = {0x100000, 0x100004};
+      const uint32_t values[] = {10 + trips, 10 + 3 * trips};
+      check_stores(nir, addresses, values, 2);
+      ralloc_free(nir);
+   }
+   const char *conditional =
+      "entry:\n%n = and i32 %tid, 3\n%bit = and i32 %tid, 4\n"
+      "%take = icmp ne i32 %bit, 0\nbr i1 %take, label %pre, label %other\n"
+      "pre:\nbr label %header\n"
+      "header:\n%i = phi i32 [0, %pre], [%next, %latch]\n"
+      "store i32 %i, ptr addrspace(1) %out, align 4\n"
+      "%more = icmp ult i32 %i, %n\nbr i1 %more, label %latch, label %join\n"
+      "latch:\n%next = add i32 %i, 1\nbr label %header\n"
+      "other:\nbr label %join\n"
+      "join:\n%result = phi i32 [%i, %header], [99, %other]\n"
+      "%p = getelementptr i32, ptr addrspace(1) %out, i32 1\n"
+      "store i32 %result, ptr addrspace(1) %p, align 4\nret void\n";
+   for (unsigned tid = 0; tid < 8; tid++) {
+      nir_shader *nir = translate_body(conditional);
+      specialize_loop(nir, tid);
+      unsigned trips = tid & 3, effects = 0;
+      uint64_t addresses[5];
+      uint32_t values[5];
+      if (tid & 4) {
+         for (unsigned i = 0; i <= trips; i++) {
+            addresses[effects] = 0x100000;
+            values[effects++] = i;
+         }
+      }
+      addresses[effects] = 0x100004;
+      values[effects++] = (tid & 4) ? trips : 99;
+      check_stores(nir, addresses, values, effects);
+      ralloc_free(nir);
+   }
+}
+
+static void
+loop_refusals(void)
+{
+   expect_refusal("entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %header, label %body\n"
+      "header:\nbr i1 %c, label %body, label %exit\nbody:\nbr label %header\nexit:\nret void\n",
+      "", 100, STELA_AIR_CONTROL_FLOW); /* Irreducible side entry. */
+   expect_refusal("entry:\nbr label %header\nheader:\n%c = icmp eq i32 %tid, 0\n"
+      "br i1 %c, label %body, label %exit\nbody:\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
+   expect_refusal("entry:\nbr label %header\nheader:\n%c = icmp eq i32 %tid, 0\n"
+      "br i1 %c, label %body, label %exit\nbody:\nbr i1 %c, label %l1, label %l2\n"
+      "l1:\nbr label %header\nl2:\nbr label %header\nexit:\nret void\n",
+      "", 100, STELA_AIR_CONTROL_FLOW);
+   expect_refusal("entry:\nbr label %h1\nh1:\n%c = icmp eq i32 %tid, 0\n"
+      "br i1 %c, label %pre, label %exit\npre:\nbr label %h2\n"
+      "h2:\nbr i1 %c, label %l2, label %l1\nl2:\nbr label %h2\n"
+      "l1:\nbr label %h1\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
+   expect_refusal("entry:\nbr label %header\nheader:\n"
+      "%p = phi ptr addrspace(1) [%out, %entry], [%p, %latch]\n"
+      "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_TYPE);
+   expect_refusal("entry:\nbr label %header\nheader:\nbr label %body\n"
+      "body:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_CONTROL_FLOW);
+   expect_refusal(loop_body, "", 20, STELA_AIR_LIMIT);
+   expect_refusal("entry:\nbr label %header\nheader:\n"
+      "%i = phi i32 [0, %entry], [1, %exit]\n"
+      "%c = icmp eq i32 %tid, 0\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\nbr label %header\nexit:\nret void\n", "", 100, STELA_AIR_VERIFY);
+}
+
+static void
 conditional_refusals(void)
 {
    expect_refusal("entry:\nbr label %loop\nloop:\nbr label %loop\n", "", 100, STELA_AIR_CONTROL_FLOW);
@@ -606,6 +783,52 @@ static void
 ieee_store(const char *body, uint32_t expected)
 {
    constant_store_input(ieee_bitcode(stela_air_test_prefix, body), expected, 0x100000);
+}
+
+static const char *floating_loop_body =
+   "entry:\n%count = add i32 %tid, 0\nbr label %header\n"
+   "header:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+   "%x = phi float [1.0, %entry], [%xnext, %latch]\n"
+   "%v = phi <2 x float> [<float 1.0, float -0.0>, %entry], [%vnext, %latch]\n"
+   "store float %x, ptr addrspace(1) %out, align 4\n"
+   "%done = icmp uge i32 %i, %count\nbr i1 %done, label %exit, label %latch\n"
+   "latch:\n%next = add i32 %i, 1\n%xnext = fadd float %x, 0.5\n"
+   "%vnext = fadd <2 x float> %v, <float 0.5, float -0.0>\nbr label %header\n"
+   "exit:\n%result = phi float [%x, %header]\n"
+   "%v0 = extractelement <2 x float> %v, i32 0\n"
+   "%p0 = getelementptr float, ptr addrspace(1) %out, i32 1\n"
+   "store float %v0, ptr addrspace(1) %p0, align 4\n"
+   "%v1 = extractelement <2 x float> %v, i32 1\n"
+   "%p1 = getelementptr float, ptr addrspace(1) %out, i32 2\n"
+   "store float %v1, ptr addrspace(1) %p1, align 4\n"
+   "%p2 = getelementptr float, ptr addrspace(1) %out, i32 3\n"
+   "store float %result, ptr addrspace(1) %p2, align 4\nret void\n";
+
+static void
+floating_loop_semantics(void)
+{
+   const uint32_t values[] = {0x3f800000, 0x3fc00000, 0x40000000, 0x40200000, 0x40400000};
+   for (unsigned trips = 0; trips < ARRAY_SIZE(values); trips++) {
+      LLVMMemoryBufferRef input = ieee_bitcode(stela_air_test_prefix, floating_loop_body);
+      struct stela_air_error error;
+      nir_shader *nir = translate(input, &test_nir_options, 1000, &error);
+      CHECK(nir);
+      LLVMDisposeMemoryBuffer(input);
+      specialize_loop(nir, trips);
+      uint64_t addresses[8];
+      uint32_t expected[8];
+      for (unsigned i = 0; i <= trips; i++) {
+         addresses[i] = 0x100000;
+         expected[i] = values[i];
+      }
+      addresses[trips + 1] = 0x100004;
+      addresses[trips + 2] = 0x100008;
+      addresses[trips + 3] = 0x10000c;
+      expected[trips + 1] = expected[trips + 3] = values[trips];
+      expected[trips + 2] = 0x80000000; /* Carried negative zero remains exact. */
+      check_stores(nir, addresses, expected, trips + 4);
+      ralloc_free(nir);
+   }
 }
 
 static void
@@ -975,8 +1198,11 @@ tests(void)
    LLVMDisposeMemoryBuffer(input);
    constant_semantics();
    conditional_semantics();
+   loop_semantics();
+   loop_refusals();
    conditional_refusals();
    floating_semantics();
+   floating_loop_semantics();
    floating_backend_options();
    floating_contracts();
    qualified_floating_semantics();
@@ -1116,7 +1342,9 @@ main(void)
 #ifdef STELA_AIR_TEST_NAK
    nak_codegen(stela_air_test_store_body, "integer", false);
    nak_codegen(conditional_body, "nested-conditional", false);
+   nak_codegen(loop_body, "natural-loop", false);
    nak_codegen(floating_body, "ieee-fp32", true);
+   nak_codegen(floating_loop_body, "ieee-fp32-natural-loop", true);
    char *comparisons = floating_comparison_body();
    nak_codegen(comparisons, "ieee-fp32-comparisons", true);
    free(comparisons);
