@@ -233,7 +233,10 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
             .split_ascii_whitespace()
             .any(|word| matches!(word, "--input" | "--tss" | "--guest-network"));
     let storage = if host_devices {
-        Some(storage::discover()?)
+        crate::status::begin("Finding the PCI devices Stela drives itself");
+        let found = storage::discover()?;
+        crate::status::done("");
+        Some(found)
     } else {
         None
     };
@@ -257,10 +260,13 @@ fn inputs(options: &[u8], mut volume: FileSystem) -> Result<Inputs, &'static str
         // The install medium's pieces are checked through the firmware's
         // FAT driver now, while it is there; the engine reads them through
         // its own after boot services end.
-        (None, Some(path)) => Some(crate::engine::bundle::with_inventory(
-            path,
-            crate::engine::install::check_pieces,
-        )?),
+        (None, Some(path)) => {
+            crate::status::begin("Checking the macOS install files on the USB");
+            let inventory =
+                crate::engine::bundle::with_inventory(path, crate::engine::install::check_pieces)?;
+            crate::status::done("");
+            Some(inventory)
+        }
         (None, None) => None,
     };
     if let Some(inventory) = inventory {
@@ -354,10 +360,13 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
     if !options.starts_with(b"--system") {
         return None;
     }
-    match crate::selection::peek(options.to_vec()) {
+    crate::status::begin("Checking the internal SSD and NVRAM");
+    let held = match crate::selection::peek(options.to_vec()) {
         Err(refusal @ (Refusal::BlankDisk | Refusal::RecoveryMode)) => Some(held(refusal)),
         _ => None,
-    }
+    };
+    crate::status::done(held.unwrap_or(""));
+    held
 }
 
 /// Run the engine; never returns.
@@ -368,7 +377,10 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem, log: Option<Guid>) -> 
     // NVRAM holds in recovery mode waits at the startup choices, as LLB
     // waits for a restore host, until one that boots is chosen.
     let options = loop {
-        match crate::selection::route(options) {
+        crate::status::begin("Choosing what to start, as NVRAM says");
+        let routed = crate::selection::route(options);
+        crate::status::done("");
+        match routed {
             Ok(routed) => break routed,
             Err(Refusal::Other(error)) => output::fatal(error),
             Err(refusal) => {
@@ -403,6 +415,7 @@ fn load(
     storage: Option<stela_drivers::Handoff>,
     log: Option<Guid>,
 ) -> Result<core::convert::Infallible, &'static str> {
+    crate::status::begin("Setting up Stela's memory");
     // SAFETY: written once at entry, read here.
     let snapshot = unsafe { *PRISTINE.0.get() }.ok_or("no pristine image copy")?;
     let image = firmware::Image::loaded()?;
@@ -593,6 +606,7 @@ fn load(
     let engine_entry =
         layout::image() + (crate::engine::entry as *const () as u64 - image.start as u64);
 
+    crate::status::done("");
     let mut history = [0; crate::status::HISTORY_BYTES];
     let history_bytes = crate::status::history(&mut history);
     crate::output::leave_boot_services();

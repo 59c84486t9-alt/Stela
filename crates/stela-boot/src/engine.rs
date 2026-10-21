@@ -1421,9 +1421,6 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::arguments(format_args!("host storage refusal: {error}\n"));
             output::fatal(&format!("host storage could not be opened: {error}"))
         });
-        if let Some(log) = log {
-            crate::log_file::resume(log);
-        }
         let count = |count: usize, one: &str, many: &str| {
             format!("{count} {}", if count == 1 { one } else { many })
         };
@@ -1436,6 +1433,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             ),
             count(usb_disks.len(), "more disk", "more disks")
         ));
+        if let Some(log) = log {
+            crate::log_file::resume(log);
+        }
         if let Some(store) = store {
             translations::set_partition(store);
         }
@@ -1542,7 +1542,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
                 .map_or("", |(directory, _)| directory);
             let hashes = restore::inventory_file(handoff, crate::system::INSTALL_PIECES_FILE)
                 .ok_or("the install medium's piece hashes were not loaded")?;
-            install::open(partition, &manifest, directory, hashes).map(restore::Source::new)
+            crate::status::begin("Finding the macOS install files on the USB");
+            let opened = install::open(partition, &manifest, directory, hashes)?;
+            crate::status::done("");
+            Ok(restore::Source::new(opened))
         })),
         (None, None) => None,
     }
@@ -1630,6 +1633,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             display::Display::new(screen, options.dram_base + options.ram_bytes)
         });
     let (entry, x0) = if options.bundle {
+        crate::status::begin("Loading macOS into memory");
         let files = &handoff.files[..handoff.file_count];
         let framebuffer = display.as_ref().map(display::Display::framebuffer);
         let (dram_base, ram_bytes) = (options.dram_base, options.ram_bytes);
@@ -1654,6 +1658,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         if let Some(display) = &display {
             display.clear(&mut bare);
         }
+        crate::status::done("");
         (loaded.pc, loaded.x0)
     } else {
         // SAFETY: the guest image was left allocated by the loader.
@@ -1697,6 +1702,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         Some(Some(tree)) => Some(tree),
         None => None,
     };
+    if tree.is_some() {
+        crate::status::begin("Setting up the Mac's hardware");
+    }
     let mut board = tree.map(|tree| {
         soc::board(tree).unwrap_or_else(|error| {
             output::arguments(format_args!("board refusal: {error}\n"));
@@ -1787,6 +1795,9 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             output::fatal("the board devices could not be placed")
         }
     };
+    if tree.is_some() {
+        crate::status::done(profile.name);
+    }
     let mut machine = Machine::new(cpu, bare, devices, profile, target);
     if options.survey {
         output::arguments(format_args!(

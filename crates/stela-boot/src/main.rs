@@ -13,7 +13,7 @@
 #![no_std]
 #![no_main]
 extern crate alloc;
-use alloc::{vec, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 use core::{arch::asm, panic::PanicInfo};
 use stela_compiler::{GuestAddress, GuestState, TargetCpu};
 use stela_runtime::{
@@ -178,12 +178,16 @@ fn main() -> Status {
     // SAFETY: fresh LOADER_DATA pages that Stela owns for the whole boot,
     // initialized before any allocation.
     unsafe { ALLOCATOR.initialize(heap.as_ptr(), HEAP_BYTES) };
-    let log = log_file::open();
-    firmware::connect_all();
     status::set_clock(firmware::tsc_hz());
     firmware::start_ticker();
+    let log = log_file::open();
+    status::begin("Connecting the firmware's drivers to every device");
+    let handles = firmware::connect_all();
+    status::done(&format!("{handles} handles"));
+    status::begin("Reading Stela's settings");
     let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
+    status::done("");
     let held = system::held_at_start(&options);
     let options = choice::choose(&mut volume, options, held);
     status::take_screen(console::Framebuffer::from_firmware());

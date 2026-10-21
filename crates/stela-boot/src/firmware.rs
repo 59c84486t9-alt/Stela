@@ -74,13 +74,15 @@ fn boot_volume() -> Option<FileSystem> {
 /// firmware that boots fast connects only the path to the boot loader, and
 /// the bundle, the install medium and the host disks lie on other
 /// partitions and devices. A controller no driver takes stays as it was.
-pub(crate) fn connect_all() {
+/// Returns how many handles there were.
+pub(crate) fn connect_all() -> usize {
     let Ok(handles) = boot::locate_handle_buffer(boot::SearchType::AllHandles) else {
-        return;
+        return 0;
     };
     for &handle in handles.iter() {
         let _ = boot::connect_controller(handle, &[], None, true);
     }
+    handles.len()
 }
 
 /// The first file system that has `stela.cfg`.
