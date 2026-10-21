@@ -1,4 +1,4 @@
-//! The architectural external-debug Software Lock of a CoreSight component.
+//! External-debug Software Lock and Apple UTTDBG PC sampling.
 //!
 //! Arm SysReg_xml_A_profile-2026-06 `ext-edlar.xml` and `ext-edlsr.xml`
 //! specify the 32-bit write-only EDLAR at +0xfb0 and read-only EDLSR at
@@ -83,10 +83,111 @@ impl MmioDevice for SoftwareLock {
     }
 }
 
+/// Apple UTTDBG is the fourth 64 KiB region of a CPU's CoreSight map
+/// (XNU `osfmk/arm64/proc_reg.h`, `CORESIGHT_UTT`).
+pub const UTT_OFFSET: u64 = 0x3_0000;
+/// The UTTDBG PC sample register, relative to its own region.
+pub const PC_SAMPLE: u64 = 0x90;
+
+/// One PE's UTTDBG PC sampler.
+///
+/// XNU `osfmk/arm/model_dep.c` `panic_display_hung_cpus_help` first reads
+/// +0x90 as a word to trigger a sample, then reads the same address as a
+/// doubleword. Without the word read the initial result is zero. The exact
+/// 26A434 kernel does both at file offsets 0x4d7dd60 and 0x4d7dd64.
+/// The engine publishes actual execution PCs; the trigger latches that
+/// observation so another PE's execution cannot change a sample being read.
+/// The debug-halt wrapper and all other UTTDBG registers remain unsupported.
+#[derive(Debug, Clone, Default)]
+pub struct PcSampler {
+    observed: u64,
+    sampled: u64,
+}
+
+impl PcSampler {
+    /// Publish the most recent execution PC of the PE this sampler belongs to.
+    /// This changes the sampling source, not an already-triggered sample.
+    pub fn observe(&mut self, pc: u64) {
+        self.observed = pc;
+    }
+}
+
+impl MmioDevice for PcSampler {
+    fn name(&self) -> &'static str {
+        "utt-pc-sampler"
+    }
+
+    fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        match (offset, width) {
+            (PC_SAMPLE, Width::Word) => {
+                self.sampled = self.observed;
+                Ok(self.sampled & Width::Word.mask())
+            }
+            (PC_SAMPLE, Width::Double) => Ok(self.sampled),
+            _ => Err(refuse(
+                self.name(),
+                offset,
+                width,
+                Direction::Read,
+                "only the word trigger and doubleword PC sample are described",
+            )),
+        }
+    }
+
+    fn write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        _: u64,
+        _: &mut Access<'_>,
+    ) -> Result<(), MmioError> {
+        Err(refuse(
+            self.name(),
+            offset,
+            width,
+            Direction::Write,
+            "the PC sampler is read-only; UTTDBG halt controls are not modeled",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::apple::interrupt::InterruptLatch;
+    #[test]
+    fn pc_sampler_latches_only_on_word_read_and_keeps_per_pe_state() {
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        let mut first = PcSampler::default();
+        let mut second = PcSampler::default();
+        let pc = 0xffff_fe00_3a3a_9d60;
+        first.observe(pc);
+        second.observe(pc + 4);
+        assert_eq!(first.read(PC_SAMPLE, Width::Double, &mut access), Ok(0));
+        assert_eq!(
+            first.read(PC_SAMPLE, Width::Word, &mut access),
+            Ok(pc & 0xffff_ffff)
+        );
+        first.observe(pc + 8);
+        assert_eq!(first.read(PC_SAMPLE, Width::Double, &mut access), Ok(pc));
+        assert_eq!(second.read(PC_SAMPLE, Width::Double, &mut access), Ok(0));
+        second.read(PC_SAMPLE, Width::Word, &mut access).unwrap();
+        assert_eq!(
+            second.read(PC_SAMPLE, Width::Double, &mut access),
+            Ok(pc + 4)
+        );
+        assert!(first.read(PC_SAMPLE, Width::Half, &mut access).is_err());
+        assert!(first.read(PC_SAMPLE + 4, Width::Word, &mut access).is_err());
+        assert!(first.write(PC_SAMPLE, Width::Word, 0, &mut access).is_err());
+        assert_eq!(first.read(PC_SAMPLE, Width::Double, &mut access), Ok(pc));
+        first.read(PC_SAMPLE, Width::Word, &mut access).unwrap();
+        assert_eq!(
+            first.read(PC_SAMPLE, Width::Double, &mut access),
+            Ok(pc + 8)
+        );
+    }
+
     #[test]
     fn key_unlocks_other_words_relock_and_unsupported_accesses_preserve_state() {
         let mut sink = InterruptLatch::new();

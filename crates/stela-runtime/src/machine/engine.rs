@@ -432,6 +432,12 @@ pub enum DeviceError {
 /// PE making the access, as [`CpuProfile::processors`] numbers it, and `now`
 /// is the system counter value (24 MHz ticks) of the access.
 pub trait Devices {
+    /// The PE a read triggers a debug PC sample of, when this is a sampler.
+    fn pc_sample_target(&self, _physical: u64, _bytes: u8) -> Option<usize> {
+        None
+    }
+    /// Supply that PE's execution PC immediately before its sample trigger.
+    fn observe_pc_sample(&mut self, _physical: u64, _pc: u64) {}
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError>;
     fn write(
         &mut self,
@@ -1641,6 +1647,14 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// A device read by the running PE, watched.
     fn device_read(&mut self, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
         self.host.speculation_barrier();
+        if let Some(cpu) = self.devices.pc_sample_target(physical, bytes) {
+            let pc = self.processor_pc(cpu).ok_or_else(|| {
+                DeviceError::Refused(format!(
+                    "debug PC sample: PE {cpu} has no powered execution state"
+                ))
+            })?;
+            self.devices.observe_pc_sample(physical, pc);
+        }
         let result = self.devices.read(self.current, physical, bytes, now);
         self.watch(physical, bytes, result.as_ref().ok().copied(), false);
         result

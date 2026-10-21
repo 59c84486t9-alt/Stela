@@ -941,10 +941,15 @@ fn devices<'f>(
     for spmi in board.map_or(&[][..], |board| &board.spmis) {
         devices.add_spmi(spmi, clock.wall)?;
     }
-    for &physical in board.map_or(&[][..], |board| &board.coresight) {
+    for component in board.map_or(&[][..], |board| &board.coresight) {
         devices
-            .add_coresight_lock(physical)
+            .add_coresight_lock(component.physical)
             .map_err(|error| alloc::format!("CoreSight lock placement: {error:?}"))?;
+        if let Some(physical) = component.pc_sampler() {
+            devices
+                .add_coresight_sampler(component.cpu, physical)
+                .map_err(|error| alloc::format!("UTTDBG sampler placement: {error:?}"))?;
+        }
     }
     for block in board.map_or(&[][..], |board| &board.lockdown) {
         let range = Range {
@@ -1354,14 +1359,17 @@ fn panic_message(message: &str) -> String {
     message.replace("\" \"", "").replace('"', "").trim().into()
 }
 
-/// How the guest went down: its first kernel panic's message when it
-/// printed one, else `otherwise`.
-fn guest_down(otherwise: String) -> String {
+/// The first panic, preferring the original message recovered by a nested panic.
+fn guest_panic() -> Option<String> {
     let first = |panic: &output::Global<Option<String>>| {
         panic.0.try_borrow().ok().and_then(|panic| panic.clone())
     };
-    let panic = first(&GUEST_NESTED_PANIC).or_else(|| first(&GUEST_PANIC));
-    match panic {
+    first(&GUEST_NESTED_PANIC).or_else(|| first(&GUEST_PANIC))
+}
+
+/// How the guest went down: the first panic, else `otherwise`.
+fn guest_down(otherwise: String) -> String {
+    match guest_panic() {
         Some(message) => format!("macOS crashed: {message}"),
         None => otherwise,
     }
@@ -2878,7 +2886,12 @@ fn finish(
             )
         }
         Stop::Reset(reset) => {
-            output::arguments(format_args!("STOP reset: {reset}\n"));
+            if let Some(message) = guest_panic() {
+                output::arguments(format_args!("STOP macOS crashed: {message}\n"));
+                output::arguments(format_args!("RESET after panic: {reset}\n"));
+            } else {
+                output::arguments(format_args!("STOP reset: {reset}\n"));
+            }
             // The run is over: its blocks' memory goes to proving the new
             // ones.
             machine.discard_blocks();

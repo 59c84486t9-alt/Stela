@@ -123,6 +123,15 @@ impl<H: Host, D: Devices> Machine<H, D> {
             .collect()
     }
 
+    /// The execution PC a board debug sampler observes for a powered PE.
+    pub(super) fn processor_pc(&self, cpu: usize) -> Option<u64> {
+        match self.peers.get(cpu)? {
+            Peer::Running if !down(self.waiting) => Some(self.cpu.pc),
+            Peer::Parked(parked) if !down(parked.waiting) => Some(parked.cpu.pc),
+            _ => None,
+        }
+    }
+
     /// Release the PEs devices started, then keep the running PE until its
     /// time slice ends or it waits. Otherwise run the next PE that can, round
     /// robin from the running one, or wait on the host until one can (or,
@@ -645,6 +654,34 @@ mod tests {
             Peer::Parked(parked) => &parked.cpu,
             _ => panic!("PE {pe} is not parked"),
         }
+    }
+
+    #[test]
+    fn debug_pc_sample_latches_the_requested_parked_pe() {
+        use crate::machine::apple::AppleDevices;
+        use crate::platform::apple::coresight::PC_SAMPLE;
+        let base = 0x2_1004_0000;
+        let mut devices = AppleDevices::new();
+        devices.add_coresight_sampler(1, base).unwrap();
+        let mut machine = board(&[], devices, alloc::vec![identity(0), identity(1)]);
+        let pc = BASE + 0x400;
+        machine.peers[1] = Peer::Parked(Box::new(Parked {
+            cpu: Cpu::of(machine.profile.chip, pc, Pstate::reset(2)),
+            event_sample: None,
+            waiting: None,
+        }));
+        assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(0));
+        machine.device_read(base + PC_SAMPLE, 4, 0).unwrap();
+        assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(pc));
+        if let Peer::Parked(parked) = &mut machine.peers[1] {
+            parked.cpu.pc += 4;
+        }
+        assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(pc));
+        machine.device_read(base + PC_SAMPLE, 4, 0).unwrap();
+        assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(pc + 4));
+        machine.peers[1] = Peer::Off;
+        assert!(machine.device_read(base + PC_SAMPLE, 4, 0).is_err());
+        assert_eq!(machine.device_read(base + PC_SAMPLE, 8, 0), Ok(pc + 4));
     }
 
     #[test]

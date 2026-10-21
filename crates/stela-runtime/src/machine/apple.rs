@@ -25,7 +25,7 @@ use crate::platform::apple::{
     bus::{Access, Bus, DeviceId, MapError, MmioError, Width},
     cluster::{self, Cluster},
     core_counters::{self, CoreCounters},
-    coresight::{self, SoftwareLock},
+    coresight::{self, PcSampler, SoftwareLock},
     cpm::Cpm,
     cpustart::{self, CpuStart},
     dart::{self, Dart},
@@ -131,6 +131,7 @@ pub struct AppleDevices {
     /// Each PE's CLPC sampler counters (`platform::apple::core_counters`),
     /// by PE number.
     core_counters: Vec<Option<DeviceId>>,
+    pc_samplers: Vec<(usize, u64, DeviceId)>,
     starts: Vec<Start>,
     selects: Vec<SelectWire>,
     /// The AP GPIO bank's base and the board nets on its input pins.
@@ -422,6 +423,7 @@ impl AppleDevices {
             cpu_start: None,
             reset_vectors: Vec::new(),
             core_counters: Vec::new(),
+            pc_samplers: Vec::new(),
             starts: Vec::new(),
             selects: Vec::new(),
             gpio: None,
@@ -720,6 +722,17 @@ impl AppleDevices {
             8,
             coresight::ACCESS,
         )
+    }
+
+    /// The UTTDBG sampler of PE `cpu`, at its DT-placed UTT region base.
+    pub fn add_coresight_sampler(&mut self, cpu: usize, physical: u64) -> Result<(), MapError> {
+        let register = physical
+            .checked_add(coresight::PC_SAMPLE)
+            .ok_or(MapError::Overflow)?;
+        let device = self.bus.add(Box::new(PcSampler::default()));
+        self.bus.map(device, register, 8, coresight::PC_SAMPLE)?;
+        self.pc_samplers.push((cpu, register, device));
+        Ok(())
     }
 
     /// The lockdown registers of a CPU implementation block named `name`,
@@ -1949,6 +1962,25 @@ fn reset_reason(access: &Access<'_>) -> Option<Reset> {
 }
 
 impl Devices for AppleDevices {
+    fn pc_sample_target(&self, physical: u64, bytes: u8) -> Option<usize> {
+        self.pc_samplers
+            .iter()
+            .find_map(|&(cpu, register, _)| (physical == register && bytes == 4).then_some(cpu))
+    }
+
+    fn observe_pc_sample(&mut self, physical: u64, pc: u64) {
+        if let Some(&(_, _, device)) = self
+            .pc_samplers
+            .iter()
+            .find(|&&(_, register, _)| register == physical)
+        {
+            self.bus
+                .device_mut::<PcSampler>(device)
+                .expect("registered PC sampler")
+                .observe(pc);
+        }
+    }
+
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
         let width = width(bytes)?;
         let mut access = Access::new(cpu, now, &mut self.latch);

@@ -1350,8 +1350,8 @@ pub struct Board {
     /// Every PE's CLPC sampler counters in its `cpu-impl-reg`, on a SoC
     /// whose counters are known.
     pub counters: Vec<CounterBlock>,
-    /// CPU CoreSight component bases, for their architectural Software Locks.
-    pub coresight: Vec<u64>,
+    /// CPU CoreSight regions, retaining the PE identity and aperture length.
+    pub coresight: Vec<CoreSight>,
     /// The AMCC lock registers of `/chosen/lock-regs/amcc`, when iBoot
     /// described them.
     pub memory_controller: Option<MemoryController>,
@@ -3335,9 +3335,26 @@ fn watchdog_side(
     Ok(Some(WatchdogSide { words, triggers }))
 }
 
-/// The DT region can contain several components. This model places only
-/// the first component's described management pair, within that region.
-fn place_coresight(pairs: &[(u64, u64)]) -> Result<u64, String> {
+/// A CPU's CoreSight aperture; components exist only within its DT length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CoreSight {
+    pub cpu: usize,
+    pub physical: u64,
+    pub bytes: u64,
+}
+
+impl CoreSight {
+    /// The UTTDBG region base, only when the DT aperture contains its sampler.
+    pub fn pc_sampler(&self) -> Option<u64> {
+        (self.bytes >= coresight::UTT_OFFSET + coresight::PC_SAMPLE + 8)
+            .then(|| self.physical.checked_add(coresight::UTT_OFFSET))
+            .flatten()
+    }
+}
+
+/// Validate the DT aperture before placing its lock pair and, when it fits,
+/// the UTTDBG PC sampler. Preserve the owner even when other PEs lack a map.
+fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String> {
     let [(physical, bytes)] = pairs else {
         return Err("CPU CoreSight map must describe one component".into());
     };
@@ -3347,7 +3364,11 @@ fn place_coresight(pairs: &[(u64, u64)]) -> Result<u64, String> {
     {
         return Err("CPU CoreSight component is empty, unaligned or overflows its page".into());
     }
-    Ok(*physical)
+    Ok(CoreSight {
+        cpu,
+        physical: *physical,
+        bytes: *bytes,
+    })
 }
 
 /// The SoC's CPU start registers, and its CPU clusters and always-on eFuses
@@ -4404,7 +4425,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .visit(&mut |node| {
             if let Some(cluster_type) = node.property("cluster-type") {
                 if node.property("coresight-reg").is_some() {
-                    debug_components.push(node.pairs("coresight-reg"));
+                    debug_components.push((found.len(), node.pairs("coresight-reg")));
                 }
                 found.push((
                     cluster_type.first().copied(),
@@ -4420,7 +4441,12 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         .ok_or("DeviceTree walk failed")?;
     let coresight = debug_components
         .into_iter()
-        .map(|pairs| place_coresight(&pairs.ok_or("CPU CoreSight reg contains partial records")?))
+        .map(|(cpu, pairs)| {
+            place_coresight(
+                cpu,
+                &pairs.ok_or("CPU CoreSight reg contains partial records")?,
+            )
+        })
         .collect::<Result<Vec<_>, String>>()?;
     let processors = found
         .into_iter()
@@ -4635,9 +4661,19 @@ mod tests {
     #[test]
     fn coresight_lock_uses_the_dt_component_base_and_stays_inside_its_region() {
         assert_eq!(
-            place_coresight(&[(0x2_1001_0000, 0x300c8)]).unwrap(),
-            0x2_1001_0000
+            place_coresight(3, &[(0x2_1001_0000, 0x300c8)]).unwrap(),
+            CoreSight {
+                cpu: 3,
+                physical: 0x2_1001_0000,
+                bytes: 0x300c8
+            }
         );
+        let mut component = place_coresight(3, &[(0x2_1001_0000, 0x300c8)]).unwrap();
+        assert_eq!(component.pc_sampler(), Some(0x2_1004_0000));
+        component.bytes = coresight::UTT_OFFSET + coresight::PC_SAMPLE + 7;
+        assert_eq!(component.pc_sampler(), None);
+        component.bytes += 1;
+        assert_eq!(component.pc_sampler(), Some(0x2_1004_0000));
         for pairs in [
             vec![],
             vec![(0x2_1001_0001, 0x3c8)],
@@ -4645,7 +4681,7 @@ mod tests {
             vec![(0, 0x3c8)],
             vec![(u64::MAX - 0xfff, 4)],
         ] {
-            assert!(place_coresight(&pairs).is_err());
+            assert!(place_coresight(0, &pairs).is_err());
         }
     }
 
@@ -5819,7 +5855,21 @@ mod tests {
             }
         );
         assert_eq!(found.watchdog.irq, 379);
-        assert_eq!(found.coresight, vec![0x2_1001_0000, 0x2_1101_0000]);
+        assert_eq!(
+            found.coresight,
+            vec![
+                CoreSight {
+                    cpu: 0,
+                    physical: 0x2_1001_0000,
+                    bytes: 0x300c8
+                },
+                CoreSight {
+                    cpu: 1,
+                    physical: 0x2_1101_0000,
+                    bytes: 0x300c8
+                },
+            ]
+        );
         // Each PE's cpu-impl-reg and each cluster's cpm-impl-reg, once.
         let block = |name, physical, control, cpu| LockdownBlock {
             name,
