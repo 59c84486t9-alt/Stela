@@ -7,4 +7,5 @@ pub mod cdc;
 pub mod ethernet;
 pub mod hid;
 pub mod storage;
+pub mod typec;
 pub mod xhci;
