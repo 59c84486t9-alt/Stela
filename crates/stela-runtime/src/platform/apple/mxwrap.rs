@@ -118,10 +118,14 @@ impl MxWrap {
             return Err("MxWrap DMA on a stopped coprocessor");
         }
         let mut produced = Vec::new();
-        self.firmware.dma(port, &mut produced)?;
+        let result = self.firmware.dma(port, &mut produced);
+        // Earlier DMA writes and their emitted notifications can already be
+        // committed when a later transfer faults. Retain those messages in
+        // FIFO/backlog order and publish their actual visibility before the
+        // error reaches the AP; repairing DMA must not replay or erase them.
         self.deliver(produced);
         self.update_lines(port.access);
-        Ok(())
+        result
     }
 
     fn start(&mut self) -> Result<(), &'static str> {
@@ -295,14 +299,16 @@ impl MmioDevice for MxWrap {
     }
 
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
-        if self.running {
+        let result = if self.running {
             let mut produced = Vec::new();
-            self.firmware
-                .poll(&mut produced)
-                .map_err(|reason| refuse(NAME, 0, Width::Double, Direction::Read, reason))?;
+            let result = self.firmware.poll(&mut produced);
             self.deliver(produced);
-        }
+            result
+        } else {
+            Ok(())
+        };
         self.update_lines(access);
+        result.map_err(|reason| refuse(NAME, 0, Width::Double, Direction::Read, reason))?;
         Ok(None)
     }
 }
@@ -583,6 +589,8 @@ mod tests {
         );
         send(&mut wrapper, 6 << 52 | 0x201, &mut access);
         assert_eq!(receive(&mut wrapper, &mut access).0, 7 << 52 | 0x201);
+        // An already emitted reply must remain before the autonomous wake.
+        send(&mut wrapper, 3 << 52 | 0x9999, &mut access);
         wrapper
             .write(CPU_RUN, Width::Word, STOP, &mut access)
             .unwrap();
@@ -590,8 +598,14 @@ mod tests {
         wrapper
             .write(CPU_RUN, Width::Word, RUN, &mut access)
             .unwrap();
-        // No new HELLO/roll call: the same enumerated endpoint accepts this.
+        wrapper
+            .write(CPU_RUN, Width::Word, RUN, &mut access)
+            .unwrap();
+        // Resume appends RUNNING once, behind retained traffic and before
+        // later replies. It preserves the original endpoint enumeration.
         send(&mut wrapper, 3 << 52 | 0x1234, &mut access);
+        assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0x9999);
+        assert_eq!(receive(&mut wrapper, &mut access).0, 7 << 52 | 0x20);
         assert_eq!(receive(&mut wrapper, &mut access).0, 4 << 52 | 0x1234);
         assert_eq!(
             count(wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap()),
@@ -783,6 +797,195 @@ mod tests {
                 })
                 .is_err()
         );
+    }
+
+    #[test]
+    fn committed_dma_messages_survive_faults_masking_halt_and_wrapping_backlog() {
+        use crate::platform::dma::{Physical, tests::Ram};
+        #[derive(Default)]
+        struct PartialDma {
+            committed: bool,
+            calls: usize,
+            writes: usize,
+        }
+        impl Firmware for PartialDma {
+            fn start(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+                out.extend((0..6).map(|payload| Message {
+                    endpoint: 0x20,
+                    payload,
+                }));
+                Ok(())
+            }
+            fn stop(&mut self) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn resume(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+                out.push(Message {
+                    endpoint: 0,
+                    payload: 7 << 52 | 0x20,
+                });
+                Ok(())
+            }
+            fn receive(
+                &mut self,
+                message: Message,
+                out: &mut Vec<Message>,
+            ) -> Result<(), &'static str> {
+                out.push(message);
+                Ok(())
+            }
+            fn dma_pending(&self) -> bool {
+                true
+            }
+            fn dma(
+                &mut self,
+                port: &mut Port<'_, '_>,
+                out: &mut Vec<Message>,
+            ) -> Result<(), &'static str> {
+                self.calls += 1;
+                if !self.committed {
+                    port.write(0, b"done").map_err(|_| "first DMA failed")?;
+                    self.writes += 1;
+                    out.extend((100..112).map(|payload| Message {
+                        endpoint: 0x24,
+                        payload,
+                    }));
+                    self.committed = true;
+                }
+                port.read(0x1000, &mut [0]).map_err(|_| "later DMA failed")
+            }
+        }
+        for enabled in [false, true] {
+            let lines = [0x42c, 0x42b, 0x42e, 0x42d].map(|i| AicInput::new(0, i));
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            let mut wrapper =
+                MxWrap::booted(Box::<PartialDma>::default(), Lines::from_interrupts(lines))
+                    .unwrap();
+            let mut memory = Ram::new(0, 8);
+            for expected in 0..3 {
+                assert_eq!(receive(&mut wrapper, &mut access).0, expected);
+            }
+            wrapper
+                .write(A2I_SEND0, Width::Double, 0xfeed, &mut access)
+                .unwrap();
+            wrapper
+                .write(I2A_CONTROL, Width::Word, u64::from(enabled), &mut access)
+                .unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    wrapper.service_dma(&mut Port {
+                        memory: &mut memory,
+                        iommu: &mut Physical,
+                        stream: 0,
+                        access: &mut access,
+                    }),
+                    Err("later DMA failed")
+                );
+            }
+            assert_eq!(&memory.bytes[..4], b"done");
+            assert_eq!(wrapper.firmware::<PartialDma>().unwrap().writes, 1);
+            assert_eq!(wrapper.outbox.len(), 8);
+            assert_eq!(wrapper.pending.len(), 7);
+            assert_eq!((wrapper.rx_write, wrapper.rx_read), (3, 3));
+            assert_eq!(wrapper.levels[2], Some(enabled));
+            if enabled {
+                assert_eq!(
+                    count(wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap()),
+                    8
+                );
+            } else {
+                assert_eq!(
+                    wrapper.read(I2A_CONTROL, Width::Word, &mut access).unwrap(),
+                    EMPTY
+                );
+                assert!(wrapper.read(I2A_RECV1, Width::Double, &mut access).is_err());
+            }
+            wrapper
+                .write(CPU_RUN, Width::Word, STOP, &mut access)
+                .unwrap();
+            assert!(!wrapper.dma_pending());
+            assert!(
+                wrapper
+                    .service_dma(&mut Port {
+                        memory: &mut memory,
+                        iommu: &mut Physical,
+                        stream: 0,
+                        access: &mut access,
+                    })
+                    .is_err()
+            );
+            assert_eq!(wrapper.firmware::<PartialDma>().unwrap().calls, 2);
+            wrapper
+                .write(CPU_RUN, Width::Word, RUN, &mut access)
+                .unwrap();
+            wrapper
+                .write(CPU_RUN, Width::Word, RUN, &mut access)
+                .unwrap();
+            assert_eq!(wrapper.pending.len(), 8);
+            assert_eq!(wrapper.staged, Some(0xfeed));
+            wrapper
+                .write(I2A_CONTROL, Width::Word, ENABLE | STATUS, &mut access)
+                .unwrap();
+            let expected: Vec<_> = (3..6)
+                .map(|payload| (0x20, payload))
+                .chain((100..112).map(|payload| (0x24, payload)))
+                .chain([(0, 7 << 52 | 0x20)])
+                .collect();
+            for (index, (endpoint, payload)) in expected.into_iter().enumerate() {
+                let (actual, word) = receive(&mut wrapper, &mut access);
+                assert_eq!((word & 0xff, actual), (endpoint, payload));
+                assert_eq!(count(word >> 32), (16 - index).min(8) as u64);
+            }
+            assert_eq!((wrapper.rx_write, wrapper.rx_read), (3, 3));
+            assert_eq!(wrapper.levels[2], Some(false));
+            assert_eq!(wrapper.levels[3], Some(true));
+            wrapper
+                .write(A2I_SEND1, Width::Double, 0x20, &mut access)
+                .unwrap();
+            assert_eq!(receive(&mut wrapper, &mut access).0, 0xfeed);
+            assert_eq!(wrapper.firmware::<PartialDma>().unwrap().writes, 1);
+            assert!(wrapper.pending.is_empty());
+            assert!(wrapper.outbox.is_empty());
+        }
+    }
+
+    #[test]
+    fn emitted_poll_messages_remain_visible_after_a_later_asynchronous_error() {
+        struct PartialPoll(bool);
+        impl Firmware for PartialPoll {
+            fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn poll(&mut self, out: &mut Vec<Message>) -> Result<(), &'static str> {
+                if !self.0 {
+                    out.extend((0..12).map(|payload| Message {
+                        endpoint: 0x24,
+                        payload,
+                    }));
+                    self.0 = true;
+                }
+                Err("later asynchronous failure")
+            }
+        }
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut wrapper = MxWrap::booted(Box::new(PartialPoll(false)), Lines::default()).unwrap();
+        for _ in 0..2 {
+            assert!(wrapper.advance(&mut access).is_err());
+        }
+        assert_eq!(wrapper.outbox.len(), 8);
+        assert_eq!(wrapper.pending.len(), 4);
+        assert_eq!(wrapper.levels[2], Some(true));
+        for expected in 0..12 {
+            assert_eq!(receive(&mut wrapper, &mut access).0, expected);
+        }
+        assert_eq!(wrapper.levels[2], Some(false));
+        assert!(wrapper.outbox.is_empty());
+        assert!(wrapper.pending.is_empty());
     }
 
     #[test]
