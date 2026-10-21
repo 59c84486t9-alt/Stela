@@ -19,6 +19,7 @@
 //! protected management frames are explicitly unsupported by this first path.
 
 use super::{Aggregation, frame::Mpdu};
+use crate::net::Mac;
 use core::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
@@ -75,6 +76,21 @@ impl PacketNumber {
     }
 }
 
+/// Actual firmware key purpose and peer/BSS, independent of a reusable slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyScope {
+    Pairwise(Mac),
+    Group(Mac),
+}
+
+impl KeyScope {
+    pub const fn peer(self) -> Mac {
+        match self {
+            Self::Pairwise(peer) | Self::Group(peer) => peer,
+        }
+    }
+}
+
 /// Binding to one acknowledged installation, not merely a reusable HW slot.
 /// Copy this identity from `KeySlot::installed()` into the vendor key table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +100,7 @@ pub struct KeyIdentity {
     generation: u64,
     native_epoch: u64,
     cipher: Cipher,
+    scope: KeyScope,
 }
 
 impl KeyIdentity {
@@ -98,6 +115,9 @@ impl KeyIdentity {
     }
     pub const fn native_epoch(self) -> u64 {
         self.native_epoch
+    }
+    pub const fn scope(self) -> KeyScope {
+        self.scope
     }
     pub const fn cipher(self) -> Cipher {
         self.cipher
@@ -143,6 +163,7 @@ pub struct SecurityStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidKeyIndex,
+    InvalidPeer,
     InvalidKeyLength,
     AlreadyInstalled(KeyIdentity),
     Reinstallation,
@@ -271,9 +292,13 @@ impl KeySlot {
         cipher: Cipher,
         material: &[u8],
         receive: ReplaySeed,
+        scope: KeyScope,
     ) -> Result<InstallTicket, Error> {
-        if index > 3 {
+        if index > 3 || (matches!(scope, KeyScope::Pairwise(_)) && index > 1) {
             return Err(Error::InvalidKeyIndex);
+        }
+        if scope.peer().is_multicast() || scope.peer().0 == [0; 6] {
+            return Err(Error::InvalidPeer);
         }
         let length = match cipher {
             Cipher::Ccmp128 | Cipher::Gcmp128 => 16,
@@ -295,6 +320,7 @@ impl KeySlot {
             if let State::Installed(key) = self.state
                 && key.index == index
                 && key.cipher == cipher
+                && key.scope == scope
             {
                 return Err(Error::AlreadyInstalled(key));
             }
@@ -317,6 +343,7 @@ impl KeySlot {
             generation,
             native_epoch: self.native_epoch,
             cipher,
+            scope,
         };
         // Invalidate the old binding before a command can change hardware state.
         self.state = State::Pending(key);
@@ -482,7 +509,13 @@ mod tests {
 
     fn install(slot: &mut KeySlot) -> KeyIdentity {
         let ticket = slot
-            .begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO)
+            .begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x42; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+            )
             .unwrap();
         assert_eq!(slot.installed(), None);
         slot.complete_install(ticket, InstallOutcome::Accepted)
@@ -541,7 +574,13 @@ mod tests {
             &[1, 2, 3]
         );
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO),
+            slot.begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x43; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            ),
             Err(Error::KeyStillInstalled)
         );
         slot.invalidate();
@@ -550,14 +589,26 @@ mod tests {
             slot.retire_after_drain();
         }
         let ticket = slot
-            .begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x43; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+            )
             .unwrap();
         assert!(matches!(
             slot.authorize(&packet(old, 9, None)),
             Err(Error::NoInstalledKey)
         ));
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO),
+            slot.begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x43; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            ),
             Err(Error::Busy)
         );
         slot.complete_install(ticket, InstallOutcome::Accepted)
@@ -579,12 +630,24 @@ mod tests {
     fn uncertain_install_requires_real_retirement() {
         let mut slot = slot(3);
         let ticket = slot
-            .begin_install(0, Cipher::Gcmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .begin_install(
+                0,
+                Cipher::Gcmp128,
+                &[0x43; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+            )
             .unwrap();
         slot.complete_install(ticket, InstallOutcome::Uncertain)
             .unwrap();
         assert_eq!(
-            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16], ReplaySeed::ZERO),
+            slot.begin_install(
+                0,
+                Cipher::Ccmp128,
+                &[0x44; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            ),
             Err(Error::Quarantined)
         );
         // Fixture has no hardware or queued RX users.
@@ -592,10 +655,16 @@ mod tests {
             slot.retire_after_drain();
         }
         assert!(
-            slot.begin_install(0, Cipher::Ccmp128, &[0x44; 16], ReplaySeed::ZERO)
-                .unwrap()
-                .identity()
-                .generation()
+            slot.begin_install(
+                0,
+                Cipher::Ccmp128,
+                &[0x44; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            )
+            .unwrap()
+            .identity()
+            .generation()
                 > ticket.identity().generation()
         );
     }
@@ -674,7 +743,13 @@ mod tests {
         let key = install(&mut slot);
         assert!(slot.authorize(&packet(key, 10, None)).is_ok());
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO),
+            slot.begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x42; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            ),
             Err(Error::AlreadyInstalled(key))
         );
         assert!(matches!(
@@ -687,7 +762,13 @@ mod tests {
             slot.retire_after_drain();
         }
         assert_eq!(
-            slot.begin_install(2, Cipher::Ccmp128, &[0x42; 16], ReplaySeed::ZERO),
+            slot.begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x42; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1]))
+            ),
             Err(Error::Reinstallation)
         );
     }
@@ -709,7 +790,13 @@ mod tests {
                 };
                 let material = [0x42; 32];
                 let ticket = slot
-                    .begin_install(index, cipher, &material[..length], ReplaySeed::ZERO)
+                    .begin_install(
+                        index,
+                        cipher,
+                        &material[..length],
+                        ReplaySeed::ZERO,
+                        KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+                    )
                     .unwrap();
                 slot.complete_install(ticket, InstallOutcome::Accepted)
                     .unwrap();
@@ -770,7 +857,13 @@ mod tests {
         let mut slot = slot(7);
         let seed = ReplaySeed::uniform(PacketNumber::new(100).unwrap());
         let ticket = slot
-            .begin_install(2, Cipher::Ccmp128, &[0x42; 16], seed)
+            .begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x42; 16],
+                seed,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+            )
             .unwrap();
         assert_eq!(ticket.receive_seed().counters(), [100; 17]);
         assert_eq!(slot.installed(), None);
@@ -795,6 +888,45 @@ mod tests {
     }
 
     #[test]
+    fn key_purpose_has_a_real_peer_and_legal_on_air_index() {
+        let mut key = slot(7);
+        let peer = Mac([2, 0, 0, 0, 0, 1]);
+        assert_eq!(
+            key.begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[1; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Pairwise(peer)
+            ),
+            Err(Error::InvalidKeyIndex)
+        );
+        for peer in [Mac([0; 6]), Mac::BROADCAST] {
+            assert_eq!(
+                key.begin_install(
+                    0,
+                    Cipher::Ccmp128,
+                    &[1; 16],
+                    ReplaySeed::ZERO,
+                    KeyScope::Pairwise(peer)
+                ),
+                Err(Error::InvalidPeer)
+            );
+            assert_eq!(
+                key.begin_install(
+                    2,
+                    Cipher::Ccmp128,
+                    &[1; 16],
+                    ReplaySeed::ZERO,
+                    KeyScope::Group(peer)
+                ),
+                Err(Error::InvalidPeer)
+            );
+        }
+        assert!(key.installed().is_none());
+    }
+
+    #[test]
     fn recreated_hardware_slot_cannot_accept_old_native_epoch() {
         let old = {
             let mut previous = slot(7);
@@ -809,7 +941,13 @@ mod tests {
         };
         let mut current = slot(7);
         let ticket = current
-            .begin_install(2, Cipher::Ccmp128, &[0x43; 16], ReplaySeed::ZERO)
+            .begin_install(
+                2,
+                Cipher::Ccmp128,
+                &[0x43; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Group(Mac([2, 0, 0, 0, 0, 1])),
+            )
             .unwrap();
         current
             .complete_install(ticket, InstallOutcome::Accepted)

@@ -9,6 +9,14 @@ pub mod frame;
 pub mod intel;
 pub mod mediatek;
 pub mod security;
+pub mod station;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Channel {
+    pub band: Band,
+    pub number: u16,
+    pub frequency_mhz: u16,
+}
 
 /// On-air band, independent of a driver's raw channel encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
