@@ -216,8 +216,9 @@ pub struct Run {
     /// mount drives after ExitBootServices for its own requests (`--tss`,
     /// `--network-check`), on a QEMU `stream` netdev to xtask's own LAN
     /// peer (`boot/lan.rs`): DHCP, DNS and TCP relayed to the host, logged
-    /// to `network.log`. QEMU needs no slirp.
-    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "usb_image", "payload"])]
+    /// to `network.log`. QEMU needs no slirp. A USB image's own entries say
+    /// whether the mount uses it.
+    #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "payload"])]
     network: bool,
     /// Have the mount POST once to this `http://` URL over the host network
     /// at start and report the reply: adds `--network-check URL`.
