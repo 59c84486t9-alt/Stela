@@ -17,7 +17,7 @@
 #include "addrlib.h"
 #include "addrcommon.h"
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && !defined(HAVE_TSERVER)
 
 UINT_32 div64_32(UINT_64 n, UINT_32 base)
 {
@@ -61,7 +61,7 @@ UINT_32 __umoddi3(UINT_64 n, UINT_32 base)
     return div64_32(n, base);
 }
 
-#endif // __APPLE__
+#endif // __APPLE__ && !HAVE_TSERVER
 
 namespace Addr
 {

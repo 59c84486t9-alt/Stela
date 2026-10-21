@@ -118,6 +118,7 @@ amd_common_files = files(
   'ac_gpu_info_compute.c',
   'ac_gpu_info.h',
   'ac_surface.c',
+  'ac_surface_debug.c',
   'ac_surface.h',
   'ac_debug.c',
   'ac_registers.c',
