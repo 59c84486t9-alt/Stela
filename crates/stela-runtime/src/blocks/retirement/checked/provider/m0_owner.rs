@@ -270,26 +270,31 @@ impl Owner for M0Owner<'_> {
 
     fn execution_loan(&mut self) -> anyhow::Result<MemoryExecutionLoan> {
         use crate::memory::domain::ExecutionLoanAttempt;
-        loop {
-            match self
-                .memory
+        let try_loan = || {
+            self.memory
                 .try_execution_loan()
-                .map_err(|error| anyhow::anyhow!("M0 exclusion: {error:?}"))?
+                .map_err(|error| anyhow::anyhow!("M0 exclusion: {error:?}"))
+        };
+        let attempt = try_loan()?;
+        #[cfg(feature = "std")]
+        let attempt = {
+            let mut attempt = attempt;
+            // Only a hosted-wait PE shares its domain with a host service,
+            // whose publication is short; wait for it as a wake does.
+            while self.cohort == InstalledCohort::El1HostedWait
+                && matches!(attempt, ExecutionLoanAttempt::ServiceBusy)
             {
-                ExecutionLoanAttempt::Acquired(loan) => return Ok(loan),
-                // Only a hosted-wait PE shares its domain with a host service,
-                // whose publication is short; wait for it as a wake does.
-                #[cfg(feature = "std")]
-                ExecutionLoanAttempt::ServiceBusy
-                    if self.cohort == InstalledCohort::El1HostedWait =>
-                {
-                    std::thread::park_timeout(
-                        crate::system::events::hosted::HOSTED_MAX_REQUESTED_SLEEP,
-                    );
-                }
-                ExecutionLoanAttempt::ServiceBusy => {
-                    anyhow::bail!("M0 exclusion: a host service holds the domain")
-                }
+                std::thread::park_timeout(
+                    crate::system::events::hosted::HOSTED_MAX_REQUESTED_SLEEP,
+                );
+                attempt = try_loan()?;
+            }
+            attempt
+        };
+        match attempt {
+            ExecutionLoanAttempt::Acquired(loan) => Ok(loan),
+            ExecutionLoanAttempt::ServiceBusy => {
+                anyhow::bail!("M0 exclusion: a host service holds the domain")
             }
         }
     }

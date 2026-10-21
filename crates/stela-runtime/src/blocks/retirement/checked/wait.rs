@@ -62,100 +62,103 @@ impl<B: provider::Owner> Active<'_, '_, B> {
                 .ok_or_else(|| anyhow::anyhow!("outer loan missing"))?,
         )?;
         #[cfg(feature = "std")]
-        let mut reply = reply;
-        loop {
-            match reply {
-                WaitReply::Park { requested } => {
-                    #[cfg(not(feature = "std"))]
-                    {
-                        let _ = requested;
-                        anyhow::bail!("hosted parking adapter is unavailable");
+        let reply = self.poll_hosted_wait(bound, reply)?;
+        match reply {
+            WaitReply::Park { requested } => {
+                let _ = requested;
+                anyhow::bail!("hosted parking adapter is unavailable")
+            }
+            WaitReply::WakeIrqPending => {
+                if matches!(
+                    instruction.operation,
+                    SystemOperation::Wait {
+                        kind: WaitKind::Interrupt,
+                        ..
                     }
-                    #[cfg(feature = "std")]
-                    {
-                        self.pe
-                            .authority
-                            .suspend_system(&ConsumerKey(()), self.attempt)
-                            .map_err(|()| anyhow::anyhow!("wait suspension authority failed"))?;
-                        // The caller settled the native context, finalizer and source
-                        // prefix. Keep the PE and source but release the domain
-                        // exclusion before the host thread parks.
-                        self.outer.take();
-                        std::thread::park_timeout(requested);
-                        self.pe
-                            .authority
-                            .resume_suspended(&ConsumerKey(()), self.attempt)
-                            .map_err(|()| anyhow::anyhow!("wait wake authority failed"))?;
-                        // A host service may still be active after a spurious or poll
-                        // return. Only that busy result is retried; any other domain
-                        // failure is terminal.
-                        loop {
-                            match self.pe.backend.reacquire_wait_loan()? {
-                                crate::memory::domain::ExecutionLoanAttempt::Acquired(loan) => {
-                                    self.outer = Some(loan);
-                                    break;
-                                }
-                                crate::memory::domain::ExecutionLoanAttempt::ServiceBusy => {
-                                    std::thread::park_timeout(
-                                        crate::system::events::hosted::HOSTED_MAX_REQUESTED_SLEEP,
-                                    );
-                                }
-                            }
-                        }
-                        self.pe.backend.qualify_wake(
-                            bound,
-                            self.pe.system,
-                            &mut self.pe.thread.registers,
-                            self.outer
-                                .as_ref()
-                                .ok_or_else(|| anyhow::anyhow!("wake outer missing"))?,
-                        )?;
-                        self.pe
-                            .authority
-                            .qualify_wake(&ConsumerKey(()), self.attempt)
-                            .map_err(|()| {
-                                anyhow::anyhow!("wait requalification authority failed")
-                            })?;
-                        // A host return is not an architectural wake. Re-check the
-                        // event, IRQ and counter conditions.
-                        reply = self.pe.backend.poll_wait()?;
-                    }
-                }
-                WaitReply::WakeIrqPending => {
-                    if matches!(
-                        instruction.operation,
-                        SystemOperation::Wait {
-                            kind: WaitKind::Interrupt,
-                            ..
-                        }
-                    ) {
-                        // A WFI wake retires the instruction even when I is clear.
-                        // The IRQ is a separate boundary afterward; the next
-                        // instruction is not fetched before arbitration.
-                        let outcome = self.pe.backend.wait_outcome()?;
-                        self.retire_wait(instruction, outcome, bound)?;
-                        // Record the outcome only after the PC store, post-checks
-                        // and retirement have completed.
-                        *observation = Some(outcome);
-                        return Ok(self.retired_wait_step(instruction));
-                    }
-                    // How an IRQ wakes WFE is decided separately; no event bit
-                    // is invented and the wait is not resumed by polling.
-                    return Ok(WaitStep::IrqPending);
-                }
-                WaitReply::CompletionReady => {
+                ) {
+                    // A WFI wake retires the instruction even when I is clear.
+                    // The IRQ is a separate boundary afterward; the next
+                    // instruction is not fetched before arbitration.
                     let outcome = self.pe.backend.wait_outcome()?;
-                    let Outcome::Retired { .. } = outcome else {
-                        return Ok(WaitStep::ExceptionPending(outcome));
-                    };
                     self.retire_wait(instruction, outcome, bound)?;
                     // Record the outcome only after the PC store, post-checks
                     // and retirement have completed.
                     *observation = Some(outcome);
                     return Ok(self.retired_wait_step(instruction));
                 }
+                // How an IRQ wakes WFE is decided separately; no event bit
+                // is invented and the wait is not resumed by polling.
+                Ok(WaitStep::IrqPending)
+            }
+            WaitReply::CompletionReady => {
+                let outcome = self.pe.backend.wait_outcome()?;
+                let Outcome::Retired { .. } = outcome else {
+                    return Ok(WaitStep::ExceptionPending(outcome));
+                };
+                self.retire_wait(instruction, outcome, bound)?;
+                // Record the outcome only after the PC store, post-checks
+                // and retirement have completed.
+                *observation = Some(outcome);
+                Ok(self.retired_wait_step(instruction))
             }
         }
+    }
+
+    /// Hosted suspension releases the execution loan, then requalifies the
+    /// source and architectural wake conditions before retirement can proceed.
+    #[cfg(feature = "std")]
+    fn poll_hosted_wait(
+        &mut self,
+        bound: &BoundSource<'_>,
+        mut reply: WaitReply,
+    ) -> anyhow::Result<WaitReply> {
+        while let WaitReply::Park { requested } = reply {
+            self.pe
+                .authority
+                .suspend_system(&ConsumerKey(()), self.attempt)
+                .map_err(|()| anyhow::anyhow!("wait suspension authority failed"))?;
+            // The caller settled the native context, finalizer and source
+            // prefix. Keep the PE and source but release the domain
+            // exclusion before the host thread parks.
+            self.outer.take();
+            std::thread::park_timeout(requested);
+            self.pe
+                .authority
+                .resume_suspended(&ConsumerKey(()), self.attempt)
+                .map_err(|()| anyhow::anyhow!("wait wake authority failed"))?;
+            // A host service may still be active after a spurious or poll
+            // return. Only that busy result is retried; any other domain
+            // failure is terminal.
+            loop {
+                match self.pe.backend.reacquire_wait_loan()? {
+                    crate::memory::domain::ExecutionLoanAttempt::Acquired(loan) => {
+                        self.outer = Some(loan);
+                        break;
+                    }
+                    crate::memory::domain::ExecutionLoanAttempt::ServiceBusy => {
+                        std::thread::park_timeout(
+                            crate::system::events::hosted::HOSTED_MAX_REQUESTED_SLEEP,
+                        );
+                    }
+                }
+            }
+            self.pe.backend.qualify_wake(
+                bound,
+                self.pe.system,
+                &mut self.pe.thread.registers,
+                self.outer
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("wake outer missing"))?,
+            )?;
+            self.pe
+                .authority
+                .qualify_wake(&ConsumerKey(()), self.attempt)
+                .map_err(|()| anyhow::anyhow!("wait requalification authority failed"))?;
+            // A host return is not an architectural wake. Re-check the
+            // event, IRQ and counter conditions.
+            reply = self.pe.backend.poll_wait()?;
+        }
+        Ok(reply)
     }
 
     fn retired_wait_step(&mut self, instruction: SystemInstruction) -> WaitStep {

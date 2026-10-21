@@ -31,6 +31,26 @@ pub fn run(fix: bool) -> Result<()> {
         "-D",
         "warnings",
     ]))?;
+    // Cargo caps Clippy lints on dependencies of the boot package. Select the
+    // runtime itself too, so its freestanding-only branches are checked.
+    exec(
+        cargo()
+            .env("RUSTFLAGS", format!("{BOOT_RUSTFLAGS} -D warnings"))
+            .args([
+                "clippy",
+                "-p",
+                "stela-runtime",
+                "--no-default-features",
+                "--locked",
+                "--target",
+                BOOT_TARGET,
+                "--target-dir",
+                BOOT_TARGET_DIR,
+                "--",
+                "-D",
+                "warnings",
+            ]),
+    )?;
     // RUSTFLAGS also denies warnings in the runtime crates the mount builds
     // without std; registry dependencies stay lint-capped. It replaces the
     // target's configured flags, so it repeats them.
