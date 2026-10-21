@@ -166,6 +166,7 @@ const COMMAND_US: u64 = 5_000_000;
 const CONTROL_US: u64 = 5_000_000;
 const PORT_RESET_US: u64 = 500_000;
 const RESET_RECOVERY_US: u64 = 10_000;
+const ADDRESS_RECOVERY_US: u64 = 2_000;
 const BIOS_HANDOFF_US: u64 = 1_000_000;
 
 // Standard requests and descriptors (USB 2.0 9.4, 9.6).
@@ -784,6 +785,10 @@ impl Controller {
             0,
             ADDRESS_DEVICE << 10 | u32::from(slot) << 24,
         )?;
+        // Address Device sends SET_ADDRESS with BSR=0. The xHC does not
+        // time the device's recovery interval (xHCI 1.2b 4.6.5); USB 2.0
+        // 9.2.6.3 permits it to ignore Setup packets for another 2 ms.
+        self.clock.delay(ADDRESS_RECOVERY_US);
         Ok(slot)
     }
 
@@ -1591,6 +1596,189 @@ mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use alloc::vec::Vec;
+
+    /// A command/event DMA model with a device that needs the full
+    /// SET_ADDRESS recovery interval before accepting its first Setup.
+    struct AddressModel {
+        commands: u64,
+        command_index: usize,
+        events: u64,
+        event_index: usize,
+        control_ring: u64,
+        ready_at: u64,
+        recovery_ticks: u64,
+        address_code: u32,
+        commands_seen: Vec<u32>,
+        setup_seen: Vec<[u8; 8]>,
+        early_setup: bool,
+    }
+
+    impl AddressModel {
+        fn event(&mut self, parameter: u64, code: u32, kind: u32, endpoint: u8) {
+            let address = self.events + (self.event_index * TRB) as u64;
+            // SAFETY: these are aligned DMA words in the test's backing
+            // allocation, which outlives the controller and this model.
+            unsafe {
+                (address as *mut u64).write_volatile(parameter);
+                ((address + 8) as *mut u32).write_volatile(code << 24);
+                ((address + 12) as *mut u32)
+                    .write_volatile(1 << 24 | u32::from(endpoint) << 16 | kind << 10 | CYCLE);
+            }
+            self.event_index += 1;
+        }
+    }
+
+    struct AddressRegisters(Rc<RefCell<AddressModel>>);
+
+    impl Registers for AddressRegisters {
+        fn read32(&mut self, _offset: usize) -> u32 {
+            0
+        }
+
+        fn write32(&mut self, offset: usize, _value: u32) {
+            let mut model = self.0.borrow_mut();
+            if offset == 0x1000 {
+                let address = model.commands + (model.command_index * TRB) as u64;
+                // SAFETY: the command ring and the input context named by
+                // Address Device belong to the live test DMA allocation.
+                let (parameter, kind) = unsafe {
+                    (
+                        (address as *const u64).read_volatile(),
+                        ((address + 12) as *const u32).read_volatile() >> 10 & 0x3f,
+                    )
+                };
+                model.command_index += 1;
+                model.commands_seen.push(kind);
+                let code = if kind == ADDRESS_DEVICE {
+                    // SAFETY: EP0's dequeue pointer in the 32-byte input
+                    // context points to this test controller's control ring.
+                    model.control_ring =
+                        unsafe { ((parameter + 2 * 32 + 8) as *const u64).read_volatile() & !0xf };
+                    model.ready_at = Clock::ticks() + model.recovery_ticks;
+                    model.address_code
+                } else {
+                    SUCCESS
+                };
+                model.event(address, code, COMMAND_COMPLETION, 0);
+            } else if offset == 0x1004 {
+                // This model runs one GET_DESCRIPTOR with Setup/Data/Status.
+                let ring = model.control_ring;
+                // SAFETY: the ring is initialized by control() before its
+                // doorbell, in the test's still-live DMA allocation.
+                let request = unsafe { (ring as *const u64).read_volatile().to_le_bytes() };
+                model.setup_seen.push(request);
+                model.early_setup = Clock::ticks() < model.ready_at;
+                let (parameter, code) = if model.early_setup {
+                    (ring, 4)
+                } else {
+                    (ring + 2 * TRB as u64, SUCCESS)
+                };
+                model.event(parameter, code, TRANSFER_EVENT, 1);
+            }
+        }
+    }
+
+    fn address_controller(
+        dma: &mut dyn DmaAllocator,
+        address_code: u32,
+    ) -> (Controller, Rc<RefCell<AddressModel>>) {
+        let commands = Ring::new(dma).unwrap();
+        let events = dma.allocate(RING_TRBS * TRB, 64).unwrap();
+        let clock = Clock {
+            ticks_per_microsecond: 1_000,
+        };
+        let model = Rc::new(RefCell::new(AddressModel {
+            commands: commands.buffer.physical(),
+            command_index: 0,
+            events: events.physical(),
+            event_index: 0,
+            control_ring: 0,
+            ready_at: 0,
+            recovery_ticks: ADDRESS_RECOVERY_US * clock.ticks_per_microsecond,
+            address_code,
+            commands_seen: Vec::new(),
+            setup_seen: Vec::new(),
+            early_setup: false,
+        }));
+        let controller = Controller {
+            registers: Box::new(AddressRegisters(model.clone())),
+            clock,
+            operational: 0x40,
+            runtime: 0x800,
+            doorbells: 0x1000,
+            context_bytes: 32,
+            wide: true,
+            max_slots: 1,
+            max_ports: 1,
+            port_major: vec![2],
+            dcbaa: dma.allocate(16, 64).unwrap(),
+            _scratchpads: Vec::new(),
+            commands,
+            events,
+            _event_table: dma.allocate(16, 64).unwrap(),
+            event_index: 0,
+            event_cycle: true,
+            slots: vec![None, None],
+            pending: Vec::new(),
+            error: None,
+            location: String::from("test xhci"),
+        };
+        (controller, model)
+    }
+
+    #[test]
+    fn the_first_setup_waits_for_set_address_recovery() {
+        let mut backing = vec![0u64; 16 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives the controller and all its DMA buffers.
+        let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+        let (mut controller, model) = address_controller(&mut dma, SUCCESS);
+        let attachment = Attachment {
+            root_port: 1,
+            route: 0,
+            tier: 0,
+            speed: FULL_SPEED,
+            translator: None,
+        };
+        let slot = controller.address(attachment, &mut dma).unwrap();
+        let request = setup(
+            0x80,
+            GET_DESCRIPTOR,
+            u16::from(DEVICE_DESCRIPTOR) << 8,
+            0,
+            8,
+        );
+        assert_eq!(controller.control(slot, request, &[]).unwrap().len(), 8);
+        let state = model.borrow();
+        assert_eq!(state.commands_seen, [ENABLE_SLOT, ADDRESS_DEVICE]);
+        assert_eq!(state.setup_seen, [request]);
+        assert!(!state.early_setup);
+    }
+
+    #[test]
+    fn an_address_device_error_does_not_issue_a_setup() {
+        let mut backing = vec![0u64; 16 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives the controller and all its DMA buffers.
+        let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+        let (mut controller, model) = address_controller(&mut dma, 4);
+        let attachment = Attachment {
+            root_port: 1,
+            route: 0,
+            tier: 0,
+            speed: FULL_SPEED,
+            translator: None,
+        };
+        assert_eq!(
+            controller
+                .identify(attachment, String::from("port 1"), &mut dma)
+                .unwrap_err(),
+            BlockError::Device { status: 4 }
+        );
+        let state = model.borrow();
+        assert_eq!(state.commands_seen, [ENABLE_SLOT, ADDRESS_DEVICE]);
+        assert!(state.setup_seen.is_empty());
+    }
 
     #[test]
     fn completion_codes_are_named() {
