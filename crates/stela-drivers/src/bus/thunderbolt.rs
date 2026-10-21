@@ -10,6 +10,7 @@
 //! working connection manager. No PCI ID is admitted by this initial core.
 pub mod channel;
 pub mod config;
+pub mod controller;
 pub mod domain;
 pub mod hop;
 pub mod ring;
