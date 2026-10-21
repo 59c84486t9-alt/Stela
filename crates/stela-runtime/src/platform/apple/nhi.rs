@@ -14,6 +14,7 @@ use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, collections::BTreeSet, vec, vec::Vec};
 pub use ring::Direction;
 use ring::{Descriptor, Ring, Transfer};
+pub mod control;
 mod ring;
 
 const NAME: &str = "nhi";
