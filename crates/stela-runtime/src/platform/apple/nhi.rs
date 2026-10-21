@@ -16,6 +16,7 @@ pub use ring::Direction;
 use ring::{Descriptor, Ring, Transfer};
 pub mod control;
 mod ring;
+pub mod router;
 
 const NAME: &str = "nhi";
 const ENABLE: u32 = 1 << 31;
@@ -115,6 +116,7 @@ pub struct Transmit<'a> {
     pub eof: u8,
     pub isochronous: bool,
     pub scheduled_time: u32,
+    pub now: u64,
     pub options: Options,
     /// Posted receive slots available to the peer, indexed by receive HopID.
     pub receive_credits: &'a [usize],
@@ -138,7 +140,9 @@ pub trait Consumer {
         direction: Direction,
         options: Option<Options>,
     ) -> Result<(), &'static str>;
-    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Accepted, &'static str>;
+    /// `None` applies real peer backpressure without consuming the frame or
+    /// changing protocol state. A later poll/deadline may make it ready.
+    fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>, &'static str>;
     fn poll(
         &mut self,
         now: u64,
@@ -419,16 +423,20 @@ impl Nhi {
                     let mut bytes = vec![0; descriptor.length()];
                     port.read(descriptor.address, &mut bytes)?;
                     let receive_credits = self.receive_credits();
-                    let accepted = self.consumer.transmit(Transmit {
+                    let Some(accepted) = self.consumer.transmit(Transmit {
                         hop,
                         bytes: &bytes,
                         sof: descriptor.sof(),
                         eof: descriptor.eof(),
                         isochronous: descriptor.isochronous(),
                         scheduled_time: descriptor.time,
+                        now: port.access.now,
                         options,
                         receive_credits: &receive_credits,
-                    })?;
+                    })?
+                    else {
+                        return Ok(false);
+                    };
                     self.tx[hop].transfer = Some(Transfer {
                         descriptor: address,
                         metadata: descriptor.tx_completion(),
@@ -813,7 +821,7 @@ mod tests {
             state.configured.push((hop, dir, options));
             Ok(())
         }
-        fn transmit(&mut self, frame: Transmit<'_>) -> Result<Accepted, &'static str> {
+        fn transmit(&mut self, frame: Transmit<'_>) -> Result<Option<Accepted>, &'static str> {
             let mut state = self.0.borrow_mut();
             if state.refuse_send {
                 return Err("test wire rejected frame before acceptance");
@@ -826,10 +834,10 @@ mod tests {
                 frame.isochronous,
                 frame.scheduled_time,
             ));
-            Ok(Accepted {
+            Ok(Some(Accepted {
                 timestamp: 0x12345678,
                 incoming: Vec::new(),
-            })
+            }))
         }
         fn poll(&mut self, _: u64, _: &[usize]) -> Result<(Vec<Frame>, Option<u64>), &'static str> {
             let mut state = self.0.borrow_mut();
