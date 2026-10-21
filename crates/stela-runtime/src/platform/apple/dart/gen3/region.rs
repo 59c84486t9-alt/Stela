@@ -14,6 +14,28 @@ const TAG_PROTECTION: u32 = 0x18;
 const ADDRESS_PROTECTION: u32 = 2;
 pub const TAG_PROPERTY_BYTES: usize = 56;
 
+/// The native TZ dead-index validator's lookup levels. These are not the
+/// MAP_TABLE ABI's target levels: its root is included as level zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeadIndexLevel {
+    Root,
+    Context,
+    Segment,
+    Page,
+}
+
+impl DeadIndexLevel {
+    const fn projection(self) -> (u64, u32) {
+        // mac18g __PRELINK_TEXT741d988/741d9a8, respectively.
+        match self {
+            Self::Root => (0x3e_0000_0000, 33),
+            Self::Context => (0x1_ffc0_0000, 22),
+            Self::Segment => (0x3f_f800, 11),
+            Self::Page => (0x7ff, 0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TagRegion {
     start: u32,
@@ -109,6 +131,35 @@ impl Tagger {
     }
     pub const fn inclusive(self) -> bool {
         self.inclusive
+    }
+
+    /// Execute mac18g `_validateTzDeadPage`'s supplied-index guard
+    /// (928c074..928c0c4). It projects each enabled region independently;
+    /// it never normalizes a DMA address or validates the physical dead-page
+    /// value in the property. In particular the original upper comparison
+    /// is inclusive after its separate `inclusive-tz-range` adjustment.
+    pub fn validate_dead_index(
+        self,
+        index: u32,
+        level: DeadIndexLevel,
+    ) -> Result<(), &'static str> {
+        let (mask, shift) = level.projection();
+        for (slot, region) in self.regions.iter().enumerate() {
+            if self.config & (1 << slot) == 0 {
+                continue;
+            }
+            let start = u64::from(region.start >> 2) & 0x0fff_ffff;
+            // The native code shifts first, adds in a 32-bit register and
+            // then masks to 28 page bits. Do not clamp or change a wrapped
+            // upper endpoint into a saturated range.
+            let end = u64::from((region.end >> 2) + u32::from(self.inclusive)) & 0x0fff_ffff;
+            if (start & mask) >> shift <= u64::from(index)
+                && u64::from(index) <= (end & mask) >> shift
+            {
+                return Ok(());
+            }
+        }
+        Err("gen3 DART dead-table index is outside its enabled TZ region projections")
     }
 
     pub fn property(self) -> [u8; TAG_PROPERTY_BYTES] {
@@ -341,6 +392,93 @@ mod tests {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         bytes
+    }
+
+    #[test]
+    fn native_dead_index_guard_projects_each_enabled_zone_at_every_lookup_level() {
+        let bytes = property(1, 4, [[0; 3], [0; 3], [0x1040_8040, 0x1040_807c, 0]], 0);
+        let original = Tagger::parse(&bytes, false).unwrap();
+        let inclusive = Tagger::parse(&bytes, true).unwrap();
+        for (level, first, last) in [
+            (DeadIndexLevel::Root, 0, 0),
+            (DeadIndexLevel::Context, 16, 16),
+            (DeadIndexLevel::Segment, 0x204, 0x204),
+            (DeadIndexLevel::Page, 0x10, 0x1f),
+        ] {
+            original.validate_dead_index(first, level).unwrap();
+            original.validate_dead_index(last, level).unwrap();
+            assert!(original.validate_dead_index(last + 1, level).is_err());
+            if first != 0 {
+                assert!(original.validate_dead_index(first - 1, level).is_err());
+            }
+            assert!(original.validate_dead_index(u32::MAX, level).is_err());
+        }
+        inclusive
+            .validate_dead_index(0x20, DeadIndexLevel::Page)
+            .unwrap();
+        assert!(
+            inclusive
+                .validate_dead_index(0x21, DeadIndexLevel::Page)
+                .is_err()
+        );
+        assert_eq!(original.property(), bytes);
+
+        // No enabled regions means no reserved dead index, including zero.
+        // Selector choice does not change this software predicate.
+        for select in [0, 1] {
+            let absent = Tagger::parse(&property(select, 0, [[0; 3]; 3], 0), false).unwrap();
+            for level in [
+                DeadIndexLevel::Root,
+                DeadIndexLevel::Context,
+                DeadIndexLevel::Segment,
+                DeadIndexLevel::Page,
+            ] {
+                assert!(absent.validate_dead_index(0, level).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn native_dead_index_end_adjustment_wraps_before_projection_without_range_repair() {
+        let bytes = property(
+            0,
+            1,
+            [[0xffff_ff00, 0xffff_fffc, 0], [0; 3], [0; 3]],
+            u64::MAX,
+        );
+        let exclusive = Tagger::parse(&bytes, false).unwrap();
+        let inclusive = Tagger::parse(&bytes, true).unwrap();
+        for (level, last) in [
+            (DeadIndexLevel::Context, 63),
+            (DeadIndexLevel::Segment, 2047),
+            (DeadIndexLevel::Page, 2047),
+        ] {
+            exclusive.validate_dead_index(last, level).unwrap();
+            assert!(inclusive.validate_dead_index(last, level).is_err());
+            assert!(inclusive.validate_dead_index(0, level).is_err());
+        }
+        // Root projection is zero at both endpoints even after wrapping.
+        inclusive
+            .validate_dead_index(0, DeadIndexLevel::Root)
+            .unwrap();
+        // A successful supplied-index guard does not validate this address.
+        assert_eq!(inclusive.dead_page(), u64::MAX);
+
+        let bytes = property(0, 1, [[0x1ffc, 0x2000, 0], [0; 3], [0; 3]], 0);
+        let tagger = Tagger::parse(&bytes, false).unwrap();
+        // Projection across an 11-bit index wrap does not become a union.
+        assert!(
+            tagger
+                .validate_dead_index(2047, DeadIndexLevel::Page)
+                .is_err()
+        );
+        assert!(tagger.validate_dead_index(0, DeadIndexLevel::Page).is_err());
+        tagger
+            .validate_dead_index(0, DeadIndexLevel::Segment)
+            .unwrap();
+        tagger
+            .validate_dead_index(1, DeadIndexLevel::Segment)
+            .unwrap();
     }
 
     #[test]
