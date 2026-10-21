@@ -162,6 +162,20 @@ fn arm64_programs_run_with_no_options_after_the_system_files_are_installed() {
         text(&output)
     );
 
+    // The first program argument may be an option Stela recognizes too.
+    let output = stela(
+        &home,
+        &programs,
+        &["run", "./hello", "--help", "--model", "guest"],
+    );
+    assert_eq!(
+        text(&output).0,
+        "hello from arm64: --help --model guest\n",
+        "{:?}",
+        text(&output)
+    );
+    assert_eq!(output.status.code(), Some(3));
+
     // A #! script runs its interpreter (/bin/echo's arm64e slice).
     let script = programs.join("script");
     std::fs::write(&script, "#!/bin/echo from\n").unwrap();

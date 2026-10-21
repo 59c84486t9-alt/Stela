@@ -38,10 +38,15 @@ const ADVANCED: &str = "Advanced options";
 pub(crate) struct Run {
     /// The program: an arm64 Mach-O, a #! script or an app bundle (.app),
     /// by path, or a name looked up in PATH.
-    program: PathBuf,
-    /// Its arguments.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    arguments: Vec<OsString>,
+    /// All following words belong to the program, including options that
+    /// Stela also recognizes, such as `--help` or `--model`.
+    #[arg(
+        value_names = ["PROGRAM", "ARGUMENTS"],
+        num_args = 1..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    command: Vec<OsString>,
     /// A guest system root (repeatable, searched in order) instead of the
     /// installed system files: read-only lookups of absolute paths that
     /// exist under it resolve there.
@@ -241,11 +246,11 @@ impl Run {
     /// `stela PROGRAM [ARGS...]`: the program and its arguments, every
     /// option at its default.
     pub(crate) fn shorthand(words: Vec<OsString>) -> Result<Self> {
-        let mut words = words.into_iter();
-        let program = words.next().context("no program named")?;
+        if words.is_empty() {
+            bail!("no program named");
+        }
         Ok(Self {
-            program: program.into(),
-            arguments: words.collect(),
+            command: words,
             root: vec![],
             argv0: None,
             cpu_subtype: None,
@@ -289,7 +294,8 @@ impl Run {
     /// without guest system files, a program Stela could not run anyway
     /// is the better message.
     fn check_runnable(&self) -> Result<()> {
-        let target = program::resolve(&[], &self.program, std::env::var_os("PATH").as_deref())?;
+        let program = Path::new(&self.command[0]);
+        let target = program::resolve(&[], program, std::env::var_os("PATH").as_deref())?;
         let activated = activate(&[], &target.program, vec![])?;
         let (_, slice) = select_slice(&activated.data, self.cpu_subtype)?;
         if signature(slice)?.is_none() {
@@ -318,14 +324,15 @@ impl Run {
         // The guest's own `execve` (`--argv0`) names a path, as the kernel
         // takes it: relative to the working directory, never a PATH lookup
         // or a bundle.
+        let program = Path::new(&self.command[0]);
         let target = match &self.argv0 {
-            Some(_) => program::Target::path(&self.program),
-            None => program::resolve(&roots, &self.program, std::env::var_os("PATH").as_deref())?,
+            Some(_) => program::Target::path(program),
+            None => program::resolve(&roots, program, std::env::var_os("PATH").as_deref())?,
         };
         let argv0 = self.argv0.clone().unwrap_or(target.argv0);
         let mut argv = vec![argv0.as_bytes().to_vec()];
         argv.extend(
-            self.arguments
+            self.command[1..]
                 .iter()
                 .map(|argument| argument.as_bytes().to_vec()),
         );
@@ -399,11 +406,31 @@ mod tests {
     #[test]
     fn the_shorthand_runs_the_program_with_every_option_at_its_default() -> Result<()> {
         let run = Run::shorthand(vec!["./hello".into(), "--help".into(), "x".into()])?;
-        assert_eq!(run.program, Path::new("./hello"));
-        assert_eq!(run.arguments, ["--help", "x"]);
+        assert_eq!(run.command, ["./hello", "--help", "x"]);
         assert!(run.root.is_empty() && !run.trace && !run.statistics);
         assert!(Run::shorthand(vec![]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn the_explicit_run_passes_every_word_after_the_program_through() {
+        use clap::Parser as _;
+        let crate::Command::Run(run) = crate::Cli::try_parse_from([
+            "stela", "run", "--trace", "--root", "/guest", "./hello", "--help", "--model", "other",
+            "--", "-h",
+        ])
+        .unwrap()
+        .command
+        else {
+            panic!("not a run");
+        };
+        assert!(run.trace);
+        assert_eq!(run.root, [Path::new("/guest")]);
+        assert_eq!(
+            run.command,
+            ["./hello", "--help", "--model", "other", "--", "-h"]
+        );
+        assert!(run.model.is_none());
     }
 
     #[test]
