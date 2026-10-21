@@ -14,7 +14,7 @@
 //! Platform ACPI power resources, firmware/AML/SMM arbitration and coherent DMA
 //! mappings remain prerequisites. DSP/GPU controllers require additional owners
 //! and are deliberately absent from this attachment table.
-use super::{Config, CorbReset, MmioRegisters};
+use super::{Config, CorbReset, MmioRegisters, PositionPolicy, ProbePolicy};
 use crate::bus::{
     i2c::Timer,
     pci::{Bar, ConfigSpace, Function},
@@ -31,6 +31,7 @@ const PCI_CLASS: u16 = 8;
 const PCI_HEADER: u16 = 0x0e;
 const PCI_BAR0: u16 = 0x10;
 const PCI_CAPABILITIES: u16 = 0x34;
+const PCI_SUBSYSTEM: u16 = 0x2c;
 const COMMAND_MEMORY: u16 = 1 << 1;
 const COMMAND_MASTER: u16 = 1 << 2;
 const COMMAND_INTX_DISABLE: u16 = 1 << 10;
@@ -74,6 +75,8 @@ pub struct Identity {
     /// Explicit platform ceiling, independent of GCAP. ATI uses a conservative
     /// 32-bit policy without companion-SMBus stepping evidence; AMD uses 40 bits.
     pub dma_address_bits: u8,
+    pub position_policy: PositionPolicy,
+    pub probe_policy: ProbePolicy,
     setup: Setup,
 }
 
@@ -91,6 +94,10 @@ pub enum AttachError {
     UnsupportedController,
     Ownership,
     IdentityChanged,
+    SubsystemUnavailable,
+    SubsystemExcluded,
+    BoardIdentityRequired,
+    BoardExcluded,
     InvalidBar,
     InvalidCapabilities,
     UnsupportedPowerManagement,
@@ -99,8 +106,8 @@ pub enum AttachError {
 }
 
 /// Match the enumerated identity only; `prepare` rechecks actual config space.
-/// Match ICH6/ESB2/ICH7–10 and the exact legacy ATI/AMD Azalia hosts below.
-/// Newer AMD FIFO/retry quirks, Intel DSP and GPU HDA functions remain separate.
+/// This is a candidate match; actual subsystem/DMI exclusions are checked by
+/// prepare before any write. Intel DSP and GPU HDA functions remain separate.
 pub fn identify<C: ConfigSpace>(function: &Function<C>) -> Result<Identity, AttachError> {
     identity(function.vendor, function.device, function.class)
 }
@@ -117,18 +124,80 @@ fn identity(vendor: u16, device: u16, class: [u8; 3]) -> Result<Identity, Attach
         // before 0x30 additionally require 32 bits. Without companion evidence,
         // retain the supported conservative 32-bit mode on every ATI stepping.
         (ATI, 0x437b | 0x4383) => (Setup::AtiAzalia, 32),
-        // Exact legacy AMD hosts use ATI snoop and LPIB, not the later AMD
-        // FIFO-position/retry-probe quirk family. Linux limits DMA to 40 bits.
-        (AMD, 0x780d | 0x157a) => (Setup::AtiAzalia, 40),
+        // Exact AMD hosts use ATI snoop and 40-bit DMA. The later family
+        // selects FIFO correction and mandatory bounded discovery below.
+        (AMD, 0x780d | 0x157a | 0x1457 | 0x1487 | 0x15e3) => (Setup::AtiAzalia, 40),
         _ => return Err(AttachError::UnsupportedController),
     };
+    let (position_policy, probe_policy) =
+        if vendor == AMD && matches!(device, 0x1457 | 0x1487 | 0x15e3) {
+            (
+                PositionPolicy::AmdFifo32,
+                ProbePolicy::Retry {
+                    attempts: 60,
+                    delay_us: 1_000_000,
+                },
+            )
+        } else {
+            (PositionPolicy::Link, ProbePolicy::Once)
+        };
     Ok(Identity {
         vendor,
         device,
         corb_reset: CorbReset::Handshake,
         dma_address_bits,
+        position_policy,
+        probe_policy,
         setup,
     })
+}
+
+/// Target-machine SMBIOS board strings, when actually available. Missing data
+/// stays Unknown; a retail product name or development-host identity is no proof.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BoardIdentity<'a> {
+    #[default]
+    Unknown,
+    Known {
+        vendor: &'a str,
+        name: &'a str,
+    },
+}
+
+fn check_subsystem<C: ConfigSpace>(
+    config: &C,
+    identity: Identity,
+    board: BoardIdentity<'_>,
+) -> Result<(), AttachError> {
+    if identity.vendor != AMD || !matches!(identity.device, 0x1457 | 0x1487 | 0x15e3) {
+        return Ok(());
+    }
+    let subsystem = config.read32(PCI_SUBSYSTEM);
+    if subsystem == u32::MAX {
+        return Err(AttachError::SubsystemUnavailable);
+    }
+    let pair = (subsystem as u16, (subsystem >> 16) as u16);
+    // Exact unconditional PCI denylist from the pinned driver's driver_denylist.
+    if identity.device == 0x1487 && matches!(pair, (0x1043, 0x874f) | (0x1462, 0xcb59 | 0xcb60)) {
+        return Err(AttachError::SubsystemExcluded);
+    }
+    // The donor intentionally conditions this subsystem on two DMI strings:
+    // some laptops share the PCI IDs. Keep that condition, including unknowns.
+    if identity.device == 0x15e3 && pair == (0x1462, 0xee59) {
+        let BoardIdentity::Known { vendor, name } = board else {
+            return Err(AttachError::BoardIdentityRequired);
+        };
+        if vendor.trim().is_empty() || name.trim().is_empty() {
+            return Err(AttachError::BoardIdentityRequired);
+        }
+        // Linux DMI_MATCH uses case-sensitive substring matching.
+        if vendor.contains("Micro-Star International Co., Ltd.")
+            && name.contains("MAG X870E TOMAHAWK WIFI (MS-7E59)")
+        {
+            return Err(AttachError::BoardExcluded);
+        }
+    }
+    Ok(())
 }
 
 /// Successful PCI preparation. Keep the function and mapping exclusively owned
@@ -149,6 +218,8 @@ impl Prepared {
         Config {
             corb_reset: self.identity.corb_reset,
             dma_address_bits: self.identity.dma_address_bits,
+            position_policy: self.identity.position_policy,
+            probe_policy: self.identity.probe_policy,
             ..Config::default()
         }
     }
@@ -278,6 +349,23 @@ pub unsafe fn prepare<C: ConfigSpace>(
     timer: &impl Timer,
     ownership: Ownership,
 ) -> Result<Prepared, AttachError> {
+    unsafe { prepare_with_board(function, bar0, timer, ownership, BoardIdentity::Unknown) }
+}
+
+/// Prepare with actual target SMBIOS board evidence for conditional exclusions.
+/// `prepare` supplies Unknown and refuses ambiguous subsystem identities.
+///
+/// # Safety
+/// All platform/power/ownership/coherent-DMA prerequisites of `prepare` apply.
+/// Known board strings must come from this target's actual firmware SMBIOS,
+/// never a guessed machine name, the development host, or a PCI-ID inference.
+pub unsafe fn prepare_with_board<C: ConfigSpace>(
+    function: &mut Function<C>,
+    bar0: Bar,
+    timer: &impl Timer,
+    ownership: Ownership,
+    board: BoardIdentity<'_>,
+) -> Result<Prepared, AttachError> {
     if ownership != Ownership::ExclusiveLegacy {
         return Err(AttachError::Ownership);
     }
@@ -293,6 +381,7 @@ pub unsafe fn prepare<C: ConfigSpace>(
     if actual != selected || config.read8(PCI_HEADER) & 0x7f != 0 {
         return Err(AttachError::IdentityChanged);
     }
+    check_subsystem(config, actual, board)?;
     let (base, bytes, wide) = match bar0 {
         Bar::Memory {
             address,
@@ -600,7 +689,7 @@ mod tests {
             (INTEL, 0x9dc8, CLASS),
             (INTEL, 0x0a0c, CLASS),
             (INTEL, 0xffff, CLASS),
-            (AMD, 0x1487, CLASS),
+            (AMD, 0x15e2, CLASS),
             (INTEL, 0x2668, [4, 1, 0]),
         ] {
             assert_eq!(
@@ -907,11 +996,134 @@ mod tests {
     }
 
     #[test]
-    fn new_amd_fifo_dsp_and_gpu_id_families_do_not_inherit_legacy_snoop_policy() {
+    fn newer_amd_ids_select_fifo_retry_snoop_and_explicit_dma_ceiling() {
+        for device in [0x1457, 0x1487, 0x15e3] {
+            let (mut function, timer, bar) = fixture(3);
+            set_identity(&mut function, AMD, device);
+            function.config().words[16] = 0x5aa5_1234;
+            let prepared = prepare_model(&mut function, &timer, bar).unwrap();
+            let policy = prepared.config();
+            assert_eq!(policy.corb_reset, CorbReset::Handshake);
+            assert_eq!(policy.dma_address_bits, 40);
+            assert_eq!(policy.position_policy, PositionPolicy::AmdFifo32);
+            assert_eq!(
+                policy.probe_policy,
+                ProbePolicy::Retry {
+                    attempts: 60,
+                    delay_us: 1_000_000
+                }
+            );
+            assert_eq!(function.config().words[16], 0x5aa2_1234);
+            assert!(
+                !function
+                    .config()
+                    .writes
+                    .iter()
+                    .any(|(offset, _, _, _)| *offset == TCSEL)
+            );
+            assert_eq!(function.config().get16(0x54) & 3, 0);
+            assert!(timer.now_us() >= 10_000);
+        }
+        for (vendor, device) in [(INTEL, 0x2668), (ATI, 0x4383), (AMD, 0x157a)] {
+            let selected = identity(vendor, device, CLASS).unwrap();
+            assert_eq!(selected.position_policy, PositionPolicy::Link);
+            assert_eq!(selected.probe_policy, ProbePolicy::Once);
+        }
+    }
+
+    #[test]
+    fn newer_amd_subsystem_exclusions_and_failed_subsystem_reads_refuse_before_writes() {
+        for (device, subvendor, subdevice, error) in [
+            (0x1487, 0x1043, 0x874f, AttachError::SubsystemExcluded),
+            (0x1487, 0x1462, 0xcb59, AttachError::SubsystemExcluded),
+            (0x1487, 0x1462, 0xcb60, AttachError::SubsystemExcluded),
+            (0x15e3, 0x1462, 0xee59, AttachError::BoardIdentityRequired),
+            (0x1457, 0xffff, 0xffff, AttachError::SubsystemUnavailable),
+        ] {
+            let (mut function, timer, bar) = fixture(0);
+            set_identity(&mut function, AMD, device);
+            function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = subvendor | (subdevice << 16);
+            assert_eq!(
+                prepare_model(&mut function, &timer, bar).unwrap_err(),
+                error
+            );
+            assert!(function.config().writes.is_empty());
+        }
+        // Similar pairs do not inherit another subsystem's exclusion.
+        for (device, subvendor, subdevice) in [
+            (0x1487, 0x1043, 0x8750),
+            (0x1487, 0x1463, 0xcb59),
+            (0x15e3, 0x1462, 0xee60),
+        ] {
+            let (mut function, timer, bar) = fixture(0);
+            set_identity(&mut function, AMD, device);
+            function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = subvendor | (subdevice << 16);
+            prepare_model(&mut function, &timer, bar).unwrap();
+        }
+    }
+
+    #[test]
+    fn conditional_amd_board_exclusion_retains_exact_dmi_condition_and_unknown_evidence() {
+        for (vendor, name, expected) in [
+            (
+                "Micro-Star International Co., Ltd.",
+                "MAG X870E TOMAHAWK WIFI (MS-7E59)",
+                Some(AttachError::BoardExcluded),
+            ),
+            (
+                "OEM Micro-Star International Co., Ltd. ",
+                "prefix MAG X870E TOMAHAWK WIFI (MS-7E59) rev2",
+                Some(AttachError::BoardExcluded),
+            ),
+            (
+                "Micro-Star International Co., Ltd.",
+                "Different verified laptop board",
+                None,
+            ),
+            (
+                "Different verified vendor",
+                "MAG X870E TOMAHAWK WIFI (MS-7E59)",
+                None,
+            ),
+            (
+                "",
+                "MAG X870E TOMAHAWK WIFI (MS-7E59)",
+                Some(AttachError::BoardIdentityRequired),
+            ),
+            (
+                "Micro-Star International Co., Ltd.",
+                "  ",
+                Some(AttachError::BoardIdentityRequired),
+            ),
+        ] {
+            let (mut function, timer, bar) = fixture(0);
+            set_identity(&mut function, AMD, 0x15e3);
+            function.config().words[usize::from(PCI_SUBSYSTEM / 4)] = 0xee59_1462;
+            // SAFETY: modeled target firmware strings, no real platform state.
+            let result = unsafe {
+                prepare_with_board(
+                    &mut function,
+                    bar,
+                    &timer,
+                    Ownership::ExclusiveLegacy,
+                    BoardIdentity::Known { vendor, name },
+                )
+            };
+            if let Some(error) = expected {
+                assert_eq!(result.unwrap_err(), error);
+                assert!(function.config().writes.is_empty());
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_amd_dsp_and_gpu_id_families_do_not_inherit_snoop_policy() {
         for (vendor, device) in [
-            (AMD, 0x1457),
-            (AMD, 0x1487),
-            (AMD, 0x15e3),
+            (AMD, 0x15e2),
+            (AMD, 0x1640),
+            (AMD, 0xab28),
             (ATI, 0x157a),
             (ATI, 0x0002),
             (0x10de, 0x0be3),
