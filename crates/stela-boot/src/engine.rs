@@ -1079,6 +1079,13 @@ fn devices<'f>(
     }
     if let Some(sep) = board.and_then(|board| board.sep) {
         use stela_runtime::machine::apple::AscLines;
+        let group = darts.get(sep.iommu).ok_or("SEP DART group is missing")?;
+        let [dart] = group.as_slice() else {
+            return Err("SEP DMA owner requires explicit multiple-TRAD selection".into());
+        };
+        if sep.instance != 0 {
+            return Err("SEP selected TRAD is outside its sole-owner group".into());
+        }
         let ranges = sep
             .ranges
             .map(|(physical, bytes)| Range { physical, bytes });
@@ -1103,7 +1110,7 @@ fn devices<'f>(
         devices.add_sep(
             ranges,
             lines,
-            (darts[sep.iommu][0], sep.stream as usize),
+            (*dart, sep.stream as usize),
             alloc::boxed::Box::new(bundle::entropy),
             stela_runtime::machine::apple::SepProvisioning {
                 security: sep.security,

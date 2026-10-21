@@ -1578,8 +1578,12 @@ impl AppleDevices {
         if wrapper.bytes < asc::WRAPPER_BYTES || auxiliary.bytes == 0 {
             return Err("SEP register apertures are incomplete".into());
         }
-        if stream != 0 {
-            return Err("SEP requires dart-sep stream zero".into());
+        let owner = self
+            .bus
+            .device::<Dart>(dart.0)
+            .ok_or("SEP DMA owner is not a mounted DART")?;
+        if stream >= owner.stream_capacity() {
+            return Err("SEP incoming stream exceeds its mounted DART capacity".into());
         }
         let device = self.bus.add(Box::new(
             Sep::new(entropy, lines, security, ecid, observe, state).map_err(String::from)?,
@@ -5313,6 +5317,136 @@ mod tests {
         // The FIFO drained: EMPTY with LEVEL 0.
         assert_eq!(devices.read(0, AES + 0x24, 4, 0).unwrap() & 0xff02, 0b10);
     }
+    #[test]
+    fn sep_native_nonzero_routes_read_actual_firmware_and_preflight_owner_capacity() {
+        use crate::platform::apple::sep::message::{Frame, ROM};
+        const DART: u64 = 0x25d2c0000;
+        const SEP: u64 = 0x25e400000;
+        const AUX: u64 = 0x25e050000;
+        const RAM: u64 = 0x800000000;
+        let ranges = [
+            Range {
+                physical: SEP,
+                bytes: 0x6c000,
+            },
+            Range {
+                physical: AUX,
+                bytes: 0x60000,
+            },
+        ];
+        let add = |d: &mut AppleDevices, owner, input| {
+            d.add_sep(
+                ranges,
+                asc::Lines::default(),
+                (owner, input),
+                Box::new(|b: &mut [u8]| {
+                    b.fill(0xa5);
+                    Ok(())
+                }),
+                SepProvisioning {
+                    security: None,
+                    ecid: 0xa5a5_0006,
+                    observe: false,
+                    state: sep::state::Location::Volatile,
+                },
+            )
+        };
+        for (profile, input, context) in
+            [(dart::Profile::T8110, 4, 4), (dart::Profile::T6000, 5, 4)]
+        {
+            let mut unrelated = AppleDevices::new();
+            let absent = unrelated
+                .add_dart(
+                    Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    },
+                    16,
+                    None,
+                    None,
+                )
+                .unwrap();
+            let mut d = AppleDevices::new();
+            assert!(
+                add(&mut d, absent, input)
+                    .unwrap_err()
+                    .contains("not a mounted DART")
+            );
+            d.add_aic(0x23b100000, 16, AicLayout::V1).unwrap();
+            let (Controller::V1(id) | Controller::V2(id)) = d.aic.unwrap();
+            let foreign = DartId(id);
+            assert!(
+                add(&mut d, foreign, input)
+                    .unwrap_err()
+                    .contains("not a mounted DART")
+            );
+            let owner = d
+                .add_dart_group_for_profile(
+                    profile,
+                    &[Range {
+                        physical: DART,
+                        bytes: 0x4000,
+                    }],
+                    16,
+                    None,
+                    None,
+                )
+                .unwrap()[0];
+            assert!(add(&mut d, owner, 16).unwrap_err().contains("capacity"));
+            assert!(
+                add(&mut d, owner, usize::MAX)
+                    .unwrap_err()
+                    .contains("capacity")
+            );
+            assert!(d.sep_masters.is_empty());
+            assert!(d.read(0, SEP + 0x8114, 4, 0).is_err());
+            add(&mut d, owner, input).unwrap();
+            assert_eq!(d.sep_masters[0].stream, input);
+            d.write(0, SEP + 0x8114, 4, 1, 0).unwrap();
+            let regs = if profile == dart::Profile::T8110 {
+                [
+                    (0xc00, 1u64 << context),
+                    (0x1000 + 4 * context, 6),
+                    (0x80, 0),
+                ]
+            } else {
+                // Source5 -> context4, all other sources identity. Only
+                // context4 is enabled/bypassed; retain input5 independently.
+                [
+                    (0xfc, 1u64 << context),
+                    (0x100 + 4 * context, 1 << 8),
+                    (0x84, 0x07060404),
+                ]
+            };
+            for (offset, value) in regs {
+                if profile == dart::Profile::T6000 || offset != 0x80 {
+                    d.write(0, DART + offset, 4, value, 0).unwrap();
+                }
+            }
+            let send = |d: &mut AppleDevices, ram: &mut Ram, opcode, data| {
+                let frame = Frame {
+                    service: ROM,
+                    tag: 1,
+                    opcode,
+                    parameter: 0,
+                    data,
+                };
+                d.write(0, SEP + 0x8800, 8, frame.mailbox().payload, 0)
+                    .unwrap();
+                d.write(0, SEP + 0x8808, 8, 0, 0).unwrap();
+                d.transfer(0, ram, 0).unwrap();
+                let reply = Frame::from_payload(d.read(0, SEP + 0x8830, 8, 0).unwrap());
+                d.read(0, SEP + 0x8838, 8, 0).unwrap();
+                reply
+            };
+            let mut ram = Ram::new(RAM, 0x8000);
+            let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
+            ram.bytes[..image.len()].copy_from_slice(&image);
+            assert_eq!(send(&mut d, &mut ram, 5, 0).opcode, 105);
+            assert_eq!(send(&mut d, &mut ram, 6, (RAM >> 12) as u32).opcode, 106);
+        }
+    }
+
     #[test]
     fn sep_rom_accepts_firmware_under_stela_policy_and_reaches_os_active() {
         use crate::platform::{

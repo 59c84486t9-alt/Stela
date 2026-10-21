@@ -1473,6 +1473,11 @@ pub struct SepDevice {
     pub ranges: [(u64, u64); 2],
     pub irqs: [u32; 4],
     pub iommu: usize,
+    /// Explicit selection of the sole original TRAD, independent of SID count.
+    pub instance: usize,
+    /// Actual iommu-parent owner and OS context, before native incoming remap.
+    pub mapper: u32,
+    pub mapper_context: u32,
     pub stream: u32,
     pub firmware: Option<(u64, u64)>,
     /// The AP's effective production status and security mode in `/chosen`,
@@ -4335,21 +4340,39 @@ fn sep_device(
         ));
     }
     let parent = node
-        .first_u32("iommu-parent")
+        .property("iommu-parent")
         .ok_or_else(|| format!("{PATH} has no iommu-parent"))?;
-    let (iommu, stream) = darts
-        .iter()
-        .enumerate()
-        .find_map(|(index, dart)| {
-            dart.mappers
-                .iter()
-                .find(|(phandle, _)| *phandle == parent)
-                .map(|&(_, stream)| (index, stream))
-        })
-        .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
-    if stream != 0 || darts[iommu].streams != 1 || darts[iommu].instances.len() != 1 {
-        return Err(format!("{PATH} requires dart-sep's single stream 0"));
+    let parent: [u8; 4] = parent
+        .try_into()
+        .map_err(|_| format!("{PATH} iommu-parent is not one phandle"))?;
+    let parent = u32::from_le_bytes(parent);
+    if parent == 0 {
+        return Err(format!("{PATH} iommu-parent is zero"));
     }
+    let mut matches = darts.iter().enumerate().flat_map(|(index, dart)| {
+        dart.mappers
+            .iter()
+            .filter(move |(phandle, _)| *phandle == parent)
+            .map(move |&(_, context)| (index, dart, context))
+    });
+    let (iommu, dart, mapper_context) = matches
+        .next()
+        .ok_or_else(|| format!("{PATH} iommu-parent is no modeled DART's mapper"))?;
+    if matches.next().is_some() {
+        return Err(format!("{PATH} mapper ownership is ambiguous"));
+    }
+    if dart.instances.len() != 1 {
+        return Err(format!(
+            "{PATH} DMA owner requires explicit multiple-TRAD selection"
+        ));
+    }
+    if !dart.sids.is_empty() && !dart.sids.contains(&mapper_context) {
+        return Err(format!(
+            "{PATH} mapper context is absent from the original SID set"
+        ));
+    }
+    let stream =
+        native_mapper_input(dart, mapper_context).map_err(|why| format!("{PATH} {why}"))?;
     let firmware = root
         .child("chosen")
         .and_then(|n| n.child("memory-map"))
@@ -4386,6 +4409,9 @@ fn sep_device(
         ranges: [place(first)?, place(second)?],
         irqs,
         iommu,
+        instance: 0,
+        mapper: parent,
+        mapper_context,
         stream,
         firmware,
         security,
@@ -7623,6 +7649,9 @@ mod tests {
                 ranges: [(0x25e400000, 0x6c000), (0x25e050000, 0x60000)],
                 irqs,
                 iommu: 0,
+                instance: 0,
+                mapper: 0x84,
+                mapper_context: 0,
                 stream: 0,
                 firmware: None,
                 security: None,
@@ -7630,6 +7659,76 @@ mod tests {
             })
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x25d2c0000);
+        // A sole TRAD's SID capacity is independent of the selected context.
+        // Incoming source5 -> context4 remains an explicit native route.
+        let root = Node::root(&bytes).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let place = |darts: &[Iommu]| {
+            sep_device(&root, &io, &|v| Some(v + 0x200000000), darts).map(|sep| sep.unwrap())
+        };
+        let mut routed = found.darts.clone();
+        routed[0].profile = dart::Profile::T6000;
+        routed[0].streams = 16;
+        routed[0].sids = alloc::vec![0, 4, 15];
+        routed[0].mappers = alloc::vec![(0x84, 4)];
+        routed[0].remap = alloc::vec![(5, 4)];
+        let route = place(&routed).unwrap();
+        assert_eq!(
+            (
+                route.instance,
+                route.mapper,
+                route.mapper_context,
+                route.stream
+            ),
+            (0, 0x84, 4, 5)
+        );
+        let good = routed[0].clone();
+        routed[0].remap.clear();
+        assert_eq!(
+            (
+                place(&routed).unwrap().mapper_context,
+                place(&routed).unwrap().stream
+            ),
+            (4, 4)
+        );
+        routed[0] = good.clone();
+        routed[0].mappers.push((0x84, 0));
+        assert!(place(&routed).unwrap_err().contains("ambiguous"));
+        routed[0] = good.clone();
+        routed.push(good.clone());
+        assert!(place(&routed).unwrap_err().contains("ambiguous"));
+        routed.pop();
+        routed[0] = good.clone();
+        routed[0].instances.push(good.instances[0].clone());
+        assert!(place(&routed).unwrap_err().contains("multiple-TRAD"));
+        routed[0].instances.clear();
+        assert!(place(&routed).unwrap_err().contains("multiple-TRAD"));
+        routed[0] = good.clone();
+        routed[0].sids = alloc::vec![0, 15];
+        assert!(place(&routed).unwrap_err().contains("SID set"));
+        routed[0] = good.clone();
+        routed[0].mappers[0].1 = 16;
+        routed[0].sids.push(16);
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .contains("outside the native profile")
+        );
+        routed[0] = good.clone();
+        routed[0].mappers[0].1 = 5;
+        routed[0].sids.push(5);
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .contains("incoming remapped source")
+        );
+        routed[0] = good;
+        routed[0].profile = dart::Profile::T8110;
+        assert!(
+            place(&routed)
+                .unwrap_err()
+                .contains("unqualified for this generation")
+        );
         // Admitted only with its distinguishing `role = SEP`; the nub is kept
         // as a modeled child, and neither is a bare flat-list compatible.
         let sep_role = |key: &str| (key == "role").then_some(b"SEP\0".as_slice());
@@ -7646,6 +7745,11 @@ mod tests {
         assert!(board(&tree("iop-nub,rtbuddy-v2", &irqs, 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs[..3], 0x84, 0)).is_err());
         assert!(board(&tree(SEP_NUB, &irqs, 0x85, 0)).is_err());
+        assert!(
+            board(&tree(SEP_NUB, &irqs, 0, 0))
+                .unwrap_err()
+                .contains("iommu-parent is zero")
+        );
         assert!(board(&tree(SEP_NUB, &irqs, 0x84, 1)).is_err());
         let root = Node::root(&bytes).unwrap();
         let io = root.child("arm-io").unwrap();
@@ -7680,6 +7784,43 @@ mod tests {
             );
         }
     }
+    #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    fn original_j314s_sep_preserves_sole_trad_with_sixteen_sid_capacity() {
+        let data = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset: u64| {
+            ranges.iter().find_map(|&(child, parent, bytes)| {
+                offset
+                    .checked_sub(child)
+                    .filter(|&delta| delta < bytes)
+                    .and_then(|delta| parent.checked_add(delta))
+            })
+        };
+        let node = io.child("dart-sep").unwrap();
+        assert_eq!(node.first_u32("sids"), Some(0x8001));
+        let darts = [iommu(&node, &translate).unwrap()];
+        let dart = &darts[0];
+        assert_eq!(dart.profile, dart::Profile::T6000);
+        assert_eq!(dart.streams, 16);
+        assert_eq!(dart.sids, [0, 15]);
+        assert_eq!(dart.instances.len(), 1);
+        assert!(dart.remap.is_empty());
+        let sep = sep_device(&root, &io, &translate, &darts).unwrap().unwrap();
+        assert_eq!(
+            (sep.iommu, sep.instance, sep.mapper_context, sep.stream),
+            (0, 0, 0, 0)
+        );
+        assert_eq!(dart.mappers, [(sep.mapper, 0)]);
+        println!("source-qualified SEP route: {sep:?}; dart={dart:?}");
+    }
+
     #[test]
     #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
     fn original_j314s_external_output_preserves_native_routes_and_identity() {
