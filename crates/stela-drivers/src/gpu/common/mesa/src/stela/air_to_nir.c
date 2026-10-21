@@ -13,6 +13,16 @@
 #define AIR_MAX_ARGUMENTS 128
 #define AIR_MAX_METADATA_OPERANDS 256
 #define AIR_MAX_BITCODE_BYTES (64u * 1024u * 1024u)
+#define AIR_MAX_BLOCKS 128
+#define AIR_MAX_IF_DEPTH 32
+#define AIR_MAX_MERGE_PHIS 128
+
+struct air_block {
+   LLVMBasicBlockRef llvm;
+   unsigned predecessors;
+   unsigned visit; /* LLVM CFG validation: 0=new, 1=active, 2=complete. */
+   bool emitted;
+};
 
 struct value {
    nir_def *def;
@@ -46,6 +56,8 @@ struct translator {
    struct stela_air_error *error;
    unsigned air_minor;
    unsigned max_device_buffers;
+   struct air_block blocks[AIR_MAX_BLOCKS];
+   unsigned block_count;
 };
 
 static bool
@@ -758,6 +770,216 @@ instruction(struct translator *t, LLVMValueRef inst)
    return def && put_value(t, inst, def, 0);
 }
 
+static struct air_block *
+cfg_block(struct translator *t, LLVMBasicBlockRef llvm)
+{
+   for (unsigned i = 0; i < t->block_count; i++) {
+      if (t->blocks[i].llvm == llvm)
+         return &t->blocks[i];
+   }
+   return NULL;
+}
+
+static bool
+cfg_visit(struct translator *t, struct air_block *block)
+{
+   if (block->visit == 1)
+      return fail(t, STELA_AIR_CONTROL_FLOW, "cyclic AIR control flow unsupported");
+   if (block->visit == 2)
+      return true;
+   block->visit = 1;
+   LLVMValueRef terminator = LLVMGetBasicBlockTerminator(block->llvm);
+   for (unsigned i = 0; i < LLVMGetNumSuccessors(terminator); i++) {
+      struct air_block *next = cfg_block(t, LLVMGetSuccessor(terminator, i));
+      if (!next || !cfg_visit(t, next))
+         return false;
+   }
+   block->visit = 2;
+   return true;
+}
+
+static bool
+cfg_prepare(struct translator *t, LLVMValueRef fn)
+{
+   t->block_count = LLVMCountBasicBlocks(fn);
+   if (!t->block_count || t->block_count > AIR_MAX_BLOCKS)
+      return fail(t, STELA_AIR_LIMIT, "AIR basic-block budget exceeded");
+   unsigned i = 0;
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block))
+      t->blocks[i++].llvm = block;
+   unsigned instructions = 0, returns = 0;
+   for (i = 0; i < t->block_count; i++) {
+      struct air_block *block = &t->blocks[i];
+      LLVMValueRef term = LLVMGetBasicBlockTerminator(block->llvm);
+      LLVMOpcode opcode = LLVMGetInstructionOpcode(term);
+      if (opcode == LLVMRet) {
+         returns++;
+      } else if (opcode != LLVMUncondBr && opcode != LLVMCondBr) {
+         return fail(t, STELA_AIR_CONTROL_FLOW, "unsupported AIR terminator %u", opcode);
+      }
+      if (opcode == LLVMCondBr &&
+          LLVMGetSuccessor(term, 0) == LLVMGetSuccessor(term, 1))
+         return fail(t, STELA_AIR_CONTROL_FLOW, "duplicate conditional edges unsupported");
+      for (unsigned s = 0; s < LLVMGetNumSuccessors(term); s++) {
+         struct air_block *next = cfg_block(t, LLVMGetSuccessor(term, s));
+         if (!next)
+            return fail(t, STELA_AIR_CONTROL_FLOW, "branch leaves AIR kernel");
+         next->predecessors++;
+      }
+      unsigned phis = 0;
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm); inst;
+           inst = LLVMGetNextInstruction(inst)) {
+         if (instructions == t->options->max_instructions) {
+            t->error->instruction = instructions;
+            return fail(t, STELA_AIR_LIMIT, "AIR instruction budget exceeded");
+         }
+         instructions++;
+         if (LLVMGetInstructionOpcode(inst) == LLVMPHI && ++phis > AIR_MAX_MERGE_PHIS)
+            return fail(t, STELA_AIR_LIMIT, "AIR merge PHI budget exceeded");
+      }
+   }
+   if (returns != 1 || !cfg_visit(t, &t->blocks[0]))
+      return fail(t, STELA_AIR_CONTROL_FLOW, "requires one acyclic compute return");
+   for (i = 0; i < t->block_count; i++) {
+      if (t->blocks[i].visit != 2)
+         return fail(t, STELA_AIR_CONTROL_FLOW, "unreachable AIR blocks unsupported");
+   }
+   return true;
+}
+
+struct arm_exit {
+   struct air_block *merge;
+   LLVMBasicBlockRef predecessor;
+};
+
+struct merge_phi {
+   LLVMValueRef llvm;
+   nir_def *then_value;
+   nir_def *else_value;
+};
+
+static bool
+phi_edge_value(struct translator *t, LLVMValueRef phi, LLVMBasicBlockRef predecessor,
+               unsigned incoming_count, nir_def **value)
+{
+   unsigned components, bits;
+   if (!shape(LLVMTypeOf(phi), &components, &bits))
+      return fail(t, STELA_AIR_TYPE, "only integer/vector PHI values supported");
+   if (LLVMCountIncoming(phi) != incoming_count)
+      return fail(t, STELA_AIR_CONTROL_FLOW, "PHI predecessor count differs from structured merge");
+   LLVMValueRef incoming = NULL;
+   for (unsigned i = 0; i < incoming_count; i++) {
+      if (LLVMGetIncomingBlock(phi, i) == predecessor) {
+         if (incoming)
+            return fail(t, STELA_AIR_CONTROL_FLOW, "duplicate PHI predecessor");
+         incoming = LLVMGetIncomingValue(phi, i);
+      }
+   }
+   if (!incoming)
+      return fail(t, STELA_AIR_CONTROL_FLOW, "missing PHI predecessor edge");
+   *value = get_value(t, incoming);
+   return *value != NULL;
+}
+
+static bool
+emit_region(struct translator *t, struct air_block *block, LLVMBasicBlockRef predecessor,
+            unsigned depth, struct arm_exit *exit)
+{
+   if (depth > AIR_MAX_IF_DEPTH)
+      return fail(t, STELA_AIR_LIMIT, "AIR conditional nesting budget exceeded");
+   /* This is a bounded region recognizer, not a general CFG structurizer. Each
+    * arm follows unique-predecessor chains to a common two-predecessor merge.
+    * Existing NIR builders retain conditional execution and edge-specific SSA. */
+   if (predecessor && block->predecessors > 1) {
+      *exit = (struct arm_exit){block, predecessor};
+      return true;
+   }
+   while (block) {
+      if (block->emitted)
+         return fail(t, STELA_AIR_CONTROL_FLOW, "overlapping/unstructured AIR regions");
+      block->emitted = true;
+      LLVMValueRef term = LLVMGetBasicBlockTerminator(block->llvm);
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block->llvm); inst != term;
+           inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMGetInstructionOpcode(inst) == LLVMPHI) {
+            if (!find_value(t, inst)) {
+               nir_def *value = NULL;
+               if (block->predecessors != 1 ||
+                   !phi_edge_value(t, inst, predecessor, 1, &value) ||
+                   !put_value(t, inst, value, 0))
+                  return fail(t, STELA_AIR_CONTROL_FLOW, "unsupported standalone PHI");
+               t->error->instruction++;
+            }
+         } else {
+            if (!instruction(t, inst))
+               return false;
+            t->error->instruction++;
+         }
+      }
+      t->error->instruction++;
+      if (LLVMGetInstructionOpcode(term) == LLVMRet) {
+         if (depth || !instruction(t, term))
+            return fail(t, STELA_AIR_CONTROL_FLOW, "return inside conditional arm unsupported");
+         *exit = (struct arm_exit){0};
+         return true;
+      }
+      if (LLVMGetInstructionOpcode(term) == LLVMUncondBr) {
+         predecessor = block->llvm;
+         block = cfg_block(t, LLVMGetSuccessor(term, 0));
+         if (block->predecessors > 1) {
+            *exit = (struct arm_exit){block, predecessor};
+            return true;
+         }
+         continue;
+      }
+      if (depth == AIR_MAX_IF_DEPTH)
+         return fail(t, STELA_AIR_LIMIT, "AIR conditional nesting budget exceeded");
+      nir_def *condition = get_value(t, LLVMGetCondition(term));
+      if (!condition || condition->num_components != 1 || condition->bit_size != 1)
+         return fail(t, STELA_AIR_TYPE, "conditional branch requires scalar i1");
+      struct arm_exit then_exit = {0}, else_exit = {0};
+      struct merge_phi phis[AIR_MAX_MERGE_PHIS];
+      unsigned phi_count = 0;
+      nir_if *nif = nir_push_if(&t->b, condition);
+      if (!emit_region(t, cfg_block(t, LLVMGetSuccessor(term, 0)), block->llvm,
+                       depth + 1, &then_exit))
+         return false;
+      if (!then_exit.merge || then_exit.merge->predecessors != 2)
+         return fail(t, STELA_AIR_CONTROL_FLOW, "requires two-predecessor structured merge");
+      for (LLVMValueRef phi = LLVMGetFirstInstruction(then_exit.merge->llvm);
+           phi && LLVMGetInstructionOpcode(phi) == LLVMPHI; phi = LLVMGetNextInstruction(phi)) {
+         if (phi_count == AIR_MAX_MERGE_PHIS)
+            return fail(t, STELA_AIR_LIMIT, "AIR merge PHI budget exceeded");
+         phis[phi_count] = (struct merge_phi){.llvm = phi};
+         if (!phi_edge_value(t, phi, then_exit.predecessor, 2, &phis[phi_count].then_value))
+            return false;
+         phi_count++;
+      }
+      nir_push_else(&t->b, nif);
+      if (!emit_region(t, cfg_block(t, LLVMGetSuccessor(term, 1)), block->llvm,
+                       depth + 1, &else_exit))
+         return false;
+      if (then_exit.merge != else_exit.merge ||
+          then_exit.predecessor == else_exit.predecessor)
+         return fail(t, STELA_AIR_CONTROL_FLOW, "conditional arms do not form a structured merge");
+      for (unsigned i = 0; i < phi_count; i++) {
+         if (!phi_edge_value(t, phis[i].llvm, else_exit.predecessor, 2, &phis[i].else_value))
+            return false;
+      }
+      nir_pop_if(&t->b, nif);
+      for (unsigned i = 0; i < phi_count; i++) {
+         if (!put_value(t, phis[i].llvm,
+                        nir_if_phi(&t->b, phis[i].then_value, phis[i].else_value), 0))
+            return false;
+         t->error->instruction++;
+      }
+      block = then_exit.merge;
+      predecessor = NULL; /* Merge PHIs were handled simultaneously above. */
+   }
+   return fail(t, STELA_AIR_CONTROL_FLOW, "missing AIR region exit");
+}
+
 nir_shader *
 stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
                  const nir_shader_compiler_options *nir_options,
@@ -835,10 +1057,8 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_ARGUMENT, "entry must be a defined nonvariadic void C-convention kernel");
       goto done;
    }
-   if (LLVMCountBasicBlocks(fn) != 1) {
-      fail(&t, STELA_AIR_CONTROL_FLOW, "only straight-line compute kernels supported");
+   if (!cfg_prepare(&t, fn))
       goto done;
-   }
    t.b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, nir_options, "%s", entry);
    for (unsigned i = 0; i < 3; i++)
       t.b.shader->info.workgroup_size[i] = options->workgroup_size[i];
@@ -848,15 +1068,18 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_ALLOCATION, "AIR shader/value map allocation failed");
       goto done;
    }
-   for (LLVMValueRef inst = LLVMGetFirstInstruction(LLVMGetFirstBasicBlock(fn));
-        inst; inst = LLVMGetNextInstruction(inst)) {
-      if (error->instruction >= options->max_instructions) {
-         fail(&t, STELA_AIR_LIMIT, "AIR instruction budget exceeded");
+   struct arm_exit exit = {0};
+   if (!emit_region(&t, &t.blocks[0], NULL, 0, &exit))
+      goto done;
+   if (exit.merge) {
+      fail(&t, STELA_AIR_CONTROL_FLOW, "unpaired AIR merge region");
+      goto done;
+   }
+   for (unsigned i = 0; i < t.block_count; i++) {
+      if (!t.blocks[i].emitted) {
+         fail(&t, STELA_AIR_CONTROL_FLOW, "unconsumed AIR control-flow region");
          goto done;
       }
-      if (!instruction(&t, inst))
-         goto done;
-      error->instruction++;
    }
    nir_validate_shader(t.b.shader, "AIR integer compute translation");
    result = t.b.shader;

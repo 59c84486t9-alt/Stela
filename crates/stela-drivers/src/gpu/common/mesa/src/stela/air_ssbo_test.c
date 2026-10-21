@@ -111,6 +111,66 @@ store_case(uint64_t offset, uint32_t size, bool valid)
 }
 
 static void
+conditional_accesses(void)
+{
+   const char *body =
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\n%lp = getelementptr i8, ptr addrspace(1) %out, i64 4294967300\n"
+      "%l = load i32, ptr addrspace(1) %lp, align 1\n"
+      "%ls = getelementptr i8, ptr addrspace(1) %out, i64 4\n"
+      "store i32 55, ptr addrspace(1) %ls, align 4\nbr label %join\n"
+      "right:\n%rs = getelementptr i8, ptr addrspace(1) %out, i64 8\n"
+      "store i32 66, ptr addrspace(1) %rs, align 4\nbr label %join\n"
+      "join:\n%v = phi i32 [%l, %left], [37, %right]\n"
+      "store i32 %v, ptr addrspace(1) %out, align 4\nret void\n";
+   for (unsigned tid = 0; tid < 2; tid++) {
+      const unsigned sizes[] = {0, 6, 64};
+      for (unsigned i = 0; i < ARRAY_SIZE(sizes); i++) {
+         nir_shader *nir = translate(body, 2);
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr_safe(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+                  if (intrinsic->intrinsic != nir_intrinsic_load_workgroup_id &&
+                      intrinsic->intrinsic != nir_intrinsic_load_local_invocation_id)
+                     continue;
+                  nir_builder b = nir_builder_at(nir_before_instr(instr));
+                  nir_def *id = nir_imm_ivec3(&b,
+                     intrinsic->intrinsic == nir_intrinsic_load_workgroup_id ? 0 : tid, 0, 0);
+                  nir_def_rewrite_uses(&intrinsic->def, id);
+                  nir_instr_remove(instr);
+               }
+            }
+         }
+         set_size(nir, sizes[i]);
+         unsigned stores = 0;
+         nir_foreach_function_impl(impl, nir) {
+            nir_foreach_block(block, impl) {
+               CHECK(nir_block_get_following_if(block) == NULL);
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic)
+                     continue;
+                  nir_intrinsic_instr *intrinsic = nir_instr_as_intrinsic(instr);
+                  CHECK(intrinsic->intrinsic != nir_intrinsic_load_ssbo);
+                  if (intrinsic->intrinsic != nir_intrinsic_store_ssbo)
+                     continue;
+                  uint32_t expected_offset = sizes[i] == 64 && !stores ? (tid ? 8 : 4) : 0;
+                  uint32_t expected_value = expected_offset ? (tid ? 66 : 55) : (tid ? 37 : 0);
+                  CHECK(nir_src_is_const(intrinsic->src[2]) && nir_src_as_uint(intrinsic->src[2]) == expected_offset);
+                  CHECK(nir_src_is_const(intrinsic->src[0]) && nir_src_as_uint(intrinsic->src[0]) == expected_value);
+                  stores++;
+               }
+            }
+         }
+         CHECK(stores == (sizes[i] == 64 ? 2 : sizes[i] ? 1 : 0));
+         ralloc_free(nir);
+      }
+   }
+}
+
+static void
 view_validation(void)
 {
    struct stela_air_ssbo_view view = {
@@ -222,6 +282,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    view_validation();
    binding_refusals();
+   conditional_accesses();
    store_case(0, 64, true);
    store_case(60, 64, true);
    store_case(61, 64, false);
@@ -240,6 +301,6 @@ main(void)
    check_accesses(nir, 0, 1, 0, 0);
    ralloc_free(nir);
    glsl_type_singleton_decref();
-   puts("AIR SSBO exact-view validation, 64-bit offset bounds and refusal tests passed");
+   puts("AIR SSBO exact-view validation, conditional effects, 64-bit bounds and refusal tests passed");
    return 0;
 }
