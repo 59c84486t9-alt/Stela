@@ -3891,4 +3891,22 @@ mod tests {
             assert_eq!(model.read32(TX_CONFIG) & (1 << 7), 0);
         }
     }
+    #[test]
+    fn csi_failed_data_read_does_not_publish_a_fabricated_config_value() {
+        for version in [34, 61, 63, 64, 65] {
+            let time = Time::default();
+            let mut model = Model::nbase(&time);
+            model.failed_read = Some(CSI_DATA);
+            let mut hw = Hardware::new(&model, &time, revision(version), 2);
+            assert_eq!(
+                hw.configure_mac(None),
+                Err(Error::Device(BlockError::Device { status: u32::MAX }))
+            );
+            let s = model.state.borrow();
+            assert_eq!(s.bytes[CONFIG_LOCK], 0);
+            assert!(!s.writes.iter().any(|(r, v, _)| *r == CSI_DATA
+                || (*r == CSI_ADDRESS && *v & ACCESS != 0)
+                || matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW)));
+        }
+    }
 }

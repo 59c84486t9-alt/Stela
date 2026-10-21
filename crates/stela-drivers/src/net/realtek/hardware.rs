@@ -244,7 +244,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         let cmd = 0x70c | 0xf000 | (u32::from(self.function) << 16);
         self.registers.write32(CSI_ADDRESS, cmd);
         self.poll32(CSI_ADDRESS, ACCESS, true, 10, 100)?;
-        let value = (self.registers.read32(CSI_DATA) & 0x00ff_ffff) | 0x2700_0000;
+        let value = (self.mmio32(CSI_DATA)? & 0x00ff_ffff) | 0x2700_0000;
         self.registers.write32(CSI_DATA, value);
         self.registers.write32(CSI_ADDRESS, ACCESS | cmd);
         self.poll32(CSI_ADDRESS, ACCESS, false, 10, 100)
