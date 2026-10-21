@@ -958,4 +958,110 @@ mod tests {
         assert_eq!(fresh.phase(), Phase::Quarantined);
         assert!(!fresh.port_open(None, None));
     }
+
+    fn broadcast(frame: Mpdu) -> Mpdu {
+        let mut bytes = frame.bytes().to_vec();
+        bytes[4..10].copy_from_slice(&Mac::BROADCAST.0);
+        Mpdu::new(bytes, frame.radio, frame.security).unwrap()
+    }
+
+    #[test]
+    fn broadcast_ap_departures_close_authorized_controlled_port() {
+        for subtype in [0xa0, 0xc0] {
+            let mut station = Station::new(LOCAL).unwrap();
+            let config = configure(&mut station, PortPolicy::Controlled);
+            station
+                .complete_configuration(config, Completion::Accepted, 4)
+                .unwrap();
+            let ptk = key(1, KeyScope::Pairwise(AP));
+            let gtk = key(2, KeyScope::Group(AP));
+            station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
+            assert!(station.port_open(Some(&ptk), Some(&gtk)));
+            let action = station
+                .receive(
+                    config.epoch(),
+                    &broadcast(response(subtype, &[3, 0])),
+                    5,
+                    &mut Policy(true),
+                )
+                .unwrap();
+            assert!(matches!(
+                action,
+                Action::Remove {
+                    failure: Some(Failure::PeerDeparture(3)),
+                    ..
+                }
+            ));
+            assert_eq!(station.phase(), Phase::Disconnecting);
+            assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+        }
+    }
+
+    #[test]
+    fn broadcast_departure_from_wrong_ap_does_not_close_port() {
+        for subtype in [0xa0, 0xc0] {
+            let mut station = Station::new(LOCAL).unwrap();
+            let config = configure(&mut station, PortPolicy::Controlled);
+            station
+                .complete_configuration(config, Completion::Accepted, 4)
+                .unwrap();
+            let ptk = key(1, KeyScope::Pairwise(AP));
+            let gtk = key(2, KeyScope::Group(AP));
+            station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
+            for offset in [10, 16] {
+                let frame = broadcast(response(subtype, &[3, 0]));
+                let mut bytes = frame.bytes().to_vec();
+                bytes[offset] ^= 2;
+                let wrong = Mpdu::new(bytes, frame.radio, frame.security).unwrap();
+                assert!(matches!(
+                    station.receive(config.epoch(), &wrong, 5, &mut Policy(true)),
+                    Err(Error::Wire(wire::Error::WrongPeer))
+                ));
+                assert!(station.port_open(Some(&ptk), Some(&gtk)));
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_authentication_and_association_responses_are_not_accepted() {
+        let mut station = Station::new(LOCAL).unwrap();
+        let auth = station
+            .begin(join(PortPolicy::Open), 0, &mut Policy(true))
+            .unwrap();
+        station.submitted(ticket(&auth)).unwrap();
+        let epoch = ticket(&auth).epoch();
+        assert!(matches!(
+            station.receive(
+                epoch,
+                &broadcast(response(0xb0, &[0, 0, 2, 0, 0, 0])),
+                1,
+                &mut Policy(true)
+            ),
+            Err(Error::Wire(wire::Error::WrongPeer))
+        ));
+        assert_eq!(station.phase(), Phase::Authenticating);
+        let assoc = station
+            .receive(
+                epoch,
+                &response(0xb0, &[0, 0, 2, 0, 0, 0]),
+                2,
+                &mut Policy(true),
+            )
+            .unwrap();
+        station.submitted(ticket(&assoc)).unwrap();
+        assert!(matches!(
+            station.receive(
+                epoch,
+                &broadcast(response(
+                    0x10,
+                    &[1, 0, 0, 0, 7, 0xc0, 1, 3, 0x8c, 0x98, 0xb0]
+                )),
+                3,
+                &mut Policy(true)
+            ),
+            Err(Error::Wire(wire::Error::WrongPeer))
+        ));
+        assert_eq!(station.phase(), Phase::Associating);
+        assert!(!station.port_open(None, None));
+    }
 }

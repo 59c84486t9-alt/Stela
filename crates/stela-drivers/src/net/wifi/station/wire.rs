@@ -238,7 +238,11 @@ pub fn check_peer(frame: &Mpdu, local: Mac, bssid: Mac) -> Result<(), Error> {
     if header.fragmented() {
         return Err(Error::Unsupported("fragmented management frame"));
     }
-    if header.receiver != local
+    // Non-PMF AP departure frames may address all associated stations. Auth
+    // and association responses remain addressed to this station alone.
+    let broadcast_departure =
+        header.receiver == Mac::BROADCAST && matches!(header.control & 0x00fc, 0x00a0 | 0x00c0);
+    if (header.receiver != local && !broadcast_departure)
         || header.transmitter != Some(bssid)
         || frame.bytes()[16..22] != bssid.0
     {
