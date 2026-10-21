@@ -5,8 +5,9 @@
 //! Param selects the application service and each transaction has a nonzero
 //! command-pool tag (`_cmsgSend`, 0x2d85250). IN is AP-to-SEP; OUT is SEP-to-AP.
 //! This records the recovered prefix and performs bounded DMA for a future
-//! implemented service. It sends no reply: the control reply encoding, clear,
-//! relay and DMA-descriptor protocols are still unrecovered and refuse.
+//! implemented service. This prefix codec sends no reply; the active control
+//! endpoint owns acknowledgements after its catalog and lifecycle checks.
+//! Clear, relay and DMA-descriptor protocols remain explicit refusals.
 use super::{
     message::{self, Frame},
     shared::Region,
@@ -57,7 +58,7 @@ impl Buffers {
     }
 
     pub fn new(service: u8) -> Result<Self, &'static str> {
-        if service == message::CONTROL || service >= message::DISCOVERY {
+        if service == message::CONTROL || service > super::endpoint::MAX_SERVICE {
             return Err("SEP OOL owner is not an application service");
         }
         Ok(Self {
@@ -159,6 +160,8 @@ mod tests {
     #[test]
     fn registrations_are_ordered_per_owner_and_direction_and_refusals_preserve_state() {
         assert!(Buffers::new(0).is_err());
+        assert!(Buffers::new(0x20).is_err());
+        assert!(Buffers::new(0xfc).is_err());
         assert!(Buffers::new(0xfd).is_err());
         let mut buffers = Buffers::new(7).unwrap();
         assert!(buffers.record(frame(2, 1)).is_err());

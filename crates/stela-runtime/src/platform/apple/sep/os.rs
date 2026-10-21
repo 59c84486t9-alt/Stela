@@ -4,7 +4,8 @@
 //! (see [`super::firmware`]), this phase speaks the AP-facing boot-completion
 //! protocol. `AppleSEPBooter::bootSEP` 0x2d73ddc..0x2d73e68 maps the aggregate
 //! shared-memory buffer and sends its slave address and size on service 0xfe;
-//! the SEP then notifies the control endpoint that the OS is active. That
+//! the SEP validates its directory through dart-sep before notifying the
+//! control endpoint that the OS is active. That
 //! notification drives `AppleSEPManager::notifyOSActive` 0x2d6c998 and
 //! `_notifyOSActiveGated` 0x2d6b38c, which publishes `sepBootedOnce`
 //! (0x2d6b558) and advances the manager to its booted state.
@@ -35,12 +36,12 @@ use super::{
     message::{self, Frame},
     observe::{self, Journal},
     ool::Buffers,
-    shared::Region,
+    shared::{Layout, Region},
     store::{Backend, Nonces},
     xart::{self, Payload, Xart},
 };
 use crate::platform::dma::{DmaError, Port};
-use alloc::{boxed::Box, format, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec::Vec};
 
 /// The SEP's power state as the control endpoint drives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,8 @@ pub enum Power {
 
 pub struct SepOs {
     region: Option<Region>,
+    pending_region: Option<Region>,
+    layout: Option<Layout>,
     os_active_sent: bool,
     security: Option<SecurityMode>,
     power: Power,
@@ -62,7 +65,7 @@ pub struct SepOs {
     catalog: Catalog,
     xart: Option<Xart>,
     /// Application-service requests awaiting the DMA step, in arrival order.
-    pending: Vec<Frame>,
+    pending: VecDeque<Frame>,
     /// When observing (`--sep-observe`), the recorded `sks`/`pnon`/`scrd`
     /// traffic. Those services are then advertised and their requests logged
     /// and never answered.
@@ -76,11 +79,15 @@ pub struct SepOs {
 /// `AppleSEPManager::start` 0x2d67308 selects it from the SEP node's `aarch64`
 /// property, which `soc::sep_device` requires.
 pub const SEP_PAGE_BYTES: u32 = 0x4000;
+/// Native implementation resource bound, not a firmware protocol constant.
+const MAX_PENDING_REQUESTS: usize = 256;
 
 impl SepOs {
     pub fn new(security: Option<SecurityMode>) -> Self {
         Self {
             region: None,
+            pending_region: None,
+            layout: None,
             os_active_sent: false,
             security,
             power: Power::Awake,
@@ -88,7 +95,7 @@ impl SepOs {
             buffers: Vec::new(),
             catalog: Catalog::empty(),
             xart: None,
-            pending: Vec::new(),
+            pending: VecDeque::new(),
             observe: None,
             strict: true,
         }
@@ -138,7 +145,7 @@ impl SepOs {
 
     /// Whether application-service requests await the DMA step.
     pub fn dma_pending(&self) -> bool {
-        !self.pending.is_empty()
+        self.pending_region.is_some() || !self.pending.is_empty()
     }
 
     /// Answer the queued application-service requests through `port`. A
@@ -150,7 +157,30 @@ impl SepOs {
         entropy: &mut dyn Entropy,
         outbox: &mut Vec<Message>,
     ) -> Result<(), &'static str> {
-        for frame in core::mem::take(&mut self.pending) {
+        if let Some(region) = self.pending_region {
+            let layout =
+                Layout::read(port, region, u64::from(SEP_PAGE_BYTES)).map_err(dma_refusal)?;
+            self.region = Some(region);
+            self.layout = Some(layout);
+            self.pending_region = None;
+            if !self.os_active_sent {
+                outbox.push(control::notification(control::OS_ACTIVE, 0).mailbox());
+                outbox.extend(
+                    self.catalog
+                        .advertisements()
+                        .into_iter()
+                        .map(Frame::mailbox),
+                );
+                self.os_active_sent = true;
+            }
+            return Ok(());
+        }
+        // One request per DMA step: ASC publishes the whole produced outbox
+        // only on success. A later request's failure must not discard an
+        // earlier committed operation's reply. A failed request may
+        // already have committed durable state before output DMA failed;
+        // do not replay it or silently discard unrelated later requests.
+        if let Some(frame) = self.pending.pop_front() {
             if let Some(name) = observe::name(frame.service) {
                 // Record the request (frame plus a bounded prefix of its OOL
                 // input); observation never answers.
@@ -158,7 +188,7 @@ impl SepOs {
                 if self.strict {
                     return Err(observe::refusal(frame.service));
                 }
-                continue;
+                return Ok(());
             }
             let xart = self
                 .xart
@@ -218,6 +248,12 @@ impl SepOs {
         self.region
     }
 
+    /// Directory metadata last validated through dart-sep. This makes no
+    /// claim about an unrecovered channel's content or authentication.
+    pub fn layout(&self) -> Option<&Layout> {
+        self.layout.as_ref()
+    }
+
     /// Whether the SEP has reported its OS active to the control endpoint.
     pub fn os_active_sent(&self) -> bool {
         self.os_active_sent
@@ -238,8 +274,8 @@ impl SepOs {
     }
 
     /// Dispatch an AP-sent frame in the active phase. Boot (0xfe) records the
-    /// shared-memory region and reports OS active once; control requests are
-    /// answered once that has happened; other traffic refuses.
+    /// shared-memory region for validation in the DMA step. Control requests
+    /// are answered once that reports OS active; other traffic refuses.
     pub fn receive(
         &mut self,
         frame: Frame,
@@ -248,18 +284,11 @@ impl SepOs {
     ) -> Result<(), &'static str> {
         match frame.service {
             message::BOOT => {
-                let region = Region::from_message(frame.mailbox())?;
-                self.region = Some(region);
-                if !self.os_active_sent {
-                    outbox.push(control::notification(control::OS_ACTIVE, 0).mailbox());
-                    outbox.extend(
-                        self.catalog
-                            .advertisements()
-                            .into_iter()
-                            .map(Frame::mailbox),
-                    );
-                    self.os_active_sent = true;
+                if self.pending_region.is_some() || !self.pending.is_empty() {
+                    return Err("SEP shared-memory remap while DMA work is pending");
                 }
+                let region = Region::from_message(frame.mailbox())?;
+                self.pending_region = Some(region);
                 Ok(())
             }
             message::CONTROL => self.control(frame, entropy, outbox),
@@ -271,10 +300,23 @@ impl SepOs {
                 if !self.os_active_sent {
                     return Err("SEP service request before sepOS reported OS active");
                 }
+                if self.pending_region.is_some() {
+                    return Err("SEP service request while shared-memory remap is pending");
+                }
                 if self.power != Power::Awake {
                     return Err("SEP service request while the SEP sleeps or naps");
                 }
-                self.pending.push(frame);
+                if self.pending.len() == MAX_PENDING_REQUESTS {
+                    return Err("SEP application request queue exceeds the resource bound");
+                }
+                if self
+                    .pending
+                    .iter()
+                    .any(|pending| pending.service == frame.service && pending.tag == frame.tag)
+                {
+                    return Err("SEP application request repeats an outstanding service/tag");
+                }
+                self.pending.push_back(frame);
                 Ok(())
             }
             _ => Err("SEP application service is not modeled"),
@@ -290,6 +332,9 @@ impl SepOs {
         if !self.os_active_sent {
             return Err("SEP control request before sepOS mapped its shared memory");
         }
+        if self.pending_region.is_some() {
+            return Err("SEP control request while shared-memory remap is pending");
+        }
         let request = Request::decode(frame)?;
         if self.power != Power::Awake && !matches!(request, Request::Wake | Request::WakeFromNap) {
             return Err("SEP control request while the SEP sleeps or naps");
@@ -297,6 +342,13 @@ impl SepOs {
         let data = match request {
             Request::Nop => Some(0),
             Request::Ool => {
+                if self
+                    .pending
+                    .iter()
+                    .any(|pending| pending.service == frame.parameter)
+                {
+                    return Err("SEP OOL registration while its service has pending requests");
+                }
                 let service = self.catalog.service(frame.parameter)?;
                 let input = matches!(
                     frame.opcode,
@@ -324,6 +376,9 @@ impl SepOs {
                 Some(0)
             }
             Request::Sleep(kind) => {
+                if !self.pending.is_empty() {
+                    return Err("SEP sleep while application requests are pending is not modeled");
+                }
                 self.power = Power::Asleep(kind);
                 Some(0)
             }
@@ -336,6 +391,9 @@ impl SepOs {
                 Some(0)
             }
             Request::Nap => {
+                if !self.pending.is_empty() {
+                    return Err("SEP nap while application requests are pending is not modeled");
+                }
                 self.power = Power::Napping;
                 None
             }
@@ -369,6 +427,11 @@ impl SepOs {
             // initializes the gigalocker: the SEP erases its anti-replay
             // state.
             Request::EraseInstall => {
+                if !self.pending.is_empty() {
+                    return Err(
+                        "SEP erase-install while application requests are pending is not modeled",
+                    );
+                }
                 self.xart
                     .as_mut()
                     .ok_or("SEP erase-install needs the xART store")?
@@ -482,9 +545,7 @@ mod tests {
 
     fn active(security: Option<SecurityMode>) -> SepOs {
         let mut os = SepOs::new(security).with_catalog(catalog());
-        let mut outbox = Vec::new();
-        os.receive(shm(0x1234_5000, 0x20), &mut counter(), &mut outbox)
-            .unwrap();
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         os
     }
 
@@ -497,15 +558,23 @@ mod tests {
             .collect())
     }
 
+    fn map_shared(os: &mut SepOs, frame: Frame) -> Result<Vec<Frame>, &'static str> {
+        let region = Region::from_message(frame.mailbox())?;
+        assert!(reply(os, frame)?.is_empty());
+        let mut ram = crate::platform::dma::tests::Ram::new(region.address, 0x4000);
+        ram.bytes[..4].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
+        dma(os, &mut ram)
+    }
+
     #[test]
     fn mapping_shared_memory_reports_os_active_exactly_once() {
         let mut os = SepOs::new(None);
         assert!(!os.os_active_sent());
-        let first = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        let first = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         assert_eq!(
             os.region(),
             Some(Region {
-                address: 0x1234_5000,
+                address: 0x1234_4000,
                 bytes: 0x20 << 12,
             })
         );
@@ -513,12 +582,16 @@ mod tests {
         assert!(os.os_active_sent());
         // A cataloged service is advertised after OS active, name first.
         let mut os = SepOs::new(None).with_catalog(catalog());
-        let first = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        let first = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         assert_eq!(first[0], control::notification(control::OS_ACTIVE, 0));
         assert_eq!(first[1..], catalog().advertisements()[..]);
         assert_eq!((first[1].opcode, first[2].opcode), (0, 1));
         // A second shared-memory frame (wake remap) does not re-announce.
-        assert!(reply(&mut os, shm(0x2000_0000, 0x10)).unwrap().is_empty());
+        assert!(
+            map_shared(&mut os, shm(0x2000_0000, 0x10))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -636,7 +709,7 @@ mod tests {
     #[test]
     fn xart_requests_are_answered_after_their_ool_input_is_read() {
         let mut os = SepOs::new(None).with_services(store(), false).unwrap();
-        let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         // OS active, then name and capacities for each of xarm and xars.
         assert_eq!(advertised.len(), 5);
         assert_eq!(advertised[1].data, xart::MASTER);
@@ -711,10 +784,89 @@ mod tests {
     }
 
     #[test]
+    fn one_failed_request_does_not_discard_other_transactions_or_their_replies() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        map_shared(&mut os, shm(0x4000, 4)).unwrap();
+        for (tag, opcode, data) in [
+            (1, control::SET_OOL_IN_LENGTH, 0x8000),
+            (2, control::SET_OOL_IN_ADDRESS, 0x100),
+        ] {
+            reply(&mut os, control(tag, opcode, xart::SLAVE_ID, data)).unwrap();
+        }
+        let request = |tag, op, length| {
+            xart::XartMessage {
+                service: xart::SLAVE_ID,
+                tag,
+                op,
+                length,
+                flags: 0,
+                slot: 0,
+                reserved: 0,
+            }
+            .frame()
+        };
+        for frame in [request(1, 8, 16), request(2, 18, 0), request(3, 8, 16)] {
+            reply(&mut os, frame).unwrap();
+        }
+        assert!(reply(&mut os, request(1, 8, 16)).is_err());
+        assert!(
+            reply(
+                &mut os,
+                control(3, control::SET_OOL_IN_LENGTH, xart::SLAVE_ID, 0x8000)
+            )
+            .is_err()
+        );
+        assert!(reply(&mut os, control(3, control::SLEEP, 0, 0)).is_err());
+        assert_eq!(os.power(), Power::Awake);
+        assert!(reply(&mut os, shm(0x8000, 4)).is_err());
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x8000);
+        ram.bytes[..16].fill(0x5a);
+        let first = dma(&mut os, &mut ram).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tag, 1);
+        assert!(os.dma_pending());
+        assert_eq!(
+            dma(&mut os, &mut ram),
+            Err("xART commit-hash types are not recovered")
+        );
+        assert!(os.dma_pending());
+        let third = dma(&mut os, &mut ram).unwrap();
+        assert_eq!(third.len(), 1);
+        assert_eq!(third[0].tag, 3);
+        assert!(!os.dma_pending());
+        assert_eq!(os.xart().unwrap().os_uuid(), Some(&[0x5a; 16][..]));
+    }
+
+    #[test]
+    fn remap_validates_before_replacing_the_active_layout() {
+        let mut os = active(None);
+        let previous = os.layout().unwrap().clone();
+        assert!(reply(&mut os, shm(0x8000, 4)).unwrap().is_empty());
+        assert_eq!(os.region(), Some(previous.region));
+        assert!(reply(&mut os, control(1, control::NOP, 0, 0)).is_err());
+        let mut ram = crate::platform::dma::tests::Ram::new(0x8000, 0x4000);
+        // A zero-filled directory has no null terminator and must not
+        // replace the known layout, even after OS-active was published.
+        assert!(dma(&mut os, &mut ram).is_err());
+        assert_eq!(os.layout(), Some(&previous));
+        assert!(os.dma_pending());
+        ram.bytes[..4].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
+        assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+        assert_eq!(os.region().unwrap().address, 0x8000);
+        assert!(!os.dma_pending());
+        assert_eq!(
+            reply(&mut os, control(1, control::NOP, 0, 0))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn observed_services_are_advertised_logged_and_refused_without_a_reply() {
         use super::observe;
         let mut os = SepOs::new(None).with_services(store(), true).unwrap();
-        let advertised = reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        let advertised = map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         // OS active, then the xART pair and the three observed services.
         assert_eq!(advertised.len(), 1 + 2 * (2 + 3));
         let names: Vec<u32> = advertised[1..]
@@ -775,7 +927,7 @@ mod tests {
         use super::observe;
         let mut os = SepOs::new(None).with_services(store(), true).unwrap();
         os.set_strict(false);
-        reply(&mut os, shm(0x1234_5000, 0x20)).unwrap();
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
         let request = |service, tag| Frame {
             service,
             tag,
@@ -790,7 +942,9 @@ mod tests {
             assert!(reply(&mut os, frame).unwrap().is_empty());
         }
         let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
-        // Both are recorded in one DMA step, and neither gets a reply.
+        // Each DMA step consumes one request; neither observation gets a reply.
+        assert!(dma(&mut os, &mut ram).unwrap().is_empty());
+        assert!(os.dma_pending());
         assert!(dma(&mut os, &mut ram).unwrap().is_empty());
         assert!(!os.dma_pending());
         let lines = os.observations();

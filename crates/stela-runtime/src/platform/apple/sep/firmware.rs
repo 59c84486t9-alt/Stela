@@ -128,7 +128,7 @@ impl SepFirmware {
 
     /// Measure the container, bind its payload type to the request, and record
     /// any manifest signature as evidence. Structural or type errors refuse.
-    fn measure(&mut self, snapshot: &image::Snapshot, parameter: u8) -> Result<(), &'static str> {
+    fn measure(&self, snapshot: &image::Snapshot, parameter: u8) -> Result<Evidence, &'static str> {
         let parts = crate::img4::parse(snapshot.bytes())
             .map_err(|_| "SEP firmware Image4 structure is malformed")?;
         let kind = crate::img4::payload_type(parts.payload)
@@ -145,12 +145,11 @@ impl SepFirmware {
             .manifest
             .map(|m| signature::inspect(parts.payload, m))
             .transpose()?;
-        self.evidence = Some(Evidence {
+        Ok(Evidence {
             measurement: snapshot.measurement.clone(),
             manifest,
             firmware_type: parameter,
-        });
-        Ok(())
+        })
     }
 }
 
@@ -230,10 +229,21 @@ impl Firmware for SepFirmware {
         };
         let snapshot =
             image::snapshot(port, request.address, image::MAX_IMAGE_BYTES).map_err(dma_refusal)?;
-        self.measure(&snapshot, request.parameter)?;
+        let evidence = self.measure(&snapshot, request.parameter)?;
+        // State open/provision and catalog construction can fail. Keep the
+        // ROM request and state location until all activation prerequisites
+        // succeed, so neither an acknowledgement nor an accepted identity
+        // escapes for a partially activated SEP.
+        let location = self.state.as_ref().ok_or("sepOS activated twice")?.clone();
+        let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
+        let mut os = SepOs::new(self.security).with_services(store, self.observe)?;
+        os.set_strict(self.strict);
         // Stela is the SEP: under its own explicit, TSS-free trust policy it
         // accepts the delivered container (evidence recorded above) and brings
         // up its native sepOS. No Apple key or signing service is consulted.
+        self.phase = Phase::Active(Box::new(os));
+        self.evidence = Some(evidence);
+        self.state = None;
         self.rom.accept_image();
         outbox.push(
             Frame {
@@ -245,11 +255,6 @@ impl Firmware for SepFirmware {
             }
             .mailbox(),
         );
-        let location = self.state.take().ok_or("sepOS activated twice")?;
-        let (store, _) = state::open(location, self.ecid, self.rom.entropy())?;
-        let mut os = SepOs::new(self.security).with_services(store, self.observe)?;
-        os.set_strict(self.strict);
-        self.phase = Phase::Active(Box::new(os));
         Ok(())
     }
 }
@@ -345,13 +350,41 @@ mod tests {
             access: &mut access,
         };
         let mut produced = Vec::new();
-        fw.dma(&mut port, &mut produced)?;
+        let result = fw.dma(&mut port, &mut produced);
+        if result.is_err() {
+            assert!(
+                produced.is_empty(),
+                "a failed DMA step publishes no replies"
+            );
+        }
+        result?;
         Ok(produced)
     }
 
     fn booted(fw: &mut SepFirmware) {
         let mut outbox = Vec::new();
         fw.start(&mut outbox).unwrap();
+    }
+
+    fn map_shared(fw: &mut SepFirmware) -> Vec<Message> {
+        let mut outbox = Vec::new();
+        fw.receive(
+            Frame {
+                service: message::BOOT,
+                tag: 0,
+                opcode: 0x20,
+                parameter: 0,
+                data: 0x5_0000,
+            }
+            .mailbox(),
+            &mut outbox,
+        )
+        .unwrap();
+        assert!(outbox.is_empty());
+        assert!(!fw.booted());
+        let mut ram = Ram::new(0x5000_0000, 0x4000);
+        ram.bytes[..4].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
+        dma(fw, &mut ram, false).unwrap()
     }
 
     #[test]
@@ -372,19 +405,7 @@ mod tests {
         assert!(fw.evidence().unwrap().manifest.is_none());
         assert!(!fw.dma_pending());
         // The AP maps shared memory; sepOS then reports OS active.
-        let mut outbox = Vec::new();
-        fw.receive(
-            Frame {
-                service: message::BOOT,
-                tag: 0,
-                opcode: 0x20,
-                parameter: 0,
-                data: 0x5_0000,
-            }
-            .mailbox(),
-            &mut outbox,
-        )
-        .unwrap();
+        let outbox = map_shared(&mut fw);
         assert!(fw.booted());
         assert_eq!(Frame::from_mailbox(outbox[0]).unwrap().opcode, 21);
     }
@@ -416,19 +437,7 @@ mod tests {
         fw.set_strict(false);
         let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
         deliver(&mut fw, &image, false).unwrap();
-        let mut outbox = Vec::new();
-        fw.receive(
-            Frame {
-                service: message::BOOT,
-                tag: 0,
-                opcode: 0x20,
-                parameter: 0,
-                data: 0x5_0000,
-            }
-            .mailbox(),
-            &mut outbox,
-        )
-        .unwrap();
+        map_shared(&mut fw);
         // Graceful from before activation: recorded, unanswered, no stop.
         assert_eq!(observed(&mut fw), Ok(Vec::new()));
         fw.set_strict(true);
@@ -488,6 +497,91 @@ mod tests {
     }
 
     #[test]
+    fn state_open_failure_preserves_the_rom_request_without_an_acceptance() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        let failing = Rc::new(Cell::new(true));
+        let source = failing.clone();
+        let mut fw = SepFirmware::new(
+            Box::new(move |bytes: &mut [u8]| {
+                if source.get() {
+                    return Err("entropy unavailable");
+                }
+                bytes.fill(0xa5);
+                Ok(())
+            }),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
+        booted(&mut fw);
+        let image = crate::img4::tests::im4p(b"sepi", b"native SEP fixture");
+        assert_eq!(deliver(&mut fw, &image, false), Err("entropy unavailable"));
+        assert!(fw.dma_pending());
+        assert!(fw.evidence().is_none());
+        assert!(fw.state.is_some());
+        assert!(!fw.booted());
+        failing.set(false);
+        let mut ram = Ram::new(0x4000, 0x8000);
+        ram.bytes[..image.len()].copy_from_slice(&image);
+        let reply = dma(&mut fw, &mut ram, false).unwrap();
+        assert_eq!(reply.len(), 1);
+        assert_eq!(
+            Frame::from_mailbox(reply[0]).unwrap().opcode,
+            IMAGE_ACCEPTED
+        );
+        assert!(!fw.dma_pending());
+        assert!(fw.evidence().is_some());
+        assert!(fw.state.is_none());
+    }
+
+    #[test]
+    fn shared_directory_faults_do_not_announce_os_active_or_services() {
+        let mut fw = SepFirmware::new(
+            entropy(),
+            None,
+            0xa5a5_0004,
+            false,
+            state::Location::Volatile,
+        );
+        booted(&mut fw);
+        deliver(
+            &mut fw,
+            &crate::img4::tests::im4p(b"sepi", b"native SEP fixture"),
+            false,
+        )
+        .unwrap();
+        let frame = Frame {
+            service: message::BOOT,
+            tag: 0,
+            opcode: 4,
+            parameter: 0,
+            data: 4,
+        };
+        let mut outbox = Vec::new();
+        fw.receive(frame.mailbox(), &mut outbox).unwrap();
+        assert!(outbox.is_empty());
+        assert!(!fw.booted());
+        assert!(fw.dma_pending());
+        let mut ram = Ram::new(0x4000, 0x4000);
+        ram.bytes[..4].copy_from_slice(&u32::from_be_bytes(*b"null").to_le_bytes());
+        assert!(dma(&mut fw, &mut ram, true).is_err());
+        assert!(!fw.booted());
+        assert!(fw.dma_pending());
+        let before = ram.bytes.clone();
+        let replies = dma(&mut fw, &mut ram, false).unwrap();
+        assert_eq!(ram.bytes, before);
+        assert!(fw.booted());
+        assert_eq!(
+            Frame::from_mailbox(replies[0]).unwrap().opcode,
+            control::OS_ACTIVE
+        );
+        assert_eq!(replies.len(), 5);
+        assert!(!fw.dma_pending());
+    }
+
+    #[test]
     fn error_replies_follow_each_phase_protocol_and_refuse_without_one() {
         let mut fw = SepFirmware::new(
             entropy(),
@@ -517,9 +611,7 @@ mod tests {
 
         let image = crate::img4::tests::im4p(b"sepi", b"stela-sepos");
         deliver(&mut fw, &image, false).unwrap();
-        let mut outbox = Vec::new();
-        fw.receive(request(message::BOOT, 0, 0x20), &mut outbox)
-            .unwrap();
+        map_shared(&mut fw);
         assert!(fw.booted());
         let policy = reply(&mut fw, request(observe::BOOT_POLICY_ID, 3, 4)).unwrap();
         assert_eq!(

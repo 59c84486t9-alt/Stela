@@ -184,6 +184,19 @@ impl<B: Backend> Nonces<B> {
             .ok_or("SEP nonce slot is not generated or was invalidated")
     }
 
+    /// An absent nonce is distinct from a store whose last commit has an
+    /// uncertain outcome. Service handlers must not turn the latter into a
+    /// successful idempotent invalidation.
+    pub fn contains(&self, slot: u8) -> Result<bool, &'static str> {
+        Ok(self.state()?.slots.contains_key(&slot))
+    }
+
+    /// Commits are already durable by the Backend contract. A flush still
+    /// refuses poisoned state rather than acknowledging an unknown outcome.
+    pub fn flush(&self) -> Result<(), &'static str> {
+        self.state().map(|_| ())
+    }
+
     /// The service, once recovered, owns slot selection. No Apple slot count
     /// or allocation rule is inferred here. Entropy/commit failures yield no
     /// nonce reply; the previous state survives an entropy failure.
@@ -468,6 +481,8 @@ mod tests {
         store.backend.fail = true;
         assert!(store.invalidate(1).is_err());
         assert!(store.read(1).is_err());
+        assert!(store.contains(1).is_err());
+        assert!(store.flush().is_err());
         assert!(store.firmware().is_err());
         let mut backend = store.into_backend();
         backend.fail = false;

@@ -12,7 +12,7 @@
 //! for the `xarm` endpoint (`xartSEPMasterEP`, which panics after 15 s).
 //!
 //! A message is the eight-byte SEP frame read as: byte 0 the service, byte 1
-//! the tag, byte 2 the operation (the status in a reply), bytes 3..5 the
+//! the tag, byte 2 the operation (the status in a reply), bytes 3..4 the
 //! little-endian payload length, byte 5 flags and byte 6 a slot.
 //! `_xmsgSendLocked` 0x2d7eba8 tags an AP request with its command-pool
 //! index plus one (0x2d7ed40..0x2d7ed48), copies at most 0x8000 input bytes
@@ -230,7 +230,9 @@ impl Xart {
         }
     }
 
-    /// Answer one AP request on either instance. The reply carries the
+    /// Answer one AP request on the slave instance. Master traffic from
+    /// the AP is a reply to a SEP-initiated operation, none of which this
+    /// implementation sends. The reply carries the
     /// request's service and tag, status 0 and the result length.
     pub fn request(
         &mut self,
@@ -239,7 +241,10 @@ impl Xart {
         entropy: &mut dyn Entropy,
     ) -> Result<Frame, &'static str> {
         let message = XartMessage::from_frame(frame);
-        if message.service != MASTER_ID && message.service != SLAVE_ID {
+        if message.service == MASTER_ID {
+            return Err("xART master reply has no outstanding SEP-initiated request");
+        }
+        if message.service != SLAVE_ID {
             return Err("xART request is not addressed to an xART instance");
         }
         if message.tag == 0 {
@@ -249,7 +254,26 @@ impl Xart {
         if length > MAX_PAYLOAD {
             return Err("xART request payload exceeds its 0x8000-byte buffer");
         }
-        let result = match Operation::decode(message.op)? {
+        let operation = Operation::decode(message.op)?;
+        if matches!(
+            operation,
+            Operation::SetupOsUuid
+                | Operation::FlushCached
+                | Operation::ShutdownUnmount
+                | Operation::DisableForEacs
+                | Operation::NonceGenerate
+                | Operation::NonceRead
+                | Operation::NonceInvalidate
+        ) && (message.flags != 0 || message.reserved != 0 || message.slot != 0)
+        {
+            if matches!(operation, Operation::NonceGenerate | Operation::NonceRead)
+                && message.slot == SANDCAT_SLOT_REQUEST
+            {
+                return Err("xART nonce slots exist only on boards with a Sandcat SEP nub");
+            }
+            return Err("xART request flags, slot or reserved fields are not modeled");
+        }
+        let result = match operation {
             Operation::SetupOsUuid => {
                 if length != UUID_BYTES {
                     return Err("xART OS UUID request is not one 16-byte UUID");
@@ -264,6 +288,7 @@ impl Xart {
                     return Err("xART flush request is not one Boolean");
                 }
                 payload.input(&mut [0])?;
+                self.store.flush()?;
                 0
             }
             Operation::ShutdownUnmount | Operation::DisableForEacs => {
@@ -278,8 +303,8 @@ impl Xart {
                 0
             }
             Operation::NonceGenerate | Operation::NonceRead => {
-                if message.slot == SANDCAT_SLOT_REQUEST {
-                    return Err("xART nonce slots exist only on boards with a Sandcat SEP nub");
+                if length != 0 {
+                    return Err("xART nonce generation or read carries an input payload");
                 }
                 self.live()?;
                 let nonce = if message.op == 15 {
@@ -297,7 +322,7 @@ impl Xart {
                 self.live()?;
                 // Killing a nonce that was never generated leaves none,
                 // which is what the AP asks for.
-                if self.store.read(NONCE_SLOT).is_ok() {
+                if self.store.contains(NONCE_SLOT)? {
                     self.store.invalidate(NONCE_SLOT)?;
                 }
                 0
@@ -482,6 +507,71 @@ mod tests {
         assert!(ask(&mut xart, request(SLAVE_ID, 0, 8, 16), &mut buffers).is_err());
         assert!(ask(&mut xart, request(SLAVE_ID, 1, 8, 0x8001), &mut buffers).is_err());
         assert!(ask(&mut xart, request(0x12, 1, 8, 16), &mut buffers).is_err());
+        assert!(ask(&mut xart, request(MASTER_ID, 1, 8, 16), &mut buffers).is_err());
+        for (flags, slot, reserved) in [(1, 0, 0), (0, 2, 0), (0, 0, 1)] {
+            let frame = XartMessage {
+                flags,
+                slot,
+                reserved,
+                ..XartMessage::from_frame(request(SLAVE_ID, 1, 8, 16))
+            }
+            .frame();
+            assert!(ask(&mut xart, frame, &mut buffers).is_err());
+        }
+        for op in [15, 16] {
+            assert!(ask(&mut xart, request(SLAVE_ID, 1, op, 1), &mut buffers).is_err());
+        }
         assert!(buffers.output.is_empty());
+        assert!(xart.os_uuid().is_none());
+    }
+
+    #[test]
+    fn uncertain_commits_cannot_be_acknowledged_by_flush_or_idempotent_invalidate() {
+        use alloc::rc::Rc;
+        use core::cell::Cell;
+        struct Failing {
+            inner: super::super::store::Volatile,
+            fail: Rc<Cell<bool>>,
+        }
+        impl Backend for Failing {
+            fn load(&mut self) -> Result<Option<super::super::store::Head>, &'static str> {
+                self.inner.load()
+            }
+            fn commit(
+                &mut self,
+                expected: u64,
+                head: super::super::store::Head,
+            ) -> Result<(), &'static str> {
+                self.inner.commit(expected, head)?;
+                if self.fail.get() {
+                    Err("commit acknowledgement lost")
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        let fail = Rc::new(Cell::new(false));
+        let roots = super::super::keys::Roots::provisioned([1; 32], [2; 32], 0xa5a5_0002).unwrap();
+        let backend: Box<dyn Backend> = Box::new(Failing {
+            inner: super::super::store::Volatile::default(),
+            fail: fail.clone(),
+        });
+        let mut xart = Xart::new(Nonces::provision(&roots, backend).unwrap());
+        let mut buffers = Buffers {
+            input: vec![0],
+            output: Vec::new(),
+        };
+        fail.set(true);
+        assert_eq!(
+            ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers),
+            Err("commit acknowledgement lost")
+        );
+        assert!(buffers.output.is_empty());
+        for (op, length) in [(17, 0), (12, 1), (16, 0), (15, 0)] {
+            assert!(ask(&mut xart, request(SLAVE_ID, 1, op, length), &mut buffers).is_err());
+        }
+        fail.set(false);
+        let reopened = Nonces::open(&roots, xart.store.into_backend()).unwrap();
+        assert_eq!(reopened.read(0).unwrap(), [0x5a; NONCE_BYTES]);
     }
 }

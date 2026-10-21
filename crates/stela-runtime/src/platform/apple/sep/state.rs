@@ -35,6 +35,7 @@ type Root = Zeroizing<[u8; ROOT_BYTES]>;
 pub type Opened = (Nonces<Box<dyn Backend>>, bool);
 
 /// Where the SEP's state lives.
+#[derive(Clone)]
 pub enum Location {
     /// Nowhere durable: fresh roots and a store that end at power-off.
     Volatile,
