@@ -253,10 +253,307 @@ pub fn storage_path(path: &str) -> bool {
     })
 }
 
-#[cfg(test)]
-mod tests;
-
 #[cfg(feature = "std")]
 mod package;
 #[cfg(feature = "std")]
 pub use package::Package;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::{boxed::Box, vec};
+    use serde_json::{Value, json};
+    use stela_drivers::firmware::{Provider, Requirement};
+
+    fn image() -> Value {
+        json!({"name":"Vendor/FW.bin", "path":"vendor/fw.bin",
+            "target":{"driver":"realtek","hardware":"10ec:8168","revision":"xid-509","board":null},
+            "provenance":{"source":"synthetic-fixture","revision":"v1","member":"fixtures/abc.bin","license":"CC0-1.0"},
+            "length":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"})
+    }
+    fn manifest(images: Vec<Value>) -> Vec<u8> {
+        serde_json::to_vec(&json!({"schema":1,"images":images})).unwrap()
+    }
+
+    #[test]
+    fn permanent_bytes_keep_pointer_identity_across_metadata_reconstruction_and_arc_clones() {
+        let bytes = manifest(vec![image()]);
+        let parsed = Manifest::parse(&bytes).unwrap();
+        let persistent: &'static [u8] = Box::leak(b"abc".to_vec().into_boxed_slice());
+        let before = parsed.catalog(&[persistent]).unwrap();
+        assert_eq!(before.inventory(), (1, 3));
+        drop(before);
+        let catalog = alloc::sync::Arc::new(parsed.catalog(&[persistent]).unwrap());
+        let copy = catalog.clone();
+        assert!(alloc::sync::Arc::ptr_eq(&catalog, &copy));
+        let requirement = Requirement {
+            name: "Vendor/FW.bin",
+            target: Target {
+                driver: "realtek",
+                hardware: "10ec:8168",
+                revision: "xid-509",
+                board: None,
+            },
+            minimum_bytes: 3,
+        };
+        let loaded = copy.load(requirement).unwrap();
+        assert_eq!(loaded.bytes().as_ptr(), persistent.as_ptr());
+        assert_eq!(loaded.provenance().license, "CC0-1.0");
+        assert!(
+            copy.load(Requirement {
+                name: "vendor/fw.bin",
+                ..requirement
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_unknown_and_duplicate_fields_never_publish_a_manifest() {
+        for bytes in [
+            b"".as_slice(),
+            b"{}",
+            b"[]",
+            b"{\"schema\":1,\"schema\":1,\"images\":[]}",
+            b"{\"schema\":1,\"images\":[],\"fallback\":true}",
+            b"{\"schema\":2,\"images\":[]}",
+        ] {
+            assert!(Manifest::parse(bytes).is_err(), "{bytes:?}");
+        }
+        let mut input = image();
+        input["target"]["fallback"] = json!(true);
+        assert!(Manifest::parse(&manifest(vec![input])).is_err());
+        let good = String::from_utf8(manifest(vec![image()])).unwrap();
+        let duplicate = good.replace("\"length\":3", "\"length\":3,\"length\":3");
+        assert!(Manifest::parse(duplicate.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn all_budgets_and_duplicate_bindings_are_checked_without_image_reads() {
+        assert!(Manifest::parse(&vec![b' '; MAX_MANIFEST_BYTES + 1]).is_err());
+        let mut input = image();
+        input["name"] = json!("x".repeat(MAX_LABEL_BYTES + 1));
+        assert!(Manifest::parse(&manifest(vec![input])).is_err());
+        let mut input = image();
+        input["target"]["revision"] = json!("x".repeat(MAX_LABEL_BYTES + 1));
+        assert!(Manifest::parse(&manifest(vec![input])).is_err());
+        for length in [0, MAX_IMAGE_BYTES + 1] {
+            let mut input = image();
+            input["length"] = json!(length);
+            assert!(Manifest::parse(&manifest(vec![input])).is_err());
+        }
+        let mut images = Vec::new();
+        for n in 0..=MAX_IMAGES {
+            let mut input = image();
+            input["path"] = json!(format!("file{n}.bin"));
+            input["target"]["revision"] = json!(format!("rev{n}"));
+            images.push(input);
+        }
+        assert!(Manifest::parse(&manifest(images)).is_err());
+        let mut images = Vec::new();
+        for n in 0..5 {
+            let mut input = image();
+            input["length"] = json!(MAX_IMAGE_BYTES);
+            input["path"] = json!(format!("file{n}.bin"));
+            input["target"]["revision"] = json!(format!("rev{n}"));
+            images.push(input);
+        }
+        assert!(Manifest::parse(&manifest(images)).is_err());
+        assert!(Manifest::parse(&manifest(vec![image(), image()])).is_err());
+        let mut duplicate = image();
+        duplicate["path"] = json!("other.bin");
+        assert!(Manifest::parse(&manifest(vec![image(), duplicate])).is_err());
+        let mut duplicate = image();
+        duplicate["target"]["revision"] = json!("other");
+        assert!(Manifest::parse(&manifest(vec![image(), duplicate])).is_err());
+    }
+
+    #[test]
+    fn fat_aliases_and_uefi_path_escapes_are_rejected() {
+        for path in [
+            "",
+            "/x",
+            "x/",
+            "x//y",
+            ".",
+            "..",
+            "a/../b",
+            "./x",
+            "a\\b",
+            "c:x",
+            "a:b",
+            "a b",
+            "x.",
+            "x ",
+            "Vendor/fw.bin",
+            "vendor/FW.bin",
+            "x~1.bin",
+            "con",
+            "con.bin",
+            "aux.bin",
+            "lpt1.bin",
+            "com9",
+            "a\0b",
+            "a\nb",
+            "é.bin",
+            "manifest.json",
+        ] {
+            let mut input = image();
+            input["path"] = json!(path);
+            assert!(
+                Manifest::parse(&manifest(vec![input])).is_err(),
+                "accepted {path:?}"
+            );
+        }
+        assert!(storage_path("vendor/fw-1.2_test.bin"));
+    }
+
+    #[test]
+    fn corruption_truncation_wrong_counts_and_bad_digests_fail() {
+        let bytes = manifest(vec![image()]);
+        let parsed = Manifest::parse(&bytes).unwrap();
+        assert!(parsed.catalog(&[]).is_err());
+        assert!(parsed.catalog(&[b"ab"]).is_err());
+        assert!(parsed.catalog(&[b"abcd"]).is_err());
+        assert!(parsed.catalog(&[b"abd"]).is_err());
+        for hash in [
+            "f",
+            "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+            "zz7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ] {
+            let mut input = image();
+            input["sha256"] = json!(hash);
+            assert!(Manifest::parse(&manifest(vec![input])).is_err());
+        }
+    }
+
+    #[cfg(feature = "std")]
+    fn package(root: &std::path::Path) -> std::path::PathBuf {
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::create_dir(source.join("vendor")).unwrap();
+        std::fs::write(source.join("vendor/fw.bin"), b"abc").unwrap();
+        std::fs::write(source.join("manifest.json"), manifest(vec![image()])).unwrap();
+        source
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn local_package_is_bounded_and_published_with_immutable_objects_before_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let source = package(root.path());
+        let loaded = Package::read(&source).unwrap();
+        assert_eq!(loaded.inventory(), (1, 3));
+        let destination = root.path().join("firmware");
+        loaded.publish(&destination).unwrap();
+        let active = std::fs::read(destination.join("manifest.json")).unwrap();
+        let parsed = Manifest::parse(&active).unwrap();
+        assert!(parsed.images[0].path.starts_with("objects/"));
+        assert_eq!(
+            std::fs::read(destination.join(parsed.images[0].path)).unwrap(),
+            b"abc"
+        );
+        assert_eq!(parsed.images[0].name, "Vendor/FW.bin");
+        loaded.publish(&destination).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("manifest.json")).unwrap(),
+            active
+        );
+        std::fs::write(destination.join(parsed.images[0].path), b"abd").unwrap();
+        assert!(loaded.publish(&destination).is_err());
+        assert_eq!(
+            std::fs::read(destination.join("manifest.json")).unwrap(),
+            active
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn local_loader_rejects_file_length_corruption_and_aliases_without_publication() {
+        let root = tempfile::tempdir().unwrap();
+        let source = package(root.path());
+        for contents in [b"ab".as_slice(), b"abcd", b"abd"] {
+            std::fs::write(source.join("vendor/fw.bin"), contents).unwrap();
+            assert!(Package::read(&source).is_err());
+        }
+        std::fs::write(source.join("vendor/fw.bin"), b"abc").unwrap();
+        std::fs::write(source.join("vendor/FW.BIN"), b"abc").unwrap();
+        // A case-insensitive source filesystem has one entry; a case-sensitive
+        // source with both spellings is ambiguous and must be rejected.
+        if std::fs::read_dir(source.join("vendor")).unwrap().count() > 1 {
+            assert!(Package::read(&source).is_err());
+        }
+        std::fs::write(
+            source.join("manifest.json"),
+            vec![b' '; MAX_MANIFEST_BYTES + 1],
+        )
+        .unwrap();
+        assert!(Package::read(&source).is_err());
+    }
+
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn local_loader_and_publisher_refuse_symlink_escapes() {
+        let root = tempfile::tempdir().unwrap();
+        let source = package(root.path());
+        let external = root.path().join("outside.bin");
+        std::fs::write(&external, b"abc").unwrap();
+        std::fs::remove_file(source.join("vendor/fw.bin")).unwrap();
+        std::os::unix::fs::symlink(&external, source.join("vendor/fw.bin")).unwrap();
+        assert!(Package::read(&source).is_err());
+        std::fs::remove_file(source.join("vendor/fw.bin")).unwrap();
+        std::fs::write(source.join("vendor/fw.bin"), b"abc").unwrap();
+        let loaded = Package::read(&source).unwrap();
+        let destination = root.path().join("firmware");
+        std::fs::create_dir(&destination).unwrap();
+        std::os::unix::fs::symlink(root.path(), destination.join("objects")).unwrap();
+        assert!(loaded.publish(&destination).is_err());
+        assert!(!destination.join("manifest.json").exists());
+    }
+
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn interruptions_before_manifest_commit_preserve_old_resources_and_allow_retry() {
+        for stop in 0..5 {
+            let root = tempfile::tempdir().unwrap();
+            let source = package(root.path());
+            let old = Package::read(&source).unwrap();
+            let destination = root.path().join("firmware");
+            old.publish(&destination).unwrap();
+            let before = std::fs::read(destination.join("manifest.json")).unwrap();
+            let parsed = Manifest::parse(&before).unwrap();
+            let previous_object = destination.join(parsed.images[0].path);
+            let mut changed = image();
+            changed["target"]["revision"] = json!("v2");
+            std::fs::write(source.join("manifest.json"), manifest(vec![changed])).unwrap();
+            let next = Package::read(&source).unwrap();
+            let mut checkpoints = 0;
+            assert!(
+                next.publish_checkpointed(&destination, |_| {
+                    let at = checkpoints;
+                    checkpoints += 1;
+                    if at == stop {
+                        Err(fail("injected interruption"))
+                    } else {
+                        Ok(())
+                    }
+                })
+                .is_err()
+            );
+            assert_eq!(checkpoints, stop + 1);
+            assert_eq!(
+                std::fs::read(destination.join("manifest.json")).unwrap(),
+                before
+            );
+            assert_eq!(std::fs::read(&previous_object).unwrap(), b"abc");
+            assert_eq!(Package::read(&destination).unwrap().inventory(), (1, 3));
+            next.publish(&destination).unwrap();
+            let after = std::fs::read(destination.join("manifest.json")).unwrap();
+            assert_eq!(
+                Manifest::parse(&after).unwrap().images[0].target.revision,
+                "v2"
+            );
+            assert_eq!(std::fs::read(&previous_object).unwrap(), b"abc");
+        }
+    }
+}
