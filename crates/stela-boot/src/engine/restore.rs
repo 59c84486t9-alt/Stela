@@ -238,11 +238,15 @@ impl Experiment {
                 output::arguments(format_args!("{label} REFUSED {error}\n"));
                 // Preserve the guest stop context and refuse further writes.
                 // The restore has no automatic reboot/retry or fallback.
-                output::fatal(match self.mode {
-                    Mode::Install => "the install failed; inspect the session ledger",
-                    Mode::Update => "the update failed; inspect the session ledger",
-                    Mode::Study => "restore study failed; inspect the session ledger",
-                })
+                output::fatal(&format!(
+                    "{} failed: {}",
+                    match self.mode {
+                        Mode::Install => "the install",
+                        Mode::Update => "the update",
+                        Mode::Study => "the restore study",
+                    },
+                    error.summary()
+                ))
             }
         }
     }

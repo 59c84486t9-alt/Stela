@@ -19,7 +19,7 @@ pub mod stream;
 pub mod ticket;
 pub mod tss;
 
-use alloc::{boxed::Box, string::String};
+use alloc::{boxed::Box, format, string::String};
 use plist::Value;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,10 +40,37 @@ impl core::fmt::Display for Error {
         write!(f, "{self:?}")
     }
 }
+impl Error {
+    /// The error in one line, without a refused request's message.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Invalid(what) => format!("invalid {what}"),
+            Self::Limit(what) => format!("over the limit of {what}"),
+            Self::Transport(why) => format!("transport: {why}"),
+            Self::Payload(why) => format!("payload: {why}"),
+            Self::Refused { reason, .. } => reason.clone(),
+        }
+    }
+}
 pub type Result<T> = core::result::Result<T, Error>;
 pub fn refuse(reason: impl Into<String>, request: &Value) -> Error {
     Error::Refused {
         reason: reason.into(),
         request: Box::new(request.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_summary_is_one_line_without_the_refused_request() {
+        let refused = refuse("device final status is failure", &Value::Integer(6));
+        assert_eq!(refused.summary(), "device final status is failure");
+        assert_eq!(
+            Error::Invalid("identity number").summary(),
+            "invalid identity number"
+        );
     }
 }
