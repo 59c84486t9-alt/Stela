@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "air_to_nir.h"
-#include "air_test_fixture.h"
+#include "air_probe_input.h"
 #include "stela/probe_report.h"
 #include "intel/compiler/elk/elk_compiler.h"
 #include "intel/compiler/elk/elk_nir.h"
@@ -44,9 +44,11 @@ static bool
 bind_ssbo(const struct stela_air_buffer *buffer, unsigned *slot, void *data)
 {
    unsigned *bindings = data;
-   CHECK(buffer->argument == 1 && buffer->index == 7 && buffer->address_space == 1);
-   CHECK(buffer->access == STELA_AIR_READ_WRITE && buffer->type_size == 4 &&
-         buffer->type_alignment == 4);
+   if (buffer->index != 7 || buffer->address_space != 1 ||
+       buffer->access != STELA_AIR_READ_WRITE || buffer->type_size != 4 ||
+       buffer->type_alignment != 4 || bindings[0])
+      return false;
+   bindings[1] = buffer->argument;
    /* Fixture binding table maps Metal index 7 to explicit slot 0. No physical
     * VA or runtime resource is constructed. Runtime surfaces must describe the
     * exact validated Metal view, not an inferred address or rounded byte size.
@@ -84,7 +86,7 @@ count_sends(const struct elk_isa_info *isa, const void *code, unsigned bytes)
 }
 
 static int
-compile_air(const char *platform, LLVMMemoryBufferRef input)
+compile_air(const char *platform, LLVMMemoryBufferRef input, const char *entry, bool fixture)
 {
    struct intel_device_info device;
    int pci_id = intel_device_name_to_pci_device_id(platform);
@@ -95,18 +97,22 @@ compile_air(const char *platform, LLVMMemoryBufferRef input)
    CHECK(compiler);
    compiler->shader_debug_log = compiler_log;
    compiler->shader_perf_log = compiler_log;
-   unsigned bindings = 0;
+   unsigned bindings[2] = {0};
    const struct stela_air_options options = {
       .workgroup_size = {32, 1, 1}, .max_instructions = 100,
-      .bind_ssbo = bind_ssbo, .ssbo_count = 1, .binding_data = &bindings,
+      .bind_ssbo = bind_ssbo, .ssbo_count = 1, .binding_data = bindings,
    };
    struct stela_air_error error;
    nir_shader *nir = stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input),
-                                     "kernel", compiler->nir_options[MESA_SHADER_COMPUTE],
+                                     entry, compiler->nir_options[MESA_SHADER_COMPUTE],
                                      &options, &error);
    if (!nir)
       fprintf(stderr, "%s AIR lowering failed: %s\n", platform, error.detail);
-   CHECK(nir && bindings == 1 && error.kind == STELA_AIR_OK && nir->info.num_ssbos == 1);
+   if (!nir || bindings[0] != 1 || error.kind != STELA_AIR_OK || nir->info.num_ssbos != 1) {
+      ralloc_free(nir);
+      ralloc_free(context);
+      return 1;
+   }
    const struct elk_nir_compiler_opts compiler_options = {0};
    elk_preprocess_nir(compiler, nir, &compiler_options);
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -132,11 +138,17 @@ compile_air(const char *platform, LLVMMemoryBufferRef input)
       digest(LLVMGetBufferStart(input), LLVMGetBufferSize(input), input_hash);
       digest(code, data.base.program_size, code_hash);
       probe_compiled("air-elk", platform, data.base.program_size);
-      printf("STELA_AIR_INTEL_OUTPUT {\"target\":\"%s\",\"entry\":\"kernel\","
+      printf("STELA_AIR_INTEL_OUTPUT {\"target\":\"%s\",\"pci_id\":%u,\"entry\":\"%s\","
              "\"input_blake3\":\"%s\",\"code_blake3\":\"%s\","
+             "\"input_kind\":\"%s\",\"input_bytes\":%zu,\"buffer_argument\":%u,\"buffer_access\":\"read_write\","
+             "\"buffer_type_bytes\":4,\"buffer_alignment\":4,\"max_instructions\":100,"
              "\"workgroup\":[32,1,1],\"buffer_index\":7,\"ssbo_slot\":0,"
-             "\"subgroup\":16,\"per_thread_push_bytes\":%u}\n",
-             platform, input_hash, code_hash, data.push.per_thread.size);
+             "\"ssbo_count\":1,\"subgroup\":16,\"per_thread_push_bytes\":%u,"
+             "\"cross_thread_push_bytes\":%u}\n",
+             platform, pci_id, entry, input_hash, code_hash,
+             fixture ? "source_fixture" : "raw_input", LLVMGetBufferSize(input),
+             bindings[1], data.push.per_thread.size,
+             data.push.cross_thread.size);
       printf("AIR indexed SSBO->ELK %s PCI %04x: %u bytes, %u sends, validated\n",
              platform, pci_id, data.base.program_size, sends);
    } else {
@@ -148,15 +160,20 @@ compile_air(const char *platform, LLVMMemoryBufferRef input)
    return !valid;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
    const char *platforms[] = {"ivb", "byt", "hsw", "bdw", "chv"};
+   const char *entry = "kernel";
+   LLVMMemoryBufferRef input = stela_intel_air_probe_input(argc, argv, &entry);
+   if (!input) {
+      fprintf(stderr, "usage: %s [--input RAW_AIR_BITCODE --entry IDENTIFIER] (4 bytes..16 MiB)\n", argv[0]);
+      return 2;
+   }
    process_intel_debug_variable();
    glsl_type_singleton_init_or_ref();
-   LLVMMemoryBufferRef input = stela_air_test_bitcode(stela_air_test_store_body, "");
    int result = 0;
    for (unsigned i = 0; i < ARRAY_SIZE(platforms); ++i)
-      result |= compile_air(platforms[i], input);
+      result |= compile_air(platforms[i], input, entry, argc == 1);
    LLVMDisposeMemoryBuffer(input);
    glsl_type_singleton_decref();
    return result;
