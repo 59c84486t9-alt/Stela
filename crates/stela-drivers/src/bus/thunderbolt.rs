@@ -11,5 +11,6 @@
 pub mod channel;
 pub mod config;
 pub mod domain;
+pub mod hop;
 pub mod ring;
 pub mod topology;
