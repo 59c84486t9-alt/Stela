@@ -60,6 +60,7 @@ pub enum VtdError {
     Busy,
     Unsupported,
     RegisterRange,
+    RegisterRead,
     Memory,
     Timeout,
     Invalidation,
@@ -384,8 +385,12 @@ impl<R: Registers> Unit<R> {
         let cap = registers.read64(CAP);
         let ecap = registers.read64(ECAP);
         let status = registers.read32(GSTS);
+        let protected = registers.read32(PMEN);
+        if cap == u64::MAX || ecap == u64::MAX || status == u32::MAX || protected == u32::MAX {
+            return Err(VtdError::RegisterRead);
+        }
         if status & (TRANSLATION | QUEUED_INVALIDATION | INTERRUPT_REMAP) != 0
-            || registers.read32(PMEN) & (1 << 31 | 1) != 0
+            || protected & (1 << 31 | 1) != 0
         {
             return Err(VtdError::Busy);
         }
@@ -486,7 +491,11 @@ impl<R: Registers> Unit<R> {
     fn wait32(&self, register: usize, mask: u32, set: bool) -> Result<(), VtdError> {
         let start = self.registers.ticks();
         loop {
-            if (self.registers.read32(register) & mask != 0) == set {
+            let value = self.registers.read32(register);
+            if value == u32::MAX {
+                return Err(VtdError::RegisterRead);
+            }
+            if (value & mask != 0) == set {
                 return Ok(());
             }
             if self.registers.ticks().wrapping_sub(start) >= self.registers.timeout_ticks() {
@@ -618,12 +627,14 @@ impl State {
         }
     }
 
-    fn leaf(
+    fn leaf<R: Registers>(
         &mut self,
         source: &dyn PageSource,
         levels: u8,
         physical_bits: u8,
         iova: u64,
+        registers: &R,
+        table_cacheline: Option<usize>,
     ) -> Result<(usize, usize), VtdError> {
         let mut table = 0;
         for level in (1..levels).rev() {
@@ -632,11 +643,23 @@ impl State {
             if entry & (READ | WRITE) == 0 {
                 let child = Table::new(source, physical_bits)?;
                 let physical = child.physical();
+                // The walker can follow this branch as soon as Present is
+                // visible, including an unsolicited device access before map
+                // returns. Evict the complete zeroed child before exposing
+                // its parent; eventual final invalidation is insufficient.
+                if let Some(line) = table_cacheline {
+                    child.flush(registers, line);
+                }
+                publish();
                 let next = self.tables.len();
                 self.tables.push(child);
                 self.table_index.insert(physical, next);
                 publish();
                 self.tables[table].write(index, physical | READ | WRITE);
+                if let Some(line) = table_cacheline {
+                    self.tables[table].flush(registers, line);
+                }
+                publish();
                 table = next;
             } else {
                 table = *self
@@ -714,6 +737,8 @@ unsafe impl<R: Registers + 'static> DmaDomain for Unit<R> {
                         self.levels,
                         self.physical_bits,
                         address + offset as u64,
+                        &*self.registers,
+                        self.table_cacheline,
                     )
                     .map_err(|_| DmaError::MappingFailed)?,
             );
@@ -873,6 +898,7 @@ mod tests {
     struct Source {
         next: AtomicU64,
         released: Arc<AtomicU64>,
+        table_addresses: Mutex<BTreeMap<u64, usize>>,
     }
     impl PageSource for Source {
         fn allocate(
@@ -886,13 +912,20 @@ mod tests {
                 (PAGE, PAGE, CacheAttribute::WriteBack)
             );
             let physical = self.next.fetch_add(PAGE as u64, Ordering::Relaxed);
-            Ok(pages(bytes, 12, physical, self.released.clone()))
+            let pages = pages(bytes, 12, physical, self.released.clone());
+            let cpu = pages.cpu_mapping(CacheAttribute::WriteBack).unwrap();
+            self.table_addresses
+                .lock()
+                .unwrap()
+                .insert(physical, cpu.address(0, PAGE).unwrap().as_ptr() as usize);
+            Ok(pages)
         }
     }
     fn source() -> &'static Source {
         Box::leak(Box::new(Source {
             next: AtomicU64::new(0x100000),
             released: Arc::new(AtomicU64::new(0)),
+            table_addresses: Mutex::new(BTreeMap::new()),
         }))
     }
     struct Model {
@@ -902,6 +935,65 @@ mod tests {
         block_iotlb: bool,
         block_te_off: bool,
         cache_events: Vec<(bool, usize)>,
+        fail_gsts_after: Option<u32>,
+        source: Option<&'static Source>,
+        visible_tables: BTreeMap<u64, Vec<u64>>,
+        active_observations: usize,
+    }
+    impl Model {
+        fn visible_table(&self, physical: u64) -> &[u64] {
+            self.visible_tables
+                .get(&physical)
+                .expect("walker reached an unflushed child table")
+        }
+        fn observe_level(&self, physical: u64, level: u8) {
+            let entries = self.visible_table(physical);
+            if level != 0 {
+                for entry in entries.iter().filter(|entry| **entry & (READ | WRITE) != 0) {
+                    self.observe_level(entry & ADDRESS, level - 1);
+                }
+            }
+        }
+        fn observe_tables(&mut self) {
+            if self.source.is_none()
+                || self.values.get(&GSTS).copied().unwrap_or(0) & u64::from(TRANSLATION) == 0
+            {
+                return;
+            }
+            self.active_observations += 1;
+            let root = self.values[&RTADDR] & ADDRESS;
+            for root_pair in self.visible_table(root).as_chunks::<2>().0 {
+                if root_pair[0] & 1 == 0 {
+                    continue;
+                }
+                for context_pair in self
+                    .visible_table(root_pair[0] & ADDRESS)
+                    .as_chunks::<2>()
+                    .0
+                {
+                    if context_pair[0] & 1 != 0 {
+                        let levels = (context_pair[1] & 7) as u8 + 2;
+                        self.observe_level(context_pair[0] & ADDRESS, levels - 1);
+                    }
+                }
+            }
+        }
+        fn translation(&self, requester: u16, iova: u64) -> Option<u64> {
+            let root = self.visible_table(self.values[&RTADDR] & ADDRESS);
+            let context = self.visible_table(root[usize::from(requester >> 8) * 2] & ADDRESS);
+            let index = usize::from(requester & 255) * 2;
+            let levels = (context[index + 1] & 7) as u8 + 2;
+            let mut physical = context[index] & ADDRESS;
+            for level in (0..levels).rev() {
+                let index = ((iova >> (12 + 9 * u32::from(level))) & 511) as usize;
+                let entry = self.visible_table(physical)[index];
+                if entry & (READ | WRITE) == 0 {
+                    return None;
+                }
+                physical = entry & ADDRESS;
+            }
+            Some(physical | iova & 4095)
+        }
     }
     #[derive(Clone)]
     struct ModelRegisters(Arc<Mutex<Model>>);
@@ -920,6 +1012,10 @@ mod tests {
                 block_iotlb: false,
                 block_te_off: false,
                 cache_events: Vec::new(),
+                fail_gsts_after: None,
+                source: None,
+                visible_tables: BTreeMap::new(),
+                active_observations: 0,
             })))
         }
     }
@@ -968,6 +1064,10 @@ mod tests {
                 }
                 status &= !WRITE_BUFFER;
                 model.values.insert(GSTS, u64::from(status));
+                model.observe_tables();
+                if model.fail_gsts_after == Some(value) {
+                    model.values.insert(GSTS, u64::from(u32::MAX));
+                }
             }
         }
         fn write64(&self, offset: usize, value: u64) {
@@ -987,14 +1087,128 @@ mod tests {
         unsafe fn flush_table(&self, cpu: NonNull<u8>, bytes: usize, line: usize) {
             assert_eq!(bytes, PAGE);
             assert!((cpu.as_ptr() as usize).is_multiple_of(PAGE));
-            self.0
-                .lock()
-                .unwrap()
-                .cache_events
-                .push((true, cpu.as_ptr() as usize));
+            let mut model = self.0.lock().unwrap();
+            model.cache_events.push((true, cpu.as_ptr() as usize));
+            if let Some(source) = model.source {
+                let addresses = source.table_addresses.lock().unwrap();
+                let physical = *addresses
+                    .iter()
+                    .find(|(_, pointer)| **pointer == cpu.as_ptr() as usize)
+                    .unwrap()
+                    .0;
+                // SAFETY: retained model table mapping; snapshot represents
+                // what a noncoherent walker can see after this real eviction.
+                let visible =
+                    unsafe { core::slice::from_raw_parts(cpu.as_ptr().cast::<u64>(), PAGE / 8) }
+                        .to_vec();
+                model.visible_tables.insert(physical, visible);
+                model.observe_tables();
+            }
             // SAFETY: the model uses actual retained allocated table RAM and
             // the production CPUID qualification; keep real cache effects too.
             unsafe { super::flush_table(cpu, bytes, line) };
+        }
+    }
+
+    #[test]
+    fn active_noncoherent_walker_never_reaches_unpublished_children() {
+        let source = source();
+        let registers = ModelRegisters::new();
+        {
+            let mut model = registers.0.lock().unwrap();
+            model.values.insert(ECAP, 0x10 << 8);
+            model.source = Some(source);
+        }
+        // SAFETY: stopped isolated model; enabling TE activates the observer.
+        let unit = unsafe { Unit::take_over(registers.clone(), source, 8, 48) }.unwrap();
+        let mut first = DmaMapping::map(
+            unit.clone(),
+            pages(PAGE, 12, 0xb000000, Arc::new(AtomicU64::new(0))),
+            Direction::Bidirectional,
+            u64::MAX,
+        )
+        .unwrap();
+        let first_iova = first.address().unwrap();
+        // Cross a 2 MiB boundary while an older mapping is reachable. Every
+        // individual visible parent publication invokes the walker observer;
+        // delaying all child evictions until final invalidation fails here.
+        let mut second = DmaMapping::map(
+            unit.clone(),
+            pages(2 * 1024 * 1024, 12, 0xc000000, Arc::new(AtomicU64::new(0))),
+            Direction::Bidirectional,
+            u64::MAX,
+        )
+        .unwrap();
+        let second_iova = second.address().unwrap();
+        {
+            let model = registers.0.lock().unwrap();
+            assert!(model.active_observations > 10);
+            assert_eq!(model.translation(8, first_iova), Some(0xb000000));
+            assert_eq!(
+                model.translation(8, second_iova + 511 * 4096),
+                Some(0xc000000 + 511 * 4096)
+            );
+        }
+        // SAFETY: stopped synchronous model; removal must evict the leaves.
+        unsafe { second.unmap() }.unwrap();
+        assert_eq!(
+            registers.0.lock().unwrap().translation(8, second_iova),
+            None
+        );
+        assert_eq!(
+            registers.0.lock().unwrap().translation(8, first_iova),
+            Some(0xb000000)
+        );
+        // SAFETY: no pending DMA or asynchronous work exists in the model.
+        unsafe { first.unmap() }.unwrap();
+        assert_eq!(registers.0.lock().unwrap().translation(8, first_iova), None);
+        // SAFETY: all mappings retired and requester stays stopped.
+        unsafe { unit.shut_down() }.unwrap();
+    }
+
+    #[test]
+    fn all_ones_control_reads_never_establish_a_domain() {
+        for offset in [CAP, ECAP, GSTS, PMEN] {
+            let registers = ModelRegisters::new();
+            let value = if matches!(offset, CAP | ECAP) {
+                u64::MAX
+            } else {
+                u64::from(u32::MAX)
+            };
+            registers.0.lock().unwrap().values.insert(offset, value);
+            let source = source();
+            // SAFETY: explicit failed-register model; no takeover may occur.
+            assert!(matches!(
+                unsafe { Unit::take_over(registers.clone(), source, 8, 48) },
+                Err(VtdError::RegisterRead)
+            ));
+            assert_eq!(source.next.load(Ordering::Relaxed), 0x100000);
+            assert!(registers.0.lock().unwrap().writes.is_empty());
+        }
+        for command in [ROOT_POINTER, TRANSLATION] {
+            let registers = ModelRegisters::new();
+            registers.0.lock().unwrap().fail_gsts_after = Some(command);
+            let source = source();
+            let before = quarantined_units();
+            // SAFETY: model injects failed GSTS only after this real stage's
+            // command; no acknowledged usable Arc may escape.
+            assert!(matches!(
+                unsafe { Unit::take_over(registers.clone(), source, 8, 48) },
+                Err(VtdError::RegisterRead)
+            ));
+            assert!(quarantined_units() > before);
+            assert!(source.next.load(Ordering::Relaxed) > 0x100000);
+            assert_eq!(source.released.load(Ordering::Relaxed), 0);
+            if command == ROOT_POINTER {
+                assert!(
+                    !registers
+                        .0
+                        .lock()
+                        .unwrap()
+                        .writes
+                        .contains(&(GCMD, u64::from(TRANSLATION)))
+                );
+            }
         }
     }
 
@@ -1046,13 +1260,12 @@ mod tests {
                 .iter()
                 .position(|event| *event == (false, unit.iotlb))
                 .unwrap();
-            assert_eq!(
-                events[..invalidation]
-                    .iter()
-                    .filter(|event| event.0)
-                    .count(),
-                count
-            );
+            let flushed: alloc::collections::BTreeSet<_> = events[..invalidation]
+                .iter()
+                .filter(|event| event.0)
+                .map(|event| event.1)
+                .collect();
+            assert_eq!(flushed.len(), count);
             assert!(!events[invalidation..].iter().any(|event| event.0));
         };
         check();
