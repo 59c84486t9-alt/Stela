@@ -97,6 +97,8 @@ pub const PC_SAMPLE: u64 = 0x90;
 /// 26A434 kernel does both at file offsets 0x4d7dd60 and 0x4d7dd64.
 /// The engine publishes actual execution PCs; the trigger latches that
 /// observation so another PE's execution cannot change a sample being read.
+/// XNU discards the trigger read's result. Returning the sampled PC's low
+/// word is an inferred register alias, not a measured hardware encoding.
 /// The debug-halt wrapper and all other UTTDBG registers remain unsupported.
 #[derive(Debug, Clone, Default)]
 pub struct PcSampler {
