@@ -205,8 +205,6 @@ fn unproduced(tree: &DeviceTree) -> Vec<String> {
          not modeled (TXM reads an absent boot-command as not 7)"
             .into(),
         "/chosen iboot-handoff: iBoot's hand-off carveout (region 1) is not placed".into(),
-        "/pram reg, /chosen embedded-panic-log-size: the panic carveout (region 98) is not placed"
-            .into(),
         "/chosen trusted-boot-policy-measurement: no LocalPolicy measurement model".into(),
         "/chosen restore-security-overrides0..3: iBoot's override table is not modeled; no \
          consumer reads them"

@@ -10,10 +10,23 @@
 //! records at file offset `0x1d6288` (base `~0` until placed, the size at
 //! +0x10, the region ID at +0x18), of which the fixed-size ones are listed
 //! here. iBoot sizes the rest at run time (size `~0`) or leaves them empty;
-//! those stay absent. iBoot's placement policy is not established, so Stela
-//! places carveouts back to back from the DRAM base and starts the managed
-//! range at the next 32 MiB boundary, the block size of XNU's physical
-//! aperture.
+//! those stay absent, except the panic region below. iBoot's placement policy
+//! is not established, so Stela places carveouts back to back from the DRAM
+//! base and starts the managed range at the next 32 MiB boundary, the block
+//! size of XNU's physical aperture.
+//!
+//! The panic region, carveout 98, is XNU's panic buffer, and every SoC with
+//! hand-off facts gets it ([`PANIC`]; LLB sizes it alike on every SoC,
+//! `machine::soc::PANIC_REGION_BYTES`). iBoot writes it as `/pram reg` (base,
+//! size; 26A434 J473 iBoot 0x23028 calling 0x24d70, only when `/pram`
+//! exists) and its size as the u32 `/chosen embedded-panic-log-size`
+//! (0x24420). 26A434 XNU's `check_for_panic_log` (kernel 0xfffffe000c4d8790,
+//! called from `PE_create_console` at 0xfffffe000c52d3ac) needs both: it maps
+//! `reg[0]` write-combined for `embedded-panic-log-size` bytes as
+//! `gPanicBase` (0xfffffe000ca640b0) and `panic_info` (0xfffffe000ca640b8),
+//! and `debug_log_init` puts the panic log 0x331 bytes in, past the panic
+//! header. Without them `panic_info` stays NULL and the panic path faults
+//! writing the header (`docs/research/iboot-handoff.md#panic-region`).
 //!
 //! The GPU's UAT regions come from four of them. iBoot's sgx setup (26A434
 //! iBoot `0xd9328`) looks up regions 8, 0x34, 0xd9 and 0x38 and writes their
@@ -29,9 +42,14 @@ use crate::apple_device_tree::DeviceTree;
 use crate::kernel_collection::PAGE_BYTES;
 use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result};
+use stela_runtime::machine::soc;
 
 pub const MEMORY_MAP: &str = "/chosen/carveout-memory-map";
 const SGX: &str = "/arm-io/sgx";
+/// The node whose `reg` names the panic region.
+pub const PRAM: &str = "/pram";
+/// The `/chosen` u32 that bounds XNU's panic buffer.
+pub const PANIC_LOG_SIZE: &str = "embedded-panic-log-size";
 /// XNU maps its physical aperture in 32 MiB blocks (m1n1 `_write_boot_args`
 /// offsets `virtBase` by `physBase` modulo this).
 pub const MANAGED_ALIGNMENT: u64 = 32 << 20;
@@ -54,6 +72,9 @@ pub struct Placed {
 const fn carveout(id: u16, bytes: u64) -> Carveout {
     Carveout { id, bytes }
 }
+
+/// Carveout 98, the panic region, at the size LLB gives it on every SoC.
+pub const PANIC: Carveout = carveout(soc::PANIC_REGION_ID, soc::PANIC_REGION_BYTES);
 
 /// The T8112 table in iBoot's order.
 const T8112: [Carveout; 18] = [
@@ -95,6 +116,14 @@ pub fn table(chip_id: u32) -> Option<&'static [Carveout]> {
     }
 }
 
+/// The carveouts a bundle places for the SoC with `chip_id`: its fixed-size
+/// table when read, then the panic region on every SoC with hand-off facts.
+pub fn for_chip(chip_id: u32) -> Vec<Carveout> {
+    let fixed = table(chip_id).unwrap_or_default();
+    let panic = soc::handoff(chip_id).map(|_| PANIC);
+    fixed.iter().copied().chain(panic).collect()
+}
+
 /// The carveouts placed back to back from `dram_base`.
 pub fn place(table: &[Carveout], dram_base: u64) -> Vec<Placed> {
     let mut cursor = dram_base;
@@ -128,11 +157,22 @@ fn range(base: u64, bytes: u64) -> Vec<u8> {
 }
 
 /// Publishes the carveouts as iBoot does: every one in
-/// `/chosen/carveout-memory-map`, and the GPU's UAT regions in
-/// `/arm-io/sgx` when the board has a GPU.
+/// `/chosen/carveout-memory-map`, the panic region in `/pram reg` (when the
+/// template has `/pram`) and `/chosen embedded-panic-log-size`, and the GPU's
+/// UAT regions in `/arm-io/sgx` when the board has a GPU.
 pub fn publish(tree: &mut DeviceTree, placed: &[Placed]) -> Result<()> {
     if placed.is_empty() {
         return Ok(());
+    }
+    if let Some(panic) = placed.iter().find(|carveout| carveout.id == PANIC.id) {
+        if tree.node(PRAM).is_some() {
+            tree.set_property(PRAM, "reg", range(panic.base, panic.bytes))?;
+        }
+        tree.set_property(
+            "/chosen",
+            PANIC_LOG_SIZE,
+            u32::try_from(panic.bytes)?.to_le_bytes().to_vec(),
+        )?;
     }
     tree.ensure_child("/chosen", "carveout-memory-map")?;
     let map = tree.node_mut(MEMORY_MAP).context("carveout-memory-map")?;
@@ -169,11 +209,23 @@ pub fn gaps(tree: &DeviceTree, chip_id: Option<u32>) -> Vec<String> {
     let mut gaps = Vec::new();
     match chip_id.and_then(table) {
         Some(_) => gaps.push(format!(
-            "{MEMORY_MAP}: the carveouts iBoot sizes at run time are absent"
+            "{MEMORY_MAP}: the carveouts iBoot sizes at run time, other than the panic region, \
+             are absent"
         )),
         None => gaps.push(format!(
-            "{MEMORY_MAP}: no iBoot carveout table for this SoC; the machine declares no carveouts"
+            "{MEMORY_MAP}: no iBoot carveout table for this SoC; its fixed-size carveouts are \
+             absent"
         )),
+    }
+    if chip_id.and_then(soc::handoff).is_none() {
+        gaps.push(format!(
+            "{PRAM} reg, /chosen {PANIC_LOG_SIZE}: no hand-off facts for this SoC; the kernel \
+             keeps no panic buffer"
+        ));
+    } else if tree.node(PRAM).is_none() {
+        gaps.push(format!(
+            "{PRAM} reg: the template has no {PRAM} node; the kernel keeps no panic buffer"
+        ));
     }
     if tree.node(SGX).is_some() {
         gaps.push(format!(
@@ -238,6 +290,70 @@ mod tests {
                 .as_u64(),
             Some(0x4000)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn every_soc_with_handoff_facts_gets_the_panic_region_after_its_table() {
+        let t8112 = for_chip(0x8112);
+        assert_eq!(&t8112[..T8112.len()], &T8112[..]);
+        assert_eq!(t8112[T8112.len()..], [PANIC]);
+        assert_eq!(PANIC, carveout(98, 0x18_8000));
+        // A SoC without a read table still gets it; an unknown SoC none.
+        for chip_id in [0x8103, 0x6000, 0x8122, 0x6041, 0x8152] {
+            assert_eq!(for_chip(chip_id), [PANIC]);
+        }
+        assert!(for_chip(0x6050).is_empty());
+        // It meets SPTM's I/O range rules and leaves physBase where it was.
+        assert!(PANIC.bytes.is_multiple_of(PAGE_BYTES) && PANIC.bytes / PAGE_BYTES < 0x10000);
+        let placed = place(&t8112, 0x8_0000_0000);
+        assert_eq!(managed_floor(&placed, 0x8_0000_0000), 0x8_0200_0000);
+        let alone = place(&[PANIC], 0x10_0000_0000);
+        assert_eq!(managed_floor(&alone, 0x10_0000_0000), 0x10_0200_0000);
+    }
+
+    fn tree_with(nodes: &[&str]) -> Result<DeviceTree> {
+        let mut tree = DeviceTree {
+            root: crate::apple_device_tree::Node::named("device-tree")?,
+        };
+        for node in nodes {
+            tree.ensure_child("/", node)?;
+        }
+        Ok(tree)
+    }
+
+    #[test]
+    fn the_panic_region_is_pram_reg_region_98_and_the_panic_log_size() -> Result<()> {
+        let mut tree = tree_with(&["chosen", "pram"])?;
+        tree.set_property(PRAM, "reg", vec![0; 16])?;
+        let placed = place(&for_chip(0x8112), 0x8_0000_0000);
+        publish(&mut tree, &placed)?;
+        let panic = placed.last().unwrap();
+        assert_eq!(panic.id, 98);
+        let reg = range(panic.base, 0x18_8000);
+        assert_eq!(tree.property(PRAM, "reg").unwrap().value, reg);
+        assert_eq!(
+            tree.property(MEMORY_MAP, "region-id-98").unwrap().value,
+            reg
+        );
+        assert_eq!(
+            tree.property("/chosen", PANIC_LOG_SIZE).unwrap().as_u32(),
+            Some(0x18_8000)
+        );
+        assert!(!gaps(&tree, Some(0x8112)).iter().any(|g| g.contains(PRAM)));
+
+        // As iBoot, a template without /pram gets no node, only the size.
+        let mut bare = tree_with(&["chosen"])?;
+        publish(&mut bare, &placed)?;
+        assert!(bare.node(PRAM).is_none());
+        assert!(bare.property("/chosen", PANIC_LOG_SIZE).is_some());
+        assert!(
+            gaps(&bare, Some(0x8112))
+                .iter()
+                .any(|g| g.contains("no /pram node"))
+        );
+        let unknown = gaps(&bare, Some(0x6050));
+        assert!(unknown.iter().any(|g| g.contains("no hand-off facts")));
         Ok(())
     }
 }

@@ -668,8 +668,7 @@ fn assemble(inputs: &Inputs, options: &Options, owned: Option<OwnedRamdisk>) -> 
     let carveouts = inputs
         .target
         .chip_id
-        .and_then(carveouts::table)
-        .map(|table| carveouts::place(table, options.dram_base))
+        .map(|chip_id| carveouts::place(&carveouts::for_chip(chip_id), options.dram_base))
         .unwrap_or_default();
     let options = &Options {
         phys_base: options
@@ -1620,7 +1619,7 @@ mod tests {
         let mut tree = DeviceTree {
             root: crate::apple_device_tree::Node::named("device-tree").unwrap(),
         };
-        for child in ["chosen", "cpus", "vram"] {
+        for child in ["chosen", "cpus", "vram", "pram"] {
             tree.ensure_child("/", child).unwrap();
         }
         tree.ensure_child("/chosen", "memory-map").unwrap();
@@ -1628,6 +1627,7 @@ mod tests {
         tree.set_property("/cpus/cpu0", "state", b"waiting\0".to_vec())
             .unwrap();
         tree.set_property("/vram", "reg", vec![0; 16]).unwrap();
+        tree.set_property("/pram", "reg", vec![0; 16]).unwrap();
         tree.set_property("/chosen", "random-seed", vec![0; 0x100])
             .unwrap();
         tree.set_property("/chosen", "cl4-entropy", vec![0; 0xc0])
@@ -1860,6 +1860,19 @@ mod tests {
                 .unwrap()
                 .value,
             range_value(nvme.base, nvme.bytes)
+        );
+        // The panic region is XNU's panic buffer, below physBase.
+        let panic = manifest.carveouts.iter().find(|c| c.id == 98).unwrap();
+        assert_eq!(panic.bytes, 0x18_8000);
+        assert_eq!(
+            tree.property(carveouts::PRAM, "reg").unwrap().value,
+            range_value(panic.base, panic.bytes)
+        );
+        assert_eq!(
+            tree.property("/chosen", carveouts::PANIC_LOG_SIZE)
+                .unwrap()
+                .as_u32(),
+            Some(0x18_8000)
         );
         assert_eq!(
             entry("TrustCache"),
