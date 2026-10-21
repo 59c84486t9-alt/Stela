@@ -7,7 +7,7 @@ use crate::amx::{AmxOperation, AmxRegisters, Generation};
 const MULTIPLE: u64 = 1 << 62;
 const NON_CONSECUTIVE: u64 = 1 << 61;
 const MULTIPLE_MEANS_FOUR: u64 = 1 << 60;
-/// Multi-row transfers were compared with hardware only at this alignment.
+/// Qualified transfer alignment; only M1's misalignment fault is recovered.
 const MULTIPLE_ALIGNMENT: u64 = 128;
 const INTERLEAVED_LANES: usize = 16;
 
@@ -31,9 +31,9 @@ pub(super) fn execute(
             memory,
             false,
         ),
-        StoreX => store(&registers.x, operand, address, memory),
-        StoreY => store(&registers.y, operand, address, memory),
-        StoreZ => store(&registers.z, operand, address, memory),
+        StoreX => store(generation, &registers.x, operand, address, memory),
+        StoreY => store(generation, &registers.y, operand, address, memory),
+        StoreZ => store(generation, &registers.z, operand, address, memory),
         LoadZInterleaved => {
             let mut bytes = [0u8; 64];
             memory.read(address, &mut bytes)?;
@@ -77,8 +77,15 @@ fn rows(operand: u64, xy: bool) -> usize {
     }
 }
 
-fn aligned(rows: usize, address: u64) -> Result<(), AmxError> {
+fn aligned(generation: Generation, rows: usize, address: u64, write: bool) -> Result<(), AmxError> {
     if rows > 1 && !address.is_multiple_of(MULTIPLE_ALIGNMENT) {
+        if generation == Generation::M1 {
+            return Err(AmxError::Alignment {
+                address,
+                write,
+                bytes: 128,
+            });
+        }
         return Err(AmxError::Unsupported {
             detail: "multi-row AMX transfer outside 128-byte alignment",
         });
@@ -95,7 +102,7 @@ fn load<const N: usize>(
     xy: bool,
 ) -> Result<(), AmxError> {
     let count = rows(operand, xy && generation.m2_extensions());
-    aligned(count, address)?;
+    aligned(generation, count, address, false)?;
     let mut bytes = [0u8; 256];
     memory.read(address, &mut bytes[..count * 64])?;
     let first = (operand >> 56) as usize % N;
@@ -115,13 +122,14 @@ fn load<const N: usize>(
 }
 
 fn store<const N: usize>(
+    generation: Generation,
     file: &[Row; N],
     operand: u64,
     address: u64,
     memory: &mut dyn AmxMemory,
 ) -> Result<(), AmxError> {
     let count = if operand & MULTIPLE != 0 { 2 } else { 1 };
-    aligned(count, address)?;
+    aligned(generation, count, address, true)?;
     let first = (operand >> 56) as usize % N;
     let mut bytes = [0u8; 128];
     for index in 0..count {
@@ -243,7 +251,7 @@ mod tests {
                 operand + 1,
                 &mut memory
             ),
-            Err(AmxError::Unsupported { .. })
+            Err(AmxError::Alignment { .. })
         ));
         assert_eq!(registers, before);
         assert_eq!(memory.accesses.len(), 1);
@@ -359,6 +367,104 @@ mod tests {
         ));
         assert!(registers == before);
         assert_eq!(memory.accesses.len(), 1);
+    }
+
+    #[test]
+    fn m1_pairs_fault_before_memory_for_every_unaligned_byte_and_direction() {
+        for operation in [
+            AmxOperation::LoadX,
+            AmxOperation::LoadY,
+            AmxOperation::LoadZ,
+            AmxOperation::StoreX,
+            AmxOperation::StoreY,
+            AmxOperation::StoreZ,
+        ] {
+            let mut memory = window();
+            let mut registers = AmxRegisters::zeroed();
+            registers.x.fill([0x37; 64]);
+            registers.y.fill([0x59; 64]);
+            registers.z.fill([0xb1; 64]);
+            let before = registers.clone();
+            let bytes = memory.bytes.clone();
+            let write = matches!(
+                operation,
+                AmxOperation::StoreX | AmxOperation::StoreY | AmxOperation::StoreZ
+            );
+            for offset in 1..128 {
+                let address = memory.base + offset;
+                // All high operand flags also exercise X/Y ignored fields,
+                // Z63 wrapping and effective-address stripping.
+                let operand = (0xff << 56) | address;
+                assert_eq!(
+                    super::super::execute_for(
+                        Generation::M1,
+                        &mut registers,
+                        operation,
+                        operand,
+                        &mut memory,
+                    ),
+                    Err(AmxError::Alignment {
+                        address,
+                        write,
+                        bytes: 128,
+                    }),
+                    "{operation:?} at {offset}"
+                );
+                assert!(registers == before);
+                assert_eq!(memory.bytes, bytes);
+            }
+            assert!(memory.accesses.is_empty(), "alignment precedes memory");
+        }
+    }
+
+    #[test]
+    fn m1_alignment_uses_the_effective_address_even_outside_mapped_memory() {
+        let mut memory = window();
+        let mut registers = AmxRegisters::zeroed();
+        let address = 0xffff_8000_0000_0040;
+        assert_eq!(
+            super::super::execute_for(
+                Generation::M1,
+                &mut registers,
+                AmxOperation::StoreX,
+                MULTIPLE | (address & 0x00ff_ffff_ffff_ffff),
+                &mut memory,
+            ),
+            Err(AmxError::Alignment {
+                address,
+                write: true,
+                bytes: 128,
+            })
+        );
+        assert!(memory.accesses.is_empty());
+    }
+
+    #[test]
+    fn later_generation_pairs_keep_the_unqualified_alignment_refusal() {
+        for generation in [Generation::M2, Generation::M3, Generation::M4] {
+            for operation in [
+                AmxOperation::LoadX,
+                AmxOperation::LoadY,
+                AmxOperation::LoadZ,
+                AmxOperation::StoreX,
+                AmxOperation::StoreY,
+                AmxOperation::StoreZ,
+            ] {
+                let mut memory = window();
+                let mut registers = AmxRegisters::zeroed();
+                assert!(matches!(
+                    super::super::execute_for(
+                        generation,
+                        &mut registers,
+                        operation,
+                        MULTIPLE | (memory.base + 64),
+                        &mut memory,
+                    ),
+                    Err(AmxError::Unsupported { .. })
+                ));
+                assert!(memory.accesses.is_empty());
+            }
+        }
     }
 
     #[test]

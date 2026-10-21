@@ -40,6 +40,13 @@ pub enum Failure {
     Unsupported { detail: &'static str },
     /// The transfer touches memory outside the direct-RAM user range.
     Memory { address: u64, write: bool },
+    /// A qualified transfer alignment fault. The current hosted M2 default
+    /// does not produce this M1-specific diagnostic.
+    Alignment {
+        address: u64,
+        write: bool,
+        bytes: u16,
+    },
     /// An unallocated operation (23..31), which hardware raises as an
     /// undefined instruction. Hosted execution has no exception delivery.
     Undefined,
@@ -131,6 +138,15 @@ impl Thread {
                 AmxError::Memory(MemoryFault { address, write }) => {
                     Failure::Memory { address, write }
                 }
+                AmxError::Alignment {
+                    address,
+                    write,
+                    bytes,
+                } => Failure::Alignment {
+                    address,
+                    write,
+                    bytes,
+                },
                 AmxError::Unsupported { detail } => Failure::Unsupported { detail },
                 AmxError::Enablement | AmxError::Undefined => {
                     unreachable!("set, clr and unallocated operations are handled above")

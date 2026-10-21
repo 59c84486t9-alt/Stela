@@ -38,6 +38,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path, help="new ignored evidence directory")
     parser.add_argument("--chains", type=int, default=128)
     parser.add_argument("--steps", type=int, default=256)
+    parser.add_argument("--transfers", action="store_true", help="also retain guarded transfer/fault observations")
     args = parser.parse_args()
     if not 1 <= args.chains <= 4096 or not 128 <= args.steps <= 4096:
         parser.error("chains must be 1..4096; steps 128..4096 cover all FP environments")
@@ -52,9 +53,13 @@ def main():
         if sha(files[name]) != expected:
             raise RuntimeError(f"reference source {name} differs from {REFERENCE}")
     files["native.c"] = (here / "native.c").read_bytes()
+    if args.transfers:
+        files["native_transfers.c"] = (here / "native_transfers.c").read_bytes()
     args.output.mkdir(parents=True, exist_ok=False)
     (args.output / "native.c").write_bytes(files["native.c"])
     (args.output / "native.py").write_bytes(Path(__file__).read_bytes())
+    if args.transfers:
+        (args.output / "native_transfers.c").write_bytes(files["native_transfers.c"])
     receipt = {
         "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "remote": args.remote, "reference_commit": REFERENCE,
@@ -178,6 +183,42 @@ sys.exit(result)
             print(f"{name}: exit {result.returncode}, {len(rows)} records", flush=True)
         receipt["qualified_random_steps"] = 22 * args.chains * args.steps
         receipt["qualified_fp_edge_steps"] = 6 * 24576
+        if args.transfers:
+            command = ["clang", "-O2", "-march=armv8.2-a+fp16", "-Wall", "-Wextra", "-Werror",
+                       "-I", scratch, scratch + "/native_transfers.c", "-o", scratch + "/native-transfers"]
+            receipt["transfer_compiler_argv"] = command
+            built = remote(command, timeout=60)
+            record("transfer-compile", built)
+            if built.returncode:
+                raise RuntimeError("native transfer compile failed")
+            record("transfer-binary-hash", remote(["shasum", "-a", "256", scratch + "/native-transfers"]))
+            record("transfer-disassembly", remote(["otool", "-tvV", scratch + "/native-transfers"]))
+            observed = remote(["python3", "-c", supervisor, scratch + "/native-transfers",
+                               scratch + "/transfers.bin"], timeout=190)
+            record("transfers", observed)
+            # Retain partial observations even if a post-fault state could not
+            # be captured. A missing state always remains a failed observation.
+            expected_hash = remote(["shasum", "-a", "256", scratch + "/transfers.bin"])
+            record("transfer-payload-hash", expected_hash)
+            payload_path = args.output / "transfers.bin"
+            with payload_path.open("wb") as destination:
+                downloaded = subprocess.run(["ssh", "-o", "BatchMode=yes", args.remote,
+                                             shlex.join(["cat", scratch + "/transfers.bin"])],
+                                            stdout=destination, stderr=subprocess.PIPE, timeout=60)
+            record("transfer-download", subprocess.CompletedProcess([], downloaded.returncode, b"", downloaded.stderr))
+            payload_hash = sha(payload_path.read_bytes())
+            if (downloaded.returncode or expected_hash.returncode or
+                    expected_hash.stdout.split()[0].decode() != payload_hash):
+                raise RuntimeError("transfer payload hash mismatch")
+            rows = [json.loads(line) for line in observed.stdout.splitlines()]
+            receipt["transfer_observations"] = len(rows)
+            receipt["transfer_payload_sha256"] = payload_hash
+            receipt["transfer_payload_bytes"] = payload_path.stat().st_size
+            if observed.returncode or len(rows) != 2256 or any(not row["complete"] for row in rows):
+                raise RuntimeError("incomplete transfer observation; retained raw evidence")
+            from native_transfers import verify
+            receipt["transfer_replay"] = verify(args.output)
+            print(f"transfers: {len(rows)} complete state/memory/fault observations", flush=True)
     finally:
         cleanup = remote(["python3", "-c", "import shutil,sys; shutil.rmtree(sys.argv[1])", scratch])
         record("cleanup", cleanup)

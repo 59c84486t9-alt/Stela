@@ -5,13 +5,14 @@
 //!
 //! Floating-point arithmetic follows the configuration corsix compared with
 //! hardware: round to nearest even, no flushing and default NaN (FPCR.DN).
-//! It is computed with Stela's Arm evaluators. FPSR is not updated; hardware
-//! FPSR effects, other FPCR settings and NaN propagation without DN are
-//! unverified (docs/research/amx.md).
+//! It is computed with Stela's Arm evaluators. FPSR is not updated. A bounded
+//! M1 Pro native corpus confirms that behavior under RMode/DN/FZ/FZ16/AHP;
+//! other fields and later-generation hardware remain unverified (docs/research/amx.md).
 //!
 //! Memory operations stage a complete transfer before any register or memory
-//! effect. 128- and 256-byte transfers outside 128-byte alignment were never
-//! compared with hardware and are refused.
+//! effect. M1 pair transfers outside 128-byte alignment raise an alignment
+//! fault before any memory access, as observed natively. Later-generation
+//! unaligned multi-row transfers remain outside the qualified domain.
 mod extract;
 mod float;
 mod fused;
@@ -42,6 +43,13 @@ pub trait AmxMemory {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AmxError {
     Memory(MemoryFault),
+    /// A source-qualified transfer alignment fault, before any memory access.
+    /// Native M1 reports ISV=0: the width is diagnostic, not an ISS SAS field.
+    Alignment {
+        address: u64,
+        write: bool,
+        bytes: u16,
+    },
     /// An operand outside the hardware-compared domain.
     Unsupported {
         detail: &'static str,

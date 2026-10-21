@@ -217,6 +217,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.cpu.amx.registers = Some(registers);
         match result {
             Ok(()) => self.next(),
+            Err(AmxError::Alignment { address, write, .. }) => self.alignment_fault(address, write),
             Err(AmxError::Memory(MemoryFault { address, write })) => match failure {
                 Some(Failure::Fault(fault)) => self.data_abort(address, fault, write, false),
                 Some(Failure::Translation(unsupported)) => {
@@ -492,6 +493,106 @@ mod tests {
             assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), 0x2000);
             let registers = machine.cpu.amx.registers.as_deref().unwrap();
             assert_eq!(registers.x[0][..], bytes[0xe0..0xe0 + 64], "unchanged");
+        }
+    }
+
+    #[test]
+    fn m1_pair_alignment_reports_native_iss_and_far_before_translation() {
+        for el in [0, 1] {
+            for operation in [0, 1, 2, 3, 4, 5] {
+                for offset in [1, 63, 64, 127] {
+                    let mut machine = machine_on(Chip::AppleM1, &[]);
+                    *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
+                    machine.amx(SET).unwrap();
+                    machine.cpu.amx.registers.as_mut().unwrap().x[7] = [0x37; 64];
+                    machine.cpu.amx.registers.as_mut().unwrap().z[63] = [0xb1; 64];
+                    let before = machine.cpu.amx.registers.clone();
+                    let ram = machine.host.ram.clone();
+                    machine.cpu.pc = BASE;
+                    machine.cpu.pstate = crate::machine::exception::Pstate::reset(el);
+                    // No translation table exists at TTBR0=0: a walk would
+                    // fail. Alignment must win without any memory service.
+                    machine
+                        .cpu
+                        .registers
+                        .set(SystemRegister::SCTLR_EL1, 0, mmu::SCTLR_M);
+                    machine
+                        .cpu
+                        .registers
+                        .set(SystemRegister::TCR_EL1, 0, 25 | 5 << 32);
+                    machine.cpu.registers.set(SystemRegister::TTBR0_EL1, 0, 0);
+                    machine
+                        .cpu
+                        .registers
+                        .set(SystemRegister::VBAR_EL1, 0, BASE + 0x4000);
+                    let address = 0x100_0000 | offset;
+                    machine.cpu.state.x[3] = (0xff << 56) | address;
+                    let write = matches!(operation, 2 | 3 | 5);
+                    machine
+                        .completing(BASE, |machine| machine.amx(LDX | (operation << 5) | 3))
+                        .unwrap();
+                    let class = if el == 0 {
+                        Class::DataAbortLower
+                    } else {
+                        Class::DataAbortSame
+                    };
+                    assert_eq!(
+                        machine.cpu.read(SystemRegister::ESR_EL1),
+                        syndrome(class, 0x21 | u32::from(write) << 6),
+                        "ISV is zero, including the 128-byte transfer width"
+                    );
+                    assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), address);
+                    assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+                    assert_eq!(machine.cpu.retired, 0, "faulting word never retires");
+                    assert!(machine.cpu.amx.registers == before);
+                    assert_eq!(machine.host.ram, ram);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alignment_qualification_does_not_change_live_or_hacr_admission() {
+        let mut machine = machine_on(Chip::AppleM1, &[]);
+        machine.cpu.state.x[3] = (1 << 62) | (DATA + 64);
+        machine.amx(LDX | 3).unwrap();
+        assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0xfe00_0003);
+
+        *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
+        machine.cpu.pc = BASE;
+        assert!(
+            machine.amx(LDX | 3).is_err(),
+            "no live state remains unqualified"
+        );
+        machine.amx(SET).unwrap();
+        machine.cpu.pc = BASE;
+        let before = machine.cpu.amx.registers.clone();
+        machine
+            .cpu
+            .registers
+            .set(SystemRegister::HACR_EL2, 0, 1 << 10);
+        let error = machine.amx(LDX | 3).unwrap_err();
+        assert!(format!("{error:?}").contains("bit 10"));
+        assert_eq!(machine.cpu.pc, BASE);
+        assert!(machine.cpu.amx.registers == before);
+    }
+
+    #[test]
+    fn later_chips_keep_refusing_unqualified_pair_alignment() {
+        for chip in [Chip::AppleM2, Chip::AppleM3, Chip::AppleM4] {
+            let mut machine = machine_on(chip, &[]);
+            *machine.cpu.amx.control(AmxView::El1) = 1 << 63;
+            machine.amx(SET).unwrap();
+            machine.cpu.pc = BASE;
+            machine.cpu.state.x[3] = (1 << 62) | (DATA + 64);
+            let before = machine.cpu.amx.registers.clone();
+            let esr = machine.cpu.read(SystemRegister::ESR_EL1);
+            for word in [LDX, STZ] {
+                assert!(machine.amx(word | 3).is_err());
+                assert_eq!(machine.cpu.pc, BASE);
+                assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), esr);
+                assert!(machine.cpu.amx.registers == before);
+            }
         }
     }
 
