@@ -31,6 +31,7 @@
 //! sent the model at the first named refusal.
 pub mod abi;
 pub mod afk;
+pub mod avipc;
 pub mod iomfb;
 pub mod link;
 pub mod modes;

@@ -52,15 +52,18 @@
 use super::super::scanout::{self, Mode, Scanout};
 use super::Log;
 use super::abi::{self, Fields, IO_RETURN_SUCCESS, Packed};
+use super::avipc::DisplayState;
 use super::modes::{self, Advertised};
 use super::rpc::{Callback, Service, Step};
 use super::swap::{self, Layer, Submission};
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::format;
+use alloc::rc::Rc;
 use alloc::string::String;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 /// The most display-log entries kept between drains.
 const LOG_CAPACITY: usize = 4096;
@@ -123,8 +126,8 @@ pub struct Methods {
     log: VecDeque<Log>,
     dropped: u64,
     dumped: u32,
-    /// The last `setPowerState`.
-    powered: Option<bool>,
+    /// The monitor's power and sleep state, shared with its IOAV controller.
+    display: Rc<RefCell<DisplayState>>,
     /// Open IOMFB clients (`first_client_open` minus `last_client_close`).
     clients: u32,
     /// The mode set by `set_digital_out_mode`, `(color, timing)`.
@@ -158,6 +161,14 @@ impl Methods {
     }
 
     pub fn new(scanout: Box<dyn Scanout>) -> Self {
+        // Configured model power, not an observation of Apple's boot state.
+        Self::with_display_state(scanout, Rc::new(RefCell::new(DisplayState::new(true))))
+    }
+
+    pub fn with_display_state(
+        scanout: Box<dyn Scanout>,
+        display: Rc<RefCell<DisplayState>>,
+    ) -> Self {
         let advertised = Advertised::new(scanout.mode());
         Self {
             scanout,
@@ -166,7 +177,7 @@ impl Methods {
             log: VecDeque::new(),
             dropped: 0,
             dumped: 0,
-            powered: None,
+            display,
             clients: 0,
             digital_out: None,
             config_frame: (0, 0),
@@ -188,7 +199,7 @@ impl Methods {
 
     /// The last `setPowerState` the AP asked for.
     pub fn powered(&self) -> Option<bool> {
-        self.powered
+        self.display.borrow().powered
     }
 
     /// The `(color, timing)` IDs of the last `set_digital_out_mode`.
@@ -229,6 +240,9 @@ impl Methods {
         &mut self,
         read: impl FnMut(u64, &mut [u8]) -> bool,
     ) -> Result<(), &'static str> {
+        if !self.display.borrow().active() {
+            return Ok(());
+        }
         let Some(frame) = self.frames.pop_front() else {
             return Ok(());
         };
@@ -337,6 +351,10 @@ impl Methods {
         // A single, untiled display: a zero IOMFB_TiledDisplayInfo, present
         // (its null flag clear); the trailing bool is not read by
         // IOMobileFramebufferShim::hotPlug_notify_gated.
+        self.queue_hotplug()
+    }
+
+    fn queue_hotplug(&mut self) -> Result<(), &'static str> {
         self.queue(
             HOTPLUG,
             Packed::new()
@@ -424,7 +442,7 @@ impl Service for Methods {
             // (Asahi dcp_on_set_power_state / last_client_closed_poff).
             b"A484" => {
                 let state = fields.u64()?;
-                self.powered = Some(match state {
+                self.display.borrow_mut().powered = Some(match state {
                     0 => false,
                     1 => true,
                     _ => {
@@ -594,12 +612,18 @@ impl Service for Methods {
     }
 
     fn callback_pending(&self) -> bool {
-        !self.in_flight && !(self.outgoing.is_empty() && self.completed.is_empty())
+        !self.in_flight
+            && (!(self.outgoing.is_empty() && self.completed.is_empty())
+                || (!self.shut_down && self.display.borrow().hotplug_pending()))
     }
 
     fn take_callback(&mut self) -> Option<Callback<Self>> {
         if self.in_flight {
             return None;
+        }
+        if !self.shut_down && self.display.borrow_mut().take_hotplug_request() {
+            self.queue_hotplug()
+                .expect("the recorded fixed-monitor HPD callback has a valid size");
         }
         if let Some(Outgoing { tag, input, output }) = self.outgoing.pop_front() {
             self.in_flight = true;
@@ -1236,6 +1260,62 @@ mod tests {
         // first_client_open / last_client_close_dcp.
         assert!(returned(methods.call(*b"A466", &[], 0)).is_empty());
         assert_eq!(returned(methods.call(*b"A467", &[0; 4], 4)), [0; 4]);
+    }
+
+    #[test]
+    fn ioav_power_and_sleep_gate_real_scanout_and_its_completion() {
+        use super::super::avipc::{COMMAND_PACKET_TYPE, Controller};
+        let display = Rc::new(RefCell::new(DisplayState::new(true)));
+        let screen = TestScreen(Rc::default(), Some(MODE));
+        let frames = screen.0.clone();
+        let mut methods = Methods::with_display_state(Box::new(screen), Rc::clone(&display));
+        let mut controller = Controller::new(display);
+        let mut command = |index: u32, value: Option<u64>| {
+            let size: u32 = if value.is_some() { 0x20 } else { 0x10 };
+            let mut bytes = alloc::vec![0; 0x40 + size as usize];
+            bytes[4..8].copy_from_slice(&index.to_le_bytes());
+            bytes[8..12].copy_from_slice(&size.to_le_bytes());
+            bytes[12..16].copy_from_slice(&0x6970_6378u32.to_le_bytes());
+            if let Some(value) = value {
+                bytes[0x50..0x58].copy_from_slice(&value.to_le_bytes());
+            }
+            let (status, reply) = controller.handle(COMMAND_PACKET_TYPE, &bytes).unwrap();
+            assert_eq!(status, 0);
+            assert_eq!(&reply[0x40..0x44], &[0; 4]);
+            reply
+        };
+        start_swap(&mut methods);
+        returned(methods.call(*b"A407", &submission(1, &[]), 0xc));
+        command(6, Some(0));
+        methods
+            .present(|_, _| panic!("powered-off scanout reads no pixels"))
+            .unwrap();
+        assert!(methods.frame_pending() && !methods.callback_pending());
+        assert!(frames.borrow().is_empty());
+        command(6, Some(1));
+        command(9, None);
+        methods
+            .present(|_, _| panic!("asleep scanout reads no pixels"))
+            .unwrap();
+        assert!(methods.frame_pending() && frames.borrow().is_empty());
+        command(8, None);
+        methods
+            .present(|_, _| panic!("background clear has no surface"))
+            .unwrap();
+        assert_eq!(frames.borrow().len(), 1);
+        assert!(!methods.frame_pending() && methods.callback_pending());
+        let callback = methods.take_callback().unwrap();
+        assert_eq!(callback.tag, SWAP_COMPLETE);
+        (callback.then)(&mut methods, &[]).unwrap();
+        // The opposite API observes the same power change.
+        returned(methods.call(*b"A484", &[0; 0x10], 8));
+        let power = command(7, Some(0));
+        assert_eq!(&power[0x50..0x58], &[0; 8]);
+        command(10, None);
+        assert!(methods.callback_pending());
+        let callback = methods.take_callback().unwrap();
+        assert_eq!(callback.tag, HOTPLUG);
+        assert_eq!(&callback.input[..8], &PLUGGED.to_le_bytes());
     }
 
     fn start_swap(methods: &mut Methods) -> u32 {
