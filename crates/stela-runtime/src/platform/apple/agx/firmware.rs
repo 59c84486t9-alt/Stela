@@ -255,6 +255,9 @@ impl State {
         if payload >> TYPE_SHIFT != MSG_INIT {
             return Err("AGX message endpoint models only the 0x81 initdata message");
         }
+        if payload & !(MSG_INIT << TYPE_SHIFT | INIT_VA_BITS) != 0 {
+            return Err("AGX initdata message has bits outside its 44-bit address field");
+        }
         if self.initdata_va.is_some() {
             return Err("AGX initdata sent twice");
         }
@@ -269,7 +272,8 @@ impl State {
         }
         // The kext forms (0x80 | type) << 48 | (index & 7) << 2 | kind;
         // nothing else is set.
-        if payload & !(0xff << TYPE_SHIFT) & !0x1f != 0 {
+        let type_bits = (DOORBELL_FLAG | TYPE_MASK) << TYPE_SHIFT;
+        if payload & !(type_bits | 0x1f) != 0 {
             return Err("AGX doorbell has bits outside the type, index and kind");
         }
         let low = payload & 0x1f;
@@ -811,7 +815,7 @@ pub fn endpoints(family: &'static Family, observe: bool) -> (Vec<NumberedEndpoin
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::apple::agx::generation::{G13G, G14G, MAGIC_G13_G14G};
+    use crate::platform::apple::agx::generation::{G13G, G13X, G14G, G14X, G15G, MAGIC_G13_G14G};
     use crate::platform::apple::agx::initdata::tests::{BASE, RINGS, ROOT, kext_root};
     use crate::platform::apple::agx::ring::tests::Flat;
     use crate::platform::apple::agx::ring::{READ, WRITE};
@@ -874,11 +878,16 @@ mod tests {
         assert!(state.init((MSG_INIT << TYPE_SHIFT) | va).is_err());
         let mut fresh = State::new(&G14G, false);
         assert!(fresh.init(0x42 << TYPE_SHIFT).is_err());
-        // A VA above 44 bits is truncated to the field the kext sends.
-        let mut wide = State::new(&G14G, false);
-        wide.init((MSG_INIT << TYPE_SHIFT) | INIT_VA_BITS | (1 << 44))
-            .unwrap();
-        assert_eq!(wide.initdata_va, Some(INIT_VA_BITS));
+        // Reserved low bits are not another way to spell the same VA.
+        for bit in 44..48 {
+            let mut wide = State::new(&G14G, false);
+            assert!(
+                wide.init((MSG_INIT << TYPE_SHIFT) | INIT_VA_BITS | (1 << bit))
+                    .is_err()
+            );
+            assert_eq!(wide.initdata_va, None);
+            assert!(!wide.dma_pending());
+        }
     }
 
     #[test]
@@ -917,6 +926,32 @@ mod tests {
         // A firmware-control doorbell other than device control.
         assert!(state.doorbell(doorbell_payload(DOORBELL_FWCTL, 0)).is_err());
         assert!(state.work.is_empty() && !state.dma_pending());
+    }
+
+    #[test]
+    fn every_reserved_doorbell_bit_refuses_without_queueing_or_counting_work() {
+        // kickFirmware masks the type to six bits, fixes bit 55, and uses
+        // only bits 4:0 for index/pipe. In particular bit 54 is reserved,
+        // even though simply masking to the type would accept 0xc3/0xc4.
+        let allowed = (DOORBELL_FLAG | TYPE_MASK) << TYPE_SHIFT | 0x1f;
+        for family in [&G13G, &G13X, &G14G, &G14X, &G15G] {
+            for bit in 0..64 {
+                if allowed & (1 << bit) != 0 {
+                    continue;
+                }
+                let mut state = State::new(family, false);
+                for payload in [work(2, 3), doorbell_payload(DOORBELL_FWCTL, 0x11)] {
+                    assert!(state.doorbell(payload | 1 << bit).is_err());
+                    assert!(state.work.is_empty());
+                    assert_eq!(state.fwctl, 0);
+                    assert!(state.jobs.is_empty());
+                }
+                // A rejected message must leave the endpoint usable.
+                state.doorbell(work(2, 3)).unwrap();
+                assert_eq!(state.work, [(Pipe::Compute, 3)]);
+                assert_eq!(state.jobs.len(), 1);
+            }
+        }
     }
 
     #[test]
