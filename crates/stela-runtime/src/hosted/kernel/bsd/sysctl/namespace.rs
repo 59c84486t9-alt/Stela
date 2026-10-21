@@ -1,7 +1,7 @@
 //! The pinned `kern_newsysctl.c` metadata family, sharing the machine
 //! namespace with value reads. Host OIDs retain their names; model-only
-//! leaves have stable process-local synthetic OIDs. Enumeration merges
-//! both without exposing the host's x86-only machine variables.
+//! members have stable hierarchical process-local synthetic OIDs.
+//! Enumeration merges the static ARM publication with unowned host data.
 use super::*;
 
 type Oid = Vec<i32>;
@@ -41,26 +41,124 @@ impl Host for Native {
     }
 }
 
-/// OIDs are chosen once for one process's immutable hardware model, so
-/// a name lookup and a later enumeration cannot assign different aliases.
+/// One published variable or branch. Metadata is independent of whether
+/// its contents are modeled, host-owned or explicitly unsupported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Member {
+    oid: Oid,
+    name: String,
+    info: metadata::Info,
+    value: Option<usize>,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct Namespace {
-    leaves: Vec<(Oid, usize)>,
+    members: Vec<Member>,
 }
 
 impl Namespace {
     fn new(model: &Model, host: &impl Host) -> HostResult<Self> {
-        let mut leaves = Vec::with_capacity(model.entries.len());
-        for (index, (name, _)) in model.entries.iter().enumerate() {
-            let oid = match host.query(META_NAME_TO_OID, &[], Some(name.as_bytes())) {
-                Ok(bytes) => decode_oid(&bytes)?,
-                Err(ENOENT) => model.synthetic_oid(index).to_vec(),
-                Err(error) => return Err(error),
-            };
-            leaves.push((oid, index));
+        Self::with_publications(model, host, metadata::DECLARATIONS)
+    }
+
+    fn with_publications(
+        model: &Model,
+        host: &impl Host,
+        declarations: &[metadata::Declaration],
+    ) -> HostResult<Self> {
+        let mut members = Vec::new();
+        for (index, (name, value)) in model.entries.iter().enumerate() {
+            let info = metadata::info(name)
+                .unwrap_or(metadata::Info {
+                    flags: value.kind() | CTLFLAG_RD | CTLFLAG_KERN | CTLFLAG_LOCKED,
+                    format: value.format(),
+                    description: "",
+                })
+                .read_only();
+            members.push(Member {
+                oid: vec![],
+                name: name.clone(),
+                info,
+                value: Some(index),
+            });
         }
-        leaves.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(Self { leaves })
+        for &(name, flags, format, description) in declarations {
+            if members.iter().any(|member| member.name == name)
+                || INSTALLED.contains(&name) && model.index(name).is_none()
+            {
+                continue;
+            }
+            members.push(Member {
+                oid: vec![],
+                name: name.to_owned(),
+                info: metadata::Info {
+                    flags,
+                    format,
+                    description,
+                },
+                value: None,
+            });
+        }
+        // Every synthetic leaf is a child of its real namespace branch.
+        // This is necessary for sysctl's prefix-bounded subtree traversal.
+        let names: Vec<String> = members.iter().map(|member| member.name.clone()).collect();
+        for name in names {
+            let mut prefix = name.as_str();
+            while let Some((parent, _)) = prefix.rsplit_once('.') {
+                if !members.iter().any(|member| member.name == parent) {
+                    let Some(info) = metadata::info(parent).filter(|info| info.node()) else {
+                        return Err(EINVAL);
+                    };
+                    members.push(Member {
+                        oid: vec![],
+                        name: parent.into(),
+                        info,
+                        value: None,
+                    });
+                }
+                prefix = parent;
+            }
+        }
+        let mut namespace = Self { members };
+        for index in 0..namespace.members.len() {
+            namespace.assign(index, host)?;
+        }
+        namespace.members.sort_by(|a, b| a.oid.cmp(&b.oid));
+        Ok(namespace)
+    }
+
+    fn assign(&mut self, index: usize, host: &impl Host) -> HostResult<Oid> {
+        if !self.members[index].oid.is_empty() {
+            return Ok(self.members[index].oid.clone());
+        }
+        let name = self.members[index].name.clone();
+        let oid = match host.query(META_NAME_TO_OID, &[], Some(name.as_bytes())) {
+            Ok(bytes) => decode_oid(&bytes)?,
+            Err(ENOENT) => {
+                if let Some((parent, _)) = name.rsplit_once('.') {
+                    let Some(parent) = self.members.iter().position(|member| member.name == parent)
+                    else {
+                        return Err(EINVAL);
+                    };
+                    let mut oid = self.assign(parent, host)?;
+                    oid.push(SYNTHETIC + index as i32);
+                    if oid.len() > MAX_NAME as usize - 2 {
+                        return Err(EINVAL);
+                    }
+                    oid
+                } else {
+                    vec![match name.as_str() {
+                        "kern" => CTL_KERN,
+                        "hw" => CTL_HW,
+                        "machdep" => CTL_MACHDEP,
+                        _ => return Err(ENOENT),
+                    }]
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        self.members[index].oid = oid.clone();
+        Ok(oid)
     }
 
     fn get(model: &Model) -> HostResult<&Self> {
@@ -73,30 +171,20 @@ impl Namespace {
         Ok(model.namespace.get().expect("initialized namespace"))
     }
 
-    fn oid(&self, index: usize) -> &Oid {
-        &self
-            .leaves
-            .iter()
-            .find(|(_, leaf)| *leaf == index)
-            .expect("every modeled leaf has an OID")
-            .0
+    fn named(&self, name: &str) -> Option<&Member> {
+        self.members.iter().find(|member| member.name == name)
     }
 
-    fn index(&self, model: &Model, oid: &[i32]) -> Option<usize> {
-        model.synthetic(oid).or_else(|| {
-            self.leaves
-                .iter()
-                .find(|(candidate, _)| candidate == oid)
-                .map(|(_, index)| *index)
-        })
+    fn numbered(&self, oid: &[i32]) -> Option<&Member> {
+        self.members.iter().find(|member| member.oid == oid)
     }
 
     fn next(&self, model: &Model, after: &[i32], host: &impl Host) -> HostResult<Oid> {
         let modeled = self
-            .leaves
+            .members
             .iter()
-            .find(|(oid, _)| oid.as_slice() > after)
-            .map(|(oid, _)| oid.clone());
+            .find(|member| !member.info.node() && member.oid.as_slice() > after)
+            .map(|member| member.oid.clone());
         let mut cursor = after.to_vec();
         loop {
             let candidate = match host.query(META_NEXT, &cursor, None) {
@@ -111,11 +199,7 @@ impl Namespace {
                 return Ok(modeled.unwrap());
             }
             let bytes = host.query(META_NAME, &candidate, None)?;
-            let name = c_name(&bytes);
-            // Published but unmodeled ARM variables remain discoverable.
-            // Reading their contents still reports the existing explicit
-            // limit; enumeration must neither invent nor hide those values.
-            if visible(model, &name) {
+            if visible(model, &c_name(&bytes)) {
                 return Ok(candidate);
             }
             cursor = candidate;
@@ -144,14 +228,75 @@ pub(super) fn c_name(bytes: &[u8]) -> String {
 }
 
 fn visible(model: &Model, name: &str) -> bool {
+    if INSTALLED.contains(&name) {
+        return model.index(name).is_some();
+    }
     model.index(name).is_some()
-        || UNMODELED.contains(&name)
+        || metadata::info(name).is_some()
         || HOST_MACHINE.contains(&name)
-        || !OWNED.iter().any(|prefix| name.starts_with(prefix)) && !INSTALLED.contains(&name)
+        || !OWNED.iter().any(|prefix| name.starts_with(prefix))
 }
 
-/// Return `None` only for a host-owned request. No raw guest pointer is
-/// passed to the host while constructing or filtering namespace metadata.
+/// A content request must never use metadata as a successful data value.
+fn read_member(model: &Model, member: &Member, request: &Request) -> Result<Option<Outcome>> {
+    if let Some(index) = member.value {
+        return Ok(Some(request.answer(&model.entries[index].1)));
+    }
+    if member.info.node() {
+        return Ok(Some(Outcome::Error(ENOENT)));
+    }
+    if HOST_MACHINE.contains(&member.name.as_str()) {
+        return Ok(None);
+    }
+    // sysctl_hw_generic rejects a published inactive perflevel before
+    // reading its field. Its metadata and subtree nevertheless exist.
+    if let Some(suffix) = member.name.strip_prefix("hw.perflevel")
+        && let Some((level, _)) = suffix.split_once('.')
+        && let Ok(level) = level.parse::<i32>()
+        && let Some(index) = model.index("hw.nperflevels")
+        && let Value::Int(count) = &model.entries[index].1
+        && level >= *count
+    {
+        return Ok(Some(Outcome::Error(ENOENT)));
+    }
+    crate::hosted::unsupported::refuse!(
+        ENOENT,
+        "the hosted machine model does not answer sysctl {} (its metadata is published)",
+        member.name
+    )
+}
+
+pub(super) fn named_value(model: &Model, name: &str, request: &Request) -> Result<Option<Outcome>> {
+    if model.index(name).is_none() && metadata::info(name).is_none() {
+        return Ok(None);
+    }
+    let namespace = match Namespace::get(model) {
+        Ok(namespace) => namespace,
+        Err(error) => return Ok(Some(Outcome::Error(error))),
+    };
+    match namespace.named(name) {
+        Some(member) => read_member(model, member, request),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn numeric_value(
+    model: &Model,
+    oid: &[i32],
+    request: &Request,
+) -> Result<Option<Outcome>> {
+    let namespace = match Namespace::get(model) {
+        Ok(namespace) => namespace,
+        Err(error) => return Ok(Some(Outcome::Error(error))),
+    };
+    match namespace.numbered(oid) {
+        Some(member) => read_member(model, member, request),
+        None => Ok(None),
+    }
+}
+
+/// Return None for a host-owned metadata request. Names and numeric OIDs
+/// share the same publication; content support is a separate decision.
 pub(super) fn answer(
     model: &Model,
     call: &Call,
@@ -198,33 +343,34 @@ pub(super) fn answer(
         };
         let name = c_name(&bytes);
         let name = name.strip_suffix('.').unwrap_or(&name);
+        if let Some(member) = namespace.named(name) {
+            return Ok(Some(request.out(&encode_oid(&member.oid))));
+        }
         return Ok(match lookup(model, name)? {
             Lookup::Host => None,
-            Lookup::Absent => Some(Outcome::Error(ENOENT)),
-            Lookup::Modeled(index) => Some(request.out(&encode_oid(namespace.oid(index)))),
+            _ => Some(Outcome::Error(ENOENT)),
         });
     }
     let target = &oid[2..];
-    if let Some(index) = namespace.index(model, target) {
-        let (name, value) = &model.entries[index];
+    if let Some(member) = namespace.numbered(target) {
         return Ok(Some(match oid[1] {
-            META_NAME => name_out(request, name),
-            META_FORMAT => format_out(request, name, value),
+            META_NAME => name_out(request, &member.name),
+            META_FORMAT => format_out(request, member.info),
             META_DESCRIPTION => {
-                let description = description(name);
-                let mut bytes = description.as_bytes().to_vec();
+                let mut bytes = member.info.description.as_bytes().to_vec();
                 bytes.push(0);
                 request.out(&bytes)
             }
-            _ => return Ok(None),
+            _ => unreachable!("non-lookup metadata operations were handled"),
         }));
     }
-    // An extra component after a modeled leaf is advisory numeric text
-    // for oid2name, and a malformed leaf request for oidfmt/oiddescr.
-    for length in 2..target.len() {
-        if let Some(index) = namespace.index(model, &target[..length]) {
+    for length in 1..target.len() {
+        if let Some(member) = namespace
+            .numbered(&target[..length])
+            .filter(|member| !member.info.node())
+        {
             return Ok(Some(if oid[1] == META_NAME {
-                let mut name = model.entries[index].0.clone();
+                let mut name = member.name.clone();
                 for component in &target[length..] {
                     name.push_str(&format!(".{component}"));
                 }
@@ -234,11 +380,11 @@ pub(super) fn answer(
             }));
         }
     }
-    if target.get(1).is_some_and(|number| *number >= SYNTHETIC) {
+    if target.iter().any(|number| *number >= SYNTHETIC) {
         return Ok(Some(Outcome::Error(ENOENT)));
     }
     if let Some(name) = host_name(target)?
-        && let Lookup::Absent = lookup(model, &name)?
+        && !visible(model, &name)
     {
         return Ok(Some(Outcome::Error(ENOENT)));
     }
@@ -263,57 +409,10 @@ fn name_out(request: &Request, name: &str) -> Outcome {
     request.out_parts(&parts)
 }
 
-/// Public flags from the pinned ARM declarations. SYSCTL_PROC/INT add
-/// OID2 and PERMANENT; OID_AUTO is the only kernel-private bit masked by
-/// sysctl_sysctl_oidfmt. Modeled identity remains read-only in this adapter.
-fn flags(name: &str) -> u32 {
-    const OID2: u32 = 0x0040_0000;
-    const PERMANENT: u32 = 0x0020_0000;
-    const MASKED: u32 = 0x0400_0000;
-    let mut flags = CTLFLAG_RD | OID2 | PERMANENT;
-    if name != "machdep.ptrauth_enabled" {
-        flags |= CTLFLAG_LOCKED;
-    }
-    if name.ends_with("_compat")
-        || matches!(
-            name,
-            "hw.machine" | "hw.model" | "hw.target" | "hw.product" | "hw.vectorunit"
-        )
-    {
-        flags |= MASKED;
-    } else if !name.starts_with("machdep.cpu.")
-        && !matches!(
-            name,
-            "hw.cacheconfig" | "hw.cachesize" | "machdep.virtual_address_size"
-        )
-    {
-        flags |= CTLFLAG_KERN;
-    }
-    flags
-}
-
-fn description(name: &str) -> &str {
-    match name {
-        "hw.nperflevels" => "Number of performance levels supported by this system",
-        "machdep.cpu.brand_string" => "CPU brand string",
-        "machdep.cpu.cores_per_package" => "CPU cores per package",
-        "machdep.cpu.core_count" => "Number of enabled cores per package",
-        "machdep.cpu.logical_per_package" => "CPU logical cpus per package",
-        "machdep.cpu.thread_count" => "Number of enabled threads per package",
-        "machdep.virtual_address_size" => {
-            "Number of addressable bits in userspace virtual addresses"
-        }
-        "kern.osproductversion" => "The ProductVersion from SystemVersion.plist",
-        "kern.iossupportversion" => "The iOSSupportVersion from SystemVersion.plist",
-        _ => "",
-    }
-}
-
-fn format_out(request: &Request, name: &str, value: &Value) -> Outcome {
-    let kind = (value.kind() | flags(name)).to_le_bytes();
-    let mut format = value.format().as_bytes().to_vec();
+fn format_out(request: &Request, info: metadata::Info) -> Outcome {
+    let mut format = info.format.as_bytes().to_vec();
     format.push(0);
-    request.out_parts(&[&kind, &format])
+    request.out_parts(&[&info.flags.to_le_bytes(), &format])
 }
 
 #[cfg(test)]
@@ -384,19 +483,151 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_children_stay_inside_their_published_subtree() {
+        let model = model();
+        let tree = Tree::default();
+        let declarations: Vec<_> = metadata::DECLARATIONS
+            .iter()
+            .copied()
+            .filter(|entry| entry.0 == "hw.optional.arm.FEAT_CPA")
+            .collect();
+        let namespace = Namespace::with_publications(&model, &tree, &declarations).unwrap();
+        let parent = &namespace.named("hw.optional.arm").unwrap().oid;
+        assert_eq!(parent.len(), 3);
+        let mut cursor = parent.clone();
+        let mut names = Vec::new();
+        while let Ok(next) = namespace.next(&model, &cursor, &tree) {
+            if !next.starts_with(parent) {
+                break;
+            }
+            names.push(namespace.numbered(&next).unwrap().name.clone());
+            cursor = next;
+        }
+        names.sort();
+        assert_eq!(
+            names,
+            ["hw.optional.arm.FEAT_CPA", "hw.optional.arm.FEAT_LSE"]
+        );
+        let member = namespace.named("hw.optional.arm.FEAT_CPA").unwrap();
+        assert_eq!(member.info.flags & metadata::TYPE_MASK, CTLTYPE_INT);
+        let mut bytes = [0xa5; 64];
+        let mut length = 64;
+        assert!(read_member(&model, member, &request(&mut bytes, &mut length)).is_err());
+        assert_eq!((bytes, length), ([0xa5; 64], 64));
+    }
+
+    #[test]
+    fn publication_is_independent_of_content_and_inactive_perflevels() {
+        let mut model = model();
+        model.entries.push(("hw.nperflevels".into(), Value::Int(2)));
+        let namespace = Namespace::get(&model).unwrap();
+        let mut bytes = [0xa5; 128];
+        let mut length = 128;
+        // Real registrations remain visible even when the adapter has
+        // not implemented their data handler. Never return host x86 caps.
+        let avx = namespace.named("hw.optional.avx2_0").unwrap();
+        assert_eq!(avx.info.format, "I");
+        assert!(read_member(&model, avx, &request(&mut bytes, &mut length)).is_err());
+        assert_eq!((length, bytes), (128, [0xa5; 128]));
+        assert!(
+            namespace.named("hw.cputhreadtype").is_none(),
+            "NOAUTO and no SMT"
+        );
+        assert!(
+            namespace.named("machdep.wfe_allowed").is_none(),
+            "debug-only"
+        );
+        assert!(
+            namespace.named("hw.memfrequency").is_none(),
+            "absent from the release publication"
+        );
+        for member in namespace
+            .members
+            .iter()
+            .filter(|member| member.name.starts_with("hw.perflevel2."))
+        {
+            assert_eq!(
+                read_member(&model, member, &request(&mut bytes, &mut length)).unwrap(),
+                Some(Outcome::Error(ENOENT)),
+                "{}",
+                member.name
+            );
+        }
+        for name in [
+            "hw",
+            "hw.optional",
+            "hw.optional.arm",
+            "hw.perflevel0",
+            "hw.perflevel2",
+            "machdep.cpu",
+        ] {
+            assert_eq!(
+                read_member(
+                    &model,
+                    namespace.named(name).unwrap(),
+                    &request(&mut bytes, &mut length)
+                )
+                .unwrap(),
+                Some(Outcome::Error(ENOENT))
+            );
+        }
+        assert_eq!(
+            namespace.named("hw.perflevel2.name").unwrap().info.format,
+            "A"
+        );
+        assert_eq!(
+            namespace
+                .named("hw.engineering_sample")
+                .unwrap()
+                .info
+                .format,
+            ""
+        );
+        assert!(
+            namespace
+                .named("hw.features.allows_security_research")
+                .is_none(),
+            "dynamic driver registration"
+        );
+    }
+
+    #[test]
+    fn branch_metadata_matches_the_native_common_abi() {
+        let model = model();
+        let namespace = Namespace::get(&model).unwrap();
+        for name in ["hw", "hw.optional", "machdep", "machdep.cpu"] {
+            let member = namespace.named(name).unwrap();
+            let native_oid = decode_oid(
+                &Native
+                    .query(META_NAME_TO_OID, &[], Some(name.as_bytes()))
+                    .unwrap(),
+            )
+            .unwrap();
+            let native = Native.query(META_FORMAT, &native_oid, None).unwrap();
+            let mut bytes = [0xa5; 128];
+            let mut length = 128;
+            assert_eq!(
+                format_out(&request(&mut bytes, &mut length), member.info),
+                Outcome::value(0)
+            );
+            assert_eq!(&bytes[..length as usize], native, "{name}");
+        }
+    }
+
+    #[test]
     fn enumeration_merges_aliases_filters_host_only_and_keeps_unmodeled_values_discoverable() {
         let model = model();
         let tree = Tree(BTreeMap::from([
             (vec![1, 1], "kern.ostype".into()),
             (vec![6, 7], "hw.pagesize".into()),
-            (vec![6, 8], "hw.optional.avx2_0".into()),
+            (vec![6, 8], "hw.optional.host_only_fixture".into()),
             (vec![6, 9], "hw.memsize".into()),
             (vec![7, 1, 1], "machdep.cpu.vendor".into()),
             (vec![7, 1, 2], "machdep.cpu.brand_string".into()),
             (vec![7, 2], "machdep.wake_abstime".into()),
             (vec![8, 1], "net.inet.test".into()),
         ]));
-        let namespace = Namespace::new(&model, &tree).unwrap();
+        let namespace = Namespace::with_publications(&model, &tree, &[]).unwrap();
         let mut seen = Vec::new();
         let mut cursor = vec![];
         while let Ok(next) = namespace.next(&model, &cursor, &tree) {
@@ -408,23 +639,29 @@ mod tests {
             seen,
             vec![
                 vec![1, 1],
-                model.synthetic_oid(3).to_vec(),
+                namespace.named("kern.osrelease").unwrap().oid.clone(),
                 vec![6, 7],
                 vec![6, 9],
-                model.synthetic_oid(1).to_vec(),
+                namespace
+                    .named("hw.optional.arm.FEAT_LSE")
+                    .unwrap()
+                    .oid
+                    .clone(),
                 vec![7, 1, 2],
                 vec![7, 2],
                 vec![8, 1],
             ]
         );
-        for (oid, index) in &namespace.leaves {
-            assert_eq!(namespace.index(&model, oid), Some(*index));
-            assert_eq!(namespace.oid(*index), oid);
+        for member in &namespace.members {
+            assert_eq!(namespace.numbered(&member.oid), Some(member));
+            assert_eq!(namespace.named(&member.name), Some(member));
         }
         assert_eq!(namespace.next(&model, &[i32::MAX], &tree), Err(ENOENT));
         assert_eq!(
-            Namespace::new(&model, &tree).unwrap().leaves,
-            namespace.leaves
+            Namespace::with_publications(&model, &tree, &[])
+                .unwrap()
+                .members,
+            namespace.members
         );
     }
 
@@ -433,9 +670,15 @@ mod tests {
         let model = model();
         let mut bytes = [0xa5; 128];
         let mut length = bytes.len() as u64;
-        let oid = model.synthetic_oid(1);
+        let namespace = Namespace::get(&model).unwrap();
+        let oid = namespace
+            .named("hw.optional.arm.FEAT_LSE")
+            .unwrap()
+            .oid
+            .clone();
+        assert!(oid.starts_with(&namespace.named("hw.optional.arm").unwrap().oid));
         let mut query = vec![CTL_UNSPEC, META_NAME];
-        query.extend(oid);
+        query.extend_from_slice(&oid);
         assert_eq!(
             answer(
                 &model,
@@ -447,11 +690,12 @@ mod tests {
             Some(Outcome::value(0))
         );
         assert_eq!(&bytes[..length as usize], b"hw.optional.arm.FEAT_LSE\0");
-        let mut wrong = oid;
+        let mut wrong = oid.clone();
         wrong[0] = CTL_KERN;
-        assert_eq!(model.synthetic(&wrong), None);
+        assert!(namespace.numbered(&wrong).is_none());
         for operation in [META_NAME, META_FORMAT, META_DESCRIPTION] {
-            let query = [CTL_UNSPEC, operation, wrong[0], wrong[1]];
+            let mut query = vec![CTL_UNSPEC, operation];
+            query.extend_from_slice(&wrong);
             length = 128;
             assert_eq!(
                 answer(
@@ -468,7 +712,7 @@ mod tests {
         // handler rather than the x86 host's format or integer width.
         let namespace = Namespace::get(&model).unwrap();
         let mut query = vec![CTL_UNSPEC, META_FORMAT];
-        query.extend(namespace.oid(0));
+        query.extend_from_slice(&namespace.named("hw.pagesize").unwrap().oid);
         length = 128;
         answer(
             &model,
@@ -483,7 +727,7 @@ mod tests {
         );
         assert_eq!(&bytes[4..length as usize], b"Q\0");
         let cloned = model.clone();
-        assert_eq!(Namespace::get(&cloned).unwrap().leaves, namespace.leaves);
+        assert_eq!(Namespace::get(&cloned).unwrap().members, namespace.members);
     }
 
     #[test]
@@ -509,13 +753,17 @@ mod tests {
             );
             assert_eq!(
                 decode_oid(&bytes[..length as usize]).unwrap(),
-                model.synthetic_oid(1)
+                Namespace::get(&model)
+                    .unwrap()
+                    .named("hw.optional.arm.FEAT_LSE")
+                    .unwrap()
+                    .oid
             );
         }
         for (name, expected) in [
             (vec![], ENOENT),
             (vec![b'x'; PATH_MAX], ENAMETOOLONG),
-            (b"hw.optional.avx2_0".to_vec(), ENOENT),
+            (b"hw.optional.host_only_fixture".to_vec(), ENOENT),
         ] {
             assert_eq!(
                 answer(
@@ -541,7 +789,13 @@ mod tests {
             Some(Outcome::Error(EFAULT))
         );
         let mut query = vec![0, META_DESCRIPTION];
-        query.extend(model.synthetic_oid(2));
+        query.extend_from_slice(
+            &Namespace::get(&model)
+                .unwrap()
+                .named("machdep.cpu.brand_string")
+                .unwrap()
+                .oid,
+        );
         length = 128;
         answer(
             &model,

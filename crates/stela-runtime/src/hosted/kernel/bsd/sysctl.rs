@@ -10,15 +10,15 @@
 //! and `machdep.*` namespaces are owned here and answered as an arm64 XNU
 //! release kernel answers them (`bsd/kern/kern_mib.c`,
 //! `bsd/dev/arm64/sysctl.c`) for [`Hardware`] and the PE's identification
-//! registers. An owned name the arm64 kernel does not publish (the x86
-//! host's `hw.optional.avx2_0`, `machdep.cpu.vendor`, ...) is `ENOENT`, as
-//! it is there; an arm64 name this model does not yet answer stops the
-//! process naming it.
+//! registers. An owned name absent from the original ARM publication
+//! (`machdep.cpu.vendor`, ...) is `ENOENT`; a published name whose
+//! contents this model does not yet answer stops the process naming it.
+//! Compatibility names such as `hw.optional.avx2_0` have metadata in the
+//! original ARM kernel, independently of content support here.
 //!
-//! Numeric names reach the model through the host's `oid2name`: the static
-//! numbers are the same source on both kernels, and an `OID_AUTO` number
-//! the host assigned names the same variable. A modeled name the host does
-//! not know receives a synthetic number from `name2oid`.
+//! Numeric and textual requests share a process-local namespace. Existing
+//! host OIDs retain their names; a published member absent on the host
+//! receives a synthetic child OID under its published parent branch.
 use super::{Call, Kernel, Outcome, forward};
 use crate::darwin::catalog;
 use crate::hosted::darwin::{EFAULT, EINVAL, ENOENT, ENOMEM, EPERM, ERANGE};
@@ -31,6 +31,7 @@ use anyhow::{Context, Result, anyhow};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+mod metadata;
 mod namespace;
 
 /// `CTL_MAXNAME`.
@@ -133,49 +134,6 @@ const HOST_MACHINE: &[&str] = &[
     "hw.memsize_usable",
     "hw.physmem",
     "hw.usermem",
-];
-
-/// arm64 release-kernel machine variables and nodes this model does not
-/// answer yet (`sme_max_svl_b` only when the machine presents SME).
-const UNMODELED: &[&str] = &[
-    "hw",
-    "hw.optional",
-    "hw.optional.arm",
-    "hw.optional.arm.sme_max_svl_b",
-    "hw.perflevel0",
-    "hw.perflevel1",
-    "hw.memfrequency",
-    "hw.memfrequency_min",
-    "hw.memfrequency_max",
-    "hw.prffrequency",
-    "hw.prffrequency_min",
-    "hw.prffrequency_max",
-    "hw.fixfrequency",
-    "hw.osenvironment",
-    "hw.ephemeral_storage",
-    "hw.use_recovery_securityd",
-    "hw.serialdebugmode",
-    "hw.mempath",
-    "hw.epoch",
-    "hw.engineering_sample",
-    "hw.l2settings",
-    "hw.l3settings",
-    "machdep",
-    "machdep.cpu",
-    "machdep.wfe_rec_max",
-    "machdep.wfe_allowed",
-    "machdep.idle_timer_wfe",
-    "machdep.idle_io_wfe_masked",
-    "machdep.idle_io_wfe_unmasked",
-    "machdep.wfe_rec_none",
-    "machdep.wfe_rec_override_mat",
-    "machdep.wfe_rec_clamp",
-    "machdep.wake_abstime",
-    "machdep.time_since_reset",
-    "machdep.wake_conttime",
-    "machdep.deferred_ipi_timeout",
-    "machdep.ctrr_type",
-    "machdep.user_idle_level",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,27 +427,6 @@ impl Model {
     fn index(&self, name: &str) -> Option<usize> {
         self.entries.iter().position(|(entry, _)| entry == name)
     }
-
-    fn synthetic(&self, oid: &[i32]) -> Option<usize> {
-        match oid {
-            [_, number] if *number >= SYNTHETIC => {
-                let index = (*number - SYNTHETIC) as usize;
-                (index < self.entries.len() && oid == self.synthetic_oid(index)).then_some(index)
-            }
-            _ => None,
-        }
-    }
-
-    fn synthetic_oid(&self, index: usize) -> [i32; 2] {
-        let top = if self.entries[index].0.starts_with("machdep.") {
-            CTL_MACHDEP
-        } else if self.entries[index].0.starts_with("kern.") {
-            CTL_KERN
-        } else {
-            CTL_HW
-        };
-        [top, SYNTHETIC + index as i32]
-    }
 }
 
 fn levels(hardware: &Hardware) -> Vec<Level> {
@@ -544,7 +481,10 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
     {
         return Ok(Lookup::Host);
     }
-    if UNMODELED.contains(&name) {
+    if INSTALLED.contains(&name) {
+        return Ok(Lookup::Absent);
+    }
+    if metadata::info(name).is_some() || name.starts_with("hw.features.") {
         crate::hosted::unsupported::refuse!(
             ENOENT,
             "the hosted machine model does not answer sysctl {name}"
@@ -555,8 +495,9 @@ fn lookup(model: &Model, name: &str) -> Result<Lookup> {
 
 pub(super) const CALLS: &[&str] = &["sysctl", "sys_sysctlbyname"];
 
-pub(super) const LIMIT: &str = "some machine subtree metadata and unmodeled ARM variables are refused; \
-    installed-system identity is read-only, including for privileged writers";
+pub(super) const LIMIT: &str = "static ARM namespace metadata is published independently of value support; \
+    unmodeled contents and dynamic driver variables are refused, and installed-system identity \
+    is read-only, including for privileged writers";
 
 pub(super) fn call(kernel: &mut Kernel, call: &Call) -> Result<Option<Outcome>> {
     Ok(Some(match call.entry.name {
@@ -649,6 +590,11 @@ fn by_name(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
         return Ok(Outcome::Error(EFAULT));
     };
     let name = namespace::c_name(&bytes);
+    if let Some(outcome) =
+        namespace::named_value(&kernel.process.sysctl, &name, &Request::of(call))?
+    {
+        return Ok(outcome);
+    }
     Ok(match lookup(&kernel.process.sysctl, &name)? {
         Lookup::Modeled(index) => Request::of(call).answer(&kernel.process.sysctl.entries[index].1),
         Lookup::Host => forward(kernel, call)?,
@@ -674,11 +620,11 @@ fn by_number(kernel: &mut Kernel, call: &Call) -> Result<Outcome> {
     if oid[0] == CTL_UNSPEC {
         return meta(kernel, call, &oid, &request);
     }
-    if let Some(index) = kernel.process.sysctl.synthetic(&oid) {
-        return Ok(request.answer(&kernel.process.sysctl.entries[index].1));
-    }
     if ![CTL_KERN, CTL_HW, CTL_MACHDEP].contains(&oid[0]) {
         return forward(kernel, call);
+    }
+    if let Some(outcome) = namespace::numeric_value(&kernel.process.sysctl, &oid, &request)? {
+        return Ok(outcome);
     }
     let Some(name) = host_name(&oid)? else {
         return forward(kernel, call);
@@ -868,10 +814,7 @@ mod tests {
             Value::Number(16384).bytes(Some(8)).unwrap(),
             16384i64.to_le_bytes()
         );
-        assert!(matches!(
-            lookup(&model, "hw.optional.avx2_0"),
-            Ok(Lookup::Absent)
-        ));
+        assert!(lookup(&model, "hw.optional.avx2_0").is_err());
         assert!(matches!(lookup(&model, "kern.ostype"), Ok(Lookup::Host)));
         assert_eq!(value("kern.osrelease"), &Value::String("1.2.3".into()));
         assert_eq!(value("kern.version"), &Value::String(VERSION.into()));
@@ -899,9 +842,7 @@ mod tests {
         }
         assert!(matches!(lookup(&model, "hw.memsize"), Ok(Lookup::Host)));
         assert!(lookup(&model, "machdep.wake_abstime").is_err());
-        let index = model.index("hw.optional.arm.FEAT_LSE").unwrap();
-        let oid = model.synthetic_oid(index);
-        assert_eq!(model.synthetic(&oid), Some(index));
+        assert!(model.index("hw.optional.arm.FEAT_LSE").is_some());
     }
 
     #[test]
