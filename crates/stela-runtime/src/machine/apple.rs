@@ -2550,7 +2550,7 @@ mod tests {
                 bytes: dart::SMMU_BYTES,
             },
             Range {
-                physical: u64::MAX & !(dart::SMMU_BYTES - 1),
+                physical: !(dart::SMMU_BYTES - 1),
                 bytes: dart::SMMU_BYTES,
             },
         ] {
