@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Timed Realtek headphone startup adapted from alc269.c::alc_default_init and
+//! Timed Realtek headphone startup adapted from alc269.c::{alc_default_init,alc256_init} and
 //! realtek.c::alc_fill_eapd_coef at
 //! a804c5742bff224d4cb4d25dd383554d598be32b (GPL-2.0-or-later).
 //! This is a selected standard headphone route; OEM GPIO/companion amplifiers,
@@ -16,12 +16,22 @@ use crate::{
 
 /// Startup measurements and observed common controls after the explicit route
 /// was configured and reserved. This is not an acoustic or OEM-readiness claim.
+/// Common coefficient observations are ordered transactions; an index may
+/// occur more than once. Fixed depop endpoints are verified during startup.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RealtekHeadphoneReport {
     pub common: RealtekCommonReport,
     pub headphone_pin: u8,
     pub initial_sense: PinSense,
 }
+// These are fixed endpoints in the ALC256/257 donor procedure, not selectable
+// register banks or arbitrary graph NIDs. The public caller chooses only hp_pin.
+#[derive(Clone, Copy)]
+enum DepopControl {
+    HeadphonePower,
+    AnalogReset,
+}
+
 impl<R: Registers, T: Timer> Controller<R, T> {
     fn headphone_preflight(
         &mut self,
@@ -167,6 +177,120 @@ impl<R: Registers, T: Timer> Controller<R, T> {
                 self.headphone_unmute_zero(graph.address, route.pin())?;
                 self.delay(75_000);
             }
+            self.configure_analog_route(graph, route, id, channel, options)?;
+            Ok(RealtekHeadphoneReport {
+                common: RealtekCommonReport {
+                    codec_id,
+                    revision_id,
+                    subsystem_id,
+                    coefficients,
+                },
+                headphone_pin: route.pin(),
+                initial_sense,
+            })
+        })();
+        if result.is_err() {
+            self.routing_failed = true;
+        }
+        result
+    }
+    fn depop_control(
+        &mut self,
+        codec: u8,
+        control: DepopControl,
+        setting: u16,
+    ) -> Result<(), Error> {
+        let (node, index, mask) = match control {
+            DepopControl::HeadphonePower => (0x57, 4, 7),
+            DepopControl::AnalogReset => (0x53, 2, 0x8000),
+        };
+        let fault = Error::CoefficientRejected { node, index };
+        if setting & !mask != 0 {
+            return Err(Error::InvalidConfiguration);
+        }
+        // Exact family identity is checked before this helper. These hidden
+        // vendor endpoints are not invented standard widget-capability nodes;
+        // positive index and data readback are required for every transaction.
+        self.verb(Verb::long(codec, node, 5, index)?)?;
+        if self.verb(Verb::long(codec, node, 13, 0)?)? != u32::from(index) {
+            return Err(fault);
+        }
+        let previous =
+            u16::try_from(self.verb(Verb::long(codec, node, 12, 0)?)?).map_err(|_| fault)?;
+        let current = (previous & !mask) | setting;
+        self.verb(Verb::long(codec, node, 5, index)?)?;
+        if self.verb(Verb::long(codec, node, 13, 0)?)? != u32::from(index) {
+            return Err(fault);
+        }
+        // Keep the donor's write even when the value matches, notably the
+        // ordered high/low analog-reset transactions.
+        self.verb(Verb::long(codec, node, 4, current)?)?;
+        self.verb(Verb::long(codec, node, 5, index)?)?;
+        if self.verb(Verb::long(codec, node, 13, 0)?)? != u32::from(index)
+            || self.verb(Verb::long(codec, node, 12, 0)?)? != u32::from(current)
+        {
+            return Err(fault);
+        }
+        Ok(())
+    }
+
+    /// Exact ALC256/257 held-D0 headphone depop/startup, then explicit route
+    /// configuration/reservation. It uses alc256_init's fixed node57 power,
+    /// node53 analog-reset pulse and node20 controls, including the literal
+    /// 0x5757 PC-beep/1Ah routing choice. The same live pin/codec/format and
+    /// presence checks as ALC298 apply. ULP, OEM headset/GPIO/amp and shutup
+    /// policies are not selected; those need their own actual board ownership.
+    pub fn configure_realtek_alc256_headphone(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+    ) -> Result<RealtekHeadphoneReport, Error> {
+        self.realtek_common_guard(graph)?;
+        if !matches!(graph.vendor_id, 0x10ec_0256 | 0x10ec_0257) {
+            return Err(Error::UnsupportedTopology);
+        }
+        let pin_power = self.headphone_preflight(graph, route, id, channel, options)?;
+        let (codec_id, revision_id, subsystem_id, vendor_power) =
+            self.realtek_common_identity(graph)?;
+        if self.realtek_parameter(graph.address, 0x51, 0)? != 0 {
+            return Err(Error::UnsupportedTopology);
+        }
+        let result = (|| {
+            self.power_d0(graph.address, 1)?;
+            if vendor_power {
+                self.power_d0(graph.address, 0x20)?;
+            }
+            if pin_power {
+                self.power_d0(graph.address, route.pin())?;
+            }
+            let mut coefficients = alloc::vec![
+                self.clear_coefficient_bits(graph.address, 0x36, 1 << 13)?,
+                self.clear_coefficient_bits(graph.address, 0x10, 1 << 9)?,
+            ];
+            self.delay(30_000);
+            let initial_sense = self.poll_pin_sense(graph, route.pin())?;
+            if initial_sense.present {
+                self.delay(2_000);
+                self.depop_control(graph.address, DepopControl::HeadphonePower, 1)?;
+                self.route_control(graph.address, route.pin(), 0x707, 0xf07, 0x40)?;
+                self.delay(75_000);
+                self.headphone_unmute_zero(graph.address, route.pin())?;
+                self.delay(75_000);
+                self.depop_control(graph.address, DepopControl::HeadphonePower, 4)?;
+            }
+            coefficients.push(self.clear_coefficient_bits(graph.address, 0x46, 3 << 12)?);
+            self.depop_control(graph.address, DepopControl::AnalogReset, 0x8000)?;
+            self.depop_control(graph.address, DepopControl::AnalogReset, 0)?;
+            let previous = self.read_coefficient(graph.address, 0x36)?;
+            coefficients.push(self.write_coefficient_observed(
+                graph.address,
+                0x36,
+                previous,
+                0x5757,
+            )?);
             self.configure_analog_route(graph, route, id, channel, options)?;
             Ok(RealtekHeadphoneReport {
                 common: RealtekCommonReport {
