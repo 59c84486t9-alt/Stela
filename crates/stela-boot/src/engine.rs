@@ -1632,7 +1632,15 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         // Any HTTP status proves the path end to end; only a transport
         // failure (link, DHCP, DNS, TCP, malformed reply) fails the check.
         match network.post(host, path, "text/plain", b"") {
-            Ok(_) | Err(stela_runtime::net::NetError::Status(_)) => {
+            Ok(body) => {
+                output::arguments(format_args!(
+                    "NETWORK CHECK body bytes={} sha256={}\n",
+                    body.len(),
+                    stela_runtime::sha256(&body)
+                ));
+                output::arguments(format_args!("NETWORK CHECK passed\n"))
+            }
+            Err(stela_runtime::net::NetError::Status(_)) => {
                 output::arguments(format_args!("NETWORK CHECK passed\n"))
             }
             Err(_) => output::fatal("the network check failed"),

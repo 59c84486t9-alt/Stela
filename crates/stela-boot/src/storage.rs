@@ -117,6 +117,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
                     || input::virtio::matches(&function)
                     || net::virtio::matches(&function)
                     || net::igc::matches(&function)
+                    || net::e1000e::matches(&function)
                     || function.class == nvme::CLASS
                     || function.class == ahci::CLASS
                     || function.class == xhci::CLASS;

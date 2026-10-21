@@ -36,6 +36,7 @@ use stela_runtime::payload::{
 
 mod disks;
 mod lan;
+mod network_check;
 mod preboot;
 
 /// `isa-debug-exit` reports `(code << 1) | 1`; a timeout reports 124.
@@ -221,10 +222,19 @@ pub struct Run {
     /// whether the mount uses it.
     #[arg(long, group = "network_adapter", conflicts_with_all = ["module", "payload"])]
     network: bool,
+    /// PCI network controller exercised by --network. Physical-controller
+    /// models test the same driver the mount uses on a PC.
+    #[arg(long, value_enum, requires = "network")]
+    network_model: Option<NetworkModel>,
     /// Have the mount POST once to this `http://` URL over the host network
     /// at start and report the reply: adds `--network-check URL`.
     #[arg(long, requires = "network_adapter")]
     network_check: Option<String>,
+    /// Check DHCP, DNS, TCP and NIC ring reuse against a local HTTP peer
+    /// with a 200,000-byte response whose digest the mount must reproduce.
+    /// Requires system mode, such as --scenario system-kernel.
+    #[arg(long, requires = "network_adapter", conflicts_with = "network_check")]
+    network_self_check: bool,
     /// Give the guest its USB Ethernet adapter: a second `virtio-net-pci`
     /// on a LAN peer of its own (logged to `guest-network.log`), which the
     /// mount bridges to the guest's CDC-ECM adapter: adds `--guest-network`.
@@ -273,6 +283,22 @@ enum Display {
     None,
     /// Show the UART in a host window; adds no guest display device.
     Cocoa,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum NetworkModel {
+    Virtio,
+    /// Intel 82574L, PCI ID 8086:10d3.
+    E1000e,
+}
+
+impl NetworkModel {
+    fn device(self) -> &'static str {
+        match self {
+            Self::Virtio => "virtio-net-pci",
+            Self::E1000e => "e1000e",
+        }
+    }
 }
 
 /// A path inside a QEMU option list, where a comma separates options and a
@@ -361,6 +387,46 @@ fn firmware(qemu: &Path) -> Result<PathBuf> {
         .with_context(|| format!("QEMU has no {FIRMWARE_CODE}"))
 }
 
+/// Version reported by the configured launcher, which may establish its
+/// runtime library environment before executing the native QEMU binary.
+fn qemu_version(qemu: &Path) -> Result<String> {
+    let output = Process::new(qemu).arg("--version").output()?;
+    ensure!(output.status.success(), "QEMU --version failed");
+    let version = String::from_utf8(output.stdout)?;
+    ensure!(
+        version.starts_with("QEMU emulator version "),
+        "unexpected QEMU version output"
+    );
+    Ok(version.trim_end().to_owned())
+}
+
+/// Kernel-observed image of the launched process. If a custom wrapper forks
+/// rather than execs, this identifies the wrapper process, not its child.
+#[cfg(target_os = "macos")]
+fn process_image(pid: u32) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let mut bytes = vec![0u8; 4096];
+    // SAFETY: the buffer is writable for its advertised length; proc_pidpath
+    // performs a read-only query on this task's child process.
+    let count =
+        unsafe { libc::proc_pidpath(pid as i32, bytes.as_mut_ptr().cast(), bytes.len() as u32) };
+    if count <= 0 {
+        return None;
+    }
+    bytes.truncate(bytes.iter().position(|byte| *byte == 0)?);
+    Some(std::ffi::OsString::from_vec(bytes).into())
+}
+
+#[cfg(target_os = "linux")]
+fn process_image(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_image(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
 fn launch(arguments: Run) -> Result<ExitCode> {
     let limit = if arguments.usb_image.is_some() || arguments.bundle.is_some() {
         MAX_LONG_TIMEOUT_SECONDS
@@ -439,7 +505,21 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if strict {
         options.push_str(" --strict");
     }
-    if let Some(url) = &arguments.network_check {
+    if arguments.network_self_check || arguments.network_check.is_some() {
+        ensure!(
+            options.split_whitespace().next() == Some("--system"),
+            "network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
+        );
+    }
+    let fixture = arguments
+        .network_self_check
+        .then(network_check::Fixture::start)
+        .transpose()?;
+    let network_check_url = arguments
+        .network_check
+        .as_deref()
+        .or_else(|| fixture.as_ref().map(|fixture| fixture.url.as_str()));
+    if let Some(url) = network_check_url {
         ensure!(
             url.starts_with("http://") && !url.contains(char::is_whitespace),
             "the network check is one http:// URL"
@@ -635,12 +715,26 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     if arguments.network {
         let port = lan::listen(output.join("network.log")).context("start the network peer")?;
+        let model = arguments.network_model.unwrap_or(NetworkModel::Virtio);
+        let bus = match model {
+            NetworkModel::E1000e => {
+                // Exercise the real driver's upstream bridge discovery and
+                // endpoint/parent ASPM workaround, not just a root-bus NIC.
+                command.args([
+                    "-device",
+                    "pcie-root-port,id=host-net-port,chassis=1,bus=pcie.0",
+                ]);
+                ",bus=host-net-port"
+            }
+            NetworkModel::Virtio => "",
+        };
         command
             .arg("-netdev")
             .arg(format!(
                 "stream,id=host-net,server=off,addr.type=inet,addr.host=127.0.0.1,addr.port={port}"
             ))
-            .args(["-device", "virtio-net-pci,netdev=host-net"]);
+            .arg("-device")
+            .arg(format!("{},netdev=host-net{bus}", model.device()));
     }
     // After the mount's own adapter, so the mount gives the guest the
     // second one when both are present.
@@ -740,6 +834,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .chain(command.get_args())
         .map(|argument| argument.to_string_lossy().into_owned())
         .collect();
+    let qemu_version = qemu_version(&qemu)?;
 
     let started = Instant::now();
     let mut child = command
@@ -747,10 +842,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         .stderr(fs::File::create(output.join("stderr.txt"))?)
         .stdin(Stdio::null())
         .spawn()?;
+    // The local launcher can be a shell wrapper. Observe its running image
+    // after exec, keeping the launcher binding and QEMU version separately.
+    std::thread::sleep(Duration::from_millis(10));
+    let qemu_process_image = process_image(child.id());
     // A paused debugging session has no deadline.
     let limit = match arguments.gdb {
         Some(_) => Duration::MAX,
-        None => Duration::from_secs_f64(arguments.timeout),
+        None => Duration::from_secs_f64(arguments.timeout).saturating_sub(started.elapsed()),
     };
     let status = match wait(&mut child, limit) {
         Ok(status) => status,
@@ -794,19 +893,52 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         None
     };
 
-    let outputs: Vec<Value> = ["serial.txt", "stdout.txt", "stderr.txt"]
-        .into_iter()
-        .map(|name| output.join(name))
-        .filter(|path| path.exists())
-        .map(|path| binding(&path))
-        .collect::<Result<_>>()?;
+    let peer_path = output.join(if arguments.usb_network {
+        "usb-network.log"
+    } else {
+        "network.log"
+    });
+    // LAN listeners run independently. Preserve exactly the peer bytes used
+    // for this check rather than hashing a log another thread can append to.
+    let peer_text = fs::read_to_string(peer_path).unwrap_or_default();
+    let peer_snapshot = fixture
+        .as_ref()
+        .map(|_| output.join("network-check-peer.txt"));
+    if let Some(path) = &peer_snapshot {
+        fs::write(path, &peer_text)?;
+    }
+    let outputs: Vec<Value> = [
+        "serial.txt",
+        "stdout.txt",
+        "stderr.txt",
+        "network-check-peer.txt",
+    ]
+    .into_iter()
+    .map(|name| output.join(name))
+    .filter(|path| path.exists())
+    .map(|path| binding(&path))
+    .collect::<Result<_>>()?;
     let storage = match arguments.storage_check {
         true => Some(disks::verify(&disks, &output.join("serial.txt"))),
         false => None,
     };
+    let expected_driver = if arguments.usb_network {
+        "usb-cdc"
+    } else {
+        match arguments.network_model.unwrap_or(NetworkModel::Virtio) {
+            NetworkModel::Virtio => "virtio-net",
+            NetworkModel::E1000e => "e1000e",
+        }
+    };
+    let network = network_check_url.map(|_| {
+        network_check::verify(&serial_text, fixture.as_ref(), expected_driver, &peer_text)
+    });
+    let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
+        "qemu_version": qemu_version,
+        "qemu_process_image": qemu_process_image,
         "image": binding(&image)?,
         "source": source.exists().then(|| binding(&source)).transpose()?,
         "usb_image": arguments.usb_image,
@@ -836,11 +968,32 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             Ok(disks) => disks.clone(),
             Err(error) => json!({ "error": format!("{error:#}") }),
         }),
+        "network": network.as_ref().map(|result| match result {
+            Ok(()) => json!({
+                "passed": true,
+                "url": network_check_url,
+                "driver": expected_driver,
+                "peer_snapshot": peer_snapshot,
+                "expected_body": fixture.as_ref().map(|fixture| json!({
+                    "bytes": network_check::BODY_BYTES,
+                    "sha256": fixture.sha256,
+                })),
+                "model": if arguments.usb_network {
+                    "usb-net"
+                } else {
+                    arguments.network_model.unwrap_or(NetworkModel::Virtio).device()
+                },
+            }),
+            Err(error) => json!({ "passed": false, "reason": error }),
+        }),
     });
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
     if let Some(Err(error)) = storage {
         return Err(error.context("host storage check failed"));
+    }
+    if let Some(Err(error)) = network {
+        bail!("host network check failed: {error}");
     }
     Ok(ExitCode::from(match (preboot.is_some(), entered) {
         (true, true) => 0,
@@ -1073,6 +1226,15 @@ mod tests {
             vec!["--network-check", "http://example.test/"],
             vec!["--usb-storage-disk", "/tmp/disk", "--storage-check"],
             vec!["--network", "--usb-network"],
+            vec!["--network-model", "e1000e"],
+            vec!["--network-self-check"],
+            vec![
+                "--network",
+                "--network-self-check",
+                "--network-check",
+                "http://localhost/",
+            ],
+            vec!["--network", "--network-model", "unknown"],
             vec!["--usb-disk", "/tmp/disk", "--storage-check"],
             vec![
                 "--storage-disk",
@@ -1086,6 +1248,42 @@ mod tests {
                 .chain(extra)
                 .collect();
             assert!(crate::Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn process_image_identifies_the_executing_binary() {
+        assert_eq!(
+            fs::canonicalize(process_image(std::process::id()).unwrap()).unwrap(),
+            fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
+        );
+    }
+
+    #[test]
+    fn network_models_select_only_implemented_pci_drivers() {
+        use clap::Parser;
+        for (argument, expected) in [
+            ("virtio", NetworkModel::Virtio),
+            ("e1000e", NetworkModel::E1000e),
+        ] {
+            let cli = crate::Cli::try_parse_from([
+                "xtask",
+                "boot",
+                "run",
+                "--output",
+                "/tmp/run",
+                "--network",
+                "--network-model",
+                argument,
+                "--network-check",
+                "http://localhost/check",
+            ])
+            .unwrap();
+            let crate::Task::Boot(Command::Run(run)) = cli.task else {
+                panic!("boot run");
+            };
+            assert_eq!(run.network_model, Some(expected));
         }
     }
 
