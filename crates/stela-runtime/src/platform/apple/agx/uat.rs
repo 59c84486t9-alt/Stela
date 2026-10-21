@@ -88,6 +88,10 @@ const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 const GPU_ACCESS: u64 = 1 << 55;
 const NON_GLOBAL: u64 = 1 << 11;
+const ACCESS_FLAG: u64 = 1 << 10;
+const SHAREABILITY: u64 = 3 << 8;
+const LEAF_FLAGS: u64 =
+    TABLE | ATTR_MASK | AP_MASK | SHAREABILITY | ACCESS_FLAG | NON_GLOBAL | PXN | UXN | GPU_ACCESS;
 
 /// Access permission of a leaf entry (`AGXUATSingleStage` AP field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +102,9 @@ pub enum Access {
     Firmware,
     /// AP 2: GPU only.
     Gpu,
+    /// AP 3: neither agent, when the GPU-access bit is set (Public:
+    /// m1n1 `PTE.access_fw`/`access_gpu`).
+    None,
 }
 
 impl Access {
@@ -106,6 +113,7 @@ impl Access {
             Access::FirmwareGpu => 0,
             Access::Firmware => 1,
             Access::Gpu => 2,
+            Access::None => 3,
         }
     }
 
@@ -114,6 +122,7 @@ impl Access {
             0 => Some(Access::FirmwareGpu),
             1 => Some(Access::Firmware),
             2 => Some(Access::Gpu),
+            3 => Some(Access::None),
             _ => None,
         }
     }
@@ -209,8 +218,13 @@ pub enum Fault {
     OutOfRange,
     /// A table or leaf entry had bit 0 clear.
     NotPresent { level: u32 },
-    /// A table base or output address was outside bits 39:14.
+    /// A table base or output address was misaligned or outside the
+    /// configured output address width.
     BadAddress { level: u32 },
+    /// The descriptor uses a type, flag or attribute whose behavior the
+    /// model does not implement. This is an explicit model refusal, not a
+    /// claim that hardware reports an architectural translation fault.
+    UnsupportedDescriptor { level: u32 },
     /// A table could not be read from guest RAM.
     Memory { level: u32 },
     /// The leaf does not permit the access.
@@ -221,9 +235,12 @@ pub enum Fault {
 pub const CONTEXTS: usize = 64;
 /// TTBAT bytes per context: the TTBR0 then the TTBR1 word.
 const TTBAT_ENTRY_BYTES: u64 = 16;
-/// The context tag of a TTBAT word, bits 55:48 (`mapTaskIdIntoGPTBAT`).
+/// The context tag of a TTBAT word, bits 63:48 (m1n1 `TTBR.ASID`;
+/// `mapTaskIdIntoGPTBAT` inserts the context at bit 48).
 const CONTEXT_SHIFT: u32 = 48;
-const CONTEXT_MASK: u64 = 0xff;
+const CONTEXT_MASK: u64 = 0xffff;
+const TTBAT_CONTEXT: u64 = CONTEXT_MASK << CONTEXT_SHIFT;
+const TTBAT_ADDRESS: u64 = ((1 << CONTEXT_SHIFT) - 1) & !PAGE_MASK;
 /// The context the GFX firmware runs in.
 pub const FIRMWARE_CONTEXT: usize = 0;
 /// The stream bit of a GPU-unit access on the GFX coprocessor's port. The
@@ -302,15 +319,12 @@ pub fn translate(
     output_bits: u32,
 ) -> Result<Mapping, Fault> {
     in_range(input)?;
+    let mask = output_mask(output_bits);
+    if ttbr & !mask != 0 {
+        return Err(Fault::BadAddress { level: 0 });
+    }
     let (_, idx) = indices(input);
-    walk_from(
-        memory,
-        ttbr & !PAGE_MASK,
-        0,
-        &idx,
-        input,
-        output_mask(output_bits),
-    )
+    walk_from(memory, ttbr, 0, &idx, input, mask)
 }
 
 /// `input`'s bits above [`IAS`] must all equal its TTBR-select bit.
@@ -342,6 +356,12 @@ fn walk_from(
         if entry & VALID == 0 {
             return Err(Fault::NotPresent { level });
         }
+        if entry & ENTRY_ADDRESS & !mask != 0 {
+            return Err(Fault::BadAddress { level });
+        }
+        if entry & !mask != TABLE {
+            return Err(Fault::UnsupportedDescriptor { level });
+        }
         table = entry & mask;
     }
     let leaf = LEVELS - 1;
@@ -349,8 +369,14 @@ fn walk_from(
     if entry & VALID == 0 {
         return Err(Fault::NotPresent { level: leaf });
     }
+    if entry & ENTRY_ADDRESS & !mask != 0 {
+        return Err(Fault::BadAddress { level: leaf });
+    }
+    if entry & TABLE != TABLE || entry & ACCESS_FLAG == 0 || entry & !(mask | LEAF_FLAGS) != 0 {
+        return Err(Fault::UnsupportedDescriptor { level: leaf });
+    }
     let base = entry & mask;
-    let flags = Flags::decode(entry).ok_or(Fault::BadAddress { level: leaf })?;
+    let flags = Flags::decode(entry).ok_or(Fault::UnsupportedDescriptor { level: leaf })?;
     Ok(Mapping {
         physical: base | (input & PAGE_MASK),
         flags,
@@ -391,24 +417,31 @@ const RW: Option<Permits> = Some(Permits {
 });
 
 /// The permissions of `(AP, UXN, PXN)` with the GPU-access bit set, as
-/// (firmware, GPU), for the combinations whose meaning Asahi's working
-/// mappings establish (`pgtable.rs` `prot`: FW_GPU_NA, FW_GPU_RW, FW_RO,
-/// FW_RW, FW_RW_GPU_RO, GPU_RO, GPU_WO, GPU_RW). `None` is an agent whose
-/// access to such a page no source states; it refuses rather than guesses.
+/// (firmware, GPU), from the pinned Asahi `pgtable.rs` protection constants
+/// and m1n1 `hw/uat.py` `PTE.access_fw`/`access_gpu` (commit
+/// 25b1d89ca50be848b136ce771ce7167244852a91). `None` marks an uncertain
+/// permission: firmware on the shared write-only combination, or a page
+/// without the GPU-access bit (firmware EL/GL permissions differ there).
 fn permits(flags: &Flags, agent: Agent) -> Option<Permits> {
     if !flags.gpu_access {
-        return None;
+        return match agent {
+            Agent::Firmware => None,
+            Agent::Gpu => NONE,
+        };
     }
     let (firmware, gpu) = match (flags.access, flags.uxn, flags.pxn) {
         (Access::FirmwareGpu, false, false) => (NONE, NONE),
+        (Access::FirmwareGpu, false, true) => (RO, RO),
+        (Access::FirmwareGpu, true, false) => (None, WO),
         (Access::FirmwareGpu, true, true) => (RW, RW),
-        (Access::Firmware, false, false) => (RO, None),
-        (Access::Firmware, true, false) => (RW, None),
+        (Access::Firmware, false, false) => (RO, NONE),
+        (Access::Firmware, false, true) => (NONE, NONE),
+        (Access::Firmware, true, false) => (RW, NONE),
         (Access::Firmware, true, true) => (RW, RO),
-        (Access::Gpu, false, false) => (None, RO),
-        (Access::Gpu, false, true) => (None, WO),
-        (Access::Gpu, true, false) => (None, RW),
-        _ => (None, None),
+        (Access::Gpu, false, false) => (NONE, RO),
+        (Access::Gpu, false, true) => (NONE, WO),
+        (Access::Gpu, true, false) => (NONE, RW),
+        (Access::Gpu, true, true) | (Access::None, _, _) => (NONE, NONE),
     };
     match agent {
         Agent::Firmware => firmware,
@@ -523,45 +556,79 @@ impl Uat {
         iova: u64,
         write: bool,
     ) -> Result<u64, DmaError> {
-        let ttbr = self.root(memory, context, iova)?;
-        let mut record = |fault, code| {
-            self.last_fault = Some(FaultRecord {
-                agent,
-                context,
-                address: iova,
-                write,
-                fault,
-            });
-            DmaError::Fault(code)
+        // Reject a noncanonical VA before it can select or read a root.
+        if let Err(fault) = in_range(iova) {
+            return Err(self.record(agent, context, iova, write, fault));
+        }
+        let ttbr = match self.root(memory, context, iova) {
+            Ok(ttbr) => ttbr,
+            Err(DmaError::Memory) => {
+                return Err(self.record(agent, context, iova, write, Fault::Memory { level: 0 }));
+            }
+            Err(error) => return Err(error),
         };
         if ttbr & VALID == 0 {
-            return Err(record(Fault::NotPresent { level: 0 }, FAULT_TRANSLATION));
+            return Err(self.record(agent, context, iova, write, Fault::NotPresent { level: 0 }));
         }
         if (ttbr >> CONTEXT_SHIFT) & CONTEXT_MASK != context as u64 {
             return Err(DmaError::Unsupported(
                 "UAT TTBAT entry tagged with another context",
             ));
         }
+        if ttbr & TTBAT_ADDRESS & !self.output != 0 {
+            return Err(self.record(agent, context, iova, write, Fault::BadAddress { level: 0 }));
+        }
+        if ttbr & !(self.output | TTBAT_CONTEXT | VALID) != 0 {
+            return Err(DmaError::Unsupported(
+                "UAT TTBAT entry has unsupported low address bits",
+            ));
+        }
         let (half, idx) = indices(iova);
         let shared = (half == Half::Ttbr1 && idx[0] == SHARED_INDEX)
             .then_some(self.shared_l2)
             .flatten();
-        let walked = in_range(iova).and_then(|()| match shared {
+        let walked = match shared {
             Some(l2) => walk_from(memory, l2, 1, &idx, iova, self.output),
             None => walk_from(memory, ttbr & self.output, 0, &idx, iova, self.output),
-        });
+        };
         let mapping = match walked {
             Ok(mapping) => mapping,
-            Err(Fault::Memory { .. }) => return Err(DmaError::Memory),
-            Err(fault) => return Err(record(fault, FAULT_TRANSLATION)),
+            Err(fault) => return Err(self.record(agent, context, iova, write, fault)),
         };
         let permits = permits(&mapping.flags, agent).ok_or(DmaError::Unsupported(
             "UAT leaf permission encoding not modeled for this agent",
         ))?;
         if !(if write { permits.write } else { permits.read }) {
-            return Err(record(Fault::Permission, FAULT_PERMISSION));
+            return Err(self.record(agent, context, iova, write, Fault::Permission));
         }
         Ok(mapping.physical)
+    }
+
+    /// Preserve the diagnostic reason independently of whether the device
+    /// boundary reports a hardware fault, inaccessible RAM or a model limit.
+    fn record(
+        &mut self,
+        agent: Agent,
+        context: usize,
+        address: u64,
+        write: bool,
+        fault: Fault,
+    ) -> DmaError {
+        self.last_fault = Some(FaultRecord {
+            agent,
+            context,
+            address,
+            write,
+            fault,
+        });
+        match fault {
+            Fault::Memory { .. } => DmaError::Memory,
+            Fault::UnsupportedDescriptor { .. } => {
+                DmaError::Unsupported("UAT descriptor type, flags or attributes are not modeled")
+            }
+            Fault::Permission => DmaError::Fault(FAULT_PERMISSION),
+            _ => DmaError::Fault(FAULT_TRANSLATION),
+        }
     }
 }
 
@@ -797,11 +864,11 @@ mod tests {
         );
         let fault = uat.last_fault().unwrap();
         assert_eq!((fault.context, fault.address), (0, 0x4000));
-        // A firmware-RW page's GPU access is stated nowhere: it refuses.
-        assert!(matches!(
+        // A firmware-RW page denies GPU accesses.
+        assert_eq!(
             port_read(&mut uat, Agent::Gpu, &mut ram, 0, va),
-            Err(DmaError::Unsupported(_))
-        ));
+            Err(DmaError::Fault(FAULT_PERMISSION))
+        );
         // A context past the TTBAT refuses.
         assert!(matches!(
             port_read(&mut uat, Agent::Firmware, &mut ram, CONTEXTS, va),
@@ -885,8 +952,8 @@ mod tests {
     #[test]
     fn the_coprocessor_port_reaches_a_context_with_gpu_permissions() {
         // Context 0's TTBR0 maps a GPU-RW page (AP 2, UXN 1, PXN 0): the
-        // firmware's own accesses have no stated meaning there, the GPU
-        // stream of the same context reads it.
+        // firmware's own accesses are denied there, while the GPU stream
+        // of the same context reads it.
         let base = 0x8_0000_0000;
         let mut ram = Ram::new(base, 0x4000 * 6);
         let (ttbat, pce, pde, pte, page) = (
@@ -908,10 +975,10 @@ mod tests {
         ram.put_u64(page + 8, 0xa6e5);
         let mut uat = Uat::new(40);
         uat.configure(ttbat).unwrap();
-        assert!(matches!(
+        assert_eq!(
             port_read(&mut uat, Agent::Firmware, &mut ram, 5, va + 8),
-            Err(DmaError::Unsupported(_))
-        ));
+            Err(DmaError::Fault(FAULT_PERMISSION))
+        );
         assert_eq!(
             port_read(&mut uat, Agent::Firmware, &mut ram, gpu_stream(5), va + 8),
             Ok(0xa6e5)
@@ -1001,5 +1068,265 @@ mod tests {
             page | 0x10
         );
         assert!(translate(&mut ram, pce, 0x10, 40).is_err());
+    }
+
+    #[test]
+    fn an_output_address_past_the_profile_never_aliases_a_lower_page() {
+        // This catches masking a malformed high PA down to a valid table
+        // or target. Exercise every descriptor level on both profile widths.
+        for bits in [40, 42] {
+            let base = 0x8_0000_0000;
+            let mut ram = Ram::new(base, 4 * PAGE_BYTES as usize);
+            let entries = [base, base + PAGE_BYTES, base + 2 * PAGE_BYTES];
+            let valid = [
+                encode_table(entries[1]),
+                encode_table(entries[2]),
+                encode_pte(base + 3 * PAGE_BYTES, &demo_flags()),
+            ];
+            for (address, entry) in entries.into_iter().zip(valid) {
+                ram.put_u64(address, entry);
+            }
+            for (level, address) in entries.into_iter().enumerate() {
+                ram.put_u64(address, valid[level] | 1 << bits);
+                assert_eq!(
+                    translate(&mut ram, base, 0, bits),
+                    Err(Fault::BadAddress {
+                        level: level as u32
+                    })
+                );
+                ram.put_u64(address, valid[level]);
+            }
+            for root in [base | 8, base | 1 << bits] {
+                assert_eq!(
+                    translate(&mut ram, root, 0, bits),
+                    Err(Fault::BadAddress { level: 0 })
+                );
+            }
+            assert_eq!(
+                translate(&mut ram, base, 0, bits).unwrap().physical,
+                base + 3 * PAGE_BYTES
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_descriptors_are_not_successful_page_mappings() {
+        let base = 0x8_0000_0000;
+        let mut ram = Ram::new(base, 4 * PAGE_BYTES as usize);
+        let entries = [base, base + PAGE_BYTES, base + 2 * PAGE_BYTES];
+        let valid = [
+            encode_table(entries[1]),
+            encode_table(entries[2]),
+            encode_pte(base + 3 * PAGE_BYTES, &demo_flags()),
+        ];
+        for (address, entry) in entries.into_iter().zip(valid) {
+            ram.put_u64(address, entry);
+        }
+        for (level, address) in entries.into_iter().enumerate() {
+            // Block descriptors, unknown low flags, and unknown high flags
+            // have no implemented effects. Keep them explicit model limits.
+            for bad in [
+                valid[level] & !2,
+                valid[level] | 1 << 12,
+                valid[level] | 1 << 63,
+            ] {
+                ram.put_u64(address, bad);
+                assert_eq!(
+                    translate(&mut ram, base, 0, 40),
+                    Err(Fault::UnsupportedDescriptor {
+                        level: level as u32
+                    })
+                );
+            }
+            ram.put_u64(address, valid[level]);
+        }
+        for bad in [valid[2] & !ACCESS_FLAG, valid[2] | ATTR_MASK] {
+            ram.put_u64(entries[2], bad);
+            assert_eq!(
+                translate(&mut ram, base, 0, 40),
+                Err(Fault::UnsupportedDescriptor { level: 2 })
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_roots_and_unreadable_tables_preserve_fault_diagnostics() {
+        let flags = shared(Access::FirmwareGpu, true, true);
+        for level in 0..3 {
+            let (mut ram, mut uat, va, _) = firmware_space(flags);
+            let ttbat = ram.base;
+            let root = ttbat + PAGE_BYTES;
+            let (_, idx) = indices(va);
+            let missing = ttbat + 10 * PAGE_BYTES;
+            let at = match level {
+                0 => {
+                    uat.configure(missing).unwrap();
+                    None
+                }
+                1 => Some(root + idx[0] as u64 * ENTRY_BYTES),
+                _ => Some(root + PAGE_BYTES + idx[1] as u64 * ENTRY_BYTES),
+            };
+            if let Some(at) = at {
+                ram.put_u64(at, encode_table(missing));
+            }
+            assert_eq!(
+                port_read(&mut uat, Agent::Gpu, &mut ram, 0, va),
+                Err(DmaError::Memory)
+            );
+            assert_eq!(
+                uat.last_fault(),
+                Some(FaultRecord {
+                    agent: Agent::Gpu,
+                    context: 0,
+                    address: va,
+                    write: false,
+                    fault: Fault::Memory { level },
+                })
+            );
+        }
+        let (mut ram, mut uat, va, _) = firmware_space(flags);
+        let root_word = ram.base + 8;
+        let valid = encode_gptbat(0, 0, ram.base + PAGE_BYTES)[1];
+        ram.put_u64(root_word, valid | 1 << 40);
+        assert_eq!(
+            port_read(&mut uat, Agent::Firmware, &mut ram, 0, va),
+            Err(DmaError::Fault(FAULT_TRANSLATION))
+        );
+        assert_eq!(
+            uat.last_fault().unwrap().fault,
+            Fault::BadAddress { level: 0 }
+        );
+        for invalid in [valid | 2, valid | 1 << 56] {
+            ram.put_u64(root_word, invalid);
+            assert!(matches!(
+                port_read(&mut uat, Agent::Firmware, &mut ram, 0, va),
+                Err(DmaError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn noncanonical_inputs_are_rejected_before_any_memory_access() {
+        struct Inaccessible;
+        impl Memory for Inaccessible {
+            fn read(&mut self, _: u64, _: &mut [u8]) -> bool {
+                panic!("a malformed VA must not reach physical memory");
+            }
+            fn write(&mut self, _: u64, _: &[u8]) -> bool {
+                panic!("a malformed VA must not reach physical memory");
+            }
+        }
+        let mut memory = Inaccessible;
+        let mut uat = Uat::new(40);
+        uat.configure(0x8_0000_0000).unwrap();
+        for va in [
+            TTBR_SELECT_BIT,
+            1 << 40,
+            0xffff_ffff_ffff & !TTBR_SELECT_BIT,
+        ] {
+            assert_eq!(
+                uat.walk(&mut memory, Agent::Gpu, 0, va, true),
+                Err(DmaError::Fault(FAULT_TRANSLATION))
+            );
+            assert_eq!(
+                uat.last_fault(),
+                Some(FaultRecord {
+                    agent: Agent::Gpu,
+                    context: 0,
+                    address: va,
+                    write: true,
+                    fault: Fault::OutOfRange,
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn firmware_owned_mappings_never_grant_gpu_access() {
+        for access in [
+            Access::FirmwareGpu,
+            Access::Firmware,
+            Access::Gpu,
+            Access::None,
+        ] {
+            for xn in 0..4 {
+                let flags = Flags {
+                    gpu_access: false,
+                    ..shared(access, xn & 2 != 0, xn & 1 != 0)
+                };
+                let (mut ram, mut uat, va, _) = firmware_space(flags);
+                assert_eq!(
+                    port_read(&mut uat, Agent::Gpu, &mut ram, 0, va),
+                    Err(DmaError::Fault(FAULT_PERMISSION))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn protection_table_enforces_each_agent_and_direction_without_writing_denied_memory() {
+        use crate::platform::apple::interrupt::InterruptLatch;
+        use crate::platform::dma::Port;
+        // Independent permission tables in m1n1 PTE.access_fw/access_gpu,
+        // OS=1, AP rows and (UXN << 1 | PXN) columns. 1=read, 2=write;
+        // None is its uncertain firmware "-?" entry.
+        let firmware = [
+            [Some(0), Some(1), None, Some(3)],
+            [Some(1), Some(0), Some(3), Some(3)],
+            [Some(0); 4],
+            [Some(0); 4],
+        ];
+        let gpu = [[0, 1, 2, 3], [0, 0, 0, 1], [1, 2, 3, 0], [0; 4]];
+        for ap in 0..4 {
+            for xn in 0..4 {
+                for agent in [Agent::Firmware, Agent::Gpu] {
+                    let expected = match agent {
+                        Agent::Firmware => firmware[ap][xn],
+                        Agent::Gpu => Some(gpu[ap][xn]),
+                    };
+                    for write in [false, true] {
+                        let flags = shared(
+                            Access::from_bits(ap as u64).unwrap(),
+                            xn & 2 != 0,
+                            xn & 1 != 0,
+                        );
+                        let (mut ram, mut uat, va, page) = firmware_space(flags);
+                        ram.put_u64(page, 0xaabb_ccdd);
+                        let before = ram.bytes.clone();
+                        let mut latch = InterruptLatch::new();
+                        let mut access = BusAccess::new(0, 0, &mut latch);
+                        let mut view = uat.agent(agent);
+                        let mut port = Port {
+                            iommu: &mut view,
+                            stream: 0,
+                            memory: &mut ram,
+                            access: &mut access,
+                        };
+                        let mut buffer = [0; 8];
+                        let result = if write {
+                            port.write(va, &0x1234u64.to_le_bytes())
+                        } else {
+                            port.read(va, &mut buffer)
+                        };
+                        match expected {
+                            None => assert!(matches!(result, Err(DmaError::Unsupported(_)))),
+                            Some(bits) if bits & if write { 2 } else { 1 } == 0 => {
+                                assert_eq!(result, Err(DmaError::Fault(FAULT_PERMISSION)));
+                                assert_eq!(uat.last_fault().unwrap().write, write);
+                            }
+                            Some(_) => {
+                                assert_eq!(result, Ok(()));
+                                if !write {
+                                    assert_eq!(u64::from_le_bytes(buffer), 0xaabb_ccdd);
+                                }
+                            }
+                        }
+                        if result.is_err() || !write {
+                            assert_eq!(ram.bytes, before);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
