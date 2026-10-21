@@ -45,7 +45,7 @@
 //! owned; physical reset/rail loss and armed-source wake behavior refuse.
 //! Quiesce permits nonmutating reads, while a clock-stop MMIO access remains
 //! unqualified. Slave autonomous time is independent of controller gating.
-//! PMU autonomous interrupt capture/routing remains an explicit board
+//! Armed autonomous capture through clock/power loss remains an explicit board
 //! requirement; attaching a slave does not claim that wire. The debug queue
 //! windows (A+0xb0..0xb8), command types other than the four
 //! extended forms and request or response overflow refuse.
@@ -100,6 +100,20 @@ pub trait SpmiSlave {
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError>;
     /// Bring time-driven state up to `now`; the next counter value at which
     /// the slave changes state by itself, if any.
+    /// Validate an autonomous time step before any attached slave advances.
+    /// Callers must complete this preflight before calling `advance`.
+    fn check_time(&self, _now: u64) -> Result<(), SlaveError> {
+        Ok(())
+    }
+    /// Actual slave output. None means this slave has no qualified output contract.
+    fn interrupt_level(&self) -> Option<bool> {
+        None
+    }
+    /// Could an autonomous output change while the master is paused? Unknown
+    /// slaves conservatively retain ownership; a masked local vector is irrelevant.
+    fn interrupt_armed(&self) -> bool {
+        true
+    }
     fn advance(&mut self, _now: u64) -> Option<u64> {
         None
     }
@@ -156,6 +170,7 @@ pub struct Spmi {
     lifecycle: LifecycleState,
     irq: AicInput,
     slaves: Vec<(u8, Box<dyn SpmiSlave>)>,
+    inputs: Vec<(u8, u16, bool)>,
     enable: [u32; GROUPS],
     pending: [u32; GROUPS],
     control: u32,
@@ -180,6 +195,7 @@ impl Spmi {
             },
             irq,
             slaves: Vec::new(),
+            inputs: Vec::new(),
             enable: [0; GROUPS],
             pending: [0; GROUPS],
             control: 0,
@@ -194,6 +210,42 @@ impl Spmi {
         }
         self.slaves.push((sid, slave));
         Ok(())
+    }
+    /// Attach an actual deasserted slave output to a source-declared edge vector.
+    /// This samples the initial level; attaching cannot manufacture an edge.
+    pub fn attach_with_interrupt(
+        &mut self,
+        sid: u8,
+        vector: u16,
+        slave: Box<dyn SpmiSlave>,
+    ) -> Result<(), &'static str> {
+        if usize::from(vector) >= GROUPS * 32
+            || u32::from(vector) == self.configuration.response_vector()
+            || self.inputs.iter().any(|(_, input, _)| *input == vector)
+        {
+            return Err("invalid, response-aliasing or duplicate SPMI input vector");
+        }
+        if slave.interrupt_level() != Some(false) {
+            return Err("SPMI input requires an actual qualified deasserted output");
+        }
+        self.attach(sid, slave)?;
+        self.inputs.push((sid, vector, false));
+        Ok(())
+    }
+    fn capture_inputs(&mut self) {
+        for (sid, vector, previous) in &mut self.inputs {
+            let slave = &self
+                .slaves
+                .iter()
+                .find(|(id, _)| id == sid)
+                .expect("attached input owner")
+                .1;
+            let level = slave.interrupt_level().expect("qualified input owner");
+            if level && !*previous {
+                self.pending[usize::from(*vector / 32)] |= 1 << (*vector % 32);
+            }
+            *previous = level;
+        }
     }
     fn status(&self) -> u32 {
         (if self.responses.is_empty() {
@@ -298,6 +350,7 @@ impl Spmi {
                 }
             }
         }
+        self.capture_inputs();
         if chunk.header & LAST != 0 {
             let vector = self.configuration.response_vector();
             self.pending[(vector >> 5) as usize] |= 1 << (vector & 31);
@@ -314,6 +367,15 @@ impl Lifecycle for Spmi {
             );
         }
         if !proposed.clocked || proposed.quiesced {
+            if self.inputs.iter().any(|(sid, _, _)| {
+                self.slaves
+                    .iter()
+                    .any(|(id, slave)| id == sid && slave.interrupt_armed())
+            }) {
+                return Err(
+                    "SPMI pause with an autonomous routed slave has unqualified capture/wake semantics",
+                );
+            }
             if self.partial.is_some() {
                 return Err(
                     "SPMI pause while a partial request owns the transaction is unqualified",
@@ -441,11 +503,28 @@ impl MmioDevice for Spmi {
     fn advance(&mut self, access: &mut Access<'_>) -> Result<Option<u64>, MmioError> {
         // Slaves such as the PMIC own independent clocks, rails and timers.
         // Gating the SPMI master cannot suspend their autonomous time.
-        Ok(self
+        for (_, slave) in &self.slaves {
+            slave.check_time(access.now).map_err(|error| {
+                refuse(
+                    NAME,
+                    0,
+                    Width::Word,
+                    Direction::Read,
+                    match error {
+                        SlaveError::Unsupported(reason) => reason,
+                        SlaveError::Nack => "SPMI autonomous slave refused time",
+                    },
+                )
+            })?;
+        }
+        let deadline = self
             .slaves
             .iter_mut()
             .filter_map(|(_, slave)| slave.advance(access.now))
-            .min())
+            .min();
+        self.capture_inputs();
+        self.update_irq(access);
+        Ok(deadline)
     }
 }
 
@@ -679,6 +758,180 @@ mod tests {
         assert_eq!(c.responses.len(), 1);
         assert!(latch.is_asserted(Wire::Aic(AicInput::new(0, 0x180))));
     }
+    #[test]
+    fn pmu_output_edges_latch_local_vector_independently_of_mask_response_and_ack() {
+        use crate::platform::apple::{
+            counter::FREQUENCY_HZ,
+            pmu::{Pmu, Rtc},
+        };
+        let rtc = Rtc {
+            upcount: 0x1406,
+            clock_offset: 0x1411,
+            alarm_control: 0x1401,
+            alarm_enable: 0x40,
+            alarm_offset: 0x140c,
+            alarm_event: 0x14c0,
+            irq_mask: 0x14c2,
+            event_mask: 1,
+            interrupt_mask: 1,
+        };
+        let model = Pmu::new(Vec::new(), Some(rtc), None);
+        let output = model.interrupt();
+        let mut c = Spmi::with_configuration(
+            AicInput::new(0, 0x180),
+            Configuration::new(Profile::Gen1, 192, [256, 256]).unwrap(),
+        );
+        c.attach_with_interrupt(15, 2, Box::new(model)).unwrap();
+        struct Sink(alloc::rc::Rc<core::cell::Cell<bool>>, Wire);
+        impl crate::platform::apple::interrupt::InterruptSink for Sink {
+            fn set_level(&mut self, wire: Wire, asserted: bool) {
+                assert_eq!(wire, self.1);
+                self.0.set(asserted);
+            }
+        }
+        let level = alloc::rc::Rc::new(core::cell::Cell::new(false));
+        let mut sink = Sink(level.clone(), Wire::Aic(c.irq));
+        let mut a = Access::new(0, 0, &mut sink);
+        let write = |c: &mut Spmi, a: &mut Access<'_>, address: u16, opcode: u32, value: u32| {
+            wr(
+                c,
+                a,
+                REQUEST,
+                u32::from(address) << 16 | LAST | 15 << 8 | opcode,
+            );
+            wr(c, a, REQUEST, value);
+            assert_ne!(rd(c, a, RESPONSE) & ACK, 0);
+        };
+        write(&mut c, &mut a, rtc.alarm_offset, 0x33, 30);
+        write(&mut c, &mut a, rtc.alarm_control, 0x30, 0x41);
+        assert_eq!(c.pending[6], 1); // response192, not slave2
+        assert_eq!(c.pending[0], 0);
+        let stopped = LifecycleState {
+            clocked: false,
+            ..c.lifecycle
+        };
+        // A masked controller vector cannot justify capturing an autonomous edge
+        // through a clock/power transition. Preflight leaves all owners intact.
+        assert!(c.check_lifecycle(stopped).is_err());
+        a.now = 30 * FREQUENCY_HZ;
+        assert_eq!(c.advance(&mut a), Ok(None));
+        assert!(output.asserted());
+        assert_eq!(c.pending[0], 4);
+        assert!(!level.get());
+        wr(&mut c, &mut a, ENABLE, 4);
+        assert!(level.get());
+        wr(&mut c, &mut a, PENDING, 4);
+        assert_eq!(c.advance(&mut a), Ok(None));
+        assert_eq!(c.pending[0], 0); // still-high input is not a second edge
+        assert!(output.asserted());
+        assert!(!level.get());
+        write(&mut c, &mut a, rtc.irq_mask, 0x30, 1);
+        assert!(!output.asserted());
+        write(&mut c, &mut a, rtc.irq_mask, 0x30, 0);
+        assert_eq!(c.pending[0], 4); // actual wire fell and rose
+        assert!(output.asserted());
+        write(&mut c, &mut a, rtc.alarm_event, 0x30, 1);
+        assert!(!output.asserted());
+        assert_eq!(c.pending[0], 4); // PMU W1C is distinct from controller W1C
+        wr(&mut c, &mut a, PENDING, 4);
+        assert!(!level.get());
+        wr(&mut c, &mut a, ENABLE, 0);
+        c.check_lifecycle(stopped).unwrap();
+        c.set_lifecycle(stopped, &mut a);
+        assert_eq!(c.advance(&mut a), Ok(None));
+        assert_eq!(c.pending[0], 0);
+    }
+
+    #[test]
+    fn autonomous_preflight_refusal_does_not_advance_any_peer() {
+        use crate::platform::apple::{
+            counter::FREQUENCY_HZ,
+            pmu::{Pmu, RTC_HZ, Rtc},
+        };
+        struct Peer(alloc::rc::Rc<core::cell::Cell<u32>>);
+        impl SpmiSlave for Peer {
+            fn read(&mut self, _: u16, _: &mut [u8], _: u64) -> Result<(), SlaveError> {
+                Ok(())
+            }
+            fn write(&mut self, _: u16, _: &[u8], _: u64) -> Result<(), SlaveError> {
+                Ok(())
+            }
+            fn advance(&mut self, _: u64) -> Option<u64> {
+                self.0.set(self.0.get() + 1);
+                None
+            }
+        }
+        let count = alloc::rc::Rc::new(core::cell::Cell::new(0));
+        let mut c = Spmi::new(AicInput::new(0, 1));
+        c.attach(1, Box::new(Peer(count.clone()))).unwrap();
+        c.attach(
+            2,
+            Box::new(Pmu::new(
+                Vec::new(),
+                Some(Rtc {
+                    upcount: 0x1406,
+                    clock_offset: 0x1411,
+                    alarm_control: 0x1401,
+                    alarm_enable: 0x40,
+                    alarm_offset: 0x140c,
+                    alarm_event: 0x14c0,
+                    irq_mask: 0x14c2,
+                    event_mask: 1,
+                    interrupt_mask: 1,
+                }),
+                None,
+            )),
+        )
+        .unwrap();
+        let mut latch = InterruptLatch::new();
+        let now = ((1u128 << 47) * u128::from(FREQUENCY_HZ) / u128::from(RTC_HZ)) as u64;
+        let mut access = Access::new(0, now, &mut latch);
+        assert!(c.advance(&mut access).is_err());
+        assert_eq!(count.get(), 0);
+        access.now = 0;
+        assert_eq!(c.advance(&mut access), Ok(None));
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn routed_outputs_require_unique_real_deasserted_owners_and_valid_vectors() {
+        use crate::platform::apple::pmu::{Pmu, Rtc};
+        let mut c = Spmi::with_configuration(
+            AicInput::new(0, 1),
+            Configuration::new(Profile::Gen1, 192, [256, 256]).unwrap(),
+        );
+        let model = || {
+            Box::new(Pmu::new(
+                Vec::new(),
+                Some(Rtc {
+                    upcount: 0x1406,
+                    clock_offset: 0x1411,
+                    alarm_control: 0x1401,
+                    alarm_enable: 0x40,
+                    alarm_offset: 0x140c,
+                    alarm_event: 0x14c0,
+                    irq_mask: 0x14c2,
+                    event_mask: 1,
+                    interrupt_mask: 1,
+                }),
+                None,
+            ))
+        };
+        for vector in [192, 288, u16::MAX] {
+            assert!(c.attach_with_interrupt(1, vector, model()).is_err());
+            assert!(c.slaves.is_empty());
+        }
+        assert!(
+            c.attach_with_interrupt(1, 2, Box::new(Bytes([0; 256])))
+                .is_err()
+        );
+        assert!(c.slaves.is_empty());
+        c.attach_with_interrupt(1, 2, model()).unwrap();
+        assert!(c.attach_with_interrupt(2, 2, model()).is_err());
+        assert!(c.attach_with_interrupt(1, 3, model()).is_err());
+        assert_eq!((c.slaves.len(), c.inputs.len()), (1, 1));
+    }
+
     #[test]
     fn actual_pmic_alarm_time_and_output_continue_while_spmi_master_clock_is_paused() {
         use crate::platform::apple::{

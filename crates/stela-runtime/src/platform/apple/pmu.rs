@@ -1,6 +1,8 @@
 //! Dialog SPMI PMU (`pmu,spmi`): a byte-addressed register file behind an
 //! SPMI slave ID, holding the boot-state scratchpads and, on the primary
-//! PMU, the 32768 Hz real-time clock and its alarm.
+//! PMU service, the 32768 Hz real-time clock and its alarm. Secondary PMUs
+//! can own the same register layout without owning the system service.
+//! See `docs/research/pmu-t6000.md` for the independently pinned T6000 contract.
 //!
 //! Evidence (26A434 KC VAs, unslid): `AppleDialogSPMIPMU::_readConfiguration`
 //! 0xfffffe0009dd5014 reads the `info-*` windows; `_readRegs` 0xfffffe0009dd6610
@@ -48,6 +50,9 @@
 //! write-one-to-clear. The PMU's interrupt output ([`Interrupt`]) is
 //! asserted while the event is latched and the IRQ mask leaves it
 //! unmasked; where it leads is the board's. Every other address NACKs.
+mod config;
+pub use config::Configuration;
+
 use super::spmi::{SlaveError, SpmiSlave};
 use crate::platform::apple::counter::FREQUENCY_HZ;
 use alloc::{rc::Rc, vec::Vec};
@@ -78,7 +83,8 @@ impl Window {
     }
 }
 
-/// The primary PMU's RTC registers, each from its `info-rtc*` property.
+/// One PMU's RTC registers, each from its `info-rtc*` property.
+/// Their presence does not imply primary system-service ownership.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rtc {
     pub upcount: u16,
@@ -119,12 +125,15 @@ enum Byte {
     Upcount(u16),
     AlarmControl,
     AlarmEvent,
+    IrqMask,
 }
 
 pub struct Pmu {
     /// Storage windows, including the RTC's storage registers.
     windows: Vec<Window>,
     rtc: Option<Rtc>,
+    monitor: u8,
+    identity: Option<Window>,
     /// Bytes of every storage window, in window order.
     storage: Vec<Vec<u8>>,
     alarm_control: u8,
@@ -136,7 +145,25 @@ pub struct Pmu {
 
 impl Pmu {
     /// `windows` are the scratchpad and log windows; the RTC adds its own.
-    pub fn new(mut windows: Vec<Window>, rtc: Option<Rtc>, wall: Option<WallClock>) -> Self {
+    pub fn new(windows: Vec<Window>, rtc: Option<Rtc>, wall: Option<WallClock>) -> Self {
+        // Original J473 legacy API; new board admission supplies the mask explicitly.
+        let config = Configuration::new(windows, rtc, u8::from(rtc.is_some()))
+            .expect("valid PMU register configuration");
+        Self::configured(config, wall).expect("representable PMU initial wall clock")
+    }
+
+    /// Instantiate only validated byte resources. Initial wall time is a declared
+    /// emulated resource value, never a captured PMIC identity or firmware image.
+    pub fn configured(
+        config: Configuration,
+        wall: Option<WallClock>,
+    ) -> Result<Self, &'static str> {
+        let Configuration {
+            mut windows,
+            rtc,
+            monitor,
+            identity,
+        } = config;
         if let Some(rtc) = rtc {
             windows.push(Window {
                 base: rtc.clock_offset,
@@ -153,6 +180,8 @@ impl Pmu {
         let mut pmu = Self {
             windows,
             rtc,
+            monitor,
+            identity,
             storage,
             alarm_control: 0,
             alarm_event: 0,
@@ -160,12 +189,19 @@ impl Pmu {
             interrupt: Interrupt::default(),
         };
         if let (Some(rtc), Some(wall)) = (rtc, wall) {
+            if ticks(wall.counter) >= 1 << 47 {
+                return Err("PMU initial counter exceeds qualified RTC epoch");
+            }
             let target = i128::from(wall.unix_seconds) * i128::from(RTC_HZ);
-            let offset = (target - i128::from(ticks(wall.counter))) as i64;
+            let offset = target - i128::from(ticks(wall.counter));
+            if !(-(1i128 << 47)..(1i128 << 47)).contains(&offset) {
+                return Err("PMU initial RTC offset exceeds signed 48-bit resource");
+            }
+            let offset = offset as i64;
             let bytes = offset.to_le_bytes();
             pmu.store(rtc.clock_offset, &bytes[..OFFSET_BYTES.into()]);
         }
-        pmu
+        Ok(pmu)
     }
 
     /// The PMU's interrupt output.
@@ -183,6 +219,9 @@ impl Pmu {
             }
             if address == rtc.alarm_event {
                 return Some(Byte::AlarmEvent);
+            }
+            if address == rtc.irq_mask {
+                return Some(Byte::IrqMask);
             }
         }
         self.windows
@@ -204,8 +243,21 @@ impl Pmu {
             *self.byte(base + i as u16) = value;
         }
     }
+    fn check_identity(&self, address: u16, bytes: usize) -> Result<(), SlaveError> {
+        for address in Self::span(address, bytes)? {
+            if self.identity.is_some_and(|window| window.contains(address)) {
+                return Err(SlaveError::Unsupported(
+                    "PMU declared identity register contents are unqualified",
+                ));
+            }
+        }
+        Ok(())
+    }
     fn span(address: u16, bytes: usize) -> Result<impl Iterator<Item = u16>, SlaveError> {
-        let end = u32::from(address) + bytes as u32;
+        let bytes = u32::try_from(bytes).map_err(|_| SlaveError::Nack)?;
+        let end = u32::from(address)
+            .checked_add(bytes)
+            .ok_or(SlaveError::Nack)?;
         if end > 0x1_0000 {
             return Err(SlaveError::Nack);
         }
@@ -264,16 +316,18 @@ fn ticks(counter: u64) -> u64 {
 
 impl SpmiSlave for Pmu {
     fn read(&mut self, address: u16, data: &mut [u8], now: u64) -> Result<(), SlaveError> {
+        self.check_identity(address, data.len())?;
         let cells: Vec<_> = Self::span(address, data.len())?
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
             .ok_or(SlaveError::Nack)?;
+        self.check_time(now)?;
         self.update(now);
         // One sample serves every upcount byte of the access.
         let raw = (ticks(now) << 1).to_le_bytes();
         for ((at, cell), out) in cells.into_iter().zip(data.iter_mut()) {
             *out = match cell {
-                Byte::Storage => *self.byte(at),
+                Byte::Storage | Byte::IrqMask => *self.byte(at),
                 Byte::Upcount(i) => raw[usize::from(i)],
                 Byte::AlarmControl => self.alarm_control,
                 Byte::AlarmEvent => self.alarm_event,
@@ -282,6 +336,7 @@ impl SpmiSlave for Pmu {
         Ok(())
     }
     fn write(&mut self, address: u16, data: &[u8], now: u64) -> Result<(), SlaveError> {
+        self.check_identity(address, data.len())?;
         let cells: Vec<_> = Self::span(address, data.len())?
             .map(|a| self.cell(a).map(|cell| (a, cell)))
             .collect::<Option<_>>()
@@ -292,6 +347,25 @@ impl SpmiSlave for Pmu {
         {
             return Err(SlaveError::Nack);
         }
+        // Preflight the complete transfer before time, storage, event or output effects.
+        if let Some(rtc) = self.rtc {
+            for ((_, cell), &value) in cells.iter().zip(data) {
+                let qualified = match cell {
+                    Byte::AlarmControl => {
+                        value == self.monitor || value == self.monitor | rtc.alarm_enable
+                    }
+                    Byte::AlarmEvent => value & !rtc.event_mask == 0,
+                    Byte::IrqMask => value == 0 || value == rtc.interrupt_mask,
+                    _ => true,
+                };
+                if !qualified {
+                    return Err(SlaveError::Unsupported(
+                        "PMU RTC control/event/mask field is unqualified",
+                    ));
+                }
+            }
+        }
+        self.check_time(now)?;
         self.update(now);
         let alarm = self
             .rtc
@@ -299,7 +373,7 @@ impl SpmiSlave for Pmu {
         let mut programmed = false;
         for ((at, cell), &value) in cells.into_iter().zip(data) {
             match cell {
-                Byte::Storage => {
+                Byte::Storage | Byte::IrqMask => {
                     *self.byte(at) = value;
                     programmed |= alarm.as_ref().is_some_and(|time| time.contains(&at));
                 }
@@ -316,6 +390,20 @@ impl SpmiSlave for Pmu {
         }
         self.update(now);
         Ok(())
+    }
+    fn check_time(&self, now: u64) -> Result<(), SlaveError> {
+        if self.rtc.is_some() && ticks(now) >= 1 << 47 {
+            return Err(SlaveError::Unsupported(
+                "PMU RTC upcount/alarm wrap behavior is unqualified",
+            ));
+        }
+        Ok(())
+    }
+    fn interrupt_level(&self) -> Option<bool> {
+        self.rtc.map(|_| self.interrupt.asserted())
+    }
+    fn interrupt_armed(&self) -> bool {
+        self.armed || self.interrupt.asserted()
     }
     fn advance(&mut self, now: u64) -> Option<u64> {
         self.update(now);
@@ -358,6 +446,259 @@ mod tests {
             },
         ];
         Pmu::new(windows, Some(RTC), wall)
+    }
+
+    fn maverick() -> Rtc {
+        Rtc {
+            upcount: 0x1406,
+            clock_offset: 0x1411,
+            alarm_control: 0x1401,
+            alarm_enable: 0x40,
+            alarm_offset: 0x140c,
+            alarm_event: 0x14c0,
+            irq_mask: 0x14c2,
+            event_mask: 1,
+            interrupt_mask: 1,
+        }
+    }
+
+    #[test]
+    fn configuration_unifies_storage_aliases_and_rejects_semantic_aliases_or_bad_masks() {
+        let rtc = maverick();
+        assert!(Configuration::new(Vec::new(), Some(rtc), 1).is_ok());
+        for window in [
+            Window {
+                base: rtc.upcount,
+                bytes: 1,
+            },
+            Window {
+                base: 0xffff,
+                bytes: 2,
+            },
+            Window { base: 1, bytes: 0 },
+        ] {
+            assert!(Configuration::new(alloc::vec![window], Some(rtc), 1).is_err());
+        }
+        assert!(
+            Configuration::new(
+                alloc::vec![
+                    Window {
+                        base: 0x8000,
+                        bytes: 16
+                    },
+                    Window {
+                        base: 0x800f,
+                        bytes: 1
+                    }
+                ],
+                None,
+                0
+            )
+            .is_ok()
+        );
+        for invalid in [
+            Rtc {
+                alarm_event: rtc.irq_mask,
+                ..rtc
+            },
+            Rtc {
+                clock_offset: 0xfffb,
+                ..rtc
+            },
+            Rtc {
+                event_mask: 0,
+                ..rtc
+            },
+            Rtc {
+                interrupt_mask: 0,
+                ..rtc
+            },
+            Rtc {
+                alarm_enable: 1,
+                ..rtc
+            },
+        ] {
+            assert!(Configuration::new(Vec::new(), Some(invalid), 1).is_err());
+        }
+        assert!(Configuration::new(Vec::new(), Some(rtc), 0).is_err());
+        assert!(Configuration::new(Vec::new(), None, 1).is_err());
+        let config = Configuration::new(
+            alloc::vec![
+                Window {
+                    base: 0x8000,
+                    bytes: 0x1000
+                },
+                Window {
+                    base: 0x867b,
+                    bytes: 16
+                }
+            ],
+            None,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            config.windows,
+            alloc::vec![Window {
+                base: 0x8000,
+                bytes: 0x1000
+            }]
+        );
+        let mut pmu = Pmu::configured(config, None).unwrap();
+        pmu.write(0x867b, &[1, 2, 3], 0).unwrap();
+        let mut bytes = [0; 3];
+        pmu.read(0x867b, &mut bytes, 0).unwrap();
+        assert_eq!(bytes, [1, 2, 3]);
+        assert!(
+            Pmu::configured(
+                Configuration::new(Vec::new(), Some(rtc), 1).unwrap(),
+                Some(WallClock {
+                    unix_seconds: u64::MAX,
+                    counter: 0
+                })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn both_original_maverick_rtcs_have_independent_registers_without_identity_substitutes() {
+        let rtc = maverick();
+        let mut primary =
+            Pmu::configured(Configuration::new(Vec::new(), Some(rtc), 1).unwrap(), None).unwrap();
+        let mut secondary =
+            Pmu::configured(Configuration::new(Vec::new(), Some(rtc), 1).unwrap(), None).unwrap();
+        primary
+            .write(rtc.clock_offset, &[1, 2, 3, 4, 5, 6], 0)
+            .unwrap();
+        let mut data = [0xff; 6];
+        secondary.read(rtc.clock_offset, &mut data, 0).unwrap();
+        assert_eq!(data, [0; 6]);
+        secondary
+            .read(rtc.upcount, &mut data, 3 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(
+            u64::from_le_bytes([data[0], data[1], data[2], data[3], data[4], data[5], 0, 0]) >> 1,
+            3 * RTC_HZ
+        );
+        for pmu in [&mut primary, &mut secondary] {
+            assert_eq!(pmu.read(0, &mut [0; 10], 0), Err(SlaveError::Nack));
+            assert_eq!(pmu.read(0x3000, &mut [0; 16], 0), Err(SlaveError::Nack));
+        }
+    }
+
+    #[test]
+    fn declared_identity_is_an_explicit_requirement_and_never_zero_or_absent_readback() {
+        let config = Configuration::new(Vec::new(), Some(maverick()), 1).unwrap();
+        assert!(
+            config
+                .clone()
+                .with_unqualified_identity(Window {
+                    base: 0xffff,
+                    bytes: 2
+                })
+                .is_err()
+        );
+        assert!(
+            config
+                .clone()
+                .with_unqualified_identity(Window {
+                    base: 0x1401,
+                    bytes: 1
+                })
+                .is_err()
+        );
+        let config = config
+            .with_unqualified_identity(Window { base: 0, bytes: 10 })
+            .unwrap();
+        assert!(
+            config
+                .clone()
+                .with_unqualified_identity(Window { base: 16, bytes: 1 })
+                .is_err()
+        );
+        let mut pmu = Pmu::configured(config, None).unwrap();
+        let mut bytes = [0xaa; 16];
+        assert!(matches!(
+            pmu.read(0, &mut bytes[..10], 0),
+            Err(SlaveError::Unsupported(_))
+        ));
+        assert!(matches!(
+            pmu.read(9, &mut bytes, 0),
+            Err(SlaveError::Unsupported(_))
+        ));
+        assert_eq!(bytes, [0xaa; 16]);
+        assert!(matches!(
+            pmu.write(0, &[0; 10], 0),
+            Err(SlaveError::Unsupported(_))
+        ));
+        assert_eq!(pmu.read(10, &mut bytes[..1], 0), Err(SlaveError::Nack));
+    }
+
+    #[test]
+    fn rtc_controls_preflight_whole_transfer_and_preserve_due_alarm_on_refusal() {
+        let rtc = maverick();
+        let mut pmu =
+            Pmu::configured(Configuration::new(Vec::new(), Some(rtc), 1).unwrap(), None).unwrap();
+        pmu.write(rtc.alarm_offset, &30u32.to_le_bytes(), 0)
+            .unwrap();
+        pmu.write(rtc.alarm_control, &[0x41], 0).unwrap();
+        let output = pmu.interrupt();
+        for (address, value) in [
+            (rtc.alarm_control, 0),
+            (rtc.alarm_control, 0x80),
+            (rtc.alarm_control, 0x40),
+            (rtc.irq_mask, 2),
+            (rtc.alarm_event, 2),
+        ] {
+            assert!(matches!(
+                pmu.write(address, &[value], 31 * FREQUENCY_HZ),
+                Err(SlaveError::Unsupported(_))
+            ));
+            assert!(!output.asserted());
+            assert!(pmu.armed);
+        }
+        assert_eq!(
+            pmu.write(rtc.alarm_offset, &[99; 6], 31 * FREQUENCY_HZ),
+            Err(SlaveError::Nack)
+        );
+        assert!(pmu.armed);
+        assert_eq!(pmu.advance(30 * FREQUENCY_HZ), None);
+        assert!(output.asserted());
+        // Masking changes the wire without discarding the latched wake event.
+        pmu.write(rtc.irq_mask, &[1], 31 * FREQUENCY_HZ).unwrap();
+        assert!(!output.asserted());
+        let mut event = [0];
+        pmu.read(rtc.alarm_event, &mut event, 31 * FREQUENCY_HZ)
+            .unwrap();
+        assert_eq!(event, [1]);
+        pmu.write(rtc.irq_mask, &[0], 31 * FREQUENCY_HZ).unwrap();
+        assert!(output.asserted());
+        pmu.write(rtc.alarm_event, &[1], 31 * FREQUENCY_HZ).unwrap();
+        assert!(!output.asserted());
+    }
+
+    #[test]
+    fn unqualified_upcount_wrap_refuses_before_read_write_or_autonomous_effects() {
+        let mut pmu = stowe(None);
+        let now = (1u128 << 47) * u128::from(FREQUENCY_HZ) / u128::from(RTC_HZ);
+        let now = u64::try_from(now).unwrap();
+        let mut data = [0xaa; 6];
+        assert!(matches!(
+            pmu.read(RTC.upcount, &mut data, now),
+            Err(SlaveError::Unsupported(_))
+        ));
+        assert_eq!(data, [0xaa; 6]);
+        assert!(matches!(
+            pmu.write(RTC.clock_offset, &[0xaa; 6], now),
+            Err(SlaveError::Unsupported(_))
+        ));
+        assert!(matches!(
+            pmu.check_time(now),
+            Err(SlaveError::Unsupported(_))
+        ));
+        pmu.read(RTC.clock_offset, &mut data, 0).unwrap();
+        assert_eq!(data, [0; 6]);
     }
 
     #[test]
@@ -486,5 +827,187 @@ mod tests {
         assert_eq!(aux.read(0xf802, &mut [0; 6], 0), Err(SlaveError::Nack));
         aux.write(0xa7ff, &[9], 0).unwrap();
         assert_eq!(aux.advance(0), None);
+    }
+    #[test]
+    #[ignore = "requires pinned original mac13j26A434 via STELA_TEST_PMGR_M1_KERNELCACHE"]
+    fn original_primary_service_rtc_registers_alarm_and_edge_contract_are_source_pinned() {
+        let data = std::fs::read(std::env::var("STELA_TEST_PMGR_M1_KERNELCACHE").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "5109fca5209bdbb89cec29e3241cc42a90418cb737d65e31962b059b9879af90"
+        );
+        for (offset, bytes, digest) in [
+            (
+                0x2d53b00usize,
+                96usize,
+                "ae72f04d836556710cd8623bf9b2363ef48d1cab10996e739e0062175178d32c",
+            ), // primary-configuration
+            (
+                0x2d51b78usize,
+                76usize,
+                "fe0fd661e1a7e0cb7a9b73341ecfdb78b602f2e3d2379b57125d872a1ce033b4",
+            ), // primary-registration
+            (
+                0x2d5b4b4usize,
+                428usize,
+                "eb7dfdd469a93045a2973ead2831e79b91c2710c899f60791612ae12aac8b160",
+            ), // rtc-primary-start
+            (
+                0x2d523fcusize,
+                88usize,
+                "6cdf10ae91af7d453a6b7d2f5d526e3c92f248ec99ac90f98b0a93d136d8df5c",
+            ), // rtc-alarm-interrupt-action
+            (
+                0x2d5d528usize,
+                616usize,
+                "4daed85c0f254899e551d039561acca4c1bd0bdd12ba90dc87cfb279482812ea",
+            ), // rtc-program
+            (
+                0x2d5da14usize,
+                104usize,
+                "a9ee1c7e106e4d2333a784c35233fc407dfefd4826290a38e1a71439e9695c86",
+            ), // rtc-upcount
+            (
+                0x2d5c284usize,
+                2028usize,
+                "78c4fcde5203af89991b24a4afe42b85f930e87177c434051e4d192b7e632e02",
+            ), // rtc-register-configuration
+            (
+                0x2d5dbccusize,
+                420usize,
+                "4e6176a07847a9d3425fa88b7cb61875c4fd955e8db99d379c5a84db0c448fec",
+            ), // rtc-schedule
+            (
+                0x2d5de60usize,
+                132usize,
+                "8e624bf9b2d4bc205e9ef306279804737a3ad6e613d0b71b32a99e8183b5d493",
+            ), // rtc-read-wake-event
+            (
+                0x12a6e18usize,
+                8usize,
+                "3e0e0067b1027e83b92ef97507faea7580ffed3c5bbcb72e63c5a9876b4499f4",
+            ), // spmi-get-vector-type-slot
+            (
+                0x54821a4usize,
+                8usize,
+                "2f6110664dbd16b514a0c2c7c8326932a36e85d2f15b91e57ca76efd2c7a625a",
+            ), // spmi-edge-handler
+            (
+                0x12a8ff0usize,
+                8usize,
+                "628c0e30cbecff297891396eb57936a4b8e6df7e493b51fd2bdd52fb9f721b41",
+            ), // rtc-alarm-vtable-slot
+            (
+                0x2d51864usize,
+                80usize,
+                "77649b1296a66d2725fe2bc3c1b607b70fa6f9d2c6da9f0dcf661cdeacdd014b",
+            ), // identity-descriptor-retain
+        ] {
+            assert_eq!(
+                crate::sha256(&data[offset..offset + bytes]),
+                digest,
+                "source span {offset:#x}"
+            );
+        }
+        let edge = u64::from_le_bytes(data[0x12a6e18..0x12a6e20].try_into().unwrap());
+        assert_eq!(0xfffffe0007004000 + (edge & 0x3fffffff), 0xfffffe000c4861a4);
+        assert_eq!(
+            &data[0x54821a4..0x54821ac],
+            &[0, 0, 128, 82, 192, 3, 95, 214]
+        );
+        let alarm = u64::from_le_bytes(data[0x12a8ff0..0x12a8ff8].try_into().unwrap());
+        assert_eq!(
+            0xfffffe0007004000 + (alarm & 0x3fffffff),
+            0xfffffe0009d61528
+        );
+    }
+
+    #[test]
+    #[ignore = "requires original J314s26A434 DT via STELA_TEST_SPMI_DT"]
+    fn original_j314s_two_rtc_resources_have_one_primary_service_and_local_output() {
+        use crate::machine::adt::Node;
+        let data = std::fs::read(std::env::var("STELA_TEST_SPMI_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let mut pmus = 0;
+        let mut rtcs = 0;
+        let mut primaries = 0;
+        for controller in root.child("arm-io").unwrap().children().unwrap() {
+            if !controller.compatible("aapl,spmi") {
+                continue;
+            }
+            for node in controller.children().unwrap() {
+                if !node.compatible("pmu,spmi") {
+                    continue;
+                }
+                pmus += 1;
+                assert_eq!(node.cells32("info-id").unwrap(), [0, 10]); // address/length, not ID bytes
+                let mut windows = Vec::new();
+                for key in ["info-scrpad", "info-fault_log", "info-fault_shadow"] {
+                    if let Some(pair) = node.cells32(key) {
+                        windows.push(Window {
+                            base: pair[0] as u16,
+                            bytes: pair[1] as u16,
+                        });
+                    }
+                }
+                if let Some(base) = node.first_u32("info-leg_scrpad") {
+                    windows.push(Window {
+                        base: base as u16,
+                        bytes: LEGACY_SCRATCH_BYTES,
+                    });
+                }
+                if let Some(base) = node.first_u32("info-pm_setting") {
+                    windows.push(Window {
+                        base: base as u16,
+                        bytes: 1,
+                    });
+                }
+                let rtc = if node.first_u32("info-rtc").is_some() {
+                    rtcs += 1;
+                    let expected = maverick();
+                    for (key, value) in [
+                        ("info-rtc", expected.upcount),
+                        ("info-rtc_alarm_ctrl", expected.alarm_control),
+                        ("info-rtc_alarm_offset", expected.alarm_offset),
+                        ("info-rtc_alarm_event", expected.alarm_event),
+                        ("info-rtc_irq_mask_offset", expected.irq_mask),
+                    ] {
+                        assert_eq!(node.first_u32(key), Some(u32::from(value)));
+                    }
+                    assert_eq!(node.cells32("info-clock_offset").unwrap(), [0x1411, 6]);
+                    assert_eq!(node.first_u32("info-rtc_alarm_monitor_mask"), Some(1));
+                    assert_eq!(node.first_u32("info-rtc_alarm_ctrl_en_mask"), Some(64));
+                    assert_eq!(node.first_u32("info-rtc_alarm_mask"), Some(1));
+                    Some(expected)
+                } else {
+                    None
+                };
+                let configuration = Configuration::new(windows, rtc, u8::from(rtc.is_some()))
+                    .unwrap()
+                    .with_unqualified_identity(Window { base: 0, bytes: 10 })
+                    .unwrap();
+                let mut model = Pmu::configured(configuration, None).unwrap();
+                assert!(matches!(
+                    model.read(0, &mut [0; 10], 0),
+                    Err(SlaveError::Unsupported(_))
+                ));
+                if node.first_u32("is-primary") == Some(1) {
+                    primaries += 1;
+                    assert!(rtc.is_some());
+                    assert_eq!(node.cells32("interrupts").unwrap(), [2]);
+                    assert_eq!(
+                        node.first_u32("interrupt-parent"),
+                        controller.first_u32("AAPL,phandle")
+                    );
+                } else {
+                    assert!(node.property("interrupts").is_none());
+                }
+            }
+        }
+        assert_eq!((pmus, rtcs, primaries), (5, 2, 1));
     }
 }
