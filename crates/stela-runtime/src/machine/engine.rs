@@ -5864,6 +5864,125 @@ mod tests {
         ));
     }
 
+    /// A real register store can start DMA that commits before later failure.
+    /// This fixture distinguishes refused register writes from failed service.
+    struct PairFaultDevice {
+        refused: Option<u64>,
+        failed_transfer: Option<usize>,
+        reads: Vec<u64>,
+        stores: Vec<(u64, u64)>,
+        transfers: usize,
+    }
+
+    impl Devices for PairFaultDevice {
+        fn read(&mut self, _: usize, physical: u64, _: u8, _: u64) -> Result<u64, DeviceError> {
+            self.reads.push(physical);
+            if self.refused == Some(physical) {
+                return Err(DeviceError::Refused("injected register refusal".into()));
+            }
+            Ok(physical)
+        }
+        fn write(&mut self, _: usize, physical: u64, _: u8, value: u64, _: u64) -> Result<(), DeviceError> {
+            if self.refused == Some(physical) {
+                return Err(DeviceError::Refused("injected register refusal".into()));
+            }
+            self.stores.push((physical, value));
+            Ok(())
+        }
+        fn transfer(&mut self, _: usize, memory: &mut dyn Memory, _: u64) -> Result<(), DeviceError> {
+            let index = self.transfers;
+            self.transfers += 1;
+            let (_, value) = self.stores[index];
+            assert!(memory.write(BASE + 0x800 + index as u64 * 8, &value.to_le_bytes()));
+            if self.failed_transfer == Some(index) {
+                return Err(DeviceError::TransferRefused("injected later DMA failure".into()));
+            }
+            Ok(())
+        }
+        fn lines(&mut self, _: usize, _: u64) -> Lines {
+            Lines::default()
+        }
+    }
+
+    fn pair_fault_device() -> PairFaultDevice {
+        PairFaultDevice {
+            refused: None,
+            failed_transfer: None,
+            reads: Vec::new(),
+            stores: Vec::new(),
+            transfers: 0,
+        }
+    }
+
+    #[test]
+    fn device_pair_store_faults_keep_committed_register_and_dma_prefixes_without_writeback() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        for failed_element in 0..2 {
+            for service_failure in [false, true] {
+                let mut devices = pair_fault_device();
+                if service_failure {
+                    devices.failed_transfer = Some(failed_element);
+                } else {
+                    devices.refused = Some(DEVICE + failed_element as u64 * 8);
+                }
+                let mut machine = board(&[], devices, Vec::new());
+                machine.set_strict(true);
+                machine.set_watches(&[(DEVICE, 16)]);
+                machine.write_register(Register::X(1), DEVICE - 16);
+                machine.write_register(Register::X(2), 0x1234);
+                machine.write_register(Register::X(3), 0x5678);
+                // stp x2, x3, [x1, #16]!
+                let Err(Stop::Unsupported(requirement)) = machine.device_access(0xa981_0c22, DEVICE, DEVICE, true) else {
+                    panic!("the pair must expose its original failure");
+                };
+                let failed_address = DEVICE + failed_element as u64 * 8;
+                assert_eq!(requirement.address, Some(failed_address));
+                assert!(matches!(requirement.kind, RequirementKind::Device { physical, write: true, .. } if physical == failed_address));
+                assert_eq!(machine.cpu.pc, BASE);
+                assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
+                let committed = failed_element + usize::from(service_failure);
+                assert_eq!(machine.devices.stores.len(), committed);
+                assert_eq!(machine.devices.transfers, committed);
+                let mut ram = [0; 16];
+                assert!(machine.host.read_ram(BASE + 0x800, &mut ram));
+                let mut expected = [0; 16];
+                for (index, value) in [0x1234u64, 0x5678].into_iter().take(committed).enumerate() {
+                    expected[index * 8..index * 8 + 8].copy_from_slice(&value.to_le_bytes());
+                }
+                assert_eq!(ram, expected);
+                let hits = machine.take_watch_hits();
+                assert_eq!(hits.len(), failed_element + 1);
+                assert_eq!(hits.iter().filter(|hit| hit.completed).count(), committed);
+                assert!(hits.iter().all(|hit| hit.write));
+            }
+        }
+    }
+
+    #[test]
+    fn device_pair_load_refusal_preserves_both_destinations_and_reports_the_failed_member() {
+        const DEVICE: u64 = 0x2_3b3c_0a00;
+        for failed_element in 0..2 {
+            let failed_address = DEVICE + failed_element as u64 * 8;
+            let mut devices = pair_fault_device();
+            devices.refused = Some(failed_address);
+            let mut machine = board(&[], devices, Vec::new());
+            machine.set_strict(false);
+            machine.write_register(Register::X(1), DEVICE - 16);
+            machine.write_register(Register::X(2), 0x1234);
+            machine.write_register(Register::X(3), 0x5678);
+            // ldp x2, x3, [x1, #16]!
+            machine.device_access(0xa9c1_0c22, DEVICE, DEVICE, false).unwrap();
+            assert_eq!(machine.read_register(Register::X(1)), DEVICE - 16);
+            assert_eq!(machine.read_register(Register::X(2)), 0x1234);
+            assert_eq!(machine.read_register(Register::X(3)), 0x5678);
+            assert_eq!(machine.cpu.read(SystemRegister::ESR_EL1), 0x9600_0010);
+            assert_eq!(machine.cpu.read(SystemRegister::FAR_EL1), failed_address);
+            assert_eq!(machine.cpu.read(SystemRegister::ELR_EL1), BASE);
+            assert_eq!(machine.devices.reads.len(), failed_element + 1);
+            assert!(machine.devices.stores.is_empty());
+        }
+    }
+
     #[test]
     fn watched_device_ranges_record_each_access_and_its_value() {
         const DEVICE: u64 = 0x3_8228_c80c;
