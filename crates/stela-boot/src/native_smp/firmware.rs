@@ -1,7 +1,10 @@
 //! Copy processor identity/capabilities while UEFI MP Services still owns APs.
 //! Every callback returns before ExitBootServices; persistent executors use
 //! Stela's own INIT/SIPI entry, stacks and control memory afterward.
-use super::topology::{self, Cpuid, Location, Msr, Processor, Snapshot};
+use super::{
+    memory_types::amd,
+    topology::{self, Cpuid, Location, Msr, Processor, Snapshot},
+};
 use crate::{handoff::Region, tables::PAGE};
 use alloc::vec::Vec;
 use core::{
@@ -20,7 +23,7 @@ use uefi::{
 };
 
 const MAGIC: u64 = 0x5354_4c53_4d50_3031;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const EFER: u32 = 0xc000_0080;
 const PAT: u32 = 0x277;
 const APIC_BASE: u32 = 0x1b;
@@ -55,6 +58,7 @@ pub(crate) enum Error {
     SnapshotTimeout,
     ProcessorIdentity,
     Memory,
+    AmdMemoryControls,
 }
 
 impl Error {
@@ -74,6 +78,9 @@ impl Error {
                 "native observed CPUID identity differs from firmware identity"
             }
             Self::Memory => "native source record allocation or extent is invalid",
+            Self::AmdMemoryControls => {
+                "AMD encrypted/SNP or fixed-attribute visibility controls are unqualified"
+            }
         }
     }
 }
@@ -85,6 +92,69 @@ unsafe fn read_msr(index: u32) -> u64 {
         asm!("rdmsr", in("ecx") index, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags))
     };
     (u64::from(high) << 32) | u64::from(low)
+}
+
+unsafe fn write_msr(index: u32, value: u64) {
+    // SAFETY: caller has qualified this actual processor/MSR and value.
+    unsafe {
+        asm!("wrmsr", in("ecx") index, in("eax") value as u32,
+        in("edx") (value >> 32) as u32, options(nostack, preserves_flags));
+    }
+}
+
+/// Opens only fixed-attribute read/write visibility, without changing routing,
+/// type, encryption or latent attributes. The original control/IF is restored
+/// before the joined firmware callback returns, including early errors.
+struct FixedVisibility {
+    syscfg: u64,
+    interrupts: bool,
+    changed: bool,
+}
+impl FixedVisibility {
+    /// # Safety
+    /// Actual CPL0 AMD family1Ah/model44h B0, no concurrent control writer on
+    /// this processor. No SNP/encryption owner may lock the visibility control.
+    unsafe fn open() -> Result<Self, Error> {
+        let flags: u64;
+        unsafe {
+            asm!("pushfq", "pop {}", "cli", out(reg) flags);
+        }
+        let original = unsafe { read_msr(amd::SYSCFG) };
+        let mut guard = Self {
+            syscfg: original,
+            interrupts: flags & (1 << 9) != 0,
+            changed: false,
+        };
+        if original & amd::ENCRYPTION != 0 {
+            return Err(Error::AmdMemoryControls);
+        }
+        if original & amd::FIXED_MODIFY == 0 {
+            guard.changed = true;
+            unsafe {
+                write_msr(amd::SYSCFG, original | amd::FIXED_MODIFY);
+            }
+            core::sync::atomic::compiler_fence(Ordering::SeqCst);
+            if unsafe { read_msr(amd::SYSCFG) } != original | amd::FIXED_MODIFY {
+                return Err(Error::AmdMemoryControls);
+            }
+        }
+        Ok(guard)
+    }
+}
+impl Drop for FixedVisibility {
+    fn drop(&mut self) {
+        // SAFETY: this guard cannot migrate or escape the synchronous CPL0
+        // observation. Only the original known control value is restored.
+        unsafe {
+            if self.changed {
+                core::sync::atomic::compiler_fence(Ordering::SeqCst);
+                write_msr(amd::SYSCFG, self.syscfg);
+            }
+            if self.interrupts {
+                asm!("sti", options(nomem, nostack));
+            }
+        }
+    }
 }
 
 fn cpuid(leaf: u32, subleaf: u32) -> Cpuid {
@@ -204,10 +274,29 @@ pub(crate) unsafe fn observe() -> Result<Snapshot, Error> {
             }
             push_msr(&mut snapshot, MTRR_CAP, cap)?;
             push_msr(&mut snapshot, MTRR_DEFAULT, read_msr(MTRR_DEFAULT))?;
+            let amd_family = amd::supported(&snapshot);
+            let visibility = if amd_family {
+                Some(FixedVisibility::open()?)
+            } else {
+                None
+            };
             if cap & (1 << 8) != 0 {
                 for index in [
                     0x250, 0x258, 0x259, 0x268, 0x269, 0x26a, 0x26b, 0x26c, 0x26d, 0x26e, 0x26f,
                 ] {
+                    push_msr(&mut snapshot, index, read_msr(index))?;
+                }
+            }
+            if let Some(visibility) = visibility {
+                let original = visibility.syscfg;
+                drop(visibility);
+                if read_msr(amd::SYSCFG) != original {
+                    return Err(Error::AmdMemoryControls);
+                }
+                // Do not report masked fixed zeros as physical source state.
+                snapshot.amd_fixed_raw = true;
+                push_msr(&mut snapshot, amd::SYSCFG, original)?;
+                for index in amd::REGISTERS.into_iter().skip(1) {
                     push_msr(&mut snapshot, index, read_msr(index))?;
                 }
             }

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 pub const MAX_PROCESSORS: usize = 256;
 pub const MAX_CORES: usize = 64;
 pub const MAX_CPUID: usize = 48;
-pub const MAX_MSRS: usize = 48;
+pub const MAX_MSRS: usize = 64;
 
 pub const BSP: u32 = 1;
 pub const ENABLED: u32 = 1 << 1;
@@ -79,6 +79,9 @@ pub struct Snapshot {
     pub apic_base: u64,
     pub xcr0: u64,
     pub xcr0_valid: bool,
+    /// AMD fixed RdMem/WrMem were read with the visibility gate open,
+    /// then the original SYSCFG was restored. Masked zeros are not evidence.
+    pub amd_fixed_raw: bool,
 }
 
 impl Default for Snapshot {
@@ -97,6 +100,7 @@ impl Default for Snapshot {
             apic_base: 0,
             xcr0: 0,
             xcr0_valid: false,
+            amd_fixed_raw: false,
         }
     }
 }
@@ -187,15 +191,16 @@ impl Snapshot {
         Ok(())
     }
 
-    /// The startup path changes PAT deliberately but does not rewrite MTRRs.
-    /// Require the complete source MTRR configuration to agree before sharing
-    /// WB guest RAM or Stela metadata. TSC_ADJUST is separate clock evidence.
+    /// Require the actual installed memory-type/routing image to equal the
+    /// intended source image before sharing RAM or Stela metadata. Initial
+    /// offline installation may establish this equality; TSC_ADJUST is separate.
     pub fn same_memory_types(&self, other: &Self) -> Result<(), CapabilityRefusal> {
         fn memory(index: u32) -> bool {
             index == 0xfe
                 || index == 0x2ff
                 || (0x200..=0x21f).contains(&index)
                 || matches!(index, 0x250 | 0x258 | 0x259 | 0x268..=0x26f)
+                || matches!(index, 0xc001_0010 | 0xc001_0016..=0xc001_001a | 0xc001_001d)
         }
         let left = self
             .msrs
@@ -205,7 +210,8 @@ impl Snapshot {
             .msrs
             .get(..other.msr_count as usize)
             .ok_or(CapabilityRefusal::InvalidSnapshot)?;
-        if !self.pat_valid
+        if self.amd_fixed_raw != other.amd_fixed_raw
+            || !self.pat_valid
             || !other.pat_valid
             || self.pat != other.pat
             || !left

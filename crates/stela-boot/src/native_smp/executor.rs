@@ -255,6 +255,28 @@ pub(crate) unsafe fn start(
         .map_err(|_| StartupFailure::Resources)?;
     let memory_types = super::memory_types::Image::from_snapshot(&memory_source)
         .map_err(StartupFailure::Bootstrap)?;
+    if memory_types.amd.is_some() {
+        for range in ram {
+            memory_types
+                .writeback_ram(range.host, range.bytes)
+                .map_err(StartupFailure::Bootstrap)?;
+        }
+        for region in [
+            handoff.heap,
+            handoff.code,
+            handoff.pool,
+            handoff.native_resources.stacks,
+        ] {
+            memory_types
+                .writeback_ram(region.physical, region.bytes)
+                .map_err(StartupFailure::Bootstrap)?;
+        }
+        if cores > 1 {
+            memory_types
+                .writeback_ram(handoff.native_resources.sipi, PAGE)
+                .map_err(StartupFailure::Bootstrap)?;
+        }
+    }
     let effective_pat = memory_source.pat;
     for slot in 1..cores {
         let part = resources::partition(cores, slot, handoff.code.bytes, handoff.pool.bytes)

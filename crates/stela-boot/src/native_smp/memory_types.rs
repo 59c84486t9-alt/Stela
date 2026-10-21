@@ -1,6 +1,10 @@
 //! Initial offline-AP memory types, copied from the live BSP configuration.
 //! This is not an update protocol for an already participating processor.
 use super::topology::Snapshot;
+#[path = "memory_types/amd.rs"]
+pub(crate) mod amd;
+#[path = "memory_types/ranges.rs"]
+mod ranges;
 
 pub(crate) const CAP: u32 = 0xfe;
 pub(crate) const DEFAULT: u32 = 0x2ff;
@@ -25,6 +29,7 @@ pub(crate) struct Image {
     pub default: u64,
     pub writes: [Write; MAX_WRITABLE],
     pub count: usize,
+    pub amd: Option<amd::State>,
 }
 
 fn register(snapshot: &Snapshot, index: u32) -> Result<u64, &'static str> {
@@ -53,8 +58,11 @@ fn memory_type(value: u8, cap: u64) -> bool {
 
 impl Image {
     pub(crate) fn from_snapshot(snapshot: &Snapshot) -> Result<Self, &'static str> {
-        if !intel(snapshot) {
-            return Err("native initial MTRR recipe requires qualified Intel controls");
+        if snapshot.cr0 & ((1 << 29) | (1 << 30)) != 0 {
+            return Err("BSP cache-disable controls do not permit WB sharing");
+        }
+        if !intel(snapshot) && !amd::supported(snapshot) {
+            return Err("native initial MTRR recipe has no qualified vendor/family controls");
         }
         let cap = register(snapshot, CAP)?;
         let variables = (cap & 0xff) as usize;
@@ -66,6 +74,11 @@ impl Image {
             .map(|leaf| leaf.eax as u8)
             .filter(|bits| (36..=52).contains(bits))
             .ok_or("native MTRRs need source physical-address width")?;
+        let amd = if amd::supported(snapshot) {
+            Some(amd::State::from_snapshot(snapshot, physical_bits)?)
+        } else {
+            None
+        };
         let default = register(snapshot, DEFAULT)?;
         if default & !0xcff != 0
             || !memory_type(default as u8, cap)
@@ -82,6 +95,7 @@ impl Image {
             default,
             writes: [Write::default(); MAX_WRITABLE],
             count: 0,
+            amd,
         };
         for index in FIXED
             .into_iter()
@@ -91,10 +105,15 @@ impl Image {
             let value = register(snapshot, index)?;
             let physical_mask = ((1u64 << physical_bits) - 1) & !0xfff;
             let supported = if FIXED.contains(&index) {
-                value
-                    .to_le_bytes()
-                    .into_iter()
-                    .all(|kind| memory_type(kind, cap))
+                value.to_le_bytes().into_iter().all(|kind| match amd {
+                    Some(state)
+                        if state.syscfg & amd::FIXED_DRAM != 0 && default & (1 << 10) != 0 =>
+                    {
+                        amd::fixed_type(kind, cap)
+                    }
+                    Some(_) => kind & !0x1f == 0 && memory_type(kind & 7, cap),
+                    None => memory_type(kind, cap),
+                })
             } else if (index - VARIABLE_BASE).is_multiple_of(2) {
                 value & !(physical_mask | 0xff) == 0 && memory_type(value as u8, cap)
             } else {
@@ -102,6 +121,10 @@ impl Image {
             };
             if !supported {
                 return Err("unsupported BSP memory-type register fields");
+            }
+            if !FIXED.contains(&index) && (index - VARIABLE_BASE) % 2 == 1 && value & (1 << 11) != 0
+            {
+                ranges::range(register(snapshot, index - 1)?, value, physical_bits)?;
             }
             image.writes[image.count] = Write {
                 index,
@@ -116,8 +139,25 @@ impl Image {
     /// Old contents may be uninitialized on a never-admitted AP. Hardware
     /// capacity/physical-width differences may not be normalized away.
     pub(crate) fn compatible(&self, snapshot: &Snapshot) -> Result<(), &'static str> {
-        if !intel(snapshot)
-            || register(snapshot, CAP)? != self.cap
+        match self.amd {
+            Some(source) => {
+                source.compatible(amd::State::from_snapshot(snapshot, self.physical_bits)?)?;
+                // Clearing MTRR.E leaves routing attributes active. Preserve
+                // their exact low-page routing throughout offline installation.
+                for write in self.writes[..self.count]
+                    .iter()
+                    .filter(|write| FIXED.contains(&write.index))
+                {
+                    let expected = u64::from(write.low) | u64::from(write.high) << 32;
+                    if (expected ^ register(snapshot, write.index)?) & 0x1818_1818_1818_1818 != 0 {
+                        return Err("AMD initial fixed DRAM routing differs across cores");
+                    }
+                }
+            }
+            None if !intel(snapshot) => return Err("selected processor vendor differs from BSP"),
+            None => {}
+        }
+        if register(snapshot, CAP)? != self.cap
             || snapshot.get(0x8000_0008, 0).map(|leaf| leaf.eax as u8) != Some(self.physical_bits)
         {
             return Err("physical cores have incompatible MTRR capabilities");
@@ -203,6 +243,57 @@ mod tests {
     }
 
     #[test]
+    fn amd_install_preserves_actual_routing_and_normalizes_only_visibility() {
+        let mut snapshot = source();
+        snapshot.records[0].ebx = amd::VENDOR[0];
+        snapshot.records[0].edx = amd::VENDOR[1];
+        snapshot.records[0].ecx = amd::VENDOR[2];
+        snapshot.records[2] = Cpuid {
+            leaf: 1,
+            eax: amd::SIGNATURE,
+            ..Cpuid::default()
+        };
+        snapshot.count = 3;
+        snapshot.amd_fixed_raw = true;
+        for msr in &mut snapshot.msrs[..snapshot.msr_count as usize] {
+            if FIXED.contains(&msr.index) {
+                msr.value = 0x1e1e_1e1e_1e1e_1e1e;
+            }
+        }
+        for index in amd::REGISTERS {
+            snapshot.msrs[snapshot.msr_count as usize] = Msr {
+                index,
+                value: if index == amd::SYSCFG {
+                    amd::FIXED_DRAM
+                } else {
+                    0
+                },
+            };
+            snapshot.msr_count += 1;
+        }
+        let image = Image::from_snapshot(&snapshot).unwrap();
+        assert!(
+            image.writes[..image.count]
+                .iter()
+                .all(|write| !amd::REGISTERS.contains(&write.index))
+        );
+        let mut changed = snapshot;
+        let control = changed.msrs[..changed.msr_count as usize]
+            .iter_mut()
+            .find(|msr| msr.index == amd::SYSCFG)
+            .unwrap();
+        control.value ^= amd::FIXED_MODIFY;
+        assert_eq!(image.compatible(&changed), Ok(()));
+        changed.msrs[2].value ^= 0x18;
+        assert!(image.compatible(&changed).is_err());
+        changed = snapshot;
+        changed.msrs[2].value = 0x1818_1818_1818_1818; // same routing, UC before offline install
+        assert_eq!(image.compatible(&changed), Ok(()));
+        changed.amd_fixed_raw = false;
+        assert!(image.compatible(&changed).is_err());
+    }
+
+    #[test]
     fn incomplete_duplicate_disabled_or_excess_images_refuse() {
         let source = source();
         let mut changed = source;
@@ -220,6 +311,11 @@ mod tests {
         changed = source;
         changed.msrs[2].value |= 0x80;
         assert!(Image::from_snapshot(&changed).is_err());
+        for bit in [29, 30] {
+            changed = source;
+            changed.cr0 |= 1 << bit;
+            assert!(Image::from_snapshot(&changed).is_err());
+        }
         changed = source;
         changed.msrs[0].value = (MAX_VARIABLE + 1) as u64;
         assert!(Image::from_snapshot(&changed).is_err());

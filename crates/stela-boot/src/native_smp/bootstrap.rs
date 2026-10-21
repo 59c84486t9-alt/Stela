@@ -3,7 +3,7 @@
 //! entry into permanently pinned high-window code and stopped reading it.
 use core::arch::global_asm;
 
-use super::memory_types::{Image, MAX_WRITABLE, Write};
+use super::memory_types::{Image, MAX_WRITABLE, Write, amd};
 use crate::tables::PAGE;
 
 global_asm!(
@@ -55,10 +55,40 @@ global_asm!(
     "jne 90f",
     "cmp (stela_ap_mtrr_cap - stela_ap_start + 4)(%ebp), %edx",
     "jne 90f",
-    "mov $0x2ff, %ecx",
+    // AMD's fixed attribute visibility is separate from effective routing.
+    // Recheck the actual family signature before touching its additional MSRs.
+    "cmpl $0, (stela_ap_amd - stela_ap_start)(%ebp)",
+    "je 6f",
+    "xor %eax, %eax",
+    "cpuid",
+    "cmp ${amd_ebx}, %ebx", // AuthenticAMD, independently rechecked after INIT
+    "jne 90f",
+    "cmp ${amd_edx}, %edx",
+    "jne 90f",
+    "cmp ${amd_ecx}, %ecx",
+    "jne 90f",
+    "mov $1, %eax",
+    "xor %ecx, %ecx",
+    "cpuid",
+    "cmp (stela_ap_signature - stela_ap_start)(%ebp), %eax",
+    "jne 90f",
+    "mov ${amd_syscfg}, %ecx",
+    "rdmsr",
+    "mov %eax, %esi",
+    "xor (stela_ap_syscfg - stela_ap_start)(%ebp), %eax",
+    "and ${amd_preserved}, %eax", // only MFDM visibility may differ
+    "jnz 90f",
+    "cmp (stela_ap_syscfg - stela_ap_start + 4)(%ebp), %edx",
+    "jne 90f",
+    "mov %esi, %eax",
+    "or ${amd_fixed_modify}, %eax", // MFDM: expose actual RdMem/WrMem for writes
+    "wrmsr", // preserve every effective routing/non-memory control for now
+    "6: mov $0x2ff, %ecx",
     "xor %eax, %eax",
     "xor %edx, %edx",
     "wrmsr", // disabled, UC while the complete image is installed
+    "cmpl $0, (stela_ap_amd - stela_ap_start)(%ebp)",
+    "jne 3f",
     "lea (stela_ap_mtrrs - stela_ap_start)(%ebp), %esi",
     "mov (stela_ap_mtrr_count - stela_ap_start)(%ebp), %edi",
     "test %edi, %edi",
@@ -79,7 +109,13 @@ global_asm!(
     "add ${mtrr_stride}, %esi",
     "dec %edi",
     "jnz 4b",
-    "5: mov $0x277, %ecx",
+    "5: cmpl $0, (stela_ap_amd - stela_ap_start)(%ebp)",
+    "je 7f",
+    "mov ${amd_syscfg}, %ecx",
+    "mov (stela_ap_syscfg - stela_ap_start)(%ebp), %eax",
+    "mov (stela_ap_syscfg - stela_ap_start + 4)(%ebp), %edx",
+    "wrmsr", // complete known memory controls; retain identical opaque fields
+    "7: mov $0x277, %ecx",
     "mov (stela_ap_pat - stela_ap_start)(%ebp), %eax",
     "mov (stela_ap_pat - stela_ap_start + 4)(%ebp), %edx",
     "wrmsr",
@@ -159,10 +195,22 @@ global_asm!(
     "stela_ap_mtrr_cap: .quad 0",
     ".global stela_ap_mtrr_default",
     "stela_ap_mtrr_default: .quad 0",
+    ".global stela_ap_amd",
+    "stela_ap_amd: .long 0",
+    ".global stela_ap_signature",
+    "stela_ap_signature: .long 0",
+    ".global stela_ap_syscfg",
+    "stela_ap_syscfg: .quad 0",
     ".global stela_ap_mtrrs",
     "stela_ap_mtrrs: .zero {mtrr_bytes}",
     ".global stela_ap_end",
     "stela_ap_end:",
+    amd_syscfg = const amd::SYSCFG,
+    amd_ebx = const amd::VENDOR[0],
+    amd_edx = const amd::VENDOR[1],
+    amd_ecx = const amd::VENDOR[2],
+    amd_fixed_modify = const amd::FIXED_MODIFY,
+    amd_preserved = const !(amd::FIXED_MODIFY as u32),
     mtrr_stride = const core::mem::size_of::<Write>(),
     mtrr_bytes = const MAX_WRITABLE * core::mem::size_of::<Write>(),
     options(att_syntax),
@@ -189,6 +237,9 @@ unsafe extern "C" {
     static stela_ap_mtrr_cap: u8;
     static stela_ap_mtrr_default: u8;
     static stela_ap_mtrrs: u8;
+    static stela_ap_amd: u8;
+    static stela_ap_signature: u8;
+    static stela_ap_syscfg: u8;
 }
 
 fn offset(symbol: *const u8) -> usize {
@@ -270,6 +321,20 @@ pub(crate) unsafe fn prepare(
             .cast::<u32>()
             .write_unaligned((physical + offset(&raw const stela_ap_gdt) as u64) as u32);
         put32(
+            &raw const stela_ap_amd,
+            u32::from(entry.memory_types.amd.is_some()),
+        );
+        // The qualified AMD family1Ah/model44h B0 signature is an actual
+        // hardware-profile bound, independent of the selected ARM guest.
+        put32(
+            &raw const stela_ap_signature,
+            super::memory_types::amd::SIGNATURE,
+        );
+        put64(
+            &raw const stela_ap_syscfg,
+            entry.memory_types.amd.map_or(0, |amd| amd.syscfg),
+        );
+        put32(
             &raw const stela_ap_phys_bits,
             u32::from(entry.memory_types.physical_bits),
         );
@@ -294,5 +359,10 @@ pub(crate) unsafe fn prepare(
     // Serializes the current core's stores before APIC sends; the AP's INIT/
     // SIPI fetch supplies its architectural startup serialization separately.
     core::arch::x86_64::__cpuid(0);
+    // SAFETY: initial executor bootstrap only, before any guest/native loan;
+    // caller owns the system's unchanged shared memory-type configuration.
+    unsafe {
+        core::arch::asm!("wbinvd", options(nostack, preserves_flags));
+    }
     Ok((physical / PAGE) as u8)
 }
