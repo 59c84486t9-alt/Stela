@@ -8,6 +8,7 @@ use crate::{
         dma::DmaAllocator,
         pci::{Address, EcamWindow, Function},
     },
+    gpu,
     input::{self, virtio::VirtioInput},
     net::{
         self, Link, LinkError, Mac,
@@ -160,6 +161,9 @@ impl Link for Adapter {
 #[derive(Default)]
 pub struct Disks {
     pub devices: Vec<Box<dyn BlockDevice>>,
+    /// Display controllers, inventoried without changing firmware scanout.
+    /// These are not initialized accelerators; each records its missing port.
+    pub gpus: Vec<gpu::Adapter>,
     pub inputs: Vec<VirtioInput>,
     /// USB keyboards and pointers behind xHCI controllers.
     pub usb_inputs: Vec<UsbInput>,
@@ -252,6 +256,10 @@ pub unsafe fn probe_with_provider(
         // SAFETY: mapped as checked; the caller owns the machine.
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
+            if let Some(adapter) = gpu::Adapter::discover(&function) {
+                disks.gpus.push(adapter);
+                continue;
+            }
             crate::working(&alloc::format!("PCI {address}"));
             let result = if virtio::matches(&function) {
                 virtio::VirtioBlk::new(&mut function, handoff, dma)

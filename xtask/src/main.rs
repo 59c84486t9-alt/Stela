@@ -26,6 +26,7 @@ mod darwin_catalogs;
 mod differential;
 mod dit;
 mod floor_audit;
+mod gpu;
 mod hosted_matrix;
 mod oracle;
 mod progress;
@@ -53,6 +54,9 @@ enum Task {
     /// Build, run and debug the UEFI mount in x86 QEMU.
     #[command(subcommand)]
     Boot(boot::Command),
+    /// Build native GPU components and report their remaining platform imports.
+    #[command(subcommand)]
+    Gpu(gpu::Command),
     /// Compare native translations with the QEMU original, form by form.
     Differential(differential::Differential),
     /// Time unchanged real-program functions in the process engines, against
@@ -97,6 +101,7 @@ fn main() -> ExitCode {
     let result = match Cli::parse().task {
         Task::Check { fix } => check::run(fix).map(|()| ExitCode::SUCCESS),
         Task::Boot(command) => boot::run(command),
+        Task::Gpu(command) => gpu::run(command).map(|()| ExitCode::SUCCESS),
         Task::Differential(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::Bench(task) => task.run().map(|()| ExitCode::SUCCESS),
         Task::AmxReference(task) => task.run().map(|()| ExitCode::SUCCESS),

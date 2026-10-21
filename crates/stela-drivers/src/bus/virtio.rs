@@ -88,7 +88,7 @@ impl Modern {
                 "virtio device without modern registers",
             ));
         };
-        function.enable();
+        function.enable_polled();
         common.write8(DEVICE_STATUS, 0);
         if !handoff
             .clock

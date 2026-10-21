@@ -1,7 +1,8 @@
 //! PCI configuration space through ECAM: enumeration, BAR decoding and
-//! sizing, capabilities and interrupt discovery. Every driver here polls, so
-//! [`Function::enable`] turns on memory decoding and bus mastering and leaves
-//! INTx, MSI and MSI-X off.
+//! sizing, capabilities and interrupt discovery. Memory decoding and bus
+//! mastering are independent of interrupt policy. The current boot drivers
+//! use [`Function::enable_polled`]; interrupt-driven ports must arrange
+//! delivery with the mount before enabling their interrupt sources.
 use super::mmio::Mmio;
 use alloc::vec::Vec;
 use core::{fmt, ops::Range};
@@ -156,8 +157,8 @@ pub struct MsiX {
     pub pending_offset: u32,
 }
 
-/// The message-signalled interrupts a function offers. The drivers poll;
-/// these are recorded so a later interrupt route can program them.
+/// The message-signalled interrupts a function offers. Discovery alone
+/// neither programs nor enables interrupt delivery.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Interrupts {
     pub msi: Option<Msi>,
@@ -303,8 +304,18 @@ impl<C: ConfigSpace> Function<C> {
         interrupts
     }
 
-    /// Decode memory and master the bus, with every interrupt source off.
-    pub fn enable(&mut self) {
+    /// Enable memory decoding and bus mastering without changing interrupt
+    /// controls. The driver must first establish its DMA and interrupt policy.
+    /// This does not program MSI/MSI-X routes or install interrupt handlers.
+    pub fn enable_memory_and_bus_master(&mut self) {
+        let command = self.config.read16(COMMAND);
+        self.config
+            .write16(COMMAND, command | COMMAND_MEMORY | COMMAND_BUS_MASTER);
+    }
+
+    /// Enable a polling driver: memory decoding and bus mastering on,
+    /// INTx, MSI and MSI-X off.
+    pub fn enable_polled(&mut self) {
         let interrupts = self.interrupts();
         if let Some(msi) = interrupts.msi {
             let control = self.config.read16(u16::from(msi.offset) + 2);
@@ -505,11 +516,30 @@ mod tests {
                 wide: true
             })
         );
-        function.enable();
+        function.enable_polled();
         assert_eq!(function.config().words[16] >> 31, 0);
         assert_eq!(function.config().words[20] >> 16 & 1, 0);
         let command = function.config().read16(COMMAND);
         assert_eq!(command & 0x406, 0x406);
+    }
+
+    #[test]
+    fn memory_enable_does_not_choose_an_interrupt_policy() {
+        for intx in [0, COMMAND_INTX_DISABLE] {
+            let mut config = fake();
+            config.words[1] = (config.words[1] & !0xffff) | u32::from(intx);
+            config.words[16] |= 1 << 31;
+            config.words[20] |= 1 << 16;
+            let mut function = Function::new(Address::default_for_tests(), config).unwrap();
+            function.enable_memory_and_bus_master();
+            let config = function.config();
+            assert_eq!(
+                config.read16(COMMAND),
+                intx | COMMAND_MEMORY | COMMAND_BUS_MASTER
+            );
+            assert_eq!(config.words[16] >> 31, 1);
+            assert_eq!(config.words[20] >> 16 & 1, 1);
+        }
     }
 
     #[test]

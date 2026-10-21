@@ -208,7 +208,7 @@ impl Igc {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         let device = registers(handoff, function.bars()[0], 0, REGISTER_BYTES)?;
-        function.enable();
+        function.enable_polled();
         let clock = handoff.clock;
         reset(&device, &clock);
         let mac = station(device.read32(RAL), device.read32(RAH)).ok_or(

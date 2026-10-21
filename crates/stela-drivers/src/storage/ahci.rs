@@ -79,7 +79,7 @@ pub fn attach(
 ) -> Result<Vec<AhciDisk>, BlockError> {
     let bars = function.bars();
     let hba = registers(handoff, bars[5], 0, 0x100)?;
-    function.enable();
+    function.enable_polled();
     let clock = handoff.clock;
     if hba.read32(CAPABILITIES_2) & CAP2_HANDOFF != 0 {
         hba.write32(HANDOFF, hba.read32(HANDOFF) | HANDOFF_OS_OWNED);

@@ -205,7 +205,7 @@ pub fn attach(
 ) -> Result<Vec<Namespace>, BlockError> {
     let bars = function.bars();
     let registers = registers(handoff, bars[0], 0, 0x2000)?;
-    function.enable();
+    function.enable_polled();
     let capabilities = registers.read64(CAPABILITIES);
     let entries_supported = (capabilities & 0xffff) + 1;
     let doorbell_stride = 4usize << (capabilities >> 32 & 0xf);

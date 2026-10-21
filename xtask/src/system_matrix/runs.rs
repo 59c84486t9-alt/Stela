@@ -82,9 +82,22 @@ fn libtest_name(test: &str) -> Option<String> {
 
 /// SHA-256 over every source file of [`TREES`], each as its path and digest.
 pub fn digest() -> Result<String> {
+    digest_trees(root(), &TREES)
+}
+
+fn digest_trees(source_root: &Path, trees: &[&str]) -> Result<String> {
     fn walk(directory: &Path, files: &mut Vec<std::path::PathBuf>) -> Result<()> {
         for entry in fs::read_dir(directory)? {
-            let path = entry?.path();
+            let entry = entry?;
+            // Native driver generators may leave caches next to their sources.
+            // These are derived files/locks, not inputs observed by runtime tests.
+            if ["__pycache__", "packagecache", ".wraplock"]
+                .iter()
+                .any(|name| entry.file_name() == *name)
+            {
+                continue;
+            }
+            let path = entry.path();
             if path.is_dir() {
                 walk(&path, files)?;
             } else {
@@ -94,13 +107,13 @@ pub fn digest() -> Result<String> {
         Ok(())
     }
     let mut files = Vec::new();
-    for tree in TREES {
-        walk(&root().join(tree), &mut files)?;
+    for tree in trees {
+        walk(&source_root.join(tree), &mut files)?;
     }
     files.sort();
     let mut listing = String::new();
     for file in files {
-        let relative = file.strip_prefix(root())?.display().to_string();
+        let relative = file.strip_prefix(source_root)?.display().to_string();
         listing.push_str(&format!("{relative}\0{}\n", sha256(&fs::read(&file)?)));
     }
     Ok(sha256(listing.as_bytes()))
@@ -208,6 +221,24 @@ pub(super) fn parse(text: &str, digest: &str) -> Result<Runs> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_source_changes_invalidate_the_ledger_but_generator_caches_do_not() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let driver = temporary.path().join("drivers/vendor");
+        fs::create_dir_all(&driver)?;
+        fs::write(driver.join("shader.c"), "unsigned shader;\n")?;
+        let before = digest_trees(temporary.path(), &["drivers"])?;
+        fs::create_dir(driver.join("__pycache__"))?;
+        fs::write(driver.join("__pycache__/generator.pyc"), b"cache")?;
+        fs::create_dir(driver.join("packagecache"))?;
+        fs::write(driver.join("packagecache/archive.tar.gz"), b"archive")?;
+        fs::write(driver.join(".wraplock"), b"")?;
+        assert_eq!(before, digest_trees(temporary.path(), &["drivers"])?);
+        fs::write(driver.join("shader.c"), "unsigned shader = 1;\n")?;
+        assert_ne!(before, digest_trees(temporary.path(), &["drivers"])?);
+        Ok(())
+    }
 
     #[test]
     fn cited_tests_map_to_their_libtest_names() {

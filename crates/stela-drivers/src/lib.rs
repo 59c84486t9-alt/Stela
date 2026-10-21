@@ -1,11 +1,14 @@
-//! Stela's own host PC drivers, which the mount runs after
-//! ExitBootServices, when the firmware's drivers are gone.
+//! Stela's host PC drivers, organized by device class. The mount runs
+//! them after ExitBootServices, when the firmware's drivers are gone.
 //!
 //! Each driver backs an emulated Apple device: a host disk becomes the
 //! Mac's internal SSD or a USB disk, a host keyboard or pointer the native
 //! USB peripheral, a host network adapter the mount's own client or the
 //! guest's Ethernet. macOS never sees these drivers; it keeps Apple's stock
-//! drivers for the Apple devices. Every driver polls.
+//! drivers for the Apple devices. Polling and the reserved DMA region are
+//! implementation choices of the current boot drivers, not requirements
+//! for this crate. Native C/C++ ports belong behind explicit ABI wrappers;
+//! driver requirements determine allocation and interrupt services.
 //!
 //! `stela.efi` records the ACPI MCFG windows, a block of DMA pages below
 //! 4 GiB, the MMIO ranges it mapped uncached and a TSC rate in a [`Handoff`]
@@ -13,7 +16,8 @@
 //! through ECAM ([`bus`]) and brings up every driver, one folder per device
 //! class: disks ([`storage`], behind [`block::BlockDevice`]), keyboards and
 //! pointers ([`input`]), raw Ethernet links ([`net`]) and the USB devices
-//! behind xHCI controllers ([`usb`]).
+//! behind xHCI controllers ([`usb`]). [`gpu`] inventories display controllers;
+//! its vendor backends are not implemented yet.
 #![no_std]
 #[macro_use]
 extern crate alloc;
@@ -28,6 +32,7 @@ pub mod audio;
 pub mod block;
 pub mod bus;
 pub mod firmware;
+pub mod gpu;
 pub mod input;
 pub mod net;
 pub mod probe;
