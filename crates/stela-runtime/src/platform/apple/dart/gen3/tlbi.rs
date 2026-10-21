@@ -1,4 +1,4 @@
-//! Whole-payload gen3 TLBI requests, not two independent MMIO commands.
+//! Typed gen3 invalidation requests, independently of MMIO execution.
 //!
 //! Original 26A434 T8152 SPTM VA 0xfffffff0270cc75c..0xfffffff0270cc870
 //! constructs the two words; VA 0xfffffff0270cc7f0 submits them with STP.
@@ -14,6 +14,43 @@ const INSTANCE_SHIFT: u32 = 56;
 const INSTANCE: u64 = 0xf << INSTANCE_SHIFT;
 const CLASS_SHIFT: u32 = 60;
 const CLASS: u64 = 3 << CLASS_SHIFT;
+
+/// The separate TRAD600 context-table publication command. Original SPTM
+/// d366c..d36b8 duplicates the parent CTE slot into fields17:12/5:0 and
+/// places SID in31:24. It broadcasts to every TRAD, checking ESB/DISR after
+/// each write, then polls604 busy0 on every instance. Encoding does not
+/// complete those obligations or the DMB ISHST/DSB SY publication barriers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextCommand {
+    sid: u8,
+    slot: u8,
+}
+
+impl ContextCommand {
+    pub(super) fn new(sid: usize, slot: u16) -> Result<Self, &'static str> {
+        let sid = u8::try_from(sid)
+            .map_err(|_| "gen3 DART publication SID exceeds its native command field")?;
+        if slot >= 64 {
+            return Err("gen3 DART publication context slot exceeds its native command field");
+        }
+        Ok(Self {
+            sid,
+            slot: slot as u8,
+        })
+    }
+
+    pub const fn sid(self) -> u8 {
+        self.sid
+    }
+
+    pub const fn slot(self) -> u8 {
+        self.slot
+    }
+
+    pub const fn word(self) -> u32 {
+        (self.sid as u32) << 24 | (self.slot as u32) << 12 | self.slot as u32
+    }
+}
 
 /// The recovered invalidation classes. Range endpoints are page numbers,
 /// as supplied by the original request. Decoding does not infer whether the
@@ -150,6 +187,20 @@ mod tests {
             [header(3, 0, 0) | 2 << PAGE_SHIFT, 1 << PAGE_SHIFT],
         ] {
             assert!(Command::decode(words).is_err(), "{words:x?}");
+        }
+    }
+
+    #[test]
+    fn publication_command_does_not_truncate_sid_or_context_slot() {
+        assert_eq!(ContextCommand::new(255, 63).unwrap().word(), 0xff03_f03f);
+        for (sid, slot) in [
+            (256, 0),
+            (usize::MAX, 63),
+            (0, 64),
+            (0, 2047),
+            (0, u16::MAX),
+        ] {
+            assert!(ContextCommand::new(sid, slot).is_err());
         }
     }
 }

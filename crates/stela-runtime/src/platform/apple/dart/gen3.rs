@@ -4,6 +4,7 @@
 //! context/security/filter and device/CPU ordering contracts still require
 //! qualification; see `docs/research/dart-iommu.md`. In particular an old
 //! t8110 register bank cannot substitute for gen3's per-SID fault capture.
+pub mod context;
 pub mod fault;
 pub mod tables;
 pub mod tlbi;
