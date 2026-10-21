@@ -49,6 +49,7 @@ use pointer::{PointerInputs, PointerOperation, PointerResult};
 #[cfg(test)]
 pub(crate) use prepare::test_preparation;
 pub use prepare::{Description, Preparation, Prepared, Refused, window};
+pub use processors::publication;
 pub use processors::{
     PeerState, PreparedProcessorPower, ProcessorBinding, ProcessorChange, ProcessorPowerError,
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
@@ -311,6 +312,12 @@ pub enum InstallError {
 /// The x86 machine beneath the engine: guest RAM, native code, shadow
 /// translation, time and waiting.
 pub trait Host {
+    /// Source-qualified identity retained by this physical worker's local
+    /// Host/GS owner. Serial hosts have no native-worker authority.
+    fn native_worker(&self) -> Option<publication::WorkerId> {
+        None
+    }
+
     /// Read guest RAM. False when any byte is not RAM.
     fn read_ram(&mut self, physical: u64, buffer: &mut [u8]) -> bool;
     /// Write guest RAM. False when any byte is not RAM.
@@ -1242,6 +1249,8 @@ pub struct Machine<H: Host, D: Devices> {
     peers: Vec<processors::Peer>,
     /// Explicitly qualified retained core/cluster clock and quiesce inputs.
     processor_power: Processors,
+    /// Actual native-worker publication inventory; absent in the serial lane.
+    native_publication: Option<processors::publication::WorkerPublications>,
     /// Host breakpoints, ascending (`set_breakpoints`).
     breakpoints: Vec<u64>,
     /// Host trace points, ascending (`set_traces`), and the hits not yet
@@ -1381,6 +1390,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             waiting: None,
             peers: Vec::new(),
             processor_power,
+            native_publication: None,
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
