@@ -199,6 +199,32 @@ if with_stela_intel
       depend_files : gen_pack_header_deps,
     )
   endforeach
+  stela_intel_gpgpu_headers = []
+  foreach generation : ['70', '75', '80', '90', '110', '120']
+    stela_intel_gpgpu_headers += custom_target(
+      'stela_intel_gpgpu_@0@_pack'.format(generation),
+      input : ['../intel/genxml/gen_pack_header.py',
+               '../intel/genxml/gen@0@.xml'.format(generation)],
+      output : 'gen@0@_dispatch_pack.h'.format(generation),
+      command : [prog_python, '@INPUT@', '--include-symbols',
+                 'GPGPU_WALKER,MEDIA_STATE_FLUSH', '--helpers-include', 'genxml_native.h'],
+      capture : true,
+      depend_files : gen_pack_header_deps,
+    )
+  endforeach
+  stela_intel_gpgpu_native = static_library(
+    'stela_intel_gpgpu_native',
+    ['../../../../intel/stela/dispatch.c',
+     '../../../../intel/stela/dispatch/gen70.c',
+     '../../../../intel/stela/dispatch/gen75.c',
+     '../../../../intel/stela/dispatch/gen80.c',
+     '../../../../intel/stela/dispatch/gen90.c',
+     '../../../../intel/stela/dispatch/gen110.c',
+     '../../../../intel/stela/dispatch/gen120.c', stela_intel_gpgpu_headers],
+    include_directories : [inc_src, inc_intel,
+                           include_directories('../../../../intel/stela', '../intel/genxml')],
+    c_args : ['-Werror'],
+  )
   stela_intel_compute_native = static_library(
     'stela_intel_compute_native',
     ['../../../../intel/stela/compute_dispatch.c',
@@ -234,6 +260,38 @@ if with_stela_intel
     link_args : stela_intel_policy_gc,
   )
   test('stela_intel_compute_program', stela_intel_compute_program_probe, suite : 'stela')
+  # The hosted legacy producer reuses the same original SLM policy archive and
+  # the single native walker archive. Full hosted packers come from idep_genxml;
+  # no new algorithm, duplicated policy TU or private header generator exists.
+  stela_intel_legacy_compute = static_library(
+    'stela_intel_legacy_compute',
+    ['../../../../intel/stela/hosted/legacy_compute.c',
+     '../../../../intel/stela/hosted/legacy70.c',
+     '../../../../intel/stela/hosted/legacy75.c',
+     '../../../../intel/stela/hosted/legacy80.c',
+     '../../../../intel/stela/hosted/legacy90.c',
+     '../../../../intel/stela/hosted/legacy110.c',
+     '../../../../intel/stela/hosted/legacy120.c'],
+    include_directories : [inc_include, inc_src, inc_intel,
+                           include_directories('../intel/genxml')],
+    dependencies : [dep_m, idep_genxml, idep_intel_compiler_brw,
+                    idep_intel_compiler_elk, idep_intel_dev, idep_mesautil],
+    link_with : [stela_intel_compute_policy, stela_intel_gpgpu_native, libisl],
+    c_args : ['-Werror'],
+  )
+  stela_intel_legacy_compute_program_probe = executable(
+    'stela_intel_legacy_compute_program_probe',
+    ['../../../../intel/stela/tests/legacy_compute_program.c',
+     '../../../../intel/stela/tests/legacy_elk_validate.c'],
+    include_directories : [inc_include, inc_src, inc_intel],
+    dependencies : [idep_intel_compiler_brw, idep_intel_compiler_elk,
+                    idep_intel_compiler_gen, idep_intel_dev, idep_mesautil],
+    link_with : [stela_intel_legacy_compute],
+    c_args : ['-Werror'],
+    link_args : stela_intel_policy_gc,
+  )
+  test('stela_intel_legacy_compute_program', stela_intel_legacy_compute_program_probe,
+       suite : 'stela')
   stela_intel_compute_packet_probe = executable(
     'stela_intel_compute_packet_probe',
     '../../../../intel/stela/tests/compute_dispatch.c',
