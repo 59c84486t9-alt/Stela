@@ -128,10 +128,10 @@ impl Allocation {
         bytes: usize,
         direction: Direction,
     ) -> Result<Self, Error> {
-        // Descriptor polling needs real UC RAM, not a compiler-fence substitute for
-        // device-written coherent data. The platform may explicitly refuse UC pins.
-        let pages = source.allocate(bytes, 4096, CacheAttribute::Uncached)?;
-        let cpu = pages.cpu_mapping(CacheAttribute::Uncached)?;
+        // The unsafe installer requires actual hardware-coherent WB DMA for
+        // this requester, with NoSnoop/ATS disabled. WB alone proves nothing.
+        let pages = source.allocate(bytes, 4096, CacheAttribute::WriteBack)?;
+        let cpu = pages.cpu_mapping(CacheAttribute::WriteBack)?;
         let dma = DmaMapping::map(domain, pages, direction, u32::MAX.into())?;
         Ok(Self {
             cpu,
@@ -148,7 +148,7 @@ impl Allocation {
     }
     fn write32(&self, at: usize, value: u32) -> Result<(), Error> {
         let ptr = self.pointer(at, 4)?.cast::<u32>();
-        // SAFETY: bounded aligned UC allocation, serialized ring owner, descriptor
+        // SAFETY: bounded aligned qualified-coherent WB allocation, serialized ring owner, descriptor
         // is CPU-owned when written; no Rust reference aliases a device access.
         unsafe { ptr.write_volatile(value.to_le()) };
         Ok(())
@@ -201,7 +201,12 @@ impl<Q: QueueIo> TxRing<Q> {
     /// The caller must hold exclusive PCI/WFDMA ownership, with the actual TX
     /// engine disabled and idle before queue register mutation, and retain it
     /// through this ring's destruction/quarantine. `domain` must belong to that
-    /// same requester. Polling mode must keep device IRQ sources masked and
+    /// same requester. Ordinary WB DMA must be genuinely cache coherent for
+    /// volatile completion polling on this exact platform/requester, with PCIe
+    /// NoSnoop and ATS disabled. A WB cache attribute or compiler fence alone
+    /// is not that proof. This qualification must remain true until acknowledged
+    /// quiescence and final unmap, including every quarantined mapping.
+    /// Polling mode must keep device IRQ sources masked and
     /// exclude every other submit/cleanup/reset owner.
     pub unsafe fn install(
         io: Q,
@@ -332,6 +337,15 @@ impl<Q: QueueIo> TxRing<Q> {
         if advanced == 0 {
             return Ok(None);
         }
+        fence(Ordering::SeqCst);
+        let descriptor = self.tail * DESC_BYTES;
+        // SAFETY: the observed actual hardware DMA index passed this entry,
+        // completing descriptor fetch/writeback for this exact queue slot.
+        unsafe {
+            self.descriptors
+                .dma
+                .sync_for_cpu(descriptor..descriptor + DESC_BYTES)?
+        };
         let slot = &mut self.slots[self.tail];
         let (cookie, bytes) = slot.pending.ok_or(Error::OwnershipMismatch)?;
         // Actual DMA index passed this slot; the requester has completed reads.
@@ -422,7 +436,7 @@ mod tests {
             12
         }
         fn cache_attribute(&self) -> CacheAttribute {
-            CacheAttribute::Uncached
+            CacheAttribute::WriteBack
         }
     }
     impl Drop for Pages {
@@ -438,7 +452,7 @@ mod tests {
             alignment: usize,
             attribute: CacheAttribute,
         ) -> Result<PinnedPages, MemoryError> {
-            assert_eq!(attribute, CacheAttribute::Uncached);
+            assert_eq!(attribute, CacheAttribute::WriteBack);
             let n = bytes.next_multiple_of(4096);
             let layout = Layout::from_size_align(n, alignment).unwrap();
             let ptr =
@@ -483,7 +497,7 @@ mod tests {
             let address = 0x10000000 + s.next;
             assert!(address + pages.bytes() as u64 - 1 <= limit);
             let pointer = pages
-                .cpu_mapping(CacheAttribute::Uncached)
+                .cpu_mapping(CacheAttribute::WriteBack)
                 .unwrap()
                 .address(0, pages.bytes())
                 .unwrap()
@@ -610,7 +624,7 @@ mod tests {
         }
         let s = state.lock().unwrap();
         assert_eq!(s.completed.len(), 70);
-        assert_eq!(s.syncs.iter().filter(|v| v.0).count(), 70);
+        assert_eq!(s.syncs.iter().filter(|v| v.0).count(), 140);
         drop(s);
         // SAFETY: model stopped consuming and every submission is completed.
         unsafe { ring.release_after_quiesce() }.unwrap();
@@ -664,7 +678,7 @@ mod tests {
     }
     #[test]
     fn visibility_failures_poison_without_releasing_unknown_ownership() {
-        for fail_at in [2, 3, 4] {
+        for fail_at in [2, 3, 4, 5] {
             let (mut ring, state) = setup(4);
             state.lock().unwrap().fail_sync_at = Some(fail_at);
             let submit = ring.submit(11, &[11; 4096]);
