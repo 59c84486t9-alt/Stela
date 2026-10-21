@@ -10,8 +10,10 @@ use anyhow::{Context, Result, ensure};
 use serde::Serialize;
 use stela_runtime::{pauth, sha256};
 
+pub mod configuration;
 mod fixups;
 mod macho;
+pub mod publication;
 pub use fixups::{Authentication, Fixup, FixupChains};
 pub use macho::Section;
 #[cfg(test)]
@@ -70,6 +72,7 @@ pub struct Plan {
     pub image_bytes: u64,
     pub minimum_alignment: u64,
     pub chains: FixupChains,
+    pub patchbay: Option<configuration::Patchbay>,
 }
 
 /// Owns the immutable decoded input and its checked plan.
@@ -129,25 +132,25 @@ pub fn prepare_im4p(
     );
     let layout = macho::parse(&decoded, limits)?;
     let chains = fixups::parse(&decoded, &layout, limits.fixups)?;
-    Ok(Prepared {
-        plan: Plan {
-            source,
-            product_build,
-            hardware,
-            decode,
-            cpu_subtype: layout.cpu_subtype,
-            header_flags: layout.header_flags,
-            uuid: layout.uuid,
-            thread: layout.thread,
-            segments: layout.segments,
-            sections: layout.sections,
-            vm_base: layout.vm_base,
-            image_bytes: layout.image_bytes,
-            minimum_alignment: layout.alignment,
-            chains,
-        },
-        decoded,
-    })
+    let mut plan = Plan {
+        source,
+        product_build,
+        hardware,
+        decode,
+        cpu_subtype: layout.cpu_subtype,
+        header_flags: layout.header_flags,
+        uuid: layout.uuid,
+        thread: layout.thread,
+        segments: layout.segments,
+        sections: layout.sections,
+        vm_base: layout.vm_base,
+        image_bytes: layout.image_bytes,
+        minimum_alignment: layout.alignment,
+        chains,
+        patchbay: None,
+    };
+    plan.patchbay = configuration::parse(&decoded, &plan)?;
+    Ok(Prepared { plan, decoded })
 }
 
 #[derive(Debug, Clone, Serialize)]

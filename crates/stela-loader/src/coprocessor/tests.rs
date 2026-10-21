@@ -18,19 +18,19 @@ fn fixture() -> Vec<u8> {
         (8, 0x80000002),
         (12, 5),
         (16, 4),
-        (20, 616),
+        (20, 696),
     ] {
         w32(&mut b, at, v);
     }
     // Two segments, two sections in TEXT. Header remains outside the loaded map.
     let s = 32;
     w32(&mut b, s, 0x19);
-    w32(&mut b, s + 4, 232);
+    w32(&mut b, s + 4, 312);
     name(&mut b, s + 8, "__TEXT");
     for (o, v) in [(24, 0), (32, 0x1000), (40, 0x1000), (48, 0x1000)] {
         w64(&mut b, s + o, v);
     }
-    for (o, v) in [(56, 5), (60, 5), (64, 2)] {
+    for (o, v) in [(56, 5), (60, 5), (64, 3)] {
         w32(&mut b, s + o, v);
     }
     for (at, n, addr, size, off, reserved) in [
@@ -45,7 +45,21 @@ fn fixture() -> Vec<u8> {
         w32(&mut b, at + 52, 2);
         w32(&mut b, at + 68, reserved);
     }
-    let s = 264;
+    let sec = s + 232;
+    name(&mut b, sec, "_rtk_patchbay");
+    name(&mut b, sec + 16, "__TEXT");
+    w64(&mut b, sec + 32, 0x200);
+    w64(&mut b, sec + 40, 41);
+    w32(&mut b, sec + 48, 0x1200);
+    for (at, tag, size) in [
+        (0x1200, 0x50414345, 8),
+        (0x1210, 0x726f6c65, 4),
+        (0x121c, 0x62417267, 5),
+    ] {
+        w32(&mut b, at, tag);
+        w32(&mut b, at + 4, size);
+    }
+    let s = 344;
     w32(&mut b, s, 0x19);
     w32(&mut b, s + 4, 72);
     name(&mut b, s + 8, "__DATA");
@@ -54,14 +68,14 @@ fn fixture() -> Vec<u8> {
     }
     w32(&mut b, s + 56, 3);
     w32(&mut b, s + 60, 3);
-    let t = 336;
+    let t = 416;
     w32(&mut b, t, 5);
     w32(&mut b, t + 4, 288);
     w32(&mut b, t + 8, 6);
     w32(&mut b, t + 12, 68);
-    w32(&mut b, 624, 0x1b);
-    w32(&mut b, 628, 24);
-    b[632..648].copy_from_slice(&[1; 16]);
+    w32(&mut b, 704, 0x1b);
+    w32(&mut b, 708, 24);
+    b[712..728].copy_from_slice(&[1; 16]);
     w32(&mut b, 0x1000, 0xd503201f);
     for (o, v) in [(0, 7), (4, 1), (8, 0x2000)] {
         w32(&mut b, 0x1100 + o, v);
@@ -216,11 +230,11 @@ fn malformed_loads_and_chain_effects_are_refused() {
         (16, 4, 5),
         (20, 4, 608),
         (32 + 24, 8, u64::MAX),
-        (264 + 24, 8, 0x800),
+        (344 + 24, 8, 0x800),
         (32 + 72 + 56, 4, 1),
         (32 + 72 + 64, 4, 0x12),
-        (336 + 8, 4, 0),
-        (336 + 272, 8, 0x1000),
+        (416 + 8, 4, 0),
+        (416 + 272, 8, 0x1000),
         (0x1100, 4, 10),
         (0x1104, 4, 5),
         (0x1108, 4, 0x2004),
@@ -228,7 +242,7 @@ fn malformed_loads_and_chain_effects_are_refused() {
         (0x2000, 8, 1u64 << 62),
         (0x2000, 8, (1u64 << 63) | (1u64 << 51)),
         (0x2000, 8, 0x1800),
-        (624, 4, 0x80000034),
+        (704, 4, 0x80000034),
     ] {
         let mut raw = fixture();
         if width == 4 {
@@ -261,12 +275,34 @@ fn original_t6000_restore_firmware() -> Result<()> {
     };
     let prepared = prepare_im4p(
         &container,
-        source,
+        source.clone(),
         "26A434".into(),
-        hardware(),
+        HardwareIdentity {
+            role: "DCPEXT0".into(),
+            compatible: "iop,ascwrap-v4".into(),
+        },
         Limits::default(),
     )?;
     let p = prepared.plan();
+    let bay = p.patchbay.as_ref().unwrap();
+    assert_eq!(bay.records.len(), 61);
+    assert_eq!(bay.bytes, 0x75a);
+    assert_eq!(
+        bay.records
+            .iter()
+            .find(|r| r.tag == 0x50414345)
+            .unwrap()
+            .bytes,
+        8
+    );
+    assert_eq!(
+        bay.records
+            .iter()
+            .find(|r| r.tag == 0x726f6c65)
+            .unwrap()
+            .bytes,
+        4
+    );
     assert_eq!(p.cpu_subtype, 0x80000002);
     assert_eq!(p.thread.pc, 0);
     assert_eq!(p.uuid.as_deref(), Some("643ec3de5fef38769cd1ddeebc9a9e7e"));
@@ -294,6 +330,27 @@ fn original_t6000_restore_firmware() -> Result<()> {
     assert!(staged.placement().zeroes.is_empty());
     let r = staged.relocate(0, context(), 16)?;
     assert_eq!(r.receipt().pointer_count, 26103);
+    // All-preserve tests the complete packed-record mechanism, not actual
+    // original boot policy: iBoot updates identity, entropy and other fields.
+    let second = prepare_im4p(
+        &container,
+        source,
+        "26A434".into(),
+        HardwareIdentity {
+            role: "DCPEXT0".into(),
+            compatible: "iop,ascwrap-v4".into(),
+        },
+        Limits::default(),
+    )?;
+    let policy = config_policy(second.plan());
+    let configured = second.stage(0x90000000, 0xc00000)?.configure(policy)?;
+    assert_eq!(configured.receipt().fields.len(), 61);
+    assert!(configured.receipt().fields.iter().all(|f| !f.changed));
+    assert_eq!(
+        configured.receipt().configured_sha256,
+        configured.placement().staged_sha256
+    );
+    assert_eq!(configured.plan().chains.pointers.len(), 26103);
     // Synthetic PAC keys test complete format handling; they are not original trust/key provenance.
     assert_eq!(r.receipt().authenticated_pointer_count, 23858);
     assert_eq!(r.bytes().len(), 0xb24000);
@@ -305,5 +362,255 @@ fn original_t6000_restore_firmware() -> Result<()> {
         r.bytes().len(),
         r.receipt().pointer_count
     );
+    Ok(())
+}
+
+fn config_policy(plan: &Plan) -> configuration::Policy {
+    configuration::Policy {
+        owner: "synthetic boot policy".into(),
+        product_build: plan.product_build.clone(),
+        hardware_role: plan.hardware.role.clone(),
+        compatible: plan.hardware.compatible.clone(),
+        decoded_sha256: plan.source.decoded_sha256.clone(),
+        patchbay_sha256: plan.patchbay.as_ref().unwrap().source_sha256.clone(),
+        fields: plan
+            .patchbay
+            .as_ref()
+            .unwrap()
+            .records
+            .iter()
+            .map(|r| configuration::Field {
+                tag: r.tag,
+                action: configuration::Action::Preserve,
+                provenance: provenance(),
+            })
+            .collect(),
+    }
+}
+fn provenance() -> configuration::Provenance {
+    configuration::Provenance {
+        input_sha256: "1".repeat(64),
+        coordinates: "synthetic policy source span".into(),
+        span_sha256: "2".repeat(64),
+    }
+}
+fn configured() -> Result<configuration::Configured> {
+    let p = prepare(&fixture())?;
+    let policy = config_policy(p.plan());
+    p.stage(0x800000, 0x3000)?.configure(policy)
+}
+#[test]
+fn complete_configuration_preserves_source_and_encoded_cold_chains() -> Result<()> {
+    let p = prepare(&fixture())?;
+    let original = p.plan().source.decoded_sha256.clone();
+    let bay = p.plan().patchbay.as_ref().unwrap();
+    assert_eq!(bay.records.len(), 3);
+    assert_eq!(bay.records[2].bytes, 5); // Packed records do not imply alignment.
+    let mut policy = config_policy(p.plan());
+    policy.fields[0].action = configuration::Action::Replace(123u64.to_le_bytes().to_vec());
+    let s = p.stage(0x800000, 0x3000)?;
+    let encoded = s.bytes()[0x2000..0x2010].to_vec();
+    let c = s.configure(policy)?;
+    assert_eq!(c.plan().source.decoded_sha256, original);
+    assert_eq!(&c.bytes()[0x2000..0x2010], &encoded);
+    assert_eq!(&c.bytes()[0x208..0x210], &123u64.to_le_bytes());
+    assert_eq!(c.receipt().fields.iter().filter(|f| f.changed).count(), 1);
+    assert_ne!(c.receipt().configured_sha256, c.placement().staged_sha256);
+    assert_eq!(
+        configured()?.receipt().configured_sha256,
+        configured()?.placement().staged_sha256
+    );
+    Ok(())
+}
+#[test]
+fn configuration_rejects_incomplete_stale_or_malformed_policy() -> Result<()> {
+    for case in 0..7 {
+        let p = prepare(&fixture())?;
+        let mut policy = config_policy(p.plan());
+        match case {
+            0 => {
+                policy.fields.pop();
+            }
+            1 => {
+                policy.fields[1].tag = policy.fields[0].tag;
+            }
+            2 => policy.fields[0].action = configuration::Action::Replace(vec![0; 4]),
+            3 => policy.fields[0].tag = 0,
+            4 => policy.decoded_sha256 = "3".repeat(64),
+            5 => policy.fields[0].provenance.coordinates.clear(),
+            _ => policy.hardware_role = "another owner".into(),
+        }
+        assert!(p.stage(0x800000, 0x3000)?.configure(policy).is_err());
+    }
+    let mut malformed = fixture();
+    w32(&mut malformed, 0x1204, 0x10000);
+    assert!(prepare(&malformed).is_err());
+    let mut repeated = fixture();
+    w32(&mut repeated, 0x1210, 0x50414345);
+    assert!(prepare(&repeated).is_err());
+    Ok(())
+}
+fn publication_policy(c: &configuration::Configured) -> publication::Policy {
+    publication::Policy {
+        allocation_owner: "allocation fixture1".into(),
+        mapping_owner: "DART fixture1".into(),
+        configured_sha256: c.receipt().configured_sha256.clone(),
+        segments: vec![
+            publication::SegmentPolicy {
+                name: "__TEXT".into(),
+                action: publication::Action::Publish {
+                    iop_remap: 0x100000,
+                    raw_flags: 1,
+                },
+                provenance: provenance(),
+            },
+            publication::SegmentPolicy {
+                name: "__DATA".into(),
+                action: publication::Action::Publish {
+                    iop_remap: 0x200000,
+                    raw_flags: 4,
+                },
+                provenance: provenance(),
+            },
+        ],
+    }
+}
+#[test]
+fn publication_keeps_three_domains_and_exact_complete_wire_records() -> Result<()> {
+    let c = configured()?;
+    let proposal = c.publication_proposal(publication_policy(&c))?;
+    assert_eq!(proposal.segment_ranges.len(), 64);
+    assert_eq!(proposal.segment_names, b"__TEXT;__DATA;");
+    let q = |at| u64::from_le_bytes(proposal.segment_ranges[at..at + 8].try_into().unwrap());
+    assert_eq!((q(0), q(8), q(16)), (0x800000, 0, 0x100000));
+    assert_eq!(
+        (
+            proposal.entry.linked_virtual,
+            proposal.entry.physical,
+            proposal.entry.iop_remap
+        ),
+        (0, 0x800000, 0x100000)
+    );
+    assert_eq!(
+        (
+            proposal.records[1].physical,
+            proposal.records[1].linked_virtual,
+            proposal.records[1].iop_remap
+        ),
+        (0x802000, 0x2000, 0x200000)
+    );
+    let mut policy = publication_policy(&c);
+    policy.segments[0].action = publication::Action::Publish {
+        iop_remap: 0,
+        raw_flags: 1,
+    };
+    let zero = c.publication_proposal(policy)?;
+    assert_eq!(zero.entry.iop_remap, 0);
+    assert_ne!(zero.entry.physical, 0); // Proposal only, never an ASC authorization.
+    Ok(())
+}
+#[test]
+fn publication_refuses_implicit_or_overlapping_owner_policy() -> Result<()> {
+    let c = configured()?;
+    for case in 0..7 {
+        let mut policy = publication_policy(&c);
+        match case {
+            0 => {
+                policy.segments.pop();
+            }
+            1 => policy.segments[0].action = publication::Action::Omit,
+            2 => {
+                policy.segments[1].action = publication::Action::Publish {
+                    iop_remap: 0x100800,
+                    raw_flags: 4,
+                }
+            }
+            3 => {
+                policy.segments[0].action = publication::Action::Publish {
+                    iop_remap: u64::MAX,
+                    raw_flags: 1,
+                }
+            }
+            4 => {
+                policy.segments[0].action = publication::Action::Publish {
+                    iop_remap: 0x100000,
+                    raw_flags: 0x20,
+                }
+            }
+            5 => policy.mapping_owner.clear(),
+            _ => policy.configured_sha256 = "3".repeat(64),
+        }
+        assert!(c.publication_proposal(policy).is_err());
+    }
+    let mut policy = publication_policy(&c);
+    policy.segments[1].action = publication::Action::Omit;
+    let omitted = c.publication_proposal(policy)?;
+    assert_eq!(omitted.omitted.len(), 1);
+    assert_eq!(omitted.omitted[0].virtual_bytes, 0x100);
+    Ok(())
+}
+
+#[test]
+fn configuration_cannot_replace_original_encoded_fixup_slots() -> Result<()> {
+    let mut raw = fixture();
+    w32(&mut raw, 0x1108, 0x208);
+    w64(&mut raw, 0x1208, (1u64 << 63) | (2u64 << 49));
+    let p = prepare(&raw)?;
+    let mut policy = config_policy(p.plan());
+    policy.fields[0].action = configuration::Action::Replace(vec![0; 8]);
+    assert!(p.stage(0x800000, 0x3000)?.configure(policy).is_err());
+    Ok(())
+}
+
+#[test]
+fn empty_segment_decision_is_explicit_and_publication_stays_unqualified() -> Result<()> {
+    let mut raw = fixture();
+    w32(&mut raw, 16, 5);
+    w32(&mut raw, 20, 768);
+    let at = 728;
+    w32(&mut raw, at, 0x19);
+    w32(&mut raw, at + 4, 72);
+    name(&mut raw, at + 8, "__EMPTY");
+    w64(&mut raw, at + 24, 0x2100);
+    w64(&mut raw, at + 40, 0x2010);
+    w32(&mut raw, at + 56, 3);
+    w32(&mut raw, at + 60, 3);
+    let p = prepare(&raw)?;
+    let policy = config_policy(p.plan());
+    let c = p.stage(0x800000, 0x3000)?.configure(policy)?;
+    assert!(c.publication_proposal(publication_policy(&c)).is_err());
+    let mut policy = publication_policy(&c);
+    policy.segments.push(publication::SegmentPolicy {
+        name: "__EMPTY".into(),
+        action: publication::Action::Omit,
+        provenance: provenance(),
+    });
+    let proposal = c.publication_proposal(policy)?;
+    assert_eq!(proposal.omitted[0].name, "__EMPTY");
+    let mut policy = publication_policy(&c);
+    policy.segments.push(publication::SegmentPolicy {
+        name: "__EMPTY".into(),
+        action: publication::Action::Publish {
+            iop_remap: 0x300000,
+            raw_flags: 0,
+        },
+        provenance: provenance(),
+    });
+    assert!(c.publication_proposal(policy).is_err());
+    Ok(())
+}
+
+#[test]
+fn packed_zero_width_records_are_explicit_and_never_advance_by_alignment() -> Result<()> {
+    let mut raw = fixture();
+    w32(&mut raw, 0x1220, 0);
+    w64(&mut raw, 32 + 232 + 40, 36);
+    let p = prepare(&raw)?;
+    let mut policy = config_policy(p.plan());
+    assert_eq!(p.plan().patchbay.as_ref().unwrap().records[2].bytes, 0);
+    policy.fields[2].action = configuration::Action::Replace(vec![]);
+    let c = p.stage(0x800000, 0x3000)?.configure(policy)?;
+    assert_eq!(c.receipt().fields[2].bytes, 0);
+    assert!(!c.receipt().fields[2].changed);
     Ok(())
 }
