@@ -2,7 +2,8 @@
 //!
 //! iBoot hands XNU a linear framebuffer through `boot_args.Video` and the
 //! DeviceTree's `/vram`; XNU's boot console and verbose output draw into it.
-//! The mount gives the guest one of the firmware mode's size, 32 bits per
+//! The mount gives the guest one of the screen mode's size (the mode
+//! `console::mode` chose, which the DCP model can advertise), 32 bits per
 //! pixel, at the top of guest DRAM, outside the range the kernel manages
 //! (`stela_runtime::boot_bundle::Machine`), and shows only the frames the
 //! modeled DCP presents. XNU's 32-bit pixels are x8r8g8b8 with blue in the

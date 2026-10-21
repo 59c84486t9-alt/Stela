@@ -167,7 +167,7 @@ impl Menu<'_> {
 
     /// The chosen entry; `None` without console input.
     fn run(mut self) -> Option<usize> {
-        console::release();
+        console::to_firmware();
         let top = uefi::system::with_stdout(|out| self.open(out));
         loop {
             uefi::system::with_stdout(|out| self.draw(out, top));

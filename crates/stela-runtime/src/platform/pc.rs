@@ -9,8 +9,11 @@
 //! [`machine_state`] keeps that partition's layout in the tail of the Apple
 //! region instead. [`acpi`] reads the firmware's ACPI tables, through which
 //! [`power`] restarts and powers off the host and reads its power button.
+//! [`display`] chooses the graphics mode the screen runs in while boot
+//! services still allow it.
 pub mod acpi;
 pub mod boot_log;
+pub mod display;
 pub mod fat32;
 pub mod gpt;
 pub mod machine_state;

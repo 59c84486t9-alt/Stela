@@ -3,11 +3,15 @@
 //! guest's display takes the screen.
 //!
 //! Glyphs come from one 8x16 bitmap font drawn at its own resolution on any
-//! screen, so a larger display shows smaller, sharper text. The
-//! text is a grid of cells kept in memory, and drawing writes only the cells
-//! that changed: video memory is uncached and slow to read back, so
-//! scrolling redraws from the grid instead of moving pixels.
+//! screen, so a larger display shows smaller, sharper text. The screen runs
+//! in the panel's native mode where the firmware offers it ([`mode`]), so
+//! each font pixel is one panel pixel instead of one the monitor scales up,
+//! as in OpenCore's console. The text is a grid of cells kept in memory, and
+//! drawing writes only the cells that changed: video memory is
+//! write-combining and slow to read back, so scrolling redraws from the grid
+//! instead of moving pixels.
 mod font;
+mod mode;
 
 use alloc::{string::String, vec, vec::Vec};
 use core::{
@@ -17,8 +21,9 @@ use core::{
 use font::Font;
 use stela_runtime::machine::apple::ScanoutMasks;
 use uefi::{
-    boot::{self, OpenProtocolAttributes, OpenProtocolParams},
-    proto::console::gop::{GraphicsOutput, PixelFormat},
+    Handle,
+    boot::{self, OpenProtocolAttributes, OpenProtocolParams, ScopedProtocol},
+    proto::console::gop::{GraphicsOutput, ModeInfo, PixelFormat},
 };
 
 const BYTES_PER_PIXEL: usize = 4;
@@ -59,6 +64,39 @@ impl Encoding {
     }
 }
 
+/// A mode's pixel layout, when Stela can draw in it.
+fn encoding(mode: &ModeInfo) -> Option<Encoding> {
+    match (mode.pixel_format(), mode.pixel_bitmask()) {
+        (PixelFormat::Rgb, _) => Some(Encoding::Rgb),
+        (PixelFormat::Bgr, _) => Some(Encoding::Bgr),
+        (PixelFormat::Bitmask, Some(masks)) => {
+            ScanoutMasks::new(masks.red, masks.green, masks.blue)
+                .ok()
+                .map(Encoding::Masks)
+        }
+        (PixelFormat::Bitmask | PixelFormat::BltOnly, _) => None,
+    }
+}
+
+/// The first GOP, read-only (see [`Framebuffer::from_firmware`]), and its
+/// handle.
+fn gop() -> Option<(Handle, ScopedProtocol<GraphicsOutput>)> {
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
+    // SAFETY: the protocol is only used while boot services run.
+    let gop = unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+    Some((handle, gop))
+}
+
 /// The GOP mode in use when Stela takes over.
 #[derive(Debug, Clone, Copy)]
 pub struct Framebuffer {
@@ -71,35 +109,24 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
-    /// The first GOP's current mode, when it is a linear 32-bit framebuffer:
-    /// RGB, BGR or channel masks (`scanout::ChannelMasks`). A `PixelBltOnly`
-    /// mode has no framebuffer to draw in once boot services end, so it gives
-    /// none, as do masks that `ChannelMasks` refuses. Boot managers keep
-    /// their own handle open, so this only reads the protocol rather than
-    /// opening it exclusively.
+    /// The first GOP's mode, when it is a linear 32-bit framebuffer: RGB,
+    /// BGR or channel masks (`scanout::ChannelMasks`). The first call
+    /// switches the GOP to the best mode ([`mode`]), and later ones take it
+    /// back after the firmware's menu ([`to_firmware`]). A `PixelBltOnly`
+    /// mode has no framebuffer to draw in once boot services end, so it
+    /// gives none, as do masks that `ChannelMasks` refuses. Boot managers
+    /// keep their own handle open, so this only reads the protocol rather
+    /// than opening it exclusively.
     pub fn from_firmware() -> Option<Self> {
-        let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
-        // SAFETY: the protocol is only read, and only while boot services run.
-        let mut gop = unsafe {
-            boot::open_protocol::<GraphicsOutput>(
-                OpenProtocolParams {
-                    handle,
-                    agent: boot::image_handle(),
-                    controller: None,
-                },
-                OpenProtocolAttributes::GetProtocol,
-            )
-        }
-        .ok()?;
+        let (handle, mut gop) = gop()?;
+        mode::select(handle, &mut gop);
+        Self::current(&mut gop)
+    }
+
+    /// `gop`'s current mode, when Stela can draw in it.
+    fn current(gop: &mut GraphicsOutput) -> Option<Self> {
         let mode = gop.current_mode_info();
-        let encoding = match (mode.pixel_format(), mode.pixel_bitmask()) {
-            (PixelFormat::Rgb, _) => Encoding::Rgb,
-            (PixelFormat::Bgr, _) => Encoding::Bgr,
-            (PixelFormat::Bitmask, Some(masks)) => {
-                Encoding::Masks(ScanoutMasks::new(masks.red, masks.green, masks.blue).ok()?)
-            }
-            (PixelFormat::Bitmask | PixelFormat::BltOnly, _) => return None,
-        };
+        let encoding = encoding(&mode)?;
         let (width, height) = mode.resolution();
         let mut buffer = gop.frame_buffer();
         let framebuffer = Self {
@@ -350,6 +377,21 @@ pub fn install(screen: Framebuffer) {
 pub fn release() {
     // SAFETY: see `Console`; no reference to the text is live here.
     unsafe { *PARKED.0.get() = (*CONSOLE.0.get()).take() };
+}
+
+/// Hand the screen to the firmware's text console, for its startup menu:
+/// [`release`], and give the GOP back the firmware's own mode, which the
+/// text console was laid out for. The kept text was drawn for the mode
+/// Stela chose, so it is dropped when the mode changes back; the next
+/// [`Framebuffer::from_firmware`] takes the chosen mode again.
+pub fn to_firmware() {
+    release();
+    if let Some((_, mut gop)) = gop()
+        && mode::give_back(&mut gop)
+    {
+        // SAFETY: see `Console`; no reference to the text is live here.
+        unsafe { *PARKED.0.get() = None };
+    }
 }
 
 /// Take the screen back after [`release`] and draw the kept text again, so
