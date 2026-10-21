@@ -12,6 +12,8 @@ use crate::platform::apple::{
 };
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
+pub mod effects;
+
 const NAME: &str = "t6000-native-controller";
 const SRAM_BYTES: usize = (SRAM_LIMIT - SRAM_BASE) as usize;
 const GPCE: u64 = 0x28e099000;
@@ -44,6 +46,8 @@ pub enum Error {
     Unconfigured,
     Unmounted,
     Paused,
+    EffectsOwned,
+    Cursor(crate::platform::apple::pmgr::sequencer::Error),
 }
 impl Error {
     fn reason(self) -> &'static str {
@@ -68,6 +72,8 @@ impl Error {
             Self::Paused => {
                 "T6000 native physical memory access while its rail/clock/reset inhibits service"
             }
+            Self::EffectsOwned => "T6000 native packet effects already have an exclusive owner",
+            Self::Cursor(_) => "T6000 native packet input is unqualified",
         }
     }
 }
@@ -166,6 +172,7 @@ pub struct Observations {
     pub epoch: u64,
     pub stela_initialization: Option<SramInitialization>,
     pub activation_inputs: Vec<ActivationInput>,
+    pub packet_effects_owned: bool,
 }
 /// Chronological committed AP input, not a hardware trigger/completion report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,6 +197,7 @@ pub(super) struct State {
     epoch: u64,
     initialization: Option<SramInitialization>,
     activation_inputs: Vec<ActivationInput>,
+    packet_effects_owned: bool,
 }
 impl State {
     pub(super) fn new(handoff: Handoff) -> Result<Self, Error> {
@@ -212,6 +220,7 @@ impl State {
             epoch: 0,
             initialization: None,
             activation_inputs: Vec::new(),
+            packet_effects_owned: false,
         };
         match handoff {
             Handoff::Unknown => {}
@@ -283,6 +292,7 @@ impl State {
             epoch: self.epoch,
             stela_initialization: self.initialization,
             activation_inputs: self.activation_inputs.clone(),
+            packet_effects_owned: self.packet_effects_owned,
         }
     }
     fn activation_word(address: u64) -> bool {
@@ -293,7 +303,8 @@ impl State {
     /// cannot authorize replacing configuration/code. Later disable stores do
     /// not erase earlier work that may already have started.
     fn reconfiguration_qualified(&self) -> bool {
-        self.activation_inputs.is_empty()
+        !self.packet_effects_owned
+            && self.activation_inputs.is_empty()
             && ACTIVATION_WORDS.iter().all(|(address, fields)| {
                 let word = self
                     .words
@@ -905,5 +916,125 @@ mod tests {
         owner.0.borrow_mut().native.as_mut().unwrap().epoch = u64::MAX;
         assert_eq!(memory.write_checked(SRAM_BASE, &[1]), Err(Error::Epoch));
         assert_eq!(bus.read(SRAM_BASE, Width::Byte, &mut access), Ok(0));
+    }
+
+    #[test]
+    fn actual_frozen_sram_effects_route_stores_and_polls_through_the_same_controller_and_pause() {
+        use crate::platform::apple::pmgr::sequencer::{self, AddressFormat, RouteOutcome, poll};
+        let owner = owner(Handoff::StelaEmpty {
+            sram: SramInitialization::Unknown,
+        });
+        let (mut bus, controls, _) = mount(&owner);
+        let cpm = bus.add(Box::new(owner.view(0).unwrap()));
+        bus.map(cpm, 0x28e09c0c0, 4, 0x1c0c0).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        // Explicit supplied emitter-format test program: disable CPM, poll its
+        // actual input bit clear, then submit a real GPCE target. End remains
+        // unqualified; none of these effects acknowledges native completion.
+        let words = [
+            0x28e09c01, 0, 0x30, 0, 0x28e09c02, 0, 0x30, 0x80000000, 0, 0x28e09801, 0, 0, 15, 0,
+        ];
+        let bytes: Vec<_> = words.into_iter().flat_map(u32::to_le_bytes).collect();
+        let mut supplied = images();
+        let image = supplied.iter_mut().find(|row| row.sequence == 12).unwrap();
+        image.counted_words = words.len() as u32 - 1;
+        image.bytes = bytes.clone();
+        let mut installation = t6000::programs(0x20, Some(0), supplied).unwrap();
+        while let Some(claim) = installation.begin().unwrap() {
+            let outcome = match installation.dispatch(&claim).unwrap() {
+                Action::Read { address, width } => {
+                    Outcome::<MmioError>::Read(bus.read(address, width, &mut access).unwrap())
+                }
+                Action::Write(write) => {
+                    bus.write(write.address, write.width, write.value, &mut access)
+                        .unwrap();
+                    Outcome::Written
+                }
+                Action::DmbSy => panic!("no source barrier in publication"),
+            };
+            installation.finish(&claim, outcome).unwrap();
+        }
+        let entry = owner.native_entry(2, 0).unwrap();
+        let mut effects = owner
+            .native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord)
+            .unwrap();
+        assert!(matches!(
+            owner.native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord),
+            Err(Error::EffectsOwned)
+        ));
+        let mut memory = owner.native_memory().unwrap();
+        assert_eq!(memory.write_checked(entry.pc, &[0; 4]), Err(Error::Pending));
+        assert!(owner.native_observations().unwrap().packet_effects_owned);
+        let write = effects.begin_write().unwrap();
+        let actual = effects.dispatch_write(&write).unwrap();
+        bus.write(actual.address, actual.width, actual.value, &mut access)
+            .unwrap();
+        effects
+            .finish_write::<()>(&write, RouteOutcome::Committed)
+            .unwrap();
+        assert_eq!(
+            effects.begin_write().unwrap_err(),
+            sequencer::Error::ExpectedWrite
+        );
+        let read = effects.begin_read().unwrap();
+        let mut paused = LIVE;
+        paused.quiesced = true;
+        bus.device_mut::<View>(controls)
+            .unwrap()
+            .set_lifecycle(paused, &mut access);
+        assert_eq!(
+            effects.dispatch_read(&read),
+            Err(sequencer::Error::Suspended)
+        );
+        bus.device_mut::<View>(controls)
+            .unwrap()
+            .set_lifecycle(LIVE, &mut access);
+        let actual = effects.dispatch_read(&read).unwrap();
+        let value = bus.read(actual.address, actual.width, &mut access).unwrap();
+        paused.clocked = false;
+        bus.device_mut::<View>(controls)
+            .unwrap()
+            .set_lifecycle(paused, &mut access);
+        assert_eq!(
+            effects.finish_read::<()>(&read, poll::Outcome::Read(value)),
+            Ok(true)
+        );
+        assert_eq!(
+            effects.begin_write().unwrap_err(),
+            sequencer::Error::Suspended
+        );
+        bus.device_mut::<View>(controls)
+            .unwrap()
+            .set_lifecycle(LIVE, &mut access);
+        let write = effects.begin_write().unwrap();
+        let actual = effects.dispatch_write(&write).unwrap();
+        bus.write(actual.address, actual.width, actual.value, &mut access)
+            .unwrap();
+        effects
+            .finish_write::<()>(&write, RouteOutcome::Committed)
+            .unwrap();
+        assert_eq!(
+            (effects.committed_writes(), effects.committed_reads()),
+            (2, 1)
+        );
+        assert_eq!(
+            effects.begin_read().unwrap_err(),
+            sequencer::Error::UnqualifiedRetirement
+        );
+        assert_eq!(owner.requests().len(), 2); // disable input and actual GPCE target
+        let gpce = owner
+            .observations()
+            .into_iter()
+            .find(|word| word.offset == 0x18000)
+            .unwrap();
+        assert_eq!(gpce.value & 15, 15);
+        assert_eq!(gpce.known & 0x70, 0); // no readiness fabricated by a matched poll
+        let mut retained = vec![0; bytes.len()];
+        memory.read_checked(entry.pc, &mut retained).unwrap();
+        assert_eq!(retained, bytes);
+        drop(effects);
+        assert_eq!(memory.write_checked(entry.pc, &[0; 4]), Err(Error::Pending));
+        assert!(sink.take_aic_inputs().is_empty());
     }
 }

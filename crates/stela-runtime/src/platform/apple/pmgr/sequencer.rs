@@ -14,6 +14,8 @@
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod poll;
+
 const SRAM_ALIGNMENT: u64 = 32;
 const MAX_PHYSICAL: u64 = 1 << 42;
 const WRITE_TAG: u32 = 1;
@@ -52,6 +54,13 @@ pub enum Error {
     WidePadding,
     UnqualifiedInstruction(u32),
     UnqualifiedRetirement,
+    ExpectedWrite,
+    ExpectedRead,
+    PollEncoding,
+    PollExpectedMask,
+    UnqualifiedPollCondition(u8),
+    UnqualifiedPollTimeout(u16),
+    CounterExhausted,
 }
 
 /// One physical store, without a claim that its target accepts that access.
@@ -98,6 +107,7 @@ pub enum FinishError<E> {
 struct InFlight {
     ticket: u64,
     dispatched: bool,
+    read: bool,
 }
 
 struct Sram {
@@ -125,10 +135,13 @@ pub struct PacketCursor {
     sram: Option<Sram>,
     pc: usize,
     packet: Option<Packet>,
+    poll: Option<poll::Packet>,
     in_flight: Option<InFlight>,
     uncertain: Option<PhysicalWrite>,
+    uncertain_read: Option<poll::PhysicalRead>,
     ticket: u64,
     committed_writes: u64,
+    committed_reads: u64,
     suspended: bool,
 }
 impl PacketCursor {
@@ -195,7 +208,7 @@ impl PacketCursor {
     /// exposing its first effect. A nested service call cannot claim it again.
     /// No end/unknown instruction is treated as successful retirement.
     pub fn begin_write(&mut self) -> Result<WriteClaim, Error> {
-        if self.uncertain.is_some() {
+        if self.quarantined() {
             return Err(Error::UncertainEffects);
         }
         if self.in_flight.is_some() {
@@ -203,6 +216,12 @@ impl PacketCursor {
         }
         if self.suspended {
             return Err(Error::Suspended);
+        }
+        if self.poll.is_some() {
+            return Err(Error::ExpectedWrite);
+        }
+        if self.committed_writes == u64::MAX {
+            return Err(Error::CounterExhausted);
         }
         let sram = self.sram.as_ref().ok_or(Error::UnknownSram)?;
         if self.packet.is_none() {
@@ -214,6 +233,7 @@ impl PacketCursor {
         self.in_flight = Some(InFlight {
             ticket,
             dispatched: false,
+            read: false,
         });
         let packet = self.packet.as_ref().expect("validated write packet");
         Ok(WriteClaim {
@@ -224,19 +244,23 @@ impl PacketCursor {
     }
 
     fn check_claim(&self, claim: &WriteClaim) -> Result<(), Error> {
-        if self.uncertain.is_some() {
+        if self.quarantined() {
             return Err(Error::UncertainEffects);
         }
         if Rc::ptr_eq(&claim.owner, &self.owner)
             && self
                 .in_flight
                 .as_ref()
-                .is_some_and(|state| state.ticket == claim.ticket)
+                .is_some_and(|state| state.ticket == claim.ticket && !state.read)
         {
             Ok(())
         } else {
             Err(Error::StaleClaim)
         }
+    }
+
+    fn quarantined(&self) -> bool {
+        self.uncertain.is_some() || self.uncertain_read.is_some()
     }
 
     /// Mark exclusive ownership as dispatched immediately before calling the
@@ -320,6 +344,9 @@ fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
         return Err(Error::UnqualifiedRetirement);
     }
     if header & WRITE_TAG == 0 {
+        if header & 0x1f == 2 {
+            return Err(Error::ExpectedWrite);
+        }
         return Err(Error::UnqualifiedInstruction(header));
     }
     let wide = header & WIDE != 0;
@@ -829,7 +856,7 @@ mod tests {
             (
                 vec![2],
                 AddressFormat::Compact,
-                Error::UnqualifiedInstruction(2),
+                Error::ExpectedWrite, // tag2 now requires the separate checked read path
             ),
             (
                 vec![0x44],
