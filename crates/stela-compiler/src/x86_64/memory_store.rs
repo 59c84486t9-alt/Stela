@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 pub(crate) mod checked_pair;
 pub(crate) mod checked_scalar;
-use super::{AddressMode, Register, isa::ShiftOpcode};
+use super::{AddressMode, Register, isa::SimdOpcode};
 
 pub(super) const PROTECTION_GRANULE_BYTES: u32 = 4096;
 const BYTE_BITS: u8 = 8;
@@ -11,6 +11,10 @@ const HALFWORD_BYTES: u8 = 2;
 const DWORD_BYTES: u8 = 4;
 const QWORD_BYTES: u8 = 8;
 const VECTOR_BYTES: u8 = 16;
+/// Wide stores stage their sources in XMM0/XMM1. XMM2 is never a retained
+/// input at this boundary; a full-width shuffle also avoids a merge dependency.
+const HIGH_QWORD_SCRATCH_XMM: u8 = 2;
+const DUPLICATE_HIGH_QWORD: u8 = 0xee;
 const OPERAND_SIZE_PREFIX: u8 = 0x66;
 const REP_PREFIX: u8 = 0xf3;
 const SSE_ESCAPE: u8 = 0x0f;
@@ -63,7 +67,9 @@ pub(super) fn aligned_register_offset(
 
 /// RAX is the address; displacement is zero or the second pair element's size.
 /// RDX (pending writeback), R8 (second integer value), RDI and guest state survive.
-/// RCX, R10 and the selected XMM register are scratch on the crossing path.
+/// RCX, R10 and XMM2 are scratch on the crossing path. The selected XMM0/XMM1
+/// source remains whole, including where the block retains XMM0 for a later
+/// instruction.
 pub(super) fn emit(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source, aligned: bool) {
     debug_assert!(bytes.is_power_of_two() && bytes <= VECTOR_BYTES);
     debug_assert!(displacement == 0 || displacement == bytes);
@@ -183,8 +189,18 @@ fn prefix_store(code: &mut Vec<u8>, bytes: u8, displacement: u8, source: Source)
             let Source::Xmm(xmm) = source else {
                 unreachable!("only vectors exceed a qword")
             };
-            ShiftOpcode::RightBytes.emit(code, xmm, QWORD_BYTES);
-            extract_qword(code, xmm);
+            assert_ne!(
+                xmm, HIGH_QWORD_SCRATCH_XMM,
+                "store input aliases its scratch"
+            );
+            SimdOpcode::ShuffleDword.register(
+                code,
+                HIGH_QWORD_SCRATCH_XMM,
+                xmm,
+                crate::TargetCpu::Baseline,
+            );
+            code.push(DUPLICATE_HIGH_QWORD);
+            extract_qword(code, HIGH_QWORD_SCRATCH_XMM);
         } else if byte != 0 {
             code.extend(SHR_RCX_IMM8);
             code.push(BYTE_BITS);
