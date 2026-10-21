@@ -1,12 +1,13 @@
-//! Apple's core performance monitor (CPMU) of the M2's cores (H14), as
-//! XNU `xnu-12377.121.6` programs it: `osfmk/arm64/cpc_arm64.c`,
-//! `cpc_arm64.h` and `pexpert/arm64/H14.h` (`CPMU_PMC_COUNT 10`,
-//! `CPMU_64BIT_PMCS`, no `CPMU_AIC_PMI`).
+//! Apple's core performance monitor (CPMU) of the M1 (H13) and M2 (H14),
+//! as XNU `xnu-12377.121.6` programs it: `osfmk/arm64/cpc_arm64.c`,
+//! `cpc_arm64.h` and `pexpert/arm64/H13.h` / `H14.h` (10 counters,
+//! 48-bit on H13, `CPMU_64BIT_PMCS` on H14, no `CPMU_AIC_PMI`).
+//! See `docs/research/core-pmu.md` for the source and qualification limits.
 //!
 //! - PMC0 counts cycles and PMC1 retired instructions; PMC2 to PMC9 count
-//!   the events PMESR0 and PMESR1 select. The counters are 64 bits wide and
-//!   bit 63 is the overflow bit (`CPC_CPMU_MAX_COUNT` is 2^63 - 1); PMSR
-//!   reports each counter's overflow.
+//!   the events PMESR0 and PMESR1 select. The counters wrap at their
+//!   configured width: bit 47 (M1) or bit 63 (M2) is the overflow bit
+//!   (`CPC_CPMU_MAX_COUNT`); PMSR reports each counter's overflow.
 //! - PMCR0 enables counting (bits 0-7, 32-33 for PMC8 and PMC9), selects the
 //!   PMI (bits 8-10, 4 for FIQ), reports it (bit 11, PMAI), enables each
 //!   counter's PMI (bits 12-19, 44-45), PC capture for PMC5-7 (bits 24-26)
@@ -86,7 +87,32 @@ const EXTENSIONS: usize = 9;
 pub const COUNTERS: usize = 10;
 const CYCLES: usize = 0;
 const INSTRUCTIONS: usize = 1;
+#[cfg(test)]
 const OVERFLOW: u64 = 1 << 63;
+
+/// Counter geometry, separately qualified from event selectors and clocks.
+#[derive(Debug, Clone, Copy)]
+enum Width {
+    Bits48,
+    Bits64,
+}
+
+impl Width {
+    fn bits(self) -> u32 {
+        match self {
+            Self::Bits48 => 48,
+            Self::Bits64 => 64,
+        }
+    }
+
+    fn mask(self) -> u64 {
+        u64::MAX >> (64 - self.bits())
+    }
+
+    fn overflow(self) -> u64 {
+        1 << (self.bits() - 1)
+    }
+}
 
 const PMCR0_COUNT: u64 = 0xff | 0b11 << 32;
 const PMCR0_INTGEN: u64 = 0b111 << 8;
@@ -121,6 +147,7 @@ pub struct Context {
 /// One PE's CPMU.
 #[derive(Debug, Clone)]
 pub struct Pmu {
+    width: Width,
     /// The core clock, in Hz, and the system counter frequency.
     clock: u64,
     frequency: u64,
@@ -145,8 +172,26 @@ pub struct Pmu {
 }
 
 impl Pmu {
+    /// Preserve the original M2 monitor API.
     pub fn new(clock: u64, frequency: u64) -> Self {
+        Self::with_width(Width::Bits64, clock, frequency)
+    }
+
+    /// Construct only a source-qualified core monitor, with a core clock
+    /// supplied by its PE profile. A generation name supplies no clock or
+    /// later-generation counter/event layout.
+    pub fn for_chip(chip: Chip, clock: u64, frequency: u64) -> Option<Self> {
+        let width = match chip {
+            Chip::AppleM1 => Width::Bits48,
+            Chip::AppleM2 => Width::Bits64,
+            _ => return None,
+        };
+        Some(Self::with_width(width, clock, frequency))
+    }
+
+    fn with_width(width: Width, clock: u64, frequency: u64) -> Self {
         Self {
+            width,
             clock,
             frequency,
             pmcr0: 0,
@@ -168,9 +213,9 @@ impl Pmu {
         }
     }
 
-    /// Whether `chip`'s cores have this layout: the M2's (H14).
+    /// Whether `chip`'s fixed CPMU layout is qualified (H13/H14).
     pub fn on(chip: Chip) -> bool {
-        chip == Chip::AppleM2
+        matches!(chip, Chip::AppleM1 | Chip::AppleM2)
     }
 
     pub fn owns(encoding: Encoding) -> bool {
@@ -206,11 +251,13 @@ impl Pmu {
         if self.counts(CYCLES, self.context) {
             let scaled = u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder);
             let frequency = u128::from(self.frequency);
-            self.counters[CYCLES] = self.counters[CYCLES].wrapping_add((scaled / frequency) as u64);
+            self.counters[CYCLES] =
+                self.counters[CYCLES].wrapping_add((scaled / frequency) as u64) & self.width.mask();
             self.remainder = (scaled % frequency) as u64;
         }
         if self.counts(INSTRUCTIONS, self.context) {
-            self.counters[INSTRUCTIONS] = self.counters[INSTRUCTIONS].wrapping_add(instructions);
+            self.counters[INSTRUCTIONS] =
+                self.counters[INSTRUCTIONS].wrapping_add(instructions) & self.width.mask();
         }
         self.synced_count = self.synced_count.max(now);
         self.synced_retired = retired;
@@ -227,10 +274,13 @@ impl Pmu {
     fn update(&mut self) {
         let fiq = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ;
         let armed = |n: usize| fiq && self.pmcr0 & counter_bit(12, 44, n) != 0;
-        self.asserted = (0..COUNTERS).any(|n| armed(n) && self.counters[n] & OVERFLOW != 0);
+        self.asserted =
+            (0..COUNTERS).any(|n| armed(n) && self.counters[n] & self.width.overflow() != 0);
         self.cycle_deadline = (armed(CYCLES) && self.counts(CYCLES, self.context))
             .then(|| {
-                let needed = u128::from(OVERFLOW.wrapping_sub(self.counters[CYCLES]));
+                let needed = u128::from(
+                    self.width.overflow().wrapping_sub(self.counters[CYCLES]) & self.width.mask(),
+                );
                 let scaled = (needed * u128::from(self.frequency))
                     .saturating_sub(u128::from(self.remainder));
                 let ticks = scaled.div_ceil(u128::from(self.clock));
@@ -242,8 +292,12 @@ impl Pmu {
         self.instruction_deadline = (armed(INSTRUCTIONS)
             && self.counts(INSTRUCTIONS, self.context))
         .then(|| {
-            self.synced_retired
-                .checked_add(OVERFLOW.wrapping_sub(self.counters[INSTRUCTIONS]))
+            self.synced_retired.checked_add(
+                self.width
+                    .overflow()
+                    .wrapping_sub(self.counters[INSTRUCTIONS])
+                    & self.width.mask(),
+            )
         })
         .flatten();
     }
@@ -252,11 +306,38 @@ impl Pmu {
     /// instructions retired, the context unchanged since the last
     /// synchronization.
     pub fn asserted(&self, now: u64, retired: u64) -> bool {
-        self.asserted
+        if !(self.asserted
             || self.cycle_deadline.is_some_and(|deadline| now >= deadline)
             || self
                 .instruction_deadline
-                .is_some_and(|deadline| retired >= deadline)
+                .is_some_and(|deadline| retired >= deadline))
+        {
+            return false;
+        }
+        // A cached deadline identifies the first crossing, but the high
+        // counter bit can clear again after a complete-width wrap. Do not
+        // turn that deadline into an unqualified sticky pending latch.
+        (0..COUNTERS).any(|n| {
+            let armed = self.pmcr0 & PMCR0_INTGEN == PMCR0_INTGEN_FIQ
+                && self.pmcr0 & counter_bit(12, 44, n) != 0;
+            if !armed {
+                return false;
+            }
+            let increment = if self.counts(n, self.context) {
+                match n {
+                    CYCLES => {
+                        let ticks = now.saturating_sub(self.synced_count);
+                        ((u128::from(ticks) * u128::from(self.clock) + u128::from(self.remainder))
+                            / u128::from(self.frequency)) as u64
+                    }
+                    INSTRUCTIONS => retired.wrapping_sub(self.synced_retired),
+                    _ => 0,
+                }
+            } else {
+                0
+            };
+            self.counters[n].wrapping_add(increment) & self.width.overflow() != 0
+        })
     }
 
     /// The earliest system count at which the PMI can assert without
@@ -287,7 +368,7 @@ impl Pmu {
             PMESR0 => stored(self.pmesr[0])?,
             PMESR1 => stored(self.pmesr[1])?,
             PMSR => (0..COUNTERS)
-                .filter(|&n| self.counters[n] & OVERFLOW != 0)
+                .filter(|&n| self.counters[n] & self.width.overflow() != 0)
                 .fold(0, |status, n| status | 1 << n),
             PC_CAPTURE => return Err("PMI PC capture is not modelled"),
             _ => match PMC.iter().position(|&pmc| pmc == encoding) {
@@ -356,7 +437,7 @@ impl Pmu {
             PMESR1 => self.pmesr[1] = Some(value),
             PMSR | PC_CAPTURE => return Err("write of a performance monitor status register"),
             _ => match PMC.iter().position(|&pmc| pmc == encoding) {
-                Some(n) => self.counters[n] = value,
+                Some(n) => self.counters[n] = value & self.width.mask(),
                 None => {
                     let index = EXTENSION
                         .iter()
@@ -396,7 +477,11 @@ mod tests {
     const FREQUENCY: u64 = 24_000_000;
 
     fn configured(clock: u64) -> Pmu {
-        let mut pmu = Pmu::new(clock, FREQUENCY);
+        configured_on(Chip::AppleM2, clock)
+    }
+
+    fn configured_on(chip: Chip, clock: u64) -> Pmu {
+        let mut pmu = Pmu::for_chip(chip, clock, FREQUENCY).unwrap();
         // `_cpc_cpmu_pmcr01_write`: PMCR1, its copy, then PMCR0.
         pmu.write(PMCR1, PMCR1_INIT, 0, 0, KERNEL).unwrap();
         pmu.write(PMCR1_ALTERNATE, PMCR1_INIT, 0, 0, KERNEL)
@@ -477,6 +562,94 @@ mod tests {
             },
         );
         assert_eq!(pmu.deadline(), None);
+    }
+
+    #[test]
+    fn qualified_counter_geometry_masks_writes_without_inheriting_future_layouts() {
+        for (chip, mask, overflow) in [
+            (Chip::AppleM1, (1u64 << 48) - 1, 1u64 << 47),
+            (Chip::AppleM2, u64::MAX, 1u64 << 63),
+        ] {
+            let mut pmu = Pmu::for_chip(chip, CLOCK, FREQUENCY).unwrap();
+            assert!(Pmu::on(chip));
+            for (index, encoding) in PMC.into_iter().enumerate() {
+                pmu.write(encoding, u64::MAX, 0, 0, KERNEL).unwrap();
+                assert_eq!(pmu.read(encoding, 0, 0, KERNEL), Ok(mask));
+                assert_eq!(pmu.read(PMSR, 0, 0, KERNEL), Ok((1 << (index + 1)) - 1));
+            }
+            for encoding in PMC {
+                pmu.write(encoding, overflow - 1, 0, 0, KERNEL).unwrap();
+            }
+            assert_eq!(pmu.read(PMSR, 0, 0, KERNEL), Ok(0));
+            // Counter storage does not qualify event counting or EL0 access.
+            for value in [1 << 2, 1 << 32, 1 << 30] {
+                assert!(pmu.write(PMCR0, value, 0, 0, KERNEL).is_err());
+            }
+        }
+        assert!(!Pmu::owns(monitor(2, 8, 0)), "PMC8 is CRm9, not CRm8");
+        for chip in [Chip::AppleM3, Chip::AppleM4, Chip::AppleM5, Chip::AppleM6] {
+            assert!(!Pmu::on(chip));
+            assert!(Pmu::for_chip(chip, CLOCK, FREQUENCY).is_none());
+        }
+    }
+
+    #[test]
+    fn m1_fixed_counts_wrap_at_48_bits_and_signal_at_bit47() {
+        const M1_OVERFLOW: u64 = 1 << 47;
+        const M1_MASK: u64 = (1 << 48) - 1;
+        let mut pmu = configured_on(Chip::AppleM1, FREQUENCY);
+        pmu.write(PMC[0], M1_OVERFLOW - 3, 0, 0, KERNEL).unwrap();
+        pmu.write(PMC[1], M1_OVERFLOW - 2, 0, 0, KERNEL).unwrap();
+        assert_eq!(pmu.deadline(), Some(3));
+        assert!(!pmu.asserted(2, 1));
+        assert!(pmu.asserted(2, 2));
+        assert_eq!(pmu.read(PMSR, 2, 2, KERNEL), Ok(1 << 1));
+        assert_eq!(pmu.read(PMC[1], 2, 2, KERNEL), Ok(M1_OVERFLOW));
+        assert_eq!(pmu.read(PMSR, 3, 2, KERNEL), Ok(0b11));
+        // Rewriting the counters clears their overflow indications.
+        pmu.write(PMC[0], M1_MASK - 1, 3, 2, KERNEL).unwrap();
+        pmu.write(PMC[1], M1_MASK - 1, 3, 2, KERNEL).unwrap();
+        // Predictive FIQ must agree with an eventual synchronized read
+        // even when a large elapsed interval crosses the full width.
+        assert!(!pmu.asserted(6, 5));
+        assert_eq!(pmu.read(PMC[0], 6, 5, KERNEL), Ok(1));
+        assert_eq!(pmu.read(PMC[1], 6, 5, KERNEL), Ok(1));
+        assert_eq!(pmu.read(PMSR, 6, 5, KERNEL), Ok(0));
+        assert!(!pmu.asserted(6, 5));
+        // On M2, crossing bit47 is ordinary counting, not overflow.
+        let mut m2 = configured_on(Chip::AppleM2, FREQUENCY);
+        m2.write(PMC[1], M1_OVERFLOW - 2, 0, 0, KERNEL).unwrap();
+        assert!(!m2.asserted(0, 2));
+        assert_eq!(m2.read(PMSR, 0, 2, KERNEL), Ok(0));
+    }
+
+    #[test]
+    fn m1_cycle_deadlines_keep_fractions_filters_and_wait_state() {
+        const M1_OVERFLOW: u64 = 1 << 47;
+        let mut pmu = configured_on(Chip::AppleM1, 10_000_000);
+        pmu.write(PMC[0], M1_OVERFLOW - 1, 0, 0, KERNEL).unwrap();
+        // 5/12 cycle per tick: one cycle needs three ticks, preserving
+        // fractional cycles across reads and wait/context transitions.
+        assert_eq!(pmu.deadline(), Some(3));
+        assert_eq!(pmu.read(PMC[0], 2, 0, KERNEL), Ok(M1_OVERFLOW - 1));
+        assert_eq!(pmu.deadline(), Some(3));
+        let waiting = Context {
+            el: 2,
+            waiting: true,
+        };
+        pmu.sync(2, 0, waiting);
+        assert_eq!(pmu.deadline(), None);
+        pmu.sync(100, 0, USER);
+        assert_eq!(pmu.deadline(), Some(101));
+        assert_eq!(pmu.read(PMC[0], 101, 0, USER), Ok(M1_OVERFLOW));
+        assert_eq!(pmu.read(PMCR0, 101, 0, USER), Ok(PMCR0_INIT | PMCR0_PMAI));
+        // Disable user counting without changing the fixed events.
+        pmu.write(PMCR1_ALTERNATE, 0x30000, 101, 0, USER).unwrap();
+        pmu.write(PMCR1, 0x30000, 101, 0, USER).unwrap();
+        assert_eq!(pmu.read(PMC[0], 200, 100, USER), Ok(M1_OVERFLOW));
+        assert_eq!(pmu.read(PMC[1], 200, 100, USER), Ok(0));
+        pmu.sync(200, 100, KERNEL);
+        assert_eq!(pmu.read(PMC[1], 200, 103, KERNEL), Ok(3));
     }
 
     #[test]

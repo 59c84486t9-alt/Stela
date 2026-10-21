@@ -1362,8 +1362,7 @@ pub(super) fn identify(
     let own = profile.processors.get(pe);
     cpu.pmu = own
         .and_then(|identity| identity.clock)
-        .filter(|_| Pmu::on(profile.chip))
-        .map(|clock| Pmu::new(clock, profile.counter_frequency));
+        .and_then(|clock| Pmu::for_chip(profile.chip, clock, profile.counter_frequency));
     // The activity monitors count the board's core clock, or the counter's
     // frequency where the board gives none (`machine::amu`).
     cpu.amu = (cpu.registers.implemented(Feature::FEAT_AMUv1) == Ok(true)).then(|| {
@@ -1436,6 +1435,41 @@ mod tests {
         system::{Feature, Register},
     };
     use stela_compiler::aarch64::system::registers::Encoding;
+
+    #[test]
+    fn core_monitor_construction_needs_a_qualified_layout_and_an_explicit_pe_clock() {
+        use crate::machine::{Identity, pmu};
+        for chip in Chip::ALL {
+            let mut machine = machine_on(chip, &[]);
+            assert!(machine.cpu.pmu.is_none());
+            // A synthetic profile clock tests ownership and routing; it is
+            // not a hardware clock declaration for any board.
+            machine.profile.processors = alloc::vec![Identity {
+                midr: 0,
+                mpidr: 0x8000_0000,
+                clock: Some(1_000_000_000),
+                caches: None,
+            }];
+            machine.load_profile();
+            assert_eq!(machine.cpu.pmu.is_some(), pmu::Pmu::on(chip));
+            if pmu::Pmu::on(chip) {
+                machine.cpu.state.x[0] = 1 << 48;
+                machine
+                    .system_instruction(access(false, pmu::PMC[1], 0))
+                    .unwrap();
+                machine
+                    .system_instruction(access(true, pmu::PMC[1], 1))
+                    .unwrap();
+                assert_eq!(
+                    machine.cpu.state.x[1],
+                    if chip == Chip::AppleM1 { 0 } else { 1 << 48 }
+                );
+            }
+            machine.profile.processors[0].clock = None;
+            machine.load_profile();
+            assert!(machine.cpu.pmu.is_none());
+        }
+    }
 
     fn access(read: bool, encoding: Encoding, rt: u32) -> u32 {
         0xd510_0000

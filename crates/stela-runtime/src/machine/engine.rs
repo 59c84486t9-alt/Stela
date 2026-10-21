@@ -6648,78 +6648,87 @@ mod tests {
     }
 
     #[test]
-    fn the_m2_performance_monitor_counts_retired_instructions_and_signals_fiq() {
-        const MSR_PMCR1_X1: u32 = 0xd519_f101;
-        const MSR_PMCR1_COPY_X1: u32 = 0xd519_f741;
-        const MSR_PMCR0_X2: u32 = 0xd519_f002;
-        const MSR_PMC1_X6: u32 = 0xd51a_f106;
-        const MRS_X3_PMC1: u32 = 0xd53a_f103;
-        const MRS_X4_HCR_EL2: u32 = 0xd53c_1104;
-        const MRS_X5_PMC1: u32 = 0xd53a_f105;
-        const MRS_X7_PMCR0: u32 = 0xd539_f007;
-        const ADD: u32 = 0x9100_0400;
-        const B_NEXT: u32 = 0x1400_0001;
-        const SVC: u32 = 0xd400_0001;
-        let mut words = vec![
-            MSR_PMCR1_X1,
-            MSR_PMCR1_COPY_X1,
-            MSR_PMCR0_X2,
-            ADD,
-            ADD,
-            B_NEXT,
-            MRS_X3_PMC1,
-            MRS_X4_HCR_EL2,
-        ];
-        // The EL1 vectors at BASE + 0x800: current EL, SPx, synchronous.
-        words.resize(0xa00 / 4, 0);
-        words.extend([MRS_X5_PMC1, SVC]);
-        let identity = registers::Identity {
-            midr: 0x611f_0330,
-            mpidr: 0x8001_0000,
-            clock: Some(3_504_000_000),
-            caches: None,
-        };
-        let chip = crate::machine::Chip::AppleM2;
-        let mut machine = board_on(chip, &words, NoDevices, vec![identity]);
-        machine
-            .cpu
-            .registers
-            .set(SystemRegister::VBAR_EL1, 0, BASE + 0x800);
-        // XNU's PMCR1_INIT and PMCR0_INIT: PMC0 and PMC1 with their PMIs.
-        machine.cpu.state.x[1] = 0x30300;
-        machine.cpu.state.x[2] = 0x3 | 0x3000 | 0x400;
-        let run = |machine: &mut Machine<FakeHost, NoDevices>, next_pc, kind: ExitKind| {
-            machine.host.exits.push(NativeExit::Exit {
-                next_pc,
-                kind: kind as u64,
-            });
-            machine.step().unwrap();
-        };
-        for pc in [BASE, BASE + 4, BASE + 8] {
-            run(&mut machine, pc, ExitKind::System);
+    fn the_m1_and_m2_performance_monitors_count_retirement_and_signal_their_overflow_fiq() {
+        for (chip, overflow) in [
+            (crate::machine::Chip::AppleM1, 1u64 << 47),
+            (crate::machine::Chip::AppleM2, 1u64 << 63),
+        ] {
+            const MSR_PMCR1_X1: u32 = 0xd519_f101;
+            const MSR_PMCR1_COPY_X1: u32 = 0xd519_f741;
+            const MSR_PMCR0_X2: u32 = 0xd519_f002;
+            const MSR_PMC1_X6: u32 = 0xd51a_f106;
+            const MRS_X3_PMC1: u32 = 0xd53a_f103;
+            const MRS_X4_HCR_EL2: u32 = 0xd53c_1104;
+            const MRS_X5_PMC1: u32 = 0xd53a_f105;
+            const MRS_X7_PMCR0: u32 = 0xd539_f007;
+            const ADD: u32 = 0x9100_0400;
+            const B_NEXT: u32 = 0x1400_0001;
+            const SVC: u32 = 0xd400_0001;
+            let mut words = vec![
+                MSR_PMCR1_X1,
+                MSR_PMCR1_COPY_X1,
+                MSR_PMCR0_X2,
+                ADD,
+                ADD,
+                B_NEXT,
+                MRS_X3_PMC1,
+                MRS_X4_HCR_EL2,
+            ];
+            // The EL1 vectors at BASE + 0x800: current EL, SPx, synchronous.
+            words.resize(0xa00 / 4, 0);
+            words.extend([MRS_X5_PMC1, SVC]);
+            let identity = registers::Identity {
+                midr: if chip == crate::machine::Chip::AppleM1 {
+                    0x611f_0230
+                } else {
+                    0x611f_0330
+                },
+                mpidr: 0x8001_0000,
+                // Synthetic fixture clock: no board clock is inferred.
+                clock: Some(1_000_000_000),
+                caches: None,
+            };
+            let mut machine = board_on(chip, &words, NoDevices, vec![identity]);
+            machine
+                .cpu
+                .registers
+                .set(SystemRegister::VBAR_EL1, 0, BASE + 0x800);
+            // XNU's PMCR1_INIT and PMCR0_INIT: PMC0 and PMC1 with their PMIs.
+            machine.cpu.state.x[1] = 0x30300;
+            machine.cpu.state.x[2] = 0x3 | 0x3000 | 0x400;
+            let run = |machine: &mut Machine<FakeHost, NoDevices>, next_pc, kind: ExitKind| {
+                machine.host.exits.push(NativeExit::Exit {
+                    next_pc,
+                    kind: kind as u64,
+                });
+                machine.step().unwrap();
+            };
+            for pc in [BASE, BASE + 4, BASE + 8] {
+                run(&mut machine, pc, ExitKind::System);
+            }
+            // The two ADDs and the branch, then the MRS, which counts itself.
+            run(&mut machine, BASE + 24, ExitKind::Direct);
+            run(&mut machine, BASE + 24, ExitKind::System);
+            assert_eq!(machine.cpu.state.x[3], 4);
+            // An UNDEFINED MRS does not retire; the vector's MRS does.
+            run(&mut machine, BASE + 28, ExitKind::System);
+            assert_eq!(machine.cpu.pc, BASE + 0xa00);
+            run(&mut machine, BASE + 0xa00, ExitKind::System);
+            assert_eq!(machine.cpu.state.x[5], 5);
+            // SVC retires as it takes its exception.
+            run(&mut machine, BASE + 0xa04, ExitKind::System);
+            run(&mut machine, BASE + 0xa00, ExitKind::System);
+            assert_eq!(machine.cpu.state.x[5], 7);
+            // Two instructions short of overflow, the PMI asserts as FIQ once
+            // they retire, and PMAI reports it.
+            machine.cpu.state.x[6] = overflow - 2;
+            machine.system_instruction(MSR_PMC1_X6).unwrap();
+            assert!(!machine.lines().fiq);
+            machine.cpu.retired += 2;
+            assert!(machine.lines().fiq);
+            machine.system_instruction(MRS_X7_PMCR0).unwrap();
+            assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
         }
-        // The two ADDs and the branch, then the MRS, which counts itself.
-        run(&mut machine, BASE + 24, ExitKind::Direct);
-        run(&mut machine, BASE + 24, ExitKind::System);
-        assert_eq!(machine.cpu.state.x[3], 4);
-        // An UNDEFINED MRS does not retire; the vector's MRS does.
-        run(&mut machine, BASE + 28, ExitKind::System);
-        assert_eq!(machine.cpu.pc, BASE + 0xa00);
-        run(&mut machine, BASE + 0xa00, ExitKind::System);
-        assert_eq!(machine.cpu.state.x[5], 5);
-        // SVC retires as it takes its exception.
-        run(&mut machine, BASE + 0xa04, ExitKind::System);
-        run(&mut machine, BASE + 0xa00, ExitKind::System);
-        assert_eq!(machine.cpu.state.x[5], 7);
-        // Two instructions short of overflow, the PMI asserts as FIQ once
-        // they retire, and PMAI reports it.
-        machine.cpu.state.x[6] = (1 << 63) - 2;
-        machine.system_instruction(MSR_PMC1_X6).unwrap();
-        assert!(!machine.lines().fiq);
-        machine.cpu.retired += 2;
-        assert!(machine.lines().fiq);
-        machine.system_instruction(MRS_X7_PMCR0).unwrap();
-        assert_eq!(machine.cpu.state.x[7], 0x3 | 0x3000 | 0x400 | 1 << 11);
     }
 
     #[test]
