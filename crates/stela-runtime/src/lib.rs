@@ -13,6 +13,7 @@ pub mod amx;
 pub mod apfs;
 pub mod blocks;
 pub mod boot_bundle;
+mod checksum;
 pub mod clock;
 #[cfg(feature = "std")]
 pub mod code_signature;

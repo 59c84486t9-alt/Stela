@@ -30,40 +30,8 @@ pub(super) const SECTIONS: usize = 3;
 /// replace the image and activate it at the next reset (NVMe 1.4 figure
 /// 181). No other slot or action is ever sent.
 pub(super) const ACTIVATE_SLOT0_REPLACE: u32 = 1 << 3;
-const CASTAGNOLI: u32 = 0x82f6_3b78;
-const CRC_TABLE: [u32; 256] = crc_table();
-
-const fn crc_table() -> [u32; 256] {
-    let mut table = [0; 256];
-    let mut i = 0;
-    while i < 256 {
-        let mut crc = i as u32;
-        let mut bit = 0;
-        while bit < 8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ CASTAGNOLI
-            } else {
-                crc >> 1
-            };
-            bit += 1;
-        }
-        table[i] = crc;
-        i += 1;
-    }
-    table
-}
-
-fn crc_update(mut state: u32, data: &[u8]) -> u32 {
-    for &byte in data {
-        state = CRC_TABLE[((state ^ u32::from(byte)) & 0xff) as usize] ^ (state >> 8);
-    }
-    state
-}
-
-/// CRC32C as `BuildCommandBFHImageDownload` computes it for CDW15.
-pub(super) fn crc32c(data: &[u8]) -> u32 {
-    !crc_update(!0, data)
-}
+pub(super) use crate::checksum::crc32c;
+use crate::checksum::crc32c_update as crc_update;
 
 /// A transferred byte string's identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,14 +153,6 @@ impl Download {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn crc32c_matches_the_castagnoli_check_value_and_kernel_table() {
-        assert_eq!(crc32c(b"123456789"), 0xe306_9283);
-        // The kernel's table at file 0xb09000 starts 0, f26b8303, e13b70f7.
-        assert_eq!(CRC_TABLE[..3], [0, 0xf26b_8303, 0xe13b_70f7]);
-        assert_eq!(crc32c(&[]), 0);
-    }
 
     #[test]
     fn sections_are_ordered_contiguous_and_checked() {
