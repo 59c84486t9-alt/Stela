@@ -186,6 +186,13 @@ pub struct Entry {
     pub subtype: Option<u16>,
 }
 
+/// One accepted input entry. Service effects/fragment assembly are already
+/// committed in native RAM; only idempotent transport writes may be retried.
+struct Accepted {
+    next: u32,
+    response: Option<(u16, interface::Response)>,
+}
+
 /// One AFK endpoint of the coprocessor.
 pub struct Afk {
     /// The endpoint's RTKit number and service name, for refusals and the
@@ -198,12 +205,14 @@ pub struct Afk {
     /// AP words whose handling needs the buffer.
     incoming: VecDeque<u64>,
     peer: lifecycle::PeerState,
+    accepted: Option<Accepted>,
     reply: Option<Pending>,
     outgoing: VecDeque<Pending>,
     interfaces: interface::Interfaces,
     sequence: u8,
     transmit_full: bool,
     receive_full: bool,
+    pause_completion: bool,
     /// What the endpoint saw, drained by the coprocessor's log.
     pub(super) seen: VecDeque<Event>,
 }
@@ -217,12 +226,14 @@ impl Afk {
             window,
             incoming: VecDeque::new(),
             peer: lifecycle::PeerState::default(),
+            accepted: None,
             reply: None,
             outgoing: VecDeque::new(),
             interfaces: interface::Interfaces::default(),
             sequence: 0,
             transmit_full: false,
             receive_full: false,
+            pause_completion: false,
             seen: VecDeque::new(),
         }
     }
@@ -263,14 +274,23 @@ impl Afk {
     }
 
     pub fn pending(&self) -> bool {
-        !self.incoming.is_empty()
-            || (!self.transmit_full && (self.reply.is_some() || !self.outgoing.is_empty()))
+        self.accepted.is_some()
+            || !self.incoming.is_empty()
+            || (!self.transmit_full
+                && (self.reply.is_some()
+                    || !self.outgoing.is_empty()
+                    || (self.peer == lifecycle::PeerState::Running && self.interfaces.pending())))
     }
 
     /// Partial messages are retained RAM, not queued DMA work. The CPU may
     /// stop with one assembled prefix and finish it after retained wake.
     pub(super) fn retained_idle(&self) -> bool {
-        self.incoming.is_empty() && self.reply.is_none() && self.outgoing.is_empty()
+        self.incoming.is_empty()
+            && self.accepted.is_none()
+            && self.reply.is_none()
+            && self.outgoing.is_empty()
+            && self.interfaces.quiescent()
+            && !self.pause_completion
     }
 
     /// The AP sent `word`; what needs no memory is answered at once.
@@ -322,9 +342,11 @@ impl Afk {
                 self.state = State::Stopped;
                 self.incoming.clear();
                 self.peer = lifecycle::PeerState::default();
+                self.accepted = None;
                 self.reply = None;
                 self.outgoing.clear();
-                self.interfaces.reset();
+                self.interfaces.reset()?;
+                self.pause_completion = false;
                 self.sequence = 0;
                 self.transmit_full = false;
                 self.receive_full = false;
@@ -351,7 +373,7 @@ impl Afk {
             self.validate_header(tx)?;
             self.drain(bus, buffer, tx, outbox)?;
         }
-        while let Some(word) = self.incoming.pop_front() {
+        while let Some(word) = self.incoming.front().copied() {
             match (kind(word), self.state) {
                 (GETBUF_ACK, State::Asked) => {
                     let buffer = self.bus(word & 0xffff_ffff_ffff);
@@ -394,6 +416,7 @@ impl Afk {
                 }
                 _ => return Err("DCP AFK queued message no longer matches the endpoint"),
             }
+            self.incoming.pop_front();
         }
         Ok(())
     }
@@ -434,6 +457,36 @@ impl Afk {
         outbox: &mut Vec<u64>,
     ) -> Result<(), &'static str> {
         loop {
+            if let Some(accepted) = &self.accepted {
+                if let Some((_, response)) = &accepted.response {
+                    response.write(bus)?;
+                }
+                bus.write(buffer + TX_RING + RPTR, &accepted.next.to_le_bytes())?;
+                let accepted = self.accepted.take().expect("accepted input");
+                tx[2] = accepted.next;
+                self.reply = accepted
+                    .response
+                    .map(|(number, response)| Pending::new(number, response.bytes));
+                // Published RPTR survives later failures, as does this doorbell
+                // through ASC's independently committed firmware outbox.
+                outbox.push(message(RECV, 0));
+            }
+            if self.reply.is_none() && self.outgoing.is_empty() {
+                if self.pause_completion && self.interfaces.quiescent() {
+                    self.pause_completion = false;
+                    self.reply = Some(Pending::new(
+                        0,
+                        lifecycle::Command::PauseDone.packet(0)[8..].to_vec(),
+                    ));
+                } else if self.peer == lifecycle::PeerState::Running && tx[2] == tx[3] {
+                    self.outgoing.extend(
+                        self.interfaces
+                            .commands()?
+                            .into_iter()
+                            .map(|(interface, bytes)| Pending::new(interface, bytes)),
+                    );
+                }
+            }
             if !self.flush_reply(bus, buffer, outbox)? || tx[2] == tx[3] {
                 return Ok(());
             }
@@ -459,26 +512,34 @@ impl Afk {
                 .ok_or("DCP AFKEPV2 packet header is truncated")?;
             let interface = u16::from_le_bytes(header[2..4].try_into().expect("interface"));
             let total = u32::from_le_bytes(header[4..8].try_into().expect("length"));
-            self.reply = if interface == 0 {
+            let response = if interface == 0 {
                 let packet: [u8; lifecycle::PACKET_BYTES] = packet
                     .as_slice()
                     .try_into()
                     .map_err(|_| "DCP AFKEPV2 internal packet length is not four bytes")?;
                 self.seen.push_back(Event::Lifecycle(packet));
                 let command = lifecycle::Command::decode(&packet)?;
-                self.peer
-                    .receive(command)
-                    .map(|command| Pending::new(0, command.packet(0)[8..].to_vec()))
+                let response = self.peer.receive(command);
+                if command == lifecycle::Command::Pause && !self.interfaces.quiescent() {
+                    self.pause_completion = true;
+                    None
+                } else {
+                    if command == lifecycle::Command::Unpause {
+                        self.pause_completion = false;
+                    }
+                    response.map(|command| {
+                        (
+                            0,
+                            interface::Response::inline(command.packet(0)[8..].to_vec()),
+                        )
+                    })
+                }
             } else {
                 self.interfaces
                     .receive(interface, total, &packet[8..], bus, self.window)?
-                    .map(|bytes| Pending::new(interface, bytes))
+                    .map(|response| (interface, response))
             };
-            tx[2] = next;
-            bus.write(buffer + TX_RING + RPTR, &tx[2].to_le_bytes())?;
-            // Read-pointer updates signal the same symmetric doorbell as
-            // enqueue, even when this command has no response.
-            outbox.push(message(RECV, 0));
+            self.accepted = Some(Accepted { next, response });
         }
     }
 
@@ -559,7 +620,8 @@ impl Afk {
                 bytes: reply.bytes.len() as u32,
                 packet_type: reply.bytes[8],
                 category: reply.bytes[9],
-                command_sequence: response.then(|| reply.bytes[17]),
+                command_sequence: (matches!(reply.bytes[9], 1 | 2) && reply.bytes.len() >= 24)
+                    .then(|| reply.bytes[17]),
                 status: response
                     .then(|| i32::from_le_bytes(reply.bytes[20..24].try_into().expect("status"))),
             });
@@ -790,6 +852,208 @@ mod tests {
         packet[41] = 0x55; // Separate command correlation sequence.
         packet.extend_from_slice(body);
         packet
+    }
+
+    struct Initiator(Rc<Cell<u64>>, Rc<Cell<usize>>);
+    impl interface::Service for Initiator {
+        fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+            Err("no incoming commands")
+        }
+        fn transport_closed(&mut self) {}
+        fn pending(&self) -> bool {
+            self.0.get() != 0
+        }
+        fn take_command(&mut self) -> Option<interface::CommandRequest> {
+            let cookie = self.0.replace(0);
+            (cookie != 0).then(|| interface::CommandRequest {
+                cookie,
+                packet_type: 0xc0,
+                payload: alloc::vec![7],
+                reply_bytes: 4,
+            })
+        }
+        fn complete(
+            &mut self,
+            cookie: u64,
+            status: i32,
+            payload: Vec<u8>,
+        ) -> Result<(), &'static str> {
+            assert_eq!((cookie, status, payload.as_slice()), (1, 0, &[4][..]));
+            self.1.set(self.1.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pause_completion_waits_for_local_responses_and_preserves_new_queued_commands() {
+        let mut memory = Memory::default();
+        let mut afk = Afk::new(0x24, "bidirectional", Some(WINDOW));
+        let queued = Rc::new(Cell::new(1));
+        let completed = Rc::new(Cell::new(0));
+        afk.register(
+            interface::Descriptor {
+                number: 9,
+                name: "client",
+                properties: b"<dict/>\0".to_vec(),
+            },
+            Box::new(Initiator(queued.clone(), completed.clone())),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        afk.receive(message(INIT, 0x100), &mut out).unwrap();
+        afk.receive(message(GETBUF_ACK, 0x4000), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        afk.receive(message(START, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        let rx = WINDOW + 0x6000;
+        let tx = WINDOW + 0x4000;
+        assert_eq!(read_word(&mut memory, rx + WPTR), 0x100); // Publish, then local command.
+        memory.write(rx + RPTR, &0x100u32.to_le_bytes()).unwrap();
+        queued.set(2);
+        enqueue_internal(&mut memory, 0, 2);
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(afk.peer, lifecycle::PeerState::Paused);
+        assert!(afk.pause_completion && !afk.retained_idle());
+        // The new producer request remains queued while the peer is paused.
+        // A command already in flight is allowed to complete through the ring.
+        let mut response = command_entry(9, &[4]);
+        response[33] = 2;
+        response[41] = 0;
+        response[44..48].fill(0);
+        memory.write(tx + RING_HEADER + 0x80, &response).unwrap();
+        memory.write(tx + WPTR, &0x100u32.to_le_bytes()).unwrap();
+        afk.receive(message(RECV, 0), &mut out).unwrap();
+        afk.dma(&mut memory, &mut out).unwrap();
+        assert_eq!(completed.get(), 1);
+        assert_eq!(queued.get(), 2);
+        assert!(!afk.pause_completion && afk.retained_idle());
+        assert_eq!(read_word(&mut memory, rx + RING_HEADER + 0x100 + 24), 3); // PauseDone.
+    }
+
+    struct Fault<'a> {
+        memory: &'a mut Memory,
+        write: Option<u64>,
+        read: Option<u64>,
+    }
+
+    impl Bus for Fault<'_> {
+        fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), &'static str> {
+            if self.read == Some(address) {
+                return Err("injected DMA read fault");
+            }
+            self.memory.read(address, bytes)
+        }
+        fn write(&mut self, address: u64, bytes: &[u8]) -> Result<(), &'static str> {
+            if self.write == Some(address) {
+                return Err("injected DMA write fault");
+            }
+            self.memory.write(address, bytes)
+        }
+    }
+
+    #[test]
+    fn completed_service_effects_survive_each_response_dma_and_pointer_fault() {
+        let tx = WINDOW + 0x4000;
+        let rx = WINDOW + 0x6000;
+        for address in [
+            WINDOW + 0x9000,
+            tx + RPTR,
+            rx + RING_HEADER + 0x80,
+            rx + WPTR,
+        ] {
+            let mut memory = Memory::default();
+            let (mut afk, calls) = service(&mut memory);
+            let mut body = Vec::new();
+            body.extend_from_slice(&0x9000u64.to_le_bytes());
+            body.extend_from_slice(&0u64.to_le_bytes());
+            body.extend_from_slice(&4u32.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(b"data");
+            let mut entry = command_entry(7, &body);
+            entry[40] = 1;
+            entry[44..48].copy_from_slice(&4u32.to_le_bytes());
+            memory.write(tx + RING_HEADER, &entry).unwrap();
+            memory.write(tx + WPTR, &0x80u32.to_le_bytes()).unwrap();
+            let mut out = Vec::new();
+            afk.receive(message(RECV, 0), &mut out).unwrap();
+            assert_eq!(
+                afk.dma(
+                    &mut Fault {
+                        memory: &mut memory,
+                        write: Some(address),
+                        read: None
+                    },
+                    &mut out
+                ),
+                Err("injected DMA write fault")
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(afk.pending() && !afk.retained_idle());
+            // Repairing translation resumes retained transport writes, with no
+            // duplicate service call or extra AP doorbell required.
+            afk.dma(&mut memory, &mut out).unwrap();
+            assert_eq!(calls.get(), 1);
+            let mut result = [0; 4];
+            memory.read(WINDOW + 0x9000, &mut result).unwrap();
+            assert_eq!(&result, b"atad");
+            assert_eq!(read_word(&mut memory, tx + RPTR), 0x80);
+            assert_eq!(read_word(&mut memory, rx + WPTR), 0x100);
+            assert_eq!(
+                read_word(&mut memory, rx + RING_HEADER + 0x80 + 40) & 0xffff,
+                0x5501
+            );
+            assert!(afk.retained_idle());
+        }
+    }
+
+    #[test]
+    fn fragment_ack_and_final_request_dma_faults_preserve_the_assembled_packet() {
+        for fail_final_read in [false, true] {
+            let mut memory = Memory::default();
+            let (mut afk, calls) = service(&mut memory);
+            let tx = WINDOW + 0x4000;
+            let mut body = Vec::new();
+            body.extend_from_slice(&0u64.to_le_bytes());
+            body.extend_from_slice(&0x9000u64.to_le_bytes());
+            body.extend_from_slice(&0u32.to_le_bytes());
+            body.extend_from_slice(&4u32.to_le_bytes());
+            memory.write(WINDOW + 0x9000, b"data").unwrap();
+            let mut packet = command_entry(7, &body);
+            packet[40] = 1;
+            let logical = &packet[24..];
+            let mut out = Vec::new();
+            for (index, fragment) in [&logical[..19], &logical[19..]].into_iter().enumerate() {
+                let pointer = index as u32 * 0x80;
+                let mut entry = alloc::vec![0; 24];
+                entry[..4].copy_from_slice(&QE_MAGIC.to_le_bytes());
+                entry[4..8].copy_from_slice(&(8u32 + fragment.len() as u32).to_le_bytes());
+                entry[18..20].copy_from_slice(&7u16.to_le_bytes());
+                entry[20..24].copy_from_slice(&(logical.len() as u32).to_le_bytes());
+                entry.extend_from_slice(fragment);
+                memory
+                    .write(tx + RING_HEADER + u64::from(pointer), &entry)
+                    .unwrap();
+                memory
+                    .write(tx + WPTR, &(pointer + 0x80).to_le_bytes())
+                    .unwrap();
+                afk.receive(message(RECV, 0), &mut out).unwrap();
+                if (index == 0 && !fail_final_read) || (index == 1 && fail_final_read) {
+                    let mut fault = Fault {
+                        memory: &mut memory,
+                        write: (!fail_final_read).then_some(tx + RPTR),
+                        read: fail_final_read.then_some(WINDOW + 0x9000),
+                    };
+                    assert!(afk.dma(&mut fault, &mut out).is_err());
+                    assert_eq!(calls.get(), 0);
+                }
+                afk.dma(&mut memory, &mut out).unwrap();
+            }
+            assert_eq!(calls.get(), 1);
+            assert_eq!(read_word(&mut memory, tx + RPTR), 0x100);
+            assert!(afk.retained_idle());
+        }
     }
 
     #[test]

@@ -22,11 +22,38 @@ const OVERRUN: i32 = 0xe000_02e1u32 as i32;
 
 /// A complete logical command, after AFKEPV2 framing and command-buffer DMA.
 /// An error is a missing model effect; an i32 is an original wire status.
+/// A refused handle/completion must leave its service effect uncommitted.
 pub(crate) trait Service {
     fn handle(&mut self, packet_type: u8, payload: &[u8]) -> Result<(i32, Vec<u8>), &'static str>;
 
     /// Actual interface close/termination, distinct from retained CPU sleep.
     fn transport_closed(&mut self);
+
+    fn pending(&self) -> bool {
+        false
+    }
+
+    fn take_command(&mut self) -> Option<CommandRequest> {
+        None
+    }
+
+    fn complete(
+        &mut self,
+        _cookie: u64,
+        _status: i32,
+        _payload: Vec<u8>,
+    ) -> Result<(), &'static str> {
+        Err("DCP AFKEPV2 service has no local command completion owner")
+    }
+}
+
+/// A service-owned local request. Cookie belongs solely to its completion
+/// owner; the wire uses its independently allocated eight-bit sequence.
+pub(crate) struct CommandRequest {
+    pub cookie: u64,
+    pub packet_type: u8,
+    pub payload: Vec<u8>,
+    pub reply_bytes: u32,
 }
 
 /// Publication is admitted only with a real service implementing its effects.
@@ -81,6 +108,15 @@ struct Interface {
     service: Box<dyn Service>,
     peer_open: bool,
     terminated: bool,
+    next_sequence: u8,
+    commands: BTreeMap<u8, u64>,
+}
+
+struct Received {
+    number: u16,
+    total: u32,
+    fragment: Vec<u8>,
+    packet: Vec<u8>,
 }
 
 /// Each interface owns its assembly; fragments from other interfaces may
@@ -90,6 +126,7 @@ struct Interface {
 pub(super) struct Interfaces {
     services: BTreeMap<u16, Interface>,
     assemblies: BTreeMap<u16, Assembly>,
+    received: Option<Received>,
 }
 
 impl Interfaces {
@@ -111,6 +148,8 @@ impl Interfaces {
                 service,
                 peer_open: false,
                 terminated: false,
+                next_sequence: 0,
+                commands: BTreeMap::new(),
             },
         );
         Ok(())
@@ -130,19 +169,65 @@ impl Interfaces {
         reports
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<(), &'static str> {
         self.assemblies.clear();
+        self.received = None;
         for interface in self.services.values_mut() {
+            interface.cancel_commands()?;
             interface.peer_open = false;
             interface.terminated = false;
             interface.service.transport_closed();
+            interface.next_sequence = 0;
         }
+        Ok(())
     }
 
     pub fn idle(&self) -> bool {
         self.assemblies
             .values()
             .all(|assembly| assembly.bytes.is_empty())
+    }
+
+    pub fn quiescent(&self) -> bool {
+        self.services
+            .values()
+            .all(|interface| interface.commands.is_empty())
+    }
+
+    pub fn pending(&self) -> bool {
+        self.services.values().any(|interface| {
+            !interface.terminated && interface.commands.len() < 256 && interface.service.pending()
+        })
+    }
+
+    /// At most one request per service per pass. Full sequence spaces apply
+    /// backpressure to the producer without consuming another request.
+    pub fn commands(&mut self) -> Result<Vec<(u16, Vec<u8>)>, &'static str> {
+        let mut packets = Vec::new();
+        for (&number, interface) in &mut self.services {
+            if interface.terminated || interface.commands.len() == 256 {
+                continue;
+            }
+            let Some(request) = interface.service.take_command() else {
+                continue;
+            };
+            let sequence = (0..=255)
+                .map(|offset| interface.next_sequence.wrapping_add(offset))
+                .find(|sequence| !interface.commands.contains_key(sequence))
+                .expect("unoccupied command sequence");
+            u32::try_from(request.payload.len())
+                .map_err(|_| "DCP AFKEPV2 local command length overflow")?;
+            interface.commands.insert(sequence, request.cookie);
+            interface.next_sequence = sequence.wrapping_add(1);
+            let mut packet = alloc::vec![0; 24];
+            packet[8] = request.packet_type;
+            packet[9] = COMMAND;
+            packet[17] = sequence;
+            packet[20..24].copy_from_slice(&request.reply_bytes.to_le_bytes());
+            packet.extend_from_slice(&request.payload);
+            packets.push((number, packet));
+        }
+        Ok(packets)
     }
 
     pub fn receive(
@@ -152,22 +237,47 @@ impl Interfaces {
         fragment: &[u8],
         bus: &mut dyn Bus,
         window: Option<u64>,
-    ) -> Result<Option<Vec<u8>>, &'static str> {
-        let Some(packet) = self
-            .assemblies
-            .entry(number)
-            .or_default()
-            .push(total, fragment)?
-        else {
-            return Ok(None);
-        };
+    ) -> Result<Option<Response>, &'static str> {
+        if !self.received.as_ref().is_some_and(|received| {
+            received.number == number && received.total == total && received.fragment == fragment
+        }) {
+            let Some(packet) = self
+                .assemblies
+                .entry(number)
+                .or_default()
+                .push(total, fragment)?
+            else {
+                return Ok(None);
+            };
+            self.received = Some(Received {
+                number,
+                total,
+                fragment: fragment.to_vec(),
+                packet,
+            });
+        }
+        let received = self.received.as_ref().expect("complete packet");
+        let result = Self::dispatch(&mut self.services, number, &received.packet, bus, window);
+        if result.is_ok() {
+            self.received = None;
+        }
+        result
+    }
+
+    fn dispatch(
+        services: &mut BTreeMap<u16, Interface>,
+        number: u16,
+        packet: &[u8],
+        bus: &mut dyn Bus,
+        window: Option<u64>,
+    ) -> Result<Option<Response>, &'static str> {
         let header: &[u8; 16] = packet
             .get(..16)
             .ok_or("DCP AFKEPV2 interface header is truncated")?
             .try_into()
             .expect("header");
         let packet_type = header[8];
-        let interface = self.services.get_mut(&number);
+        let interface = services.get_mut(&number);
         match header[9] {
             REPORT => {
                 let Some(interface) = interface else {
@@ -181,10 +291,12 @@ impl Interfaces {
                         interface.peer_open = true;
                     }
                     CLOSE if header[10] & 1 != 0 => {
+                        interface.cancel_commands()?;
                         interface.peer_open = false;
                         interface.service.transport_closed();
                     }
                     TERMINATE => {
+                        interface.cancel_commands()?;
                         interface.peer_open = false;
                         interface.terminated = true;
                         interface.service.transport_closed();
@@ -205,24 +317,52 @@ impl Interfaces {
                     response[9] = RESPONSE;
                     response[17] = command[1];
                     response[20..24].copy_from_slice(&OFFLINE.to_le_bytes());
-                    return Ok(Some(response));
+                    return Ok(Some(Response {
+                        bytes: response,
+                        dma: None,
+                    }));
                 };
                 let command = Command::decode(&packet[16..], bus, window)?;
                 let (status, payload) = interface.service.handle(packet_type, &command.payload)?;
-                command
-                    .response(header, status, payload, bus, window)
-                    .map(Some)
+                Ok(Some(command.response(header, status, payload, window)))
             }
-            // No local commands are initiated. Original AP 0x94c069c logs
-            // and drops an unmatched response without invoking a service.
             RESPONSE => {
                 if packet.len() < 24 {
                     return Err("DCP AFKEPV2 response header is truncated");
                 }
+                // Original 0x94c0628 removes the pending command by sequence;
+                // unmatched responses at 0x94c069c never invoke a client.
+                let Some(interface) = interface else {
+                    return Ok(None);
+                };
+                let sequence = packet[17];
+                let Some(&cookie) = interface.commands.get(&sequence) else {
+                    return Ok(None);
+                };
+                if packet[16] & 1 != 0 {
+                    return Err("DCP AFKEPV2 response supplies unrequested DMA buffers");
+                }
+                let status = i32::from_le_bytes(packet[20..24].try_into().expect("status"));
+                interface
+                    .service
+                    .complete(cookie, status, packet[24..].to_vec())?;
+                interface.commands.remove(&sequence);
                 Ok(None)
             }
             _ => Err("DCP AFKEPV2 invalid interface message category"),
         }
+    }
+}
+
+impl Interface {
+    fn cancel_commands(&mut self) -> Result<(), &'static str> {
+        // Original createErrorResponses (AP 0x94c04bc) settles each pending
+        // command with OFFLINE before disconnect completes.
+        while let Some((&sequence, &cookie)) = self.commands.first_key_value() {
+            self.service.complete(cookie, OFFLINE, Vec::new())?;
+            self.commands.remove(&sequence);
+        }
+        Ok(())
     }
 }
 
@@ -238,6 +378,35 @@ fn address(window: Option<u64>, dva: u64) -> u64 {
     match window {
         Some(base) if dva < base => base + dva,
         _ => dva,
+    }
+}
+
+/// A completed service effect and its deterministic transport writes. The
+/// ring owner retains this until input RPTR commits, so a DMA retry never
+/// calls the service or appends the same fragment twice.
+pub(super) struct Response {
+    pub bytes: Vec<u8>,
+    dma: Option<(u64, Vec<u8>)>,
+}
+
+impl Response {
+    pub fn inline(bytes: Vec<u8>) -> Self {
+        Self { bytes, dma: None }
+    }
+
+    pub fn write(&self, bus: &mut dyn Bus) -> Result<(), &'static str> {
+        if let Some((address, bytes)) = &self.dma {
+            bus.write(*address, bytes)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl core::ops::Deref for Response {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.bytes
     }
 }
 
@@ -289,9 +458,9 @@ impl Command {
         message: &[u8; 16],
         mut status: i32,
         mut payload: Vec<u8>,
-        bus: &mut dyn Bus,
         window: Option<u64>,
-    ) -> Result<Vec<u8>, &'static str> {
+    ) -> Response {
+        let mut dma = None;
         if let Some(mut buffers) = self.buffers {
             let maximum =
                 u32::from_le_bytes(self.header[4..8].try_into().expect("budget")) as usize;
@@ -301,9 +470,8 @@ impl Command {
                     status = OVERRUN;
                 } else {
                     let dva = u64::from_le_bytes(buffers[..8].try_into().expect("DVA"));
-                    bus.write(address(window, dva), &payload)?;
                     buffers[16..20].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-                    payload.clear();
+                    dma = Some((address(window, dva), core::mem::take(&mut payload)));
                 }
             }
             let mut bytes = buffers.to_vec();
@@ -319,7 +487,7 @@ impl Command {
         result[10..].fill(0);
         result.extend_from_slice(&self.header);
         result.extend_from_slice(&payload);
-        Ok(result)
+        Response { bytes: result, dma }
     }
 }
 
@@ -407,7 +575,120 @@ mod tests {
         bytes: &[u8],
         memory: &mut Memory,
     ) -> Result<Option<Vec<u8>>, &'static str> {
-        interfaces.receive(number, bytes.len() as u32, bytes, memory, None)
+        interfaces
+            .receive(number, bytes.len() as u32, bytes, memory, None)?
+            .map(|response| {
+                response.write(memory)?;
+                Ok(response.bytes)
+            })
+            .transpose()
+    }
+
+    #[derive(Default)]
+    struct Producer {
+        requests: alloc::collections::VecDeque<u64>,
+        completions: Vec<(u64, i32, Vec<u8>)>,
+    }
+    struct Client(Rc<RefCell<Producer>>);
+    impl Service for Client {
+        fn handle(&mut self, _: u8, _: &[u8]) -> Result<(i32, Vec<u8>), &'static str> {
+            Err("no incoming command contract")
+        }
+        fn transport_closed(&mut self) {}
+        fn pending(&self) -> bool {
+            !self.0.borrow().requests.is_empty()
+        }
+        fn take_command(&mut self) -> Option<CommandRequest> {
+            self.0
+                .borrow_mut()
+                .requests
+                .pop_front()
+                .map(|cookie| CommandRequest {
+                    cookie,
+                    packet_type: 0xc0,
+                    payload: cookie.to_le_bytes().to_vec(),
+                    reply_bytes: 16,
+                })
+        }
+        fn complete(
+            &mut self,
+            cookie: u64,
+            status: i32,
+            bytes: Vec<u8>,
+        ) -> Result<(), &'static str> {
+            self.0
+                .borrow_mut()
+                .completions
+                .push((cookie, status, bytes));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn local_sequences_correlate_out_of_order_and_apply_full_space_backpressure() {
+        let producer = Rc::new(RefCell::new(Producer::default()));
+        producer.borrow_mut().requests.extend(1000..1257);
+        let mut interfaces = Interfaces::default();
+        interfaces
+            .register(
+                Descriptor {
+                    number: 7,
+                    name: "client",
+                    properties: b"<dict/>\0".to_vec(),
+                },
+                Box::new(Client(producer.clone())),
+            )
+            .unwrap();
+        let mut packets = Vec::new();
+        for sequence in 0..=255u8 {
+            let mut next = interfaces.commands().unwrap();
+            assert_eq!(next.len(), 1);
+            assert_eq!(next[0].1[17], sequence);
+            packets.push(next.pop().unwrap().1);
+        }
+        assert!(!interfaces.quiescent() && !interfaces.pending());
+        assert!(interfaces.commands().unwrap().is_empty());
+        assert_eq!(producer.borrow().requests.len(), 1);
+        let mut memory = Memory::default();
+        for sequence in [255u8, 1, 128, 0] {
+            let mut response = packets[sequence as usize].clone();
+            response[9] = RESPONSE;
+            response[20..24].copy_from_slice(&(-31i32).to_le_bytes());
+            response[16] = 1;
+            assert!(receive(&mut interfaces, 7, &response, &mut memory).is_err());
+            assert!(interfaces.services[&7].commands.contains_key(&sequence));
+            response[16] = 0;
+            receive(&mut interfaces, 7, &response, &mut memory).unwrap();
+            receive(&mut interfaces, 7, &response, &mut memory).unwrap(); // Stale duplicate.
+        }
+        {
+            let completed = &producer.borrow().completions;
+            assert_eq!(
+                completed.iter().map(|entry| entry.0).collect::<Vec<_>>(),
+                [1255, 1001, 1128, 1000]
+            );
+            for (cookie, status, bytes) in completed {
+                assert_eq!(*status, -31);
+                assert_eq!(bytes, &cookie.to_le_bytes());
+            }
+        }
+        assert!(interfaces.pending());
+        let next = interfaces.commands().unwrap();
+        assert_eq!(next[0].1[17], 0); // Wrapped allocation uses the released slot.
+        receive(&mut interfaces, 7, &report(CLOSE, &[]), &mut memory).unwrap();
+        assert!(interfaces.quiescent());
+        assert_eq!(producer.borrow().completions.len(), 257);
+        assert_eq!(
+            producer
+                .borrow()
+                .completions
+                .iter()
+                .filter(|entry| entry.1 == OFFLINE)
+                .count(),
+            253
+        );
+        interfaces.reset().unwrap();
+        assert_eq!(producer.borrow().completions.len(), 257);
     }
 
     #[test]
@@ -488,6 +769,7 @@ mod tests {
         assert_eq!(&response[16..24], &[1, 0x92, 0, 0, 0, 0, 0, 0]);
         assert_eq!(response.len(), 48);
         assert_eq!(&response[40..44], &3u32.to_le_bytes());
+        response.write(&mut memory).unwrap();
         let mut data = [0; 3];
         memory.read(0x8000_0300, &mut data).unwrap();
         assert_eq!(&data, b"cba");
@@ -542,7 +824,7 @@ mod tests {
         interfaces
             .receive(7, 28, &packet[..5], &mut memory, None)
             .unwrap();
-        interfaces.reset();
+        interfaces.reset().unwrap();
         assert!(interfaces.idle());
         assert_eq!(effects.borrow().closes, 3);
         let publications = interfaces.publications();
