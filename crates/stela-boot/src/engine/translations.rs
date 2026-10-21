@@ -350,9 +350,14 @@ pub fn write() {
         counters.invalid,
         counters.dropped
     ));
-    // Proving compiles each block twice more: it stops while the heap
-    // still has room for the layout and the write.
+    // Proof recompiles the original and both relocation probes; stop while
+    // the heap still has room for the layout and the write.
     let planned = store.plan(bound, || !crate::ALLOCATOR.low());
+    output::arguments(format_args!(
+        "TRANSLATIONS planned records={} bytes={}\n",
+        planned.layout.records(),
+        planned.layout.bytes()
+    ));
     let mut volume = match Fat32::open(Bytes::new(partition)) {
         Ok(volume) => volume,
         Err(error) => {
@@ -368,6 +373,10 @@ pub fn write() {
         }
     };
     let mut device = volume.into_inner().into_inner();
+    output::arguments(format_args!(
+        "TRANSLATIONS writing extents={}\n",
+        file.extents.len()
+    ));
     match pack::write_in_place(&mut *device, &file.extents, &planned.layout) {
         Ok(()) => output::arguments(format_args!(
             "TRANSLATIONS written records={} bytes={} proven={} unprovable={} unproven={} \
