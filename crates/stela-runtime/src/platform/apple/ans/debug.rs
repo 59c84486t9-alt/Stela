@@ -4,6 +4,10 @@
 //! in CDW12, selector in CDW13 and a write value in CDW14. SetNANDDebug
 //! (0x3dfc174) splits its diagnostic mask across selectors 0xb00/0xb01.
 //! Firmware's setter (VA 0x16fb6c) merges the selected half of its mask.
+//! Stela admits the canonical builder encoding only: firmware tests just
+//! CDW12 bit 0 (0x16d128..0x16d134) and ignores CDW14 on reads. Refusing
+//! other operation bits or a nonzero read value is conservative admission,
+//! not a recovered firmware Invalid Field response.
 //! Only bit 0 is admitted: it enables extra NAND register/error diagnostics
 //! (0x32fa4), which this die has no physical NAND failures to produce.
 //! Other bits change timeout/error handling and debug capture, so mere
