@@ -8,21 +8,27 @@
 //! checks page shift and region/bypass capabilities at VA9dc20b4, and decodes
 //! a fault's SID from bits27:24 at VA9dc09e8 (full VAs start fffffe000).
 //!
-//! Non-identity stream remap is retained for readback but refuses DMA until
-//! its position relative to the bus master's mapper SID is established.
-//! Unsupported SMMU context selection (TCR23:16), APF filtering, auxiliary
-//! fault/capture and the different 64-SID USB4 interface refuse explicitly.
+//! Original T6000 SPTM programs source->context bytes at80..8c before
+//! enabling streams (VA270bce64..bcecc); mapper entry270be1e0..be22c
+//! rejects remapped sources. DMA therefore remaps the incoming SID once,
+//! before context enable/TCR/TTBR. Remapped-fault SID provenance remains
+//! unqualified and refuses instead of inventing captured metadata.
+//! A separate T6000 UMMS owner exposes the native absent capture store and
+//! disabled performance state. Unsupported SMMU context selection
+//! (TCR23:16), active performance, APF filtering, auxiliary fault/capture
+//! fields and the different 64-SID USB4 interface refuse explicitly.
 //! This module does not qualify those board configurations by constructing a
 //! successful-looking superset. Translation is cacheless and DMA synchronous.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::super::interrupt::{AicInput, Wire};
-use super::{Profile, descriptor::Format};
+use super::{Profile, SMMU_BYTES, SMMU_OFFSET, descriptor::Format, legacy_umms};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::{rc::Rc, vec, vec::Vec};
 use core::cell::RefCell;
 
 const PARAMS1: u64 = 0;
 const PARAMS2: u64 = 4;
+const T6000_PARAMS3: u64 = 8;
 const REGION: u32 = 1 << 31;
 const SUPPORT_BYPASS: u32 = 1;
 const SUPPORT_LOCK: u32 = 1 << 1;
@@ -61,6 +67,10 @@ const NO_PTE: u32 = 1 << 2;
 const WRITE_FAULT: u32 = 1 << 3;
 const READ_FAULT: u32 = 1 << 4;
 const REGION_FAULT: u32 = 1 << 7;
+const T6000_ERROR_ACK_CODES: u32 = 0xb7f;
+const PERF_CONTROL: u64 = 0x1000;
+const PERF_STATUS: u64 = 0x100c;
+const PERF_ACK_CODES: u32 = 0x2d;
 
 pub(super) struct Dart {
     profile: Profile,
@@ -82,9 +92,27 @@ pub(super) struct Dart {
     irq: Option<AicInput>,
     level: bool,
     shared_fault: Option<(Rc<RefCell<Vec<bool>>>, usize)>,
+    smmu: Option<legacy_umms::Umms>,
+    performance: legacy_umms::Performance,
 }
 
 impl Dart {
+    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<(), &'static str> {
+        if self.irq != Some(irq.input) {
+            return Err("DART shared IRQ does not match its physical input");
+        }
+        if self.level
+            || self
+                .shared_fault
+                .as_ref()
+                .is_some_and(|(levels, _)| levels.borrow().iter().any(|&level| level))
+        {
+            return Err("an asserted DART IRQ source cannot be rebound");
+        }
+        self.shared_fault = Some(irq.source());
+        Ok(())
+    }
+
     pub(super) fn new(profile: Profile, streams: usize, irq: Option<AicInput>) -> Self {
         Self {
             profile,
@@ -106,6 +134,8 @@ impl Dart {
             irq,
             level: false,
             shared_fault: None,
+            smmu: None,
+            performance: legacy_umms::Performance::default(),
         }
     }
 
@@ -128,6 +158,25 @@ impl Dart {
     pub(super) fn with_apf(mut self, slices: usize) -> Self {
         self.apf = slices != 0;
         self
+    }
+
+    pub(super) fn supports_smmu(&self) -> bool {
+        self.profile == Profile::T6000
+    }
+
+    pub(super) fn enable_smmu(&mut self) -> Result<(), &'static str> {
+        if !self.supports_smmu() {
+            return Err("legacy DART paired SMMU capture format is unsupported");
+        }
+        if self.smmu.is_some() {
+            return Err("DART already has a paired SMMU instance");
+        }
+        self.smmu = Some(legacy_umms::Umms::default());
+        Ok(())
+    }
+
+    pub(super) fn has_smmu(&self) -> bool {
+        self.smmu.is_some()
     }
 
     pub(super) fn set_power(&mut self, powered: bool, retention: bool, access: &mut Access<'_>) {
@@ -161,6 +210,10 @@ impl Dart {
         self.ttbr.fill([0; TABLES]);
         self.error = 0;
         self.error_address = 0;
+        if let Some(smmu) = &mut self.smmu {
+            smmu.clear();
+        }
+        self.performance = legacy_umms::Performance::default();
         self.signal(access);
     }
 
@@ -224,7 +277,7 @@ impl Dart {
             ));
         }
         let sid = self.remap[input_sid];
-        if usize::from(sid) != input_sid {
+        if self.profile != Profile::T6000 && usize::from(sid) != input_sid {
             return Err(DmaError::Unsupported("legacy DART stream remapping"));
         }
         let sid = usize::from(sid);
@@ -341,6 +394,14 @@ impl Iommu for Dart {
         debug_assert!(last >= iova && last / self.page() == iova / self.page());
         let result = self.walk(memory, stream, iova, last, write);
         if let Err(DmaError::Fault(code)) = result {
+            if self.profile == Profile::T6000
+                && stream < self.streams
+                && usize::from(self.remap[stream]) != stream
+            {
+                return Err(DmaError::Unsupported(
+                    "T6000 remapped fault source-versus-context SID provenance",
+                ));
+            }
             if self.error & FLAG == 0 {
                 self.error = FLAG
                     | (stream as u32 & 0xf) << SID_SHIFT
@@ -371,9 +432,21 @@ impl MmioDevice for Dart {
         if let Some(reason) = self.unavailable() {
             return Err(fail(reason));
         }
+        if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            return self
+                .smmu
+                .as_ref()
+                .ok_or_else(|| fail("legacy DART has no paired UMMS instance"))?
+                .read(offset - SMMU_OFFSET)
+                .map(u64::from)
+                .map_err(fail);
+        }
         let value = match offset {
             PARAMS1 => REGION | self.page_shift << 24,
             PARAMS2 => SUPPORT_BYPASS | SUPPORT_LOCK,
+            // Original T6000 SPTM270bc554..bc5b8 derives the native PA
+            // aperture from bits29:24 and requires at most42 address bits.
+            T6000_PARAMS3 if self.profile == Profile::T6000 => T6000_PA_BITS << 24,
             COMMAND => 0,
             SELECT => self.select,
             ERROR => self.error,
@@ -385,6 +458,8 @@ impl MmioDevice for Dart {
                 }
             }
             ENABLED => self.enabled,
+            PERF_CONTROL if self.profile == Profile::T6000 => self.performance.control(),
+            PERF_STATUS if self.profile == Profile::T6000 => self.performance.status(),
             _ if ERROR_ADDRESS.contains(&offset) => {
                 (self.error_address >> (32 * usize::from(offset == ERROR_ADDRESS[1]))) as u32
             }
@@ -433,15 +508,40 @@ impl MmioDevice for Dart {
             return Err(fail(reason));
         }
         let value = value as u32;
+        if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            return self
+                .smmu
+                .as_mut()
+                .ok_or_else(|| fail("legacy DART has no paired UMMS instance"))?
+                .write(offset - SMMU_OFFSET, value)
+                .map_err(fail);
+        }
         match offset {
             COMMAND if value == INVALIDATE => {}
+            // T6000 powerup270bcfcc and powerdown270bdf60 initialize
+            // an idle command word before polling. There is no queued work
+            // or translation cache to cancel in this native profile.
+            COMMAND if self.profile == Profile::T6000 && value == 0 => {}
             COMMAND => return Err(fail("unknown legacy DART stream command")),
             SELECT => self.select = value & self.mask(),
             ERROR => {
                 if value != 0 && value & FLAG == 0 {
-                    return Err(fail(
-                        "legacy DART code-only fault acknowledgement is not specified",
-                    ));
+                    if self.profile != Profile::T6000 {
+                        return Err(fail(
+                            "legacy DART code-only fault acknowledgement is not specified",
+                        ));
+                    }
+                    // Original T6000 SPTM270bbc64..bbc9c writes one
+                    // selected code, then reads back before returning.
+                    if value & !T6000_ERROR_ACK_CODES != 0 || value.count_ones() != 1 {
+                        return Err(fail("unknown T6000 DART code acknowledgement"));
+                    }
+                    if self.error & value != 0 {
+                        self.error &= !value;
+                        if self.error & T6000_ERROR_ACK_CODES == 0 {
+                            self.error = 0;
+                        }
+                    }
                 }
                 if value & FLAG != 0 {
                     self.error = 0;
@@ -461,11 +561,29 @@ impl MmioDevice for Dart {
                 }
                 self.enabled = value & self.mask();
             }
+            PERF_CONTROL if self.profile == Profile::T6000 => {
+                self.performance.disable(value).map_err(fail)?;
+            }
+            PERF_STATUS if self.profile == Profile::T6000 => {
+                self.performance
+                    .acknowledge(value, PERF_ACK_CODES)
+                    .map_err(fail)?;
+            }
             _ if (REMAP..REMAP + 16).contains(&offset) => {
                 if self.locked {
                     return Err(fail("legacy DART remap lock coverage is not specified"));
                 }
                 let sid = (offset - REMAP) as usize;
+                if self.profile == Profile::T6000
+                    && value
+                        .to_le_bytes()
+                        .iter()
+                        .any(|&sid| usize::from(sid) >= self.streams)
+                {
+                    return Err(fail(
+                        "T6000 DART remap target is outside the native profile",
+                    ));
+                }
                 self.remap[sid..sid + 4].copy_from_slice(&value.to_le_bytes());
             }
             _ if (TCR..TCR + 16 * 4).contains(&offset) => {
@@ -563,6 +681,252 @@ mod tests {
                 Ok(u64::from(REGION | 14 << 24))
             );
             assert_eq!(model.read(PARAMS2, Width::Word, &mut a), Ok(3));
+        }
+    }
+
+    fn remapped_t6000() -> (Dart, Ram, InterruptLatch) {
+        let (mut model, ram, mut sink) = setup(Profile::T6000);
+        let mut access = Access::new(0, 0, &mut sink);
+        for (offset, value) in [
+            (ENABLED, 1),
+            (TCR, TRANSLATE),
+            (TTBR, TTBR_VALID | (ROOT >> TTBR_SHIFT) as u32),
+            (REMAP + 4, 0x0706_0004),
+        ] {
+            model
+                .write(offset, Width::Word, u64::from(value), &mut access)
+                .unwrap();
+        }
+        (model, ram, sink)
+    }
+
+    #[test]
+    fn t6000_remap_selects_the_target_context_before_enable_and_tables() {
+        let (mut model, mut ram, mut sink) = remapped_t6000();
+        let mut access = Access::new(0, 0, &mut sink);
+        assert_eq!(
+            model.read(T6000_PARAMS3, Width::Word, &mut access),
+            Ok(u64::from(T6000_PA_BITS << 24))
+        );
+        assert!(
+            model
+                .write(T6000_PARAMS3, Width::Word, 0, &mut access)
+                .is_err()
+        );
+        // Only context0 is enabled, and only its root is used. Incoming5 is
+        // absent from the enable bitmap and must not select context5 tables.
+        let mut port = Port {
+            iommu: &mut model,
+            stream: 5,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        port.write(IOVA, &[0x35, 0x79]).unwrap();
+        let mut bytes = [0; 2];
+        assert!(ram.read(FRAME, &mut bytes));
+        assert_eq!(bytes, [0x35, 0x79]);
+        assert_eq!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+        assert!(
+            model
+                .write(REMAP + 4, Width::Word, 0x0710_0004, &mut access)
+                .is_err()
+        );
+        assert_eq!(
+            model.read(REMAP + 4, Width::Word, &mut access),
+            Ok(0x0706_0004)
+        );
+        // Invalidation cannot rewrite the stream table or target context.
+        model
+            .write(COMMAND, Width::Word, u64::from(INVALIDATE), &mut access)
+            .unwrap();
+        model.write(COMMAND, Width::Word, 0, &mut access).unwrap();
+        assert_eq!(
+            model.translate(&mut ram, 5, IOVA, IOVA, false, &mut access),
+            Ok(FRAME)
+        );
+    }
+
+    #[test]
+    fn remapped_fault_refuses_unknown_metadata_after_preserving_completed_pages() {
+        let (mut model, mut ram, mut sink) = remapped_t6000();
+        let mut access = Access::new(0, 0, &mut sink);
+        let mut port = Port {
+            iommu: &mut model,
+            stream: 5,
+            memory: &mut ram,
+            access: &mut access,
+        };
+        assert_eq!(
+            port.write(IOVA + PAGE - 2, &[1, 2, 3, 4]),
+            Err(DmaError::Unsupported(
+                "T6000 remapped fault source-versus-context SID provenance"
+            ))
+        );
+        let mut bytes = [0; 2];
+        assert!(ram.read(FRAME + PAGE - 2, &mut bytes));
+        assert_eq!(bytes, [1, 2]);
+        assert_eq!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+        assert!(!sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+    }
+
+    #[test]
+    fn t6000_code_ack_clears_only_the_pending_code_and_updates_irq() {
+        let (mut model, mut ram, mut sink) = setup(Profile::T6000);
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            assert_eq!(
+                model.translate(&mut ram, 2, IOVA, IOVA, false, &mut access),
+                Err(DmaError::Fault(NO_TTBR))
+            );
+            model
+                .write(ERROR, Width::Word, u64::from(NO_PTE), &mut access)
+                .unwrap();
+            assert_ne!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+            assert!(
+                model
+                    .write(ERROR, Width::Word, u64::from(NO_TTBR | NO_PTE), &mut access)
+                    .is_err()
+            );
+        }
+        assert!(sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            model
+                .write(ERROR, Width::Word, u64::from(NO_TTBR), &mut access)
+                .unwrap();
+            assert_eq!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+        }
+        assert!(!sink.is_asserted(Wire::Aic(AicInput::new(0, 7))));
+    }
+
+    #[test]
+    fn t6000_umms_has_distinct_fault_ownership_and_no_invented_diagnostic_fields() {
+        let (mut model, mut ram, mut sink) = setup(Profile::T6000);
+        model.enable_smmu().unwrap();
+        let mut access = Access::new(0, 0, &mut sink);
+        assert_eq!(model.read(SMMU_OFFSET, Width::Word, &mut access), Ok(0));
+        assert_eq!(
+            model.read(SMMU_OFFSET + 0x1008, Width::Word, &mut access),
+            Ok(0)
+        );
+        assert_eq!(model.read(PERF_STATUS, Width::Word, &mut access), Ok(0));
+        assert_eq!(
+            model.translate(&mut ram, 2, IOVA, IOVA, false, &mut access),
+            Err(DmaError::Fault(NO_TTBR))
+        );
+        // UMMS acknowledgements cannot clear a paired TRAD translation fault.
+        model
+            .write(SMMU_OFFSET + 0x40, Width::Word, 4, &mut access)
+            .unwrap();
+        model
+            .write(SMMU_OFFSET + 0x1008, Width::Word, 1 << 20, &mut access)
+            .unwrap();
+        assert_ne!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+        assert_eq!(
+            model.read(SMMU_OFFSET + 0x40, Width::Word, &mut access),
+            Ok(0)
+        );
+        for offset in [
+            0x44, 0x48, 0x4c, 0x50, 0x58, 0x60, 0x64, 0x1004, 0x1020, 0x2000, 0x3ffc,
+        ] {
+            assert!(
+                model
+                    .read(SMMU_OFFSET + offset, Width::Word, &mut access)
+                    .is_err()
+            );
+        }
+        for offset in [0, 0x5c, 0x80, 0x2000] {
+            assert!(
+                model
+                    .write(SMMU_OFFSET + offset, Width::Word, 0, &mut access)
+                    .is_err()
+            );
+        }
+        assert!(
+            model
+                .write(SMMU_OFFSET + 0x1000, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        assert!(
+            model
+                .write(PERF_CONTROL, Width::Word, 1, &mut access)
+                .is_err()
+        );
+        for (offset, value) in [
+            (PERF_STATUS, 2),
+            (SMMU_OFFSET + 0x1008, 1),
+            (SMMU_OFFSET + 0x40, 0x8000_0000),
+            (SMMU_OFFSET + 0x40, 0xc),
+        ] {
+            assert!(
+                model
+                    .write(offset, Width::Word, value, &mut access)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            model.read(SMMU_OFFSET + 0x1000, Width::Word, &mut access),
+            Ok(0)
+        );
+        assert!(
+            model
+                .write(SMMU_OFFSET + 0x20, Width::Word, LOCK.into(), &mut access)
+                .is_err()
+        );
+        assert_eq!(
+            model.read(SMMU_OFFSET + 0x20, Width::Word, &mut access),
+            Ok(0)
+        );
+        assert_ne!(model.read(ERROR, Width::Word, &mut access), Ok(0));
+    }
+
+    #[test]
+    fn paired_t6000_umms_obeys_the_translator_lifecycle_and_retention() {
+        for retention in [false, true] {
+            let (mut model, mut ram, mut sink) = setup(Profile::T6000);
+            model.enable_smmu().unwrap();
+            let mut access = Access::new(0, 0, &mut sink);
+            model
+                .write(SMMU_OFFSET + 0x20, Width::Word, 1 << 31, &mut access)
+                .unwrap();
+            model.set_clock(false);
+            assert!(model.read(SMMU_OFFSET, Width::Word, &mut access).is_err());
+            model.set_clock(true);
+            model.set_quiesced(true);
+            assert!(
+                model
+                    .translate(&mut ram, 1, IOVA, IOVA, false, &mut access)
+                    .is_err()
+            );
+            assert_eq!(
+                model.read(SMMU_OFFSET + 0x20, Width::Word, &mut access),
+                Ok(1 << 31)
+            );
+            model.set_power(false, retention, &mut access);
+            assert!(model.read(SMMU_OFFSET, Width::Word, &mut access).is_err());
+            model.set_power(true, retention, &mut access);
+            let retained = model.read(SMMU_OFFSET + 0x20, Width::Word, &mut access);
+            if retention {
+                assert_eq!(retained, Ok(1 << 31));
+            } else {
+                assert!(retained.is_err());
+            }
+            model.set_reset(true, &mut access);
+            assert!(model.read(SMMU_OFFSET, Width::Word, &mut access).is_err());
+            model.set_reset(false, &mut access);
+            assert!(model.has_smmu());
+            assert!(
+                model
+                    .read(SMMU_OFFSET + 0x20, Width::Word, &mut access)
+                    .is_err()
+            );
+            model
+                .write(SMMU_OFFSET + 0x20, Width::Word, 0, &mut access)
+                .unwrap();
+            assert_eq!(
+                model.read(SMMU_OFFSET + 0x20, Width::Word, &mut access),
+                Ok(0)
+            );
         }
     }
 

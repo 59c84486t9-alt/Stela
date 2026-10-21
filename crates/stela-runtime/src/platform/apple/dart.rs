@@ -4,7 +4,9 @@
 //! See `docs/research/dart-iommu.md` for evidence and qualification limits.
 mod descriptor;
 pub mod gen3;
+mod irq;
 mod legacy;
+mod legacy_umms;
 pub mod smmu;
 mod t8110;
 
@@ -12,6 +14,7 @@ use super::bus::{Access, MmioDevice, MmioError, Width};
 use super::interrupt::AicInput;
 use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::vec::Vec;
+pub use irq::SharedIrq;
 pub use smmu::SmmuBlock;
 /// Internal bus offsets of the independently placed APF and UMMS views.
 pub const DAPF_OFFSET: u64 = 0x4000;
@@ -71,6 +74,42 @@ impl Profile {
             Self::T8110 => 256,
         }
     }
+
+    /// Resolve an OS mapper context to the incoming stream declared by DT.
+    /// T6000 SPTM programs the source->context table before enabling DMA;
+    /// mapper entry points reject remapped sources. This is a board route
+    /// declaration, not an observation of a physical bus transaction.
+    pub fn mapper_input_stream(
+        self,
+        streams: usize,
+        context: usize,
+        remaps: &[(u8, u8)],
+    ) -> Result<usize, &'static str> {
+        if streams == 0 || streams > self.stream_limit() || context >= streams {
+            return Err("DART mapper context is outside the native profile");
+        }
+        if !remaps.is_empty() && self != Self::T6000 {
+            return Err("DART mapper remap routing is unqualified for this generation");
+        }
+        for (index, &(source, target)) in remaps.iter().enumerate() {
+            if usize::from(source) >= streams
+                || usize::from(target) >= streams
+                || source == target
+                || remaps[..index]
+                    .iter()
+                    .any(|&(s, t)| [source, target].contains(&s) || [source, target].contains(&t))
+            {
+                return Err("DART mapper remaps overlap or exceed the native profile");
+            }
+            if usize::from(source) == context {
+                return Err("DART mapper names an incoming remapped source instead of its context");
+            }
+        }
+        Ok(remaps
+            .iter()
+            .find(|&&(_, target)| usize::from(target) == context)
+            .map_or(context, |&(source, _)| usize::from(source)))
+    }
 }
 
 enum Model {
@@ -83,6 +122,15 @@ pub struct Dart {
 }
 
 impl Dart {
+    /// Join a physical input's wired-OR owner before mapping this translator.
+    /// An active source cannot be rebound without losing its old assertion.
+    pub fn bind_shared_irq(&mut self, irq: &SharedIrq) -> Result<(), &'static str> {
+        match &mut self.model {
+            Model::Legacy(model) => model.bind_shared_irq(irq),
+            Model::T8110(model) => model.bind_shared_irq(irq),
+        }
+    }
+
     /// The existing cacheless revision-1 t8110 profile.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {
         Self {
@@ -155,10 +203,15 @@ impl Dart {
         Ok(self)
     }
 
-    /// Whether this generation implements the paired capture format. This
-    /// query never attaches a view or changes a device's state.
+    /// Whether this generation implements a native paired UMMS view. This
+    /// does not qualify optional hardware capture/performance/configuration
+    /// forms: unsupported accesses still refuse inside the selected family.
+    /// The query never attaches a view or changes a device's state.
     pub fn supports_smmu(&self) -> bool {
-        matches!(self.model, Model::T8110(_))
+        match &self.model {
+            Model::T8110(_) => true,
+            Model::Legacy(model) => model.supports_smmu(),
+        }
     }
 
     /// Validate support and uniqueness before placing any physical window.
@@ -177,7 +230,7 @@ impl Dart {
                     Err("DART already has a paired SMMU instance")
                 }
             }
-            Model::Legacy(_) => Err("legacy DART paired SMMU capture format is unsupported"),
+            Model::Legacy(model) => model.enable_smmu(),
         }
     }
 
@@ -185,7 +238,7 @@ impl Dart {
     pub fn has_smmu(&self) -> bool {
         match &self.model {
             Model::T8110(model) => model.has_smmu(),
-            Model::Legacy(_) => false,
+            Model::Legacy(model) => model.has_smmu(),
         }
     }
 
@@ -285,6 +338,7 @@ mod tests {
         apple::interrupt::{InterruptLatch, Wire},
         dma::{Port, tests::Ram},
     };
+    use alloc::vec;
 
     #[test]
     fn explicit_profiles_keep_the_shared_bus_master_type_and_actual_table_effects() {
@@ -429,7 +483,7 @@ mod tests {
         for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
             let mut model = Dart::for_profile(profile, 16, None).unwrap();
             assert!(!model.has_smmu());
-            let supported = profile == Profile::T8110;
+            let supported = matches!(profile, Profile::T6000 | Profile::T8110);
             assert_eq!(model.supports_smmu(), supported);
             assert_eq!(model.can_attach_smmu(), supported);
             // Capability queries have no attachment side effect.
@@ -461,6 +515,86 @@ mod tests {
                 Err("a DART group needs a translation instance")
             ));
         }
+    }
+
+    #[test]
+    fn mapper_context_and_declared_incoming_stream_remain_distinct() {
+        assert_eq!(Profile::T6000.mapper_input_stream(16, 0, &[(5, 0)]), Ok(5));
+        assert_eq!(Profile::T6000.mapper_input_stream(16, 4, &[]), Ok(4));
+        for (streams, context, remaps) in [
+            (0, 0, vec![]),
+            (17, 0, vec![]),
+            (16, 16, vec![]),
+            (16, 5, vec![(5, 0)]),
+            (16, 0, vec![(5, 0), (6, 0)]),
+            (16, 0, vec![(5, 0), (0, 1)]),
+            (16, 0, vec![(5, 16)]),
+            (16, 0, vec![(5, 5)]),
+        ] {
+            assert!(
+                Profile::T6000
+                    .mapper_input_stream(streams, context, &remaps)
+                    .is_err()
+            );
+        }
+        for profile in [Profile::T8020, Profile::T8110] {
+            assert!(profile.mapper_input_stream(16, 0, &[(5, 0)]).is_err());
+            assert_eq!(profile.mapper_input_stream(16, 0, &[]), Ok(0));
+        }
+    }
+
+    #[test]
+    fn separate_logical_groups_and_generations_share_one_physical_irq_owner() {
+        let input = AicInput::new(0, 873);
+        let shared = SharedIrq::new(input);
+        let mut legacy = Dart::for_profile(Profile::T6000, 16, Some(input)).unwrap();
+        let mut modern = Dart::for_profile(Profile::T8110, 16, Some(input)).unwrap();
+        legacy.bind_shared_irq(&shared).unwrap();
+        modern.bind_shared_irq(&shared).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut ram = Ram::new(0, 0x4000);
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            for model in [&mut legacy, &mut modern] {
+                assert!(matches!(
+                    model.translate(&mut ram, 0, 0, 0, false, &mut access),
+                    Err(DmaError::Fault(_))
+                ));
+                assert!(model.bind_shared_irq(&shared).is_err());
+            }
+            legacy.write(0x40, Width::Word, 1, &mut access).unwrap();
+        }
+        assert!(sink.is_asserted(crate::platform::apple::interrupt::Wire::Aic(input)));
+        {
+            let mut access = Access::new(0, 0, &mut sink);
+            modern.set_reset(true, &mut access);
+        }
+        assert!(!sink.is_asserted(crate::platform::apple::interrupt::Wire::Aic(input)));
+        assert!(
+            legacy
+                .bind_shared_irq(&SharedIrq::new(AicInput::new(0, 1)))
+                .is_err()
+        );
+        assert!(
+            Dart::for_profile(Profile::T6000, 16, None)
+                .unwrap()
+                .bind_shared_irq(&shared)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_active_original_group_cannot_be_split_by_rebinding_its_idle_peer() {
+        let input = AicInput::new(0, 873);
+        let mut models = Dart::group_for_profile(Profile::T6000, 16, Some(input), 2).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut ram = Ram::new(0, 0x4000);
+        let mut access = Access::new(0, 0, &mut sink);
+        assert!(matches!(
+            models[0].translate(&mut ram, 0, 0, 0, false, &mut access),
+            Err(DmaError::Fault(_))
+        ));
+        assert!(models[1].bind_shared_irq(&SharedIrq::new(input)).is_err());
     }
 
     #[test]

@@ -289,6 +289,22 @@ impl Slice {
 }
 
 impl Dart {
+    pub(super) fn bind_shared_irq(&mut self, irq: &super::SharedIrq) -> Result<(), &'static str> {
+        if self.irq != Some(irq.input) {
+            return Err("DART shared IRQ does not match its physical input");
+        }
+        if self.irq_level
+            || self
+                .shared_fault
+                .as_ref()
+                .is_some_and(|(levels, _)| levels.borrow().iter().any(|&level| level))
+        {
+            return Err("an asserted DART IRQ source cannot be rebound");
+        }
+        self.shared_fault = Some(irq.source());
+        Ok(())
+    }
+
     /// A DART of `streams` streams (`sid-count`, at most 256), every stream
     /// disabled and untranslated, signalling faults on `irq`.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {
