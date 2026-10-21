@@ -607,19 +607,32 @@ impl Nhi {
             (field, width),
             (8, Width::Word | Width::Half) | (10, Width::Half)
         ) {
-            let owned = match (direction, field, width) {
-                (Direction::Transmit, 8, Width::Word) => Some((value >> 16) as u16),
+            let stopped = r.active.is_none();
+            let (posted, consumed) = match (direction, field, width) {
+                (Direction::Transmit, 8, Width::Word) => {
+                    (Some((value >> 16) as u16), stopped.then_some(value as u16))
+                }
+                (Direction::Receive, 8, Width::Word) => {
+                    (Some(value as u16), stopped.then_some((value >> 16) as u16))
+                }
                 (Direction::Transmit, 10, Width::Half) | (Direction::Receive, 8, Width::Half) => {
-                    Some(value as u16)
+                    (Some(value as u16), None)
                 }
-                (Direction::Receive, 8, Width::Word) => Some(value as u16),
-                _ => None,
+                _ => (None, stopped.then_some(value as u16)),
             };
-            if let Some(index) = owned {
+            // Ownership applies while the ring runs. Once stopped, software
+            // initializes both indexes before enabling a replacement table.
+            // Validate both word halves before changing either one.
+            for index in posted.into_iter().chain(consumed) {
                 if index >= r.count && !(index == 0 && r.count == 0) {
-                    return Err("NHI posted index is outside the descriptor ring");
+                    return Err("NHI index is outside the descriptor ring");
                 }
+            }
+            if let Some(index) = posted {
                 r.posted = index;
+            }
+            if let Some(index) = consumed {
+                r.consumed = index;
             }
             return Ok(());
         }
@@ -1302,5 +1315,88 @@ mod tests {
         }
         assert_eq!(state.borrow().sent.len(), 198);
         assert!(!nhi.dma_pending());
+    }
+    #[test]
+    fn stopped_rings_restart_from_reinitialized_indices_and_new_tables() {
+        let (mut nhi, state) = make(1);
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut ram = Ram::new(0, 0x10000);
+        let mut guard = Guard::default();
+        nhi.set_powered(true, &mut access).unwrap();
+        program(&mut nhi, &mut access, Direction::Transmit, 0, RAW, 0);
+        program(&mut nhi, &mut access, Direction::Receive, 0, RAW, 256);
+        assert!(ram.write(0x3000, b"a"));
+        for slot in 0..3 {
+            descriptor(&mut ram, 0x1000 + slot * 16, 0x3000, 0x400001, 0);
+            descriptor(
+                &mut ram,
+                0x2000 + slot * 16,
+                0x4000 + slot * 0x100,
+                0x400000,
+                0,
+            );
+            state
+                .borrow_mut()
+                .notifications
+                .push(Frame::new(0, vec![slot as u8], 0, 0, 42, false).unwrap());
+        }
+        write(&mut nhi, &mut access, 0x1000a, Width::Half, 3);
+        write(&mut nhi, &mut access, 0x80008, Width::Half, 3);
+        nhi.advance(&mut access).unwrap();
+        service(&mut nhi, &mut ram, &mut guard, &mut access).unwrap();
+        assert_eq!(read(&mut nhi, &mut access, 0x10008, Width::Word), 0x30003);
+        assert_eq!(read(&mut nhi, &mut access, 0x80008, Width::Word), 0x30003);
+        write(&mut nhi, &mut access, 0x10010, Width::Word, 0);
+        write(&mut nhi, &mut access, 0x80010, Width::Word, 0);
+        assert!(
+            nhi.write(0x10008, Width::Word, 4 << 16, &mut access)
+                .is_err()
+        );
+        assert_eq!(read(&mut nhi, &mut access, 0x10008, Width::Word), 0x30003);
+        write(&mut nhi, &mut access, 0x10008, Width::Word, 0);
+        write(&mut nhi, &mut access, 0x8000a, Width::Half, 0);
+        write(&mut nhi, &mut access, 0x80008, Width::Half, 0);
+        write(&mut nhi, &mut access, 0x10000, Width::Double, 0x5000);
+        write(&mut nhi, &mut access, 0x80000, Width::Double, 0x6000);
+        assert_eq!(read(&mut nhi, &mut access, 0x10008, Width::Word), 0);
+        assert_eq!(read(&mut nhi, &mut access, 0x80008, Width::Word), 0);
+        write(
+            &mut nhi,
+            &mut access,
+            0x10010,
+            Width::Word,
+            u64::from(ENABLE | RAW),
+        );
+        write(
+            &mut nhi,
+            &mut access,
+            0x80010,
+            Width::Word,
+            u64::from(ENABLE | RAW),
+        );
+        assert!(ram.write(0x7000, b"Z"));
+        descriptor(&mut ram, 0x5000, 0x7000, 0x400001, 0);
+        descriptor(&mut ram, 0x6000, 0x8000, 0x400000, 0);
+        // Running rings ignore the hardware-owned half, for both widths.
+        write(&mut nhi, &mut access, 0x10008, Width::Half, 0xffff);
+        write(&mut nhi, &mut access, 0x8000a, Width::Half, 0xffff);
+        write(&mut nhi, &mut access, 0x10008, Width::Word, 0x1ffff);
+        write(&mut nhi, &mut access, 0x80008, Width::Word, 0xffff0001);
+        assert_eq!(read(&mut nhi, &mut access, 0x10008, Width::Word), 0x10000);
+        assert_eq!(read(&mut nhi, &mut access, 0x80008, Width::Word), 1);
+        state
+            .borrow_mut()
+            .notifications
+            .push(Frame::new(0, vec![b'Z'], 0, 0, 43, false).unwrap());
+        nhi.advance(&mut access).unwrap();
+        service(&mut nhi, &mut ram, &mut guard, &mut access).unwrap();
+        assert_eq!(read(&mut nhi, &mut access, 0x10008, Width::Word), 0x10001);
+        assert_eq!(read(&mut nhi, &mut access, 0x80008, Width::Word), 0x10001);
+        assert_eq!(state.borrow().sent.len(), 4);
+        assert_eq!(state.borrow().sent.last().unwrap().1, b"Z");
+        assert_eq!(ram.bytes[0x8000], b'Z');
+        assert_eq!(word(&mut ram, 0x5008), 0x200001);
+        assert_eq!(word(&mut ram, 0x6008), 0x200001);
     }
 }
