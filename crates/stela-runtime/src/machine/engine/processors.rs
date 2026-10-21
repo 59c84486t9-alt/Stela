@@ -31,6 +31,7 @@
 //! core's own timers, performance monitor and vGIC went down with it. Its
 //! reset vector is the board's (`Devices::reset_vector`), and the board
 //! learns of each power-down and power-up (`Devices::processor_power`).
+pub mod publication;
 mod retained;
 mod transaction;
 use super::{
@@ -162,6 +163,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     pub(super) fn processor_write_parts(&mut self) -> (&mut D, ProcessorWrite<'_>) {
         let processors = ProcessorWrite {
             processors: &mut self.processor_power,
+            publication: &mut self.native_publication,
             current: self.current,
             cpu: &mut self.cpu,
             peers: &mut self.peers,

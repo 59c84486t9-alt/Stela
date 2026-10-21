@@ -17,6 +17,7 @@ use super::{
 /// CPU batch, then perform only an infallible prepared commit before ACK.
 pub struct ProcessorWrite<'a> {
     pub(super) processors: &'a mut Processors,
+    pub(super) publication: &'a mut Option<super::publication::WorkerPublications>,
     pub(super) current: usize,
     pub(super) cpu: &'a mut Cpu,
     pub(super) peers: &'a mut [Peer],
@@ -181,6 +182,11 @@ impl<'a> ProcessorWrite<'a> {
         plan: PreparedProcessorPower,
     ) -> Result<SettledProcessorWrite<'a>, ProcessorPowerError> {
         self.processors.check(&plan)?;
+        if let Some(publication) = self.publication.as_ref() {
+            publication
+                .require_stopped(self.processors.count(), plan.affected())
+                .map_err(ProcessorPowerError::Publication)?;
+        }
         check_owners(self.processors, self.current, self.peers)?;
         let settlement = self.processors.settlement(plan)?;
         let current_changed = settlement

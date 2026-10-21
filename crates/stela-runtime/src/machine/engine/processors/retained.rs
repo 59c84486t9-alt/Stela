@@ -54,6 +54,7 @@ pub enum ProcessorPowerError {
     MissingLiveOwner(usize),
     UnexpectedLiveOwner(usize),
     NativeStateExhausted(&'static str),
+    Publication(super::publication::PublicationError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,12 +72,19 @@ pub struct PreparedProcessorPower {
     processors: usize,
     before: BTreeMap<u64, Domain>,
     after: BTreeMap<u64, Domain>,
+    affected: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct PauseChange {
     pub pe: usize,
     pub paused: bool,
+}
+
+impl PreparedProcessorPower {
+    pub(super) fn affected(&self) -> &[usize] {
+        &self.affected
+    }
 }
 
 /// A checked exclusive lease over the actual participant inventory. While
@@ -190,7 +198,7 @@ impl Processors {
                 },
             );
         }
-        self.plan(after)
+        self.plan(after, bindings.iter().map(|binding| binding.domain))
     }
 
     pub fn prepare(
@@ -219,21 +227,31 @@ impl Processors {
             }
             domain.state = change.state;
         }
-        self.plan(after)
+        self.plan(after, changes.iter().map(|change| change.domain))
     }
 
     fn plan(
         &self,
         after: BTreeMap<u64, Domain>,
+        requested: impl Iterator<Item = u64>,
     ) -> Result<PreparedProcessorPower, ProcessorPowerError> {
         self.revision
             .checked_add(1)
             .ok_or(ProcessorPowerError::RevisionExhausted)?;
+        // Preserve complete requested membership, even when its effective
+        // pause state does not change because another domain still gates it.
+        let mut affected = Vec::new();
+        for domain in requested {
+            affected.extend_from_slice(after[&domain].target.members());
+        }
+        affected.sort_unstable();
+        affected.dedup();
         Ok(PreparedProcessorPower {
             revision: self.revision,
             processors: self.count,
             before: self.domains.clone(),
             after,
+            affected,
         })
     }
 
