@@ -291,6 +291,9 @@ pub(super) fn add(environment: &Environment<'_>, command: &Setup) -> Result<Stri
     copy_bundles(&mut next, &prepared)?;
     write_record(&next.esp.clone(), &next)?;
     apply_install(environment, &mut next, &ipsw, install_plan)?;
+    if let Some(region) = &checked.foreign {
+        installed::erase_foreign(host, region)?;
+    }
     if let Some(image) = &checked.nor_image {
         installed::initialize_nor(host, &checked.disk, image)?;
     }

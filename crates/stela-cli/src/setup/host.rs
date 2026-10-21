@@ -95,6 +95,9 @@ pub(crate) trait Host {
     fn read(&self, identifier: &str, offset: u64, length: usize) -> Result<Vec<u8>>;
     /// Write `bytes` at `offset` of a partition, durably.
     fn write(&self, identifier: &str, offset: u64, bytes: &[u8]) -> Result<()>;
+    /// Unmount `partition`'s volume, or every volume of the APFS container
+    /// it backs.
+    fn unmount(&self, partition: &PartitionInfo) -> Result<()>;
     /// This computer's memory and CPU, for a disk it boots itself.
     fn memory_bytes(&self) -> Result<u64>;
     fn cpu(&self) -> Result<Cpu>;
@@ -199,6 +202,24 @@ impl Host for System {
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        Ok(())
+    }
+
+    fn unmount(&self, partition: &PartitionInfo) -> Result<()> {
+        let mut command = Command::new("diskutil");
+        match &partition.container {
+            Some(container) => command.args(["unmountDisk", container]),
+            None => command.args(["unmount", &partition.identifier]),
+        };
+        let status = command.status().context("cannot run diskutil")?;
+        ensure!(
+            status.success(),
+            "diskutil could not unmount {}",
+            partition
+                .container
+                .as_deref()
+                .unwrap_or(&partition.identifier)
+        );
         Ok(())
     }
 

@@ -37,6 +37,11 @@ const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
 /// LBA 1 at 512-byte or 4096-byte blocks.
 const GPT_HEADER_OFFSETS: [u64; 2] = [512, 4096];
 const PROBE_BYTES: usize = 8192;
+/// The bytes at the start of an Apple region that `--erase-target` clears
+/// of another file system: the signatures every host OS finds one by (APFS's
+/// container superblock in block 0, HFS+'s and ext4's at 1 KiB, NTFS's and
+/// FAT's boot sector) lie in its first MiB.
+const FOREIGN_HEAD_BYTES: usize = 1 << 20;
 
 /// The installed disk, as `stela.cfg` names it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -304,6 +309,9 @@ pub(super) struct Checked {
     /// The SEP area holds an earlier machine's state, which is bound to
     /// that machine's ECID.
     pub(super) sep_provisioned: bool,
+    /// The region holds another file system, which [`erase_foreign`]
+    /// clears: the partition as found, mounted or not.
+    pub(super) foreign: Option<PartitionInfo>,
     pub(super) notes: Vec<String>,
 }
 
@@ -340,11 +348,14 @@ fn guest_disk_bytes(head: &[u8]) -> Option<u64> {
     })
 }
 
+/// `identifier` as a partition Stela may own. A mounted one is refused,
+/// unless `erasing` says setup erases it anyway, after unmounting it.
 fn usable(
     host: &dyn Host,
     identifier: &str,
     role: &str,
     usb_disk: Option<&str>,
+    erasing: bool,
 ) -> Result<PartitionInfo> {
     let info = host.partition(identifier)?;
     ensure!(
@@ -359,18 +370,21 @@ fn usable(
         usb_disk != Some(info.disk.as_str()),
         "{identifier} is on the setup USB; the {role} belongs on the PC's own disk"
     );
+    if erasing {
+        return Ok(info);
+    }
     if let Some(mount) = &info.mount {
         bail!(
-            "{identifier} is mounted at {}: the {role} is a raw partition Stela owns. Unmount it \
-             (`diskutil unmount {identifier}`) after moving anything you keep elsewhere.",
+            "{identifier} is mounted at {}: the {role} is a raw partition Stela owns. Move \
+             anything you keep elsewhere, then pass --erase-target, which unmounts and erases it.",
             mount.display()
         );
     }
     if let Some(container) = &info.container {
         bail!(
             "{identifier} backs APFS container {container}, whose volumes are mounted: the {role} \
-             is a raw partition Stela owns. Unmount them (`diskutil unmountDisk {container}`) \
-             after moving anything you keep elsewhere; the container of the running system \
+             is a raw partition Stela owns. Move anything you keep elsewhere, then pass \
+             --erase-target, which unmounts and erases it; the container of the running system \
              cannot be used."
         );
     }
@@ -418,6 +432,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         request.apple_region,
         "Apple region",
         request.usb_disk.filter(|_| !request.external_disks),
+        request.erase_target,
     )?;
     // Without `--nor`, the guest's SSD is the region less its tail.
     let split = match request.nor {
@@ -440,7 +455,9 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         },
         DEFAULT_MIN_APPLE_BYTES / 1_000_000_000
     );
-    match contents(host, &region.identifier)? {
+    let found = contents(host, &region.identifier)?;
+    let foreign = matches!(found, Contents::Other).then(|| region.clone());
+    match found {
         Contents::GuestDisk => {
             if let Some(split) = split {
                 let head = host.read(&region.identifier, 0, PROBE_BYTES)?;
@@ -470,8 +487,9 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
             region.identifier
         )),
         Contents::Other if request.erase_target => notes.push(format!(
-            "{} holds other data, which installing macOS onto it from recoveryOS erases \
-             (--erase-target)",
+            "{} holds other data, which setup erases (--erase-target): left in place, the PC's \
+             own OS would mount its file system and clear the free space it sees, Stela's \
+             machine state included",
             region.identifier
         )),
         Contents::Other => bail!(
@@ -483,7 +501,7 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
     // The machine state: a partition of its own, or the region's tail.
     let (nor, area, label) = match (request.nor, split) {
         (Some(identifier), _) => {
-            let nor = usable(host, identifier, "NOR", request.usb_disk)?;
+            let nor = usable(host, identifier, "NOR", request.usb_disk, false)?;
             let area = StateArea {
                 identifier: nor.identifier.clone(),
                 offset: 0,
@@ -618,8 +636,30 @@ pub(super) fn check(host: &dyn Host, request: &Request) -> Result<Checked> {
         disk,
         nor_image,
         sep_provisioned,
+        foreign,
         notes,
     })
+}
+
+/// The Apple region of `disk`, when it holds another file system than a
+/// guest disk: the PC's own OS mounts it and clears its free space, Stela's
+/// machine state included.
+pub(super) fn foreign(host: &dyn Host, disk: &InstalledDisk) -> Result<Option<PartitionInfo>> {
+    let identifier = confirm(host, disk, Role::AppleRegion, None)?;
+    Ok(match contents(host, &identifier)? {
+        Contents::Other => Some(host.partition(&identifier)?),
+        Contents::Blank | Contents::GuestDisk => None,
+    })
+}
+
+/// Clear the other file system at the start of `region`, unmounting it
+/// first, which `--erase-target` gave up.
+pub(super) fn erase_foreign(host: &dyn Host, region: &PartitionInfo) -> Result<()> {
+    if region.mount.is_some() || region.container.is_some() {
+        host.unmount(region)?;
+    }
+    host.write(&region.identifier, 0, &vec![0; FOREIGN_HEAD_BYTES])
+        .with_context(|| format!("erasing the file system on {}", region.identifier))
 }
 
 /// Write the machine-state bytes `check` planned: a fresh NOR image, a

@@ -369,6 +369,9 @@ fn install_status(
             install.name
         )),
     }
+    if let Ok(Some(region)) = installed::foreign(host, disk) {
+        report.problem(foreign_problem(&install.name, &region.identifier));
+    }
     let area = match installed::state_area(host, disk, None) {
         Ok(area) => area,
         Err(error) => {
@@ -433,6 +436,14 @@ fn install_status(
 }
 
 /// `--status`.
+/// An install's Apple region holds another file system.
+fn foreign_problem(install: &str, region: &str) -> String {
+    format!(
+        "install \"{install}\"'s Apple region {region} holds another file system, which the PC's \
+         own OS mounts, clearing the free space it sees, Stela's machine state included"
+    )
+}
+
 pub(super) fn status(environment: &Environment<'_>, usb: &Path) -> Result<String> {
     let record = read_record(environment, usb)?;
     let mut report = Report {
@@ -693,6 +704,26 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         text,
         "  boot loader    stela.efi, stela.cfg and the startup choices as recorded"
     )?;
+    // An Apple region holding another file system: erased with
+    // --erase-target, else named.
+    let mut foreign = Vec::new();
+    for install in &record.installs {
+        if let Some(region) = installed::foreign(environment.host, &install.disk)? {
+            if command.erase_target {
+                writeln!(
+                    text,
+                    "  disks          erase the file system on {}, install \"{}\"'s Apple region",
+                    region.identifier, install.name
+                )?;
+                foreign.push(region);
+            } else {
+                notes.push(format!(
+                    "{}; pass --erase-target to erase it",
+                    foreign_problem(&install.name, &region.identifier)
+                ));
+            }
+        }
+    }
     for note in &notes {
         writeln!(text, "  note           {note}")?;
     }
@@ -712,6 +743,9 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
         && !store_repairs.is_empty()
     {
         store.repair()?;
+    }
+    for region in &foreign {
+        installed::erase_foreign(environment.host, region)?;
     }
     copy_bundles(&mut record, &prepared)?;
     write_record(&esp, &record)?;

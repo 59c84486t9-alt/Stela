@@ -162,9 +162,10 @@ pub(crate) struct Setup {
     /// this computer cannot read it.
     #[arg(long, requires = "target")]
     disk_serial: Option<String>,
-    /// Use a `--target` that holds other data, which installing macOS onto
-    /// it erases.
-    #[arg(long, requires = "target")]
+    /// Erase the other file system a `--target` holds, unmounting it first,
+    /// or with `--repair` the one an install's Apple region holds: the PC's
+    /// own OS would mount it and clear Stela's machine state.
+    #[arg(long)]
     erase_target: bool,
     /// Write a fresh NOR image over machine state that is neither blank nor
     /// one, and blank a foreign SEP area.
@@ -1032,6 +1033,10 @@ impl Setup {
                 || self.boot_log,
             "--nor names a NOR partition for --target, --reset-nvram, --backup-state, \
              --restore-state or --boot-log"
+        );
+        ensure!(
+            !self.erase_target || self.target.is_some() || self.repair,
+            "--erase-target goes with --target or --repair"
         );
         Ok(())
     }
@@ -2035,10 +2040,13 @@ fn apply(environment: &Environment<'_>, plan: Plan) -> Result<()> {
     if let Some(install) = plan.install {
         apply_install(environment, &mut record, &plan.ipsw, install)?;
     }
-    if let Some(checked) = &plan.installed
-        && let Some(nor) = &checked.nor_image
-    {
-        installed::initialize_nor(environment.host, &checked.disk, nor)?;
+    if let Some(checked) = &plan.installed {
+        if let Some(region) = &checked.foreign {
+            installed::erase_foreign(environment.host, region)?;
+        }
+        if let Some(nor) = &checked.nor_image {
+            installed::initialize_nor(environment.host, &checked.disk, nor)?;
+        }
     }
     // The version is kept first, so `--rollback` of a later update finds it.
     let version = update::store_version(&esp, &plan.efi_image)?;
@@ -2178,6 +2186,8 @@ mod tests {
         pub(super) serials: BTreeMap<String, String>,
         pub(super) memory: u64,
         pub(super) cpu: Cpu,
+        /// The partitions `unmount` unmounted, in order.
+        pub(super) unmounted: std::cell::RefCell<Vec<String>>,
     }
 
     impl FakeHost {
@@ -2192,6 +2202,7 @@ mod tests {
                 serials: BTreeMap::new(),
                 memory: 32 * GIB,
                 cpu: Cpu { entropy: true },
+                unmounted: Default::default(),
             }
         }
 
@@ -2205,10 +2216,27 @@ mod tests {
 
     impl Host for FakeHost {
         fn partition(&self, identifier: &str) -> Result<PartitionInfo> {
-            self.partitions
+            let mut info = self
+                .partitions
                 .get(identifier)
                 .map(|(info, _)| info.clone())
-                .context("no such partition")
+                .context("no such partition")?;
+            if self
+                .unmounted
+                .borrow()
+                .iter()
+                .any(|done| done == identifier)
+            {
+                info.mount = None;
+                info.container = None;
+            }
+            Ok(info)
+        }
+        fn unmount(&self, partition: &PartitionInfo) -> Result<()> {
+            self.unmounted
+                .borrow_mut()
+                .push(partition.identifier.clone());
+            Ok(())
         }
         fn serial(&self, disk: &str) -> Result<Option<String>> {
             Ok(self.serials.get(disk).cloned())
@@ -2869,6 +2897,54 @@ mod tests {
     }
 
     #[test]
+    fn another_file_system_on_a_target_is_unmounted_and_erased_now_and_on_repair() {
+        let mut apfs = vec![0u8; 64];
+        apfs[32..36].copy_from_slice(b"NXSB");
+        let erased = |f: &Fixture| {
+            fs::read(&f.host.partitions[REGION].1).unwrap()[..IMAGE_BYTES / 2]
+                .iter()
+                .all(|&byte| byte == 0)
+        };
+        // A mounted container is refused, and with --erase-target setup
+        // unmounts and erases it, so the PC's OS stops mounting it.
+        let mut f = fixture(64 * GIB, false);
+        add_installed_disk(&mut f, &apfs, &[]);
+        f.host.partitions.get_mut(REGION).unwrap().0.container = Some("disk9".into());
+        let error = setup(&environment(&f.host), installed_command(&f))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("--erase-target, which unmounts and erases"),
+            "{error}"
+        );
+        let mut erase = installed_command(&f);
+        erase.erase_target = true;
+        setup(&environment(&f.host), erase).unwrap();
+        assert_eq!(*f.host.unmounted.borrow(), [REGION]);
+        assert!(erased(&f));
+        // One an existing install's region gains is a problem --status
+        // names and --repair erases with --erase-target.
+        let path = f.host.partitions[REGION].1.clone();
+        let mut image = fs::read(&path).unwrap();
+        image[..apfs.len()].copy_from_slice(&apfs);
+        fs::write(&path, image).unwrap();
+        let error = rerun(&f, |c| c.status = true).unwrap_err().to_string();
+        assert!(error.contains("holds another file system"), "{error}");
+        let report = rerun(&f, |c| c.repair = true).unwrap();
+        assert!(
+            report.contains("pass --erase-target to erase it"),
+            "{report}"
+        );
+        assert!(!erased(&f));
+        rerun(&f, |c| {
+            c.repair = true;
+            c.erase_target = true;
+        })
+        .unwrap();
+        assert!(erased(&f));
+    }
+
+    #[test]
     fn an_installed_disk_boots_macos_or_recoveryos_and_keeps_its_partitions() {
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], &[]);
@@ -3096,7 +3172,7 @@ mod tests {
         dry.erase_target = true;
         dry.dry_run = true;
         let plan = setup(&environment(&f.host), dry).unwrap();
-        assert!(plan.contains("erases (--erase-target)"), "{plan}");
+        assert!(plan.contains("setup erases (--erase-target)"), "{plan}");
         // A NOR partition with other bytes needs --initialize-nor.
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], b"not a NOR image");
@@ -3142,7 +3218,7 @@ mod tests {
         let mut f = fixture(64 * GIB, false);
         add_installed_disk(&mut f, &[], &[]);
         f.host.partitions.get_mut(REGION).unwrap().0.container = Some("disk4".into());
-        assert!(refusal(&f, &|_| {}).contains("unmountDisk disk4"));
+        assert!(refusal(&f, &|_| {}).contains("APFS container disk4"));
         f.host.partitions.get_mut(REGION).unwrap().0.container = None;
         f.host.partitions.get_mut(NOR).unwrap().0.mount = Some("/Volumes/x".into());
         assert!(refusal(&f, &|_| {}).contains("is mounted"));
