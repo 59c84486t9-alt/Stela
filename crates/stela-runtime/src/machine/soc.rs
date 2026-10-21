@@ -4168,6 +4168,7 @@ fn aes_engine(
             "{PATH} DMA instance routing is undetermined for a multi-instance DART"
         ));
     }
+    let stream = native_mapper_input(&darts[iommu], stream)?;
     Ok(Some(AesEngine {
         ranges: [place(block)?, place(key_disable)?],
         version: number("aes-version")?,
@@ -4263,6 +4264,7 @@ fn usb_controller(
     if stream >= u32::from(darts[iommu].streams) {
         return Err(err("mapper stream exceeds DART capacity"));
     }
+    let stream = native_mapper_input(&darts[iommu], stream)?;
     let port = node
         .first_u32("port-number")
         .filter(|&port| port != 0)
@@ -4389,6 +4391,17 @@ fn sep_device(
         security,
         ecid,
     }))
+}
+
+/// Assign a modeled native endpoint its declared incoming route while
+/// retaining the original OS mapper context in the tree. This is a Stela
+/// endpoint assignment, not an observation of an Apple bus transaction.
+fn native_mapper_input(dart: &Iommu, context: u32) -> Result<u32, String> {
+    let input = dart
+        .profile
+        .mapper_input_stream(usize::from(dart.streams), context as usize, &dart.remap)
+        .map_err(String::from)?;
+    u32::try_from(input).map_err(|_| "native DMA input exceeds u32".into())
 }
 
 /// One selected external coprocessor, its expert and pipe, with distinct

@@ -141,21 +141,59 @@ fn modeled_dart(node: &Node) -> bool {
     else {
         return false;
     };
-    // Properties alone do not select which legacy translation instance a
-    // mapper masters. Keep the same explicit routing gate as SoC placement.
-    if profile != Profile::T8110
-        && node
-            .property("instance")
-            .is_some_and(|property| property.value.len() > 12)
-        && node
-            .children
-            .iter()
-            .any(|child| named(child, soc::IOMMU_MAPPER))
+    if !compatibles(node)
+        .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
     {
         return false;
     }
-    compatibles(node)
-        .any(|name| soc::models(name, |key| node.property(key).map(|p| p.value.as_slice())))
+    if profile == Profile::T8110 {
+        return true;
+    }
+    // A capture descriptor does not create another translating owner.
+    let descriptors = &node
+        .property("instance")
+        .expect("qualified native descriptors")
+        .value;
+    let translations = descriptors
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .filter(|d| &d[..4] == b"TRAD")
+        .count();
+    let mappers = node
+        .children
+        .iter()
+        .filter(|child| named(child, soc::IOMMU_MAPPER));
+    if translations != 1 && mappers.clone().next().is_some() {
+        return false;
+    }
+    let streams = node
+        .property("sid-count")
+        .and_then(|p| p.as_u32())
+        .unwrap_or(16) as usize;
+    let remaps = node
+        .property("remap")
+        .map(|p| p.value.as_slice())
+        .unwrap_or_default()
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .filter(|p| **p != [0, 0])
+        .map(|p| (p[0], p[1]))
+        .collect::<Vec<_>>();
+    // The source mapper names a context, not an incoming remapped SID.
+    mappers.into_iter().all(|mapper| {
+        let Some(context) = mapper
+            .property("reg")
+            .and_then(|p| <[u8; 4]>::try_from(p.value.as_slice()).ok())
+            .map(u32::from_le_bytes)
+        else {
+            return false;
+        };
+        profile
+            .mapper_input_stream(streams, context as usize, &remaps)
+            .is_ok()
+    })
 }
 
 /// A modeled device that is not part of an IOMMU.
@@ -1501,6 +1539,41 @@ mod tests {
         }
         // A visible AES engine keeps the secure root prefix.
         assert!(tree.root.property(SECURE_ROOT_PREFIX).is_some());
+    }
+
+    #[test]
+    #[ignore = "requires original 26A434 J314s DT through STELA_TEST_DART_DT"]
+    fn original_j314s_preparation_keeps_the_complete_external_display_graph() {
+        let bytes = std::fs::read(std::env::var("STELA_TEST_DART_DT").unwrap()).unwrap();
+        assert_eq!(
+            stela_runtime::sha256(&bytes),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let mut tree = DeviceTree::parse(&bytes).unwrap();
+        hide_unmodeled(&mut tree);
+        for path in [
+            "/arm-io/dcpext0",
+            "/arm-io/dcpext0-expert",
+            "/arm-io/dispext0",
+            "/arm-io/dart-dcpext0",
+            "/arm-io/dart-dcpext0/mapper-dcpext0",
+            "/arm-io/dart-dispext0",
+            "/arm-io/dart-dispext0/mapper-dispext0",
+        ] {
+            assert!(tree.property(path, COMPATIBLE).is_some(), "{path}");
+        }
+        let surface = tree.node("/arm-io/dart-dispext0").unwrap();
+        assert_eq!(surface.property("instance").unwrap().value.len(), 24);
+        assert_eq!(surface.property("never-lock").unwrap().value, []);
+        assert_eq!(
+            surface
+                .property("ignore-inconsistent-hw-locks")
+                .unwrap()
+                .value,
+            []
+        );
+        assert!(tree.property("/arm-io/dcpext1", COMPATIBLE).is_none());
+        assert!(tree.property("/arm-io/usb-drd0", COMPATIBLE).is_none());
     }
 
     #[test]
