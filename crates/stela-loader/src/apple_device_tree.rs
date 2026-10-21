@@ -9,6 +9,8 @@
 //! such as `syscfg/WMac/6`); Asahi's m1n1 `proxyclient/m1n1/adt.py` reads the
 //! same flag. Parsing rejects anything that would not serialize back to the
 //! same bytes, so `serialize(parse(bytes)) == bytes` for every accepted tree.
+pub mod assigned;
+
 use alloc::{borrow::ToOwned, format, string::String, vec, vec::Vec};
 use anyhow::{Context, Result, bail, ensure};
 use serde::Serialize;

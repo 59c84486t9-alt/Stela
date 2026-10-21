@@ -2,14 +2,12 @@
 //! never native execution, CPU-start, PMGR-settlement or backing authority.
 //! Root owners must separately admit the same plan against actual executors and
 //! devices. No source addresses, chip counts or limits are inferred here.
-use crate::{
-    machine::{
-        Chip,
-        caches::{Cache, Caches},
-        registers::Identity,
-    },
-    platform::apple::pmgr::coverage::DomainId,
+use crate::machine::{
+    Chip,
+    caches::{Cache, Caches},
+    registers::Identity,
 };
+pub use crate::platform::apple::pmgr::coverage::DomainId;
 use alloc::{collections::BTreeSet, sync::Arc, vec::Vec};
 
 const AFFINITY_MASK: u32 = 0xffff;
