@@ -319,8 +319,9 @@ impl Bus {
         }
         Ok(())
     }
-    /// The device and device offset for a guest PA access.
-    fn route(&self, address: u64, width: Width) -> Result<(DeviceId, u64), MmioError> {
+    /// The device and device offset for a complete guest PA access. Mounts
+    /// may inspect ownership without reading or changing a register.
+    pub(crate) fn route(&self, address: u64, width: Width) -> Result<(DeviceId, u64), MmioError> {
         if !address.is_multiple_of(width.bytes()) {
             return Err(MmioError::Misaligned { address, width });
         }
@@ -330,7 +331,11 @@ impl Bus {
         let region = index
             .checked_sub(1)
             .map(|index| self.regions[index])
-            .filter(|region| address + width.bytes() <= region.end)
+            .filter(|region| {
+                address
+                    .checked_add(width.bytes())
+                    .is_some_and(|end| end <= region.end)
+            })
             .ok_or(MmioError::Unmapped { address, width })?;
         Ok((
             region.device,
@@ -430,6 +435,23 @@ mod tests {
             let len = range.len();
             self.0[range].copy_from_slice(&value.to_le_bytes()[..len]);
             Ok(())
+        }
+    }
+
+    #[test]
+    fn routing_requires_a_nonwrapping_complete_access_without_register_effects() {
+        let mut bus = Bus::new();
+        let bank = bus.add(Box::new(Scratch([0; 16])));
+        bus.map(bank, 0x1000, 16, 0).unwrap();
+        assert_eq!(bus.route(0x1008, Width::Double), Ok((bank, 8)));
+        for address in [0x1010, u64::MAX - 7] {
+            assert_eq!(
+                bus.route(address, Width::Double),
+                Err(MmioError::Unmapped {
+                    address,
+                    width: Width::Double,
+                })
+            );
         }
     }
 

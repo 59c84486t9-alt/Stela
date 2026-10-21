@@ -1111,7 +1111,13 @@ impl AppleDevices {
             .0;
         let sgx = Sgx::handed_off(placement.gpu, placement.ttbat, placement.shared_l2)
             .map_err(String::from)?;
-        let power = sgx.firmware_power(&placement.sgx).map_err(String::from)?;
+        let power = sgx
+            .firmware_power(&placement.sgx)
+            .and_then(|power| power.with_asc_wrapper(placement.wrapper.0))
+            .map_err(String::from)?;
+        let native_control = power
+            .native_asc_control()
+            .ok_or("GFX native ASC control has no qualified physical placement")?;
         let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, observe, power)
             .map_err(String::from)?;
         let wrapper = Asc::booted(
@@ -1132,6 +1138,15 @@ impl AppleDevices {
             self.bus
                 .map_gaps(block, base, bytes, offset)
                 .map_err(|e| format!("sgx placement: {e:?}"))?;
+        }
+        if !self
+            .bus
+            .route(native_control, Width::Double)
+            .is_ok_and(|(owner, _)| owner == block)
+        {
+            return Err(
+                "GFX native ASC control is not wholly owned by its mounted SGX bank".into(),
+            );
         }
         self.gfx_masters.push((asc, block));
         // sgx and gfx-asc are distinct root resources, coupled by their
@@ -4230,6 +4245,46 @@ mod tests {
     }
 
     #[test]
+    fn gfx_native_control_cannot_bind_over_another_mounted_bank() {
+        use crate::machine::soc::GfxController;
+        use crate::platform::apple::agx::generation;
+        const WRAPPER: u64 = 0x2_0640_0000;
+        const CONTROL: u64 = WRAPPER + 0x14_0120;
+        let placement = GfxController {
+            gpu: generation::by_chip(0x8112).unwrap(),
+            wrapper: (WRAPPER, 0x6c000),
+            interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
+            sgx: vec![(0x2_0400_0000, 0x400_0000, 0)],
+            ttbat: 0x8_0000_0000,
+            shared_l2: 0x8_0000_8000,
+        };
+        // Reject a complete foreign word and a foreign upper half. Declared
+        // SGX geometry alone cannot qualify either physical bus layout.
+        for (base, bytes) in [(CONTROL, 8), (CONTROL + 4, 4)] {
+            let mut devices = AppleDevices::new();
+            let foreign = devices.bus.add(Box::new(CheckedPowerBank {
+                reject: true,
+                committed: Vec::new(),
+            }));
+            devices.bus.map(foreign, base, bytes, 0).unwrap();
+            assert_eq!(
+                devices.add_gfx(&placement, false),
+                Err("GFX native ASC control is not wholly owned by its mounted SGX bank".into())
+            );
+            assert!(devices.gfx_masters.is_empty());
+            assert_eq!(devices.bus.route(base, Width::Word), Ok((foreign, 0)));
+            assert!(
+                devices
+                    .bus
+                    .device::<CheckedPowerBank>(foreign)
+                    .unwrap()
+                    .committed
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn gfx_firmware_reads_its_initdata_through_the_uat_the_sgx_mmu_roots() {
         use crate::machine::soc::GfxController;
         use crate::platform::apple::agx::{firmware, generation, uat as table};
@@ -4266,6 +4321,11 @@ mod tests {
         assert!(devices.read(0, SGX + 0x10, 4, 0).is_err());
         // The wrapper inside the sgx window stays the ASC's.
         assert!(devices.read(0, WRAPPER + 0x8110, 4, 0).is_ok());
+        let (_, block) = devices.gfx_masters[0];
+        assert_eq!(
+            devices.bus.route(WRAPPER + 0x14_0120, Width::Double),
+            Ok((block, 0x254_0120))
+        );
 
         // The TTBAT, context 0's empty TTBR1 root, and one firmware page of
         // the shared kernel window through the shared L2, as SPTM leaves
