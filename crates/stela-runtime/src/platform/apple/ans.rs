@@ -14,8 +14,8 @@
 //! controller's values must satisfy, and the matrix of every register the
 //! drivers reach through restore, boot, sleep, wake and shutdown.
 //!
-//! Stela's die choices: NVMe 1.3, one I/O queue, 64 tags, 4/16 KiB memory
-//! pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
+//! Stela's die choices: NVMe 1.3, one I/O queue, explicit linear geometry,
+//! 4/16 KiB queue pages, fixed 4 KiB NVMMU data pages, 4 KiB LBAs, 1 MiB maximum transfer, no volatile write cache, no
 //! optional encryption/SHA/firmware-slot updates or asynchronous events.
 //! The restore mode's boot-from-host image download is recorded, not run,
 //! and so are the restore updater's NAND tunable tables. Identity
@@ -28,6 +28,7 @@ mod bfh;
 mod commands;
 mod debug;
 mod die;
+mod geometry;
 mod namespace;
 mod prp;
 mod tunables;
@@ -37,24 +38,28 @@ use super::{
     interrupt::{AicInput, Wire},
 };
 use crate::platform::{apple::sart::Sart, dma::Port};
-use alloc::{boxed::Box, collections::VecDeque};
+use alloc::{boxed::Box, collections::VecDeque, vec, vec::Vec};
 pub use bfh::{BootImage, Identity};
+pub use geometry::QueueGeometry;
 pub use namespace::Description;
 use namespace::Medium;
 use prp::dma_error;
 use stela_drivers::block::{BlockDevice, BlockError};
 
 const NAME: &str = "ans2";
+/// Historical default software tag slots; configured dies use QueueGeometry.
+#[cfg(test)]
 pub const TAGS: u16 = 64;
 /// Entries one queue may hold, CAP.MQES + 1. SPTM `INIT` (0x270c79d0)
 /// requires the kernel's queue entries to equal `nvme-queue-entries` (64),
 /// and `AppleANS3CGv2Controller::GetNVMeSPTMQueueEntries` (0x3db9270)
 /// passes `min(MQES + 1, 257) - 1` (0x3de4aa8..ae0 with its 256 pending
-/// commands, 0x3db9264), so MQES is exactly 64. The kernel sizes every
+/// commands, 0x3db9264), so this default's MQES is 64. The kernel sizes every
 /// ring with that minimum (`SetNVMeProperties` 0x3db3850, read by
 /// `CreateSubmissionQueue` 0x3ddd1dc and `CreateCompletionQueue`
 /// 0x3ddd648): 65-entry admin and I/O rings, while tags stay below
 /// [`TAGS`] (SPTM `MAP_PAGES` 0x270c8178).
+#[cfg(test)]
 pub const QUEUE_ENTRIES: u16 = 65;
 pub const REGISTER_BYTES: u64 = 0x28134;
 /// Where SPTM finds the VDMA translation cache in ANS2 `reg[13]` when the
@@ -62,6 +67,8 @@ pub const REGISTER_BYTES: u64 = 0x28134;
 /// bank and keeps it + 0x20000), and the cache's span: one 32-byte entry
 /// per tag (`UNMAP_PAGES` 0x270c7c20..30 reads tag << 5).
 pub const VDMA_CACHE_OFFSET: u64 = 0x2_0000;
+/// Historical default span; placement uses QueueGeometry::vdma_bytes.
+#[cfg(test)]
 pub const VDMA_CACHE_BYTES: u64 = TAGS as u64 * VDMA_ENTRY_BYTES;
 /// The device offset the board maps the VDMA cache window at, past the
 /// NVMe registers.
@@ -90,7 +97,7 @@ const AUTO_QUEUE: u64 = 0x13c8;
 const LINEAR: u64 = 0x24908;
 const ADMIN_SUBMIT: u64 = 0x2490c;
 const IO_SUBMIT: u64 = 0x24910;
-const TCB_COUNT: u64 = 0x28100;
+const NVMMU_CONTROL_REG: u64 = 0x28100;
 const ADMIN_TCB: u64 = 0x28108;
 const IO_TCB: u64 = 0x28110;
 const TCB_INVALIDATE: u64 = 0x28118;
@@ -106,13 +113,13 @@ const CONFIG_MASK: u32 = ENABLE | (0xf << 7) | SHUTDOWN | (0xf << 16) | (0xf << 
 const ENTRY_SIZES: u32 = (6 << 16) | (4 << 20);
 const READY: u32 = 1;
 const SHUTDOWN_COMPLETE: u32 = 2 << 2;
-const CAPABILITIES: u64 =
-    (QUEUE_ENTRIES as u64 - 1) | (1 << 16) | (1 << 24) | (1 << 37) | (2 << 52);
 const VERSION: u64 = 0x0001_0300;
 const BOOT_OK: u64 = 0xde71_ce55;
 const COMMAND_BYTES: u64 = 64;
 const COMPLETION_BYTES: u64 = 16;
 const TCB_BYTES: u64 = 128;
+/// SPTM NVMMU TCB PRPs always describe 4 KiB pages, independent of CC.MPS.
+const NVMMU_PAGE_BYTES: u64 = 4096;
 
 /// ANS2's RTKit application endpoint. RTBuddy publishes it at roll call as
 /// the service `ANS2Endpoint1` (`RTBuddyEndpointService::createName`
@@ -195,8 +202,18 @@ pub struct Submission {
     pub tunnel: Option<[u8; 80]>,
 }
 
+struct Completed {
+    queue: usize,
+    tag: u16,
+    tail: u16,
+    phase: bool,
+    cq: u64,
+    bytes: [u8; 16],
+}
+
 pub struct Ans {
     lifecycle: LifecycleState,
+    geometry: QueueGeometry,
     medium: Medium,
     config: u32,
     status: u32,
@@ -206,9 +223,10 @@ pub struct Ans {
     aqa: u32,
     queues: [Queue; 2],
     tcb_bases: [u64; 2],
-    tcb_count: u16,
-    valid: [bool; TAGS as usize],
+    nvmmu_control: u16,
+    valid: Vec<bool>,
     pending: VecDeque<(usize, u16)>,
+    completed: Option<Completed>,
     linear: bool,
     /// I/O queue attributes at 0x1210: 0's-based SQ entries in bits 15:0
     /// and CQ entries in bits 31:16, as AQA. Both writers size their rings
@@ -242,6 +260,15 @@ impl Ans {
         namespaces: &[Description],
         irq: Option<AicInput>,
     ) -> Result<Self, &'static str> {
+        Self::with_geometry(backing, namespaces, irq, QueueGeometry::DEFAULT)
+    }
+
+    pub fn with_geometry(
+        backing: Box<dyn BlockDevice>,
+        namespaces: &[Description],
+        irq: Option<AicInput>,
+        geometry: QueueGeometry,
+    ) -> Result<Self, &'static str> {
         let medium = Medium::new(backing, namespaces)?;
         Ok(Self {
             lifecycle: LifecycleState {
@@ -251,6 +278,7 @@ impl Ans {
                 reset: false,
                 retention: false,
             },
+            geometry,
             medium,
             config: 0,
             status: 0,
@@ -260,9 +288,10 @@ impl Ans {
             aqa: 0,
             queues: [Queue::default(); 2],
             tcb_bases: [0; 2],
-            tcb_count: TAGS - 1,
-            valid: [false; TAGS as usize],
+            nvmmu_control: geometry::NVMMU_CONTROL,
+            valid: vec![false; geometry.tag_slots() as usize],
             pending: VecDeque::new(),
+            completed: None,
             linear: false,
             queue_attributes: None,
             modesel: 0,
@@ -410,8 +439,8 @@ impl Ans {
                 let cq_entries = (((self.aqa >> 16) & 0xfff) + 1) as u16;
                 let page = 4096 << ((value >> 7) & 0xf);
                 let queue = self.queues[0];
-                if sq_entries > QUEUE_ENTRIES
-                    || cq_entries > QUEUE_ENTRIES
+                if sq_entries > self.geometry.ring_entries()
+                    || cq_entries > self.geometry.ring_entries()
                     || queue.sq == 0
                     || queue.cq == 0
                     || !queue.sq.is_multiple_of(page)
@@ -458,15 +487,19 @@ impl Ans {
         if self.status != READY || self.shutdown || !self.linear || !self.queues[queue].sq_enabled {
             return Err("ANS submission requires a ready controller and an enabled linear SQ");
         }
-        if tag > self.tcb_count || tag >= TAGS || self.valid[tag as usize] {
-            return Err("ANS tag outside NVMMU capacity or still in use");
+        if tag >= self.geometry.tag_slots()
+            || tag >= self.queues[queue].sq_entries
+            || self.valid[tag as usize]
+        {
+            return Err("ANS tag outside handoff/SQ capacity or still in use");
         }
         if self.tcb_bases[queue] == 0 {
             return Err("ANS submission without an NVMMU TCB array");
         }
-        let limit = self
-            .queue_attributes
-            .map(|attributes| ((attributes >> (queue * 16)) & 0xffff) as usize + 1);
+        let limit = (queue == 1)
+            .then_some(self.queue_attributes)
+            .flatten()
+            .map(|attributes| (attributes & 0xffff) as usize + 1);
         if limit
             .is_some_and(|limit| self.pending.iter().filter(|&&(q, _)| q == queue).count() >= limit)
         {
@@ -498,7 +531,9 @@ impl Ans {
             ));
         }
         while let Some(&(queue, tag)) = self.pending.front() {
-            self.last_submission = None;
+            if self.completed.is_none() {
+                self.last_submission = None;
+            }
             let error = |reason| {
                 refuse(
                     NAME,
@@ -509,91 +544,119 @@ impl Ans {
                 )
             };
             let q = self.queues[queue];
-            if !q.cq_enabled || q.pending == q.cq_entries {
-                return Err(error("ANS completion queue is full or disabled"));
+            if !q.cq_enabled {
+                return Err(error("ANS completion queue is disabled"));
+            }
+            if q.pending == q.cq_entries {
+                // Queue backpressure leaves every accepted tag owned until
+                // the guest advances CQ head; no completion is overwritten.
+                break;
             }
             let address = |base: u64, bytes| base.checked_add(bytes).ok_or("ANS DMA address wraps");
-            let mut raw = [0; 64];
-            port.read(
-                address(q.sq, u64::from(tag) * COMMAND_BYTES).map_err(error)?,
-                &mut raw,
-            )
-            .map_err(dma_error)
-            .map_err(error)?;
-            let mut command = commands::Command(raw);
-            if command.cid() != tag {
-                return Err(error("ANS SQ command ID differs from its linear tag"));
-            }
-            let mut tcb = [0; 128];
-            port.read(
-                address(self.tcb_bases[queue], u64::from(tag) * TCB_BYTES).map_err(error)?,
-                &mut tcb,
-            )
-            .map_err(dma_error)
-            .map_err(error)?;
-            self.last_submission = Some(Submission {
-                queue,
-                tag,
-                command: command.0,
-                tcb,
-                tunnel: None,
-            });
-            // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
-            // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
-            // submissions leave them zero. The key area from 0x40 on must
-            // stay empty.
-            let mirror = &tcb[56..64];
-            if tcb[0] != 0 && tcb[0] != command.opcode()
-                || u16::from(tcb[2]) != tag
-                || tcb[3] != 0
-                || mirror != [0; 8] && mirror != &command.0[56..64]
-                || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
-            {
-                return Err(error(
-                    "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
-                ));
-            }
-            // The key area (bytes 0x40..) names the inline AES-XTS key for the
-            // sector (`sep::inline_key`). The SEP installs those keys over the
-            // unrecovered `sks` service, and the key area's slot/wrapped-key
-            // encoding is itself unrecovered (docs/research/ans2.md), so until
-            // both are recovered no key is installed and an inline-keyed
-            // command refuses here rather than passing data in the clear.
-            if tcb[64..].iter().any(|&b| b != 0) {
-                return Err(error(
-                    "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
+            if self.completed.is_none() {
+                let mut raw = [0; 64];
+                port.read(
+                    address(q.sq, u64::from(tag) * COMMAND_BYTES).map_err(error)?,
+                    &mut raw,
+                )
+                .map_err(dma_error)
+                .map_err(error)?;
+                let mut command = commands::Command(raw);
+                if command.cid() != tag {
+                    return Err(error("ANS SQ command ID differs from its linear tag"));
+                }
+                let mut tcb = [0; 128];
+                port.read(
+                    address(self.tcb_bases[queue], u64::from(tag) * TCB_BYTES).map_err(error)?,
+                    &mut tcb,
+                )
+                .map_err(dma_error)
+                .map_err(error)?;
+                self.last_submission = Some(Submission {
+                    queue,
+                    tag,
+                    command: command.0,
+                    tcb,
+                    tunnel: None,
+                });
+                // `NVMeCoastGuardSetTCBEntry` (CG v2, 0x3de4bd8..0x3de4be4)
+                // copies CDW14 and CDW15 to TCB 0x38 and 0x3c; earlier
+                // submissions leave them zero. The key area from 0x40 on must
+                // stay empty.
+                let mirror = &tcb[56..64];
+                if tcb[0] != 0 && tcb[0] != command.opcode()
+                    || u16::from(tcb[2]) != tag
+                    || tcb[3] != 0
+                    || mirror != [0; 8] && mirror != &command.0[56..64]
+                    || tcb[6..24].iter().chain(&tcb[40..56]).any(|&b| b != 0)
+                {
+                    return Err(error(
+                        "ANS NVMMU TCB opcode, tag, encryption or hash fields are not modeled",
+                    ));
+                }
+                // The key area (bytes 0x40..) names the inline AES-XTS key for the
+                // sector (`sep::inline_key`). The SEP installs those keys over the
+                // unrecovered `sks` service, and the key area's slot/wrapped-key
+                // encoding is itself unrecovered (docs/research/ans2.md), so until
+                // both are recovered no key is installed and an inline-keyed
+                // command refuses here rather than passing data in the clear.
+                if tcb[64..].iter().any(|&b| b != 0) {
+                    return Err(error(
+                        "ANS NVMMU inline AES-XTS key area is set, but no SEP key is installed for it \
                      (sep::inline_key); its slot/wrapped-key encoding is not recovered",
-                ));
+                    ));
+                }
+                // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
+                // 1 (`270c8130`): a grant of device writes (bit 0) and reads
+                // (bit 1). A read into an in-out descriptor grants both, so the
+                // command's own direction need only be within the grant.
+                let flags = tcb[1];
+                command.validate().map_err(error)?;
+                let direction = command.direction(queue).map_err(error)?;
+                if flags & !3 != 0 || direction & !flags != 0 {
+                    return Err(error(
+                        "ANS NVMMU TCB DMA permissions do not grant the command's direction",
+                    ));
+                }
+                if queue != 0
+                    && matches!(command.opcode(), 1 | 2 | 5)
+                    && tcb[4..6] != command.0[48..50]
+                {
+                    return Err(error("ANS NVMMU length differs from the command"));
+                }
+                command.0[24..40].copy_from_slice(&tcb[24..40]);
+                let outcome = self.execute(queue, &command, port, sart).map_err(error)?;
+                let mut completion = [0; 16];
+                completion[..4].copy_from_slice(&outcome.result.to_le_bytes());
+                // Linear SQs have no advancing head; the consumed slot is tag.
+                completion[8..10].copy_from_slice(&tag.to_le_bytes());
+                completion[10..12].copy_from_slice(&(queue as u16).to_le_bytes());
+                completion[12..14].copy_from_slice(&command.cid().to_le_bytes());
+                completion[14..]
+                    .copy_from_slice(&((outcome.status << 1) | u16::from(q.phase)).to_le_bytes());
+                self.completed = Some(Completed {
+                    queue,
+                    tag,
+                    tail: q.tail,
+                    phase: q.phase,
+                    cq: q.cq,
+                    bytes: completion,
+                });
             }
-            // SPTM's MAP_PAGES writes the request's IODirection to TCB byte
-            // 1 (`270c8130`): a grant of device writes (bit 0) and reads
-            // (bit 1). A read into an in-out descriptor grants both, so the
-            // command's own direction need only be within the grant.
-            let flags = tcb[1];
-            command.validate().map_err(error)?;
-            let direction = command.direction(queue).map_err(error)?;
-            if flags & !3 != 0 || direction & !flags != 0 {
-                return Err(error(
-                    "ANS NVMMU TCB DMA permissions do not grant the command's direction",
-                ));
-            }
-            if queue != 0 && matches!(command.opcode(), 1 | 2 | 5) && tcb[4..6] != command.0[48..50]
+            let completed = self.completed.as_ref().unwrap();
+            if (
+                completed.queue,
+                completed.tag,
+                completed.tail,
+                completed.phase,
+                completed.cq,
+            ) != (queue, tag, q.tail, q.phase, q.cq)
             {
-                return Err(error("ANS NVMMU length differs from the command"));
+                return Err(error("ANS completion publication owner changed"));
             }
-            command.0[24..40].copy_from_slice(&tcb[24..40]);
-            let outcome = self.execute(queue, &command, port, sart).map_err(error)?;
-            let mut completion = [0; 16];
-            completion[..4].copy_from_slice(&outcome.result.to_le_bytes());
-            // Linear SQs have no advancing head; the consumed slot is tag.
-            completion[8..10].copy_from_slice(&tag.to_le_bytes());
-            completion[10..12].copy_from_slice(&(queue as u16).to_le_bytes());
-            completion[12..14].copy_from_slice(&command.cid().to_le_bytes());
-            completion[14..]
-                .copy_from_slice(&((outcome.status << 1) | u16::from(q.phase)).to_le_bytes());
             port.write(
                 address(q.cq, u64::from(q.tail) * COMPLETION_BYTES).map_err(error)?,
-                &completion,
+                &completed.bytes,
             )
             .map_err(dma_error)
             .map_err(error)?;
@@ -605,9 +668,10 @@ impl Ans {
                 q.phase = !q.phase;
             }
             self.pending.pop_front();
+            self.completed = None;
             self.update_irq(port.access);
         }
-        if self.shutdown {
+        if self.shutdown && self.pending.is_empty() {
             self.medium.device.flush().map_err(|_| {
                 refuse(
                     NAME,
@@ -626,9 +690,7 @@ impl Ans {
 
 impl Lifecycle for Ans {
     fn check_lifecycle(&self, proposed: LifecycleState) -> Result<(), &'static str> {
-        if proposed.reset && !self.lifecycle.reset
-            || !proposed.powered && self.lifecycle.powered && !proposed.retention
-        {
+        if proposed.reset && !self.lifecycle.reset || !proposed.powered && !proposed.retention {
             // CC.EN reset is modeled separately in configure(). The PMGR
             // bank includes the protected linear/NVMMU handoff, loader and
             // NAND firmware state: CC reset does not prove their rail/reset
@@ -674,7 +736,7 @@ impl MmioDevice for Ans {
         // bits). The controller caches no translation once a command
         // completes, so that entry reads 0; every other word, and the entry
         // of a tag whose command is still pending, has no model.
-        if (VDMA_CACHE..VDMA_CACHE + VDMA_CACHE_BYTES).contains(&offset) {
+        if (VDMA_CACHE..VDMA_CACHE + self.geometry.vdma_bytes()).contains(&offset) {
             let tag = (offset - VDMA_CACHE) / VDMA_ENTRY_BYTES;
             let pending = self.pending.iter().any(|&(_, t)| u64::from(t) == tag);
             if width != Width::Word || !offset.is_multiple_of(VDMA_ENTRY_BYTES) || pending {
@@ -691,7 +753,7 @@ impl MmioDevice for Ans {
         // SPTM 0x270c7c40 invalidates a tag then checks its three-bit
         // status in a four-bit lane (eight tags per word). The controller
         // has no cached translations after a synchronous DMA completes.
-        if (TAG_STATUS..TAG_STATUS + 32).contains(&offset)
+        if (TAG_STATUS..TAG_STATUS + self.geometry.status_bytes()).contains(&offset)
             && offset.is_multiple_of(4)
             && width == Width::Word
         {
@@ -703,9 +765,9 @@ impl MmioDevice for Ans {
                 .fold(0, |bits, (_, tag)| bits | (1 << ((tag - first) * 4))));
         }
         let value = match (offset, width) {
-            (CAP, Width::Double) => CAPABILITIES,
-            (CAP, Width::Word) => CAPABILITIES & u64::from(u32::MAX),
-            (4, Width::Word) => CAPABILITIES >> 32,
+            (CAP, Width::Double) => self.geometry.capabilities(),
+            (CAP, Width::Word) => self.geometry.capabilities() & u64::from(u32::MAX),
+            (4, Width::Word) => self.geometry.capabilities() >> 32,
             (VS, Width::Word) => VERSION,
             (INTMS | INTMC, Width::Word) => u64::from(self.interrupt_mask),
             (CC, Width::Word) => u64::from(self.config),
@@ -725,7 +787,7 @@ impl MmioDevice for Ans {
             (AUTO_QUEUE, Width::Word) => u64::from(self.auto_queue),
             (MAX_PENDING, Width::Word) => u64::from(self.queue_attributes.unwrap_or(0)),
             (LINEAR, Width::Word) => u64::from(self.linear),
-            (TCB_COUNT, Width::Word) => u64::from(self.tcb_count),
+            (NVMMU_CONTROL_REG, Width::Word) => u64::from(self.nvmmu_control),
             (TCB_STATUS, Width::Word) => 0, // No cached translations: invalidation completes synchronously.
             _ => {
                 return Err(refuse(
@@ -779,6 +841,15 @@ impl MmioDevice for Ans {
             if !value.is_multiple_of(4096) {
                 return Err(error("ANS queue/TCB base is not page-aligned"));
             }
+            let bytes = match base {
+                ADMIN_TCB | IO_TCB => u64::from(self.geometry.tag_slots()) * TCB_BYTES,
+                ASQ | IO_SQ => u64::from(self.geometry.ring_entries()) * COMMAND_BYTES,
+                ACQ | IO_CQ => u64::from(self.geometry.ring_entries()) * COMPLETION_BYTES,
+                _ => unreachable!(),
+            };
+            if value.checked_add(bytes).is_none() {
+                return Err(error("ANS declared queue/TCB extent wraps"));
+            }
             match base {
                 ASQ => self.queues[0].sq = value,
                 ACQ => self.queues[0].cq = value,
@@ -816,9 +887,18 @@ impl MmioDevice for Ans {
             }
             LINEAR if value <= 1 && self.pending.is_empty() => self.linear = value != 0,
             MAX_PENDING
-                if value & 0xffff < u32::from(QUEUE_ENTRIES)
-                    && value >> 16 < u32::from(QUEUE_ENTRIES) =>
+                if value & 0xffff < u32::from(self.geometry.ring_entries())
+                    && value >> 16 < u32::from(self.geometry.ring_entries()) =>
             {
+                let q = self.queues[1];
+                if q.sq_enabled && q.sq_entries != (value as u16 + 1)
+                    || q.cq_enabled && q.cq_entries != ((value >> 16) as u16 + 1)
+                    || self.pending.iter().any(|(queue, _)| *queue == 1)
+                {
+                    return Err(error(
+                        "ANS IOQA changes an active queue or outstanding submission",
+                    ));
+                }
                 self.queue_attributes = Some(value)
             }
             MODESEL
@@ -831,8 +911,10 @@ impl MmioDevice for Ans {
                 self.modesel = value
             }
             AUTO_QUEUE if value <= 1 => self.auto_queue = value != 0,
-            TCB_COUNT if value < u32::from(TAGS) && self.config & ENABLE == 0 => {
-                self.tcb_count = value as u16
+            NVMMU_CONTROL_REG
+                if value == u32::from(geometry::NVMMU_CONTROL) && self.config & ENABLE == 0 =>
+            {
+                self.nvmmu_control = value as u16
             }
             ADMIN_SUBMIT | IO_SUBMIT => self
                 .submit(
@@ -840,7 +922,7 @@ impl MmioDevice for Ans {
                     u16::try_from(value).map_err(|_| error("ANS tag exceeds 16 bits"))?,
                 )
                 .map_err(error)?,
-            TCB_INVALIDATE if value < u32::from(TAGS) => {
+            TCB_INVALIDATE if value < u32::from(self.geometry.tag_slots()) => {
                 if self.pending.iter().any(|&(_, tag)| u32::from(tag) == value) {
                     return Err(error("ANS invalidation of a pending command"));
                 }
@@ -889,9 +971,12 @@ mod tests {
     }
     impl Rig {
         fn new() -> Self {
+            Self::with_geometry(QueueGeometry::DEFAULT)
+        }
+        fn with_geometry(geometry: QueueGeometry) -> Self {
             let disk = Box::new(RamDisk::new("partition-id", 32, 4096));
             let mut rig = Self {
-                ans: Ans::new(
+                ans: Ans::with_geometry(
                     disk,
                     &[Description {
                         id: 1,
@@ -899,10 +984,11 @@ mod tests {
                         blocks: 0,
                     }],
                     Some(IRQ),
+                    geometry,
                 )
                 .unwrap(),
                 sart: Sart::new(Bounds::Exclusive),
-                ram: Ram::new(RAM, 0x20000),
+                ram: Ram::new(RAM, 0x100000),
                 latch: InterruptLatch::new(),
             };
             let mut access = Access::new(0, 0, &mut rig.latch);
@@ -912,7 +998,11 @@ mod tests {
                     .unwrap();
             }
             for (offset, width, value) in [
-                (AQA, Width::Word, 0x0001_0001),
+                (
+                    AQA,
+                    Width::Word,
+                    (1 << 16) | u64::from(geometry.handoff_entries()),
+                ),
                 (ASQ, Width::Double, SQ),
                 (ACQ, Width::Double, CQ),
                 (ADMIN_TCB, Width::Double, TCB),
@@ -1010,8 +1100,22 @@ mod tests {
             self.submit(0, 0, 5, 0, IOCQ, [1 | (3 << 16), 3, 0, 0, 0, 0])
                 .unwrap();
             self.retire(0, 0);
-            self.submit(0, 1, 1, 0, IOSQ, [1 | (3 << 16), 1 | (1 << 16), 0, 0, 0, 0])
-                .unwrap();
+            self.submit(
+                0,
+                1,
+                1,
+                0,
+                IOSQ,
+                [
+                    1 | (u32::from(QUEUE_ENTRIES - 1) << 16),
+                    1 | (1 << 16),
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            )
+            .unwrap();
             self.retire(0, 1);
         }
         fn bytes(&mut self, address: u64, len: usize) -> alloc::vec::Vec<u8> {
@@ -1622,7 +1726,9 @@ mod tests {
         rig.submit(0, 0, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
         rig.submit(0, 1, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
         let before = rig.bytes(CQ, 32);
-        assert!(rig.submit(0, 2, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).is_err());
+        rig.submit(0, 2, 6, 0, DATA, [1, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(rig.ans.pending.front(), Some(&(0, 2)));
+        assert!(rig.ans.completed.is_none());
         assert_eq!(rig.bytes(CQ, 32), before);
         assert!(
             rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | 1 << 12))
@@ -1634,5 +1740,303 @@ mod tests {
         assert!(rig.write(MODESEL, u64::from(MODE_RESTORE)).is_err());
         assert!(rig.write(AUTO_QUEUE, 2).is_err());
         assert!(rig.write(ADMIN_HEAD, 3).is_err());
+    }
+    const LARGE_CQ: u64 = RAM + 0x10000;
+    const LARGE_TCB: u64 = RAM + 0x20000;
+    const LARGE_DATA: u64 = RAM + 0x70000;
+    fn large(handoff: u32) -> Rig {
+        large_mps(handoff, 0)
+    }
+    fn large_mps(handoff: u32, mps: u32) -> Rig {
+        let geometry = QueueGeometry::linear(handoff).unwrap();
+        let mut rig = Rig::with_geometry(geometry);
+        rig.write(CC, 0).unwrap();
+        for (register, address) in [(ASQ, SQ), (ACQ, LARGE_CQ), (ADMIN_TCB, LARGE_TCB)] {
+            rig.ans
+                .write(
+                    register,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(NVMMU_CONTROL_REG, 63).unwrap();
+        rig.write(AQA, handoff as u64 | (handoff as u64) << 16)
+            .unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE | mps << 7))
+            .unwrap();
+        rig
+    }
+    fn large_command(rig: &mut Rig, tag: u16, opcode: u8, prp: u64, words: [u32; 6]) {
+        let mut cmd = [0u8; 64];
+        cmd[0] = opcode;
+        cmd[2..4].copy_from_slice(&tag.to_le_bytes());
+        for (i, value) in words.into_iter().enumerate() {
+            cmd[40 + i * 4..44 + i * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let mut tcb = [0; 128];
+        tcb[1] = 3;
+        tcb[2] = tag as u8;
+        tcb[24..32].copy_from_slice(&prp.to_le_bytes());
+        assert!(rig.ram.write(SQ + u64::from(tag) * 64, &cmd));
+        assert!(rig.ram.write(LARGE_TCB + u64::from(tag) * 128, &tcb));
+    }
+    #[test]
+    fn dynamic_linear_geometry_wraps_non_power_of_two_rings_and_stalls_without_overwrite() {
+        for handoff in [1, 253, 254, 256] {
+            let mut rig = large(handoff);
+            assert_eq!(rig.read(CAP) & 0xffff, u64::from(handoff));
+            assert_eq!(rig.read(NVMMU_CONTROL_REG), 63);
+            for index in 0..handoff + 1 {
+                let tag = (index % handoff) as u16;
+                if index >= handoff {
+                    rig.write(TCB_INVALIDATE, u64::from(tag)).unwrap();
+                }
+                large_command(&mut rig, tag, 6, LARGE_DATA, [1, 0, 0, 0, 0, 0]);
+                rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
+                rig.run().unwrap();
+            }
+            assert_eq!(rig.ans.queues[0].tail, 0);
+            assert!(!rig.ans.queues[0].phase);
+            assert_eq!(rig.ans.queues[0].pending, (handoff + 1) as u16);
+            let before = rig.bytes(LARGE_CQ, (handoff as usize + 1) * 16);
+            let tag = ((handoff + 1) % handoff) as u16;
+            rig.write(TCB_INVALIDATE, u64::from(tag)).unwrap();
+            large_command(&mut rig, tag, 6, LARGE_DATA, [1, 0, 0, 0, 0, 0]);
+            rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
+            rig.run().unwrap();
+            assert_eq!(rig.bytes(LARGE_CQ, before.len()), before);
+            assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
+            assert!(rig.write(CC, 0).is_err());
+            rig.write(ADMIN_HEAD, 1).unwrap();
+            rig.run().unwrap();
+            assert!(rig.ans.pending.is_empty());
+            assert!(rig.ans.completed.is_none());
+            assert_eq!(rig.bytes(LARGE_CQ + 14, 2), [0, 0]);
+            assert!(rig.write(ADMIN_SUBMIT, u64::from(handoff)).is_err());
+        }
+    }
+    #[test]
+    fn large_queue_creation_auto_queue_and_live_resize_use_one_geometry() {
+        let mut rig = large(253);
+        let io_sq = RAM + 0x30000;
+        let io_cq = RAM + 0x40000;
+        for (tag, opcode, prp, words) in [
+            (0, 5, io_cq, [1 | (253 << 16), 3, 0, 0, 0, 0]),
+            (1, 1, io_sq, [1 | (253 << 16), 1 | (1 << 16), 0, 0, 0, 0]),
+        ] {
+            large_command(&mut rig, tag, opcode, prp, words);
+            rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
+            rig.run().unwrap();
+            rig.retire(0, tag);
+        }
+        assert_eq!(rig.ans.queues[1].sq_entries, 254);
+        assert_eq!(rig.ans.queues[1].cq_entries, 254);
+        rig.write(MAX_PENDING, 253 | (253 << 16)).unwrap();
+        let attributes = rig.ans.queue_attributes;
+        assert!(rig.write(MAX_PENDING, 252 | (253 << 16)).is_err());
+        assert_eq!(rig.ans.queue_attributes, attributes);
+        assert!(rig.write(MAX_PENDING, 254 | (253 << 16)).is_err());
+        rig.write(CC, 0).unwrap();
+        assert_eq!(rig.read(CAP) & 0xffff, 253);
+        assert!(rig.write(NVMMU_CONTROL_REG, 62).is_err());
+        assert_eq!(rig.read(NVMMU_CONTROL_REG), 63);
+        // Auto management programs the same two ring sizes before EN.
+        for (register, address) in [(ASQ, SQ), (ACQ, LARGE_CQ), (IO_SQ, io_sq), (IO_CQ, io_cq)] {
+            rig.ans
+                .write(
+                    register,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(AUTO_QUEUE, 1).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        assert_eq!(rig.ans.queues[1].sq_entries, 254);
+        assert_eq!(rig.ans.queues[1].cq_entries, 254);
+    }
+    struct FaultWrites<'a> {
+        ram: &'a mut Ram,
+        at: u64,
+        fail: bool,
+    }
+    impl Memory for FaultWrites<'_> {
+        fn read(&mut self, p: u64, b: &mut [u8]) -> bool {
+            self.ram.read(p, b)
+        }
+        fn write(&mut self, p: u64, b: &[u8]) -> bool {
+            if self.fail && p == self.at {
+                self.fail = false;
+                false
+            } else {
+                self.ram.write(p, b)
+            }
+        }
+    }
+    #[test]
+    fn completed_effects_survive_cq_fault_retention_and_retry_without_reexecution() {
+        let mut rig = large(253);
+        let tag = 252;
+        large_command(&mut rig, tag, 0xc2, 0, [0, 0, 1, 0xb00, 1, 0]);
+        rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
+        let mut access = Access::new(0, 0, &mut rig.latch);
+        let mut memory = FaultWrites {
+            ram: &mut rig.ram,
+            at: LARGE_CQ,
+            fail: true,
+        };
+        assert!(
+            rig.ans
+                .run(
+                    &mut Port {
+                        iommu: &mut Physical,
+                        stream: 0,
+                        memory: &mut memory,
+                        access: &mut access
+                    },
+                    &mut rig.sart
+                )
+                .is_err()
+        );
+        assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
+        assert!(rig.ans.completed.is_some());
+        assert_eq!(rig.ans.queues[0].pending, 0);
+        assert_eq!(rig.ans.queues[0].tail, 0);
+        assert!(!rig.latch.is_asserted(Wire::Aic(IRQ)));
+        assert_eq!(
+            rig.read(TAG_STATUS + 4 * (u64::from(tag) / 8)),
+            1 << ((tag % 8) * 4)
+        );
+        assert!(rig.write(TCB_INVALIDATE, u64::from(tag)).is_err());
+        let live = rig.ans.lifecycle;
+        let stopped = LifecycleState {
+            powered: false,
+            clocked: false,
+            quiesced: true,
+            retention: true,
+            ..live
+        };
+        rig.ans.check_lifecycle(stopped).unwrap();
+        rig.ans
+            .set_lifecycle(stopped, &mut Access::new(0, 0, &mut rig.latch));
+        assert!(rig.run().is_err());
+        assert!(rig.ans.completed.is_some());
+        assert!(
+            rig.ans
+                .check_lifecycle(LifecycleState {
+                    retention: false,
+                    ..stopped
+                })
+                .is_err()
+        );
+        rig.ans
+            .set_lifecycle(live, &mut Access::new(0, 0, &mut rig.latch));
+        // A changed source command cannot replace already executed effects.
+        large_command(&mut rig, tag, 0xff, 0, [0; 6]);
+        rig.run().unwrap();
+        assert!(rig.ans.pending.is_empty());
+        assert!(rig.ans.completed.is_none());
+        assert_eq!(rig.bytes(LARGE_CQ + 12, 4), [252, 0, 1, 0]);
+        assert!(rig.latch.is_asserted(Wire::Aic(IRQ)));
+    }
+    #[test]
+    fn partial_data_dma_keeps_tag_owned_without_a_successful_completion() {
+        let mut rig = large_mps(253, 2);
+        let tag = 252;
+        large_command(&mut rig, tag, 6, LARGE_DATA + 4092, [1, 0, 0, 0, 0, 0]);
+        assert!(rig.ram.write(
+            LARGE_TCB + u64::from(tag) * 128 + 32,
+            &(LARGE_DATA + 4096).to_le_bytes()
+        ));
+        rig.write(ADMIN_SUBMIT, u64::from(tag)).unwrap();
+        let mut access = Access::new(0, 0, &mut rig.latch);
+        let mut memory = FaultWrites {
+            ram: &mut rig.ram,
+            at: LARGE_DATA + 4096,
+            fail: true,
+        };
+        assert!(
+            rig.ans
+                .run(
+                    &mut Port {
+                        iommu: &mut Physical,
+                        stream: 0,
+                        memory: &mut memory,
+                        access: &mut access
+                    },
+                    &mut rig.sart
+                )
+                .is_err()
+        );
+        assert_eq!(rig.bytes(LARGE_DATA + 4092, 4), [0x6b, 0x10, 0x6b, 0x10]);
+        assert_eq!(rig.bytes(LARGE_CQ, 16), [0; 16]);
+        assert_eq!(rig.ans.pending.front(), Some(&(0, tag)));
+        assert!(rig.ans.completed.is_none());
+        assert!(rig.write(TCB_INVALIDATE, u64::from(tag)).is_err());
+        rig.run().unwrap();
+        assert!(rig.ans.completed.is_none());
+        assert_eq!(rig.ans.queues[0].pending, 1);
+    }
+    #[test]
+    fn declared_extents_and_per_queue_tag_bounds_refuse_before_mutation() {
+        let mut rig = large(256);
+        rig.write(CC, 0).unwrap();
+        for register in [ASQ, ACQ, ADMIN_TCB, IO_SQ, IO_CQ, IO_TCB] {
+            let before = rig.ans.base(register).unwrap();
+            assert!(
+                rig.ans
+                    .write(
+                        register,
+                        Width::Double,
+                        !4095,
+                        &mut Access::new(0, 0, &mut rig.latch)
+                    )
+                    .is_err()
+            );
+            assert_eq!(rig.ans.base(register), Some(before));
+        }
+        for (register, address) in [(ASQ, SQ), (ACQ, LARGE_CQ)] {
+            rig.ans
+                .write(
+                    register,
+                    Width::Double,
+                    address,
+                    &mut Access::new(0, 0, &mut rig.latch),
+                )
+                .unwrap();
+        }
+        rig.write(AQA, 1 | (1 << 16)).unwrap();
+        rig.write(CC, u64::from(ENTRY_SIZES | ENABLE)).unwrap();
+        assert!(rig.write(ADMIN_SUBMIT, 2).is_err());
+        assert!(!rig.ans.valid[2]);
+        assert!(rig.ans.pending.is_empty());
+    }
+    #[test]
+    fn nvmmu_data_pages_are_4k_with_16k_controller_queue_alignment() {
+        let mut reference = large(253);
+        large_command(&mut reference, 252, 6, LARGE_DATA, [1, 0, 0, 0, 0, 0]);
+        reference.write(ADMIN_SUBMIT, 252).unwrap();
+        reference.run().unwrap();
+        let expected = reference.bytes(LARGE_DATA, 4096);
+        let mut rig = large_mps(253, 2);
+        let first = LARGE_DATA + 4092;
+        let second = LARGE_DATA + 0x8000;
+        assert!(rig.ram.write(LARGE_DATA + 4096, &vec![0x6a; 4092]));
+        large_command(&mut rig, 252, 6, first, [1, 0, 0, 0, 0, 0]);
+        assert!(
+            rig.ram
+                .write(LARGE_TCB + 252 * 128 + 32, &second.to_le_bytes())
+        );
+        rig.write(ADMIN_SUBMIT, 252).unwrap();
+        rig.run().unwrap();
+        let mut actual = rig.bytes(first, 4);
+        actual.extend(rig.bytes(second, 4092));
+        assert_eq!(actual, expected);
+        assert_eq!(rig.bytes(LARGE_DATA + 4096, 4092), vec![0x6a; 4092]);
+        assert_eq!(rig.ans.page(), 16384);
+        assert_eq!(rig.ans.queues[0].pending, 1);
     }
 }

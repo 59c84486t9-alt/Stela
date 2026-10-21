@@ -9,7 +9,7 @@
 //! parameters, see [`super::bfh`]). Unknown vendor effects stop before
 //! completion.
 use super::{
-    Ans, MODE_RESTORE, QUEUE_ENTRIES, Queue, bfh, die,
+    Ans, COMMAND_BYTES, COMPLETION_BYTES, MODE_RESTORE, NVMMU_PAGE_BYTES, Queue, bfh, die,
     namespace::BLOCK_BYTES,
     prp::{MAX_TRANSFER, Prps, dma_error},
     tunables,
@@ -360,7 +360,7 @@ impl Ans {
             if !cmd.zero_words(44) {
                 return Err("ANS BFH parameter command fields are not modeled");
             }
-            cmd.prps(port, data.len(), self.page())?
+            cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
                 .read(port, &mut data)?;
             self.download.params(&data)?;
             return Ok(Outcome::status(SUCCESS));
@@ -368,7 +368,7 @@ impl Ans {
         if cmd.word(48) != 0 || cmd.word(52) != 0 {
             return Err("ANS BFH download CDW12/CDW13 are not modeled");
         }
-        cmd.prps(port, data.len(), self.page())?
+        cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .read(port, &mut data)?;
         self.download.chunk(
             cmd.word(56),
@@ -430,7 +430,7 @@ impl Ans {
             }
             _ => return Err("ANS Identify selector is not modeled"),
         }
-        cmd.prps(port, data.len(), self.page())?
+        cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .write(port, &data)?;
         Ok(Outcome::status(SUCCESS))
     }
@@ -458,8 +458,16 @@ impl Ans {
         {
             return Err("ANS queue creation fields or address are not modeled");
         }
-        if id != 1 || depth > u32::from(QUEUE_ENTRIES) {
+        if id != 1 || depth > u32::from(self.geometry.ring_entries()) {
             return Ok(Outcome::status(INVALID_FIELD));
+        }
+        let bytes = if cmd.opcode() == CREATE_CQ {
+            COMPLETION_BYTES
+        } else {
+            COMMAND_BYTES
+        } * u64::from(depth);
+        if cmd.long(24).checked_add(bytes).is_none() {
+            return Err("ANS queue creation extent wraps");
         }
         let flags = cmd.word(44);
         if cmd.opcode() == CREATE_CQ {
@@ -597,7 +605,7 @@ impl Ans {
         if bytes > MAX_TRANSFER {
             return Ok(Outcome::status(INVALID_FIELD));
         }
-        let prps = cmd.prps(port, bytes, self.page())?;
+        let prps = cmd.prps(port, bytes, NVMMU_PAGE_BYTES)?;
         let mut data = vec![0; bytes];
         match cmd.opcode() {
             READ => {
@@ -647,7 +655,7 @@ impl Ans {
         }
         let ranges = count as usize + 1;
         let mut list = vec![0; ranges * RANGE_BYTES];
-        cmd.prps(port, list.len(), self.page())?
+        cmd.prps(port, list.len(), NVMMU_PAGE_BYTES)?
             .read(port, &mut list)?;
         let mut extents = vec![];
         for range in list.as_chunks::<RANGE_BYTES>().0 {
@@ -682,7 +690,7 @@ impl Ans {
             return Err("ANS namespace creation options are not modeled");
         }
         let mut data = [0; IDENTIFY_BYTES];
-        cmd.prps(port, data.len(), self.page())?
+        cmd.prps(port, data.len(), NVMMU_PAGE_BYTES)?
             .read(port, &mut data)?;
         let count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
         if count != self.medium.namespaces.len() {
