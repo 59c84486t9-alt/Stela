@@ -10,16 +10,19 @@
 //! real core, while the other PEs spin out their slices, can take that long
 //! in host time, and the guest panics although nothing is wrong.
 //!
-//! So a time slice may advance the counter by at most [`TICKS_PER_BLOCK`]
+//! So a time slice accounts for at most [`TICKS_PER_BLOCK`] counts
 //! for each block it runs, shared among the PEs that could run with it:
 //! over a round of slices every runnable PE then gets a block done for each
 //! `TICKS_PER_BLOCK` counts, as on a slow but concurrent machine. A slice
-//! that shows more is charged as lag when it ends, and the counter holds at
-//! the last value read until the host's catches up, so it never runs
+//! that takes more host time is charged as lag when it ends, and the counter
+//! holds at the last value read until the adjusted host count catches up, so it never runs
 //! backwards (Arm ARM D12.1.2, the count is monotonically increasing).
 //! While every PE waits nothing has to progress, and the counter follows
 //! the host's. When the host is fast enough, no slice exceeds its bound and
 //! the counter is the host's minus the lag of earlier slow stretches.
+//! The monotonic clamp can retain a slice's already observed overshoot, but
+//! cannot cancel the lag charged for a later slice: lag measures elapsed
+//! host time, independently of how long an earlier count remains held.
 //!
 //! With idle skip (`Machine::set_idle_skip`), a wait of every PE ends at
 //! once: the counter leaps to the next deadline, as if the host had waited
@@ -52,7 +55,7 @@ pub(super) struct Clock {
     lead: u64,
     /// The last count read, which no later read precedes.
     last: u64,
-    /// The running slice, when a PE runs: its start count, start block
+    /// The running slice, when a PE runs: its host start, start block
     /// count and the PEs sharing the round.
     slice: Option<Slice>,
     /// Charge no slice lag: the count is the host's ([`Clock::follow_host`]).
@@ -61,7 +64,8 @@ pub(super) struct Clock {
 
 #[derive(Debug, Clone, Copy)]
 struct Slice {
-    count: u64,
+    host: u64,
+    lag: u64,
     blocks: u64,
     share: u64,
 }
@@ -101,25 +105,34 @@ impl Clock {
     /// `deadline` if it is still before it.
     pub(super) fn skip_to(&mut self, host: u64, deadline: u64) {
         let count = self.read(host);
-        self.lead += deadline.saturating_sub(count);
-        self.last = self.last.max(deadline);
+        if deadline > count {
+            // Advance the underlying count, not only the monotonic clamp:
+            // an earlier slice may still hold `count` above host minus lag.
+            let adjusted = host.saturating_add(self.lead).saturating_sub(self.lag);
+            self.lead += deadline - adjusted;
+            self.last = deadline;
+        }
     }
 
     /// A slice starts at host counter value `host` and block count `blocks`,
     /// with `share` PEs (at least one) able to run in the round.
     pub(super) fn start_slice(&mut self, host: u64, blocks: u64, share: u64) {
-        let count = self.read(host);
+        self.read(host);
         self.slice = Some(Slice {
-            count,
+            host,
+            lag: self.lag,
             blocks,
             share: share.max(1),
         });
     }
 
-    /// The running slice ends at `host` and `blocks`: the counts it showed
-    /// beyond its blocks' bound become lag.
+    /// The running slice ends at `host` and `blocks`: elapsed host counts
+    /// beyond its blocks' bound become lag. Explicitly excluded host work
+    /// was already charged and must not be charged twice. The monotonic
+    /// count can still be held by an earlier read; it does not measure this
+    /// slice's elapsed time.
     pub(super) fn end_slice(&mut self, host: u64, blocks: u64) {
-        let count = self.read(host);
+        self.read(host);
         let Some(slice) = self.slice.take() else {
             return;
         };
@@ -127,9 +140,11 @@ impl Clock {
             .saturating_sub(slice.blocks)
             .saturating_mul(TICKS_PER_BLOCK)
             / slice.share;
-        let shown = count - slice.count;
+        let elapsed = host
+            .saturating_sub(slice.host)
+            .saturating_sub(self.lag.saturating_sub(slice.lag));
         if !self.follows_host {
-            self.lag += shown.saturating_sub(allowed);
+            self.lag += elapsed.saturating_sub(allowed);
         }
     }
 }
@@ -137,6 +152,76 @@ impl Clock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeated_slow_slices_charge_their_full_host_duration() {
+        let mut clock = Clock::default();
+        let mut previous = 0;
+        // Four concurrent PEs get ten counts per forty blocks. Each slice
+        // takes 100 host counts: after the initial overshoot, work must
+        // advance the count by ten, not by a share of the host's slowdown.
+        for slice in 0..100 {
+            clock.start_slice(slice * 100, slice * 40, 4);
+            let during = clock.read(slice * 100 + 50);
+            assert!(during >= previous);
+            clock.end_slice((slice + 1) * 100, (slice + 1) * 40);
+            let after = clock.read((slice + 1) * 100);
+            assert!(after >= during);
+            assert_eq!(after, 100 + slice * 10);
+            previous = after;
+        }
+        // The final read's bounded overshoot holds briefly, then ordinary
+        // idle time reaches the translated deadline exactly.
+        assert_eq!(clock.read(10_089), 1090);
+        assert_eq!(clock.read(10_100), 1100);
+        assert_eq!(clock.host_deadline(2000), 11_000);
+        assert_eq!(clock.read(10_999), 1999);
+        assert_eq!(clock.read(11_000), 2000);
+    }
+
+    #[test]
+    fn host_work_excluded_mid_slice_is_not_charged_again() {
+        let mut clock = Clock::default();
+        for slice in 0..100 {
+            clock.start_slice(slice * 100, slice * 10, 1);
+            // Eighty counts were host-only work; the other twenty ran ten
+            // blocks. Only ten more counts become slice lag.
+            clock.exclude(80);
+            clock.end_slice((slice + 1) * 100, (slice + 1) * 10);
+            assert_eq!(clock.read((slice + 1) * 100), 20 + slice * 10);
+        }
+        assert_eq!(clock.host_deadline(2000), 11_000);
+        assert_eq!(clock.read(11_000), 2000);
+    }
+
+    #[test]
+    fn idle_leaps_from_a_held_count_keep_deadlines_and_host_following_coherent() {
+        let mut clock = Clock::default();
+        clock.start_slice(1000, 0, 1);
+        clock.end_slice(2000, 100);
+        assert_eq!(clock.read(2000), 2000);
+        // The observed count is held above the host minus lag. Leaping to
+        // 5000 must advance that underlying count too, so it can continue
+        // from 5000 and translate the very next deadline correctly.
+        clock.skip_to(2000, 5000);
+        assert_eq!(clock.read(2000), 5000);
+        assert_eq!(clock.host_deadline(5001), 2001);
+        assert_eq!(clock.read(2001), 5001);
+        clock.start_slice(2001, 100, 1);
+        clock.end_slice(2101, 120);
+        assert_eq!(clock.read(2101), 5101);
+        assert_eq!(clock.host_deadline(6000), 3080);
+        assert_eq!(clock.read(3079), 5999);
+        assert_eq!(clock.read(3080), 6000);
+        clock.exclude(500);
+        assert_eq!(clock.read(3580), 6000);
+        clock.follow_host();
+        assert_eq!(clock.read(3580), 7480);
+        clock.start_slice(3580, 120, 4);
+        clock.end_slice(4580, 124);
+        assert_eq!(clock.read(4580), 8480);
+        assert_eq!(clock.host_deadline(9000), 5100);
+    }
 
     #[test]
     fn slices_advance_by_their_blocks_and_waits_by_the_host() {

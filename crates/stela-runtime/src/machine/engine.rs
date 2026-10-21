@@ -7071,12 +7071,15 @@ mod tests {
     #[test]
     fn timer_snapshot_tracks_guest_reads_and_wfi_when_the_clock_lags() {
         let mut machine = machine(&[]);
-        // A slow slice charged 1000 host counts as lag. At host count 2000
-        // the guest still sees 1000, before its timer's deadline of 1500.
-        machine.clock.start_slice(0, 0, 1);
-        machine.host.now = 1000;
-        machine.clock.end_slice(1000, 0);
-        machine.host.now = 2000;
+        // Three slow slices each run ten blocks in 1000 host counts. The
+        // initial observed overshoot remains monotonic, but repeated slow
+        // work advances it only by ten per slice, not by host duration.
+        for slice in 0..3 {
+            machine.clock.start_slice(slice * 1000, slice * 10, 1);
+            machine.host.now = (slice + 1) * 1000;
+            machine.clock.end_slice(machine.host.now, (slice + 1) * 10);
+        }
+        machine.host.now = 3500;
         machine
             .cpu
             .registers
@@ -7092,7 +7095,7 @@ mod tests {
             "the host count would incorrectly report an expired timer"
         );
         let (now, timers) = machine.timer_snapshot();
-        assert_eq!((now, timers[1]), (1000, (timer::ENABLE, 1500)));
+        assert_eq!((now, timers[1]), (1020, (timer::ENABLE, 1500)));
         machine.system_instruction(0xd53b_e041).unwrap(); // mrs x1, cntvct_el0
         machine.system_instruction(0xd53b_e322).unwrap(); // mrs x2, cntv_ctl_el0
         assert_eq!(
@@ -7104,11 +7107,11 @@ mod tests {
         assert!(machine.waiting.is_some());
         assert_eq!(machine.timer_snapshot(), (now, timers));
         machine.schedule().unwrap();
-        assert_eq!(machine.host.now, 3000, "WFI waited for guest time");
+        assert_eq!(machine.host.now, 4500, "WFI waited for guest time");
         let (now, timers) = machine.timer_snapshot();
         assert_eq!(
             (now, timers[1]),
-            (2000, (timer::ENABLE | timer::ISTATUS, 1500))
+            (1530, (timer::ENABLE | timer::ISTATUS, 1500))
         );
         machine.system_instruction(0xd53b_e041).unwrap();
         machine.system_instruction(0xd53b_e322).unwrap();
