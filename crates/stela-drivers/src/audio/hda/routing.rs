@@ -395,7 +395,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         Ok(())
     }
 
-    fn power_d0(&mut self, codec: u8, node: u8) -> Result<(), Error> {
+    pub(super) fn power_d0(&mut self, codec: u8, node: u8) -> Result<(), Error> {
         self.verb(Verb::short(codec, node, SET_POWER, 0)?)?;
         let start = self.timer.now_us();
         loop {

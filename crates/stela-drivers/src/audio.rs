@@ -147,6 +147,10 @@ pub enum Error {
     },
     InvalidPosition(u32),
     ConverterRejected,
+    CoefficientRejected {
+        node: u8,
+        index: u16,
+    },
     InvalidPinControl,
     RouteRejected,
     RouteInUse,
