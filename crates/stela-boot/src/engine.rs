@@ -1380,6 +1380,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
     crate::status::set_clock(handoff.tsc_hz);
     stela_drivers::on_wait(crate::status::tick);
+    stela_drivers::on_work(crate::status::progress);
     crate::status::take_screen(
         handoff
             .screen

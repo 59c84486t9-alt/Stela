@@ -92,6 +92,26 @@ pub fn on_wait(hook: fn()) {
     WAITING.store(hook as *mut (), Ordering::Relaxed);
 }
 
+/// What runs as a driver starts on a device, with the device named: the
+/// mount's boot screen shows it, so a device that never answers is named
+/// there. A `fn(&str)` pointer, null when none is set.
+static WORKING: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Call `hook` with a device's name as a driver starts on it; it must not
+/// drive a device.
+pub fn on_work(hook: fn(&str)) {
+    WORKING.store(hook as *mut (), Ordering::Relaxed);
+}
+
+pub(crate) fn working(device: &str) {
+    let hook = WORKING.load(Ordering::Relaxed);
+    if !hook.is_null() {
+        // SAFETY: `on_work` stored a `fn(&str)`, the pointer's only source.
+        let hook: fn(&str) = unsafe { core::mem::transmute(hook) };
+        hook(device);
+    }
+}
+
 pub(crate) fn waiting() {
     let hook = WAITING.load(Ordering::Relaxed);
     if !hook.is_null() {

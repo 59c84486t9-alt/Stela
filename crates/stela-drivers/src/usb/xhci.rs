@@ -1128,6 +1128,7 @@ impl Controller {
         let mut devices = Vec::new();
         for port in 1..=self.max_ports {
             let location = format!("{} port {port}", self.location);
+            crate::working(&location);
             match self.root_port(port) {
                 Ok(Some(speed)) => {
                     let attachment = Attachment {
@@ -1331,6 +1332,7 @@ impl Controller {
         self.clock.delay(power_good_us.max(20_000));
         for port in 1..=ports {
             let location = format!("{}.{port}", device.location);
+            crate::working(&location);
             match self.hub_port(slot, port) {
                 Ok(Some(speed)) => {
                     let translator = match (speed, attachment.speed) {
@@ -1541,6 +1543,7 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
     }
     for (interface, plan) in plans {
         let location = format!("{} interface {}", device.location, interface.number);
+        crate::working(&location);
         let result = match plan {
             Plan::Storage(endpoints) => {
                 storage::UsbDisk::new(shared.clone(), &device, &interface, endpoints, dma)

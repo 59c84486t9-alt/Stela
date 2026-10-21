@@ -104,6 +104,7 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
         // SAFETY: mapped as checked; the caller owns the machine.
         for mut function in unsafe { Function::enumerate(window) } {
             let address = function.address;
+            crate::working(&alloc::format!("PCI {address}"));
             let result = if virtio::matches(&function) {
                 virtio::VirtioBlk::new(&mut function, handoff, dma)
                     .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
