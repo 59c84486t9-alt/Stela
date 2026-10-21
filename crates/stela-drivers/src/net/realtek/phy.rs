@@ -7,9 +7,10 @@
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
 //! Revision-specific analogue PHY programming from the pinned Linux source.
-use super::{Error, Registers, Timer, firmware::Script, hardware::Hardware, registers::*};
+use super::{Error, Registers, Timer, Warning, firmware::Script, hardware::Hardware, registers::*};
 use crate::block::BlockError;
 mod d;
+mod e;
 mod f;
 
 const S: &[(u16, u16)] = &[
@@ -270,7 +271,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         &mut self,
         script: Option<&Script<'_>>,
         gigabyte_sc: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Warning>, Error> {
         self.phy_write(PHY_PAGE, 0)?;
         let id = (u32::from(self.phy_read(2)?) << 16) | u32::from(self.phy_read(3)?);
         // This slice implements the internal FE/GE path and RTL8211B's
@@ -279,8 +280,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         if !matches!(id, 0x001c_c800 | 0x001c_c912) {
             return Err(Error::UnsupportedPhy(id));
         }
-        if matches!(self.revision.version, 35 | 36 | 38) && id != 0x001c_c800 {
-            // This F/8411 slice implements the internal FE/GE analogue path;
+        if matches!(self.revision.version, 32 | 33 | 35 | 36 | 38) && id != 0x001c_c800 {
+            // These E/F/8411 paths implement the internal FE/GE analogue path;
             // external PHY initialization remains outside these new revisions.
             return Err(Error::UnsupportedPhy(id));
         }
@@ -308,6 +309,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             return Err(Error::Script("Realtek PHY lacks copper gigabit capability"));
         }
         let result = (|| {
+            let mut warning = None;
             match self.revision.version {
                 2 | 3 => self.batch(S)?,
                 4 => self.paged(2, 1, 0xffff, 0x90d0)?,
@@ -337,6 +339,10 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                     self.paged(1, 0x1d, 0xffff, 0x3d98)?;
                 }
                 25 | 26 => self.d(script.ok_or(Error::Script("RTL8168D requires firmware"))?)?,
+                32 | 33 => {
+                    warning =
+                        Some(self.e(script.ok_or(Error::Script("RTL8168E requires firmware"))?)?)
+                }
                 35 | 36 | 38 => {
                     self.f(script.ok_or(Error::Script("RTL8168F/8411 requires firmware"))?)?
                 }
@@ -350,10 +356,12 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             self.phy_write(4, 0x01e1)?; // IEEE selector, 10/100 half/full, no pause.
             self.phy_modify(9, (3 << 8) | (3 << 11) | (7 << 13), 1 << 9)?; // 1000 full, auto master.
             self.phy_write(PHY_CONTROL, (1 << 12) | (1 << 9))?; // restart autonegotiation.
-            Ok(())
+            Ok(warning)
         })();
         let restored = self.phy_write(PHY_PAGE, 0).map_err(Error::from);
-        result.and(restored)
+        let warning = result?;
+        restored?;
+        Ok(warning)
     }
     fn c_tail(&self) -> Result<(), BlockError> {
         self.phy_modify(0x16, 0, 1)?;

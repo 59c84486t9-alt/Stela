@@ -96,6 +96,27 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                         r.write8(DEBUG, 0x20);
                     }
                     25 | 26 => self.latency()?,
+                    32 | 33 => {
+                        self.latency()?;
+                        self.ephys(&[
+                            (0, 0x0200, 0x0100),
+                            (0, 0, 4),
+                            (6, 2, 1),
+                            (6, 0, 0x30),
+                            (7, 0, 0x2000),
+                            (0, 0, 0x20),
+                            (3, 0x5800, 0x2000),
+                            (3, 0, 1),
+                            (1, 0x0800, 0x1000),
+                            (7, 0, 0x4000),
+                            (0x1e, 0, 0x2000),
+                            (0x19, 0xffff, 0xfe6c),
+                            (0x0a, 0, 0x40),
+                        ])?;
+                        r.write32(MISC, r.read32(MISC) | (1 << 29));
+                        r.write32(MISC, r.read32(MISC) & !(1 << 29));
+                        r.write8(CONFIG5, r.read8(CONFIG5) & !(1 << 3));
+                    }
                     35 | 36 | 38 => {
                         self.latency()?;
                         self.eri_write(0xc0, 3, 0)?;
@@ -168,6 +189,11 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 }
                 // Disable jumbo mode, including stale UNDI configuration.
                 if self.revision.version == 17 {
+                    r.write8(CONFIG4, r.read8(CONFIG4) & !1);
+                }
+                if matches!(self.revision.version, 32 | 33) {
+                    r.write8(EARLY_TX, 0x3f);
+                    r.write8(CONFIG3, r.read8(CONFIG3) & !(1 << 2));
                     r.write8(CONFIG4, r.read8(CONFIG4) & !1);
                 }
                 if (18..=26).contains(&self.revision.version) {
