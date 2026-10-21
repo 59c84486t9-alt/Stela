@@ -15,7 +15,7 @@ use crate::bus::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
-    sync::atomic::{Ordering, fence},
+    sync::atomic::{AtomicU64, Ordering, fence},
 };
 
 const DESC_BYTES: usize = 16;
@@ -64,34 +64,37 @@ impl core::error::Error for Error {}
 /// DMA visibility operations; successful writes are completed register stores.
 /// Errors may be uncertain and must never manufacture a completion index.
 /// No competing firmware, OS, IRQ worker or reset path may access this queue.
-pub unsafe trait QueueIo {
+pub unsafe trait QueueIo: 'static {
     fn configure(&mut self, address: u32, count: u16) -> Result<(), Error>;
     fn device_index(&mut self) -> Result<u16, Error>;
     fn publish(&mut self, head: u16) -> Result<(), Error>;
 }
 
-/// Native queue MMIO, retaining the caller's exclusive BAR-window borrow.
+/// Native queue MMIO, retaining the actual owned BAR/requester context.
 /// Construct it only after PCI ownership, full BAR bounds and UC mapping are
 /// established. This is not a PCI function claim or an interrupt allocation.
-pub struct MmioQueue<'a> {
+pub struct MmioQueue {
     registers: Mmio,
-    _exclusive: core::marker::PhantomData<&'a mut [u32; 4]>,
+    _owner: Arc<dyn core::any::Any>,
 }
-impl<'a> MmioQueue<'a> {
+impl MmioQueue {
     /// # Safety
-    /// `window` must name the four live, uncached queue registers of the owned
-    /// PCI requester for `'a`, remain mapped, and exclude every competing access.
-    /// The caller must retain the actual BAR mapping/reservation and PCI claim.
-    pub unsafe fn from_window(window: NonNull<[u32; 4]>) -> Self {
+    /// `window` names the four actual uncached queue registers of the claimed
+    /// requester. `owner` must retain the real exclusive PCI function claim
+    /// and BAR mapping/reservation through its final Drop; the window remains
+    /// mapped and excludes competing accesses for that entire lifetime.
+    /// No unrelated token or owner whose Drop releases another reservation
+    /// meets this contract. Uncertain ring Drop deliberately retains this Arc.
+    pub unsafe fn from_window(window: NonNull<[u32; 4]>, owner: Arc<dyn core::any::Any>) -> Self {
         Self {
             registers: unsafe { Mmio::new(window.as_ptr().cast::<u32>() as u64) },
-            _exclusive: core::marker::PhantomData,
+            _owner: owner,
         }
     }
 }
 // SAFETY: construction requires the actual exclusive mapped queue window;
 // volatile accesses use the donor's exact four-register offsets.
-unsafe impl QueueIo for MmioQueue<'_> {
+unsafe impl QueueIo for MmioQueue {
     fn configure(&mut self, address: u32, count: u16) -> Result<(), Error> {
         self.registers.write32(8, 0);
         self.registers.write32(12, 0);
@@ -184,7 +187,7 @@ pub struct Completion {
 /// mapped across all submissions and are quarantined on Drop until explicit
 /// acknowledged quiescence. This queue reserves two entries as donor raw TX.
 pub struct TxRing<Q: QueueIo> {
-    io: Q,
+    io: Option<Q>,
     descriptors: Allocation,
     slots: Vec<Slot>,
     head: usize,
@@ -201,7 +204,7 @@ impl<Q: QueueIo> TxRing<Q> {
     /// same requester. Polling mode must keep device IRQ sources masked and
     /// exclude every other submit/cleanup/reset owner.
     pub unsafe fn install(
-        mut io: Q,
+        io: Q,
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
         count: usize,
@@ -209,7 +212,7 @@ impl<Q: QueueIo> TxRing<Q> {
         if !(4..=MAX_COUNT).contains(&count) || !count.is_power_of_two() {
             return Err(Error::InvalidSize);
         }
-        let mut descriptors = Allocation::new(
+        let descriptors = Allocation::new(
             source,
             domain.clone(),
             count * DESC_BYTES,
@@ -225,27 +228,30 @@ impl<Q: QueueIo> TxRing<Q> {
         }
         descriptors.dma.sync_for_device(0..count * DESC_BYTES)?;
         let base = descriptors.address()?;
-        // Even a failed base store might expose the ring. Retain its mappings on
-        // every uncertain configure result; caller-owned engine stop is mandatory.
-        descriptors.published = true;
-        io.configure(base, count as u16)?;
-        let actual = usize::from(io.device_index()?);
-        if actual != 0 {
-            // Configure explicitly reset both indices. A nonzero hardware
-            // index is an unacknowledged reset, never an empty-ring baseline.
-            return Err(Error::InvalidDeviceIndex);
-        }
-        Ok(Self {
-            io,
+        let mut ring = Self {
+            io: Some(io),
             descriptors,
             slots,
-            head: actual,
-            tail: actual,
+            head: 0,
+            tail: 0,
             queued: 0,
-            poisoned: false,
+            poisoned: true,
             released: false,
-        })
+        };
+        // Construct the guard before the first potentially publishing store.
+        // Any later error retains both Q's actual requester/BAR owner and DMA.
+        ring.descriptors.published = true;
+        ring.io
+            .as_mut()
+            .expect("retained queue")
+            .configure(base, count as u16)?;
+        if ring.io.as_mut().expect("retained queue").device_index()? != 0 {
+            return Err(Error::InvalidDeviceIndex);
+        }
+        ring.poisoned = false;
+        Ok(ring)
     }
+
     pub fn pending(&self) -> usize {
         self.queued
     }
@@ -296,7 +302,10 @@ impl<Q: QueueIo> TxRing<Q> {
         self.queued += 1;
         self.head = (self.head + 1) % self.slots.len();
         fence(Ordering::SeqCst);
-        self.io.publish(self.head as u16)
+        self.io
+            .as_mut()
+            .expect("retained queue")
+            .publish(self.head as u16)
     }
     /// Read the actual hardware DMA index and release at most one completed
     /// transfer. Enqueue or software head progression never grants CPU ownership.
@@ -312,7 +321,7 @@ impl<Q: QueueIo> TxRing<Q> {
     }
     fn poll_inner(&mut self) -> Result<Option<Completion>, Error> {
         let count = self.slots.len();
-        let actual = usize::from(self.io.device_index()?);
+        let actual = usize::from(self.io.as_mut().expect("retained queue").device_index()?);
         if actual >= count {
             return Err(Error::InvalidDeviceIndex);
         }
@@ -350,6 +359,28 @@ impl<Q: QueueIo> TxRing<Q> {
         self.queued = 0;
         self.released = true;
         Ok(())
+    }
+}
+
+static QUARANTINED_QUEUES: AtomicU64 = AtomicU64::new(0);
+/// Cumulative owned queue/BAR/requester contexts retained after uncertain
+/// publication or Drop. This does not claim hardware reset or reclamation.
+pub fn quarantined_queues() -> u64 {
+    QUARANTINED_QUEUES.load(Ordering::Relaxed)
+}
+fn retain_queue<Q>(io: Option<Q>) {
+    if let Some(io) = io {
+        let _ = QUARANTINED_QUEUES.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_add(1))
+        });
+        core::mem::forget(io);
+    }
+}
+impl<Q: QueueIo> Drop for TxRing<Q> {
+    fn drop(&mut self) {
+        if self.descriptors.published && !self.released {
+            retain_queue(self.io.take());
+        }
     }
 }
 
@@ -426,6 +457,7 @@ mod tests {
         count: u16,
         head: u16,
         index: u16,
+        queue_drops: usize,
         fail_publish: bool,
         fail_configure: bool,
         invalid_index: bool,
@@ -502,6 +534,11 @@ mod tests {
         }
     }
     struct Io(Arc<Mutex<State>>);
+    impl Drop for Io {
+        fn drop(&mut self) {
+            self.0.lock().unwrap().queue_drops += 1;
+        }
+    }
     // SAFETY: serialized test device queues; completions advance only when the
     // device model actually reads its separately mapped IOVA payload/descriptor.
     unsafe impl QueueIo for Io {
@@ -621,6 +658,7 @@ mod tests {
         // Three never-published payload allocations unmap; active descriptor and
         // payload mappings retain their domain and pins through canonical Drop.
         assert_eq!(state.lock().unwrap().mappings.len(), 2);
+        assert_eq!(state.lock().unwrap().queue_drops, 0);
         device_complete_one(&state);
         assert_eq!(state.lock().unwrap().completed[0], [9]);
     }
@@ -676,5 +714,22 @@ mod tests {
             Err(Error::RegisterFailure)
         ));
         assert_eq!(state.lock().unwrap().mappings.len(), 1);
+        assert_eq!(state.lock().unwrap().queue_drops, 0);
+    }
+    #[test]
+    fn requester_and_bar_owner_drop_only_after_full_quiescent_unmap() {
+        let (mut ring, state) = setup(4);
+        ring.submit(1, &[1]).unwrap();
+        state.lock().unwrap().fail_unmap_at = Some(2);
+        // SAFETY: stopped model; partial invalidation fails and keeps Q alive.
+        assert_eq!(
+            unsafe { ring.release_after_quiesce() },
+            Err(Error::Dma(DmaError::InvalidationFailed))
+        );
+        assert_eq!(state.lock().unwrap().queue_drops, 0);
+        unsafe { ring.release_after_quiesce() }.unwrap();
+        assert_eq!(state.lock().unwrap().queue_drops, 0);
+        drop(ring);
+        assert_eq!(state.lock().unwrap().queue_drops, 1);
     }
 }
