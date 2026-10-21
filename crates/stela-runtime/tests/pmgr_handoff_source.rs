@@ -874,6 +874,86 @@ fn original_kernel_restore_orders_gpce_readiness_before_the_complete_ps_sweep() 
 
 #[test]
 #[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
+fn original_kernel_isp_stop_is_a_restore_write_not_an_initial_state_or_admission_oracle() {
+    let bytes = kernelcache();
+    for (start, end, digest) in [
+        (
+            0x2ba0938,
+            0x2ba0980,
+            "1963c0417c6426cf589fe1cb819134abc021ce27e828610af819a5bd6f9c9f82",
+        ),
+        (
+            0x2b7c55c,
+            0x2b7c590,
+            "bc96144768d8644bdf138450e6c3a04b359ab2fd4c20257980dc6cc5ae9e0f89",
+        ),
+        (
+            0x2b7c650,
+            0x2b7c680,
+            "c95668d6597ce2dc8c63e6476467636ab2f97286a0667bc1673ceffb436ce81e",
+        ),
+        (
+            0x2b7c69c,
+            0x2b7c6b0,
+            "cd5fd9ee504ed61adba684167569599b6b963442d7cf5571f7c6d8634ac683e6",
+        ),
+        (
+            0x2b7c760,
+            0x2b7c7f0,
+            "0e0e8a160353d1fa02ad8546d07df1356ddea07cb9dfb3d7858de4581ba57e7e",
+        ),
+        (
+            0x2b8c380,
+            0x2b8c468,
+            "8aa3f40d3b609754d7bef90dd76d041be5e011d1a89ccfb8f73b815bc2079cc0",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    // V1 reverse sweep uses the driver's desired-level cache, not a live
+    // target/current snapshot. Desired f is skipped in this pass.
+    assert_eq!(word(&bytes, 0x2ba0958), 0x39400124);
+    assert_eq!(word(&bytes, 0x2ba095c), 0x71003c9f);
+    assert_eq!(word(&bytes, 0x2ba0974), 0x52800005); // auto=false
+    assert_eq!(branch_target(&bytes, 0x2ba097c), 0x2b7c294);
+    // _setPSLevel reads the real control before checking the existing target
+    // and bits30/10. Its separate auto-enable comparison must also agree.
+    for (offset, opcode) in [
+        (0x2b7c574, 0x12000c1c),
+        (0x2b7c578, 0x6b19039f),
+        (0x2b7c57c, 0x12165008),
+        (0x2b7c580, 0x12023108),
+        (0x2b7c584, 0x7a400900),
+        (0x2b7c69c, 0x12040368),
+        (0x2b7c6a0, 0x4a4872e8),
+        (0x2b7c65c, 0x128061e8), // clear mask 0x30f
+        (0x2b7c664, 0x33000f3b), // insert requested low4
+        (0x2b7c670, 0x3218077b), // requested<15 adds 0x300
+        (0x2b7c794, 0x531c6f24), // expected current=requested<<4
+        (0x2b7c7cc, 0x52801e03), // current readback mask f0
+        (0x2b8c3a0, 0xaa0303f7), // preserve raw value in x23
+        (0x2b8c458, 0xf9400c08), // resolved bank mapping
+        (0x2b8c45c, 0xb8344917), // captured STR w23,[x8,w20,uxtw]
+    ] {
+        assert_eq!(word(&bytes, offset), opcode, "restore at {offset:#x}");
+    }
+    // This explains the captured write from the model's active fallback;
+    // neither this calculation nor the setter establishes actual handoff.
+    let supplied_old = 0xff_u32;
+    let requested = 0_u32;
+    assert_eq!((supplied_old & !0x30f) | requested | 0x300, 0x3f0);
+    let capture_pc = 0xffff_fe00_381b_c45c_u64;
+    let kernelcache_slide = 0x2e62_c000_u64;
+    let image_base = 0xffff_fe00_0700_4000_u64;
+    assert_eq!(capture_pc - kernelcache_slide - image_base, 0x2b8c45c);
+    // A raw-zero target can take the no-store branch with auto=false; source
+    // does not prove raw zero, and that branch does not test current bits7:4.
+    assert_eq!(word(&bytes, 0x2b7c588), 0x540008a0);
+    assert_eq!(word(&bytes, 0x2b7c6ac), 0x36081788);
+}
+
+#[test]
+#[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
 fn original_kernel_cio_trigger_and_wait_preserve_the_unqualified_sram_boundary() {
     let bytes = kernelcache();
     for (start, end, digest) in [
