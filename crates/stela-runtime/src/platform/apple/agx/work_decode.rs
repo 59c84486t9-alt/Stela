@@ -14,6 +14,8 @@
 //! after the complete record has been read; retrying a failed read has no
 //! architectural effect.
 
+pub mod registers;
+
 use super::channel::{Command, Kind, Record, STAMPS, Stamp};
 use super::generation::{self, Family};
 use super::ring::Shared;
