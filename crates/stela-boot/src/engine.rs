@@ -650,8 +650,11 @@ fn target() -> TargetCpu {
         (basic.ecx & (1 << 25) != 0, TargetCpu::with_aes),
         (basic.ecx & (1 << 13) != 0, TargetCpu::with_cx16),
         (basic.edx & (1 << 8) != 0, TargetCpu::with_cx8),
-        // 16-byte SSE loads are atomic on CPUs that implement AVX.
-        (basic.ecx & (1 << 28) != 0, TargetCpu::with_atomic_load16),
+        // Optional plain 128-bit loads need a documented vendor guarantee.
+        (
+            TargetCpu::atomic_load16_guaranteed([vendor.ebx, vendor.edx, vendor.ecx], basic.ecx),
+            TargetCpu::with_atomic_load16,
+        ),
         (extended.ebx & (1 << 3) != 0, TargetCpu::with_bmi1),
         (extended.ebx & (1 << 29) != 0, TargetCpu::with_sha),
         (

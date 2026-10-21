@@ -5,7 +5,6 @@ use alloc::format;
 use alloc::string::String;
 #[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_BASIC_FEATURES: u32 = 1;
-#[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_AVX_HARDWARE: u32 = 1 << 28;
 #[cfg(all(any(feature = "std", test), target_arch = "x86_64"))]
 const CPUID_CX16: u32 = 1 << 13;
@@ -123,8 +122,8 @@ impl TargetCpu {
     pub const Aes: Self = Self::Baseline.with_aes();
     /// Minimum requirements for legacy XMM SHA instructions, independent of SSE tiers.
     pub const Sha: Self = Self::Baseline.with_sha();
-    /// Aligned16 atomic loads, enumerated by AVX hardware support. Lowering uses
-    /// legacy SSE2 instructions, independently of OS-enabled AVX register state.
+    /// Aligned 16-byte atomic loads: Intel/AMD vendor guarantees with AVX hardware.
+    /// Lowering uses legacy SSE2, independently of OS-enabled AVX state.
     pub const AtomicLoad16: Self = Self::Baseline.with_atomic_load16();
     /// Single-copy atomic unaligned loads within a cache line ([`Self::line_atomic`]).
     pub const LineAtomic: Self = Self::Baseline.with_line_atomic();
@@ -147,6 +146,22 @@ impl TargetCpu {
         u32::from_le_bytes(*b"ineI"),
         u32::from_le_bytes(*b"ntel"),
     ];
+    /// AMD's vendor identity in CPUID0 EBX, EDX, ECX order.
+    pub const AMD_VENDOR: [u32; 3] = [
+        u32::from_le_bytes(*b"Auth"),
+        u32::from_le_bytes(*b"enti"),
+        u32::from_le_bytes(*b"cAMD"),
+    ];
+
+    /// Classify the documented aligned cacheable 16-byte load guarantee from
+    /// CPUID.0 vendor and CPUID.1 ECX. Intel SDM Guaranteed Atomic Operations and
+    /// AMD APM 24593 rev. 3.44 §7.3.2 require AVX hardware; OS AVX state is separate.
+    /// These raw values alone are not authority to enter native code or RAM.
+    pub const fn atomic_load16_guaranteed(vendor: [u32; 3], leaf1_ecx: u32) -> bool {
+        matches!(vendor, Self::INTEL_VENDOR | Self::AMD_VENDOR)
+            && leaf1_ecx & CPUID_AVX_HARDWARE != 0
+    }
+
     /// x86-64-v2 (SSE4.2, POPCNT, CMPXCHG8B, CMPXCHG16B): the least host
     /// Stela runs on. Every other feature is optional and has a fallback.
     pub const X86_64_V2: Self = Self::Sse42.with_popcnt().with_cx8().with_cx16();
@@ -288,6 +303,8 @@ impl TargetCpu {
         #[cfg(target_arch = "x86_64")]
         {
             let basic = core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES);
+            let identity = core::arch::x86_64::__cpuid(0);
+            let vendor = [identity.ebx, identity.edx, identity.ecx];
             Self {
                 popcnt: std::is_x86_feature_detected!("popcnt"),
                 bmi1: std::is_x86_feature_detected!("bmi1"),
@@ -296,7 +313,7 @@ impl TargetCpu {
                 cx16: basic.ecx & CPUID_CX16 != 0,
                 cx8: basic.edx & CPUID_CX8 != 0,
                 // Hardware atomicity, rather than permission to execute VEX.
-                atomic_load16: basic.ecx & CPUID_AVX_HARDWARE != 0,
+                atomic_load16: Self::atomic_load16_guaranteed(vendor, basic.ecx),
                 line_atomic: intel(),
                 // Rust's detector checks CPUID and XSAVE/OSXSAVE/XCR0 state.
                 avx2: std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"),
@@ -671,6 +688,71 @@ mod tests {
     }
 
     #[test]
+    fn atomic_load16_requires_a_documented_vendor_and_independent_avx_hardware() {
+        for vendor in [TargetCpu::INTEL_VENDOR, TargetCpu::AMD_VENDOR] {
+            assert!(!TargetCpu::atomic_load16_guaranteed(vendor, 0));
+            // OSXSAVE/XSAVE/CX16 do not grant the independent plain-load fact.
+            assert!(!TargetCpu::atomic_load16_guaranteed(
+                vendor,
+                (1 << 13) | (1 << 26) | (1 << 27)
+            ));
+            assert!(TargetCpu::atomic_load16_guaranteed(
+                vendor,
+                CPUID_AVX_HARDWARE
+            ));
+        }
+        for vendor in [
+            [0; 3],
+            [
+                u32::from_le_bytes(*b"Hygo"),
+                u32::from_le_bytes(*b"nGen"),
+                u32::from_le_bytes(*b"uine"),
+            ],
+        ] {
+            assert!(!TargetCpu::atomic_load16_guaranteed(vendor, u32::MAX));
+        }
+    }
+
+    #[test]
+    fn unqualified_plain_load_does_not_remove_v2_casp_or_cx16() {
+        use crate::{
+            GuestAddress,
+            block::{BlockProfile, compile_for_target},
+        };
+        let source: alloc::vec::Vec<_> = [0x4822_7c04u32, 0xd65f_03c0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        let baseline = TargetCpu::X86_64_V2;
+        assert!(!TargetCpu::atomic_load16_guaranteed([0; 3], u32::MAX));
+        assert!(!baseline.supports(TargetCpu::AtomicLoad16));
+        assert!(baseline.supports(TargetCpu::Cx16));
+        let original = compile_for_target(
+            &source,
+            GuestAddress(0x1000),
+            BlockProfile::Ordinary,
+            baseline,
+        )
+        .unwrap();
+        let optional = compile_for_target(
+            &source,
+            GuestAddress(0x1000),
+            BlockProfile::Ordinary,
+            baseline.with_atomic_load16(),
+        )
+        .unwrap();
+        assert_eq!(original.native.x86_64_code, optional.native.x86_64_code);
+        assert_eq!(original.native.source_map, optional.native.source_map);
+        assert!(
+            original
+                .native
+                .x86_64_code
+                .windows(5)
+                .any(|bytes| bytes == [0xf0, 0x49, 0x0f, 0xc7, 0x08])
+        );
+    }
+
+    #[test]
     fn every_independent_feature_requires_full_containment() {
         for host in profiles() {
             for (required, present) in FEATURES.into_iter().zip([
@@ -821,10 +903,13 @@ mod tests {
                     std::is_x86_feature_detected!("avx") && std::is_x86_feature_detected!("avx2"),
                 ),
                 (TargetCpu::Avx512f, avx512f_usable()),
-                (
-                    TargetCpu::AtomicLoad16,
-                    core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_AVX_HARDWARE != 0,
-                ),
+                (TargetCpu::AtomicLoad16, {
+                    let vendor = core::arch::x86_64::__cpuid(0);
+                    TargetCpu::atomic_load16_guaranteed(
+                        [vendor.ebx, vendor.edx, vendor.ecx],
+                        core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx,
+                    )
+                }),
                 (
                     TargetCpu::Cx16,
                     core::arch::x86_64::__cpuid(CPUID_BASIC_FEATURES).ecx & CPUID_CX16 != 0,
