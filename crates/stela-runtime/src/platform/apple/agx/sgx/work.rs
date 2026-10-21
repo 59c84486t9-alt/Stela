@@ -927,6 +927,7 @@ mod tests {
             assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(power.native.borrow().work.render.writes, 0);
             assert!(owner.three_d_zls_bindings(&input, lease).is_err());
+            assert!(owner.three_d_sample_storage(&input, lease).is_err());
             memory.ram.put_u64(DATA + 0x2518, 0x999f);
             mapping(&mut memory.ram, VA + 0x14000, SGX + 0x14000, true);
             mapping(&mut memory.ram, 0x4000, 0, false);
@@ -969,6 +970,10 @@ mod tests {
             })
             .unwrap();
             assert!(parameters.completed());
+            assert_eq!(
+                owner.three_d_sample_storage(&input, lease).unwrap(),
+                crate::platform::apple::agx::exec::render::SampleStorage::native(0x10b)
+            );
             let zls = owner.three_d_zls_bindings(&input, lease).unwrap();
             let shifted = owner.policy == Policy::G14G;
             assert_eq!(zls.control, 0x800b);
@@ -1045,6 +1050,7 @@ mod tests {
                 .unwrap();
             assert!(!power.native.borrow().work.active());
             assert!(owner.three_d_zls_bindings(&input, lease).is_err());
+            assert!(owner.three_d_sample_storage(&input, lease).is_err());
             assert_eq!(
                 power
                     .native
@@ -1069,6 +1075,12 @@ mod tests {
             .unwrap();
             let counts = (memory.reads, memory.writes);
             assert!(owner.three_d_zls_bindings(&input, lease).is_err());
+            // The unrelated stride fault does not invalidate a complete
+            // source-programmed TIB capacity or fabricate its sample view.
+            assert_eq!(
+                owner.three_d_sample_storage(&input, lease).unwrap(),
+                crate::platform::apple::agx::exec::render::SampleStorage::native(0x10b)
+            );
             assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(
                 power.native.borrow().work.render.value(

@@ -34,6 +34,17 @@ impl Env for PipelineEnv<'_> {
     }
 }
 
+/// Preshaders have memory/uniform/sampler state, without an invented pixel
+/// or tile. BG/EOT use the same once-only preshader boundary as fragments.
+pub(super) fn run_preshader(
+    memory: &mut dyn Memory,
+    pass: &FragmentInputs,
+    shader: &mut ShaderState,
+    program: &mut Program,
+) -> Result<(), WorkError> {
+    shader.run_preshader(&mut PipelineEnv { memory, pass }, program)
+}
+
 /// A CF binding (cmdbuf.xml `CF binding`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
@@ -74,11 +85,13 @@ pub struct FragmentPipeline {
 /// preshader.
 pub(super) fn load(
     memory: &mut dyn Memory,
-    pass: &FragmentInputs,
+    pass: &mut FragmentInputs,
     words: &crate::platform::apple::agx::stream::ppp::FragmentShader,
     program: &mut Program,
 ) -> Result<FragmentPipeline, WorkError> {
     let usc = usc::parse(memory, pass.usc_base, u64::from(words.pipeline))?;
+    pass.sample_bytes
+        .observe(usc.shared.as_ref(), pass.tile, pass.samples)?;
     let properties = usc.fragment.ok_or(WorkError::Refused(
         "a fragment shader without Fragment properties",
     ))?;
@@ -88,7 +101,7 @@ pub(super) fn load(
         &usc,
         extended_samplers(words.sampler_states),
     )?;
-    shader.run_preshader(&mut PipelineEnv { memory, pass }, program)?;
+    run_preshader(memory, pass, &mut shader, program)?;
     let table = pass.usc_base + u64::from(words.cf_bindings);
     let header = read_u32(memory, table)?;
     let mut bindings = Vec::with_capacity(words.cf_binding_count as usize);

@@ -23,6 +23,8 @@
 
 pub mod fragment;
 pub mod geometry;
+mod storage;
+pub use storage::SampleStorage;
 
 use super::WorkError;
 use crate::platform::apple::agx::isa::machine::Memory;
@@ -100,7 +102,7 @@ pub struct FragmentInputs {
     pub layers: u32,
     pub samples: u32,
     pub tile: (u32, u32),
-    pub sample_bytes: u32,
+    pub sample_bytes: SampleStorage,
     pub multisample_control: u32,
     pub background: Program,
     pub end_of_tile: Program,
@@ -279,7 +281,7 @@ impl RenderPass {
             layers: self.layers,
             samples: self.samples,
             tile: self.tile,
-            sample_bytes: self.sample_bytes,
+            sample_bytes: SampleStorage::Explicit(self.sample_bytes),
             multisample_control: self.multisample_control,
             background: self.background,
             end_of_tile: self.end_of_tile,
@@ -776,6 +778,102 @@ mod tests {
             stream_bytes: 0x400,
         }
     }
+    fn tile_shared(memory: &mut Flat, at: u64, stride: u32, enabled: bool) {
+        let tail = memory.get(BASE + at, 0x40).to_vec();
+        memory.put(BASE + at + 4, &tail);
+        let bytes = SIZE * SIZE * stride;
+        let word = 0x4d
+            | u32::from(enabled) << 8
+            | crate::platform::apple::agx::stream::usc::layout::TILE_32X32 << 10
+            | (stride / 8) << 20
+            | (bytes / 256) << 24;
+        memory.put(BASE + at, &word.to_le_bytes());
+    }
+
+    #[test]
+    fn native_tile_allocation_uses_original_shader_views_and_settles_late_failures() {
+        use crate::platform::apple::agx::{channel::Kind, work::Execution};
+        // Success; missing view; disagreeing EOT view; late EOT read fault;
+        // FS explicitly lacking tile access despite the other shader views.
+        for case in 0..5 {
+            let red = [1.0, 0.0, 0.0, 1.0];
+            let (mut flat, pass) = scene(
+                &[
+                    vertex(-1.0, -1.0, 0.5, red),
+                    vertex(1.0, -1.0, 0.5, red),
+                    vertex(-1.0, 1.0, 0.5, red),
+                ],
+                ALWAYS_NO_WRITE,
+                0,
+                0,
+            );
+            if case == 3 {
+                // The BG preshader commits a real global write before EOT
+                // metadata faults. No synthetic tile exists in a preshader.
+                usc(&mut flat, BG_USC, Some((0, 12, 0x560)), None, None, BG_CODE);
+                flat.put(BASE + 0x560, &MARKER.to_le_bytes());
+                let clear: Vec<u8> = CLEAR.iter().flat_map(|c| c.to_le_bytes()).collect();
+                flat.put(BASE + 0x568, &clear);
+                flat.put(
+                    BASE + BG_USC + 18,
+                    &(0x38u64 | 0xc08000 << 8 | 0x2000 << 32).to_le_bytes(),
+                );
+                flat.put(
+                    BASE + 0x2000,
+                    &program("mov r2, 1\nmov r3, 0\nstore r2, du0, r3, i32, x, a\nstop"),
+                );
+            }
+            if case != 1 {
+                tile_shared(&mut flat, FS_USC, 8, case != 4);
+                tile_shared(&mut flat, BG_USC, 8, true);
+                tile_shared(&mut flat, EOT_USC, if case == 2 { 16 } else { 8 }, true);
+            }
+            let mut memory = StagedMemory {
+                flat,
+                blocked: (case == 3).then_some(BASE + EOT_USC..BASE + EOT_USC + 4),
+                reads: 0,
+                writes: 0,
+                marker_writes: 0,
+                last_write: None,
+                fail_write: None,
+                fragment_reads: Vec::new(),
+            };
+            let mut geometry = Execution::geometry(accepted(Kind::Ta, pass.vm_slot), pass).unwrap();
+            geometry.run(&mut memory).unwrap();
+            assert!(memory.fragment_reads.is_empty());
+            let mut inputs = pass.fragment_inputs();
+            // Deliberately rounded larger than the shaders' 8-byte view:
+            // allocation/sample division would produce the wrong stride.
+            inputs.sample_bytes = SampleStorage::native(8);
+            let snapshot = inputs;
+            let mut fragment = Execution::fragment(
+                accepted(Kind::ThreeD, pass.vm_slot),
+                inputs,
+                geometry.take_geometry().unwrap(),
+            )
+            .unwrap_or_else(|_| panic!("matching geometry refused"));
+            let result = fragment.run(&mut memory);
+            assert_eq!(inputs, snapshot);
+            if case == 0 {
+                result.unwrap();
+                let pixel = |x, y| BASE + IMAGE + 4 * (y * u64::from(SIZE) + x);
+                assert_eq!(memory.flat.get(pixel(2, 2), 4), &[255, 0, 0, 255]);
+                let clear = CLEAR.map(|x| unorm8(f64::from(x)) as u8);
+                assert_eq!(memory.flat.get(pixel(30, 30), 4), &clear);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(memory.marker_writes, usize::from(case == 3), "{error:?}");
+                let counts = (memory.reads, memory.writes);
+                memory.blocked = None;
+                memory.flat.put(MARKER, &42u32.to_le_bytes());
+                assert_eq!(fragment.run(&mut memory), Err(error));
+                assert_eq!((memory.reads, memory.writes), counts);
+                assert_eq!(memory.flat.get(MARKER, 4), &[42, 0, 0, 0]);
+            }
+            assert_eq!(memory.flat.get(BASE + 0x3ff04, 4), &[0; 4]);
+        }
+    }
+
     #[test]
     fn fragment_program_and_preshader_effects_belong_to_3d_and_survive_later_fault_once() {
         use crate::platform::apple::agx::{channel::Kind, work::Execution};

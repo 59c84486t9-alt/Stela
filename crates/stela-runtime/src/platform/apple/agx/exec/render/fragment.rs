@@ -203,6 +203,7 @@ struct FragmentEnv<'a> {
     coefficients: Vec<[f32; 3]>,
     tests: Option<Tests>,
     block_stores: bool,
+    tile_access: bool,
     visibility: &'a mut Visibility,
 }
 
@@ -328,6 +329,9 @@ impl Env for FragmentEnv<'_> {
     }
 
     fn tile_load(&mut self, access: &TileAccess) -> Result<[u64; 4], &'static str> {
+        if !self.tile_access {
+            return Err("tile load has no shader Shared view");
+        }
         let samples = self.samples(access.samples);
         if samples.count_ones() != 1 {
             return Err("a tilebuffer load of several samples");
@@ -349,6 +353,9 @@ impl Env for FragmentEnv<'_> {
     }
 
     fn tile_store(&mut self, access: &TileAccess, values: [u64; 4]) -> Result<(), &'static str> {
+        if !self.tile_access {
+            return Err("tile store has no shader Shared view");
+        }
         let lane = self.lanes[access.lane];
         let samples = self.samples(access.samples) & lane.alive;
         if self.tests.is_some() && samples & !lane.tested != 0 {
@@ -407,6 +414,9 @@ impl Env for FragmentEnv<'_> {
     }
 
     fn block_store(&mut self, store: &BlockStore) -> Result<(), ImageError> {
+        if !self.tile_access {
+            return Err(ImageError::Refused("block store has no shader Shared view"));
+        }
         if !self.block_stores {
             return Err(ImageError::Refused(
                 "imgwblk outside an end-of-tile program",
@@ -666,36 +676,35 @@ fn image_error(error: ImageError) -> WorkError {
 /// A background or end-of-tile program's state.
 fn load_program(
     memory: &mut dyn Memory,
-    pass: &FragmentInputs,
+    pass: &mut FragmentInputs,
     program: &PassProgram,
     cache: &mut Program,
 ) -> Result<ShaderState, WorkError> {
     let usc = usc::parse(memory, pass.usc_base, program.offset()?)?;
+    pass.sample_bytes
+        .observe(usc.shared.as_ref(), pass.tile, pass.samples)?;
     let mut state = ShaderState::load(
         memory,
         pass.usc_base,
         &usc,
         extended_samplers(field(u64::from(program.counts), 9, 3) as u32),
     )?;
-    let mut tile = empty_tile(pass);
-    let mut visibility = Visibility::new();
-    let positions = [[0.5; 2]; MAX_SAMPLES];
-    let mut env = env(memory, pass, &mut tile, &positions, &mut visibility);
-    state.run_preshader(&mut env, cache)?;
+    pipeline::run_preshader(memory, pass, &mut state, cache)?;
     Ok(state)
 }
 
-fn empty_tile(pass: &FragmentInputs) -> Tile {
+fn empty_tile(pass: &FragmentInputs) -> Result<Tile, WorkError> {
     let size = [pass.tile.0, pass.tile.1];
     let count = (size[0] * size[1] * pass.samples) as usize;
-    Tile {
+    let sample_bytes = pass.sample_bytes.bytes()? as usize;
+    Ok(Tile {
         origin: [0, 0],
         size,
         index: [0, 0],
         layer: 0,
         samples: pass.samples,
-        sample_bytes: pass.sample_bytes as usize,
-        colour: vec![0; count * pass.sample_bytes as usize],
+        sample_bytes,
+        colour: vec![0; count * sample_bytes],
         zs: vec![
             Sample {
                 depth: 0.0,
@@ -703,7 +712,7 @@ fn empty_tile(pass: &FragmentInputs) -> Tile {
             };
             count
         ],
-    }
+    })
 }
 
 fn env<'a>(
@@ -712,6 +721,7 @@ fn env<'a>(
     tile: &'a mut Tile,
     positions: &'a [[f64; 2]; MAX_SAMPLES],
     visibility: &'a mut Visibility,
+    shared: Option<&usc::Shared>,
 ) -> FragmentEnv<'a> {
     let all = (1u32 << tile.samples) - 1;
     FragmentEnv {
@@ -724,6 +734,7 @@ fn env<'a>(
         coefficients: Vec::new(),
         tests: None,
         block_stores: false,
+        tile_access: pass.sample_bytes.tile_access(shared),
         visibility,
     }
 }
@@ -735,6 +746,8 @@ pub fn run(
     binned: &Binned,
     stats: &mut Stats,
 ) -> Result<(), WorkError> {
+    let mut invocation = *pass;
+    let pass = &mut invocation;
     pass.check()?;
     let positions = coverage::sample_positions(pass.multisample_control, pass.samples);
     let surfaces = Surfaces::new(pass)?;
@@ -744,14 +757,16 @@ pub fn run(
         pipelines.push(pipeline::load(memory, pass, words, &mut program)?);
     }
     let primitives = primitive::prepare(memory, pass, binned)?;
-    let background = load_program(memory, pass, &pass.background, &mut program)?;
-    let end_of_tile = load_program(memory, pass, &pass.end_of_tile, &mut program)?;
+    let bg = pass.background;
+    let eot = pass.end_of_tile;
+    let background = load_program(memory, pass, &bg, &mut program)?;
+    let end_of_tile = load_program(memory, pass, &eot, &mut program)?;
     let mut visibility = Visibility::new();
     let tiles = [
         pass.width.div_ceil(pass.tile.0),
         pass.height.div_ceil(pass.tile.1),
     ];
-    let mut tile = empty_tile(pass);
+    let mut tile = empty_tile(pass)?;
     for layer in 0..pass.layers {
         for ty in 0..tiles[1] {
             for tx in 0..tiles[0] {
@@ -897,7 +912,14 @@ impl Context<'_> {
                 }
                 let mut group = state.group(SIMD_WIDTH, state.code);
                 group.specials = self.specials(tile, &lanes, false);
-                let mut env = env(memory, self.pass, tile, self.positions, visibility);
+                let mut env = env(
+                    memory,
+                    self.pass,
+                    tile,
+                    self.positions,
+                    visibility,
+                    state.shared.as_ref(),
+                );
                 env.lanes = lanes;
                 finish(
                     &mut group,
@@ -929,7 +951,14 @@ impl Context<'_> {
         };
         let mut group = state.group(1, state.code);
         group.specials = self.specials(tile, &lanes, false);
-        let mut env = env(memory, self.pass, tile, self.positions, visibility);
+        let mut env = env(
+            memory,
+            self.pass,
+            tile,
+            self.positions,
+            visibility,
+            state.shared.as_ref(),
+        );
         env.lanes = lanes;
         env.block_stores = true;
         finish(
@@ -1020,7 +1049,14 @@ impl Context<'_> {
                 if present == 0 {
                     continue;
                 }
-                let mut env = env(memory, self.pass, tile, self.positions, visibility);
+                let mut env = env(
+                    memory,
+                    self.pass,
+                    tile,
+                    self.positions,
+                    visibility,
+                    pipeline.and_then(|p| p.shader.shared.as_ref()),
+                );
                 env.lanes = lanes;
                 env.tests = Some(Tests {
                     ..tests.clone_tests()
@@ -1331,7 +1367,7 @@ mod tests {
                 let depth_meta = memory.get(0x22000, 0x200).to_vec();
                 let stencil_meta = memory.get(0x24000, 0x300).to_vec();
                 for layer in 0..2 {
-                    let mut tile = empty_tile(&pass);
+                    let mut tile = empty_tile(&pass).unwrap();
                     tile.layer = layer;
                     surfaces.load(&mut memory, &pass, &mut tile).unwrap();
                     // No draw is needed to prove real load -> tile -> store

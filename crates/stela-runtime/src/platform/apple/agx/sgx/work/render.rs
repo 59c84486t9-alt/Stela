@@ -5,7 +5,7 @@
 use super::FirmwareWork;
 use crate::platform::apple::agx::{
     channel::Kind,
-    exec::render::{GeometryInputs, SamplerHeap, Zls, ZlsPair},
+    exec::render::{GeometryInputs, SampleStorage, SamplerHeap, Zls, ZlsPair},
     work_decode::{
         Frame, Submission,
         resources::{Lease, Outcome},
@@ -158,6 +158,34 @@ impl FirmwareWork {
                 store: surface(0x15340, 0x15428, 0x153d8, 0x15438)?,
             },
         })
+    }
+    /// Native TIB capacity is allocated in 2KiB blocks. The actual shader's
+    /// USC Shared view must still bind its stride within that allocation.
+    pub fn three_d_sample_storage(
+        &self,
+        submission: &Submission,
+        lease: Lease,
+    ) -> Result<SampleStorage, &'static str> {
+        self.available()?;
+        let native = self.power.native.borrow();
+        let registers = &native.work.render;
+        let run = registers
+            .run
+            .as_ref()
+            .ok_or("GFX 3D sample storage has no native owner")?;
+        if run.submission != *submission
+            || run.lease != lease
+            || submission.command.kind != Kind::ThreeD
+            || run.next != run.words.len()
+        {
+            return Err("GFX 3D sample storage requires its complete accepted parameter phase");
+        }
+        let blocks = registers
+            .committed(Word::new(0x10050, 4))
+            .ok_or("GFX 3D TIB allocation has not been programmed")?;
+        Ok(SampleStorage::native(
+            u32::try_from(blocks).map_err(|_| "GFX 3D TIB allocation width is invalid")?,
+        ))
     }
     pub fn ta_parameter_access<'a, 'p, 'm>(
         &'a self,

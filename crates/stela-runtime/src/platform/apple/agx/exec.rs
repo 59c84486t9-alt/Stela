@@ -75,6 +75,8 @@ pub struct ShaderState {
     pub preshader: Option<u64>,
     /// The USC execution base (call and return offsets are relative to it).
     pub code_base: u64,
+    /// Original USC Shared declaration; stage-specific owners bind its storage.
+    pub shared: Option<crate::platform::apple::agx::stream::usc::Shared>,
 }
 
 impl ShaderState {
@@ -103,6 +105,7 @@ impl ShaderState {
                 .preshader
                 .map(|offset| usc_base.wrapping_add(u64::from(offset))),
             code_base: usc_base,
+            shared: usc.shared,
         };
         for load in &usc.uniforms {
             let end = (load.start + load.halves) as usize;
