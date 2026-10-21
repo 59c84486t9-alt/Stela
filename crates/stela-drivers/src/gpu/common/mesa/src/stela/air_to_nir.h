@@ -57,11 +57,47 @@ typedef nir_def *(*stela_air_bind_buffer)(nir_builder *b,
                                         const struct stela_air_buffer *buffer,
                                         void *data);
 
+/* Alternative for a backend with indexed buffer surfaces rather than global
+ * device addresses. The callback maps a Metal argument to a fixed SSBO slot.
+ * Its surface must describe exactly that argument's buffer view, including its
+ * offset and byte length; the shader's logical offset starts at zero. Distinct
+ * arguments require distinct slots, even when their runtime views alias. A slot
+ * is not an encoded or truncated GPU VA. */
+typedef bool (*stela_air_bind_ssbo)(const struct stela_air_buffer *buffer,
+                                   unsigned *slot, void *data);
+
+struct stela_air_ssbo_view {
+   unsigned slot;
+   uint64_t buffer_size;
+   uint64_t offset;
+   uint64_t size;
+   enum stela_air_buffer_access access; /* Required by this shader argument. */
+   enum stela_air_buffer_access available_access; /* Actual resource rights. */
+   unsigned alignment; /* Required power-of-two byte alignment of this view. */
+};
+
+/* Command binding precondition for the 32-bit get_ssbo_size ABI: nonempty exact
+ * byte views, <=UINT32_MAX bytes, wholly within the real allocation, and a slot
+ * within the pipeline's explicit table extent (1..UINT8_MAX). The native driver
+ * must additionally validate its GPU base VA/canonical form and base alignment,
+ * lifetime and residency when constructing the original hardware surface state.
+ * No physical VA is constructed by the SSBO compiler path. */
+bool stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
+                               unsigned ssbo_count);
+
 struct stela_air_options {
    unsigned workgroup_size[3]; /* Exact nonzero pipeline specialization. */
    unsigned max_instructions; /* Nonzero caller-supplied compilation budget. */
    stela_air_bind_buffer bind_buffer;
    void *binding_data;
+   /* Select one buffer callback, never both. Zero-initialized additions retain
+    * the original global64 path. SSBO mode uses the existing NIR SSBO intrinsics
+    * and size query; the backend must lower these through its actual resource
+    * ABI. Full 64-bit offsets are checked before narrowing; out-of-view loads
+    * return zero and stores are discarded, never wrapped into another offset.
+    * Every runtime view must pass stela_air_ssbo_view_valid before dispatch. */
+   stela_air_bind_ssbo bind_ssbo;
+   unsigned ssbo_count;
 };
 
 /* Input is the hash-checked raw AIR bitcode selected by the archive reader.

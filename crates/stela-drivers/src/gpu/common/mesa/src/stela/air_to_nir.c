@@ -17,7 +17,24 @@
 struct value {
    nir_def *def;
    unsigned access; /* Buffer provenance; zero for integer values. */
+   bool ssbo;
+   unsigned ssbo_slot;
 };
+
+bool
+stela_air_ssbo_view_valid(const struct stela_air_ssbo_view *view,
+                          unsigned ssbo_count)
+{
+   return view && ssbo_count && ssbo_count <= UINT8_MAX &&
+          view->slot < ssbo_count && view->size && view->size <= UINT32_MAX &&
+          view->access >= STELA_AIR_READ && view->access <= STELA_AIR_READ_WRITE &&
+          view->available_access >= STELA_AIR_READ && view->available_access <= STELA_AIR_READ_WRITE &&
+          !(view->access & ~view->available_access) &&
+          view->alignment && !(view->alignment & (view->alignment - 1)) &&
+          !(view->offset & (view->alignment - 1)) &&
+          view->offset <= view->buffer_size &&
+          view->size <= view->buffer_size - view->offset;
+}
 
 struct translator {
    LLVMContextRef context;
@@ -248,6 +265,7 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       return fail(t, STELA_AIR_METADATA, "AIR argument descriptors do not match parameters");
    bool used[AIR_MAX_ARGUMENTS] = {false};
    bool buffer_indices[AIR_MAX_ARGUMENTS] = {false};
+   bool ssbo_slots[UINT8_MAX + 1] = {false};
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
       unsigned fields_count, index;
@@ -320,16 +338,26 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
          }
       }
       nir_def *def;
+      unsigned ssbo_slot = 0;
       if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
          if (!has_location || !has_as || !desc.access || desc.address_space != 1 ||
              LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
              LLVMGetPointerAddressSpace(type) != desc.address_space ||
-             !t->options->bind_buffer)
+             (!t->options->bind_buffer && !t->options->bind_ssbo))
             return fail(t, STELA_AIR_ARGUMENT, "unsupported/unbound device buffer %u", index);
-         def = t->options->bind_buffer(&t->b, &desc, t->options->binding_data);
-         if (!def || def->num_components != 1 || def->bit_size != 64)
-            return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
+         if (t->options->bind_ssbo) {
+            if (!t->options->bind_ssbo(&desc, &ssbo_slot, t->options->binding_data) ||
+                ssbo_slot >= t->options->ssbo_count || ssbo_slots[ssbo_slot])
+               return fail(t, STELA_AIR_ARGUMENT, "SSBO callback refused/invalid slot for buffer %u", index);
+            ssbo_slots[ssbo_slot] = true;
+            /* The exact Metal view is the surface, not an inferred raw VA. */
+            def = nir_imm_int64(&t->b, 0);
+         } else {
+            def = t->options->bind_buffer(&t->b, &desc, t->options->binding_data);
+            if (!def || def->num_components != 1 || def->bit_size != 64)
+               return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
+         }
       } else {
          unsigned components, bits;
          if (!shape(LLVMTypeOf(param), &components, &bits) || bits != 32 ||
@@ -348,6 +376,11 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
       if (!put_value(t, param, def, desc.access))
          return false;
+      if (buffer && t->options->bind_ssbo) {
+         struct value *value = find_value(t, param);
+         value->ssbo = true;
+         value->ssbo_slot = ssbo_slot;
+      }
    }
    return true;
 }
@@ -389,7 +422,7 @@ address_layout(struct translator *t)
 }
 
 static nir_def *
-gep(struct translator *t, LLVMValueRef inst, unsigned *access)
+gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
 {
    struct value *base = find_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
@@ -443,8 +476,36 @@ gep(struct translator *t, LLVMValueRef inst, unsigned *access)
          address = nir_iadd(&t->b, address, offset);
       }
    }
-   *access = base->access;
+   *origin = base;
    return address;
+}
+
+static nir_def *
+ssbo_access(struct translator *t, const struct value *address, nir_def *stored,
+            unsigned components, unsigned bits, unsigned alignment)
+{
+   nir_builder *b = &t->b;
+   nir_def *slot = nir_imm_int(b, address->ssbo_slot);
+   nir_def *size = nir_u2u64(b, nir_get_ssbo_size(b, 32, slot));
+   unsigned bytes = components * (bits / 8);
+   /* Compare at LLVM pointer width before narrowing to the native SSBO offset.
+    * Subtract the small access size only with a separate size>=bytes guard;
+    * offset+bytes could overflow, and offset truncation would alias low bytes.
+    * The surface byte length ABI is validated at command binding, not guessed
+    * from the argument's scalar type size or a synthetic backing allocation. */
+   nir_def *valid = nir_iand(b, nir_uge_imm(b, size, bytes),
+      nir_uge(b, nir_iadd_imm(b, size, -(int64_t)bytes), address->def));
+   nir_def *loaded = NULL;
+   nir_push_if(b, valid);
+   nir_def *offset = nir_u2u32(b, address->def);
+   if (stored)
+      nir_store_ssbo(b, stored, slot, offset, .align_mul = alignment);
+   else
+      loaded = nir_load_ssbo(b, components, bits, slot, offset, .align_mul = alignment);
+   nir_push_else(b, NULL);
+   nir_def *zero = stored ? NULL : nir_imm_zero(b, components, bits);
+   nir_pop_if(b, NULL);
+   return stored ? NULL : nir_if_phi(b, loaded, zero);
 }
 
 static nir_def *
@@ -469,15 +530,21 @@ static bool
 instruction(struct translator *t, LLVMValueRef inst)
 {
    LLVMOpcode op = LLVMGetInstructionOpcode(inst);
-   unsigned components = 0, bits = 0, access = 0;
+   unsigned components = 0, bits = 0;
    if (op == LLVMRet)
       return LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
    if (op != LLVMStore && op != LLVMGetElementPtr &&
        !shape(LLVMTypeOf(inst), &components, &bits))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
-      nir_def *def = gep(t, inst, &access);
-      return def && put_value(t, inst, def, access);
+      const struct value *origin;
+      nir_def *def = gep(t, inst, &origin);
+      if (!def || !put_value(t, inst, def, origin->access))
+         return false;
+      struct value *value = find_value(t, inst);
+      value->ssbo = origin->ssbo;
+      value->ssbo_slot = origin->ssbo_slot;
+      return true;
    }
    if (bits == 1 && (op == LLVMAdd || op == LLVMSub || op == LLVMMul ||
                     op == LLVMShl || op == LLVMLShr || op == LLVMAShr))
@@ -502,9 +569,14 @@ instruction(struct translator *t, LLVMValueRef inst)
          nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
          if (!value)
             return false;
-         nir_store_global(&t->b, value, address->def, .align_mul = alignment);
+         if (address->ssbo)
+            ssbo_access(t, address, value, components, bits, alignment);
+         else
+            nir_store_global(&t->b, value, address->def, .align_mul = alignment);
          return true;
       }
+      if (address->ssbo)
+         return put_value(t, inst, ssbo_access(t, address, NULL, components, bits, alignment), 0);
       return put_value(t, inst, nir_load_global(&t->b, components, bits,
                        address->def, .align_mul = alignment), 0);
    }
@@ -599,6 +671,12 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
          return NULL;
       }
    }
+   if ((options->bind_buffer && options->bind_ssbo) ||
+       (options->bind_ssbo && (!options->ssbo_count || options->ssbo_count > UINT8_MAX)) ||
+       (!options->bind_ssbo && options->ssbo_count)) {
+      fail(&t, STELA_AIR_INPUT, "invalid/mixed global and SSBO binding ABI");
+      return NULL;
+   }
    unsigned major, minor, patch;
    LLVMGetVersion(&major, &minor, &patch);
    if (major != 23) {
@@ -648,6 +726,7 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    t.b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, nir_options, "%s", entry);
    for (unsigned i = 0; i < 3; i++)
       t.b.shader->info.workgroup_size[i] = options->workgroup_size[i];
+   t.b.shader->info.num_ssbos = options->ssbo_count;
    t.values = _mesa_pointer_hash_table_create(t.b.shader);
    if (!t.values || !kernel_arguments(&t, fn)) {
       fail(&t, STELA_AIR_ALLOCATION, "AIR shader/value map allocation failed");
