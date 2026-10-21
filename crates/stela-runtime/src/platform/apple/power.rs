@@ -24,6 +24,10 @@
 //! Captured GPCE/CIO unready observations remain explicit even before a new
 //! request; a snapshot must not turn prior native work into an empty idle queue.
 //!
+//! LLB `tunableh_pmgr_soc_gpce0_finalize` (file9c26c/9c2dc) has two actual
+//! auxiliary RMWs at +2008/+200c, mask1/set0. Their configuration effects are
+//! retained without qualifying the distinct native rearm or engine progress.
+//!
 //! Power-gate enables (reg[32], restoreHW 0x2f9cc3c and
 //! `_enableCPMPowerDomainGating` 0x2f9fd88) retain bit31 and other RMW fields.
 //! They permit automatic gating without inventing an electrical idle event.
@@ -58,6 +62,8 @@ pub enum Kind {
     Gpce,
     /// T8112 original RegMap0x63/reg41: both CIO reconfiguration words.
     Cio,
+    /// LLB's source GPCE0 finalizer auxiliary controls, not a native PC/status bank.
+    GpceFinalize,
     /// Exact T8112 native sequence/table configuration words, placed at their
     /// physical-address offsets. No status, trigger or SRAM aperture is implied.
     NubBindings,
@@ -76,6 +82,7 @@ impl Kind {
             Self::Marker => alloc::vec![MARKER],
             Self::Gpce => alloc::vec![0, 4],
             Self::Cio => alloc::vec![0x4000, 0x8000],
+            Self::GpceFinalize => alloc::vec![0x2008, 0x200c],
             Self::NubBindings => {
                 let mut offsets = alloc::vec![
                     0x23d2d0200,
@@ -388,6 +395,20 @@ impl MmioDevice for Power {
                 });
                 return Ok(());
             }
+            Kind::GpceFinalize => {
+                if value != old & !1 {
+                    return Err(fail(
+                        "GPCE finalization only qualifies clearing bit0 and preserving captured other fields",
+                    ));
+                }
+                self.registers.insert(offset, Word::captured(value));
+                self.pending_configuration.push(ConfigurationRequest {
+                    offset,
+                    previous: old,
+                    written: value,
+                });
+                return Ok(());
+            }
             _ => {}
         }
         self.registers.insert(offset, Word::captured(value));
@@ -464,6 +485,7 @@ mod tests {
             Kind::Marker,
             Kind::Gpce,
             Kind::Cio,
+            Kind::GpceFinalize,
             Kind::NubBindings,
             Kind::Gating,
             Kind::Tvm,
@@ -614,6 +636,69 @@ mod tests {
                 Ok(u64::from(entries[0].1))
             );
         }
+    }
+
+    #[test]
+    fn actual_gpce_finalization_retains_ordered_masked_effects_without_clearing_native_progress() {
+        let mut bus = Bus::new();
+        let id = bus.add(Box::new(
+            Power::from_snapshot(Kind::GpceFinalize, [(0x2008, 0x123), (0x200c, 0x456)]).unwrap(),
+        ));
+        bus.map(id, 0x23b782008, 8, 0x2008).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        assert!(bus.write(0x23b782008, Width::Word, 0, &mut access).is_err());
+        let first = bus.read(0x23b782008, Width::Word, &mut access).unwrap();
+        bus.write(0x23b782008, Width::Word, first & !1, &mut access)
+            .unwrap();
+        assert_eq!(bus.read(0x23b782008, Width::Word, &mut access), Ok(0x122));
+        // Later unqualified rearm refuses without erasing the first write.
+        assert!(
+            bus.write(0x23b78200c, Width::Word, 0x457, &mut access)
+                .is_err()
+        );
+        assert_eq!(bus.read(0x23b78200c, Width::Word, &mut access), Ok(0x456));
+        let second = bus.read(0x23b78200c, Width::Word, &mut access).unwrap();
+        // The original RMW stores even when the bit was already clear.
+        bus.write(0x23b78200c, Width::Word, second & !1, &mut access)
+            .unwrap();
+        let model = bus.device_mut::<Power>(id).unwrap();
+        assert_eq!(
+            model.pending_configuration().collect::<Vec<_>>(),
+            [
+                ConfigurationRequest {
+                    offset: 0x2008,
+                    previous: 0x123,
+                    written: 0x122
+                },
+                ConfigurationRequest {
+                    offset: 0x200c,
+                    previous: 0x456,
+                    written: 0x456
+                },
+            ]
+        );
+        assert!(model.advance(&mut access).is_err());
+        assert_eq!(model.pending_configuration().count(), 2);
+        assert!(
+            model
+                .write(0x2008, Width::Word, 0x122, &mut access)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn native_gpce_status_control_fields_do_not_gain_semantics_from_the_ap_request_setter() {
+        let mut model = Power::from_snapshot(Kind::Gpce, [(0, 0xf), (4, 0x2f)]).unwrap();
+        let mut sink = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut sink);
+        // Original native programs use bit5 too; its hardware effect cannot
+        // be invented from the AP driver's preserving low4 update.
+        assert!(model.write(0, Width::Word, 0x2f, &mut access).is_err());
+        assert!(model.write(4, Width::Word, 0xf, &mut access).is_err());
+        assert_eq!(model.read(0, Width::Word, &mut access), Ok(0xf));
+        assert_eq!(model.read(4, Width::Word, &mut access), Ok(0x2f));
+        assert_eq!(model.pending_gpce().count(), 0);
     }
     #[test]
     fn tvm_retains_config_and_other_domains_without_claiming_idle_progress() {

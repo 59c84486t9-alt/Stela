@@ -1086,6 +1086,86 @@ fn original_llb_gpce_producers_and_live_bindings_exclude_a_low_four_only_retirem
 }
 
 #[test]
+#[ignore = "requires pinned original J473 LLB; no Apple image is committed"]
+fn original_llb_gpce_finalization_is_two_real_masked_writes_under_original_caller_guards() {
+    let bytes = llb();
+    for (start, end, digest) in [
+        (
+            0x4933c,
+            0x49388,
+            "ae444f4fa465bd2fd4679c3f3e1249477173c5b44e33709466284972767d29bf",
+        ),
+        (
+            0x9c26c,
+            0x9c2fc,
+            "9a02743c6fafc024f54ff0f7ffa2d7688a9bcdc9e21ac0a7cad26936e5404fe2",
+        ),
+        (
+            0x4f550,
+            0x4fe14,
+            "7f9142838c64893b0a6726e1db01e2c4113ba3b8460953ad9af2b3aab5233b71",
+        ),
+        (
+            0x17d1a8,
+            0x17d1e0,
+            "a86d550bd8169c5dc04a2f09e19550f8810d8f896db2732e31966ff88bbabfc9",
+        ),
+        (
+            0x1a30c8,
+            0x1a30d0,
+            "895ccbbed029d7bc8466f68f15e375a9eb389e457b532cd6c27e2a4a1ae4ebc4",
+        ),
+        (
+            0x1a4030,
+            0x1a4040,
+            "4cbbd8ca5215b8d161aec181a74b694f4e24b001d5b081dc0030ed797a8973e0",
+        ),
+        (
+            0x2089d0,
+            0x208a10,
+            "6b71fc248941fdd6d4448a53dd21d78ff3c776dd8e78ae9062198918ce219ae4",
+        ),
+    ] {
+        assert_eq!(hex::encode(Sha256::digest(&bytes[start..end])), digest);
+    }
+    assert_eq!(quad(&bytes, 0x2089d0), 0x23b780000);
+    assert_eq!(branch_target(&bytes, 0x49360), 0x9c26c);
+    assert_eq!(branch_target(&bytes, 0x9c2f8), 0x4fa44);
+    assert_eq!(&bytes[0x1a30cc..0x1a30ce], &[1, 1]); // indirect operands + pointer-list rows
+    for (pointer, row, offset) in [(0x17d1c8, 0x17d1a8, 0x2008), (0x17d1d0, 0x17d1b8, 0x200c)] {
+        assert_eq!(quad(&bytes, pointer), 0x1fc050000 + row as u64);
+        assert_eq!(quad(&bytes, row), 0x40000000 | offset); // 32-bit width/relative offset
+        assert_eq!(quad(&bytes, row + 8), 0x1fc050000 + 0x1a4030);
+    }
+    assert_eq!(quad(&bytes, 0x17d1d8), 0); // list terminator, not native retirement
+    assert_eq!(word(&bytes, 0x1a4030), 1); // mask
+    assert_eq!(word(&bytes, 0x1a4034), 0); // set value
+    assert_eq!(quad(&bytes, 0x1a4038), 0); // no dynamic value callback
+    for (table, base, target) in [
+        (0x4fa20, 0x4f9ac, 0x4f9cc),
+        (0x4f6a4, 0x4f5e8, 0x4f638),
+        (0x4f920, 0x4f864, 0x4f8b4),
+        (0x4fd8c, 0x4fd48, 0x4fd5c),
+    ] {
+        assert_eq!(base + word(&bytes, table + 3 * 4) as usize, target); // original width4 branches
+    }
+    for (offset, opcode) in [
+        (0x4f9d8, 0xb9400100), // actual old physical word
+        (0x4fcb0, 0x8a2002f7), // old & ~mask
+        (0x4fcc0, 0x8a180008), // set & mask
+        (0x4fcc8, 0xaa170104), // actual combined store value
+        (0x4fd5c, 0xb9000044), // actual STR w4,[x2]
+    ] {
+        assert_eq!(word(&bytes, offset), opcode);
+    }
+    // Caller arg0 bit0 clear enters these writes; arg0 bit0 set instead
+    // checks arg1==0x16. The subsequent finalizer is a distinct obligation.
+    assert_eq!(word(&bytes, 0x4933c), 0x36000080);
+    assert_eq!(word(&bytes, 0x49340), 0x7100583f);
+    assert_eq!(branch_target(&bytes, 0x49384), 0x9dae8);
+}
+
+#[test]
 #[ignore = "requires pinned original J473 kernelcache; no Apple image is committed"]
 fn original_kernel_gpce_maps_and_cio_sleep_do_not_imply_native_retirement() {
     let bytes = kernelcache();
