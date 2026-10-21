@@ -275,10 +275,13 @@ impl Asc {
             return Err("mailbox DMA on a stopped coprocessor");
         }
         let mut produced = Vec::new();
-        let result = self.firmware.dma(port, &mut produced).map(|()| produced);
-        self.deliver(result)?;
+        let result = self.firmware.dma(port, &mut produced);
+        // Firmware may have committed earlier DMA writes before a later
+        // transfer faults. Its already-produced notifications are equally
+        // committed and must remain visible even when this step fails.
+        self.outbox.extend(produced);
         self.update_lines(port.access);
-        Ok(())
+        result
     }
 
     /// The native coprocessor, for board events it reports; what it sends
@@ -829,6 +832,57 @@ mod tests {
                 .is_err()
         );
         assert_eq!(asc.firmware::<Retained>().unwrap().resumes, 0);
+    }
+
+    struct PartialDma(bool);
+    impl Firmware for PartialDma {
+        fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+            Ok(())
+        }
+        fn dma(
+            &mut self,
+            port: &mut Port<'_, '_>,
+            out: &mut Vec<Message>,
+        ) -> Result<(), &'static str> {
+            if !self.0 {
+                port.write(0, b"done").map_err(|_| "first DMA failed")?;
+                out.push(Message {
+                    endpoint: 0x24,
+                    payload: 0x85 << 48,
+                });
+                self.0 = true;
+            }
+            port.read(0x1000, &mut [0]).map_err(|_| "later DMA failed")
+        }
+    }
+
+    #[test]
+    fn an_earlier_dma_notification_survives_a_later_transfer_fault() {
+        use crate::platform::dma::{Physical, tests::Ram};
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut memory = Ram::new(0, 8);
+        let mut asc =
+            Asc::booted(Box::new(PartialDma(false)), Lines::from_interrupts(LINES)).unwrap();
+        asc.write(I2A_CONTROL, Width::Word, CONTROL_ENABLE, &mut access)
+            .unwrap();
+        for _ in 0..2 {
+            let mut port = Port {
+                iommu: &mut Physical,
+                stream: 0,
+                memory: &mut memory,
+                access: &mut access,
+            };
+            assert_eq!(asc.service_dma(&mut port), Err("later DMA failed"));
+        }
+        assert_eq!(&memory.bytes[..4], b"done");
+        assert_eq!(asc.outbox.len(), 1);
+        assert_eq!(asc.levels[2], Some(true));
+        assert_eq!(receive(&mut asc, &mut access), (0x85 << 48, 0x24 | 1 << 52));
+        assert_eq!(asc.levels[2], Some(false));
     }
 
     /// Powers the machine off for any message and reports one event of
