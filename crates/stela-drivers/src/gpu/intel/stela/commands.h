@@ -23,6 +23,9 @@ struct stela_intel_commands {
     size_t used;
     uint32_t address_bits;
 };
+_Static_assert(offsetof(struct stela_intel_commands, capacity) == sizeof(size_t), "Rust/C capacity ABI");
+_Static_assert(offsetof(struct stela_intel_commands, used) == 2 * sizeof(size_t), "Rust/C used ABI");
+_Static_assert(offsetof(struct stela_intel_commands, address_bits) == 3 * sizeof(size_t), "Rust/C address ABI");
 
 /* Errors: -22 invalid arguments; -28 insufficient space. An error leaves the
  * command storage and used count unchanged. No memory is allocated or retained.
