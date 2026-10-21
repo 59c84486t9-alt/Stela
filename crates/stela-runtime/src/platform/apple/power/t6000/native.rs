@@ -1,6 +1,6 @@
 //! T6000's real shared configuration/SRAM owner.
 //!
-//! These are the original 35 native-program configuration words and the
+//! These are the original native-program configuration/activation words and the
 //! physical SRAM used by `pmgr::install::t6000`. No request, installed pointer,
 //! zero instruction or observed control value establishes a hardware trigger
 //! or native retirement. Every view shares the parent controller's lifecycle,
@@ -15,6 +15,16 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 const NAME: &str = "t6000-native-controller";
 const SRAM_BYTES: usize = (SRAM_LIMIT - SRAM_BASE) as usize;
 const GPCE: u64 = 0x28e099000;
+const ACTIVATION_WORDS: [(u64, u32); 8] = [
+    (GPCE + 0x6c, 1),
+    (GPCE + 0x74, 1),
+    (0x292000200, 0x1c000000),
+    (0x292000204, 1),
+    (0x292dc21c, 1),
+    (0x292dc220, 1),
+    (0x292dc224, 1),
+    (0x292dc228, 1),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -47,7 +57,7 @@ impl Error {
             Self::UnqualifiedBits => "T6000 native control write changes unqualified fields",
             Self::UnknownSram => "T6000 native SRAM bytes are unknown",
             Self::Pending => {
-                "T6000 native configuration requires qualified absence of pending/autonomous work"
+                "T6000 native configuration requires qualified absence of pending/autonomous/activation work"
             }
             Self::Epoch => "T6000 native configuration epoch exhausted",
             Self::Group => "T6000 native group is outside the actual first-die catalog",
@@ -67,7 +77,9 @@ pub struct Control {
     pub address: u64,
     pub fields: u32,
 }
-/// Complete original `47090`/`471b8` first-die configuration interface.
+/// Complete original `47090`/`471b8` first-die configuration interface and
+/// `4b030`/`3d7d4` activation stores. The latter retain actual control inputs;
+/// they do not qualify request-to-PC selection or hardware retirement.
 /// Field masks qualify software inputs, never completion/status bits.
 pub fn controls() -> Vec<Control> {
     let mut rows = vec![
@@ -110,6 +122,7 @@ pub fn controls() -> Vec<Control> {
     ] {
         rows.push(Control { address, fields });
     }
+    rows.extend(ACTIVATION_WORDS.map(|(address, fields)| Control { address, fields }));
     rows.sort_by_key(|row| row.address);
     rows
 }
@@ -152,6 +165,13 @@ pub struct Observations {
     pub sram: Vec<Fragment>,
     pub epoch: u64,
     pub stela_initialization: Option<SramInitialization>,
+    pub activation_inputs: Vec<ActivationInput>,
+}
+/// Chronological committed AP input, not a hardware trigger/completion report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivationInput {
+    pub address: u64,
+    pub value: u32,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
@@ -169,6 +189,7 @@ pub(super) struct State {
     known: Vec<bool>,
     epoch: u64,
     initialization: Option<SramInitialization>,
+    activation_inputs: Vec<ActivationInput>,
 }
 impl State {
     pub(super) fn new(handoff: Handoff) -> Result<Self, Error> {
@@ -190,6 +211,7 @@ impl State {
             known: vec![false; SRAM_BYTES],
             epoch: 0,
             initialization: None,
+            activation_inputs: Vec::new(),
         };
         match handoff {
             Handoff::Unknown => {}
@@ -260,7 +282,25 @@ impl State {
             sram: fragments,
             epoch: self.epoch,
             stela_initialization: self.initialization,
+            activation_inputs: self.activation_inputs.clone(),
         }
+    }
+    fn activation_word(address: u64) -> bool {
+        ACTIVATION_WORDS.iter().any(|(word, _)| *word == address)
+    }
+    /// This is an ownership qualification, not an assertion of physical idle.
+    /// Unknown/nonzero activation inputs or any committed activation prefix
+    /// cannot authorize replacing configuration/code. Later disable stores do
+    /// not erase earlier work that may already have started.
+    fn reconfiguration_qualified(&self) -> bool {
+        self.activation_inputs.is_empty()
+            && ACTIVATION_WORDS.iter().all(|(address, fields)| {
+                let word = self
+                    .words
+                    .get(address)
+                    .expect("complete native control inventory");
+                word.known & *fields == *fields && word.value & *fields == 0
+            })
     }
     fn read_control(&self, address: u64, width: Width) -> Result<u64, Error> {
         if width != Width::Word {
@@ -288,6 +328,12 @@ impl State {
             .ok_or(Error::UnknownControl)?
             .value = value as u32;
         self.epoch = epoch;
+        if Self::activation_word(address) {
+            self.activation_inputs.push(ActivationInput {
+                address,
+                value: value as u32,
+            });
+        }
         Ok(())
     }
     fn extent(offset: u64, width: Width) -> Result<core::ops::Range<usize>, Error> {
@@ -456,11 +502,11 @@ impl Sram {
         if View::pending(&state) {
             return Err(Error::Pending);
         }
-        state
-            .native
-            .as_mut()
-            .ok_or(Error::Unmounted)?
-            .write_bytes(offset, input)
+        let native = state.native.as_mut().ok_or(Error::Unmounted)?;
+        if !native.reconfiguration_qualified() {
+            return Err(Error::Pending);
+        }
+        native.write_bytes(offset, input)
     }
 }
 impl crate::platform::dma::Memory for Sram {
@@ -544,6 +590,9 @@ impl MmioDevice for View {
             .native
             .as_mut()
             .ok_or_else(|| fail(Error::Unmounted.reason()))?;
+        if (self.sram || !State::activation_word(offset)) && !native.reconfiguration_qualified() {
+            return Err(fail(Error::Pending.reason()));
+        }
         (if self.sram {
             native.write_sram(offset, width, value)
         } else {
@@ -631,7 +680,7 @@ mod tests {
         let (mut bus, _, _) = mount(&owner);
         let mut sink = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut sink);
-        assert_eq!(controls().len(), 35);
+        assert_eq!(controls().len(), 43);
         let mut install = t6000::programs(0x20, Some(0), images()).unwrap();
         while let Some(claim) = install.begin().unwrap() {
             let action = install.dispatch(&claim).unwrap();
@@ -761,11 +810,19 @@ mod tests {
     #[test]
     fn observed_unknownness_duplicate_evidence_and_atomic_physical_bounds_are_preserved() {
         let owner = owner(Handoff::Observed {
-            controls: vec![Observation {
-                address: GPCE + 0x40,
-                value: 3,
-                known: 31,
-            }],
+            controls: ACTIVATION_WORDS
+                .into_iter()
+                .map(|(address, _)| Observation {
+                    address,
+                    value: 0,
+                    known: u32::MAX,
+                })
+                .chain([Observation {
+                    address: GPCE + 0x40,
+                    value: 3,
+                    known: 31,
+                }])
+                .collect(),
             sram: vec![Fragment {
                 offset: (CODE_BASE - SRAM_BASE) as usize,
                 bytes: vec![1, 2, 3, 4],

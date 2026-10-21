@@ -9,6 +9,8 @@ use super::{Error, History, Installation, NativeImage, Placement, Step, align, w
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod activation;
+
 pub const SRAM_BASE: u64 = 0x292f00000;
 pub const SRAM_LIMIT: u64 = SRAM_BASE + 0x70000;
 pub const TABLE_BASE: u64 = SRAM_BASE + 0x1000;
