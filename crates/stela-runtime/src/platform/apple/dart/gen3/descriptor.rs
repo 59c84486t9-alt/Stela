@@ -17,6 +17,17 @@ pub enum Encoding {
 }
 
 impl Encoding {
+    /// The recovered SPTM handoff and native driver agree on revision3.0.
+    /// Other firmware builder encodings remain explicit software forms until
+    /// their handoff mode is qualified; a compatible string cannot select it.
+    pub fn handoff_revision(revision: u16) -> Result<Self, &'static str> {
+        match revision {
+            0x300 => Ok(Self::Shift4),
+            0x302 | 0x303 => Err("gen3 DART compact descriptor handoff mode is unqualified"),
+            _ => Err("gen3 DART handoff revision is outside the recovered native contract"),
+        }
+    }
+
     /// The original mBoot builder's choice for the revisions also named by
     /// SPTM's gen3 validator. The SPTM builder itself uses Shift4, so this
     /// is source-specific construction metadata, not native mode admission.
@@ -104,11 +115,17 @@ mod tests {
     #[test]
     fn original_revision_selection_does_not_alias_unrecovered_revisions() {
         assert_eq!(Encoding::mboot_revision(0x300), Ok(Encoding::Shift4));
+        assert_eq!(Encoding::handoff_revision(0x300), Ok(Encoding::Shift4));
         for revision in [0x302, 0x303] {
             assert_eq!(Encoding::mboot_revision(revision), Ok(Encoding::Shift8));
+            assert_eq!(
+                Encoding::handoff_revision(revision),
+                Err("gen3 DART compact descriptor handoff mode is unqualified")
+            );
         }
         for revision in [0, 0x101, 0x204, 0x301, 0x304, u16::MAX] {
             assert!(Encoding::mboot_revision(revision).is_err());
+            assert!(Encoding::handoff_revision(revision).is_err());
         }
     }
 }

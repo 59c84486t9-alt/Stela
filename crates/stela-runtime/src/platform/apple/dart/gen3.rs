@@ -7,5 +7,6 @@
 pub mod context;
 pub mod descriptor;
 pub mod fault;
+pub mod region;
 pub mod tables;
 pub mod tlbi;
