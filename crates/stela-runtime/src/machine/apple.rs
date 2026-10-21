@@ -96,6 +96,7 @@ pub use crate::platform::apple::{
         inspect as inspect_sep_signature, verify_manifest as verify_sep_manifest_signature,
     },
     sep::state as sep_state,
+    smc::WriteLog as SmcWriteLog,
     typec,
     uart::{ConsoleBusy, ConsoleSink},
 };
@@ -1522,6 +1523,11 @@ impl AppleDevices {
             .ok_or("unknown USB controller")?;
         Ok(UsbClient(&mut master.session))
     }
+    /// One observed key write, including its unchanged raw reply or refusal.
+    pub fn take_smc_log(&mut self) -> Option<SmcWriteLog> {
+        self.smc().ok()?.take_log()
+    }
+
     /// The next entry of a display coprocessor's log: what the guest sent
     /// the DCP model and what it answered or refused.
     pub fn take_display_log(&mut self) -> Option<DisplayLog> {

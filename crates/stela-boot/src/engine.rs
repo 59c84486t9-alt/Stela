@@ -2156,6 +2156,20 @@ fn run(
             }
         }
 
+        while let Some(log) = machine.devices.take_smc_log() {
+            output::arguments(format_args!(
+                "SMC key-write op={:#x} id={} flags={:#x} key={:#010x} command={:x?} request={:#018x} reply={:x?} dropped={}\n",
+                log.request as u8,
+                (log.request >> 12) & 0xf,
+                (log.request >> 8) & 0xf,
+                (log.request >> 32) as u32,
+                log.system_event,
+                log.request,
+                log.reply,
+                log.dropped_before
+            ));
+        }
+
         while let Some(entry) = machine.devices.take_display_log() {
             display::print_log(&entry);
         }

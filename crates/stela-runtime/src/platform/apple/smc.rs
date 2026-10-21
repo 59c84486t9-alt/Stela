@@ -213,6 +213,19 @@ pub const READABLE: u8 = 0x80;
 pub const WRITABLE: u8 = 0x40;
 pub const FUNCTION: u8 = 0x10;
 const MAX_VALUE: usize = 120;
+const WRITE_LOG_LIMIT: usize = 64;
+
+/// A diagnostic observation of a write at the key endpoint. The raw reply
+/// is retained even when it is zero; an error means no reply was emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteLog {
+    pub request: u64,
+    /// The four-byte system-event command, when this write targets MBSE.
+    pub system_event: Option<u32>,
+    pub reply: Result<u64, &'static str>,
+    /// Older observations lost to the bounded queue before this entry.
+    pub dropped_before: usize,
+}
 
 /// The 32-bit form of a four-character key or type code.
 pub const fn code(name: &[u8; 4]) -> u32 {
@@ -346,6 +359,8 @@ pub struct Smc {
     wake_bits: WakeBits,
     /// The power button woke the SoC; its release is not reported.
     waking_press: bool,
+    write_log: VecDeque<WriteLog>,
+    dropped_writes: usize,
 }
 
 impl Smc {
@@ -383,6 +398,8 @@ impl Smc {
             sleep: Sleep::Awake,
             wake_bits: WakeBits::default(),
             waking_press: false,
+            write_log: VecDeque::new(),
+            dropped_writes: 0,
         })
     }
 
@@ -439,6 +456,13 @@ impl Smc {
     /// `panb` or `pane`).
     pub fn notice(&self) -> Option<u32> {
         self.notice
+    }
+
+    /// Drains one bounded protocol observation without altering its reply.
+    pub fn take_log(&mut self) -> Option<WriteLog> {
+        let mut log = self.write_log.pop_front()?;
+        log.dropped_before = core::mem::take(&mut self.dropped_writes);
+        Some(log)
     }
 
     /// The power button went down or up: `bHLD` follows it and the AP is
@@ -589,36 +613,55 @@ impl Endpoint for Smc {
         let write_size = usize::from((payload >> 24) as u8);
         let name = (payload >> 32) as u32;
         let mut answers = Vec::new();
-        let reply = match kind {
-            INITIALIZE => self.sram_address,
-            READ if (1..=MAX_VALUE).contains(&size) => self.read(payload, name, size),
-            WRITE if (1..=MAX_VALUE).contains(&size) => {
-                Self::reply(payload, self.write(name, size, &mut answers)?, 0, 0)
-            }
-            READ_WRITE if (1..=MAX_VALUE).contains(&write_size) => {
-                match self.write(name, write_size, &mut answers)? {
-                    SUCCESS => self.read(payload, name, size),
-                    result => Self::reply(payload, result, 0, 0),
+        let system_event = (name == SYSTEM_EVENT
+            && matches!((kind, size, write_size), (WRITE, 4, _) | (READ_WRITE, _, 4)))
+        .then(|| u32::from_le_bytes(self.sram.get(4).try_into().expect("four-byte command")));
+        let result = (|| {
+            let reply = match kind {
+                INITIALIZE => self.sram_address,
+                READ if (1..=MAX_VALUE).contains(&size) => self.read(payload, name, size),
+                WRITE if (1..=MAX_VALUE).contains(&size) => {
+                    Self::reply(payload, self.write(name, size, &mut answers)?, 0, 0)
                 }
-            }
-            READ | WRITE | READ_WRITE => Self::reply(payload, BAD_ARGUMENT, 0, 0),
-            KEY_BY_INDEX => match self.keys.keys().nth(name as usize) {
-                Some(&key) => Self::reply(payload, SUCCESS, 4, key),
-                None => Self::reply(payload, INDEX_RANGE, 0, 0),
-            },
-            KEY_INFO => match self.keys.get(&name) {
-                Some(key) => {
-                    let mut info = [0u8; 6];
-                    info[0] = key.value.len() as u8;
-                    info[1..5].copy_from_slice(&key.kind.to_le_bytes());
-                    info[5] = key.flags;
-                    self.sram.put(&info);
-                    Self::reply(payload, SUCCESS, info.len(), 0)
+                READ_WRITE if (1..=MAX_VALUE).contains(&write_size) => {
+                    match self.write(name, write_size, &mut answers)? {
+                        SUCCESS => self.read(payload, name, size),
+                        result => Self::reply(payload, result, 0, 0),
+                    }
                 }
-                None => Self::reply(payload, KEY_NOT_FOUND, 0, 0),
-            },
-            _ => return Err("SMC key endpoint message type is not modeled"),
-        };
+                READ | WRITE | READ_WRITE => Self::reply(payload, BAD_ARGUMENT, 0, 0),
+                KEY_BY_INDEX => match self.keys.keys().nth(name as usize) {
+                    Some(&key) => Self::reply(payload, SUCCESS, 4, key),
+                    None => Self::reply(payload, INDEX_RANGE, 0, 0),
+                },
+                KEY_INFO => match self.keys.get(&name) {
+                    Some(key) => {
+                        let mut info = [0u8; 6];
+                        info[0] = key.value.len() as u8;
+                        info[1..5].copy_from_slice(&key.kind.to_le_bytes());
+                        info[5] = key.flags;
+                        self.sram.put(&info);
+                        Self::reply(payload, SUCCESS, info.len(), 0)
+                    }
+                    None => Self::reply(payload, KEY_NOT_FOUND, 0, 0),
+                },
+                _ => return Err("SMC key endpoint message type is not modeled"),
+            };
+            Ok(reply)
+        })();
+        if matches!(kind, WRITE | READ_WRITE) {
+            if self.write_log.len() == WRITE_LOG_LIMIT {
+                self.write_log.pop_front();
+                self.dropped_writes = self.dropped_writes.saturating_add(1);
+            }
+            self.write_log.push_back(WriteLog {
+                request: payload,
+                system_event,
+                reply: result,
+                dropped_before: 0,
+            });
+        }
+        let reply = result?;
         outbox.push(reply);
         outbox.extend(answers);
         Ok(())
@@ -765,6 +808,65 @@ mod tests {
         smc.receive(payload, &mut outbox).unwrap();
         assert_eq!(outbox.len(), 1);
         outbox[0]
+    }
+
+    #[test]
+    fn write_observations_preserve_zero_replies_and_request_id_wrap() {
+        let (mut smc, sram) = smc();
+        sram.put(&PANIC_BEGIN.to_le_bytes());
+        for number in 0..=16 {
+            let id = (number & 15) as u8;
+            let payload = request(WRITE, id, 4, 0, SYSTEM_EVENT);
+            let reply = send(&mut smc, payload);
+            assert_eq!(reply, u64::from(id) << 12);
+            assert_eq!(
+                smc.take_log(),
+                Some(WriteLog {
+                    request: payload,
+                    system_event: Some(PANIC_BEGIN),
+                    reply: Ok(reply),
+                    dropped_before: 0,
+                })
+            );
+        }
+        assert_eq!(smc.notice(), Some(PANIC_BEGIN));
+        assert_eq!(smc.take_log(), None);
+    }
+
+    #[test]
+    fn write_observations_bound_storage_and_report_losses_and_refusals() {
+        let (mut smc, sram) = smc();
+        sram.put(&[0]);
+        for number in 0..WRITE_LOG_LIMIT + 3 {
+            send(
+                &mut smc,
+                request(WRITE, (number & 15) as u8, 1, 0, NOTIFICATIONS),
+            );
+        }
+        assert_eq!(smc.write_log.len(), WRITE_LOG_LIMIT);
+        let first = smc.take_log().unwrap();
+        assert_eq!(first.request, request(WRITE, 3, 1, 0, NOTIFICATIONS));
+        assert_eq!(first.dropped_before, 3);
+        assert_eq!(smc.take_log().unwrap().dropped_before, 0);
+        while smc.take_log().is_some() {}
+
+        sram.put(&0u32.to_le_bytes());
+        let payload = request(WRITE, 0, 4, 0, SYSTEM_EVENT);
+        let mut replies = Vec::new();
+        assert_eq!(
+            smc.receive(payload, &mut replies),
+            Err("SMC MBSE command is not modeled")
+        );
+        assert!(replies.is_empty());
+        assert_eq!(
+            smc.take_log(),
+            Some(WriteLog {
+                request: payload,
+                system_event: Some(0),
+                reply: Err("SMC MBSE command is not modeled"),
+                dropped_before: 0,
+            })
+        );
     }
 
     #[test]
