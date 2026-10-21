@@ -37,15 +37,9 @@ use stela_runtime::machine::{
     },
 };
 
+mod ram;
 mod translated;
-
-/// Guest DRAM backed by one contiguous host range.
-#[derive(Debug, Clone, Copy)]
-pub struct RamRange {
-    pub guest: u64,
-    pub host: u64,
-    pub bytes: u64,
-}
+pub use ram::RamRange;
 
 /// Page-table frames from the handoff pool: a permanent part for roots and a
 /// shadow part, split between the guest's two halves, each of which resets
@@ -393,30 +387,18 @@ pub fn native_ticks() -> u64 {
 
 impl State {
     fn host_physical(&self, guest: u64) -> Option<u64> {
-        let index = self.ram.partition_point(|range| range.guest <= guest);
-        let range = self.ram.get(index.checked_sub(1)?)?;
-        (guest - range.guest < range.bytes).then(|| range.host + (guest - range.guest))
+        self.run(guest).map(|(host, _)| host)
     }
 
     /// The longest RAM run starting at `guest`, as (host, bytes).
     fn run(&self, guest: u64) -> Option<(u64, u64)> {
-        let index = self.ram.partition_point(|range| range.guest <= guest);
-        let range = self.ram.get(index.checked_sub(1)?)?;
-        let offset = guest - range.guest;
-        (offset < range.bytes).then(|| (range.host + offset, range.bytes - offset))
+        ram::run(&self.ram, guest)
     }
 
     fn copy(&self, guest: u64, length: usize, mut action: impl FnMut(u64, usize, usize)) -> bool {
-        let mut done = 0;
-        while done < length {
-            let Some((host, available)) = self.run(guest + done as u64) else {
-                return false;
-            };
-            let chunk = (available as usize).min(length - done);
+        ram::copy(&self.ram, guest, length, |host, done, chunk| {
             action(layout::physical(host), done, chunk);
-            done += chunk;
-        }
-        true
+        })
     }
 
     fn reset_shadow(&mut self) {

@@ -9,6 +9,9 @@ extern crate alloc;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/console_lines.rs"]
 mod boot_console;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
+mod boot_ram;
 
 mod agx_isa;
 mod agx_observe;
