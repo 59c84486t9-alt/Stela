@@ -38,6 +38,7 @@ pub mod i2c;
 pub mod interrupt;
 pub mod ipi;
 pub mod lockdown;
+pub mod mcc;
 pub mod mxwrap;
 pub mod nhi;
 pub mod nor;
