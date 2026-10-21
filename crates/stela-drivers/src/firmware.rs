@@ -3,7 +3,8 @@
 //!
 //! A setup/boot loader supplies owned [`Resource`] buffers and their manifests to
 //! [`Catalog::from_handoff`], then retains the catalog while drivers borrow images.
-//! This is a Rust ownership boundary; the boot schema does not yet supply it.
+//! The host-only manifest and reserved-page boot handoff supply it separately
+//! from guest Apple boot bundles.
 //! No vendor firmware is embedded here. Length and SHA-256 checks establish
 //! integrity against the supplied manifest, **not** vendor authentication. A
 //! caller that changes both the manifest and the bytes can pass those checks.
@@ -75,13 +76,13 @@ pub struct Provenance<'a> {
 /// Loader-to-driver handoff. Construction consumes `bytes` without copying them;
 /// descriptor strings need only live through [`Catalog::from_handoff`].
 /// Expected length and digest must come from the loader's selected manifest.
-pub struct Resource<'a> {
+pub struct Resource<'a, B = Vec<u8>> {
     pub name: &'a str,
     pub target: Target<'a>,
     pub provenance: Provenance<'a>,
     pub expected_length: usize,
     pub expected_sha256: [u8; 32],
-    pub bytes: Vec<u8>,
+    pub bytes: B,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -160,12 +161,28 @@ impl OwnedProvenance {
     }
 }
 
+#[derive(Debug)]
+enum Bytes {
+    Owned(Vec<u8>),
+    Persistent(&'static [u8]),
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Owned(bytes) => bytes,
+            Self::Persistent(bytes) => bytes,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct Entry {
     name: String,
     target: OwnedTarget,
     provenance: OwnedProvenance,
     sha256: [u8; 32],
-    bytes: Vec<u8>,
+    bytes: Bytes,
 }
 
 /// Immutable verified resource catalog. Failed construction publishes no entries.
@@ -173,6 +190,16 @@ struct Entry {
 /// resource names. Drivers retain responsibility for choosing compatible APIs.
 pub struct Catalog {
     entries: Vec<Entry>,
+}
+
+impl fmt::Debug for Catalog {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (images, bytes) = self.inventory();
+        f.debug_struct("Catalog")
+            .field("images", &images)
+            .field("bytes", &bytes)
+            .finish()
+    }
 }
 
 /// Lifetime-checked, immutable image lookup. Implementations must preserve exact
@@ -203,7 +230,7 @@ impl<'a> Image<'a> {
         self.entry.sha256
     }
     pub fn bytes(self) -> &'a [u8] {
-        &self.entry.bytes
+        self.entry.bytes.as_ref()
     }
 }
 
@@ -221,6 +248,33 @@ impl fmt::Debug for Image<'_> {
 
 impl Catalog {
     pub fn from_handoff(resources: Vec<Resource<'_>>) -> Result<Self, Error> {
+        Self::from_resources(resources, Bytes::Owned)
+    }
+
+    /// Permanent immutable loader pages or static data, without an image copy.
+    /// The caller must obtain actual static references; constructing references
+    /// from physical addresses remains the platform's unsafe mapping boundary.
+    pub fn from_persistent_handoff(
+        resources: Vec<Resource<'_, &'static [u8]>>,
+    ) -> Result<Self, Error> {
+        Self::from_resources(resources, Bytes::Persistent)
+    }
+
+    /// Number and total bytes of immutable resources, for boot diagnostics.
+    pub fn inventory(&self) -> (usize, usize) {
+        (
+            self.entries.len(),
+            self.entries
+                .iter()
+                .map(|entry| entry.bytes.as_ref().len())
+                .sum(),
+        )
+    }
+
+    fn from_resources<B>(
+        resources: Vec<Resource<'_, B>>,
+        wrap: impl Fn(B) -> Bytes,
+    ) -> Result<Self, Error> {
         let mut entries: Vec<Entry> = Vec::with_capacity(resources.len());
         for resource in resources {
             let fail = |kind| error(resource.name, kind);
@@ -238,7 +292,8 @@ impl Catalog {
             if !path(provenance.member) {
                 return Err(fail(ErrorKind::InvalidProvenance("member")));
             }
-            let actual = resource.bytes.len();
+            let bytes = wrap(resource.bytes);
+            let actual = bytes.as_ref().len();
             if actual < resource.expected_length {
                 return Err(fail(ErrorKind::Truncated {
                     expected: resource.expected_length,
@@ -251,7 +306,7 @@ impl Catalog {
                     actual,
                 }));
             }
-            let sha256: [u8; 32] = Sha256::digest(&resource.bytes).into();
+            let sha256: [u8; 32] = Sha256::digest(bytes.as_ref()).into();
             if sha256 != resource.expected_sha256 {
                 return Err(fail(ErrorKind::DigestMismatch {
                     expected: resource.expected_sha256,
@@ -264,7 +319,7 @@ impl Catalog {
             {
                 return Err(fail(
                     if previous.sha256 == sha256
-                        && previous.bytes == resource.bytes
+                        && previous.bytes.as_ref() == bytes.as_ref()
                         && previous.provenance.view() == provenance
                     {
                         ErrorKind::Duplicate
@@ -288,7 +343,7 @@ impl Catalog {
                     license: provenance.license.into(),
                 },
                 sha256,
-                bytes: resource.bytes,
+                bytes,
             });
         }
         Ok(Self { entries })
@@ -311,10 +366,10 @@ impl Provider for Catalog {
             if entry.target.view() != requirement.target {
                 continue;
             }
-            if entry.bytes.len() < requirement.minimum_bytes {
+            if entry.bytes.as_ref().len() < requirement.minimum_bytes {
                 return Err(fail(ErrorKind::Truncated {
                     expected: requirement.minimum_bytes,
-                    actual: entry.bytes.len(),
+                    actual: entry.bytes.as_ref().len(),
                 }));
             }
             return Ok(Image { entry });

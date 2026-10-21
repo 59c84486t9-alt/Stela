@@ -17,7 +17,10 @@ use uefi::{
     cstr16,
     fs::FileSystem,
     mem::memory_map::MemoryMap,
-    proto::{loaded_image::LoadedImage, media::fs::SimpleFileSystem},
+    proto::{
+        loaded_image::LoadedImage,
+        media::{file::Directory, fs::SimpleFileSystem},
+    },
 };
 
 /// Mount options, in the format [`crate::Options::parse`] reads.
@@ -63,10 +66,10 @@ fn configured(volume: &mut FileSystem) -> bool {
     matches!(volume.try_exists(OPTIONS), Ok(true))
 }
 
-fn boot_volume() -> Option<FileSystem> {
-    boot::get_image_file_system(boot::image_handle())
-        .ok()
-        .map(FileSystem::new)
+fn boot_volume() -> Option<(FileSystem, Directory)> {
+    let mut protocol = boot::get_image_file_system(boot::image_handle()).ok()?;
+    let root = protocol.open_volume().ok()?;
+    Some((FileSystem::new(protocol), root))
 }
 
 /// Connect every controller to its drivers, recursively, as a boot manager
@@ -86,24 +89,25 @@ pub(crate) fn connect_all() -> usize {
 }
 
 /// The first file system that has `stela.cfg`.
-fn configured_volume() -> Option<FileSystem> {
+fn configured_volume() -> Option<(FileSystem, Directory)> {
     boot::find_handles::<SimpleFileSystem>()
         .ok()?
         .into_iter()
         .find_map(|handle| {
-            let volume = boot::open_protocol_exclusive::<SimpleFileSystem>(handle).ok()?;
-            let mut volume = FileSystem::new(volume);
-            configured(&mut volume).then_some(volume)
+            let mut protocol = boot::open_protocol_exclusive::<SimpleFileSystem>(handle).ok()?;
+            let root = protocol.open_volume().ok()?;
+            let mut volume = FileSystem::new(protocol);
+            configured(&mut volume).then_some((volume, root))
         })
 }
 
 /// The volume Stela was loaded from. When the firmware names no such volume,
 /// as for an image a boot manager starts from memory, or that volume has no
 /// `stela.cfg`, the first volume with one is used instead.
-pub(crate) fn volume() -> Result<FileSystem, &'static str> {
-    let own = boot_volume().map(|mut volume| {
+pub(crate) fn volume() -> Result<(FileSystem, Directory), &'static str> {
+    let own = boot_volume().map(|(mut volume, root)| {
         let configured = configured(&mut volume);
-        (volume, configured)
+        ((volume, root), configured)
     });
     Ok(match own {
         Some((volume, true)) => volume,
@@ -284,11 +288,14 @@ pub(crate) fn tables(
 pub fn take_over(
     options: Vec<u8>,
     source: Option<Vec<u8>>,
+    host_firmware: crate::host_firmware::Resources,
 ) -> Result<(Handoff, Tables), &'static str> {
     // Install mode stages a payload and stops here; otherwise nothing changes.
     let options = crate::payload::run(options)?;
     let source = source.ok_or("cannot read \\EFI\\stela\\source.bin")?;
-    let storage = crate::storage::prepare(&options)?;
+    // SAFETY: standalone mount retains identity mappings and this allocator.
+    let host_firmware = unsafe { host_firmware.identity_catalog() }?;
+    let storage = crate::storage::prepare(&options, host_firmware)?;
     let native = arenas::<NATIVE_ARENAS>()?;
     let ram = arenas::<RAM_ARENAS>()?;
     let guard = pages(STACK_PAGES + 1)?;

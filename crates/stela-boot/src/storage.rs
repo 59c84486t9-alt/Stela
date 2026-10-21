@@ -7,7 +7,7 @@
 //! of that partition with a known pattern, reads it back and reports its
 //! hash. Without either option nothing here touches the hardware.
 use crate::{output, paging::Tables};
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::time::Duration;
 use stela_drivers::{
     Clock, Handoff,
@@ -72,14 +72,19 @@ pub fn rsdp() -> Option<u64> {
 
 /// Before ExitBootServices: find ECAM, reserve DMA pages, measure the TSC
 /// and collect the storage controllers' register ranges.
-pub fn prepare(options: &[u8]) -> Result<Option<Prepared>, &'static str> {
+pub fn prepare(
+    options: &[u8],
+    firmware: Option<Arc<stela_drivers::firmware::Catalog>>,
+) -> Result<Option<Prepared>, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
     let (open, check, _) = split(text)?;
     if open.is_empty() && check.is_empty() {
         return Ok(None);
     }
+    let mut handoff = discover()?;
+    handoff.firmware = firmware;
     Ok(Some(Prepared {
-        handoff: discover()?,
+        handoff,
         open,
         check,
     }))
@@ -132,6 +137,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
         }
     }
     Ok(Handoff {
+        firmware: None,
         ecam,
         mapped,
         dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,

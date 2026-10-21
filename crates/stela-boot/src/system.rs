@@ -441,7 +441,12 @@ pub fn held_at_start(options: &[u8]) -> Option<&'static str> {
 /// Run the engine; never returns.
 /// `log` is the partition holding the USB's boot log, when the loader keeps
 /// one there (`log_file`).
-pub fn boot(mut options: Vec<u8>, mut volume: FileSystem, log: Option<Guid>) -> ! {
+pub fn boot(
+    mut options: Vec<u8>,
+    mut volume: FileSystem,
+    log: Option<Guid>,
+    host_firmware: crate::host_firmware::Resources,
+) -> ! {
     // NVRAM chooses macOS or recoveryOS before any input is read. A machine
     // NVRAM holds in recovery mode waits at the startup choices, as LLB
     // waits for a restore host, until one that boots is chosen.
@@ -469,8 +474,9 @@ pub fn boot(mut options: Vec<u8>, mut volume: FileSystem, log: Option<Guid>) -> 
     // `inputs` closes the volume: protocols must be closed before boot
     // services end.
     let inputs = inputs(&options, volume);
-    let result =
-        inputs.and_then(|(source, files, storage)| load(options, source, files, storage, log));
+    let result = inputs.and_then(|(source, files, storage)| {
+        load(options, source, files, storage, log, host_firmware)
+    });
     match result {
         Ok(never) => match never {},
         Err(error) => output::fatal(error),
@@ -483,6 +489,7 @@ fn load(
     bundle: BundleFiles,
     storage: Option<stela_drivers::Handoff>,
     log: Option<Guid>,
+    host_firmware: crate::host_firmware::Resources,
 ) -> Result<core::convert::Infallible, &'static str> {
     crate::status::begin("Setting up Stela's memory");
     // SAFETY: written once at entry, read here.
@@ -742,6 +749,7 @@ fn load(
             guest,
             guest_count: count,
             storage,
+            host_firmware,
             power,
         });
     }

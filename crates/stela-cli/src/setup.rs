@@ -261,6 +261,10 @@ pub(crate) struct Setup {
     /// USB's FAT32 volumes have room for.
     #[arg(long, value_name = "BYTES")]
     translation_store_bytes: Option<u64>,
+    /// Install an authorized local host-device firmware package (manifest.json
+    /// and resources) onto an existing USB; independent of Apple boot bundles.
+    #[arg(long, value_name = "DIRECTORY")]
+    host_firmware: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -1072,6 +1076,7 @@ impl Setup {
     /// At most one action per command.
     fn check_actions(&self) -> Result<()> {
         let actions = [
+            ("--host-firmware", self.host_firmware.is_some()),
             ("--uninstall", self.uninstall),
             ("--update-stela", self.update_stela),
             ("--update-os", self.update_os),
@@ -1115,6 +1120,32 @@ impl Setup {
 
     fn dispatch(self, environment: &Environment<'_>) -> Result<String> {
         self.check_actions()?;
+        if let Some(source) = &self.host_firmware {
+            let record = read_record(environment, &self.usb)?;
+            check_installed_efi(environment, &record)?;
+            ensure!(
+                stela_loader::host_firmware::supports_mount(&fs::read(
+                    record.esp.join(LOADER_PATH)
+                )?),
+                "installed stela.efi predates host firmware resources; run stela setup --update-stela first"
+            );
+            let package = stela_loader::host_firmware::Package::read(source)?;
+            let (images, bytes) = package.inventory();
+            let destination = record.esp.join(stela_loader::host_firmware::DIRECTORY);
+            let mut report = format!(
+                "Host firmware: {images} verified resources, {bytes} bytes to {}\n",
+                destination.display()
+            );
+            if self.dry_run {
+                report.push_str("Dry run: nothing was changed.\n");
+            } else {
+                package.publish(&destination)?;
+                report.push_str(
+                    "Published host firmware manifest. Device initialization is checked at boot.\n",
+                );
+            }
+            return Ok(report);
+        }
         if self.uninstall {
             return uninstall(environment, &self.usb, self.dry_run);
         }
@@ -2492,6 +2523,7 @@ mod tests {
             restore_state: None,
             boot_log: false,
             translation_store_bytes: None,
+            host_firmware: None,
         }
     }
 
@@ -4934,5 +4966,110 @@ mod tests {
             );
         }
         assert!(choices.entries[7].options.contains(" --update-restore"));
+    }
+    #[test]
+    fn host_firmware_action_validates_dry_run_and_publishes_separately_from_guest_bundles() {
+        let f = fixture(64 * GIB, false);
+        setup(&environment(&f.host), command(&f, &f.esp)).unwrap();
+        let source = f._dir.path().join("firmware-package");
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("data.bin"), b"abc").unwrap();
+        fs::write(source.join("manifest.json"), serde_json::to_vec(&serde_json::json!({
+            "schema": 1, "images": [{"name":"Vendor/FW.bin", "path":"data.bin", "length":3,
+            "sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "target":{"driver":"fixture","hardware":"synthetic","revision":"v1","board":null},
+            "provenance":{"source":"synthetic","revision":"v1","member":"fixtures/abc.bin","license":"CC0-1.0"}}]
+        })).unwrap()).unwrap();
+        let old = snapshot(&f.esp);
+        let mut unsupported = command(&f, &f.esp);
+        unsupported.host_firmware = Some(source.clone());
+        assert!(
+            unsupported
+                .dispatch(&environment(&f.host))
+                .unwrap_err()
+                .to_string()
+                .contains("predates host firmware")
+        );
+        assert_eq!(snapshot(&f.esp), old);
+        let aware = f._dir.path().join("firmware-aware.efi");
+        let mut image = efi_image(b"firmware-aware");
+        image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+        fs::write(&aware, image).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(aware.clone());
+        })
+        .unwrap();
+        let before = snapshot(&f.esp);
+        let mut dry = command(&f, &f.esp);
+        dry.host_firmware = Some(source.clone());
+        dry.dry_run = true;
+        let report = dry.dispatch(&environment(&f.host)).unwrap();
+        assert!(report.contains("1 verified resources, 3 bytes"));
+        assert_eq!(snapshot(&f.esp), before);
+        let mut write = command(&f, &f.esp);
+        write.host_firmware = Some(source.clone());
+        write.dispatch(&environment(&f.host)).unwrap();
+        let published = f.esp.join(stela_loader::host_firmware::MANIFEST_PATH);
+        assert!(published.is_file());
+        for (path, bytes) in &before {
+            assert_eq!(&fs::read(path).unwrap(), bytes);
+        }
+        let active = fs::read(&published).unwrap();
+        let firmware_before = snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY));
+        let new_efi = f._dir.path().join("firmware-test-update.efi");
+        let mut image = efi_image(b"firmware-test-update");
+        image.extend_from_slice(&stela_loader::host_firmware::MOUNT_CAPABILITY);
+        fs::write(&new_efi, image).unwrap();
+        rerun(&f, |c| {
+            c.update_stela = true;
+            c.efi = Some(new_efi.clone());
+        })
+        .unwrap();
+        assert_eq!(
+            snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
+            firmware_before
+        );
+        rerun(&f, |c| c.rollback = true).unwrap();
+        let new_os = f._dir.path().join("firmware-test-update.ipsw");
+        restore::payload::synthetic_ipsw_of(&new_os, "STELA2").unwrap();
+        rerun(&f, |c| {
+            c.update_os = true;
+            c.ipsw = Some(new_os.clone());
+        })
+        .unwrap();
+        assert_eq!(
+            snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
+            firmware_before
+        );
+        rerun(&f, |c| c.rollback = true).unwrap();
+        rerun(&f, |c| c.repair = true).unwrap();
+        assert_eq!(
+            snapshot(&f.esp.join(stela_loader::host_firmware::DIRECTORY)),
+            firmware_before
+        );
+        let before_downgrade = snapshot(&f.esp);
+        assert!(
+            rerun(&f, |c| {
+                c.update_stela = true;
+                c.efi = Some(f.efi.clone());
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("cannot load installed host firmware")
+        );
+        assert_eq!(snapshot(&f.esp), before_downgrade);
+        assert!(
+            rerun(&f, |c| c.rollback = true)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot load installed host firmware")
+        );
+        assert_eq!(snapshot(&f.esp), before_downgrade);
+        fs::write(source.join("data.bin"), b"abd").unwrap();
+        let mut corrupt = command(&f, &f.esp);
+        corrupt.host_firmware = Some(source);
+        assert!(corrupt.dispatch(&environment(&f.host)).is_err());
+        assert_eq!(fs::read(published).unwrap(), active);
     }
 }

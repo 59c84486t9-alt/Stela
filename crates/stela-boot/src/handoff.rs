@@ -101,6 +101,7 @@ impl Storage {
 
     pub fn handoff(&self) -> Option<stela_drivers::Handoff> {
         self.present.then(|| stela_drivers::Handoff {
+            firmware: None,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()
@@ -156,6 +157,8 @@ pub struct Handoff {
     pub guest_count: usize,
     /// The host storage drivers' ranges, for a bundle built from a disk.
     pub storage: Storage,
+    /// Host-device firmware, separate from guest boot-bundle files.
+    pub host_firmware: crate::host_firmware::Resources,
     /// The host's ACPI power hardware, when its FADT is usable.
     pub power: Option<pc::power::HostPower>,
 }

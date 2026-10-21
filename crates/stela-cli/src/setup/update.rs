@@ -132,6 +132,16 @@ pub(super) fn store_version(esp: &Path, image: &[u8]) -> Result<String> {
     Ok(id)
 }
 
+pub(super) fn check_firmware_support(esp: &Path, image: &[u8]) -> Result<()> {
+    ensure!(
+        !esp.join(stela_loader::host_firmware::MANIFEST_PATH)
+            .try_exists()?
+            || stela_loader::host_firmware::supports_mount(image),
+        "stela.efi cannot load installed host firmware; keep a firmware-capable Stela version"
+    );
+    Ok(())
+}
+
 fn activate_stela(esp: &Path, id: &str) -> Result<()> {
     let path = version_path(esp, id);
     ensure!(
@@ -139,6 +149,7 @@ fn activate_stela(esp: &Path, id: &str) -> Result<()> {
         "Stela version {id} is not kept intact at {}",
         path.display()
     );
+    check_firmware_support(esp, &fs::read(&path)?)?;
     efi::add_mount(esp, &path, None, None)?;
     Ok(())
 }
@@ -266,6 +277,7 @@ pub(super) fn update_stela(
     dry_run: bool,
 ) -> Result<String> {
     let image = read_efi(environment, image_path)?;
+    check_firmware_support(&record.esp, &image)?;
     let to = version_id(&image);
     let to_generation = environment.generation();
     ready(
@@ -592,6 +604,9 @@ pub(super) fn rollback(mut record: Record, dry_run: bool) -> Result<String> {
             None => bail!("{} has no update to roll back", record.esp.display()),
         },
     };
+    if let Change::Stela { from, .. } = &change {
+        check_firmware_support(&record.esp, &fs::read(version_path(&record.esp, from))?)?;
+    }
     let mut text = String::new();
     let what = if pending { "interrupted" } else { "last" };
     match &change {

@@ -1426,6 +1426,10 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     layout::set(handoff.placement);
     // SAFETY: the window heap is reserved for this allocator and still unused.
     unsafe { crate::ALLOCATOR.initialize(layout::heap() as *mut u8, handoff.heap.bytes as usize) };
+    // SAFETY: loader-reserved immutable pages, retained in every shared-window
+    // physmap; metadata and Arc are created in this active engine allocator.
+    let host_firmware =
+        unsafe { handoff.host_firmware.after_ebs() }.unwrap_or_else(|error| output::fatal(error));
     crate::status::set_clock(handoff.tsc_hz);
     stela_drivers::on_wait(crate::status::tick);
     stela_drivers::on_work(crate::status::progress);
@@ -1490,10 +1494,11 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
     {
         (Vec::new(), None, None, None, None, Vec::new(), None)
     } else {
-        let storage_handoff = handoff
+        let mut storage_handoff = handoff
             .storage
             .handoff()
             .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+        storage_handoff.firmware = host_firmware.clone();
         crate::status::begin("Starting the PC's disks and USB devices");
         // SAFETY: before host::install, with sole ownership of DMA/controllers.
         let storage::Opened {

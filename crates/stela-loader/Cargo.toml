@@ -20,6 +20,7 @@ std = [
 ]
 
 [dependencies]
+stela-drivers.workspace = true
 anyhow = { version = "1", default-features = false }
 hex = { version = "0.4", default-features = false, features = ["alloc"] }
 object = { version = "0.37", default-features = false, features = ["read"] }

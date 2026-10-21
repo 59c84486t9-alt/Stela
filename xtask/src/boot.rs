@@ -119,6 +119,9 @@ pub struct Run {
     /// The application; defaults to a fresh release build.
     #[arg(long)]
     image: Option<PathBuf>,
+    /// Authorized local host-device firmware package, loaded before boot services end.
+    #[arg(long, conflicts_with = "usb_image")]
+    host_firmware: Option<PathBuf>,
     /// Original ARM bytes; defaults to the scenario's image.
     #[arg(long)]
     module: Option<PathBuf>,
@@ -574,6 +577,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         }
     };
     let system = options.starts_with("--system");
+    ensure!(
+        arguments.host_firmware.is_none() || system,
+        "host firmware qualification requires --scenario system-kernel or another --system boot"
+    );
     if arguments.usb_image.is_some() {
         fs::create_dir_all(&output)?;
     } else {
@@ -582,6 +589,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         fs::copy(&image, volume.join("EFI/BOOT/BOOTX64.EFI"))?;
         fs::write(&source, bytes)?;
         fs::write(volume.join("EFI/stela/stela.cfg"), &options)?;
+        if let Some(directory) = &arguments.host_firmware {
+            let package = stela_loader::host_firmware::Package::read(directory)?;
+            package.publish(&volume.join(stela_loader::host_firmware::DIRECTORY))?;
+        }
         if let Some(bundle) = &arguments.bundle {
             copy_bundle(bundle, &volume.join("EFI/stela/bundle"))?;
         }
@@ -934,11 +945,23 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let network = network_check_url.map(|_| {
         network_check::verify(&serial_text, fixture.as_ref(), expected_driver, &peer_text)
     });
+    let host_firmware = arguments.host_firmware.as_ref().map(|_| -> Result<Value> {
+        let path = volume.join(stela_loader::host_firmware::MANIFEST_PATH);
+        let data = fs::read(&path)?;
+        let parsed = stela_loader::host_firmware::Manifest::parse(&data)?;
+        let images = parsed.images.len();
+        let bytes = parsed.total_bytes();
+        let passed = ["before-ebs", "after-ebs"].iter().all(|phase| serial_text.lines().any(|line|
+            line.trim_end() == format!("HOST FIRMWARE phase={phase} images={images} bytes={bytes}")));
+        let resources = parsed.images.iter().map(|image| binding(&volume.join(stela_loader::host_firmware::DIRECTORY).join(image.path))).collect::<Result<Vec<_>>>()?;
+        Ok(json!({"manifest":binding(&path)?, "resources":resources,"images":images,"bytes":bytes,"passed":passed}))
+    }).transpose()?;
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
     let report = json!({
         "command": command_line,
         "qemu": binding(&qemu)?,
         "qemu_version": qemu_version,
+        "host_firmware": host_firmware,
         "qemu_process_image": qemu_process_image,
         "image": binding(&image)?,
         "source": source.exists().then(|| binding(&source)).transpose()?,
@@ -994,6 +1017,10 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if let Some(Err(error)) = storage {
         return Err(error.context("host storage check failed"));
     }
+    ensure!(
+        report["host_firmware"].is_null() || report["host_firmware"]["passed"] == true,
+        "host firmware did not survive the before/after EBS verification"
+    );
     if let Some(Err(error)) = network {
         bail!("host network check failed: {error}");
     }

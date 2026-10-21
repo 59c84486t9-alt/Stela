@@ -40,6 +40,7 @@ mod firmware;
 mod handoff;
 mod heap;
 mod host_check;
+mod host_firmware;
 mod la57;
 mod layout;
 mod log_file;
@@ -61,6 +62,10 @@ const HEAP_BYTES: usize = 384 * 1024 * 1024;
 #[used]
 static MOUNT_INTERFACE: [u8; stela_loader::mount_interface::MARKER_BYTES] =
     stela_loader::mount_interface::marker(stela_loader::mount_interface::CURRENT);
+
+/// Optional native host resource capability read by setup before publication.
+#[used]
+static HOST_FIRMWARE_INTERFACE: [u8; 21] = stela_loader::host_firmware::MOUNT_CAPABILITY;
 
 #[derive(Debug)]
 struct Options {
@@ -167,6 +172,7 @@ fn main() -> Status {
     system::take_snapshot();
     // Referenced, so the linker keeps the marker setup reads.
     core::hint::black_box(&MOUNT_INTERFACE);
+    core::hint::black_box(&HOST_FIRMWARE_INTERFACE);
     serial::initialize();
     output::arguments(format_args!("STELA UEFI MOUNT\n"));
     let heap = uefi::boot::allocate_pages(
@@ -185,14 +191,17 @@ fn main() -> Status {
     let handles = firmware::connect_all();
     status::done(&format!("{handles} handles"));
     status::begin("Reading Stela's settings");
-    let mut volume = firmware::volume().unwrap_or_else(|e| output::fatal(e));
+    let (mut volume, mut firmware_root) = firmware::volume().unwrap_or_else(|e| output::fatal(e));
+    let host_firmware =
+        host_firmware::read(&mut firmware_root).unwrap_or_else(|e| output::fatal(e));
+    drop(firmware_root);
     let options = firmware::options(&mut volume).unwrap_or_else(|e| output::fatal(e));
     status::done("");
     let held = system::held_at_start(&options);
     let options = choice::choose(&mut volume, options, held);
     status::take_screen(console::Framebuffer::from_firmware());
     if options.starts_with(b"--system") {
-        system::boot(options, volume, log);
+        system::boot(options, volume, log, host_firmware);
     }
     if options.starts_with(host_check::OPTION) {
         drop(volume);
@@ -202,7 +211,7 @@ fn main() -> Status {
     let source = firmware::source(&mut volume).ok();
     drop(volume);
     let (mut handoff, tables) =
-        firmware::take_over(options, source).unwrap_or_else(|e| output::fatal(e));
+        firmware::take_over(options, source, host_firmware).unwrap_or_else(|e| output::fatal(e));
     if let Some(screen) = handoff.screen {
         console::install(screen);
         output::arguments(format_args!("STELA UEFI MOUNT\n"));

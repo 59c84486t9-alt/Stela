@@ -544,6 +544,7 @@ pub(super) fn repair(environment: &Environment<'_>, command: &Setup) -> Result<S
              setup --update-stela` first"
         );
     }
+    update::check_firmware_support(&esp, &kept_image)?;
     if restore_tool {
         writeln!(text, "  stela.efi      put back version {id}")?;
     }

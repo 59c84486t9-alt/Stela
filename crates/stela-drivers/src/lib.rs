@@ -18,7 +18,7 @@
 #[macro_use]
 extern crate alloc;
 
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::{
     ops::Range,
     sync::atomic::{AtomicPtr, Ordering},
@@ -50,6 +50,8 @@ pub struct Handoff {
     pub dma: Range<u64>,
     /// The time-stamp counter rate, measured against the firmware's stall.
     pub clock: Clock,
+    /// Verified host-device firmware; sharing a handoff never copies image bytes.
+    pub firmware: Option<Arc<firmware::Catalog>>,
 }
 
 impl Handoff {
@@ -191,6 +193,7 @@ mod tests {
     #[test]
     fn mapped_ranges_must_contain_the_whole_range() {
         let handoff = Handoff {
+            firmware: None,
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
             dma: 0..0,
@@ -202,6 +205,24 @@ mod tests {
         assert!(handoff.is_mapped(&(0x2000..0x2800)));
         assert!(!handoff.is_mapped(&(0x2000..0x4000)));
         assert!(!handoff.is_mapped(&(0x3000..0x8800)));
+    }
+
+    #[test]
+    fn cloning_a_driver_handoff_shares_the_immutable_firmware_catalog() {
+        let catalog = Arc::new(firmware::Catalog::from_handoff(vec![]).unwrap());
+        let handoff = Handoff {
+            ecam: Vec::new(),
+            mapped: Vec::new(),
+            dma: 0..0,
+            clock: Clock {
+                ticks_per_microsecond: 1,
+            },
+            firmware: Some(catalog.clone()),
+        };
+        let cloned = handoff.clone();
+        assert!(Arc::ptr_eq(cloned.firmware.as_ref().unwrap(), &catalog));
+        drop(handoff);
+        assert_eq!(cloned.firmware.as_ref().unwrap().inventory(), (0, 0));
     }
 
     #[test]

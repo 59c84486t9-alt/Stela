@@ -352,6 +352,7 @@ mod tests {
             end_bus: 3,
         };
         let mut handoff = Handoff {
+            firmware: None,
             ecam: vec![window],
             mapped: vec![window.range()],
             dma: 0..0,

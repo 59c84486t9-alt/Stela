@@ -31,6 +31,7 @@ pub mod dvfs;
 pub mod exports;
 pub mod gpu_dvfs;
 pub mod handoff;
+pub mod host_firmware;
 pub mod im4m;
 pub mod im4p;
 pub mod installed;
