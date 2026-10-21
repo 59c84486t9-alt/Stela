@@ -93,14 +93,19 @@ pub(super) fn plan(
     interface: &Interface,
     all: &[Interface],
 ) -> Result<Plan, &'static str> {
-    match interface.class {
+    let binding = match interface.class {
         storage::CLASS => storage::plan(interface),
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
         bluetooth::CLASS => bluetooth::Binding::new(device, interface).map(Plan::Bluetooth),
         0xff => ethernet::Binding::new(device, interface).map(Plan::VendorEthernet),
         _ => Err("no class driver for this interface"),
+    }?;
+    for endpoint in binding.endpoints() {
+        endpoint::Context::new(&endpoint, device.speed)
+            .map_err(|_| "USB function has an unsupported speed-specific endpoint")?;
     }
+    Ok(binding)
 }
 
 /// All simultaneously active settings, including interfaces left to other
@@ -147,6 +152,8 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
                 if interface.endpoints.len() == 1
                     && interface.endpoints[0].kind() == 3
                     && interface.endpoints[0].is_in()
+                    && device.speed < SUPER_SPEED
+                    && endpoint::Context::new(&interface.endpoints[0], device.speed).is_ok()
                 {
                     count += 1;
                 }
@@ -323,6 +330,102 @@ pub(super) mod tests {
             unreachable!()
         };
         assert_eq!(binding.data_setting(), (1, 3));
+    }
+
+    fn superspeed(bytes: &[u8]) -> Vec<u8> {
+        let mut ss = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let length = usize::from(bytes[at]);
+            let mut d = bytes[at..at + length].to_vec();
+            if d[1] == ENDPOINT_DESCRIPTOR {
+                if d[3] & 3 == 2 {
+                    d[4..6].copy_from_slice(&1024u16.to_le_bytes());
+                }
+                ss.extend_from_slice(&d);
+                ss.extend_from_slice(&[
+                    6,
+                    SS_ENDPOINT_COMPANION,
+                    0,
+                    0,
+                    if d[3] & 3 == 3 { d[4] } else { 0 },
+                    0,
+                ]);
+            } else {
+                ss.extend_from_slice(&d);
+            }
+            at += length;
+        }
+        let total = ss.len() as u16;
+        ss[2..4].copy_from_slice(&total.to_le_bytes());
+        validate(&ss).unwrap();
+        ss
+    }
+
+    #[test]
+    fn refused_superspeed_functions_never_tie_or_beat_usable_configuration() {
+        let valid = superspeed(&storage(42));
+        let mut missing = storage(7);
+        missing[22..24].copy_from_slice(&1024u16.to_le_bytes());
+        missing[29..31].copy_from_slice(&1024u16.to_le_bytes());
+        let mut streams = superspeed(&storage(7));
+        streams[28] = 1;
+        let mut invalid = superspeed(&storage(7));
+        invalid[27] = 16;
+        for refused in [missing, streams, invalid] {
+            for order in [false, true] {
+                let mut configurations = vec![refused.clone(), valid.clone()];
+                if order {
+                    configurations.reverse();
+                }
+                let mut dev = device(configurations);
+                dev.speed = SUPER_SPEED;
+                select(&mut dev).unwrap();
+                assert_eq!(dev.configuration_value(), 42);
+                assert_eq!(dev.configurations.len(), 2);
+                let all = interfaces(&refused);
+                assert!(plan(&dev, &all[0], &all).is_err());
+            }
+        }
+        // Even the supported, observed vendor-mode preference cannot count a
+        // vendor function whose transport is explicitly refused by this host.
+        let mut vendor = superspeed(&storage(7));
+        vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
+        vendor[28] = 1;
+        let valid = superspeed(&ecm(42));
+        for order in [false, true] {
+            let mut configurations = vec![vendor.clone(), valid.clone()];
+            if order {
+                configurations.reverse();
+            }
+            let mut dev = device(configurations);
+            dev.speed = SUPER_SPEED;
+            dev.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x53, 0x81]);
+            dev.vendor_ethernet_revision = Some(0x4c10);
+            select(&mut dev).unwrap();
+            assert_eq!(dev.configuration_value(), 42);
+        }
+    }
+
+    #[test]
+    fn hub_configuration_coverage_requires_a_usable_interrupt_endpoint() {
+        let valid = vec![
+            9, 2, 25, 0, 1, 42, 0, 0x80, 50, 9, 4, 0, 0, 1, HUB_CLASS, 0, 0, 0, 7, 5, 0x81, 3, 8,
+            0, 1,
+        ];
+        let mut invalid = valid.clone();
+        invalid[5] = 7;
+        invalid[24] = 0;
+        for order in [false, true] {
+            let mut configurations = vec![invalid.clone(), valid.clone()];
+            if order {
+                configurations.reverse();
+            }
+            let mut dev = device(configurations);
+            dev.descriptor[4] = HUB_CLASS;
+            select(&mut dev).unwrap();
+            assert_eq!(dev.configuration_value(), 42);
+        }
     }
 
     #[test]

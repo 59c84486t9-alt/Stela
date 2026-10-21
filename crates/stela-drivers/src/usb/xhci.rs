@@ -3086,6 +3086,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn refused_superspeed_plan_preserves_inventory_without_configuration_or_dma() {
+        for streams in [false, true] {
+            let mut configuration = vec![
+                9, 2, 0, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 8, 6, 0x50, 0, 7, 5, 0x81, 2, 0, 4, 0,
+            ];
+            if streams {
+                configuration.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 0, 1, 0, 0]);
+            }
+            configuration.extend_from_slice(&[7, 5, 2, 2, 0, 4, 0]);
+            if streams {
+                configuration.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 0, 0, 0, 0]);
+            }
+            let total = configuration.len() as u16;
+            configuration[2..4].copy_from_slice(&total.to_le_bytes());
+            configuration::validate(&configuration).unwrap();
+            let mut device = configuration::tests::device(vec![configuration.clone()]);
+            device.speed = SUPER_SPEED;
+            configuration::select(&mut device).unwrap();
+            assert_eq!(device.configuration, configuration);
+            let mut backing = vec![0u64; 128 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing stays exclusive/live throughout model and controller access.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let (controller, model) = unconfigured_cancellation_controller(&mut dma);
+            let input = controller.slots[1].as_ref().unwrap().input.bytes().to_vec();
+            let shared = Rc::new(RefCell::new(controller));
+            let mut found = Found::default();
+            bind(&shared, device, &mut dma, &mut found);
+            assert!(found.failures.is_empty());
+            assert_eq!(found.unused.len(), 1);
+            assert!(model.borrow().setup.is_empty() && model.borrow().seen.is_empty());
+            let controller = shared.borrow();
+            let slot = controller.slots[1].as_ref().unwrap();
+            assert_eq!(slot.input.bytes(), input);
+            assert!(slot.endpoints[2..].iter().all(Option::is_none));
+            assert_eq!(slot.current_configuration, Some(0));
+        }
+    }
+
+    #[test]
     fn superspeed_companions_reach_real_32_and_64_byte_controller_contexts() {
         for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
             for context in [32, 64] {
