@@ -8,6 +8,7 @@
 pub mod frame;
 pub mod intel;
 pub mod mediatek;
+pub mod realtek;
 pub mod security;
 pub mod station;
 
