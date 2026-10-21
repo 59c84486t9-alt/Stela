@@ -762,6 +762,7 @@ mod tests {
             original: alloc::vec::Vec<u8>,
             entry: Option<std::rc::Rc<std::cell::RefCell<EntryRam>>>,
             regime: Option<Regime>,
+            clock: Option<std::time::Instant>,
             code: alloc::vec::Vec<(Mapping, usize)>,
             output_prefix: alloc::string::String,
             patches: usize,
@@ -931,7 +932,12 @@ mod tests {
             }
             fn invalidate_translations(&mut self) {}
             fn counter(&mut self) -> u64 {
-                0
+                // Full entry receives actual elapsed host time in the declared
+                // 24MHz counter domain; bounded isolated register replays retain
+                // their explicit fixed-time scenario. Never tick from a poll.
+                self.clock.as_ref().map_or(0, |clock| {
+                    (clock.elapsed().as_nanos() * 24_000_000 / 1_000_000_000) as u64
+                })
             }
             fn arm_timer(&mut self, _: Option<u64>) {}
             fn wait_for_interrupt(&mut self) {
@@ -1008,6 +1014,7 @@ mod tests {
                 original: original(input),
                 entry: None,
                 regime: None,
+                clock: None,
                 code: alloc::vec::Vec::new(),
                 output_prefix: alloc::format!(
                     "entry-{entry:x}-aff2-{aff2:x}-descriptor-{:x}",
@@ -1410,6 +1417,7 @@ mod tests {
                 original: vec![],
                 entry: Some(shared.clone()),
                 regime: None,
+                clock: Some(std::time::Instant::now()),
                 code: vec![],
                 output_prefix: "j314s-live-entry".into(),
                 patches: 0,
@@ -1476,17 +1484,21 @@ mod tests {
                 == Encoding::new(3, 3, 15, 7, 0)
                 && value.is_none()));
             if initialize_reservation {
-                use crate::machine::system::Register;
-                // Stop at the first actual exception, before its handler needs
-                // the hosted adapter's currently unsupported vector RAM path.
-                // The original read remains UNDEFINED, never a fabricated tick.
-                assert_eq!(stop, Stop::Budget);
-                assert_eq!(exceptions.len(), 1);
-                assert_eq!(machine.cpu.pc, ENTRY_BASE + 0xf4a00);
-                assert_eq!(machine.cpu.read(Register::ELR_EL2), ENTRY_BASE + 0x438);
-                assert_eq!(machine.cpu.read(Register::ESR_EL2), 0x02000000);
-                assert_eq!(machine.cpu.read(Register::FAR_EL2), 0);
-                assert!(entry.unknown.is_empty());
+                // Continue the qualified physical alias using actual shared
+                // host time. The next input is the original SEP outbox/control
+                // bank; this bounded fixture has no physical device provider.
+                let Stop::Unsupported(requirement) = &stop else {
+                    panic!("original entry did not reach its next physical input: {stop:?}");
+                };
+                assert_eq!(requirement.pc, ENTRY_BASE + 0x15654);
+                assert!(matches!(&requirement.kind, RequirementKind::Device {
+                    physical: 0x396408114, write: false, detail,
+                } if detail == "original entry physical input is unknown"));
+                assert_eq!(entry.unknown.last(), Some(&(0x396408114, 4)));
+                assert_eq!(machine.statistics.exceptions, 0);
+                assert!(entry.registers.iter().any(|(encoding, value)| *encoding
+                    == crate::machine::registers::encodings::ACNTPCT_EL0
+                    && value.is_none()));
             } else {
                 let Stop::Unsupported(requirement) = &stop else {
                     panic!("original entry did not reach its unknown storage boundary: {stop:?}");
@@ -1514,7 +1526,8 @@ mod tests {
                     "aperture_base":APERTURE,"aperture_bytes":CAPACITY,"unit_exponent":16,"limit":60,"initial_units":60,
                     "initial_mapping":format!("{before:?}"),"final_mapping":format!("{:?}",entry.cram.backing().state()),
                     "backing_commits":entry.cram.backing().commits,"stop":format!("{stop:?}"),
-                    "boundary":if initialize_reservation {"first architectural exception before handler execution"} else {"unknown original storage input"},"pc":machine.cpu.pc,
+                    "boundary":if initialize_reservation {"next original physical peripheral input; no provider mounted"} else {"unknown original storage input"},"pc":machine.cpu.pc,
+                    "physical_counter":"full entry uses actual monotonic host elapsed time in the declared24MHz domain, never poll-driven ticks",
                     "blocks":machine.statistics.blocks,"exceptions":machine.statistics.exceptions,"exception_events":exceptions,
                     "registers":machine.cpu.state.x,"sp":machine.cpu.state.sp,
                     "source_reads":entry.source_reads,"guest_stores":entry.committed,"unknown_reads":entry.unknown,

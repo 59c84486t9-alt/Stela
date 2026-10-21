@@ -464,3 +464,83 @@ fn original_j314s_cram_aperture_consumers_and_copied_cleanup_are_exact() {
     assert_eq!(word(&bytes, 0x2cac8), 0xa8817c1f);
     assert_eq!(word(&bytes, 0x2caf8), 0xd65f03c0);
 }
+
+#[test]
+#[ignore = "requires matching original J314s LLB/iBoot; complete physical alias occurrence and source consumers"]
+fn original_physical_counter_alias_is_read_only_and_separate_from_siq_tuning() {
+    let llb = original(
+        "STELA_TEST_PMGR_M1_LLB",
+        "f45549025d8cb4aa5e1cdb6107a25f90999f6b96da0b31a2f3cfb90561653ae1",
+    );
+    for (bytes, direct, target, digest) in [
+        (
+            &llb,
+            [0xf568c, 0xf56d4],
+            0xf5678,
+            "6a62c5a6ac10b9d3e1c97d1a64122f2d88ac3d1d2aba30aab12d9cd205a8fe2e",
+        ),
+        (
+            &iboot(),
+            [0x12268c, 0x1226d4],
+            0x122678,
+            "0e9fcfb65e270c8f78c9019ce0f748571dbc64d50ad33cddd05e0ab1fe73e0ce",
+        ),
+    ] {
+        let occurrences = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bytes)| {
+                let opcode = u32::from_le_bytes(*bytes);
+                matches!(
+                    opcode & 0xffffffe0,
+                    0xd53cfa80 | 0xd51cfa80 | 0xd53cfaa0 | 0xd51cfaa0 | 0xd53cfac0 | 0xd51cfac0
+                )
+                .then_some((index * 4, opcode))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(occurrences, [(0x190, 0xd51cfa9f), (0x438, 0xd53cfaa0)]);
+        assert_eq!(
+            hex::encode(Sha256::digest(&bytes[target..target + 0x7c])),
+            digest
+        );
+        assert_eq!(branch_target(bytes, 0x58c), 0x438);
+        assert_eq!(branch_target(bytes, 0x5f4), 0x438);
+        assert_eq!(branch_target(bytes, 0x5fc), 0x438);
+        for caller in direct {
+            assert_eq!(branch_target(bytes, caller), 0x438);
+        }
+        // The same physical counter drives actual CNTP TVAL/CTL timing.
+        assert_eq!(branch_target(bytes, target + 0x30), 0x440);
+        assert_eq!(branch_target(bytes, target + 0x38), 0x42c);
+        assert_eq!(branch_target(bytes, target + 0x58), 0x440);
+        assert_eq!(word(bytes, 0x440), 0xd51be200); // CNTP_TVAL_EL0
+        assert_eq!(word(bytes, 0x42c), 0xd51be220); // CNTP_CTL_EL0
+        assert_eq!(branch_target(bytes, 0x524), 0x44c);
+        assert_eq!(word(bytes, 0x44c), 0xd53be000); // actual CNTFRQ_EL0
+    }
+    assert_eq!(branch_target(&llb, 0x119c20), 0x58c); // first actual live-entry caller
+    // After the alias, the next actual entry requirement is the original
+    // physical SEP transport. Metadata identifies ownership, not a ready bit.
+    let bytes = adt();
+    let root = Node::root(&bytes).unwrap();
+    let io = root.child("arm-io").unwrap();
+    let sep = io.child("sep").unwrap();
+    assert_eq!(
+        sep.property("compatible"),
+        Some(&b"iop-sep,ascwrap-v4\0"[..])
+    );
+    assert!(sep.pairs("reg").unwrap().contains(&(0x196400000, 0x6c000)));
+    assert_eq!(sep.cells32("clock-gates").unwrap(), [0x12a]);
+    assert_eq!(sep.cells32("power-gates").unwrap(), [0x12a]);
+    let (child, parent, _) = io
+        .ranges()
+        .unwrap()
+        .into_iter()
+        .find(|&(child, _, length)| 0x196400000 >= child && 0x196400000 - child < length)
+        .unwrap();
+    assert_eq!(parent + 0x196400000 - child, 0x396400000);
+    assert_eq!(quad(&llb, 0x1a1628), 0x811400008110); // original transport offsets
+    assert_eq!(word(&llb, 0x15654), 0xb940014a); // actual 32-bit physical read
+}

@@ -165,6 +165,10 @@ pub mod encodings {
         // KERNEL_CNTVCTSS_EL0: "S3_4_C15_C10_6 and ACNTVCT_EL0 have identical
         // encodings"; m1n1 CNTVCT_ALIAS_EL0).
         CNTVCT_ALIAS_EL0 = 3, 4, 15, 10, 6;
+        // m1n1 apple_regs.json ACNTPCT_EL0, physical timer counter
+        // (pre-spec CNTPCTSS_EL0); matching original LLB/iBoot read it
+        // beside CNTP_TVAL/CTL and CNTFRQ. Source-qualified here at EL2.
+        ACNTPCT_EL0 = 3, 4, 15, 10, 5;
         // m1n1 `cpu_regs.h` "Lockdown registers"; the commit register has no
         // public name (see `Apple::SprLockdown`).
         SPR_LOCKDOWN_EL2 = 3, 4, 15, 0, 5;
@@ -364,6 +368,7 @@ enum Apple {
     VmsaLock,
     VmTimerFiq,
     CountAlias,
+    PhysicalCountAlias,
     /// SPR_LOCKDOWN_EL2 (`false`) and `S3_4_C15_C12_5` (`true`). SPTM 26A434
     /// writes SPR_LOCKDOWN_EL2 once per PE, with every bit except 4, 27 and
     /// 63, after its MMIO lockdown (`__text+0x181a4`), then writes 1 to
@@ -459,6 +464,12 @@ impl Cpu {
             VMSA_LOCK_EL1 => Apple::VmsaLock,
             VM_TMR_FIQ_ENA_EL2 => return el2(Apple::VmTimerFiq),
             CNTVCT_ALIAS_EL0 => Apple::CountAlias,
+            ACNTPCT_EL0 if !at_el2 => {
+                return Some(Err(Outcome::Refused(Refusal::UnsupportedSetting(
+                    "ACNTPCT_EL0 access below EL2 lacks permission qualification",
+                ))));
+            }
+            ACNTPCT_EL0 => Apple::PhysicalCountAlias,
             SPR_LOCKDOWN_EL2 => return el2(Apple::SprLockdown(false)),
             SPR_LOCKDOWN_COMMIT => return el2(Apple::SprLockdown(true)),
             CYC_OVRD => Apple::CycleOverride,
@@ -634,6 +645,7 @@ impl Cpu {
         }
         match self.apple(encoding) {
             Some(Ok(Apple::CountAlias)) if read => Outcome::Read(count_alias(self, physical)),
+            Some(Ok(Apple::PhysicalCountAlias)) if read => Outcome::Read(physical),
             Some(Ok(register)) if read => register.read(self),
             Some(Ok(register)) => register.write(self, value),
             Some(Err(outcome)) => outcome,
@@ -654,6 +666,9 @@ impl Cpu {
         match encoding {
             SPRR_PERM_EL0 if read => register.read(self),
             SPRR_PERM_EL0 => register.write(self, value),
+            ACNTPCT_EL0 => Outcome::Refused(Refusal::UnsupportedSetting(
+                "ACNTPCT_EL0 access below EL2 lacks permission qualification",
+            )),
             CNTVCT_ALIAS_EL0 if !read => Outcome::Undefined,
             CNTVCT_ALIAS_EL0 => {
                 let control = if self.in_host() {
@@ -800,7 +815,9 @@ impl Apple {
             Self::KernelKey(index) => apple.kernel_key[index],
             Self::VmsaLock => apple.vmsa_lock,
             Self::VmTimerFiq => apple.vm_timer_fiq,
-            Self::CountAlias => unreachable!("the caller completes the count alias"),
+            Self::CountAlias | Self::PhysicalCountAlias => {
+                unreachable!("the caller completes the count alias")
+            }
             Self::SprLockdown(_) => {
                 return Outcome::Refused(Refusal::UnsupportedSetting(
                     "read of a lockdown register no software reads",
@@ -878,7 +895,9 @@ impl Apple {
                 }
                 apple.gxf_config[level] = value;
             }
-            Self::GxfStatus | Self::ApStatus | Self::CountAlias => return Outcome::Undefined,
+            Self::GxfStatus | Self::ApStatus | Self::CountAlias | Self::PhysicalCountAlias => {
+                return Outcome::Undefined;
+            }
             Self::GxfEntry(level, true) => apple.guarded[level].enter = value,
             Self::GxfEntry(level, false) => apple.guarded[level].abort = value,
             Self::Guarded(..) if !guarded => {
@@ -980,6 +999,57 @@ mod tests {
                 | u32::from(read.rt()),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn physical_count_alias_uses_actual_supplied_time_without_virtual_offset_or_tuning_coupling() {
+        for chip in super::super::Chip::ALL {
+            let mut cpu = Cpu::of(chip, 0, Pstate::reset(2));
+            cpu.registers.set(Register::CNTVOFF_EL2, 0, 0x1234);
+            // SIQ_CFG is a separate retained tuning word, not a count reset.
+            let siq = impdef::SIQ_CFG_EL1;
+            for tuning in [0, 2, 0] {
+                cpu.state.x[5] = tuning;
+                assert!(matches!(
+                    cpu.apple_access(msr(5, siq), 0),
+                    Outcome::Written(_)
+                ));
+                for physical in [0, 0x9876_5432_1234_5678, u64::MAX] {
+                    assert_eq!(
+                        cpu.apple_access(mrs(0, ACNTPCT_EL0), physical),
+                        Outcome::Read(physical)
+                    );
+                    assert_eq!(cpu.read(Register::CNTVOFF_EL2), 0x1234);
+                }
+            }
+            assert_eq!(
+                cpu.apple_access(msr(5, ACNTPCT_EL0), 99),
+                Outcome::Undefined
+            );
+            assert_eq!(
+                cpu.apple_access(mrs(0, ACNTPCT_EL0), 100),
+                Outcome::Read(100)
+            );
+        }
+    }
+
+    #[test]
+    fn unqualified_lower_el_physical_alias_permissions_remain_named_for_both_directions() {
+        for el in [0, 1] {
+            let mut cpu = Cpu::new(0, Pstate::reset(el));
+            for control in [0, u64::MAX] {
+                cpu.registers.set(Register::CNTKCTL_EL1, 0, control);
+                cpu.registers.set(Register::CNTHCTL_EL2, 0, control);
+                for access in [mrs(0, ACNTPCT_EL0), msr(0, ACNTPCT_EL0)] {
+                    assert_eq!(
+                        cpu.apple_access(access, 123),
+                        Outcome::Refused(Refusal::UnsupportedSetting(
+                            "ACNTPCT_EL0 access below EL2 lacks permission qualification"
+                        ))
+                    );
+                }
+            }
+        }
     }
 
     #[test]
