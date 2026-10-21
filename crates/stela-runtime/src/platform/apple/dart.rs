@@ -40,6 +40,36 @@ pub enum Profile {
     T8110,
 }
 
+impl Profile {
+    /// Select one native family from an entire DT compatible string list.
+    /// A conflicting or unknown DART family cannot fall back to another
+    /// entry in the list. Selection alone does not qualify optional features.
+    pub fn from_compatible(compatible: &[u8]) -> Option<Self> {
+        let mut selected = None;
+        for name in compatible.split(|&byte| byte == 0).filter(|name| !name.is_empty()) {
+            let profile = match name {
+                b"dart,t8020" => Self::T8020,
+                b"dart,t6000" => Self::T6000,
+                b"dart,t8110" => Self::T8110,
+                name if name.starts_with(b"dart,") => return None,
+                _ => continue,
+            };
+            if selected.is_some_and(|previous| previous != profile) {
+                return None;
+            }
+            selected = Some(profile);
+        }
+        selected
+    }
+
+    pub const fn stream_limit(self) -> usize {
+        match self {
+            Self::T8020 | Self::T6000 => 16,
+            Self::T8110 => 256,
+        }
+    }
+}
+
 enum Model {
     Legacy(legacy::Dart),
     T8110(t8110::Dart),
@@ -64,7 +94,7 @@ impl Dart {
         streams: usize,
         irq: Option<AicInput>,
     ) -> Result<Self, &'static str> {
-        if streams == 0 || streams > if profile == Profile::T8110 { 256 } else { 16 } {
+        if streams == 0 || streams > profile.stream_limit() {
             return Err("DART stream count is outside the selected native profile");
         }
         Ok(Self {
@@ -492,5 +522,23 @@ mod tests {
             model.set_reset(false, &mut a);
             assert_eq!(model.read(tcr, Width::Word, &mut a), Ok(0));
         }
+    }
+
+    #[test]
+    fn compatible_selection_never_aliases_a_different_native_family() {
+        for (bytes, expected) in [
+            (b"dart,t8020\0".as_slice(), Some(Profile::T8020)),
+            (b"dart,t6000\0".as_slice(), Some(Profile::T6000)),
+            (b"generic\0dart,t8110\0".as_slice(), Some(Profile::T8110)),
+            (b"dart,gen3\0".as_slice(), None),
+            (b"dart,gen3\0dart,t8110\0".as_slice(), None),
+            (b"dart,t8020\0dart,t6000\0".as_slice(), None),
+            (b"dart,unknown\0dart,t8020\0".as_slice(), None),
+        ] {
+            assert_eq!(Profile::from_compatible(bytes), expected);
+        }
+        assert_eq!(Profile::T8020.stream_limit(), 16);
+        assert_eq!(Profile::T6000.stream_limit(), 16);
+        assert_eq!(Profile::T8110.stream_limit(), 256);
     }
 }
