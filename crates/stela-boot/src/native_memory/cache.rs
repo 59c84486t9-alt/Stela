@@ -242,7 +242,9 @@ fn verify_amd_writeback(
     table_offset: u64,
 ) -> Result<(), MemoryError> {
     use crate::native_smp::{firmware, memory_types::Image};
-    fn unavailable<E>(_: E) -> MemoryError { MemoryError::CacheAttributeUnavailable }
+    fn unavailable<E>(_: E) -> MemoryError {
+        MemoryError::CacheAttributeUnavailable
+    }
     // SAFETY: initialize's contract excludes migration, root/cache writers
     // and IRQ allocation. This is the actual current CPL0 processor; observe
     // restores AMD's read-visibility control without changing routing.
