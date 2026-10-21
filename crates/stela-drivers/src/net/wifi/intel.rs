@@ -11,4 +11,5 @@ pub mod context;
 pub mod dma;
 pub mod firmware;
 pub mod identity;
+pub mod pnvm;
 pub mod power;
