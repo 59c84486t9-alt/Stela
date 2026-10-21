@@ -5,6 +5,9 @@
 use super::registers::*;
 use crate::{block::BlockError, net::Mac};
 use alloc::vec::Vec;
+mod upload;
+#[cfg(test)]
+pub(crate) use upload::tests::Hardware as FirmwareModel;
 
 const PLA: u16 = 0x0100;
 const USB: u16 = 0;
@@ -70,6 +73,7 @@ pub struct Chip<C> {
     base: Option<u32>,
     accessible: bool,
     enabled: bool,
+    initialized: bool,
 }
 
 impl<C: Control> Chip<C> {
@@ -79,19 +83,12 @@ impl<C: Control> Chip<C> {
     }
 
     pub fn attach(io: C, expected: Revision, full_speed: bool) -> Result<(Self, Mac), BlockError> {
-        let (io, revision) = Self::identify(io)?;
-        if revision != expected || !revision.implemented() {
+        let mut chip = Self::probe(io, expected)?;
+        if !chip.revision.implemented() {
             return Err(BlockError::Unsupported(
                 "RTL815x unimplemented or changed chip revision",
             ));
         }
-        let mut chip = Self {
-            io,
-            revision,
-            base: None,
-            accessible: true,
-            enabled: false,
-        };
         let first = chip.read(PLA, PLA_BACKUP, 4)?.to_le_bytes();
         let last = chip.read(PLA, PLA_BACKUP + 4, 4)?.to_le_bytes();
         let mac = Mac([first[0], first[1], first[2], first[3], last[0], last[1]]);
@@ -111,7 +108,25 @@ impl<C: Control> Chip<C> {
             u32::from(u16::from_le_bytes([last[0], last[1]])),
         )?;
         chip.write(PLA, PLA_CRWECR, 1, 0)?;
+        chip.initialized = true;
         Ok((chip, mac))
+    }
+
+    /// Identify a chip without claiming initialization or carrier readiness.
+    /// This permits revision-specific firmware preparation before PHY startup.
+    pub fn probe(io: C, expected: Revision) -> Result<Self, BlockError> {
+        let (io, revision) = Self::identify(io)?;
+        if revision != expected {
+            return Err(BlockError::Unsupported("RTL815x hardware revision changed"));
+        }
+        Ok(Self {
+            io,
+            revision,
+            base: None,
+            accessible: true,
+            enabled: false,
+            initialized: false,
+        })
     }
 
     fn transaction(&mut self, request: [u8; 8], data: &[u8]) -> Result<Vec<u8>, BlockError> {
@@ -353,6 +368,9 @@ impl<C: Control> Chip<C> {
     /// Actual PHY carrier drives MAC enabling. A disconnected link is never
     /// assumed up merely because USB enumeration or initialization succeeded.
     pub fn carrier(&mut self) -> Result<bool, BlockError> {
+        if !self.initialized {
+            return Err(BlockError::Unsupported("RTL815x chip is not initialized"));
+        }
         let status = self.read(PLA, PLA_PHYSTATUS, 2)?;
         if status & PHYSTATUS_LINK == 0 {
             return Ok(false);
@@ -407,7 +425,7 @@ pub(crate) mod tests {
     /// completion is driven by later reads instead of write echo.
     pub(crate) struct Model {
         registers: BTreeMap<(u16, u32), u8>,
-        base: u32,
+        pub(super) base: u32,
         reset: usize,
         phy_reset: usize,
         pub trace: Vec<([u8; 8], Vec<u8>)>,
@@ -448,14 +466,14 @@ pub(crate) mod tests {
             model
         }
 
-        fn get(&self, bank: u16, address: u32, width: u32) -> u32 {
+        pub(super) fn get(&self, bank: u16, address: u32, width: u32) -> u32 {
             (0..width).fold(0, |value, lane| {
                 value
                     | (u32::from(*self.registers.get(&(bank, address + lane)).unwrap_or(&0))
                         << (lane * 8))
             })
         }
-        fn set(&mut self, bank: u16, address: u32, width: u32, value: u32) {
+        pub(super) fn set(&mut self, bank: u16, address: u32, width: u32, value: u32) {
             for lane in 0..width {
                 self.registers
                     .insert((bank, address + lane), (value >> (lane * 8)) as u8);
@@ -473,7 +491,8 @@ pub(crate) mod tests {
                 return Err(BlockError::Timeout);
             }
             assert_eq!(setup[1], 5);
-            assert_eq!(&setup[6..], &[4, 0]);
+            let length = usize::from(u16::from_le_bytes([setup[6], setup[7]]));
+            assert!(length > 0 && length <= 512 && length.is_multiple_of(4));
             let address = u32::from(u16::from_le_bytes([setup[2], setup[3]]));
             assert_eq!(address & 3, 0);
             let index = u16::from_le_bytes([setup[4], setup[5]]);
@@ -486,6 +505,7 @@ pub(crate) mod tests {
             };
             match setup[0] {
                 0xc0 => {
+                    assert_eq!(length, 4);
                     assert!(output.is_empty());
                     if address == PLA_CR & !3 && self.reset > 0 && !self.stuck_reset {
                         self.reset -= 1;
@@ -513,13 +533,13 @@ pub(crate) mod tests {
                     Ok(bytes)
                 }
                 0x40 => {
-                    assert_eq!(output.len(), 4);
+                    assert_eq!(output.len(), length);
                     let enables = index as u8;
                     assert_eq!(enables & 0xf, enables >> 4);
                     let lanes = enables & 0xf;
                     assert!(matches!(lanes, 1 | 2 | 4 | 8 | 3 | 12 | 15));
                     for (lane, byte) in output.iter().enumerate() {
-                        if lanes & (1 << lane) != 0 {
+                        if lanes & (1 << (lane % 4)) != 0 {
                             self.registers.insert((bank, mapped + lane as u32), *byte);
                         }
                     }
@@ -660,6 +680,7 @@ pub(crate) mod tests {
             base: None,
             accessible: true,
             enabled: false,
+            initialized: false,
         };
         for bank in [USB, PLA] {
             for address in 0xc000..0xc020 {

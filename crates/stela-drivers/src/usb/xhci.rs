@@ -2417,6 +2417,7 @@ pub(crate) mod tests {
         configuration_seen_before_endpoints: Vec<u8>,
         short_control_out: bool,
         ethernet: Option<ethernet::rtl815x::tests::Model>,
+        ethernet_upload: Option<ethernet::rtl815x::FirmwareModel>,
     }
     impl CancelModel {
         fn state(&self, dci: usize) -> u32 {
@@ -2617,7 +2618,7 @@ pub(crate) mod tests {
                     }
                     if request[1] == 5
                         && matches!(request[0], 0xc0 | 0x40)
-                        && let Some(ethernet) = &mut self.ethernet
+                        && (self.ethernet.is_some() || self.ethernet_upload.is_some())
                     {
                         let output = if request[0] == 0x40 {
                             // SAFETY: Data TRB refers to the live control buffer.
@@ -2625,7 +2626,15 @@ pub(crate) mod tests {
                         } else {
                             &[]
                         };
-                        let reply = ethernet.request(request, output).unwrap();
+                        let reply = if let Some(ethernet) = &mut self.ethernet {
+                            ethernet.request(request, output).unwrap()
+                        } else {
+                            self.ethernet_upload
+                                .as_mut()
+                                .unwrap()
+                                .request(request, output)
+                                .unwrap()
+                        };
                         if request[0] == 0xc0 {
                             received = reply.len();
                             assert!(received <= length);
@@ -2766,6 +2775,7 @@ pub(crate) mod tests {
             configuration_seen_before_endpoints: Vec::new(),
             short_control_out: false,
             ethernet: None,
+            ethernet_upload: None,
         }));
         model.borrow_mut().set_state(1, 1);
         controller.registers = Box::new(CancelRegisters(model.clone()));
@@ -3277,6 +3287,69 @@ pub(crate) mod tests {
                         unsafe { core::slice::from_raw_parts(buffer as *const u8, bytes) },
                         before
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rtl815x_firmware_uses_actual_ep0_dma_wrapping_and_poison_guards() {
+        use ethernet::{
+            firmware::{Firmware, tests::synthetic_upload},
+            rtl815x::{Chip, FirmwareModel, Revision},
+        };
+        for revision in [
+            0x5c10, 0x5c20, 0x5c30, 0x6010, 0x6400, 0x7030, 0x7410, 0x7420,
+        ] {
+            let bytes = synthetic_upload(revision);
+            let firmware = Firmware::parse(&bytes, Revision(revision)).unwrap();
+            for fail in [false, true] {
+                let mut backing = vec![0u64; 128 * 1024];
+                let start = backing.as_mut_ptr() as u64;
+                // SAFETY: backing outlives all real control/ring DMA and model access.
+                let mut dma =
+                    unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+                let (mut controller, model) = unconfigured_cancellation_controller(&mut dma);
+                controller.set_configuration(1, 7).unwrap();
+                model.borrow_mut().ethernet_upload = Some(FirmwareModel::new(revision, &bytes));
+                let shared = Rc::new(RefCell::new(controller));
+                let io = ethernet::HostControl {
+                    controller: shared.clone(),
+                    slot: 1,
+                };
+                let mut chip = Chip::probe(io, Revision(revision)).unwrap();
+                if fail {
+                    model.borrow_mut().silence_transfer = Some(1);
+                    model.borrow_mut().fail = Some((STOP_ENDPOINT, CONTEXT_STATE_ERROR));
+                    assert!(chip.upload_firmware(&firmware, false).is_err());
+                    assert!(shared.borrow_mut().endpoint_ready(1, 1).is_err());
+                    let control = shared.borrow().slots[1]
+                        .as_ref()
+                        .unwrap()
+                        .control
+                        .bytes()
+                        .to_vec();
+                    let requests = model.borrow().setup.len();
+                    assert!(chip.upload_firmware(&firmware, false).is_err());
+                    assert_eq!(model.borrow().setup.len(), requests);
+                    assert_eq!(
+                        shared.borrow().slots[1].as_ref().unwrap().control.bytes(),
+                        control
+                    );
+                } else {
+                    chip.upload_firmware(&firmware, false).unwrap();
+                    assert!(chip.carrier().is_err()); // Upload alone is not initialized PHY/MAC.
+                    let state = model.borrow();
+                    assert_eq!(state.configuration_value, 7);
+                    assert!(state.configuration_seen_before_endpoints.is_empty());
+                    assert!(
+                        state
+                            .setup
+                            .iter()
+                            .any(|(request, data)| request[0] == 0x40 && data.len() > 4)
+                    );
+                    assert!(state.setup.iter().all(|(_, data)| data.len() <= 512));
+                    assert!(state.active[1].is_none());
                 }
             }
         }

@@ -504,7 +504,7 @@ fn parse_mac(bytes: &[u8], revision: Revision, pla: bool) -> Result<Mac<'_>, &'s
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn put(bytes: &mut [u8], at: usize, value: u16) {
@@ -571,6 +571,50 @@ mod tests {
     fn checksum(bytes: &mut [u8]) {
         let digest = Sha256::digest(&bytes[32..]);
         bytes[..32].copy_from_slice(&digest);
+    }
+
+    pub(crate) fn synthetic_upload(revision: u16) -> Vec<u8> {
+        let old = matches!(revision, 0x5c10 | 0x5c20 | 0x5c30);
+        let mut usb = mac(false, old);
+        put(&mut usb, 60, 0xcfd7);
+        usb[62] = 4;
+        let mut pla = mac(true, old);
+        put(&mut pla, 60, 0xcfd6);
+        pla[62] = 6;
+        if revision == 0x6400 {
+            put(&mut pla, 16, 0xfc48);
+        }
+        let mut blocks = vec![usb, pla];
+        if old {
+            blocks.extend([start(), nc(), block(STOP, 8)]);
+        } else if revision == 0x7030 {
+            let mut version = block(VERSION, 16);
+            put(&mut version, 8, 0x801e);
+            put(&mut version, 10, 0x21);
+            let mut fixup = block(FIXUP, 16);
+            put(&mut fixup, 8, 0xb820);
+            put(&mut fixup, 10, 0x80);
+            put(&mut fixup, 12, 1);
+            blocks.extend([version, start(), fixup]);
+            for kind in UNION_NC..=UNION_MISC {
+                let mut patch = union(kind);
+                put(&mut patch, 10, 0x9000 + kind as u16 * 0x100);
+                patch[58..].fill(kind as u8);
+                blocks.push(patch);
+            }
+            blocks.push(block(STOP, 8));
+            blocks.push(union(UNION_MISC));
+        } else if matches!(revision, 0x7410 | 0x7420) {
+            let mut speed = block(SPEED_UP, 16 + 4224);
+            put(&mut speed, 8, 16);
+            put(&mut speed, 10, 0x21);
+            put(&mut speed, 12, 0x9a00);
+            for (index, byte) in speed[16..].iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_mul(7).wrapping_add(13);
+            }
+            blocks.push(speed);
+        }
+        image(&blocks)
     }
 
     #[test]
@@ -809,56 +853,58 @@ mod tests {
         ));
     }
 
+    pub(crate) const FIXTURES: [(&str, u16, usize, &str); 7] = [
+        (
+            "rtl8153a-2.fw",
+            0x5c10,
+            5,
+            "7d4f422ec0e8141576c1b486fe6b7c6ce8ec9ea1f650815fd4058878c038366d",
+        ),
+        (
+            "rtl8153a-3.fw",
+            0x5c20,
+            5,
+            "c7099a1b0fc80e02ff7276aacbb08b5771e2f5c763fb76a7a8df3a89d58d8208",
+        ),
+        (
+            "rtl8153a-4.fw",
+            0x5c30,
+            5,
+            "99a05414fc0ae3b99a453d73b5cae90bfa6d371320f78011fc58cb03a33e2a09",
+        ),
+        (
+            "rtl8153b-2.fw",
+            0x6010,
+            2,
+            "137c9c752e8648ecfcf3b74ffc7d675c098145c222e2969721e6257af31716bc",
+        ),
+        (
+            "rtl8153c-1.fw",
+            0x6400,
+            2,
+            "bbe5f74bd2625b71c9a70e0588472ef670b5eeb65f83b1202cd25b3381720a3f",
+        ),
+        (
+            "rtl8156a-2.fw",
+            0x7030,
+            14,
+            "7b50f4a307bde7b3f384935537c4d9705457fa42613eb0003ffbc4e19461a1e0",
+        ),
+        (
+            "rtl8156b-2.fw",
+            0x7410,
+            3,
+            "5a3b21e27305876af8eac4b9bd11a821487b338e4ac1b58b8be8d23467d3f91f",
+        ),
+    ];
+
     #[test]
     #[ignore = "requires seven immutable linux-firmware fixtures; see THIRD_PARTY.md"]
     fn pinned_real_firmware_files_parse_all_observed_block_effects() {
         extern crate std;
         let directory =
             std::env::var("STELA_RTL815X_FIRMWARE").expect("path to pinned fixture directory");
-        for (name, revision, count, hash) in [
-            (
-                "rtl8153a-2.fw",
-                0x5c10,
-                5,
-                "7d4f422ec0e8141576c1b486fe6b7c6ce8ec9ea1f650815fd4058878c038366d",
-            ),
-            (
-                "rtl8153a-3.fw",
-                0x5c20,
-                5,
-                "c7099a1b0fc80e02ff7276aacbb08b5771e2f5c763fb76a7a8df3a89d58d8208",
-            ),
-            (
-                "rtl8153a-4.fw",
-                0x5c30,
-                5,
-                "99a05414fc0ae3b99a453d73b5cae90bfa6d371320f78011fc58cb03a33e2a09",
-            ),
-            (
-                "rtl8153b-2.fw",
-                0x6010,
-                2,
-                "137c9c752e8648ecfcf3b74ffc7d675c098145c222e2969721e6257af31716bc",
-            ),
-            (
-                "rtl8153c-1.fw",
-                0x6400,
-                2,
-                "bbe5f74bd2625b71c9a70e0588472ef670b5eeb65f83b1202cd25b3381720a3f",
-            ),
-            (
-                "rtl8156a-2.fw",
-                0x7030,
-                14,
-                "7b50f4a307bde7b3f384935537c4d9705457fa42613eb0003ffbc4e19461a1e0",
-            ),
-            (
-                "rtl8156b-2.fw",
-                0x7410,
-                3,
-                "5a3b21e27305876af8eac4b9bd11a821487b338e4ac1b58b8be8d23467d3f91f",
-            ),
-        ] {
+        for (name, revision, count, hash) in FIXTURES {
             let bytes = std::fs::read(std::path::Path::new(&directory).join(name)).unwrap();
             assert_eq!(alloc::format!("{:x}", Sha256::digest(&bytes)), hash);
             let firmware = Firmware::parse(&bytes, Revision(revision)).unwrap();

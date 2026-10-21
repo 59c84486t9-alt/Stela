@@ -73,9 +73,9 @@ impl Binding {
     }
 }
 
-struct HostControl {
-    controller: Shared,
-    slot: u8,
+pub(super) struct HostControl {
+    pub(super) controller: Shared,
+    pub(super) slot: u8,
 }
 
 impl Control for HostControl {
