@@ -219,6 +219,16 @@ pub fn setup(request_type: u8, request: u8, value: u16, index: u16, length: u16)
     [request_type, request, v0, v1, i0, i1, l0, l1]
 }
 
+/// Enumeration reports retain the original error alongside the operation
+/// that failed. In particular, Address Device and an EP0 transfer can both
+/// report USB Transaction Error, with different recovery requirements.
+fn during<T>(
+    operation: impl Into<String>,
+    result: Result<T, BlockError>,
+) -> Result<T, (String, BlockError)> {
+    result.map_err(|error| (operation.into(), error))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Event {
     parameter: u64,
@@ -728,27 +738,37 @@ impl Controller {
         &mut self,
         attachment: Attachment,
         dma: &mut dyn DmaAllocator,
-    ) -> Result<u8, BlockError> {
-        let event = self.command(0, 0, ENABLE_SLOT << 10)?;
+    ) -> Result<u8, (String, BlockError)> {
+        let event = during("Enable Slot", self.command(0, 0, ENABLE_SLOT << 10))?;
         let slot = event.slot();
         if usize::from(slot) == 0 || usize::from(slot) > self.max_slots {
-            return Err(BlockError::Unsupported("xHCI slot ID out of range"));
+            return during(
+                "Enable Slot",
+                Err(BlockError::Unsupported("xHCI slot ID out of range")),
+            );
         }
         let context = self.context();
-        let output = dma.allocate(32 * context, 64)?;
-        let mut input = dma.allocate(33 * context, 64)?;
-        let control = dma.allocate(CONTROL_BYTES, CONTROL_BYTES)?;
+        let allocation = format!("slot {slot} allocate contexts and EP0 ring");
+        let output = during(allocation.clone(), dma.allocate(32 * context, 64))?;
+        let mut input = during(allocation.clone(), dma.allocate(33 * context, 64))?;
+        let control = during(
+            allocation.clone(),
+            dma.allocate(CONTROL_BYTES, CONTROL_BYTES),
+        )?;
         if !self.wide
             && [output.physical(), input.physical(), control.physical()]
                 .iter()
                 .any(|address| address >> 32 != 0)
         {
-            return Err(BlockError::Unsupported(
-                "xHCI 32-bit controller with DMA above 4 GiB",
-            ));
+            return during(
+                allocation,
+                Err(BlockError::Unsupported(
+                    "xHCI 32-bit controller with DMA above 4 GiB",
+                )),
+            );
         }
         self.dcbaa.write(usize::from(slot) * 8, output.physical());
-        let ring = Ring::new(dma)?;
+        let ring = during(allocation, Ring::new(dma))?;
         let max_packet: u32 = match attachment.speed {
             LOW_SPEED | FULL_SPEED => 8,
             HIGH_SPEED => 64,
@@ -771,6 +791,7 @@ impl Controller {
         input.write(ep0 + 16, 8u32);
         let mut endpoints: [Option<Transfer>; 32] = Default::default();
         endpoints[1] = Some(Transfer { ring, is_in: false });
+        let input_address = input.physical();
         self.slots[usize::from(slot)] = Some(Slot {
             input,
             _output: output,
@@ -779,11 +800,13 @@ impl Controller {
             control,
             speed: attachment.speed,
         });
-        let input_address = self.slot(slot)?.input.physical();
-        self.command(
-            input_address,
-            0,
-            ADDRESS_DEVICE << 10 | u32::from(slot) << 24,
+        during(
+            format!("slot {slot} Address Device"),
+            self.command(
+                input_address,
+                0,
+                ADDRESS_DEVICE << 10 | u32::from(slot) << 24,
+            ),
         )?;
         // Address Device sends SET_ADDRESS with BSR=0. The xHC does not
         // time the device's recovery interval (xHCI 1.2b 4.6.5); USB 2.0
@@ -1146,7 +1169,7 @@ impl Controller {
                     self.attach(attachment, location, dma, &mut devices, failures);
                 }
                 Ok(None) => {}
-                Err(error) => failures.push((location, error)),
+                Err(error) => failures.push((format!("{location} enable/reset root port"), error)),
             }
         }
         devices
@@ -1202,11 +1225,21 @@ impl Controller {
         match self.identify(attachment, location.clone(), dma) {
             Ok(device) if device.descriptor[4] == HUB_CLASS => {
                 if let Err(error) = self.hub(&device, attachment, dma, devices, failures) {
-                    failures.push((location, error));
+                    failures.push((format!("{location} {} enumerate hub", device.name()), error));
                 }
             }
             Ok(device) => devices.push(device),
-            Err(error) => failures.push((location, error)),
+            Err((operation, error)) => {
+                let at = self.port_offset(attachment.root_port);
+                let portsc = self.registers.read32(at);
+                failures.push((
+                    format!(
+                        "{location} speed={} root-portsc={portsc:#010x} {operation}",
+                        attachment.speed
+                    ),
+                    error,
+                ));
+            }
         }
     }
 
@@ -1215,11 +1248,14 @@ impl Controller {
         attachment: Attachment,
         location: String,
         dma: &mut dyn DmaAllocator,
-    ) -> Result<Device, BlockError> {
+    ) -> Result<Device, (String, BlockError)> {
         let slot = self.address(attachment, dma)?;
-        let first = self.descriptor(slot, DEVICE_DESCRIPTOR, 0, 8)?;
+        let first = self.enumeration_descriptor(slot, DEVICE_DESCRIPTOR, 0, 8)?;
         if first.len() < 8 {
-            return Err(BlockError::Unsupported("short device descriptor"));
+            return during(
+                format!("slot {slot} device descriptor header"),
+                Err(BlockError::Unsupported("short device descriptor")),
+            );
         }
         let ep0 = u16::from(first[7]);
         let expected = match attachment.speed {
@@ -1228,20 +1264,33 @@ impl Controller {
             _ => 512,
         };
         if attachment.speed == FULL_SPEED && ep0 != expected && [8, 16, 32, 64].contains(&ep0) {
-            self.set_control_packet(slot, ep0)?;
+            during(
+                format!("slot {slot} Evaluate Context EP0 max_packet={ep0}"),
+                self.set_control_packet(slot, ep0),
+            )?;
         }
-        let bytes = self.descriptor(slot, DEVICE_DESCRIPTOR, 0, 18)?;
-        let descriptor: [u8; 18] = bytes
-            .get(..18)
-            .and_then(|b| b.try_into().ok())
-            .ok_or(BlockError::Unsupported("short device descriptor"))?;
+        let bytes = self.enumeration_descriptor(slot, DEVICE_DESCRIPTOR, 0, 18)?;
+        let descriptor: [u8; 18] = during(
+            format!("slot {slot} full device descriptor"),
+            bytes
+                .get(..18)
+                .and_then(|b| b.try_into().ok())
+                .ok_or(BlockError::Unsupported("short device descriptor")),
+        )?;
+        let identity = format!(
+            "{:04x}:{:04x}",
+            u16::from_le_bytes([descriptor[8], descriptor[9]]),
+            u16::from_le_bytes([descriptor[10], descriptor[11]])
+        );
         // The USB core's choice (Linux `usb_choose_configuration`): the first
         // configuration whose first interface has a standard class, so an
         // adapter that also offers CDC Ethernet after its vendor-specific
         // configuration (as Realtek RTL8153 adapters do) is used through it.
         let mut chosen = None;
         for index in 0..descriptor[17].max(1) {
-            let configuration = self.configuration(slot, index)?;
+            let configuration = self
+                .configuration(slot, index)
+                .map_err(|(operation, error)| (format!("{identity} {operation}"), error))?;
             if standard_class(&configuration) {
                 chosen = Some(configuration);
                 break;
@@ -1265,13 +1314,29 @@ impl Controller {
     }
 
     /// Configuration descriptor `index`, whole.
-    fn configuration(&mut self, slot: u8, index: u8) -> Result<Vec<u8>, BlockError> {
-        let head = self.descriptor(slot, CONFIGURATION_DESCRIPTOR, index, 9)?;
+    fn configuration(&mut self, slot: u8, index: u8) -> Result<Vec<u8>, (String, BlockError)> {
+        let head = self.enumeration_descriptor(slot, CONFIGURATION_DESCRIPTOR, index, 9)?;
         if head.len() < 9 {
-            return Err(BlockError::Unsupported("short configuration descriptor"));
+            return during(
+                format!("slot {slot} configuration {index} header"),
+                Err(BlockError::Unsupported("short configuration descriptor")),
+            );
         }
         let total = u16::from_le_bytes([head[2], head[3]]).min(CONTROL_BYTES as u16);
-        self.descriptor(slot, CONFIGURATION_DESCRIPTOR, index, total)
+        self.enumeration_descriptor(slot, CONFIGURATION_DESCRIPTOR, index, total)
+    }
+
+    fn enumeration_descriptor(
+        &mut self,
+        slot: u8,
+        kind: u8,
+        index: u8,
+        length: u16,
+    ) -> Result<Vec<u8>, (String, BlockError)> {
+        during(
+            format!("slot {slot} EP0 GET_DESCRIPTOR type={kind} index={index} length={length}"),
+            self.descriptor(slot, kind, index, length),
+        )
     }
 
     fn hub(
@@ -1533,17 +1598,24 @@ fn bind(shared: &Shared, device: Device, dma: &mut dyn DmaAllocator, found: &mut
     }
     let configured = {
         let mut controller = shared.borrow_mut();
-        controller
-            .configure(device.slot, &endpoints, None, dma)
-            .and_then(|()| {
-                let value = u16::from(device.configuration_value());
-                controller
-                    .control(device.slot, setup(0, SET_CONFIGURATION, value, 0, 0), &[])
-                    .map(|_| ())
-            })
+        during(
+            format!("slot {} Configure Endpoint", device.slot),
+            controller.configure(device.slot, &endpoints, None, dma),
+        )
+        .and_then(|()| {
+            let value = u16::from(device.configuration_value());
+            during(
+                format!("slot {} EP0 SET_CONFIGURATION value={value}", device.slot),
+                controller.control(device.slot, setup(0, SET_CONFIGURATION, value, 0, 0), &[]),
+            )
+            .map(|_| ())
+        })
     };
-    if let Err(error) = configured {
-        found.failures.push((device.location.clone(), error));
+    if let Err((operation, error)) = configured {
+        found.failures.push((
+            format!("{} {} {operation}", device.location, device.name()),
+            error,
+        ));
         return;
     }
     for (interface, plan) in plans {
@@ -1773,11 +1845,51 @@ mod tests {
             controller
                 .identify(attachment, String::from("port 1"), &mut dma)
                 .unwrap_err(),
-            BlockError::Device { status: 4 }
+            (
+                String::from("slot 1 Address Device"),
+                BlockError::Device { status: 4 }
+            )
         );
         let state = model.borrow();
         assert_eq!(state.commands_seen, [ENABLE_SLOT, ADDRESS_DEVICE]);
         assert!(state.setup_seen.is_empty());
+    }
+
+    #[test]
+    fn descriptor_failure_retains_the_request_and_completion_code() {
+        let mut backing = vec![0u64; 16 * 1024];
+        let start = backing.as_mut_ptr() as u64;
+        // SAFETY: backing outlives the controller and all its DMA buffers.
+        let mut dma = unsafe { RegionAllocator::new(start..start + 128 * 1024) };
+        let (mut controller, model) = address_controller(&mut dma, SUCCESS);
+        let attachment = Attachment {
+            root_port: 1,
+            route: 0,
+            tier: 0,
+            speed: FULL_SPEED,
+            translator: None,
+        };
+        let slot = controller.address(attachment, &mut dma).unwrap();
+        // Model a descriptor transfer failing after successful addressing.
+        model.borrow_mut().ready_at = u64::MAX;
+        assert_eq!(
+            controller
+                .enumeration_descriptor(slot, CONFIGURATION_DESCRIPTOR, 2, 9)
+                .unwrap_err(),
+            (
+                String::from("slot 1 EP0 GET_DESCRIPTOR type=2 index=2 length=9"),
+                BlockError::Device { status: 4 }
+            )
+        );
+        let state = model.borrow();
+        assert_eq!(
+            state.setup_seen,
+            [setup(0x80, GET_DESCRIPTOR, 0x0202, 0, 9)]
+        );
+        assert_eq!(
+            state.commands_seen,
+            [ENABLE_SLOT, ADDRESS_DEVICE, RESET_ENDPOINT, SET_DEQUEUE]
+        );
     }
 
     #[test]
