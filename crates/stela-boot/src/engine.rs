@@ -1235,7 +1235,11 @@ fn devices<'f>(
         )?;
     }
     if let Some(controller) = board.and_then(|board| board.io_access_controller.as_ref()) {
-        devices.add_io_access_controller(&controller.apertures, controller.layout, read_only_region)?;
+        devices.add_io_access_controller(
+            &controller.apertures,
+            controller.layout,
+            read_only_region,
+        )?;
     }
     if let Some(mcc) = memory_cache {
         let (physical, bytes, channels) = mcc.channels;
