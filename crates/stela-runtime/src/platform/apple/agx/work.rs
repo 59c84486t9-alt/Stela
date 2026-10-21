@@ -12,10 +12,13 @@
 use super::channel::Kind;
 use super::exec::WorkError;
 use super::exec::compute::{self, Job};
+use super::exec::render::SamplerHeap;
 use super::exec::render::{self, FragmentInputs, GeometryInputs, RenderPass};
 use super::isa::machine::{Fault, Memory};
 use super::ring::Shared;
+use super::sgx::work::{FirmwareWork, render::TaGeometryBinding};
 use super::uat::CONTEXTS;
+use super::work_decode::resources::Lease;
 use super::work_decode::{Frame, Submission, scene};
 use crate::platform::dma::DmaError;
 use alloc::boxed::Box;
@@ -73,6 +76,7 @@ struct GeometryData {
     pass: GeometryInputs,
     binned: render::geometry::Binned,
     stats: render::Stats,
+    native: Option<TaGeometryBinding>,
 }
 
 impl GeometryProduct {
@@ -125,6 +129,7 @@ pub struct Execution {
     job: JobKind,
     scene: Option<scene::Key>,
     phase: Phase,
+    native: Option<TaGeometryBinding>,
 }
 impl Execution {
     pub fn compute(submission: Submission, job: Job) -> Result<Self, WorkError> {
@@ -139,6 +144,7 @@ impl Execution {
             job: JobKind::Compute(job),
             scene: None,
             phase: Phase::Ready,
+            native: None,
         })
     }
 
@@ -164,6 +170,7 @@ impl Execution {
             job: JobKind::Geometry(Box::new(pass)),
             scene: None,
             phase: Phase::Ready,
+            native: None,
         })
     }
 
@@ -181,6 +188,51 @@ impl Execution {
         Ok(owner)
     }
 
+    /// Capture source-native metadata with the linear TA product. Common
+    /// setup, TVB and native start remain prerequisites of the outer owner.
+    pub fn geometry_from_native(binding: TaGeometryBinding) -> Result<Self, WorkError> {
+        binding.check_live().map_err(WorkError::Refused)?;
+        let mut owner =
+            Self::geometry_for_setup(binding.submission.clone(), &binding.frame, binding.inputs)?;
+        owner.native = Some(binding);
+        Ok(owner)
+    }
+
+    /// Decode the current matching actual SGX 3D owner. No caller-supplied
+    /// fragment fields can replace its native layer/sample/program bindings.
+    pub fn fragment_from_native(
+        native: &FirmwareWork,
+        submission: Submission,
+        lease: Lease,
+        sampler_heap: Option<SamplerHeap>,
+        product: GeometryProduct,
+    ) -> Result<Self, (WorkError, GeometryProduct)> {
+        let Some(binding) = &product.0.native else {
+            return Err((
+                WorkError::Refused("GFX native 3D requires its original native TA metadata"),
+                product,
+            ));
+        };
+        let (frame, pass) =
+            match native.fragment_inputs_from_ta(&submission, lease, binding, sampler_heap) {
+                Ok(inputs) => inputs,
+                Err(reason) => return Err((WorkError::Refused(reason), product)),
+            };
+        let key = match scene::Key::read(&submission, &frame) {
+            Ok(key) => key,
+            Err(reason) => return Err((WorkError::Refused(reason), product)),
+        };
+        if product.0.scene != Some(key) {
+            return Err((
+                WorkError::Refused("GFX native 3D does not own its source geometry product"),
+                product,
+            ));
+        }
+        let mut owner = Self::fragment_inner(submission, pass, product)?;
+        owner.scene = Some(key);
+        Ok(owner)
+    }
+
     /// Return the still-owned product on every pre-execution refusal. A
     /// same-sized render pass or a caller-supplied helper product supplies no
     /// proof that this distinct 3D setup belongs to the original TA scene.
@@ -190,6 +242,12 @@ impl Execution {
         pass: FragmentInputs,
         product: GeometryProduct,
     ) -> Result<Self, (WorkError, GeometryProduct)> {
+        if product.0.native.is_some() {
+            return Err((
+                WorkError::Refused("GFX native TA product requires actual native 3D bindings"),
+                product,
+            ));
+        }
         let key = match scene::Key::read(&submission, frame) {
             Ok(key) => key,
             Err(reason) => return Err((WorkError::Refused(reason), product)),
@@ -253,6 +311,7 @@ impl Execution {
             },
             scene: None,
             phase: Phase::Ready,
+            native: None,
         })
     }
 
@@ -265,6 +324,15 @@ impl Execution {
     /// Subsequent firmware DMA faults may retry only the later firmware phase.
     pub fn run(&mut self, memory: &mut dyn Shared) -> Result<ResultKind, WorkError> {
         if matches!(self.phase, Phase::Ready) {
+            let native = match &self.job {
+                JobKind::Fragment { product, .. } => product.0.native.as_ref(),
+                _ => self.native.as_ref(),
+            };
+            if let Some(Err(reason)) = native.map(TaGeometryBinding::check_live) {
+                let error = WorkError::Refused(reason);
+                self.phase = Phase::Settled(Err(error));
+                return Err(error);
+            }
             let mut view = GpuView::new(memory, self.submission.context as usize);
             let result = match &self.job {
                 JobKind::Compute(job) => compute::run(&mut view, job).map(Output::Compute),
@@ -277,6 +345,7 @@ impl Execution {
                             pass: **pass,
                             binned,
                             stats,
+                            native: self.native.take(),
                         })))
                     })
                 }

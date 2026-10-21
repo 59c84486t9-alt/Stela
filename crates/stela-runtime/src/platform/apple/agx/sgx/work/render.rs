@@ -2,6 +2,9 @@
 //! native values have no reset readback; only source stores make them known.
 //! No trigger or backend invocation is provided by this configuration phase.
 
+mod binding;
+pub use binding::TaGeometryBinding;
+
 use super::FirmwareWork;
 use crate::platform::apple::agx::{
     channel::Kind,
@@ -14,7 +17,8 @@ use crate::platform::apple::agx::{
     },
 };
 use crate::platform::dma::Port;
-use alloc::vec::Vec;
+use alloc::{rc::Rc, vec::Vec};
+use core::cell::Cell;
 
 #[derive(Debug)]
 struct Run {
@@ -23,6 +27,13 @@ struct Run {
     frame: Frame,
     next: usize,
     words: Vec<Word>,
+    valid: Rc<Cell<bool>>,
+    binding_issued: Cell<bool>,
+}
+impl Drop for Run {
+    fn drop(&mut self) {
+        self.valid.set(false);
+    }
 }
 #[derive(Debug, Default)]
 pub(super) struct Registers {
@@ -301,6 +312,8 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
             lease,
             frame: frame.clone(),
             next: 0,
+            valid: Rc::new(Cell::new(true)),
+            binding_issued: Cell::new(false),
             words: match self.pipeline {
                 Kind::Ta => ta::words(self.owner.policy),
                 Kind::ThreeD => {

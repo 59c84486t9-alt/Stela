@@ -1132,6 +1132,14 @@ mod tests {
                 }
                 port.write(0x2208, &0x200u32.to_le_bytes()).unwrap();
                 port.write(0x220c, &0x000f000fu32.to_le_bytes()).unwrap();
+                port.write(0x2228, &0xe002u32.to_le_bytes()).unwrap();
+                let tile_at = if owner.policy == Policy::G14G {
+                    0x38
+                } else {
+                    0x48
+                };
+                port.write(0x3ff8 + tile_at, &0x5001u64.to_le_bytes())
+                    .unwrap();
                 let (vdm, usc) = if owner.policy == Policy::G14G {
                     (0x70, 0xa8)
                 } else {
@@ -1180,6 +1188,7 @@ mod tests {
             assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(power.native.borrow().work.render.writes, 12);
             assert!(owner.ta_geometry_inputs(&input, lease, None).is_err());
+            assert!(owner.ta_geometry_binding(&input, lease, None).is_err());
             assert!(power.check_reset().is_err());
             assert!(owner.begin(&submission(), LEASE).is_err());
             let mut other = input.clone();
@@ -1256,6 +1265,18 @@ mod tests {
                 }
             );
             assert!(owner.ta_geometry_inputs(&other, lease, None).is_err());
+            assert!(owner.ta_geometry_binding(&other, lease, None).is_err());
+            let binding = owner.ta_geometry_binding(&input, lease, None).unwrap();
+            assert_eq!(
+                binding.inputs,
+                owner.ta_geometry_inputs(&input, lease, None).unwrap()
+            );
+            assert_eq!(binding.frame, frame);
+            binding.check_live().unwrap();
+            let counts = (memory.reads, memory.writes);
+            assert!(owner.ta_geometry_binding(&input, lease, None).is_err());
+            assert_eq!((memory.reads, memory.writes), counts);
+            let mut execution = Execution::geometry_from_native(binding).unwrap();
             let expected = if owner.policy == Policy::G13X { 49 } else { 41 };
             assert_eq!(power.native.borrow().work.render.writes, expected);
             let counts = (memory.reads, memory.writes);
@@ -1296,6 +1317,18 @@ mod tests {
                 .unwrap();
             assert!(!power.native.borrow().work.active());
             assert!(owner.ta_geometry_inputs(&input, lease, None).is_err());
+            assert!(owner.ta_geometry_binding(&input, lease, None).is_err());
+            let counts = (memory.reads, memory.writes);
+            let error = io(&mut sgx, &mut memory, |port| execution.run(port)).unwrap_err();
+            assert_eq!(
+                error,
+                WorkError::Refused("GFX native TA metadata was cancelled or invalidated")
+            );
+            assert_eq!(
+                io(&mut sgx, &mut memory, |port| execution.run(port)),
+                Err(error)
+            );
+            assert_eq!((memory.reads, memory.writes), counts);
             assert_eq!(
                 power
                     .native
