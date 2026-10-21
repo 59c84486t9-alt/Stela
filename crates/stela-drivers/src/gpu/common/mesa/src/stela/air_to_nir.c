@@ -35,6 +35,8 @@ struct value {
    unsigned access; /* Buffer provenance; zero for integer values. */
    bool ssbo;
    unsigned ssbo_slot;
+   nir_variable *shared;
+   unsigned shared_size;
 };
 
 bool
@@ -63,6 +65,10 @@ struct translator {
    unsigned air_minor;
    unsigned language_major, language_minor;
    unsigned max_device_buffers;
+   unsigned max_threadgroup_buffers;
+   unsigned shared_resources;
+   unsigned shared_barriers;
+   uint64_t shared_layout_bound;
    bool denorms_disable;
    bool fast_math;
    bool fp_checked;
@@ -204,10 +210,12 @@ module_flags(struct translator *t)
          return fail(t, STELA_AIR_METADATA, "unsupported module flag value: %s", keys[key]);
       if (key == 2)
          t->max_device_buffers = value;
+      if (key == 4)
+         t->max_threadgroup_buffers = value;
    }
    /* No linking, CPU frame operations or source wchar operations occur in the
     * implemented compute subset. Other resource kinds remain refused.
-    * Device-buffer location bounds are enforced below, never advertised as the
+    * Device/threadgroup location bounds are enforced below, never advertised as the
     * hardware's actual Metal capability or silently removed from the input. */
    return true;
 }
@@ -254,8 +262,9 @@ module_metadata(struct translator *t)
    }
    t->denorms_disable = seen & 1;
    t->fast_math = seen & 2;
-   /* This private AIR option has not yet been qualified for arithmetic. Exact
-    * storage/selection and integer operations do not depend on FP denorm mode. */
+   /* Arithmetic requires an explicit qualified FP policy for this private AIR
+    * option. Exact storage/shared access and integer operations do not depend
+    * on FP denorm mode. */
    return true;
 }
 
@@ -372,12 +381,17 @@ find_value(struct translator *t, LLVMValueRef llvm)
    return entry ? entry->data : NULL;
 }
 
+static nir_def *shared_global(struct translator *t, LLVMValueRef global);
+static nir_variable *shared_resource(struct translator *t, uint64_t size, unsigned alignment);
+
 static nir_def *
 get_value(struct translator *t, LLVMValueRef llvm)
 {
    struct value *value = find_value(t, llvm);
    if (value)
       return value->def;
+   if (LLVMIsAGlobalVariable(llvm))
+      return shared_global(t, llvm);
    unsigned components, bits;
    if (!value_shape(LLVMTypeOf(llvm), &components, &bits)) {
       fail(t, STELA_AIR_TYPE, "unsupported AIR operand type");
@@ -440,6 +454,7 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       return fail(t, STELA_AIR_METADATA, "AIR argument descriptors do not match parameters");
    bool used[AIR_MAX_ARGUMENTS] = {false};
    bool buffer_indices[AIR_MAX_ARGUMENTS] = {false};
+   bool shared_indices[AIR_MAX_ARGUMENTS] = {false};
    bool ssbo_slots[UINT8_MAX + 1] = {false};
    for (unsigned a = 0; a < argc; a++) {
       LLVMValueRef fields[AIR_MAX_METADATA_OPERANDS];
@@ -486,11 +501,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
             unsigned locations;
             if (!buffer || has_location || f + 2 > fields_count ||
                 !md_uint(fields[f], &desc.index) || !md_uint(fields[f + 1], &locations) ||
-                locations != 1 || desc.index >= AIR_MAX_ARGUMENTS || buffer_indices[desc.index])
+                locations != 1 || desc.index >= AIR_MAX_ARGUMENTS)
                return fail(t, STELA_AIR_METADATA, "unsupported/duplicate buffer location");
-            buffer_indices[desc.index] = true;
-            if (t->max_device_buffers && desc.index >= t->max_device_buffers)
-               return fail(t, STELA_AIR_METADATA, "buffer location exceeds AIR module limit");
             has_location = true;
             f += 2;
          } else if (md_string(key, "air.address_space")) {
@@ -516,14 +528,36 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
       nir_def *def;
       unsigned ssbo_slot = 0;
+      nir_variable *shared = NULL;
+      unsigned shared_size = 0;
       if (buffer) {
          LLVMTypeRef type = LLVMTypeOf(param);
-         if (!has_location || !has_as || !desc.access || desc.address_space != 1 ||
+         if (!has_location || !has_as || !desc.access ||
+             (desc.address_space != 1 && desc.address_space != 3) ||
              LLVMGetTypeKind(type) != LLVMPointerTypeKind ||
-             LLVMGetPointerAddressSpace(type) != desc.address_space ||
-             (!t->options->bind_buffer && !t->options->bind_ssbo))
-            return fail(t, STELA_AIR_ARGUMENT, "unsupported/unbound device buffer %u", index);
-         if (t->options->bind_ssbo) {
+             LLVMGetPointerAddressSpace(type) != desc.address_space)
+            return fail(t, STELA_AIR_ARGUMENT, "unsupported buffer %u", index);
+         bool threadgroup = desc.address_space == 3;
+         bool *indices = threadgroup ? shared_indices : buffer_indices;
+         unsigned limit = threadgroup ? t->max_threadgroup_buffers : t->max_device_buffers;
+         if (indices[desc.index] || (limit && desc.index >= limit))
+            return fail(t, STELA_AIR_METADATA, "duplicate buffer or location exceeds AIR module limit");
+         indices[desc.index] = true;
+         if (threadgroup) {
+            struct stela_air_threadgroup_view view = {0};
+            if (!has_size || !has_align || !desc.type_size || !desc.type_alignment ||
+                !t->options->bind_threadgroup ||
+                !t->options->bind_threadgroup(&desc, &view, t->options->binding_data) ||
+                view.size < desc.type_size || view.alignment < desc.type_alignment ||
+                view.available_access < STELA_AIR_READ || view.available_access > STELA_AIR_READ_WRITE ||
+                (desc.access & ~view.available_access))
+               return fail(t, STELA_AIR_ARGUMENT, "invalid/unbound threadgroup buffer %u", index);
+            shared = shared_resource(t, view.size, view.alignment);
+            if (!shared)
+               return false;
+            shared_size = (unsigned)view.size;
+            def = nir_imm_int64(&t->b, 0);
+         } else if (t->options->bind_ssbo) {
             if (!t->options->bind_ssbo(&desc, &ssbo_slot, t->options->binding_data) ||
                 ssbo_slot >= t->options->ssbo_count || ssbo_slots[ssbo_slot])
                return fail(t, STELA_AIR_ARGUMENT, "SSBO callback refused/invalid slot for buffer %u", index);
@@ -531,6 +565,8 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
             /* The exact Metal view is the surface, not an inferred raw VA. */
             def = nir_imm_int64(&t->b, 0);
          } else {
+            if (!t->options->bind_buffer)
+               return fail(t, STELA_AIR_ARGUMENT, "unbound device buffer %u", index);
             def = t->options->bind_buffer(&t->b, &desc, t->options->binding_data);
             if (!def || def->num_components != 1 || def->bit_size != 64)
                return fail(t, STELA_AIR_ARGUMENT, "binding callback refused/invalid buffer %u", index);
@@ -553,7 +589,11 @@ kernel_arguments(struct translator *t, LLVMValueRef fn)
       }
       if (!put_value(t, param, def, desc.access))
          return false;
-      if (buffer && t->options->bind_ssbo) {
+      if (shared) {
+         struct value *value = find_value(t, param);
+         value->shared = shared;
+         value->shared_size = shared_size;
+      } else if (buffer && t->options->bind_ssbo) {
          struct value *value = find_value(t, param);
          value->ssbo = true;
          value->ssbo_slot = ssbo_slot;
@@ -634,14 +674,135 @@ fixed_storage_type(struct translator *t, LLVMTypeRef type, unsigned depth,
    }
 }
 
+static bool
+shared_profile(struct translator *t)
+{
+   LLVMValueRef nodes[AIR_MAX_METADATA_OPERANDS], fields[AIR_MAX_METADATA_OPERANDS];
+   unsigned count, fields_count;
+   if (t->air_minor != 9 || t->language_major != 4 || t->language_minor != 1 ||
+       strcmp(LLVMGetTarget(t->module), "air64_v29-apple-macosx27.2.0") ||
+       !named_md(t, "llvm.ident", nodes, &count) || count != 1 ||
+       !md_node(t, nodes[0], fields, &fields_count) || fields_count != 1 ||
+       !md_string(fields[0], "Apple metal version 32023.922 (metalfe-32023.922.4)"))
+      return fail(t, STELA_AIR_METADATA, "shared-memory AIR/compiler profile is unqualified");
+   if (LLVMPointerSizeForAS(t->layout, 3) != 8)
+      return fail(t, STELA_AIR_TARGET, "shared-memory AIR pointers require 64-bit layout");
+   return true;
+}
+
+static nir_variable *
+shared_resource(struct translator *t, uint64_t size, unsigned alignment)
+{
+   if (!size || size > t->options->max_threadgroup_bytes ||
+       !alignment || (alignment & (alignment - 1)) ||
+       t->shared_resources == AIR_MAX_ARGUMENTS ||
+       t->shared_layout_bound + size + alignment - 1 > UINT32_MAX) {
+      fail(t, STELA_AIR_LIMIT, "shared-memory size/alignment/layout budget exceeded");
+      return NULL;
+   }
+   if (!shared_profile(t))
+      return NULL;
+   /* Original NIR owns byte-storage placement, alignment and final lowering.
+    * The conservative bound above only prevents its unsigned layout overflow. */
+   nir_variable *var = nir_variable_create(t->b.shader, nir_var_mem_shared,
+      glsl_array_type(glsl_uint8_t_type(), (unsigned)size, 1), "air.shared");
+   if (!var) {
+      fail(t, STELA_AIR_ALLOCATION, "shared-memory variable allocation failed");
+      return NULL;
+   }
+   var->data.alignment = alignment;
+   t->shared_resources++;
+   t->shared_layout_bound += size + alignment - 1;
+   return var;
+}
+
+static bool
+shared_storage_size(struct translator *t, LLVMTypeRef type, unsigned depth,
+                     uint64_t *size)
+{
+   if (depth == 32)
+      return fail(t, STELA_AIR_LIMIT, "shared storage type nesting exceeded");
+   if (LLVMGetTypeKind(type) == LLVMArrayTypeKind) {
+      uint64_t element;
+      if (!shared_storage_size(t, LLVMGetElementType(type), depth + 1, &element))
+         return false;
+      uint64_t length = LLVMGetArrayLength2(type);
+      if (!length || length > UINT32_MAX / element)
+         return fail(t, STELA_AIR_LIMIT, "shared storage array extent exceeded");
+   } else {
+      unsigned components, bits;
+      if (!value_shape(type, &components, &bits) || bits < 8)
+         return fail(t, STELA_AIR_TYPE, "shared globals require fixed integer/FP32 scalar/vector arrays");
+   }
+   /* Aggregate extents were bounded before invoking fixed-size LLVM queries. */
+   *size = LLVMABISizeOfType(t->layout, type);
+   return (*size && *size <= UINT32_MAX) ||
+      fail(t, STELA_AIR_LIMIT, "shared storage allocation size exceeded");
+}
+
+static bool
+shared_global_info(struct translator *t, LLVMValueRef global,
+                    uint64_t *size, unsigned *alignment)
+{
+   const char *section = LLVMGetSection(global);
+   LLVMValueRef initializer = LLVMGetInitializer(global);
+   if (LLVMGetPointerAddressSpace(LLVMTypeOf(global)) != 3 ||
+       LLVMGetLinkage(global) != LLVMInternalLinkage || LLVMIsThreadLocal(global) ||
+       LLVMIsGlobalConstant(global) || LLVMIsExternallyInitialized(global) ||
+       (section && *section) || !initializer || !LLVMIsUndef(initializer) || LLVMIsPoison(initializer))
+      return fail(t, STELA_AIR_TARGET, "unsupported global/shared initializer or storage ABI");
+   LLVMTypeRef type = LLVMGlobalGetValueType(global);
+   if (!shared_storage_size(t, type, 0, size))
+      return false;
+   *alignment = LLVMGetAlignment(global);
+   if (!*alignment)
+      *alignment = LLVMABIAlignmentOfType(t->layout, type);
+   return (*alignment && !(*alignment & (*alignment - 1))) ||
+      fail(t, STELA_AIR_TYPE, "unsupported shared global alignment");
+}
+
+static bool
+shared_globals(struct translator *t)
+{
+   unsigned count = 0;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(t->module); global;
+        global = LLVMGetNextGlobal(global)) {
+      uint64_t size;
+      unsigned alignment;
+      if (++count > AIR_MAX_ARGUMENTS)
+         return fail(t, STELA_AIR_LIMIT, "shared global count exceeded");
+      if (!shared_global_info(t, global, &size, &alignment))
+         return false;
+   }
+   return true;
+}
+
+static nir_def *
+shared_global(struct translator *t, LLVMValueRef global)
+{
+   uint64_t size;
+   unsigned alignment;
+   if (!shared_global_info(t, global, &size, &alignment))
+      return NULL;
+   nir_variable *var = shared_resource(t, size, alignment);
+   if (!var || !put_value(t, global, nir_imm_int64(&t->b, 0), STELA_AIR_READ_WRITE))
+      return NULL;
+   struct value *value = find_value(t, global);
+   value->shared = var;
+   value->shared_size = (unsigned)size;
+   return value->def;
+}
+
 static nir_def *
 gep(struct translator *t, LLVMValueRef inst, const struct value **origin)
 {
+   if (LLVMIsAGlobalVariable(LLVMGetOperand(inst, 0)) && !get_value(t, LLVMGetOperand(inst, 0)))
+      return NULL;
    struct value *base = find_value(t, LLVMGetOperand(inst, 0));
    LLVMTypeRef result_type = LLVMTypeOf(inst);
    if (!base || !base->access || LLVMGetTypeKind(result_type) != LLVMPointerTypeKind ||
-       LLVMGetPointerAddressSpace(result_type) != 1) {
-      fail(t, STELA_AIR_MEMORY, "GEP requires a validated device-buffer pointer");
+       LLVMGetPointerAddressSpace(result_type) != (base->shared ? 3 : 1)) {
+      fail(t, STELA_AIR_MEMORY, "GEP requires a validated buffer/shared pointer");
       return NULL;
    }
    LLVMTypeRef type = LLVMGetGEPSourceElementType(inst);
@@ -740,6 +901,33 @@ ssbo_access(struct translator *t, const struct value *address, nir_def *stored,
 }
 
 static nir_def *
+shared_access(struct translator *t, const struct value *address, nir_def *stored,
+               unsigned components, unsigned bits, unsigned alignment)
+{
+   nir_builder *b = &t->b;
+   unsigned bytes = components * (bits / 8);
+   /* Preserve LLVM64 offsets and resource provenance. An out-of-view access
+    * never truncates into another shared allocation or a valid low offset. */
+   nir_def *valid = address->shared_size >= bytes ?
+      nir_uge(b, nir_imm_int64(b, address->shared_size - bytes), address->def) : nir_imm_false(b);
+   nir_push_if(b, valid);
+   nir_deref_instr *byte = nir_build_deref_array(b, nir_build_deref_var(b, address->shared),
+                                                nir_u2u32(b, address->def));
+   const struct glsl_type *type = glsl_vector_type(glsl_get_base_type(glsl_uintN_t_type(bits)), components);
+   nir_deref_instr *typed = nir_build_deref_cast_with_alignment(b, &byte->def,
+      nir_var_mem_shared, type, bytes, alignment, 0);
+   nir_def *loaded = NULL;
+   if (stored)
+      nir_store_deref(b, typed, stored, BITFIELD_MASK(components));
+   else
+      loaded = nir_load_deref(b, typed);
+   nir_push_else(b, NULL);
+   nir_def *zero = stored ? NULL : nir_imm_zero(b, components, bits);
+   nir_pop_if(b, NULL);
+   return stored ? NULL : nir_if_phi(b, loaded, zero);
+}
+
+static nir_def *
 compare(struct translator *t, LLVMValueRef inst, nir_def *a, nir_def *b)
 {
    switch (LLVMGetICmpPredicate(inst)) {
@@ -765,7 +953,7 @@ instruction(struct translator *t, LLVMValueRef inst)
    unsigned components = 0, bits = 0;
    if (op == LLVMRet)
       return LLVMGetNumOperands(inst) == 0 || fail(t, STELA_AIR_TYPE, "compute kernel return value");
-   if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast &&
+   if (op != LLVMStore && op != LLVMGetElementPtr && op != LLVMBitCast && op != LLVMCall &&
        !value_shape(LLVMTypeOf(inst), &components, &bits))
       return fail(t, STELA_AIR_TYPE, "unsupported AIR instruction result type (opcode %u)", op);
    if (op == LLVMGetElementPtr) {
@@ -776,6 +964,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       struct value *value = find_value(t, inst);
       value->ssbo = origin->ssbo;
       value->ssbo_slot = origin->ssbo_slot;
+      value->shared = origin->shared;
+      value->shared_size = origin->shared_size;
       return true;
    }
    if (op == LLVMBitCast) {
@@ -783,13 +973,16 @@ instruction(struct translator *t, LLVMValueRef inst)
       LLVMTypeRef source = LLVMTypeOf(LLVMGetOperand(inst, 0));
       if (LLVMGetTypeKind(source) == LLVMPointerTypeKind &&
           LLVMGetTypeKind(LLVMTypeOf(inst)) == LLVMPointerTypeKind &&
-          LLVMGetPointerAddressSpace(source) == 1 && LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) == 1) {
+          (LLVMGetPointerAddressSpace(source) == 1 || LLVMGetPointerAddressSpace(source) == 3) &&
+          LLVMGetPointerAddressSpace(LLVMTypeOf(inst)) == LLVMGetPointerAddressSpace(source)) {
          const struct value *origin = find_value(t, LLVMGetOperand(inst, 0));
          if (!origin || !origin->access || !put_value(t, inst, origin->def, origin->access))
             return fail(t, STELA_AIR_MEMORY, "pointer identity cast lacks buffer provenance");
          struct value *value = find_value(t, inst);
          value->ssbo = origin->ssbo;
          value->ssbo_slot = origin->ssbo_slot;
+         value->shared = origin->shared;
+         value->shared_size = origin->shared_size;
          return true;
       }
       bool fp_pair = (float_shape(source, &src_components, &src_bits) &&
@@ -805,6 +998,35 @@ instruction(struct translator *t, LLVMValueRef inst)
       LLVMValueRef callee = LLVMGetCalledValue(inst);
       size_t name_length = 0;
       const char *name = LLVMGetValueName2(callee, &name_length);
+      if (name_length == strlen("air.wg.barrier") && !memcmp(name, "air.wg.barrier", name_length)) {
+         if (!shared_profile(t))
+            return false;
+         unsigned convergent = LLVMGetEnumAttributeKindForName("convergent", strlen("convergent"));
+         if (!t->options->max_threadgroup_bytes || !LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee) ||
+             LLVMGetFunctionCallConv(callee) != LLVMCCallConv ||
+             LLVMGetInstructionCallConv(inst) != LLVMCCallConv || LLVMGetNumArgOperands(inst) != 3 ||
+             LLVMCountParams(callee) != 3 || LLVMIsFunctionVarArg(LLVMGlobalGetValueType(callee)) ||
+             LLVMGetCalledFunctionType(inst) != LLVMGlobalGetValueType(callee) ||
+             LLVMGetNumOperandBundles(inst) ||
+             LLVMGetTypeKind(LLVMTypeOf(inst)) != LLVMVoidTypeKind ||
+             !LLVMGetEnumAttributeAtIndex(callee, LLVMAttributeFunctionIndex, convergent) ||
+             !LLVMGetCallSiteEnumAttribute(inst, LLVMAttributeFunctionIndex, convergent))
+            return fail(t, STELA_AIR_INSTRUCTION, "unsupported/unconfigured workgroup barrier signature");
+         const unsigned expected[] = {2, 5, 1};
+         for (unsigned i = 0; i < ARRAY_SIZE(expected); i++) {
+            LLVMValueRef operand = LLVMGetOperand(inst, i);
+            if (!LLVMIsAConstantInt(operand) || LLVMGetIntTypeWidth(LLVMTypeOf(operand)) != 32 ||
+                LLVMConstIntGetZExtValue(operand) != expected[i])
+               return fail(t, STELA_AIR_INSTRUCTION, "unsupported workgroup barrier memory flags/order/scope");
+         }
+         /* Qualified MSL collective: all WG threads rendezvous, publishing
+          * ordinary shared-memory reads/writes. No atomic SC order, device or
+          * image memory scope is implemented by this observed form. */
+         nir_barrier(&t->b, .execution_scope = SCOPE_WORKGROUP, .memory_scope = SCOPE_WORKGROUP,
+            .memory_semantics = NIR_MEMORY_ACQ_REL, .memory_modes = nir_var_mem_shared);
+         t->shared_barriers++;
+         return true;
+      }
       const char *signed_name = "air.convert.f.f32.s.i32";
       const char *unsigned_name = "air.convert.f.f32.u.i32";
       bool signed_conversion = name_length == strlen(signed_name) && !memcmp(name, signed_name, name_length);
@@ -911,6 +1133,8 @@ instruction(struct translator *t, LLVMValueRef inst)
       return fail(t, STELA_AIR_TYPE, "pointer comparison unsupported");
    if (op == LLVMLoad || op == LLVMStore) {
       LLVMValueRef pointer = LLVMGetOperand(inst, op == LLVMStore ? 1 : 0);
+      if (LLVMIsAGlobalVariable(pointer) && !get_value(t, pointer))
+         return false;
       struct value *address = find_value(t, pointer);
       unsigned required = op == LLVMStore ? STELA_AIR_WRITE : STELA_AIR_READ;
       if (!address || !(address->access & required) || LLVMGetVolatile(inst) ||
@@ -927,12 +1151,16 @@ instruction(struct translator *t, LLVMValueRef inst)
          nir_def *value = get_value(t, LLVMGetOperand(inst, 0));
          if (!value)
             return false;
-         if (address->ssbo)
+         if (address->shared)
+            shared_access(t, address, value, components, bits, alignment);
+         else if (address->ssbo)
             ssbo_access(t, address, value, components, bits, alignment);
          else
             nir_store_global(&t->b, value, address->def, .align_mul = alignment);
          return true;
       }
+      if (address->shared)
+         return put_value(t, inst, shared_access(t, address, NULL, components, bits, alignment), 0);
       if (address->ssbo)
          return put_value(t, inst, ssbo_access(t, address, NULL, components, bits, alignment), 0);
       return put_value(t, inst, nir_load_global(&t->b, components, bits,
@@ -1434,6 +1662,10 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
       fail(&t, STELA_AIR_INPUT, "invalid/mixed global and SSBO binding ABI");
       return NULL;
    }
+   if (options->bind_threadgroup && !options->max_threadgroup_bytes) {
+      fail(&t, STELA_AIR_INPUT, "threadgroup callback requires an explicit shared-byte limit");
+      return NULL;
+   }
    if (options->fp_profile != STELA_AIR_FP_IEEE_DEFAULT &&
        options->fp_profile != STELA_AIR_FP_APPLE_32023_922_AIR29_MSL41) {
       fail(&t, STELA_AIR_INPUT, "unknown AIR floating-point profile");
@@ -1466,12 +1698,12 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
    size_t asm_size;
    LLVMGetModuleInlineAsm(t.module, &asm_size);
    if (strncmp(target, "air64_v", 7) || asm_size ||
-       LLVMGetFirstGlobal(t.module) || LLVMGetFirstGlobalAlias(t.module) ||
+       LLVMGetFirstGlobalAlias(t.module) ||
        LLVMGetFirstGlobalIFunc(t.module)) {
       fail(&t, STELA_AIR_TARGET, "unsupported target/globals/inline assembly");
       goto done;
    }
-   if (!address_layout(&t) || !module_metadata(&t))
+   if (!address_layout(&t) || !module_metadata(&t) || !shared_globals(&t))
       goto done;
    char target_prefix[40];
    snprintf(target_prefix, sizeof(target_prefix), "air64_v2%u-apple-macosx", t.air_minor);
@@ -1514,6 +1746,16 @@ stela_air_to_nir(const void *bitcode, size_t size, const char *entry,
          goto done;
       }
    }
+   if (t.shared_resources) {
+      nir_lower_vars_to_explicit_types(t.b.shader, nir_var_mem_shared, glsl_get_natural_size_align_bytes);
+      if (t.b.shader->info.shared_size > options->max_threadgroup_bytes) {
+         fail(&t, STELA_AIR_LIMIT, "aligned shared layout exceeds target/backend byte limit");
+         goto done;
+      }
+      nir_lower_explicit_io(t.b.shader, nir_var_mem_shared, nir_address_format_32bit_offset);
+   }
+   if (t.shared_resources || t.shared_barriers)
+      nir_shader_gather_info(t.b.shader, nir_shader_get_entrypoint(t.b.shader));
    nir_validate_shader(t.b.shader, "AIR bounded compute translation");
    result = t.b.shader;
    t.b.shader = NULL;

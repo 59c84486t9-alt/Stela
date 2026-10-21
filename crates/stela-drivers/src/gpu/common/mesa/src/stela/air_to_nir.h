@@ -66,6 +66,21 @@ typedef nir_def *(*stela_air_bind_buffer)(nir_builder *b,
 typedef bool (*stela_air_bind_ssbo)(const struct stela_air_buffer *buffer,
                                    unsigned *slot, void *data);
 
+struct stela_air_threadgroup_view {
+   uint64_t size; /* Exact nonempty per-dispatch byte extent, not type_size. */
+   unsigned alignment;
+   enum stela_air_buffer_access available_access;
+};
+
+/* AS3 uses a separate Metal index namespace. Return the actual dispatch's
+ * allocation length/rights/alignment; NIR owns the shared-memory layout, never
+ * a CPU/GPU VA. The exact sizes/alignment and workgroup specialization must be
+ * retained in receipts and the pipeline cache key. Changing them requires a
+ * matching compiled specialization and dispatch shared-memory reservation. */
+typedef bool (*stela_air_bind_threadgroup)(const struct stela_air_buffer *buffer,
+                                          struct stela_air_threadgroup_view *view,
+                                          void *data);
+
 struct stela_air_ssbo_view {
    unsigned slot;
    uint64_t buffer_size;
@@ -110,6 +125,11 @@ struct stela_air_options {
    stela_air_bind_ssbo bind_ssbo;
    unsigned ssbo_count;
    enum stela_air_fp_profile fp_profile;
+   stela_air_bind_threadgroup bind_threadgroup;
+   /* Explicit target/backend representability limit. Zero refuses shared
+    * resources/barriers; NAK callers must additionally stay within UINT16_MAX
+    * before its original smem_size conversion. No target limit is inferred. */
+   unsigned max_threadgroup_bytes;
 };
 
 /* Input is the hash-checked raw AIR bitcode selected by the archive reader.
@@ -122,6 +142,10 @@ struct stela_air_options {
  * one distinct unconditional latch and one header exit; iterations are uncapped.
  * One final return, <=128 blocks/header-or-merge PHIs and <=32 nested constructs.
  * Nested/multi-latch/body-exit loops, pointer PHIs and general CFGs are refused.
+ * Qualified AS3 storage is returned as explicit shared32 NIR with the original
+ * aligned layout in info.shared_size. Dynamic view sizes/alignment and target
+ * byte limits are caller specializations, never inferred GPU capabilities.
+ * Only the observed ordinary-shared collective barrier form is supported.
  * LLVM is a native compiler library, not a hostile-input sandbox.
  */
 nir_shader *stela_air_to_nir(const void *bitcode, size_t size, const char *entry,

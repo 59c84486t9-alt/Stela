@@ -738,6 +738,321 @@ qualified_bitcode(const char *body, const char *extra)
    return result;
 }
 
+static const char *shared_declaration =
+   "declare void @air.wg.barrier(i32, i32, i32) convergent\n";
+static const char *shared_global_declaration =
+   "@scratch = internal addrspace(3) global [64 x i32] undef, align 4\n";
+static const char *shared_body =
+   "%lane = and i32 %tid, 63\n%idx = zext i32 %lane to i64\n"
+   "%p = getelementptr [64 x i32], ptr addrspace(3) @scratch, i64 0, i64 %idx\n"
+   "%v = add i32 %lane, 1\nstore i32 %v, ptr addrspace(3) %p, align 4\n"
+   "call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\n"
+   "%next = add i32 %lane, 1\n%other = and i32 %next, 63\n%o64 = zext i32 %other to i64\n"
+   "%q = getelementptr [64 x i32], ptr addrspace(3) @scratch, i64 0, i64 %o64\n"
+   "%loaded = load i32, ptr addrspace(3) %q, align 4\n"
+   "store i32 %loaded, ptr addrspace(1) %out, align 4\nret void\n";
+
+static LLVMMemoryBufferRef
+shared_bitcode_index(const char *body, bool dynamic, const char *extra, unsigned index)
+{
+   /* Original LLVM fixtures test the observed ABI; captured Apple modules are
+    * separately consumed byte-for-byte, never relabelled or rewritten here. */
+   char *prefix = replace_once(stela_air_test_prefix, "air64_v28-apple-macosx26.7.0", "air64_v29-apple-macosx27.2.0");
+   char *air = replace_once(stela_air_test_metadata, "i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0");
+   char *metadata = replace_once(air, "i32 4, i32 0, i32 0", "i32 4, i32 1, i32 0");
+   if (dynamic) {
+      char *next = replace_once(prefix, "ptr addrspace(1) %out)",
+         "ptr addrspace(1) %out, ptr addrspace(3) %scratch)");
+      free(prefix); prefix = next;
+      next = replace_once(metadata, "!4 = !{!5,!6}", "!4 = !{!5,!6,!12}");
+      free(metadata); metadata = next;
+   }
+   char argument[512] = "";
+   if (dynamic)
+      CHECK(snprintf(argument, sizeof(argument),
+         "!12 = !{i32 2, !\"air.buffer\", !\"air.location_index\", i32 %u, i32 1, !\"air.read_write\","
+         "!\"air.address_space\", i32 3, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4}\n", index) > 0);
+   size_t size = strlen(extra) + strlen(argument) + 512;
+   char *declarations = malloc(size);
+   CHECK(declarations);
+   CHECK(snprintf(declarations, size,
+      "!llvm.ident = !{!11}\n!11 = !{!\"Apple metal version 32023.922 (metalfe-32023.922.4)\"}\n"
+      "!llvm.module.flags = !{!13}\n!13 = !{i32 7, !\"air.max_threadgroup_buffers\", i32 31}\n%s%s",
+      argument, extra) > 0);
+   LLVMMemoryBufferRef input = stela_air_test_custom_bitcode(prefix, body, metadata, declarations);
+   free(declarations); free(prefix); free(air); free(metadata);
+   return input;
+}
+
+static LLVMMemoryBufferRef
+shared_bitcode(const char *body, bool dynamic, const char *extra)
+{
+   /* Same index7 as AS1 proves these are separate Metal resource namespaces. */
+   return shared_bitcode_index(body, dynamic, extra, 7);
+}
+
+struct shared_bindings {
+   unsigned devices, shared;
+   struct stela_air_threadgroup_view view;
+};
+
+static nir_def *
+shared_bind_device(nir_builder *b, const struct stela_air_buffer *buffer, void *data)
+{
+   struct shared_bindings *bindings = data;
+   return bind_buffer(b, buffer, &bindings->devices);
+}
+
+static bool
+shared_bind(const struct stela_air_buffer *buffer, struct stela_air_threadgroup_view *view, void *data)
+{
+   struct shared_bindings *bindings = data;
+   CHECK(buffer->argument == 2 && buffer->index == 7 && buffer->address_space == 3 &&
+         buffer->access == STELA_AIR_READ_WRITE && buffer->type_size == 4 && buffer->type_alignment == 4);
+   bindings->shared++;
+   *view = bindings->view;
+   return true;
+}
+
+static nir_shader *
+shared_translate(LLVMMemoryBufferRef input, const nir_shader_compiler_options *nir_options,
+                  struct shared_bindings *bindings, unsigned limit, struct stela_air_error *error)
+{
+   const struct stela_air_options options = {
+      .workgroup_size = {64,1,1}, .max_instructions = 1000,
+      .bind_buffer = shared_bind_device, .binding_data = bindings,
+      .bind_threadgroup = limit ? shared_bind : NULL, .max_threadgroup_bytes = limit,
+   };
+   return stela_air_to_nir(LLVMGetBufferStart(input), LLVMGetBufferSize(input), "kernel",
+                           nir_options, &options, error);
+}
+
+static void
+check_shared_operations(nir_shader *nir, unsigned stores, unsigned loads, unsigned barriers)
+{
+   unsigned seen_stores = 0, seen_loads = 0, seen_barriers = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_store_shared) {
+               CHECK(!seen_barriers); /* Publication precedes the rendezvous. */
+               seen_stores++;
+            } else if (intr->intrinsic == nir_intrinsic_load_shared) {
+               CHECK(seen_barriers == barriers);
+               seen_loads++;
+            } else if (intr->intrinsic == nir_intrinsic_barrier) {
+               CHECK(seen_stores == stores && !seen_loads);
+               CHECK(nir_intrinsic_execution_scope(intr) == SCOPE_WORKGROUP &&
+                     nir_intrinsic_memory_scope(intr) == SCOPE_WORKGROUP &&
+                     nir_intrinsic_memory_modes(intr) == nir_var_mem_shared &&
+                     nir_intrinsic_memory_semantics(intr) == NIR_MEMORY_ACQ_REL);
+               seen_barriers++;
+            }
+         }
+      }
+   }
+   CHECK(seen_stores == stores && seen_loads == loads && seen_barriers == barriers);
+   if (barriers)
+      CHECK(nir->info.uses_control_barrier && nir->info.uses_memory_barrier);
+   nir_validate_shader(nir, "AIR shared bounds/collective ordering");
+}
+
+static void
+shared_semantics(void)
+{
+   char extra[512];
+   snprintf(extra, sizeof(extra), "%s%s", shared_global_declaration, shared_declaration);
+   LLVMMemoryBufferRef input = shared_bitcode(shared_body, false, extra);
+   struct shared_bindings bindings = {.view = {256,4,STELA_AIR_READ_WRITE}};
+   struct stela_air_error error;
+   nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 256, &error);
+   CHECK(nir && bindings.devices == 1 && !bindings.shared && nir->info.shared_size == 256);
+   check_shared_operations(nir, 1, 1, 1);
+   ralloc_free(nir);
+   CHECK(!shared_translate(input, &test_nir_options, &bindings, 255, &error) && error.kind == STELA_AIR_LIMIT);
+   CHECK(!shared_translate(input, &test_nir_options, &bindings, 0, &error) && error.kind == STELA_AIR_LIMIT);
+   LLVMDisposeMemoryBuffer(input);
+
+   char *dynamic = replace_once(shared_body, "@scratch", "%scratch");
+   char *next = replace_once(dynamic, "@scratch", "%scratch");
+   free(dynamic); dynamic = next;
+   input = shared_bitcode(dynamic, true, shared_declaration);
+   bindings = (struct shared_bindings){.view = {256,4,STELA_AIR_READ_WRITE}};
+   nir = shared_translate(input, &test_nir_options, &bindings, 256, &error);
+   CHECK(nir && bindings.devices == 1 && bindings.shared == 1 && nir->info.shared_size == 256);
+   check_shared_operations(nir, 1, 1, 1);
+   ralloc_free(nir);
+   const struct stela_air_threadgroup_view invalid[] = {
+      {0,4,STELA_AIR_READ_WRITE}, {3,4,STELA_AIR_READ_WRITE},
+      {257,4,STELA_AIR_READ_WRITE}, {UINT64_MAX,4,STELA_AIR_READ_WRITE},
+      {256,0,STELA_AIR_READ_WRITE}, {256,3,STELA_AIR_READ_WRITE},
+      {256,2,STELA_AIR_READ_WRITE}, {256,4,STELA_AIR_READ}, {256,4,4},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); i++) {
+      bindings.view = invalid[i];
+      CHECK(!shared_translate(input, &test_nir_options, &bindings, 256, &error));
+      CHECK(error.kind == STELA_AIR_ARGUMENT || error.kind == STELA_AIR_LIMIT);
+   }
+   LLVMDisposeMemoryBuffer(input);
+   input = shared_bitcode_index(dynamic, true, shared_declaration, 31);
+   bindings.view = (struct stela_air_threadgroup_view){256,4,STELA_AIR_READ_WRITE};
+   CHECK(!shared_translate(input, &test_nir_options, &bindings, 256, &error) && error.kind == STELA_AIR_METADATA);
+   LLVMDisposeMemoryBuffer(input);
+   free(dynamic);
+
+   /* Separate resources use original NIR's required alignment, not a custom
+    * allocator. The 8-byte object starts at16 after the 3-byte object. */
+   input = shared_bitcode("store i8 1, ptr addrspace(3) @a, align 1\n"
+      "store i32 2, ptr addrspace(3) @b, align 4\nret void\n", false,
+      "@a = internal addrspace(3) global [3 x i8] undef, align 1\n"
+      "@b = internal addrspace(3) global [2 x i32] undef, align 16\n");
+   bindings = (struct shared_bindings){0};
+   nir = shared_translate(input, &test_nir_options, &bindings, 24, &error);
+   CHECK(nir && nir->info.shared_size == 24);
+   specialize_invocation(nir, 0);
+   unsigned shared_stores = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_shared)
+               continue;
+            CHECK(nir_src_is_const(intr->src[1]) &&
+                  nir_src_as_uint(intr->src[1]) + nir_intrinsic_base(intr) == (shared_stores ? 16 : 0));
+            CHECK(nir_src_is_const(intr->src[0]) && nir_src_as_uint(intr->src[0]) == shared_stores + 1);
+            shared_stores++;
+         }
+      }
+   }
+   CHECK(shared_stores == 2);
+   ralloc_free(nir);
+   CHECK(!shared_translate(input, &test_nir_options, &bindings, 23, &error) && error.kind == STELA_AIR_LIMIT);
+   LLVMDisposeMemoryBuffer(input);
+
+   const uint64_t offsets[] = {0, 15, 16, UINT64_C(1) << 30, UINT64_MAX};
+   for (unsigned i = 0; i < ARRAY_SIZE(offsets); i++) {
+      char body[512];
+      snprintf(body, sizeof(body), "%%p = getelementptr [16 x i32], ptr addrspace(3) @scratch, i64 0, i64 %llu\n"
+         "store i32 42, ptr addrspace(3) %%p, align 4\n"
+         "%%v = load i32, ptr addrspace(3) %%p, align 4\n"
+         "store i32 %%v, ptr addrspace(1) %%out, align 4\nret void\n", (unsigned long long)offsets[i]);
+      input = shared_bitcode(body, false, "@scratch = internal addrspace(3) global [16 x i32] undef, align 4\n");
+      nir = shared_translate(input, &test_nir_options, &bindings, 64, &error);
+      CHECK(nir && nir->info.shared_size == 64);
+      specialize_invocation(nir, 0);
+      bool valid = i < 2;
+      check_shared_operations(nir, valid ? 1 : 0, valid ? 1 : 0, 0);
+      if (!valid) {
+         const uint64_t address = 0x100000;
+         const uint32_t value = 0;
+         check_stores(nir, &address, &value, 1);
+      }
+      ralloc_free(nir);
+      LLVMDisposeMemoryBuffer(input);
+   }
+}
+
+static void
+shared_refusal(const char *body, const char *extra, enum stela_air_error_kind expected)
+{
+   LLVMMemoryBufferRef input = shared_bitcode(body, false, extra);
+   struct shared_bindings bindings = {0};
+   struct stela_air_error error;
+   nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 256, &error);
+   if (nir || error.kind != expected)
+      fprintf(stderr, "shared refusal wanted%u got%u: %s\n", expected, error.kind, error.detail);
+   CHECK(!nir && error.kind == expected && error.detail[0]);
+   LLVMDisposeMemoryBuffer(input);
+}
+
+static void
+shared_contracts(void)
+{
+   const char *flags[] = {"i32 0, i32 5, i32 1", "i32 1, i32 5, i32 1",
+      "i32 4, i32 5, i32 1", "i32 6, i32 5, i32 1", "i32 2, i32 0, i32 1",
+      "i32 2, i32 2, i32 1", "i32 2, i32 4, i32 1", "i32 2, i32 5, i32 0",
+      "i32 2, i32 5, i32 2", "i32 %tid, i32 5, i32 1"};
+   for (unsigned i = 0; i < ARRAY_SIZE(flags); i++) {
+      char body[256];
+      snprintf(body, sizeof(body), "call void @air.wg.barrier(%s) convergent\nret void\n", flags[i]);
+      shared_refusal(body, shared_declaration, STELA_AIR_INSTRUCTION);
+   }
+   shared_refusal("call void @air.wg.barrier(i64 2, i32 5, i32 1) convergent\nret void\n",
+      "declare void @air.wg.barrier(i64, i32, i32) convergent\n", STELA_AIR_INSTRUCTION);
+   shared_refusal("%v = call i32 @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nret void\n",
+      "declare i32 @air.wg.barrier(i32, i32, i32) convergent\n", STELA_AIR_INSTRUCTION);
+   shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1)\nret void\n",
+      shared_declaration, STELA_AIR_INSTRUCTION);
+   shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nret void\n",
+      "declare void @air.wg.barrier(i32, i32, i32)\n", STELA_AIR_INSTRUCTION);
+   shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nret void\n",
+      "define void @air.wg.barrier(i32 %a, i32 %b, i32 %c) convergent { ret void }\n", STELA_AIR_INSTRUCTION);
+   shared_refusal("call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent [\"deopt\"(i32 1)]\nret void\n",
+      shared_declaration, STELA_AIR_INSTRUCTION);
+   const char *globals[] = {
+      "@s = internal addrspace(3) global i32 0, align 4\n",
+      "@s = internal addrspace(3) global i32 poison, align 4\n",
+      "@s = external addrspace(3) global i32\n",
+      "@s = internal addrspace(3) constant i32 undef, align 4\n",
+      "@s = internal addrspace(1) global i32 undef, align 4\n",
+      "@s = internal addrspace(4) global i32 undef, align 4\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(globals); i++)
+      shared_refusal("ret void\n", globals[i], STELA_AIR_TARGET);
+   shared_refusal("ret void\n", "@s = internal addrspace(3) global [4294967296 x i32] undef\n", STELA_AIR_LIMIT);
+   shared_refusal("ret void\n", "@s = internal addrspace(3) global {i32,i32} undef\n", STELA_AIR_TYPE);
+   shared_refusal("store atomic i32 1, ptr addrspace(3) @s monotonic, align 4\nret void\n",
+      "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
+   shared_refusal("store volatile i32 1, ptr addrspace(3) @s, align 4\nret void\n",
+      "@s = internal addrspace(3) global i32 undef, align 4\n", STELA_AIR_MEMORY);
+   shared_refusal("ret void\n", "@s = internal addrspace(3) global <vscale x 4 x i32> undef\n", STELA_AIR_VERIFY);
+   LLVMMemoryBufferRef old_profile = stela_air_test_bitcode(
+      "call void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nret void\n", shared_declaration);
+   struct shared_bindings old_bindings = {0};
+   struct stela_air_error old_error;
+   CHECK(!shared_translate(old_profile, &test_nir_options, &old_bindings, 256, &old_error) &&
+         old_error.kind == STELA_AIR_METADATA);
+   LLVMDisposeMemoryBuffer(old_profile);
+
+   /* Collective placement remains exact, even in source regions whose caller
+    * must guarantee uniform participation. No frontend speculation/hoisting. */
+   const char *placement[] = {
+      "entry:\n%c = icmp eq i32 %tid, 0\nbr i1 %c, label %left, label %right\n"
+      "left:\ncall void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\nbr label %join\n"
+      "right:\nbr label %join\njoin:\nret void\n",
+      "entry:\nbr label %header\nheader:\n%i = phi i32 [0, %entry], [%next, %latch]\n"
+      "%c = icmp ult i32 %i, 2\nbr i1 %c, label %latch, label %exit\n"
+      "latch:\ncall void @air.wg.barrier(i32 2, i32 5, i32 1) convergent\n"
+      "%next = add i32 %i, 1\nbr label %header\nexit:\nret void\n",
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(placement); i++) {
+      LLVMMemoryBufferRef input = shared_bitcode(placement[i], false, shared_declaration);
+      struct shared_bindings bindings = {0};
+      struct stela_air_error error;
+      nir_shader *nir = shared_translate(input, &test_nir_options, &bindings, 256, &error);
+      CHECK(nir);
+      unsigned barriers = 0;
+      nir_foreach_function_impl(impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic ||
+                   nir_instr_as_intrinsic(instr)->intrinsic != nir_intrinsic_barrier)
+                  continue;
+               CHECK(block->cf_node.parent->type == (i ? nir_cf_node_loop : nir_cf_node_if));
+               barriers++;
+            }
+         }
+      }
+      CHECK(barriers == 1);
+      ralloc_free(nir); LLVMDisposeMemoryBuffer(input);
+   }
+}
+
 static const char *floating_body =
    "%index = zext i32 %tid to i64\n"
    "%address = getelementptr float, ptr addrspace(1) %out, i64 %index\n"
@@ -1206,6 +1521,8 @@ tests(void)
    floating_backend_options();
    floating_contracts();
    qualified_floating_semantics();
+   shared_semantics();
+   shared_contracts();
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 10, i32 0", STELA_AIR_METADATA);
    metadata_refusal("i32 2, i32 8, i32 0", "i32 2, i32 9, i32 0", STELA_AIR_TARGET);
    metadata_refusal("i32 4, i32 0, i32 0", "i32 4, i32 1, i32 0", STELA_AIR_METADATA);
@@ -1247,7 +1564,7 @@ tests(void)
    expect_refusal("%v = load atomic i32, ptr addrspace(1) %out monotonic, align 4\nret void\n", "", 100, STELA_AIR_MEMORY);
    expect_refusal("%v = udiv i32 %tid, 2\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("%v = freeze i32 poison\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
-   expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_TYPE);
+   expect_refusal("call void @helper()\nret void\n", "declare void @helper()\n", 100, STELA_AIR_INSTRUCTION);
    expect_refusal("store i32 %later, ptr addrspace(1) %out, align 4\n%later = add i32 %tid, 1\nret void\n", "", 100, STELA_AIR_VERIFY);
    expect_refusal("ret void\n", "!air.function_constants = !{!3}\n", 100, STELA_AIR_METADATA);
    expect_refusal("%v = add i32 undef, 1\nret void\n", "", 100, STELA_AIR_INSTRUCTION);
@@ -1284,6 +1601,47 @@ digest(const void *bytes, size_t size, char out[2 * BLAKE3_OUT_LEN + 1])
       out[2 * i + 1] = hex[hash[i] & 15];
    }
    out[2 * BLAKE3_OUT_LEN] = 0;
+}
+
+static void
+nak_shared_codegen(bool dynamic)
+{
+   const unsigned targets[] = {75,80,86,87,89,90,100,104,120};
+   char extra[512];
+   snprintf(extra, sizeof(extra), "%s%s", dynamic ? "" : shared_global_declaration, shared_declaration);
+   char *body = NULL;
+   if (dynamic) {
+      char *first = replace_once(shared_body, "@scratch", "%scratch");
+      body = replace_once(first, "@scratch", "%scratch");
+      free(first);
+   }
+   LLVMMemoryBufferRef input = shared_bitcode(dynamic ? body : shared_body, dynamic, extra);
+   for (unsigned i = 0; i < ARRAY_SIZE(targets); i++) {
+      const struct nv_device_info dev = {.sm = targets[i], .max_warps_per_mp = 32};
+      const struct nak_constant_offset_info layout = {
+         .sample_info_cb = 0, .sample_locations_offset = 0, .sample_masks_offset = 256,
+         .printf_cb = 0, .printf_buffer_offset = 512,
+      };
+      struct nak_compiler *compiler = nak_compiler_create(&dev, &layout, &layout);
+      CHECK(compiler);
+      struct shared_bindings bindings = {.view = {256,4,STELA_AIR_READ_WRITE}};
+      struct stela_air_error error;
+      nir_shader *nir = shared_translate(input, nak_nir_options(compiler), &bindings, 256, &error);
+      CHECK(nir && bindings.devices == 1 && bindings.shared == (dynamic ? 1 : 0));
+      check_shared_operations(nir, 1, 1, 1);
+      nak_preprocess_nir(nir, compiler);
+      struct nak_shader_bin *bin = nak_compile_shader(nir, true, compiler, 0, NULL, false);
+      CHECK(bin && bin->code && bin->code_size && bin->info.cs.smem_size == 256 &&
+            bin->info.num_control_barriers == 1);
+      CHECK(bin->asm_str && strstr(bin->asm_str, "st.shared") &&
+            strstr(bin->asm_str, "ld.shared") && strstr(bin->asm_str, "bar.sync"));
+      printf("AIR shared-%s-workgroup64->LLVM->NIR->NAK SM%u: %u bytes, %u instructions, shared256, barriers1\n",
+         dynamic ? "dynamic" : "static", targets[i], bin->code_size, bin->info.num_instrs);
+      puts(bin->asm_str);
+      nak_shader_bin_destroy(bin); ralloc_free(nir); nak_compiler_destroy(compiler);
+   }
+   LLVMDisposeMemoryBuffer(input);
+   free(body);
 }
 
 static void
@@ -1348,6 +1706,8 @@ main(void)
    char *comparisons = floating_comparison_body();
    nak_codegen(comparisons, "ieee-fp32-comparisons", true);
    free(comparisons);
+   nak_shared_codegen(false);
+   nak_shared_codegen(true);
 #endif
    glsl_type_singleton_decref();
    return 0;
