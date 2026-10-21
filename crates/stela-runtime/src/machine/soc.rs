@@ -1062,6 +1062,28 @@ pub const NOR: &str = "nor-flash,spi";
 pub const NVRAM: &str = "nvram,chrp";
 /// GPIO output provider compatible.
 pub const GPIO: &str = "gpio,t8101";
+const GPIO_T6000: &str = "gpio,t6000";
+const GPIO_S5L: &str = "gpio,s5l8960x";
+
+/// Compatible identifies register semantics, while role bounds the qualified
+/// board owner. Only the AP S5L bank is admitted: auxiliary restoration,
+/// wake groups and nets remain explicit unqualified board dependencies.
+fn gpio_profile<'a>(property: impl Fn(&str) -> Option<&'a [u8]>) -> Option<gpio::Profile> {
+    let compatibles = property("compatible")?;
+    let has = |name: &str| {
+        compatibles
+            .split(|byte| *byte == 0)
+            .any(|c| c == name.as_bytes())
+    };
+    match (has(GPIO), has(GPIO_T6000), has(GPIO_S5L)) {
+        (true, false, false) => Some(gpio::Profile::T8101),
+        (false, true, true) if property("role") == Some(b"AP\0".as_slice()) => {
+            Some(gpio::Profile::S5l8960x)
+        }
+        _ => None,
+    }
+}
+
 /// The Type-C I2C bus: controller, HPM bus manager and CD321x dies.
 pub const I2C: &str = "i2c,t8101";
 pub const HPM_MANAGER: &str = "usbc,manager";
@@ -1299,6 +1321,8 @@ pub fn models<'a>(name: &str, property: impl Fn(&str) -> Option<&'a [u8]>) -> bo
         DISPEXT,
     ]
     .contains(&name)
+        || [GPIO_T6000, GPIO_S5L].contains(&name)
+            && gpio_profile(&property) == Some(gpio::Profile::S5l8960x)
         || dart::Profile::from_compatible(name.as_bytes()).is_some_and(|profile| {
             property("compatible")
                 .is_none_or(|bytes| dart::Profile::from_compatible(bytes) == Some(profile))
@@ -1863,6 +1887,10 @@ pub struct SpiNor {
 /// pulled-up I2C lines in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpioBank {
+    pub profile: gpio::Profile,
+    /// Original software restoration exclusions. The device model does not
+    /// restore pads or implement global 0xc48/wake from this metadata.
+    pub no_restore_pins: Vec<u32>,
     pub physical: u64,
     pub bytes: u64,
     pub pins: u32,
@@ -1902,7 +1930,7 @@ fn gpio_bank(
     let Some(node) = AP_GPIO_NAMES
         .iter()
         .find_map(|name| io.child(name))
-        .filter(|n| n.compatible(GPIO))
+        .filter(|n| gpio_profile(|key| n.property(key)).is_some())
     else {
         return Ok(None);
     };
@@ -2015,7 +2043,40 @@ fn gpio_geometry(
     {
         return Err("unsupported GPIO geometry or interrupt parent".into());
     }
+    let profile = gpio_profile(|key| node.property(key))
+        .ok_or("GPIO register profile or board role is unqualified")?;
+    let no_restore_pins = match node.property("no-restore-gpio-pins") {
+        None => Vec::new(),
+        Some(raw) if raw.len().is_multiple_of(4) => {
+            let values = node.cells32("no-restore-gpio-pins").unwrap_or_default();
+            if values
+                .iter()
+                .enumerate()
+                .any(|(index, pin)| *pin >= pins || values[..index].contains(pin))
+            {
+                return Err(
+                    "GPIO restoration exclusions contain an invalid or duplicate pin".into(),
+                );
+            }
+            values
+        }
+        Some(_) => return Err("GPIO restoration exclusions have incomplete cells".into()),
+    };
+    if profile == gpio::Profile::S5l8960x
+        && [
+            "no-resume-restore",
+            "supported-int-groups",
+            "wake-events",
+            "wake-no-interrupt-group",
+        ]
+        .iter()
+        .any(|key| node.property(key).is_some())
+    {
+        return Err("S5L AP GPIO restoration/wake overrides are unqualified".into());
+    }
     Ok(GpioBank {
+        profile,
+        no_restore_pins,
         physical,
         bytes,
         pins,
@@ -4654,6 +4715,143 @@ mod tests {
     }
 
     #[test]
+    fn s5l_gpio_admission_requires_qualified_pair_and_ap_role() {
+        let compatible = b"gpio,t6000\0gpio,s5l8960x\0";
+        for role in [
+            b"AP\0".as_slice(),
+            b"AOP\0",
+            b"SMC\0",
+            b"NUB\0",
+            b"unknown\0",
+        ] {
+            let property = |key: &str| match key {
+                "compatible" => Some(compatible.as_slice()),
+                "role" => Some(role),
+                _ => None,
+            };
+            for name in [GPIO_T6000, GPIO_S5L] {
+                assert_eq!(models(name, property), role == b"AP\0");
+            }
+        }
+        for compatible in [
+            b"gpio,s5l8960x\0".as_slice(),
+            b"gpio,t9999\0gpio,s5l8960x\0",
+            b"gpio,t6000\0gpio,t8101\0gpio,s5l8960x\0",
+        ] {
+            assert!(!models(GPIO_S5L, |key| match key {
+                "compatible" => Some(compatible),
+                "role" => Some(b"AP\0"),
+                _ => None,
+            }));
+        }
+    }
+
+    #[test]
+    fn s5l_ap_geometry_preserves_validated_restoration_exclusions() {
+        use crate::machine::adt::encode;
+        let make = |excluded: &[u8], override_key: Option<&str>| {
+            let reg = [0x19b028000u64, 0x4000]
+                .into_iter()
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>();
+            let irqs = (427u32..434).flat_map(u32::to_le_bytes).collect::<Vec<_>>();
+            let pins = 255u32.to_le_bytes();
+            let groups = 7u32.to_le_bytes();
+            let parent = 130u32.to_le_bytes();
+            let phandle = 136u32.to_le_bytes();
+            let mut properties = vec![
+                ("compatible", b"gpio,t6000\0gpio,s5l8960x\0".as_slice()),
+                ("role", b"AP\0"),
+                ("reg", reg.as_slice()),
+                ("#gpio-pins", &pins),
+                ("#gpio-int-groups", &groups),
+                ("interrupt-parent", &parent),
+                ("interrupts", irqs.as_slice()),
+                ("AAPL,phandle", &phandle),
+                ("no-restore-gpio-pins", excluded),
+            ];
+            if let Some(key) = override_key {
+                properties.push((key, b""));
+            }
+            encode(&properties, &[])
+        };
+        let excluded = [114u32, 115, 119]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let data = make(&excluded, None);
+        let bank = gpio_geometry(
+            &Node::root(&data).unwrap(),
+            &|value| value.checked_add(0x200000000),
+            130,
+        )
+        .unwrap();
+        assert_eq!(bank.profile, gpio::Profile::S5l8960x);
+        assert_eq!(bank.physical, 0x39b028000);
+        assert_eq!(bank.no_restore_pins, [114, 115, 119]);
+        for values in [vec![114u32, 114], vec![255], vec![u32::MAX]] {
+            let raw = values
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            let data = make(&raw, None);
+            assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+        }
+        let data = make(&excluded[..3], None);
+        assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+        for key in [
+            "no-resume-restore",
+            "supported-int-groups",
+            "wake-events",
+            "wake-no-interrupt-group",
+        ] {
+            let data = make(&excluded, Some(key));
+            assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "requires original26A434J314sDT throughSTELA_TEST_GPIO_DT"]
+    fn original_j314s_ap_gpio_qualifies_without_auxiliary_or_lifecycle_claims() {
+        let data = std::fs::read(std::env::var("STELA_TEST_GPIO_DT").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&data),
+            "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let ranges = io.ranges().unwrap();
+        let translate = |offset| {
+            ranges
+                .iter()
+                .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
+                .map(|(child, parent, _)| parent + (offset - child))
+        };
+        let bank = gpio_bank(&io, &translate, 130).unwrap().unwrap();
+        assert_eq!(bank.profile, gpio::Profile::S5l8960x);
+        assert_eq!(
+            (
+                bank.physical,
+                bank.bytes,
+                bank.pins,
+                bank.groups,
+                bank.phandle
+            ),
+            (0x39b028000, 0x4000, 255, 7, 136)
+        );
+        assert_eq!(bank.lines, [427, 428, 429, 430, 431, 432, 433]);
+        assert_eq!(bank.no_restore_pins, [114, 115, 119]);
+        for name in ["aop-gpio0", "nub-gpio0", "smc-gpio"] {
+            let node = io.child(name).unwrap();
+            assert!(gpio_profile(|key| node.property(key)).is_none());
+        }
+        assert_eq!(
+            io.child("spi1").unwrap().cells32("function-spi_cs0"),
+            Some(vec![136, GPIO_FUNCTION, 33, 0x10001])
+        );
+    }
+
+    #[test]
     fn other_gpio_banks_carry_the_pins_their_clients_name() {
         use crate::machine::adt::encode;
         let words = |v: &[u32]| v.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
@@ -5998,6 +6196,8 @@ mod tests {
             ],
         );
         let gpio = GpioBank {
+            profile: gpio::Profile::T8101,
+            no_restore_pins: Vec::new(),
             physical: 0x23c100000,
             bytes: 0x100000,
             pins: 213,

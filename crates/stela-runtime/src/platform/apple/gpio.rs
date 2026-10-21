@@ -52,6 +52,7 @@ use core::cell::Cell;
 const NAME: &str = "Apple GPIO";
 const DATA: u32 = 1;
 const MODE: u32 = 7 << 1;
+const INPUT: u32 = 0;
 const OUTPUT: u32 = 1 << 1;
 const LEVEL_HIGH: u32 = 2 << 1;
 const LEVEL_LOW: u32 = 3 << 1;
@@ -70,6 +71,14 @@ const IRQ_BASE: u64 = 0x800;
 const IRQ_STRIDE: u64 = 0x40;
 /// The interrupt groups the 3-bit group field selects.
 pub const GROUPS: usize = 8;
+
+/// Source-qualified register behavior; board nets and lifecycle remain
+/// separately owned. The S5L driver does not implement T8101 lockGPIO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    T8101,
+    S5l8960x,
+}
 
 /// A board net pulled high: open-drain outputs attached to it pull it low.
 /// Clones share the net; at most 64 outputs attach to one net.
@@ -122,6 +131,7 @@ impl OpenDrain {
 }
 
 pub struct Gpio {
+    profile: Profile,
     lifecycle: LifecycleState,
     pins: Vec<u32>,
     nets: Vec<Option<Net>>,
@@ -146,6 +156,18 @@ impl Gpio {
         selects: &[u32],
         nets: Vec<(u32, Net)>,
     ) -> Result<Self, &'static str> {
+        Self::with_profile(Profile::T8101, pins, lines, selects, nets)
+    }
+
+    /// Select register semantics at construction; the immutable profile
+    /// cannot be switched after any pin, net or interrupt has become live.
+    pub fn with_profile(
+        profile: Profile,
+        pins: u32,
+        lines: Vec<AicInput>,
+        selects: &[u32],
+        nets: Vec<(u32, Net)>,
+    ) -> Result<Self, &'static str> {
         if pins == 0
             || pins > 512
             || lines.is_empty()
@@ -160,6 +182,7 @@ impl Gpio {
         }
         let words = (pins as usize).div_ceil(32);
         let mut bank = Self {
+            profile,
             lifecycle: LifecycleState {
                 powered: true,
                 clocked: true,
@@ -315,6 +338,11 @@ impl MmioDevice for Gpio {
         self.sample(access);
         let pin = offset as usize / 4;
         if let Some(&word) = self.pins.get(pin) {
+            if word & MODE == INPUT && word & INPUT_ENABLE == 0 {
+                return Err(err(
+                    "plain GPIO input DATA with receiver disabled is unqualified",
+                ));
+            }
             if word & MODE == OUTPUT || word & INPUT_ENABLE == 0 {
                 return Ok(u64::from(word));
             }
@@ -355,8 +383,17 @@ impl MmioDevice for Gpio {
         if let Some(&word) = self.pins.get(pin) {
             let mut value = value as u32;
             let mode = value & MODE;
-            if value & !FIELDS != 0 || mode == 0 {
+            if value & !FIELDS != 0 {
                 return Err(err("unknown GPIO fields are not modeled"));
+            }
+            // Original mac13j S5L getGPIOData calls direction0, which
+            // changes output/mode7 into plain input with receiver9 set
+            // (VA 0xfffffe00094fc420..440). Safe reconfiguration may first
+            // write the same plain input with its old receiver bit clear.
+            // That intermediate form grants no sampled DATA level; reads
+            // refuse until the source enables the receiver.
+            if self.profile == Profile::S5l8960x && value & LOCK != 0 {
+                return Err(err("S5L GPIO lock bit semantics are unqualified"));
             }
             if value & PERIPH != 0 && mode != INPUT_OFF {
                 return Err(err(
@@ -423,6 +460,119 @@ mod tests {
     fn lines() -> Vec<AicInput> {
         (199..206).map(|irq| AicInput::new(0, irq)).collect()
     }
+    #[test]
+    fn plain_input_samples_real_net_without_arming_or_clearing_interrupts() {
+        for profile in [Profile::T8101, Profile::S5l8960x] {
+            let net = Net::new();
+            let driver = net.open_drain().unwrap();
+            let mut bank = Gpio::with_profile(profile, 32, lines(), &[], vec![(3, net)]).unwrap();
+            let mut latch = InterruptLatch::new();
+            {
+                let mut access = Access::new(0, 0, &mut latch);
+                // Actual source safe-reconfiguration order: old receiver0,
+                // intermediate plain-input0, then receiver9. Do not sample an
+                // invented DATA value from the intermediate hardware state.
+                bank.write(12, Width::Word, 0, &mut access).unwrap();
+                assert!(bank.read(12, Width::Word, &mut access).is_err());
+                bank.write(12, Width::Word, INPUT_ENABLE.into(), &mut access)
+                    .unwrap();
+                assert_eq!(
+                    bank.read(12, Width::Word, &mut access),
+                    Ok(u64::from(INPUT_ENABLE | DATA))
+                );
+                driver.pull_low(true);
+                bank.advance(&mut access).unwrap();
+                assert_eq!(
+                    bank.read(12, Width::Word, &mut access),
+                    Ok(u64::from(INPUT_ENABLE))
+                );
+                assert!(bank.armed.is_empty());
+                assert!(bank.pending.iter().all(|word| *word == 0));
+            }
+            assert!(latch.take_aic_inputs().is_empty());
+            let mut access = Access::new(0, 0, &mut latch);
+            // Changing to plain input removes edge capture but does not
+            // surrender an existing pending interrupt owned by software.
+            bank.write(
+                12,
+                Width::Word,
+                (EDGE_RISING | INPUT_ENABLE).into(),
+                &mut access,
+            )
+            .unwrap();
+            driver.pull_low(false);
+            bank.advance(&mut access).unwrap();
+            assert_eq!(bank.pending[0], 1 << 3);
+            bank.write(12, Width::Word, INPUT_ENABLE.into(), &mut access)
+                .unwrap();
+            assert_eq!(bank.pending[0], 1 << 3);
+            bank.write(IRQ_BASE, Width::Word, 1 << 3, &mut access)
+                .unwrap();
+            assert_eq!(bank.pending[0], 0);
+        }
+    }
+
+    #[test]
+    fn plain_input_uses_pulls_and_refuses_floating_data_for_both_profiles() {
+        for profile in [Profile::T8101, Profile::S5l8960x] {
+            let mut bank = Gpio::with_profile(profile, 32, lines(), &[], vec![]).unwrap();
+            let mut latch = InterruptLatch::new();
+            let mut access = Access::new(0, 0, &mut latch);
+            bank.write(4, Width::Word, INPUT_ENABLE.into(), &mut access)
+                .unwrap();
+            assert!(bank.read(4, Width::Word, &mut access).is_err());
+            for (pull, level) in [(1 << 7, false), (2 << 7, true)] {
+                let value = INPUT_ENABLE | pull;
+                bank.write(4, Width::Word, value.into(), &mut access)
+                    .unwrap();
+                assert_eq!(
+                    bank.read(4, Width::Word, &mut access),
+                    Ok(u64::from(value | u32::from(level)))
+                );
+            }
+            assert!(bank.armed.is_empty());
+        }
+    }
+
+    #[test]
+    fn s5l_lock_refuses_before_effects_while_t8101_lock_stays_monotonic() {
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut bank = Gpio::with_profile(Profile::S5l8960x, 32, lines(), &[3], vec![]).unwrap();
+        let before = bank.pins.clone();
+        for value in [
+            OUTPUT | LOCK,
+            INPUT_ENABLE | LOCK,
+            EDGE_RISING | INPUT_ENABLE | LOCK,
+        ] {
+            assert!(
+                bank.write(12, Width::Word, value.into(), &mut access)
+                    .is_err()
+            );
+            assert_eq!(bank.pins, before);
+            assert!(bank.armed.is_empty());
+            assert!(bank.pending.iter().all(|word| *word == 0));
+        }
+        for value in [0, u32::MAX] {
+            assert!(
+                bank.write(0xc48, Width::Word, value.into(), &mut access)
+                    .is_err()
+            );
+            assert_eq!(bank.pins, before);
+        }
+        assert!(bank.read(0xc48, Width::Word, &mut access).is_err());
+        let mut old = Gpio::new(32, lines(), &[3], vec![]).unwrap();
+        old.write(12, Width::Word, (OUTPUT | LOCK).into(), &mut access)
+            .unwrap();
+        old.write(12, Width::Word, (OUTPUT | DATA).into(), &mut access)
+            .unwrap();
+        assert_eq!(old.pins[3], OUTPUT | DATA | LOCK);
+        assert!(
+            old.write(12, Width::Word, INPUT_ENABLE.into(), &mut access)
+                .is_err()
+        );
+    }
+
     #[test]
     fn retained_clock_and_quiesce_preserve_pad_ownership_independently() {
         let net = Net::new();
@@ -877,7 +1027,8 @@ mod tests {
         bank.write(49 * 4, Width::Word, u64::from(2 | LOCK), &mut a)
             .unwrap();
         assert!(bank.write(49 * 4, Width::Word, 0x202, &mut a).is_err());
-        assert!(bank.write(0, Width::Word, 0, &mut a).is_err());
+        bank.write(0, Width::Word, 0, &mut a).unwrap();
+        assert!(bank.read(0, Width::Word, &mut a).is_err());
         assert!(bank.read(0xc48, Width::Word, &mut a).is_err());
         assert_eq!(bank.read(0x800, Width::Word, &mut a), Ok(0));
     }

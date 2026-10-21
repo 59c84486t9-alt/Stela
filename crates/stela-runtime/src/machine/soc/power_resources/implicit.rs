@@ -493,6 +493,8 @@ mod tests {
             .unwrap();
         for (index, binding) in T8112[1..].iter().enumerate() {
             let bank = GpioBank {
+                profile: crate::platform::apple::gpio::Profile::T8101,
+                no_restore_pins: alloc::vec::Vec::new(),
                 physical: binding.physical,
                 bytes: binding.bytes,
                 pins: 32,

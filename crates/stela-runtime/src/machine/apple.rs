@@ -644,7 +644,7 @@ impl AppleDevices {
             .iter()
             .map(|&irq| AicInput::new(0, irq))
             .collect();
-        let gpio = Gpio::new(bank.pins, lines, selects, nets.clone())
+        let gpio = Gpio::with_profile(bank.profile, bank.pins, lines, selects, nets.clone())
             .and_then(|gpio| gpio.with_groups(bank.groups as usize))
             .map_err(String::from)?;
         let id = self.bus.add(Box::new(gpio));
@@ -680,7 +680,7 @@ impl AppleDevices {
             .iter()
             .map(|&irq| AicInput::new(0, irq))
             .collect();
-        let gpio = Gpio::new(aux.bank.pins, lines, &[], nets.clone())
+        let gpio = Gpio::with_profile(aux.bank.profile, aux.bank.pins, lines, &[], nets.clone())
             .and_then(|gpio| gpio.with_groups(aux.bank.groups as usize))
             .map_err(|error| format!("{}: {error}", aux.name))?;
         let id = self.bus.add(Box::new(gpio));
@@ -4060,6 +4060,8 @@ mod tests {
             .add_aic(0x100000, 1024, AicLayout::aic2(0x8000, 0))
             .unwrap();
         let bank = GpioBank {
+            profile: crate::platform::apple::gpio::Profile::T8101,
+            no_restore_pins: Vec::new(),
             physical: GPIO,
             bytes: 0x1000,
             pins: 213,
@@ -4251,6 +4253,8 @@ mod tests {
         let aux = AuxGpioBank {
             name: "aop-gpio".into(),
             bank: GpioBank {
+                profile: crate::platform::apple::gpio::Profile::T8101,
+                no_restore_pins: Vec::new(),
                 physical: BANK,
                 bytes: 0x4000,
                 pins: 0x36,
