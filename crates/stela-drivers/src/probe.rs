@@ -254,7 +254,17 @@ pub unsafe fn probe(handoff: &Handoff, dma: &mut dyn DmaAllocator) -> Disks {
                 // SAFETY: the caller granted exclusive post-EBS ownership of
                 // mapped PCI/MMIO and DMA, including upstream ASPM configuration.
                 match unsafe { Realtek::new(&mut function, handoff, dma, &firmware) } {
-                    Ok(device) => disks.links.push(Adapter::Realtek(device)),
+                    Ok(device) => {
+                        if let Some(warning) = device.warning() {
+                            let message = match warning {
+                                realtek::Warning::EeeAdvertisementDisableUnavailable => {
+                                    "Realtek optional EEE advertisement cleanup not performed; EEE advertisement state unverified"
+                                }
+                            };
+                            disks.warnings.push((address, message));
+                        }
+                        disks.links.push(Adapter::Realtek(device));
+                    }
                     Err(error) => disks.failures.push((address, error.into())),
                 }
                 continue;
