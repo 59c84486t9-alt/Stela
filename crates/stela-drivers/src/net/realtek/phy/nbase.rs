@@ -6,7 +6,7 @@
 // Copyright (c) 2003-2007 Francois Romieu <romieu@fr.zoreil.com>
 // Copyright (c) a lot of people too. Please respect their work.
 // Copyright (c) 2026 Stela contributors
-//! Exact RTL8125A2/B PHY paths from pinned r8169_phy_config.c.
+//! Exact RTL8125A2/B/D/K/9151A/CP PHY paths from pinned r8169_phy_config.c.
 use super::{BlockError, Error, Hardware, Registers, Script, Timer};
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     fn n_parameter(&self, address: u16, clear: u16, set: u16) -> Result<(), BlockError> {
@@ -16,7 +16,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         self.phy_ocp_write(0xb87e, (value & !clear) | set)
     }
     pub(super) fn nbase_phy(&mut self, script: &Script<'_>) -> Result<(), Error> {
-        if !matches!(self.revision.version, 61 | 63) {
+        if !matches!(self.revision.version, 61 | 63..=65) {
             return Err(Error::UnsupportedRevision(self.revision));
         }
         if self.revision.version == 61 {
@@ -64,7 +64,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 self.paged(page, reg, clear, set)?;
             }
             self.paged(0xa44, 0x11, 0, 1 << 11)?;
-        } else {
+        } else if self.revision.version == 63 {
             self.apply_firmware(script)?;
             self.paged(0xa44, 0x11, 0, 1 << 11)?;
             self.paged(0xac4, 0x13, 0xf0, 0x90)?;
@@ -81,6 +81,25 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
             }
             self.paged(0xa4c, 0x15, 0, 0x40)?;
             self.paged(0xbf8, 0x12, 0xe000, 0xa000)?;
+            self.paged(0xa5b, 0x12, 1 << 15, 0)?; // Legacy force mode.
+        } else {
+            self.apply_firmware(script)?;
+            self.paged(0xa44, 0x11, 0, 1 << 11)?; // GPHY 10M.
+            if self.revision.version == 65 {
+                self.paged(0xad0, 0x17, 0x7f, 0xb)?;
+                self.paged(0xad7, 0x14, 0, 1 << 4)?;
+                self.n_parameter(0x807f, 0xff00, 0x5300)?;
+                for (address, value) in [
+                    (0x81b8, 0x00b4),
+                    (0x81ba, 0x00e4),
+                    (0x81c5, 0x0104),
+                    (0x81d0, 0x054d),
+                ] {
+                    self.g_parameter(address, 0xffff, value)?;
+                }
+                self.paged(0xa43, 0x10, 0, 3)?; // 10M/ALDPS PLL off.
+                self.paged(0xa44, 0x11, 0, 1 << 7)?;
+            }
             self.paged(0xa5b, 0x12, 1 << 15, 0)?; // Legacy force mode.
         }
         self.paged(0xa43, 0x10, 1 << 2, 0)?; // Disable ALDPS.

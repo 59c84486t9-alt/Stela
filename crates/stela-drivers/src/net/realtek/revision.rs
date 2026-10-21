@@ -17,7 +17,7 @@ pub struct Revision {
 
 impl Revision {
     pub fn implemented(self) -> bool {
-        matches!(self.version, 2..=6 | 17..=26 | 28 | 31..=36 | 38 | 40 | 42 | 44 | 46 | 51 | 52 | 61 | 63)
+        matches!(self.version, 2..=6 | 17..=26 | 28 | 31..=36 | 38 | 40 | 42 | 44 | 46 | 51 | 52 | 61 | 63..=65)
     }
 
     pub(super) fn gigabit_pcie(self) -> bool {

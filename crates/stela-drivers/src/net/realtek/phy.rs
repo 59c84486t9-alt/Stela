@@ -298,6 +298,8 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
         // Other external PHY IDs need their own realtek_main.c quirks.
         let supported = if self.revision.nbase() {
             matches!(id, 0x001c_c800 | 0x001c_c840)
+                || (matches!(self.revision.version, 64 | 65)
+                    && matches!(id, 0x001c_c841 | 0x001c_c862 | 0x001c_c890))
         } else {
             matches!(id, 0x001c_c800 | 0x001c_c912)
         };
@@ -388,9 +390,9 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                 46 => self.h(script.ok_or(Error::Script("RTL8168H/M requires firmware"))?)?,
                 51 => self.ep_phy()?,
                 52 => self.fp_phy()?, // XID54a's MAC firmware executes after MAC setup.
-                61 | 63 => {
-                    self.nbase_phy(script.ok_or(Error::Script("RTL8125A/B requires firmware"))?)?
-                }
+                61 | 63..=65 => self.nbase_phy(
+                    script.ok_or(Error::Script("RTL8125 requires revision firmware"))?,
+                )?,
                 34 => self.evl(script.ok_or(Error::Script("RTL8168E-VL requires firmware"))?)?,
                 _ => return Err(Error::UnsupportedRevision(self.revision)),
             }
