@@ -10,14 +10,36 @@
 //! means set. Of the template's four groups iBoot fills only `amcc-ctrr-a`;
 //! the others stay empty, as it leaves them.
 //!
-//! SPTM 26A434 `ctrr_dt_get_lock_group` requires every property listed here
-//! but the enable and write-disable registers. `ctrr_map_lock_group` reads
-//! each plane's lower and upper limits, which must agree across planes, as
-//! the CTRR-A region in pages of `1 << page-size-shift` bytes from the DRAM
-//! base, upper inclusive. `ctrr_lock_boot` asserts every plane's cache is
-//! disabled and the group neither write-disabled nor locked, then sets
-//! enable, write-disable and lock in that order and programs the cores'
-//! CTRR registers with the same region.
+//! T6000 is independently recovered from 26A434 `iBoot.j314s` (decoded
+//! SHA256 `20dfa3a5e6d4e4b2844c7558e6d4f8ab74397d11eae63312f00a559cf9612b03`).
+//! Its builder at file `0x3848c` and publisher `0x1376d4` describe four AMCC
+//! apertures, four planes each, and four single-plane IOA apertures. The MCC
+//! count selector `0x514ac` indexes `0x1dfff0` by chip ID minus `0x6000`;
+//! IOA selector `0x38220` indexes `0x1d8f24`, with addresses at `0x1d3110`.
+//! The AMCC cache-status offset is `0x10000c`, not inside the first plane
+//! stride. It also publishes master-lock `(0x1c00, 0x1f, 0)`. IOA publishes
+//! broadcast `(0, 1, 1)`; neither is a cache-status substitute. CTRR-A has no
+//! write-disable register on either controller, and IOA has no lock register.
+//! The builder also contains IOA-B, but the original J314s DeviceTree has no
+//! such node: publisher `0x137aa4` uses existing-child lookup `0xe0840`, then
+//! skips a missing child at `0x137b28`. Only IOA-A is published here.
+//!
+//! Original T6000 SPTM (decoded SHA256
+//! `dda6be8f5aa266b2a9505269d7152e870e2b610114185a2f60a587782d2af082`)
+//! `0xfffffff0270d64f8` selects AMCC and IOA separately. Register reader
+//! `0xfffffff0270d6d20` allows absent enable/write-disable/IOA lock fields;
+//! `0xfffffff0270d75a0` requires matching limits across apertures/planes.
+//! Its CTRR selector requests cache-status only for AMCC and does not consume
+//! master-lock or broadcast. Their publication alone qualifies no MMIO effects.
+//!
+//! SPTM's register reader requires lower/upper limits and AMCC's lock, while
+//! enable/write-disable and IOA's lock may be absent. Limits must agree across
+//! every aperture and plane; the upper page is inclusive. AMCC limits count
+//! pages from the DRAM base. IOA limits count absolute physical pages, which
+//! T6000 SPTM `0xfffffff0270d7748..0xfffffff0270d777c` normalizes by subtracting
+//! `dram_base >> page-size-shift`. `ctrr_lock_boot` checks the described cache
+//! status and present write-disable/lock fields, then writes the present enable,
+//! write-disable and lock fields in order, with the cores' matching CTRR range.
 //!
 //! iBoot's choice of region: the CTRR-A region covers the read-only and
 //! executable images, which SPTM requires in one physical run ahead of every
@@ -31,6 +53,7 @@ use alloc::{format, string::String, vec::Vec};
 use anyhow::{Context, Result, ensure};
 
 pub const AMCC: &str = "/chosen/lock-regs/amcc";
+pub const IOA: &str = "/chosen/lock-regs/ioa";
 
 /// One register of a plane: its offset, the bits that hold it and, for a
 /// bit register, the masked value that means set.
@@ -49,12 +72,12 @@ pub struct LockGroup {
     pub page_size_shift: u32,
     pub lower_limit: Register,
     pub upper_limit: Register,
-    pub enable: Register,
-    pub write_disable: Register,
-    pub lock: Register,
+    pub enable: Option<Register>,
+    pub write_disable: Option<Register>,
+    pub lock: Option<Register>,
 }
 
-/// The AMCC as `/chosen/lock-regs/amcc` describes it.
+/// A memory controller as its `/chosen/lock-regs` node describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryController {
     pub apertures: &'static [u64],
@@ -63,7 +86,11 @@ pub struct MemoryController {
     pub plane_stride: u32,
     /// Reads `value` under `mask` on every plane while the cache is
     /// disabled.
-    pub cache_status: Register,
+    pub cache_status: Option<Register>,
+    /// Optional original control descriptors; their masked values are literal,
+    /// including master-lock's zero, not an assumed active-high bit convention.
+    pub master_lock: Option<Register>,
+    pub broadcast: Option<Register>,
     pub groups: &'static [LockGroup],
 }
 
@@ -91,15 +118,63 @@ const T8112: MemoryController = MemoryController {
     aperture_size: 0xf4_0000,
     plane_count: 4,
     plane_stride: 0x4_0000,
-    cache_status: bit(0x424),
+    cache_status: Some(bit(0x424)),
+    master_lock: None,
+    broadcast: None,
     groups: &[LockGroup {
         name: "amcc-ctrr-a",
         page_size_shift: 14,
         lower_limit: limit(0x680),
         upper_limit: limit(0x684),
-        enable: bit(0x688),
-        write_disable: bit(0x7f0),
-        lock: bit(0x68c),
+        enable: Some(bit(0x688)),
+        write_disable: Some(bit(0x7f0)),
+        lock: Some(bit(0x68c)),
+    }],
+};
+
+// J314s builder 0x385e4..0x38a6c: one die, four MCCs (not T6001/2's
+// eight), each a 2 MiB lock aperture in its 16 MiB MCC register window.
+const T6000: MemoryController = MemoryController {
+    apertures: &[0x2_0000_0000, 0x2_0100_0000, 0x2_0200_0000, 0x2_0300_0000],
+    aperture_size: 0x20_0000,
+    plane_count: 4,
+    plane_stride: 0x4_0000,
+    cache_status: Some(bit(0x10_000c)),
+    master_lock: Some(Register {
+        offset: 0x1c00,
+        mask: 0x1f,
+        value: Some(0),
+    }),
+    broadcast: None,
+    groups: &[LockGroup {
+        name: "amcc-ctrr-a",
+        page_size_shift: 14,
+        lower_limit: limit(0x680),
+        upper_limit: limit(0x684),
+        enable: Some(bit(0x688)),
+        write_disable: None,
+        lock: Some(bit(0x68c)),
+    }],
+};
+
+// J314s builder 0x38aa4..0x38d10. A single plane needs no stride. The
+// original template exposes only IOA-A; no fabricated lock/cache register.
+const T6000_IOA: MemoryController = MemoryController {
+    apertures: &[0x2_8200_0000, 0x3_0400_0000, 0x3_8300_0000, 0x4_0200_0000],
+    aperture_size: 0x4000,
+    plane_count: 1,
+    plane_stride: 0,
+    cache_status: None,
+    master_lock: None,
+    broadcast: Some(bit(0)),
+    groups: &[LockGroup {
+        name: "ioa-ctrr-a",
+        page_size_shift: 14,
+        lower_limit: limit(0x220),
+        upper_limit: limit(0x224),
+        enable: Some(bit(0x228)),
+        write_disable: None,
+        lock: None,
     }],
 };
 
@@ -107,7 +182,16 @@ const T8112: MemoryController = MemoryController {
 /// iBoot has not been read.
 pub fn table(chip_id: u32) -> Option<&'static MemoryController> {
     match chip_id {
+        0x6000 => Some(&T6000),
         0x8112 => Some(&T8112),
+        _ => None,
+    }
+}
+
+/// The independently qualified IOA companion; absence does not reuse AMCC.
+pub fn ioa_table(chip_id: u32) -> Option<&'static MemoryController> {
+    match chip_id {
+        0x6000 => Some(&T6000_IOA),
         _ => None,
     }
 }
@@ -125,6 +209,28 @@ fn set_register(tree: &mut DeviceTree, path: &str, name: &str, register: Registe
     tree.set_property(path, &format!("{name}-reg-mask"), u32_value(register.mask))?;
     if let Some(value) = register.value {
         tree.set_property(path, &format!("{name}-reg-value"), u32_value(value))?;
+    } else {
+        tree.node_mut(path)
+            .context("lock-register node disappeared")?
+            .remove_property(&format!("{name}-reg-value"));
+    }
+    Ok(())
+}
+
+fn set_optional_register(
+    tree: &mut DeviceTree,
+    path: &str,
+    name: &str,
+    register: Option<Register>,
+) -> Result<()> {
+    if let Some(register) = register {
+        return set_register(tree, path, name, register);
+    }
+    let node = tree
+        .node_mut(path)
+        .context("lock-register node disappeared")?;
+    for suffix in ["offset", "mask", "value"] {
+        node.remove_property(&format!("{name}-reg-{suffix}"));
     }
     Ok(())
 }
@@ -132,36 +238,58 @@ fn set_register(tree: &mut DeviceTree, path: &str, name: &str, register: Registe
 /// Writes the map into `/chosen/lock-regs/amcc` and its group nodes, as
 /// iBoot does.
 pub fn publish(tree: &mut DeviceTree, controller: &MemoryController) -> Result<()> {
+    publish_controller(tree, AMCC, "amcc", controller, &EMPTY_GROUPS)
+}
+
+/// Publish the independently described IOA companion, when `ioa_table` provides
+/// one. It has no cache-status or lock property on T6000.
+pub fn publish_ioa(tree: &mut DeviceTree, controller: &MemoryController) -> Result<()> {
+    publish_controller(tree, IOA, "ioa", controller, &[])
+}
+
+fn publish_controller(
+    tree: &mut DeviceTree,
+    path: &str,
+    name: &str,
+    controller: &MemoryController,
+    empty_groups: &[&str],
+) -> Result<()> {
     tree.ensure_child("/chosen", "lock-regs")?;
-    tree.ensure_child("/chosen/lock-regs", "amcc")?;
+    tree.ensure_child("/chosen/lock-regs", name)?;
     let count = u32::try_from(controller.apertures.len())?;
-    tree.set_property(AMCC, "aperture-count", u32_value(count))?;
-    tree.set_property(AMCC, "aperture-size", u32_value(controller.aperture_size))?;
+    tree.set_property(path, "aperture-count", u32_value(count))?;
+    tree.set_property(path, "aperture-size", u32_value(controller.aperture_size))?;
     let addresses = controller
         .apertures
         .iter()
         .flat_map(|address| address.to_le_bytes())
         .collect();
-    tree.set_property(AMCC, "aperture-phys-addr", addresses)?;
-    tree.set_property(AMCC, "plane-count", u32_value(controller.plane_count))?;
-    tree.set_property(AMCC, "plane-stride", u32_value(controller.plane_stride))?;
-    set_register(tree, AMCC, "cache-status", controller.cache_status)?;
+    tree.set_property(path, "aperture-phys-addr", addresses)?;
+    tree.set_property(path, "plane-count", u32_value(controller.plane_count))?;
+    tree.set_property(path, "plane-stride", u32_value(controller.plane_stride))?;
+    for (name, register) in [
+        ("cache-status", controller.cache_status),
+        ("master-lock", controller.master_lock),
+        ("broadcast", controller.broadcast),
+    ] {
+        set_optional_register(tree, path, name, register)?;
+    }
     for group in controller.groups {
-        tree.ensure_child(AMCC, group.name)?;
-        let path = format!("{AMCC}/{}", group.name);
+        tree.ensure_child(path, group.name)?;
+        let path = format!("{path}/{}", group.name);
         tree.set_property(&path, "page-size-shift", u32_value(group.page_size_shift))?;
         for (name, register) in [
-            ("lower-limit", group.lower_limit),
-            ("upper-limit", group.upper_limit),
+            ("lower-limit", Some(group.lower_limit)),
+            ("upper-limit", Some(group.upper_limit)),
             ("enable", group.enable),
             ("write-disable", group.write_disable),
             ("lock", group.lock),
         ] {
-            set_register(tree, &path, name, register)?;
+            set_optional_register(tree, &path, name, register)?;
         }
     }
-    for name in EMPTY_GROUPS {
-        tree.ensure_child(AMCC, name)?;
+    for name in empty_groups {
+        tree.ensure_child(path, name)?;
     }
     Ok(())
 }
@@ -250,6 +378,150 @@ mod tests {
                 .is_some_and(|node| node.property("page-size-shift").is_none())
         );
         Ok(())
+    }
+
+    #[test]
+    fn publishes_original_t6000_amcc_and_ioa_without_invented_registers() -> Result<()> {
+        let mut tree = DeviceTree {
+            root: Node::named("device-tree")?,
+        };
+        tree.ensure_child("/", "chosen")?;
+        let amcc = table(0x6000).unwrap();
+        let ioa = ioa_table(0x6000).unwrap();
+        // Re-publication must remove T8112-only fields, not retain a fake 7f0.
+        publish(&mut tree, &T8112)?;
+        publish(&mut tree, amcc)?;
+        publish_ioa(&mut tree, ioa)?;
+        for (path, expected) in [
+            (
+                AMCC,
+                &[
+                    0x2_0000_0000u64,
+                    0x2_0100_0000,
+                    0x2_0200_0000,
+                    0x2_0300_0000,
+                ],
+            ),
+            (
+                IOA,
+                &[
+                    0x2_8200_0000u64,
+                    0x3_0400_0000,
+                    0x3_8300_0000,
+                    0x4_0200_0000,
+                ],
+            ),
+        ] {
+            assert_eq!(
+                tree.property(path, "aperture-count").unwrap().as_u32(),
+                Some(4)
+            );
+            let addresses = &tree.property(path, "aperture-phys-addr").unwrap().value;
+            let actual: Vec<_> = addresses
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|bytes| u64::from_le_bytes(*bytes))
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        let number = |path: &str, name: &str| tree.property(path, name).and_then(|p| p.as_u32());
+        for (path, name, expected) in [
+            (AMCC, "aperture-size", 0x20_0000),
+            (AMCC, "plane-count", 4),
+            (AMCC, "plane-stride", 0x4_0000),
+            (AMCC, "cache-status-reg-offset", 0x10_000c),
+            (AMCC, "cache-status-reg-mask", 1),
+            (AMCC, "cache-status-reg-value", 1),
+            (AMCC, "master-lock-reg-offset", 0x1c00),
+            (AMCC, "master-lock-reg-mask", 0x1f),
+            (AMCC, "master-lock-reg-value", 0),
+            (IOA, "aperture-size", 0x4000),
+            (IOA, "plane-count", 1),
+            (IOA, "plane-stride", 0),
+            (IOA, "broadcast-reg-offset", 0),
+            (IOA, "broadcast-reg-mask", 1),
+            (IOA, "broadcast-reg-value", 1),
+        ] {
+            assert_eq!(number(path, name), Some(expected), "{path}/{name}");
+        }
+        for (path, lower, upper, enable, lock, property_count) in [
+            (
+                "/chosen/lock-regs/amcc/amcc-ctrr-a",
+                0x680,
+                0x684,
+                0x688,
+                Some(0x68c),
+                12,
+            ),
+            (
+                "/chosen/lock-regs/ioa/ioa-ctrr-a",
+                0x220,
+                0x224,
+                0x228,
+                None,
+                9,
+            ),
+        ] {
+            assert_eq!(number(path, "page-size-shift"), Some(14));
+            for (name, offset) in [("lower-limit", lower), ("upper-limit", upper)] {
+                assert_eq!(number(path, &format!("{name}-reg-offset")), Some(offset));
+                assert_eq!(number(path, &format!("{name}-reg-mask")), Some(u32::MAX));
+                assert!(tree.property(path, &format!("{name}-reg-value")).is_none());
+            }
+            assert_eq!(number(path, "enable-reg-offset"), Some(enable));
+            assert_eq!(number(path, "enable-reg-mask"), Some(1));
+            assert_eq!(number(path, "enable-reg-value"), Some(1));
+            assert_eq!(number(path, "lock-reg-offset"), lock);
+            for suffix in ["offset", "mask", "value"] {
+                assert!(
+                    tree.property(path, &format!("write-disable-reg-{suffix}"))
+                        .is_none()
+                );
+            }
+            assert_eq!(tree.node(path).unwrap().properties.len(), property_count);
+        }
+        assert_eq!(tree.node(AMCC).unwrap().properties.len(), 12);
+        assert_eq!(tree.node(IOA).unwrap().properties.len(), 9);
+        assert!(tree.node("/chosen/lock-regs/ioa/ioa-ctrr-b").is_none());
+        for name in EMPTY_GROUPS {
+            assert_eq!(
+                tree.node(&format!("{AMCC}/{name}"))
+                    .unwrap()
+                    .properties
+                    .len(),
+                1
+            );
+        }
+        let bytes = tree.serialize();
+        assert_eq!(DeviceTree::parse(&bytes)?, tree);
+        let before = bytes;
+        publish(&mut tree, amcc)?;
+        publish_ioa(&mut tree, ioa)?;
+        assert_eq!(tree.serialize(), before);
+        Ok(())
+    }
+
+    #[test]
+    fn source_qualification_does_not_alias_other_chips_or_ioa() {
+        assert!(ioa_table(0x8112).is_none());
+        for chip in [0x6001, 0x6002, 0x6020, 0x8103, 0xdead] {
+            assert!(table(chip).is_none());
+            assert!(ioa_table(chip).is_none());
+            assert_eq!(gaps(Some(chip)).len(), 1);
+        }
+        assert!(gaps(Some(0x6000)).is_empty());
+        let region = ctrr_a(
+            table(0x6000).unwrap(),
+            0x8_0000_0000,
+            0x8_0200_0000,
+            0x8_0779_0000,
+        )
+        .unwrap();
+        assert_eq!(
+            (region.group, region.base, region.bytes),
+            ("amcc-ctrr-a", 0x8_0200_0000, 0x579_0000)
+        );
     }
 
     #[test]
