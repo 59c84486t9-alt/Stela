@@ -27,12 +27,17 @@ use crate::platform::apple::{
 use alloc::{format, string::String, vec::Vec};
 
 mod handoff;
+mod power_resources;
 mod topology;
 pub use handoff::{
     BOOT_CLOCK_HZ, CHIP_REVISION, Carveout, DRAM_VENDOR, DramVendor, Evidence, HANDOFF_REGION,
     Handoff, IBOOT_PAGE_BYTES, PANIC_REGION_BYTES, PANIC_REGION_ID, PANIC_WINDOW_BYTES,
     PANIC_WINDOW_MEMBERS, SOCD_TRACE_KEYS, USB_PHY_HZ, handoff,
 };
+#[cfg(test)]
+use power_resources::PMGR_VIRTUAL;
+use power_resources::{PMGR_DEVICE, power_states};
+pub use power_resources::{PowerOwner, PowerResource, PowerStates};
 
 /// One SoC row: ApChipID, `product-soc-name`, chip, the MIDR_EL1 part
 /// number of each `cluster-type`, and the `aic` node's `compatible` with the
@@ -1369,6 +1374,8 @@ pub struct UsbController {
     pub stream: u32,
     /// The Type-C connector's `port-number`, shared with its HPM die.
     pub port: u32,
+    /// Ordinary controller state survives supply gating only when declared.
+    pub retention: bool,
 }
 
 /// Everything the engine models of a board, from its DeviceTree.
@@ -2170,18 +2177,6 @@ pub struct PtdBank {
 /// 16-byte name.
 const PTD_RANGE: usize = 32;
 
-/// The PMGR power-state registers `/arm-io/pmgr` `ps-regs` and `devices`
-/// place (m1n1 `src/pmgr.c`): each block, the span from a `ps-regs` entry's
-/// base to its last device's register, and each device's register.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PowerStates {
-    pub blocks: Vec<(u64, u64)>,
-    pub registers: Vec<u64>,
-    /// Device IDs and their physical supply addresses, resolving virtual
-    /// devices through both parent IDs without using their names.
-    pub devices: Vec<(u16, Vec<u64>)>,
-}
-
 /// One numbered TRAD instance. Owners are retained as the DT's eight bytes,
 /// not used as application or stream-selection keys. `AppleT8110DART::
 /// _dartSetupInstance` (26A434 KC file 0x2f12884..0x2f12918) checks the
@@ -2207,7 +2202,8 @@ pub struct Iommu {
     pub irq: u32,
     pub mappers: Vec<(u32, u32)>,
     pub apf: Option<(u64, usize)>,
-    /// PMGR supply IDs from the DT, resolved through `PowerStates::devices`.
+    /// Separate original PMGR clock and power requirements.
+    pub clock_gates: Vec<u16>,
     pub power_gates: Vec<u16>,
     /// A retained DART preserves ordinary state while its supply is gated.
     pub retention: bool,
@@ -3110,19 +3106,8 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
     let irq = node
         .first_u32("interrupts")
         .ok_or_else(|| format!("{path} has no interrupts"))?;
-    let power_gates = node.property("power-gates").unwrap_or_default();
-    if !power_gates.len().is_multiple_of(4) {
-        return Err(format!("{path} power-gates contains a partial device ID"));
-    }
-    let power_gates = power_gates
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|word| {
-            u16::try_from(u32::from_le_bytes(*word))
-                .map_err(|_| format!("{path} power gate exceeds PMGR device ID width"))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let clock_gates = power_resources::gate_ids(node, &path, "clock-gates")?;
+    let power_gates = power_resources::gate_ids(node, &path, "power-gates")?;
     let retention = node.property("retention").is_some();
     if retention && node.property("no-sleep").is_some() {
         return Err(format!(
@@ -3195,131 +3180,10 @@ fn iommu(node: &Node<'_>, translate: &dyn Fn(u64) -> Option<u64>) -> Result<Iomm
         irq,
         mappers,
         apf,
+        clock_gates,
         power_gates,
         retention,
     })
-}
-
-/// Bytes of one `/arm-io/pmgr` `devices` entry: flags, parents, the
-/// register index in its `ps-regs` block [10], the block [11], the device
-/// id [26..28] and the name [32..48] (m1n1 `struct pmgr_device`).
-const PMGR_DEVICE: usize = 48;
-/// A `devices` entry with no power-state register (m1n1
-/// `PMGR_FLAG_VIRTUAL`).
-const PMGR_VIRTUAL: u32 = 0x10;
-
-/// The power-state registers of `/arm-io/pmgr`, if it is the PMGR of the
-/// SoC with `chip_id`.
-fn power_states(
-    io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
-    chip_id: u32,
-) -> Result<Option<PowerStates>, String> {
-    let Some(node) = io
-        .child("pmgr")
-        .filter(|node| pmgr(chip_id).is_some_and(|model| node.compatible(model)))
-    else {
-        return Ok(None);
-    };
-    const PATH: &str = "/arm-io/pmgr";
-    let reg = node.pairs("reg").unwrap_or_default();
-    let blocks = node.cells32("ps-regs").unwrap_or_default();
-    let devices = node.property("devices").unwrap_or_default();
-    if blocks.len() % 3 != 0 || devices.len() % PMGR_DEVICE != 0 {
-        return Err(format!("{PATH} ps-regs or devices is not whole entries"));
-    }
-    let mut spans: Vec<Option<(u64, u64)>> = alloc::vec![None; blocks.len() / 3];
-    let mut registers = Vec::new();
-    let mut ids = Vec::new();
-    for entry in devices.as_chunks::<PMGR_DEVICE>().0 {
-        let flags = u32::from_le_bytes(entry[..4].try_into().expect("4 bytes"));
-        let id = u16::from_le_bytes(entry[26..28].try_into().expect("device ID"));
-        let parents = [
-            u16::from_le_bytes(entry[4..6].try_into().expect("parent ID")),
-            u16::from_le_bytes(entry[6..8].try_into().expect("parent ID")),
-        ];
-        if ids.iter().any(|&(old, _, _)| old == id) {
-            return Err("PMGR has duplicate device IDs".into());
-        }
-        if flags & PMGR_VIRTUAL != 0 {
-            ids.push((id, None, parents));
-            continue;
-        }
-        let (index, block) = (u64::from(entry[10]), usize::from(entry[11]));
-        let base = blocks
-            .get(block * 3..block * 3 + 2)
-            .and_then(|cells| {
-                let (range, _) = reg.get(cells[0] as usize)?;
-                Some(translate(*range)? + u64::from(cells[1]))
-            })
-            .ok_or_else(|| format!("{PATH} device names ps-regs block {block} outside reg"))?;
-        let address = base + index * 8;
-        ids.push((id, Some(address), parents));
-        let span = spans[block].get_or_insert((base, 0));
-        span.1 = span.1.max(address + 4 - base);
-        if !registers.contains(&address) {
-            registers.push(address);
-        }
-    }
-    registers.sort_unstable();
-    Ok(Some(PowerStates {
-        blocks: spans.into_iter().flatten().collect(),
-        registers,
-        devices: ids
-            .iter()
-            .filter_map(
-                |&(id, _, _)| match resolve_supplies(id, &ids, &mut Vec::new()) {
-                    Ok(supplies) => Some(Ok((id, supplies))),
-                    Err(Unresolved::Absent) => None,
-                    Err(Unresolved::Cycle) => Some(Err(String::from(
-                        "PMGR virtual supply graph contains a cycle",
-                    ))),
-                },
-            )
-            .collect::<Result<Vec<_>, String>>()?,
-    }))
-}
-
-/// Why a PMGR device's supplies do not resolve.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Unresolved {
-    /// A parent ID this PMGR does not list: J504AP's `ISP_CPU_CORE0` and
-    /// `CORE1` name 176, which its `devices` lack. Such a device has no
-    /// supplies here, so a client gated by it refuses where it is used.
-    Absent,
-    Cycle,
-}
-
-/// Virtual PMGR devices have no register; their nonzero parent IDs select
-/// the physical supplies (`devices` parents at bytes 4..8, m1n1 pmgr_device).
-/// A cycle or a missing parent leaves the device unresolved rather than
-/// silently dropping a dependency.
-fn resolve_supplies(
-    id: u16,
-    devices: &[(u16, Option<u64>, [u16; 2])],
-    visiting: &mut Vec<u16>,
-) -> Result<Vec<u64>, Unresolved> {
-    if visiting.contains(&id) {
-        return Err(Unresolved::Cycle);
-    }
-    let (_, address, parents) = devices
-        .iter()
-        .find(|(device, _, _)| *device == id)
-        .ok_or(Unresolved::Absent)?;
-    if let Some(address) = address {
-        return Ok(alloc::vec![*address]);
-    }
-    visiting.push(id);
-    let mut supplies = Vec::new();
-    for &parent in parents.iter().filter(|&&parent| parent != 0) {
-        for address in resolve_supplies(parent, devices, visiting)? {
-            if !supplies.contains(&address) {
-                supplies.push(address);
-            }
-        }
-    }
-    visiting.pop();
-    Ok(supplies)
 }
 
 /// The watchdog's side registers, each one aligned word outside its timer
@@ -4215,6 +4079,7 @@ fn usb_controller(
         iommu,
         stream,
         port,
+        retention: node.property("retention").is_some(),
     })
 }
 
@@ -4625,7 +4490,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let gfx = gfx_controller(&io, &translate, chip_id)?;
     let sep = sep_device(&root, &io, &translate, &darts)?;
     let usbs = usb_controllers(&io, &translate, &darts)?;
-    let power_states = power_states(&io, &translate, chip_id)?;
+    let power_states = power_states(&root, &translate, chip_id)?;
     let PmgrRegisters {
         cluster_events,
         bridges,
@@ -4733,29 +4598,6 @@ mod tests {
         ] {
             assert!(place_coresight(0, &pairs).is_err());
         }
-    }
-
-    #[test]
-    fn virtual_supply_graph_expands_both_parents_and_rejects_missing_nodes_and_cycles() {
-        let physical = 0x2_3b70_0100;
-        let graph = [
-            (1, Some(physical), [0, 0]),
-            (2, Some(physical + 8), [0, 0]),
-            (0x212, None, [1, 2]),
-            (4, None, [0x212, 1]),
-        ];
-        assert_eq!(
-            resolve_supplies(4, &graph, &mut Vec::new()).unwrap(),
-            vec![physical, physical + 8]
-        );
-        assert_eq!(
-            resolve_supplies(9, &graph, &mut Vec::new()),
-            Err(Unresolved::Absent)
-        );
-        assert_eq!(
-            resolve_supplies(1, &[(1, None, [2, 0]), (2, None, [1, 0])], &mut Vec::new()),
-            Err(Unresolved::Cycle)
-        );
     }
 
     #[test]
@@ -6077,6 +5919,7 @@ mod tests {
                 irq: 0x301,
                 mappers: vec![(0x89, 0), (0x8a, 1)],
                 apf: None,
+                clock_gates: Vec::new(),
                 power_gates: Vec::new(),
                 retention: false,
                 smmu: None,
@@ -6657,19 +6500,29 @@ mod tests {
         assert_eq!(found.wake_masks.as_ref().unwrap().physical, 0x2_3d00_4008);
         assert_eq!(found.clusters, T8112_CLUSTERS.to_vec());
         assert_eq!(found.aon_fuses, Some((0x2_3d2c_8000, 0x4000)));
+        let states = found.power_states.as_ref().unwrap();
         assert_eq!(
-            found.power_states,
-            Some(PowerStates {
-                blocks: vec![(0x2_3d28_4000, 0x14), (0x2_3b70_0000, 0x1c)],
-                registers: vec![0x2_3b70_0000, 0x2_3b70_0018, 0x2_3d28_4010],
-                devices: vec![
-                    (1, vec![0x2_3b70_0000]),
-                    (4, vec![0x2_3b70_0018]),
-                    (8, vec![0x2_3b70_0000]),
-                    (3, vec![0x2_3d28_4010])
-                ],
-            })
+            states.blocks,
+            vec![(0x2_3d28_4000, 0x14), (0x2_3b70_0000, 0x1c)]
         );
+        assert_eq!(
+            states.registers,
+            vec![0x2_3b70_0000, 0x2_3b70_0018, 0x2_3d28_4010]
+        );
+        assert_eq!(
+            states
+                .domains
+                .iter()
+                .map(|domain| (domain.id.device, domain.address))
+                .collect::<Vec<_>>(),
+            [
+                (1, Some(0x2_3b70_0000)),
+                (4, Some(0x2_3b70_0018)),
+                (8, None),
+                (3, Some(0x2_3d28_4010))
+            ]
+        );
+        assert_eq!(states.domains[2].parents[0].unwrap().device, 1);
         // Without the PMGR's compatible, nothing is placed.
         assert_eq!(
             board(&tree(0x8112, "Apple M2", MODELED))
@@ -7500,6 +7353,7 @@ mod tests {
                 iommu: 0,
                 stream: 1,
                 port: 1,
+                retention: false,
             }]
         );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);

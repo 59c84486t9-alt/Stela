@@ -15,7 +15,9 @@
 //! gated state; automatic power management never lowers a domain, so the
 //! actual state stays at the target. Other states, device reset and
 //! quiescing through DEV_DISABLE are refused until a model connects them to
-//! the device models. Parent domains are not checked.
+//! the device models. The complete-consumer mount explicitly refuses lifecycle
+//! changes for uncovered domains and retains the resource names. Parent
+//! arbitration is not modeled; coverage includes their actual consumers.
 pub mod coverage;
 
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
@@ -60,6 +62,7 @@ pub enum PmgrError {
     Duplicate(u64),
     UnknownDomain(u64),
     AlreadyBound(u64),
+    LifecycleRefused(u64),
 }
 
 /// State the machine must apply to every client of a physical PMGR domain.
@@ -96,6 +99,7 @@ pub struct DomainTransition {
 pub struct Pmgr {
     registers: BTreeMap<u64, u32>,
     lifecycle: BTreeSet<u64>,
+    refused: BTreeSet<u64>,
     transitions: Vec<DomainTransition>,
 }
 impl Pmgr {
@@ -113,6 +117,7 @@ impl Pmgr {
         Ok(Self {
             registers,
             lifecycle: BTreeSet::new(),
+            refused: BTreeSet::new(),
             transitions: Vec::new(),
         })
     }
@@ -123,9 +128,26 @@ impl Pmgr {
         if !self.registers.contains_key(&address) {
             return Err(PmgrError::UnknownDomain(address));
         }
+        if self.refused.contains(&address) {
+            return Err(PmgrError::LifecycleRefused(address));
+        }
         if !self.lifecycle.insert(address) {
             return Err(PmgrError::AlreadyBound(address));
         }
+        Ok(())
+    }
+
+    /// Keep a domain's lifecycle unchanged when complete consumer coverage
+    /// cannot connect it. The machine retains the named resource reasons.
+    /// Harmless configuration and W1C writes remain available.
+    pub fn refuse_lifecycle(&mut self, address: u64) -> Result<(), PmgrError> {
+        if !self.registers.contains_key(&address) {
+            return Err(PmgrError::UnknownDomain(address));
+        }
+        if self.lifecycle.contains(&address) {
+            return Err(PmgrError::AlreadyBound(address));
+        }
+        self.refused.insert(address);
         Ok(())
     }
 
@@ -232,6 +254,14 @@ impl MmioDevice for Pmgr {
             .get_mut(&offset)
             .ok_or_else(|| fail("PMGR register is not a modeled power state"))?;
         let before = DomainState::decode(*register);
+        // A failed coverage decision also forbids power/clock changes;
+        // unsupported consumers must never observe an acknowledged gate.
+        if self.refused.contains(&offset)
+            && (value as u32 & (TARGET | DEV_DISABLE | RESET)
+                != *register & (TARGET | DEV_DISABLE | RESET))
+        {
+            return Err(fail("PMGR lifecycle has consumers without connected sinks"));
+        }
         let next =
             write_state(*register, value as u32, self.lifecycle.contains(&offset)).map_err(fail)?;
         let after = DomainState::decode(next);
@@ -269,6 +299,42 @@ mod tests {
             },
         ])
         .unwrap()
+    }
+
+    #[test]
+    fn uncovered_lifecycle_refusals_preserve_registers_and_allow_only_configuration() {
+        let mut pmgr = pmgr();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        pmgr.refuse_lifecycle(AIC).unwrap();
+        assert_eq!(
+            pmgr.bind_lifecycle(AIC),
+            Err(PmgrError::LifecycleRefused(AIC))
+        );
+        assert_eq!(
+            pmgr.refuse_lifecycle(AIC + 4),
+            Err(PmgrError::UnknownDomain(AIC + 4))
+        );
+        for value in [0, 4, DEV_DISABLE | 15, RESET | DEV_DISABLE | 15] {
+            assert!(
+                pmgr.write(AIC, Width::Word, value.into(), &mut access)
+                    .is_err()
+            );
+            assert_eq!(pmgr.read(AIC, Width::Word, &mut access), Ok(0xff));
+            assert!(pmgr.take_transitions().is_empty());
+        }
+        pmgr.write(
+            AIC,
+            Width::Word,
+            (AUTO_ENABLE | MIN_STATE | 15).into(),
+            &mut access,
+        )
+        .unwrap();
+        assert_eq!(
+            pmgr.read(AIC, Width::Word, &mut access),
+            Ok((AUTO_ENABLE | MIN_STATE | 0xff).into())
+        );
+        assert!(pmgr.take_transitions().is_empty());
     }
 
     /// Linux `apple_pmgr_ps_set`: clear AUTO_ENABLE, the flags and the target,

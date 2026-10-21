@@ -69,8 +69,18 @@ impl Session {
         Ok(())
     }
     pub fn detach(&mut self) -> Result<(), &'static str> {
-        if self.generation.take().is_some() {
-            self.mux.reset()?;
+        self.detach_reset(Mux::reset)
+    }
+
+    fn detach_reset(
+        &mut self,
+        reset_mux: impl FnOnce(&mut Mux) -> Result<(), &'static str>,
+    ) -> Result<(), &'static str> {
+        if self.generation.is_some() {
+            // Failed invalidation must remain required on the next attempt;
+            // an old connection can never become a successful detach retry.
+            reset_mux(&mut self.mux)?;
+            self.generation = None;
         }
         self.host.detach();
         while self.host.completion().is_some() {}
@@ -233,6 +243,26 @@ impl Session {
 mod tests {
     use super::*;
     use alloc::vec;
+    #[test]
+    fn detach_retries_failed_invalidation_and_success_invalidates_stale_handles_once() {
+        use crate::platform::usb::mux::tests::connected;
+        let (mux, stream) = connected();
+        let mut session = Session::test_mux(mux);
+        session.attach(7).unwrap();
+        assert_eq!(session.state(stream), Ok(StreamState::Open));
+        assert_eq!(session.detach_reset(|_| Err("injected reset refusal")), Err("injected reset refusal"));
+        assert_eq!(session.generation, Some(7));
+        assert_eq!(session.state(stream), Ok(StreamState::Open));
+        session.detach().unwrap();
+        assert_eq!(session.generation, None);
+        assert!(session.state(stream).is_err());
+        assert!(session.mux.take_packet().is_some()); // One fresh Version frame.
+        assert!(session.mux.take_packet().is_none());
+        session.detach().unwrap();
+        assert!(session.mux.take_packet().is_none()); // No second invalidation.
+        assert!(session.state(stream).is_err());
+    }
+
     /// Synthetic mux wire fixture, never represented as an observed guest.
     fn packet(protocol: u32, payload: &[u8], v2: bool) -> Vec<u8> {
         let mut bytes = Vec::new();

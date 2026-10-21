@@ -1157,25 +1157,24 @@ fn devices<'f>(
         ));
     }
     if let Some(board) = board {
-        for (bank, instances) in board.darts.iter().zip(&darts) {
-            let mut domains = Vec::new();
-            for id in &bank.power_gates {
-                let supplies = board
-                    .power_states
-                    .as_ref()
-                    .and_then(|states| states.devices.iter().find(|(device, _)| device == id))
-                    .map(|(_, addresses)| addresses)
-                    .ok_or_else(|| {
-                        alloc::format!("DART power gate ID {id:#x} has no PMGR state")
-                    })?;
-                domains.extend_from_slice(supplies);
-            }
-            domains.sort_unstable();
-            domains.dedup();
-            // One supply powers every TRAD instance of the DT DART.
-            for &dart in instances {
-                devices.connect_dart_power(dart, &domains, bank.retention)?;
-            }
+        if let Some(states) = board.power_states.as_ref() {
+            let retention = board
+                .darts
+                .iter()
+                .map(|dart| dart.retention)
+                .collect::<Vec<_>>();
+            devices.connect_power_resources(states, &darts, &retention)?;
+            output::arguments(format_args!(
+                "DEVICES pmgr lifecycle-refusals={} resources={}\n",
+                devices.power_refusals().len(),
+                states.resources.len()
+            ));
+        } else if board
+            .darts
+            .iter()
+            .any(|dart| !dart.clock_gates.is_empty() || !dart.power_gates.is_empty())
+        {
+            return Err("DART resource gates require a modeled PMGR".into());
         }
     }
     for bank in board.map_or(&[][..], |b| &b.bridges) {

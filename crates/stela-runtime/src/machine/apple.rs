@@ -6,6 +6,7 @@
 use super::{
     engine::{DeviceError, Devices, Memory, Reset, Start, Transition},
     registers::Lines,
+    soc::PowerOwner,
 };
 pub use crate::platform::apple::pmu::WallClock;
 use crate::platform::apple::{
@@ -43,7 +44,10 @@ use crate::platform::apple::{
     ipi::{self, Affinity, FastIpi},
     lockdown::{self, Lockdown},
     perf::PerfCounters,
-    pmgr::{ACTIVE, POWER_GATED, Pmgr, PowerState},
+    pmgr::{
+        ACTIVE, DomainState, POWER_GATED, Pmgr, PowerState,
+        coverage::{self, Consumer, LifecycleSinks},
+    },
     pmp,
     pmu::{self, Pmu},
     power::{self, Power},
@@ -142,7 +146,9 @@ pub struct AppleDevices {
     aux_gpios: Vec<(u32, Vec<(u32, Net)>)>,
     typec_ports: Vec<(u32, typec::Port)>,
     pmgr: Option<DeviceId>,
-    dart_power: Vec<DartPower>,
+    power_clients: Vec<PowerClient>,
+    power_refusals: Vec<(u64, String)>,
+    power_configured: bool,
     /// The SoC's sleep and wake (`sleep`).
     sleep: sleep::SocSleep,
 }
@@ -167,7 +173,22 @@ struct UsbMaster {
     next_poll: u64,
     attached: bool,
     epoch: u64,
+    retention: bool,
+    session_reset: bool,
 }
+impl UsbMaster {
+    fn cancel_session(&mut self, reset: bool) -> Result<(), &'static str> {
+        self.session_reset |= reset;
+        if self.session_reset {
+            self.session.detach()?;
+            self.attached = false;
+            self.next_poll = 0;
+            self.session_reset = false;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct UsbPort {
     generation: u64,
@@ -275,9 +296,10 @@ struct CpuStarter {
 }
 
 /// Supplies shared by one DART, with its hardware retention property.
-struct DartPower {
+struct PowerClient {
     device: DeviceId,
-    domains: Vec<u64>,
+    owner: PowerOwner,
+    domains: Vec<(u64, DomainState)>,
     retention: bool,
 }
 
@@ -431,7 +453,9 @@ impl AppleDevices {
             aux_gpios: Vec::new(),
             typec_ports: Vec::new(),
             pmgr: None,
-            dart_power: Vec::new(),
+            power_clients: Vec::new(),
+            power_refusals: Vec::new(),
+            power_configured: false,
             sleep: sleep::SocSleep::default(),
         }
     }
@@ -1425,6 +1449,8 @@ impl AppleDevices {
             next_poll: 0,
             attached: false,
             epoch: 0,
+            retention: placement.retention,
+            session_reset: false,
         });
         Ok(UsbId(device))
     }
@@ -1542,6 +1568,12 @@ impl AppleDevices {
             .iter_mut()
             .find(|master| master.device == id.0)
             .ok_or("unknown USB controller")?;
+        let reset = self
+            .bus
+            .device_mut::<Dwc3>(master.device)
+            .expect("USB master owns DWC3")
+            .take_session_reset();
+        master.cancel_session(reset)?;
         Ok(UsbClient(&mut master.session))
     }
     /// One observed key write, including its unchanged raw reply or refusal.
@@ -1616,35 +1648,154 @@ impl AppleDevices {
         Ok(())
     }
 
-    /// Connect a DART to the translated PMGR supplies its DT names. Empty
-    /// supply lists require no PMGR. Every supplied address must be modeled.
-    pub fn connect_dart_power(
+    /// Account for every original resource before connecting lifecycle.
+    /// Mapper views have the same hardware owner as their DART. Other
+    /// hardware needs its own real sinks. Validate all links before enabling
+    /// any register control.
+    pub fn connect_power_resources(
         &mut self,
-        dart: DartId,
-        domains: &[u64],
-        retention: bool,
+        states: &super::soc::PowerStates,
+        darts: &[Vec<DartId>],
+        retention: &[bool],
     ) -> Result<(), String> {
-        if domains.is_empty() {
-            return Ok(());
+        if self.power_configured || darts.len() != retention.len() {
+            return Err("PMGR binding is duplicate or has mismatched DART groups".into());
         }
         let pmgr = self
             .pmgr
             .and_then(|id| self.bus.device::<Pmgr>(id))
-            .ok_or("DART supplies have no PMGR")?;
-        if domains.iter().any(|&address| pmgr.state(address).is_none()) {
-            return Err("DART names an undescribed PMGR supply".into());
+            .ok_or("PMGR resources have no mapped power-state model")?;
+        let complete = LifecycleSinks {
+            clock: true,
+            power: true,
+            quiesce: true,
+            reset: true,
+        };
+        let mut devices = Vec::new();
+        for instances in darts {
+            if instances.is_empty() {
+                return Err("PMGR binding has an empty DART group".into());
+            }
+            for dart in instances {
+                if self.bus.device::<Dart>(dart.0).is_none() || devices.contains(&dart.0) {
+                    return Err("PMGR binding is duplicate or not a DART".into());
+                }
+                devices.push(dart.0);
+            }
         }
-        if self.bus.device::<Dart>(dart.0).is_none()
-            || self.dart_power.iter().any(|p| p.device == dart.0)
+        let mut consumers = Vec::new();
+        for resource in &states.resources {
+            if resource.owner.is_some_and(|owner| match owner {
+                PowerOwner::Dart(index) => index >= darts.len(),
+                PowerOwner::Usb(index) => index >= self.usb_masters.len(),
+            }) {
+                return Err(format!(
+                    "{} names an unplaced hardware lifecycle owner",
+                    resource.name
+                ));
+            }
+            consumers.push(Consumer {
+                name: &resource.name,
+                clocks: &resource.clocks,
+                power: &resource.power,
+                sinks: if resource.owner.is_some() {
+                    complete
+                } else {
+                    LifecycleSinks::default()
+                },
+            });
+        }
+        let coverage = coverage::analyze(&states.domains, &consumers)
+            .map_err(|error| format!("PMGR resource coverage: {error:?}"))?;
+        if coverage.len() != states.registers.len()
+            || coverage.iter().any(|record| {
+                !states.registers.contains(&record.address)
+                    || pmgr.domain_state(record.address).is_none()
+            })
         {
-            return Err("DART supply binding is duplicate or not a DART".into());
+            return Err("PMGR resource graph differs from mapped power states".into());
         }
-        self.dart_power.push(DartPower {
-            device: dart.0,
-            domains: domains.to_vec(),
-            retention,
-        });
+        let mut clients = darts
+            .iter()
+            .enumerate()
+            .flat_map(|(index, instances)| {
+                instances
+                    .iter()
+                    .map(move |dart| (PowerOwner::Dart(index), dart.0, retention[index]))
+            })
+            .collect::<Vec<_>>();
+        clients.extend(
+            self.usb_masters
+                .iter()
+                .enumerate()
+                .map(|(index, master)| (PowerOwner::Usb(index), master.device, master.retention)),
+        );
+        let mut links = Vec::new();
+        for (owner, device, retention) in clients {
+            let domains = coverage
+                .iter()
+                .filter(|record| {
+                    record.consumers.iter().any(|consumer| {
+                        states.resources.iter().any(|resource| {
+                            resource.name == consumer.name && resource.owner == Some(owner)
+                        })
+                    })
+                })
+                .map(|record| {
+                    (
+                        record.address,
+                        pmgr.domain_state(record.address).expect("validated domain"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            links.push(PowerClient {
+                device,
+                owner,
+                domains,
+                retention,
+            });
+        }
+        let refusals = coverage
+            .iter()
+            .filter(|record| !record.bindable())
+            .map(|record| {
+                let names = record
+                    .consumers
+                    .iter()
+                    .filter(|consumer| !consumer.sinks.complete())
+                    .map(|consumer| consumer.name.as_str())
+                    .collect::<Vec<_>>();
+                (
+                    record.address,
+                    if names.is_empty() {
+                        "no resource has registered lifecycle sinks".into()
+                    } else {
+                        format!("lifecycle sinks missing for {}", names.join(", "))
+                    },
+                )
+            })
+            .collect();
+        let pmgr = self
+            .bus
+            .device_mut::<Pmgr>(self.pmgr.expect("validated PMGR"))
+            .expect("PMGR type");
+        for record in coverage {
+            let result = if record.bindable() {
+                pmgr.bind_lifecycle(record.address)
+            } else {
+                pmgr.refuse_lifecycle(record.address)
+            };
+            result.map_err(|error| format!("PMGR resource binding: {error:?}"))?;
+        }
+        self.power_clients = links;
+        self.power_refusals = refusals;
+        self.power_configured = true;
         Ok(())
+    }
+
+    /// Resource names for domains whose actual consumers still lack sinks.
+    pub fn power_refusals(&self) -> &[(u64, String)] {
+        &self.power_refusals
     }
 
     /// A CPU cluster's PMGR registers at `base`: its register window, with
@@ -1918,27 +2069,71 @@ impl AppleDevices {
             .map_err(|error| format!("AIC placement: {error:?}"))
     }
 
+    /// Replay each edge: off/on or reset assertion/release must still
+    /// discard ordinary state even if the final image is active again.
+    /// Infallible after binding, this runs before the next client effect,
+    /// including after a bus/service operation returned a partial failure.
+    fn settle_power(&mut self, cpu: CpuIndex, now: u64) {
+        let Some(pmgr) = self.pmgr else {
+            return;
+        };
+        let transitions = self
+            .bus
+            .device_mut::<Pmgr>(pmgr)
+            .expect("PMGR type")
+            .take_transitions();
+        for transition in transitions {
+            for link in &mut self.power_clients {
+                let Some((_, state)) = link
+                    .domains
+                    .iter_mut()
+                    .find(|(address, _)| *address == transition.address)
+                else {
+                    continue;
+                };
+                debug_assert_eq!(*state, transition.before, "PMGR lifecycle edge order");
+                *state = transition.after;
+                let powered = link
+                    .domains
+                    .iter()
+                    .all(|(_, state)| state.power != POWER_GATED);
+                let clocked = link.domains.iter().all(|(_, state)| state.power == ACTIVE);
+                let quiesced = link.domains.iter().any(|(_, state)| state.disabled);
+                let reset = link.domains.iter().any(|(_, state)| state.reset);
+                let mut access = Access::new(cpu, now, &mut self.latch);
+                match link.owner {
+                    PowerOwner::Dart(_) => {
+                        let dart = self
+                            .bus
+                            .device_mut::<Dart>(link.device)
+                            .expect("binding checked DART");
+                        dart.set_quiesced(quiesced);
+                        dart.set_clock(clocked);
+                        dart.set_reset(reset, &mut access);
+                        dart.set_power(powered, link.retention, &mut access);
+                    }
+                    PowerOwner::Usb(_) => {
+                        let usb = self
+                            .bus
+                            .device_mut::<Dwc3>(link.device)
+                            .expect("binding checked USB controller");
+                        usb.set_quiesced(quiesced);
+                        usb.set_clock(clocked, &access);
+                        usb.set_reset(reset, &mut access);
+                        usb.set_power(powered, link.retention, &mut access);
+                    }
+                }
+            }
+        }
+    }
+
     /// Forward queued device wires into the AIC and record a reset request;
     /// `cpu` is the PE whose access or time step queued them.
     fn settle(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) -> Result<(), DeviceError> {
         if self.reset.is_none() {
             self.reset = reset;
         }
-        for link in &self.dart_power {
-            let pmgr = self
-                .bus
-                .device::<Pmgr>(self.pmgr.expect("binding checked PMGR"))
-                .expect("PMGR type");
-            let powered = link
-                .domains
-                .iter()
-                .all(|&a| pmgr.state(a) != Some(POWER_GATED));
-            let mut access = Access::new(cpu, now, &mut self.latch);
-            self.bus
-                .device_mut::<Dart>(link.device)
-                .expect("binding checked DART")
-                .set_power(powered, link.retention, &mut access);
-        }
+        self.settle_power(cpu, now);
         self.release_cores()?;
         loop {
             let inputs = self.latch.take_aic_inputs();
@@ -2009,6 +2204,7 @@ impl Devices for AppleDevices {
     }
 
     fn read(&mut self, cpu: usize, physical: u64, bytes: u8, now: u64) -> Result<u64, DeviceError> {
+        self.settle_power(cpu, now);
         let width = width(bytes)?;
         let mut access = Access::new(cpu, now, &mut self.latch);
         let value = self
@@ -2028,6 +2224,7 @@ impl Devices for AppleDevices {
         value: u64,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.settle_power(cpu, now);
         let width = width(bytes)?;
         // Validate the NOR CS edge before the GPIO word changes. This keeps
         // an incomplete-command refusal atomic across the two devices.
@@ -2047,7 +2244,20 @@ impl Devices for AppleDevices {
         let mut access = Access::new(cpu, now, &mut self.latch);
         self.bus
             .write(physical, width, value, &mut access)
-            .map_err(describe)?;
+            .map_err(|error| {
+                if let Some((_, reason)) = self
+                    .power_refusals
+                    .iter()
+                    .find(|(address, _)| *address == physical)
+                {
+                    DeviceError::Refused(format!(
+                        "PMGR domain {physical:#x}: {reason}; {:?}",
+                        describe(error)
+                    ))
+                } else {
+                    describe(error)
+                }
+            })?;
         for wire in self.selects.iter().filter(|w| w.physical == physical) {
             self.bus
                 .device_mut::<Spi>(wire.spi)
@@ -2090,6 +2300,7 @@ impl Devices for AppleDevices {
     }
 
     fn lines(&mut self, cpu: usize, now: u64) -> Lines {
+        self.settle_power(cpu, now);
         if let Some(ipi) = self.ipi.as_mut() {
             ipi.advance(now, &mut self.latch);
         }
@@ -2120,6 +2331,7 @@ impl Devices for AppleDevices {
     }
 
     fn deadline(&mut self, now: u64) -> Option<u64> {
+        self.settle_power(0, now);
         // Time-driven state is the board's, not a PE's: the access names
         // cpu0.
         let deferred = self
@@ -2132,7 +2344,13 @@ impl Devices for AppleDevices {
         let usb = self
             .usb_masters
             .iter()
-            .filter(|master| master.port.ready || master.attached)
+            .filter(|master| {
+                (master.port.ready || master.attached)
+                    && self
+                        .bus
+                        .device::<Dwc3>(master.device)
+                        .is_some_and(Dwc3::lifecycle_active)
+            })
             .map(|master| master.next_poll)
             .min();
         let device = match (device, usb) {
@@ -2177,6 +2395,9 @@ impl Devices for AppleDevices {
             .filter_map(|master| {
                 let port = UsbPort::of(&master.connector);
                 let controller = self.bus.device::<Dwc3>(master.device);
+                if !controller.is_some_and(Dwc3::lifecycle_active) {
+                    return None;
+                }
                 if port != master.port || controller.is_some_and(Dwc3::host_pending) {
                     return Some(0);
                 }
@@ -2194,6 +2415,7 @@ impl Devices for AppleDevices {
         memory: &mut dyn Memory,
         now: u64,
     ) -> Result<(), DeviceError> {
+        self.settle_power(cpu, now);
         for master in &self.masters {
             let (aes, dart) = self
                 .bus
@@ -2369,6 +2591,9 @@ impl Devices for AppleDevices {
                 access: &mut access,
             };
             let fail = |why: &str| DeviceError::Refused(format!("USB device advance: {why}"));
+            master
+                .cancel_session(controller.take_session_reset())
+                .map_err(fail)?;
             let connector = UsbPort::of(&master.connector);
             if connector != master.port {
                 // A new cable generation cancels the previous connection's work.
@@ -2376,6 +2601,12 @@ impl Devices for AppleDevices {
                 master.attached = false;
                 master.port = connector;
                 master.next_poll = 0;
+            }
+            // A retained clock/quiesce pause preserves the external session;
+            // connector changes still cancel it, and reset/power loss above
+            // invalidates it before any new USB or DMA transaction.
+            if !controller.lifecycle_active() {
+                continue;
             }
             controller.sync_port(&master.port).map_err(fail)?;
             controller
@@ -2413,6 +2644,10 @@ impl Devices for AppleDevices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{
+        apple::bus::MmioDevice,
+        dma::{Iommu, tests::Ram},
+    };
     use alloc::{rc::Rc, vec::Vec};
     use core::cell::RefCell;
 
@@ -2432,58 +2667,58 @@ mod tests {
         assert!(d.write(0, bases[0] + coresight::ACCESS, 8, 0, 0).is_err());
     }
 
-    #[test]
-    fn pmgr_power_gates_reset_dart_tables_but_clock_gates_and_retention_preserve_them() {
-        for retention in [false, true] {
-            let mut d = AppleDevices::new();
-            let supply = 0x2_3b70_0100;
-            let base = 0x2_3500_4000;
-            d.add_power_states(
-                &[Range {
-                    physical: supply,
-                    bytes: 4,
-                }],
-                &[supply],
-            )
-            .unwrap();
-            let dart = d
-                .add_dart(
-                    Range {
-                        physical: base,
-                        bytes: 0x4000,
-                    },
-                    16,
-                    None,
-                    None,
-                )
-                .unwrap();
-            d.connect_dart_power(dart, &[supply], retention).unwrap();
-            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
-            d.write(0, supply, 4, 4, 0).unwrap();
-            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
-            d.write(0, supply, 4, 0, 0).unwrap();
-            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
-            d.write(0, supply, 4, 15, 0).unwrap();
-            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(u64::from(retention)));
-            assert!(d.connect_dart_power(dart, &[supply + 4], false).is_err());
-        }
+    fn powered_dart(retention: bool, supplies: usize) -> (AppleDevices, DartId, u64, u64) {
+        powered_dart_with(retention, supplies, |_| {})
     }
 
-    #[test]
-    fn paired_smmu_shares_dart_power_and_reset() {
+    fn powered_dart_with(
+        retention: bool,
+        supplies: usize,
+        edit: impl FnOnce(&mut super::super::soc::PowerStates),
+    ) -> (AppleDevices, DartId, u64, u64) {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Domain, DomainId};
         let mut d = AppleDevices::new();
         let supply = 0x2_3b70_0100;
         let base = 0x2_3500_4000;
-        let smmu = 0x2_7130_0000;
+        let registers = (0..supplies)
+            .map(|index| supply + index as u64 * 8)
+            .collect::<Vec<_>>();
+        let ids = (0..supplies)
+            .map(|index| DomainId {
+                die: 0,
+                device: index as u16 + 1,
+            })
+            .collect::<Vec<_>>();
+        let mut states = PowerStates {
+            blocks: vec![(supply, supplies as u64 * 8)],
+            registers: registers.clone(),
+            domains: registers
+                .iter()
+                .zip(&ids)
+                .map(|(&address, &id)| Domain {
+                    id,
+                    address: Some(address),
+                    parents: [None; 2],
+                })
+                .collect(),
+            resources: vec![PowerResource {
+                name: "/arm-io/dart".into(),
+                clocks: ids,
+                power: Vec::new(),
+                owner: Some(PowerOwner::Dart(0)),
+            }],
+        };
+        edit(&mut states);
         d.add_power_states(
             &[Range {
                 physical: supply,
-                bytes: 4,
+                bytes: supplies as u64 * 8,
             }],
-            &[supply],
+            &registers,
         )
         .unwrap();
-        let owner = d
+        let dart = d
             .add_dart(
                 Range {
                     physical: base,
@@ -2494,6 +2729,31 @@ mod tests {
                 None,
             )
             .unwrap();
+        d.connect_power_resources(&states, &[vec![dart]], &[retention])
+            .unwrap();
+        (d, dart, supply, base)
+    }
+
+    #[test]
+    fn pmgr_power_gates_reset_dart_tables_but_clock_gates_and_retention_preserve_them() {
+        for retention in [false, true] {
+            let (mut d, _, supply, base) = powered_dart(retention, 1);
+            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+            d.write(0, supply, 4, 4, 0).unwrap();
+            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+            d.write(0, supply, 4, 15, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+            d.write(0, supply, 4, 0, 0).unwrap();
+            assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+            d.write(0, supply, 4, 15, 0).unwrap();
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(u64::from(retention)));
+        }
+    }
+
+    #[test]
+    fn paired_smmu_shares_dart_power_and_reset() {
+        let (mut d, owner, supply, base) = powered_dart(false, 1);
+        let smmu = 0x2_7130_0000;
         d.add_dart_smmu(
             owner,
             Range {
@@ -2502,7 +2762,6 @@ mod tests {
             },
         )
         .unwrap();
-        d.connect_dart_power(owner, &[supply], false).unwrap();
         assert_eq!(d.read(0, smmu, 4, 0), Ok(0));
         assert!(d.read(0, smmu, 8, 0).is_err());
         assert!(d.read(0, smmu + 0x2000, 4, 0).is_err());
@@ -2599,6 +2858,124 @@ mod tests {
         );
         assert_eq!(d.read(0, smmu, 4, 0), Ok(0));
         assert!(d.read(0, other, 4, 0).is_err());
+    }
+
+    #[test]
+    fn pmgr_replays_queued_off_on_and_reset_edges_before_the_next_client_access() {
+        for reset in [false, true] {
+            let (mut d, _, supply, base) = powered_dart(reset, 1);
+            d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+            let writes = if reset {
+                vec![0x40f, 0x8000_040f, 0x40f, 0xf]
+            } else {
+                vec![0, 15]
+            };
+            let mut access = Access::new(0, 0, &mut d.latch);
+            let pmgr = d.bus.device_mut::<Pmgr>(d.pmgr.unwrap()).unwrap();
+            for value in writes {
+                pmgr.write(supply, Width::Word, value, &mut access).unwrap();
+            }
+            assert_eq!(pmgr.domain_state(supply).unwrap().power, ACTIVE);
+            // The failed access must still deliver earlier accepted edges.
+            assert!(d.write(0, base + 1, 4, 0, 0).is_err());
+            assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
+            assert!(
+                d.bus
+                    .device_mut::<Pmgr>(d.pmgr.unwrap())
+                    .unwrap()
+                    .take_transitions()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn pmgr_multi_supply_inhibits_activity_until_every_clock_and_reset_is_released() {
+        let (mut d, dart, supply, base) = powered_dart(true, 2);
+        d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+        d.write(0, supply, 4, 4, 0).unwrap();
+        d.write(0, supply + 8, 4, 4, 0).unwrap();
+        d.write(0, supply, 4, 15, 0).unwrap();
+        assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+        d.write(0, supply + 8, 4, 15, 0).unwrap();
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+        d.write(0, supply, 4, 0x40f, 0).unwrap();
+        let mut access = Access::new(0, 0, &mut d.latch);
+        assert!(
+            d.bus
+                .device_mut::<Dart>(dart.0)
+                .unwrap()
+                .translate(&mut Ram::new(0, 0x1000), 0, 0, 0, false, &mut access)
+                .is_err()
+        );
+        d.write(0, supply, 4, 0x8000_040f, 0).unwrap();
+        d.write(0, supply + 8, 4, 0x8000_040f, 0).unwrap();
+        d.write(0, supply, 4, 15, 0).unwrap();
+        assert!(d.read(0, base + 0x1000, 4, 0).is_err());
+        d.write(0, supply + 8, 4, 15, 0).unwrap();
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
+    }
+
+    #[test]
+    fn pmgr_shared_parents_and_aliases_refuse_only_the_uncovered_hardware_domains() {
+        use super::super::soc::PowerResource;
+        use coverage::{Domain, DomainId};
+        let id = |device| DomainId { die: 0, device };
+        let (mut d, _, supply, base) = powered_dart_with(false, 3, |states| {
+            states.domains[1].parents = [Some(id(1)), None];
+            states.domains.push(Domain {
+                id: id(4),
+                address: states.domains[1].address,
+                parents: [Some(id(3)), None],
+            });
+            states.resources[0].clocks = vec![id(2)];
+            for (name, device) in [("controller", 1), ("firmware-endpoint", 3)] {
+                states.resources.push(PowerResource {
+                    name: name.into(),
+                    clocks: vec![],
+                    power: vec![id(device)],
+                    owner: None,
+                });
+            }
+        });
+        assert_eq!(d.power_refusals().len(), 2);
+        d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+        for (address, consumer) in [(supply, "controller"), (supply + 16, "firmware-endpoint")] {
+            for value in [0, 4, 0x40f, 0x8000_040f] {
+                let error = d.write(0, address, 4, value, 0).unwrap_err();
+                assert!(format!("{error:?}").contains(consumer));
+                assert_eq!(d.read(0, address, 4, 0), Ok(0xff));
+                assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(1));
+            }
+        }
+        // The exclusive child remains connected even though its two alias
+        // parents have unrelated unsupported hardware consumers.
+        d.write(0, supply + 8, 4, 0x40f, 0).unwrap();
+        d.write(0, supply + 8, 4, 0x8000_040f, 0).unwrap();
+        d.write(0, supply + 8, 4, 15, 0).unwrap();
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
+    }
+
+    #[test]
+    fn pmgr_accepted_edges_survive_a_later_wire_delivery_failure() {
+        use crate::platform::apple::interrupt::{InterruptSink, Wire};
+        let (mut d, _, supply, base) = powered_dart(false, 1);
+        d.write(0, base + 0x1000, 4, 1, 0).unwrap();
+        d.latch.set_level(Wire::Aic(AicInput::new(0, 1)), true);
+        // PMGR accepts the edge and DART clears first; the unrelated AIC
+        // delivery then refuses. No later client may see pre-gate state.
+        assert!(d.write(0, supply, 4, 0, 0).is_err());
+        assert_eq!(
+            d.bus
+                .device::<Pmgr>(d.pmgr.unwrap())
+                .unwrap()
+                .domain_state(supply)
+                .unwrap()
+                .power,
+            POWER_GATED
+        );
+        d.write(0, supply, 4, 15, 0).unwrap();
+        assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
     }
 
     #[test]
@@ -3655,22 +4032,9 @@ mod tests {
             matches!(refusal, Err(DeviceError::Refused(reason)) if reason.contains("payload type is malformed"))
         );
     }
-    #[test]
-    fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
+    fn usb_placement() -> super::super::soc::UsbController {
         const BASE: u64 = 0x382280000;
-        let mut devices = AppleDevices::new();
-        let dart = devices
-            .add_dart(
-                Range {
-                    physical: 0x382f00000,
-                    bytes: 0x4000,
-                },
-                16,
-                Some(AicInput::new(0, 1035)),
-                None,
-            )
-            .unwrap();
-        let placement = super::super::soc::UsbController {
+        super::super::soc::UsbController {
             ranges: [
                 (BASE, 0x11800),
                 (0x382200000, 0x4000),
@@ -3686,7 +4050,103 @@ mod tests {
             iommu: 0,
             stream: 1,
             port: 1,
+            retention: false,
+        }
+    }
+
+    #[test]
+    fn pmgr_shared_usb_leaf_pauses_both_clients_and_cancels_sessions_only_on_reset_or_detach() {
+        use super::super::soc::{PowerResource, PowerStates};
+        use coverage::{Domain, DomainId};
+        let id = |device| DomainId { die: 0, device };
+        let mut d = AppleDevices::new();
+        d.add_aic(0x3b0c0000, 1100, AicLayout::aic2(0x8000, 0)).unwrap();
+        let dart_base = 0x382f00000;
+        let dart = d.add_dart(Range { physical: dart_base, bytes: 0x4000 }, 16, None, None).unwrap();
+        let placement = usb_placement();
+        let usb = d.add_usb(&placement, dart).unwrap();
+        let base = placement.ranges[0].0;
+        let supply = 0x23d280098;
+        let states = PowerStates {
+            registers: vec![supply, supply + 8], blocks: vec![(supply, 12)],
+            domains: vec![
+                Domain { id: id(0x210), address: None, parents: [Some(id(0x108)), None] },
+                Domain { id: id(0x108), address: Some(supply), parents: [Some(id(2)), None] },
+                Domain { id: id(2), address: Some(supply + 8), parents: [None; 2] },
+            ],
+            resources: vec![
+                PowerResource { name: "dart-usb0".into(), clocks: vec![id(0x210)], power: vec![], owner: Some(PowerOwner::Dart(0)) },
+                PowerResource { name: "usb-drd0".into(), clocks: vec![id(0x108)], power: vec![], owner: Some(PowerOwner::Usb(0)) },
+                PowerResource { name: "usb-drd0/port-hs".into(), clocks: vec![id(0x108)], power: vec![], owner: Some(PowerOwner::Usb(0)) },
+                PowerResource { name: "atc-phy0".into(), clocks: vec![id(2)], power: vec![], owner: None },
+            ],
         };
+        d.add_power_states(&[Range { physical: supply, bytes: 12 }], &states.registers).unwrap();
+        d.connect_power_resources(&states, &[vec![dart]], &[false]).unwrap();
+        assert_eq!(d.power_refusals().len(), 1);
+        assert!(d.write(0, supply + 8, 4, 0, 0).is_err());
+        let host = typec::Attached { orientation: typec::Orientation::Normal, role: typec::DataRole::Ufp, source: false, vbus: true, speed: typec::Usb2Speed::High };
+        d.set_connection(1, Some(host)).unwrap();
+        let restore_dart = |d: &mut AppleDevices| {
+            d.write(0, dart_base + 0xc00, 4, 2, 0).unwrap();
+            d.write(0, dart_base + 0x1004, 4, 6, 0).unwrap();
+        };
+        restore_dart(&mut d);
+        d.write(0, base + 0xc704, 4, 1 << 31, 0).unwrap(); // DCTL RUN
+        let mut ram = Ram::new(0x800000000, 0x10000);
+        d.transfer(0, &mut ram, 0).unwrap();
+        assert!(d.usb_masters[0].attached);
+        assert_eq!(d.usb_masters[0].epoch, 1);
+        d.write(0, supply, 4, 4, 10).unwrap();
+        assert!(d.read(0, base + 0xc704, 4, 10).is_err());
+        assert!(d.read(0, dart_base + 0x1004, 4, 10).is_err());
+        assert_eq!(d.dma_deadline(), None);
+        d.transfer(0, &mut ram, 20).unwrap();
+        assert!(d.usb_masters[0].attached);
+        assert_eq!(d.usb_masters[0].epoch, 1);
+        d.write(0, supply, 4, 15, 30).unwrap();
+        d.transfer(0, &mut ram, 30).unwrap();
+        assert_eq!(d.usb_masters[0].epoch, 1);
+        for value in [0x40f, 0x8000040f, 0x40f, 15] { d.write(0, supply, 4, value, 40).unwrap(); }
+        assert_eq!(d.typec_port(1).snapshot().connection, Some(host));
+        restore_dart(&mut d);
+        d.transfer(0, &mut ram, 50).unwrap();
+        assert!(!d.usb_masters[0].attached);
+        assert_eq!(d.read(0, base + 0xc704, 4, 50), Ok(0));
+        d.write(0, base + 0xc704, 4, 1 << 31, 60).unwrap();
+        d.transfer(0, &mut ram, 60).unwrap();
+        assert!(d.usb_masters[0].attached);
+        assert_eq!(d.usb_masters[0].epoch, 2);
+        // Cable removal cancels the connection even while the clock is off.
+        d.write(0, supply, 4, 4, 70).unwrap();
+        d.set_connection(1, None).unwrap();
+        d.transfer(0, &mut ram, 70).unwrap();
+        assert!(!d.usb_masters[0].attached);
+        d.set_connection(1, Some(host)).unwrap();
+        d.transfer(0, &mut ram, 80).unwrap();
+        d.write(0, supply, 4, 15, 90).unwrap();
+        d.transfer(0, &mut ram, 90).unwrap();
+        assert!(d.usb_masters[0].attached);
+        assert_eq!(d.usb_masters[0].epoch, 3);
+        assert_eq!(d.usb_client(usb).unwrap().mux_state(), MuxState::Negotiating);
+    }
+
+    #[test]
+    fn usb_core_aliases_platform_refusals_and_port_driven_polling() {
+        const BASE: u64 = 0x382280000;
+        let mut devices = AppleDevices::new();
+        let dart = devices
+            .add_dart(
+                Range {
+                    physical: 0x382f00000,
+                    bytes: 0x4000,
+                },
+                16,
+                Some(AicInput::new(0, 1035)),
+                None,
+            )
+            .unwrap();
+        let placement = usb_placement();
         let id = devices.add_usb(&placement, dart).unwrap();
         assert_eq!(devices.read(0, BASE + 0xc120, 4, 0), Ok(0x5533_300a));
         devices

@@ -297,6 +297,20 @@ impl Xhci {
         }
     }
 
+    /// Pause the actual host counter without touching rings, slot state,
+    /// pending events or committed memory. Only the containing DWC3 calls
+    /// this on a clock edge; software run/stop remains independently held.
+    pub(super) fn set_clock(&mut self, enabled: bool, now: u64) {
+        if enabled {
+            if self.usbsts & HCH == 0 {
+                self.started = Some(now);
+            }
+        } else {
+            self.mfindex = self.microframes(now);
+            self.started = None;
+        }
+    }
+
     /// Doorbell or segment-table work waits for DMA.
     pub fn pending(&self) -> bool {
         self.command_doorbell
