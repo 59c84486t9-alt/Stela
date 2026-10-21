@@ -18,6 +18,10 @@ pub enum Error {
     Route,
     Depth,
     RootRequired,
+    LegacyTmuAccess {
+        vendor: u16,
+        device: u16,
+    },
     Length,
     CapabilityOffset(u16),
     CapabilityLoop(u16),
@@ -481,6 +485,12 @@ impl<R: Registers> Inspector<R> {
         match job.stage {
             Stage::Router => {
                 let header = RouterHeader::parse(&data)?;
+                if header.vendor() == 0x8086 && matches!(header.device(), 0x1513 | 0x151a) {
+                    return Err(Error::LegacyTmuAccess {
+                        vendor: header.vendor(),
+                        device: header.device(),
+                    });
+                }
                 if job.path.depth()
                     > if usb4_domain || header.usb4_version() > 0 {
                         5

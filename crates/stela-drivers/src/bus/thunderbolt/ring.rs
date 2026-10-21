@@ -1791,4 +1791,52 @@ mod tests {
             channel_release(&mut channel);
         }
     }
+
+    #[test]
+    fn inspector_refuses_exact_legacy_tmu_quirks_before_any_capability_or_adapter_access() {
+        use super::super::{
+            config::Route,
+            topology::{Error as InspectError, Inspector},
+        };
+        for device in [0x1513u16, 0x151a] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let mut inspector = Inspector::new(channel, 100, 64).unwrap();
+            inspector.begin(Route::new(0).unwrap(), 0).unwrap();
+            let sent = domain.data(model.frame_address(Direction::Tx, 0), 16);
+            let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+            model.finish(Direction::Tx, 0, &[], None);
+            let reply = incoming(
+                PacketType::Read,
+                &[
+                    1 << 31,
+                    0,
+                    address,
+                    0x8086 | (u32::from(device) << 16),
+                    0x20 | (3 << 14),
+                    0,
+                    0,
+                    0,
+                ],
+            );
+            finish_rx(&model, 0, &reply);
+            assert_eq!(
+                inspector.poll(1),
+                Err(InspectError::LegacyTmuAccess {
+                    vendor: 0x8086,
+                    device
+                })
+            );
+            assert_eq!(
+                model.read32(TX_DESCRIPTOR + 8) >> 16,
+                1,
+                "no second request may be published"
+            );
+            let writes = model.state.lock().unwrap().writes.len();
+            assert_eq!(inspector.poll(2).unwrap(), None);
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            let mut channel = inspector.into_channel();
+            channel_release(&mut channel);
+        }
+    }
 }
