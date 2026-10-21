@@ -283,9 +283,18 @@ check_preamble_and_limits(void)
    CHECK(written > 0);
    CHECK(stela_amd_compute_preamble(&info, &preamble, words, written - 1, &written) == STELA_AMD_COMMAND_BUFFER_TOO_SMALL);
    CHECK(!memcmp(words, before, sizeof(words)));
-   info.spi_cu_en = 0;
-   CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
-   CHECK(written == 0 && !memcmp(words, before, sizeof(words)));
+   const uint32_t empty_cu_masks[] = {0, 1u << 16, 0xffff0000};
+   for (unsigned i = 0; i < ARRAY_SIZE(empty_cu_masks); i++) {
+      info.spi_cu_en = empty_cu_masks[i];
+      CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
+      CHECK(written == 0 && !memcmp(words, before, sizeof(words)));
+      struct stela_amd_compute_pipeline disabled = pipeline();
+      CHECK(stela_amd_compute_pipeline(&info, &disabled, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
+      CHECK(written == 0 && !memcmp(words, before, sizeof(words)));
+      struct stela_amd_compute_dispatch dispatch = {.size = {1, 1, 1}};
+      CHECK(stela_amd_compute_dispatch(&info, &disabled, &dispatch, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
+      CHECK(written == 0 && !memcmp(words, before, sizeof(words)));
+   }
    info.spi_cu_en = 0x00f3;
    preamble.gfx11.compute_dispatch_interleave = 63;
    CHECK(stela_amd_compute_preamble(&info, &preamble, words, ARRAY_SIZE(words), &written) == STELA_AMD_COMMAND_INVALID);
