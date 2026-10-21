@@ -82,12 +82,32 @@ struct Controller {
     max_transfer: usize,
     command_id: u16,
     clock: Clock,
+    /// An unresolved command may still own the queues, PRPs and bounce RAM.
+    /// No buffer or queue may be reused until a new, acknowledged reset.
+    fault: Option<BlockError>,
 }
 
 impl Controller {
+    fn ready(&mut self) -> Result<(), BlockError> {
+        if let Some(error) = &self.fault {
+            return Err(error.clone());
+        }
+        let status = self.registers.read32(STATUS);
+        if status & FATAL != 0 {
+            return Err(self.poison(BlockError::Device { status }));
+        }
+        Ok(())
+    }
+
+    fn poison(&mut self, error: BlockError) -> BlockError {
+        self.fault = Some(error.clone());
+        error
+    }
+
     /// Submit one command on `queue` (admin when false) and poll for its
     /// completion; return completion dword 0.
     fn execute(&mut self, io: bool, command: [u32; 16]) -> Result<u32, BlockError> {
+        self.ready()?;
         let stride = self.doorbell_stride;
         let registers = self.registers;
         self.command_id = self.command_id.wrapping_add(1);
@@ -112,14 +132,28 @@ impl Controller {
         let phase = queue.phase;
         let completions = &queue.completions;
         let done = self.clock.wait(COMMAND_TIMEOUT_US, || {
-            (completions.read::<u32>(entry + 12) >> 16 & 1 == 1) == phase
+            registers.read32(STATUS) & FATAL != 0
+                || (completions.read::<u32>(entry + 12) >> 16 & 1 == 1) == phase
         });
+        let status = registers.read32(STATUS);
+        if status & FATAL != 0 {
+            return Err(self.poison(BlockError::Device { status }));
+        }
         if !done {
-            return Err(BlockError::Timeout);
+            return Err(self.poison(BlockError::Timeout));
         }
         fence(Ordering::SeqCst);
         let result = queue.completions.read::<u32>(entry);
         let tail_word = queue.completions.read::<u32>(entry + 12);
+        let submission = queue.completions.read::<u32>(entry + 8);
+        // A phase bit alone does not retire our command. A stale/malformed
+        // completion must not authorize reuse or acknowledge an unknown CQE.
+        if tail_word as u16 != id
+            || submission >> 16 != u32::from(queue.id)
+            || submission as u16 >= ENTRIES
+        {
+            return Err(self.poison(BlockError::Device { status: 0xffff }));
+        }
         queue.head = (queue.head + 1) % ENTRIES;
         if queue.head == 0 {
             queue.phase = !queue.phase;
@@ -128,9 +162,6 @@ impl Controller {
             DOORBELLS + (2 * usize::from(queue.id) + 1) * stride,
             u32::from(queue.head),
         );
-        if tail_word as u16 != id {
-            return Err(BlockError::Device { status: 0xffff });
-        }
         match tail_word >> 17 & 0x7fff {
             0 => Ok(result),
             status => Err(BlockError::Device { status }),
@@ -174,6 +205,7 @@ impl Controller {
         blocks: u32,
         bytes: usize,
     ) -> Result<(), BlockError> {
+        self.ready()?;
         let (prp1, prp2) = self.data_pointers(bytes);
         let mut command = [0u32; 16];
         command[0] = u32::from(opcode);
@@ -263,6 +295,7 @@ pub fn attach(
         max_transfer: BOUNCE_BYTES,
         command_id: 0,
         clock,
+        fault: None,
     };
 
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
@@ -348,6 +381,7 @@ impl BlockDevice for Namespace {
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
         self.identity.check(lba, buffer.len())?;
         let mut controller = self.controller.borrow_mut();
+        controller.ready()?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes(&controller);
         for (index, part) in buffer.chunks_mut(chunk).enumerate() {
@@ -362,6 +396,7 @@ impl BlockDevice for Namespace {
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
         self.identity.check_write(lba, data.len())?;
         let mut controller = self.controller.borrow_mut();
+        controller.ready()?;
         let block = self.identity.block_size as usize;
         let chunk = self.chunk_bytes(&controller);
         for (index, part) in data.chunks(chunk).enumerate() {
@@ -381,5 +416,177 @@ impl BlockDevice for Namespace {
             .borrow_mut()
             .execute(true, command)
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bus::dma::RegionAllocator;
+    use alloc::boxed::Box;
+
+    struct Fixture {
+        disk: Namespace,
+        // The real driver uses volatile MMIO/DMA accesses to these owned,
+        // stable allocations. This fixture advances completions explicitly;
+        // it is not a physical NVMe model or a reset qualification.
+        _registers: Box<[u64]>,
+        _memory: Vec<u64>,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let mut registers = vec![0u64; 1024].into_boxed_slice();
+            let mut memory = vec![0u64; 65536];
+            let start = memory.as_mut_ptr() as u64;
+            // SAFETY: this fixture owns both stable allocations until after
+            // all controller operations; no actual device accesses them.
+            let (mmio, mut dma) = unsafe {
+                (
+                    Mmio::new(registers.as_mut_ptr() as u64),
+                    RegionAllocator::new(start..start + (memory.len() * 8) as u64),
+                )
+            };
+            let controller = Controller {
+                registers: mmio,
+                doorbell_stride: 4,
+                admin: Queue::new(0, &mut dma).unwrap(),
+                io: Queue::new(1, &mut dma).unwrap(),
+                bounce: dma.allocate(BOUNCE_BYTES, PAGE).unwrap(),
+                prp_list: dma.allocate(PAGE, PAGE).unwrap(),
+                max_transfer: BOUNCE_BYTES,
+                command_id: 0,
+                // Force the actual polling path to expire immediately.
+                clock: Clock {
+                    ticks_per_microsecond: 0,
+                },
+                fault: None,
+            };
+            Self {
+                _registers: registers,
+                _memory: memory,
+                disk: Namespace {
+                    controller: Rc::new(RefCell::new(controller)),
+                    namespace: 1,
+                    identity: Identity {
+                        transport: Transport::Nvme,
+                        location: "fixture".into(),
+                        model: "fixture".into(),
+                        serial: "fixture".into(),
+                        blocks: 1024,
+                        block_size: 512,
+                        read_only: false,
+                    },
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn timeout_and_late_completion_cannot_reuse_any_namespace_dma() {
+        let mut fixture = Fixture::new();
+        assert_eq!(
+            fixture.disk.write(0, &[0x31; 512]),
+            Err(BlockError::Timeout)
+        );
+        let mut sibling = Namespace {
+            controller: fixture.disk.controller.clone(),
+            namespace: 2,
+            identity: fixture.disk.identity.clone(),
+        };
+        let (submission, prps, doorbell) = {
+            let mut c = fixture.disk.controller.borrow_mut();
+            // The timed-out device now delivers its late completion and DMA.
+            c.io.completions.write(8, 1u32 << 16 | 1);
+            c.io.completions.write(12, 1u32 << 16 | 1);
+            c.bounce.bytes_mut().fill(0x9d);
+            (
+                c.io.submissions.bytes().to_vec(),
+                c.prp_list.bytes().to_vec(),
+                c.registers.read32(DOORBELLS + 8),
+            )
+        };
+        let mut output = vec![0x55; BOUNCE_BYTES];
+        assert_eq!(sibling.read(0, &mut output), Err(BlockError::Timeout));
+        assert!(output.iter().all(|byte| *byte == 0x55));
+        assert_eq!(
+            fixture.disk.write(1, &[0xe6; 512]),
+            Err(BlockError::Timeout)
+        );
+        assert_eq!(sibling.flush(), Err(BlockError::Timeout));
+        let mut c = fixture.disk.controller.borrow_mut();
+        assert_eq!(
+            c.transfer(IO_READ, 1, 0, 256, BOUNCE_BYTES),
+            Err(BlockError::Timeout)
+        );
+        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0x9d));
+        assert_eq!(c.io.submissions.bytes(), submission);
+        assert_eq!(c.prp_list.bytes(), prps);
+        assert_eq!(c.registers.read32(DOORBELLS + 8), doorbell);
+        assert_eq!((c.command_id, c.io.tail, c.io.head), (1, 1, 0));
+    }
+
+    #[test]
+    fn unrelated_or_malformed_completions_do_not_retire_our_command() {
+        for (cid, sqid, head) in [(2u32, 1u32, 1u32), (1, 2, 1), (1, 1, 16)] {
+            let mut fixture = Fixture::new();
+            {
+                let mut c = fixture.disk.controller.borrow_mut();
+                c.io.completions.write(8, sqid << 16 | head);
+                c.io.completions.write(12, 1u32 << 16 | cid);
+            }
+            let error = BlockError::Device { status: 0xffff };
+            assert_eq!(fixture.disk.flush(), Err(error.clone()));
+            assert_eq!(fixture.disk.write(0, &[0x71; 512]), Err(error));
+            let c = fixture.disk.controller.borrow();
+            assert_eq!(c.io.head, 0);
+            assert_eq!(c.registers.read32(DOORBELLS + 12), 0);
+            assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
+        }
+    }
+
+    #[test]
+    fn completed_command_error_is_distinct_from_unresolved_dma() {
+        let mut fixture = Fixture::new();
+        {
+            let mut c = fixture.disk.controller.borrow_mut();
+            c.io.completions.write(8, 1u32 << 16 | 1);
+            c.io.completions.write(12, 2u32 << 17 | 1 << 16 | 1);
+        }
+        assert_eq!(fixture.disk.flush(), Err(BlockError::Device { status: 2 }));
+        {
+            let mut c = fixture.disk.controller.borrow_mut();
+            assert!(c.fault.is_none());
+            assert_eq!(c.io.head, 1);
+            c.io.completions.write(16 + 8, 1u32 << 16 | 2);
+            c.io.completions.write(16 + 12, 1u32 << 16 | 2);
+        }
+        assert_eq!(fixture.disk.flush(), Ok(()));
+        assert_eq!(fixture.disk.controller.borrow().io.head, 2);
+    }
+
+    #[test]
+    fn fatal_status_poison_precedes_cpu_dma_access_and_does_not_reopen() {
+        let mut fixture = Fixture::new();
+        fixture
+            .disk
+            .controller
+            .borrow()
+            .registers
+            .write32(STATUS, FATAL);
+        let error = BlockError::Device { status: FATAL };
+        assert_eq!(fixture.disk.write(0, &[0xa9; 512]), Err(error.clone()));
+        fixture
+            .disk
+            .controller
+            .borrow()
+            .registers
+            .write32(STATUS, 0);
+        assert_eq!(fixture.disk.flush(), Err(error));
+        let c = fixture.disk.controller.borrow();
+        assert_eq!((c.command_id, c.io.tail, c.io.head), (0, 0, 0));
+        assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
+        assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
+        assert_eq!(c.registers.read32(DOORBELLS + 8), 0);
     }
 }
