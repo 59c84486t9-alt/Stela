@@ -6,6 +6,7 @@
 //! MAC startup branches from pinned r8169_main.c, before DMA is published.
 use super::{Registers, Timer, hardware::Hardware, registers::*};
 use crate::block::BlockError;
+mod g;
 
 impl<R: Registers, T: Timer> Hardware<'_, R, T> {
     fn ephys(&self, values: &[(u8, u16, u16)]) -> Result<(), BlockError> {
@@ -156,6 +157,7 @@ impl<R: Registers, T: Timer> Hardware<'_, R, T> {
                             self.eri_modify(0xd4, 0, 0x1f00)?;
                         }
                     }
+                    40 | 42 | 44 => self.g_start()?,
                     34 => {
                         self.latency()?;
                         self.ephys(&[

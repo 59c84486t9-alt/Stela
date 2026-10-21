@@ -12,17 +12,19 @@
 //!
 //! This slice implements MAC versions 02..06 (8169S/SB/SC, 8110S/SB/SC),
 //! 17..26 (8168B/C/CP/D, 8111B/C/CP/D), 32..36 (8168E/E-VL/F,
-//! 8111E/E-VL/F) and 38 (RTL8411). PHY IDs
-//! `001c:c800` (internal FE/GE) and `001c:c912` (RTL8211B) are accepted only
+//! 8111E/E-VL/F), 38 (RTL8411), 40/42 (8168G/8111G) and 44 (RTL8411B).
+//! PHY IDs `001c:c800` (internal FE/GE) and `001c:c912` (RTL8211B) are accepted only
 //! with actual copper-gigabit capabilities. Versions 25/26 require their exact
 //! `rtl_nic/rtl8168d-1.fw`/`rtl_nic/rtl8168d-2.fw` resource and matching PHY
 //! firmware-readiness sentinel; 34 requires `rtl_nic/rtl8168e-3.fw`.
-//! Versions 32/33/35/36/38 require their exact E/F/8411 firmware and the
+//! Versions 32/33/35/36/38/40/42/44 require exact revision firmware and the
 //! internal FE/GE PHY; external PHY initialization is outside these new paths.
-//! E1/E2 return an observable warning for unavailable optional EEE cleanup;
-//! Optional EEE cleanup is not performed; EEE advertisement state is unverified.
-//! No firmware bytes are embedded or copied.
+//! E1/E2 return an observable warning: optional EEE cleanup is not performed
+//! and EEE advertisement state is unverified. External `.fw` image bytes are
+//! never embedded or copied.
 //!
+//! MAC40/42/44 use checked PHY/MAC OCP, explicit shared FIFO ownership, and
+//! their exact PHY/start paths; MAC44 retains the donor's licensed RX fix.
 //! Later 8168/8111, 8125 and 8126 MAC versions are identified for diagnostics
 //! but **refused** until their complete MAC/PHY initialization is implemented.
 //! RTL8139, 100Mbps-only chips, ancient unsupported version 01, external PHY
@@ -244,6 +246,7 @@ impl Realtek {
         let subsystem = function.config().read32(0x2c);
         let mut hardware =
             Hardware::new(&device, &handoff.clock, revision, function.address.function);
+        hardware.initialize_modern()?;
         hardware.reset()?;
         if revision.version <= 6 {
             function.config().write16(0x0c, 0x4008); // Linux cache-line/latency values, narrow config write.
@@ -380,7 +383,7 @@ fn link_patch<R: Registers, T: Timer>(
     Ok(())
 }
 fn read_station<R: Registers, T: Timer>(hw: &Hardware<'_, R, T>) -> Result<Mac, BlockError> {
-    if matches!(hw.revision.version, 35 | 36 | 38)
+    if matches!(hw.revision.version, 35 | 36 | 38 | 40 | 42 | 44)
         && let Some(mac) = station(hw.eri_read(0xe0)?, hw.eri_read(0xe4)?)
     {
         return Ok(mac);
@@ -442,6 +445,7 @@ fn publish<R: Registers, T: Timer>(
     let rxconfig = match revision.version {
         2..=17 => (7 << 13) | (7 << 8),
         25 | 26 | 32 | 33 => (1 << 15) | (7 << 8),
+        40 | 42 | 44 => (1 << 15) | (1 << 14) | (7 << 8) | (1 << 11),
         _ => (1 << 15) | (1 << 14) | (7 << 8),
     };
     // Broadcast, multicast, station only; no promiscuous/errors/runt/VLAN stripping.
@@ -521,6 +525,9 @@ mod tests {
         ephy: [u16; 32],
         eri: BTreeMap<u16, u32>,
         mac: BTreeMap<u16, u16>,
+        phy_ocp: BTreeMap<u16, u16>,
+        g_parameter: u16,
+        g_parameters: BTreeMap<u16, u16>,
         page: u16,
         parameter: u16,
         parameters: BTreeMap<u16, u16>,
@@ -530,6 +537,7 @@ mod tests {
         pending: Option<(usize, u32, u64)>,
         reset_phy_at: Option<u64>,
         reset_mac_at: Option<u64>,
+        shared_ready_at: Option<u64>,
         writes: Vec<(usize, u32, u8)>,
         mdio_commands: usize,
         eri_commands: usize,
@@ -544,6 +552,7 @@ mod tests {
         stuck_reset: bool,
         stuck_phy_reset: bool,
         command_readback: Option<u8>,
+        shared_ready_delay: Option<u64>,
     }
     impl Model {
         fn ready(time: &Time) -> Self {
@@ -571,7 +580,29 @@ mod tests {
                 stuck_reset: false,
                 stuck_phy_reset: false,
                 command_readback: None,
+                shared_ready_delay: None,
             }
+        }
+        fn modern(time: &Time) -> Self {
+            let mut model = Self::ready(time);
+            model.shared_ready_delay = Some(300);
+            {
+                let mut s = model.state.borrow_mut();
+                s.phy_ocp.extend([
+                    (0xa400, 0x1940),
+                    (0xa402, 0x7909),
+                    (0xa404, 0x001c),
+                    (0xa406, 0xc800),
+                    (0xa412, 0x1b00),
+                    (0xa41e, 0x3000),
+                    (0xa616, 0),
+                ]);
+                s.bytes[MCU] = 0x32;
+                Self::store32(&mut s, TX_CONFIG, 1 << 11);
+                s.eri.insert(0xe0, 0x0504_0302);
+                s.eri.insert(0xe4, 0x0706);
+            }
+            model
         }
         fn raw32(s: &State, o: usize) -> u32 {
             u32::from_le_bytes(s.bytes[o..o + 4].try_into().unwrap())
@@ -580,8 +611,15 @@ mod tests {
             s.bytes[o..o + 4].copy_from_slice(&v.to_le_bytes());
         }
         fn complete(&self, s: &mut State) {
+            if s.shared_ready_at.is_some_and(|at| self.time.now() >= at) {
+                s.bytes[MCU] |= 2;
+                s.shared_ready_at = None;
+            }
             if s.reset_phy_at.is_some_and(|t| self.time.now() >= t) && !self.stuck_phy_reset {
                 s.phy.entry((0, 0)).and_modify(|v| *v &= !PHY_RESET);
+                s.phy_ocp
+                    .entry(OCP_PHY_BASE)
+                    .and_modify(|v| *v &= !PHY_RESET);
                 s.reset_phy_at = None;
             }
             if s.reset_mac_at.is_some_and(|t| self.time.now() >= t) && !self.stuck_reset {
@@ -678,10 +716,27 @@ mod tests {
                     }
                 }
                 PHY_OCP => {
+                    // Address bit0 is always zero. Data bit15 occupies the
+                    // same command bit15 and must not contaminate the address.
+                    let address = ((command >> 15) as u16) & !1;
                     if write {
+                        s.phy_ocp.insert(address, command as u16);
+                        if address == 0xa436 {
+                            s.g_parameter = command as u16;
+                        } else if address == 0xa438 {
+                            s.g_parameters.insert(s.g_parameter, command as u16);
+                        }
+                        if address == OCP_PHY_BASE && command as u16 & PHY_RESET != 0 {
+                            s.reset_phy_at = Some(self.time.now() + 100);
+                        }
                         command & !ACCESS
                     } else {
-                        command | ACCESS | 0x1234
+                        let value = if address == 0xa438 {
+                            *s.g_parameters.get(&s.g_parameter).unwrap_or(&0)
+                        } else {
+                            *s.phy_ocp.get(&address).unwrap_or(&0)
+                        };
+                        command | ACCESS | u32::from(value)
                     }
                 }
                 _ => panic!("unmodeled command port"),
@@ -742,9 +797,14 @@ mod tests {
                 s.pending = Some((o, v, self.time.now() + 15));
             }
             if o == MAC_OCP {
-                let reg = ((v & !ACCESS) >> 15) as u16;
+                let reg = (((v & !ACCESS) >> 15) as u16) & !1;
                 if v & ACCESS != 0 {
                     s.mac.insert(reg, v as u16);
+                    if reg == 0xe8de {
+                        s.bytes[MCU] &= !2;
+                        s.shared_ready_at =
+                            self.shared_ready_delay.map(|delay| self.time.now() + delay);
+                    }
                 } else {
                     let data = u32::from(*s.mac.get(&reg).unwrap_or(&0));
                     Self::store32(&mut s, o, data);
@@ -776,6 +836,9 @@ mod tests {
             35 => 0x480,
             36 => 0x481,
             38 => 0x488,
+            40 => 0x4c0,
+            42 => 0x509,
+            44 => 0x5c8,
             34 => 0x2c8,
             _ => panic!("fixture revision"),
         };
@@ -1376,7 +1439,7 @@ mod tests {
             publish(&hw, &rx, &tx, Mac([2, 3, 4, 5, 6, 7])).unwrap();
             assert_eq!(model.read32(RX_CONFIG), (1 << 15) | (7 << 8) | 0x0e);
         }
-        for xid in [0x28a, 0x28b, 0x4c0, 0x609, 0x64a] {
+        for xid in [0x28a, 0x28b, 0x541, 0x609, 0x64a] {
             assert!(!revision::detect(xid << 20).unwrap().implemented());
         }
     }
@@ -1772,5 +1835,322 @@ mod tests {
                 assert_eq!(model.read8(CONFIG_LOCK), 0);
             }
         }
+    }
+    #[test]
+    fn modern_ocp_protocol_preserves_data_bit15_and_uses_independent_physical_addresses() {
+        use firmware::ScriptIo;
+        for version in [40, 42, 44] {
+            let time = Time::default();
+            let model = Model::modern(&time);
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.phy_write(PHY_PAGE, 0x0a43).unwrap();
+            hw.phy_write(0x10, 0x8001).unwrap();
+            hw.phy_write(0x0f, 0xffff).unwrap();
+            hw.phy_write(0x1e, 0x9876).unwrap();
+            assert_eq!(hw.phy_read(0x10).unwrap(), 0x8001);
+            assert_eq!(hw.phy_read(0x0f).unwrap(), 0xffff);
+            let s = model.state.borrow();
+            assert_eq!(s.phy_ocp[&0xa430], 0x8001);
+            assert_eq!(s.phy_ocp[&0xa42e], 0xffff);
+            assert_eq!(s.phy_ocp[&0xa44c], 0x9876);
+            drop(s);
+            hw.mac_ocp_write(0xe8de, 0xffff).unwrap();
+            assert_eq!(hw.mac_ocp_read(0xe8de).unwrap(), 0xffff);
+            assert_eq!(model.state.borrow().mac[&0xe8de], 0xffff);
+            assert!(!model.state.borrow().mac.contains_key(&0xe8df));
+            hw.write(true, PHY_PAGE, 0x0f80).unwrap();
+            hw.write(true, 0, 0x8123).unwrap();
+            assert_eq!(hw.read(true, 0).unwrap(), 0x8123);
+            assert_eq!(model.state.borrow().mac[&0xf800], 0x8123);
+            hw.restore();
+            hw.phy_write(PHY_PAGE, 0).unwrap();
+            assert_eq!(hw.phy_read(2).unwrap(), 0x001c);
+        }
+    }
+
+    #[test]
+    fn mac40_bmcr_quirk_precedes_each_phy_ocp_write_and_fails_before_power_transition() {
+        for (control, expected) in [
+            (0x0800, 0x03ff_ffff),
+            (0x1000, u32::MAX),
+            (0x8800, u32::MAX),
+        ] {
+            let time = Time::default();
+            let model = Model::modern(&time);
+            model.state.borrow_mut().eri.insert(0x1a8, u32::MAX);
+            let hw = Hardware::new(&model, &time, revision(40), 0);
+            hw.phy_write(PHY_CONTROL, control).unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.eri[&0x1a8], expected);
+            let last_eri = s
+                .writes
+                .iter()
+                .rposition(|(r, _, _)| *r == ERI_ADDRESS)
+                .unwrap();
+            let phy = s.writes.iter().position(|(r, _, _)| *r == PHY_OCP).unwrap();
+            assert!(last_eri < phy);
+        }
+        let time = Time::default();
+        let mut model = Model::modern(&time);
+        model.fault = Some(ERI_ADDRESS);
+        let hw = Hardware::new(&model, &time, revision(40), 0);
+        assert_eq!(hw.phy_write(PHY_CONTROL, 0x1000), Err(BlockError::Timeout));
+        assert!(
+            !model
+                .state
+                .borrow()
+                .writes
+                .iter()
+                .any(|(r, _, _)| *r == PHY_OCP)
+        );
+        let model = Model::modern(&time);
+        let hw = Hardware::new(&model, &time, revision(42), 0);
+        hw.phy_write(PHY_CONTROL, 0x1000).unwrap();
+        assert!(
+            !model
+                .state
+                .borrow()
+                .writes
+                .iter()
+                .any(|(r, _, _)| *r == ERI_ADDRESS)
+        );
+    }
+
+    #[test]
+    fn modern_initial_ownership_requires_both_empty_fifos_and_two_fresh_shared_ready_events() {
+        for version in [40, 42, 44] {
+            let time = Time::default();
+            let model = Model::modern(&time);
+            model.state.borrow_mut().mac.insert(0xe8de, 0xffff);
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.initialize_modern().unwrap();
+            let s = model.state.borrow();
+            assert_eq!(s.mac[&0xe8de], 0xbfff);
+            assert_eq!(s.bytes[MCU] & 0x82, 2);
+            assert_eq!(s.bytes[COMMAND] & ENABLE, 0);
+            assert!(time.now() >= 3_800);
+            assert!(
+                !s.writes
+                    .iter()
+                    .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+            );
+            drop(s);
+            for broken in [TX_CONFIG, MCU, MAC_OCP] {
+                let time = Time::default();
+                let mut model = Model::modern(&time);
+                if broken == TX_CONFIG {
+                    Model::store32(&mut model.state.borrow_mut(), TX_CONFIG, 0);
+                }
+                if broken == MCU {
+                    model.state.borrow_mut().bytes[MCU] = 0x20;
+                }
+                if broken == MAC_OCP {
+                    model.shared_ready_delay = None;
+                }
+                let hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(hw.initialize_modern(), Err(BlockError::Timeout));
+                assert!(time.now() < 15_000);
+                assert!(
+                    !model.state.borrow().writes.iter().any(|(r, _, _)| matches!(
+                        *r,
+                        PHY_OCP | TX_HIGH | TX_LOW | RX_HIGH | RX_LOW
+                    ))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g_phy_mask_branches_and_post_reset_eee_cleanup_use_real_ocp_state() {
+        let script_bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&script_bytes).unwrap();
+        for version in [40, 42, 44] {
+            for capability in [0, 0x100] {
+                let time = Time::default();
+                let model = Model::modern(&time);
+                {
+                    let mut s = model.state.borrow_mut();
+                    s.phy_ocp.extend([
+                        (0xa460, capability),
+                        (0xa466, capability),
+                        (0xbcc4, 0xffff),
+                        (0xc41a, 0xffff),
+                        (0xbcc8, 0xffff),
+                        (0xc422, 0xffff),
+                        (0xa5d0, 0xffff),
+                    ]);
+                    s.g_parameters.insert(0x8084, 0xffff);
+                }
+                let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                assert_eq!(hw.configure_phy(Some(&script), false).unwrap(), None);
+                let s = model.state.borrow();
+                assert_eq!(s.phy_ocp[&0xa42c], 0xa55a); // standard PHY reg22.
+                assert_eq!(s.phy_ocp[&0xa400], 0x1200);
+                assert_eq!(s.phy_ocp[&0xa5d0], 0);
+                assert_eq!(s.phy_ocp[&0xa432] & 0x10, 0x10);
+                if version == 40 {
+                    assert_eq!(
+                        s.phy_ocp[&0xbcc4] & 0x8000,
+                        if capability == 0 { 0x8000 } else { 0 }
+                    );
+                    assert_eq!(s.phy_ocp[&0xc41a] & 2, if capability == 0 { 0 } else { 2 });
+                    assert_eq!(s.phy_ocp[&0xbcc8], 0xfeff);
+                    assert_eq!(s.g_parameters[&0x8084], 0x9fff);
+                    assert_eq!(s.g_parameters[&0x8012] & 0x8000, 0x8000);
+                    assert_eq!(s.phy_ocp[&0xc422], 0xdfff);
+                    assert_eq!(s.phy_ocp[&0xbcd8], 0x1065);
+                } else {
+                    assert_eq!(s.phy_ocp[&0xbcc4], 0xffff);
+                    assert!(!s.g_parameters.contains_key(&0x8012));
+                }
+                let reset = s
+                    .writes
+                    .iter()
+                    .rposition(|(r, v, _)| {
+                        *r == PHY_OCP && (*v >> 15) as u16 & !1 == 0xa400 && *v & (1 << 15) != 0
+                    })
+                    .unwrap();
+                let eee = s
+                    .writes
+                    .iter()
+                    .position(|(r, v, _)| *r == PHY_OCP && *v == 0xd2e8_0000)
+                    .unwrap();
+                assert!(reset < eee);
+            }
+        }
+    }
+    #[test]
+    fn g_mac_sequences_include_exact_8411b_rx_fix_before_any_descriptor_publication() {
+        use crate::bus::dma::RegionAllocator;
+        for version in [40, 42, 44] {
+            let time = Time::default();
+            let model = Model::modern(&time);
+            {
+                let mut s = model.state.borrow_mut();
+                s.ephy.fill(0xffff);
+                s.bytes[CONFIG3] = 0x7f;
+                s.eri
+                    .extend([(0xcc, 0xaabb_ccdd), (0xd0, 0x1122_3344), (0x1b0, 0xffff)]);
+                s.mac.insert(0xc0ac, 0x8000);
+            }
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            hw.initialize_modern().unwrap();
+            hw.configure_mac().unwrap();
+            {
+                let s = model.state.borrow();
+                assert_eq!(s.bytes[CONFIG_LOCK], 0);
+                assert_eq!(s.bytes[CONFIG3] & 2, 0);
+                assert_eq!(s.eri[&0xc8], 0x0008_0002);
+                assert_eq!(s.eri[&0xe8], 0x0010_0006);
+                assert_eq!(s.eri[&0xcc], 0xaabb_cc38);
+                assert_eq!(s.eri[&0xd0], 0x1122_3348);
+                assert_eq!(s.eri[&0x2f8], 0x1d8f);
+                assert_eq!(s.eri[&0x1b0] & 0x1003, 0);
+                assert_eq!(s.mac[&0xc0ac], 0x9f80);
+                assert!(
+                    !s.writes
+                        .iter()
+                        .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+                );
+                if version == 44 {
+                    assert_eq!(s.ephy[0xc], 0xc82f);
+                    assert_eq!(s.mac[&0xf800], 0xe008);
+                    assert_eq!(s.mac[&0xf8dc], 0x0132);
+                    assert_eq!(s.mac.range(0xf800..=0xf8dc).count(), 111);
+                    assert_eq!(s.mac[&0xfc26], 0x8000);
+                    assert_eq!(s.mac[&0xfc36], 0x012d);
+                    let at = |value| {
+                        s.writes
+                            .iter()
+                            .position(|(r, v, _)| *r == MAC_OCP && *v == value)
+                            .unwrap()
+                    };
+                    assert!(at(0xfe13_0000) < at(0xfc00_e008)); // FC26 off before first patch word.
+                    assert!(at(0xfc6e_0132) < at(0xfe13_8000)); // Last word before enabling fix.
+                } else if version == 42 {
+                    assert_eq!(s.ephy[0], 0x10a3);
+                    assert_eq!(s.ephy[0x1e], 0x20eb);
+                    assert!(!s.mac.contains_key(&0xfc26));
+                } else {
+                    assert_eq!(s.ephy[0xc], 0xc82f);
+                    assert_eq!(s.ephy[0x19], 0x7fff);
+                }
+            }
+            let mut backing = vec![0u64; 40_000];
+            let base = backing.as_mut_ptr() as u64;
+            // SAFETY: backing outlives descriptor use and has no competing access.
+            let mut dma = unsafe { RegionAllocator::new(base..base + (backing.len() * 8) as u64) };
+            let mut rx = Ring::new(&mut dma, true).unwrap();
+            let mut tx = Ring::new(&mut dma, true).unwrap();
+            rx.initialize(true);
+            tx.initialize(false);
+            let mac = read_station(&hw).unwrap();
+            publish(&hw, &rx, &tx, mac).unwrap();
+            assert_eq!(
+                model.read32(RX_CONFIG),
+                (1 << 15) | (1 << 14) | (1 << 11) | (7 << 8) | 0x0e
+            );
+            assert_eq!(
+                model.read32(RX_HIGH),
+                (rx.descriptors.physical() >> 32) as u32
+            );
+        }
+    }
+
+    #[test]
+    fn g_required_protocol_failures_never_become_warnings_or_publish_dma() {
+        let bytes = 0x8016_a55au32.to_le_bytes();
+        let script = Script::parse(&bytes).unwrap();
+        for version in [40, 42, 44] {
+            for port in [PHY_OCP, ERI_ADDRESS, EPHY_ACCESS, CSI_ADDRESS] {
+                let time = Time::default();
+                let mut model = Model::modern(&time);
+                model.fault = Some(port);
+                let mut hw = Hardware::new(&model, &time, revision(version), 0);
+                if port == PHY_OCP {
+                    assert_eq!(
+                        hw.configure_phy(Some(&script), false),
+                        Err(Error::Device(BlockError::Timeout))
+                    );
+                } else {
+                    assert_eq!(hw.configure_mac(), Err(BlockError::Timeout));
+                    assert_eq!(model.read8(CONFIG_LOCK), 0);
+                }
+                assert!(
+                    !model
+                        .state
+                        .borrow()
+                        .writes
+                        .iter()
+                        .any(|(r, _, _)| matches!(*r, TX_HIGH | TX_LOW | RX_HIGH | RX_LOW))
+                );
+            }
+            let time = Time::default();
+            let mut model = Model::modern(&time);
+            model.failed_read = Some(MAC_OCP);
+            let hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.initialize_modern(),
+                Err(BlockError::Device { status: u32::MAX })
+            );
+            let model = Model::modern(&time);
+            let mut hw = Hardware::new(&model, &time, revision(version), 0);
+            assert_eq!(
+                hw.configure_phy(None, false),
+                Err(Error::Script("RTL8168G/8411B requires firmware"))
+            );
+            model.state.borrow_mut().phy_ocp.insert(0xa406, 0xc912);
+            assert_eq!(
+                hw.configure_phy(Some(&script), false),
+                Err(Error::UnsupportedPhy(0x001c_c912))
+            );
+        }
+        let time = Time::default();
+        let mut model = Model::modern(&time);
+        model.failed_read = Some(PHY_OCP);
+        let hw = Hardware::new(&model, &time, revision(40), 0);
+        assert_eq!(hw.phy_read(2), Err(BlockError::Device { status: u32::MAX }));
+        assert!(hw.phy_ocp_read(1).is_err());
+        assert!(hw.mac_ocp_write(1, 0).is_err());
     }
 }

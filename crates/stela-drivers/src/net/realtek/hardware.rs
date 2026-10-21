@@ -7,6 +7,7 @@
 use super::{Registers, Revision, Timer, firmware::ScriptIo, registers::*};
 use crate::block::BlockError;
 use core::cell::Cell;
+mod ocp;
 
 pub(super) struct Hardware<'a, R, T> {
     pub registers: &'a R,
@@ -91,9 +92,7 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
                 });
             }
             let address = self.phy_address(reg)?;
-            self.registers.write32(PHY_OCP, u32::from(address) << 15);
-            self.poll32(PHY_OCP, ACCESS, true, 25, 10)?;
-            Ok(self.registers.read32(PHY_OCP) as u16)
+            self.phy_ocp_read(address)
         } else {
             self.registers.write32(PHY_ACCESS, u32::from(reg) << 16);
             let done = self.poll32(PHY_ACCESS, ACCESS, true, 25, 20);
@@ -120,11 +119,16 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
                 return Ok(());
             }
             let address = self.phy_address(reg)?;
-            self.registers.write32(
-                PHY_OCP,
-                ACCESS | (u32::from(address) << 15) | u32::from(value),
-            );
-            self.poll32(PHY_OCP, ACCESS, false, 25, 10)
+            if self.revision.version == 40 && address == OCP_PHY_BASE {
+                // rtl8168g_phy_suspend_quirk: MCU IRQs must be gated before
+                // powerdown and restored before reset or leaving powerdown.
+                if value & PHY_RESET != 0 || value & PHY_POWER_DOWN == 0 {
+                    self.eri_modify(0x1a8, 0, 0xfc00_0000)?;
+                } else {
+                    self.eri_modify(0x1a8, 0xfc00_0000, 0)?;
+                }
+            }
+            self.phy_ocp_write(address, value)
         } else {
             self.registers.write32(
                 PHY_ACCESS,
@@ -136,17 +140,14 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         }
     }
     fn phy_address(&self, reg: u16) -> Result<u16, BlockError> {
-        let reg = if self.ocp_base.get() == OCP_PHY_BASE {
-            reg
-        } else {
-            reg.checked_sub(0x10).ok_or(BlockError::Unsupported(
-                "Realtek OCP paged register below 0x10",
-            ))?
-        };
-        self.ocp_base
-            .get()
-            .checked_add(reg * 2)
-            .ok_or(BlockError::Unsupported("Realtek OCP address overflow"))
+        let offset = i32::from(reg)
+            - if self.ocp_base.get() == OCP_PHY_BASE {
+                0
+            } else {
+                16
+            };
+        u16::try_from(i32::from(self.ocp_base.get()) + offset * 2)
+            .map_err(|_| BlockError::Unsupported("Realtek OCP address overflow"))
     }
     pub fn phy_modify(&self, reg: u16, clear: u16, set: u16) -> Result<(), BlockError> {
         self.phy_write(reg, (self.phy_read(reg)? & !clear) | set)
@@ -157,6 +158,15 @@ impl<'a, R: Registers, T: Timer> Hardware<'a, R, T> {
         let result = self.phy_modify(reg, clear, set);
         let restored = self.phy_write(PHY_PAGE, old);
         result.and(restored)
+    }
+    pub fn paged_read(&self, page: u16, reg: u16) -> Result<u16, BlockError> {
+        let old = self.phy_read(PHY_PAGE)?;
+        self.phy_write(PHY_PAGE, page)?;
+        let value = self.phy_read(reg);
+        let restored = self.phy_write(PHY_PAGE, old);
+        let value = value?;
+        restored?;
+        Ok(value)
     }
     pub fn phy_reset(&self) -> Result<(), BlockError> {
         self.phy_write(PHY_PAGE, 0)?;
@@ -241,9 +251,7 @@ impl<R: Registers, T: Timer> ScriptIo for Hardware<'_, R, T> {
             return self.phy_read(reg);
         }
         let address = self.mac_address(reg)?;
-        self.registers.write32(MAC_OCP, u32::from(address) << 15);
-        // MAC OCP is synchronous and has no completion flag (unlike PHY OCP).
-        Ok(self.registers.read32(MAC_OCP) as u16)
+        self.mac_ocp_read(address)
     }
     fn write(&mut self, mac: bool, reg: u16, value: u16) -> Result<(), BlockError> {
         if !mac {
@@ -258,11 +266,7 @@ impl<R: Registers, T: Timer> ScriptIo for Hardware<'_, R, T> {
             return Ok(());
         }
         let address = self.mac_address(reg)?;
-        self.registers.write32(
-            MAC_OCP,
-            ACCESS | (u32::from(address) << 15) | u32::from(value),
-        );
-        Ok(())
+        self.mac_ocp_write(address, value)
     }
     fn restore(&mut self) {
         self.ocp_base.set(OCP_PHY_BASE);
