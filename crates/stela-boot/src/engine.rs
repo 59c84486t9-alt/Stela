@@ -212,6 +212,8 @@ struct Options {
     /// Log, without stopping, when a PE reaches one of these guest PCs
     /// (`--trace`; `Machine::set_traces`).
     traces: Vec<u64>,
+    /// Log raw guarded entries, exits, exceptions and returns (`--monitor-trace`).
+    monitor_trace: bool,
     /// Log, without stopping, every device access in these physical ranges
     /// (`--watch BASE,BYTES`; `Machine::set_watches`).
     watches: Vec<(u64, u64)>,
@@ -313,6 +315,7 @@ impl Options {
             strict: false,
             breakpoints: Vec::new(),
             traces: Vec::new(),
+            monitor_trace: false,
             watches: Vec::new(),
             dumps: Vec::new(),
         };
@@ -321,6 +324,10 @@ impl Options {
             return Err("system options must start with --system");
         }
         while let Some(name) = words.next() {
+            if name == "--monitor-trace" {
+                options.monitor_trace = true;
+                continue;
+            }
             if name == "--native-shared-check" {
                 if options.native_shared_check {
                     return Err("duplicate native shared check");
@@ -911,6 +918,29 @@ static EVENTS: AtomicU64 = AtomicU64::new(0);
 static INTERRUPTS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn report(event: &Event) {
+    // Explicit monitor traces bypass the ordinary progress-event limit
+    // without consuming its reporting allowance.
+    if let Event::Monitor(trace) = event {
+        output::arguments(format_args!(
+            "MONITOR pe={} kind={:?} from={}{}:{:#x} il={} to={}{}:{:#x} il={} \
+             x0-x7={:x?} x16={:#x} x17={:#x} lr={:#x}\n",
+            trace.pe,
+            trace.kind,
+            level_name(trace.from.guarded),
+            trace.from.el,
+            trace.from.pc,
+            trace.from.illegal,
+            level_name(trace.to.guarded),
+            trace.to.el,
+            trace.to.pc,
+            trace.to.illegal,
+            trace.arguments,
+            trace.x16,
+            trace.x17,
+            trace.lr,
+        ));
+        return;
+    }
     let count = EVENTS.fetch_add(1, Ordering::Relaxed);
     let interrupt = matches!(
         event,
@@ -933,6 +963,7 @@ pub(crate) fn report(event: &Event) {
         return;
     }
     match event {
+        Event::Monitor(_) => unreachable!("monitor traces are emitted before event throttling"),
         Event::Exception {
             vector,
             from_el,
@@ -1862,6 +1893,12 @@ fn run_machine<H: Host>(
     machine.set_wait_limit(Some(host::COUNTER_HZ / WAIT_POLLS_PER_SECOND));
     if !options.breakpoints.is_empty() {
         machine.set_breakpoints(&options.breakpoints);
+    }
+    machine.set_monitor_tracing(options.monitor_trace);
+    if options.monitor_trace {
+        output::arguments(format_args!(
+            "MONITOR TRACE enabled: raw guarded boundaries; endpoint ABI uninterpreted\n"
+        ));
     }
     if !options.traces.is_empty() {
         machine.set_traces(&options.traces);

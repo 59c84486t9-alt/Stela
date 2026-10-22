@@ -1,7 +1,7 @@
 //! Apple GXF instruction exits (`block::system::GuardedOperation`): GENTER
 //! and GEXIT. The contracts and their evidence are in `docs/design/system.md`
 //! (GXF).
-use super::{Devices, Event, Host, Machine, RequirementKind, Step};
+use super::{Devices, Event, Host, Machine, MonitorKind, RequirementKind, Step};
 use crate::machine::{cpu::ASPSR_GUARDED, hacr};
 use stela_compiler::block::system::GuardedOperation;
 
@@ -28,6 +28,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             });
             self.degrade(requirement)?;
         }
+        let trace = self.monitor_before(MonitorKind::GuardedEnter { immediate });
         if self.cpu.guarded_enter(immediate).is_err() {
             return self.undefined();
         }
@@ -37,6 +38,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             guarded: true,
             pc: self.cpu.pc,
         });
+        self.monitor_after(trace);
         self.sync_regime();
         Ok(())
     }
@@ -47,6 +49,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
             self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0)?;
         }
+        let trace = self.monitor_before(MonitorKind::GuardedExit);
         match self.cpu.guarded_exit() {
             Err(_) => self.undefined(),
             Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
@@ -58,6 +61,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     guarded: self.cpu.pstate.guarded,
                     pc: self.cpu.pc,
                 });
+                self.monitor_after(trace);
                 self.sync_regime();
                 Ok(())
             }

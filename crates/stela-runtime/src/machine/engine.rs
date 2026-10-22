@@ -10,6 +10,8 @@ mod device_write;
 mod exclusive;
 mod guarded;
 mod hosted;
+mod monitor;
+pub use monitor::{MonitorEvent, MonitorKind, MonitorLocation};
 mod pointer;
 mod prepare;
 pub use device_read::{CanonicalDeviceMemory, ConsumedScalar, DeviceReadRequest, DeviceReadShape};
@@ -742,6 +744,8 @@ pub enum Event {
     },
     /// An exception return, to a guarded level when `guarded`.
     Return { to_el: u8, guarded: bool, pc: u64 },
+    /// An opt-in guarded boundary trace, emitted synchronously without a queue.
+    Monitor(MonitorEvent),
     /// GENTER (`enter`) or GEXIT, and the level the PE is now at.
     Guarded {
         enter: bool,
@@ -1429,6 +1433,8 @@ pub struct Machine<H: Host, D: Devices> {
     /// taken (`take_trace_hits`).
     traces: Vec<u64>,
     trace_hits: Vec<TraceHit>,
+    /// Emit raw guarded boundary events through Host::report, off by default.
+    monitor_tracing: bool,
     /// Host watch ranges of physical device addresses, first and last
     /// byte (`set_watches`), and the hits not yet taken (`take_watch_hits`).
     watches: Vec<(u64, u64)>,
@@ -1592,6 +1598,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             breakpoints: Vec::new(),
             traces: Vec::new(),
             trace_hits: Vec::new(),
+            monitor_tracing: false,
             watches: Vec::new(),
             watch_hits: Vec::new(),
             strict: true,
@@ -2170,6 +2177,12 @@ impl<H: Host, D: Devices> Machine<H, D> {
         {
             self.cpu.retired -= 1;
         }
+        let trace = self.monitor_before(MonitorKind::Exception {
+            vector: exception.vector,
+            syndrome: exception.syndrome,
+            return_address: exception.return_address,
+            fault_address: exception.fault_address,
+        });
         let (from_el, from_guarded) = (self.cpu.pstate.el, self.cpu.pstate.guarded);
         self.cpu.take(exception);
         self.statistics.exceptions += 1;
@@ -2181,6 +2194,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             return_address: exception.return_address,
             fault_address: exception.fault_address,
         });
+        self.monitor_after(trace);
         self.sync_regime();
     }
 
@@ -5363,6 +5377,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             }
         }
         self.guest_entry(self.cpu.exception_state(), self.cpu.pstate.guarded)?;
+        let trace = self.monitor_before(MonitorKind::ExceptionReturn);
         self.cpu.exception_return(target).map_err(|_| {
             self.unsupported(RequirementKind::Native(
                 "canonical exclusive/event settlement failed before exception return",
@@ -5374,6 +5389,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             guarded: self.cpu.pstate.guarded,
             pc: self.cpu.pc,
         });
+        self.monitor_after(trace);
         self.sync_regime();
         Ok(())
     }
@@ -5937,6 +5953,7 @@ mod tests {
 
     pub(super) struct FakeHost {
         pub(super) ram: Vec<u8>,
+        pub(super) events: Vec<Event>,
         base: u64,
         pub(super) now: u64,
         pub(super) regimes: Vec<Regime>,
@@ -5960,7 +5977,7 @@ mod tests {
         /// Pages whose fetch the host refuses, and its answers.
         refused: Vec<u64>,
         fetch_checks: usize,
-        counter_reads: usize,
+        pub(super) counter_reads: usize,
         placement: mmu::placement::Placement,
         translation_helper: Option<u64>,
         /// What [`Host::memory_low`] answers.
@@ -6091,6 +6108,9 @@ mod tests {
         fn wait_for_interrupt(&mut self) {
             self.now += 1000;
         }
+        fn report(&mut self, event: &Event) {
+            self.events.push(*event);
+        }
         fn translations(&mut self) -> Option<&mut dyn Translations> {
             self.store
                 .as_mut()
@@ -6183,6 +6203,7 @@ mod tests {
         }
         let host = FakeHost {
             ram,
+            events: Vec::new(),
             base: BASE,
             now: 0,
             regimes: Vec::new(),
