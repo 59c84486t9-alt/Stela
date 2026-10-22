@@ -136,12 +136,7 @@ impl AppleDevices {
     /// Retain reached outputs even when the producing register operation
     /// subsequently refuses. Capturing never delivers an input or retries a
     /// peripheral effect, and keeps its original CPU/counter context.
-    pub(super) fn capture_reached(
-        &mut self,
-        cpu: CpuIndex,
-        now: u64,
-        reset: Option<Reset>,
-    ) {
+    pub(super) fn capture_reached(&mut self, cpu: CpuIndex, now: u64, reset: Option<Reset>) {
         self.service.retain_reset(&mut self.reset, reset);
         // Capture both queues before either family can refuse. A release error
         // must not leave the reached wire batch unrepresented or discard it.

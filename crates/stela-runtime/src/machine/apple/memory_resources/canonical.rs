@@ -97,7 +97,10 @@ impl Prepared {
         // completed device copyout and fenced the actual CPU owners before
         // obtaining this same mapping/native/all-writer exclusion. No frontend
         // transaction remains in flight, and none can enter while borrowed.
-        self.router.controller.drain_control(aperture as u8, within).map(u64::from)
+        self.router
+            .controller
+            .drain_control(aperture as u8, within)
+            .map(u64::from)
     }
 
     /// Consume the original low-byte clear under the exact same live owner as
@@ -123,7 +126,9 @@ impl Prepared {
             return Err("DCS flush must preserve high16 and clear both low bytes");
         }
         let (aperture, within) = self.router.target(offset)?;
-        self.router.controller.record_ram_drain(aperture as u8, within, value as u32, now)
+        self.router
+            .controller
+            .record_ram_drain(aperture as u8, within, value as u32, now)
     }
 }
 
@@ -211,22 +216,41 @@ mod tests {
     fn consuming_drain_write_requires_its_real_owner_and_preserves_later_refusals() {
         let ram = ram();
         let mut owner = super::super::tests::prepared()
-            .with_registered_ram(Arc::clone(&ram)).unwrap();
+            .with_registered_ram(Arc::clone(&ram))
+            .unwrap();
         let foreign = self::ram();
         let other = foreign.try_service().unwrap().unwrap();
         let offset = mcc::DCS_BASE + mcc::DCS_DRAIN;
         // SAFETY: this fixture has no other producers, frames or DMA. Each
         // call retains its exact actual all-writer borrow through completion.
         unsafe {
-            assert!(owner.write_ram_drain(offset, Width::Word, 0, 9, &other).is_err());
+            assert!(
+                owner
+                    .write_ram_drain(offset, Width::Word, 0, 9, &other)
+                    .is_err()
+            );
         }
         drop(other);
         let memory = ram.try_service().unwrap().unwrap();
         unsafe {
-            assert!(owner.write_ram_drain(offset, Width::Double, 0, 9, &memory).is_err());
-            assert!(owner.write_ram_drain(offset, Width::Word, 1, 9, &memory).is_err());
-            assert!(owner.write_ram_drain(offset, Width::Word, 0x10000, 9, &memory).is_err());
-            owner.write_ram_drain(offset, Width::Word, 0, 9, &memory).unwrap();
+            assert!(
+                owner
+                    .write_ram_drain(offset, Width::Double, 0, 9, &memory)
+                    .is_err()
+            );
+            assert!(
+                owner
+                    .write_ram_drain(offset, Width::Word, 1, 9, &memory)
+                    .is_err()
+            );
+            assert!(
+                owner
+                    .write_ram_drain(offset, Width::Word, 0x10000, 9, &memory)
+                    .is_err()
+            );
+            owner
+                .write_ram_drain(offset, Width::Word, 0, 9, &memory)
+                .unwrap();
         }
         let requests = owner.controller().requests();
         assert_eq!(requests.len(), 1);
@@ -237,10 +261,16 @@ mod tests {
         let mut access = Access::new(0, 10, &mut latch);
         assert!(owner.write(offset, Width::Word, 0, &mut access).is_err());
         assert!(owner.read(offset, Width::Word, &mut access).is_err());
-        owner.write(mcc::DCS_BASE + 0x13cc, Width::Word, 0xffff0000, &mut access).unwrap();
+        owner
+            .write(mcc::DCS_BASE + 0x13cc, Width::Word, 0xffff0000, &mut access)
+            .unwrap();
         let memory = ram.try_service().unwrap().unwrap();
         unsafe {
-            assert!(owner.write_ram_drain(offset, Width::Word, 0, 11, &memory).is_err());
+            assert!(
+                owner
+                    .write_ram_drain(offset, Width::Word, 0, 11, &memory)
+                    .is_err()
+            );
         }
         assert_eq!(owner.controller().requests().len(), 2);
     }

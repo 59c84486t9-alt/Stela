@@ -9,8 +9,8 @@ use alloc::{collections::BTreeMap, rc::Rc, vec::Vec};
 use core::cell::RefCell;
 
 mod configuration;
-pub mod policy;
 mod drain;
+pub mod policy;
 mod status;
 pub use configuration::Configuration;
 use policy::CacheResource;

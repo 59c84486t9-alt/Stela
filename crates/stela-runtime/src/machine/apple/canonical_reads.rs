@@ -49,9 +49,13 @@ impl AppleDevices {
         let value = if canonical {
             let memory = memory.expect("canonical read preflight requires its live service");
             memory.fence_cpu_memory();
-            let (device, offset) = self.bus.route(physical, width)
+            let (device, offset) = self
+                .bus
+                .route(physical, width)
                 .expect("exclusive board borrow retains the classified prepared route");
-            let owner = self.bus.device::<memory_resources::Prepared>(device)
+            let owner = self
+                .bus
+                .device::<memory_resources::Prepared>(device)
                 .expect("exclusive board borrow retains the classified prepared owner");
             // SAFETY: only the engine's held native/all-writer service can
             // implement this sealed interface. Its consuming continuation
@@ -105,8 +109,11 @@ mod tests {
             if self.1 {
                 access.request_reset(self.name(), "reached read before refusal");
                 return Err(crate::platform::apple::bus::refuse(
-                    self.name(), offset, width,
-                    crate::platform::apple::bus::Direction::Read, "retained read prefix",
+                    self.name(),
+                    offset,
+                    width,
+                    crate::platform::apple::bus::Direction::Read,
+                    "retained read prefix",
                 ));
             }
             Ok(u64::from(value))
@@ -152,17 +159,31 @@ mod tests {
     fn refused_read_keeps_its_reached_reset_and_original_wire_context() {
         let mut board = AppleDevices::new();
         let reads = Rc::new(Cell::new(7));
-        board.bus.install(Box::new(Reader(reads.clone(), true)), &[(0x1000, 4, 0)]).unwrap();
+        board
+            .bus
+            .install(Box::new(Reader(reads.clone(), true)), &[(0x1000, 4, 0)])
+            .unwrap();
         assert!(board.consume_scalar_read(5, 0x1000, 4, 0x55, None).is_err());
         assert_eq!(reads.get(), 8);
         let pending = board.pending_service().unwrap();
         assert_eq!(pending.committed(), 0);
-        assert_eq!(pending.inputs(), &[ServiceInput::Aic(AicDelivery {
-            input: AicInput::new(0, 1), level: true, cpu: 5, now: 0x55,
-        })]);
+        assert_eq!(
+            pending.inputs(),
+            &[ServiceInput::Aic(AicDelivery {
+                input: AicInput::new(0, 1),
+                level: true,
+                cpu: 5,
+                now: 0x55,
+            })]
+        );
         assert_eq!(pending.resets().len(), 1);
-        assert!(board.take_reset().unwrap().reason.contains("reached read before refusal"));
+        assert!(
+            board
+                .take_reset()
+                .unwrap()
+                .reason
+                .contains("reached read before refusal")
+        );
         assert_eq!(reads.get(), 8);
     }
-
 }

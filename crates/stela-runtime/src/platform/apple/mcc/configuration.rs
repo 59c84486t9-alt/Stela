@@ -205,7 +205,8 @@ mod tests {
     #[ignore = "requires the immutable original 26A434 mac13j kernelcache"]
     fn original_t6000_opaque_control_save_and_restore_consumers() {
         use sha2::{Digest, Sha256};
-        let path = std::env::var("STELA_TEST_MCC_KERNELCACHE").expect("original mac13j kernelcache");
+        let path =
+            std::env::var("STELA_TEST_MCC_KERNELCACHE").expect("original mac13j kernelcache");
         let bytes = std::fs::read(path).unwrap();
         assert_eq!(
             hex::encode(Sha256::digest(&bytes)),
