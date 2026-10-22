@@ -85,6 +85,14 @@ impl Pipe {
 /// unbounded interval. Idle receive polling returns `None` without canceling.
 pub trait Io {
     fn control(&mut self, setup: [u8; 8], packet: &[u8]) -> Result<(), BlockError>;
+    /// Completed EP0 IN bytes for identified vendor protocols. Empty means the
+    /// device returned a real zero-length transfer, never command completion.
+    /// Implementations without that transport fail explicitly.
+    fn control_read(&mut self, _setup: [u8; 8]) -> Result<Vec<u8>, BlockError> {
+        Err(BlockError::Unsupported(
+            "USB Bluetooth control IN transport",
+        ))
+    }
     fn receive(&mut self, pipe: Pipe) -> Result<Option<Vec<u8>>, BlockError>;
     /// Raw bulk OUT; the HCI layer validates ACL or identified vendor commands.
     fn write_acl(&mut self, packet: &[u8]) -> Result<(), BlockError>;

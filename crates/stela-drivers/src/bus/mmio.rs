@@ -1,4 +1,5 @@
-//! Volatile access to identity-mapped, uncached device registers.
+//! Volatile device-register access and owned native physical mappings.
+pub mod owned;
 use core::ptr::{read_volatile, write_volatile};
 
 #[derive(Clone, Copy, Debug)]

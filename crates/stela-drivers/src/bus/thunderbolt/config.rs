@@ -22,6 +22,9 @@ pub enum PacketType {
     NotifyAck = 4,
     Event = 5,
     Reset = 9,
+    IcmEvent = 10,
+    IcmCommand = 11,
+    IcmResponse = 12,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -34,6 +37,9 @@ impl TryFrom<u8> for PacketType {
             4 => Ok(Self::NotifyAck),
             5 => Ok(Self::Event),
             9 => Ok(Self::Reset),
+            10 => Ok(Self::IcmEvent),
+            11 => Ok(Self::IcmCommand),
+            12 => Ok(Self::IcmResponse),
             _ => Err(Error::UnsupportedPacket(value)),
         }
     }
@@ -117,7 +123,7 @@ pub struct Encoded {
     pub bytes: Vec<u8>,
 }
 
-fn encode(kind: PacketType, words: &[u32]) -> Result<Encoded, Error> {
+pub(super) fn encode(kind: PacketType, words: &[u32]) -> Result<Encoded, Error> {
     if words.len() * 4 + 4 > FRAME_BYTES {
         return Err(Error::Length);
     }

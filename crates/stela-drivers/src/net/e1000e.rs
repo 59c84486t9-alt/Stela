@@ -44,6 +44,8 @@
 //!
 //! DMA allocations live until reboot, including after a transmit timeout;
 //! a descriptor is never reused until the device writes its done bit.
+pub mod pch;
+
 use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac};
 use crate::{
     Clock, Handoff,

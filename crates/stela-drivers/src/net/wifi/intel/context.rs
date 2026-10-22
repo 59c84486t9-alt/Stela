@@ -66,7 +66,7 @@ pub fn crosses_4g_boundary(address: u64, bytes: u16) -> bool {
         .is_none_or(|end| address >> 32 != end >> 32)
 }
 
-fn validate(region: Region, expected: usize, alignment: u64) -> Result<(), Error> {
+pub(super) fn validate(region: Region, expected: usize, alignment: u64) -> Result<(), Error> {
     if region.bytes != expected || expected == 0 || expected > u16::MAX as usize {
         return Err(Error::PayloadLength);
     }

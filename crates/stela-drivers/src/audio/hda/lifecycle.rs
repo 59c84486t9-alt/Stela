@@ -31,6 +31,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             *stream = None;
         }
         self.routes.clear();
+        self.codec_controls.clear();
         self.corb_wp = 0;
         self.rirb_rp = 0;
         self.codec_mask = 0;
@@ -116,7 +117,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if self.stopped {
                 return Err(Error::Shutdown);
             }
-            if self.streams.iter().any(Option::is_some) || !self.routes.is_empty() {
+            if self.streams.iter().any(Option::is_some)
+                || !self.routes.is_empty()
+                || !self.codec_controls.is_empty()
+            {
                 return Err(Error::StreamsAllocated);
             }
             Ok(budget)

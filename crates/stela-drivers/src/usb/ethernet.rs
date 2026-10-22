@@ -2,7 +2,9 @@
 //! after exact chip identification and revision-specific initialization.
 //! RTL8152 01/02/07, RTL8153A 03/04/05/06, RTL8153B 08/09, RTL8153C 14
 //! and RTL8156A 10/11 and RTL8156B 12/13/15 have distinct implementations.
-//! Revision15 follows the donor's gigabit capability policy.
+//! Revision15 follows the donor's gigabit capability policy. ASIX AX88179/178A
+//! uses its own control protocol and packet framing behind the shared DMA path.
+mod asix;
 pub mod firmware;
 mod framing;
 mod identity;
@@ -16,33 +18,76 @@ use crate::{
     net::{Link, LinkError, Mac},
 };
 use alloc::{collections::VecDeque, format, string::String, vec::Vec};
+#[cfg(test)]
+pub(crate) use asix::LegacyModel;
+#[cfg(test)]
+pub(crate) use asix::model::Hardware as AsixModel;
+#[cfg(test)]
+pub(crate) fn asix_legacy_ids() -> Vec<(u16, u16)> {
+    asix::legacy_ids()
+        .iter()
+        .map(|entry| (entry.0, entry.1))
+        .collect()
+}
 use core::sync::atomic::{Ordering, fence};
 pub use firmware::Error;
 #[cfg(test)]
 pub(crate) use identity::USB_IDS;
 pub use identity::matches;
 use identity::policy;
-use rtl815x::{Chip, Control, Revision};
+use rtl815x::{Chip, Revision};
+
+#[cfg(test)]
+pub(crate) fn asix_ids() -> Vec<(u16, u16)> {
+    asix::ids().iter().map(|entry| (entry.0, entry.1)).collect()
+}
+
+/// Synchronous endpoint-zero requests. Success includes the exact transferred
+/// byte count; short replies/writes are errors, never fabricated register values.
+pub trait Control {
+    fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError>;
+    fn delay_us(&mut self, microseconds: u64);
+}
 
 #[derive(Clone, Debug)]
 pub struct Binding {
     input: Endpoint,
     output: Endpoint,
-    revision: Revision,
+    kind: Kind,
+    setting: (u8, u8),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Kind {
+    Realtek(Revision),
+    Asix(asix::Identity),
 }
 
 impl Binding {
     pub(super) fn new(device: &Device, interface: &Interface) -> Result<Self, &'static str> {
-        let revision = device
-            .vendor_ethernet_revision
-            .map(Revision)
-            .ok_or("USB Ethernet chip revision not identified")?;
-        if !matches(&device.descriptor) || !revision.implemented() {
-            return Err("RTL815x chip revision initialization not implemented");
-        }
-        if interface.class != 0xff || interface.alternate != 0 || interface.number != 0 {
-            return Err("RTL815x unsupported vendor interface setting");
-        }
+        let kind = if let Some(identity) = asix::identify(&device.descriptor, interface) {
+            if matches!(identity, asix::Identity::Ax88772 { .. })
+                && !matches!(
+                    device.speed,
+                    super::xhci::FULL_SPEED | super::xhci::HIGH_SPEED
+                )
+            {
+                return Err("AX88772 requires USB full or high speed");
+            }
+            Kind::Asix(identity)
+        } else {
+            let revision = device
+                .vendor_ethernet_revision
+                .map(Revision)
+                .ok_or("USB Ethernet chip revision not identified")?;
+            if !matches(&device.descriptor) || !revision.implemented() {
+                return Err("RTL815x chip revision initialization not implemented");
+            }
+            if interface.class != 0xff || interface.alternate != 0 || interface.number != 0 {
+                return Err("RTL815x unsupported vendor interface setting");
+            }
+            Kind::Realtek(revision)
+        };
         let input: Vec<_> = interface
             .endpoints
             .iter()
@@ -56,18 +101,32 @@ impl Binding {
             .filter(|e| e.kind() == 2 && !e.is_in())
             .collect();
         if input.len() != 1 || output.len() != 1 {
-            return Err("RTL815x requires unique bulk IN/OUT endpoints");
+            return Err("USB vendor Ethernet requires unique bulk IN/OUT endpoints");
         }
         // rtl_check_vendor_ok fixes the controller's RX/TX pipe numbers.
         // Carrier is polled, so the unused interrupt endpoint is not required.
-        if input[0].address != 0x81 || output[0].address != 0x02 {
+        if matches!(kind, Kind::Realtek(_))
+            && (input[0].address != 0x81 || output[0].address != 0x02)
+        {
             return Err("RTL815x requires RX endpoint1 and TX endpoint2");
         }
         Ok(Self {
             input: input[0],
             output: output[0],
-            revision,
+            kind,
+            setting: (interface.number, interface.alternate),
         })
+    }
+
+    pub(super) fn setting(&self) -> (u8, u8) {
+        self.setting
+    }
+
+    pub(super) fn observed_vendor(&self) -> bool {
+        matches!(self.kind, Kind::Realtek(_))
+    }
+    pub(super) fn asix_candidate(&self) -> bool {
+        matches!(self.kind, Kind::Asix(_))
     }
 
     pub(super) fn endpoints(&self) -> Vec<Endpoint> {
@@ -93,13 +152,56 @@ impl Control for HostControl {
     }
 }
 
+enum Backend {
+    Realtek(Chip<HostControl>),
+    Asix(asix::Device<HostControl>),
+}
+impl Backend {
+    fn receive_bytes(&self) -> usize {
+        match self {
+            Self::Realtek(chip) => chip.receive_bytes(),
+            Self::Asix(chip) => chip.receive_bytes(),
+        }
+    }
+    fn carrier(&mut self) -> Result<bool, BlockError> {
+        match self {
+            Self::Realtek(chip) => chip.carrier(),
+            Self::Asix(chip) => chip.carrier(),
+        }
+    }
+    fn link_down(&mut self) -> Result<(), BlockError> {
+        match self {
+            Self::Realtek(c) => c.stop(),
+            Self::Asix(c) => c.link_down(),
+        }
+    }
+    fn stop(&mut self) -> Result<(), BlockError> {
+        match self {
+            Self::Realtek(chip) => chip.stop(),
+            Self::Asix(chip) => chip.stop(),
+        }
+    }
+    fn encode(&self, frame: &[u8], output: &mut [u8], packet: u16) -> Result<usize, &'static str> {
+        match self {
+            Self::Realtek(_) => framing::encode(frame, output),
+            Self::Asix(chip) => chip.encode(frame, output, packet),
+        }
+    }
+    fn decode(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
+        match self {
+            Self::Realtek(_) => framing::decode(bytes),
+            Self::Asix(chip) => chip.decode(bytes),
+        }
+    }
+}
+
 /// One receive TD and one synchronous transmit TD; DMA allocations persist
 /// for the boot even after failed cancellation, as required by xHCI ownership.
 pub struct UsbEthernet {
     controller: Shared,
     slot: u8,
     binding: Binding,
-    chip: Chip<HostControl>,
+    chip: Backend,
     mac: Mac,
     receive: DmaBuffer,
     send: DmaBuffer,
@@ -113,6 +215,13 @@ pub struct UsbEthernet {
 }
 
 impl UsbEthernet {
+    pub fn driver(&self) -> &'static str {
+        match self.chip {
+            Backend::Realtek(_) => "usb-rtl815x",
+            Backend::Asix(_) => "usb-asix",
+        }
+    }
+
     pub(super) fn new(
         controller: Shared,
         device: &Device,
@@ -120,34 +229,72 @@ impl UsbEthernet {
         dma: &mut dyn DmaAllocator,
         provider: &dyn crate::firmware::Provider,
     ) -> Result<Self, Error> {
-        let firmware = firmware::load(provider, &device.descriptor, binding.revision)?;
+        if binding.setting.1 != 0 {
+            controller.borrow_mut().control(
+                device.slot,
+                super::xhci::setup(
+                    1,
+                    super::xhci::SET_INTERFACE,
+                    u16::from(binding.setting.1),
+                    u16::from(binding.setting.0),
+                    0,
+                ),
+                &[],
+            )?;
+        }
         let io = HostControl {
             controller: controller.clone(),
             slot: device.slot,
         };
-        let (chip, mac) = Chip::attach_with_policy(
-            io,
-            binding.revision,
-            device.speed,
-            firmware.as_ref().map(|(_, parsed)| parsed),
-            policy(device),
-        )?;
-        let receive_bytes = chip.receive_bytes();
-        let family = if binding.revision.is_8153a() {
-            "RTL8153A"
-        } else if binding.revision.is_8153b() {
-            "RTL8153B"
-        } else if binding.revision.is_8153c() {
-            "RTL8153C"
-        } else if binding.revision.is_8156a() {
-            "RTL8156A"
-        } else if binding.revision.0 == 0x7420 {
-            "RTL815x tcr-7420 (gigabit)"
-        } else if binding.revision.is_8156b() {
-            "RTL8156B"
-        } else {
-            "RTL8152B"
+        let (chip, mac, firmware, family) = match binding.kind {
+            Kind::Realtek(revision) => {
+                let firmware = firmware::load(provider, &device.descriptor, revision)?;
+                let (chip, mac) = Chip::attach_with_policy(
+                    io,
+                    revision,
+                    device.speed,
+                    firmware.as_ref().map(|(_, parsed)| parsed),
+                    policy(device),
+                )?;
+                let family = if revision.is_8153a() {
+                    "RTL8153A"
+                } else if revision.is_8153b() {
+                    "RTL8153B"
+                } else if revision.is_8153c() {
+                    "RTL8153C"
+                } else if revision.is_8156a() {
+                    "RTL8156A"
+                } else if revision.0 == 0x7420 {
+                    "RTL815x tcr-7420 (gigabit)"
+                } else if revision.is_8156b() {
+                    "RTL8156B"
+                } else {
+                    "RTL8152"
+                };
+                let receipt = firmware.map(|(image, _)| firmware::Receipt::from_image(image));
+                (Backend::Realtek(chip), mac, receipt, String::from(family))
+            }
+            Kind::Asix(identity) => {
+                let (chip, mac) = asix::Device::attach(io, identity)?;
+                let family = match identity {
+                    asix::Identity::Ax88179 => "AX88179",
+                    asix::Identity::Ax88178a => "AX88178A",
+                    asix::Identity::Ax88772 { .. } => "AX88772/A/B",
+                };
+                let register = if matches!(identity, asix::Identity::Ax88772 { .. }) {
+                    "smsr"
+                } else {
+                    "general"
+                };
+                let family = format!(
+                    "{family} {register}-{:02x} phy-{:08x}",
+                    chip.identity().0,
+                    chip.identity().1
+                );
+                (Backend::Asix(chip), mac, None, family)
+            }
         };
+        let receive_bytes = chip.receive_bytes();
         Ok(Self {
             controller,
             slot: device.slot,
@@ -161,7 +308,7 @@ impl UsbEthernet {
             carrier: false,
             closed: false,
             stopped: false,
-            firmware: firmware.map(|(image, _)| firmware::Receipt::from_image(image)),
+            firmware,
             location: format!("{} {family}", device.location),
         })
     }
@@ -191,7 +338,7 @@ impl UsbEthernet {
         let linked = self.chip.carrier()?;
         if self.carrier
             && !linked
-            && let Err(error) = self.quiesce().and_then(|()| self.chip.stop())
+            && let Err(error) = self.quiesce().and_then(|()| self.chip.link_down())
         {
             self.closed = true;
             self.carrier = false;
@@ -224,7 +371,7 @@ impl Drop for UsbEthernet {
 }
 
 fn link_error(error: BlockError) -> LinkError {
-    LinkError::Adapter(format!("USB RTL815x: {error}"))
+    LinkError::Adapter(format!("USB Ethernet: {error}"))
 }
 
 impl Link for UsbEthernet {
@@ -241,7 +388,9 @@ impl Link for UsbEthernet {
         let mut c = self.controller.borrow_mut();
         c.endpoint_ready(self.slot, self.binding.output.dci())
             .map_err(link_error)?;
-        let bytes = framing::encode(frame, self.send.bytes_mut())
+        let bytes = self
+            .chip
+            .encode(frame, self.send.bytes_mut(), self.binding.output.max_packet)
             .map_err(|why| LinkError::Adapter(why.into()))?;
         fence(Ordering::Release);
         let actual = match c.transfer(
@@ -261,7 +410,7 @@ impl Link for UsbEthernet {
             }
         };
         if actual != bytes {
-            return Err(LinkError::Adapter("RTL815x short TX transfer".into()));
+            return Err(LinkError::Adapter("USB Ethernet short TX transfer".into()));
         }
         // The vendor protocol carries its own lengths; Linux submits no ZLP.
         Ok(())
@@ -303,12 +452,13 @@ impl Link for UsbEthernet {
         };
         if actual > self.receive.len() {
             return Err(LinkError::Adapter(
-                "RTL815x RX completion exceeds DMA".into(),
+                "USB Ethernet RX completion exceeds DMA".into(),
             ));
         }
         fence(Ordering::Acquire);
         self.pending.extend(
-            framing::decode(&self.receive.bytes()[..actual])
+            self.chip
+                .decode(&self.receive.bytes()[..actual])
                 .map_err(|why| LinkError::Adapter(why.into()))?,
         );
         Ok(self.pending.pop_front())

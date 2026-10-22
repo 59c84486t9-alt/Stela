@@ -79,6 +79,7 @@ pub enum Phase {
     StreamResetExit,
     StreamStart,
     CodecPower,
+    CodecDepop,
     LinkPowerDown,
     LinkPowerUp,
 }

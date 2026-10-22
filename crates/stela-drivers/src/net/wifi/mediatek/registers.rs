@@ -120,6 +120,10 @@ impl<I: BarIo> Registers<I> {
     pub fn chip(&self) -> Chip {
         self.chip
     }
+    #[cfg(test)]
+    pub(in crate::net::wifi::mediatek) fn test_io(&mut self) -> &mut I {
+        &mut self.io
+    }
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }

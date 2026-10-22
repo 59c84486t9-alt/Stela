@@ -1,0 +1,915 @@
+// SPDX-License-Identifier: GPL-2.0-only
+// Copyright (c) 2014 Andreas Noever <andreas.noever@gmail.com>
+// Copyright (C) 2019 Intel Corporation
+//! One reserved two-hop USB3 path over an actual retained native USB4 link.
+//! Linux path.c activation and tunnel.c USB3 settings; no tunnel/endpoint enable,
+//! HopID allocator, bandwidth or platform authorization provider is fabricated.
+use super::{
+    channel::{self, Channel},
+    config::{self, Address, Reply, Route, Space},
+    domain::Identity,
+    link::{self, Linked},
+    ring::{self, Registers},
+    router::Decision,
+    topology::{AdapterHeader, AdapterKind, AdapterObservation, Inventory},
+};
+use alloc::{boxed::Box, sync::Arc};
+use core::sync::atomic::{AtomicU64, Ordering};
+const ENABLE: u32 = 1 << 31;
+const PENDING: u32 = 1 << 28;
+const REQUEST_MS: u64 = 500;
+const JOB_MS: u64 = 10_000;
+static QUARANTINED: AtomicU64 = AtomicU64::new(0);
+pub fn quarantined_paths() -> u64 {
+    QUARANTINED.load(Ordering::Relaxed)
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Downstream,
+    Upstream,
+}
+/// Source USB3 lane credit choice. RouterAllocated is the actual observed and
+/// reserved sw->max_usb3_credits, not the register total or a caller estimate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaneCredits {
+    LegacyBonded,
+    RouterAllocated(u8),
+}
+impl LaneCredits {
+    fn value(self) -> Result<u8, Error> {
+        match self {
+            Self::LegacyBonded => Ok(32),
+            Self::RouterAllocated(value @ 1..=127) => Ok(value),
+            _ => Err(Error::Credits),
+        }
+    }
+}
+/// Metadata of an independently protected real allocation; never authority by
+/// itself. Hop pairs are (ingress HopID, outgoing HopID), source to destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Allocation {
+    pub identity: Identity,
+    pub topology_epoch: u64,
+    pub grant_epoch: u64,
+    pub direction: Direction,
+    pub usb3_down: u8,
+    pub usb3_up: u8,
+    pub hops: [(u16, u16); 2],
+    pub lane_credits: LaneCredits,
+    pub permission: Decision,
+}
+/// Real protected native USB3 path reservation, including permission/lifetimes.
+///
+/// # Safety
+/// This object retains exclusive actual input AND output HopIDs on all four
+/// ports, including any stale configuration at those IDs, from the shared native
+/// domain allocator. They belong to the exact retained Linked/NHI/reset/topology
+/// epoch and actual USB3-to-primary-lane mapping. Neither firmware nor another
+/// CM can reuse them or modify the path. Permission is a real platform/_OSC and
+/// security decision for these endpoints, with protected grant_epoch; it is not
+/// an integer tuple assertion or a default authorization. Credit mode is from
+/// actual router VSEC allocation support, and the source-sized lane credits are
+/// reserved against every competing path, not merely compared to total buffers.
+/// The native owner has serialized dependent paths/power/CL0, satisfies any real
+/// preactivation bandwidth prerequisites and retains endpoint/DMA/IMR/IOMMU/IRQ
+/// ownership independently. Stale-hop draining must not release any prior ID,
+/// posted DMA, endpoint or attachment. Drop releases this reservation only after
+/// no mutation, proven restoration/reset, independently retained transfer, or
+/// a genuine same-epoch complete local path disable/pending drain. That last
+/// proof returns only local HopID/flow-credit rights; independent endpoint DMA,
+/// IRQ/IOMMU, link and residual bandwidth/permission lifetimes stay retained.
+/// No production implementation of these missing native services is supplied.
+pub unsafe trait Reservation: Send + Sync {
+    fn allocation(&self) -> Allocation;
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Revoked,
+    Identity,
+    Topology,
+    Permission,
+    Unsupported,
+    HopId,
+    Credits,
+    ClockOverflow,
+    ClockRegressed,
+    Timeout,
+    Changed,
+    Readback,
+    Cancelled,
+    Poisoned,
+    Stopped,
+    UnexpectedReceipt,
+    Controller {
+        route: Route,
+        port: u8,
+        code: u8,
+        raw: u32,
+    },
+    Hotplug(config::PlugEvent),
+    Notification(config::NotificationError),
+    Link(link::Error),
+    Channel(channel::Error),
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Words {
+    pub raw: [u32; 2],
+}
+/// Active local path, retaining the original link and actual path allocation.
+/// Neither this receipt nor a pending-bit observation authorizes endpoint enable
+/// or finishes a USB3 tunnel, security/attachment admission or endpoint teardown.
+pub struct Active {
+    pub allocation: Allocation,
+    pub words: [Words; 2],
+    link: Option<Backing>,
+    reservation: Option<Arc<dyn Reservation>>,
+    changed: bool,
+}
+enum Backing {
+    Direct(Box<Linked>),
+    Bandwidth(Box<super::usb3::Allocated>),
+    Previous(Box<Active>),
+}
+impl Backing {
+    fn is_current(&self) -> bool {
+        match self {
+            Self::Direct(_) => true,
+            Self::Bandwidth(b) => b.is_current(),
+            Self::Previous(p) => p.is_current(),
+        }
+    }
+    fn linked(&self) -> &Linked {
+        match self {
+            Self::Direct(link) => link,
+            Self::Bandwidth(allocation) => allocation.linked(),
+            Self::Previous(path) => path.link.as_ref().expect("retained first path").linked(),
+        }
+    }
+    unsafe fn retire(self) {
+        match self {
+            Self::Direct(link) => unsafe { link.retire() },
+            Self::Bandwidth(allocation) => unsafe { allocation.retire() },
+            Self::Previous(path) => unsafe { path.retire() },
+        }
+    }
+}
+impl Active {
+    pub(super) fn is_current(&self) -> bool {
+        self.link.as_ref().is_some_and(|link| link.is_current())
+    }
+    pub(super) fn protected_allocation(&self) -> Allocation {
+        self.reservation
+            .as_ref()
+            .expect("retained native path")
+            .allocation()
+    }
+    pub(super) fn previous(&self) -> &Active {
+        let Some(Backing::Previous(previous)) = &self.link else {
+            panic!("actual two-direction path chain")
+        };
+        previous
+    }
+    pub(super) fn bandwidth_ref(&self) -> &super::usb3::Allocated {
+        match self.link.as_ref().expect("retained backing") {
+            Backing::Bandwidth(b) => b,
+            Backing::Previous(p) => p.bandwidth_ref(),
+            Backing::Direct(_) => panic!("actual bandwidth-backed path"),
+        }
+    }
+    pub(super) fn take_bandwidth(&mut self) -> Box<super::usb3::Allocated> {
+        match self.link.as_mut().expect("retained backing") {
+            Backing::Bandwidth(_) => {
+                let Some(Backing::Bandwidth(b)) = self.link.take() else {
+                    unreachable!()
+                };
+                b
+            }
+            Backing::Previous(p) => p.take_bandwidth(),
+            Backing::Direct(_) => panic!("actual bandwidth-backed path"),
+        }
+    }
+    pub(super) fn put_bandwidth(&mut self, bandwidth: Box<super::usb3::Allocated>) {
+        match self.link.as_mut() {
+            None => self.link = Some(Backing::Bandwidth(bandwidth)),
+            Some(Backing::Previous(p)) => p.put_bandwidth(bandwidth),
+            _ => panic!("unique removed bandwidth slot"),
+        }
+    }
+    pub(super) fn drain_hops(&self) -> Result<[DrainHop; 2], Error> {
+        let allocation = self.protected_allocation();
+        let hops = plan(self.bandwidth_ref().linked(), allocation)?;
+        Ok(core::array::from_fn(|i| {
+            let hop = hops[i];
+            let expected = hop.program(Words { raw: [0; 2] }, i);
+            DrainHop {
+                route: hop.route,
+                port: hop.input,
+                upstream: hop.upstream,
+                id: hop.ingress,
+                expected,
+                mask: [
+                    !((1 << 31) | if hop.lane { 0 } else { 127 << 17 }),
+                    !((1 << 28) | if hop.lane { 0 } else { (1 << 24) | (1 << 26) }),
+                ],
+            }
+        }))
+    }
+    /// # Safety
+    /// The containing stopped receipt proves matching live epoch, both PE0 and
+    /// every actual hop disabled/PENDING0. Only LOCAL path IDs/flow credits may
+    /// become reusable; independent endpoint DMA/IRQ/IOMMU and residual native
+    /// permission/accounting remain retained by the returned bandwidth object.
+    pub(super) unsafe fn release_stopped(
+        mut self,
+    ) -> (Box<super::usb3::Allocated>, [Arc<dyn Reservation>; 2]) {
+        let Some(Backing::Previous(mut down)) = self.link.take() else {
+            panic!("complete actual two-path chain")
+        };
+        let Some(Backing::Bandwidth(bandwidth)) = down.link.take() else {
+            panic!("unique original bandwidth owner")
+        };
+        let down_owner = down
+            .reservation
+            .take()
+            .expect("actual Down path allocation");
+        let up_owner = self.reservation.take().expect("actual Up path allocation");
+        (bandwidth, [down_owner, up_owner])
+    }
+    /// # Safety
+    /// Actual path/link restoration or reset and all independent dependent DMA,
+    /// IRQ/power lifetimes are satisfied, or the complete live path, both router
+    /// owners and reciprocal link reservation are independently retained by the
+    /// real native CM. This must never release an unknown prior owner's IDs.
+    /// ```compile_fail
+    /// use stela_drivers::bus::thunderbolt::path::Active;
+    /// fn release(path:Active){path.retire();}
+    /// ```
+    pub unsafe fn retire(mut self) {
+        if let Some(link) = self.link.take() {
+            // SAFETY: caller proves the actual full ownership transfer or drain.
+            unsafe { link.retire() };
+        }
+        self.reservation.take();
+    }
+}
+pub(super) fn retain_reservation(reservation: &Arc<dyn Reservation>) {
+    let _ = QUARANTINED.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        Some(n.saturating_add(1))
+    });
+    core::mem::forget(reservation.clone());
+}
+impl Drop for Active {
+    fn drop(&mut self) {
+        if self.changed
+            && let Some(reservation) = &self.reservation
+        {
+            retain_reservation(reservation);
+        }
+    }
+}
+
+pub enum Event {
+    Active(Active),
+    Discarded(config::Error),
+}
+#[derive(Clone, Copy)]
+struct Hop {
+    route: Route,
+    upstream: u8,
+    input: u8,
+    output: u8,
+    ingress: u16,
+    next: u16,
+    lane: bool,
+    credits: u8,
+    header: [u32; 8],
+}
+impl Hop {
+    fn address(self, space: Space) -> Address {
+        Address {
+            port: self.input,
+            space,
+            offset: if space == Space::Hops {
+                self.ingress * 2
+            } else {
+                0
+            },
+            words: if space == Space::Hops { 2 } else { 8 },
+        }
+    }
+    fn program(self, before: Words, index: usize) -> Words {
+        // Real tb_regs_hop bitfields, including counter=-1 with enable=0.
+        // USB4 protocol-adapter credits/IFC/ISE are vendor-defined and retained.
+        let credits = if self.lane {
+            u32::from(self.credits) << 17
+        } else {
+            before.raw[0] & (127 << 17)
+        };
+        let ingress = if self.lane {
+            1 << 24
+        } else {
+            before.raw[1] & ((1 << 24) | (1 << 26))
+        };
+        Words {
+            raw: [
+                u32::from(self.next) | (u32::from(self.output) << 11) | credits | ENABLE,
+                2 | (3 << 8)
+                    | (2047 << 12)
+                    | ingress
+                    | if index == 0 { 1 << 25 } else { 0 }
+                    | (before.raw[1] & PENDING),
+            ],
+        }
+    }
+}
+fn adapter(inventory: &Inventory, port: u8) -> Result<&AdapterHeader, Error> {
+    inventory
+        .adapters
+        .iter()
+        .find_map(|item| match item {
+            AdapterObservation::Present {
+                port: number,
+                header,
+                ..
+            } if *number == port && port != 0 => Some(header),
+            _ => None,
+        })
+        .ok_or(Error::Topology)
+}
+fn plan(link: &Linked, allocation: Allocation) -> Result<[Hop; 2], Error> {
+    let (parent, child) = link.retained_routers().map_err(Error::Link)?;
+    let partners = link.protected_partners();
+    if allocation.identity != partners.identity
+        || allocation.topology_epoch != partners.topology_epoch
+        || allocation.grant_epoch == 0
+        || link.partners != partners
+    {
+        return Err(Error::Identity);
+    }
+    if !link.link_usb4 || !matches!(link.generation, 2 | 3) {
+        return Err(Error::Unsupported);
+    }
+    if allocation.permission != Decision::Allowed
+        || parent.retained_owner().policy().usb3 != Decision::Allowed
+        || child.retained_owner().policy().usb3 != Decision::Allowed
+    {
+        return Err(Error::Permission);
+    }
+    let parent_inventory = parent.retained_owner().target();
+    let child_inventory = child.retained_owner().target();
+    let down = adapter(parent_inventory, allocation.usb3_down)?;
+    let up = adapter(child_inventory, allocation.usb3_up)?;
+    if down.kind() != AdapterKind::Usb3Down || up.kind() != AdapterKind::Usb3Up {
+        return Err(Error::Topology);
+    }
+    let credits = allocation.lane_credits.value()?;
+    let (source, destination, inputs, outputs) = match allocation.direction {
+        Direction::Downstream => (
+            parent_inventory,
+            child_inventory,
+            [allocation.usb3_down, partners.child[0]],
+            [partners.parent[0], allocation.usb3_up],
+        ),
+        Direction::Upstream => (
+            child_inventory,
+            parent_inventory,
+            [allocation.usb3_up, partners.parent[0]],
+            [partners.child[0], allocation.usb3_down],
+        ),
+    };
+    let inventories = [source, destination];
+    let mut hops = [None, None];
+    for i in 0..2 {
+        let inventory = inventories[i];
+        let input = adapter(inventory, inputs[i])?;
+        let output = adapter(inventory, outputs[i])?;
+        let (ingress, next) = allocation.hops[i];
+        if ingress < 8
+            || ingress > input.max_in_hop()
+            || next < 8
+            || next > output.max_out_hop()
+            || ingress >= 2048
+            || next >= 2048
+        {
+            return Err(Error::HopId);
+        }
+        if i == 0 && ingress != 8 || i == 1 && (next != 8 || ingress != allocation.hops[0].1) {
+            return Err(Error::HopId);
+        }
+        let lane = input.kind() == AdapterKind::Lane;
+        if (i == 1) != lane || (i == 0 && output.kind() != AdapterKind::Lane) {
+            return Err(Error::Topology);
+        }
+        if lane {
+            let actual = link
+                .credits
+                .iter()
+                .find(|credit| credit.route == inventory.path.route() && credit.port == inputs[i])
+                .ok_or(Error::Credits)?;
+            if u32::from(actual.total()) < u32::from(actual.nonflow()) + u32::from(credits) {
+                return Err(Error::Credits);
+            }
+        }
+        hops[i] = Some(Hop {
+            route: inventory.path.route(),
+            upstream: inventory.upstream_port,
+            input: inputs[i],
+            output: outputs[i],
+            ingress,
+            next,
+            lane,
+            credits: if lane { credits } else { 7 },
+            header: input.raw,
+        });
+    }
+    Ok([
+        hops[0].ok_or(Error::Topology)?,
+        hops[1].ok_or(Error::Topology)?,
+    ])
+}
+#[derive(Clone, Copy)]
+pub(super) struct DrainHop {
+    pub route: Route,
+    pub port: u8,
+    pub upstream: u8,
+    pub id: u16,
+    pub expected: Words,
+    pub mask: [u32; 2],
+}
+impl DrainHop {
+    pub fn matches(self, words: Words) -> bool {
+        (0..2).all(|i| words.raw[i] & self.mask[i] == self.expected.raw[i] & self.mask[i])
+    }
+}
+/// Private composition plan checked against the genuine protected link before
+/// any first-path write. It carries no independent hardware authority.
+pub(super) struct Prepared {
+    allocation: Allocation,
+    hops: [Hop; 2],
+}
+pub(super) fn prepare(link: &Linked, allocation: Allocation) -> Result<Prepared, Error> {
+    Ok(Prepared {
+        allocation,
+        hops: plan(link, allocation)?,
+    })
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Inventory(usize),
+    Credit,
+    Initial(usize),
+    Disable(usize, Words),
+    Drain(usize),
+    Prepare(usize),
+    Write(usize, Words),
+    Verify(usize, Words),
+    Done,
+    Fault,
+}
+/// Polled actual path programming. Source USB3 counter and NFC credits are zero,
+/// so neither counter clears nor non-flow-controlled allocation writes are needed.
+pub struct Activate<R: Registers> {
+    channel: Option<Channel<R>>,
+    retained: Option<Active>,
+    hops: [Hop; 2],
+    stage: Stage,
+    expected: Option<u64>,
+    deadline: u64,
+    job_deadline: u64,
+    last_now: u64,
+    next_poll: u64,
+}
+impl<R: Registers> Activate<R> {
+    /// # Safety
+    /// The Channel, complete retained Linked and native allocation are the exact
+    /// same physical NHI/reset/topology/grant epoch, exclusively idle/current.
+    /// Reservation's real allocator, permission, mapping, bandwidth, credit and
+    /// dependent-path lifetime obligations hold; matching numbers alone do not
+    /// prove that pairing. No independent endpoint/attachment resource is retired.
+    /// ```compile_fail
+    /// use std::sync::Arc;
+    /// use stela_drivers::bus::thunderbolt::{channel::Channel,link::Linked,path::{Activate,Reservation},ring::Registers};
+    /// fn pair<R:Registers>(c:Channel<R>,l:Box<Linked>,r:Arc<dyn Reservation>){let _=Activate::new(c,l,r,0);}
+    /// ```
+    pub unsafe fn new(
+        channel: Channel<R>,
+        link: Box<Linked>,
+        reservation: Arc<dyn Reservation>,
+        now: u64,
+    ) -> Result<Self, Error> {
+        let allocation = reservation.allocation();
+        Self::new_inner(channel, Backing::Direct(link), reservation, allocation, now)
+    }
+    /// Consume the exact completed root bandwidth handshake without cloning its
+    /// original link or native accounting/permission ownership.
+    ///
+    /// # Safety
+    /// All `new` physical pairing/grant requirements hold. This exact allocated
+    /// bandwidth reservation belongs to the same protected endpoints, permission
+    /// generation and source path allocation; no other tunnel consumes it.
+    /// ```compile_fail
+    /// use std::sync::Arc;
+    /// use stela_drivers::bus::thunderbolt::{channel::Channel,path::{Activate,Reservation},usb3::Allocated,ring::Registers};
+    /// fn pair<R:Registers>(c:Channel<R>,a:Box<Allocated>,r:Arc<dyn Reservation>){let _=Activate::with_bandwidth(c,a,r,0);}
+    /// ```
+    pub unsafe fn with_bandwidth(
+        channel: Channel<R>,
+        bandwidth: Box<super::usb3::Allocated>,
+        reservation: Arc<dyn Reservation>,
+        now: u64,
+    ) -> Result<Self, Error> {
+        if !bandwidth.is_current() {
+            retain_reservation(&reservation);
+            return Err(Error::Revoked);
+        }
+        let path = reservation.allocation();
+        let grant = bandwidth.protected_grant();
+        if grant.identity != path.identity
+            || grant.topology_epoch != path.topology_epoch
+            || grant.grant_epoch != path.grant_epoch
+            || grant.usb3_down != path.usb3_down
+            || grant.usb3_up != path.usb3_up
+            || grant.permission != Decision::Allowed
+        {
+            retain_reservation(&reservation);
+            return Err(Error::Identity);
+        }
+        Self::new_inner(
+            channel,
+            Backing::Bandwidth(bandwidth),
+            reservation,
+            path,
+            now,
+        )
+    }
+    fn new_inner(
+        channel: Channel<R>,
+        link: Backing,
+        reservation: Arc<dyn Reservation>,
+        allocation: Allocation,
+        now: u64,
+    ) -> Result<Self, Error> {
+        let prepared = (|| {
+            let prepared = prepare(link.linked(), allocation)?;
+            let deadline = now.checked_add(REQUEST_MS).ok_or(Error::ClockOverflow)?;
+            let job_deadline = now.checked_add(JOB_MS).ok_or(Error::ClockOverflow)?;
+            Ok((prepared, deadline, job_deadline))
+        })();
+        let (prepared, deadline, job_deadline) = match prepared {
+            Ok(value) => value,
+            Err(error) => {
+                if !matches!(link, Backing::Direct(_)) {
+                    retain_reservation(&reservation);
+                }
+                return Err(error);
+            }
+        };
+        Ok(Self::initialize(
+            channel,
+            link,
+            reservation,
+            prepared,
+            now,
+            deadline,
+            job_deadline,
+        ))
+    }
+    /// # Safety
+    /// The containing actual native CM has preflighted this exact protected
+    /// plan, same physical pairing and endpoint authority, and checked all clock
+    /// additions before moving ownership. This is not a public admission API.
+    pub(super) unsafe fn start_bandwidth(
+        channel: Channel<R>,
+        bandwidth: Box<super::usb3::Allocated>,
+        reservation: Arc<dyn Reservation>,
+        prepared: Prepared,
+        now: u64,
+        deadline: u64,
+        job_deadline: u64,
+    ) -> Self {
+        Self::initialize(
+            channel,
+            Backing::Bandwidth(bandwidth),
+            reservation,
+            prepared,
+            now,
+            deadline,
+            job_deadline,
+        )
+    }
+    /// # Safety
+    /// Same exact physical/grant proof as start_bandwidth; the protected plan is
+    /// the opposite direction and all real first-path/bandwidth owners remain
+    /// inside previous. Its wrapper storage was reserved before first mutation.
+    pub(super) unsafe fn start_previous(
+        channel: Channel<R>,
+        previous: Box<Active>,
+        reservation: Arc<dyn Reservation>,
+        prepared: Prepared,
+        now: u64,
+        deadline: u64,
+        job_deadline: u64,
+    ) -> Self {
+        Self::initialize(
+            channel,
+            Backing::Previous(previous),
+            reservation,
+            prepared,
+            now,
+            deadline,
+            job_deadline,
+        )
+    }
+    fn initialize(
+        channel: Channel<R>,
+        link: Backing,
+        reservation: Arc<dyn Reservation>,
+        prepared: Prepared,
+        now: u64,
+        deadline: u64,
+        job_deadline: u64,
+    ) -> Self {
+        // A prior actual bandwidth/path success makes the complete transaction
+        // live already. Retain the new path reservation even if later preflight
+        // or construction fails before its first own write.
+        let changed = !matches!(link, Backing::Direct(_));
+        Self {
+            channel: Some(channel),
+            retained: Some(Active {
+                allocation: prepared.allocation,
+                words: [Words { raw: [0; 2] }; 2],
+                link: Some(link),
+                reservation: Some(reservation),
+                changed,
+            }),
+            hops: prepared.hops,
+            stage: Stage::Inventory(0),
+            expected: None,
+            deadline,
+            job_deadline,
+            last_now: now,
+            next_poll: now,
+        }
+    }
+    fn channel(&mut self) -> &mut Channel<R> {
+        self.channel.as_mut().expect("retained channel")
+    }
+    fn fail<T>(&mut self, error: Error) -> Result<T, Error> {
+        self.stage = Stage::Fault;
+        let _ = self.channel().cancel();
+        Err(error)
+    }
+    pub fn into_channel(mut self) -> Channel<R> {
+        self.channel.take().expect("retained channel")
+    }
+    pub fn cancel(&mut self) -> Result<(), Error> {
+        match self.stage {
+            Stage::Done => Err(Error::Stopped),
+            Stage::Fault => Err(Error::Poisoned),
+            _ => self.fail(Error::Cancelled),
+        }
+    }
+    fn enter(&mut self, stage: Stage, now: u64) -> Result<(), Error> {
+        self.stage = stage;
+        self.next_poll = now;
+        self.deadline = now
+            .checked_add(REQUEST_MS)
+            .ok_or(Error::ClockOverflow)?
+            .min(self.job_deadline);
+        Ok(())
+    }
+    fn request(&self) -> Result<(Hop, Address, Option<[u32; 2]>), Error> {
+        let (index, space, data) = match self.stage {
+            Stage::Inventory(i) => (i, Space::Port, None),
+            Stage::Credit => {
+                let hop = self.hops[1];
+                return Ok((
+                    hop,
+                    Address {
+                        port: hop.input,
+                        space: Space::Port,
+                        offset: 4,
+                        words: 1,
+                    },
+                    None,
+                ));
+            }
+            Stage::Initial(i) | Stage::Drain(i) | Stage::Prepare(i) | Stage::Verify(i, _) => {
+                (i, Space::Hops, None)
+            }
+            Stage::Disable(i, words) | Stage::Write(i, words) => (i, Space::Hops, Some(words.raw)),
+            _ => return Err(Error::Stopped),
+        };
+        let hop = self.hops[index];
+        Ok((hop, hop.address(space), data))
+    }
+    pub(super) fn is_current(&self) -> bool {
+        self.retained.as_ref().is_some_and(|path| path.is_current())
+    }
+    fn submit(&mut self, now: u64) -> Result<(), Error> {
+        if !self.is_current() {
+            return self.fail(Error::Revoked);
+        }
+        if self.expected.is_some() || now < self.next_poll {
+            return Ok(());
+        }
+        let (hop, address, data) = self.request()?;
+        let deadline = self.deadline;
+        let result = if let Some(data) = data {
+            let result = self
+                .channel()
+                .write(hop.route, address, &data, now, deadline);
+            if !matches!(
+                result,
+                Err(channel::Error::Busy | channel::Error::Ring(ring::Error::Full))
+            ) {
+                self.retained.as_mut().expect("retained allocation").changed = true;
+            }
+            result
+        } else {
+            self.channel().read(hop.route, address, now, deadline)
+        };
+        match result {
+            Ok(id) => {
+                self.expected = Some(id);
+                Ok(())
+            }
+            Err(channel::Error::Busy | channel::Error::Ring(ring::Error::Full)) => Ok(()),
+            Err(error) => self.fail(Error::Channel(error)),
+        }
+    }
+    fn complete(&mut self, reply: Reply, now: u64) -> Result<Option<Event>, Error> {
+        if !self.is_current() {
+            return self.fail(Error::Revoked);
+        }
+        let data = match reply {
+            Reply::Configuration {
+                upstream_port,
+                data,
+            } => {
+                if upstream_port != self.request()?.0.upstream {
+                    return self.fail(Error::Changed);
+                }
+                data
+            }
+            Reply::ControllerError {
+                route,
+                port,
+                code,
+                raw,
+                ..
+            } => {
+                return self.fail(Error::Controller {
+                    route,
+                    port,
+                    code,
+                    raw,
+                });
+            }
+            Reply::Reset => return self.fail(Error::UnexpectedReceipt),
+        };
+        match self.stage {
+            Stage::Inventory(i) => {
+                let actual = AdapterHeader::parse(&data).map_err(|_| Error::UnexpectedReceipt)?;
+                let expected = AdapterHeader {
+                    raw: self.hops[i].header,
+                };
+                if actual.kind() != expected.kind()
+                    || actual.reported_port() != self.hops[i].input
+                    || actual.max_in_hop() != expected.max_in_hop()
+                    || actual.max_out_hop() != expected.max_out_hop()
+                {
+                    return self.fail(Error::Changed);
+                }
+                self.enter(
+                    if i == 0 {
+                        Stage::Inventory(1)
+                    } else {
+                        Stage::Credit
+                    },
+                    now,
+                )?;
+            }
+            Stage::Credit => {
+                let [raw] = data.as_slice() else {
+                    return self.fail(Error::UnexpectedReceipt);
+                };
+                if (raw >> 20) & 1023 < (raw & 1023) + u32::from(self.hops[1].credits) {
+                    return self.fail(Error::Credits);
+                }
+                self.enter(Stage::Initial(0), now)?;
+            }
+            Stage::Initial(_) | Stage::Drain(_) | Stage::Prepare(_) | Stage::Verify(_, _) => {
+                let raw: [u32; 2] = data
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::UnexpectedReceipt)?;
+                let words = Words { raw };
+                match self.stage {
+                    Stage::Initial(i) => self.enter(
+                        if raw[0] & ENABLE != 0 {
+                            Stage::Disable(
+                                i,
+                                Words {
+                                    raw: [raw[0] & !ENABLE, raw[1]],
+                                },
+                            )
+                        } else {
+                            Stage::Prepare(i)
+                        },
+                        now,
+                    )?,
+                    Stage::Drain(i) => {
+                        if raw[0] & ENABLE != 0 {
+                            return self.fail(Error::Changed);
+                        }
+                        if raw[1] & PENDING == 0 {
+                            self.enter(Stage::Prepare(i), now)?;
+                        } else {
+                            self.next_poll = now.checked_add(1).ok_or(Error::ClockOverflow)?;
+                        }
+                    }
+                    Stage::Prepare(i) => {
+                        if raw[0] & ENABLE != 0 {
+                            return self.fail(Error::Changed);
+                        }
+                        self.enter(Stage::Write(i, self.hops[i].program(words, i)), now)?;
+                    }
+                    Stage::Verify(i, programmed) => {
+                        if raw[0] != programmed.raw[0]
+                            || raw[1] & !PENDING != programmed.raw[1] & !PENDING
+                        {
+                            return self.fail(Error::Readback);
+                        }
+                        self.retained.as_mut().expect("retained allocation").words[i] = words;
+                        if i == 0 {
+                            self.enter(Stage::Initial(1), now)?;
+                        } else {
+                            if !self.is_current() {
+                                return self.fail(Error::Revoked);
+                            }
+                            self.stage = Stage::Done;
+                            return Ok(Some(Event::Active(
+                                self.retained.take().ok_or(Error::UnexpectedReceipt)?,
+                            )));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            Stage::Disable(i, _) => {
+                if !data.is_empty() {
+                    return self.fail(Error::UnexpectedReceipt);
+                }
+                self.enter(Stage::Drain(i), now)?;
+            }
+            Stage::Write(i, programmed) => {
+                if !data.is_empty() {
+                    return self.fail(Error::UnexpectedReceipt);
+                }
+                self.enter(Stage::Verify(i, programmed), now)?;
+            }
+            _ => return self.fail(Error::UnexpectedReceipt),
+        }
+        Ok(None)
+    }
+    pub fn poll(&mut self, now: u64) -> Result<Option<Event>, Error> {
+        match self.stage {
+            Stage::Done => return Err(Error::Stopped),
+            Stage::Fault => return Err(Error::Poisoned),
+            _ => {}
+        }
+        if !self.is_current() {
+            return self.fail(Error::Revoked);
+        }
+        if now < self.last_now {
+            return self.fail(Error::ClockRegressed);
+        }
+        self.last_now = now;
+        if now >= self.deadline || now >= self.job_deadline {
+            return self.fail(Error::Timeout);
+        }
+        match self.channel().poll(now) {
+            Err(error) => return self.fail(Error::Channel(error)),
+            Ok(Some(channel::Event::Completed { request, reply })) => {
+                if self.expected != Some(request) {
+                    return self.fail(Error::UnexpectedReceipt);
+                }
+                self.expected = None;
+                match self.complete(reply, now) {
+                    Ok(Some(event)) => return Ok(Some(event)),
+                    Ok(None) => {}
+                    Err(error) => return self.fail(error),
+                }
+            }
+            Ok(Some(channel::Event::Plug(event))) => return self.fail(Error::Hotplug(event)),
+            Ok(Some(channel::Event::Notification(event))) => {
+                return self.fail(Error::Notification(event));
+            }
+            Ok(Some(channel::Event::Discarded(error))) => return Ok(Some(Event::Discarded(error))),
+            Ok(None) => {}
+        }
+        self.submit(now)?;
+        Ok(None)
+    }
+}

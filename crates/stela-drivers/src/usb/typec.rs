@@ -2,6 +2,8 @@
 //!
 //! These backends do not emulate an Apple USB-C controller or choose system
 //! power policy. The platform supplies the actual ACPI/I²C resources and owns
-//! connector-to-host-router, role-switch, mux and retimer routing.
+//! connector-to-host-router and role-switch association. Selected mux/retimer
+//! backends perform the actual register and power programming.
+pub mod mux;
 pub mod tps6598x;
 pub mod ucsi;

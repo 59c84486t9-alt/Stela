@@ -35,14 +35,15 @@ const BYTES: usize = 4096;
 const TIMEOUT_US: u64 = 2_000_000;
 
 pub(crate) struct Prepared {
-    hardware: HardwareUnit,
-    functions: Vec<Function>,
-    edu: usize,
+    pub(super) hardware: HardwareUnit,
+    pub(super) functions: Vec<Function>,
+    pub(super) edu: usize,
     virtio: usize,
-    edu_registers: Range<u64>,
+    pub(super) edu_registers: Range<u64>,
     virtio_status: u64,
-    clock: Clock,
-    level: crate::native_irq::level_diagnostic::Prepared,
+    pub(super) clock: Clock,
+    level: Option<crate::native_irq::level_diagnostic::Prepared>,
+    pub(super) second: Option<(usize, Range<u64>)>,
 }
 
 fn memory_bar(bar: Option<Bar>) -> Result<Range<u64>, String> {
@@ -98,7 +99,7 @@ fn translation_features_stopped(function: &mut Function) -> Result<(), String> {
 impl Prepared {
     /// Before EBS, with firmware callbacks excluded by TPL_HIGH_LEVEL. No
     /// takeover or DMA occurs here; BAR sizing restores decoding immediately.
-    pub(crate) fn prepare(handoff: &Handoff) -> Result<Self, String> {
+    pub(crate) fn prepare(handoff: &Handoff, isolation: bool) -> Result<Self, String> {
         let hv = core::arch::x86_64::__cpuid(0x4000_0000);
         let signature = [
             hv.ebx.to_le_bytes(),
@@ -129,6 +130,7 @@ impl Prepared {
         }
         // SAFETY: actual firmware ECAM mapping; TPL excludes firmware callbacks.
         let mut functions = unsafe { Function::enumerate(&handoff.ecam[0]) };
+        let mut edus = Vec::new();
         let (mut edu, mut virtio, mut host, mut isa) = (None, None, false, false);
         for (index, function) in functions.iter_mut().enumerate() {
             if function.address.bus != 0 {
@@ -136,8 +138,9 @@ impl Prepared {
             }
             translation_features_stopped(function)?;
             if (function.vendor, function.device) == (EDU_VENDOR, EDU_DEVICE) {
-                if edu.replace(index).is_some() {
-                    return Err(String::from("multiple fixture EDU requesters"));
+                edus.push(index);
+                if edu.is_none() {
+                    edu = Some(index);
                 }
             } else if function.vendor == 0x1af4 && matches!(function.device, 0x1001 | 0x1042) {
                 if virtio.replace(index).is_some() {
@@ -165,6 +168,18 @@ impl Prepared {
                     function.address, function.vendor, function.device
                 ));
             }
+        }
+        if edus.len() != if isolation { 2 } else { 1 } {
+            return Err(String::from("unexpected fixture EDU requester count"));
+        }
+        if isolation
+            && edus.iter().enumerate().any(|(n, &i)| {
+                functions[i].address.device != n as u8 + 2 || functions[i].address.function != 0
+            })
+        {
+            return Err(String::from(
+                "isolation fixture requires EDU 00:02.0 and 00:03.0",
+            ));
         }
         let edu = edu.ok_or_else(|| String::from("fixture EDU requester missing"))?;
         let virtio = virtio.ok_or_else(|| String::from("fixture boot virtio missing"))?;
@@ -220,9 +235,26 @@ impl Prepared {
                 return Err(String::from("duplicate virtio common capability"));
             }
         }
-        let level = crate::native_irq::level_diagnostic::Prepared::prepare(handoff, rsdp, fadt)?;
+        let level = if isolation {
+            None
+        } else {
+            Some(crate::native_irq::level_diagnostic::Prepared::prepare(
+                handoff, rsdp, fadt,
+            )?)
+        };
+        let second = if isolation {
+            let i = edus[1];
+            let bar = memory_bar(functions[i].bars()[0])?;
+            if bar.end - bar.start != 1 << 20 {
+                return Err(String::from("unexpected second EDU register span"));
+            }
+            Some((i, bar))
+        } else {
+            None
+        };
         Ok(Self {
             level,
+            second,
             hardware,
             functions,
             edu,
@@ -234,81 +266,40 @@ impl Prepared {
         })
     }
 
-    pub(crate) fn mappings(&self) -> [Range<u64>; 4] {
-        [
+    pub(crate) fn mappings(&self) -> Vec<Range<u64>> {
+        let mut ranges = alloc::vec![
             self.hardware.base..self.hardware.base + self.hardware.bytes as u64,
             self.edu_registers.clone(),
             self.virtio_status & !4095..(self.virtio_status & !4095) + 4096,
-            self.level.mapping(),
-        ]
+        ];
+        if let Some(level) = &self.level {
+            ranges.push(level.mapping());
+        }
+        if let Some((_, bar)) = &self.second {
+            ranges.push(bar.clone());
+        }
+        ranges
     }
 
-    fn read32(&self, offset: usize) -> u32 {
-        assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
-        // SAFETY: the fixture's real EDU BAR is retained and mapped UC.
-        unsafe { ((self.edu_registers.start + offset as u64) as *const u32).read_volatile() }
-    }
-    fn write32(&self, offset: usize, value: u32) {
-        assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
-        // SAFETY: actual bounded, owned UC EDU register.
-        unsafe { ((self.edu_registers.start + offset as u64) as *mut u32).write_volatile(value) };
-    }
-    fn read64(&self, offset: usize) -> u64 {
-        assert!(
-            offset >= 0x80
-                && offset + 8 <= (self.edu_registers.end - self.edu_registers.start) as usize
-        );
-        // SAFETY: EDU permits 64-bit accesses at these DMA register offsets.
-        unsafe { ((self.edu_registers.start + offset as u64) as *const u64).read_volatile() }
-    }
-    fn write64(&self, offset: usize, value: u64) {
-        assert!(
-            offset >= 0x80
-                && offset + 8 <= (self.edu_registers.end - self.edu_registers.start) as usize
-        );
-        // SAFETY: as for read64, with exclusive fixture ownership.
-        unsafe { ((self.edu_registers.start + offset as u64) as *mut u64).write_volatile(value) };
-    }
-    fn master(&mut self, enabled: bool) -> Result<(), String> {
-        let config = self.functions[self.edu].config();
-        let command = config.read16(COMMAND);
-        config.write16(
-            COMMAND,
-            if enabled {
-                command | BUS_MASTER
-            } else {
-                command & !BUS_MASTER
-            },
-        );
-        if (config.read16(COMMAND) & BUS_MASTER != 0) != enabled {
-            return Err(String::from("EDU bus master state did not latch"));
+    fn device(&self) -> Device {
+        Device {
+            edu_registers: self.edu_registers.clone(),
+            clock: self.clock,
         }
-        Ok(())
-    }
-    fn transfer(&self, source: u64, destination: u64, to_ram: bool) -> Result<(), String> {
-        if self.read64(DMA_COMMAND) & DMA_RUN != 0 {
-            return Err(String::from("EDU DMA was already running"));
-        }
-        self.write64(DMA_SOURCE, source);
-        self.write64(DMA_DESTINATION, destination);
-        self.write64(DMA_COUNT, BYTES as u64);
-        vtd::publish();
-        self.write64(DMA_COMMAND, DMA_RUN | if to_ram { DMA_TO_RAM } else { 0 });
-        if !self
-            .clock
-            .wait(TIMEOUT_US, || self.read64(DMA_COMMAND) & DMA_RUN == 0)
-        {
-            return Err(String::from(
-                "EDU DMA completion timeout; domain quarantined",
-            ));
-        }
-        Ok(())
     }
 
     /// Only after EBS on the prepared UC mappings, with interrupts off. Any
     /// error must stop the host check; normal probing cannot resume into an
     /// uncertain translation state. Unit/lease Drop retains uncertain resources.
-    pub(crate) fn run(mut self) -> Result<(String, String), String> {
+    pub(crate) fn run(mut self) -> Result<Report, String> {
+        self.quiesce()?;
+        if self.second.is_some() {
+            return super::isolation_diagnostic::run(self).map(Report::Isolation);
+        }
+        self.run_single().map(|(dma, irq)| Report::Single(dma, irq))
+    }
+
+    fn quiesce(&mut self) -> Result<(), String> {
         // QEMU v11.1.2 i8257.c: write-all-mask stops each channel, including
         // controller two's cascade. Its single-threaded device callbacks are
         // synchronous; the next run sees all masks before any channel handler.
@@ -328,7 +319,10 @@ impl Prepared {
             }
         }
         for (index, function) in self.functions.iter_mut().enumerate() {
-            if index != self.edu && index != self.virtio {
+            if index != self.edu
+                && self.second.as_ref().is_none_or(|(i, _)| index != *i)
+                && index != self.virtio
+            {
                 let config = function.config();
                 let command = config.read16(COMMAND);
                 config.write16(COMMAND, command & !BUS_MASTER);
@@ -353,18 +347,36 @@ impl Prepared {
         if config.read16(COMMAND) & BUS_MASTER != 0 {
             return Err(String::from("virtio bus master remained enabled"));
         }
-        let config = self.functions[self.edu].config();
-        let command = config.read16(COMMAND);
-        config.write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER);
-        if self.read32(0) != 0x010000ed
-            || self.read32(0x20) & 1 != 0
-            || self.read64(DMA_COMMAND) & DMA_RUN != 0
-            || self.read32(0x24) != 0
-        {
-            return Err(String::from("EDU is not the supported idle QEMU fixture"));
+        let mut devices = alloc::vec![(self.edu, self.edu_registers.clone())];
+        if let Some(second) = &self.second {
+            devices.push(second.clone());
         }
-        self.write32(0x20, 0);
-        self.write32(0x64, u32::MAX);
+        for (index, bar) in devices {
+            let config = self.functions[index].config();
+            let command = config.read16(COMMAND);
+            if command == u16::MAX {
+                return Err(String::from("EDU command read failed"));
+            }
+            config.write16(COMMAND, (command | MEMORY | INTX_DISABLE) & !BUS_MASTER);
+            let device = Device {
+                edu_registers: bar,
+                clock: self.clock,
+            };
+            if device.read32(0) != 0x010000ed
+                || device.read32(0x20) & 1 != 0
+                || device.read64(DMA_COMMAND) & DMA_RUN != 0
+                || device.read32(0x24) != 0
+            {
+                return Err(String::from("EDU is not the supported idle QEMU fixture"));
+            }
+            device.write32(0x20, 0);
+            device.write32(0x64, u32::MAX);
+        }
+        Ok(())
+    }
+
+    fn run_single(mut self) -> Result<(String, String), String> {
+        let device = self.device();
         let timeout = self
             .clock
             .ticks_per_microsecond
@@ -389,15 +401,27 @@ impl Prepared {
             | u16::from(address.function);
         // SAFETY: QEMU-only flat topology, exact matched DMAR owner; all
         // other requesters are reset/drained, EDU idle, ATS/NoSnoop off.
+        let requesters: Vec<u16> = self
+            .functions
+            .iter()
+            .map(|f| u16::from(f.address.device) * 8 + u16::from(f.address.function))
+            .collect();
+        let function = self.functions.swap_remove(self.edu);
+        // SAFETY: same actual exclusive, idle fixture function and retained root.
+        let claim = unsafe { super::requester::RequesterClaim::from_stopped_pci(function) }
+            .map_err(|error| format!("requester claim: {error:?}"))?;
         let unit = unsafe {
             Unit::take_over(
                 registers,
                 &crate::native_memory::SOURCE,
-                requester,
+                &requesters,
                 self.hardware.physical_bits,
             )
         }
         .map_err(|error| format!("VT-d takeover: {error:?}; no normal probing permitted"))?;
+        // SAFETY: same actual retained stopped requester epoch and coherent grant.
+        let domain = unsafe { unit.attach_requester(claim) }
+            .map_err(|error| format!("requester domain: {error:?}"))?;
         if !unit
             .pending_faults()
             .map_err(|error| format!("VT-d initial faults: {error:?}"))?
@@ -433,11 +457,15 @@ impl Prepared {
                 receive_pointer.add(index).write_volatile(0xa7)
             };
         }
-        let mut send_dma =
-            DmaMapping::map(unit.clone(), send.clone(), Direction::ToDevice, 0x0fff_ffff)
-                .map_err(|error| format!("send IOVA: {error:?}"))?;
+        let mut send_dma = DmaMapping::map(
+            domain.clone(),
+            send.clone(),
+            Direction::ToDevice,
+            0x0fff_ffff,
+        )
+        .map_err(|error| format!("send IOVA: {error:?}"))?;
         let mut receive_dma = DmaMapping::map(
-            unit.clone(),
+            domain.clone(),
             receive.clone(),
             Direction::FromDevice,
             0x0fff_ffff,
@@ -458,9 +486,9 @@ impl Prepared {
         receive_dma
             .sync_for_device(0..BYTES)
             .map_err(|error| format!("receive visibility: {error:?}"))?;
-        self.master(true)?;
-        self.transfer(send_iova, DEVICE_BUFFER, false)?;
-        self.transfer(DEVICE_BUFFER, receive_iova, true)?;
+        unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
+        device.transfer(send_iova, DEVICE_BUFFER, false)?;
+        device.transfer(DEVICE_BUFFER, receive_iova, true)?;
         // SAFETY: actual EDU RUN-clear completion; exclusive fixture has no
         // queued submission, IRQ callback or worker that could reuse the BO.
         unsafe { receive_dma.sync_for_cpu(0..BYTES) }
@@ -479,7 +507,7 @@ impl Prepared {
         {
             return Err(String::from("unexpected VT-d roundtrip fault"));
         }
-        self.master(false)?;
+        unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
         // SAFETY: both actual transfers completed and submission is stopped;
         // no ISR/worker exists. Unmap awaits actual IOTLB acknowledgement.
         unsafe { send_dma.unmap() }.map_err(|error| format!("send unmap: {error:?}"))?;
@@ -491,9 +519,9 @@ impl Prepared {
         // Controlled stale-IOVA transaction before any IOVA reuse. The CPU
         // mapping still pins the target RAM; a stale hardware translation
         // would corrupt the sentinel and fail the test.
-        self.master(true)?;
-        self.transfer(DEVICE_BUFFER, receive_iova, true)?;
-        self.master(false)?;
+        unsafe { domain.set_bus_master(true) }.map_err(|e| format!("EDU BM enable: {e:?}"))?;
+        device.transfer(DEVICE_BUFFER, receive_iova, true)?;
+        unsafe { domain.set_bus_master(false) }.map_err(|e| format!("EDU BM disable: {e:?}"))?;
         let faults = unit
             .pending_faults()
             .map_err(|error| format!("VT-d stale IOVA fault status: {error:?}"))?;
@@ -515,6 +543,11 @@ impl Prepared {
             .map_err(|error| format!("fault acknowledgement: {error:?}"))?;
         // SAFETY: EDU idle, bus mastering stopped, both mappings removed with
         // IOTLB acknowledgements, no other DMA requester or IRQ work can start.
+        let claim = unsafe { domain.detach() }.map_err(|e| format!("requester detach: {e:?}"))?;
+        drop(domain);
+        let function = claim
+            .into_function()
+            .map_err(|e| format!("retired PCI owner: {e:?}"))?;
         unsafe { unit.shut_down() }
             .map_err(|error| format!("VT-d TE-off acknowledgement failed: {error:?}"))?;
         let dma = format!(
@@ -523,13 +556,77 @@ impl Prepared {
             receive.physical_pages()[0],
             fault.reason
         );
-        let function = self.functions.swap_remove(self.edu);
         let irq =
             crate::native_irq::diagnostic::run(function, self.edu_registers.start, self.clock)?;
         // Release every remaining configuration-space owner before the next
         // fixture phase exclusively re-enumerates the stopped native bus.
         drop(self.functions);
-        let level = self.level.run(self.edu_registers.start, self.clock)?;
+        let level = self
+            .level
+            .ok_or_else(|| String::from("single fixture missing level preparation"))?
+            .run(self.edu_registers.start, self.clock)?;
         Ok((dma, format!("{irq}; {level}")))
+    }
+}
+
+pub(crate) enum Report {
+    Single(String, String),
+    Isolation(String),
+}
+
+pub(super) struct Device {
+    pub(super) edu_registers: Range<u64>,
+    pub(super) clock: Clock,
+}
+impl Device {
+    pub(super) fn read32(&self, offset: usize) -> u32 {
+        assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
+        // SAFETY: the fixture's real EDU BAR is retained and mapped UC.
+        unsafe { ((self.edu_registers.start + offset as u64) as *const u32).read_volatile() }
+    }
+    pub(super) fn write32(&self, offset: usize, value: u32) {
+        assert!(offset + 4 <= (self.edu_registers.end - self.edu_registers.start) as usize);
+        // SAFETY: actual bounded, owned UC EDU register.
+        unsafe { ((self.edu_registers.start + offset as u64) as *mut u32).write_volatile(value) };
+    }
+    pub(super) fn read64(&self, offset: usize) -> u64 {
+        assert!(
+            offset >= 0x80
+                && offset + 8 <= (self.edu_registers.end - self.edu_registers.start) as usize
+        );
+        // SAFETY: EDU permits 64-bit accesses at these DMA register offsets.
+        unsafe { ((self.edu_registers.start + offset as u64) as *const u64).read_volatile() }
+    }
+    pub(super) fn write64(&self, offset: usize, value: u64) {
+        assert!(
+            offset >= 0x80
+                && offset + 8 <= (self.edu_registers.end - self.edu_registers.start) as usize
+        );
+        // SAFETY: as for read64, with exclusive fixture ownership.
+        unsafe { ((self.edu_registers.start + offset as u64) as *mut u64).write_volatile(value) };
+    }
+    pub(super) fn transfer(
+        &self,
+        source: u64,
+        destination: u64,
+        to_ram: bool,
+    ) -> Result<(), String> {
+        if self.read64(DMA_COMMAND) & DMA_RUN != 0 {
+            return Err(String::from("EDU DMA was already running"));
+        }
+        self.write64(DMA_SOURCE, source);
+        self.write64(DMA_DESTINATION, destination);
+        self.write64(DMA_COUNT, BYTES as u64);
+        vtd::publish();
+        self.write64(DMA_COMMAND, DMA_RUN | if to_ram { DMA_TO_RAM } else { 0 });
+        if !self
+            .clock
+            .wait(TIMEOUT_US, || self.read64(DMA_COMMAND) & DMA_RUN == 0)
+        {
+            return Err(String::from(
+                "EDU DMA completion timeout; domain quarantined",
+            ));
+        }
+        Ok(())
     }
 }

@@ -129,7 +129,7 @@ impl Policy {
 }
 
 #[cfg(not(test))]
-pub(super) fn verify_writeback(
+pub(crate) fn verify_writeback(
     cpu: u64,
     start: u64,
     bytes: usize,

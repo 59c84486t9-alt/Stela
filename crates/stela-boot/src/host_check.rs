@@ -106,6 +106,8 @@ static APIC_BASE: AtomicU64 = AtomicU64::new(0);
 
 struct Options {
     native_dma_check: bool,
+    native_work_check: bool,
+    native_dma_isolation_check: bool,
     nor_file: Option<(Guid, String)>,
     deadline: Option<u64>,
     key_seconds: u64,
@@ -126,13 +128,17 @@ impl Options {
         }
         let mut options = Self {
             native_dma_check: false,
+            native_work_check: false,
+            native_dma_isolation_check: false,
             nor_file: None,
             deadline: None,
             key_seconds: DEFAULT_KEY_SECONDS,
         };
         while let Some(word) = words.next() {
             match word {
+                "--native-work-check" => options.native_work_check = true,
                 "--native-dma-check" => options.native_dma_check = true,
+                "--native-dma-isolation-check" => options.native_dma_isolation_check = true,
                 "--nor-file" => {
                     let (guid, path) = words
                         .next()
@@ -144,6 +150,13 @@ impl Options {
                 "--key-seconds" => options.key_seconds = seconds(words.next())?,
                 _ => return Err("host check: unknown option"),
             }
+        }
+        if u8::from(options.native_dma_check)
+            + u8::from(options.native_dma_isolation_check)
+            + u8::from(options.native_work_check)
+            > 1
+        {
+            return Err("host check: native diagnostic fixture modes are exclusive");
         }
         Ok(options)
     }
@@ -214,6 +227,7 @@ impl Timing {
 /// What the check takes from the firmware, handed to [`run`].
 struct Machine {
     native_dma: Option<crate::native_dma::diagnostic::Prepared>,
+    native_work: Option<crate::native_work_check::Prepared>,
     options: Options,
     timing: Timing,
     screen: Option<Framebuffer>,
@@ -275,6 +289,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
     let tsc_hz = (rdtsc() - started) * MILLISECONDS / TSC_STALL_MILLISECONDS;
     let mut machine = Machine {
         native_dma: None,
+        native_work: None,
         timing: Timing {
             tsc_hz,
             started,
@@ -315,7 +330,7 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
         Ok(handoff) => machine.storage = Some(handoff),
         Err(error) => machine.record("storage", Verdict::Fail, format!("no PCI access: {error}")),
     }
-    if machine.options.native_dma_check {
+    if machine.options.native_dma_check || machine.options.native_dma_isolation_check {
         let handoff = machine
             .storage
             .as_ref()
@@ -324,7 +339,10 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
             // SAFETY: no firmware callback may access PCI while BAR sizing
             // temporarily disables decoding; restored before any service call.
             let _tpl = unsafe { boot::raise_tpl(uefi::boot::Tpl::HIGH_LEVEL) };
-            crate::native_dma::diagnostic::Prepared::prepare(handoff)
+            crate::native_dma::diagnostic::Prepared::prepare(
+                handoff,
+                machine.options.native_dma_isolation_check,
+            )
         };
         match prepared {
             Ok(prepared) => machine.native_dma = Some(prepared),
@@ -334,10 +352,22 @@ fn prepare(options: &[u8]) -> Result<(Machine, paging::Tables), &'static str> {
             }
         }
     }
+    if machine.options.native_work_check {
+        let clock = machine
+            .storage
+            .as_ref()
+            .ok_or("native work proof needs native clock")?
+            .clock;
+        machine.native_work = Some(crate::native_work_check::Prepared::prepare(clock)?);
+    }
     let guard = firmware::pages(firmware::STACK_PAGES + 1)?;
     machine.stack_top = guard + (firmware::STACK_PAGES + 1) * PAGE;
     let image = firmware::Image::loaded()?;
-    let mut tables = firmware::tables(&image, [0, guard], &[], machine.screen.as_ref())?;
+    let work_arenas: Vec<_> = machine.native_work.iter().map(|p| p.arena()).collect();
+    let mut tables = firmware::tables(&image, [0, guard], &work_arenas, machine.screen.as_ref())?;
+    if let Some(prepared) = &machine.native_work {
+        prepared.map(&mut tables)?;
+    }
     for range in machine.storage.iter().flat_map(|handoff| &handoff.mapped) {
         tables.device(range.start as usize, range.end as usize)?;
     }
@@ -371,15 +401,27 @@ extern "sysv64" fn run(machine: &mut Machine) -> ! {
     APIC_BASE.store(machine.apic_base, Ordering::Relaxed);
     if let Some(prepared) = machine.native_dma.take() {
         match prepared.run() {
-            Ok((dma, irq)) => {
+            Ok(crate::native_dma::diagnostic::Report::Single(dma, irq)) => {
                 machine.record("native-dma", Verdict::Pass, dma);
                 machine.record("native-irq", Verdict::Pass, irq);
+            }
+            Ok(crate::native_dma::diagnostic::Report::Isolation(proof)) => {
+                machine.record("native-dma-isolation", Verdict::Pass, proof);
             }
             Err(error) => {
                 machine.record("native-dma", Verdict::Fail, error);
                 // The unit/requester may be in an uncertain DMA state. Unit
                 // and lease Drop retained its resources; do not resume probe.
                 output::fatal("native DMA fixture failed; normal probing inhibited");
+            }
+        }
+    }
+    if let Some(prepared) = machine.native_work.take() {
+        match prepared.run() {
+            Ok(proof) => machine.record("native-work", Verdict::Pass, proof),
+            Err(error) => {
+                machine.record("native-work", Verdict::Fail, error);
+                output::fatal("native work failed; pending contexts retained");
             }
         }
     }

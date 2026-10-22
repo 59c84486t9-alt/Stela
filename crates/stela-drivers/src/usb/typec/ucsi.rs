@@ -14,6 +14,7 @@ use alloc::{boxed::Box, vec::Vec};
 use core::fmt;
 
 pub mod acpi;
+pub mod altmode;
 pub mod ccg;
 mod wire;
 use wire::*;
@@ -197,8 +198,18 @@ impl Command {
         Self::connector(0x0d, connector)
     }
     pub fn new_cam(connector: ConnectorNumber, mode: u8, enter: bool) -> Self {
+        Self::new_cam_configuration(connector, mode, enter, 0)
+    }
+    pub fn new_cam_configuration(
+        connector: ConnectorNumber,
+        mode: u8,
+        enter: bool,
+        configuration: u32,
+    ) -> Self {
         Self::connector(
-            0x0f | (u64::from(enter) << 23) | (u64::from(mode) << 24),
+            0x0f | (u64::from(enter) << 23)
+                | (u64::from(mode) << 24)
+                | (u64::from(configuration) << 32),
             connector,
         )
     }

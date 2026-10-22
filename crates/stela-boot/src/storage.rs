@@ -7,9 +7,13 @@
 //! of that partition with a known pattern, reads it back and reports its
 //! hash. Without either option nothing here touches the hardware.
 mod bluetooth_platform;
+mod media_check;
+mod options;
+mod reset_check;
+pub use options::split;
 
 use crate::{output, paging::Tables};
-use alloc::{string::String, sync::Arc, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::time::Duration;
 use stela_drivers::{
     Clock, Handoff,
@@ -40,27 +44,8 @@ pub struct Prepared {
     handoff: Handoff,
     open: Vec<Target>,
     check: Vec<Target>,
-}
-
-/// The storage options, and the rest of `stela.cfg` for the mount.
-pub fn split(options: &str) -> Result<(Vec<Target>, Vec<Target>, String), &'static str> {
-    let mut open = Vec::new();
-    let mut check = Vec::new();
-    let mut rest = String::new();
-    let mut words = options.split_ascii_whitespace();
-    while let Some(word) = words.next() {
-        let list = match word {
-            "--storage" => &mut open,
-            "--storage-check" => &mut check,
-            _ => {
-                rest.push_str(word);
-                rest.push(' ');
-                continue;
-            }
-        };
-        list.push(words.next().ok_or("missing storage target")?.parse()?);
-    }
-    Ok((open, check, rest))
+    usb_reset_check: bool,
+    usb_media_check: bool,
 }
 
 pub fn rsdp() -> Option<u64> {
@@ -77,18 +62,24 @@ pub fn rsdp() -> Option<u64> {
 pub fn prepare(
     options: &[u8],
     firmware: Option<Arc<stela_drivers::firmware::Catalog>>,
+    wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
 ) -> Result<Option<Prepared>, &'static str> {
     let text = core::str::from_utf8(options).map_err(|_| "stela.cfg is not UTF-8")?;
     let (open, check, _) = split(text)?;
+    let usb_reset_check = options::reset_requested(text, &open, &check)?;
+    let usb_media_check = options::media_requested(text, &open, &check)?;
     if open.is_empty() && check.is_empty() {
         return Ok(None);
     }
     let mut handoff = discover()?;
     handoff.firmware = firmware;
+    handoff.wifi_platform = wifi_platform;
     Ok(Some(Prepared {
         handoff,
         open,
         check,
+        usb_reset_check,
+        usb_media_check,
     }))
 }
 
@@ -143,6 +134,7 @@ pub fn discover() -> Result<Handoff, &'static str> {
     Ok(Handoff {
         firmware: None,
         bluetooth_platform: bluetooth_platform::capture(),
+        wifi_platform: Default::default(),
         ecam,
         mapped,
         dma: dma..dma + (DMA_PAGES * crate::paging::PAGE) as u64,
@@ -166,8 +158,25 @@ impl Prepared {
     pub fn run(self) {
         // SAFETY: one CPU after ExitBootServices; `dma` was reserved for this.
         let mut dma = unsafe { RegionAllocator::new(self.handoff.dma.clone()) };
-        // SAFETY: this handoff describes the running machine and its tables.
-        let mut disks = unsafe { probe(&self.handoff, &mut dma) };
+        let mut disks = if self.usb_media_check {
+            // SAFETY: same exclusive post-EBS grant as probe; this explicit
+            // fixture diagnostic attaches native USB and retains every owner.
+            match unsafe { media_check::probe_and_rescan(&self.handoff, &mut dma, &self.check[0]) }
+            {
+                Ok(disks) => disks,
+                Err(error) => output::fatal(error),
+            }
+        } else if self.usb_reset_check {
+            // SAFETY: the same exclusive post-EBS grant as probe, restricted
+            // to native USB attachment for this explicit diagnostic.
+            match unsafe { reset_check::probe_and_reset(&self.handoff, &mut dma, &self.check[0]) } {
+                Ok(disks) => disks,
+                Err(error) => output::fatal(error),
+            }
+        } else {
+            // SAFETY: this handoff describes the running machine and its tables.
+            unsafe { probe(&self.handoff, &mut dma) }
+        };
         for window in &disks.unmapped {
             output::arguments(format_args!("STORAGE UNMAPPED ecam={window:x?}\n"));
         }

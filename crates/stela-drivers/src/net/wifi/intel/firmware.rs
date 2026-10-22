@@ -38,6 +38,7 @@ const CAPABILITIES: u32 = 30;
 const PAGING: u32 = 32;
 const FW_VERSION: u32 = 36;
 const CMD_VERSIONS: u32 = 48;
+const IML: u32 = 52;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Family {
@@ -133,6 +134,7 @@ pub struct Firmware<'a> {
     cpus: Option<u32>,
     paging_bytes: Option<u32>,
     version_components: Option<[u32; 3]>,
+    iml: Option<&'a [u8]>,
     api_words: BTreeMap<u32, u32>,
     capability_words: BTreeMap<u32, u32>,
 }
@@ -180,6 +182,12 @@ impl<'a> Firmware<'a> {
     pub fn tlvs(&self) -> &[Tlv<'a>] {
         &self.tlvs
     }
+
+    /// Exact borrowed initial microcode loader bytes (TLV52). Presence does
+    /// not authenticate the loader or prove ROM execution.
+    pub fn iml(&self) -> Option<&'a [u8]> {
+        self.iml
+    }
     pub fn sections(&self) -> &[Section<'a>] {
         &self.sections
     }
@@ -222,6 +230,7 @@ impl<'a> Firmware<'a> {
             cpus: None,
             paging_bytes: None,
             version_components: None,
+            iml: None,
             api_words: BTreeMap::new(),
             capability_words: BTreeMap::new(),
         };
@@ -349,6 +358,12 @@ impl<'a> Firmware<'a> {
                         })
                         .collect();
                     singleton(&mut image.command_versions, versions, kind)?;
+                }
+                IML => {
+                    if data.is_empty() {
+                        return Err(Error::TlvLength { kind, bytes: 0 });
+                    }
+                    singleton(&mut image.iml, data, kind)?;
                 }
                 _ => {} // Retained below, never interpreted as a ready device.
             }
@@ -507,6 +522,32 @@ mod tests {
         section(&mut bytes, 0x0100_0000, &[0x44; 4096]);
         word(&mut bytes, PAGING, 4096);
         bytes
+    }
+
+    #[test]
+    fn iml_retains_exact_borrowed_payload_and_refuses_empty_or_ambiguous_loader() {
+        let mut bytes = image();
+        assert!(Firmware::parse(&bytes).unwrap().iml().is_none());
+        let at = bytes.len() + TLV_HEADER_BYTES;
+        tlv(&mut bytes, IML, &[0xa5; 17]);
+        let fw = Firmware::parse(&bytes).unwrap();
+        assert_eq!(fw.iml().unwrap(), &[0xa5; 17]);
+        assert_eq!(fw.iml().unwrap().as_ptr(), bytes[at..].as_ptr());
+        assert_eq!(fw.tlvs().last().unwrap().data, fw.iml().unwrap());
+        tlv(&mut bytes, IML, &[0x55; 4]);
+        assert_eq!(
+            Firmware::parse(&bytes).unwrap_err(),
+            Error::Duplicate { kind: IML }
+        );
+        let mut bytes = image();
+        tlv(&mut bytes, IML, &[]);
+        assert_eq!(
+            Firmware::parse(&bytes).unwrap_err(),
+            Error::TlvLength {
+                kind: IML,
+                bytes: 0
+            }
+        );
     }
 
     #[test]

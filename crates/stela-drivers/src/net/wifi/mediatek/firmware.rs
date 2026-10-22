@@ -8,6 +8,9 @@ use crate::firmware::{self as resources, Image, Provider, Requirement, Target};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
 
+pub mod auxiliary;
+pub mod clc;
+
 const PATCH_HEADER: usize = 96;
 const PATCH_SECTION: usize = 64;
 const RAM_TRAILER: usize = 36;
@@ -330,8 +333,22 @@ impl Requests {
     /// Both exact resources are requested before returning a missing member,
     /// making setup requirements observable without any device mutation.
     pub fn load<'a>(&self, provider: &'a dyn Provider) -> Result<Prepared<'a>, LoadError> {
-        let patch = provider.load(self.requirement(true));
-        let ram = provider.load(self.requirement(false));
+        let load = |patch| {
+            let requirement = self.requirement(patch);
+            let image = provider.load(requirement)?;
+            // Catalog enforces this contract, but a safe custom Provider can
+            // redirect to another valid Catalog Image. Validate the actual
+            // returned identity before parsing or publishing private Prepared.
+            if image.name() != requirement.name || image.target() != requirement.target {
+                return Err(resources::Error {
+                    name: requirement.name.into(),
+                    kind: resources::ErrorKind::WrongTarget,
+                });
+            }
+            Ok(image)
+        };
+        let patch = load(true);
+        let ram = load(false);
         match (patch, ram) {
             (Ok(patch_image), Ok(ram_image)) => {
                 let patch =
@@ -600,6 +617,98 @@ pub(crate) mod tests {
             assert_eq!(r.regions().len(), ram_count);
             assert!(!r.release_information.is_empty());
             assert!(r.regions().iter().any(|r| r.non_download() && r.kind == 2));
+        }
+    }
+
+    #[test]
+    fn safe_redirecting_provider_cannot_publish_wrong_name_or_any_target_field() {
+        use core::cell::Cell;
+        use sha2::{Digest, Sha256};
+        struct Redirect<'a> {
+            correct: &'a resources::Catalog,
+            other: &'a resources::Catalog,
+            requested: &'a str,
+            redirected: Requirement<'a>,
+            calls: Cell<usize>,
+        }
+        impl Provider for Redirect<'_> {
+            fn load(&self, requirement: Requirement<'_>) -> Result<Image<'_>, resources::Error> {
+                self.calls.set(self.calls.get() + 1);
+                if requirement.name == self.requested {
+                    self.other.load(self.redirected)
+                } else {
+                    self.correct.load(requirement)
+                }
+            }
+        }
+        let requests = requests(Chip::Mt7922);
+        let correct = catalog(&requests, patch_bytes(), ram_bytes());
+        for patch in [true, false] {
+            let expected = requests.requirement(patch);
+            for field in 0..5 {
+                for malformed in [false, true] {
+                    let name = if field == 0 {
+                        "mediatek/redirected.bin"
+                    } else {
+                        expected.name
+                    };
+                    let mut target = expected.target;
+                    match field {
+                        0 => {}
+                        1 => target.driver = "wifi-other",
+                        2 => target.hardware = "pci:other",
+                        3 => target.revision = "chip:other",
+                        4 => target.board = Some("other-board"),
+                        _ => unreachable!(),
+                    }
+                    let bytes = if malformed {
+                        vec![0xa5; expected.minimum_bytes]
+                    } else if patch {
+                        patch_bytes()
+                    } else {
+                        ram_bytes()
+                    };
+                    let other = resources::Catalog::from_handoff(vec![resources::Resource {
+                        name,
+                        target,
+                        provenance: resources::Provenance {
+                            source: "https://example.invalid/fixture",
+                            revision: "fixture",
+                            member: name,
+                            license: "MIT",
+                        },
+                        expected_length: bytes.len(),
+                        expected_sha256: Sha256::digest(&bytes).into(),
+                        bytes,
+                    }])
+                    .unwrap();
+                    let provider = Redirect {
+                        correct: &correct,
+                        other: &other,
+                        requested: expected.name,
+                        redirected: Requirement {
+                            name,
+                            target,
+                            minimum_bytes: 1,
+                        },
+                        calls: Cell::new(0),
+                    };
+                    let LoadError::Resources {
+                        requests: actual,
+                        errors,
+                    } = requests.load(&provider).unwrap_err()
+                    else {
+                        panic!(
+                            "wrong actual metadata must refuse before any image parse or Prepared publication"
+                        )
+                    };
+                    assert_eq!(actual, requests);
+                    assert_eq!(provider.calls.get(), 2);
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].name, expected.name);
+                    assert_eq!(errors[0].kind, resources::ErrorKind::WrongTarget);
+                }
+            }
         }
     }
 }

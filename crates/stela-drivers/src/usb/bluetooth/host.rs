@@ -94,6 +94,22 @@ impl Io for Host {
         Ok(())
     }
 
+    fn control_read(&mut self, setup: [u8; 8]) -> Result<Vec<u8>, BlockError> {
+        self.open()?;
+        if setup[0] & 0x80 == 0 {
+            return Err(BlockError::Unsupported(
+                "USB Bluetooth control IN direction",
+            ));
+        }
+        self.control_pending = true;
+        let bytes = self
+            .controller
+            .borrow_mut()
+            .control(self.slot, setup, &[])?;
+        self.control_pending = false;
+        Ok(bytes)
+    }
+
     fn receive(&mut self, pipe: Pipe) -> Result<Option<Vec<u8>>, BlockError> {
         self.open()?;
         let receive = match pipe {
@@ -211,5 +227,66 @@ impl Io for Host {
 impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.close();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bus::dma::RegionAllocator,
+        usb::xhci::{self, FULL_SPEED},
+    };
+
+    #[test]
+    fn vendor_control_in_cannot_reuse_ep0_after_failed_running_or_halted_recovery() {
+        for halted in [false, true] {
+            let mut backing = vec![0u64; 64 * 1024];
+            let start = backing.as_mut_ptr() as u64;
+            // SAFETY: backing remains live and exclusively owns this test DMA.
+            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+            let buffer = dma.allocate(64, 64).unwrap();
+            let controller = xhci::tests::controller_with_unresolved_td(
+                &mut dma,
+                buffer.physical(),
+                buffer.len(),
+                1,
+                halted,
+            );
+            let configuration = vec![
+                9, 2, 39, 0, 1, 1, 0, 0x80, 50, 9, 4, 2, 0, 3, 0xe0, 1, 1, 0, 7, 5, 0x81, 3, 16, 0,
+                1, 7, 5, 0x82, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
+            ];
+            let device = Device {
+                vendor_ethernet_tcr: None,
+                vendor_ethernet_revision: None,
+                slot: 1,
+                speed: FULL_SPEED,
+                location: "real xHCI poisoned EP0 model".into(),
+                descriptor: [
+                    18, 1, 0, 2, 0xe0, 1, 1, 64, 0x8d, 0x0e, 8, 6, 0, 1, 0, 0, 0, 1,
+                ],
+                configurations: vec![configuration.clone()],
+                configuration,
+                manufacturer: None,
+                product: None,
+                serial: None,
+            };
+            let binding =
+                Binding::new(&device, &xhci::interfaces(&device.configuration)[0]).unwrap();
+            let mut hci = Hci::attach(controller, &device, binding, &mut dma).unwrap();
+            let before = backing.clone();
+            assert!(
+                hci.io
+                    .control_read(xhci::setup(0xc0, 1, 48, 0, 64))
+                    .is_err()
+            );
+            assert!(hci.io.control_pending);
+            // The actual outstanding control buffer, transfer/command/event
+            // rings and all other DMA bytes remain untouched by this retry.
+            assert_eq!(backing, before);
+            assert!(hci.close().is_err());
+            assert_eq!(hci.state(), super::super::State::Failed);
+        }
     }
 }

@@ -16,6 +16,10 @@
 //! system's APFS Preboot volume; the mount builds the boot bundle from it at
 //! boot and enters it, and the run checks the result against the bundle the
 //! host builds from the same image.
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/storage/options.rs"]
+mod storage_options;
+
 use crate::{
     check::{BOOT_MANIFEST, BOOT_TARGET, BOOT_TARGET_DIR},
     tools::{binding, cargo, exec, qemu, root, stop, wait},
@@ -223,6 +227,20 @@ pub struct Run {
         "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
     ])]
     native_dma_check: bool,
+    /// Two isolated EDU domains, same IOVAs and a matched wrong-domain fault.
+    #[arg(long, conflicts_with_all = [
+        "native_dma_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input",
+        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+    ])]
+    native_dma_isolation_check: bool,
+    /// Actual BSP deferred-work contexts, ABI/control/IRQ flags and guard proof.
+    #[arg(long, conflicts_with_all = [
+        "native_dma_check", "native_dma_isolation_check", "module", "bundle", "append", "payload", "preboot_disk", "usb_image",
+        "storage_check", "storage_disk", "network", "usb_network", "input",
+        "usb_input", "usb_disk", "usb_storage_disk", "guest_network", "host_firmware", "audio_check"
+    ])]
+    native_work_check: bool,
     /// Boot an existing USB disk image, such as one `stela setup` prepared,
     /// from its removable-media boot loader; writes go to a temporary
     /// overlay.
@@ -281,9 +299,20 @@ pub struct Run {
     /// over Bulk-Only and selects it by that serial like any host disk.
     #[arg(long, conflicts_with_all = ["storage_check", "payload", "preboot_disk", "usb_image"])]
     usb_disk: Vec<PathBuf>,
+    /// Physical USB mass-storage model, including UAS with actual xHCI streams.
+    #[arg(long, value_enum, requires = "usb_disk")]
+    usb_disk_model: Option<UsbDiskModel>,
     /// Run install mode on a synthetic restore payload.
     #[arg(long, value_enum, conflicts_with_all = ["module", "append"])]
     payload: Option<PayloadMode>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum UsbDiskModel {
+    Bot,
+    Uas,
+    /// Disable SuperSpeed root ports to exercise the USB2 READY handshake.
+    UasUsb2,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -506,12 +535,22 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             arguments.append.unwrap_or_else(|| KERNEL_OPTIONS.into()),
         ),
     };
-    if arguments.native_dma_check {
+    if arguments.native_dma_check
+        || arguments.native_dma_isolation_check
+        || arguments.native_work_check
+    {
         ensure!(
             matches!(arguments.display, Display::None),
-            "native DMA fixture uses a headless flat PCI topology"
+            "native fixture uses a headless single-BSP topology"
         );
-        options = String::from("--host-check --native-dma-check --deadline 5 --key-seconds 1");
+        let mode = if arguments.native_work_check {
+            "--native-work-check"
+        } else if arguments.native_dma_isolation_check {
+            "--native-dma-isolation-check"
+        } else {
+            "--native-dma-check"
+        };
+        options = format!("--host-check {mode} --deadline 5 --key-seconds 1");
     }
     let disks = match arguments.storage_check {
         true => {
@@ -676,7 +715,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     let cpu = qemu_cpu(
         arguments.cpu.as_deref(),
         arguments.no_la57,
-        usb || system || arguments.native_dma_check,
+        usb
+            || system
+            || arguments.native_dma_check
+            || arguments.native_dma_isolation_check
+            || arguments.native_work_check,
     );
     let (keyboard, access) = if usb {
         ("on", "readonly=off,file=fat:rw:")
@@ -813,7 +856,14 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     }
     let host_usb = arguments.usb_input || arguments.usb_network || !arguments.usb_disk.is_empty();
     if host_usb {
-        command.args(["-device", "qemu-xhci,id=host-usb"]);
+        command.args([
+            "-device",
+            if arguments.usb_disk_model == Some(UsbDiskModel::UasUsb2) {
+                "qemu-xhci,id=host-usb,p3=0"
+            } else {
+                "qemu-xhci,id=host-usb"
+            },
+        ]);
     }
     if arguments.usb_input {
         for device in ["usb-kbd", "usb-tablet", "usb-mouse"] {
@@ -833,16 +883,25 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .args(["-device", "usb-net,netdev=usb-net,bus=host-usb.0"]);
     }
     for (index, path) in arguments.usb_disk.iter().enumerate() {
-        command
-            .arg("-drive")
-            .arg(format!(
-                "if=none,id=usbdisk{index},format=raw,file={}",
-                option_path(path)
-            ))
-            .arg("-device")
-            .arg(format!(
-                "usb-storage,drive=usbdisk{index},serial=STELAUSBDISK{index},bus=host-usb.0"
-            ));
+        command.arg("-drive").arg(format!(
+            "if=none,id=usbdisk{index},format=raw,file={}",
+            option_path(path)
+        ));
+        match arguments.usb_disk_model.unwrap_or(UsbDiskModel::Bot) {
+            UsbDiskModel::Bot => {
+                command.arg("-device").arg(format!(
+                    "usb-storage,drive=usbdisk{index},serial=STELAUSBDISK{index},bus=host-usb.0"
+                ));
+            }
+            UsbDiskModel::Uas | UsbDiskModel::UasUsb2 => {
+                command.arg("-device").arg(format!(
+                    "usb-uas,id=host-uas{index},serial=STELAUSBDISK{index},bus=host-usb.0"
+                ));
+                command.arg("-device").arg(format!(
+                    "scsi-hd,drive=usbdisk{index},bus=host-uas{index}.0,scsi-id=0,lun=0"
+                ));
+            }
+        }
     }
     for (index, path) in arguments.usb_storage_disk.iter().enumerate() {
         command
@@ -886,13 +945,13 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             .arg("-device")
             .arg(format!("nvme,drive=ans{index},serial={serial}"));
     }
-    if arguments.native_dma_check {
-        command.args([
-            "-device",
-            "intel-iommu,intremap=off,caching-mode=on",
-            "-device",
-            "edu",
-        ]);
+    if arguments.native_dma_check || arguments.native_dma_isolation_check {
+        command.args(["-device", "intel-iommu,intremap=off,caching-mode=on"]);
+        if arguments.native_dma_isolation_check {
+            command.args(["-device", "edu,addr=2", "-device", "edu,addr=3"]);
+        } else {
+            command.args(["-device", "edu"]);
+        }
     }
     if let Some(port) = arguments.gdb {
         command
@@ -964,6 +1023,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     } else if arguments.bundle.is_none()
         && arguments.module.is_none()
         && !arguments.native_dma_check
+        && !arguments.native_dma_isolation_check
+        && !arguments.native_work_check
         && arguments.scenario == Scenario::SystemKernel
     {
         let checked = verify_kernel(&serial_text);
@@ -1040,6 +1101,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         Ok::<_, anyhow::Error>(report)
     });
     let qemu_process_image = qemu_process_image.and_then(|path| binding(&path).ok());
+    let native_work = arguments.native_work_check.then(|| {
+        json!({
+            "passed":native_work_verified(&serial_text) && status.is_some() && code==IDLE_EXIT
+                && unsupported.is_none() && first_guest_panic(&serial_text).is_none()
+        })
+    });
     let native_dma = arguments.native_dma_check.then(|| {
         json!({
             "passed": serial_text.lines().any(|line| line.starts_with("CHECK native-dma PASS "))
@@ -1047,6 +1114,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 && status.is_some() && code == IDLE_EXIT
                 && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
         })
+    });
+    let native_dma_isolation = arguments.native_dma_isolation_check.then(|| {
+        json!({ "passed": native_isolation_verified(&serial_text)
+            && status.is_some() && code == IDLE_EXIT
+            && unsupported.is_none() && first_guest_panic(&serial_text).is_none() })
     });
     let native_irq = arguments.native_dma_check.then(|| {
         let level_passed = native_level_verified(&serial_text);
@@ -1057,6 +1129,25 @@ fn launch(arguments: Run) -> Result<ExitCode> {
                 && status.is_some() && code == IDLE_EXIT
                 && unsupported.is_none() && first_guest_panic(&serial_text).is_none(),
         })
+    });
+    // Keep nested report expansion independent of the outer metadata object.
+    let network_report = network.as_ref().map(|result| match result {
+        Ok(()) => json!({
+            "passed": true,
+            "url": network_check_url,
+            "driver": expected_driver,
+            "peer_snapshot": peer_snapshot,
+            "expected_body": fixture.as_ref().map(|fixture| json!({
+                "bytes": network_check::BODY_BYTES,
+                "sha256": fixture.sha256,
+            })),
+            "model": if arguments.usb_network {
+                "usb-net"
+            } else {
+                arguments.network_model.unwrap_or(NetworkModel::Virtio).device()
+            },
+        }),
+        Err(error) => json!({ "passed": false, "reason": error }),
     });
     let report = json!({
         "command": command_line,
@@ -1069,6 +1160,8 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         "usb_image": arguments.usb_image,
         "no_la57": arguments.no_la57,
         "native_dma": native_dma,
+        "native_work": native_work,
+        "native_dma_isolation": native_dma_isolation,
         "native_irq": native_irq,
         "options": options,
         "scenario": verification,
@@ -1101,24 +1194,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             Ok(disks) => disks.clone(),
             Err(error) => json!({ "error": format!("{error:#}") }),
         }),
-        "network": network.as_ref().map(|result| match result {
-            Ok(()) => json!({
-                "passed": true,
-                "url": network_check_url,
-                "driver": expected_driver,
-                "peer_snapshot": peer_snapshot,
-                "expected_body": fixture.as_ref().map(|fixture| json!({
-                    "bytes": network_check::BODY_BYTES,
-                    "sha256": fixture.sha256,
-                })),
-                "model": if arguments.usb_network {
-                    "usb-net"
-                } else {
-                    arguments.network_model.unwrap_or(NetworkModel::Virtio).device()
-                },
-            }),
-            Err(error) => json!({ "passed": false, "reason": error }),
-        }),
+        "network": network_report,
     });
     fs::write(output.join("run.json"), format!("{report:#}\n"))?;
     println!("{report:#}");
@@ -1143,7 +1219,18 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         !arguments.native_dma_check || report["native_irq"]["passed"] == true,
         "native IRQ fixture did not verify MSI and shared level delivery, ACK and drained removal"
     );
-    if arguments.native_dma_check {
+    ensure!(
+        !arguments.native_dma_isolation_check || report["native_dma_isolation"]["passed"] == true,
+        "native DMA isolation fixture did not verify two requesters, matched fault and teardown"
+    );
+    ensure!(
+        !arguments.native_work_check || report["native_work"]["passed"] == true,
+        "native work did not verify actual owned contexts, ABI/control/flags and teardown"
+    );
+    if arguments.native_dma_check
+        || arguments.native_dma_isolation_check
+        || arguments.native_work_check
+    {
         return Ok(ExitCode::SUCCESS);
     }
     Ok(ExitCode::from(match (preboot.is_some(), entered) {
@@ -1355,6 +1442,64 @@ fn fat_image(volume: &Path, output: &Path) -> Result<PathBuf> {
     Ok(output.join("volume.cdr"))
 }
 
+fn native_work_verified(serial: &str) -> bool {
+    serial.lines().any(|line| {
+        line.starts_with("CHECK native-work PASS ")
+            && [
+                "foreground=owned-stack",
+                "ids=distinct/stable",
+                "execute=deferred",
+                "Notify=FIFO",
+                "general=yield/resume",
+                "Win64-shadow+all-GPR+XMM6-15=task+dispatcher-verified",
+                "MXCSR+x87=preserved",
+                "IF=off/on/clear-yield/exact",
+                "guards=8-absent",
+                "RW+NX+WB=verified",
+                "idle_stack_leases=4-released",
+                "pending_runtime+stacks=quarantined",
+                "overflow+close=refused",
+                "drain_cycles=refused",
+                "source_IRQ_enqueue=not-qualified",
+            ]
+            .iter()
+            .all(|marker| line.contains(marker))
+    }) && !serial
+        .lines()
+        .any(|line| line.starts_with("CHECK native-work FAIL "))
+}
+
+/// Old single-requester output never qualifies the two-context fixture.
+fn native_isolation_verified(serial: &str) -> bool {
+    serial.lines().any(|line| {
+        let reason = line
+            .split("wrong_domain_reason=0x")
+            .nth(1)
+            .and_then(|v| v.split_ascii_whitespace().next())
+            .and_then(|v| u8::from_str_radix(v, 16).ok());
+        line.starts_with("CHECK native-dma-isolation PASS ")
+            && reason.is_some_and(|v| v != 0)
+            && [
+                "rid_a=0x0010 did_a=1 rid_b=0x0018 did_b=2",
+                "same_iova=disjoint-ram",
+                "roundtrip_a=verified",
+                "roundtrip_b=verified",
+                "wrong_domain_rid=0x0018",
+                "wrong_domain_address=0x3000",
+                "wrong_domain_reason=0x",
+                "retained_ram=unchanged",
+                "owner_access=verified",
+                "other_context_after_detach=verified",
+                "teardown=context+IOTLB+TE-off-ack",
+            ]
+            .iter()
+            .all(|marker| line.contains(marker))
+    }) && !serial.lines().any(|line| {
+        line.starts_with("CHECK native-dma FAIL ")
+            || line.starts_with("CHECK native-dma-isolation FAIL ")
+    })
+}
+
 /// An older MSI-only EFI cannot satisfy the extended level-IRQ fixture.
 fn native_level_verified(serial: &str) -> bool {
     serial.lines().any(|line| {
@@ -1442,6 +1587,46 @@ mod tests {
     }
 
     #[test]
+    fn isolation_fixture_requires_both_requesters_and_matched_fault() {
+        use clap::Parser;
+        let args = [
+            "xtask",
+            "boot",
+            "run",
+            "--output",
+            "/tmp/isolation",
+            "--native-dma-isolation-check",
+        ];
+        assert!(crate::Cli::try_parse_from(args).is_ok());
+        for conflict in ["--native-dma-check", "--network", "--storage-check"] {
+            let mut bad = args.to_vec();
+            bad.push(conflict);
+            assert!(crate::Cli::try_parse_from(bad).is_err());
+        }
+        assert!(!native_isolation_verified(
+            "CHECK native-dma PASS single EDU roundtrip=verified"
+        ));
+        let full = "CHECK native-dma-isolation PASS rid_a=0x0010 did_a=1 rid_b=0x0018 did_b=2 same_iova=disjoint-ram roundtrip_a=verified roundtrip_b=verified wrong_domain_rid=0x0018 wrong_domain_address=0x3000 wrong_domain_reason=0x6 retained_ram=unchanged owner_access=verified other_context_after_detach=verified teardown=context+IOTLB+TE-off-ack";
+        assert!(native_isolation_verified(full));
+        assert!(!native_isolation_verified(
+            &full.replace("wrong_domain_reason=0x6", "wrong_domain_reason=0x0")
+        ));
+        for marker in [
+            "wrong_domain_rid=0x0018",
+            "retained_ram=unchanged",
+            "other_context_after_detach=verified",
+            "teardown=context+IOTLB+TE-off-ack",
+        ] {
+            assert!(!native_isolation_verified(
+                &full.replace(marker, "unproven")
+            ));
+        }
+        assert!(!native_isolation_verified(&format!(
+            "{full}\nCHECK native-dma FAIL uncertain"
+        )));
+    }
+
+    #[test]
     fn extended_irq_fixture_never_relabels_msi_only_or_partial_evidence() {
         let old = "CHECK native-irq PASS EDU vector=0x50 actual_cause=0x1 device_ACK+EOI=verified late_delivery=absent";
         assert!(!native_level_verified(old));
@@ -1455,6 +1640,75 @@ mod tests {
         assert!(!native_level_verified(&format!(
             "{full}\nCHECK native-dma FAIL stop uncertain"
         )));
+    }
+
+    #[test]
+    fn native_work_requires_its_complete_fresh_proof_and_exclusive_cli() {
+        use clap::Parser;
+        let full = "CHECK native-work PASS foreground=owned-stack ids=distinct/stable execute=deferred Notify=FIFO general=yield/resume Win64-shadow+all-GPR+XMM6-15=task+dispatcher-verified MXCSR+x87=preserved IF=off/on/clear-yield/exact guards=8-absent RW+NX+WB=verified idle_stack_leases=4-released pending_runtime+stacks=quarantined overflow+close=refused drain_cycles=refused source_IRQ_enqueue=not-qualified";
+        assert!(native_work_verified(full));
+        for marker in [
+            "foreground=owned-stack",
+            "Win64-shadow+all-GPR+XMM6-15=task+dispatcher-verified",
+            "IF=off/on/clear-yield/exact",
+            "guards=8-absent",
+            "pending_runtime+stacks=quarantined",
+            "drain_cycles=refused",
+            "source_IRQ_enqueue=not-qualified",
+        ] {
+            assert!(!native_work_verified(&full.replace(marker, "unproven")));
+        }
+        assert!(!native_work_verified("CHECK native-dma PASS old EFI"));
+        assert!(!native_work_verified(&full.replace(
+            "Win64-shadow+all-GPR+XMM6-15=task+dispatcher-verified",
+            "Win64-shadow+callee-save=verified"
+        )));
+        assert!(!native_work_verified(&format!(
+            "{full}\nCHECK native-work FAIL late teardown"
+        )));
+        let base = [
+            "xtask",
+            "boot",
+            "run",
+            "--output",
+            "/tmp/native-work",
+            "--native-work-check",
+        ];
+        let parsed = crate::Cli::try_parse_from(base).unwrap();
+        let crate::Task::Boot(Command::Run(run)) = parsed.task else {
+            panic!("boot run")
+        };
+        assert!(run.native_work_check);
+        for conflict in [
+            "--native-dma-check",
+            "--native-dma-isolation-check",
+            "--network",
+            "--storage-check",
+        ] {
+            assert!(crate::Cli::try_parse_from(base.into_iter().chain([conflict])).is_err());
+        }
+    }
+
+    #[test]
+    fn native_work_and_audio_fixtures_refuse_shared_ownership_in_either_option_order() {
+        use clap::{Parser, error::ErrorKind};
+        for mode in [
+            "playback",
+            "duplex",
+            "transport-playback",
+            "transport-duplex",
+        ] {
+            for options in [
+                ["--native-work-check", "--audio-check", mode],
+                ["--audio-check", mode, "--native-work-check"],
+            ] {
+                let error =
+                    crate::Cli::try_parse_from(["xtask", "boot", "run"].into_iter().chain(options))
+                        .err()
+                        .expect("native-work and audio fixtures must be exclusive");
+                assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+            }
+        }
     }
 
     #[test]

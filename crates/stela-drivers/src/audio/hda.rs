@@ -31,7 +31,7 @@ pub use pins::{AnalogEndpoint, PinConfiguration, PinConnection, PinDevice, PinSe
 mod realtek;
 pub use realtek::{
     Alc269CommonReport, Alc269Variant, CoefficientChange, RealtekCommonReport,
-    RealtekHeadphoneReport,
+    RealtekDualHeadphoneReport, RealtekHeadphoneReport, RealtekHeadphoneRoute,
 };
 mod routing;
 mod stream;
@@ -131,6 +131,9 @@ pub struct Controller<R, T> {
     stopped: bool,
     streams: Vec<Option<Stream>>,
     routes: Vec<(StreamId, AnalogRoute)>,
+    // Non-route codec controls: owner, codec address, actual node. Observing or
+    // preconditioning a pin does not fabricate a converter path for it.
+    codec_controls: Vec<(StreamId, u8, u8)>,
     routing_failed: bool,
     token: ControllerToken,
     lifecycle_failed: bool,
@@ -232,6 +235,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             stopped: false,
             streams: (0..total).map(|_| None).collect(),
             routes: Vec::new(),
+            codec_controls: Vec::new(),
             routing_failed: false,
         };
         if let Err(error) = controller.initialize() {
@@ -662,6 +666,9 @@ mod tests {
         coefficient_fault_write_threshold: usize,
         coefficient_write_nodes: BTreeMap<u8, usize>,
         coefficient_events: Vec<(u8, u16, u16, u64)>,
+        depop_started_at: Option<u64>,
+        depop_delay_us: Option<u64>,
+        depop_mutate_saved: bool,
         coefficient_index_failed: bool,
         coefficient_index_reply: Option<(u8, u32)>,
         reject_coefficient_write: bool,
@@ -677,6 +684,7 @@ mod tests {
         power_stuck: bool,
         power_error: bool,
         reject_route_control: Option<u16>,
+        reject_route_node: Option<u8>,
         reject_amplifier: bool,
         last_dma_time: u64,
         dma_step_bytes: usize,
@@ -748,6 +756,9 @@ mod tests {
                 coefficient_fault_write_threshold: 1,
                 coefficient_write_nodes: BTreeMap::new(),
                 coefficient_events: Vec::new(),
+                depop_started_at: None,
+                depop_delay_us: Some(0),
+                depop_mutate_saved: false,
                 coefficient_index_failed: false,
                 coefficient_index_reply: None,
                 reject_coefficient_write: false,
@@ -763,6 +774,7 @@ mod tests {
                 power_stuck: false,
                 power_error: false,
                 reject_route_control: None,
+                reject_route_node: None,
                 reject_amplifier: false,
                 last_dma_time: 0,
                 dma_step_bytes: 0,
@@ -998,6 +1010,12 @@ mod tests {
                             (node, *self.coefficient_indexes.get(&node).unwrap_or(&0)),
                             command as u16,
                         );
+                        if node == 0x58
+                            && self.coefficient_indexes.get(&node) == Some(&0)
+                            && command as u16 == 0xf888
+                        {
+                            self.depop_started_at = Some(self.clock.now_us());
+                        }
                     }
                     return 0;
                 }
@@ -1018,6 +1036,20 @@ mod tests {
                             })
                     {
                         return value;
+                    }
+                    if node == 0x58
+                        && self.coefficient_indexes.get(&node) == Some(&0)
+                        && let Some(start) = self.depop_started_at
+                        && let Some(delay) = self.depop_delay_us
+                        && self.clock.now_us().saturating_sub(start) >= delay
+                    {
+                        self.depop_started_at = None;
+                        *self.coefficients.entry((0x58, 0)).or_default() &= !0x8000;
+                        if self.depop_mutate_saved {
+                            for (index, mask) in [(0x38, 0x100), (0x0d, 2), (0x36, 0x200)] {
+                                *self.coefficients.entry((0x20, index)).or_default() &= !mask;
+                            }
+                        }
                     }
                     return u32::from(
                         *self
@@ -1051,7 +1083,9 @@ mod tests {
                     0
                 }
                 0xf01 | 0xf07 | 0xf0c => {
-                    if self.reject_route_control == Some(verb) {
+                    if self.reject_route_control == Some(verb)
+                        && self.reject_route_node.is_none_or(|target| target == node)
+                    {
                         0xffff_ffff
                     } else {
                         u32::from(*self.route_controls.get(&(node, verb)).unwrap_or(&0))
@@ -3226,6 +3260,660 @@ mod tests {
             m.coefficients.insert((0x20, 0x10), 0xa7ff);
         }
         model
+    }
+
+    fn realtek_two_sense_model(id: u32, first: bool, second: bool) -> Rc<RefCell<Model>> {
+        let model = realtek_headphone_model(id, first);
+        {
+            let mut m = model.borrow_mut();
+            m.parameters.insert((0x16, 9), (4 << 20) | 0x10d);
+            // PIN_OUT and AMP_OUT_UNMUTE require neither HP_EN nor mute support.
+            m.parameters.insert((0x16, 0x0c), 0x15);
+            m.parameters.insert((0x16, 0x12), 0x1f1f);
+            m.parameters.insert((0x16, 0x0e), 1);
+            m.parameters.insert((8, 9), 5);
+            m.connection_words.insert((0x16, 0), 8);
+            m.pin_defaults.insert(0x16, 0x4111_11f0); // Actual NoConnection.
+            m.pin_senses
+                .insert(0x16, if second { 0x8000_0123 } else { 0x123 });
+            for (index, value) in [
+                (0, 0),
+                (0x38, 0xab7f),
+                (0x0d, 0xb7ff),
+                (0x36, 0xaaff),
+                (0x67, 0xdead),
+                (0x4a, 0x2fff),
+            ] {
+                m.coefficients.insert((0x20, index), value);
+            }
+            m.coefficients.insert((0x58, 3), 0xa53f);
+            m.coefficients.insert((0x57, 4), 0xab07);
+            m.depop_delay_us = Some(100_000);
+            m.depop_mutate_saved = true;
+        }
+        model
+    }
+
+    fn headphone_binding(route: &AnalogRoute, stream: StreamId) -> RealtekHeadphoneRoute<'_> {
+        RealtekHeadphoneRoute {
+            route,
+            stream,
+            channel: 0,
+            options: PinOptions::Playback {
+                headphone: true,
+                eapd: None,
+            },
+        }
+    }
+
+    #[test]
+    fn alc285_and_295_single_route_observes_raw_second_pin_and_orders_actual_boot_depop() {
+        for (id, coefficient_zero, boot_depop) in [
+            (0x10ec0285, 0, true),
+            (0x10ec0285, 0x10, false),
+            (0x10ec0295, 0, true),
+        ] {
+            for first in [false, true] {
+                for second in [false, true] {
+                    let mut fixture = Fixture::new();
+                    let model = realtek_two_sense_model(id, first, second);
+                    model
+                        .borrow_mut()
+                        .coefficients
+                        .insert((0x20, 0), coefficient_zero);
+                    let mut controller = create(&model, &mut fixture, config()).unwrap();
+                    let graph = controller.enumerate_codec(0).unwrap();
+                    let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+                    let stream = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let began = model.borrow().clock.now_us();
+                    let report = controller
+                        .configure_realtek_alc285_295_headphones(
+                            &graph,
+                            headphone_binding(&route, stream),
+                            None,
+                        )
+                        .unwrap();
+                    assert_eq!(report.boot_depop_performed, boot_depop);
+                    assert_eq!(
+                        report.coefficient_zero,
+                        if id == 0x10ec0285 {
+                            Some(coefficient_zero)
+                        } else {
+                            None
+                        }
+                    );
+                    assert_eq!(report.headphone_pins, [4, 0x16]);
+                    assert_eq!(report.initial_senses[0].present, first);
+                    assert_eq!(
+                        report.initial_senses[1].raw,
+                        if second { 0x8000_0123 } else { 0x123 }
+                    );
+                    assert_eq!(controller.routes.len(), 1);
+                    assert_eq!(controller.codec_controls, [(stream, 0, 0x16)]);
+                    {
+                        let m = model.borrow();
+                        let sequences: Vec<_> = m
+                            .coefficient_events
+                            .iter()
+                            .filter(|(node, _, _, _)| *node == 0x58)
+                            .collect();
+                        if boot_depop {
+                            assert_eq!(
+                                sequences
+                                    .iter()
+                                    .map(|event| (event.1, event.2))
+                                    .collect::<Vec<_>>(),
+                                [
+                                    (0, 0x1888),
+                                    (0, 0x7880),
+                                    (0x0f, 0xf049),
+                                    (3, 0xa5cf),
+                                    (0, 0xf888),
+                                    (0, 0x7888)
+                                ]
+                            );
+                            assert!(sequences[1].3 >= sequences[0].3 + 140_000);
+                            assert!(sequences[5].3 >= sequences[4].3 + 100_000);
+                            assert_eq!(m.coefficients[&(0x20, 0x38)], 0xab7f);
+                            assert_eq!(m.coefficients[&(0x20, 0x0d)], 0xb7ff);
+                            assert_eq!(m.coefficients[&(0x20, 0x36)], 0x8aff);
+                        } else {
+                            assert!(sequences.is_empty());
+                        }
+                        let sense = m
+                            .command_times
+                            .iter()
+                            .find(|(command, _)| {
+                                (command >> 20) & 127 == 4 && (command >> 8) & 0xfff == 0xf09
+                            })
+                            .unwrap()
+                            .1;
+                        assert!(sense >= began + if boot_depop { 320_000 } else { 30_000 });
+                        let pin16_writes: Vec<_> = m
+                            .command_times
+                            .iter()
+                            .filter(|(command, _)| {
+                                (command >> 20) & 127 == 0x16
+                                    && ((command >> 8) & 0xfff == 0x707
+                                        || (command >> 16) & 15 == 3)
+                            })
+                            .collect();
+                        assert_eq!(pin16_writes.len(), if second { 2 } else { 0 });
+                        if second {
+                            assert!(pin16_writes[0].1 >= sense + 2_000);
+                            assert!(pin16_writes[1].1 >= pin16_writes[0].1 + 75_000);
+                        }
+                        let power: Vec<_> = m
+                            .coefficient_events
+                            .iter()
+                            .filter(|(node, _, _, _)| *node == 0x57)
+                            .collect();
+                        assert_eq!(power.len(), if first || second { 2 } else { 0 });
+                        if first || second {
+                            assert_eq!((power[0].2, power[1].2), (0xab01, 0xab04));
+                            assert!(power[1].3 >= power[0].3 + 150_000);
+                        }
+                    }
+                    let second_stream = controller
+                        .allocate_stream(
+                            Direction::Playback,
+                            stereo(),
+                            128,
+                            2,
+                            &mut fixture.allocator,
+                        )
+                        .unwrap();
+                    let reuse = graph.analog_route(Direction::Playback, 0x16, 8).unwrap();
+                    let before = access_counts(&model);
+                    assert_eq!(
+                        controller.configure_analog_route(
+                            &graph,
+                            &reuse,
+                            second_stream,
+                            0,
+                            PinOptions::Playback {
+                                headphone: false,
+                                eapd: None
+                            }
+                        ),
+                        Err(Error::RouteInUse)
+                    );
+                    assert_eq!(
+                        controller.bind_converter(&graph, 0x16, second_stream, 0),
+                        Err(Error::RouteInUse)
+                    );
+                    assert_eq!(access_counts(&model), before);
+                    controller.write_pcm(stream, 0, &[0x7c; 256]).unwrap();
+                    controller.start(stream).unwrap();
+                    model.borrow_mut().dma_step_bytes = 128;
+                    advance(&model, 4);
+                    assert!(controller.status(stream).unwrap().period_completed);
+                    controller.stop(stream).unwrap();
+                    assert!(model.borrow().playback.len() >= 256);
+                    assert!(model.borrow().playback.iter().all(|byte| *byte == 0x7c));
+                    controller.reinitialize().unwrap();
+                    assert!(controller.codec_controls.is_empty());
+                    let before = access_counts(&model);
+                    assert_eq!(
+                        controller.configure_realtek_alc285_295_headphones(
+                            &graph,
+                            headphone_binding(&route, stream),
+                            None
+                        ),
+                        Err(Error::InvalidCodecGraph)
+                    );
+                    assert_eq!(access_counts(&model), before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn alc295_optional_real_second_route_does_not_require_a_headphone_enable_bit() {
+        let mut fixture = Fixture::new();
+        let model = realtek_two_sense_model(0x10ec0295, true, true);
+        let mut controller = create(&model, &mut fixture, config()).unwrap();
+        let graph = controller.enumerate_codec(0).unwrap();
+        let first = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+        let second = graph.analog_route(Direction::Playback, 0x16, 8).unwrap();
+        let playback = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let other = controller
+            .allocate_stream(
+                Direction::Playback,
+                stereo(),
+                128,
+                2,
+                &mut fixture.allocator,
+            )
+            .unwrap();
+        let mut second_binding = headphone_binding(&second, other);
+        second_binding.options = PinOptions::Playback {
+            headphone: false,
+            eapd: None,
+        };
+        let report = controller
+            .configure_realtek_alc285_295_headphones(
+                &graph,
+                headphone_binding(&first, playback),
+                Some(second_binding),
+            )
+            .unwrap();
+        assert!(report.initial_senses[1].present);
+        assert_eq!(controller.routes.len(), 2);
+        assert!(controller.codec_controls.is_empty());
+        assert_eq!(model.borrow().bindings[&8], (other.tag() << 4));
+        assert_eq!(model.borrow().route_controls[&(0x16, 0xf07)], 0x40);
+        controller.write_pcm(playback, 0, &[0x31; 256]).unwrap();
+        controller.write_pcm(other, 0, &[0x31; 256]).unwrap();
+        controller.start(playback).unwrap();
+        controller.start(other).unwrap();
+        model.borrow_mut().dma_step_bytes = 128;
+        advance(&model, 4);
+        controller.stop(playback).unwrap();
+        controller.stop(other).unwrap();
+        assert!(model.borrow().playback.len() >= 512);
+        assert!(model.borrow().playback.iter().all(|byte| *byte == 0x31));
+        controller.shutdown().unwrap();
+    }
+
+    #[test]
+    fn alc295_depop_timeout_and_staged_fixed_sequencer_failures_quarantine_until_reset() {
+        for stage in 0..9 {
+            let mut fixture = Fixture::new();
+            let model = realtek_two_sense_model(0x10ec0295, true, true);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            {
+                let mut m = model.borrow_mut();
+                if stage == 0 {
+                    m.depop_delay_us = None;
+                } else if stage <= 6 {
+                    m.coefficient_read_fault = Some(u32::MAX);
+                    m.coefficient_fault_node = Some(0x58);
+                    m.coefficient_fault_after_write = true;
+                    m.coefficient_fault_write_threshold = stage;
+                } else if stage == 7 {
+                    m.coefficient_index_reply = Some((0x58, u32::MAX));
+                } else {
+                    m.reject_coefficient_node = Some(0x58);
+                }
+            }
+            let began = model.borrow().clock.now_us();
+            let error = controller
+                .configure_realtek_alc285_295_headphones(
+                    &graph,
+                    headphone_binding(&route, stream),
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(
+                error,
+                if stage == 0 {
+                    Error::Timeout(Phase::CodecDepop)
+                } else {
+                    Error::CoefficientRejected {
+                        node: 0x58,
+                        index: if stage == 3 {
+                            0x0f
+                        } else if stage == 4 {
+                            3
+                        } else {
+                            0
+                        },
+                    }
+                }
+            );
+            if stage == 0 {
+                let elapsed = model.borrow().clock.now_us() - began;
+                assert!((1_140_000..1_145_000).contains(&elapsed));
+            }
+            assert!(controller.routing_failed);
+            assert!(controller.routes.is_empty() && controller.codec_controls.is_empty());
+            let before = access_counts(&model);
+            assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+            assert_eq!(
+                controller.configure_realtek_alc285_295_headphones(
+                    &graph,
+                    headphone_binding(&route, stream),
+                    None
+                ),
+                Err(Error::NeedsReset)
+            );
+            assert_eq!(access_counts(&model), before);
+            if stage == 0 {
+                model.borrow_mut().depop_delay_us = Some(0);
+                controller.reinitialize().unwrap();
+                let fresh = controller.enumerate_codec(0).unwrap();
+                let route = fresh.analog_route(Direction::Playback, 4, 2).unwrap();
+                let stream = controller
+                    .allocate_stream(
+                        Direction::Playback,
+                        stereo(),
+                        128,
+                        2,
+                        &mut fixture.allocator,
+                    )
+                    .unwrap();
+                controller
+                    .configure_realtek_alc285_295_headphones(
+                        &fresh,
+                        headphone_binding(&route, stream),
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(controller.codec_controls, [(stream, 0, 0x16)]);
+                controller.start(stream).unwrap();
+                model.borrow_mut().stream_stop_stuck = true;
+                assert_eq!(
+                    controller.reinitialize(),
+                    Err(Error::Timeout(Phase::StreamStop))
+                );
+                assert_eq!(controller.codec_controls, [(stream, 0, 0x16)]);
+                model.borrow_mut().stream_stop_stuck = false;
+                controller.reinitialize().unwrap();
+                assert!(controller.codec_controls.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn alc295_live_fixed_pin_and_conditional_output_capabilities_are_not_invented() {
+        for case in 0..5 {
+            let mut fixture = Fixture::new();
+            let model = realtek_two_sense_model(0x10ec0295, false, case != 4);
+            if case >= 2 {
+                let mut m = model.borrow_mut();
+                m.parameters.insert((0x16, 0x0c), 4); // Sensing only, no output capability.
+                m.parameters.insert((0x16, 9), (4 << 20) | 1); // No amplifier.
+            }
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            if case == 0 {
+                model.borrow_mut().parameters.insert((0x16, 9), u32::MAX);
+            }
+            if case == 1 {
+                model.borrow_mut().parameters.insert((0x16, 0x0c), 0x1d);
+            }
+            if case == 3 {
+                model.borrow_mut().pin_senses.insert(0x16, u32::MAX);
+            }
+            let result = controller.configure_realtek_alc285_295_headphones(
+                &graph,
+                headphone_binding(&route, stream),
+                None,
+            );
+            if case < 2 {
+                assert_eq!(result, Err(Error::InvalidCodecGraph));
+                assert!(model.borrow().coefficient_events.is_empty());
+                assert!(!controller.routing_failed);
+            } else if case < 4 {
+                assert_eq!(result, Err(Error::UnsupportedTopology));
+                assert!(controller.routing_failed);
+                assert!(
+                    !model
+                        .borrow()
+                        .command_times
+                        .iter()
+                        .any(|(command, _)| (command >> 20) & 127 == 0x16
+                            && ((command >> 8) & 0xfff == 0x707 || (command >> 16) & 15 == 3))
+                );
+            } else {
+                assert_eq!(result.unwrap().initial_senses[1].raw, 0x123);
+                assert_eq!(controller.codec_controls, [(stream, 0, 0x16)]);
+            }
+        }
+    }
+
+    #[test]
+    fn alc295_optional_route_preflight_and_partial_second_route_failure_keep_ownership_explicit() {
+        for conflict in [true, false] {
+            let mut fixture = Fixture::new();
+            let model = realtek_two_sense_model(0x10ec0295, false, false);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let first = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let second = graph.analog_route(Direction::Playback, 0x16, 8).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let other = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let mut binding = headphone_binding(&second, if conflict { stream } else { other });
+            binding.options = PinOptions::Playback {
+                headphone: false,
+                eapd: None,
+            };
+            if !conflict {
+                let mut m = model.borrow_mut();
+                m.reject_route_control = Some(0xf07);
+                m.reject_route_node = Some(0x16);
+            }
+            let before = access_counts(&model);
+            let result = controller.configure_realtek_alc285_295_headphones(
+                &graph,
+                headphone_binding(&first, stream),
+                Some(binding),
+            );
+            if conflict {
+                assert_eq!(result, Err(Error::RouteInUse));
+                assert_eq!(access_counts(&model), before);
+                assert!(!controller.routing_failed);
+            } else {
+                assert_eq!(result, Err(Error::RouteRejected));
+                assert!(controller.routing_failed);
+                assert_eq!(controller.routes, [(stream, first.clone())]);
+                assert!(controller.codec_controls.is_empty());
+                let before = access_counts(&model);
+                assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                assert_eq!(controller.start(other), Err(Error::NeedsReset));
+                assert_eq!(access_counts(&model), before);
+            }
+        }
+    }
+
+    #[test]
+    fn alc255_depop_preserves_eapd_passthrough_until_the_final_literal_and_reserves_real_pcm() {
+        for present in [false, true] {
+            let mut fixture = Fixture::new();
+            let model = realtek_headphone_model(0x10ec0255, present);
+            {
+                let mut m = model.borrow_mut();
+                m.coefficients.insert((0x20, 0x36), 0xaaff);
+                m.coefficients.insert((0x20, 0x46), 0xb5a5);
+                m.coefficients.insert((0x57, 4), 0xab07);
+                m.coefficients.insert((0x53, 2), 0x9234);
+            }
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            let options = PinOptions::Playback {
+                headphone: true,
+                eapd: Some(true),
+            };
+            let before = access_counts(&model);
+            assert_eq!(
+                controller.configure_realtek_alc256_headphone(&graph, &route, stream, 0, options),
+                Err(Error::UnsupportedTopology)
+            );
+            assert_eq!(access_counts(&model), before);
+            let start = model.borrow().clock.now_us();
+            let report = controller
+                .configure_realtek_alc255_headphone(&graph, &route, stream, 0, options)
+                .unwrap();
+            assert_eq!(report.common.codec_id, 0x10ec0255);
+            assert_eq!(report.initial_sense.present, present);
+            assert_eq!(
+                report
+                    .common
+                    .coefficients
+                    .iter()
+                    .map(|c| c.index)
+                    .collect::<Vec<_>>(),
+                [0x10, 0x46, 0x36]
+            );
+            assert_eq!(report.common.coefficients[2].previous, 0xaaff);
+            assert_eq!(report.common.coefficients[2].current, 0x5757);
+            {
+                let m = model.borrow();
+                let events = &m.coefficient_events;
+                let literal: Vec<_> = events
+                    .iter()
+                    .filter(|(node, index, _, _)| *node == 0x20 && *index == 0x36)
+                    .collect();
+                assert_eq!(literal.len(), 1);
+                let reset: Vec<_> = events
+                    .iter()
+                    .filter(|(node, _, _, _)| *node == 0x53)
+                    .collect();
+                assert_eq!(reset.len(), 2);
+                assert_eq!((reset[0].2, reset[1].2), (0x9234, 0x1234));
+                assert!(reset[0].3 < reset[1].3 && reset[1].3 < literal[0].3);
+                let hp: Vec<_> = events
+                    .iter()
+                    .filter(|(node, _, _, _)| *node == 0x57)
+                    .collect();
+                assert_eq!(hp.len(), if present { 2 } else { 0 });
+                if present {
+                    assert_eq!((hp[0].2, hp[1].2), (0xab01, 0xab04));
+                    assert!(hp[0].3 >= start + 32_000);
+                    assert!(hp[1].3 >= hp[0].3 + 150_000);
+                }
+                assert_eq!(m.coefficients[&(0x20, 0x10)], 0xa5ff);
+                assert_eq!(m.coefficients[&(0x20, 0x46)], 0x85a5);
+            }
+            assert_eq!(controller.routes.len(), 1);
+            controller.write_pcm(stream, 0, &[0x5b; 256]).unwrap();
+            controller.start(stream).unwrap();
+            model.borrow_mut().dma_step_bytes = 128;
+            advance(&model, 4);
+            assert!(controller.status(stream).unwrap().period_completed);
+            controller.stop(stream).unwrap();
+            assert!(model.borrow().playback.len() >= 256);
+            assert!(model.borrow().playback.iter().all(|byte| *byte == 0x5b));
+            controller.shutdown().unwrap();
+        }
+    }
+
+    #[test]
+    fn alc255_live_identity_and_late_depop_failure_do_not_publish_a_route() {
+        for fault in 0..3 {
+            let mut fixture = Fixture::new();
+            let model = realtek_headphone_model(0x10ec0255, true);
+            model.borrow_mut().coefficients.insert((0x53, 2), 0x1234);
+            let mut controller = create(&model, &mut fixture, config()).unwrap();
+            let graph = controller.enumerate_codec(0).unwrap();
+            let route = graph.analog_route(Direction::Playback, 4, 2).unwrap();
+            let stream = controller
+                .allocate_stream(
+                    Direction::Playback,
+                    stereo(),
+                    128,
+                    2,
+                    &mut fixture.allocator,
+                )
+                .unwrap();
+            {
+                let mut m = model.borrow_mut();
+                if fault == 0 {
+                    m.parameters.insert((0, 0), 0x10ec0256);
+                } else {
+                    m.coefficient_read_fault = Some(u32::MAX);
+                    m.coefficient_fault_node = Some(0x53);
+                    m.coefficient_fault_after_write = true;
+                    m.coefficient_fault_write_threshold = fault;
+                }
+            }
+            let result = controller.configure_realtek_alc255_headphone(
+                &graph,
+                &route,
+                stream,
+                0,
+                PinOptions::Playback {
+                    headphone: true,
+                    eapd: None,
+                },
+            );
+            assert_eq!(
+                result,
+                Err(if fault == 0 {
+                    Error::InvalidCodecGraph
+                } else {
+                    Error::CoefficientRejected {
+                        node: 0x53,
+                        index: 2,
+                    }
+                })
+            );
+            assert!(controller.routes.is_empty());
+            if fault == 0 {
+                assert!(model.borrow().coefficient_events.is_empty());
+                assert!(!controller.routing_failed);
+            } else {
+                assert!(controller.routing_failed);
+                assert_eq!(model.borrow().coefficient_write_nodes[&0x53], fault);
+                let before = access_counts(&model);
+                assert_eq!(controller.start(stream), Err(Error::NeedsReset));
+                assert_eq!(access_counts(&model), before);
+            }
+        }
     }
 
     #[test]

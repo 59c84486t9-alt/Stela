@@ -1,3 +1,6 @@
+#[cfg(feature = "native-acpi")]
+#[path = "build/acpi.rs"]
+mod acpi;
 #[cfg(feature = "amd-commands")]
 #[path = "build/amd.rs"]
 mod amd;
@@ -9,6 +12,8 @@ mod intel;
 mod native;
 
 fn main() {
+    #[cfg(feature = "native-acpi")]
+    acpi::build();
     // Active ports declare their native source inputs below. Without this
     // baseline Cargo watches every vendored file even when no C port is used.
     println!("cargo:rerun-if-changed=build.rs");

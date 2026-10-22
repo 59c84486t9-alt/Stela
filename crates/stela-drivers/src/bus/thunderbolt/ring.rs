@@ -2128,4 +2128,5415 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         channel_release(&mut channel);
     }
+    struct IcmPci {
+        device: u16,
+        command: u32,
+    }
+    impl crate::bus::pci::ConfigSpace for IcmPci {
+        fn read32(&self, offset: u16) -> u32 {
+            match offset {
+                0 => (u32::from(self.device) << 16) | 0x8086,
+                4 => self.command,
+                8 => 0x0c034000,
+                0x0c => 0,
+                _ => u32::MAX,
+            }
+        }
+        fn write32(&mut self, _: u16, _: u32) {
+            panic!("ICM must not alter PCI admission");
+        }
+    }
+    fn icm(
+        device: u16,
+    ) -> (
+        Source,
+        Arc<Domain>,
+        Arc<Model>,
+        super::super::icm::Host<Model>,
+    ) {
+        let source = Source::new();
+        let domain = Arc::new(Domain::new());
+        let model = Arc::new(Model::new(domain.clone()));
+        model.state.lock().unwrap().values[0x39944 / 4] = 0x80000001;
+        model.state.lock().unwrap().values[0x3990c / 4] = 3 << 8;
+        // SAFETY: exact synthetic requester/epoch owns stopped rings and coherent
+        // mappings; firmware is the modeled ICM peer, never a ring programmer.
+        let host = unsafe {
+            super::super::icm::Host::new(
+                &IcmPci { device, command: 6 },
+                model.clone(),
+                &source,
+                domain.clone(),
+                u64::MAX,
+            )
+        }
+        .unwrap();
+        (source, domain, model, host)
+    }
+    fn icm_release(host: &mut super::super::icm::Host<Model>) {
+        host.disable().unwrap();
+        // SAFETY: modeled physical DMA/IRQ/work is finally drained.
+        unsafe { host.release() }.unwrap();
+    }
+    #[test]
+    fn icm_actual_dma_driver_ready_and_raw_notification_wrap_rings() {
+        use super::super::icm::{Event, Security};
+        let (_source, domain, model, mut host) = icm(0x15e8);
+        host.start(0).unwrap();
+        let mut rx = 0;
+        for index in 0..25 {
+            let request = host.driver_ready(index * 2).unwrap();
+            let txindex = index as usize % 10;
+            let wire = domain.data(model.frame_address(Direction::Tx, txindex), 8);
+            assert_eq!(wire, incoming(PacketType::IcmCommand, &[3]).bytes);
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, txindex) + 8);
+            assert_eq!((descriptor >> 12) & 0xf, 11);
+            assert_eq!((descriptor >> 16) & 0xf, 11);
+            model.finish(Direction::Tx, txindex, &[], None);
+            if index == 0 {
+                let mut event = incoming(PacketType::IcmEvent, &[0x00fe_40fe, 0xdeadbeef]);
+                let len = event.bytes.len();
+                event.bytes[len - 4..].copy_from_slice(&[1, 2, 3, 4]);
+                model.finish(
+                    Direction::Rx,
+                    rx,
+                    &event.bytes,
+                    Some((2 << 20) | (15 << 16) | (10 << 12) | (len as u32)),
+                );
+                match host.poll(1).unwrap().unwrap() {
+                    Event::Notification(m) => {
+                        assert_eq!(m.code, 0xfe);
+                        assert_eq!(m.sof, 15);
+                        assert_eq!(m.unverified_trailer, [1, 2, 3, 4]);
+                    }
+                    other => panic!("{other:?}"),
+                }
+                rx = (rx + 1) % 10;
+                assert_eq!(host.driver_ready(1), Err(super::super::icm::Error::Busy));
+            }
+            let reply = incoming(
+                PacketType::IcmResponse,
+                &[0x01004003, 0x00920000, 0x12345678, 0xabcdef01],
+            );
+            finish_rx(&model, rx, &reply);
+            rx = (rx + 1) % 10;
+            match host.poll(index * 2 + 1).unwrap().unwrap() {
+                Event::DriverReady {
+                    request: id,
+                    parameters,
+                } => {
+                    assert_eq!(id, request);
+                    assert_eq!(parameters.security, Some(Security::Secure));
+                    assert_eq!(parameters.protocol_version, Some(1));
+                    assert_eq!(parameters.boot_acl_slots, Some(1));
+                    assert!(parameters.runtime_pm);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        icm_release(&mut host);
+    }
+    #[test]
+    fn icm_timeout_never_reuses_ambiguous_firmware_code() {
+        use super::super::icm::Error;
+        for (device, timeout) in [
+            (0x1575, 5000),
+            (0x15e8, 250),
+            (0x1134, 250),
+            (0x8a0d, 20000),
+        ] {
+            let (_source, _domain, model, mut host) = icm(device);
+            host.start(100).unwrap();
+            let id = host.driver_ready(100).unwrap();
+            assert!(host.poll(100 + timeout - 1).unwrap().is_none());
+            assert_eq!(
+                host.poll(100 + timeout),
+                Err(Error::Timeout { request: id })
+            );
+            assert_eq!(host.driver_ready(101 + timeout), Err(Error::Poisoned));
+            let writes = model.state.lock().unwrap().writes.len();
+            assert_eq!(host.poll(102 + timeout), Err(Error::Poisoned));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            icm_release(&mut host);
+        }
+    }
+    #[test]
+    fn icm_firmware_error_and_epoch_observation_loss_poison() {
+        use super::super::icm::Error;
+        for loss in [false, true] {
+            let (_source, _domain, model, mut host) = icm(0x9a1b);
+            host.start(0).unwrap();
+            host.driver_ready(0).unwrap();
+            finish_rx(
+                &model,
+                0,
+                &incoming(PacketType::IcmResponse, &[0x01000103, 0, 0, 0]),
+            );
+            if loss {
+                model.state.lock().unwrap().values[0x39944 / 4] = 0;
+            }
+            assert_eq!(
+                host.poll(1),
+                Err(if loss {
+                    Error::FirmwareNotAuthenticated
+                } else {
+                    Error::FirmwareError(1)
+                })
+            );
+            assert_eq!(host.driver_ready(2), Err(Error::Poisoned));
+            icm_release(&mut host);
+        }
+    }
+    #[test]
+    fn icm_prerequisites_refuse_before_any_ring_programming() {
+        use super::super::icm::{Error, Host};
+        for (device, command, status, mode, expected) in [
+            (0xdead, 6, 0x80000001, 3, Error::Unsupported),
+            (0x1575, 2, 0x80000001, 3, Error::PciState),
+            (0x1575, 6, 0x80000000, 3, Error::FirmwareNotRunning),
+            (0x15e8, 6, 1, 3, Error::FirmwareNotAuthenticated),
+            (0x1134, 6, 0x80000001, 0, Error::SafeMode),
+            (0x1575, 6, 0x80000001, 2, Error::WrongMode(2)),
+            (0x9a1b, 6, 1, 0, Error::FirmwareNotAuthenticated),
+        ] {
+            let source = Source::new();
+            let domain = Arc::new(Domain::new());
+            let model = Arc::new(Model::new(domain.clone()));
+            model.state.lock().unwrap().values[0x39944 / 4] = status;
+            model.state.lock().unwrap().values[0x3990c / 4] = mode << 8;
+            // SAFETY: negative synthetic prerequisites cannot authorize any DMA.
+            let result = unsafe {
+                Host::new(
+                    &IcmPci { device, command },
+                    model.clone(),
+                    &source,
+                    domain,
+                    u64::MAX,
+                )
+            };
+            assert!(matches!(result,Err(error) if error==expected));
+            assert!(model.state.lock().unwrap().writes.is_empty());
+        }
+        let (_source, _domain, model, mut host) = icm(0x8a0d);
+        model.state.lock().unwrap().values[0x39944 / 4] = 0;
+        host.start(0).unwrap();
+        icm_release(&mut host);
+    }
+    #[test]
+    fn icm_malformed_frame_keeps_request_pending_until_real_reply() {
+        use super::super::icm::{Error, Event};
+        let (_source, _domain, model, mut host) = icm(0x1575);
+        host.start(0).unwrap();
+        let id = host.driver_ready(0).unwrap();
+        for (index, words, error) in [
+            (0, vec![0x01000004, 0], Error::WrongCode),
+            (1, vec![0x02000003, 0], Error::PacketCount),
+            (2, vec![0x01000003], Error::Length),
+        ] {
+            finish_rx(&model, index, &incoming(PacketType::IcmResponse, &words));
+            assert_eq!(
+                host.poll(1 + index as u64),
+                Ok(Some(Event::Discarded(error)))
+            );
+            assert_eq!(host.driver_ready(1 + index as u64), Err(Error::Busy));
+        }
+        finish_rx(
+            &model,
+            3,
+            &incoming(PacketType::IcmResponse, &[0x01000003, 0]),
+        );
+        assert!(matches!(host.poll(4),Ok(Some(Event::DriverReady{request,..})) if request==id));
+        icm_release(&mut host);
+    }
+    #[test]
+    fn icm_tx_backpressure_never_publishes_a_ghost_request_and_release_retries() {
+        use super::super::icm::{Error, Event};
+        let (_source, domain, model, mut host) = icm(0x15e8);
+        host.start(0).unwrap();
+        // Firmware has replied but the modeled TX descriptor consumer is stalled.
+        for i in 0..9 {
+            let id = host.driver_ready(i * 2).unwrap();
+            finish_rx(
+                &model,
+                i as usize,
+                &incoming(PacketType::IcmResponse, &[0x01000003, 0, 0, 0]),
+            );
+            assert!(
+                matches!(host.poll(i*2+1),Ok(Some(Event::DriverReady{request,..})) if request==id)
+            );
+        }
+        let writes = model.state.lock().unwrap().writes.len();
+        assert_eq!(host.driver_ready(20), Err(Error::Ring(super::Error::Full)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        model.finish(Direction::Tx, 0, &[], None);
+        assert_eq!(host.poll(21), Ok(None));
+        assert_eq!(host.driver_ready(22), Ok(10));
+        host.disable().unwrap();
+        domain.fail_unmap_at.store(12, Ordering::Relaxed);
+        // SAFETY: final synthetic device/IRQ/work drain is complete, including
+        // the active request. Failed invalidation retains its mapping for retry.
+        assert!(unsafe { host.release() }.is_err());
+        assert!(!domain.state.lock().unwrap().maps.is_empty());
+        // SAFETY: the same exact drained reservation remains retained.
+        unsafe { host.release() }.unwrap();
+        assert!(domain.state.lock().unwrap().maps.is_empty());
+    }
+    struct AdapterOwner {
+        target: super::super::adapter::Target,
+        operation: super::super::adapter::Operation,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for AdapterOwner {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: this fixture owns the actual synthetic adapter, unchanged capability
+    // metadata and positive credit reservation, with no competing CM/link change.
+    unsafe impl super::super::adapter::Owner for AdapterOwner {
+        fn target(&self) -> super::super::adapter::Target {
+            self.target
+        }
+        fn operation(&self) -> super::super::adapter::Operation {
+            self.operation
+        }
+    }
+    fn adapter_owner(
+        operation: super::super::adapter::Operation,
+    ) -> (Arc<AdapterOwner>, Arc<AtomicUsize>) {
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let owner = Arc::new(AdapterOwner {
+            target: super::super::adapter::Target {
+                route: super::super::config::Route::new(0).unwrap(),
+                port: 1,
+                kind: super::super::topology::AdapterKind::Lane,
+                usb4: true,
+                phy_capability: Some(8),
+                usb4_capability: Some(0x30),
+            },
+            operation,
+            dropped: dropped.clone(),
+        });
+        (owner, dropped)
+    }
+    fn adapter_response(
+        domain: &Domain,
+        model: &Model,
+        index: usize,
+        offset: u16,
+        data: &[u32],
+    ) -> Encoded {
+        let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+        let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+        let frame = domain.data(
+            model.frame_address(Direction::Tx, index),
+            (descriptor & 0xfff) as usize,
+        );
+        let address = u32::from_be_bytes(frame[8..12].try_into().unwrap());
+        assert_eq!(address & 0x1fff, u32::from(offset));
+        assert_eq!((address >> 25) & 3, 1);
+        assert_eq!((address >> 13) & 63, 1);
+        assert_eq!((address >> 19) & 63, 1);
+        let mut reply = vec![
+            u32::from_be_bytes(frame[..4].try_into().unwrap()) | (1 << 31),
+            u32::from_be_bytes(frame[4..8].try_into().unwrap()),
+            address & !(63 << 19),
+        ];
+        reply.extend_from_slice(data);
+        incoming(kind, &reply)
+    }
+    #[test]
+    fn adapter_lane_configured_and_credit_changes_use_actual_dma_ack_and_readback() {
+        use super::super::adapter::{Control, Event, Operation};
+        let before = 0x86454007;
+        for (operation, offset, after) in [
+            (Operation::LaneEnabled(true), 9, before & !(1 << 14)),
+            (Operation::LaneEnabled(false), 9, before | (1 << 14)),
+            (Operation::Usb4Configured(true), 0x43, before | (1 << 3)),
+            (Operation::Usb4Configured(false), 0x43, before & !(1 << 3)),
+            (Operation::NfcCredits(8), 4, (before & !0x3ff) | 15),
+            (Operation::NfcCredits(-100), 4, before & !0x3ff),
+        ] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let (owner, dropped) = adapter_owner(operation);
+            // SAFETY: exact same synthetic requester, reset epoch, real adapter
+            // metadata and exclusive credit/link reservation; channel is idle.
+            let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+            assert!(control.poll(0).unwrap().is_none());
+            let mut applied = None;
+            for index in 0..3 {
+                if index == 1 {
+                    let frame = domain.data(model.frame_address(Direction::Tx, index), 20);
+                    assert_eq!(u32::from_be_bytes(frame[12..16].try_into().unwrap()), after);
+                }
+                let data = match index {
+                    0 => vec![before],
+                    1 => vec![],
+                    _ => vec![after],
+                };
+                let reply = adapter_response(&domain, &model, index, offset, &data);
+                model.finish(Direction::Tx, index, &[], None);
+                finish_rx(&model, index, &reply);
+                let event = control.poll(index as u64 + 1).unwrap();
+                if index < 2 {
+                    assert!(event.is_none());
+                } else {
+                    let Some(Event::Applied(value)) = event else {
+                        panic!("actual applied receipt")
+                    };
+                    applied = Some(value);
+                }
+            }
+            let applied = applied.unwrap();
+            assert_eq!(applied.before, before);
+            assert_eq!(applied.after, after);
+            let mut channel = control.into_channel();
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            // SAFETY: the fixture transfers its actual active reservation into
+            // an independent synthetic CM lifetime through final modeled drain.
+            unsafe { applied.retire() };
+            assert_eq!(dropped.load(Ordering::Relaxed), 1);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn adapter_failed_readback_and_lost_write_ack_retain_exact_active_reservation() {
+        use super::super::adapter::{Control, Error, Operation};
+        for lost_ack in [false, true] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let (owner, dropped) = adapter_owner(Operation::NfcCredits(8));
+            // SAFETY: same exact synthetic adapter/requester/reset and owned
+            // positive allocation, with no independent firmware or link writer.
+            let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+            control.poll(0).unwrap();
+            let reply = adapter_response(&domain, &model, 0, 4, &[(100 << 20) | 7]);
+            model.finish(Direction::Tx, 0, &[], None);
+            finish_rx(&model, 0, &reply);
+            control.poll(1).unwrap();
+            if lost_ack {
+                assert!(matches!(control.poll(500), Err(Error::Timeout)));
+            } else {
+                for index in 1..3 {
+                    let data = if index == 1 {
+                        vec![]
+                    } else {
+                        vec![(100 << 20) | 7]
+                    };
+                    let reply = adapter_response(&domain, &model, index, 4, &data);
+                    model.finish(Direction::Tx, index, &[], None);
+                    finish_rx(&model, index, &reply);
+                    let result = control.poll(index as u64 + 1);
+                    if index == 1 {
+                        assert!(result.unwrap().is_none());
+                    } else {
+                        assert!(matches!(result, Err(Error::Readback)));
+                    }
+                }
+            }
+            let writes = model.state.lock().unwrap().writes.len();
+            assert!(matches!(control.poll(501), Err(Error::Poisoned)));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            let mut channel = control.into_channel();
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn adapter_unconsumed_applied_receipt_quarantines_active_credits() {
+        use super::super::adapter::{Control, Event, Operation};
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let (owner, dropped) = adapter_owner(Operation::NfcCredits(1));
+        // SAFETY: same exact synthetic requester/epoch and actual allocation.
+        let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+        control.poll(0).unwrap();
+        for index in 0..3 {
+            let data = match index {
+                0 => vec![(100 << 20) | 7],
+                1 => vec![],
+                _ => vec![(100 << 20) | 8],
+            };
+            let reply = adapter_response(&domain, &model, index, 4, &data);
+            model.finish(Direction::Tx, index, &[], None);
+            finish_rx(&model, index, &reply);
+            let event = control.poll(index as u64 + 1).unwrap();
+            if index == 2 {
+                assert!(matches!(event, Some(Event::Applied(_))));
+                drop(event);
+            }
+        }
+        let mut channel = control.into_channel();
+        drop(owner);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        channel_release(&mut channel);
+    }
+    #[test]
+    fn adapter_zero_credit_and_capacity_rejection_never_write_adapter() {
+        use super::super::adapter::{Control, Error, Event, Operation};
+        for delta in [0, 100] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let (owner, dropped) = adapter_owner(Operation::NfcCredits(delta));
+            // SAFETY: same exact synthetic requester/epoch; invalid allocation
+            // is rejected against actual hardware capacity before any write.
+            let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+            control.poll(0).unwrap();
+            let reply = adapter_response(&domain, &model, 0, 4, &[(10 << 20) | 7]);
+            model.finish(Direction::Tx, 0, &[], None);
+            finish_rx(&model, 0, &reply);
+            let result = control.poll(1);
+            if delta == 0 {
+                let Some(Event::Applied(applied)) = result.unwrap() else {
+                    panic!("unchanged observation")
+                };
+                assert_eq!(applied.before, applied.after);
+                drop(applied);
+            } else {
+                assert!(matches!(result, Err(Error::CreditsUnavailable)));
+            }
+            assert_eq!(
+                model.read32(TX_DESCRIPTOR + 8) >> 16,
+                1,
+                "only the initial read was sent"
+            );
+            let mut channel = control.into_channel();
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 1);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn adapter_fixed_deadline_contains_write_publication_backpressure() {
+        use super::super::{
+            adapter::{Control, Error, Operation},
+            config::{Address, Route, Space},
+        };
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        // Fill eight actual TX descriptors; firmware replies while hardware's
+        // TX consumer is stuck. The next read fills the last available slot.
+        let address = Address {
+            port: 1,
+            space: Space::Port,
+            offset: 4,
+            words: 1,
+        };
+        for index in 0..8 {
+            channel
+                .read(Route::new(0).unwrap(), address, 0, 1000)
+                .unwrap();
+            let reply = adapter_response(&domain, &model, index, 4, &[(100 << 20) | 7]);
+            finish_rx(&model, index, &reply);
+            assert!(matches!(
+                channel.poll(0),
+                Ok(Some(super::super::channel::Event::Completed { .. }))
+            ));
+        }
+        let (owner, dropped) = adapter_owner(Operation::NfcCredits(1));
+        // SAFETY: same exact synthetic requester/epoch and positive allocation;
+        // channel is idle even though its completed TX DMA has not drained.
+        let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+        control.poll(0).unwrap();
+        let reply = adapter_response(&domain, &model, 8, 4, &[(100 << 20) | 7]);
+        finish_rx(&model, 8, &reply);
+        assert!(control.poll(1).unwrap().is_none());
+        let writes = model.state.lock().unwrap().writes.len();
+        for now in [2, 100, 499] {
+            assert!(control.poll(now).unwrap().is_none());
+        }
+        assert!(matches!(control.poll(500), Err(Error::Timeout)));
+        assert!(matches!(control.poll(501), Err(Error::Poisoned)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = control.into_channel();
+        drop(owner);
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            1,
+            "no adapter write was published"
+        );
+        channel_release(&mut channel);
+    }
+    #[test]
+    fn adapter_regressed_clock_and_changed_credit_capacity_never_claim_applied() {
+        use super::super::adapter::{Control, Error, Operation};
+        let (_source, _domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let (owner, dropped) = adapter_owner(Operation::LaneEnabled(true));
+        // SAFETY: same exact idle synthetic requester/epoch.
+        let mut control = unsafe { Control::new(channel, owner.clone(), 100) }.unwrap();
+        let writes = model.state.lock().unwrap().writes.len();
+        assert!(matches!(control.poll(99), Err(Error::ClockRegressed)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = control.into_channel();
+        drop(owner);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
+        let (_source, domain, model, mut channel) = self::channel();
+        channel.start(0).unwrap();
+        let (owner, dropped) = adapter_owner(Operation::NfcCredits(8));
+        // SAFETY: same exact synthetic requester/epoch and reserved allocation.
+        let mut control = unsafe { Control::new(channel, owner.clone(), 0) }.unwrap();
+        control.poll(0).unwrap();
+        for index in 0..3 {
+            let data = match index {
+                0 => vec![(100 << 20) | 7],
+                1 => vec![],
+                _ => vec![(10 << 20) | 15],
+            };
+            let reply = adapter_response(&domain, &model, index, 4, &data);
+            model.finish(Direction::Tx, index, &[], None);
+            finish_rx(&model, index, &reply);
+            let result = control.poll(index as u64 + 1);
+            if index < 2 {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(matches!(result, Err(Error::Readback)));
+            }
+        }
+        let mut channel = control.into_channel();
+        drop(owner);
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        channel_release(&mut channel);
+    }
+    struct RouterOwner {
+        target: super::super::topology::Inventory,
+        parent: Option<super::super::topology::Inventory>,
+        policy: super::super::router::Policy,
+        epoch: u64,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for RouterOwner {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: fixtures reserve one exact synthetic NHI/domain/IMR epoch and
+    // unchanged real model inventories. Policy is an explicit model input,
+    // not a production platform/_OSC/security provider or Type-C inference.
+    unsafe impl super::super::router::Owner for RouterOwner {
+        fn identity(&self) -> super::super::domain::Identity {
+            super::super::domain::Identity {
+                nhi: crate::bus::pci::Address {
+                    segment: 0,
+                    bus: 1,
+                    device: 2,
+                    function: 0,
+                },
+                epoch: self.epoch,
+            }
+        }
+        fn target(&self) -> &super::super::topology::Inventory {
+            &self.target
+        }
+        fn parent(&self) -> Option<&super::super::topology::Inventory> {
+            self.parent.as_ref()
+        }
+        fn policy(&self) -> super::super::router::Policy {
+            self.policy
+        }
+    }
+    fn router_adapter(
+        port: u8,
+        kind: u32,
+        cap: Option<u16>,
+    ) -> super::super::topology::AdapterObservation {
+        use super::super::topology::{AdapterHeader, AdapterObservation, Capability};
+        let mut raw = [0; 8];
+        raw[2] = kind;
+        raw[3] = u32::from(port) << 20;
+        AdapterObservation::Present {
+            port,
+            header: AdapterHeader { raw },
+            capabilities: cap
+                .map(|offset| {
+                    vec![Capability {
+                        offset,
+                        id: 6,
+                        vendor_specific: None,
+                        length: None,
+                        next: 0,
+                        raw: vec![6 << 8],
+                    }]
+                })
+                .unwrap_or_default(),
+        }
+    }
+    fn router_owner(route: u64, version: u8, mask: u32) -> RouterOwner {
+        use super::super::{
+            config::Route,
+            router::{Decision, Policy},
+            topology::{Inventory, Path, RouterHeader},
+        };
+        let path = Path::new(Route::new(route).unwrap()).unwrap();
+        let header = RouterHeader {
+            raw: [
+                0x12348086,
+                0x43808000 | (9 << 8),
+                0xdeadbeef,
+                0x10203040,
+                (u32::from(version) << 29) | 0x00ab34cd,
+            ],
+        };
+        let target = Inventory {
+            path,
+            upstream_port: if route == 0 { 0 } else { 1 },
+            header,
+            capabilities: vec![],
+            adapters: vec![
+                router_adapter(1, 1, Some(0x30)),
+                router_adapter(2, 0x0e0101, Some(0x40)),
+            ],
+        };
+        let parent = if route == 0 {
+            None
+        } else {
+            let depth = path.depth() - 1;
+            let shift = depth * 8;
+            let raw = route & ((1u64 << shift) - 1);
+            let upstream = if depth == 0 { 0 } else { 5 };
+            let parent_path = Path::new(Route::new(raw).unwrap()).unwrap();
+            let down = (route >> shift) as u8;
+            Some(Inventory {
+                path: parent_path,
+                upstream_port: upstream,
+                header: RouterHeader {
+                    raw: [
+                        0x56788086,
+                        (5 << 14) | (u32::from(upstream) << 8) | (u32::from(depth) << 20),
+                        raw as u32,
+                        (raw >> 32) as u32 | (1 << 31),
+                        1 << 29,
+                    ],
+                },
+                capabilities: vec![],
+                adapters: (1..=5)
+                    .map(|port| {
+                        router_adapter(
+                            port,
+                            match port {
+                                1 | 2 | 5 => 1,
+                                3 => {
+                                    if mask & 4 != 0 {
+                                        0x200101
+                                    } else {
+                                        0
+                                    }
+                                }
+                                4 => {
+                                    if mask & 8 != 0 {
+                                        0x100101
+                                    } else {
+                                        0
+                                    }
+                                }
+                                _ => unreachable!(),
+                            },
+                            if port == down && mask & 64 != 0 {
+                                Some(0x30)
+                            } else {
+                                None
+                            },
+                        )
+                    })
+                    .collect(),
+            })
+        };
+        RouterOwner {
+            target,
+            parent,
+            policy: Policy {
+                usb3: if mask & 1 != 0 {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+                pcie: if mask & 2 != 0 {
+                    Decision::Allowed
+                } else {
+                    Decision::Denied
+                },
+            },
+            epoch: 1,
+            dropped: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct RouterWrite {
+        port: u8,
+        space: u8,
+        offset: u16,
+        data: Vec<u32>,
+    }
+    struct RouterPeer {
+        owner: Arc<RouterOwner>,
+        regs: [u32; 8],
+        hotplug: Vec<u32>,
+        mask: u32,
+        writes: Vec<RouterWrite>,
+        setup_written: bool,
+        valid_written: bool,
+        ready_reads: u32,
+        configured_reads: u32,
+        hold_ready: bool,
+        hold_configured: bool,
+        reject_header: bool,
+        override_upstream: Option<u8>,
+    }
+    impl RouterPeer {
+        fn new(owner: Arc<RouterOwner>, mask: u32) -> Self {
+            let mut regs = [0; 8];
+            regs[..5].copy_from_slice(&owner.target.header.raw);
+            regs[5] = 0x00d5001f;
+            regs[6] = 0x1202 | if mask & 32 != 0 { 1 << 18 } else { 0 };
+            let hotplug = (0..owner.target.header.max_port())
+                .map(|i| match i {
+                    0 => 0x92345678,
+                    1 => 0xabcdef01,
+                    _ => 0x98765430 + u32::from(i),
+                })
+                .collect();
+            Self {
+                owner,
+                regs,
+                hotplug,
+                mask,
+                writes: vec![],
+                setup_written: false,
+                valid_written: false,
+                ready_reads: 0,
+                configured_reads: 0,
+                hold_ready: false,
+                hold_configured: false,
+                reject_header: false,
+                override_upstream: None,
+            }
+        }
+        fn respond(&mut self, domain: &Domain, model: &Model, index: usize) -> Encoded {
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+            let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+            let frame = domain.data(
+                model.frame_address(Direction::Tx, index),
+                (descriptor & 0xfff) as usize,
+            );
+            let mut words: Vec<u32> = frame[..frame.len() - 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_be_bytes(*word))
+                .collect();
+            let route = (u64::from(words[0]) << 32) | u64::from(words[1]);
+            let address = words[2];
+            let offset = (address & 0x1fff) as u16;
+            let count = ((address >> 13) & 63) as usize;
+            let port = ((address >> 19) & 63) as u8;
+            let space = ((address >> 25) & 3) as u8;
+            let target = route == self.owner.target.path.route().raw();
+            let upstream = if target {
+                self.owner.target.upstream_port
+            } else {
+                self.owner
+                    .parent
+                    .as_ref()
+                    .expect("actual parent")
+                    .upstream_port
+            };
+            let data = if kind == PacketType::Write {
+                assert!(target, "setup must not program parent");
+                let data = words[3..].to_vec();
+                assert_eq!(data.len(), count);
+                self.writes.push(RouterWrite {
+                    port,
+                    space,
+                    offset,
+                    data: data.clone(),
+                });
+                if space == 2 {
+                    self.regs[usize::from(offset)..usize::from(offset) + count]
+                        .copy_from_slice(&data);
+                    if offset == 1 && self.reject_header {
+                        self.regs[3] &= !(1 << 31);
+                    }
+                    if offset == 5 {
+                        self.setup_written = true;
+                        if data[0] & (1 << 31) != 0 {
+                            self.valid_written = true;
+                        }
+                    }
+                } else {
+                    assert_eq!((space, offset, count), (1, 5, 1));
+                    self.hotplug[usize::from(port) - 1] = data[0];
+                }
+                vec![]
+            } else {
+                assert_eq!(kind, PacketType::Read);
+                if !target {
+                    let parent = self.owner.parent.as_ref().unwrap();
+                    assert_eq!(route, parent.path.route().raw());
+                    assert_eq!(space, 1);
+                    assert_eq!(offset, 0x42);
+                    assert_eq!(count, 1);
+                    vec![if self.mask & 16 != 0 { 1 << 9 } else { 0 }]
+                } else if space == 2 {
+                    if offset == 6 {
+                        if self.setup_written {
+                            self.ready_reads += 1;
+                            if self.ready_reads >= 2 && !self.hold_ready {
+                                self.regs[6] |= 1 << 24;
+                            }
+                        }
+                        if self.valid_written {
+                            self.configured_reads += 1;
+                            if self.configured_reads >= 2 && !self.hold_configured {
+                                self.regs[6] |= 1 << 25;
+                            }
+                        }
+                    }
+                    self.regs[usize::from(offset)..usize::from(offset) + count].to_vec()
+                } else {
+                    assert_eq!((space, offset, count), (1, 5, 1));
+                    vec![self.hotplug[usize::from(port) - 1]]
+                }
+            };
+            words.truncate(3);
+            words[0] |= 1 << 31;
+            words[2] = (address & !(63 << 19))
+                | (u32::from(self.override_upstream.unwrap_or(upstream)) << 19);
+            words.extend(data);
+            incoming(kind, &words)
+        }
+    }
+    fn drive_router(
+        peer: &mut RouterPeer,
+        domain: &Domain,
+        model: &Model,
+        setup: &mut super::super::router::Setup<Model>,
+    ) -> super::super::router::Configured {
+        use super::super::router::Event;
+        assert!(setup.poll(0).unwrap().is_none());
+        for n in 0..100 {
+            let index = n % 10;
+            let reply = peer.respond(domain, model, index);
+            model.finish(Direction::Tx, index, &[], None);
+            finish_rx(model, index, &reply);
+            match setup.poll(n as u64 + 1).unwrap() {
+                Some(Event::Configured(configured)) => return configured,
+                Some(Event::Discarded(error)) => panic!("discarded {error:?}"),
+                None => {}
+            }
+        }
+        panic!("bounded router setup did not finish")
+    }
+    #[test]
+    fn router_setup_actual_dma_root_child_policy_modes_and_hotplug_complete() {
+        use super::super::router::Setup;
+        for route in [0, 1, 0x201] {
+            for mask in [0, 15, 47, 127] {
+                let (_source, domain, model, mut channel) = channel();
+                channel.start(0).unwrap();
+                let owner = Arc::new(router_owner(route, 2, mask));
+                let dropped = owner.dropped.clone();
+                let mut peer = RouterPeer::new(owner.clone(), mask);
+                // SAFETY: this exact model requester/domain/IMR/reset epoch owns
+                // actual unchanged inventories and resolved native model policy.
+                let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+                let configured = drive_router(&mut peer, &domain, &model, &mut setup);
+                assert_eq!(configured.header.reported_route(), route);
+                assert!(configured.header.enabled());
+                assert_eq!(configured.header.raw[4] & 0xffff, 0x20ff);
+                assert_eq!(configured.hotplug.len(), 2);
+                assert_eq!(
+                    configured.link_usb4,
+                    if route == 0 {
+                        None
+                    } else {
+                        Some(mask & 64 != 0 && mask & 16 == 0)
+                    }
+                );
+                if route != 0 {
+                    assert_ne!(configured.ready_status.unwrap() & (1 << 24), 0);
+                    assert_ne!(configured.configured_status.unwrap() & (1 << 25), 0);
+                    assert_ne!(peer.regs[5] & (1 << 31), 0);
+                }
+                let mut channel = setup.into_channel();
+                drop(peer);
+                drop(owner);
+                assert_eq!(dropped.load(Ordering::Relaxed), 0);
+                // SAFETY: actual synthetic configured state is transferred into an
+                // independently retained model CM lifetime through final drain.
+                unsafe { configured.retire() };
+                assert_eq!(dropped.load(Ordering::Relaxed), 1);
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    #[ignore = "requires hash-pinned unchanged full Linux USB4 router trace"]
+    fn unchanged_linux_router_full_write_trace_matches_actual_dma_engine() {
+        use super::super::router::Setup;
+        use std::{env, fs};
+        let trace = fs::read_to_string(
+            env::var("STELA_THUNDERBOLT_ROUTER_ORACLE").expect("set router trace"),
+        )
+        .unwrap();
+        let mut cases = 0;
+        for line in trace.lines() {
+            let f: Vec<_> = line.split_ascii_whitespace().collect();
+            assert_eq!(f[0], "R");
+            let n = |i: usize| f[i].parse::<u64>().unwrap();
+            let route = n(1);
+            let version = n(2) as u8;
+            let mask = n(3) as u32;
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let owner = Arc::new(router_owner(route, version, mask));
+            assert_eq!(
+                owner.target.header.raw,
+                (4..9).map(|i| n(i) as u32).collect::<Vec<_>>().as_slice()
+            );
+            let mut peer = RouterPeer::new(owner.clone(), mask);
+            assert_eq!(peer.regs[5], n(9) as u32);
+            assert_eq!(peer.regs[6], n(10) as u32);
+            assert_eq!(peer.hotplug, [n(11) as u32, n(12) as u32]);
+            // SAFETY: exact isolated model requester/epoch with actual retained
+            // parent relationship and source-case resolved native model policy.
+            let mut setup = unsafe { Setup::new(channel, owner, 0) }.unwrap();
+            let configured = drive_router(&mut peer, &domain, &model, &mut setup);
+            let count = n(13) as usize;
+            let mut at = 14;
+            let mut writes = vec![];
+            for _ in 0..count {
+                let (port, space, offset, len) = (
+                    n(at) as u8,
+                    n(at + 1) as u8,
+                    n(at + 2) as u16,
+                    n(at + 3) as usize,
+                );
+                at += 4;
+                let data = (at..at + len).map(|i| n(i) as u32).collect();
+                at += len;
+                writes.push(RouterWrite {
+                    port,
+                    space,
+                    offset,
+                    data,
+                });
+            }
+            assert_eq!(at, f.len());
+            assert_eq!(
+                peer.writes, writes,
+                "source route={route:x} version={version} mask={mask}"
+            );
+            let mut channel = setup.into_channel();
+            // SAFETY: independent model CM retains this actual configured lease
+            // through complete synthetic teardown; no hardware provider claim.
+            unsafe { configured.retire() };
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 768);
+    }
+    #[test]
+    fn router_unresolved_policy_identity_and_parent_metadata_refuse_before_publication() {
+        use super::super::{
+            config::Route,
+            router::{Decision, Setup},
+            topology::{AdapterObservation, Path},
+        };
+        for case in 0..12 {
+            let (_source, _domain, model, channel) = channel();
+            let mut owner = router_owner(1, 2, 79);
+            match case {
+                0 => owner.policy.pcie = Decision::Unresolved,
+                1 => owner.epoch = 0,
+                2 => owner.parent = None,
+                3 => {
+                    owner.parent.as_mut().unwrap().path = Path::new(Route::new(2).unwrap()).unwrap()
+                }
+                4 => owner.parent.as_mut().unwrap().header.raw[3] &= !(1 << 31),
+                5 => {
+                    owner.parent.as_mut().unwrap().adapters[0] =
+                        router_adapter(1, 0x200101, Some(0x30))
+                }
+                6 => owner.target.upstream_port = 2,
+                7 => owner.target.header.raw[4] &= !(7 << 29),
+                8 => {
+                    if let AdapterObservation::Present { capabilities, .. } =
+                        &mut owner.parent.as_mut().unwrap().adapters[0]
+                    {
+                        capabilities[0].offset = 8191;
+                    }
+                }
+                9 => {
+                    if let AdapterObservation::Present { capabilities, .. } =
+                        &mut owner.target.adapters[0]
+                    {
+                        capabilities.push(capabilities[0].clone());
+                    }
+                }
+                10 => owner.target.adapters[1] = router_adapter(2, 0x123456, Some(0x30)),
+                11 => {}
+                _ => unreachable!(),
+            }
+            let dropped = owner.dropped.clone();
+            // SAFETY: this exact synthetic requester/epoch represents negative
+            // metadata/prerequisites. No actual authority or write is fabricated.
+            assert!(
+                unsafe {
+                    Setup::new(
+                        channel,
+                        Arc::new(owner),
+                        if case == 11 { u64::MAX } else { 0 },
+                    )
+                }
+                .is_err()
+            );
+            assert!(model.state.lock().unwrap().writes.is_empty());
+            assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        }
+    }
+    #[test]
+    fn router_policy_conflicts_changed_identity_and_upstream_never_enumerate() {
+        use super::super::router::{Error, Setup};
+        for (mask, conflict, identity, upstream) in [
+            (0, 1 << 25, false, false),
+            (0, 1 << 24, false, false),
+            (0, 1 << 26, false, false),
+            (95, 1 << 25, false, false),
+            (79, 0, true, false),
+            (79, 0, false, true),
+        ] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let owner = Arc::new(router_owner(1, 2, mask));
+            let dropped = owner.dropped.clone();
+            let mut peer = RouterPeer::new(owner.clone(), mask);
+            peer.regs[5] |= conflict;
+            if identity {
+                peer.regs[0] ^= 1 << 16;
+            }
+            if upstream {
+                peer.override_upstream = Some(0);
+            }
+            // SAFETY: exact same negative synthetic ownership/inventory epoch.
+            let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+            setup.poll(0).unwrap();
+            let mut failed = false;
+            for n in 0..10 {
+                let reply = peer.respond(&domain, &model, n);
+                model.finish(Direction::Tx, n, &[], None);
+                finish_rx(&model, n, &reply);
+                match setup.poll(n as u64 + 1) {
+                    Err(Error::PolicyConflict(_)) if conflict != 0 => {
+                        failed = true;
+                        break;
+                    }
+                    Err(Error::ChangedInventory) if identity || upstream => {
+                        failed = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    _ => panic!("unexpected policy/identity result"),
+                }
+            }
+            assert!(failed);
+            assert!(
+                peer.writes.is_empty(),
+                "no enumeration before actual policy preflight"
+            );
+            let mut channel = setup.into_channel();
+            drop(peer);
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 1);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn router_ready_and_configured_deadlines_start_at_write_ack_and_never_extend() {
+        use super::super::router::{Error, Setup};
+        for configured_wait in [false, true] {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let owner = Arc::new(router_owner(1, 2, 79));
+            let dropped = owner.dropped.clone();
+            let mut peer = RouterPeer::new(owner.clone(), 79);
+            peer.hold_ready = !configured_wait;
+            peer.hold_configured = configured_wait;
+            // SAFETY: exact same isolated synthetic native reservation.
+            let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+            setup.poll(0).unwrap();
+            let mut ack = None;
+            for n in 0..40 {
+                let index = n % 10;
+                let previous = peer.writes.len();
+                let reply = peer.respond(&domain, &model, index);
+                let reached = peer.writes.len() > previous
+                    && peer.writes.last().is_some_and(|write| {
+                        write.space == 2
+                            && write.offset == 5
+                            && ((write.data[0] & (1 << 31) != 0) == configured_wait)
+                    });
+                model.finish(Direction::Tx, index, &[], None);
+                finish_rx(&model, index, &reply);
+                assert!(setup.poll(n as u64 + 1).unwrap().is_none());
+                if reached {
+                    ack = Some((n as u64 + 1, (index + 1) % 10));
+                    break;
+                }
+            }
+            let (ack, index) = ack.expect("actual setup/configuration-valid write ACK");
+            let reply = peer.respond(&domain, &model, index);
+            model.finish(Direction::Tx, index, &[], None);
+            finish_rx(&model, index, &reply);
+            // Readback consumes nearly the whole window; entering wait must not
+            // synthesize another now+500 deadline, even with no active request.
+            assert!(setup.poll(ack + 499).unwrap().is_none());
+            let writes = model.state.lock().unwrap().writes.len();
+            assert!(matches!(setup.poll(ack + 500), Err(Error::Timeout)));
+            assert!(matches!(setup.poll(ack + 501), Err(Error::Poisoned)));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            let mut channel = setup.into_channel();
+            drop(peer);
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn router_lost_ack_rejected_enumeration_and_unconsumed_receipt_retain_owner() {
+        use super::super::router::{Error, Setup};
+        for mode in 0..3 {
+            let (_source, domain, model, mut channel) = channel();
+            channel.start(0).unwrap();
+            let owner = Arc::new(router_owner(1, 2, 79));
+            let dropped = owner.dropped.clone();
+            let mut peer = RouterPeer::new(owner.clone(), 79);
+            peer.reject_header = mode == 1;
+            // SAFETY: exact same synthetic requester/epoch; published mutations
+            // remain owned through ACK loss, rejected readback or receipt drop.
+            let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+            if mode == 2 {
+                let configured = drive_router(&mut peer, &domain, &model, &mut setup);
+                drop(configured);
+            } else {
+                setup.poll(0).unwrap();
+                let mut failed = false;
+                for n in 0..20 {
+                    let index = n % 10;
+                    let previous = peer.writes.len();
+                    let reply = peer.respond(&domain, &model, index);
+                    if mode == 0 && peer.writes.len() > previous {
+                        assert!(matches!(setup.poll(n as u64 + 501), Err(Error::Timeout)));
+                        failed = true;
+                        break;
+                    }
+                    model.finish(Direction::Tx, index, &[], None);
+                    finish_rx(&model, index, &reply);
+                    match setup.poll(n as u64 + 1) {
+                        Err(Error::Readback) if mode == 1 => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("unexpected enumeration fault result"),
+                    }
+                }
+                assert!(failed);
+            }
+            let mut channel = setup.into_channel();
+            drop(peer);
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn router_full_tx_stage_deadline_clock_and_hotplug_cancel_are_explicit() {
+        use super::super::{
+            channel::Event,
+            config::{Address, Route, Space},
+            router::{Error, Setup},
+        };
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        for index in 0..9 {
+            channel
+                .read(
+                    Route::new(0).unwrap(),
+                    Address {
+                        port: 1,
+                        space: Space::Port,
+                        offset: 4,
+                        words: 1,
+                    },
+                    0,
+                    1000,
+                )
+                .unwrap();
+            finish_rx(
+                &model,
+                index,
+                &adapter_response(&domain, &model, index, 4, &[0]),
+            );
+            assert!(matches!(channel.poll(0), Ok(Some(Event::Completed { .. }))));
+        }
+        let owner = Arc::new(router_owner(0, 1, 0));
+        // SAFETY: exact same synthetic owner, idle request engine; old completed
+        // TX DMA is stalled and the real publication ring is physically full.
+        let mut setup = unsafe { Setup::new(channel, owner, 0) }.unwrap();
+        let writes = model.state.lock().unwrap().writes.len();
+        for now in [0, 1, 499] {
+            assert!(setup.poll(now).unwrap().is_none());
+        }
+        assert!(matches!(setup.poll(500), Err(Error::Timeout)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = setup.into_channel();
+        channel_release(&mut channel);
+        let (_source, _domain, model, mut channel) = self::channel();
+        channel.start(0).unwrap();
+        let owner = Arc::new(router_owner(0, 1, 0));
+        // SAFETY: exact same idle synthetic requester/reset/native reservation.
+        let mut setup = unsafe { Setup::new(channel, owner, 100) }.unwrap();
+        let writes = model.state.lock().unwrap().writes.len();
+        assert!(matches!(setup.poll(99), Err(Error::ClockRegressed)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = setup.into_channel();
+        channel_release(&mut channel);
+        for cancel in [false, true] {
+            let (_source, domain, model, mut channel) = self::channel();
+            channel.start(0).unwrap();
+            let owner = Arc::new(router_owner(0, 1, 0));
+            let dropped = owner.dropped.clone();
+            let mut peer = RouterPeer::new(owner.clone(), 0);
+            // SAFETY: same exact synthetic requester/epoch and native policy.
+            let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+            setup.poll(0).unwrap();
+            let reply = peer.respond(&domain, &model, 0);
+            model.finish(Direction::Tx, 0, &[], None);
+            finish_rx(&model, 0, &reply);
+            setup.poll(1).unwrap();
+            if cancel {
+                assert!(matches!(setup.cancel(), Err(Error::Cancelled)));
+            } else {
+                finish_rx(&model, 1, &incoming(PacketType::Event, &[0, 0, 1]));
+                assert!(matches!(setup.poll(2), Err(Error::Hotplug(_))));
+            }
+            assert!(matches!(setup.poll(3), Err(Error::Poisoned)));
+            let mut channel = setup.into_channel();
+            drop(peer);
+            drop(owner);
+            assert_eq!(dropped.load(Ordering::Relaxed), 0);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn router_parent_mode_read_error_never_becomes_a_guessed_tbt_link() {
+        use super::super::router::{Error, Setup};
+        let (_source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let owner = Arc::new(router_owner(1, 2, 79));
+        let dropped = owner.dropped.clone();
+        let mut peer = RouterPeer::new(owner.clone(), 79);
+        // SAFETY: same actual synthetic requester/epoch and reviewed parent
+        // capability; failed hardware access cannot invent fallback ownership.
+        let mut setup = unsafe { Setup::new(channel, owner.clone(), 0) }.unwrap();
+        setup.poll(0).unwrap();
+        for n in 0..3 {
+            let reply = if n < 2 {
+                peer.respond(&domain, &model, n)
+            } else {
+                let sent = domain.data(model.frame_address(Direction::Tx, n), 16);
+                assert_eq!(&sent[..8], &[0; 8]);
+                let address = u32::from_be_bytes(sent[8..12].try_into().unwrap());
+                assert_eq!(address & 0x1fff, 0x42);
+                assert_eq!((address >> 25) & 3, 1);
+                incoming(PacketType::Error, &[1 << 31, 0, 2])
+            };
+            model.finish(Direction::Tx, n, &[], None);
+            finish_rx(&model, n, &reply);
+            let result = setup.poll(n as u64 + 1);
+            if n < 2 {
+                assert!(result.unwrap().is_none());
+            } else {
+                assert!(matches!(result, Err(Error::Controller { code: 2, .. })));
+            }
+        }
+        assert!(peer.writes.is_empty());
+        let mut channel = setup.into_channel();
+        drop(peer);
+        drop(owner);
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
+    }
+    #[derive(Default)]
+    struct NativeCursor {
+        tx: usize,
+        rx: usize,
+        now: u64,
+    }
+    fn configured_router(
+        peer: &mut RouterPeer,
+        domain: &Domain,
+        model: &Model,
+        setup: &mut super::super::router::Setup<Model>,
+        cursor: &mut NativeCursor,
+    ) -> super::super::router::Configured {
+        use super::super::router::Event;
+        assert!(setup.poll(cursor.now).unwrap().is_none());
+        for _ in 0..100 {
+            let reply = peer.respond(domain, model, cursor.tx % 10);
+            model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+            finish_rx(model, cursor.rx % 10, &reply);
+            cursor.tx += 1;
+            cursor.rx += 1;
+            cursor.now += 1;
+            match setup.poll(cursor.now).unwrap() {
+                Some(Event::Configured(value)) => return value,
+                Some(Event::Discarded(error)) => panic!("{error:?}"),
+                None => {}
+            }
+        }
+        panic!("actual source router setup did not finish")
+    }
+    struct LinkReservation {
+        partners: super::super::link::Partners,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for LinkReservation {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: fixture owns actual reciprocal model lanes and both routers in
+    // this same synthetic NHI reset/topology epoch. No production topology,
+    // policy, power or attachment provider is fabricated by the driver.
+    unsafe impl super::super::link::Reservation for LinkReservation {
+        fn observed(&self) -> super::super::link::Partners {
+            self.partners
+        }
+    }
+    struct LinkFixture {
+        _source: Source,
+        domain: Arc<Domain>,
+        model: Arc<Model>,
+        channel: super::super::channel::Channel<Model>,
+        parent: super::super::router::Configured,
+        child: super::super::router::Configured,
+        reservation: Arc<LinkReservation>,
+        cursor: NativeCursor,
+        dropped: [Arc<AtomicUsize>; 3],
+    }
+    fn link_inventory(owner: &mut RouterOwner, max: u8, primary: u8) {
+        use super::super::topology::{AdapterObservation, Capability};
+        owner.target.header.raw[1] =
+            (owner.target.header.raw[1] & !(63 << 14)) | (u32::from(max) << 14);
+        owner.target.adapters = (1..=max)
+            .map(|port| {
+                let mut adapter =
+                    router_adapter(port, 1, if port == primary { Some(0x30) } else { None });
+                if let AdapterObservation::Present { capabilities, .. } = &mut adapter {
+                    capabilities.insert(
+                        0,
+                        Capability {
+                            offset: 8,
+                            id: 1,
+                            vendor_specific: None,
+                            length: None,
+                            next: if port == primary { 0x30 } else { 0 },
+                            raw: vec![1 << 8 | if port == primary { 0x30 } else { 0 }],
+                        },
+                    );
+                }
+                adapter
+            })
+            .collect();
+    }
+    fn add_path_usb3_adapter(inventory: &mut super::super::topology::Inventory, kind: u32) {
+        use super::super::topology::AdapterObservation;
+        let port = inventory.header.max_port() + 1;
+        inventory.header.raw[1] = (inventory.header.raw[1] & !(63 << 14)) | (u32::from(port) << 14);
+        let mut adapter = router_adapter(port, kind, Some(0x50));
+        if let AdapterObservation::Present {
+            header,
+            capabilities,
+            ..
+        } = &mut adapter
+        {
+            header.raw[1] = 0x50;
+            capabilities[0].id = 4;
+            capabilities[0].raw[0] = 4 << 8;
+        }
+        inventory.adapters.push(adapter);
+        for adapter in &mut inventory.adapters {
+            if let AdapterObservation::Present { header, .. } = adapter {
+                header.raw[5] = 127 | (127 << 11);
+            }
+        }
+    }
+    fn link_fixture(map: u8, mode: bool) -> LinkFixture {
+        link_fixture_with_usb3(map, mode, false)
+    }
+    fn link_fixture_with_usb3(map: u8, mode: bool, usb3: bool) -> LinkFixture {
+        use super::super::{link::Partners, router::Setup};
+        let (source, domain, model, mut channel) = channel();
+        channel.start(0).unwrap();
+        let mut cursor = NativeCursor::default();
+        let mask = 64 | if mode { 16 } else { 0 } | u32::from(usb3);
+        let mut parent_owner = router_owner(0, 1, mask);
+        link_inventory(
+            &mut parent_owner,
+            if map == 0 { 2 } else { 5 },
+            if map == 0 { 1 } else { 2 },
+        );
+        if usb3 {
+            add_path_usb3_adapter(&mut parent_owner.target, 0x200101);
+        }
+        let parent_owner = Arc::new(parent_owner);
+        let parent_drop = parent_owner.dropped.clone();
+        let mut peer = RouterPeer::new(parent_owner.clone(), mask);
+        // SAFETY: exact same synthetic NHI/domain/IMR epoch and actual current
+        // inventories with explicit model native policy; exclusive idle channel.
+        let mut setup = unsafe { Setup::new(channel, parent_owner.clone(), cursor.now) }.unwrap();
+        let parent = configured_router(&mut peer, &domain, &model, &mut setup, &mut cursor);
+        channel = setup.into_channel();
+        drop(peer);
+        let route = if map == 0 { 1 } else { 2 };
+        let mut child_owner = router_owner(route, 1, mask);
+        link_inventory(&mut child_owner, if map == 0 { 2 } else { 3 }, 1);
+        let mut current_parent = parent_owner.target.clone();
+        current_parent.header = parent.header.clone();
+        child_owner.parent = Some(current_parent);
+        if usb3 {
+            add_path_usb3_adapter(&mut child_owner.target, 0x200102);
+        }
+        let child_owner = Arc::new(child_owner);
+        let child_drop = child_owner.dropped.clone();
+        let mut peer = RouterPeer::new(child_owner.clone(), mask);
+        // SAFETY: same actual synthetic requester/epoch and already configured
+        // retained parent, exact current topology and native model policy.
+        let mut setup = unsafe { Setup::new(channel, child_owner.clone(), cursor.now) }.unwrap();
+        let child = configured_router(&mut peer, &domain, &model, &mut setup, &mut cursor);
+        channel = setup.into_channel();
+        drop(peer);
+        drop(parent_owner);
+        drop(child_owner);
+        let reservation_drop = Arc::new(AtomicUsize::new(0));
+        let reservation = Arc::new(LinkReservation {
+            partners: Partners {
+                identity: parent.identity,
+                topology_epoch: 2,
+                child: [1, if map == 0 { 2 } else { 3 }],
+                parent: if map == 0 { [1, 2] } else { [2, 5] },
+                observations: core::array::from_fn(|i| {
+                    let ports = if map == 0 { [1, 2, 1, 2] } else { [1, 3, 2, 5] };
+                    let routes = [child.route, child.route, parent.route, parent.route];
+                    super::super::link::ObservedLane {
+                        route: routes[i],
+                        port: ports[i],
+                        lane_index: (i % 2) as u8,
+                        dual_port: ports[i ^ 1],
+                        remote_route: routes[i ^ 2],
+                        remote_port: ports[i ^ 2],
+                    }
+                }),
+            },
+            dropped: reservation_drop.clone(),
+        });
+        LinkFixture {
+            _source: source,
+            domain,
+            model,
+            channel,
+            parent,
+            child,
+            reservation,
+            cursor,
+            dropped: [parent_drop, child_drop, reservation_drop],
+        }
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct LinkWrite {
+        index: usize,
+        offset: u16,
+        value: u32,
+    }
+    struct LinkPeer {
+        partners: super::super::link::Partners,
+        route: u64,
+        mode: bool,
+        phy: [[u32; 2]; 4],
+        credits: [u32; 4],
+        pc: [u32; 2],
+        writes: Vec<LinkWrite>,
+        bonding: bool,
+        bond_reads: u32,
+        hold_width: bool,
+        reject: Option<(usize, u16)>,
+        deny_bond: bool,
+        port_wait_state: Option<u8>,
+        secondary_reads: u32,
+    }
+    impl LinkPeer {
+        fn new(
+            partners: super::super::link::Partners,
+            generation: u8,
+            dual: bool,
+            mode: bool,
+            seed: u32,
+        ) -> Self {
+            let mut phy = [[0; 2]; 4];
+            let mut credits = [0; 4];
+            for i in 0..4 {
+                let mut word = (0x104234ab ^ (seed * 0x01804109) ^ ((i as u32) * 0x01010001))
+                    & !((15 << 16) | (63 << 20) | (15 << 26) | 0x30 | 0xc000);
+                word |= (if generation == 2 { 8 } else { 4 }) << 16;
+                word |= (if dual { 2 } else { 1 }) << 20;
+                word |= 2 << 26;
+                word |= 1 << 4;
+                if dual && i == 2 {
+                    word |= 1 << 15;
+                }
+                phy[i] = [
+                    (if i % 2 == 0 { 0x130 } else { 0x100 })
+                        | (2 << 20)
+                        | ((if generation == 2 { 8 } else { 12 }) << 16)
+                        | if mode { 1 << 31 } else { 0 },
+                    word,
+                ];
+                credits[i] = ((64 + seed + i as u32) << 20) | (8 + (seed + i as u32) % 4);
+            }
+            Self {
+                partners,
+                route: u64::from(partners.parent[0]),
+                mode,
+                phy,
+                credits,
+                pc: [0x14050101 ^ (seed * 0x10001); 2],
+                writes: vec![],
+                bonding: false,
+                bond_reads: 0,
+                hold_width: false,
+                reject: None,
+                deny_bond: false,
+                port_wait_state: None,
+                secondary_reads: 0,
+            }
+        }
+        fn respond(&mut self, domain: &Domain, model: &Model, index: usize) -> Encoded {
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+            let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+            let bytes = domain.data(
+                model.frame_address(Direction::Tx, index),
+                (descriptor & 0xfff) as usize,
+            );
+            let mut words: Vec<u32> = bytes[..bytes.len() - 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_be_bytes(*word))
+                .collect();
+            let route = (u64::from(words[0]) << 32) | u64::from(words[1]);
+            let address = words[2];
+            assert_eq!((address >> 25) & 3, 1);
+            let port = ((address >> 19) & 63) as u8;
+            let offset = (address & 0x1fff) as u16;
+            let count = ((address >> 13) & 63) as usize;
+            let lane = if route == self.route {
+                self.partners
+                    .child
+                    .iter()
+                    .position(|number| *number == port)
+                    .unwrap()
+            } else {
+                assert_eq!(route, 0);
+                2 + self
+                    .partners
+                    .parent
+                    .iter()
+                    .position(|number| *number == port)
+                    .unwrap()
+            };
+            let data = if kind == PacketType::Write {
+                assert_eq!(count, 1);
+                let value = words[3];
+                self.writes.push(LinkWrite {
+                    index: lane,
+                    offset,
+                    value,
+                });
+                match offset {
+                    9 => {
+                        self.phy[lane][1] = if self.reject == Some((lane, offset)) {
+                            value & !((3 << 4) | (1 << 15))
+                        } else {
+                            value
+                        };
+                        if lane == 2 && value & (1 << 15) != 0 {
+                            self.bonding = true;
+                            self.bond_reads = 0;
+                        }
+                    }
+                    0x43 => {
+                        assert!(lane == 0 || lane == 2);
+                        self.pc[lane / 2] = if self.reject == Some((lane, offset)) {
+                            value & !(1 << 3)
+                        } else {
+                            value
+                        };
+                    }
+                    _ => panic!("unsupported actual link write"),
+                }
+                vec![]
+            } else {
+                assert_eq!(kind, PacketType::Read);
+                if lane == 2 && offset == 9 && self.bonding {
+                    self.bond_reads += 1;
+                    if self.bond_reads >= 2 && !self.hold_width {
+                        for i in 0..4 {
+                            self.phy[i][1] = (self.phy[i][1] & !(63 << 20)) | (2 << 20);
+                            self.credits[i] += 32 << 20;
+                        }
+                        self.bonding = false;
+                    }
+                }
+                match (offset, count) {
+                    (8, 2) => {
+                        let mut data = self.phy[lane].to_vec();
+                        if lane == 3 {
+                            self.secondary_reads += 1;
+                            if self.secondary_reads > 1
+                                && let Some(state) = self.port_wait_state
+                            {
+                                data[1] = (data[1] & !(15 << 26)) | (u32::from(state) << 26);
+                            }
+                        }
+                        data
+                    }
+                    (8, 1) => vec![self.phy[lane][0]],
+                    (9, 1) => vec![self.phy[lane][1]],
+                    (4, 1) => vec![self.credits[lane]],
+                    (0x42, 1) => vec![
+                        if self.deny_bond { 0 } else { 1 << 8 }
+                            | if self.mode { 1 << 9 } else { 0 },
+                    ],
+                    (0x43, 1) => {
+                        assert!(lane == 0 || lane == 2);
+                        vec![self.pc[lane / 2]]
+                    }
+                    _ => panic!("unsupported actual link read"),
+                }
+            };
+            words.truncate(3);
+            words[0] |= 1 << 31;
+            words[2] = (address & !(63 << 19))
+                | if lane < 2 {
+                    u32::from(self.partners.child[0]) << 19
+                } else {
+                    0
+                };
+            words.extend(data);
+            incoming(kind, &words)
+        }
+    }
+    fn drive_link(
+        peer: &mut LinkPeer,
+        domain: &Domain,
+        model: &Model,
+        activate: &mut super::super::link::Activate<Model>,
+        cursor: &mut NativeCursor,
+    ) -> super::super::link::Linked {
+        use super::super::link::Event;
+        assert!(activate.poll(cursor.now).unwrap().is_none());
+        for _ in 0..150 {
+            let reply = peer.respond(domain, model, cursor.tx % 10);
+            model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+            finish_rx(model, cursor.rx % 10, &reply);
+            cursor.tx += 1;
+            cursor.rx += 1;
+            cursor.now += 1;
+            match activate.poll(cursor.now).unwrap() {
+                Some(Event::Linked(value)) => return *value,
+                Some(Event::Discarded(error)) => panic!("{error:?}"),
+                None => {}
+            }
+        }
+        panic!("actual native link activation did not finish")
+    }
+    #[test]
+    fn link_bonds_and_activates_both_actual_configured_routers_with_observed_nonadjacent_lanes() {
+        use super::super::link::Activate;
+        for map in 0..2 {
+            for generation in [2, 3] {
+                for dual in [false, true] {
+                    for mode in [false, true] {
+                        let LinkFixture {
+                            domain,
+                            model,
+                            channel,
+                            parent,
+                            child,
+                            reservation,
+                            mut cursor,
+                            dropped,
+                            ..
+                        } = link_fixture(map, mode);
+                        let mut peer =
+                            LinkPeer::new(reservation.partners, generation, dual, mode, 3);
+                        // SAFETY: actual same model NHI/reset/topology epoch, both source-
+                        // configured owners and observed reciprocal CL0 lanes/power grant.
+                        let mut activate = unsafe {
+                            Activate::new(channel, parent, child, reservation, cursor.now)
+                        }
+                        .unwrap();
+                        let linked =
+                            drive_link(&mut peer, &domain, &model, &mut activate, &mut cursor);
+                        assert_eq!(linked.generation, generation);
+                        assert_eq!(linked.link_usb4, !mode);
+                        assert_eq!((linked.parent_width >> 20) & 63, 2);
+                        assert_eq!((linked.child_width >> 20) & 63, 2);
+                        assert!(linked.configured.iter().all(|word| word & (1 << 3) != 0));
+                        assert_eq!(peer.writes.len(), if dual { 2 } else { 7 });
+                        for (credit, index) in linked.credits.iter().zip([2, 3, 0, 1]) {
+                            assert_eq!(credit.raw, peer.credits[index]);
+                        }
+                        let mut channel = activate.into_channel();
+                        assert!(
+                            dropped
+                                .iter()
+                                .all(|counter| counter.load(Ordering::Relaxed) == 0)
+                        );
+                        // SAFETY: both real synthetic configured/router/link reservations
+                        // transfer into independently retained CM lifetime through drain.
+                        unsafe { linked.retire() };
+                        assert!(
+                            dropped
+                                .iter()
+                                .all(|counter| counter.load(Ordering::Relaxed) == 1)
+                        );
+                        channel_release(&mut channel);
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    #[ignore = "requires hash-pinned unchanged Gen2/3 Linux link trace"]
+    fn unchanged_linux_link_bonding_credit_and_two_ended_write_trace_matches_actual_dma() {
+        use super::super::link::Activate;
+        use std::{env, fs};
+        let trace =
+            fs::read_to_string(env::var("STELA_THUNDERBOLT_LINK_ORACLE").expect("set link trace"))
+                .unwrap();
+        let mut cases = 0;
+        for line in trace.lines() {
+            let fields: Vec<_> = line.split_ascii_whitespace().collect();
+            assert_eq!(fields[0], "L");
+            let n = |i: usize| fields[i].parse::<u32>().unwrap();
+            let (map, generation, dual, mode, seed) =
+                (n(1) as u8, n(2) as u8, n(3) != 0, n(4) != 0, n(5));
+            let LinkFixture {
+                domain,
+                model,
+                channel,
+                parent,
+                child,
+                reservation,
+                mut cursor,
+                ..
+            } = link_fixture(map, mode);
+            let mut peer = LinkPeer::new(reservation.partners, generation, dual, mode, seed);
+            for i in 0..4 {
+                assert_eq!(peer.phy[i], [n(6 + i), n(10 + i)]);
+                assert_eq!(peer.credits[i], n(14 + i));
+            }
+            assert_eq!(peer.pc, [n(18), n(19)]);
+            // SAFETY: each isolated source fixture provides actual same native
+            // requester/epochs, configured leases and observed reciprocal map.
+            let mut activate =
+                unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+            let linked = drive_link(&mut peer, &domain, &model, &mut activate, &mut cursor);
+            assert_eq!(
+                linked
+                    .credits
+                    .iter()
+                    .map(|credit| credit.raw)
+                    .collect::<Vec<_>>(),
+                (20..24).map(n).collect::<Vec<_>>()
+            );
+            let count = n(24) as usize;
+            let mut at = 25;
+            let mut writes = vec![];
+            for _ in 0..count {
+                let side = n(at) as usize;
+                let port = n(at + 1) as u8;
+                let index = if side == 0 {
+                    peer.partners
+                        .child
+                        .iter()
+                        .position(|number| *number == port)
+                        .unwrap()
+                } else {
+                    2 + peer
+                        .partners
+                        .parent
+                        .iter()
+                        .position(|number| *number == port)
+                        .unwrap()
+                };
+                writes.push(LinkWrite {
+                    index,
+                    offset: n(at + 2) as u16,
+                    value: n(at + 3),
+                });
+                at += 4;
+            }
+            assert_eq!(at, fields.len());
+            assert_eq!(
+                peer.writes, writes,
+                "source map={map} gen={generation} dual={dual} mode={mode} seed={seed}"
+            );
+            let mut channel = activate.into_channel();
+            // SAFETY: completed actual synthetic link/routers are transferred
+            // to a retained independent model CM lifetime through final drain.
+            unsafe { linked.retire() };
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 512);
+    }
+    #[test]
+    fn link_unknown_epochs_partner_records_router_versions_and_policy_refuse_before_mutation() {
+        use super::super::link::{Activate, Error};
+        for case in 0..13 {
+            let LinkFixture {
+                domain,
+                model,
+                channel,
+                mut parent,
+                mut child,
+                mut reservation,
+                cursor,
+                dropped,
+                ..
+            } = link_fixture(1, false);
+            let observed = &mut Arc::get_mut(&mut reservation).unwrap().partners;
+            match case {
+                0 => observed.identity.epoch += 1,
+                1 => observed.topology_epoch = 0,
+                2 => observed.child[1] = 1,
+                3 => observed.parent[0] = 1,
+                4 => observed.parent[1] = 3,
+                5 => observed.observations[0].remote_port = 5,
+                6 => observed.observations[1].dual_port = 2,
+                7 => observed.observations[2].lane_index = 1,
+                8 => child.header.raw[4] = (child.header.raw[4] & !(7 << 29)) | (3 << 29),
+                9 => parent.identity.epoch += 1,
+                10 => child.setup_word = Some(1 << 24),
+                11 => child.link_usb4 = None,
+                12 => {}
+                _ => unreachable!(),
+            }
+            let writes = model.state.lock().unwrap().writes.len();
+            // SAFETY: all negative data is confined to this actual isolated
+            // synthetic requester. No native provider/authority is fabricated.
+            let result = unsafe {
+                Activate::new(
+                    channel,
+                    parent,
+                    child,
+                    reservation,
+                    if case == 12 { u64::MAX } else { cursor.now },
+                )
+            };
+            assert!(matches!(
+                result,
+                Err(Error::Identity
+                    | Error::Topology
+                    | Error::Unsupported
+                    | Error::Policy
+                    | Error::ClockOverflow)
+            ));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            assert_eq!(dropped[0].load(Ordering::Relaxed), 0);
+            assert_eq!(dropped[1].load(Ordering::Relaxed), 0);
+            assert_eq!(dropped[2].load(Ordering::Relaxed), 1);
+            drop(domain);
+        }
+    }
+    #[test]
+    fn link_unknown_phy_modes_asymmetry_and_missing_bonding_support_never_write_link() {
+        use super::super::link::{Activate, Error};
+        for case in 0..8 {
+            let LinkFixture {
+                domain,
+                model,
+                channel,
+                parent,
+                child,
+                reservation,
+                mut cursor,
+                ..
+            } = link_fixture(1, false);
+            let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
+            match case {
+                0 => peer.phy[0][1] = (peer.phy[0][1] & !(15 << 16)) | (2 << 16),
+                1 => peer.phy[0][1] &= !(15 << 16),
+                2 => peer.phy[1][1] = (peer.phy[1][1] & !(63 << 20)) | (4 << 20),
+                3 => peer.phy[1][1] = (peer.phy[1][1] & !(63 << 20)) | (2 << 20),
+                4 => peer.phy[0][1] = (peer.phy[0][1] & !(15 << 26)) | (3 << 26),
+                5 => peer.phy[2][0] &= !(2 << 20),
+                6 => peer.mode = true,
+                7 => peer.deny_bond = true,
+                _ => unreachable!(),
+            }
+            // SAFETY: exact same current synthetic configured leases/map; raw
+            // unsupported PHY and contradictory mode observations cannot grant
+            // a native transition or be replaced by successful defaults.
+            let mut activate =
+                unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+            activate.poll(cursor.now).unwrap();
+            let mut failed = false;
+            for _ in 0..20 {
+                let reply = peer.respond(&domain, &model, cursor.tx % 10);
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                cursor.tx += 1;
+                cursor.rx += 1;
+                cursor.now += 1;
+                match activate.poll(cursor.now) {
+                    Err(Error::Unsupported | Error::ChangedLink | Error::NotCl0) => {
+                        failed = true;
+                        break;
+                    }
+                    Ok(None) => {}
+                    _ => panic!("unexpected preflight outcome"),
+                }
+            }
+            assert!(failed);
+            assert!(peer.writes.is_empty());
+            let mut channel = activate.into_channel();
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn link_every_write_uncertainty_retains_both_routers_without_claiming_rollback() {
+        use super::super::link::{Activate, Error};
+        for target in 1..=7 {
+            for failure in 0..3 {
+                let LinkFixture {
+                    domain,
+                    model,
+                    channel,
+                    parent,
+                    child,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                    ..
+                } = link_fixture(1, false);
+                let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 1);
+                // SAFETY: exact same model NHI/domain/epochs and observed reciprocal
+                // CL0 lanes. Both configured owners remain real retained resources.
+                let mut activate =
+                    unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }
+                        .unwrap();
+                activate.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..100 {
+                    let tx = cursor.tx % 10;
+                    let rx = cursor.rx % 10;
+                    let descriptor = domain.read32(model.descriptor_address(Direction::Tx, tx) + 8);
+                    let is_write = ((descriptor >> 12) & 15) == PacketType::Write as u32;
+                    if failure == 2 && is_write && peer.writes.len() + 1 == target {
+                        let bytes = domain.data(model.frame_address(Direction::Tx, tx), 20);
+                        let route = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+                        let address = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+                        let port = ((address >> 19) & 63) as u8;
+                        let lane = if route == peer.route as u32 {
+                            peer.partners
+                                .child
+                                .iter()
+                                .position(|number| *number == port)
+                                .unwrap()
+                        } else {
+                            2 + peer
+                                .partners
+                                .parent
+                                .iter()
+                                .position(|number| *number == port)
+                                .unwrap()
+                        };
+                        peer.reject = Some((lane, (address & 0x1fff) as u16));
+                    }
+                    let mut reply = peer.respond(&domain, &model, tx);
+                    if is_write && peer.writes.len() == target && failure == 0 {
+                        assert!(matches!(
+                            activate.poll(cursor.now + 501),
+                            Err(Error::Timeout)
+                        ));
+                        cursor.now += 501;
+                        failed = true;
+                        break;
+                    }
+                    if is_write && peer.writes.len() == target && failure == 1 {
+                        let bytes = domain.data(model.frame_address(Direction::Tx, tx), 16);
+                        reply = incoming(
+                            PacketType::Error,
+                            &[
+                                u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
+                                u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                                2,
+                            ],
+                        );
+                    }
+                    model.finish(Direction::Tx, tx, &[], None);
+                    finish_rx(&model, rx, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match activate.poll(cursor.now) {
+                        Err(Error::Readback | Error::Controller { code: 2, .. }) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("unexpected partial-write outcome"),
+                    }
+                }
+                assert!(failed, "target={target} failure={failure}");
+                assert_eq!(peer.writes.len(), target);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(
+                    activate.poll(cursor.now + 1),
+                    Err(Error::Poisoned)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                let mut channel = activate.into_channel();
+                assert!(
+                    dropped
+                        .iter()
+                        .all(|counter| counter.load(Ordering::Relaxed) == 0),
+                    "both configured ends and changed link reservation must remain held"
+                );
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn link_bond_window_includes_readback_and_port_locked_retries_never_extend_it() {
+        use super::super::link::{Activate, Error};
+        for locked in [false, true] {
+            let LinkFixture {
+                domain,
+                model,
+                channel,
+                parent,
+                child,
+                reservation,
+                mut cursor,
+                dropped,
+                ..
+            } = link_fixture(1, false);
+            let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
+            peer.hold_width = true;
+            // SAFETY: exact same real synthetic configured owners/observations;
+            // delayed hardware or lock responses cannot replace actual readiness.
+            let mut activate =
+                unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+            activate.poll(cursor.now).unwrap();
+            let mut ack = None;
+            for _ in 0..200 {
+                // A lock retry waits at least1ms before publishing the next
+                // actual request. Do not fabricate a reply for an unused slot.
+                if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                    if let Some(ack) = ack
+                        && cursor.now + 1 >= ack + 99
+                    {
+                        break;
+                    }
+                    cursor.now += 1;
+                    assert!(activate.poll(cursor.now).unwrap().is_none());
+                    continue;
+                }
+                let before = peer.writes.len();
+                let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+                let bond_ack = peer.writes.len() > before
+                    && peer.writes.last().is_some_and(|write| {
+                        write.index == 2 && write.offset == 9 && write.value & (1 << 15) != 0
+                    });
+                if ack.is_some() && peer.bond_reads >= 1 && locked {
+                    reply = incoming(PacketType::Error, &[1 << 31, 0, 15]);
+                }
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                cursor.tx += 1;
+                cursor.rx += 1;
+                cursor.now = if let Some(ack) = ack {
+                    if locked { cursor.now + 1 } else { ack + 99 }
+                } else {
+                    cursor.now + 1
+                };
+                assert!(activate.poll(cursor.now).unwrap().is_none());
+                if bond_ack {
+                    ack = Some(cursor.now);
+                }
+                if let Some(ack) = ack
+                    && ((!locked && peer.bond_reads >= 1) || (locked && cursor.now >= ack + 99))
+                {
+                    break;
+                }
+            }
+            let ack = ack.expect("actual parent LB write ACK");
+            assert!(peer.bond_reads >= if locked { 2 } else { 1 });
+            let writes = model.state.lock().unwrap().writes.len();
+            assert!(matches!(activate.poll(ack + 100), Err(Error::Timeout)));
+            assert!(matches!(activate.poll(ack + 101), Err(Error::Poisoned)));
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            assert_eq!(peer.writes.len(), 5);
+            let mut channel = activate.into_channel();
+            assert!(
+                dropped
+                    .iter()
+                    .all(|counter| counter.load(Ordering::Relaxed) == 0)
+            );
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn link_secondary_connection_wait_obeys_ten_source_reads_and_hundred_ms_spacing() {
+        use super::super::link::{Activate, Error};
+        let LinkFixture {
+            domain,
+            model,
+            channel,
+            parent,
+            child,
+            reservation,
+            mut cursor,
+            dropped,
+            ..
+        } = link_fixture(1, false);
+        let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
+        peer.port_wait_state = Some(1);
+        // SAFETY: exact same actual synthetic partners/epochs; asynchronous
+        // secondary connection loss is observed from real config DMA replies.
+        let mut activate =
+            unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+        activate.poll(cursor.now).unwrap();
+        let mut tries = 0;
+        for _ in 0..30 {
+            let previous = peer.secondary_reads;
+            let reply = peer.respond(&domain, &model, cursor.tx % 10);
+            let waiting = peer.secondary_reads > previous && peer.secondary_reads > 1;
+            model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+            finish_rx(&model, cursor.rx % 10, &reply);
+            cursor.tx += 1;
+            cursor.rx += 1;
+            cursor.now += 1;
+            assert!(activate.poll(cursor.now).unwrap().is_none());
+            if waiting {
+                tries += 1;
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(activate.poll(cursor.now + 99).unwrap().is_none());
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                cursor.now += 100;
+                let result = activate.poll(cursor.now);
+                if tries == 10 {
+                    assert!(matches!(result, Err(Error::NoConnection)));
+                    break;
+                }
+                assert!(result.unwrap().is_none());
+            }
+        }
+        assert_eq!(tries, 10);
+        assert_eq!(peer.secondary_reads, 11);
+        assert!(peer.writes.is_empty());
+        let mut channel = activate.into_channel();
+        assert_eq!(dropped[0].load(Ordering::Relaxed), 0);
+        assert_eq!(dropped[1].load(Ordering::Relaxed), 0);
+        assert_eq!(dropped[2].load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
+    }
+    #[test]
+    fn link_receipt_storage_failure_refuses_before_publication_and_retains_active_routers() {
+        use super::super::link::{Activate, Error};
+        let LinkFixture {
+            domain,
+            model,
+            channel,
+            parent,
+            child,
+            reservation,
+            cursor,
+            dropped,
+            ..
+        } = link_fixture(1, false);
+        let writes = model.state.lock().unwrap().writes.len();
+        let unmaps = domain.state.lock().unwrap().unmaps;
+        // SAFETY: the same actual model NHI/epoch and configured owners are
+        // paired. The local null allocator deterministically refuses only this
+        // receipt; no global allocator or other test thread is affected.
+        let result = unsafe {
+            Activate::new_without_storage(channel, parent, child, reservation, cursor.now)
+        };
+        assert!(matches!(result, Err(Error::Allocation)));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        assert_eq!(domain.state.lock().unwrap().unmaps, unmaps);
+        // Already-configured routers and live channel DMA remain quarantined.
+        // The link reservation has never published a mutation and may retire.
+        assert_eq!(dropped[0].load(Ordering::Relaxed), 0);
+        assert_eq!(dropped[1].load(Ordering::Relaxed), 0);
+        assert_eq!(dropped[2].load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn link_full_publication_clock_revocation_and_unconsumed_success_keep_real_router_leases() {
+        use super::super::{
+            channel::Event,
+            config::{Address, Route, Space},
+            link::{Activate, Error},
+        };
+        let LinkFixture {
+            domain,
+            model,
+            mut channel,
+            parent,
+            child,
+            reservation,
+            mut cursor,
+            dropped,
+            ..
+        } = link_fixture(1, false);
+        for _ in 0..9 {
+            channel
+                .read(
+                    Route::new(0).unwrap(),
+                    Address {
+                        port: 1,
+                        space: Space::Port,
+                        offset: 4,
+                        words: 1,
+                    },
+                    cursor.now,
+                    cursor.now + 1000,
+                )
+                .unwrap();
+            let reply = adapter_response(&domain, &model, cursor.tx % 10, 4, &[0]);
+            finish_rx(&model, cursor.rx % 10, &reply);
+            cursor.tx += 1;
+            cursor.rx += 1;
+            cursor.now += 1;
+            assert!(matches!(
+                channel.poll(cursor.now),
+                Ok(Some(Event::Completed { .. }))
+            ));
+        }
+        // SAFETY: same exact native model reservations and idle channel; nine
+        // completed requests still occupy physically unconsumed TX descriptors.
+        let mut activate =
+            unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+        let writes = model.state.lock().unwrap().writes.len();
+        for offset in [0, 1, 499] {
+            assert!(activate.poll(cursor.now + offset).unwrap().is_none());
+        }
+        assert!(matches!(
+            activate.poll(cursor.now + 500),
+            Err(Error::Timeout)
+        ));
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        let mut channel = activate.into_channel();
+        assert_eq!(dropped[2].load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
+        for mode in 0..3 {
+            let LinkFixture {
+                domain,
+                model,
+                channel,
+                parent,
+                child,
+                reservation,
+                mut cursor,
+                dropped,
+                ..
+            } = link_fixture(1, false);
+            let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
+            // SAFETY: same exact actual configured owners/observations/epochs.
+            let mut activate =
+                unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+            if mode == 0 {
+                assert!(matches!(
+                    activate.poll(cursor.now - 1),
+                    Err(Error::ClockRegressed)
+                ));
+            } else if mode == 1 {
+                activate.poll(cursor.now).unwrap();
+                for _ in 0..100 {
+                    let reply = peer.respond(&domain, &model, cursor.tx % 10);
+                    model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(activate.poll(cursor.now).unwrap().is_none());
+                    if !peer.writes.is_empty() {
+                        break;
+                    }
+                }
+                assert!(matches!(activate.cancel(), Err(Error::Cancelled)));
+            } else {
+                let linked = drive_link(&mut peer, &domain, &model, &mut activate, &mut cursor);
+                drop(linked);
+            }
+            let mut channel = activate.into_channel();
+            assert_eq!(dropped[0].load(Ordering::Relaxed), 0);
+            assert_eq!(dropped[1].load(Ordering::Relaxed), 0);
+            assert_eq!(
+                dropped[2].load(Ordering::Relaxed),
+                if mode == 0 { 1 } else { 0 }
+            );
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn link_transient_port_lock_at_first_bond_readback_recovers_without_moving_window() {
+        use super::super::link::{Activate, Event};
+        let LinkFixture {
+            domain,
+            model,
+            channel,
+            parent,
+            child,
+            reservation,
+            mut cursor,
+            dropped,
+            ..
+        } = link_fixture(1, false);
+        let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 0);
+        // SAFETY: same exact real synthetic native/router/link reservations;
+        // temporary documented lock is a protocol response, not a new owner.
+        let mut activate =
+            unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+        activate.poll(cursor.now).unwrap();
+        let mut locked = false;
+        let mut result = None;
+        for _ in 0..150 {
+            if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                cursor.now += 1;
+                assert!(activate.poll(cursor.now).unwrap().is_none());
+                continue;
+            }
+            let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+            if peer.bond_reads == 1 && !locked {
+                reply = incoming(PacketType::Error, &[1 << 31, 0, 15]);
+                locked = true;
+            }
+            model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+            finish_rx(&model, cursor.rx % 10, &reply);
+            cursor.tx += 1;
+            cursor.rx += 1;
+            cursor.now += 1;
+            match activate.poll(cursor.now).unwrap() {
+                Some(Event::Linked(linked)) => {
+                    result = Some(linked);
+                    break;
+                }
+                None => {}
+                _ => panic!("unexpected link event"),
+            }
+        }
+        assert!(locked);
+        let linked = result.expect("actual both-ended transition after transient lock");
+        let mut channel = activate.into_channel();
+        // SAFETY: both actual model router/link leases transfer into retained
+        // independent native CM lifetime through real synthetic final drain.
+        unsafe { linked.retire() };
+        assert!(
+            dropped
+                .iter()
+                .all(|counter| counter.load(Ordering::Relaxed) == 1)
+        );
+        channel_release(&mut channel);
+    }
+    struct PathReservation {
+        allocation: super::super::path::Allocation,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for PathReservation {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: model retains actual protected IDs/credits/permission on the exact
+    // configured synthetic link. This supplies no production allocator/provider.
+    unsafe impl super::super::path::Reservation for PathReservation {
+        fn allocation(&self) -> super::super::path::Allocation {
+            self.allocation
+        }
+    }
+    struct PathFixture {
+        domain: Arc<Domain>,
+        model: Arc<Model>,
+        channel: super::super::channel::Channel<Model>,
+        linked: Box<super::super::link::Linked>,
+        reservation: Arc<PathReservation>,
+        cursor: NativeCursor,
+        dropped: [Arc<AtomicUsize>; 4],
+    }
+    fn path_fixture(
+        direction: super::super::path::Direction,
+        credits: super::super::path::LaneCredits,
+    ) -> PathFixture {
+        use super::super::{link::Activate, path::Allocation, router::Decision};
+        let LinkFixture {
+            domain,
+            model,
+            channel,
+            parent,
+            child,
+            reservation,
+            mut cursor,
+            dropped,
+            ..
+        } = link_fixture_with_usb3(1, false, true);
+        let mut peer = LinkPeer::new(reservation.partners, 3, false, false, 3);
+        // SAFETY: exact model NHI, both actual configured owners, observed lanes.
+        let mut activate =
+            unsafe { Activate::new(channel, parent, child, reservation, cursor.now) }.unwrap();
+        let linked = Box::new(drive_link(
+            &mut peer,
+            &domain,
+            &model,
+            &mut activate,
+            &mut cursor,
+        ));
+        let channel = activate.into_channel();
+        let (parent, child) = linked.retained_routers().unwrap();
+        let allocation = Allocation {
+            identity: linked.partners.identity,
+            topology_epoch: linked.partners.topology_epoch,
+            grant_epoch: 3,
+            direction,
+            usb3_down: parent.header.max_port(),
+            usb3_up: child.header.max_port(),
+            hops: [(8, 31), (31, 8)],
+            lane_credits: credits,
+            permission: Decision::Allowed,
+        };
+        let path_drop = Arc::new(AtomicUsize::new(0));
+        let reservation = Arc::new(PathReservation {
+            allocation,
+            dropped: path_drop.clone(),
+        });
+        PathFixture {
+            domain,
+            model,
+            channel,
+            linked,
+            reservation,
+            cursor,
+            dropped: [
+                dropped[0].clone(),
+                dropped[1].clone(),
+                dropped[2].clone(),
+                path_drop,
+            ],
+        }
+    }
+    struct PathPeer {
+        routes: [u64; 2],
+        ports: [u8; 2],
+        upstream: [u8; 2],
+        headers: [[u32; 8]; 2],
+        raw: [[u32; 2]; 2],
+        reads: [usize; 2],
+        disabled: [bool; 2],
+        writes: Vec<(usize, u8, u16, [u32; 2])>,
+        hold_pending: bool,
+        hold_hop: [bool; 2],
+        reject: Option<usize>,
+        changed_header: bool,
+        credit: u32,
+    }
+    impl PathPeer {
+        fn new(
+            linked: &super::super::link::Linked,
+            allocation: super::super::path::Allocation,
+            stale: bool,
+            seed: u32,
+        ) -> Self {
+            use super::super::{path::Direction, topology::AdapterObservation};
+            let (parent, child) = linked.retained_routers().unwrap();
+            let (source, destination, ports) = match allocation.direction {
+                Direction::Downstream => (
+                    parent,
+                    child,
+                    [allocation.usb3_down, linked.partners.child[0]],
+                ),
+                Direction::Upstream => (
+                    child,
+                    parent,
+                    [allocation.usb3_up, linked.partners.parent[0]],
+                ),
+            };
+            let owners = [source, destination];
+            let headers = core::array::from_fn(|i| {
+                owners[i]
+                    .retained_owner()
+                    .target()
+                    .adapters
+                    .iter()
+                    .find_map(|adapter| match adapter {
+                        AdapterObservation::Present { port, header, .. } if *port == ports[i] => {
+                            Some(header.raw)
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            });
+            Self {
+                routes: [source.route.raw(), destination.route.raw()],
+                ports,
+                upstream: [
+                    source.retained_owner().target().upstream_port,
+                    destination.retained_owner().target().upstream_port,
+                ],
+                headers,
+                raw: core::array::from_fn(|i| {
+                    [
+                        (0x12345678 ^ (seed * 0x104001) ^ (i as u32 * 0x13579)) & !(1 << 31)
+                            | if stale { 1 << 31 } else { 0 },
+                        (0xabcdef12 ^ (seed * 0x104101) ^ (i as u32 * 0x13579))
+                            | if stale { 1 << 28 } else { 0 },
+                    ]
+                }),
+                reads: [0; 2],
+                disabled: [false; 2],
+                writes: vec![],
+                hold_pending: false,
+                hold_hop: [false; 2],
+                reject: None,
+                changed_header: false,
+                credit: (100 << 20) | 8,
+            }
+        }
+        fn respond(&mut self, domain: &Domain, model: &Model, index: usize) -> Encoded {
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+            let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+            let bytes = domain.data(
+                model.frame_address(Direction::Tx, index),
+                (descriptor & 0xfff) as usize,
+            );
+            let mut words: Vec<u32> = bytes[..bytes.len() - 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|word| u32::from_be_bytes(*word))
+                .collect();
+            let route = (u64::from(words[0]) << 32) | u64::from(words[1]);
+            let address = words[2];
+            let port = ((address >> 19) & 63) as u8;
+            let lane = self
+                .routes
+                .iter()
+                .zip(self.ports)
+                .position(|(r, p)| *r == route && p == port)
+                .unwrap();
+            let space = (address >> 25) & 3;
+            let offset = address & 8191;
+            let count = ((address >> 13) & 63) as usize;
+            let data = if kind == PacketType::Write {
+                assert_eq!((space, count), (0, 2));
+                let value = [words[3], words[4]];
+                self.writes.push((lane, port, offset as u16, value));
+                if self.reject == Some(self.writes.len()) {
+                    self.raw[lane] = [value[0] ^ (1 << 31), value[1]];
+                } else {
+                    self.raw[lane] = value;
+                }
+                self.disabled[lane] = self.raw[lane][0] & (1 << 31) == 0;
+                if self.disabled[lane] {
+                    self.reads[lane] = 0;
+                }
+                vec![]
+            } else {
+                assert_eq!(kind, PacketType::Read);
+                match (space, offset, count) {
+                    (1, 0, 8) => {
+                        let mut data = self.headers[lane];
+                        if self.changed_header {
+                            data[2] ^= 1;
+                        }
+                        data.to_vec()
+                    }
+                    (1, 4, 1) => vec![self.credit],
+                    (0, _, 2) => {
+                        self.reads[lane] += 1;
+                        if self.disabled[lane]
+                            && self.reads[lane] >= 2
+                            && !self.hold_pending
+                            && !self.hold_hop[lane]
+                        {
+                            self.raw[lane][1] &= !(1 << 28);
+                        }
+                        self.raw[lane].to_vec()
+                    }
+                    _ => panic!("unexpected actual path read"),
+                }
+            };
+            words.truncate(3);
+            words[0] |= 1 << 31;
+            words[2] = (address & !(63 << 19)) | (u32::from(self.upstream[lane]) << 19);
+            words.extend(data);
+            incoming(kind, &words)
+        }
+    }
+    fn path_step(
+        peer: &mut PathPeer,
+        domain: &Domain,
+        model: &Model,
+        activate: &mut super::super::path::Activate<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Result<Option<super::super::path::Event>, super::super::path::Error> {
+        let producer = model.read32(TX_DESCRIPTOR + 8) >> 16;
+        if producer as usize == cursor.tx % 10 {
+            cursor.now += 1;
+            return activate.poll(cursor.now);
+        }
+        let reply = peer.respond(domain, model, cursor.tx % 10);
+        model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+        finish_rx(model, cursor.rx % 10, &reply);
+        cursor.tx += 1;
+        cursor.rx += 1;
+        cursor.now += 1;
+        activate.poll(cursor.now)
+    }
+    fn drive_path(
+        peer: &mut PathPeer,
+        domain: &Domain,
+        model: &Model,
+        activate: &mut super::super::path::Activate<Model>,
+        cursor: &mut NativeCursor,
+    ) -> super::super::path::Active {
+        use super::super::path::Event;
+        activate.poll(cursor.now).unwrap();
+        for _ in 0..100 {
+            match path_step(peer, domain, model, activate, cursor).unwrap() {
+                Some(Event::Active(value)) => return value,
+                Some(Event::Discarded(error)) => panic!("{error:?}"),
+                None => {}
+            }
+        }
+        panic!("actual path did not activate")
+    }
+    #[test]
+    fn path_actual_link_two_directions_credit_modes_stale_drain_and_retained_lifetime() {
+        use super::super::path::{Activate, Direction, LaneCredits};
+        for direction in [Direction::Downstream, Direction::Upstream] {
+            for credits in [LaneCredits::LegacyBonded, LaneCredits::RouterAllocated(23)] {
+                for stale in [false, true] {
+                    let PathFixture {
+                        domain,
+                        model,
+                        channel,
+                        linked,
+                        reservation,
+                        mut cursor,
+                        dropped,
+                    } = path_fixture(direction, credits);
+                    let mut peer = PathPeer::new(&linked, reservation.allocation, stale, 5);
+                    let protocol = peer.raw[0];
+                    // SAFETY: real model protected IDs/credits/permission and exact retained physical link.
+                    let mut activate =
+                        unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
+                    let active = drive_path(&mut peer, &domain, &model, &mut activate, &mut cursor);
+                    assert_eq!(peer.writes.len(), if stale { 4 } else { 2 });
+                    assert_eq!(
+                        active.words[0].raw[0] & (127 << 17),
+                        protocol[0] & (127 << 17)
+                    );
+                    assert_eq!(
+                        active.words[0].raw[1] & ((1 << 24) | (1 << 26)),
+                        protocol[1] & ((1 << 24) | (1 << 26))
+                    );
+                    assert_eq!(
+                        (active.words[1].raw[0] >> 17) & 127,
+                        match credits {
+                            LaneCredits::LegacyBonded => 32,
+                            LaneCredits::RouterAllocated(n) => u32::from(n),
+                        }
+                    );
+                    assert!(
+                        dropped
+                            .iter()
+                            .all(|counter| counter.load(Ordering::Relaxed) == 0)
+                    );
+                    let mut channel = activate.into_channel();
+                    // SAFETY: actual model complete path and all owners transfer into independently retained CM through final drain.
+                    unsafe { active.retire() };
+                    assert!(
+                        dropped
+                            .iter()
+                            .all(|counter| counter.load(Ordering::Relaxed) == 1)
+                    );
+                    channel_release(&mut channel);
+                }
+            }
+        }
+    }
+    #[test]
+    fn path_invalid_actual_grants_hop_bounds_and_mapping_refuse_before_publication() {
+        use super::super::path::{Activate, Direction, LaneCredits};
+        for case in 0..13 {
+            let PathFixture {
+                model,
+                channel,
+                mut linked,
+                reservation,
+                cursor,
+                dropped,
+                ..
+            } = path_fixture(Direction::Downstream, LaneCredits::LegacyBonded);
+            let mut allocation = reservation.allocation;
+            match case {
+                0 => allocation.identity.epoch += 1,
+                1 => allocation.topology_epoch += 1,
+                2 => allocation.grant_epoch = 0,
+                3 => allocation.permission = super::super::router::Decision::Unresolved,
+                4 => allocation.permission = super::super::router::Decision::Denied,
+                5 => allocation.usb3_down = linked.partners.parent[0],
+                6 => allocation.usb3_up = linked.partners.child[0],
+                7 => allocation.hops[0].0 = 9,
+                8 => allocation.hops[0].1 = 128,
+                9 => allocation.hops[1].0 = 30,
+                10 => allocation.lane_credits = LaneCredits::RouterAllocated(128),
+                11 => linked.link_usb4 = false,
+                12 => linked.partners.topology_epoch += 1,
+                _ => unreachable!(),
+            }
+            let replacement = Arc::new(PathReservation {
+                allocation,
+                dropped: dropped[3].clone(),
+            });
+            drop(reservation);
+            let writes = model.state.lock().unwrap().writes.len();
+            // SAFETY: same negative model pairing; invalid metadata must refuse without requests.
+            assert!(unsafe { Activate::new(channel, linked, replacement, cursor.now) }.is_err());
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            assert!(
+                dropped[..3]
+                    .iter()
+                    .all(|counter| counter.load(Ordering::Relaxed) == 0)
+            );
+            assert_eq!(dropped[3].load(Ordering::Relaxed), 2);
+        }
+    }
+    #[test]
+    fn path_each_disable_or_activation_write_failure_keeps_link_and_all_ids() {
+        use super::super::path::{Activate, Direction, Error, LaneCredits};
+        for target in 1..=4 {
+            for failure in 0..3 {
+                let PathFixture {
+                    domain,
+                    model,
+                    channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                } = path_fixture(Direction::Upstream, LaneCredits::RouterAllocated(19));
+                let mut peer = PathPeer::new(&linked, reservation.allocation, true, 1);
+                if failure == 2 {
+                    peer.reject = Some(target);
+                }
+                // SAFETY: exact protected model link, permission and resource reservation.
+                let mut activate =
+                    unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
+                activate.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..100 {
+                    let producer = model.read32(TX_DESCRIPTOR + 8) >> 16;
+                    if producer as usize == cursor.tx % 10 {
+                        cursor.now += 1;
+                        assert!(activate.poll(cursor.now).unwrap().is_none());
+                        continue;
+                    }
+                    let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+                    if peer.writes.len() == target && failure == 0 {
+                        assert!(matches!(
+                            activate.poll(cursor.now + 501),
+                            Err(Error::Timeout)
+                        ));
+                        cursor.now += 501;
+                        failed = true;
+                        break;
+                    }
+                    if peer.writes.len() == target && failure == 1 {
+                        let bytes = domain.data(
+                            model.frame_address(super::Direction::Tx, cursor.tx % 10),
+                            16,
+                        );
+                        reply = incoming(
+                            PacketType::Error,
+                            &[
+                                u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
+                                u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                                2,
+                            ],
+                        );
+                    }
+                    model.finish(super::Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match activate.poll(cursor.now) {
+                        Err(Error::Changed | Error::Readback | Error::Controller { .. }) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("unexpected path failure result"),
+                    }
+                }
+                assert!(failed, "target={target} failure={failure}");
+                assert_eq!(peer.writes.len(), target);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(
+                    activate.poll(cursor.now + 1),
+                    Err(Error::Poisoned)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                let mut channel = activate.into_channel();
+                assert!(
+                    dropped
+                        .iter()
+                        .all(|counter| counter.load(Ordering::Relaxed) == 0)
+                );
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn path_header_credit_refusal_and_stale_pending_deadline_cannot_claim_restoration() {
+        use super::super::path::{Activate, Direction, Error, LaneCredits};
+        for case in 0..3 {
+            let PathFixture {
+                domain,
+                model,
+                channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            } = path_fixture(Direction::Downstream, LaneCredits::LegacyBonded);
+            let mut peer = PathPeer::new(&linked, reservation.allocation, true, 4);
+            peer.changed_header = case == 0;
+            peer.credit = if case == 1 {
+                (32 << 20) | 8
+            } else {
+                peer.credit
+            };
+            peer.hold_pending = case == 2;
+            // SAFETY: exact owned synthetic path with negative device effects.
+            let mut activate =
+                unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
+            activate.poll(cursor.now).unwrap();
+            let mut failed = false;
+            let mut disabled_ack = None;
+            for _ in 0..600 {
+                match path_step(&mut peer, &domain, &model, &mut activate, &mut cursor) {
+                    Err(Error::Changed | Error::Credits | Error::Timeout) => {
+                        failed = true;
+                        break;
+                    }
+                    Ok(None) => {
+                        if !peer.writes.is_empty() {
+                            disabled_ack.get_or_insert(cursor.now);
+                        }
+                    }
+                    _ => panic!("unexpected pending/refusal outcome"),
+                }
+            }
+            assert!(failed);
+            if case == 2 {
+                assert_eq!(
+                    cursor.now,
+                    disabled_ack.expect("actual disable ACK") + 500,
+                    "repeated pending reads must not extend the ACK-anchored drain window"
+                );
+            }
+            assert_eq!(peer.writes.len(), usize::from(case == 2));
+            let mut channel = activate.into_channel();
+            assert!(
+                dropped[..3]
+                    .iter()
+                    .all(|counter| counter.load(Ordering::Relaxed) == 0)
+            );
+            assert_eq!(dropped[3].load(Ordering::Relaxed), usize::from(case != 2));
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    #[ignore = "requires unchanged Linux two-hop path oracle trace"]
+    fn unchanged_linux_path_usb3_complete_write_trace_matches_actual_dma() {
+        use super::super::path::{Activate, Direction, LaneCredits};
+        let text = std::fs::read_to_string(
+            std::env::var("STELA_THUNDERBOLT_PATH_ORACLE").expect("set oracle trace path"),
+        )
+        .unwrap();
+        let mut cases = 0;
+        for line in text.lines() {
+            let values: Vec<u32> = line
+                .split_ascii_whitespace()
+                .skip(1)
+                .map(|s| s.parse().unwrap())
+                .collect();
+            let [direction, mode, stale, seed] = values[..4] else {
+                panic!("oracle case header")
+            };
+            let direction = if direction == 0 {
+                Direction::Downstream
+            } else {
+                Direction::Upstream
+            };
+            let credits = if mode == 0 {
+                LaneCredits::LegacyBonded
+            } else {
+                LaneCredits::RouterAllocated((17 + seed % 31) as u8)
+            };
+            let PathFixture {
+                domain,
+                model,
+                channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            } = path_fixture(direction, credits);
+            let mut peer = PathPeer::new(&linked, reservation.allocation, stale != 0, seed);
+            peer.raw = [[values[4], values[5]], [values[6], values[7]]];
+            let count = values[8] as usize;
+            let expected: Vec<_> = values[9..9 + count * 5]
+                .as_chunks::<5>()
+                .0
+                .iter()
+                .map(|v| (v[0] as usize, v[1] as u8, v[2] as u16, [v[3], v[4]]))
+                .collect();
+            let final_words = &values[9 + count * 5..];
+            assert_eq!(final_words.len(), 4);
+            // SAFETY: same actual fixture link and independently protected model allocations/grants.
+            let mut activate =
+                unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
+            let active = drive_path(&mut peer, &domain, &model, &mut activate, &mut cursor);
+            assert_eq!(peer.writes, expected, "case={cases}");
+            assert_eq!(active.words[0].raw, final_words[..2], "case={cases}");
+            assert_eq!(active.words[1].raw, final_words[2..], "case={cases}");
+            let mut channel = activate.into_channel();
+            // SAFETY: all native synthetic owners transfer across actual model final drain.
+            unsafe { active.retire() };
+            assert!(
+                dropped
+                    .iter()
+                    .all(|counter| counter.load(Ordering::Relaxed) == 1)
+            );
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 512);
+    }
+    #[test]
+    fn path_publication_stall_clock_revocation_and_unconsumed_success_are_contained() {
+        use super::super::{
+            config::{Address, Route, Space},
+            path::{Activate, Direction, Error, LaneCredits},
+        };
+        for mode in 0..5 {
+            let PathFixture {
+                domain,
+                model,
+                mut channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            } = path_fixture(Direction::Downstream, LaneCredits::LegacyBonded);
+            let mut peer = PathPeer::new(&linked, reservation.allocation, false, 2);
+            if mode == 0 {
+                for _ in 0..9 {
+                    channel
+                        .read(
+                            Route::new(0).unwrap(),
+                            Address {
+                                port: 1,
+                                space: Space::Port,
+                                offset: 4,
+                                words: 1,
+                            },
+                            cursor.now,
+                            cursor.now + 1000,
+                        )
+                        .unwrap();
+                    let reply = adapter_response(&domain, &model, cursor.tx % 10, 4, &[0]);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(
+                        channel.poll(cursor.now),
+                        Ok(Some(super::super::channel::Event::Completed { .. }))
+                    ));
+                }
+            }
+            // SAFETY: protected real synthetic link and idle channel; mode0 leaves physical TX DMA unconsumed.
+            let mut activate =
+                unsafe { Activate::new(channel, linked, reservation, cursor.now) }.unwrap();
+            if mode == 0 {
+                let writes = model.state.lock().unwrap().writes.len();
+                for delta in [0, 1, 499] {
+                    assert!(activate.poll(cursor.now + delta).unwrap().is_none());
+                }
+                assert!(matches!(
+                    activate.poll(cursor.now + 500),
+                    Err(Error::Timeout)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            } else if mode == 1 {
+                assert!(matches!(
+                    activate.poll(cursor.now - 1),
+                    Err(Error::ClockRegressed)
+                ));
+            } else if mode == 4 {
+                let active = drive_path(&mut peer, &domain, &model, &mut activate, &mut cursor);
+                drop(active);
+            } else {
+                activate.poll(cursor.now).unwrap();
+                for _ in 0..20 {
+                    assert!(
+                        path_step(&mut peer, &domain, &model, &mut activate, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    if !peer.writes.is_empty() {
+                        break;
+                    }
+                }
+                assert_eq!(peer.writes.len(), 1);
+                if mode == 2 {
+                    assert!(matches!(activate.cancel(), Err(Error::Cancelled)));
+                } else {
+                    let event = incoming(PacketType::Event, &[0, 0, 1]);
+                    finish_rx(&model, cursor.rx % 10, &event);
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(activate.poll(cursor.now), Err(Error::Hotplug(_))));
+                }
+            }
+            let mut channel = activate.into_channel();
+            assert!(
+                dropped[..3]
+                    .iter()
+                    .all(|counter| counter.load(Ordering::Relaxed) == 0)
+            );
+            assert_eq!(dropped[3].load(Ordering::Relaxed), usize::from(mode < 2));
+            channel_release(&mut channel);
+        }
+    }
+    struct BandwidthReservation {
+        current: Arc<AtomicBool>,
+        grant: super::super::usb3::Grant,
+        dropped: Arc<AtomicUsize>,
+    }
+    impl Drop for BandwidthReservation {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    // SAFETY: actual synthetic domain accounting and permission protect this
+    // exact root/peer link and source floor/quantization throughout the phase.
+    // When used by tunnel fixtures it also retains actual exclusive synthetic
+    // CS0 endpoint control on both mapped adapters through final owner lifetime.
+    // These fixtures implement no production accounting/policy/control service.
+    unsafe impl super::super::usb3::Reservation for BandwidthReservation {
+        fn is_current(&self) -> bool {
+            self.current.load(Ordering::Acquire)
+        }
+        fn grant(&self) -> super::super::usb3::Grant {
+            self.grant
+        }
+    }
+    fn bandwidth_fixture(
+        requested: super::super::usb3::Rates,
+    ) -> (PathFixture, Arc<BandwidthReservation>, Arc<AtomicUsize>) {
+        use super::super::{
+            path::{Direction, LaneCredits},
+            usb3::Grant,
+        };
+        let fixture = path_fixture(Direction::Downstream, LaneCredits::LegacyBonded);
+        let allocation = fixture.reservation.allocation;
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let reservation = Arc::new(BandwidthReservation {
+            current: Arc::new(AtomicBool::new(true)),
+            grant: Grant {
+                identity: allocation.identity,
+                topology_epoch: allocation.topology_epoch,
+                grant_epoch: allocation.grant_epoch,
+                usb3_down: allocation.usb3_down,
+                usb3_up: allocation.usb3_up,
+                permission: allocation.permission,
+                requested,
+            },
+            dropped: dropped.clone(),
+        });
+        (fixture, reservation, dropped)
+    }
+    struct BandwidthPeer {
+        port: u8,
+        header: [u32; 8],
+        control: u32,
+        consumed: u32,
+        scale: u32,
+        writes: Vec<(u16, u32)>,
+        transition: Option<bool>,
+        polls: usize,
+        hold: [bool; 2],
+        reject: Option<usize>,
+    }
+    impl BandwidthPeer {
+        fn new(
+            link: &super::super::link::Linked,
+            grant: super::super::usb3::Grant,
+            seed: u32,
+        ) -> Self {
+            use super::super::topology::AdapterObservation;
+            let parent = link.retained_routers().unwrap().0;
+            let header = parent
+                .retained_owner()
+                .target()
+                .adapters
+                .iter()
+                .find_map(|a| match a {
+                    AdapterObservation::Present { port, header, .. }
+                        if *port == grant.usb3_down =>
+                    {
+                        Some(header.raw)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            Self {
+                port: grant.usb3_down,
+                header,
+                control: (0x12345678 ^ (seed * 0x10201)) & !(1 << 31),
+                consumed: (seed % 256) | (((seed * 3) % 256) << 12),
+                scale: (seed % 4) | 0x30000000,
+                writes: vec![],
+                transition: None,
+                polls: 0,
+                hold: [false; 2],
+                reject: None,
+            }
+        }
+        fn respond(&mut self, domain: &Domain, model: &Model, index: usize) -> Encoded {
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+            let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+            let bytes = domain.data(
+                model.frame_address(Direction::Tx, index),
+                (descriptor & 0xfff) as usize,
+            );
+            let mut words: Vec<u32> = bytes[..bytes.len() - 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| u32::from_be_bytes(*v))
+                .collect();
+            let address = words[2];
+            assert_eq!((words[0], words[1]), (0, 0));
+            assert_eq!((address >> 25) & 3, 1);
+            assert_eq!(((address >> 19) & 63) as u8, self.port);
+            let offset = (address & 8191) as u16;
+            let data = if kind == PacketType::Write {
+                assert_eq!((address >> 13) & 63, 1);
+                let value = words[3];
+                self.writes.push((offset, value));
+                let reject = self.reject == Some(self.writes.len());
+                match offset {
+                    0x52 => {
+                        let old = self.control;
+                        self.control = if reject {
+                            value ^ if self.writes.len() == 3 { 1 } else { 1 << 31 }
+                        } else {
+                            value
+                        };
+                        if (old ^ value) & (1 << 31) != 0 {
+                            self.transition = Some(value & (1 << 31) != 0);
+                            self.polls = 0;
+                        }
+                    }
+                    0x53 => self.scale = if reject { value ^ 1 } else { value },
+                    _ => panic!("unexpected source bandwidth write"),
+                };
+                vec![]
+            } else {
+                assert_eq!(kind, PacketType::Read);
+                match offset {
+                    0 => self.header.to_vec(),
+                    0x51 => {
+                        if let Some(set) = self.transition {
+                            self.polls += 1;
+                            if self.polls >= 2 && !self.hold[usize::from(!set)] {
+                                self.consumed =
+                                    (self.consumed & !(1 << 31)) | if set { 1 << 31 } else { 0 };
+                                self.transition = None;
+                            }
+                        }
+                        vec![self.consumed]
+                    }
+                    0x52 => vec![self.control],
+                    0x53 => vec![self.scale],
+                    _ => panic!("unexpected bandwidth read"),
+                }
+            };
+            words.truncate(3);
+            words[0] |= 1 << 31;
+            words[2] &= !(63 << 19);
+            words.extend(data);
+            incoming(kind, &words)
+        }
+    }
+    fn bandwidth_step(
+        peer: &mut BandwidthPeer,
+        domain: &Domain,
+        model: &Model,
+        allocate: &mut super::super::usb3::Allocate<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Result<Option<super::super::usb3::Event>, super::super::usb3::Error> {
+        if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+            cursor.now += 1;
+            return allocate.poll(cursor.now);
+        }
+        let reply = peer.respond(domain, model, cursor.tx % 10);
+        model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+        finish_rx(model, cursor.rx % 10, &reply);
+        cursor.tx += 1;
+        cursor.rx += 1;
+        cursor.now += 1;
+        allocate.poll(cursor.now)
+    }
+    fn drive_bandwidth(
+        peer: &mut BandwidthPeer,
+        domain: &Domain,
+        model: &Model,
+        allocate: &mut super::super::usb3::Allocate<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Box<super::super::usb3::Allocated> {
+        use super::super::usb3::Event;
+        allocate.poll(cursor.now).unwrap();
+        for _ in 0..100 {
+            match bandwidth_step(peer, domain, model, allocate, cursor).unwrap() {
+                Some(Event::Allocated(value)) => return value,
+                Some(Event::Discarded(error)) => panic!("{error:?}"),
+                None => {}
+            }
+        }
+        panic!("actual HCA transitions did not finish")
+    }
+    #[test]
+    fn bandwidth_actual_hca_consumed_floor_scale_and_original_link_move_into_path() {
+        use super::super::{
+            path::Activate,
+            usb3::{Allocate, Rates},
+        };
+        let (
+            PathFixture {
+                domain,
+                model,
+                channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            },
+            accounting,
+            accounting_drop,
+        ) = bandwidth_fixture(Rates {
+            upstream: 1,
+            downstream: 18000,
+        });
+        let mut peer = BandwidthPeer::new(&linked, accounting.grant, 13);
+        let mut path_peer = PathPeer::new(&linked, reservation.allocation, false, 3);
+        // SAFETY: exact actual synthetic accounting/permission/link/controller.
+        let mut allocate =
+            unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+        let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
+        assert!(allocated.allocated.upstream > 1);
+        assert_eq!(allocated.allocated.downstream, 18000);
+        assert_eq!(peer.writes.len(), 4);
+        assert_eq!(peer.control >> 31, 0);
+        assert_eq!(peer.consumed >> 31, 0);
+        let channel = allocate.into_channel();
+        // SAFETY: consume same protected grant/endpoint/link epoch; no copied ownership.
+        let mut activate =
+            unsafe { Activate::with_bandwidth(channel, allocated, reservation, cursor.now) }
+                .unwrap();
+        let active = drive_path(&mut path_peer, &domain, &model, &mut activate, &mut cursor);
+        let mut channel = activate.into_channel();
+        assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 0));
+        assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
+        // SAFETY: complete actual synthetic path/bandwidth/link native lifetime transfer.
+        unsafe { active.retire() };
+        assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));
+        assert_eq!(accounting_drop.load(Ordering::Relaxed), 1);
+        channel_release(&mut channel);
+    }
+    #[test]
+    fn bandwidth_each_cmr_scale_allocation_clear_write_failure_retains_actual_accounting() {
+        use super::super::usb3::{Allocate, Error, Rates};
+        for target in 1..=4 {
+            for failure in 0..3 {
+                let (
+                    PathFixture {
+                        domain,
+                        model,
+                        channel,
+                        linked,
+                        reservation,
+                        mut cursor,
+                        dropped,
+                    },
+                    accounting,
+                    accounting_drop,
+                ) = bandwidth_fixture(Rates {
+                    upstream: 10000,
+                    downstream: 18000,
+                });
+                drop(reservation);
+                let mut peer = BandwidthPeer::new(&linked, accounting.grant, 7);
+                if failure == 2 {
+                    peer.reject = Some(target);
+                }
+                // SAFETY: protected real synthetic CM grant and exact physical pairing.
+                let mut allocate =
+                    unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+                allocate.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..100 {
+                    if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                        cursor.now += 1;
+                        assert!(allocate.poll(cursor.now).unwrap().is_none());
+                        continue;
+                    }
+                    let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+                    if peer.writes.len() == target && failure == 0 {
+                        assert!(matches!(
+                            allocate.poll(cursor.now + 1501),
+                            Err(Error::Timeout)
+                        ));
+                        cursor.now += 1501;
+                        failed = true;
+                        break;
+                    }
+                    if peer.writes.len() == target && failure == 1 {
+                        let bytes =
+                            domain.data(model.frame_address(Direction::Tx, cursor.tx % 10), 16);
+                        reply = incoming(
+                            PacketType::Error,
+                            &[
+                                u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
+                                u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                                2,
+                            ],
+                        );
+                    }
+                    model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match allocate.poll(cursor.now) {
+                        Err(Error::Readback | Error::Controller { .. }) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("unexpected bandwidth write outcome"),
+                    }
+                }
+                assert!(failed, "write={target} failure={failure}");
+                assert_eq!(peer.writes.len(), target);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(
+                    allocate.poll(cursor.now + 1),
+                    Err(Error::Poisoned)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                let mut channel = allocate.into_channel();
+                assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+                assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn bandwidth_both_hca_windows_start_at_ack_and_never_extend() {
+        use super::super::usb3::{Allocate, Error, Rates};
+        for clear in [false, true] {
+            let (
+                PathFixture {
+                    domain,
+                    model,
+                    channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: 1000,
+                downstream: 2000,
+            });
+            drop(reservation);
+            let mut peer = BandwidthPeer::new(&linked, accounting.grant, 9);
+            peer.hold[usize::from(clear)] = true;
+            // SAFETY: real synthetic owner with stalled device HCA transition.
+            let mut allocate =
+                unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+            allocate.poll(cursor.now).unwrap();
+            let mut ack = None;
+            let mut failed = false;
+            let target = if clear { 4 } else { 1 };
+            for _ in 0..2000 {
+                match bandwidth_step(&mut peer, &domain, &model, &mut allocate, &mut cursor) {
+                    Err(Error::Timeout) => {
+                        failed = true;
+                        break;
+                    }
+                    Ok(None) => {
+                        if peer.writes.len() == target {
+                            ack.get_or_insert(cursor.now);
+                        }
+                    }
+                    _ => panic!("HCA stall claimed success"),
+                }
+            }
+            assert!(failed);
+            assert_eq!(cursor.now, ack.expect("actual source write ACK") + 1500);
+            assert_eq!(peer.writes.len(), target);
+            let mut channel = allocate.into_channel();
+            assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+            assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn bandwidth_invalid_native_grants_and_storage_refuse_before_publication() {
+        use super::super::usb3::{Allocate, Rates};
+        for case in 0..11 {
+            let (
+                PathFixture {
+                    model,
+                    channel,
+                    mut linked,
+                    reservation,
+                    cursor,
+                    dropped,
+                    ..
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: 1000,
+                downstream: 2000,
+            });
+            drop(reservation);
+            let mut grant = accounting.grant;
+            match case {
+                0 => grant.identity.epoch += 1,
+                1 => grant.topology_epoch += 1,
+                2 => grant.grant_epoch = 0,
+                3 => grant.permission = super::super::router::Decision::Denied,
+                4 => grant.permission = super::super::router::Decision::Unresolved,
+                5 => grant.usb3_down = linked.partners.parent[0],
+                6 => grant.usb3_up = linked.partners.child[0],
+                7 => grant.requested.upstream = u32::MAX,
+                8 => linked.link_usb4 = false,
+                9 | 10 => {}
+                _ => unreachable!(),
+            };
+            let replacement = Arc::new(BandwidthReservation {
+                current: accounting.current.clone(),
+                grant,
+                dropped: accounting_drop.clone(),
+            });
+            drop(accounting);
+            let writes = model.state.lock().unwrap().writes.len();
+            // SAFETY: exact negative synthetic pairing; invalid metadata/storage must refuse.
+            let result = unsafe {
+                if case == 9 {
+                    Allocate::new_without_storage(channel, linked, replacement, cursor.now)
+                } else {
+                    Allocate::new(
+                        channel,
+                        linked,
+                        replacement,
+                        if case == 10 { u64::MAX } else { cursor.now },
+                    )
+                }
+            };
+            assert!(result.is_err());
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+            assert_eq!(accounting_drop.load(Ordering::Relaxed), 2);
+        }
+    }
+    #[test]
+    fn bandwidth_busy_controller_encoding_and_unconsumed_receipts_keep_original_owners() {
+        use super::super::usb3::{Allocate, Error, Rates};
+        for case in 0..5 {
+            let (
+                PathFixture {
+                    domain,
+                    model,
+                    channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: 1000,
+                downstream: 2000,
+            });
+            drop(reservation);
+            let mut peer = BandwidthPeer::new(&linked, accounting.grant, 9);
+            match case {
+                0 => peer.control |= 1 << 31,
+                1 => peer.consumed |= 1 << 31,
+                2 => peer.header[2] ^= 1,
+                3 => peer.scale = 63,
+                4 => {}
+                _ => unreachable!(),
+            };
+            // SAFETY: exact retained synthetic physical controller/accounting grant.
+            let mut allocate =
+                unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+            if case == 4 {
+                let allocated =
+                    drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
+                drop(allocated);
+            } else {
+                allocate.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..50 {
+                    match bandwidth_step(&mut peer, &domain, &model, &mut allocate, &mut cursor) {
+                        Err(Error::Busy | Error::Changed | Error::Encoding) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("invalid controller state admitted"),
+                    }
+                }
+                assert!(failed);
+                assert_eq!(peer.writes.len(), usize::from(case == 3));
+            }
+            let mut channel = allocate.into_channel();
+            assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+            assert_eq!(
+                accounting_drop.load(Ordering::Relaxed),
+                usize::from(case < 3)
+            );
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn bandwidth_path_composition_wrong_permission_epoch_never_copies_authority() {
+        use super::super::{
+            path::Activate,
+            usb3::{Allocate, Rates},
+        };
+        let (
+            PathFixture {
+                domain,
+                model,
+                channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            },
+            accounting,
+            accounting_drop,
+        ) = bandwidth_fixture(Rates {
+            upstream: 1000,
+            downstream: 2000,
+        });
+        let mut peer = BandwidthPeer::new(&linked, accounting.grant, 0);
+        // SAFETY: actual matching protected synthetic link and native grant.
+        let mut allocate =
+            unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+        let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
+        let channel = allocate.into_channel();
+        let mut allocation = reservation.allocation;
+        allocation.grant_epoch += 1;
+        let replacement = Arc::new(PathReservation {
+            allocation,
+            dropped: dropped[3].clone(),
+        });
+        drop(reservation);
+        let writes = model.state.lock().unwrap().writes.len();
+        // SAFETY: metadata mismatch is a negative actual-model pairing; no request permitted.
+        assert!(
+            unsafe { Activate::with_bandwidth(channel, allocated, replacement, cursor.now) }
+                .is_err()
+        );
+        assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+        assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+        assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    #[ignore = "requires unchanged Linux root USB3 bandwidth oracle"]
+    fn unchanged_linux_usb3_bandwidth_complete_writes_and_rates_match_actual_dma() {
+        use super::super::usb3::{Allocate, Rates};
+        let text = std::fs::read_to_string(
+            std::env::var("STELA_USB3_BANDWIDTH_ORACLE").expect("set oracle trace path"),
+        )
+        .unwrap();
+        let mut cases = 0;
+        for line in text.lines() {
+            let v: Vec<u32> = line
+                .split_ascii_whitespace()
+                .skip(1)
+                .map(|s| s.parse().unwrap())
+                .collect();
+            let count = v[8] as usize;
+            let (
+                PathFixture {
+                    domain,
+                    model,
+                    channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: v[1],
+                downstream: v[2],
+            });
+            drop(reservation);
+            let mut peer = BandwidthPeer::new(&linked, accounting.grant, v[0]);
+            peer.consumed = v[3];
+            peer.control = v[4];
+            peer.scale = v[5];
+            // SAFETY: exact protected actual synthetic accounting/permission/link fixture.
+            let mut allocate =
+                unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+            let allocated = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
+            let expected: Vec<_> = v[9..9 + 2 * count]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|v| (v[0] as u16, v[1]))
+                .collect();
+            assert_eq!(peer.writes, expected, "case={cases}");
+            assert_eq!(
+                allocated.allocated,
+                Rates {
+                    upstream: v[6],
+                    downstream: v[7]
+                },
+                "case={cases}"
+            );
+            assert_eq!(
+                [peer.consumed, peer.control, peer.scale],
+                v[9 + 2 * count..],
+                "case={cases}"
+            );
+            let mut channel = allocate.into_channel();
+            // SAFETY: native allocation and all original owners transfer through actual synthetic final drain.
+            unsafe { allocated.retire() };
+            assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 1));
+            assert_eq!(accounting_drop.load(Ordering::Relaxed), 1);
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 512);
+    }
+    #[test]
+    fn bandwidth_full_tx_clock_cancel_and_hotplug_never_release_native_owners() {
+        use super::super::{
+            config::{Address, Route, Space},
+            usb3::{Allocate, Error, Rates},
+        };
+        for case in 0..4 {
+            let (
+                PathFixture {
+                    domain,
+                    model,
+                    mut channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: 1000,
+                downstream: 2000,
+            });
+            drop(reservation);
+            let mut peer = BandwidthPeer::new(&linked, accounting.grant, 9);
+            if case == 0 {
+                for _ in 0..9 {
+                    channel
+                        .read(
+                            Route::new(0).unwrap(),
+                            Address {
+                                port: 1,
+                                space: Space::Port,
+                                offset: 4,
+                                words: 1,
+                            },
+                            cursor.now,
+                            cursor.now + 1000,
+                        )
+                        .unwrap();
+                    let reply = adapter_response(&domain, &model, cursor.tx % 10, 4, &[0]);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(
+                        channel.poll(cursor.now),
+                        Ok(Some(super::super::channel::Event::Completed { .. }))
+                    ));
+                }
+            }
+            // SAFETY: exact physical model owners, idle software channel; case0 leaves real TX descriptors unconsumed.
+            let mut allocate =
+                unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+            if case == 0 {
+                let writes = model.state.lock().unwrap().writes.len();
+                for delta in [0, 1, 499] {
+                    assert!(allocate.poll(cursor.now + delta).unwrap().is_none());
+                }
+                assert!(matches!(
+                    allocate.poll(cursor.now + 500),
+                    Err(Error::Timeout)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            } else if case == 1 {
+                assert!(matches!(
+                    allocate.poll(cursor.now - 1),
+                    Err(Error::ClockRegressed)
+                ));
+            } else {
+                allocate.poll(cursor.now).unwrap();
+                for _ in 0..20 {
+                    assert!(
+                        bandwidth_step(&mut peer, &domain, &model, &mut allocate, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    if !peer.writes.is_empty() {
+                        break;
+                    }
+                }
+                assert_eq!(peer.writes.len(), 1);
+                if case == 2 {
+                    assert!(matches!(allocate.cancel(), Err(Error::Cancelled)));
+                } else {
+                    finish_rx(
+                        &model,
+                        cursor.rx % 10,
+                        &incoming(PacketType::Event, &[0, 0, 1]),
+                    );
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(allocate.poll(cursor.now), Err(Error::Hotplug(_))));
+                }
+            }
+            let mut channel = allocate.into_channel();
+            assert!(dropped[..3].iter().all(|n| n.load(Ordering::Relaxed) == 0));
+            assert_eq!(
+                accounting_drop.load(Ordering::Relaxed),
+                usize::from(case < 2)
+            );
+            channel_release(&mut channel);
+        }
+    }
+    struct TunnelFixture {
+        current: Arc<AtomicBool>,
+        domain: Arc<Domain>,
+        model: Arc<Model>,
+        channel: super::super::channel::Channel<Model>,
+        bandwidth: Box<super::super::usb3::Allocated>,
+        down: Arc<PathReservation>,
+        up: Arc<PathReservation>,
+        cursor: NativeCursor,
+        dropped: [Arc<AtomicUsize>; 6],
+        band_writes: Vec<(u16, u32)>,
+    }
+    fn tunnel_fixture(credits: super::super::path::LaneCredits, seed: u32) -> TunnelFixture {
+        use super::super::{
+            path::Direction,
+            usb3::{Allocate, Rates},
+        };
+        let wanted = [0, 1, 1023, 8191, 10000, 16384, 18000, 20000];
+        let (
+            PathFixture {
+                domain,
+                model,
+                channel,
+                linked,
+                reservation,
+                mut cursor,
+                dropped,
+            },
+            accounting,
+            accounting_drop,
+        ) = bandwidth_fixture(Rates {
+            upstream: wanted[seed as usize % 8],
+            downstream: wanted[(seed as usize / 8) % 8],
+        });
+        let mut allocation = reservation.allocation;
+        allocation.lane_credits = credits;
+        let down_drop = Arc::new(AtomicUsize::new(0));
+        let up_drop = Arc::new(AtomicUsize::new(0));
+        let down = Arc::new(PathReservation {
+            allocation,
+            dropped: down_drop.clone(),
+        });
+        allocation.direction = Direction::Upstream;
+        let up = Arc::new(PathReservation {
+            allocation,
+            dropped: up_drop.clone(),
+        });
+        drop(reservation);
+        let current = accounting.current.clone();
+        let mut peer = BandwidthPeer::new(&linked, accounting.grant, seed);
+        // SAFETY: actual protected native synthetic link/accounting/permission.
+        let mut allocate =
+            unsafe { Allocate::new(channel, linked, accounting, cursor.now) }.unwrap();
+        let bandwidth = drive_bandwidth(&mut peer, &domain, &model, &mut allocate, &mut cursor);
+        let channel = allocate.into_channel();
+        TunnelFixture {
+            current,
+            domain,
+            model,
+            channel,
+            bandwidth,
+            down,
+            up,
+            cursor,
+            dropped: [
+                dropped[0].clone(),
+                dropped[1].clone(),
+                dropped[2].clone(),
+                accounting_drop,
+                down_drop,
+                up_drop,
+            ],
+            band_writes: peer.writes,
+        }
+    }
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TunnelWrite {
+        route: u64,
+        port: u8,
+        space: u8,
+        offset: u16,
+        data: Vec<u32>,
+    }
+    struct TunnelPeer {
+        down: PathPeer,
+        up: PathPeer,
+        endpoints: [u32; 2],
+        writes: Vec<TunnelWrite>,
+        clear_valid: bool,
+        reject: Option<usize>,
+        fail_second_header: bool,
+    }
+    impl TunnelPeer {
+        fn new(fixture: &TunnelFixture, stale: bool, seed: u32) -> Self {
+            Self {
+                down: PathPeer::new(
+                    fixture.bandwidth.linked(),
+                    fixture.down.allocation,
+                    stale,
+                    seed,
+                ),
+                up: PathPeer::new(
+                    fixture.bandwidth.linked(),
+                    fixture.up.allocation,
+                    stale,
+                    seed + 1,
+                ),
+                endpoints: [0; 2],
+                writes: vec![],
+                clear_valid: seed & 1 != 0,
+                reject: None,
+                fail_second_header: false,
+            }
+        }
+        fn respond(&mut self, domain: &Domain, model: &Model, index: usize) -> Encoded {
+            let descriptor = domain.read32(model.descriptor_address(Direction::Tx, index) + 8);
+            let kind = PacketType::try_from(((descriptor >> 12) & 15) as u8).unwrap();
+            let bytes = domain.data(
+                model.frame_address(Direction::Tx, index),
+                (descriptor & 4095) as usize,
+            );
+            let words: Vec<u32> = bytes[..bytes.len() - 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_be_bytes(*b))
+                .collect();
+            let route = (u64::from(words[0]) << 32) | u64::from(words[1]);
+            let address = words[2];
+            let port = ((address >> 19) & 63) as u8;
+            let space = ((address >> 25) & 3) as u8;
+            let offset = (address & 8191) as u16;
+            if kind == PacketType::Write {
+                self.writes.push(TunnelWrite {
+                    route,
+                    port,
+                    space,
+                    offset,
+                    data: words[3..].to_vec(),
+                });
+            }
+            let reject = kind == PacketType::Write && self.reject == Some(self.writes.len());
+            if space == 1 && offset == 0x50 {
+                let endpoint = if route == self.down.routes[0] && port == self.down.ports[0] {
+                    0
+                } else {
+                    assert_eq!((route, port), (self.up.routes[0], self.up.ports[0]));
+                    1
+                };
+                let data = if kind == PacketType::Write {
+                    assert!(matches!(words[3], 0xc0000000 | 0x40000000));
+                    let value = if reject {
+                        words[3] ^ (1 << 31)
+                    } else {
+                        words[3]
+                    };
+                    self.endpoints[endpoint] = if self.clear_valid {
+                        value & !(1 << 30)
+                    } else {
+                        value
+                    };
+                    vec![]
+                } else {
+                    vec![self.endpoints[endpoint]]
+                };
+                let upstream = if endpoint == 0 {
+                    self.down.upstream[0]
+                } else {
+                    self.up.upstream[0]
+                };
+                let mut reply = words[..3].to_vec();
+                reply[0] |= 1 << 31;
+                reply[2] = (address & !(63 << 19)) | (u32::from(upstream) << 19);
+                reply.extend(data);
+                return incoming(kind, &reply);
+            }
+            let down = self
+                .down
+                .routes
+                .iter()
+                .zip(self.down.ports)
+                .any(|(r, p)| *r == route && p == port);
+            let changed_second = !down && self.fail_second_header && self.down.writes.len() >= 4;
+            let peer = if down { &mut self.down } else { &mut self.up };
+            if reject {
+                peer.reject = Some(peer.writes.len() + 1);
+            }
+            if changed_second {
+                peer.changed_header = true;
+            }
+            peer.respond(domain, model, index)
+        }
+    }
+    fn tunnel_step(
+        peer: &mut TunnelPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::ActivateTunnel<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Result<Option<super::super::usb3::TunnelEvent>, super::super::usb3::Error> {
+        if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+            cursor.now += 1;
+            return engine.poll(cursor.now);
+        }
+        let reply = peer.respond(domain, model, cursor.tx % 10);
+        model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+        finish_rx(model, cursor.rx % 10, &reply);
+        cursor.tx += 1;
+        cursor.rx += 1;
+        cursor.now += 1;
+        engine.poll(cursor.now)
+    }
+    fn drive_tunnel(
+        peer: &mut TunnelPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::ActivateTunnel<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Box<super::super::usb3::ActiveTunnel> {
+        use super::super::usb3::TunnelEvent;
+        engine.poll(cursor.now).unwrap();
+        for _ in 0..200 {
+            match tunnel_step(peer, domain, model, engine, cursor).unwrap() {
+                Some(TunnelEvent::Active(value)) => return value,
+                Some(TunnelEvent::Discarded(error)) => panic!("{error:?}"),
+                None => {}
+            }
+        }
+        panic!("actual source USB3 tunnel phase did not finish")
+    }
+    #[test]
+    fn tunnel_both_real_paths_then_endpoints_use_one_bandwidth_link_and_retained_owners() {
+        use super::super::{path::LaneCredits, usb3::ActivateTunnel};
+        for credits in [LaneCredits::LegacyBonded, LaneCredits::RouterAllocated(23)] {
+            for stale in [false, true] {
+                for seed in [2, 3] {
+                    let fixture = tunnel_fixture(credits, seed);
+                    let mut peer = TunnelPeer::new(&fixture, stale, seed);
+                    let TunnelFixture {
+                        domain,
+                        model,
+                        channel,
+                        bandwidth,
+                        down,
+                        up,
+                        mut cursor,
+                        dropped,
+                        ..
+                    } = fixture;
+                    // SAFETY: actual synthetic CM also retains real exclusive endpoint CS0 authority, both path grants and one bandwidth/link.
+                    let mut engine =
+                        unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }
+                            .unwrap();
+                    let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);
+                    assert_eq!(peer.writes.len(), if stale { 10 } else { 6 });
+                    let n = peer.writes.len();
+                    assert_eq!(
+                        (
+                            peer.writes[n - 2].route,
+                            peer.writes[n - 2].port,
+                            peer.writes[n - 2].offset
+                        ),
+                        (0, 6, 0x50)
+                    );
+                    assert_eq!(
+                        (
+                            peer.writes[n - 1].route,
+                            peer.writes[n - 1].port,
+                            peer.writes[n - 1].offset
+                        ),
+                        (2, 4, 0x50)
+                    );
+                    assert!(active.endpoints.iter().all(|v| v & (1 << 31) != 0));
+                    assert_eq!(active.endpoints, peer.endpoints);
+                    assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                    let mut channel = engine.into_channel();
+                    // SAFETY: whole live native synthetic tunnel and all six owners transfer through actual final drain.
+                    unsafe { active.retire() };
+                    assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+                    channel_release(&mut channel);
+                }
+            }
+        }
+    }
+    #[test]
+    fn tunnel_all_ten_possible_writes_keep_both_paths_accounting_and_link_on_failure() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{ActivateTunnel, Error},
+        };
+        for target in 1..=10 {
+            for failure in 0..3 {
+                let fixture = tunnel_fixture(LaneCredits::LegacyBonded, 2);
+                let mut peer = TunnelPeer::new(&fixture, true, 2);
+                if failure == 2 {
+                    peer.reject = Some(target);
+                }
+                let TunnelFixture {
+                    domain,
+                    model,
+                    channel,
+                    bandwidth,
+                    down,
+                    up,
+                    mut cursor,
+                    dropped,
+                    ..
+                } = fixture;
+                // SAFETY: exact protected actual synthetic endpoint authority and all owners.
+                let mut engine =
+                    unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }
+                        .unwrap();
+                engine.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..200 {
+                    if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                        cursor.now += 1;
+                        assert!(engine.poll(cursor.now).unwrap().is_none());
+                        continue;
+                    }
+                    let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+                    if peer.writes.len() == target && failure == 0 {
+                        cursor.now += 10001;
+                        assert!(engine.poll(cursor.now).is_err());
+                        failed = true;
+                        break;
+                    }
+                    if peer.writes.len() == target && failure == 1 {
+                        let bytes =
+                            domain.data(model.frame_address(Direction::Tx, cursor.tx % 10), 16);
+                        reply = incoming(
+                            PacketType::Error,
+                            &[
+                                u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
+                                u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                                2,
+                            ],
+                        );
+                    }
+                    model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match engine.poll(cursor.now) {
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("partial USB3 tunnel claimed success"),
+                    }
+                }
+                assert!(failed, "write={target} failure={failure}");
+                assert_eq!(peer.writes.len(), target);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(engine.poll(cursor.now + 1), Err(Error::Poisoned)));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                let mut channel = engine.into_channel();
+                assert!(
+                    dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0),
+                    "all native owners retained write={target} failure={failure}"
+                );
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn tunnel_constructor_mismatch_and_both_storage_failures_retain_every_live_owner() {
+        assert_ne!(
+            core::mem::size_of::<super::super::path::Active>(),
+            core::mem::size_of::<super::super::usb3::ActiveTunnel>(),
+            "local size-selective null allocator must reach the second reservation"
+        );
+        use super::super::{
+            path::{Direction, LaneCredits},
+            usb3::ActivateTunnel,
+        };
+        for case in 0..10 {
+            let fixture = tunnel_fixture(LaneCredits::LegacyBonded, 2);
+            let TunnelFixture {
+                model,
+                channel,
+                bandwidth,
+                down,
+                up,
+                cursor,
+                dropped,
+                ..
+            } = fixture;
+            let mut allocation = up.allocation;
+            match case {
+                0 => allocation.identity.epoch += 1,
+                1 => allocation.topology_epoch += 1,
+                2 => allocation.grant_epoch += 1,
+                3 => allocation.usb3_up = 1,
+                4 => allocation.direction = Direction::Downstream,
+                5 => allocation.hops[0].0 = 9,
+                6 => allocation.permission = super::super::router::Decision::Denied,
+                7..=9 => {}
+                _ => unreachable!(),
+            };
+            let replacement = Arc::new(PathReservation {
+                allocation,
+                dropped: dropped[5].clone(),
+            });
+            drop(up);
+            let writes = model.state.lock().unwrap().writes.len();
+            // SAFETY: same negative actual synthetic native transaction. All protected wrappers must remain retained on failed construction.
+            let result = unsafe {
+                if case >= 8 {
+                    ActivateTunnel::new_without_storage(
+                        channel,
+                        bandwidth,
+                        down,
+                        replacement,
+                        cursor.now,
+                        case == 9,
+                    )
+                } else {
+                    ActivateTunnel::new(
+                        channel,
+                        bandwidth,
+                        down,
+                        replacement,
+                        if case == 7 { u64::MAX } else { cursor.now },
+                    )
+                }
+            };
+            assert!(result.is_err());
+            assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            assert!(dropped[..5].iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            assert_eq!(
+                dropped[5].load(Ordering::Relaxed),
+                1,
+                "only old replaced model lease may drop"
+            );
+        }
+    }
+    #[test]
+    fn tunnel_busy_endpoints_second_path_preflight_and_unconsumed_completion_retain_chain() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{ActivateTunnel, Error},
+        };
+        for case in 0..4 {
+            let fixture = tunnel_fixture(LaneCredits::LegacyBonded, 2);
+            let mut peer = TunnelPeer::new(&fixture, true, 2);
+            if case < 2 {
+                peer.endpoints[case] = 1 << 31;
+            }
+            peer.fail_second_header = case == 2;
+            let TunnelFixture {
+                domain,
+                model,
+                channel,
+                bandwidth,
+                down,
+                up,
+                mut cursor,
+                dropped,
+                ..
+            } = fixture;
+            // SAFETY: actual same retained native controller and endpoint authority; negative wire states are explicit.
+            let mut engine =
+                unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
+            if case == 3 {
+                let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);
+                drop(active);
+            } else {
+                engine.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..200 {
+                    match tunnel_step(&mut peer, &domain, &model, &mut engine, &mut cursor) {
+                        Err(Error::Busy | Error::Path(_)) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("invalid endpoint/second path was admitted"),
+                    }
+                }
+                assert!(failed);
+                assert_eq!(peer.writes.len(), if case == 2 { 4 } else { 0 });
+            }
+            let mut channel = engine.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn tunnel_clock_cancel_hotplug_and_full_endpoint_tx_never_release_active_resources() {
+        use super::super::{
+            config::{Address, Route, Space},
+            path::LaneCredits,
+            usb3::{ActivateTunnel, Error},
+        };
+        for case in 0..4 {
+            let fixture = tunnel_fixture(LaneCredits::LegacyBonded, 2);
+            let mut peer = TunnelPeer::new(&fixture, true, 2);
+            let TunnelFixture {
+                domain,
+                model,
+                mut channel,
+                bandwidth,
+                down,
+                up,
+                mut cursor,
+                dropped,
+                ..
+            } = fixture;
+            if case == 3 {
+                for _ in 0..9 {
+                    channel
+                        .read(
+                            Route::new(0).unwrap(),
+                            Address {
+                                port: 1,
+                                space: Space::Port,
+                                offset: 4,
+                                words: 1,
+                            },
+                            cursor.now,
+                            cursor.now + 1000,
+                        )
+                        .unwrap();
+                    let reply = adapter_response(&domain, &model, cursor.tx % 10, 4, &[0]);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(
+                        channel.poll(cursor.now),
+                        Ok(Some(super::super::channel::Event::Completed { .. }))
+                    ));
+                }
+            }
+            // SAFETY: exact endpoint/native accounting/path authority; case3 has physically unconsumed TX slots.
+            let mut engine =
+                unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
+            if case == 0 {
+                assert!(matches!(
+                    engine.poll(cursor.now - 1),
+                    Err(Error::ClockRegressed)
+                ));
+            } else if case == 3 {
+                let writes = model.state.lock().unwrap().writes.len();
+                for delta in [0, 1, 499] {
+                    assert!(engine.poll(cursor.now + delta).unwrap().is_none());
+                }
+                assert!(matches!(engine.poll(cursor.now + 500), Err(Error::Timeout)));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            } else {
+                engine.poll(cursor.now).unwrap();
+                for _ in 0..200 {
+                    assert!(
+                        tunnel_step(&mut peer, &domain, &model, &mut engine, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    if peer.writes.len() == 8 {
+                        break;
+                    }
+                }
+                assert_eq!(peer.writes.len(), 8);
+                if case == 1 {
+                    assert!(matches!(engine.cancel(), Err(Error::Cancelled)));
+                } else {
+                    finish_rx(
+                        &model,
+                        cursor.rx % 10,
+                        &incoming(PacketType::Event, &[0, 0, 1]),
+                    );
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(
+                        engine.poll(cursor.now),
+                        Err(Error::Path(_) | Error::Hotplug(_))
+                    ));
+                }
+            }
+            let mut channel = engine.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    #[ignore = "requires unchanged Linux full root USB3 activation oracle"]
+    fn unchanged_linux_usb3_tunnel_full_bandwidth_paths_and_endpoint_writes_match_dma() {
+        use super::super::{path::LaneCredits, usb3::ActivateTunnel};
+        let text = std::fs::read_to_string(
+            std::env::var("STELA_USB3_TUNNEL_ORACLE").expect("set source trace path"),
+        )
+        .unwrap();
+        let mut cases = 0;
+        for line in text.lines() {
+            let v: Vec<u32> = line
+                .split_ascii_whitespace()
+                .skip(1)
+                .map(|s| s.parse().unwrap())
+                .collect();
+            let [mode, stale, seed, count] = v[..4] else {
+                panic!("source case header")
+            };
+            let credits = if mode == 0 {
+                LaneCredits::LegacyBonded
+            } else {
+                LaneCredits::RouterAllocated((17 + seed % 15) as u8)
+            };
+            let fixture = tunnel_fixture(credits, seed);
+            let mut peer = TunnelPeer::new(&fixture, stale != 0, seed);
+            let rates = fixture.bandwidth.allocated;
+            let TunnelFixture {
+                domain,
+                model,
+                channel,
+                bandwidth,
+                down,
+                up,
+                mut cursor,
+                dropped,
+                band_writes,
+                ..
+            } = fixture;
+            let mut actual: Vec<_> = band_writes
+                .into_iter()
+                .map(|(offset, value)| TunnelWrite {
+                    route: 0,
+                    port: 6,
+                    space: 1,
+                    offset,
+                    data: vec![value],
+                })
+                .collect();
+            // SAFETY: real protected synthetic accounting, BOTH path grants, exact native endpoint control and unchanged epochs.
+            let mut engine =
+                unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
+            let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);
+            actual.extend(peer.writes);
+            let mut expected = Vec::new();
+            let mut at = 4;
+            for _ in 0..count {
+                let length = v[at + 4] as usize;
+                expected.push(TunnelWrite {
+                    route: u64::from(v[at]),
+                    port: v[at + 1] as u8,
+                    space: v[at + 2] as u8,
+                    offset: v[at + 3] as u16,
+                    data: v[at + 5..at + 5 + length].to_vec(),
+                });
+                at += 5 + length;
+            }
+            assert_eq!(actual, expected, "case={cases}");
+            assert_eq!(active.endpoints, v[at..at + 2], "case={cases}");
+            assert_eq!(
+                [rates.upstream, rates.downstream],
+                v[at + 2..],
+                "case={cases}"
+            );
+            let mut channel = engine.into_channel();
+            // SAFETY: complete live native model tunnel transfers through real synthetic final drain.
+            unsafe { active.retire() };
+            assert!(dropped.iter().all(|n| n.load(Ordering::Relaxed) == 1));
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 128);
+    }
+    struct StopFixture {
+        domain: Arc<Domain>,
+        model: Arc<Model>,
+        channel: super::super::channel::Channel<Model>,
+        active: Box<super::super::usb3::ActiveTunnel>,
+        peer: TunnelPeer,
+        cursor: NativeCursor,
+        current: Arc<AtomicBool>,
+        dropped: [Arc<AtomicUsize>; 6],
+        activation: Vec<TunnelWrite>,
+        bandwidth_peer: BandwidthPeer,
+    }
+    fn stop_fixture(credits: super::super::path::LaneCredits, seed: u32) -> StopFixture {
+        use super::super::usb3::ActivateTunnel;
+        let fixture = tunnel_fixture(credits, seed);
+        let mut peer = TunnelPeer::new(&fixture, true, seed);
+        let control = fixture.band_writes.last().unwrap().1;
+        let scale = fixture
+            .band_writes
+            .iter()
+            .find(|(offset, _)| *offset == 0x53)
+            .unwrap()
+            .1;
+        let bandwidth_peer = BandwidthPeer {
+            port: 6,
+            header: peer.down.headers[0],
+            control,
+            scale,
+            consumed: if seed & 1 == 0 { 0 } else { 1023 }
+                | ((if seed.is_multiple_of(3) { 1023 } else { 255 }) << 12),
+            writes: vec![],
+            transition: None,
+            polls: 0,
+            hold: [false; 2],
+            reject: None,
+        };
+        let TunnelFixture {
+            domain,
+            model,
+            channel,
+            bandwidth,
+            down,
+            up,
+            mut cursor,
+            current,
+            dropped,
+            band_writes,
+        } = fixture;
+        // SAFETY: complete actual synthetic control/accounting/path authority.
+        let mut engine =
+            unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) }.unwrap();
+        let active = drive_tunnel(&mut peer, &domain, &model, &mut engine, &mut cursor);
+        let channel = engine.into_channel();
+        let mut activation: Vec<_> = band_writes
+            .into_iter()
+            .map(|(offset, value)| TunnelWrite {
+                route: 0,
+                port: 6,
+                space: 1,
+                offset,
+                data: vec![value],
+            })
+            .collect();
+        activation.append(&mut peer.writes);
+        peer.down.writes.clear();
+        peer.up.writes.clear();
+        for path in [&mut peer.down, &mut peer.up] {
+            for i in 0..2 {
+                path.raw[i][1] |= 1 << 28;
+                path.disabled[i] = false;
+                path.reads[i] = 0;
+            }
+        }
+        StopFixture {
+            domain,
+            model,
+            channel,
+            active,
+            peer,
+            cursor,
+            current,
+            dropped,
+            activation,
+            bandwidth_peer,
+        }
+    }
+    fn stop_step(
+        peer: &mut TunnelPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::StopTunnel<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Result<Option<super::super::usb3::StopEvent>, super::super::usb3::Error> {
+        if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+            cursor.now += 1;
+            return engine.poll(cursor.now);
+        }
+        let reply = peer.respond(domain, model, cursor.tx % 10);
+        model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+        finish_rx(model, cursor.rx % 10, &reply);
+        cursor.tx += 1;
+        cursor.rx += 1;
+        cursor.now += 1;
+        engine.poll(cursor.now)
+    }
+    fn drive_stop(
+        peer: &mut TunnelPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::StopTunnel<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Box<super::super::usb3::Stopped> {
+        use super::super::usb3::StopEvent;
+        engine.poll(cursor.now).unwrap();
+        for _ in 0..200 {
+            match stop_step(peer, domain, model, engine, cursor).unwrap() {
+                Some(StopEvent::Stopped(value)) => return value,
+                Some(StopEvent::Discarded(e)) => panic!("{e:?}"),
+                None => {}
+            }
+        }
+        panic!("normal actual tunnel stop did not finish")
+    }
+    fn release_step(
+        peer: &mut BandwidthPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::ReleaseUnused<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Result<Option<super::super::usb3::TunnelEvent>, super::super::usb3::Error> {
+        if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+            cursor.now += 1;
+            return engine.poll(cursor.now);
+        }
+        let reply = peer.respond(domain, model, cursor.tx % 10);
+        model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+        finish_rx(model, cursor.rx % 10, &reply);
+        cursor.tx += 1;
+        cursor.rx += 1;
+        cursor.now += 1;
+        engine.poll(cursor.now)
+    }
+    fn drive_release(
+        peer: &mut BandwidthPeer,
+        domain: &Domain,
+        model: &Model,
+        engine: &mut super::super::usb3::ReleaseUnused<Model>,
+        cursor: &mut NativeCursor,
+    ) -> Box<super::super::usb3::ActiveTunnel> {
+        use super::super::usb3::TunnelEvent;
+        engine.poll(cursor.now).unwrap();
+        for _ in 0..100 {
+            match release_step(peer, domain, model, engine, cursor).unwrap() {
+                Some(TunnelEvent::Active(value)) => return value,
+                Some(TunnelEvent::Discarded(e)) => panic!("{e:?}"),
+                None => {}
+            }
+        }
+        panic!("source release-unused handshake did not finish")
+    }
+    #[test]
+    fn teardown_normal_does_not_release_bandwidth_and_returns_local_owners_only_explicitly() {
+        use super::super::{path::LaneCredits, usb3::StopTunnel};
+        for unconsumed in [false, true] {
+            let StopFixture {
+                domain,
+                model,
+                channel,
+                active,
+                mut peer,
+                mut cursor,
+                dropped,
+                ..
+            } = stop_fixture(LaneCredits::LegacyBonded, 2);
+            let residual = active.bandwidth_rates();
+            // SAFETY: real exact synthetic native epoch/authority, host admission closed and independent endpoint lifetimes retained.
+            let mut stop = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+            let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
+            assert_eq!(peer.writes.len(), 6);
+            assert!(
+                peer.writes[..2]
+                    .iter()
+                    .all(|w| w.space == 1 && w.offset == 0x50 && w.data == [1 << 30])
+            );
+            assert_eq!(stopped.bandwidth_rates(), residual);
+            assert!(stopped.endpoints.iter().all(|w| w & (1 << 31) == 0));
+            assert!(
+                stopped
+                    .hops
+                    .iter()
+                    .all(|w| w.raw[0] & (1 << 31) == 0 && w.raw[1] & (1 << 28) == 0)
+            );
+            let mut channel = stop.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            if unconsumed {
+                drop(stopped);
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            } else {
+                let reusable = match stopped.into_reusable() {
+                    Ok(value) => value,
+                    Err(_) => panic!("live native guard refused"),
+                };
+                drop(reusable.paths);
+                assert_eq!(dropped[4].load(Ordering::Relaxed), 1);
+                assert_eq!(dropped[5].load(Ordering::Relaxed), 1);
+                assert!(dropped[..4].iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                // SAFETY: residual accounting/link have actual independent native provider retirement/transfer, beyond local path proof.
+                unsafe { reusable.residual.retire() };
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+            }
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn teardown_separate_release_unused_retains_900_floor_and_active_owner_chain() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{ReleaseUnused, StopTunnel},
+        };
+        let StopFixture {
+            domain,
+            model,
+            channel,
+            active,
+            mut peer,
+            mut cursor,
+            dropped,
+            mut bandwidth_peer,
+            ..
+        } = stop_fixture(LaneCredits::RouterAllocated(23), 0);
+        // SAFETY: actual protected native branch accounting explicitly reserves source consumed/900 floor; active paths stay retained.
+        let mut release = unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
+        let active = drive_release(
+            &mut bandwidth_peer,
+            &domain,
+            &model,
+            &mut release,
+            &mut cursor,
+        );
+        assert!(active.bandwidth_rates().upstream >= 900);
+        assert!(active.bandwidth_rates().downstream >= 900);
+        assert_eq!(bandwidth_peer.writes.len(), 4);
+        assert!(peer.endpoints.iter().all(|w| w & (1 << 31) != 0));
+        let channel = release.into_channel();
+        // SAFETY: same actual native epoch and submission/endpoint lifetime proof.
+        let mut stop = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+        let stopped = drive_stop(&mut peer, &domain, &model, &mut stop, &mut cursor);
+        let mut channel = stop.into_channel();
+        let reusable = match stopped.into_reusable() {
+            Ok(v) => v,
+            Err(_) => panic!("guard"),
+        };
+        assert!(reusable.residual.allocated.upstream >= 900);
+        assert!(reusable.residual.allocated.downstream >= 900);
+        drop(reusable.paths);
+        // SAFETY: actual residual provider lifetime transfers independently.
+        unsafe { reusable.residual.retire() };
+        assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+        channel_release(&mut channel);
+    }
+
+    fn controller_error(domain: &Domain, model: &Model, cursor: &NativeCursor) -> Encoded {
+        let bytes = domain.data(model.frame_address(Direction::Tx, cursor.tx % 10), 16);
+        incoming(
+            PacketType::Error,
+            &[
+                u32::from_be_bytes(bytes[..4].try_into().unwrap()) | (1 << 31),
+                u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                2,
+            ],
+        )
+    }
+    #[test]
+    fn teardown_each_endpoint_and_hop_disable_failure_retains_all_six_native_owners() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{Error, StopTunnel},
+        };
+        for target in 1..=6 {
+            for failure in 0..3 {
+                let StopFixture {
+                    domain,
+                    model,
+                    channel,
+                    active,
+                    mut peer,
+                    mut cursor,
+                    dropped,
+                    ..
+                } = stop_fixture(LaneCredits::LegacyBonded, 2);
+                if failure == 2 {
+                    peer.reject = Some(target);
+                }
+                // SAFETY: matching physical epoch/authority and independently closed native admission.
+                let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..200 {
+                    if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                        cursor.now += 1;
+                        assert!(engine.poll(cursor.now).unwrap().is_none());
+                        continue;
+                    }
+                    let mut reply = peer.respond(&domain, &model, cursor.tx % 10);
+                    if peer.writes.len() == target && failure == 0 {
+                        cursor.now += 501;
+                        assert!(matches!(engine.poll(cursor.now), Err(Error::Timeout)));
+                        failed = true;
+                        break;
+                    }
+                    if peer.writes.len() == target && failure == 1 {
+                        reply = controller_error(&domain, &model, &cursor);
+                    }
+                    model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match engine.poll(cursor.now) {
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("uncertain stop returned reusable owners"),
+                    }
+                }
+                assert!(failed, "write={target} failure={failure}");
+                assert_eq!(peer.writes.len(), target);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(engine.poll(cursor.now + 1), Err(Error::Poisoned)));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                let mut channel = engine.into_channel();
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn teardown_release_unused_each_uncertain_write_retains_both_split_owner_halves() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{Error, ReleaseUnused},
+        };
+        for target in 1..=4 {
+            for failure in 0..3 {
+                let StopFixture {
+                    domain,
+                    model,
+                    channel,
+                    active,
+                    mut cursor,
+                    dropped,
+                    mut bandwidth_peer,
+                    ..
+                } = stop_fixture(LaneCredits::RouterAllocated(23), 2);
+                if failure == 2 {
+                    bandwidth_peer.reject = Some(target);
+                }
+                // SAFETY: actual native accounting and active endpoint authority across this adjustment.
+                let mut engine =
+                    unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..100 {
+                    if (model.read32(TX_DESCRIPTOR + 8) >> 16) as usize == cursor.tx % 10 {
+                        cursor.now += 1;
+                        assert!(engine.poll(cursor.now).unwrap().is_none());
+                        continue;
+                    }
+                    let mut reply = bandwidth_peer.respond(&domain, &model, cursor.tx % 10);
+                    if bandwidth_peer.writes.len() == target && failure == 0 {
+                        cursor.now += 1501;
+                        assert!(matches!(engine.poll(cursor.now), Err(Error::Timeout)));
+                        failed = true;
+                        break;
+                    }
+                    if bandwidth_peer.writes.len() == target && failure == 1 {
+                        reply = controller_error(&domain, &model, &cursor);
+                    }
+                    model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    match engine.poll(cursor.now) {
+                        Err(_) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("uncertain release succeeded"),
+                    }
+                }
+                assert!(failed, "write={target} failure={failure}");
+                assert_eq!(bandwidth_peer.writes.len(), target);
+                assert!(matches!(engine.poll(cursor.now + 1), Err(Error::Poisoned)));
+                let mut channel = engine.into_channel();
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn teardown_each_pending_drain_has_one_ack_anchored_deadline_including_already_disabled() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{Error, StopTunnel},
+        };
+        for hop in 0..4 {
+            for already_disabled in [false, true] {
+                let StopFixture {
+                    domain,
+                    model,
+                    channel,
+                    active,
+                    mut peer,
+                    mut cursor,
+                    dropped,
+                    ..
+                } = stop_fixture(LaneCredits::LegacyBonded, 2);
+                let path = if hop < 2 {
+                    &mut peer.down
+                } else {
+                    &mut peer.up
+                };
+                let lane = hop % 2;
+                path.hold_hop[lane] = true;
+                if already_disabled {
+                    path.raw[lane][0] &= !(1 << 31);
+                    path.disabled[lane] = true;
+                }
+                // SAFETY: exact unchanged physical owner chain; pending work is not assumed quiescent.
+                let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let prefix = if already_disabled { 2 + hop } else { 3 + hop };
+                // Stop immediately after the actual disable ACK (or first disabled-state read).
+                for _ in 0..200 {
+                    assert!(
+                        stop_step(&mut peer, &domain, &model, &mut engine, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    let p = if hop < 2 { &peer.down } else { &peer.up };
+                    if peer.writes.len() == prefix
+                        && ((!already_disabled && p.disabled[lane] && p.reads[lane] == 0)
+                            || (already_disabled && p.reads[lane] == 1))
+                    {
+                        break;
+                    }
+                }
+                assert_eq!(peer.writes.len(), prefix);
+                let anchor = cursor.now;
+                for delta in [1, 49, 150, 499] {
+                    cursor.now = anchor + delta - 1;
+                    assert!(
+                        stop_step(&mut peer, &domain, &model, &mut engine, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    assert_eq!(cursor.now, anchor + delta);
+                }
+                assert!(matches!(engine.poll(anchor + 500), Err(Error::Timeout)));
+                assert_eq!(peer.writes.len(), prefix);
+                let mut channel = engine.into_channel();
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                channel_release(&mut channel);
+            }
+        }
+    }
+    #[test]
+    fn teardown_revocation_rejects_late_dma_and_owner_return_without_releasing_ids() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{Error, StopTunnel},
+        };
+        for after_completion in [false, true] {
+            let StopFixture {
+                domain,
+                model,
+                channel,
+                active,
+                mut peer,
+                mut cursor,
+                current,
+                dropped,
+                ..
+            } = stop_fixture(LaneCredits::LegacyBonded, 2);
+            // SAFETY: exact admitted native epoch and closed host submissions, until deliberately revoked.
+            let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+            if after_completion {
+                let stopped = drive_stop(&mut peer, &domain, &model, &mut engine, &mut cursor);
+                current.store(false, Ordering::Release);
+                let (error, same) = match stopped.into_reusable() {
+                    Err(v) => v,
+                    Ok(_) => panic!("revoked owner return"),
+                };
+                assert!(matches!(error, Error::Revoked));
+                drop(same);
+            } else {
+                engine.poll(cursor.now).unwrap();
+                // Actual request published while current; real DMA reply arrives only after native revocation.
+                let reply = peer.respond(&domain, &model, cursor.tx % 10);
+                current.store(false, Ordering::Release);
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                let writes = model.state.lock().unwrap().writes.len();
+                assert!(matches!(engine.poll(cursor.now + 1), Err(Error::Revoked)));
+                current.store(true, Ordering::Release);
+                assert!(matches!(engine.poll(cursor.now + 2), Err(Error::Poisoned)));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            }
+            let mut channel = engine.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn teardown_cancel_clock_null_storage_hotplug_and_revoked_constructor_keep_chain() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{Error, StopTunnel},
+        };
+        for case in 0..6 {
+            let StopFixture {
+                domain,
+                model,
+                channel,
+                active,
+                mut peer,
+                mut cursor,
+                current,
+                dropped,
+                ..
+            } = stop_fixture(LaneCredits::LegacyBonded, 2);
+            let writes = model.state.lock().unwrap().writes.len();
+            if case == 0 {
+                current.store(false, Ordering::Release);
+            }
+            // SAFETY: actual paired native resources. Refusal cases must not publish or release anything.
+            let result = unsafe {
+                if case == 1 {
+                    StopTunnel::new_without_storage(channel, active, cursor.now)
+                } else {
+                    StopTunnel::new(
+                        channel,
+                        active,
+                        if case == 2 { u64::MAX } else { cursor.now },
+                    )
+                }
+            };
+            if case < 3 {
+                assert!(matches!(
+                    result,
+                    Err(Error::Revoked | Error::Allocation | Error::ClockOverflow)
+                ));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+                assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+                continue;
+            }
+            let mut engine = result.unwrap();
+            if case == 3 {
+                assert!(matches!(
+                    engine.poll(cursor.now - 1),
+                    Err(Error::ClockRegressed)
+                ));
+            } else {
+                engine.poll(cursor.now).unwrap();
+                for _ in 0..200 {
+                    assert!(
+                        stop_step(&mut peer, &domain, &model, &mut engine, &mut cursor)
+                            .unwrap()
+                            .is_none()
+                    );
+                    if peer.writes.len() == 2 {
+                        break;
+                    }
+                }
+                if case == 4 {
+                    assert!(matches!(engine.cancel(), Err(Error::Cancelled)));
+                } else {
+                    finish_rx(
+                        &model,
+                        cursor.rx % 10,
+                        &incoming(PacketType::Event, &[0, 0, 1]),
+                    );
+                    cursor.now += 1;
+                    assert!(matches!(engine.poll(cursor.now), Err(Error::Hotplug(_))));
+                }
+            }
+            let mut channel = engine.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            channel_release(&mut channel);
+        }
+    }
+    #[test]
+    fn teardown_live_guard_also_blocks_old_bandwidth_and_activation_admission_and_late_replies() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{ActivateTunnel, Allocate, Error, Rates, ReleaseUnused},
+        };
+        for late in [false, true] {
+            let (
+                PathFixture {
+                    domain,
+                    model,
+                    channel,
+                    linked,
+                    reservation,
+                    mut cursor,
+                    dropped,
+                },
+                accounting,
+                accounting_drop,
+            ) = bandwidth_fixture(Rates {
+                upstream: 10000,
+                downstream: 18000,
+            });
+            drop(reservation);
+            let current = accounting.current.clone();
+            let mut peer = BandwidthPeer::new(&linked, accounting.grant, 2);
+            if !late {
+                current.store(false, Ordering::Release);
+            }
+            // SAFETY: exact physically admitted fixture; guard revocation is intentional.
+            let result = unsafe { Allocate::new(channel, linked, accounting, cursor.now) };
+            if late {
+                let mut engine = result.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let reply = peer.respond(&domain, &model, cursor.tx % 10);
+                current.store(false, Ordering::Release);
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                cursor.now += 1;
+                assert!(matches!(engine.poll(cursor.now), Err(Error::Revoked)));
+                let mut channel = engine.into_channel();
+                channel_release(&mut channel);
+            } else {
+                assert!(matches!(result, Err(Error::Revoked)));
+            }
+            assert!(dropped[..3].iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            assert_eq!(accounting_drop.load(Ordering::Relaxed), 0);
+        }
+        for late in [false, true] {
+            let fixture = tunnel_fixture(LaneCredits::LegacyBonded, 2);
+            let mut peer = TunnelPeer::new(&fixture, true, 2);
+            let TunnelFixture {
+                domain,
+                model,
+                channel,
+                bandwidth,
+                down,
+                up,
+                mut cursor,
+                current,
+                dropped,
+                ..
+            } = fixture;
+            if !late {
+                current.store(false, Ordering::Release);
+            }
+            // SAFETY: exact pair and real reservations, with native revocation explicitly modelled.
+            let result = unsafe { ActivateTunnel::new(channel, bandwidth, down, up, cursor.now) };
+            if late {
+                let mut engine = result.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let reply = peer.respond(&domain, &model, cursor.tx % 10);
+                current.store(false, Ordering::Release);
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                cursor.now += 1;
+                assert!(matches!(engine.poll(cursor.now), Err(Error::Revoked)));
+                let mut channel = engine.into_channel();
+                channel_release(&mut channel);
+            } else {
+                assert!(matches!(result, Err(Error::Revoked)));
+            }
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+        }
+        for late in [false, true] {
+            let StopFixture {
+                domain,
+                model,
+                channel,
+                active,
+                mut bandwidth_peer,
+                mut cursor,
+                current,
+                dropped,
+                ..
+            } = stop_fixture(LaneCredits::LegacyBonded, 2);
+            if !late {
+                current.store(false, Ordering::Release);
+            }
+            // SAFETY: actual active owner and exact native provider accounting authority.
+            let result = unsafe { ReleaseUnused::new(channel, active, cursor.now) };
+            if late {
+                let mut engine = result.unwrap();
+                engine.poll(cursor.now).unwrap();
+                let reply = bandwidth_peer.respond(&domain, &model, cursor.tx % 10);
+                current.store(false, Ordering::Release);
+                model.finish(Direction::Tx, cursor.tx % 10, &[], None);
+                finish_rx(&model, cursor.rx % 10, &reply);
+                cursor.now += 1;
+                assert!(matches!(engine.poll(cursor.now), Err(Error::Revoked)));
+                let mut channel = engine.into_channel();
+                channel_release(&mut channel);
+            } else {
+                assert!(matches!(result, Err(Error::Revoked)));
+            }
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires unchanged Linux complete USB3 stop/release oracle"]
+    fn unchanged_linux_usb3_complete_activation_optional_release_and_stop_match_dma() {
+        use super::super::{
+            path::LaneCredits,
+            usb3::{ReleaseUnused, StopTunnel},
+        };
+        let text = std::fs::read_to_string(
+            std::env::var("STELA_USB3_STOP_ORACLE").expect("source trace path"),
+        )
+        .unwrap();
+        let mut cases = 0;
+        for line in text.lines() {
+            let v: Vec<u32> = line
+                .split_ascii_whitespace()
+                .skip(1)
+                .map(|s| s.parse().unwrap())
+                .collect();
+            let [mode, release, seed, count] = v[..4] else {
+                panic!("source header")
+            };
+            let credits = if mode == 0 {
+                LaneCredits::LegacyBonded
+            } else {
+                LaneCredits::RouterAllocated((17 + seed % 15) as u8)
+            };
+            let StopFixture {
+                domain,
+                model,
+                mut channel,
+                mut active,
+                mut peer,
+                mut cursor,
+                dropped,
+                mut activation,
+                mut bandwidth_peer,
+                ..
+            } = stop_fixture(credits, seed);
+            if release != 0 {
+                // SAFETY: genuine model active receipt and retained native branch adjustment authority.
+                let mut engine =
+                    unsafe { ReleaseUnused::new(channel, active, cursor.now) }.unwrap();
+                active = drive_release(
+                    &mut bandwidth_peer,
+                    &domain,
+                    &model,
+                    &mut engine,
+                    &mut cursor,
+                );
+                channel = engine.into_channel();
+                activation.extend(bandwidth_peer.writes.into_iter().map(|(offset, value)| {
+                    TunnelWrite {
+                        route: 0,
+                        port: 6,
+                        space: 1,
+                        offset,
+                        data: vec![value],
+                    }
+                }));
+            }
+            let rates = active.bandwidth_rates();
+            // SAFETY: actual native guard, closed host admission and retained independent endpoint lifetimes.
+            let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+            let stopped = drive_stop(&mut peer, &domain, &model, &mut engine, &mut cursor);
+            activation.extend(peer.writes);
+            let mut expected = Vec::new();
+            let mut at = 4;
+            for _ in 0..count {
+                let length = v[at + 4] as usize;
+                expected.push(TunnelWrite {
+                    route: u64::from(v[at]),
+                    port: v[at + 1] as u8,
+                    space: v[at + 2] as u8,
+                    offset: v[at + 3] as u16,
+                    data: v[at + 5..at + 5 + length].to_vec(),
+                });
+                at += 5 + length;
+            }
+            assert_eq!(activation, expected, "case={cases}");
+            assert_eq!(stopped.endpoints, v[at..at + 2], "case={cases}");
+            assert_eq!(
+                [rates.upstream, rates.downstream],
+                v[at + 2..at + 4],
+                "case={cases}"
+            );
+            let words: Vec<_> = stopped.hops.iter().flat_map(|w| w.raw).collect();
+            assert_eq!(words, v[at + 4..], "case={cases}");
+            let reusable = match stopped.into_reusable() {
+                Ok(v) => v,
+                Err(_) => panic!("model live epoch"),
+            };
+            drop(reusable.paths);
+            // SAFETY: model provider independently completes residual accounting/link lifetime transfer.
+            unsafe { reusable.residual.retire() };
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 1));
+            let mut channel = engine.into_channel();
+            channel_release(&mut channel);
+            cases += 1;
+        }
+        assert_eq!(cases, 128);
+    }
+
+    #[test]
+    fn teardown_refuses_changed_owned_hops_before_disabling_them_and_full_tx_stays_bounded() {
+        use super::super::{
+            config::{Address, Route, Space},
+            path::LaneCredits,
+            usb3::{Error, StopTunnel},
+        };
+        for case in 0..5 {
+            let StopFixture {
+                domain,
+                model,
+                mut channel,
+                active,
+                mut peer,
+                mut cursor,
+                dropped,
+                ..
+            } = stop_fixture(LaneCredits::LegacyBonded, 2);
+            if case < 4 {
+                let p = if case < 2 {
+                    &mut peer.down
+                } else {
+                    &mut peer.up
+                };
+                p.raw[case % 2][0] ^= 1; // actual next-HopID differs despite retained metadata.
+            } else {
+                for _ in 0..9 {
+                    channel
+                        .read(
+                            Route::new(0).unwrap(),
+                            Address {
+                                port: 1,
+                                space: Space::Port,
+                                offset: 4,
+                                words: 1,
+                            },
+                            cursor.now,
+                            cursor.now + 1000,
+                        )
+                        .unwrap();
+                    let reply = adapter_response(&domain, &model, cursor.tx % 10, 4, &[0]);
+                    finish_rx(&model, cursor.rx % 10, &reply);
+                    cursor.tx += 1;
+                    cursor.rx += 1;
+                    cursor.now += 1;
+                    assert!(matches!(
+                        channel.poll(cursor.now),
+                        Ok(Some(super::super::channel::Event::Completed { .. }))
+                    ));
+                }
+            }
+            // SAFETY: exact protected native owner pair; real wire state/progress is deliberately adverse.
+            let mut engine = unsafe { StopTunnel::new(channel, active, cursor.now) }.unwrap();
+            if case == 4 {
+                let writes = model.state.lock().unwrap().writes.len();
+                for delta in [0, 1, 150, 499] {
+                    assert!(engine.poll(cursor.now + delta).unwrap().is_none());
+                }
+                assert!(matches!(engine.poll(cursor.now + 500), Err(Error::Timeout)));
+                assert_eq!(model.state.lock().unwrap().writes.len(), writes);
+            } else {
+                engine.poll(cursor.now).unwrap();
+                let mut failed = false;
+                for _ in 0..200 {
+                    match stop_step(&mut peer, &domain, &model, &mut engine, &mut cursor) {
+                        Err(Error::Changed) => {
+                            failed = true;
+                            break;
+                        }
+                        Ok(None) => {}
+                        _ => panic!("foreign owned hop was disabled"),
+                    }
+                }
+                assert!(failed);
+                assert_eq!(peer.writes.len(), 2 + case);
+            }
+            let mut channel = engine.into_channel();
+            assert!(dropped.iter().all(|v| v.load(Ordering::Relaxed) == 0));
+            channel_release(&mut channel);
+        }
+    }
 }

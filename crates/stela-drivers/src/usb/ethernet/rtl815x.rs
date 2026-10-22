@@ -29,12 +29,7 @@ const ADVERTISE_10_100_PAUSE: u32 = 0x0de0;
 const PHYSTATUS_LINK: u32 = 0x02;
 const PHYSTATUS_10: u32 = 0x04;
 
-/// Synchronous endpoint-zero requests. Success includes the exact transferred
-/// byte count; short replies/writes are errors, never fabricated register values.
-pub trait Control {
-    fn control(&mut self, request: [u8; 8], output: &[u8]) -> Result<Vec<u8>, BlockError>;
-    fn delay_us(&mut self, microseconds: u64);
-}
+pub use super::Control;
 
 /// Hardware identity, read from PLA_TCR0, independently of USB product strings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

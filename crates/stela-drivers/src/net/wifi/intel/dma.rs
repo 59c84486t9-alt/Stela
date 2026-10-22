@@ -34,14 +34,14 @@ impl From<MemoryError> for Error {
     }
 }
 
-struct Chunk {
+pub(super) struct Chunk {
     mapping: Option<DmaMapping>,
     cpu: CpuMapping,
     region: Region,
     exposed: bool,
 }
 impl Chunk {
-    fn allocate(
+    pub(super) fn allocate(
         source: &dyn PageSource,
         domain: Arc<dyn DmaDomain>,
         data: &[u8],
@@ -91,10 +91,82 @@ impl Chunk {
         }
         Err(Error::BoundaryRetries)
     }
+    pub(super) fn region(&self) -> Region {
+        self.region
+    }
+    pub(super) fn expose(&mut self) {
+        self.exposed = true;
+    }
+    /// Shared producer/descriptor access only for the owning transport's
+    /// explicitly qualified coherent requester. Never call on streaming DMA.
+    pub(super) unsafe fn read16_coherent(&self, offset: usize) -> Result<u16, Error> {
+        if !offset.is_multiple_of(2) {
+            return Err(Error::AllocationContract);
+        }
+        let pointer = self.cpu.address(offset, 2)?.as_ptr().cast::<u16>();
+        Ok(u16::from_le(unsafe { pointer.read_volatile() }))
+    }
+    pub(super) unsafe fn read32_coherent(&self, offset: usize) -> Result<u32, Error> {
+        if !offset.is_multiple_of(4) {
+            return Err(Error::AllocationContract);
+        }
+        let pointer = self.cpu.address(offset, 4)?.as_ptr().cast::<u32>();
+        Ok(u32::from_le(unsafe { pointer.read_volatile() }))
+    }
+    /// CPU exclusively owns this range until its next protocol doorbell.
+    pub(super) unsafe fn write_owned(&self, offset: usize, bytes: &[u8]) -> Result<(), Error> {
+        let pointer = self.cpu.address(offset, bytes.len())?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.as_ptr(), bytes.len());
+        }
+        self.mapping
+            .as_ref()
+            .ok_or(Error::State)?
+            .sync_for_device(offset..offset + bytes.len())?;
+        Ok(())
+    }
+    /// Actual device completion has ended all device access to this range,
+    /// transferring exclusive ownership back to the CPU before further writes.
+    /// Other live descriptor slots remain outside this completed range.
+    pub(super) unsafe fn complete_for_cpu(
+        &self,
+        range: core::ops::Range<usize>,
+    ) -> Result<(), Error> {
+        self.cpu.address(range.start, range.len())?;
+        unsafe {
+            self.mapping
+                .as_ref()
+                .ok_or(Error::State)?
+                .sync_for_cpu(range)?;
+        }
+        Ok(())
+    }
+    /// The entire allocation is exclusively CPU-owned after real completion;
+    /// return it to device visibility before a new descriptor publication.
+    pub(super) unsafe fn ready_for_device(&self) -> Result<(), Error> {
+        self.mapping
+            .as_ref()
+            .ok_or(Error::State)?
+            .sync_for_device(0..self.region.bytes)?;
+        Ok(())
+    }
+    /// Actual device completion must transfer this entire payload to the CPU.
+    pub(super) unsafe fn snapshot_completed(&self) -> Result<Vec<u8>, Error> {
+        let mapping = self.mapping.as_ref().ok_or(Error::State)?;
+        unsafe {
+            mapping.sync_for_cpu(0..self.region.bytes)?;
+        }
+        let pointer = self.cpu.address(0, self.region.bytes)?;
+        let mut bytes = alloc::vec![0;self.region.bytes];
+        unsafe {
+            core::ptr::copy_nonoverlapping(pointer.as_ptr(), bytes.as_mut_ptr(), bytes.len());
+        }
+        Ok(bytes)
+    }
     /// # Safety
     /// Hardware no longer accesses this allocation and submissions/IRQ work
     /// referencing it are drained. Failed invalidations retain the lease.
-    unsafe fn release(&mut self) -> Result<(), DmaError> {
+    pub(super) unsafe fn release(&mut self) -> Result<(), DmaError> {
         if let Some(mapping) = self.mapping.as_mut() {
             // SAFETY: hardware quiescence is established by this method's caller.
             unsafe {
@@ -187,6 +259,18 @@ impl MappedFirmware {
             state: State::Prepared,
         })
     }
+    /// Internal preparation only: these addresses must not reach hardware
+    /// until expose_for_context marks all leases potentially active.
+    pub(super) fn prepared_regions(&self) -> Result<Images<'_>, Error> {
+        if self.state != State::Prepared {
+            return Err(Error::State);
+        }
+        Ok(Images {
+            lmac: &self.lmac.regions,
+            umac: &self.umac.regions,
+            paging: &self.paging.regions,
+        })
+    }
     /// Transfer all sections to potentially active device ownership *before*
     /// serializing/publishing their addresses in a context. Call at most once.
     /// All section writes have passed the real domain's visibility operation.
@@ -242,7 +326,7 @@ impl MappedFirmware {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::net::wifi::intel) mod tests {
     extern crate std;
     use super::*;
     use crate::bus::dma::{
@@ -266,7 +350,7 @@ mod tests {
         pointer: NonNull<u8>,
         layout: Layout,
         pages: Vec<u64>,
-        released: Arc<AtomicUsize>,
+        pub(in crate::net::wifi::intel) released: Arc<AtomicUsize>,
     }
     // SAFETY: owned aligned model RAM; access is serialized by the test domain.
     unsafe impl Send for Backing {}
@@ -298,10 +382,10 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct Source {
-        calls: AtomicUsize,
-        fail_at: Option<usize>,
-        released: Arc<AtomicUsize>,
+    pub(in crate::net::wifi::intel) struct Source {
+        pub(in crate::net::wifi::intel) calls: AtomicUsize,
+        pub(in crate::net::wifi::intel) fail_at: Option<usize>,
+        pub(in crate::net::wifi::intel) released: Arc<AtomicUsize>,
     }
     impl PageSource for Source {
         fn allocate(
@@ -337,22 +421,27 @@ mod tests {
         }
     }
     #[derive(Default)]
-    struct Records {
-        maps: usize,
-        syncs: usize,
-        unmaps: usize,
-        map_fail: Option<usize>,
-        sync_fail: Option<usize>,
-        unmap_fail: Option<usize>,
-        bad_boundaries: usize,
-        live: BTreeMap<u64, CpuMapping>,
-        permissions: BTreeMap<u64, Direction>,
-        copied: Vec<Vec<u8>>,
-        directions: Vec<Direction>,
+    pub(in crate::net::wifi::intel) struct Records {
+        pub(in crate::net::wifi::intel) maps: usize,
+        pub(in crate::net::wifi::intel) syncs: usize,
+        pub(in crate::net::wifi::intel) unmaps: usize,
+        pub(in crate::net::wifi::intel) completed: alloc::collections::BTreeSet<u64>,
+        pub(in crate::net::wifi::intel) completed_ranges:
+            alloc::collections::BTreeSet<(u64, usize, usize)>,
+        pub(in crate::net::wifi::intel) cpu_syncs: usize,
+        pub(in crate::net::wifi::intel) cpu_sync_fail: Option<usize>,
+        pub(in crate::net::wifi::intel) map_fail: Option<usize>,
+        pub(in crate::net::wifi::intel) sync_fail: Option<usize>,
+        pub(in crate::net::wifi::intel) unmap_fail: Option<usize>,
+        pub(in crate::net::wifi::intel) bad_boundaries: usize,
+        pub(in crate::net::wifi::intel) live: BTreeMap<u64, CpuMapping>,
+        pub(in crate::net::wifi::intel) permissions: BTreeMap<u64, Direction>,
+        pub(in crate::net::wifi::intel) copied: Vec<Vec<u8>>,
+        pub(in crate::net::wifi::intel) directions: Vec<Direction>,
     }
     #[derive(Default)]
-    struct Domain {
-        records: Mutex<Records>,
+    pub(in crate::net::wifi::intel) struct Domain {
+        pub(in crate::net::wifi::intel) records: Mutex<Records>,
     }
     // SAFETY: synchronous IOMMU fixture with distinct device IOVAs independent
     // of CPU/physical addresses. Live pins and failed invalidations are retained.
@@ -412,7 +501,7 @@ mod tests {
                 return Err(DmaError::VisibilityFailed);
             }
             assert_eq!(Some(&direction), r.permissions.get(&mapping.id));
-            assert_eq!(range.start, 0);
+            assert!(range.start <= range.end && range.end <= mapping.bytes);
             let cpu = r.live.get(&mapping.id).unwrap();
             let ptr = cpu.address(range.start, range.len()).unwrap();
             // SAFETY: fixture executes synchronously before any device exposure,
@@ -423,11 +512,29 @@ mod tests {
         }
         unsafe fn sync_for_cpu(
             &self,
-            _: DomainMapping,
-            _: Range<usize>,
-            _: Direction,
+            mapping: DomainMapping,
+            range: Range<usize>,
+            direction: Direction,
         ) -> Result<(), DmaError> {
-            panic!("upload buffers are never CPU-read after exposure")
+            let mut r = self.records.lock().unwrap();
+            let index = r.cpu_syncs;
+            r.cpu_syncs += 1;
+            if r.cpu_sync_fail == Some(index) {
+                return Err(DmaError::VisibilityFailed);
+            }
+            assert!(
+                r.completed_ranges
+                    .remove(&(mapping.id, range.start, range.end))
+                    || r.completed.remove(&mapping.id),
+                "actual model device completion required before CPU sync"
+            );
+            assert_eq!(r.permissions.get(&mapping.id), Some(&direction));
+            assert!(matches!(
+                direction,
+                Direction::FromDevice | Direction::Bidirectional
+            ));
+            assert!(range.start <= range.end && range.end <= mapping.bytes);
+            Ok(())
         }
     }
     fn image() -> Vec<u8> {

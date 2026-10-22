@@ -58,6 +58,7 @@ pub struct Storage {
     pub ticks_per_microsecond: u64,
     /// Copy-only pre-EBS board capture; no firmware service/heap borrow.
     pub bluetooth_platform: stela_drivers::usb::bluetooth::intel::DsbrCapture,
+    pub wifi_platform: stela_drivers::net::wifi::intel::platform::Observations,
 }
 
 impl Storage {
@@ -76,6 +77,7 @@ impl Storage {
             dma: Region::default(),
             ticks_per_microsecond: 0,
             bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
         }
     }
 
@@ -100,6 +102,7 @@ impl Storage {
         };
         storage.ticks_per_microsecond = handoff.clock.ticks_per_microsecond;
         storage.bluetooth_platform = handoff.bluetooth_platform;
+        storage.wifi_platform = handoff.wifi_platform;
         Ok(storage)
     }
 
@@ -107,6 +110,7 @@ impl Storage {
         self.present.then(|| stela_drivers::Handoff {
             firmware: None,
             bluetooth_platform: self.bluetooth_platform,
+            wifi_platform: self.wifi_platform,
             ecam: self.ecam[..self.ecam_count].to_vec(),
             mapped: self.mapped[..self.mapped_count]
                 .iter()
@@ -176,6 +180,49 @@ pub struct Handoff {
 mod tests {
     use super::*;
     use stela_drivers::usb::bluetooth::intel::{DsbrCapture, DsbrInput};
+    #[test]
+    fn storage_wire_keeps_wifi_status_metadata_after_source_owner_drops() {
+        use stela_drivers::net::wifi::intel::platform::{Observation, Observations, Stage};
+        let mut expected = Observations {
+            oem_pnvm: Observation::Present {
+                attributes: 0x87,
+                bytes: 19,
+                sha256: [0xab; 32],
+                probe_reported_bytes: Some(23),
+            },
+            reduced_power: Observation::Absent {
+                stage: Stage::Probe,
+                status: 0x8000_0000_0000_000e,
+                reported_bytes: Some(0),
+            },
+            step: Observation::Failed {
+                stage: Stage::Read,
+                status: 0,
+                reported_bytes: Some(99),
+            },
+            ..Default::default()
+        };
+        for descriptor in &stela_drivers::net::wifi::intel::platform::VARIABLE_DESCRIPTORS[3..] {
+            expected.set(
+                descriptor.variable,
+                Observation::BoundExceeded {
+                    stage: Stage::Probe,
+                    status: 0x8000_0000_0000_0005,
+                    reported_bytes: descriptor.maximum_bytes as u64 + 1,
+                },
+            );
+        }
+        let physical = {
+            let mut record = Storage::absent();
+            record.present = true;
+            record.wifi_platform = expected;
+            let temporary = record.handoff().unwrap();
+            Storage::new(&temporary).unwrap()
+        };
+        assert_eq!(physical.wifi_platform, expected);
+        assert_eq!(physical.handoff().unwrap().wifi_platform, expected);
+        assert_eq!(Storage::absent().wifi_platform, Observations::default());
+    }
     #[test]
     fn physical_storage_record_preserves_owned_board_capture_after_source_drop() {
         for capture in [

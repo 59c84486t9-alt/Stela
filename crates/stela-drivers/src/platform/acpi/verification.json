@@ -1,0 +1,96 @@
+{
+  "target": "Stela native x86-64 physical platform services for full ARM64 macOS",
+  "linux_source_commit": "a804c5742bff224d4cb4d25dd383554d598be32b",
+  "acpica_version": "20260408",
+  "source_base": "112f4be435a924397008c6fc4125d0b98e01882b",
+  "retained_upstream_source_and_license_files": 203,
+  "excluded_unused_upstream_files": 39,
+  "compiled_interpreter_c_units": 162,
+  "authored_c_bridge_units": 2,
+  "upstream_semantics": "unchanged; only acenv.h/acenvex.h select custom freestanding environment; exact original/adapted SHA256 inventory in sources.json",
+  "native_provider": "mandatory owned C-ABI services, no Linux OSL/kernel ABI or device-driver compatibility layer",
+  "compiler": "Apple clang version 21.0.0 (clang-2100.1.1.101)",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "host_target": "x86_64-apple-darwin",
+  "uefi_rust_target": "x86_64-unknown-uefi",
+  "uefi_c_target": "x86_64-pc-windows-msvc",
+  "source_input_sha256": {
+    "crates/stela-drivers/build.rs": "a7c30a6fa481c4ea7f02b32a5d570b8814490a74f108ebc2a059e45252df596c",
+    "crates/stela-drivers/Cargo.toml": "7bf1e2c2c8af7b5c9c7c1a6b6d16d63ad6830bcd79031e3b45f8824a7d3d7e97",
+    "crates/stela-drivers/src/platform/acpi.rs": "5758fafda5b38466b6f7e55c75d13d7619e0f7d386c532f886099f7876c5b7e0",
+    "crates/stela-drivers/src/platform/acpi/bridge.c": "c180ccbd0deab2943f73959d87bb3f5cd23e3792228895b8428cc0325859d6d4",
+    "crates/stela-drivers/src/platform/acpi/bridge.h": "4894daa43450a2bdf928e51e48e668c11249723862883f9fb06ab6ec48bc0deb",
+    "crates/stela-drivers/src/platform/acpi/libc.c": "04dd3fe4d1713828d366db99c00b9a754ce761bac7aa21a908d6c55f3deece6e",
+    "crates/stela-drivers/src/platform/acpi/vendor/include/acpi/platform/acstela.h": "983fb7b9f7f23b7e5a3e70139ea5e8e71e0e414c7f9913944e7cf5e29b9fb79e",
+    "crates/stela-drivers/src/platform/acpi/vendor/include/linux/kmemleak.h": "3834f2716d4ff3c74e5becef4a689d01ed14e0479e5eb462aa775601b5974d57",
+    "crates/stela-drivers/src/platform/acpi/sources.json": "56a9044242b58c4b53b708cb8e8ae72749168bdef9d3de5cf0e69bc930e47997",
+    "crates/stela-drivers/src/platform/acpi/verify-source.py": "9c06d87b01be6717b06d06ab08eb10f2294442e52f354b7e88e59a8dd38ef0cc"
+  },
+  "gates": {
+    "format": "cargo fmt --all -- --check: pass",
+    "source_inventory": "verify-source.py: 203 pinned source/license files, 162 interpreter units, 2 fixture inputs verified",
+    "crate_tests": {
+      "passed": 381,
+      "ignored": 8,
+      "failed": 0,
+      "doc_tests_passed": 1,
+      "ignored_context": "existing ignored tests plus separately executed captured-firmware test"
+    },
+    "host_strict_clippy": "all targets + native-acpi, -D warnings: pass",
+    "uefi_strict_clippy": "native-acpi, -D warnings: pass",
+    "asan_ubsan": "authored AML/OSL lifecycle suite and captured Q35 _PIC/_PRT/GSIG._CRS probe: pass, fatal sanitizer mode, no diagnostics",
+    "uefi_c_build_and_link": {
+      "coff_objects": 164,
+      "archive_sha256": "78d844fc53ff8414ac1769abed2777e21cc54acbaef63cd6c24d212a9201bc78",
+      "instruction_listing_sha256": "efd5b596c28b919c61def9254f472b7952c3dfc98e7461654c5d1fdc63aba4c9",
+      "undefined_external_symbols": [],
+      "simd_registers": false,
+      "stack_probe_symbols": false,
+      "all_coff_timestamps_zero": true,
+      "uefi_linked_bytes": 192000,
+      "uefi_image_sha256": "603ccd5818e306bb239275f99a147e34a2f5ebcf077fe9f605b739d0ab031a50",
+      "trimmed_source_code_bytes_equal_original_dependency_closure": true,
+      "rust_c_argument_register": "RCX verified in linked image disassembly",
+      "runtime_execution": false
+    }
+  },
+  "authored_fixture": {
+    "project": "https://github.com/acpica/acpica",
+    "commit": "e80cbd7b52de20aa8c75bfba9845e9cb61f2e681",
+    "iasl_version": "20240827"
+  },
+  "captured_q35_route": {
+    "dsdt_sha256": "ed48c9772aee854066c14b36ce8f787bb69d279afa15dea729b8ba2f9b77256d",
+    "bytes": 8098,
+    "method": "\\_PIC(1)",
+    "entry": {
+      "address": 196607,
+      "pin": 0,
+      "source": "\\_SB_.GSIG",
+      "source_index": 0
+    },
+    "gsi": 22,
+    "active_low": false,
+    "level_triggered": true,
+    "shared": true,
+    "kind": "controlled hosted execution of actual captured DSDT with authored RSDP/XSDT/FADT; no native route activation",
+    "ignored_full_output": "acpi-q35-route-proof-final/"
+  },
+  "gate_log_sha256": {
+    "acpi-tests-final.log": "acaf703a19e4bc662337f3fa08af9e5d9968319ff4d10fb5398a237870414acb",
+    "acpi-clippy.log": "1359fb87fe8b6c4d8fc19fcffb897f9fd92e79a72fb062715a14ffd806fbce50",
+    "acpi-uefi-clippy-final.log": "e96191b41d0f89dc80fcac6e9a96adda6256ade8409ef80656cc6ccb2c82e10c",
+    "acpi-sanitize-final.log": "5aec7cd664ddca46031bd15eabf791ffcec5aa8cf2b2004ef17c384efc1c2380",
+    "acpi-q35-route-final.log": "23c8a7cb0943ace4fffe835accaa64f430f7cebe2a4215ab57c92033339d9ab0",
+    "acpi-q35-route-sanitize-final.log": "d0bac75e55a541c6f13f2bcdc7b5938e488424e6df5e9afe60b0d27d61d035d6",
+    "acpi-fmt-final.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "acpi-uefi-build.log": "1643926e1f3dad9cb0d57b74ac50e25553275088843f5d91b77de77016603683",
+    "acpi-uefi-link.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "limits": [
+    "Native boot/runtime provider attachment remains separate; no physical firmware methods activated by this module alone",
+    "Real SCI/INTx/IOAPIC electrical sharing, deferred enqueue/drain, IRQ-safe allocator/maps and EC/GPIO/serial-bus protocols must be supplied by actual native owners before full enable",
+    "Compiled/linked UEFI ABI probe was disassembled, not executed",
+    "System sleep API remains explicitly unsupported; no physical-device or guest frontend qualification is claimed"
+  ]
+}

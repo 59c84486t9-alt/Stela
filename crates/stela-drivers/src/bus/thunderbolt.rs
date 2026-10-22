@@ -8,10 +8,16 @@
 //! resources must be established by the native platform before ring takeover.
 //! Config-channel traffic alone grants neither tunnel authorization nor a
 //! working connection manager. No PCI ID is admitted by this initial core.
+pub mod adapter;
 pub mod channel;
 pub mod config;
 pub mod controller;
 pub mod domain;
 pub mod hop;
+pub mod icm;
+pub mod link;
+pub mod path;
 pub mod ring;
+pub mod router;
 pub mod topology;
+pub mod usb3;

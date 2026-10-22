@@ -18,6 +18,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering, fence},
 };
 
+pub mod data;
 pub mod rx;
 
 const DESC_BYTES: usize = 16;

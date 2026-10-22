@@ -168,10 +168,39 @@ impl<'a> Manifest<'a> {
     /// Each slice must actually remain immutable and mapped for this catalog's
     /// lifetime. Physical-to-reference construction belongs to the platform.
     pub fn catalog(&self, bytes: &[&'static [u8]]) -> Result<Catalog, Error> {
+        self.catalog_with(bytes, Vec::new())
+    }
+
+    /// Add platform-observed permanent resources in the same validation pass.
+    /// Descriptor borrows are copied into catalog metadata; image bytes remain
+    /// in the caller's immutable permanent mappings.
+    pub fn catalog_with<'b>(
+        &'b self,
+        bytes: &[&'static [u8]],
+        additional: Vec<Resource<'b, &'static [u8]>>,
+    ) -> Result<Catalog, Error> {
         if bytes.len() != self.images.len() {
             return Err(fail("host firmware handoff count mismatch"));
         }
-        let resources = self
+        if self
+            .images
+            .len()
+            .checked_add(additional.len())
+            .is_none_or(|count| count > MAX_IMAGES)
+            || additional
+                .iter()
+                .any(|resource| resource.bytes.len() > MAX_IMAGE_BYTES)
+            || self
+                .images
+                .iter()
+                .map(|image| image.length)
+                .chain(additional.iter().map(|resource| resource.bytes.len()))
+                .try_fold(0usize, |total, bytes| total.checked_add(bytes))
+                .is_none_or(|total| total > MAX_TOTAL_BYTES)
+        {
+            return Err(fail("combined host firmware resources exceed their budget"));
+        }
+        let mut resources = self
             .images
             .iter()
             .zip(bytes)
@@ -196,6 +225,7 @@ impl<'a> Manifest<'a> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
+        resources.extend(additional);
         Catalog::from_persistent_handoff(resources).map_err(|e| Error(format!("host {e}")))
     }
 }
@@ -276,6 +306,63 @@ mod tests {
     }
     fn manifest(images: Vec<Value>) -> Vec<u8> {
         serde_json::to_vec(&json!({"schema":1,"images":images})).unwrap()
+    }
+
+    #[test]
+    fn additional_permanent_resources_share_one_validation_pass_without_copying() {
+        static RAW: [u8; 3] = *b"abc";
+        let input = manifest(vec![image()]);
+        let parsed = Manifest::parse(&input).unwrap();
+        let extra = || Resource {
+            name: "platform/raw.bin",
+            target: Target {
+                driver: "platform",
+                hardware: "uefi:test",
+                revision: "observed",
+                board: None,
+            },
+            provenance: Provenance {
+                source: "synthetic",
+                revision: "v1",
+                member: "raw.bin",
+                license: "CC0-1.0",
+            },
+            expected_length: 3,
+            expected_sha256: parsed.images[0].digest().unwrap(),
+            bytes: &RAW[..],
+        };
+        let catalog = parsed.catalog_with(&[&RAW], vec![extra()]).unwrap();
+        let loaded = catalog
+            .load(Requirement {
+                name: "platform/raw.bin",
+                target: extra().target,
+                minimum_bytes: 3,
+            })
+            .unwrap();
+        assert_eq!(catalog.inventory(), (2, 6));
+        assert_eq!(loaded.bytes().as_ptr(), RAW.as_ptr());
+        assert!(
+            parsed
+                .catalog_with(&[&RAW], vec![extra(), extra()])
+                .is_err()
+        );
+        assert!(
+            parsed
+                .catalog_with(&[&RAW], (0..MAX_IMAGES).map(|_| extra()).collect())
+                .is_err()
+        );
+        let mut corrupt = extra();
+        corrupt.expected_sha256 = [0; 32];
+        assert!(parsed.catalog_with(&[&RAW], vec![corrupt]).is_err());
+        let mut collision = extra();
+        collision.name = parsed.images[0].name;
+        collision.target = Target {
+            driver: "realtek",
+            hardware: "10ec:8168",
+            revision: "xid-509",
+            board: None,
+        };
+        assert!(parsed.catalog_with(&[&RAW], vec![collision]).is_err());
     }
 
     #[test]

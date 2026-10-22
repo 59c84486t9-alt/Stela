@@ -8,11 +8,15 @@ license = "MIT AND BSD-3-Clause AND GPL-2.0-only AND GPL-2.0-or-later AND BSD-3-
 
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
+# Fallible native mapping metadata; the maintained owner supports alloc-only UEFI.
+triomphe = { version = "=0.1.16", default-features = false }
 
 [lints]
 workspace = true
 
 [features]
+# Native x86 ACPICA interpreter; builds freestanding C with clang.
+native-acpi = []
 # `block::RamDisk`, the in-memory disk the runtime's tests run models on.
 ram-disk = []
 # Build the implemented native NVIDIA OS hooks, not a complete GPU driver.

@@ -21,6 +21,7 @@ use crate::net::Mac;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+pub mod data;
 pub mod wire;
 
 static NEXT_ASSOCIATION: AtomicU64 = AtomicU64::new(1);
@@ -39,6 +40,7 @@ pub enum PortPolicy {
 /// The frame engine supplies no permissive default or country/DFS guesses.
 pub trait RegulatoryPolicy {
     fn allow_management_tx(&mut self, channel: Channel) -> bool;
+    fn allow_data_tx(&mut self, channel: Channel) -> bool;
 }
 
 #[derive(Clone, Debug)]
@@ -463,6 +465,9 @@ impl Station {
             .installed()
             .filter(|key| key.scope() == KeyScope::Group(bssid))
             .ok_or(Error::WrongKey)?;
+        if ptk.nonce_owner() == super::security::NonceOwner::ReceiveOnly {
+            return Err(Error::WrongKey);
+        }
         if ptk.index() != 0 {
             return Err(Error::Unsupported("extended pairwise key ID"));
         }
@@ -555,6 +560,9 @@ mod tests {
     struct Policy(bool);
     impl RegulatoryPolicy for Policy {
         fn allow_management_tx(&mut self, _: Channel) -> bool {
+            self.0
+        }
+        fn allow_data_tx(&mut self, _: Channel) -> bool {
             self.0
         }
     }
@@ -658,6 +666,11 @@ mod tests {
                 &[slot as u8; 16],
                 ReplaySeed::ZERO,
                 scope,
+                if matches!(scope, KeyScope::Pairwise(_)) {
+                    super::super::security::TransmitSeed::FIRMWARE_FRESH
+                } else {
+                    super::super::security::TransmitSeed::RECEIVE_ONLY
+                },
             )
             .unwrap();
         key.complete_install(ticket, InstallOutcome::Accepted)
@@ -1063,5 +1076,68 @@ mod tests {
         ));
         assert_eq!(station.phase(), Phase::Associating);
         assert!(!station.port_open(None, None));
+    }
+
+    #[test]
+    fn receive_only_pairwise_key_cannot_authorize_a_data_port() {
+        use crate::net::wifi::security::{NonceOwner, TransmitSeed};
+        let mut station = Station::new(LOCAL).unwrap();
+        let config = configure(&mut station, PortPolicy::Controlled);
+        station
+            .complete_configuration(config, Completion::Accepted, 4)
+            .unwrap();
+        let mut ptk = unsafe { KeySlot::new(1).unwrap() };
+        let ticket = ptk
+            .begin_install(
+                0,
+                Cipher::Ccmp128,
+                &[1; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Pairwise(AP),
+                TransmitSeed::RECEIVE_ONLY,
+            )
+            .unwrap();
+        ptk.complete_install(ticket, InstallOutcome::Accepted)
+            .unwrap();
+        assert_eq!(
+            ptk.installed().unwrap().nonce_owner(),
+            NonceOwner::ReceiveOnly
+        );
+        let gtk = key(2, KeyScope::Group(AP));
+        assert_eq!(
+            station.authorize_port(config.epoch(), &ptk, &gtk),
+            Err(Error::WrongKey)
+        );
+        assert!(!station.port_open(Some(&ptk), Some(&gtk)));
+    }
+
+    #[test]
+    fn host_nonce_exhaustion_closes_a_previously_authorized_data_port() {
+        use crate::net::wifi::security::{PacketNumber, TransmitSeed};
+        let mut station = Station::new(LOCAL).unwrap();
+        let config = configure(&mut station, PortPolicy::Controlled);
+        station
+            .complete_configuration(config, Completion::Accepted, 4)
+            .unwrap();
+        let mut ptk = unsafe { KeySlot::new(1).unwrap() };
+        let ticket = ptk
+            .begin_install(
+                0,
+                Cipher::Ccmp128,
+                &[1; 16],
+                ReplaySeed::ZERO,
+                KeyScope::Pairwise(AP),
+                TransmitSeed::host(PacketNumber::new((1_u64 << 48) - 2).unwrap()),
+            )
+            .unwrap();
+        ptk.complete_install(ticket, InstallOutcome::Accepted)
+            .unwrap();
+        let identity = ptk.installed().unwrap();
+        let gtk = key(2, KeyScope::Group(AP));
+        station.authorize_port(config.epoch(), &ptk, &gtk).unwrap();
+        assert!(station.port_open(Some(&ptk), Some(&gtk)));
+        assert!(ptk.reserve_host_tx_nonce(identity).is_ok());
+        assert!(ptk.reserve_host_tx_nonce(identity).is_err());
+        assert!(!station.port_open(Some(&ptk), Some(&gtk)));
     }
 }

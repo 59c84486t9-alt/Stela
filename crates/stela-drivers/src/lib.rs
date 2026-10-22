@@ -35,6 +35,7 @@ pub mod firmware;
 pub mod gpu;
 pub mod input;
 pub mod net;
+pub mod platform;
 pub mod probe;
 pub mod storage;
 pub mod usb;
@@ -59,6 +60,8 @@ pub struct Handoff {
     pub firmware: Option<Arc<firmware::Catalog>>,
     /// Owned pre-EBS Intel Bluetooth board-variable observation and diagnostics.
     pub bluetooth_platform: usb::bluetooth::intel::DsbrCapture,
+    /// Copied status metadata; raw bytes belong to the permanent firmware catalog.
+    pub wifi_platform: net::wifi::intel::platform::Observations,
 }
 
 impl Handoff {
@@ -202,6 +205,7 @@ mod tests {
         let handoff = Handoff {
             firmware: None,
             bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
             ecam: Vec::new(),
             mapped: vec![0x1000..0x3000, 0x8000..0x9000],
             dma: 0..0,
@@ -227,6 +231,7 @@ mod tests {
             },
             firmware: Some(catalog.clone()),
             bluetooth_platform: Default::default(),
+            wifi_platform: Default::default(),
         };
         let cloned = handoff.clone();
         assert!(Arc::ptr_eq(cloned.firmware.as_ref().unwrap(), &catalog));

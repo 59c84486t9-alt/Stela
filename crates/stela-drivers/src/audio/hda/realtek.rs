@@ -10,6 +10,8 @@ use alloc::vec::Vec;
 
 mod headphone;
 pub use headphone::RealtekHeadphoneReport;
+mod dual_headphone;
+pub use dual_headphone::{RealtekDualHeadphoneReport, RealtekHeadphoneRoute};
 
 const PROCESSING: u8 = 0x20;
 const GET_PARAMETER: u16 = 0xf00;
@@ -143,6 +145,10 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             .routes
             .iter()
             .any(|(_, route)| route.codec_address() == graph.address)
+            || self
+                .codec_controls
+                .iter()
+                .any(|(_, codec, _)| *codec == graph.address)
         {
             return Err(Error::RouteInUse);
         }

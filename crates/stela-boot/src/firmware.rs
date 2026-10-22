@@ -294,8 +294,9 @@ pub fn take_over(
     let options = crate::payload::run(options)?;
     let source = source.ok_or("cannot read \\EFI\\stela\\source.bin")?;
     // SAFETY: standalone mount retains identity mappings and this allocator.
+    let wifi_platform = host_firmware.wifi_observations();
     let host_firmware = unsafe { host_firmware.identity_catalog() }?;
-    let storage = crate::storage::prepare(&options, host_firmware)?;
+    let storage = crate::storage::prepare(&options, host_firmware, wifi_platform)?;
     let native = arenas::<NATIVE_ARENAS>()?;
     let ram = arenas::<RAM_ARENAS>()?;
     let guard = pages(STACK_PAGES + 1)?;

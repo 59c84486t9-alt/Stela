@@ -27,13 +27,18 @@ pub struct RealtekHeadphoneReport {
 // These are fixed endpoints in the ALC256/257 donor procedure, not selectable
 // register banks or arbitrary graph NIDs. The public caller chooses only hp_pin.
 #[derive(Clone, Copy)]
-enum DepopControl {
+pub(super) enum DepopControl {
     HeadphonePower,
     AnalogReset,
 }
+#[derive(Clone, Copy)]
+enum DepopProfile {
+    Alc255,
+    Alc256And257,
+}
 
 impl<R: Registers, T: Timer> Controller<R, T> {
-    fn headphone_preflight(
+    pub(super) fn headphone_preflight(
         &mut self,
         graph: &CodecGraph,
         route: &AnalogRoute,
@@ -120,7 +125,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         Ok(pin_power)
     }
-    fn headphone_unmute_zero(&mut self, codec: u8, pin: u8) -> Result<(), Error> {
+    pub(super) fn headphone_unmute_zero(&mut self, codec: u8, pin: u8) -> Result<(), Error> {
         // Exact AMP_OUT_UNMUTE: both declared stereo channels, gain code zero.
         // Generic route programming subsequently chooses its advertised 0dB.
         self.verb(Verb::long(codec, pin, 3, 0xb000)?)?;
@@ -194,7 +199,7 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         result
     }
-    fn depop_control(
+    pub(super) fn depop_control(
         &mut self,
         codec: u8,
         control: DepopControl,
@@ -248,8 +253,54 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         channel: u8,
         options: PinOptions,
     ) -> Result<RealtekHeadphoneReport, Error> {
+        self.configure_realtek_depop_headphone(
+            graph,
+            route,
+            id,
+            channel,
+            options,
+            DepopProfile::Alc256And257,
+        )
+    }
+
+    /// Exact ALC255 held-D0 headphone startup and explicit route reservation.
+    /// Its fixed depop/reset sequence matches alc256_init, but its initial
+    /// EAPD selection clears only node20/index10 bit9: index36 bit13 is left
+    /// untouched until the donor's final unconditional 0x5757 write.
+    /// The same live pin, presence, failure and OEM-policy bounds apply.
+    pub fn configure_realtek_alc255_headphone(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+    ) -> Result<RealtekHeadphoneReport, Error> {
+        self.configure_realtek_depop_headphone(
+            graph,
+            route,
+            id,
+            channel,
+            options,
+            DepopProfile::Alc255,
+        )
+    }
+
+    fn configure_realtek_depop_headphone(
+        &mut self,
+        graph: &CodecGraph,
+        route: &AnalogRoute,
+        id: StreamId,
+        channel: u8,
+        options: PinOptions,
+        profile: DepopProfile,
+    ) -> Result<RealtekHeadphoneReport, Error> {
         self.realtek_common_guard(graph)?;
-        if !matches!(graph.vendor_id, 0x10ec_0256 | 0x10ec_0257) {
+        let accepts = match profile {
+            DepopProfile::Alc255 => graph.vendor_id == 0x10ec_0255,
+            DepopProfile::Alc256And257 => matches!(graph.vendor_id, 0x10ec_0256 | 0x10ec_0257),
+        };
+        if !accepts {
             return Err(Error::UnsupportedTopology);
         }
         let pin_power = self.headphone_preflight(graph, route, id, channel, options)?;
@@ -266,10 +317,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             if pin_power {
                 self.power_d0(graph.address, route.pin())?;
             }
-            let mut coefficients = alloc::vec![
-                self.clear_coefficient_bits(graph.address, 0x36, 1 << 13)?,
-                self.clear_coefficient_bits(graph.address, 0x10, 1 << 9)?,
-            ];
+            let mut coefficients = alloc::vec::Vec::new();
+            if matches!(profile, DepopProfile::Alc256And257) {
+                coefficients.push(self.clear_coefficient_bits(graph.address, 0x36, 1 << 13)?);
+            }
+            coefficients.push(self.clear_coefficient_bits(graph.address, 0x10, 1 << 9)?);
             self.delay(30_000);
             let initial_sense = self.poll_pin_sense(graph, route.pin())?;
             if initial_sense.present {

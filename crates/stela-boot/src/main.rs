@@ -49,6 +49,7 @@ pub mod native_dma;
 pub mod native_irq;
 pub mod native_memory;
 mod native_smp;
+mod native_work_check;
 mod output;
 mod paging;
 mod payload;

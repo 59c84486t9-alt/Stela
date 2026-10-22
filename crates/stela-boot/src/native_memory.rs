@@ -26,7 +26,7 @@ const PAGE_SHIFT: u8 = 12;
 const PAGE: usize = 1 << PAGE_SHIFT;
 
 #[cfg_attr(test, path = "native_memory/cache.rs")]
-mod cache;
+pub(crate) mod cache;
 
 pub static SOURCE: NativeMemory = NativeMemory {
     cpu: AtomicUsize::new(0),

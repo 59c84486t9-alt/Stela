@@ -56,11 +56,12 @@ impl Context {
                     {
                         return Err(invalid());
                     }
-                    if companion.attributes != 0 {
-                        return Err(BlockError::Unsupported(
-                            "USB bulk streams are not implemented",
-                        ));
+                    if companion.attributes > 16 {
+                        return Err(invalid());
                     }
+                    // MaxStreams advertises a capability, not an instruction
+                    // to enable it. Ordinary contexts keep MaxPStreams/LSA zero;
+                    // configure_streams enables a checked primary array.
                     (burst, 0, 0)
                 }
             }
@@ -246,6 +247,21 @@ mod tests {
     }
 
     #[test]
+    fn advertised_stream_capability_does_not_enable_streams_in_an_ordinary_context() {
+        for attributes in 1..=16 {
+            let mut ep = endpoint(2, 1024, 0);
+            ep.companion = Some(SuperSpeedCompanion {
+                max_burst: 15,
+                attributes,
+                bytes_per_interval: 0,
+            });
+            for speed in [SUPER_SPEED, SUPER_SPEED_PLUS] {
+                assert_eq!(Context::new(&ep, speed).unwrap().info & 0xfc00, 0);
+            }
+        }
+    }
+
+    #[test]
     fn malformed_speed_packet_interval_streams_and_companions_refuse() {
         for (speed, kind, packet, interval) in [
             (LOW_SPEED, 2, 8, 0),
@@ -275,7 +291,7 @@ mod tests {
             for (packet, burst, attributes, bytes) in [
                 (512, 0, 0, 0),
                 (1024, 16, 0, 0),
-                (1024, 0, 1, 0),
+                (1024, 0, 17, 0),
                 (1024, 0, 0x80, 0),
                 (1024, 0, 0, 1),
                 (1024 | 1 << 11, 0, 0, 0),

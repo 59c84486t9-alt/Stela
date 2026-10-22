@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract unchanged Linux boot MCU encoders; emit immutable ASan/UBSan traces.
+"""Extract unchanged Linux boot/UNI MCU encoders; emit immutable ASan/UBSan traces.
 
 Usage: mt792x_mcu_oracle.py MT76_DIRECTORY FRESH_OUTPUT_DIRECTORY
 Then STELA_MT792X_MCU_ORACLE=FRESH_OUTPUT_DIRECTORY cargo test -p stela-drivers
@@ -72,10 +72,6 @@ typedef uint16_t __le16; typedef uint32_t __le32;
 #define MCU_CMD(x) MCU_CMD_##x
 #define MCU_CMD_FW_SCATTER 0xee
 #define MCU_UNI_CMD(x) (__MCU_CMD_FIELD_UNI|MCU_UNI_CMD_##x)
-#define MCU_UNI_CMD_HIF_CTRL 0x07
-#define MCU_UNI_CMD_CHIP_CONFIG 0x0e
-#define MCU_UNI_CMD_TESTMODE_RX_STAT 0x32
-#define MCU_UNI_CMD_TESTMODE_CTRL 0x46
 #define MCU_CMD_ACK BIT(0)
 #define MCU_CMD_UNI_EXT_ACK 7
 #define MCU_CMD_UNI_QUERY_ACK 3
@@ -96,14 +92,19 @@ static void *skb_push(struct sk_buff *s,int n) { s->data-=n;s->len+=n;return s->
 '''
 main=r'''
 int main(int argc,char **argv) {
- if(argc!=2)return 1; int chip=atoi(argv[1]); struct mt76_dev d={0};
+ if(argc!=2 && argc!=3)return 1; int chip=atoi(argv[1]); struct mt76_dev d={0};
+ bool cap=argc==3&&!strcmp(argv[2],"cap");
  u8 commands[]={1,2,5,7,0x10,0xee};
  for(int i=0;i<90;i++) {
   u8 cmd=commands[i%6]; int n=cmd==0xee?4096:cmd==2?8:(cmd==1||cmd==5)?12:4;
+  if(argc==3&&!cap){cmd=1+i%3;n=8+(i*37)%1000;}
+  if(cap){cmd=chip==7925?14:0x8a;n=chip==7925?8:0;}
   u8 *allocation=calloc(1,n+128);if(!allocation)abort();
   struct sk_buff s={.data=allocation+128,.len=n};
   for(int j=0;j<n;j++)s.data[j]=(u8)(i*17+j);
-  int seq=0;int rc=chip==7925?mt7925_mcu_fill_message(&d,&s,cmd,&seq):mt76_connac2_mcu_fill_message(&d,&s,cmd,&seq);
+  if(cap&&chip==7925){memset(s.data,0,n);s.data[4]=3;s.data[6]=4;}
+  int seq=0;int wire_cmd=cmd|(cap?(chip==7925?__MCU_CMD_FIELD_UNI:__MCU_CMD_FIELD_CE):(argc==3?__MCU_CMD_FIELD_UNI:0));
+  int rc=chip==7925?mt7925_mcu_fill_message(&d,&s,wire_cmd,&seq):mt76_connac2_mcu_fill_message(&d,&s,wire_cmd,&seq);
   if(rc)abort();u8 hdr[4]={cmd,(u8)seq,(u8)s.len,(u8)(s.len>>8)};
   if(fwrite(hdr,1,4,stdout)!=4 || fwrite(s.data,1,s.len,stdout)!=(size_t)s.len)abort();free(allocation);
  }
@@ -111,7 +112,9 @@ int main(int argc,char **argv) {
 }
 '''
 unit=out/'linux-mt792x-mcu.c'
-unit.write_text(prelude+'\n'.join(constants)+'\n'+structs+function('mt76_connac_mcu.c','mt76_connac2_mcu_fill_message')+'\n'+function('mt7925/mcu.c','mt7925_mcu_fill_message')+main)
+uni_start=h.rfind('enum {',0,h.index('MCU_UNI_CMD_DEV_INFO_UPDATE'))
+uni_enum=h[uni_start:h.index('};',uni_start)+2]
+unit.write_text(prelude+uni_enum+'\n'+'\n'.join(constants)+'\n'+structs+function('mt76_connac_mcu.c','mt76_connac2_mcu_fill_message')+'\n'+function('mt7925/mcu.c','mt7925_mcu_fill_message')+main)
 exe=out/'linux-mt792x-mcu'
 subprocess.run(['cc','-std=gnu11','-O1','-g','-fsanitize=address,undefined',str(unit),'-o',str(exe)],check=True)
 cases=[]
@@ -119,5 +122,11 @@ for chip in [7921,7922,7925]:
  trace=subprocess.run([str(exe.resolve()),str(chip)],stdout=subprocess.PIPE,check=True).stdout
  (out/f'{chip}.trace').write_bytes(trace)
  cases.append({'chip':chip,'messages':90,'trace_bytes':len(trace),'sha256':hashlib.sha256(trace).hexdigest()})
+ runtime=subprocess.run([str(exe.resolve()),str(chip),'uni'],stdout=subprocess.PIPE,check=True).stdout
+ (out/f'{chip}-uni.trace').write_bytes(runtime)
+ cases.append({'chip':chip,'profile':'device-bss-station-uni','messages':90,'trace_bytes':len(runtime),'sha256':hashlib.sha256(runtime).hexdigest()})
+ capability=subprocess.run([str(exe.resolve()),str(chip),'cap'],stdout=subprocess.PIPE,check=True).stdout
+ (out/f'{chip}-cap.trace').write_bytes(capability)
+ cases.append({'chip':chip,'profile':'actual-chip-nic-capabilities','messages':90,'trace_bytes':len(capability),'sha256':hashlib.sha256(capability).hexdigest()})
 (out/'manifest.json').write_text(json.dumps({'linux_commit':'a804c5742bff224d4cb4d25dd383554d598be32b','sources':hashes,'cases':cases},indent=2)+'\n')
 print(json.dumps(cases,indent=2))

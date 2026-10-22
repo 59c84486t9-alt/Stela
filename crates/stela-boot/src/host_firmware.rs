@@ -1,4 +1,4 @@
-//! Host-device resources read from the selected boot volume before EBS. Unlike
+//! Host-device resources from the selected boot volume and native UEFI before EBS. Unlike
 //! a Vec/Arc in the loader heap, this fixed wire representation survives engine
 //! relocation. Only immutable bytes in reserved LOADER_DATA pages cross it.
 use crate::{firmware, handoff::Region, layout, output, paging::PAGE};
@@ -8,6 +8,10 @@ use stela_loader::host_firmware::{self as manifest, MAX_IMAGES, MAX_MANIFEST_BYT
 use uefi::{
     CString16,
     proto::media::file::{Directory, File as _, FileAttribute, FileInfo, FileMode, RegularFile},
+};
+mod wifi;
+use stela_drivers::net::wifi::intel::platform::{
+    CapturedVariable, Observation, Observations, VARIABLE_DESCRIPTORS,
 };
 
 /// At most 4096 siblings per path component; no unbounded directory scans or
@@ -23,6 +27,7 @@ pub struct Resources {
     pub manifest: Region,
     pub images: [Region; MAX_IMAGES],
     pub count: usize,
+    wifi: [wifi::Capture; VARIABLE_DESCRIPTORS.len()],
 }
 impl Resources {
     pub const fn absent() -> Self {
@@ -37,7 +42,22 @@ impl Resources {
                 bytes: 0,
             }; MAX_IMAGES],
             count: 0,
+            wifi: [wifi::Capture {
+                observation: Observation::NotCaptured,
+                region: Region {
+                    physical: 0,
+                    bytes: 0,
+                },
+            }; VARIABLE_DESCRIPTORS.len()],
         }
+    }
+
+    pub fn wifi_observations(&self) -> Observations {
+        let mut observations = Observations::default();
+        for (descriptor, capture) in VARIABLE_DESCRIPTORS.iter().zip(&self.wifi) {
+            observations.set(descriptor.variable, capture.observation);
+        }
+        observations
     }
 
     /// # Safety
@@ -50,12 +70,10 @@ impl Resources {
         map: impl Fn(u64) -> u64,
         phase: Option<&'static str>,
     ) -> Result<Option<Arc<Catalog>>, &'static str> {
-        if !self.present {
-            return Ok(None);
-        }
         if self.count > MAX_IMAGES
-            || self.manifest.bytes as usize > MAX_MANIFEST_BYTES
-            || self.manifest.bytes == 0
+            || (!self.present && self.count != 0)
+            || (self.present
+                && (self.manifest.bytes as usize > MAX_MANIFEST_BYTES || self.manifest.bytes == 0))
         {
             return Err("invalid host firmware wire handoff");
         }
@@ -78,21 +96,132 @@ impl Resources {
                 )
             })
         };
-        let manifest_bytes = view(self.manifest)?;
-        let parsed = Manifest::parse(manifest_bytes).map_err(report)?;
-        if parsed.images.len() != self.count {
+        let manifest_bytes = if self.present {
+            Some(view(self.manifest)?)
+        } else {
+            None
+        };
+        let parsed = manifest_bytes
+            .map(Manifest::parse)
+            .transpose()
+            .map_err(report)?;
+        if parsed
+            .as_ref()
+            .is_some_and(|parsed| parsed.images.len() != self.count)
+        {
             return Err("host firmware wire count mismatch");
         }
         let mut bytes = Vec::with_capacity(self.count);
-        for (image, region) in parsed.images.iter().zip(&self.images[..self.count]) {
+        for (image, region) in parsed
+            .iter()
+            .flat_map(|p| &p.images)
+            .zip(&self.images[..self.count])
+        {
             if region.bytes != image.length as u64 {
                 return Err("host firmware wire length mismatch");
             }
             bytes.push(view(*region)?);
         }
-        let catalog = Arc::new(parsed.catalog(&bytes).map_err(report)?);
-        if let Some(phase) = phase {
-            record(phase, manifest_bytes, &parsed, &catalog)?;
+        let mut captures = Vec::new();
+        for (variable, capture) in VARIABLE_DESCRIPTORS
+            .iter()
+            .map(|descriptor| descriptor.variable)
+            .zip(&self.wifi)
+        {
+            if parsed.as_ref().is_some_and(|parsed| {
+                parsed.images.iter().any(|image| {
+                    image.name == variable.resource_name()
+                        || (image.target.driver == variable.requirement().target.driver
+                            && image.target.hardware == variable.requirement().target.hardware
+                            && image.target.revision == variable.requirement().target.revision
+                            && image.target.board == variable.requirement().target.board)
+                })
+            }) {
+                return Err("installed firmware collides with a live UEFI observation");
+            }
+            if let Observation::Present {
+                attributes,
+                bytes,
+                probe_reported_bytes,
+                ..
+            } = capture.observation
+            {
+                if bytes > variable.maximum_bytes() as u64 {
+                    return Err("Wi-Fi observation wire exceeds its resource budget");
+                }
+                if capture.region.bytes != bytes {
+                    return Err("Wi-Fi observation wire length mismatch");
+                }
+                let raw = if bytes == 0 {
+                    &[]
+                } else {
+                    view(capture.region)?
+                };
+                let captured = CapturedVariable::from_variable(
+                    variable,
+                    raw,
+                    attributes,
+                    probe_reported_bytes,
+                )
+                .map_err(|_| "Wi-Fi observation exceeds its permanent resource budget")?;
+                if captured.observation() != capture.observation {
+                    return Err("Wi-Fi observation wire digest mismatch");
+                }
+                captures.push(captured);
+            } else if capture.region.bytes != 0 || capture.region.physical != 0 {
+                return Err("failed Wi-Fi observation has a resource region");
+            }
+        }
+        let additional: Vec<_> = captures
+            .iter_mut()
+            .filter_map(CapturedVariable::take_resource)
+            .collect();
+        if self.count + additional.len() > MAX_IMAGES
+            || bytes.iter().map(|b| b.len()).sum::<usize>()
+                + additional.iter().map(|r| r.bytes.len()).sum::<usize>()
+                > manifest::MAX_TOTAL_BYTES
+        {
+            return Err("combined firmware observations exceed the catalog budget");
+        }
+        let records: Vec<_> = phase
+            .into_iter()
+            .flat_map(|phase| {
+                VARIABLE_DESCRIPTORS
+                    .iter()
+                    .map(|descriptor| descriptor.variable)
+                    .zip(&self.wifi)
+                    .map(|(variable, capture)| {
+                        wifi::record(
+                            phase,
+                            variable,
+                            capture.observation,
+                            additional
+                                .iter()
+                                .find(|resource| resource.name == variable.resource_name()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if !self.present && additional.is_empty() {
+            for record in records {
+                output::arguments(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+            }
+            return Ok(None);
+        }
+        let catalog = Arc::new(if let Some(parsed) = &parsed {
+            parsed.catalog_with(&bytes, additional).map_err(report)?
+        } else {
+            Catalog::from_persistent_handoff(additional)
+                .map_err(|_| "invalid permanent Wi-Fi resources")?
+        });
+        for record in records {
+            output::arguments(format_args!("HOST WIFI UEFI RECORD {record}\n"));
+        }
+        if let Some(phase) = phase
+            && let (Some(manifest_bytes), Some(parsed)) = (manifest_bytes, &parsed)
+        {
+            record(phase, manifest_bytes, parsed, &catalog)?;
         }
         Ok(Some(catalog))
     }
@@ -131,7 +260,8 @@ fn record(
     manifest: &Manifest<'_>,
     catalog: &Catalog,
 ) -> Result<(), &'static str> {
-    let (images, bytes) = catalog.inventory();
+    let images = manifest.images.len();
+    let bytes: usize = manifest.images.iter().map(|image| image.length).sum();
     let record = serde_json::json!({
         "kind": "manifest", "phase": phase, "images": images, "bytes": bytes,
         "sha256": stela_runtime::sha256(manifest_bytes),
@@ -279,9 +409,19 @@ fn read_file(
 /// Absence alone is optional. Any unreadable/malformed present manifest or
 /// missing/corrupt resource is a boot refusal, with no alternate-volume search.
 pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
+    let mut wifi = [wifi::Capture::default(); VARIABLE_DESCRIPTORS.len()];
+    for (slot, descriptor) in wifi.iter_mut().zip(&VARIABLE_DESCRIPTORS) {
+        *slot = wifi::capture(descriptor.variable)?;
+    }
     let Some(file) = open(root, manifest::MANIFEST_PATH)? else {
         output::arguments(format_args!("HOST FIRMWARE manifest=absent\n"));
-        return Ok(Resources::absent());
+        let resources = Resources {
+            wifi,
+            ..Resources::absent()
+        };
+        // SAFETY: freshly captured immutable permanent pages, identity mapped.
+        let _ = unsafe { resources.catalog(|physical| physical, Some("before-ebs")) }?;
+        return Ok(resources);
     };
     let region = read_file(file, None, MAX_MANIFEST_BYTES)?;
     // SAFETY: read_file reserved these pages and completed all writes.
@@ -292,6 +432,7 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
         present: true,
         manifest: region,
         count: parsed.images.len(),
+        wifi,
         ..Resources::absent()
     };
     // Parse/identity checks and the total budget precede every image allocation.
@@ -309,4 +450,163 @@ pub fn read(root: &mut Directory) -> Result<Resources, &'static str> {
         "HOST FIRMWARE phase=before-ebs images={images} bytes={total}\n"
     ));
     Ok(resources)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stela_drivers::net::wifi::intel::platform::Variable;
+
+    #[test]
+    fn installed_resources_cannot_substitute_a_live_observation_name_or_target() {
+        static RAW: [u8; 14] = [1; 14];
+        for (variable, collide_name) in [Variable::Step, Variable::Eckv, Variable::PhyFilters]
+            .into_iter()
+            .flat_map(|variable| [true, false].map(|collide| (variable, collide)))
+        {
+            let target = variable.requirement().target;
+            let digest = stela_runtime::sha256(&RAW);
+            let manifest = serde_json::json!({"schema":1,"images":[{
+                "name":if collide_name {variable.resource_name()} else {"synthetic/raw.bin"},
+                "path":"raw.bin","length":RAW.len(),"sha256":digest,
+                "target":if collide_name {serde_json::json!({"driver":"fixture","hardware":"synthetic","revision":"v1","board":null})} else {serde_json::json!({"driver":target.driver,"hardware":target.hardware,"revision":target.revision,"board":target.board})},
+                "provenance":{"source":"synthetic","revision":"v1","member":"raw.bin","license":"CC0-1.0"}
+            }]});
+            let bytes =
+                alloc::boxed::Box::leak(serde_json::to_vec(&manifest).unwrap().into_boxed_slice());
+            let mut resources = Resources::absent();
+            resources.present = true;
+            resources.count = 1;
+            resources.manifest = Region {
+                physical: bytes.as_ptr() as u64,
+                bytes: bytes.len() as u64,
+            };
+            resources.images[0] = Region {
+                physical: RAW.as_ptr() as u64,
+                bytes: RAW.len() as u64,
+            };
+            // SAFETY: these immutable static fixture aliases cover every byte.
+            assert_eq!(
+                unsafe { resources.catalog(|address| address, None) }
+                    .err()
+                    .unwrap(),
+                "installed firmware collides with a live UEFI observation"
+            );
+        }
+    }
+
+    #[test]
+    fn radio_wire_bounds_refuse_before_mapping_and_valid_pages_keep_identity() {
+        static RAW: [u8; 14] = [0xa5; 14];
+        for descriptor in &VARIABLE_DESCRIPTORS[3..] {
+            let mut resources = Resources::absent();
+            let over = descriptor.maximum_bytes as u64 + 1;
+            resources.wifi[descriptor.variable as usize] = wifi::Capture {
+                observation: Observation::Present {
+                    attributes: 7,
+                    bytes: over,
+                    sha256: [0; 32],
+                    probe_reported_bytes: Some(over),
+                },
+                region: Region {
+                    physical: 0x1000,
+                    bytes: over,
+                },
+            };
+            // SAFETY: invalid bounds must be rejected before creating a view.
+            assert_eq!(
+                unsafe { resources.catalog(|_| panic!("over-limit wire must not map"), None) }
+                    .err(),
+                Some("Wi-Fi observation wire exceeds its resource budget")
+            );
+        }
+        let variable = Variable::Eckv;
+        let captured = CapturedVariable::from_variable(variable, &RAW[..], 7, Some(14)).unwrap();
+        let mut resources = Resources::absent();
+        resources.wifi[variable as usize] = wifi::Capture {
+            observation: captured.observation(),
+            region: Region {
+                physical: 0x1000,
+                bytes: 14,
+            },
+        };
+        // SAFETY: complete static fixture models the reserved permanent alias.
+        let catalog =
+            unsafe { resources.catalog(|address| address - 0x1000 + RAW.as_ptr() as u64, None) }
+                .unwrap()
+                .unwrap();
+        let image = stela_drivers::net::wifi::intel::platform::load_radio_image(
+            variable,
+            resources.wifi_observations().get(variable),
+            catalog.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(image.bytes().as_ptr(), RAW.as_ptr());
+        assert_eq!(image.bytes(), RAW);
+        assert_eq!(image.target(), variable.requirement().target);
+        assert_eq!(catalog.inventory(), (1, 14));
+    }
+
+    #[test]
+    fn raw_observations_reconstruct_through_permanent_mapping_without_byte_copies() {
+        static RAW: [u8; 14] = [1; 14];
+        let capture =
+            CapturedVariable::from_variable(Variable::OemPnvm, &RAW[..], 0x87, Some(18)).unwrap();
+        let mut resources = Resources::absent();
+        resources.wifi[0] = wifi::Capture {
+            observation: capture.observation(),
+            region: Region {
+                physical: 0x1000,
+                bytes: 14,
+            },
+        };
+        let copied = resources;
+        // SAFETY: the mapper returns the complete immutable static fixture,
+        // modeling the reserved region's new permanent alias after relocation.
+        let catalog =
+            unsafe { copied.catalog(|address| address - 0x1000 + RAW.as_ptr() as u64, None) }
+                .unwrap()
+                .unwrap();
+        let image = catalog.load(Variable::OemPnvm.requirement()).unwrap();
+        assert_eq!(image.bytes().as_ptr(), RAW.as_ptr());
+        assert_eq!(image.bytes(), RAW);
+        assert_eq!(
+            image.provenance().license,
+            "LicenseRef-Local-UEFI-Observation"
+        );
+        assert_eq!(copied.wifi_observations(), resources.wifi_observations());
+        assert_eq!(
+            copied.wifi_observations().reduced_power,
+            Observation::NotCaptured
+        );
+        assert_eq!(catalog.inventory(), (1, 14));
+        resources.wifi[0].region.bytes = 13;
+        // SAFETY: the same static mapping; invalid wire length must be rejected.
+        assert!(
+            unsafe { resources.catalog(|address| address - 0x1000 + RAW.as_ptr() as u64, None) }
+                .is_err()
+        );
+        resources.wifi[0].region.bytes = 14;
+        resources.wifi[0].observation = Observation::Failed {
+            stage: stela_drivers::net::wifi::intel::platform::Stage::Read,
+            status: 0,
+            reported_bytes: Some(15),
+        };
+        // SAFETY: invalid failed-with-region metadata is rejected before mapping.
+        assert!(
+            unsafe { resources.catalog(|_| panic!("failed resources must not map"), None) }
+                .is_err()
+        );
+        resources.wifi[0].observation = Observation::Present {
+            attributes: 0,
+            bytes: u64::MAX,
+            sha256: [0; 32],
+            probe_reported_bytes: Some(u64::MAX),
+        };
+        resources.wifi[0].region.bytes = u64::MAX;
+        // SAFETY: the wire budget is checked before any slice/map operation.
+        assert!(
+            unsafe { resources.catalog(|_| panic!("oversized wire must not map"), None) }.is_err()
+        );
+    }
 }

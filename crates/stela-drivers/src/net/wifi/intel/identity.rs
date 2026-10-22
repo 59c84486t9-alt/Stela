@@ -140,12 +140,30 @@ pub enum StageError {
     },
 }
 
-/// Borrowed resources only. PNVM remains opaque until actual ALIVE SKU and
-/// hardware selection complete; its presence is not calibration validation.
+/// Borrowed pre-ROM firmware only. Conditional PNVM/reduced-power resource
+/// acquisition must follow actual current-epoch ALIVE SKU/source policy.
+/// The image and its parsed bytes cannot be independently replaced:
+/// ```compile_fail
+/// use stela_drivers::{firmware::Image,net::wifi::intel::{firmware::Firmware,identity::Staged}};
+/// fn forged<'a>(firmware:Firmware<'a>,source:Image<'a>)->Staged<'a> {
+///     Staged { firmware,source }
+/// }
+/// ```
 pub struct Staged<'a> {
-    pub firmware: Firmware<'a>,
-    pub source: resources::Image<'a>,
-    pub pnvm: Option<resources::Image<'a>>,
+    firmware: Firmware<'a>,
+    source: resources::Image<'a>,
+}
+
+impl<'a> Staged<'a> {
+    pub fn firmware(&self) -> &Firmware<'a> {
+        &self.firmware
+    }
+    pub fn source(&self) -> resources::Image<'a> {
+        self.source
+    }
+    pub(super) fn into_parts(self) -> (Firmware<'a>, resources::Image<'a>) {
+        (self.firmware, self.source)
+    }
 }
 
 pub fn stage<'a>(
@@ -153,35 +171,19 @@ pub fn stage<'a>(
     provider: &'a dyn resources::Provider,
 ) -> Result<Staged<'a>, StageError> {
     let request = profile.firmware_request();
-    let pnvm_request = profile.pnvm_request();
-    // Observe all exact requirements even when the first resource is missing,
-    // so setup can provision a complete next boot rather than one file at a time.
-    let firmware = provider.load(request.requirement());
-    let pnvm = pnvm_request
-        .as_ref()
-        .map(|r| provider.load(r.requirement()));
-    let source = firmware.map_err(|error| StageError::Resource {
-        request: request.clone(),
-        error: Box::new(error),
-    })?;
-    let pnvm = match (pnvm_request, pnvm) {
-        (Some(request), Some(result)) => Some(result.map_err(|error| StageError::Resource {
-            request,
+    let source = provider
+        .load(request.requirement())
+        .map_err(|error| StageError::Resource {
+            request: request.clone(),
             error: Box::new(error),
-        })?),
-        _ => None,
-    };
+        })?;
     let firmware = Firmware::parse(source.bytes())
         .and_then(|fw| {
             fw.require_family(profile.family)?;
             Ok(fw)
         })
         .map_err(|error| StageError::Firmware { request, error })?;
-    Ok(Staged {
-        firmware,
-        source,
-        pnvm,
-    })
+    Ok(Staged { firmware, source })
 }
 
 #[cfg(test)]
@@ -274,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn both_ax210_requirements_are_observed_and_missing_pnvm_never_becomes_success() {
+    fn pre_rom_staging_defers_conditional_pnvm_until_actual_alive() {
         let profile = Profile::select(observed(AX210)).unwrap();
         let catalog = Catalog::from_handoff(vec![]).unwrap();
         let provider = Observing {
@@ -284,12 +286,39 @@ mod tests {
         assert!(
             matches!(stage(&profile,&provider),Err(StageError::Resource { request,.. }) if request.name=="iwlwifi-ty-a0-gf-a0-89.ucode")
         );
-        assert_eq!(
-            &*provider.names.borrow(),
-            &["iwlwifi-ty-a0-gf-a0-89.ucode", "iwlwifi-ty-a0-gf-a0.pnvm"]
-        );
+        assert_eq!(&*provider.names.borrow(), &["iwlwifi-ty-a0-gf-a0-89.ucode"]);
     }
 
+    #[test]
+    fn ax210_firmware_only_catalog_can_stage_before_sku_observation() {
+        let profile = Profile::select(observed(AX210)).unwrap();
+        let request = profile.firmware_request();
+        let bytes = firmware(89);
+        let hash = Sha256::digest(&bytes).into();
+        let catalog = Catalog::from_handoff(vec![Resource {
+            name: request.name,
+            target: request.requirement().target,
+            provenance: Provenance {
+                source: "test",
+                revision: "immutable",
+                member: request.name,
+                license: "BSD",
+            },
+            expected_length: bytes.len(),
+            expected_sha256: hash,
+            bytes,
+        }])
+        .unwrap();
+        let provider = Observing {
+            catalog: &catalog,
+            names: RefCell::new(Vec::new()),
+        };
+        assert_eq!(
+            stage(&profile, &provider).unwrap().firmware.api_version(),
+            89
+        );
+        assert_eq!(&*provider.names.borrow(), &["iwlwifi-ty-a0-gf-a0-89.ucode"]);
+    }
     #[test]
     fn catalog_identity_and_bytes_are_borrowed_without_variant_fallback() {
         let profile = Profile::select(observed(AX200)).unwrap();
@@ -314,7 +343,6 @@ mod tests {
         let staged = stage(&profile, &catalog).unwrap();
         assert_eq!(staged.source.bytes().as_ptr(), pointer);
         assert_eq!(staged.firmware.api_version(), 77);
-        assert!(staged.pnvm.is_none());
         let mut different = profile.observed();
         different.radio_id ^= 1;
         let different = Profile::select(different).unwrap();

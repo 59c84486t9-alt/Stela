@@ -91,7 +91,7 @@ impl Adapter {
             Self::Igb(_) => "igb",
             Self::Realtek(_) => "realtek",
             Self::Usb(_) => "usb-cdc",
-            Self::UsbVendor(_) => "usb-rtl815x",
+            Self::UsbVendor(device) => device.driver(),
         }
     }
 
@@ -170,6 +170,8 @@ pub struct Disks {
     /// Complete descriptor inventories, including hubs and unbound devices.
     /// Retention does not grant hardware ownership or guest forwarding.
     pub usb_devices: Vec<xhci::Device>,
+    /// Storage class owners remain available for explicit media rescan.
+    pub usb_storage: Vec<crate::usb::storage::UsbStorage>,
     /// USB HCI transports with retained device-specific initialization results.
     /// Historical evidence does not establish radio or guest readiness.
     pub bluetooth: Vec<UsbHci>,
@@ -282,6 +284,7 @@ pub unsafe fn probe_with_provider(
                         );
                         disks.usb_inputs.extend(found.inputs);
                         disks.usb_devices.extend(found.devices);
+                        disks.usb_storage.extend(found.storage);
                         for mut device in found.bluetooth {
                             // The retained result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.

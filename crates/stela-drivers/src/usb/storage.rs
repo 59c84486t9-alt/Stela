@@ -1,49 +1,39 @@
-//! USB mass storage disks: Bulk-Only Transport (BOT 1.0) with the SCSI
-//! transparent command set, as host block devices.
-//!
-//! A disk is LUN 0 of an interface of class 8, subclass 6 (SCSI), protocol
-//! 0x50 (Bulk-Only). Attach reads INQUIRY, waits out a unit attention with
-//! TEST UNIT READY and REQUEST SENSE, takes the capacity from READ CAPACITY
-//! (10), or (16) beyond 2^32 blocks, and the write protection from MODE
-//! SENSE (6). Reads and writes use READ/WRITE (10), or (16) beyond the
-//! 32-bit LBA range, in chunks of at most 64 KiB; `flush` is SYNCHRONIZE
-//! CACHE (10). A STALL in the data stage clears the halt and reads the CSW
-//! (BOT 5.3.3); a CSW that is not valid and meaningful, or a phase error,
-//! runs reset recovery (5.3.4) and fails the command. A command that
-//! fails reports its sense key and codes as the device status. Other
-//! subclasses (RBC, UFI, ATAPI) and transports (CBI, UAS) are refused.
+//! SCSI-transparent USB disks over native BOT and UAS owners. Logical units
+//! share their transport's serialized command/tag/DMA and quarantine boundary.
+//! Every command carries the actual transport LUN; uncertain DMA prevents
+//! publication of any disk belonging to the interface.
+// SPDX-License-Identifier: GPL-2.0-only AND GPL-2.0-or-later
+// Protocol/SCSI references: Linux usb-storage, Matthew Dharm and contributors;
+// see THIRD_PARTY.md for the pinned sources, notices and implementation scope.
 use super::xhci::{Device, Endpoint, Interface, MAX_TD, Plan, STALL, Shared, setup};
 use crate::{
     block::{BlockDevice, BlockError, Identity, Transport},
-    bus::dma::{DmaAllocator, DmaBuffer},
+    bus::dma::DmaAllocator,
 };
-use alloc::{format, string::String, vec, vec::Vec};
-
+use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
+use core::cell::{Cell, RefCell};
+mod media;
+pub use media::UsbStorage;
+mod bot;
+pub mod uas;
+use bot::{Bot, Io, Native};
 pub const CLASS: u8 = 8;
 const SCSI: u8 = 6;
 const BULK_ONLY: u8 = 0x50;
-const RESET: u8 = 0xff;
-const CBW_SIGNATURE: u32 = 0x4342_5355;
-const CSW_SIGNATURE: u32 = 0x5342_5355;
-const COMMAND_US: u64 = 30_000_000;
 const READY_TRIES: usize = 20;
 const READY_DELAY_US: u64 = 100_000;
 
-pub(super) fn plan(interface: &Interface) -> Result<Plan, &'static str> {
-    if interface.subclass != SCSI || interface.protocol != BULK_ONLY {
-        return Err("mass storage other than SCSI over Bulk-Only");
-    }
-    let bulk = |is_in: bool| {
-        interface
-            .endpoints
-            .iter()
-            .copied()
-            .find(|e| e.kind() == 2 && e.is_in() == is_in)
-    };
-    match (bulk(true), bulk(false)) {
-        (Some(input), Some(output)) => Ok(Plan::Storage([input, output])),
-        _ => Err("mass storage interface without two bulk endpoints"),
-    }
+mod binding;
+pub use binding::Binding;
+pub(super) use binding::discover as discover_binding;
+
+pub(super) fn plan(
+    device: &Device,
+    interface: &Interface,
+    all: &[Interface],
+    controller: Option<&super::xhci::Controller>,
+) -> Result<Plan, &'static str> {
+    binding::select(device, interface, all, controller).map(Plan::Storage)
 }
 
 /// Which way a command's data goes.
@@ -53,223 +43,514 @@ pub enum Data<'a> {
     Out(&'a [u8]),
 }
 
-pub struct UsbDisk {
-    controller: Shared,
-    slot: u8,
-    interface: u8,
-    input: Endpoint,
-    output: Endpoint,
-    buffer: DmaBuffer,
-    wrapper: DmaBuffer,
-    tag: u32,
-    identity: Identity,
+/// SCSI semantics are shared across BOT and UAS; each transport retains its
+/// own framing, LUN address type, command ownership and uncertainty boundary.
+trait Scsi {
+    type Lun: Copy + Default + PartialEq + core::fmt::Display;
+    fn command(
+        &mut self,
+        lun: Self::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<Vec<u8>, BlockError>;
+    fn delay(&self, micros: u64);
+    fn poisoned(&self) -> bool;
+    fn media_publication(&mut self, _lun: Self::Lun, _valid: Rc<Cell<bool>>) {}
+    fn max_lun(&self) -> u8 {
+        0
+    }
+    fn mode_page(&self) -> u8 {
+        0x3f
+    }
+    fn report_luns_permitted(&self) -> bool {
+        true
+    }
+}
+impl<I: Io> Scsi for Bot<I> {
+    type Lun = u8;
+    fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        Bot::command(self, lun, cdb, data)
+    }
+    fn delay(&self, micros: u64) {
+        Bot::delay(self, micros);
+    }
+    fn poisoned(&self) -> bool {
+        Bot::poisoned(self)
+    }
+    fn max_lun(&self) -> u8 {
+        Bot::max_lun(self)
+    }
+}
+impl Scsi for uas::Host {
+    type Lun = uas::Lun;
+    fn command(
+        &mut self,
+        lun: uas::Lun,
+        cdb: &[u8],
+        data: Data<'_>,
+    ) -> Result<Vec<u8>, BlockError> {
+        uas::Host::command(self, lun.bytes(), cdb, data)
+    }
+    fn delay(&self, micros: u64) {
+        uas::Host::delay(self, micros);
+    }
+    fn poisoned(&self) -> bool {
+        self.requires_rebind()
+    }
+    fn mode_page(&self) -> u8 {
+        uas::Host::mode_page(self)
+    }
+    fn report_luns_permitted(&self) -> bool {
+        uas::Host::report_luns_permitted(self)
+    }
 }
 
-impl UsbDisk {
-    pub(super) fn new(
-        controller: Shared,
-        device: &Device,
-        interface: &Interface,
-        [input, output]: [Endpoint; 2],
-        dma: &mut dyn DmaAllocator,
-    ) -> Result<Self, BlockError> {
-        let mut disk = Self {
+/// One logical unit. Its shared owner serializes complete CDBs and sense.
+pub struct UsbDisk {
+    disk: UsbTransport,
+}
+enum UsbTransport {
+    Bot(Disk<media::Owner<Bot<Native>>>),
+    Uas(Disk<media::Owner<uas::Host>>),
+}
+
+struct Disk<T: Scsi> {
+    bot: Rc<RefCell<T>>,
+    lun: T::Lun,
+    identity: Identity,
+    media: Rc<Cell<bool>>,
+}
+
+pub(super) fn discover_retained(
+    controller: Shared,
+    device: &Device,
+    interface: &Interface,
+    endpoints: [Endpoint; 2],
+    dma: &mut dyn DmaAllocator,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
+    let bot = Bot::new(
+        Native {
             controller,
             slot: device.slot,
-            interface: interface.number,
-            input,
-            output,
-            buffer: dma.allocate(MAX_TD, MAX_TD)?,
-            wrapper: dma.allocate(64, 64)?,
-            tag: 0,
-            identity: Identity {
-                transport: Transport::Usb,
-                location: device.location.clone(),
-                model: String::new(),
-                serial: device
-                    .serial
-                    .clone()
-                    .unwrap_or_else(|| device.location.clone()),
-                blocks: 0,
-                block_size: 512,
-                read_only: false,
-            },
-        };
-        let inquiry = disk.command(&[0x12, 0, 0, 0, 36, 0], Data::In(36))?;
-        if inquiry.len() < 36 {
-            return Err(BlockError::Unsupported("short INQUIRY data"));
+            endpoints,
+        },
+        interface.number,
+        endpoints,
+        dma,
+    )?;
+    let owner = Rc::new(RefCell::new(media::Owner::new(
+        bot,
+        format!("{} interface {}", device.location, interface.number),
+        device.serial.as_deref().unwrap_or(&device.location).into(),
+    )));
+    let mut storage = UsbStorage {
+        owner: media::TransportOwner::Bot(owner),
+    };
+    let disks = storage.rescan(failures)?;
+    Ok((storage, disks))
+}
+
+/// Discover block devices through an actual configured UAS interface.
+/// Use [`discover_uas_retained`] to keep initially empty interfaces for rescan.
+///
+/// # Safety
+/// The exclusive attachment/configuration/unconfigured endpoint requirements of
+/// [`uas::Host::new`] apply.
+pub unsafe fn discover_uas(
+    controller: Shared,
+    device: &Device,
+    binding: uas::Binding,
+    dma: &mut dyn DmaAllocator,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<Vec<UsbDisk>, BlockError> {
+    // SAFETY: this caller grants the identical retained-constructor contract.
+    unsafe { discover_uas_retained(controller, device, binding, dma, failures) }
+        .map(|(_, disks)| disks)
+}
+
+/// Retain a UAS interface independently of the current ready-media inventory.
+///
+/// # Safety
+/// The exclusive attachment/configuration/unconfigured endpoint requirements of
+/// [`uas::Host::new`] apply.
+pub unsafe fn discover_uas_retained(
+    controller: Shared,
+    device: &Device,
+    binding: uas::Binding,
+    dma: &mut dyn DmaAllocator,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<(UsbStorage, Vec<UsbDisk>), BlockError> {
+    let prefix = format!("{} interface {}", device.location, binding.interface());
+    let serial = device.serial.as_deref().unwrap_or(&device.location).into();
+    // SAFETY: caller owns this exact configured interface and epoch.
+    let host = unsafe { uas::Host::new(controller, device, binding, dma)? };
+    let owner = Rc::new(RefCell::new(media::Owner::new(host, prefix, serial)));
+    let mut storage = UsbStorage {
+        owner: media::TransportOwner::Uas(owner),
+    };
+    let disks = storage.rescan(failures)?;
+    Ok((storage, disks))
+}
+
+fn discover_uas_units<T: Scsi<Lun = uas::Lun>>(
+    owner: Rc<RefCell<T>>,
+    prefix: &str,
+    serial: &str,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<Vec<Disk<T>>, BlockError> {
+    let zero = uas::Lun::default();
+    let initial = inquiry(&mut *owner.borrow_mut(), zero);
+    if owner.borrow().poisoned() {
+        return Err(quarantined());
+    }
+    // The initial INQUIRY establishes the actual ANSI level. Failure to learn
+    // it keeps the source's conservative eight-unit sequential fallback.
+    let version = initial.as_ref().map_or(0, |bytes| bytes[2] & 0x0f);
+    let mut disks = Vec::new();
+    // The source scans actual LUN0 before REPORT LUNS. A real attached unit
+    // must survive a report that omits zero; an absent unit is never invented.
+    let initial_present = initial
+        .as_ref()
+        .is_ok_and(|bytes| bytes[0] >> 5 != 3 && bytes[0] & 31 != 31);
+    if initial_present {
+        publish_unit(
+            &owner,
+            zero,
+            initial.clone(),
+            prefix,
+            serial,
+            failures,
+            &mut disks,
+        )?;
+    }
+    let reported = if version >= 3 && owner.borrow().report_luns_permitted() {
+        report_luns(&mut *owner.borrow_mut())?
+    } else {
+        None
+    };
+    if let Some(luns) = reported {
+        for lun in luns {
+            if lun == zero && initial_present {
+                continue;
+            }
+            let found = if lun == zero {
+                initial.clone()
+            } else {
+                inquiry(&mut *owner.borrow_mut(), lun)
+            };
+            publish_unit(&owner, lun, found, prefix, serial, failures, &mut disks)?;
         }
-        if inquiry[0] & 0x1f != 0 {
+    } else {
+        let limit = if version >= 3 { 256 } else { 8 };
+        for number in 0..limit {
+            if number == 0 && initial_present {
+                continue;
+            }
+            let lun = uas::Lun::sequential(number);
+            let found = if number == 0 {
+                initial.clone()
+            } else {
+                inquiry(&mut *owner.borrow_mut(), lun)
+            };
+            if owner.borrow().poisoned() {
+                return Err(quarantined());
+            }
+            // Sequential fallback stops at the first actual absent logical
+            // unit, not at a present card-reader slot with no inserted media.
+            if found
+                .as_ref()
+                .is_ok_and(|bytes| bytes[0] >> 5 == 3 || bytes[0] & 31 == 31)
+                || matches!(found, Err(BlockError::Device { status }) if status >> 16 == 5 && (status >> 8) & 255 == 0x25)
+            {
+                break;
+            }
+            let failed_inquiry = found.is_err();
+            publish_unit(&owner, lun, found, prefix, serial, failures, &mut disks)?;
+            if failed_inquiry {
+                break;
+            }
+        }
+    }
+    Ok(disks)
+}
+
+fn quarantined() -> BlockError {
+    BlockError::Unsupported("USB storage interface quarantined during discovery")
+}
+
+fn publication<T: Scsi>(owner: &Rc<RefCell<T>>, lun: T::Lun, identity: Identity) -> Disk<T> {
+    let media = Rc::new(Cell::new(true));
+    owner.borrow_mut().media_publication(lun, media.clone());
+    Disk {
+        bot: owner.clone(),
+        lun,
+        identity,
+        media,
+    }
+}
+
+fn publish_unit<T: Scsi>(
+    owner: &Rc<RefCell<T>>,
+    lun: T::Lun,
+    found: Result<Vec<u8>, BlockError>,
+    prefix: &str,
+    serial: &str,
+    failures: &mut Vec<(String, BlockError)>,
+    disks: &mut Vec<Disk<T>>,
+) -> Result<(), BlockError> {
+    let location = format!("{prefix} LUN {lun}");
+    let result = found.and_then(|bytes| {
+        probe_identified(&mut *owner.borrow_mut(), lun, &bytes, &location, serial)
+    });
+    match result {
+        Ok(identity) => disks.push(publication(owner, lun, identity)),
+        Err(error) => failures.push((location, error)),
+    }
+    if owner.borrow().poisoned() {
+        return Err(quarantined());
+    }
+    Ok(())
+}
+
+/// Linux's initial 4 KiB report grows to the actual list extent. Stela's native
+/// transfer bound is explicit: an oversized, malformed or unstable list cannot
+/// become an apparently complete prefix of disks.
+fn report_luns<T: Scsi<Lun = uas::Lun>>(
+    owner: &mut T,
+) -> Result<Option<Vec<uas::Lun>>, BlockError> {
+    let mut allocation = 4096usize;
+    for _ in 0..3 {
+        let mut cdb = [0u8; 12];
+        cdb[0] = 0xa0;
+        cdb[6..10].copy_from_slice(&(allocation as u32).to_be_bytes());
+        let mut received = None;
+        for attempt in 0..3 {
+            match owner.command(uas::Lun::default(), &cdb, Data::In(allocation)) {
+                Ok(bytes) => {
+                    received = Some(bytes);
+                    break;
+                }
+                Err(_) if owner.poisoned() => return Err(quarantined()),
+                Err(BlockError::Device { status }) if status >> 16 == 6 && attempt < 2 => continue,
+                // Source command failures fall back to actual sequential
+                // INQUIRY. A poisoned host can never enter this fallback.
+                Err(_) => return Ok(None),
+            }
+        }
+        let bytes = received.ok_or(BlockError::Unsupported("REPORT LUNS did not complete"))?;
+        if bytes.len() < 8 {
+            return Err(BlockError::Unsupported("short REPORT LUNS header"));
+        }
+        let length = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+        let total = length
+            .checked_add(8)
+            .ok_or(BlockError::Unsupported("REPORT LUNS length overflow"))?;
+        if length & 7 != 0 || total > MAX_TD {
             return Err(BlockError::Unsupported(
-                "USB storage that is not a direct-access block device",
+                "REPORT LUNS extent outside native bound",
             ));
         }
-        let text = |bytes: &[u8]| String::from(String::from_utf8_lossy(bytes).trim());
-        disk.identity.model = format!("{} {}", text(&inquiry[8..16]), text(&inquiry[16..32]))
-            .trim()
-            .into();
-        let mut ready = false;
-        for _ in 0..READY_TRIES {
-            if disk.command(&[0; 6], Data::None).is_ok() {
+        if total > allocation {
+            allocation = total;
+            continue;
+        }
+        if total > bytes.len() {
+            return Err(BlockError::Unsupported("short REPORT LUNS list"));
+        }
+        let mut luns = Vec::new();
+        for address in bytes[8..total].as_chunks::<8>().0 {
+            let lun = uas::Lun::from_bytes(*address);
+            if luns.contains(&lun) {
+                return Err(BlockError::Unsupported("duplicate REPORT LUNS address"));
+            }
+            luns.push(lun);
+        }
+        return Ok(Some(luns));
+    }
+    Err(BlockError::Unsupported(
+        "REPORT LUNS list changed repeatedly",
+    ))
+}
+
+fn discover_units<T: Scsi<Lun = u8>>(
+    bot: Rc<RefCell<T>>,
+    prefix: &str,
+    serial: &str,
+    failures: &mut Vec<(String, BlockError)>,
+) -> Result<Vec<Disk<T>>, BlockError> {
+    let mut disks = Vec::new();
+    let max_lun = bot.borrow().max_lun();
+    for lun in 0..=max_lun {
+        let location = format!("{prefix} LUN {lun}");
+        let result = probe(&mut *bot.borrow_mut(), lun, &location, serial);
+        match result {
+            Ok(identity) => disks.push(publication(&bot, lun, identity)),
+            Err(error) => {
+                failures.push((location, error));
+                // An uncertain interface cannot publish previously found disks
+                // as usable: quarantine the entire owner and discard the list.
+                if bot.borrow().poisoned() {
+                    return Err(BlockError::Unsupported(
+                        "USB storage interface quarantined during discovery",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(disks)
+}
+
+fn probe<T: Scsi>(
+    bot: &mut T,
+    lun: T::Lun,
+    location: &str,
+    serial: &str,
+) -> Result<Identity, BlockError> {
+    let inquiry = inquiry(bot, lun)?;
+    probe_identified(bot, lun, &inquiry, location, serial)
+}
+fn inquiry<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<Vec<u8>, BlockError> {
+    let mut result = Err(BlockError::Unsupported("INQUIRY did not complete"));
+    for _ in 0..3 {
+        result = bot.command(lun, &[0x12, 0, 0, 0, 36, 0], Data::In(36));
+        if !matches!(result, Err(BlockError::Device { status }) if status >> 16 == 6
+            && matches!((status >> 8) & 255, 0x28 | 0x29))
+        {
+            break;
+        }
+    }
+    let bytes = result?;
+    if bytes.len() < 36 {
+        return Err(BlockError::Unsupported("short INQUIRY data"));
+    }
+    Ok(bytes)
+}
+fn probe_identified<T: Scsi>(
+    bot: &mut T,
+    lun: T::Lun,
+    inquiry: &[u8],
+    location: &str,
+    serial: &str,
+) -> Result<Identity, BlockError> {
+    if inquiry[0] != 0 {
+        return Err(BlockError::Unsupported(
+            "USB LUN is not an attached direct-access block device",
+        ));
+    }
+    let text = |bytes: &[u8]| String::from(String::from_utf8_lossy(bytes).trim());
+    let mut ready = false;
+    for attempt in 0..READY_TRIES {
+        match bot.command(lun, &[0; 6], Data::None) {
+            Ok(_) => {
                 ready = true;
                 break;
             }
-            // REQUEST SENSE clears a unit attention.
-            let _ = disk.command(&[0x03, 0, 0, 0, 18, 0], Data::In(18));
-            let clock = disk.controller.borrow().clock;
-            clock.delay(READY_DELAY_US);
-        }
-        if !ready {
-            return Err(BlockError::Unsupported("USB storage never became ready"));
-        }
-        let capacity = disk.command(&[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::In(8))?;
-        if capacity.len() < 8 {
-            return Err(BlockError::Unsupported("short READ CAPACITY data"));
-        }
-        let last = u32::from_be_bytes(capacity[..4].try_into().unwrap());
-        let mut block_size = u32::from_be_bytes(capacity[4..8].try_into().unwrap());
-        let blocks = if last == u32::MAX {
-            let mut cdb = [0u8; 16];
-            cdb[0] = 0x9e;
-            cdb[1] = 0x10;
-            cdb[13] = 32;
-            let long = disk.command(&cdb, Data::In(32))?;
-            if long.len() < 12 {
-                return Err(BlockError::Unsupported("short READ CAPACITY (16) data"));
+            // No-media must precede the general UA retry: key6/ASC3a also
+            // reports absence, and must never lead to capacity/mode queries.
+            Err(BlockError::Device { status }) if media::no_media(status) => {
+                return Err(BlockError::Device { status });
             }
-            block_size = u32::from_be_bytes(long[8..12].try_into().unwrap());
-            u64::from_be_bytes(long[..8].try_into().unwrap()) + 1
+            // The command has already completed same-LUN REQUEST SENSE.
+            Err(BlockError::Device { status })
+                if status >> 16 == 6
+                    || status >> 16 == 2
+                        && (status >> 8) & 255 == 4
+                        && !matches!(status & 255, 3 | 0xb | 0xc | 0x1b | 0x24 | 0x25) =>
+            {
+                if attempt + 1 < READY_TRIES {
+                    bot.delay(READY_DELAY_US);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if !ready {
+        return Err(BlockError::Unsupported("USB storage never became ready"));
+    }
+    let capacity = bot.command(lun, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::In(8))?;
+    if capacity.len() < 8 {
+        return Err(BlockError::Unsupported("short READ CAPACITY data"));
+    }
+    let last = u32::from_be_bytes(capacity[..4].try_into().unwrap());
+    let mut block_size = u32::from_be_bytes(capacity[4..8].try_into().unwrap());
+    let blocks = if last == u32::MAX {
+        let mut cdb = [0u8; 16];
+        cdb[0] = 0x9e;
+        cdb[1] = 0x10;
+        cdb[13] = 32;
+        let long = bot.command(lun, &cdb, Data::In(32))?;
+        if long.len() < 12 {
+            return Err(BlockError::Unsupported("short READ CAPACITY (16) data"));
+        }
+        block_size = u32::from_be_bytes(long[8..12].try_into().unwrap());
+        u64::from_be_bytes(long[..8].try_into().unwrap())
+            .checked_add(1)
+            .ok_or(BlockError::Unsupported("USB storage capacity overflow"))?
+    } else {
+        u64::from(last) + 1
+    };
+    if block_size < 512
+        || !block_size.is_power_of_two()
+        || block_size as usize > MAX_TD
+        || blocks.checked_mul(u64::from(block_size)).is_none()
+    {
+        return Err(BlockError::Unsupported(
+            "USB storage block size or capacity",
+        ));
+    }
+    let page = bot.mode_page();
+    let read_only = match bot.command(lun, &[0x1a, 0, page, 0, 4, 0], Data::In(4)) {
+        Ok(mode) if mode.len() >= 4 && mode[0] >= 3 => mode[2] & 0x80 != 0,
+        // MODE SENSE is optional only when the unit actually reports an
+        // unsupported CDB. USB/transport errors cannot default to writable.
+        Err(BlockError::Device { status }) if status >> 16 == 5 => false,
+        Ok(_) => return Err(BlockError::Unsupported("short MODE SENSE data")),
+        Err(error) => return Err(error),
+    };
+    Ok(Identity {
+        transport: Transport::Usb,
+        location: location.into(),
+        model: format!("{} {}", text(&inquiry[8..16]), text(&inquiry[16..32]))
+            .trim()
+            .into(),
+        serial: if lun == T::Lun::default() {
+            serial.into()
         } else {
-            u64::from(last) + 1
-        };
-        if block_size < 512 || !block_size.is_power_of_two() || block_size as usize > MAX_TD {
-            return Err(BlockError::Unsupported("USB storage block size"));
-        }
-        disk.identity.blocks = blocks;
-        disk.identity.block_size = block_size;
-        // Write protection, when the device reports a mode header.
-        if let Ok(mode) = disk.command(&[0x1a, 0, 0x3f, 0, 4, 0], Data::In(4))
-            && mode.len() >= 3
-        {
-            disk.identity.read_only = mode[2] & 0x80 != 0;
-        }
-        Ok(disk)
-    }
+            format!("{serial}:lun{lun}")
+        },
+        blocks,
+        block_size,
+        read_only,
+    })
+}
 
-    /// Reset recovery (BOT 5.3.4): the class reset, then both halts cleared.
-    fn reset_recovery(&mut self) {
-        let mut controller = self.controller.borrow_mut();
-        let request = setup(0x21, RESET, 0, u16::from(self.interface), 0);
-        let _ = controller.control(self.slot, request, &[]);
-        let _ = controller.clear(self.slot, &self.input);
-        let _ = controller.clear(self.slot, &self.output);
-    }
-
-    fn bulk(
-        &mut self,
-        endpoint: Endpoint,
-        buffer: u64,
-        length: usize,
-    ) -> Result<usize, BlockError> {
-        self.controller
-            .borrow_mut()
-            .transfer(self.slot, endpoint.dci(), buffer, length, COMMAND_US)
-    }
-
-    /// One command: its IN data, or nothing. A failed command's status is
-    /// its sense key and ASC/ASCQ (`key << 16 | asc << 8 | ascq`).
+impl<T: Scsi> Disk<T> {
+    /// Execute a SCSI CDB on this unit, including same-LUN auto-sense.
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
-        // The wrapper serves both OUT CBW and IN CSW. Do not rewrite either
-        // buffer after an unresolved transfer or failed EP0 reset recovery.
-        {
-            let mut controller = self.controller.borrow_mut();
-            for dci in [1, self.input.dci(), self.output.dci()] {
-                controller.endpoint_ready(self.slot, dci)?;
-            }
+        self.check_media()?;
+        let result = self.bot.borrow_mut().command(self.lun, cdb, data);
+        if matches!(result, Err(BlockError::Device { status }) if media::changed(status)) {
+            self.media.set(false);
         }
-        let (length, is_in) = match &data {
-            Data::None => (0, false),
-            Data::In(length) => (*length, true),
-            Data::Out(bytes) => (bytes.len(), false),
-        };
-        if length > MAX_TD {
-            return Err(BlockError::Unsupported("USB storage transfer above 64 KiB"));
-        }
-        self.tag = self.tag.wrapping_add(1);
-        let mut wrapper = [0u8; 31];
-        wrapper[..4].copy_from_slice(&CBW_SIGNATURE.to_le_bytes());
-        wrapper[4..8].copy_from_slice(&self.tag.to_le_bytes());
-        wrapper[8..12].copy_from_slice(&(length as u32).to_le_bytes());
-        wrapper[12] = if is_in { 0x80 } else { 0 };
-        wrapper[14] = cdb.len() as u8;
-        wrapper[15..15 + cdb.len()].copy_from_slice(cdb);
-        self.wrapper.bytes_mut()[..31].copy_from_slice(&wrapper);
-        let physical = self.wrapper.physical();
-        if let Err(error) = self.bulk(self.output, physical, 31) {
-            self.reset_recovery();
-            return Err(error);
-        }
-        let mut moved = 0;
-        if let Data::Out(bytes) = &data {
-            self.buffer.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
-        }
-        if length > 0 {
-            let endpoint = if is_in { self.input } else { self.output };
-            match self.bulk(endpoint, self.buffer.physical(), length) {
-                Ok(n) => moved = n,
-                Err(BlockError::Device { status: STALL }) => {
-                    self.controller.borrow_mut().clear(self.slot, &endpoint)?;
-                }
-                Err(error) => {
-                    self.reset_recovery();
-                    return Err(error);
-                }
-            }
-        }
-        // The CSW, once more after clearing a STALL (5.3.3).
-        let status_buffer = self.wrapper.physical();
-        let csw = match self.bulk(self.input, status_buffer, 13) {
-            Err(BlockError::Device { status: STALL }) => {
-                self.controller.borrow_mut().clear(self.slot, &self.input)?;
-                self.bulk(self.input, status_buffer, 13)
-            }
-            other => other,
-        };
-        let valid = matches!(csw, Ok(13)) && {
-            let bytes = &self.wrapper.bytes()[..13];
-            u32::from_le_bytes(bytes[..4].try_into().unwrap()) == CSW_SIGNATURE
-                && u32::from_le_bytes(bytes[4..8].try_into().unwrap()) == self.tag
-                && bytes[12] <= 1
-        };
-        if !valid {
-            self.reset_recovery();
-            return Err(BlockError::Device {
-                status: 0x0200_0000,
-            });
-        }
-        if self.wrapper.bytes()[12] == 1 {
-            let sense = if cdb[0] == 0x03 { 0 } else { self.sense() };
-            return Err(BlockError::Device { status: sense });
-        }
-        Ok(if is_in {
-            self.buffer.bytes()[..moved].to_vec()
+        result
+    }
+    fn check_media(&self) -> Result<(), BlockError> {
+        if self.media.get() {
+            Ok(())
         } else {
-            Vec::new()
-        })
-    }
-
-    fn sense(&mut self) -> u32 {
-        match self.command(&[0x03, 0, 0, 0, 18, 0], Data::In(18)) {
-            Ok(sense) if sense.len() >= 14 => {
-                u32::from(sense[2] & 0xf) << 16 | u32::from(sense[12]) << 8 | u32::from(sense[13])
-            }
-            _ => 0x0100_0000,
+            Err(BlockError::Unsupported(
+                "USB storage media publication is stale",
+            ))
         }
     }
-
     /// READ or WRITE of `blocks` at `lba`, (10) when it fits, else (16).
     fn cdb(&self, write: bool, lba: u64, blocks: u32) -> Vec<u8> {
-        if lba + u64::from(blocks) <= u64::from(u32::MAX) && blocks <= u32::from(u16::MAX) {
+        if lba
+            .checked_add(u64::from(blocks))
+            .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
+            && blocks <= u32::from(u16::MAX)
+        {
             let mut cdb = vec![if write { 0x2a } else { 0x28 }, 0];
             cdb.extend_from_slice(&(lba as u32).to_be_bytes());
             cdb.push(0);
@@ -285,13 +566,13 @@ impl UsbDisk {
         }
     }
 }
-
-impl BlockDevice for UsbDisk {
+impl<T: Scsi> BlockDevice for Disk<T> {
     fn identity(&self) -> &Identity {
         &self.identity
     }
 
     fn read(&mut self, lba: u64, buffer: &mut [u8]) -> Result<(), BlockError> {
+        self.check_media()?;
         self.identity.check(lba, buffer.len())?;
         let size = self.identity.block_size as usize;
         let mut lba = lba;
@@ -311,6 +592,7 @@ impl BlockDevice for UsbDisk {
     }
 
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError> {
+        self.check_media()?;
         self.identity.check_write(lba, data.len())?;
         let size = self.identity.block_size as usize;
         let mut lba = lba;
@@ -329,72 +611,52 @@ impl BlockDevice for UsbDisk {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::bus::dma::RegionAllocator;
+impl UsbDisk {
+    /// Explicit recovery for an exclusively owned root-attached UAS device.
+    /// All old disk aliases remain quarantined, including on failure. Returned
+    /// disks carry fresh INQUIRY/capacity/protection state; no CDB is replayed.
+    /// Use [`Self::reset_and_rebind_retained`] to keep an initially empty fresh
+    /// interface available for rescan. This does not install a hot-plug scheduler.
+    pub fn reset_and_rebind(
+        &mut self,
+        dma: &mut dyn DmaAllocator,
+        failures: &mut Vec<(String, BlockError)>,
+    ) -> Result<Vec<UsbDisk>, BlockError> {
+        self.reset_and_rebind_retained(dma, failures)
+            .map(|(_, disks)| disks)
+    }
 
-    #[test]
-    fn poisoned_input_output_or_reset_pipe_prevents_cbw_and_data_buffer_reuse() {
-        for (dci, halted) in [1, 4, 5]
-            .into_iter()
-            .flat_map(|dci| [false, true].map(|halted| (dci, halted)))
-        {
-            let mut backing = vec![0u64; 64 * 1024];
-            let start = backing.as_mut_ptr() as u64;
-            // SAFETY: backing outlives the controller/model and all DMA buffers.
-            let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
-            let mut wrapper = dma.allocate(64, 64).unwrap();
-            wrapper.bytes_mut().fill(0xa5);
-            let mut buffer = dma.allocate(512, 512).unwrap();
-            buffer.bytes_mut().fill(0x5a);
-            let controller = super::super::xhci::tests::controller_with_unresolved_td(
-                &mut dma,
-                wrapper.physical(),
-                wrapper.len(),
-                dci,
-                halted,
-            );
-            let mut disk = UsbDisk {
-                controller,
-                slot: 1,
-                interface: 0,
-                input: Endpoint {
-                    address: 0x82,
-                    attributes: 2,
-                    max_packet: 64,
-                    interval: 0,
-                    companion: None,
-                },
-                output: Endpoint {
-                    address: 0x02,
-                    attributes: 2,
-                    max_packet: 64,
-                    interval: 0,
-                    companion: None,
-                },
-                buffer,
-                wrapper,
-                tag: 7,
-                identity: Identity {
-                    transport: Transport::Usb,
-                    location: "poisoned model disk".into(),
-                    model: "fixture".into(),
-                    serial: "fixture".into(),
-                    blocks: 1,
-                    block_size: 512,
-                    read_only: false,
-                },
-            };
-            assert!(
-                disk.command(&[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0], Data::Out(&[1, 2, 3]))
-                    .is_err()
-            );
-            assert_eq!(disk.tag, 7);
-            // The model performs no concurrent DMA while these sentinels are
-            // inspected; production command returned before accessing them.
-            assert!(disk.wrapper.bytes().iter().all(|byte| *byte == 0xa5));
-            assert!(disk.buffer.bytes().iter().all(|byte| *byte == 0x5a));
+    /// Execute a SCSI CDB on this unit, including same-LUN auto-sense.
+    pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.command(cdb, data),
+            UsbTransport::Uas(disk) => disk.command(cdb, data),
+        }
+    }
+}
+impl BlockDevice for UsbDisk {
+    fn identity(&self) -> &Identity {
+        match &self.disk {
+            UsbTransport::Bot(disk) => disk.identity(),
+            UsbTransport::Uas(disk) => disk.identity(),
+        }
+    }
+    fn read(&mut self, lba: u64, bytes: &mut [u8]) -> Result<(), BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.read(lba, bytes),
+            UsbTransport::Uas(disk) => disk.read(lba, bytes),
+        }
+    }
+    fn write(&mut self, lba: u64, bytes: &[u8]) -> Result<(), BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.write(lba, bytes),
+            UsbTransport::Uas(disk) => disk.write(lba, bytes),
+        }
+    }
+    fn flush(&mut self) -> Result<(), BlockError> {
+        match &mut self.disk {
+            UsbTransport::Bot(disk) => disk.flush(),
+            UsbTransport::Uas(disk) => disk.flush(),
         }
     }
 }

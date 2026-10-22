@@ -22,9 +22,77 @@ pub enum MemoryError {
     Unavailable,
 }
 
+/// The native allocation granules attested by one [`PageSource`].
+///
+/// Every power-of-two granule in the inclusive range is supported. A provider
+/// with holes must select a smaller complete profile or report unavailable.
+/// This is independent of allocation byte capacity, requested alignment, MMIO
+/// pages and the translated guest's page size. It grants no reservation,
+/// mapping, cache policy or firmware-memory import authority.
+///
+/// Constructing this description does not establish physical support. Only a
+/// successful query of the actual allocation provider attests its profile;
+/// consumers must also check each returned [`PinnedPages::page_shift`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PageGeometry {
+    base_shift: u8,
+    max_shift: u8,
+}
+
+impl PageGeometry {
+    /// A conservative provider profile with exactly one native granule.
+    pub fn base_only(shift: u8) -> Result<Self, MemoryError> {
+        Self::contiguous(shift, shift)
+    }
+
+    /// Describe a complete inclusive range of power-of-two native granules.
+    /// Invalid or unrepresentable page extents return `InvalidPageList`.
+    pub fn contiguous(base_shift: u8, max_shift: u8) -> Result<Self, MemoryError> {
+        if base_shift < 12 || base_shift > max_shift || u32::from(max_shift) >= usize::BITS - 1 {
+            return Err(MemoryError::InvalidPageList);
+        }
+        Ok(Self {
+            base_shift,
+            max_shift,
+        })
+    }
+
+    pub fn base_shift(self) -> u8 {
+        self.base_shift
+    }
+
+    pub fn max_shift(self) -> u8 {
+        self.max_shift
+    }
+
+    pub fn base_bytes(self) -> usize {
+        1usize << self.base_shift
+    }
+
+    pub fn max_bytes(self) -> usize {
+        1usize << self.max_shift
+    }
+
+    pub fn supports(self, shift: u8) -> bool {
+        (self.base_shift..=self.max_shift).contains(&shift)
+    }
+}
+
 /// The platform's real allocator; implementations must retain the reservation
 /// and the CPU mapping until the last pin or mapping is released.
 pub trait PageSource {
+    /// Query this actual provider's immutable supported-granule profile.
+    ///
+    /// Providers must attest every granule in the range and keep the profile
+    /// stable while users or allocations can retain it. Allocations made through
+    /// this provider must return a page shift in that profile. A contiguous byte
+    /// allocation or a large alignment alone does not establish a larger granule.
+    /// Legacy/unknown providers remain explicitly unavailable; there is no
+    /// inferred 4 KiB default. The native owner supplies any concrete override.
+    fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+        Err(MemoryError::Unavailable)
+    }
+
     fn allocate(
         &self,
         bytes: usize,
@@ -194,5 +262,129 @@ impl CpuMapping {
             .ok_or(MemoryError::InvalidSize)?;
         // SAFETY: the backing's mapping is live and the range was checked.
         Ok(unsafe { self.pages.backing.cpu_base().add(self.range.start + offset) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn geometry_rejects_unrepresentable_ranges_and_preserves_every_advertised_granule() {
+        for base in 0..=u8::MAX {
+            for max in 0..=u8::MAX {
+                let result = PageGeometry::contiguous(base, max);
+                let representable = base >= 12 && base <= max && u32::from(max) < usize::BITS - 1;
+                if !representable {
+                    assert_eq!(result, Err(MemoryError::InvalidPageList));
+                    continue;
+                }
+                let geometry = result.unwrap();
+                assert_eq!(geometry.base_shift(), base);
+                assert_eq!(geometry.max_shift(), max);
+                assert_eq!(geometry.base_bytes().trailing_zeros(), u32::from(base));
+                assert_eq!(geometry.max_bytes().trailing_zeros(), u32::from(max));
+                for shift in 0..=u8::MAX {
+                    assert_eq!(geometry.supports(shift), base <= shift && shift <= max);
+                }
+            }
+        }
+    }
+
+    // Hosted mapping fixture only. Symbolic physical labels deliberately
+    // differ from the actual owned CPU buffer; this attests no native RAM.
+    #[repr(align(8192))]
+    struct Buffer([u8; 8192]);
+    struct Backing {
+        buffer: Box<Buffer>,
+        pages: [u64; 2],
+    }
+    // SAFETY: the model owns its aligned zeroed buffer until the final pin or
+    // mapping ends. Its immutable two-page model inventory is never dereferenced.
+    unsafe impl PageBacking for Backing {
+        fn cpu_base(&self) -> NonNull<u8> {
+            NonNull::from(&self.buffer.0[0])
+        }
+        fn physical_pages(&self) -> &[u64] {
+            &self.pages
+        }
+        fn page_shift(&self) -> u8 {
+            12
+        }
+        fn cache_attribute(&self) -> CacheAttribute {
+            CacheAttribute::WriteBack
+        }
+    }
+    struct LegacySource;
+    impl PageSource for LegacySource {
+        fn allocate(
+            &self,
+            bytes: usize,
+            alignment: usize,
+            attribute: CacheAttribute,
+        ) -> Result<PinnedPages, MemoryError> {
+            if attribute != CacheAttribute::WriteBack {
+                return Err(MemoryError::CacheAttributeUnavailable);
+            }
+            if bytes == 0 || bytes > 8192 {
+                return Err(MemoryError::InvalidSize);
+            }
+            PinnedPages::new(
+                Box::new(Backing {
+                    buffer: Box::new(Buffer([0; 8192])),
+                    pages: [0x10000, 0x11000],
+                }),
+                bytes,
+                alignment,
+            )
+        }
+    }
+    struct AttestedSource;
+    impl PageSource for AttestedSource {
+        fn page_geometry(&self) -> Result<PageGeometry, MemoryError> {
+            PageGeometry::base_only(12)
+        }
+        fn allocate(
+            &self,
+            bytes: usize,
+            alignment: usize,
+            attribute: CacheAttribute,
+        ) -> Result<PinnedPages, MemoryError> {
+            LegacySource.allocate(bytes, alignment, attribute)
+        }
+    }
+
+    #[test]
+    fn successful_allocation_does_not_invent_a_legacy_provider_geometry() {
+        let source: &dyn PageSource = &LegacySource;
+        let pages = source
+            .allocate(5001, 8192, CacheAttribute::WriteBack)
+            .unwrap();
+        assert_eq!(pages.bytes(), 8192);
+        assert_eq!(pages.alignment(), 8192);
+        assert_eq!(pages.page_shift(), 12);
+        assert_eq!(source.page_geometry(), Err(MemoryError::Unavailable));
+    }
+
+    #[test]
+    fn base_only_profile_accepts_larger_allocations_without_claiming_larger_granules() {
+        let source: &dyn PageSource = &AttestedSource;
+        let geometry = source.page_geometry().unwrap();
+        let pages = source
+            .allocate(8192, 8192, CacheAttribute::WriteBack)
+            .unwrap();
+        assert_eq!(geometry.base_bytes(), 4096);
+        assert_eq!(geometry.max_bytes(), 4096);
+        assert!(geometry.supports(pages.page_shift()));
+        assert!(!geometry.supports(13));
+        assert!(pages.bytes() > geometry.max_bytes());
+        assert!(pages.alignment() > geometry.max_bytes());
+        assert_eq!(
+            pages
+                .cpu_mapping(CacheAttribute::WriteBack)
+                .unwrap()
+                .bytes(),
+            8192
+        );
     }
 }

@@ -41,6 +41,105 @@ use alloc::{string::String, vec::Vec};
 use core::fmt;
 use sha2::{Digest, Sha256};
 
+/// An owned diagnostic name. Copying borrowed bytes uses a fallible reserve;
+/// OOM keeps the original byte count and SHA-256 instead of aborting. This
+/// fallback is explicitly unavailable diagnostic data, never a resource identity.
+/// Resource selection and valid-name acceptance are unchanged.
+#[derive(PartialEq, Eq)]
+pub enum ErrorName {
+    Available(String),
+    AllocationFailed {
+        original_bytes: usize,
+        sha256: [u8; 32],
+    },
+}
+
+impl ErrorName {
+    /// Exact complete bytes when available; OOM never substitutes a prefix.
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::Available(name) => Some(name),
+            Self::AllocationFailed { .. } => None,
+        }
+    }
+    /// Only a complete diagnostic name can match a suffix.
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        self.as_str().is_some_and(|name| name.ends_with(suffix))
+    }
+}
+impl From<&str> for ErrorName {
+    fn from(name: &str) -> Self {
+        let mut owned = String::new();
+        if owned.try_reserve_exact(name.len()).is_err() {
+            return Self::AllocationFailed {
+                original_bytes: name.len(),
+                sha256: Sha256::digest(name.as_bytes()).into(),
+            };
+        }
+        owned.push_str(name);
+        Self::Available(owned)
+    }
+}
+impl From<String> for ErrorName {
+    fn from(name: String) -> Self {
+        Self::Available(name)
+    }
+}
+impl Clone for ErrorName {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Available(name) => Self::from(name.as_str()),
+            Self::AllocationFailed {
+                original_bytes,
+                sha256,
+            } => Self::AllocationFailed {
+                original_bytes: *original_bytes,
+                sha256: *sha256,
+            },
+        }
+    }
+}
+impl PartialEq<str> for ErrorName {
+    fn eq(&self, name: &str) -> bool {
+        self.as_str() == Some(name)
+    }
+}
+impl PartialEq<&str> for ErrorName {
+    fn eq(&self, name: &&str) -> bool {
+        self == *name
+    }
+}
+impl PartialEq<String> for ErrorName {
+    fn eq(&self, name: &String) -> bool {
+        self == name.as_str()
+    }
+}
+impl fmt::Display for ErrorName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Available(name) => fmt::Debug::fmt(name, f),
+            Self::AllocationFailed {
+                original_bytes,
+                sha256,
+            } => {
+                write!(
+                    f,
+                    "<name unavailable: allocation failed; original bytes={original_bytes}; sha256="
+                )?;
+                for byte in sha256 {
+                    write!(f, "{byte:02x}")?;
+                }
+                write!(f, ">")
+            }
+        }
+    }
+}
+impl fmt::Debug for ErrorName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
 /// Driver-defined, canonical identity labels, compared byte for byte.
 /// `board: None` is an exact board-independent binding, never a wildcard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +186,7 @@ pub struct Resource<'a, B = Vec<u8>> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
-    pub name: String,
+    pub name: ErrorName,
     pub kind: ErrorKind,
 }
 
@@ -117,7 +216,7 @@ pub enum ErrorKind {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "firmware {:?}: {:?}", self.name, self.kind)
+        write!(f, "firmware {}: {:?}", self.name, self.kind)
     }
 }
 

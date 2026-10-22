@@ -88,21 +88,55 @@ pub(super) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn plan(
     device: &Device,
     interface: &Interface,
     all: &[Interface],
 ) -> Result<Plan, &'static str> {
+    plan_with_controller(device, interface, all, None)
+}
+
+pub(super) fn plan_with_controller(
+    device: &Device,
+    interface: &Interface,
+    all: &[Interface],
+    controller: Option<&Controller>,
+) -> Result<Plan, &'static str> {
     let binding = match interface.class {
-        storage::CLASS => storage::plan(interface),
+        storage::CLASS => storage::plan(device, interface, all, controller),
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
         bluetooth::CLASS => bluetooth::Binding::new(device, interface).map(Plan::Bluetooth),
-        0xff => ethernet::Binding::new(device, interface).map(Plan::VendorEthernet),
+        0xff => {
+            let mut failure = "no supported vendor Ethernet interface setting";
+            let mut chosen = None;
+            for candidate in all
+                .iter()
+                .filter(|candidate| candidate.number == interface.number && candidate.class == 0xff)
+            {
+                match ethernet::Binding::new(device, candidate)
+                    .map(Plan::VendorEthernet)
+                    .and_then(|binding| supported(binding, device.speed))
+                {
+                    Ok(binding) => {
+                        chosen = Some(binding);
+                        break;
+                    }
+                    Err(error) if candidate.alternate == 0 => failure = error,
+                    Err(_) => {}
+                }
+            }
+            chosen.ok_or(failure)
+        }
         _ => Err("no class driver for this interface"),
     }?;
+    supported(binding, device.speed)
+}
+
+fn supported(binding: Plan, speed: u8) -> Result<Plan, &'static str> {
     for endpoint in binding.endpoints() {
-        endpoint::Context::new(&endpoint, device.speed)
+        endpoint::Context::new(&endpoint, speed)
             .map_err(|_| "USB function has an unsupported speed-specific endpoint")?;
     }
     Ok(binding)
@@ -111,7 +145,10 @@ pub(super) fn plan(
 /// All simultaneously active settings, including interfaces left to other
 /// drivers, must have distinct endpoint addresses. Class functions must own
 /// disjoint interfaces; two CDC masters cannot both claim one data interface.
-fn active_settings(all: &[Interface], selected: &[(u8, u8)]) -> Result<(), &'static str> {
+pub(super) fn active_settings(
+    all: &[Interface],
+    selected: &[(u8, u8)],
+) -> Result<(), &'static str> {
     let mut endpoints = Vec::new();
     for interface in all {
         let alternate = selected
@@ -136,15 +173,24 @@ fn active_settings(all: &[Interface], selected: &[(u8, u8)]) -> Result<(), &'sta
 /// wins over its generic CDC alternative, as r8152's cfgselector requires.
 /// No supported function leaves the first descriptor selected only
 /// for unused-interface diagnostics; bind will issue no configuration request.
+#[cfg(test)]
 pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
-    let mut best = None;
-    let mut maximum = (0, false);
-    let mut ambiguous = false;
+    select_with_controller(device, None)
+}
+
+pub(super) fn select_with_controller(
+    device: &mut Device,
+    controller: Option<&Controller>,
+) -> Result<(), &'static str> {
+    let mut candidates = Vec::new();
     for index in 0..device.configurations.len() {
         device.configuration = device.configurations[index].clone();
         let all = interfaces(&device.configuration);
         let mut count = 0;
         let mut vendor_ethernet = false;
+        let mut uas_count = 0;
+        let mut asix = false;
+        let mut cdc = false;
         let mut endpoints = Vec::new();
         let mut claimed = Vec::new();
         for interface in all.iter().filter(|i| i.alternate == 0 && i.class != 10) {
@@ -157,13 +203,15 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
                 {
                     count += 1;
                 }
-            } else if let Ok(binding) = plan(device, interface, &all) {
-                vendor_ethernet |= matches!(&binding, Plan::VendorEthernet(_));
-                let mut settings = vec![(interface.number, 0)];
-                if let Plan::Ethernet(binding) = &binding {
-                    settings.push(binding.data_setting());
+            } else if let Ok(binding) = plan_with_controller(device, interface, &all, controller) {
+                if let Plan::VendorEthernet(binding) = &binding {
+                    vendor_ethernet |= binding.observed_vendor();
+                    asix |= binding.asix_candidate();
                 }
-                for (number, alternate) in settings {
+                cdc |= matches!(&binding, Plan::Ethernet(_));
+                uas_count +=
+                    usize::from(matches!(&binding, Plan::Storage(binding) if binding.uas()));
+                for (number, alternate) in binding.settings(interface.number) {
                     if claimed.iter().any(|(previous, _)| *previous == number) {
                         return Err("supported USB functions claim the same interface");
                     }
@@ -179,19 +227,28 @@ pub(super) fn select(device: &mut Device) -> Result<(), &'static str> {
             }
         }
         active_settings(&all, &claimed)?;
-        let priority = (count, vendor_ethernet);
-        if priority > maximum {
-            maximum = priority;
-            best = Some(index);
-            ambiguous = false;
-        } else if count != 0 && priority == maximum {
-            ambiguous = true;
-        }
+        candidates.push((index, (count, vendor_ethernet, uas_count), asix, cdc));
     }
-    if ambiguous {
+    let maximum = candidates
+        .iter()
+        .map(|candidate| candidate.1)
+        .max()
+        .unwrap_or((0, false, 0));
+    let mut finalists: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| candidate.1 == maximum)
+        .collect();
+    // Unlike Realtek cfgselector, ASIX has no source-backed preconfiguration
+    // silicon check. At equal supported coverage retain a usable CDC alternative
+    // over an ASIX-only candidate; unrelated configurations still tie normally.
+    if !maximum.1 && finalists.iter().any(|candidate| candidate.3) {
+        finalists.retain(|candidate| !candidate.2 || candidate.3);
+    }
+    if maximum.0 != 0 && finalists.len() > 1 {
         device.configuration.clear();
         return Err("ambiguous equally supported USB configurations");
     }
+    let best = finalists.first().map(|candidate| candidate.0);
     if maximum.0 == 0 && device.descriptor[4] == HUB_CLASS {
         return Err("USB hub has no supported configuration");
     }
@@ -369,7 +426,7 @@ pub(super) mod tests {
         missing[22..24].copy_from_slice(&1024u16.to_le_bytes());
         missing[29..31].copy_from_slice(&1024u16.to_le_bytes());
         let mut streams = superspeed(&storage(7));
-        streams[28] = 1;
+        streams[28] = 17;
         let mut invalid = superspeed(&storage(7));
         invalid[27] = 16;
         for refused in [missing, streams, invalid] {
@@ -391,7 +448,7 @@ pub(super) mod tests {
         // vendor function whose transport is explicitly refused by this host.
         let mut vendor = superspeed(&storage(7));
         vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
-        vendor[28] = 1;
+        vendor[28] = 17;
         let valid = superspeed(&ecm(42));
         for order in [false, true] {
             let mut configurations = vec![vendor.clone(), valid.clone()];
@@ -404,6 +461,20 @@ pub(super) mod tests {
             dev.vendor_ethernet_revision = Some(0x4c10);
             select(&mut dev).unwrap();
             assert_eq!(dev.configuration_value(), 42);
+        }
+    }
+
+    #[test]
+    fn ordinary_bulk_configuration_accepts_a_valid_advertised_stream_capability() {
+        for exponent in 1..=16 {
+            let mut configuration = superspeed(&storage(42));
+            configuration[28] = exponent;
+            let mut dev = device(vec![configuration.clone()]);
+            dev.speed = SUPER_SPEED;
+            select(&mut dev).unwrap();
+            assert_eq!(dev.configuration_value(), 42);
+            let all = interfaces(&configuration);
+            assert!(plan(&dev, &all[0], &all).is_ok());
         }
     }
 
@@ -551,6 +622,131 @@ pub(super) mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn asix_exact_interface_candidates_preserve_cdc_and_select_supported_alternate() {
+        for (vid, pid) in ethernet::asix_ids() {
+            for mismatch in 0..4 {
+                let mut vendor = storage(7);
+                vendor[14..17].copy_from_slice(&[0xff, 0xff, 0]);
+                match mismatch {
+                    1 => vendor[15] = 0,
+                    2 => vendor[16] = 1,
+                    3 => vendor[14] = 2,
+                    _ => {}
+                }
+                for configurations in [vec![vendor.clone(), ecm(42)], vec![ecm(42), vendor.clone()]]
+                {
+                    let mut dev = device(configurations);
+                    dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+                    dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+                    select(&mut dev).unwrap();
+                    assert_eq!(dev.configuration_value(), 42);
+                    let all = interfaces(&vendor);
+                    assert_eq!(plan(&dev, &all[0], &all).is_ok(), mismatch == 0);
+                }
+            }
+        }
+        let mut bytes = storage(7);
+        bytes.truncate(18);
+        bytes[13] = 0;
+        bytes[14..17].copy_from_slice(&[0xff, 0xff, 0]);
+        bytes.extend_from_slice(&[
+            9, 4, 0, 2, 2, 0xff, 0xff, 0, 0, 7, 5, 0x81, 2, 64, 0, 0, 7, 5, 2, 2, 64, 0, 0,
+        ]);
+        let total = bytes.len() as u16;
+        bytes[2..4].copy_from_slice(&total.to_le_bytes());
+        let mut dev = device(vec![bytes]);
+        dev.descriptor[8..12].copy_from_slice(&[0x95, 0x0b, 0x90, 0x17]);
+        select(&mut dev).unwrap();
+        let all = interfaces(&dev.configuration);
+        let Plan::VendorEthernet(binding) = plan(&dev, &all[0], &all).unwrap() else {
+            panic!()
+        };
+        assert_eq!(binding.setting(), (0, 2));
+        assert!(binding.asix_candidate() && !binding.observed_vendor());
+    }
+
+    #[test]
+    fn ax88772_exact_candidates_keep_cdc_and_refuse_superspeed_before_binding() {
+        for (vid, pid) in ethernet::asix_legacy_ids() {
+            for (speed, packet) in [(FULL_SPEED, 64u16), (HIGH_SPEED, 512), (SUPER_SPEED, 1024)] {
+                let mut vendor = storage(7);
+                vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
+                vendor[22..24].copy_from_slice(&packet.to_le_bytes());
+                vendor[29..31].copy_from_slice(&packet.to_le_bytes());
+                let vendor = if speed == SUPER_SPEED {
+                    superspeed(&vendor)
+                } else {
+                    vendor
+                };
+                let mut compatible = ecm(42);
+                if speed != FULL_SPEED {
+                    let mut at = 0;
+                    while at < compatible.len() {
+                        let n = compatible[at] as usize;
+                        if compatible[at + 1] == ENDPOINT_DESCRIPTOR && compatible[at + 3] & 3 == 2
+                        {
+                            compatible[at + 4..at + 6].copy_from_slice(&packet.to_le_bytes());
+                        }
+                        at += n;
+                    }
+                }
+                if speed == SUPER_SPEED {
+                    compatible = superspeed(&compatible);
+                }
+                for configurations in [
+                    vec![vendor.clone(), compatible.clone()],
+                    vec![compatible.clone(), vendor.clone()],
+                ] {
+                    let mut dev = device(configurations);
+                    dev.speed = speed;
+                    dev.descriptor[8..10].copy_from_slice(&vid.to_le_bytes());
+                    dev.descriptor[10..12].copy_from_slice(&pid.to_le_bytes());
+                    select(&mut dev).unwrap();
+                    assert_eq!(dev.configuration_value(), 42);
+                    let all = interfaces(&vendor);
+                    assert_eq!(plan(&dev, &all[0], &all).is_ok(), speed != SUPER_SPEED);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn asix_alternate_search_validates_superspeed_contexts_before_claiming() {
+        let mut vendor = superspeed(&storage(7));
+        vendor[14..17].copy_from_slice(&[0xff, 0xff, 0]);
+        let mut alternate = vendor.clone();
+        alternate[12] = 2;
+        vendor[28] = 17; // Reserved MaxStreams encoding invalidates the default setting.
+        vendor.extend_from_slice(&alternate[9..]);
+        let length = vendor.len() as u16;
+        vendor[2..4].copy_from_slice(&length.to_le_bytes());
+        let mut dev = device(vec![vendor.clone()]);
+        dev.speed = SUPER_SPEED;
+        dev.descriptor[8..12].copy_from_slice(&[0x95, 0x0b, 0x90, 0x17]);
+        select(&mut dev).unwrap();
+        let all = interfaces(&dev.configuration);
+        let Plan::VendorEthernet(binding) = plan(&dev, &all[0], &all).unwrap() else {
+            panic!()
+        };
+        assert_eq!(binding.setting(), (0, 2));
+        for configurations in [
+            vec![vendor.clone(), superspeed(&ecm(42))],
+            vec![superspeed(&ecm(42)), vendor.clone()],
+        ] {
+            dev.configurations = configurations;
+            select(&mut dev).unwrap();
+            assert_eq!(dev.configuration_value(), 42);
+        }
+        let mut other = vendor.clone();
+        other[5] = 9;
+        dev.configurations = vec![vendor, other];
+        assert_eq!(
+            select(&mut dev),
+            Err("ambiguous equally supported USB configurations")
+        );
     }
 
     #[test]

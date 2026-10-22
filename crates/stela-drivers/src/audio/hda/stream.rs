@@ -566,7 +566,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
         }
         if self.routes.iter().any(|(_, route)| {
             route.codec_address() == graph.address && route.nodes().contains(&node)
-        }) {
+        }) || self
+            .codec_controls
+            .iter()
+            .any(|(_, codec, control)| *codec == graph.address && *control == node)
+        {
             return Err(Error::RouteInUse);
         }
         self.validate_converter(graph, node, id, channel)?;

@@ -464,7 +464,11 @@ impl<R: Registers, T: Timer> Controller<R, T> {
             *owner == id
                 || (previous.codec == route.codec
                     && previous.nodes.iter().any(|node| route.nodes.contains(node)))
-        }) {
+        }) || self
+            .codec_controls
+            .iter()
+            .any(|(_, codec, node)| *codec == route.codec && route.nodes.contains(node))
+        {
             return Err(Error::RouteInUse);
         }
         Ok(plan)

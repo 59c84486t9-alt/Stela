@@ -23,6 +23,10 @@ mod boot_native_memory;
 #[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
 mod boot_ram;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_dma/requester.rs"]
+#[allow(dead_code)]
+mod boot_requester;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_dma/vtd.rs"]
 #[allow(dead_code)]
 mod boot_vtd;

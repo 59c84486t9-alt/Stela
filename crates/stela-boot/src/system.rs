@@ -597,10 +597,11 @@ fn load(
     if let Some(storage) = &storage {
         map_devices(&mut frames, root, &ram, &storage.mapped)?;
     }
-    let storage = match &storage {
+    let mut storage = match &storage {
         Some(storage) => Storage::new(storage)?,
         None => Storage::absent(),
     };
+    storage.wifi_platform = host_firmware.wifi_observations();
     // The framebuffer is written, never read back, so its writes combine.
     let video = PRESENT | WRITABLE | NX | WRITE_COMBINING;
     if let Some(screen) = &screen {

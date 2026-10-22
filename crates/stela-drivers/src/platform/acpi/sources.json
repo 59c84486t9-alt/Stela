@@ -1,0 +1,1452 @@
+{
+  "linux_commit": "a804c5742bff224d4cb4d25dd383554d598be32b",
+  "acpica_version": "20260408",
+  "files": [
+    {
+      "linux": "drivers/acpi/acpica/accommon.h",
+      "vendor": "vendor/core/accommon.h",
+      "sha256": "6d0b1b7392b75fe713e935ef52ce38f7a01d06972ee0d7566ab2c2c774a7ae08",
+      "adapted_sha256": "6d0b1b7392b75fe713e935ef52ce38f7a01d06972ee0d7566ab2c2c774a7ae08"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acconvert.h",
+      "vendor": "vendor/core/acconvert.h",
+      "sha256": "237e938e23d5d8e5b10a30eeb0d0e490e6fecfcaf37739f4a300ac37ed1b2f9c",
+      "adapted_sha256": "237e938e23d5d8e5b10a30eeb0d0e490e6fecfcaf37739f4a300ac37ed1b2f9c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acdebug.h",
+      "vendor": "vendor/core/acdebug.h",
+      "sha256": "88195014da3ac248e62449e2835419a618a6271d030cccfed79fee5095622cc8",
+      "adapted_sha256": "88195014da3ac248e62449e2835419a618a6271d030cccfed79fee5095622cc8"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acdispat.h",
+      "vendor": "vendor/core/acdispat.h",
+      "sha256": "3b91c2fc12f7e443d928d5dae23f7d828f90fa22c693671d2138c3a1f773cbee",
+      "adapted_sha256": "3b91c2fc12f7e443d928d5dae23f7d828f90fa22c693671d2138c3a1f773cbee"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acevents.h",
+      "vendor": "vendor/core/acevents.h",
+      "sha256": "a26c14fb81985317e97700c4219b1f0bcdfdcab4478c619522b72fa692f339fa",
+      "adapted_sha256": "a26c14fb81985317e97700c4219b1f0bcdfdcab4478c619522b72fa692f339fa"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acglobal.h",
+      "vendor": "vendor/core/acglobal.h",
+      "sha256": "64f26dd9b6c5e5545a48f6427d2832bed17c546c0f1dd84a4ea6a9b5323e0c4e",
+      "adapted_sha256": "64f26dd9b6c5e5545a48f6427d2832bed17c546c0f1dd84a4ea6a9b5323e0c4e"
+    },
+    {
+      "linux": "drivers/acpi/acpica/achware.h",
+      "vendor": "vendor/core/achware.h",
+      "sha256": "078fbad10645e7f55bd0c31bf46b78cdb16a2d3c4a73f96af0e93fea8cd2fa6b",
+      "adapted_sha256": "078fbad10645e7f55bd0c31bf46b78cdb16a2d3c4a73f96af0e93fea8cd2fa6b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acinterp.h",
+      "vendor": "vendor/core/acinterp.h",
+      "sha256": "9104c250675723d865444f0b64121ede7553cda5eee55879bc31504a6f61af9a",
+      "adapted_sha256": "9104c250675723d865444f0b64121ede7553cda5eee55879bc31504a6f61af9a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/aclocal.h",
+      "vendor": "vendor/core/aclocal.h",
+      "sha256": "09cbcacaa34ffbef27501a18caaeb0a08c7014a1580bd65ce636fb2b7f9fc722",
+      "adapted_sha256": "09cbcacaa34ffbef27501a18caaeb0a08c7014a1580bd65ce636fb2b7f9fc722"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acmacros.h",
+      "vendor": "vendor/core/acmacros.h",
+      "sha256": "bd36cf2144872129e9c1f36286b8db6962871411f7ba65f5d043c1b9014fa597",
+      "adapted_sha256": "bd36cf2144872129e9c1f36286b8db6962871411f7ba65f5d043c1b9014fa597"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acnamesp.h",
+      "vendor": "vendor/core/acnamesp.h",
+      "sha256": "b2ab49306fd0739eac6113e5f5de73976016467e7c79d537d5530b6605878c7e",
+      "adapted_sha256": "b2ab49306fd0739eac6113e5f5de73976016467e7c79d537d5530b6605878c7e"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acobject.h",
+      "vendor": "vendor/core/acobject.h",
+      "sha256": "05c9dc23b40682d1277f2f966286d6deedba0e2c2c7f88372c8fc85ab766b751",
+      "adapted_sha256": "05c9dc23b40682d1277f2f966286d6deedba0e2c2c7f88372c8fc85ab766b751"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acopcode.h",
+      "vendor": "vendor/core/acopcode.h",
+      "sha256": "f3a58d85d92161f718f15462c3d052ae53329a817f2132fab7c9a562f2bf9faa",
+      "adapted_sha256": "f3a58d85d92161f718f15462c3d052ae53329a817f2132fab7c9a562f2bf9faa"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acparser.h",
+      "vendor": "vendor/core/acparser.h",
+      "sha256": "418b8fc9aa216d8c6d0371b54d3dd4404384692dc590f4ca0029a152f88c7799",
+      "adapted_sha256": "418b8fc9aa216d8c6d0371b54d3dd4404384692dc590f4ca0029a152f88c7799"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acpredef.h",
+      "vendor": "vendor/core/acpredef.h",
+      "sha256": "0fde9ec377682acecdb038e4d2f8c0af94e125185fd207c8816f58c794936672",
+      "adapted_sha256": "0fde9ec377682acecdb038e4d2f8c0af94e125185fd207c8816f58c794936672"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acresrc.h",
+      "vendor": "vendor/core/acresrc.h",
+      "sha256": "a5c4dc04561a493957ba000afc1185873a583a47625fafa812c9c520fd77e4ce",
+      "adapted_sha256": "a5c4dc04561a493957ba000afc1185873a583a47625fafa812c9c520fd77e4ce"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acstruct.h",
+      "vendor": "vendor/core/acstruct.h",
+      "sha256": "c04a6f94aac4203cdeca857a1b0a883f1c9561fd5119c6083e7e90a25837740c",
+      "adapted_sha256": "c04a6f94aac4203cdeca857a1b0a883f1c9561fd5119c6083e7e90a25837740c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/actables.h",
+      "vendor": "vendor/core/actables.h",
+      "sha256": "9482dbee383bfe9fbe4210b01c3f04fb9429262741e684e89d04022cb3ed63c7",
+      "adapted_sha256": "9482dbee383bfe9fbe4210b01c3f04fb9429262741e684e89d04022cb3ed63c7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acutils.h",
+      "vendor": "vendor/core/acutils.h",
+      "sha256": "1c76c8c3cf94804dfa78f461c14631484d4d2fcafb4933e4dac8f45f09e32431",
+      "adapted_sha256": "1c76c8c3cf94804dfa78f461c14631484d4d2fcafb4933e4dac8f45f09e32431"
+    },
+    {
+      "linux": "drivers/acpi/acpica/amlcode.h",
+      "vendor": "vendor/core/amlcode.h",
+      "sha256": "31a3263509d154acdd64b0226610c33a7e52fe5bb6776e45856f67074b7f6309",
+      "adapted_sha256": "31a3263509d154acdd64b0226610c33a7e52fe5bb6776e45856f67074b7f6309"
+    },
+    {
+      "linux": "drivers/acpi/acpica/amlresrc.h",
+      "vendor": "vendor/core/amlresrc.h",
+      "sha256": "873629ec0ba08e126e68e50fc36202aa2847ab25790317d7ed76c9f975269a26",
+      "adapted_sha256": "873629ec0ba08e126e68e50fc36202aa2847ab25790317d7ed76c9f975269a26"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsargs.c",
+      "vendor": "vendor/core/dsargs.c",
+      "sha256": "091f18eefd9769994dc4f41b6a1a4e5624385878b2dedc5fab248f567fe207bf",
+      "adapted_sha256": "091f18eefd9769994dc4f41b6a1a4e5624385878b2dedc5fab248f567fe207bf"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dscontrol.c",
+      "vendor": "vendor/core/dscontrol.c",
+      "sha256": "f1116c541cb2de5f0e2c757095f60c86dddde3f1513db2420245885b5b6bf9b2",
+      "adapted_sha256": "f1116c541cb2de5f0e2c757095f60c86dddde3f1513db2420245885b5b6bf9b2"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsdebug.c",
+      "vendor": "vendor/core/dsdebug.c",
+      "sha256": "3e1aa9d1fa832d835870eb69c08434c325b164efe628d009a6237a63da3d9864",
+      "adapted_sha256": "3e1aa9d1fa832d835870eb69c08434c325b164efe628d009a6237a63da3d9864"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsfield.c",
+      "vendor": "vendor/core/dsfield.c",
+      "sha256": "a322f24b4e2d1b76e96ee4ddc77ce70e9276f0b4765ce72080332ed162649ce7",
+      "adapted_sha256": "a322f24b4e2d1b76e96ee4ddc77ce70e9276f0b4765ce72080332ed162649ce7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsinit.c",
+      "vendor": "vendor/core/dsinit.c",
+      "sha256": "4559510e57af9b5a95944bc7992c820ac433365d57ab6f8b825c6ad9fd814af9",
+      "adapted_sha256": "4559510e57af9b5a95944bc7992c820ac433365d57ab6f8b825c6ad9fd814af9"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsmethod.c",
+      "vendor": "vendor/core/dsmethod.c",
+      "sha256": "025a0f5c0711724edbba166cf7e8f952b8cc59794944f192b0bb1f27565a5df3",
+      "adapted_sha256": "025a0f5c0711724edbba166cf7e8f952b8cc59794944f192b0bb1f27565a5df3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsmthdat.c",
+      "vendor": "vendor/core/dsmthdat.c",
+      "sha256": "429a7a298fed8a700b262c28b768a627885f560dd7ab2ba29bfff0143ae9d829",
+      "adapted_sha256": "429a7a298fed8a700b262c28b768a627885f560dd7ab2ba29bfff0143ae9d829"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsobject.c",
+      "vendor": "vendor/core/dsobject.c",
+      "sha256": "e8cbce4c1a20596ea467ee601adfc0eb8fc44454bbfc29d38eba1c0d1ceea03a",
+      "adapted_sha256": "e8cbce4c1a20596ea467ee601adfc0eb8fc44454bbfc29d38eba1c0d1ceea03a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsopcode.c",
+      "vendor": "vendor/core/dsopcode.c",
+      "sha256": "6e5248b8b101060054e1a324899c6daa8fcd9957b8bdb28e3c251448cefb6ff4",
+      "adapted_sha256": "6e5248b8b101060054e1a324899c6daa8fcd9957b8bdb28e3c251448cefb6ff4"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dspkginit.c",
+      "vendor": "vendor/core/dspkginit.c",
+      "sha256": "9017c362adf3859928211b411656e264c1114f8f9c7fb18a51227688f05f9f6d",
+      "adapted_sha256": "9017c362adf3859928211b411656e264c1114f8f9c7fb18a51227688f05f9f6d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dsutils.c",
+      "vendor": "vendor/core/dsutils.c",
+      "sha256": "d912cb0dbf661378039eb59d5937f67ef998e99d45048e3feb6de9f7d9c8c5b0",
+      "adapted_sha256": "d912cb0dbf661378039eb59d5937f67ef998e99d45048e3feb6de9f7d9c8c5b0"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dswexec.c",
+      "vendor": "vendor/core/dswexec.c",
+      "sha256": "fbc7957e6663bbc894d723b60d370536351ee27f6c908d70fe8b9a03aefbc278",
+      "adapted_sha256": "fbc7957e6663bbc894d723b60d370536351ee27f6c908d70fe8b9a03aefbc278"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dswload.c",
+      "vendor": "vendor/core/dswload.c",
+      "sha256": "dc4ede948291580dd9d956b8acf741e23b38b06b7df7e5c67354f2c2c28334aa",
+      "adapted_sha256": "dc4ede948291580dd9d956b8acf741e23b38b06b7df7e5c67354f2c2c28334aa"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dswload2.c",
+      "vendor": "vendor/core/dswload2.c",
+      "sha256": "bb515cb0f9f6069a06cdfa43cf594cba12b1dca6512fb7a624a67e6dc161de9b",
+      "adapted_sha256": "bb515cb0f9f6069a06cdfa43cf594cba12b1dca6512fb7a624a67e6dc161de9b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dswscope.c",
+      "vendor": "vendor/core/dswscope.c",
+      "sha256": "382e9045bc76809dcb17dc815cd7df750b53d670538f5418c908469ba836ed02",
+      "adapted_sha256": "382e9045bc76809dcb17dc815cd7df750b53d670538f5418c908469ba836ed02"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dswstate.c",
+      "vendor": "vendor/core/dswstate.c",
+      "sha256": "e2c6e98ed787869eec149aee81ec83f68f5d865b68f6bf9f27e8d4b8025f7799",
+      "adapted_sha256": "e2c6e98ed787869eec149aee81ec83f68f5d865b68f6bf9f27e8d4b8025f7799"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evevent.c",
+      "vendor": "vendor/core/evevent.c",
+      "sha256": "b1405a58693f9b0615bcac454770a96f2734634fae5a483225ea278ff4938cbd",
+      "adapted_sha256": "b1405a58693f9b0615bcac454770a96f2734634fae5a483225ea278ff4938cbd"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evglock.c",
+      "vendor": "vendor/core/evglock.c",
+      "sha256": "1331532c7b5f615af002d7ac85ca316d429a335769865f2f74cafaa0af3adf35",
+      "adapted_sha256": "1331532c7b5f615af002d7ac85ca316d429a335769865f2f74cafaa0af3adf35"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evgpe.c",
+      "vendor": "vendor/core/evgpe.c",
+      "sha256": "2b5924373165a8735d50f437ee29bf15a8fa9087424921dc55779eb107f207a6",
+      "adapted_sha256": "2b5924373165a8735d50f437ee29bf15a8fa9087424921dc55779eb107f207a6"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evgpeblk.c",
+      "vendor": "vendor/core/evgpeblk.c",
+      "sha256": "c590429a4da785f016c1b5c7901fed2662c6ec5051217e2adea10ce631cd6498",
+      "adapted_sha256": "c590429a4da785f016c1b5c7901fed2662c6ec5051217e2adea10ce631cd6498"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evgpeinit.c",
+      "vendor": "vendor/core/evgpeinit.c",
+      "sha256": "7af6802c4f5c4a668b98c41b50038af368415bafc8c5d8eaaaca0e5232cb6520",
+      "adapted_sha256": "7af6802c4f5c4a668b98c41b50038af368415bafc8c5d8eaaaca0e5232cb6520"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evgpeutil.c",
+      "vendor": "vendor/core/evgpeutil.c",
+      "sha256": "3c4b57c56e9cea90b41e3c6dedcfee2cdae43beb9d11c03770b23712369f12bd",
+      "adapted_sha256": "3c4b57c56e9cea90b41e3c6dedcfee2cdae43beb9d11c03770b23712369f12bd"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evhandler.c",
+      "vendor": "vendor/core/evhandler.c",
+      "sha256": "8f9a4c60780e6c158c8c0112dce588528f6f4ca0222a0909d5d9a181eeb82109",
+      "adapted_sha256": "8f9a4c60780e6c158c8c0112dce588528f6f4ca0222a0909d5d9a181eeb82109"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evmisc.c",
+      "vendor": "vendor/core/evmisc.c",
+      "sha256": "d1cabc80bfe1d86019c188997d811d7df0215d2056e41057bb987aef11c4c51c",
+      "adapted_sha256": "d1cabc80bfe1d86019c188997d811d7df0215d2056e41057bb987aef11c4c51c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evregion.c",
+      "vendor": "vendor/core/evregion.c",
+      "sha256": "67218b02594b1b5cfc690d3efe57787012f000c2147e7f54b1dff81d7dd32e9c",
+      "adapted_sha256": "67218b02594b1b5cfc690d3efe57787012f000c2147e7f54b1dff81d7dd32e9c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evrgnini.c",
+      "vendor": "vendor/core/evrgnini.c",
+      "sha256": "fee02cb599709a1eb35b64a65b1ce4fbb4be8936de6d12cdd4fa2898dba82cbd",
+      "adapted_sha256": "fee02cb599709a1eb35b64a65b1ce4fbb4be8936de6d12cdd4fa2898dba82cbd"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evsci.c",
+      "vendor": "vendor/core/evsci.c",
+      "sha256": "517dd1cba162cca689c6482f5460cf391d99f2c6ba108950f2f8aaeedb717e19",
+      "adapted_sha256": "517dd1cba162cca689c6482f5460cf391d99f2c6ba108950f2f8aaeedb717e19"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evxface.c",
+      "vendor": "vendor/core/evxface.c",
+      "sha256": "fe740fb73771a0de9cf003b0891e34877077a1a5c01f9d25dc0912adba4eabab",
+      "adapted_sha256": "fe740fb73771a0de9cf003b0891e34877077a1a5c01f9d25dc0912adba4eabab"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evxfevnt.c",
+      "vendor": "vendor/core/evxfevnt.c",
+      "sha256": "59d991f06da5b677eec90773587133b5d3befc59f719a3f9f695f4229796faab",
+      "adapted_sha256": "59d991f06da5b677eec90773587133b5d3befc59f719a3f9f695f4229796faab"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evxfgpe.c",
+      "vendor": "vendor/core/evxfgpe.c",
+      "sha256": "f09bf63f011188f840bbc2082ea41ee06a529a54329998a57921238fd6a22bf3",
+      "adapted_sha256": "f09bf63f011188f840bbc2082ea41ee06a529a54329998a57921238fd6a22bf3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/evxfregn.c",
+      "vendor": "vendor/core/evxfregn.c",
+      "sha256": "9b613b36516c27bfca78d4f1b7e4dd1ad098badf6d5d4f490b0c8d53545fa9b1",
+      "adapted_sha256": "9b613b36516c27bfca78d4f1b7e4dd1ad098badf6d5d4f490b0c8d53545fa9b1"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exconcat.c",
+      "vendor": "vendor/core/exconcat.c",
+      "sha256": "f41571964d88f0e83d48d00d47a0d6539924cadef112b7af0b711f8f22257cfb",
+      "adapted_sha256": "f41571964d88f0e83d48d00d47a0d6539924cadef112b7af0b711f8f22257cfb"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exconfig.c",
+      "vendor": "vendor/core/exconfig.c",
+      "sha256": "edcc780da57cd0522a36918b43aa9184db3422ac1780768af6466b7a19874626",
+      "adapted_sha256": "edcc780da57cd0522a36918b43aa9184db3422ac1780768af6466b7a19874626"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exconvrt.c",
+      "vendor": "vendor/core/exconvrt.c",
+      "sha256": "a3358b41cbf28db68c6817ac80debfae4ac5efa97aa4df0c0ff19d03765643cd",
+      "adapted_sha256": "a3358b41cbf28db68c6817ac80debfae4ac5efa97aa4df0c0ff19d03765643cd"
+    },
+    {
+      "linux": "drivers/acpi/acpica/excreate.c",
+      "vendor": "vendor/core/excreate.c",
+      "sha256": "919e19e0fefa7b7866e30809721f415cbadabd6519063818bc46cae9ade6b6f0",
+      "adapted_sha256": "919e19e0fefa7b7866e30809721f415cbadabd6519063818bc46cae9ade6b6f0"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exdebug.c",
+      "vendor": "vendor/core/exdebug.c",
+      "sha256": "355af8e9e6bd1a0256de443aaf3f5704416591551e67d0e004006f39b373e53a",
+      "adapted_sha256": "355af8e9e6bd1a0256de443aaf3f5704416591551e67d0e004006f39b373e53a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exdump.c",
+      "vendor": "vendor/core/exdump.c",
+      "sha256": "46f26bb268ade1120f3c18d27252f7b569ee2c5dc6ebe7eb1716478a2ccd3dd9",
+      "adapted_sha256": "46f26bb268ade1120f3c18d27252f7b569ee2c5dc6ebe7eb1716478a2ccd3dd9"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exfield.c",
+      "vendor": "vendor/core/exfield.c",
+      "sha256": "9845c4f08bca61eaf957c7bfc1ecf099e88f0a9aaa3c61e9ddc2363c5637ab3b",
+      "adapted_sha256": "9845c4f08bca61eaf957c7bfc1ecf099e88f0a9aaa3c61e9ddc2363c5637ab3b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exfldio.c",
+      "vendor": "vendor/core/exfldio.c",
+      "sha256": "62d0a4dd119b7bd15f665ca5362eb2928a93e9d03bd37c031030e52a542025e7",
+      "adapted_sha256": "62d0a4dd119b7bd15f665ca5362eb2928a93e9d03bd37c031030e52a542025e7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exmisc.c",
+      "vendor": "vendor/core/exmisc.c",
+      "sha256": "81ba1625bbafd3a2242a75c736c2a4bcba2b2b7a2f28a3ebe9951fa66599f011",
+      "adapted_sha256": "81ba1625bbafd3a2242a75c736c2a4bcba2b2b7a2f28a3ebe9951fa66599f011"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exmutex.c",
+      "vendor": "vendor/core/exmutex.c",
+      "sha256": "fa1995c56afd42f961033551f96ba6eb8aa3b4dfbd6b6de04819edb0a8c66eff",
+      "adapted_sha256": "fa1995c56afd42f961033551f96ba6eb8aa3b4dfbd6b6de04819edb0a8c66eff"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exnames.c",
+      "vendor": "vendor/core/exnames.c",
+      "sha256": "81aad467213a54c6204b4ec5115e7f55cad070fade0d78318bdec8d72582a69a",
+      "adapted_sha256": "81aad467213a54c6204b4ec5115e7f55cad070fade0d78318bdec8d72582a69a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exoparg1.c",
+      "vendor": "vendor/core/exoparg1.c",
+      "sha256": "fa352590111c052342dc6b73fa43121df6fa5dcd8571cf5fae105a1134808491",
+      "adapted_sha256": "fa352590111c052342dc6b73fa43121df6fa5dcd8571cf5fae105a1134808491"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exoparg2.c",
+      "vendor": "vendor/core/exoparg2.c",
+      "sha256": "c9763bb2c158f9736e79236a63fe08c7d0ac87faa3236a0702c89fba6b204905",
+      "adapted_sha256": "c9763bb2c158f9736e79236a63fe08c7d0ac87faa3236a0702c89fba6b204905"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exoparg3.c",
+      "vendor": "vendor/core/exoparg3.c",
+      "sha256": "50ce9abf73062777e83e61d27ee69a934db7a181a862df3733941066f4d49f85",
+      "adapted_sha256": "50ce9abf73062777e83e61d27ee69a934db7a181a862df3733941066f4d49f85"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exoparg6.c",
+      "vendor": "vendor/core/exoparg6.c",
+      "sha256": "6e917a5bbbcd2f4368a118a1926954f61000b8a816c242e2948acde77598a994",
+      "adapted_sha256": "6e917a5bbbcd2f4368a118a1926954f61000b8a816c242e2948acde77598a994"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exprep.c",
+      "vendor": "vendor/core/exprep.c",
+      "sha256": "9640aaf5612bb5b62b7e1281ff4137a696357c6181b7db7547f3cf138d8e7dac",
+      "adapted_sha256": "9640aaf5612bb5b62b7e1281ff4137a696357c6181b7db7547f3cf138d8e7dac"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exregion.c",
+      "vendor": "vendor/core/exregion.c",
+      "sha256": "fb0ad6706007e44e8d43ac8d92ba211f89cec800b07c3dc1b4df8e422df2542f",
+      "adapted_sha256": "fb0ad6706007e44e8d43ac8d92ba211f89cec800b07c3dc1b4df8e422df2542f"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exresnte.c",
+      "vendor": "vendor/core/exresnte.c",
+      "sha256": "bbff9c7c7213105ff81c5138f92dc22e675cbac89370bcd4cc68b4a664cbbbd5",
+      "adapted_sha256": "bbff9c7c7213105ff81c5138f92dc22e675cbac89370bcd4cc68b4a664cbbbd5"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exresolv.c",
+      "vendor": "vendor/core/exresolv.c",
+      "sha256": "b858d8c51c13f879b8d263bb0a7b3574bb352a0e47f7b94c8a583cd733902c49",
+      "adapted_sha256": "b858d8c51c13f879b8d263bb0a7b3574bb352a0e47f7b94c8a583cd733902c49"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exresop.c",
+      "vendor": "vendor/core/exresop.c",
+      "sha256": "84af18cb93bc177e35edeb5e85ed184611720ead2fd72331ed80ee3e22aad987",
+      "adapted_sha256": "84af18cb93bc177e35edeb5e85ed184611720ead2fd72331ed80ee3e22aad987"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exserial.c",
+      "vendor": "vendor/core/exserial.c",
+      "sha256": "1486159d197a8cdb9844e00061e2e2409b9eb079fcc90c7ffd51bc338dc817ce",
+      "adapted_sha256": "1486159d197a8cdb9844e00061e2e2409b9eb079fcc90c7ffd51bc338dc817ce"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exstore.c",
+      "vendor": "vendor/core/exstore.c",
+      "sha256": "aab48a40f0959ee871adc51642c7f722f06689e1742a89e6c5d5a795c86f0eef",
+      "adapted_sha256": "aab48a40f0959ee871adc51642c7f722f06689e1742a89e6c5d5a795c86f0eef"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exstoren.c",
+      "vendor": "vendor/core/exstoren.c",
+      "sha256": "400ba464b914cc856a0b64007cd502e8bd868ce6677611950b865e76fb022852",
+      "adapted_sha256": "400ba464b914cc856a0b64007cd502e8bd868ce6677611950b865e76fb022852"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exstorob.c",
+      "vendor": "vendor/core/exstorob.c",
+      "sha256": "f328688dff058d6b556ddf4dea19c332f739e03f468c5a70f81d7c76fdba7beb",
+      "adapted_sha256": "f328688dff058d6b556ddf4dea19c332f739e03f468c5a70f81d7c76fdba7beb"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exsystem.c",
+      "vendor": "vendor/core/exsystem.c",
+      "sha256": "16c95ab3645620d155acb49c7500c6eabf0f909dc638c50a48aafe5d17680533",
+      "adapted_sha256": "16c95ab3645620d155acb49c7500c6eabf0f909dc638c50a48aafe5d17680533"
+    },
+    {
+      "linux": "drivers/acpi/acpica/extrace.c",
+      "vendor": "vendor/core/extrace.c",
+      "sha256": "a69527038a86b9593c775de13aa9bf6dc5aa93dc110878cd6d98c6f5bdbba778",
+      "adapted_sha256": "a69527038a86b9593c775de13aa9bf6dc5aa93dc110878cd6d98c6f5bdbba778"
+    },
+    {
+      "linux": "drivers/acpi/acpica/exutils.c",
+      "vendor": "vendor/core/exutils.c",
+      "sha256": "826ebf1cae7e843ce0a50de7096b5e7719a9f7dd1712b1d9648fdf39046c87de",
+      "adapted_sha256": "826ebf1cae7e843ce0a50de7096b5e7719a9f7dd1712b1d9648fdf39046c87de"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwacpi.c",
+      "vendor": "vendor/core/hwacpi.c",
+      "sha256": "800f9b709ca79ae41646325e91eff350918f056eedd4990817cfbca2f2a030d1",
+      "adapted_sha256": "800f9b709ca79ae41646325e91eff350918f056eedd4990817cfbca2f2a030d1"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwesleep.c",
+      "vendor": "vendor/core/hwesleep.c",
+      "sha256": "2349e2526d5e74d9b4b377efe7eeb3a7e5166b395a32adb3d13197c0213550f4",
+      "adapted_sha256": "2349e2526d5e74d9b4b377efe7eeb3a7e5166b395a32adb3d13197c0213550f4"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwgpe.c",
+      "vendor": "vendor/core/hwgpe.c",
+      "sha256": "0ba3f11f6fc2c3d039f0b3db39693091e30ee760f0494ffcedb6b6afdebab1f4",
+      "adapted_sha256": "0ba3f11f6fc2c3d039f0b3db39693091e30ee760f0494ffcedb6b6afdebab1f4"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwpci.c",
+      "vendor": "vendor/core/hwpci.c",
+      "sha256": "d78b8fe56d532920cef487cf6c2cd782451110442ca0e75f0c934c35577199c7",
+      "adapted_sha256": "d78b8fe56d532920cef487cf6c2cd782451110442ca0e75f0c934c35577199c7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwregs.c",
+      "vendor": "vendor/core/hwregs.c",
+      "sha256": "72a20e254cc2fd5896bba5eaa4c1e29a9f583f98ce999c5dd86ab3e9ddd01bb3",
+      "adapted_sha256": "72a20e254cc2fd5896bba5eaa4c1e29a9f583f98ce999c5dd86ab3e9ddd01bb3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwsleep.c",
+      "vendor": "vendor/core/hwsleep.c",
+      "sha256": "7a706faad949b997194643d57c972b9324e79b2e87b66a6e59b0f62950714b97",
+      "adapted_sha256": "7a706faad949b997194643d57c972b9324e79b2e87b66a6e59b0f62950714b97"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwtimer.c",
+      "vendor": "vendor/core/hwtimer.c",
+      "sha256": "29ef494755dcb86555df0d8e2485423af38dc9806e3c55f1299329fa150e902b",
+      "adapted_sha256": "29ef494755dcb86555df0d8e2485423af38dc9806e3c55f1299329fa150e902b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwvalid.c",
+      "vendor": "vendor/core/hwvalid.c",
+      "sha256": "e5d2be47121dd19a24b92c6479cad850b5369eff29a21a2a0b72f78c0969eddc",
+      "adapted_sha256": "e5d2be47121dd19a24b92c6479cad850b5369eff29a21a2a0b72f78c0969eddc"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwxface.c",
+      "vendor": "vendor/core/hwxface.c",
+      "sha256": "6777cf62fe2860e98ebc754c2ce9f9f78e77b9b569166fdafb1a5ea606ac71b6",
+      "adapted_sha256": "6777cf62fe2860e98ebc754c2ce9f9f78e77b9b569166fdafb1a5ea606ac71b6"
+    },
+    {
+      "linux": "drivers/acpi/acpica/hwxfsleep.c",
+      "vendor": "vendor/core/hwxfsleep.c",
+      "sha256": "4531ce66d82b06b0ddf81f51903b7d93a200162532dab65e1b83068b4057c75d",
+      "adapted_sha256": "4531ce66d82b06b0ddf81f51903b7d93a200162532dab65e1b83068b4057c75d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsaccess.c",
+      "vendor": "vendor/core/nsaccess.c",
+      "sha256": "afffb591cbfd8df8681444895c31bcbb2b77f6a5d1d5e8b7fd89a20949b4bcaf",
+      "adapted_sha256": "afffb591cbfd8df8681444895c31bcbb2b77f6a5d1d5e8b7fd89a20949b4bcaf"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsalloc.c",
+      "vendor": "vendor/core/nsalloc.c",
+      "sha256": "146abd0ba6cf447572ce9fd54a8bee253b34d430c6d9d840e3db1f8a071da956",
+      "adapted_sha256": "146abd0ba6cf447572ce9fd54a8bee253b34d430c6d9d840e3db1f8a071da956"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsarguments.c",
+      "vendor": "vendor/core/nsarguments.c",
+      "sha256": "ca23831610e5a825123df3830d8e68ec681f5aeaa5f1317409d154ad7861c630",
+      "adapted_sha256": "ca23831610e5a825123df3830d8e68ec681f5aeaa5f1317409d154ad7861c630"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsconvert.c",
+      "vendor": "vendor/core/nsconvert.c",
+      "sha256": "54ba7a06c5defdc8e6c649d8c98a9ca36d3c07a5809d5b9ef10ce5c6892e9778",
+      "adapted_sha256": "54ba7a06c5defdc8e6c649d8c98a9ca36d3c07a5809d5b9ef10ce5c6892e9778"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsdump.c",
+      "vendor": "vendor/core/nsdump.c",
+      "sha256": "050a9f6c440474f998c573d4d410402d70df81f45c82ce16aa4c4174120fa389",
+      "adapted_sha256": "050a9f6c440474f998c573d4d410402d70df81f45c82ce16aa4c4174120fa389"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsdumpdv.c",
+      "vendor": "vendor/core/nsdumpdv.c",
+      "sha256": "1c8f5ea601ecb637ad406083a987da295d4e50e670d02eaa1b38c985c7f8d21c",
+      "adapted_sha256": "1c8f5ea601ecb637ad406083a987da295d4e50e670d02eaa1b38c985c7f8d21c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nseval.c",
+      "vendor": "vendor/core/nseval.c",
+      "sha256": "b9c3d28127e581ffe07eab55ef7c683155af0cfc87dc277ccd3ba2f2b1db8825",
+      "adapted_sha256": "b9c3d28127e581ffe07eab55ef7c683155af0cfc87dc277ccd3ba2f2b1db8825"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsinit.c",
+      "vendor": "vendor/core/nsinit.c",
+      "sha256": "04996e57eb17457fd5983f159627646b20b83e148d054ceba7024b6ebb668d76",
+      "adapted_sha256": "04996e57eb17457fd5983f159627646b20b83e148d054ceba7024b6ebb668d76"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsload.c",
+      "vendor": "vendor/core/nsload.c",
+      "sha256": "83c69b119a93f39b5a341a273633c27d27e6eb1c0b2562256dc8a222cc56a3e1",
+      "adapted_sha256": "83c69b119a93f39b5a341a273633c27d27e6eb1c0b2562256dc8a222cc56a3e1"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsnames.c",
+      "vendor": "vendor/core/nsnames.c",
+      "sha256": "29b4bd4e3bdb669f7eb3cfed099d6a54d955092b6f083bb15f6a81612a2d5f6f",
+      "adapted_sha256": "29b4bd4e3bdb669f7eb3cfed099d6a54d955092b6f083bb15f6a81612a2d5f6f"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsobject.c",
+      "vendor": "vendor/core/nsobject.c",
+      "sha256": "f79e80534545144521b1ff3d27f0b79d77d6d410d962cc29e0f970ee5ffafe95",
+      "adapted_sha256": "f79e80534545144521b1ff3d27f0b79d77d6d410d962cc29e0f970ee5ffafe95"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsparse.c",
+      "vendor": "vendor/core/nsparse.c",
+      "sha256": "1da60acd1438aec2a6c5a24b540b3c970d4e81523fe0b802f61b8710300f246c",
+      "adapted_sha256": "1da60acd1438aec2a6c5a24b540b3c970d4e81523fe0b802f61b8710300f246c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nspredef.c",
+      "vendor": "vendor/core/nspredef.c",
+      "sha256": "234be6f5548b34b40015438ab251c37f7999793ac890900fbb422d3d68478de0",
+      "adapted_sha256": "234be6f5548b34b40015438ab251c37f7999793ac890900fbb422d3d68478de0"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsprepkg.c",
+      "vendor": "vendor/core/nsprepkg.c",
+      "sha256": "acf21dec5cd051f38ba16828a3655dd5f58c94250acfe3d2274505ad8732f247",
+      "adapted_sha256": "acf21dec5cd051f38ba16828a3655dd5f58c94250acfe3d2274505ad8732f247"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsrepair.c",
+      "vendor": "vendor/core/nsrepair.c",
+      "sha256": "28f2c02dc2844ec40b49662faca915bfba70e41d31703bd245cd0700028aec6e",
+      "adapted_sha256": "28f2c02dc2844ec40b49662faca915bfba70e41d31703bd245cd0700028aec6e"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsrepair2.c",
+      "vendor": "vendor/core/nsrepair2.c",
+      "sha256": "b2a7cb5a5ee5476f35970820e218ee671e4254ae00d718d7c73ae323fcc04cf6",
+      "adapted_sha256": "b2a7cb5a5ee5476f35970820e218ee671e4254ae00d718d7c73ae323fcc04cf6"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nssearch.c",
+      "vendor": "vendor/core/nssearch.c",
+      "sha256": "6956d5c93e5dca1441ee0fe937f8869950eca71953327df4f93504d5ce42bcd8",
+      "adapted_sha256": "6956d5c93e5dca1441ee0fe937f8869950eca71953327df4f93504d5ce42bcd8"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsutils.c",
+      "vendor": "vendor/core/nsutils.c",
+      "sha256": "f5d401ab8c56d3224fc16e5929193defca12d18af1311eb8407c06bb3013692a",
+      "adapted_sha256": "f5d401ab8c56d3224fc16e5929193defca12d18af1311eb8407c06bb3013692a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nswalk.c",
+      "vendor": "vendor/core/nswalk.c",
+      "sha256": "0841d3aa8131b092d29cf65c38d0179384082ea11c2560d8d1eff6c178b678b3",
+      "adapted_sha256": "0841d3aa8131b092d29cf65c38d0179384082ea11c2560d8d1eff6c178b678b3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsxfeval.c",
+      "vendor": "vendor/core/nsxfeval.c",
+      "sha256": "41a78f65aeaf24447d5f2a8400a6a7bee2e2514b8a8291bdfabe93a95880d098",
+      "adapted_sha256": "41a78f65aeaf24447d5f2a8400a6a7bee2e2514b8a8291bdfabe93a95880d098"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsxfname.c",
+      "vendor": "vendor/core/nsxfname.c",
+      "sha256": "544af76a6546d7493c1d26c74a562d209c16f989fa6ec7f769a1e578259845a9",
+      "adapted_sha256": "544af76a6546d7493c1d26c74a562d209c16f989fa6ec7f769a1e578259845a9"
+    },
+    {
+      "linux": "drivers/acpi/acpica/nsxfobj.c",
+      "vendor": "vendor/core/nsxfobj.c",
+      "sha256": "e5895cff4cc7ae9c7b637b1bbd1562075697436dbc454aec3e54d8a622a465fb",
+      "adapted_sha256": "e5895cff4cc7ae9c7b637b1bbd1562075697436dbc454aec3e54d8a622a465fb"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psargs.c",
+      "vendor": "vendor/core/psargs.c",
+      "sha256": "ed08fa90a6e813d2f64ab57d2afd826499ebc48adabe41ad94d62ad0c7a9b718",
+      "adapted_sha256": "ed08fa90a6e813d2f64ab57d2afd826499ebc48adabe41ad94d62ad0c7a9b718"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psloop.c",
+      "vendor": "vendor/core/psloop.c",
+      "sha256": "7dd89c248eed4bb5d7e0bbb2bdf28e5147ffbfbaacbb07ff16be91c77afae4b9",
+      "adapted_sha256": "7dd89c248eed4bb5d7e0bbb2bdf28e5147ffbfbaacbb07ff16be91c77afae4b9"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psobject.c",
+      "vendor": "vendor/core/psobject.c",
+      "sha256": "809e92d483d679b6fa5f5cc7995b9af6792aeec45e1e84d572f7f0766d39fbde",
+      "adapted_sha256": "809e92d483d679b6fa5f5cc7995b9af6792aeec45e1e84d572f7f0766d39fbde"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psopcode.c",
+      "vendor": "vendor/core/psopcode.c",
+      "sha256": "9235686f8031ffa8b107d63c7ceb97d04810de67ac54fa5765e31119f06770b7",
+      "adapted_sha256": "9235686f8031ffa8b107d63c7ceb97d04810de67ac54fa5765e31119f06770b7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psopinfo.c",
+      "vendor": "vendor/core/psopinfo.c",
+      "sha256": "1938dc83d3e954ab516242823bfcc2eeb70551bf24e6db072d09e25bf8506da5",
+      "adapted_sha256": "1938dc83d3e954ab516242823bfcc2eeb70551bf24e6db072d09e25bf8506da5"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psparse.c",
+      "vendor": "vendor/core/psparse.c",
+      "sha256": "39813e9697207a541485420b8c29ab1b63ae5b6129b772979002707576f001a2",
+      "adapted_sha256": "39813e9697207a541485420b8c29ab1b63ae5b6129b772979002707576f001a2"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psscope.c",
+      "vendor": "vendor/core/psscope.c",
+      "sha256": "5dbc24a9f378c62099f0d97123bbdaa4f95a561727b0fb9846c27fe7e6749529",
+      "adapted_sha256": "5dbc24a9f378c62099f0d97123bbdaa4f95a561727b0fb9846c27fe7e6749529"
+    },
+    {
+      "linux": "drivers/acpi/acpica/pstree.c",
+      "vendor": "vendor/core/pstree.c",
+      "sha256": "3d6e706b5e02c4a74ba4754dee8759e1106ffc15e69016f060b5328380ec5aa5",
+      "adapted_sha256": "3d6e706b5e02c4a74ba4754dee8759e1106ffc15e69016f060b5328380ec5aa5"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psutils.c",
+      "vendor": "vendor/core/psutils.c",
+      "sha256": "47b9c7188b4b9b370ed18a30b3773c500ef783d7826a57c5fdc93ba22701bdbd",
+      "adapted_sha256": "47b9c7188b4b9b370ed18a30b3773c500ef783d7826a57c5fdc93ba22701bdbd"
+    },
+    {
+      "linux": "drivers/acpi/acpica/pswalk.c",
+      "vendor": "vendor/core/pswalk.c",
+      "sha256": "a628a831d2ea43eddc04cbced60d9d4ae8499917a443922f12892c5bbb948d5d",
+      "adapted_sha256": "a628a831d2ea43eddc04cbced60d9d4ae8499917a443922f12892c5bbb948d5d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/psxface.c",
+      "vendor": "vendor/core/psxface.c",
+      "sha256": "b97bd077ff0d994e13d86a4619dbb845828583ed93690daa8dc468e23308d3c3",
+      "adapted_sha256": "b97bd077ff0d994e13d86a4619dbb845828583ed93690daa8dc468e23308d3c3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsaddr.c",
+      "vendor": "vendor/core/rsaddr.c",
+      "sha256": "069fec68de7b37097f4c60de381a6778da30b18312ca69a49f177f535154575c",
+      "adapted_sha256": "069fec68de7b37097f4c60de381a6778da30b18312ca69a49f177f535154575c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rscalc.c",
+      "vendor": "vendor/core/rscalc.c",
+      "sha256": "50ac809536e7908e7ad2817092f6942b7f20dfc1c60e19905807a94863240033",
+      "adapted_sha256": "50ac809536e7908e7ad2817092f6942b7f20dfc1c60e19905807a94863240033"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rscreate.c",
+      "vendor": "vendor/core/rscreate.c",
+      "sha256": "9da7922e8b4380f39a7ea4535f9149d86d40cf8adfd55cd17d79199465fd3056",
+      "adapted_sha256": "9da7922e8b4380f39a7ea4535f9149d86d40cf8adfd55cd17d79199465fd3056"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsdumpinfo.c",
+      "vendor": "vendor/core/rsdumpinfo.c",
+      "sha256": "3928c19101f0b665dd5f1571175ca498c76e25be86c04141f0c688b8ed290552",
+      "adapted_sha256": "3928c19101f0b665dd5f1571175ca498c76e25be86c04141f0c688b8ed290552"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsinfo.c",
+      "vendor": "vendor/core/rsinfo.c",
+      "sha256": "9a549f372a036b1b287999d99ca25b1418314afe9d88f50d05dc0774d52c026c",
+      "adapted_sha256": "9a549f372a036b1b287999d99ca25b1418314afe9d88f50d05dc0774d52c026c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsio.c",
+      "vendor": "vendor/core/rsio.c",
+      "sha256": "1ea502e6108391f12b21fcbd0a2006458328e48bb441076349eb7892a5eff514",
+      "adapted_sha256": "1ea502e6108391f12b21fcbd0a2006458328e48bb441076349eb7892a5eff514"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsirq.c",
+      "vendor": "vendor/core/rsirq.c",
+      "sha256": "1fd03caf61b449334ccc16971ef8b9959b6393ec3e20a0512ea59235ca7175c7",
+      "adapted_sha256": "1fd03caf61b449334ccc16971ef8b9959b6393ec3e20a0512ea59235ca7175c7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rslist.c",
+      "vendor": "vendor/core/rslist.c",
+      "sha256": "670f8ea3a4f8b81693a64729e4f7cf30fff2fc83fa5b6009d17fadacbb7e1d29",
+      "adapted_sha256": "670f8ea3a4f8b81693a64729e4f7cf30fff2fc83fa5b6009d17fadacbb7e1d29"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsmemory.c",
+      "vendor": "vendor/core/rsmemory.c",
+      "sha256": "334ad80bb53b01b8ca80b5b8dd186330252c06778c0eac1ff4d7ac357200b625",
+      "adapted_sha256": "334ad80bb53b01b8ca80b5b8dd186330252c06778c0eac1ff4d7ac357200b625"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsmisc.c",
+      "vendor": "vendor/core/rsmisc.c",
+      "sha256": "589c398829c8d1b006f397c001e2390974ebb2e1a1deb4176460290922e822e6",
+      "adapted_sha256": "589c398829c8d1b006f397c001e2390974ebb2e1a1deb4176460290922e822e6"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsserial.c",
+      "vendor": "vendor/core/rsserial.c",
+      "sha256": "fc13d8d3557cbe6761e0477717cc88387e31212f755ffc657c18d2c76f5cf23c",
+      "adapted_sha256": "fc13d8d3557cbe6761e0477717cc88387e31212f755ffc657c18d2c76f5cf23c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsutils.c",
+      "vendor": "vendor/core/rsutils.c",
+      "sha256": "c6c06913a331597bb89efa9905d56aed1cb93f0b62099c43896750e9921e2543",
+      "adapted_sha256": "c6c06913a331597bb89efa9905d56aed1cb93f0b62099c43896750e9921e2543"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsxface.c",
+      "vendor": "vendor/core/rsxface.c",
+      "sha256": "3ee5c4958bf13eb43082970152f652b08d53fdc9dd87d48a6462af3b4caa75e3",
+      "adapted_sha256": "3ee5c4958bf13eb43082970152f652b08d53fdc9dd87d48a6462af3b4caa75e3"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbdata.c",
+      "vendor": "vendor/core/tbdata.c",
+      "sha256": "296d642673eafdcc733139fb124aab60e0ac44be33979ba369c23953f8ca4c3c",
+      "adapted_sha256": "296d642673eafdcc733139fb124aab60e0ac44be33979ba369c23953f8ca4c3c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbfadt.c",
+      "vendor": "vendor/core/tbfadt.c",
+      "sha256": "30906ff3a05033c1942ae8b835248642ca3b372094c255a49b2a741a9eaa8921",
+      "adapted_sha256": "30906ff3a05033c1942ae8b835248642ca3b372094c255a49b2a741a9eaa8921"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbfind.c",
+      "vendor": "vendor/core/tbfind.c",
+      "sha256": "a268c7f0016b7e4262fcb9ad3f4718c5db4935f0fef68f6f42f722487de4ab49",
+      "adapted_sha256": "a268c7f0016b7e4262fcb9ad3f4718c5db4935f0fef68f6f42f722487de4ab49"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbinstal.c",
+      "vendor": "vendor/core/tbinstal.c",
+      "sha256": "b337e5ed00cc08fc25ddb9cdd9814a358f936de0b8657f6d438555ee67d8d901",
+      "adapted_sha256": "b337e5ed00cc08fc25ddb9cdd9814a358f936de0b8657f6d438555ee67d8d901"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbprint.c",
+      "vendor": "vendor/core/tbprint.c",
+      "sha256": "681ee4abc2c789c80b84472136839273dda5f42d070965d5373eab68f5b49b0c",
+      "adapted_sha256": "681ee4abc2c789c80b84472136839273dda5f42d070965d5373eab68f5b49b0c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbutils.c",
+      "vendor": "vendor/core/tbutils.c",
+      "sha256": "3769363b95f3ce18113c668d1f617d78e8e08575077927f2cdf3e44734f76e43",
+      "adapted_sha256": "3769363b95f3ce18113c668d1f617d78e8e08575077927f2cdf3e44734f76e43"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbxface.c",
+      "vendor": "vendor/core/tbxface.c",
+      "sha256": "48fa3598bcdee7f97094c7b7d5872a859cb8d1b1999dfc8d355f38c964624021",
+      "adapted_sha256": "48fa3598bcdee7f97094c7b7d5872a859cb8d1b1999dfc8d355f38c964624021"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbxfload.c",
+      "vendor": "vendor/core/tbxfload.c",
+      "sha256": "29c9bf9b5b9d2fc19d2f8d55a33ad93c85f076a9693422479c12f57dfac02a4a",
+      "adapted_sha256": "29c9bf9b5b9d2fc19d2f8d55a33ad93c85f076a9693422479c12f57dfac02a4a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/tbxfroot.c",
+      "vendor": "vendor/core/tbxfroot.c",
+      "sha256": "e6e8c855c5e67dab4523781e67657180304362444d24d7b2f93f5d81ce05b169",
+      "adapted_sha256": "e6e8c855c5e67dab4523781e67657180304362444d24d7b2f93f5d81ce05b169"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utaddress.c",
+      "vendor": "vendor/core/utaddress.c",
+      "sha256": "92bb85bd7c864daee181962f75234c4441549a3acf2e92a4cf3ce5951548cc3d",
+      "adapted_sha256": "92bb85bd7c864daee181962f75234c4441549a3acf2e92a4cf3ce5951548cc3d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utalloc.c",
+      "vendor": "vendor/core/utalloc.c",
+      "sha256": "3e2b42de257cb9be2d312ae6682354af682137f3d953e4e2e12f20d818e2c57b",
+      "adapted_sha256": "3e2b42de257cb9be2d312ae6682354af682137f3d953e4e2e12f20d818e2c57b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utascii.c",
+      "vendor": "vendor/core/utascii.c",
+      "sha256": "bc758073e04dc493de66bcd4755b99a7f0f53463ae3ba59c8b119a0c86d95fd2",
+      "adapted_sha256": "bc758073e04dc493de66bcd4755b99a7f0f53463ae3ba59c8b119a0c86d95fd2"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utbuffer.c",
+      "vendor": "vendor/core/utbuffer.c",
+      "sha256": "c2a0f72b62a596c71577afd1c45a0a7a20480a4e6b7a25a2af7c844df3fe04ca",
+      "adapted_sha256": "c2a0f72b62a596c71577afd1c45a0a7a20480a4e6b7a25a2af7c844df3fe04ca"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utcache.c",
+      "vendor": "vendor/core/utcache.c",
+      "sha256": "38f7fffdc6b077e69bcf1ed8a92f1a7436d6035b7b187ddc156727e1275b45bf",
+      "adapted_sha256": "38f7fffdc6b077e69bcf1ed8a92f1a7436d6035b7b187ddc156727e1275b45bf"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utcksum.c",
+      "vendor": "vendor/core/utcksum.c",
+      "sha256": "1a5481676c0a3b3db2013cfa56c17cfe8df06116addeddb977cb0bec577a8e30",
+      "adapted_sha256": "1a5481676c0a3b3db2013cfa56c17cfe8df06116addeddb977cb0bec577a8e30"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utcopy.c",
+      "vendor": "vendor/core/utcopy.c",
+      "sha256": "21dbadbecae0a6cedac299fba0fb93fcad1fb76aebb065f785a339a0d54becd8",
+      "adapted_sha256": "21dbadbecae0a6cedac299fba0fb93fcad1fb76aebb065f785a339a0d54becd8"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utdebug.c",
+      "vendor": "vendor/core/utdebug.c",
+      "sha256": "4c4e94e0c50e2f1f20b01c616653e05f757db10c0dcb6b83fe9a22ec5af4f66f",
+      "adapted_sha256": "4c4e94e0c50e2f1f20b01c616653e05f757db10c0dcb6b83fe9a22ec5af4f66f"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utdecode.c",
+      "vendor": "vendor/core/utdecode.c",
+      "sha256": "a6b1aa872c7ce16ecf56b092106bfffbea2c7d640039ce72361f1217fd072c3a",
+      "adapted_sha256": "a6b1aa872c7ce16ecf56b092106bfffbea2c7d640039ce72361f1217fd072c3a"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utdelete.c",
+      "vendor": "vendor/core/utdelete.c",
+      "sha256": "fd7abeb5ed43aa2620bde2287fe981b62f2e0be9c89e09b1f7f32e1fc9f8543c",
+      "adapted_sha256": "fd7abeb5ed43aa2620bde2287fe981b62f2e0be9c89e09b1f7f32e1fc9f8543c"
+    },
+    {
+      "linux": "drivers/acpi/acpica/uterror.c",
+      "vendor": "vendor/core/uterror.c",
+      "sha256": "ed6bac7065850a9067cc7575cb0f60444b074389a45270c84e74f032695fe4da",
+      "adapted_sha256": "ed6bac7065850a9067cc7575cb0f60444b074389a45270c84e74f032695fe4da"
+    },
+    {
+      "linux": "drivers/acpi/acpica/uteval.c",
+      "vendor": "vendor/core/uteval.c",
+      "sha256": "c7332f99dd1c74ca21ac5c7a406e54003dbda4ab4c0566b75bac4e8e458d849d",
+      "adapted_sha256": "c7332f99dd1c74ca21ac5c7a406e54003dbda4ab4c0566b75bac4e8e458d849d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utexcep.c",
+      "vendor": "vendor/core/utexcep.c",
+      "sha256": "332ae04ca8bb547a66918b3cc19c1ea9cb143920f1bbb1be9b968266427d2f94",
+      "adapted_sha256": "332ae04ca8bb547a66918b3cc19c1ea9cb143920f1bbb1be9b968266427d2f94"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utglobal.c",
+      "vendor": "vendor/core/utglobal.c",
+      "sha256": "deeb7ca9b416daf7e6120c8ad6afdd1ab2f6fb7ac65f707206bb1243bc492e56",
+      "adapted_sha256": "deeb7ca9b416daf7e6120c8ad6afdd1ab2f6fb7ac65f707206bb1243bc492e56"
+    },
+    {
+      "linux": "drivers/acpi/acpica/uthex.c",
+      "vendor": "vendor/core/uthex.c",
+      "sha256": "aa0362f4fb3b4e55828c51c028f9208f78f6d86750a6b457839f487aa9a6d580",
+      "adapted_sha256": "aa0362f4fb3b4e55828c51c028f9208f78f6d86750a6b457839f487aa9a6d580"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utids.c",
+      "vendor": "vendor/core/utids.c",
+      "sha256": "bbc1767edb51788d4d25aba49953df7edb1af3ff7e3f58e19391f0569aed6894",
+      "adapted_sha256": "bbc1767edb51788d4d25aba49953df7edb1af3ff7e3f58e19391f0569aed6894"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utinit.c",
+      "vendor": "vendor/core/utinit.c",
+      "sha256": "7ec42aca862151811dcab33c876ebc9d2762d942ae4ffad1497a903d8536e666",
+      "adapted_sha256": "7ec42aca862151811dcab33c876ebc9d2762d942ae4ffad1497a903d8536e666"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utlock.c",
+      "vendor": "vendor/core/utlock.c",
+      "sha256": "685cf90fe06317f91b842e1639e8600a4d7667dc5649f3ef11cd3fd72af2a967",
+      "adapted_sha256": "685cf90fe06317f91b842e1639e8600a4d7667dc5649f3ef11cd3fd72af2a967"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utmath.c",
+      "vendor": "vendor/core/utmath.c",
+      "sha256": "e18350864d1872e7f0c1fbf85bc7b8a3b70d9a5914ed06fdc0c8e0876bc538aa",
+      "adapted_sha256": "e18350864d1872e7f0c1fbf85bc7b8a3b70d9a5914ed06fdc0c8e0876bc538aa"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utmisc.c",
+      "vendor": "vendor/core/utmisc.c",
+      "sha256": "c1da51b55434e58e820d790d46194a6baf54a5a9332003284a3b3a3b45fc8d18",
+      "adapted_sha256": "c1da51b55434e58e820d790d46194a6baf54a5a9332003284a3b3a3b45fc8d18"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utmutex.c",
+      "vendor": "vendor/core/utmutex.c",
+      "sha256": "ad6159726e1efce6509a8b8d8b5336deaed7a2c3ec682dfd7b43bbcd8a2618dc",
+      "adapted_sha256": "ad6159726e1efce6509a8b8d8b5336deaed7a2c3ec682dfd7b43bbcd8a2618dc"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utnonansi.c",
+      "vendor": "vendor/core/utnonansi.c",
+      "sha256": "8054c097ca4f78db62827e3b3aafcbabd3d545f1fdef4e5aebaac86c2f061724",
+      "adapted_sha256": "8054c097ca4f78db62827e3b3aafcbabd3d545f1fdef4e5aebaac86c2f061724"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utobject.c",
+      "vendor": "vendor/core/utobject.c",
+      "sha256": "4bce1c99032bcd3dcae60194f9fa62282f614fa47d1f73141cf54904cac23c71",
+      "adapted_sha256": "4bce1c99032bcd3dcae60194f9fa62282f614fa47d1f73141cf54904cac23c71"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utosi.c",
+      "vendor": "vendor/core/utosi.c",
+      "sha256": "742386b995669e2e5e7ef1b1aba95898f66186f678fdf28ddc26dd8310776908",
+      "adapted_sha256": "742386b995669e2e5e7ef1b1aba95898f66186f678fdf28ddc26dd8310776908"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utownerid.c",
+      "vendor": "vendor/core/utownerid.c",
+      "sha256": "bc7afb45f767ab7185dbda4ba3d7fb12d9ea5e5b0bb1a2c9ae3d6d4302641a17",
+      "adapted_sha256": "bc7afb45f767ab7185dbda4ba3d7fb12d9ea5e5b0bb1a2c9ae3d6d4302641a17"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utpredef.c",
+      "vendor": "vendor/core/utpredef.c",
+      "sha256": "239ec45165232e883b0502f47dd831663b9ee84a30c716b6d93eebd20d9059ac",
+      "adapted_sha256": "239ec45165232e883b0502f47dd831663b9ee84a30c716b6d93eebd20d9059ac"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utprint.c",
+      "vendor": "vendor/core/utprint.c",
+      "sha256": "5b6df4dfd52f594b0eef20af09ea1146c4d09c333de010dbd9c94e6dc2ac8a6d",
+      "adapted_sha256": "5b6df4dfd52f594b0eef20af09ea1146c4d09c333de010dbd9c94e6dc2ac8a6d"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utresdecode.c",
+      "vendor": "vendor/core/utresdecode.c",
+      "sha256": "f260312b9b1e1b52cb8c61fa245e1ca8fe493e404a29c4acc8b2d9b80dd9f524",
+      "adapted_sha256": "f260312b9b1e1b52cb8c61fa245e1ca8fe493e404a29c4acc8b2d9b80dd9f524"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utresrc.c",
+      "vendor": "vendor/core/utresrc.c",
+      "sha256": "ff1199ce43bc38d00da477c2d6f8e761a95af808bd47c6c6438412413067572e",
+      "adapted_sha256": "ff1199ce43bc38d00da477c2d6f8e761a95af808bd47c6c6438412413067572e"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utstate.c",
+      "vendor": "vendor/core/utstate.c",
+      "sha256": "f7a4025c5407a4d3e00df5b8761dba1c73baac4a6332dcebf11e62eea4eb7db8",
+      "adapted_sha256": "f7a4025c5407a4d3e00df5b8761dba1c73baac4a6332dcebf11e62eea4eb7db8"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utstring.c",
+      "vendor": "vendor/core/utstring.c",
+      "sha256": "b44d064b86f0fcd724c9f7d92377be49f0f86e4dca2a158b0c64d7e2a2784f36",
+      "adapted_sha256": "b44d064b86f0fcd724c9f7d92377be49f0f86e4dca2a158b0c64d7e2a2784f36"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utstrsuppt.c",
+      "vendor": "vendor/core/utstrsuppt.c",
+      "sha256": "5de59757adf4116b20260d672ef33e0f6b36a72868f07fa028c907c683923be7",
+      "adapted_sha256": "5de59757adf4116b20260d672ef33e0f6b36a72868f07fa028c907c683923be7"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utstrtoul64.c",
+      "vendor": "vendor/core/utstrtoul64.c",
+      "sha256": "afb8241869dd98cb8f440a1a076d0427076dd99aba4e0474356d47b84654107b",
+      "adapted_sha256": "afb8241869dd98cb8f440a1a076d0427076dd99aba4e0474356d47b84654107b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/uttrack.c",
+      "vendor": "vendor/core/uttrack.c",
+      "sha256": "0a731667cbd452826b3d96032274244f026274d995242d8704e9150217c4e073",
+      "adapted_sha256": "0a731667cbd452826b3d96032274244f026274d995242d8704e9150217c4e073"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utuuid.c",
+      "vendor": "vendor/core/utuuid.c",
+      "sha256": "5c3eda901b6d42656674f92e377a0f75b5f372f846a14e880c2b47e7358fe83f",
+      "adapted_sha256": "5c3eda901b6d42656674f92e377a0f75b5f372f846a14e880c2b47e7358fe83f"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utxface.c",
+      "vendor": "vendor/core/utxface.c",
+      "sha256": "39339b72527e922166cc409635efb77439c59f3e52dd8a2bcf78ff2ec12f3e5b",
+      "adapted_sha256": "39339b72527e922166cc409635efb77439c59f3e52dd8a2bcf78ff2ec12f3e5b"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utxferror.c",
+      "vendor": "vendor/core/utxferror.c",
+      "sha256": "b60eaf7d10ae581fdb9a9434c6a580888d2811878d7eb7fb34587bf1c3c7ca23",
+      "adapted_sha256": "b60eaf7d10ae581fdb9a9434c6a580888d2811878d7eb7fb34587bf1c3c7ca23"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utxfinit.c",
+      "vendor": "vendor/core/utxfinit.c",
+      "sha256": "95aa056524face2850d85fd6318b1a8ed8294986985c830ad359c141ba6efcfc",
+      "adapted_sha256": "95aa056524face2850d85fd6318b1a8ed8294986985c830ad359c141ba6efcfc"
+    },
+    {
+      "linux": "drivers/acpi/acpica/utxfmutex.c",
+      "vendor": "vendor/core/utxfmutex.c",
+      "sha256": "e72978d6ae87aca82d2b889579e6b3e0679190170c4827f80d3314ece4dce6e0",
+      "adapted_sha256": "e72978d6ae87aca82d2b889579e6b3e0679190170c4827f80d3314ece4dce6e0"
+    },
+    {
+      "linux": "include/acpi/acbuffer.h",
+      "vendor": "vendor/include/acpi/acbuffer.h",
+      "sha256": "2e3a2bf871c0ce6e2dda13d80278992f8b142d32101bc3314e77de701a94aecd",
+      "adapted_sha256": "2e3a2bf871c0ce6e2dda13d80278992f8b142d32101bc3314e77de701a94aecd"
+    },
+    {
+      "linux": "include/acpi/acconfig.h",
+      "vendor": "vendor/include/acpi/acconfig.h",
+      "sha256": "1e87de397b114748efe424522928d14be5ae8e25248bc0dd0990972d969a0434",
+      "adapted_sha256": "1e87de397b114748efe424522928d14be5ae8e25248bc0dd0990972d969a0434"
+    },
+    {
+      "linux": "include/acpi/acexcep.h",
+      "vendor": "vendor/include/acpi/acexcep.h",
+      "sha256": "8776ebc8cd754af50ee9f4a393cc6b1ee082fe9ab8246e48fec5a49ffc0d7c09",
+      "adapted_sha256": "8776ebc8cd754af50ee9f4a393cc6b1ee082fe9ab8246e48fec5a49ffc0d7c09"
+    },
+    {
+      "linux": "include/acpi/acnames.h",
+      "vendor": "vendor/include/acpi/acnames.h",
+      "sha256": "cc3ddcab40033a4afc13742868c18e159360be4fb7c826710891b31fe3a7c9f3",
+      "adapted_sha256": "cc3ddcab40033a4afc13742868c18e159360be4fb7c826710891b31fe3a7c9f3"
+    },
+    {
+      "linux": "include/acpi/acoutput.h",
+      "vendor": "vendor/include/acpi/acoutput.h",
+      "sha256": "02a30fd1f0e3634e6be43904bb2fa19bcf85c394180f08e86b5507e02e757e8b",
+      "adapted_sha256": "02a30fd1f0e3634e6be43904bb2fa19bcf85c394180f08e86b5507e02e757e8b"
+    },
+    {
+      "linux": "include/acpi/acpi.h",
+      "vendor": "vendor/include/acpi/acpi.h",
+      "sha256": "291ad6c151aeec39c3b1a2ef83ed6938e48841ca1e75cf181b85819394cc6002",
+      "adapted_sha256": "291ad6c151aeec39c3b1a2ef83ed6938e48841ca1e75cf181b85819394cc6002"
+    },
+    {
+      "linux": "include/acpi/acpiosxf.h",
+      "vendor": "vendor/include/acpi/acpiosxf.h",
+      "sha256": "8b15f4db770bbe0b0bfade555f2e91354c70f6d886d451e343bddd964bf06a56",
+      "adapted_sha256": "8b15f4db770bbe0b0bfade555f2e91354c70f6d886d451e343bddd964bf06a56"
+    },
+    {
+      "linux": "include/acpi/acpixf.h",
+      "vendor": "vendor/include/acpi/acpixf.h",
+      "sha256": "84e8ba1798cbe4c98a093efbe4e81cb8e905b6f2f7d410bfe57d496e4469b248",
+      "adapted_sha256": "84e8ba1798cbe4c98a093efbe4e81cb8e905b6f2f7d410bfe57d496e4469b248"
+    },
+    {
+      "linux": "include/acpi/acrestyp.h",
+      "vendor": "vendor/include/acpi/acrestyp.h",
+      "sha256": "def0601b49736b4c82a38d595fd9b074c3a5840bc565325844659b07d48888f8",
+      "adapted_sha256": "def0601b49736b4c82a38d595fd9b074c3a5840bc565325844659b07d48888f8"
+    },
+    {
+      "linux": "include/acpi/actbl.h",
+      "vendor": "vendor/include/acpi/actbl.h",
+      "sha256": "6152ad6f9d325bb38f9a9836d9332dca49a96f8bfc6c40e158d48595da4a4536",
+      "adapted_sha256": "6152ad6f9d325bb38f9a9836d9332dca49a96f8bfc6c40e158d48595da4a4536"
+    },
+    {
+      "linux": "include/acpi/actbl1.h",
+      "vendor": "vendor/include/acpi/actbl1.h",
+      "sha256": "b5d73269d046ff47389eec42fe1815d2c8992f49470255a5321007377da77f51",
+      "adapted_sha256": "b5d73269d046ff47389eec42fe1815d2c8992f49470255a5321007377da77f51"
+    },
+    {
+      "linux": "include/acpi/actbl2.h",
+      "vendor": "vendor/include/acpi/actbl2.h",
+      "sha256": "ae876eab8f3414cc5cffbfc56793f0befc8539e3f2e020f3c143833497cc3b17",
+      "adapted_sha256": "ae876eab8f3414cc5cffbfc56793f0befc8539e3f2e020f3c143833497cc3b17"
+    },
+    {
+      "linux": "include/acpi/actbl3.h",
+      "vendor": "vendor/include/acpi/actbl3.h",
+      "sha256": "10619ced0d4ee16e02f56bc7575448700eb6e07286322df61b8fe86c98c95bf0",
+      "adapted_sha256": "10619ced0d4ee16e02f56bc7575448700eb6e07286322df61b8fe86c98c95bf0"
+    },
+    {
+      "linux": "include/acpi/actypes.h",
+      "vendor": "vendor/include/acpi/actypes.h",
+      "sha256": "6d51a943eacbaa345cfb62ddb610ca777368a5cad58198202d02b3bdc36e3c06",
+      "adapted_sha256": "6d51a943eacbaa345cfb62ddb610ca777368a5cad58198202d02b3bdc36e3c06"
+    },
+    {
+      "linux": "include/acpi/platform/acenv.h",
+      "vendor": "vendor/include/acpi/platform/acenv.h",
+      "sha256": "c1258587f12a97b713510de08e39195d3f515729a426875b43c17917f5e0050e",
+      "adapted_sha256": "210fb8967d50d4246b804475406c5b826cbad98b662e5cea90ba5d3b2707bc35"
+    },
+    {
+      "linux": "include/acpi/platform/acenvex.h",
+      "vendor": "vendor/include/acpi/platform/acenvex.h",
+      "sha256": "8c145624b7117d2289d950fae1ad6e129b962277ad4ff13bcdee9fbd5c2a797d",
+      "adapted_sha256": "d71dd6c3d7ec58946a65a24f4e594b010ea34cb3befc0aed015c353b6937ddc1"
+    },
+    {
+      "linux": "include/acpi/platform/acgcc.h",
+      "vendor": "vendor/include/acpi/platform/acgcc.h",
+      "sha256": "4ca2bb9a946dcfa90e32dc459a148af927db8180121163b794ca13b345e7bde3",
+      "adapted_sha256": "4ca2bb9a946dcfa90e32dc459a148af927db8180121163b794ca13b345e7bde3"
+    },
+    {
+      "linux": "include/acpi/platform/acgccex.h",
+      "vendor": "vendor/include/acpi/platform/acgccex.h",
+      "sha256": "2cfc12b516f2ecb191a4a8e06117a2f9f49cd891c3d4e35ab90f2b6bf89121ae",
+      "adapted_sha256": "2cfc12b516f2ecb191a4a8e06117a2f9f49cd891c3d4e35ab90f2b6bf89121ae"
+    },
+    {
+      "linux": "LICENSES/preferred/BSD-3-Clause",
+      "vendor": "LICENSE.BSD-3-Clause",
+      "sha256": "7a83b1aeb460458db9a4bd521d7f237c45b1650f6e60ea5ffc71e49472454de3",
+      "adapted_sha256": "7a83b1aeb460458db9a4bd521d7f237c45b1650f6e60ea5ffc71e49472454de3"
+    },
+    {
+      "linux": "LICENSES/preferred/GPL-2.0",
+      "vendor": "LICENSE.GPL-2.0",
+      "sha256": "8780e78a1a737e127f25a65f6d95269bffd36158dc261114de7859b490bfc5aa",
+      "adapted_sha256": "8780e78a1a737e127f25a65f6d95269bffd36158dc261114de7859b490bfc5aa"
+    }
+  ],
+  "fixture_generator": {
+    "project": "https://github.com/acpica/acpica",
+    "commit": "e80cbd7b52de20aa8c75bfba9845e9cb61f2e681",
+    "iasl_version": "20240827"
+  },
+  "fixtures": [
+    {
+      "path": "fixtures/namespace.aml",
+      "sha256": "66b5efe39149cf14e29c7989f4923ef2072c0e88ba1316891c50e1a968b32832"
+    },
+    {
+      "path": "fixtures/namespace.asl",
+      "sha256": "6ee2127aadab2061c35a299efacdcc79c7a3c8c78e627836fc4fce9a55525c4d"
+    },
+    {
+      "path": "fixtures/dynamic-host.asl",
+      "sha256": "73195a054d2af0e70f95c8c808a8fe09c7a72b4e45b05072f97936ee67805495"
+    },
+    {
+      "path": "fixtures/dynamic-host.aml",
+      "sha256": "cc86a10deb67d194c9160914d9304c83c15ca412ae92cfbb1b679a0096cb5fa7"
+    },
+    {
+      "path": "fixtures/dynamic.asl",
+      "sha256": "00604cbccd0bbd293ff21d504778718e7049d93ebc5f00b435a0e50db24e3e41"
+    },
+    {
+      "path": "fixtures/dynamic.aml",
+      "sha256": "65aa51c581004ed49530f02a253c4532ad896ae92eac63410d270128c83fcd5e"
+    }
+  ],
+  "excluded_files": [
+    {
+      "linux": "drivers/acpi/acpica/Makefile",
+      "sha256": "11d344d895dff37a31397da62f2e115f061bf92e0d89773caf41e004eb626978",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/acapps.h",
+      "sha256": "4b96501e4490dcef8f5b89c6c1106eda809adc7c15c0032b27d52998eeeacb1e",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbcmds.c",
+      "sha256": "d3a4a86c97311f6a594c6cb88febd8c7a66bb48c4b31d72e07dc7f6c57dbc7c4",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbconvert.c",
+      "sha256": "63cf78b29599e052f600aee03f7f19ba8da358bb0a08bd80fda974d7b7313b96",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbdisply.c",
+      "sha256": "23ccc77b2026a899c5ad527a9336b9f33bd413d30fb7469ec276b75c38a4f131",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbexec.c",
+      "sha256": "83ed9f8ba5bef7def92eac4b48b054ff9f8165bfb9955fa41b8e2700bbfad305",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbfileio.c",
+      "sha256": "e94984671c60afd455495441ab4abee575336fdf70ff49e837fbf3aff02341f8",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbhistry.c",
+      "sha256": "cafd2dbcfaa7490880cd783f44fa845c67343793e4bfd53f96665411e09a4fcc",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbinput.c",
+      "sha256": "b91cdce47b7c2298b8b919e7cc94dc8ecfd6d524c831b14e62e816da030419e9",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbmethod.c",
+      "sha256": "bbf35a21b510c534097ae88bf8b2251ca0ebf01196a9233bc3673fb2d666067f",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbnames.c",
+      "sha256": "661e79431e3119f7872722abfae9d08eb3c60c859923c8b9fc989b56fa292e39",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbobject.c",
+      "sha256": "562e41c59e0c62e0a22fa898d936f837a8a5a9c84bff6d16c248f581d82957e6",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbstats.c",
+      "sha256": "d18ff1ae17d675ead038ccd6fad8aad7d98dad6e18651dbfa3c023371a890bef",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbtest.c",
+      "sha256": "cbd75841a2fd1ec010c118a7bd9587d79c885e0bce81ff33b6bb69bed6ed597b",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbutils.c",
+      "sha256": "922d84aff7576da6f3127a6fecd4282d226e30c5673f4ce3d80cb30244e67a9c",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/dbxface.c",
+      "sha256": "38fcfeaa25722ba6ad40aebf7af537b253ed0d1ed300807953199360cee93f20",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "drivers/acpi/acpica/rsdump.c",
+      "sha256": "3f4c5e9a6ca5d745096b56df7b03befb2972a85fab83ecf5200a6cf394319332",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acpi_bus.h",
+      "sha256": "be707b3fed219e2fa64acf8be5e4e5de839eff6afb654fc3ade44b1a605bb548",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acpi_drivers.h",
+      "sha256": "4d1d227524ee23d82894bfd31a02bc98e77dc3ad36a2c3f803b5dc432584eb1c",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acpi_io.h",
+      "sha256": "c835878000442336befcfc6a39b2845a9a00ecde88ff11426a29e89f94a2ef49",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acpi_lpat.h",
+      "sha256": "ff0cf393cf8561e184bddf1075ee6ad35f2af1c3e91bd40949b59a8b1238b781",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acpi_numa.h",
+      "sha256": "33ab2e6b420cebe9e4eba3149e785d440cd5b2b704f33792e8ec5658e6a067b7",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/acuuid.h",
+      "sha256": "8cb9e5f6957a95d460469a87a6174880c7312de5a66abdaa0977709a959e6c44",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/apei.h",
+      "sha256": "954f260dcfee0d4bcc480484cd20e8429316d4508dea754a63cc0bb0f58136b9",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/battery.h",
+      "sha256": "88b65315c3e371c86f1a481c5df77c392b9475ac5413f0c481150455a0558cb9",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/button.h",
+      "sha256": "33562b1141969a18f57a9e2fc56df4b9cb481e8b83ab55df3d6dc9b6a2b961f7",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/cppc_acpi.h",
+      "sha256": "9cf1b26a5565233d3c26d711ee64955d6c8b88d17ffeef04d264efa2cd33fd10",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/ghes.h",
+      "sha256": "64aae6dbe2f8e2da9682bc24120b18e72b027e1c48211cdf513dec4494f7d0e5",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/hed.h",
+      "sha256": "bd6af2c516d8afcce8cad8eb5eae2d45c5d6f97346d56dc17f460602de8d952a",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/nfit.h",
+      "sha256": "adc79d85ea76b998b0e9f4f25d30af8cad29bb2ec948a7c538947c5a66f5848b",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/nhlt.h",
+      "sha256": "3d539f4e74491177258cabb3e454f6ff08842253bcb5fca9f69ce17e931aba48",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/pcc.h",
+      "sha256": "80ef08094043f8248a715d146a1faa9409e5cd08b33d5830759bd16dfae7eb64",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/platform/aclinux.h",
+      "sha256": "fa3052f4f4c5ba994998b3c17a7070acb39ced723c7b8155ae4239a9b16f79e5",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/platform/aclinuxex.h",
+      "sha256": "af501a681e78e6e36043117ec56155cb42c302c70dd63eb4f88824055a5a1a6f",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/platform/aczephyr.h",
+      "sha256": "7aadd8319b67b5d2e6b5922d7c17c43f09f5a10d7e130d5a754e0721a7974c57",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/proc_cap_intel.h",
+      "sha256": "6fd8f41099c8b10dbfd61b97702082a63a13a2cfd8e575dbd8d76f9f8f538d7a",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/processor.h",
+      "sha256": "041bf7df333adbdabea22c9eb4be093450536f5e1edb5fed1baa2fc38f545df9",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/reboot.h",
+      "sha256": "0ff70a684164d0661d5b247688952f435d29a7f69a219e85a9ab99db1a4a1665",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    },
+    {
+      "linux": "include/acpi/video.h",
+      "sha256": "a307f528c2670e8b76818461afd0b642d5e7506c3b49af82b37c92ba75c1a66e",
+      "reason": "outside configured freestanding interpreter dependency closure; debugger or Linux-only interfaces/build metadata"
+    }
+  ]
+}

@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 // Copyright (C) 2020-2023 MediaTek Inc.
 //! PCIe boot MCU messages from mt76_connac2_mcu_fill_message and
-//! mt7925_mcu_fill_message. This module deliberately admits only the legacy
-//! WM boot commands used by the firmware downloader, not unimplemented UNI,
-//! extended or chip-specific commands.
+//! mt7925_mcu_fill_message. The boot entry point admits only the legacy WM
+//! downloader commands. `runtime` separately implements bounded device/BSS/
+//! station UNI status envelopes using this same serialized sequence owner.
 use super::identity::Chip;
 use alloc::vec::Vec;
+
+pub mod capabilities;
+pub mod clc;
+pub mod device;
+pub mod domain;
+pub mod eeprom;
+pub mod key;
+pub mod power;
+pub mod runtime;
 
 const TX_HEADER: usize = 64;
 const MAX_TX_BYTES: usize = u16::MAX as usize;
@@ -77,6 +86,10 @@ pub struct Encoder {
     sequence: u8,
 }
 impl Encoder {
+    fn next_sequence(&mut self) -> u8 {
+        self.sequence = self.sequence % 15 + 1;
+        self.sequence
+    }
     pub fn encode(
         &mut self,
         chip: Chip,
@@ -92,8 +105,7 @@ impl Encoder {
         if !valid || payload.len() + TX_HEADER > MAX_TX_BYTES {
             return Err(Error::InvalidPayload);
         }
-        self.sequence = self.sequence % 15 + 1;
-        let sequence = self.sequence;
+        let sequence = self.next_sequence();
         if command == Command::Scatter {
             return Ok(Packet {
                 sequence,
