@@ -230,6 +230,58 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires pinned original 26A434 mac18g kernel through STELA_TEST_PMGR_M6_KERNELCACHE"]
+    fn original_m6_device_configs_keep_the_shared_record_envelope() {
+        let bytes =
+            std::fs::read(std::env::var("STELA_TEST_PMGR_M6_KERNELCACHE").unwrap()).unwrap();
+        assert_eq!(
+            crate::sha256(&bytes),
+            "09746d1f442153956ba00b385f49bc245460c1ebea92cae7e9e0e4f240745b85"
+        );
+        // SystemProp::_getDTDeviceList divides the devices property's byte
+        // length by48, then allocates/copies48*count. PlatformFactory indexes
+        // those configs; Device's constructor reads ID+0x1a, name+0x20 and
+        // all four parent halfwords. This establishes structure, not PSD ABI.
+        for (offset, length, expected) in [
+            (
+                0x3047ac0,
+                0x140,
+                "f42060d83fe8096e0897a3cbca59b4f3c01c792835fdb53c40256207496dff26",
+            ),
+            (
+                0x304c428,
+                0x108,
+                "133e3cc33141f0225592326dc7537d20669780c6e63ce836f16ef9c6a7c61b68",
+            ),
+            (
+                0x304a288,
+                0x94,
+                "7984c104d25466e4633e24a2eda944cbdb0675eb8f7dd30e3fb4e867314afe7a",
+            ),
+        ] {
+            assert_eq!(crate::sha256(&bytes[offset..offset + length]), expected);
+        }
+        assert_eq!(&bytes[0x775c08..0x775c10], b"devices\0");
+        for (offset, expected) in [
+            (0x3047b48, 0x52955568u32),
+            (0x3047b4c, 0x72b55548u32),
+            (0x3047b50, 0x9ba87c08u32),
+            (0x3047b54, 0xd365fd09u32),
+            (0x304a2c4, 0x79403428u32),
+            (0x304a2cc, 0x3dc00820u32),
+            (0x304a2f8, 0x79400828u32),
+            (0x304a300, 0x79400c28u32),
+            (0x304a308, 0x79401028u32),
+            (0x304a310, 0x79401428u32),
+        ] {
+            assert_eq!(
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn layouts_preserve_every_parent_and_do_not_treat_cluster_bytes_as_flags() {
         let mut raw = [0; BYTES];
         raw[..4].copy_from_slice(&0x0700_0002u32.to_le_bytes());

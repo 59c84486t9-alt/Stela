@@ -816,7 +816,7 @@ mod tests {
                     // ordering or guessed absolute-address escape is admitted.
                     assert_eq!(chip, 0x8152, "{member}: {error}");
                     assert!(
-                        error.contains("reg[47]") && error.contains("outside or ambiguous"),
+                        error.contains("reg[0]") && error.contains("outside or ambiguous"),
                         "{error}"
                     );
                     println!("{member} chip={chip:#x} geometry-refusal={error}");
