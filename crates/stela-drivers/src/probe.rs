@@ -160,6 +160,8 @@ impl Link for Adapter {
 /// controller they could not.
 #[derive(Default)]
 pub struct Disks {
+    /// Native UAC2 playback/capture owners, awaiting explicit runtime PCM use.
+    pub audio: Vec<crate::usb::audio::UsbAudio>,
     pub devices: Vec<Box<dyn BlockDevice>>,
     /// Display controllers, inventoried without changing firmware scanout.
     /// These are not initialized accelerators; each records its missing port.
@@ -285,6 +287,7 @@ pub unsafe fn probe_with_provider(
                         disks.usb_inputs.extend(found.inputs);
                         disks.usb_devices.extend(found.devices);
                         disks.usb_storage.extend(found.storage);
+                        disks.audio.extend(found.audio);
                         for mut device in found.bluetooth {
                             // The retained result owns its evidence/errors;
                             // no catalog borrow or firmware bytes escape.

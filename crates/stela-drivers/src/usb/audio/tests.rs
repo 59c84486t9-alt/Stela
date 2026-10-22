@@ -1,0 +1,501 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+//! Representative standard UAC2 descriptors, not a dump of the physical PC.
+use super::*;
+use crate::usb::audio::*;
+use crate::{
+    bus::dma::RegionAllocator,
+    usb::xhci::{interfaces, setup},
+};
+use alloc::{collections::BTreeMap, vec::Vec};
+
+fn append(v: &mut Vec<u8>, d: &[u8]) {
+    v.extend_from_slice(d);
+}
+pub(crate) fn configuration() -> Vec<u8> {
+    let mut v = vec![9, 2, 0, 0, 3, 1, 0, 0x80, 50];
+    append(&mut v, &[8, 11, 0, 3, 1, 0, 0x20, 0]);
+    append(&mut v, &[9, 4, 0, 0, 0, 1, 1, 0x20, 0]);
+    let start = v.len();
+    append(&mut v, &[9, 0x24, 1, 0, 2, 1, 0, 0, 0]);
+    append(&mut v, &[8, 0x24, 10, 10, 3, 7, 0, 0]); // rw frequency + ro validity
+    append(
+        &mut v,
+        &[17, 0x24, 2, 1, 1, 1, 0, 10, 2, 3, 0, 0, 0, 0, 0, 0, 0],
+    );
+    append(
+        &mut v,
+        &[18, 0x24, 6, 2, 1, 15, 0, 0, 0, 15, 0, 0, 0, 15, 0, 0, 0, 0],
+    );
+    append(&mut v, &[12, 0x24, 3, 3, 1, 3, 0, 2, 10, 0, 0, 0]);
+    append(
+        &mut v,
+        &[17, 0x24, 2, 4, 1, 2, 0, 10, 2, 3, 0, 0, 0, 0, 0, 0, 0],
+    );
+    append(&mut v, &[12, 0x24, 3, 5, 1, 1, 0, 4, 10, 0, 0, 0]);
+    let total = (v.len() - start) as u16;
+    v[start + 6..start + 8].copy_from_slice(&total.to_le_bytes());
+    for (i, terminal, address, attrs) in [(1, 1, 1, 0x0d), (2, 5, 0x82, 0x05)] {
+        append(&mut v, &[9, 4, i, 0, 0, 1, 2, 0x20, 0]);
+        append(&mut v, &[9, 4, i, 1, 1, 1, 2, 0x20, 0]);
+        append(
+            &mut v,
+            &[16, 0x24, 1, terminal, 0, 1, 1, 0, 0, 0, 2, 3, 0, 0, 0, 0],
+        );
+        append(&mut v, &[6, 0x24, 2, 1, 2, 16]);
+        append(&mut v, &[7, 5, address, attrs, 0xc0, 0, 4]);
+        append(&mut v, &[8, 0x25, 1, 0, 0, 0, 0, 0]);
+    }
+    let total = v.len() as u16;
+    v[2..4].copy_from_slice(&total.to_le_bytes());
+    v
+}
+fn binding() -> Binding {
+    let c = configuration();
+    let all = interfaces(&c);
+    Binding::parse(&all[0], &all, &c, 3).unwrap()
+}
+
+#[test]
+fn runtime_descriptors_select_graph_and_pcm_not_product_nodes() {
+    let b = binding();
+    assert_eq!(b.formats.len(), 2);
+    assert_eq!(b.formats[0].frame_bytes(), 4);
+    assert_eq!(b.graph.terminal_clock(5, Direction::Capture), Ok(10));
+    assert_eq!(b.settings(), vec![(0, 0), (1, 0), (2, 0)]);
+    let mut c = configuration();
+    c.pop();
+    let a = interfaces(&c);
+    assert!(Binding::parse(&a[0], &a, &c, 3).is_err());
+    let mut c = configuration();
+    let n = c
+        .windows(8)
+        .position(|w| w == [8, 0x24, 10, 10, 3, 7, 0, 0])
+        .unwrap();
+    c[n + 3] = 1;
+    let a = interfaces(&c);
+    assert!(Binding::parse(&a[0], &a, &c, 3).is_err());
+    let mut descriptor = [0; 18];
+    descriptor[2..7].copy_from_slice(&[0, 2, 0xef, 2, 1]);
+    descriptor[8..14].copy_from_slice(&[5, 11, 0xe1, 0x1b, 2, 0]);
+    assert!(supported_identity(&descriptor, 3));
+    assert!(!supported_identity(&descriptor, 4));
+    descriptor[12] = 3;
+    assert!(!supported_identity(&descriptor, 3));
+}
+
+#[derive(Default)]
+struct Model {
+    overrides: BTreeMap<[u8; 8], Vec<u8>>,
+    selection: u8,
+    numerator: u16,
+    denominator: u16,
+    rate: u32,
+    time: u64,
+    valid: bool,
+    muted: bool,
+    volume: i16,
+    active: Vec<u8>,
+    pending: BTreeMap<u64, (Endpoint, u64, usize)>,
+    next: u64,
+    output: Vec<u8>,
+    alternates: Vec<(u8, u8)>,
+    cancel_fail: bool,
+    packet_fault: Option<PacketStatus>,
+    transport_fault: bool,
+    hold: bool,
+}
+impl Model {
+    fn new() -> Self {
+        Self {
+            selection: 1,
+            numerator: 2,
+            denominator: 1,
+            rate: 48_000,
+            valid: true,
+            ..Self::default()
+        }
+    }
+}
+impl Control for Model {
+    fn now_us(&self) -> u64 {
+        self.time
+    }
+    fn relax(&mut self) {
+        self.time += 1000;
+    }
+    fn control(&mut self, r: [u8; 8], out: &[u8]) -> Result<Vec<u8>, BlockError> {
+        if let Some(reply) = self.overrides.get(&r) {
+            return Ok(reply.clone());
+        }
+        let entity = r[5];
+        let sel = r[3];
+        let len = u16::from_le_bytes([r[6], r[7]]) as usize;
+        if r[0] == 1 && r[1] == 11 {
+            self.alternates.push((r[4], r[2]));
+            return Ok(Vec::new());
+        }
+        assert_eq!(r[4], 0);
+        assert_eq!(r[2], 0);
+        if r[0] == 0x21 {
+            match (entity, sel) {
+                (11 | 14, 1) => self.selection = out[0],
+                (10, 1) => self.rate = u32::from_le_bytes(out.try_into().unwrap()),
+                (2, 1) => self.muted = out[0] != 0,
+                (2, 2) => self.volume = i16::from_le_bytes(out.try_into().unwrap()),
+                _ => panic!("unexpected set {r:?}"),
+            };
+            return Ok(Vec::new());
+        }
+        assert_eq!(r[0], 0xa1);
+        let data = match (entity, sel, r[1]) {
+            (11 | 14, 1, 1) => vec![self.selection],
+            (12, 1, 1) => self.numerator.to_le_bytes().to_vec(),
+            (12, 2, 1) => self.denominator.to_le_bytes().to_vec(),
+            (10, 1, 1) => self.rate.to_le_bytes().to_vec(),
+            (10, 2, 1) => vec![u8::from(self.valid)],
+            (10, 1, 2) => {
+                let mut v = 1u16.to_le_bytes().to_vec();
+                v.extend_from_slice(&44_100u32.to_le_bytes());
+                v.extend_from_slice(&96_000u32.to_le_bytes());
+                v.extend_from_slice(&100u32.to_le_bytes());
+                v
+            }
+            (2, 1, 1) => vec![u8::from(self.muted)],
+            (2, 2, 1) => self.volume.to_le_bytes().to_vec(),
+            (2, 2, 2) => vec![1, 0, 0, 0xc0, 0, 0, 0, 1],
+            _ => panic!("unexpected get {r:?}"),
+        };
+        Ok(data[..len.min(data.len())].to_vec())
+    }
+}
+impl Transport for Model {
+    type Ticket = u64;
+    fn configure(&mut self, _: Direction, eps: &[Endpoint]) -> Result<(), BlockError> {
+        for e in eps {
+            assert!(!self.active.contains(&e.address));
+            self.active.push(e.address);
+        }
+        Ok(())
+    }
+    fn deconfigure(&mut self, _: Direction, eps: &[Endpoint]) -> Result<(), BlockError> {
+        if self.cancel_fail {
+            return Err(BlockError::Timeout);
+        }
+        for e in eps {
+            self.active.retain(|a| *a != e.address);
+            self.pending.retain(|_, (ep, _, _)| ep.address != e.address);
+        }
+        Ok(())
+    }
+    fn submit(&mut self, e: &Endpoint, p: u64, n: usize) -> Result<u64, BlockError> {
+        assert!(self.active.contains(&e.address));
+        assert!(n <= 3072);
+        assert_eq!(p & 4095, 0);
+        self.next += 1;
+        self.pending.insert(self.next, (*e, p, n));
+        Ok(self.next)
+    }
+    fn completed(&mut self, t: &u64) -> Option<Result<Completion, BlockError>> {
+        if self.hold {
+            return None;
+        }
+        if self.transport_fault {
+            return Some(Err(BlockError::Timeout));
+        }
+        let (e, p, n) = self.pending.remove(t).expect("ticket consumed once");
+        // SAFETY: the class's live DMA buffer remains owned by this ticket until this terminal completion.
+        let data = unsafe { core::slice::from_raw_parts_mut(p as *mut u8, n) };
+        if e.attributes & 0x30 == 0x10 {
+            data[..4].copy_from_slice(&(6u32 << 16).to_le_bytes());
+        } else if e.is_in() {
+            data.fill(*t as u8);
+        } else {
+            self.output.extend_from_slice(data);
+        }
+        Some(Ok(Completion {
+            bytes: n,
+            status: self.packet_fault.take().unwrap_or(PacketStatus::Success),
+        }))
+    }
+}
+fn run(f: impl FnOnce(&mut AudioDevice<Model>)) {
+    let mut memory = vec![0u64; 80 * 1024];
+    let p = memory.as_mut_ptr() as u64;
+    // SAFETY: backing memory outlives this test's class, and only its allocator uses it.
+    let mut dma = unsafe { RegionAllocator::new(p..p + memory.len() as u64 * 8) };
+    let mut a = AudioDevice::new(Model::new(), binding(), &mut dma).unwrap();
+    f(&mut a);
+}
+#[test]
+fn controls_use_ranges_exact_requests_and_actual_readback() {
+    let g = binding().graph;
+    let mut m = Model::new();
+    let c = g.resolve_clock(&mut m, 10).unwrap();
+    g.set_rate(&mut m, c, 44_100).unwrap();
+    assert_eq!(m.rate, 44_100);
+    assert_eq!(g.set_rate(&mut m, c, 44_101), Err(Error::RateUnsupported));
+    g.set_mute(&mut m, 2, 0, true).unwrap();
+    g.set_volume(&mut m, 2, 0, -256).unwrap();
+    assert_eq!(m.volume, -256);
+    assert_eq!(g.set_volume(&mut m, 2, 0, -257), Err(Error::Format));
+    m.valid = false;
+    assert_eq!(g.valid_clock(&mut m, c), Err(Error::ClockInvalid));
+    assert!(m.time >= 100000);
+    assert_eq!(
+        setup(0xa1, 1, 0x100, 0xa00, 4),
+        [0xa1, 1, 0, 1, 0, 10, 4, 0]
+    );
+}
+#[test]
+fn finite_pcm_is_exact_across_many_packet_ring_wraps_and_restart() {
+    run(|a| {
+        let pcm: Vec<u8> = (0..65536).map(|i| (i * 17) as u8).collect();
+        a.start_playback(0, 48000, &pcm, true).unwrap();
+        for _ in 0..200 {
+            if a.poll().unwrap().playback_drained {
+                break;
+            }
+        }
+        assert!(a.progress().playback_drained);
+        assert_eq!(a.transport.output, pcm);
+        assert!(a.transport.pending.is_empty());
+        assert_eq!(a.transport.alternates.last(), Some(&(1, 0)));
+        a.start_playback(0, 48000, &pcm[..24], true).unwrap();
+        a.poll().unwrap();
+        assert_eq!(a.progress().playback_frames, 16390);
+    });
+}
+#[test]
+fn duplex_capture_uses_actual_packet_bytes_and_shared_clock_is_not_retuned() {
+    run(|a| {
+        a.start_capture(1, 48000).unwrap();
+        a.start_playback(0, 48000, &vec![7; 24000], true).unwrap();
+        a.poll().unwrap();
+        assert_eq!(a.progress().capture_frames, 1536);
+        let mut pcm = vec![0; 6144];
+        assert_eq!(a.read_capture(&mut pcm).unwrap(), 6144);
+        assert_eq!(&pcm[..192], &[1; 192]);
+        assert_eq!(&pcm[192..384], &[2; 192]);
+        assert_eq!(a.start_capture(1, 44100), Err(Error::Busy));
+        a.stop_playback().unwrap();
+        assert!(a.capture.is_some());
+        a.stop_capture().unwrap();
+        assert!(a.transport.pending.is_empty());
+    });
+}
+#[test]
+fn terminal_packet_failure_stops_all_and_failed_cancel_keeps_dma_quarantined() {
+    run(|a| {
+        a.start_capture(1, 48000).unwrap();
+        a.transport.packet_fault = Some(PacketStatus::MissedService);
+        assert_eq!(
+            a.poll(),
+            Err(Error::Packet("missed USB audio service interval"))
+        );
+        assert!(a.transport.pending.is_empty());
+        a.start_capture(1, 48000).unwrap();
+        a.transport.transport_fault = true;
+        a.transport.cancel_fail = true;
+        assert_eq!(a.poll(), Err(Error::Poisoned));
+        assert!(!a.transport.pending.is_empty());
+        assert_eq!(a.start_capture(1, 48000), Err(Error::Poisoned));
+        a.transport.transport_fault = false;
+        a.transport.cancel_fail = false;
+        a.shutdown().unwrap();
+        assert!(a.transport.pending.is_empty());
+    });
+}
+#[test]
+fn continuous_partial_packet_starvation_is_explicit_and_capture_fifo_wraps() {
+    run(|a| {
+        a.start_playback(0, 48000, &[1; 28], false).unwrap();
+        assert_eq!(a.poll(), Err(Error::Underrun));
+        a.start_capture(1, 48000).unwrap();
+        for _ in 0..3 {
+            a.poll().unwrap();
+            let mut out = vec![0; 6144];
+            assert_eq!(a.read_capture(&mut out).unwrap(), 6144);
+            for (n, p) in out.chunks(192).enumerate() {
+                assert!(p.iter().all(|v| *v == p[0]), "packet{n}");
+            }
+        }
+        a.shutdown().unwrap();
+    });
+}
+
+#[test]
+fn explicit_feedback_updates_packetizer_and_stale_feedback_stops() {
+    run(|a| {
+        let fb = Endpoint {
+            address: 0x83,
+            attributes: 0x11,
+            max_packet: 4,
+            interval: 4,
+            companion: None,
+        };
+        a.binding.formats[0].sync = Sync::Explicit(fb);
+        a.start_playback(0, 48000, &vec![9; 24000], false).unwrap();
+        assert_eq!(a.poll().unwrap().feedback_updates, 32);
+        a.transport.hold = true;
+        a.transport.time = 100001;
+        assert_eq!(a.poll(), Err(Error::Feedback));
+        assert!(a.transport.pending.is_empty());
+    });
+}
+#[test]
+fn implicit_feedback_uses_actual_capture_packet_frames_and_retains_requested_capture() {
+    run(|a| {
+        let c = a.binding.formats[1].clone();
+        a.binding.formats[0].sync = Sync::Implicit {
+            interface: c.interface,
+            alternate: c.alternate,
+            endpoint: c.data,
+            frame_bytes: c.frame_bytes(),
+        };
+        a.start_playback(0, 48000, &vec![3; 12288], true).unwrap();
+        assert_eq!(a.progress().queued_playback, 0);
+        a.start_capture(1, 48000).unwrap();
+        for _ in 0..4 {
+            a.poll().unwrap();
+        }
+        assert!(a.progress().playback_drained);
+        assert_eq!(a.transport.output, vec![3; 12288]);
+        assert!(a.capture.as_ref().unwrap().requested);
+        assert!(!a.capture.as_ref().unwrap().implicit);
+        a.stop_capture().unwrap();
+        assert!(a.transport.pending.is_empty());
+    });
+}
+
+#[test]
+fn selected_clock_multiplier_and_control_short_or_false_readback_are_not_success() {
+    let mut graph = binding().graph;
+    graph.entities.extend([
+        Entity::ClockSelector {
+            id: 11,
+            sources: vec![10],
+            controls: 3,
+        },
+        Entity::ClockMultiplier {
+            id: 12,
+            source: 11,
+            controls: 5,
+        },
+    ]);
+    graph.entities.push(Entity::Selector {
+        id: 14,
+        sources: vec![1, 4],
+        controls: 3,
+    });
+    let mut m = Model::new();
+    graph.signal_selection(&mut m, 14, 2).unwrap();
+    assert_eq!(m.selection, 2);
+    m.selection = 1;
+    let c = graph.resolve_clock(&mut m, 12).unwrap();
+    assert_eq!(
+        c,
+        ResolvedClock {
+            source: 10,
+            numerator: 2,
+            denominator: 1
+        }
+    );
+    graph.set_rate(&mut m, c, 88200).unwrap();
+    assert_eq!(m.rate, 44100);
+    graph.clock_selection(&mut m, 11, 1).unwrap();
+    m.selection = 0;
+    assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
+    m.selection = 1;
+    m.denominator = 0;
+    assert_eq!(graph.resolve_clock(&mut m, 12), Err(Error::ClockInvalid));
+    m.denominator = 1;
+    m.overrides
+        .insert(setup(0xa1, 1, 0x100, 0xa00, 4), vec![0; 3]);
+    assert_eq!(graph.current_rate(&mut m, c), Err(Error::ControlLength));
+    m.overrides.clear();
+    m.overrides.insert(setup(0x21, 1, 0x100, 0xa00, 4), vec![]);
+    assert_eq!(
+        graph.set_rate(&mut m, c, 96000),
+        Err(Error::ControlReadback)
+    );
+    assert_eq!(
+        graph.current_rate(
+            &mut m,
+            ResolvedClock {
+                source: 10,
+                numerator: 1,
+                denominator: 0
+            }
+        ),
+        Err(Error::ClockInvalid)
+    );
+}
+#[test]
+fn raw_endpoint_counts_reserved_usage_and_implicit_association_are_checked() {
+    let mut c = configuration();
+    let n = c
+        .windows(7)
+        .position(|w| w == [7, 5, 1, 13, 192, 0, 4])
+        .unwrap();
+    c[n + 3] = 0x35;
+    let all = interfaces(&c);
+    assert!(Binding::parse(&all[0], &all, &c, 3).is_err());
+    let mut c = configuration();
+    let n = c
+        .windows(9)
+        .position(|w| w == [9, 4, 1, 1, 1, 1, 2, 32, 0])
+        .unwrap();
+    c[n + 4] = 2;
+    let all = interfaces(&c);
+    assert!(Binding::parse(&all[0], &all, &c, 3).is_err());
+    let mut c = configuration();
+    let n = c
+        .windows(7)
+        .position(|w| w == [7, 5, 1, 13, 192, 0, 4])
+        .unwrap();
+    c[n + 3] = 5;
+    let n = c
+        .windows(7)
+        .position(|w| w == [7, 5, 0x82, 5, 192, 0, 4])
+        .unwrap();
+    c[n + 3] = 0x25;
+    let all = interfaces(&c);
+    let b = Binding::parse(&all[0], &all, &c, 3).unwrap();
+    assert!(matches!(
+        b.formats[0].sync,
+        Sync::Implicit {
+            interface: 2,
+            alternate: 1,
+            ..
+        }
+    ));
+    c[n + 6] = 3;
+    let all = interfaces(&c);
+    let b = Binding::parse(&all[0], &all, &c, 3).unwrap();
+    assert_eq!(b.formats.len(), 1);
+    assert!(!b.unsupported.is_empty());
+}
+
+#[test]
+fn missing_capture_or_synchronous_output_completions_fail_and_cancel() {
+    run(|a| {
+        a.start_capture(1, 48000).unwrap();
+        a.transport.hold = true;
+        a.transport.time = 1_000_001;
+        assert_eq!(
+            a.poll(),
+            Err(Error::Packet("USB audio capture made no progress"))
+        );
+        assert!(a.transport.pending.is_empty());
+        a.transport.time = 0;
+        a.transport.hold = false;
+        a.start_playback(0, 48000, &vec![0; 6144], true).unwrap();
+        a.transport.hold = true;
+        a.transport.time = 1_000_001;
+        assert_eq!(
+            a.poll(),
+            Err(Error::Packet("USB audio playback made no progress"))
+        );
+        assert!(a.transport.pending.is_empty());
+    });
+}

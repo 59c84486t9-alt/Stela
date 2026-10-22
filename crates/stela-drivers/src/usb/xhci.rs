@@ -37,7 +37,7 @@
 //! and SuperSpeed port control, and no class driver here needs one),
 //! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
 //! deep, and controllers without 4 KiB pages. Hot plug after attach is not seen.
-use super::{bluetooth, cdc, ethernet, hid, storage};
+use super::{audio, bluetooth, cdc, ethernet, hid, storage};
 use crate::{
     Clock, Handoff,
     block::BlockError,
@@ -2076,6 +2076,8 @@ fn take_from_firmware(registers: &mut dyn Registers, at: usize, clock: Clock) {
 /// What the class drivers found on one controller.
 #[derive(Default)]
 pub struct Found {
+    /// Native UAC2 owners; idle until an explicit PCM start request.
+    pub audio: Vec<audio::UsbAudio>,
     pub vendor_links: Vec<ethernet::UsbEthernet>,
     /// Exact firmware request/target, format and device errors from vendor
     /// network attachment; never flattened to a generic unsupported status.
@@ -2323,6 +2325,8 @@ fn bind_with_provider(
                 }
                 Ok(())
             }
+            Plan::Audio(binding) => audio::UsbAudio::attach(shared.clone(), &device, binding, dma)
+                .map(|owner| found.audio.push(owner)),
             Plan::Bluetooth(binding) => {
                 bluetooth::UsbHci::attach(shared.clone(), &device, binding, dma)
                     .map(|transport| found.bluetooth.push(transport))
@@ -2336,6 +2340,8 @@ fn bind_with_provider(
 
 /// What a class driver will use of an interface.
 pub enum Plan {
+    /// UAC2 function, initially at zero-bandwidth streaming alternates.
+    Audio(audio::Binding),
     /// Bulk IN, bulk OUT.
     Storage(storage::Binding),
     /// The interrupt IN endpoint.
@@ -2351,6 +2357,7 @@ pub enum Plan {
 impl Plan {
     fn settings(&self, interface: u8) -> Vec<(u8, u8)> {
         match self {
+            Self::Audio(binding) => binding.settings(),
             Self::Storage(binding) => vec![binding.setting()],
             Self::VendorEthernet(binding) => vec![binding.setting()],
             Self::Ethernet(binding) => vec![(interface, 0), binding.data_setting()],
@@ -2359,6 +2366,7 @@ impl Plan {
     }
     fn endpoints(&self) -> Vec<Endpoint> {
         match self {
+            Self::Audio(_) => Vec::new(),
             Self::Storage(binding) => binding.endpoints(),
             Self::Hid(endpoint) => vec![*endpoint],
             Self::Ethernet(binding) => binding.endpoints(),

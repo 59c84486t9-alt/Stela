@@ -104,6 +104,11 @@ pub(super) fn plan_with_controller(
     controller: Option<&Controller>,
 ) -> Result<Plan, &'static str> {
     let binding = match interface.class {
+        audio::CLASS if audio::supported_identity(&device.descriptor, device.speed) => {
+            audio::plan(interface, all, &device.configuration, device.speed)
+                .map(Plan::Audio)
+                .map_err(|_| "unsupported or malformed UAC2 function descriptors")
+        }
         storage::CLASS => storage::plan(device, interface, all, controller),
         hid::CLASS => hid::plan(interface),
         cdc::COMMUNICATIONS => cdc::plan(interface, all),
@@ -818,5 +823,23 @@ pub(super) mod tests {
         orphan.drain(9..18);
         orphan[2] = orphan.len() as u8;
         assert!(validate(&orphan).is_err());
+    }
+    #[test]
+    fn pc_uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
+        let configuration = audio::test_configuration();
+        validate(&configuration).unwrap();
+        let mut device = device(vec![configuration]);
+        device.speed = 3;
+        device.descriptor[2..7].copy_from_slice(&[0, 2, 0xef, 2, 1]);
+        device.descriptor[8..14].copy_from_slice(&[5, 11, 0xe1, 0x1b, 2, 0]);
+        select(&mut device).unwrap();
+        let all = interfaces(&device.configuration);
+        let selected = plan(&device, &all[0], &all).unwrap();
+        assert!(matches!(selected, Plan::Audio(_)));
+        assert!(selected.endpoints().is_empty());
+        assert_eq!(selected.settings(0), vec![(0, 0), (1, 0), (2, 0)]);
+        active_settings(&all, &selected.settings(0)).unwrap();
+        device.descriptor[12] = 3;
+        assert!(plan(&device, &all[0], &all).is_err());
     }
 }
