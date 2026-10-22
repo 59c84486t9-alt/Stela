@@ -129,6 +129,12 @@ pub struct Model {
     /// pinned `94fb23346d522edf53722357c426a3e58030beea`: 40 on T8103 and
     /// T8112, 42 on T600x and T602x, whose DRAM lies at 1 TiB).
     pub uat_output_bits: u32,
+    /// The native ASC control word required by a recovered firmware callback.
+    /// Only G14G's global callback has this qualified binding (26A434
+    /// armfw_g14g startup 0x371b0..0x371f8 and retained wake 0x378d0..0x37904).
+    /// Other families' unrecovered callbacks remain protocol refusals; their
+    /// SGX apertures must not inherit G14G's private physical requirement.
+    pub native_asc_control: Option<u64>,
     pub layout: Layout,
 }
 
@@ -136,17 +142,22 @@ const G13G_MODEL: Model = Model {
     identification: Identification::Clusters,
     gpc: 0xd0_1000,
     uat_output_bits: 40,
+    native_asc_control: None,
     layout: G13_G14G_LAYOUT,
 };
 const G13X_MODEL: Model = Model {
     uat_output_bits: 42,
     ..G13G_MODEL
 };
-const G14G_MODEL: Model = G13G_MODEL;
+const G14G_MODEL: Model = Model {
+    native_asc_control: Some(0x14_0120),
+    ..G13G_MODEL
+};
 const G14X_MODEL: Model = Model {
     identification: Identification::Dies,
     gpc: 0xe0_1000,
     uat_output_bits: 42,
+    native_asc_control: None,
     layout: G14X_LAYOUT,
 };
 /// G15G reads its identification and GPC block as G14X does (the same

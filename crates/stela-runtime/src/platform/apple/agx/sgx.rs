@@ -98,11 +98,6 @@ const FENDER_WAKE: u64 = 0xd0_6020;
 const GIFAF_IDLE_STATUS_G13_G14: u64 = 0xd6_1090;
 const GIFAF_IDLE_STATUS_G15: u64 = 0xd0_d090;
 const GIFAF_SLEEP_COMPLETE: u32 = 0x204;
-/// GXF ASC-native control restored by the original global callback. This
-/// belongs to the configured wrapper's four-MiB native device mapping, not
-/// the AP mailbox aperture's offset 0x120.
-const ASC_NATIVE_CONTROL: u64 = 0x14_0120;
-
 fn fender_sleep_supported(family: &Family) -> bool {
     matches!(family.name, "G13G" | "G14G" | "G15G")
 }
@@ -296,23 +291,28 @@ pub struct FirmwarePower {
 
 impl FirmwarePower {
     /// Bind the ASC's actual configured wrapper physical base. RTBuddy writes
-    /// it into the WrAd firmware patch; native GXF callbacks address +140120
-    /// through a private CPU mapping, independently of AP-authored GPU PIO.
+    /// it into the WrAd firmware patch. A recovered family-specific callback
+    /// additionally qualifies its private control word against the SGX banks.
     /// This qualifies ownership only; it does not model control-field effects.
     pub fn with_asc_wrapper(mut self, physical: u64) -> Result<Self, &'static str> {
+        physical
+            .checked_add(super::super::asc::WRAPPER_BYTES)
+            .ok_or("GFX ASC wrapper physical aperture wraps")?;
         if self.asc_wrapper.is_some_and(|held| held != physical) {
             return Err("GFX native power owner cannot be rebound to a different ASC wrapper");
         }
-        let control = physical
-            .checked_add(ASC_NATIVE_CONTROL)
-            .ok_or("GFX native ASC control physical address wraps")?;
-        if !self.banks.iter().any(|&(base, bytes, _)| {
-            control
-                .checked_sub(base)
-                .and_then(|at| at.checked_add(8))
-                .is_some_and(|end| end <= bytes)
-        }) {
-            return Err("GFX native ASC control is not wholly inside a qualified SGX bank");
+        if let Some(offset) = self.family.model()?.native_asc_control {
+            let control = physical
+                .checked_add(offset)
+                .ok_or("GFX native ASC control physical address wraps")?;
+            if !self.banks.iter().any(|&(base, bytes, _)| {
+                control
+                    .checked_sub(base)
+                    .and_then(|at| at.checked_add(8))
+                    .is_some_and(|end| end <= bytes)
+            }) {
+                return Err("GFX native ASC control is not wholly inside a qualified SGX bank");
+            }
         }
         self.asc_wrapper = Some(physical);
         Ok(self)
@@ -323,11 +323,12 @@ impl FirmwarePower {
         self.asc_wrapper
     }
 
-    /// The complete eight-byte native control word qualified by
-    /// `with_asc_wrapper`. The mount must also check its final bus route.
+    /// The family's complete eight-byte native control word, if a recovered
+    /// callback needs it. The mount must also check its final bus route.
+    /// Absence does not qualify any other family's native control effects.
     pub fn native_asc_control(&self) -> Option<u64> {
-        self.asc_wrapper
-            .map(|physical| physical + ASC_NATIVE_CONTROL)
+        self.asc_wrapper?
+            .checked_add(self.family.model().ok()?.native_asc_control?)
     }
 
     pub(super) fn family(&self) -> &'static Family {

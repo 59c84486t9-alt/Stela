@@ -1173,9 +1173,7 @@ impl AppleDevices {
             .firmware_power(&placement.sgx)
             .and_then(|power| power.with_asc_wrapper(placement.wrapper.0))
             .map_err(String::from)?;
-        let native_control = power
-            .native_asc_control()
-            .ok_or("GFX native ASC control has no qualified physical placement")?;
+        let native_control = power.native_asc_control();
         let coprocessor = GfxCoprocessor::with_power(placement.gpu.family, observe, power)
             .map_err(String::from)?;
         let wrapper = Asc::booted(
@@ -1197,10 +1195,11 @@ impl AppleDevices {
                 .map_gaps(block, base, bytes, offset)
                 .map_err(|e| format!("sgx placement: {e:?}"))?;
         }
-        if !self
-            .bus
-            .route(native_control, Width::Double)
-            .is_ok_and(|(owner, _)| owner == block)
+        if let Some(control) = native_control
+            && !self
+                .bus
+                .route(control, Width::Double)
+                .is_ok_and(|(owner, _)| owner == block)
         {
             return Err(
                 "GFX native ASC control is not wholly owned by its mounted SGX bank".into(),
@@ -5042,6 +5041,49 @@ mod tests {
                     .committed
                     .is_empty()
             );
+        }
+    }
+
+    #[test]
+    fn pro_max_and_ultra_gfx_keep_their_sparse_original_banks() {
+        use crate::machine::soc::GfxController;
+        use crate::platform::apple::agx::generation;
+        // 26A434 original ADTs: J314s/c, J375c/d, J414s/c and J180d.
+        // arm-io/ranges translates the child bases by 0x2_0000_0000.
+        // G13X/G14X use their own callback programs, not G14G's private
+        // wrapper+0x140120 word (docs/research/agx.md, sections 3 and 6).
+        const SGX: u64 = 0x4_0400_0000;
+        const WRAPPER: u64 = 0x4_0640_0000;
+        for chip in [0x6000, 0x6001, 0x6002, 0x6020, 0x6021, 0x6022] {
+            let info_bytes = if chip < 0x6020 { 0x20000 } else { 0x16c000 };
+            let placement = GfxController {
+                gpu: generation::by_chip(chip).unwrap(),
+                wrapper: (WRAPPER, 0x6c000),
+                interrupts: [0x2c6, 0x2c5, 0x2c8, 0x2c7],
+                sgx: vec![(SGX, 0x100000, 0), (SGX + 0xd00000, info_bytes, 0xd00000)],
+                ttbat: 0x100_0000_0000,
+                shared_l2: 0x100_0000_8000,
+            };
+            let mut devices = AppleDevices::new();
+            devices.add_gfx(&placement, false).unwrap();
+            let (asc, block) = devices.gfx_masters[0];
+            assert_eq!(
+                devices.bus.route(WRAPPER + 0x8110, Width::Word),
+                Ok((asc, 0x8110))
+            );
+            assert_eq!(
+                devices.bus.route(SGX + 0xd04000, Width::Word),
+                Ok((block, 0xd04000))
+            );
+            assert!(devices.read(0, SGX + 0xd04000, 4, 0).is_ok());
+            // No fabricated SGX aperture or successful control-word effect.
+            assert!(
+                devices
+                    .bus
+                    .route(WRAPPER + 0x14_0120, Width::Double)
+                    .is_err()
+            );
+            assert!(devices.bus.route(SGX + 0x200000, Width::Word).is_err());
         }
     }
 
