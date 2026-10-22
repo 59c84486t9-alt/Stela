@@ -31,10 +31,14 @@ struct Run {
     valid: Rc<Cell<bool>>,
     binding_issued: Cell<bool>,
     prefix: Option<context::Owner>,
+    parameters: Option<crate::platform::apple::agx::work_decode::ownership::Identity>,
 }
 impl Drop for Run {
     fn drop(&mut self) {
         self.valid.set(false);
+        if let Some(identity) = &self.parameters {
+            identity.invalidate();
+        }
     }
 }
 #[derive(Debug, Default)]
@@ -305,6 +309,10 @@ impl crate::platform::apple::agx::work_decode::render_resources::Access
             || run.frame != *frame
             || run.lease != lease
             || run.next != run.words.len()
+            || run
+                .parameters
+                .as_ref()
+                .is_none_or(|identity| !identity.same(parameters.phase_identity()))
         {
             return Err("GFX render attachment phase differs from its complete native owner");
         }
@@ -324,6 +332,7 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
         submission: &Submission,
         lease: Lease,
         frame: &Frame,
+        identity: &crate::platform::apple::agx::work_decode::ownership::Identity,
     ) -> Result<(), &'static str> {
         self.owner.available()?;
         let pipe = match self.pipeline {
@@ -341,12 +350,13 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
             );
         }
         scene::Key::read(submission, frame)?;
+        identity.bind(&self.owner.power.native)?;
         let mut native = self.owner.power.native.borrow_mut();
         if native.work.run.is_some() {
             return Err("GFX native parameter bank still belongs to accepted CL work");
         }
         let registers = &mut native.work.render;
-        if let Some(run) = &registers.run {
+        if let Some(run) = &mut registers.run {
             return if run.submission == *submission && run.lease == lease && run.frame == *frame {
                 if run.prefix.as_ref().is_some_and(|prefix| {
                     prefix.committed
@@ -358,6 +368,18 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
                             + 2
                 }) {
                     return Err("GFX native render parameters precede complete common context");
+                }
+                match &run.parameters {
+                    Some(old) if !old.same(identity) => {
+                        return Err(
+                            "GFX render native parameters belong to another accepted helper",
+                        );
+                    }
+                    None if run.next != 0 => {
+                        return Err("GFX render frame binding follows uncertified native effects");
+                    }
+                    None => run.parameters = Some(identity.clone()),
+                    _ => {}
                 }
                 Ok(())
             } else {
@@ -372,6 +394,7 @@ impl ta::Access for ParameterAccess<'_, '_, '_> {
             valid: Rc::new(Cell::new(true)),
             binding_issued: Cell::new(false),
             prefix: None,
+            parameters: Some(identity.clone()),
             words: match self.pipeline {
                 Kind::Ta => ta::words(self.owner.policy),
                 Kind::ThreeD => {

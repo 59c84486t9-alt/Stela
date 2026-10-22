@@ -9,8 +9,6 @@ use super::{
     ta::Word,
 };
 use crate::platform::apple::agx::{channel::Kind, ring::Shared};
-use alloc::rc::Rc;
-use core::cell::Cell;
 
 mod program;
 pub use program::Program;
@@ -22,18 +20,7 @@ pub enum G13XVariant {
     C000,
 }
 
-/// Linear helper identity, including accepted reads before its first store.
-/// Only Context creates it; cancellation invalidates any unfinished helper.
-#[derive(Debug, Clone)]
-pub struct Identity(Rc<Cell<bool>>);
-impl Identity {
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-    }
-    pub(crate) fn invalidate(&self) {
-        self.0.set(false);
-    }
-}
+pub use super::ownership::Identity;
 
 pub trait Access {
     fn program(&self) -> Program;
@@ -141,7 +128,7 @@ impl Context {
             frame: frame.clone(),
             lease,
             program,
-            identity: Identity(Rc::new(Cell::new(true))),
+            identity: Identity::new(),
             epoch_object,
             index: 0,
             epoch: 0,
@@ -163,7 +150,7 @@ impl Context {
         if self.completed() {
             return Ok(());
         }
-        if !self.identity.0.get() {
+        if !self.identity.live() {
             return Err("GFX render context was canceled by its native owner");
         }
         access.begin(

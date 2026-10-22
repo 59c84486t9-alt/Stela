@@ -4,6 +4,7 @@
 //! read with its native store. Completion here is only this configuration
 //! phase; it grants no TVB allocation, native start or command completion.
 
+use super::ownership::Identity;
 use super::{
     Frame, Submission,
     resources::{Lease, Policy},
@@ -126,6 +127,7 @@ pub trait Access {
         submission: &Submission,
         lease: Lease,
         frame: &Frame,
+        identity: &Identity,
     ) -> Result<(), &'static str>;
     fn write_native(&mut self, word: Word, value: u64) -> Result<(), &'static str>;
 }
@@ -136,6 +138,7 @@ pub struct Parameters {
     lease: Lease,
     policy: Policy,
     frame: Frame,
+    identity: Identity,
     tiling: u64,
     parameters: u64,
     stores: Vec<Store>,
@@ -172,12 +175,16 @@ impl Parameters {
             lease,
             policy,
             frame: frame.clone(),
+            identity: Identity::new(),
             tiling,
             parameters,
             stores: stores(policy),
             next: 0,
             held: None,
         })
+    }
+    pub(super) fn phase_identity(&self) -> &Identity {
+        &self.identity
     }
     pub(super) fn identity(&self) -> (&Submission, &Frame, Lease, Policy) {
         (&self.submission, &self.frame, self.lease, self.policy)
@@ -192,7 +199,10 @@ impl Parameters {
         if self.completed() {
             return Ok(());
         }
-        access.begin(&self.submission, self.lease, &self.frame)?;
+        if !self.identity.live() {
+            return Err("GFX render parameter phase was canceled by its native owner");
+        }
+        access.begin(&self.submission, self.lease, &self.frame, &self.identity)?;
         while let Some(store) = self.stores.get(self.next) {
             if self.held.is_none() {
                 self.held = Some(match store.source {
@@ -274,7 +284,13 @@ pub(crate) mod tests {
         fn memory(&mut self) -> &mut dyn Shared {
             self
         }
-        fn begin(&mut self, _: &Submission, _: Lease, _: &Frame) -> Result<(), &'static str> {
+        fn begin(
+            &mut self,
+            _: &Submission,
+            _: Lease,
+            _: &Frame,
+            _: &Identity,
+        ) -> Result<(), &'static str> {
             Ok(())
         }
         fn write_native(&mut self, word: Word, value: u64) -> Result<(), &'static str> {

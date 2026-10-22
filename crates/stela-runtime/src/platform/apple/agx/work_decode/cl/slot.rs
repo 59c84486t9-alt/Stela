@@ -189,7 +189,13 @@ mod tests {
                 Err("retained gate")
             }
         }
-        fn begin(&mut self, _: &Submission, _: Lease) -> Result<(), &'static str> {
+        fn begin(
+            &mut self,
+            _: &Submission,
+            _: &Frame,
+            _: Lease,
+            _: &crate::platform::apple::agx::work_decode::ownership::Identity,
+        ) -> Result<(), &'static str> {
             panic!("slot publication cannot begin a new native execution")
         }
         fn check_submitted(&self, _: &Submission, _: Lease) -> Result<(), &'static str> {

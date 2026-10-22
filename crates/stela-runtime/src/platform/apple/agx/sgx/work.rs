@@ -13,7 +13,8 @@ use crate::platform::apple::agx::{
     pio::{Kind, Region},
     work::{Execution, ResultKind},
     work_decode::{
-        Submission,
+        Frame, Submission,
+        ownership::Identity,
         resources::{Lease, Policy},
     },
 };
@@ -76,12 +77,25 @@ impl Register {
     }
 }
 
+struct ParameterOwner {
+    frame: Frame,
+    identity: Identity,
+}
 struct Run {
+    source: Option<ParameterOwner>,
     submission: Submission,
     lease: Lease,
     parameter_mask: u16,
     programmed: u8,
     backend: Option<Execution>,
+}
+
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let Some(source) = &self.source {
+            source.identity.invalidate();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -135,6 +149,7 @@ impl Registers {
             };
         }
         self.run = Some(Run {
+            source: None,
             submission: submission.clone(),
             lease,
             parameter_mask: 0,
@@ -144,6 +159,33 @@ impl Registers {
         Ok(())
     }
 
+    fn bind_parameters(
+        &mut self,
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        identity: &Identity,
+    ) -> Result<(), &'static str> {
+        self.begin(submission, lease)?;
+        let run = self.run.as_mut().unwrap();
+        if let Some(source) = &run.source {
+            if source.frame != *frame {
+                return Err("GFX CL native parameters belong to another accepted Frame");
+            }
+            if !source.identity.same(identity) {
+                return Err("GFX CL native parameters belong to another accepted helper");
+            }
+        } else {
+            if run.programmed != 0 || run.parameter_mask != 0 || run.backend.is_some() {
+                return Err("GFX CL frame binding follows uncertified native effects");
+            }
+            run.source = Some(ParameterOwner {
+                frame: frame.clone(),
+                identity: identity.clone(),
+            });
+        }
+        Ok(())
+    }
     fn read(&self, register: Register) -> Result<u64, &'static str> {
         match register {
             Register::Control => self
@@ -453,8 +495,10 @@ impl FirmwareWork {
     fn check_setup_owner(
         &self,
         submission: &Submission,
+        frame: &Frame,
         lease: Lease,
         policy: Policy,
+        identity: &Identity,
     ) -> Result<(), &'static str> {
         self.available()?;
         let native = self.power.native.borrow();
@@ -476,6 +520,10 @@ impl FirmwareWork {
             || run.backend.is_some()
             || run.parameter_mask != parameters
             || run.programmed != controls
+            || run
+                .source
+                .as_ref()
+                .is_none_or(|source| source.frame != *frame || !source.identity.same(identity))
         {
             return Err(
                 "GFX CL attachment phase does not own complete pre-trigger native parameters",
@@ -601,8 +649,21 @@ impl crate::platform::apple::agx::work_decode::cl::Access for ParameterAccess<'_
     fn check_available(&self) -> Result<(), &'static str> {
         self.owner.available()
     }
-    fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
-        self.owner.begin(submission, lease)
+    fn begin(
+        &mut self,
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        identity: &Identity,
+    ) -> Result<(), &'static str> {
+        self.owner.available()?;
+        identity.bind(&self.owner.power.native)?;
+        self.owner
+            .power
+            .native
+            .borrow_mut()
+            .work
+            .bind_parameters(submission, frame, lease, identity)
     }
     fn check_submitted(&self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
         self.owner.check_submitted(submission, lease)
@@ -664,8 +725,9 @@ impl crate::platform::apple::agx::work_decode::cl::attachments::Access
         &self,
         parameters: &crate::platform::apple::agx::work_decode::cl::Parameters,
     ) -> Result<(), &'static str> {
-        let (submission, lease, policy) = parameters.identity();
-        self.owner.check_setup_owner(submission, lease, policy)
+        let (submission, frame, lease, policy, identity) = parameters.identity();
+        self.owner
+            .check_setup_owner(submission, frame, lease, policy, identity)
     }
 }
 
@@ -929,6 +991,154 @@ mod tests {
         }
         fn write_slot_status(&mut self, l: Lease, v: u32) -> Result<(), &'static str> {
             self.inner.write_slot_status(l, v)
+        }
+    }
+    enum ParameterProgram {
+        Cl(crate::platform::apple::agx::work_decode::cl::Parameters),
+        Ta(crate::platform::apple::agx::work_decode::ta::Parameters),
+        ThreeD(crate::platform::apple::agx::work_decode::three_d::Parameters),
+    }
+    impl ParameterProgram {
+        fn new(sub: &Submission, frame: &Frame, lease: Lease, policy: Policy) -> Self {
+            use crate::platform::apple::agx::work_decode::{cl, ta, three_d};
+            match sub.command.kind {
+                CommandKind::Cl => {
+                    Self::Cl(cl::Parameters::new(sub, frame, lease, policy).unwrap())
+                }
+                CommandKind::Ta => {
+                    Self::Ta(ta::Parameters::new(sub, frame, lease, policy).unwrap())
+                }
+                _ => Self::ThreeD(three_d::Parameters::new(sub, frame, lease, policy).unwrap()),
+            }
+        }
+        fn advance(
+            &mut self,
+            owner: &FirmwareWork,
+            port: &mut Port<'_, '_>,
+        ) -> Result<(), &'static str> {
+            match self {
+                Self::Cl(p) => p.advance(&mut owner.parameter_access(port)),
+                Self::Ta(p) => p.advance(&mut owner.ta_parameter_access(port)),
+                Self::ThreeD(p) => p.advance(&mut owner.three_d_parameter_access(port)),
+            }
+        }
+    }
+    #[test]
+    fn actual_parameter_reservation_binds_frame_actor_and_issuer_before_source_reads() {
+        use crate::platform::apple::agx::work_decode::resources::Outcome;
+        for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
+            for kind in [CommandKind::Cl, CommandKind::Ta, CommandKind::ThreeD] {
+                let mut sgx = gpu(family);
+                let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                let mcc = cache();
+                let cache = mcc.firmware_cache(&[0x200000000]).unwrap();
+                let owner = power.firmware_work(region(), cache.clone()).unwrap();
+                let mut other_sgx = gpu(family);
+                let other_power = other_sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                let other_owner = other_power.firmware_work(region(), cache).unwrap();
+                let mut memory = ram();
+                mapping(&mut memory.ram, VA + 0x1c000, SGX + 0x1c000, true);
+                let mut input = submission();
+                input.command.kind = kind;
+                let (record, pipe, scene, context) = match kind {
+                    CommandKind::Cl => (
+                        crate::platform::apple::agx::channel::Record::SetupCl,
+                        2,
+                        None,
+                        0x24,
+                    ),
+                    CommandKind::Ta => (
+                        crate::platform::apple::agx::channel::Record::SetupTa,
+                        0,
+                        Some(0x1c),
+                        0x3c,
+                    ),
+                    _ => (
+                        crate::platform::apple::agx::channel::Record::Setup3d,
+                        1,
+                        Some(0x14),
+                        0x54,
+                    ),
+                };
+                let lease = Lease { pipe, slot: 1 };
+                let mut bytes = alloc::vec![0;record.bytes() as usize];
+                bytes[..4].copy_from_slice(
+                    &(match kind {
+                        CommandKind::Cl => 11u32,
+                        CommandKind::Ta => 5,
+                        _ => 7,
+                    })
+                    .to_le_bytes(),
+                );
+                bytes[4..0xc].copy_from_slice(&0x2800u64.to_le_bytes());
+                bytes[0xc..0x14].copy_from_slice(&0x2a00u64.to_le_bytes());
+                bytes[context..context + 4].copy_from_slice(&input.context.to_le_bytes());
+                if let Some(at) = scene {
+                    bytes[at..at + 8].copy_from_slice(&0x2500u64.to_le_bytes());
+                }
+                assert!(memory.ram.write(DATA + input.stream, &bytes));
+                let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                    .unwrap()
+                    .unwrap();
+                captured_rmw(&owner);
+                let mut parameters = ParameterProgram::new(&input, &frame, lease, owner.policy);
+                memory.fail_read = Some(memory.reads);
+                assert!(
+                    io(&mut sgx, &mut memory, |port| parameters
+                        .advance(&owner, port))
+                    .is_err()
+                );
+                let counts = (memory.reads, memory.writes);
+                let mut duplicate = ParameterProgram::new(&input, &frame, lease, owner.policy);
+                assert!(
+                    io(&mut sgx, &mut memory, |port| duplicate
+                        .advance(&owner, port))
+                    .unwrap_err()
+                    .contains("another accepted helper")
+                );
+                assert_eq!((memory.reads, memory.writes), counts);
+                // Identical geometry and source addresses cannot transfer
+                // the same pending helper to another actual SGX instance.
+                assert!(
+                    io(&mut other_sgx, &mut memory, |port| parameters
+                        .advance(&other_owner, port))
+                    .unwrap_err()
+                    .contains("another SGX object")
+                );
+                assert!(!other_power.native.borrow().work.active());
+                assert_eq!((memory.reads, memory.writes), counts);
+                bytes[0x44] ^= 4;
+                assert!(memory.ram.write(DATA + input.stream, &bytes));
+                let foreign = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                    .unwrap()
+                    .unwrap();
+                let counts = (memory.reads, memory.writes);
+                let mut redirected = ParameterProgram::new(&input, &foreign, lease, owner.policy);
+                assert!(
+                    io(&mut sgx, &mut memory, |port| redirected
+                        .advance(&owner, port))
+                    .is_err()
+                );
+                assert_eq!((memory.reads, memory.writes), counts);
+                match kind {
+                    CommandKind::Cl => owner.cancel_setup(&input, lease, &Outcome::Aborted),
+                    CommandKind::Ta => owner.cancel_ta_parameters(&input, lease, &Outcome::Aborted),
+                    _ => owner.cancel_three_d_parameters(&input, lease, &Outcome::Aborted),
+                }
+                .unwrap();
+                assert!(
+                    io(&mut sgx, &mut memory, |port| parameters
+                        .advance(&owner, port))
+                    .unwrap_err()
+                    .contains("canceled by its native owner")
+                );
+                assert_eq!((memory.reads, memory.writes), counts);
+                let mut replacement = ParameterProgram::new(&input, &frame, lease, owner.policy);
+                io(&mut sgx, &mut memory, |port| {
+                    replacement.advance(&owner, port)
+                })
+                .unwrap();
+            }
         }
     }
     #[test]
@@ -1399,7 +1609,12 @@ mod tests {
             assert!(
                 io(&mut sgx, &mut memory, |port| owner
                     .ta_parameter_access(port)
-                    .begin(&other, Lease { pipe: 0, slot: 1 }, &frame))
+                    .begin(
+                        &other,
+                        Lease { pipe: 0, slot: 1 },
+                        &frame,
+                        &Identity::new()
+                    ))
                 .is_err()
             );
             mapping(&mut memory.ram, 0x4000, DATA + 0x4000, false);
@@ -2668,7 +2883,7 @@ mod tests {
                 io(&mut sgx, &mut memory, |port| program
                     .advance(&mut owner.parameter_access(port)))
                 .unwrap_err()
-                .contains("control initial value")
+                .contains("frame binding follows uncertified native effects")
             );
             let native = power.native.borrow();
             assert_eq!(native.work.control, None);

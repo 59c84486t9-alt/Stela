@@ -49,6 +49,7 @@ fn new_run(submission: &Submission, frame: &Frame, lease: Lease, policy: Policy)
         valid: Rc::new(Cell::new(true)),
         binding_issued: Cell::new(false),
         prefix: None,
+        parameters: None,
     }
 }
 pub struct ContextAccess<'a, 'p, 'm> {
@@ -97,6 +98,7 @@ impl Access for ContextAccess<'_, '_, '_> {
             return Err("GFX common context has a foreign execution lease");
         }
         scene::Key::read(input, frame)?;
+        identity.bind(&self.owner.power.native)?;
         let mut native = self.owner.power.native.borrow_mut();
         if native.work.run.is_some() {
             return Err("GFX common context still belongs to accepted CL work");

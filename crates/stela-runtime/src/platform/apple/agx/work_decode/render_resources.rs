@@ -19,6 +19,12 @@ impl Parameters {
             Self::ThreeD(parameters) => parameters.identity(),
         }
     }
+    pub(crate) fn phase_identity(&self) -> &super::ownership::Identity {
+        match self {
+            Self::Ta(p) => p.phase_identity(),
+            Self::ThreeD(p) => p.phase_identity(),
+        }
+    }
     fn completed(&self) -> bool {
         match self {
             Self::Ta(parameters) => parameters.completed(),

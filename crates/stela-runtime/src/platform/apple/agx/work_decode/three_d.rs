@@ -4,6 +4,7 @@
 //! interleave each source block read/native store. This configuration phase
 //! grants no TVB/resource acquisition, engine trigger or work completion.
 
+use super::ownership::Identity;
 use super::{
     Frame, Submission,
     resources::{Lease, Policy},
@@ -229,6 +230,7 @@ pub struct Parameters {
     lease: Lease,
     policy: Policy,
     frame: Frame,
+    identity: Identity,
     scene: u64,
     first: u64,
     second: u64,
@@ -266,12 +268,16 @@ impl Parameters {
             lease,
             policy,
             frame: frame.clone(),
+            identity: Identity::new(),
             scene,
             first,
             second,
             next: 0,
             held: None,
         })
+    }
+    pub(super) fn phase_identity(&self) -> &Identity {
+        &self.identity
     }
     pub(super) fn identity(&self) -> (&Submission, &Frame, Lease, Policy) {
         (&self.submission, &self.frame, self.lease, self.policy)
@@ -286,7 +292,10 @@ impl Parameters {
         if self.completed() {
             return Ok(());
         }
-        access.begin(&self.submission, self.lease, &self.frame)?;
+        if !self.identity.live() {
+            return Err("GFX render parameter phase was canceled by its native owner");
+        }
+        access.begin(&self.submission, self.lease, &self.frame, &self.identity)?;
         let words = words(self.policy);
         while let Some(&word) = words.get(self.next) {
             if self.held.is_none() {

@@ -10,6 +10,7 @@ pub mod slot;
 
 use super::{
     Encoding, Frame, Submission,
+    ownership::Identity,
     resources::{Attachment, Lease, Policy},
 };
 use crate::platform::apple::agx::{
@@ -26,7 +27,13 @@ pub trait Access {
     fn policy(&self) -> Policy;
     fn memory(&mut self) -> &mut dyn Shared;
     fn check_available(&self) -> Result<(), &'static str>;
-    fn begin(&mut self, submission: &Submission, lease: Lease) -> Result<(), &'static str>;
+    fn begin(
+        &mut self,
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        identity: &Identity,
+    ) -> Result<(), &'static str>;
     fn check_submitted(&self, _: &Submission, _: Lease) -> Result<(), &'static str> {
         Err("GFX CL native trigger ownership is not available")
     }
@@ -56,6 +63,8 @@ pub struct Parameters {
     policy: Policy,
     attachments: Vec<Attachment>,
     submission: Submission,
+    frame: Frame,
+    identity: Identity,
     lease: Lease,
     actions: Vec<Action>,
     next: usize,
@@ -78,6 +87,17 @@ impl Parameters {
         }
         if lease.pipe != 2 || lease.slot >= 6 || submission.context >= 64 {
             return Err("GFX CL parameter phase has an invalid execution lease/context");
+        }
+        let end = submission
+            .stream
+            .checked_add(u64::from(submission.stream_bytes))
+            .ok_or("GFX CL accepted stream extent wraps")?;
+        let frame_end = frame
+            .va
+            .checked_add(frame.bytes().len() as u64)
+            .ok_or("GFX CL accepted Frame extent wraps")?;
+        if frame.va < submission.stream || frame_end > end {
+            return Err("GFX CL native parameters have a Frame outside their accepted stream");
         }
         let context = frame.u32(0x24)?;
         if context != submission.context {
@@ -141,6 +161,8 @@ impl Parameters {
             policy,
             attachments: Attachment::read_setup(Encoding::Fixed, frame)?,
             submission: submission.clone(),
+            frame: frame.clone(),
+            identity: Identity::new(),
             lease,
             actions,
             next: 0,
@@ -148,8 +170,14 @@ impl Parameters {
             mask: None,
         })
     }
-    pub(crate) fn identity(&self) -> (&Submission, Lease, Policy) {
-        (&self.submission, self.lease, self.policy)
+    pub(crate) fn identity(&self) -> (&Submission, &Frame, Lease, Policy, &Identity) {
+        (
+            &self.submission,
+            &self.frame,
+            self.lease,
+            self.policy,
+            &self.identity,
+        )
     }
     pub fn completed(&self) -> bool {
         self.next == self.actions.len()
@@ -161,8 +189,11 @@ impl Parameters {
         if access.policy() != self.policy {
             return Err("GFX CL parameter program belongs to another native family");
         }
+        if !self.identity.live() {
+            return Err("GFX CL parameter phase was canceled by its native owner");
+        }
         access.check_available()?;
-        access.begin(&self.submission, self.lease)?;
+        access.begin(&self.submission, &self.frame, self.lease, &self.identity)?;
         while let Some(action) = self.actions.get(self.next) {
             if self.held.is_none() {
                 let value = match action.value {
@@ -264,7 +295,13 @@ mod tests {
         fn check_available(&self) -> Result<(), &'static str> {
             if self.inhibited { Err("gate") } else { Ok(()) }
         }
-        fn begin(&mut self, _: &Submission, _: Lease) -> Result<(), &'static str> {
+        fn begin(
+            &mut self,
+            _: &Submission,
+            _: &Frame,
+            _: Lease,
+            _: &Identity,
+        ) -> Result<(), &'static str> {
             Ok(())
         }
         fn read_native(&mut self, register: Register) -> Result<u64, &'static str> {
