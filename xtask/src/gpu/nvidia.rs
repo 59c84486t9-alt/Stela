@@ -1,6 +1,6 @@
 //! Reproducible compilation of the vendor cores without installing Linux
 //! modules. The unresolved symbol list is the platform port's work inventory.
-use super::support::{capture, evidence_directory, source_binding};
+use super::support::{NATIVE_TARGET, capture, evidence_directory, source_binding};
 use crate::tools;
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -128,6 +128,12 @@ fn inspect(path: &Path) -> Result<(u64, String, BTreeSet<String>)> {
     ))
 }
 
+/// NVIDIA's FreeBSD interface layer includes a few FreeBSD kernel headers;
+/// Stela's stand-ins apply only where the compiler's own system has none.
+fn freebsd_headers(command: &mut Command, source: &Path) {
+    command.arg("-idirafter").arg(source.join("stela/compat"));
+}
+
 pub fn build(jobs: u16, target: Target) -> Result<()> {
     let toolchain = Toolchain::discover()?;
     let gpu = tools::root().join("crates/stela-drivers/src/gpu");
@@ -189,7 +195,7 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
         let mut command = Command::new(tools::which("make").context("install make")?);
         command
             .current_dir(&source_directory)
-            .args(["all", &format!("-j{jobs}")])
+            .arg(format!("-j{jobs}"))
             .arg("TARGET_ARCH=x86_64")
             .arg(format!("CC={}", toolchain.clang.display()))
             .arg(format!("CXX={}", toolchain.clangxx.display()))
@@ -198,7 +204,8 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             .arg(format!("AR={}", toolchain.archiver.display()))
             .arg("NV_BUILD_USER=stela")
             .arg("NV_BUILD_HOST=native")
-            .arg(format!("NV_BUILD_STAMP=source-{source_hash}"))
+            // NVIDIA's ID string runs $(DATE); name the source instead of the time.
+            .arg(format!("DATE=echo source-{source_hash}"))
             .arg(format!("OUTPUTDIR={}", output.display()))
             .arg(format!("OUTPUTDIR_ABSOLUTE={}", output.display()))
             .env_remove("MAKEFLAGS")
@@ -209,8 +216,18 @@ pub fn build(jobs: u16, target: Target) -> Result<()> {
             .stdout(Stdio::from(log.try_clone()?))
             .stderr(Stdio::from(log));
         match target {
-            Target::Stela => command.arg("TARGET_OS=Stela"),
+            // NVIDIA's FreeBSD configuration is its Unix resource manager for
+            // an OS that supplies its own kernel interface layer, as Stela's
+            // port does. The fragment archives COFF objects for the UEFI link.
+            Target::Stela => command
+                .args(["-f", "Makefile", "-f"])
+                .arg(source.join("stela/build").join(format!("{component}.mk")))
+                .args(["stela-archive", "TARGET_OS=FreeBSD"])
+                .arg(format!(
+                    "EXTRA_CFLAGS=--target={NATIVE_TARGET} -mno-incremental-linker-compatible"
+                )),
             Target::Linux => command.args([
+                "all",
                 "TARGET_OS=Linux",
                 "EXTRA_CFLAGS=--target=x86_64-unknown-linux-gnu",
             ]),
@@ -299,14 +316,17 @@ mod tests {
     fn vendor_types_preserve_flags_and_host_addresses_on_both_abis() {
         let tools = Toolchain::discover().unwrap();
         let source = tools::root().join("crates/stela-drivers/src/gpu/nvidia");
-        for target in ["x86_64-unknown-windows", "x86_64-unknown-linux-gnu"] {
+        for (target, os) in [
+            (NATIVE_TARGET, "-DNV_BSD"),
+            ("x86_64-unknown-linux-gnu", "-DNV_LINUX"),
+        ] {
             for (compiler, fixture, standard) in [
                 (&tools.clangxx, "abi.cpp", "-std=c++20"),
                 (&tools.clang, "abi.c", "-std=c11"),
             ] {
                 let mut command = Command::new(compiler);
                 command
-                    .args(["-target", target, "-DNV_STELA", "-ffreestanding"])
+                    .args(["-target", target, os, "-ffreestanding"])
                     .args([standard, "-fsyntax-only", "-Werror"])
                     .args(["-Wno-missing-field-initializers"])
                     .arg(source.join("stela/tests").join(fixture));
@@ -317,6 +337,7 @@ mod tests {
                 ] {
                     command.arg("-I").arg(source.join(include));
                 }
+                freebsd_headers(&mut command, &source);
                 capture(&mut command).unwrap();
             }
         }

@@ -49,7 +49,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         let binary = output.join(if sanitized { "sanitized" } else { "normal" });
         let mut compiler = Command::new(clang);
         compiler.args([
-            "-DNV_STELA",
+            "-DNV_BSD",
             "-std=c11",
             "-ffreestanding",
             "-fno-builtin",
@@ -69,6 +69,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         ] {
             compiler.arg("-I").arg(source.join(include));
         }
+        super::freebsd_headers(&mut compiler, source);
         if sanitized {
             compiler.args(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]);
         }

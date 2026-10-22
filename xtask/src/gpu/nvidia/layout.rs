@@ -1,5 +1,5 @@
 //! Compare actual compiled vendor records across the core and OS-hook ABIs.
-use super::{capture, tools};
+use super::{NATIVE_TARGET, capture, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use serde_json::json;
@@ -59,9 +59,8 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
     let mut baseline = None;
     let mut profiles = Vec::new();
     for (profile, target, kernel_interface) in [
-        ("core-ms", "x86_64-unknown-windows", false),
-        ("shim-ms", "x86_64-unknown-windows", true),
-        ("shim-uefi-gnu", "x86_64-unknown-windows-gnu", true),
+        ("core", NATIVE_TARGET, false),
+        ("shim", NATIVE_TARGET, true),
         ("shim-host-darwin", "x86_64-apple-macosx", true),
     ] {
         let artifact = output.join(format!("{profile}.o"));
@@ -69,7 +68,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         command.args([
             "-target",
             target,
-            "-DNV_STELA",
+            "-DNV_BSD",
             "-DNVRM",
             "-ffreestanding",
             "-fno-stack-protector",
@@ -77,8 +76,6 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
             "-mgeneral-regs-only",
             "-std=gnu11",
             "-Werror",
-            // Original nv.h deliberately forward-declares this opaque enum.
-            "-Wno-microsoft-enum-forward-reference",
         ]);
         if kernel_interface {
             command.arg("-DNV_KERNEL_INTERFACE_LAYER");
@@ -97,6 +94,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         ] {
             command.arg("-I").arg(source.join(include));
         }
+        super::freebsd_headers(&mut command, source);
         command.arg("-c").arg(&fixture).arg("-o").arg(&artifact);
         capture(&mut command)?;
         let bytes = fs::read(&artifact)?;
@@ -119,14 +117,9 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
             baseline = Some(values.clone());
         }
         let platform_long = constants(&object, "stela_nvidia_platform_long", 2)?;
-        let expected_long = if profile == "shim-host-darwin" {
-            [8, 8]
-        } else {
-            [4, 4]
-        };
         ensure!(
-            platform_long == expected_long,
-            "unexpected ordinary long ABI for {profile}"
+            platform_long == [8, 8],
+            "{profile} is not LP64, as NVIDIA's Unix resource manager assumes"
         );
         profiles.push(
             json!({"profile":profile,"target":target,"command":format!("{command:?}"),

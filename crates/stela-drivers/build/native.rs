@@ -1,6 +1,9 @@
 //! Native x86-64 tool selection shared by the physical GPU support libraries.
 use std::{env, path::PathBuf, process::Command};
 
+/// LP64 COFF with the Win64 calling convention; see `configure`.
+pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
+
 /// Upstream GPU sources are linked into `src/gpu` by `cargo xtask gpu fetch`.
 pub fn require_sources() {
     assert!(
@@ -24,6 +27,10 @@ pub fn configure() -> cc::Build {
         .flag("-mno-red-zone")
         .flag("-mgeneral-regs-only");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("uefi") {
+        // Upstream GPU code assumes LP64, as on Linux. Cygwin's target keeps
+        // that data model while emitting COFF with the UEFI Win64 C ABI;
+        // clang uses this last target over the one cc derives.
+        build.flag(format!("--target={NATIVE_TARGET}"));
         // Apple's ar produces a BSD archive even for COFF inputs. Use the
         // active Rust toolchain's LLVM archiver for this cross-target build,
         // unless the caller selected an archiver through cc's normal inputs.

@@ -4,8 +4,8 @@
 
 #include "nvtypes.h"
 
-#if !NVOS_IS_STELA || !NVOS_IS_UNIX || NVOS_IS_LINUX || NVOS_IS_MACINTOSH
-#error "native metadata hooks must select Stela's OS interface"
+#if !NVOS_IS_FREEBSD
+#error "native metadata hooks build in NVIDIA's FreeBSD configuration"
 #endif
 
 /* Same native CPU/C ABI as Rust's extern C, including UEFI's calling convention.

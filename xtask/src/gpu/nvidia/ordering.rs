@@ -1,5 +1,5 @@
 //! Inspect the actual original ordering hook; this never executes a fence.
-use super::{capture, tools};
+use super::{NATIVE_TARGET, capture, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object, ObjectSection, ObjectSymbol};
 use serde_json::json;
@@ -12,17 +12,13 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         .context("original ordering inspection requires llvm-objdump")?;
     let fixture = source.join("stela/tests/ordering.c");
     let mut profiles = Vec::new();
-    for target in [
-        "x86_64-unknown-windows",
-        "x86_64-unknown-windows-gnu",
-        "x86_64-apple-macosx",
-    ] {
+    for target in [NATIVE_TARGET, "x86_64-apple-macosx"] {
         let artifact = output.join(format!("{target}.o"));
         let mut command = Command::new(clang);
         command.args([
             "-target",
             target,
-            "-DNV_STELA",
+            "-DNV_BSD",
             "-DNV_KERNEL_INTERFACE_LAYER",
             "-ffreestanding",
             "-fno-stack-protector",
@@ -43,6 +39,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
         ] {
             command.arg("-I").arg(source.join(include));
         }
+        super::freebsd_headers(&mut command, source);
         let ir = output.join(format!("{target}.ll"));
         let mut ir_command = Command::new(clang);
         ir_command

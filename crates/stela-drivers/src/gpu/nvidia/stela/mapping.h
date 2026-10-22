@@ -4,8 +4,8 @@
 
 #include "nvtypes.h"
 
-#if !NVOS_IS_STELA || !NVOS_IS_UNIX || NVOS_IS_LINUX || NVOS_IS_MACINTOSH
-#error "native CPU mapping hooks must select Stela's OS interface"
+#if !NVOS_IS_FREEBSD
+#error "native CPU mapping hooks build in NVIDIA's FreeBSD configuration"
 #endif
 
 /* Native same-CPU C ABI. The allocation is a pinned Rust Allocation accepting

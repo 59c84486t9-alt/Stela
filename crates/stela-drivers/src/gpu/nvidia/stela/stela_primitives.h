@@ -4,8 +4,8 @@
 #include <stddef.h>
 #include "nvtypes.h"
 
-#if !NVOS_IS_STELA || !NVCPU_IS_X86_64
-#error "these original RM primitives select native x86-64 Stela"
+#if !NVOS_IS_FREEBSD || !NVCPU_IS_X86_64
+#error "these original RM primitives build for x86-64 in NVIDIA's FreeBSD configuration"
 #endif
 
 /* Declarations of the existing shared C runtime, not a private implementation.

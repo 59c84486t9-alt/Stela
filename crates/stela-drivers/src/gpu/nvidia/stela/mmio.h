@@ -4,8 +4,8 @@
 #include "nvtypes.h"
 #include "os/nv_memory_type.h"
 
-#if !NVOS_IS_STELA || !NVOS_IS_UNIX || NVOS_IS_LINUX || NVOS_IS_MACINTOSH
-#error "native physical mappings must select Stela's OS interface"
+#if !NVOS_IS_FREEBSD
+#error "native physical mappings build in NVIDIA's FreeBSD configuration"
 #endif
 
 _Static_assert(NV_MEMORY_CACHED == 0 && NV_MEMORY_UNCACHED == 1 &&

@@ -9,6 +9,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+/// The C target of the native GPU code, as `stela-drivers/build/native.rs`
+/// compiles it: LP64 COFF with the UEFI Win64 calling convention.
+pub const NATIVE_TARGET: &str = "x86_64-pc-cygwin";
+
 pub fn capture(command: &mut Command) -> Result<String> {
     let output = command
         .output()

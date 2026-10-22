@@ -107,18 +107,14 @@ mod tests {
             let output = source.with_extension("o");
             fs::write(&source, text).unwrap();
             let target = if mixed && index == 1 {
-                "--target=x86_64-unknown-linux-gnu"
+                "x86_64-unknown-linux-gnu"
             } else {
-                "--target=x86_64-unknown-windows"
+                crate::gpu::support::NATIVE_TARGET
             };
             capture(
                 Command::new(&tools.clang)
-                    .args([
-                        target,
-                        "-ffreestanding",
-                        "-mno-incremental-linker-compatible",
-                        "-c",
-                    ])
+                    .arg(format!("--target={target}"))
+                    .args(["-ffreestanding", "-mno-incremental-linker-compatible", "-c"])
                     .arg(&source)
                     .arg("-o")
                     .arg(&output),

@@ -22,7 +22,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
                 let artifact = output.join(format!("{name}-{index}.o"));
                 let mut command = Command::new(clang);
                 command.args([
-                    "-DNV_STELA",
+                    "-DNV_BSD",
                     "-ffreestanding",
                     "-fno-builtin",
                     "-std=c11",
@@ -43,6 +43,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
                 ] {
                     command.arg("-I").arg(source.join(include));
                 }
+                super::freebsd_headers(&mut command, source);
                 if sanitize {
                     command.args(["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]);
                 }

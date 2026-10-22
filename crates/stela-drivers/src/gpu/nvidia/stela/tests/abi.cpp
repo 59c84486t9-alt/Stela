@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: MIT */
-/* Compile these actual driver types under both the LP64 and native LLP64 ABI. */
+/* Compile these actual driver types under the native COFF and Linux ABIs. */
 #include "os/workitem.h"
 
 constexpr OsQueueWorkItemFlags read_only = {

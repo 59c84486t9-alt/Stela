@@ -6,6 +6,8 @@ endif
 SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 CFLAGS ?= -O2 -g
 CLANG ?= clang
+# LP64 COFF with the UEFI Win64 C ABI, as build/native.rs compiles the port.
+NATIVE_TARGET := x86_64-pc-cygwin
 NM ?= nm
 COMMON := -std=c11 -Wall -Wextra -Werror
 VM_HEADERS := $(SOURCE)/vm_cpu.h $(SOURCE)/../amdgpu/amdgpu_vm_cpu_entries.h
@@ -44,7 +46,7 @@ $(OUT_DIR)/vm_cpu.o: $(SOURCE)/vm_cpu.c $(VM_HEADERS) | $(OUT_DIR)
 	  -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 $(OUT_DIR)/vm_cpu_uefi.obj: $(SOURCE)/vm_cpu.c $(VM_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows $(COMMON) $(CFLAGS) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -ffreestanding \
 	  -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 # Original BAR policy only: no PCI/MMIO access or native provider activation.
@@ -70,7 +72,7 @@ $(OUT_DIR)/native_bar.o: $(SOURCE)/native_bar.c $(BAR_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) $(BAR_INCLUDE) -ffreestanding -fno-stack-protector \
 	  -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/native_bar_uefi.obj: $(SOURCE)/native_bar.c $(BAR_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows $(COMMON) $(CFLAGS) $(BAR_INCLUDE) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) $(BAR_INCLUDE) -ffreestanding \
 	  -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 # Same original MM-index loop; CPU-only traces and actual bounded native entry.
@@ -110,7 +112,7 @@ $(OUT_DIR)/vram_mm.o: $(SOURCE)/vram_mm.c $(VRAM_MM_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector \
 	  -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/vram_mm_uefi.obj: $(SOURCE)/vram_mm.c $(VRAM_MM_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -ffreestanding \
 	  -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 # Actual original TMR query, with CPU-only test I/O instrumentation.
@@ -162,7 +164,7 @@ $(OUT_DIR)/discovery_tmr.o: $(SOURCE)/discovery_tmr.c $(TMR_HEADERS) | $(OUT_DIR
 	$(CC) $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector \
 	 -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_tmr_uefi.obj: $(SOURCE)/discovery_tmr.c $(TMR_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -ffreestanding \
 	 -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 # Immutable discovery snapshots only; optional external files are CPU fixtures.
@@ -192,7 +194,7 @@ $(OUT_DIR)/discovery_binary.o: $(SOURCE)/discovery_binary.c $(DISCOVERY_HEADERS)
 	$(CC) $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector \
 	  -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_binary_uefi.obj: $(SOURCE)/discovery_binary.c $(DISCOVERY_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -ffreestanding \
 	  -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 # Compile the actual retained live-read function, not a copied replacement.
@@ -243,7 +245,7 @@ $(OUT_DIR)/pci_match.o: $(SOURCE)/pci_match.c $(PCI_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) $(PCI_FLAGS) -ffreestanding -fno-stack-protector \
 	 -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/pci_match_uefi.obj: $(SOURCE)/pci_match.c $(PCI_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) $(PCI_FLAGS) -ffreestanding \
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) $(PCI_FLAGS) -ffreestanding \
 	 -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/pci-linux-paths.inc: $(SOURCE)/../amdgpu/amdgpu_device.c $(SOURCE)/../amdgpu/amdgpu_discovery.c | $(OUT_DIR)
 	printf '%s\n' 'static int linux_initial_path(struct amdgpu_device *adev) {' 'int r;' > "$@"
@@ -285,7 +287,7 @@ $(OUT_DIR)/discovery_ip_sanitize: $(IP_TEST_SOURCES) $(IP_TEST_DEPS)
 $(OUT_DIR)/discovery_ip.o: $(SOURCE)/discovery_ip.c $(IP_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_ip_uefi.obj: $(SOURCE)/discovery_ip.c $(IP_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 FILE_HEADERS := $(SOURCE)/discovery_file.h $(SOURCE)/../amdgpu/amdgpu_discovery_file_core.h $(DISCOVERY_HEADERS)
 FILE_SOURCES := $(SOURCE)/discovery_file.c $(SOURCE)/discovery_binary.c \
@@ -315,7 +317,7 @@ $(OUT_DIR)/discovery_file_sanitize: $(FILE_SOURCES) $(FILE_TEST_DEPS)
 $(OUT_DIR)/discovery_file.o: $(SOURCE)/discovery_file.c $(FILE_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_file_uefi.obj: $(SOURCE)/discovery_file.c $(FILE_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 
 INFO_HEADERS := $(SOURCE)/discovery_info.h $(IP_HEADERS) \
  $(SOURCE)/../amdgpu/amdgpu_discovery_info_core.h \
@@ -354,7 +356,7 @@ $(OUT_DIR)/discovery_info_isp_sanitize: $(INFO_SOURCES) $(INFO_TEST_DEPS)
 $(OUT_DIR)/discovery_info.o: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
 	$(CC) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 $(OUT_DIR)/discovery_info_uefi.obj: $(SOURCE)/discovery_info.c $(INFO_HEADERS) | $(OUT_DIR)
-	$(CLANG) --target=x86_64-unknown-windows-gnu $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
+	$(CLANG) --target=$(NATIVE_TARGET) $(COMMON) $(CFLAGS) -fwrapv -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only -c "$<" -o "$@"
 .PHONY: info-elf
 info-elf: $(OUT_DIR)/discovery_info_elf.o
 	$(NM) -u "$<" >"$<.undefined"

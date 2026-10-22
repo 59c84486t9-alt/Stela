@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* Compile as C11 and C++11 with the real NVKMS header for each native/host
- * ABI. These constants freeze the retained GPU byte layout independently of
- * the ordinary CPU alignment. This fixture supplies no platform services.
+ * ABI. These constants freeze the device byte layout and the declared CPU
+ * alignment. This fixture supplies no platform services.
  */
 #include "nvkms-types.h"
 
@@ -20,9 +20,7 @@ extern const NvU64 stela_nvkms_lut_layout_count;
     M("offsetof(base)", offsetof(NVEvoLutDataRec, base)) \
     M("offsetof(output)", offsetof(NVEvoLutDataRec, output)) \
     M("sizeof(base)", sizeof(((NVEvoLutDataRec *)0)->base)) \
-    M("sizeof(output)", sizeof(((NVEvoLutDataRec *)0)->output)) \
-    M("sizeof(baseSlotStorage)", sizeof(((NVEvoLutDataRec *)0)->baseSlotStorage)) \
-    M("sizeof(outputSlotStorage)", sizeof(((NVEvoLutDataRec *)0)->outputSlotStorage))
+    M("sizeof(output)", sizeof(((NVEvoLutDataRec *)0)->output))
 
 #define STELA_LUT_VALUE(label, value) (NvU64)(value),
 const NvU64 stela_nvkms_lut_layout[] = { STELA_LUT_LAYOUT(STELA_LUT_VALUE) };
@@ -38,7 +36,7 @@ ct_assert(offsetof(NVEvoLutDataRec, base) == 0);
 ct_assert(offsetof(NVEvoLutDataRec, output) == 8448);
 ct_assert(sizeof(((NVEvoLutDataRec *)0)->base) == 8232);
 ct_assert(sizeof(((NVEvoLutDataRec *)0)->output) == 8232);
-ct_assert(NV_ALIGNOF(NVEvoLutDataRec) == 2);
+ct_assert(NV_ALIGNOF(NVEvoLutDataRec) == 256);
 
 void stela_nvkms_lut_first_entry_store(NVEvoLutDataRec *p, NvU16 value);
 void stela_nvkms_lut_first_entry_store(NVEvoLutDataRec *p, NvU16 value)

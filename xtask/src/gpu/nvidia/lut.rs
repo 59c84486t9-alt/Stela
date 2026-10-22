@@ -1,5 +1,5 @@
 //! Actual NVKMS types and original CPU upload over the maintained common heap.
-use super::{capture, layout, tools};
+use super::{NATIVE_TARGET, capture, layout, tools};
 use anyhow::{Context, Result, ensure};
 use object::{Architecture, Object};
 use serde_json::json;
@@ -23,7 +23,7 @@ pub(super) fn flags(clang: &Path, source: &Path, output: &Path) -> Result<Flags>
     make.current_dir(source.join("src/nvidia-modeset"))
         .args(["-s", "-f", "Makefile", "-f"])
         .arg(makefile)
-        .args(["stela-lut-flags", "TARGET_OS=Stela", "TARGET_ARCH=x86_64"])
+        .args(["stela-lut-flags", "TARGET_OS=FreeBSD", "TARGET_ARCH=x86_64"])
         .arg(format!("CC={}", clang.display()))
         .arg(format!("OUTPUTDIR={}", output.join("flags").display()))
         .arg(format!(
@@ -51,9 +51,7 @@ pub(super) fn flags(clang: &Path, source: &Path, output: &Path) -> Result<Flags>
     );
     // Only the probe's object format changes. Full production builds retain
     // their original machine-model and external return-thunk options.
-    common.retain(|flag| {
-        !flag.starts_with("--target=") && flag != "-mno-incremental-linker-compatible"
-    });
+    common.retain(|flag| !flag.starts_with("--target="));
     Ok(Flags { common, c, cxx })
 }
 
@@ -63,8 +61,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
     let fixture = source.join("stela/tests/lut_layout.c");
     let mut profiles = Vec::new();
     for (profile, target, linux) in [
-        ("core-ms", "x86_64-unknown-windows", false),
-        ("uefi-gnu", "x86_64-unknown-windows-gnu", false),
+        ("native", NATIVE_TARGET, false),
         ("host-darwin", "x86_64-apple-macosx", false),
         ("linux", "x86_64-unknown-linux-gnu", true),
     ] {
@@ -73,7 +70,7 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
             let mut command = Command::new(clang);
             command.current_dir(source.join("src/nvidia-modeset"));
             for flag in &flags.common {
-                command.arg(if linux && flag == "-DNV_STELA" {
+                command.arg(if linux && flag == "-DNV_BSD" {
                     "-DNV_LINUX"
                 } else {
                     flag
@@ -94,10 +91,10 @@ pub(super) fn verify(clang: &Path, source: &Path, output: &Path) -> Result<()> {
                 "wrong LUT object ABI"
             );
             let count = layout::constants(&object, "stela_nvkms_lut_layout_count", 1)?;
-            ensure!(count == [10], "changed LUT fixture inventory");
-            let values = layout::constants(&object, "stela_nvkms_lut_layout", 10)?;
+            ensure!(count == [8], "changed LUT fixture inventory");
+            let values = layout::constants(&object, "stela_nvkms_lut_layout", 8)?;
             ensure!(
-                values == [8, 2, 16896, 2, 0, 8448, 8232, 8232, 8448, 8448],
+                values == [8, 2, 16896, 256, 0, 8448, 8232, 8232],
                 "changed LUT byte layout or CPU alignment"
             );
             profiles.push(json!({"profile":profile,"target":target,"language":language,
@@ -174,6 +171,8 @@ pub(super) fn cpu_model(
                 "-I",
             ])
             .arg(source.join("stela"))
+            .arg("-idirafter")
+            .arg(source.join("stela/compat"))
             .args(*extra)
             .arg("-c")
             .arg(source.join(file))

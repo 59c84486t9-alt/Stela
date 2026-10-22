@@ -137,7 +137,9 @@ fn nvidia() {
     println!("cargo:rerun-if-changed={version_mk}");
     let mut build = native::configure();
     build
-        .define("NV_STELA", None)
+        // NVIDIA's FreeBSD configuration, as `cargo xtask gpu nvidia` builds the
+        // cores: its Unix resource manager for an OS with its own interface layer.
+        .define("NV_BSD", None)
         .file(format!("{source}/stela/pci.c"))
         .file(format!("{source}/stela/memory.c"))
         .file(format!("{source}/stela/stela_ram_mapping.c"))
@@ -155,6 +157,9 @@ fn nvidia() {
         .file(format!("{source}/stela/stela_nvkms_memory.c"))
         .include(&generated)
         .include(format!("{source}/stela"))
+        // FreeBSD headers NVIDIA's interface layer includes, where none exist.
+        .flag("-idirafter")
+        .flag(format!("{source}/stela/compat"))
         .include(format!("{source}/src/common/sdk/nvidia/inc"))
         .include(format!("{source}/src/nvidia/arch/nvalloc/unix/include"))
         .include(format!("{source}/src/nvidia/arch/nvalloc/common/inc"))

@@ -15,7 +15,7 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     let source = tools::root().join("crates/stela-drivers/src/gpu/nvidia");
     let binary = output.path().join("nvlink-memory");
     let mut compiler = Command::new(tools::which("clang").unwrap());
-    compiler.args(["-std=gnu11", "-DNV_STELA", "-Wall", "-Wextra", "-Werror"]);
+    compiler.args(["-std=gnu11", "-DNV_BSD", "-Wall", "-Wextra", "-Werror"]);
     for include in [
         "stela",
         "src/common/nvlink/interface",
@@ -24,6 +24,7 @@ fn nvlink_preserves_full_lengths_and_refuses_common_heap_failures() {
     ] {
         compiler.arg("-I").arg(source.join(include));
     }
+    super::freebsd_headers(&mut compiler, &source);
     compiler
         .arg(source.join("stela/stela_nvlink_memory.c"))
         .arg(source.join("stela/tests/nvlink_memory.c"))

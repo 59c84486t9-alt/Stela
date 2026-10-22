@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0-only
 SOURCE := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 BUILD ?= $(abspath $(SOURCE)/../../../../../..)/.stela/gpu/build/intel-native
-TARGET ?= x86_64-unknown-windows
+# LP64 COFF with the UEFI Win64 C ABI, as build/native.rs compiles the port.
+TARGET ?= x86_64-pc-cygwin
 CC := clang
 HOST_CC := clang
 AR ?= llvm-ar
