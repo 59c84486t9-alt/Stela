@@ -28,6 +28,7 @@ pub mod rom;
 pub mod shared;
 pub mod state;
 pub mod store;
+pub mod transaction;
 pub mod xart;
 
 use super::{

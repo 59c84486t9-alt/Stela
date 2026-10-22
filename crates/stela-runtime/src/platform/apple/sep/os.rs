@@ -27,7 +27,10 @@
 //!
 //! Application-service frames wait for the SEP's DMA step, where the service
 //! reads its request from, and writes its result to, the OOL buffers its AP
-//! client registered; the reply follows only once that has succeeded.
+//! client registered; the reply follows only once that has succeeded. A
+//! refused request stops a strict run; a graceful one sends the service
+//! protocol's failure answer, unless the request may already have taken
+//! effect ([`super::transaction`]).
 use super::super::asc::Message;
 use super::{
     Entropy, SecurityMode,
@@ -38,7 +41,8 @@ use super::{
     ool::Buffers,
     shared::{Layout, Region},
     store::{Backend, Nonces},
-    xart::{self, Payload, Xart},
+    transaction::Payload,
+    xart::{self, Xart},
 };
 use crate::platform::dma::{DmaError, Port};
 use alloc::{boxed::Box, collections::VecDeque, format, string::String, vec::Vec};
@@ -70,8 +74,9 @@ pub struct SepOs {
     /// traffic. Those services are then advertised and their requests logged
     /// and never answered.
     observe: Option<Journal>,
-    /// Strict mode ([`Self::set_strict`]): an observed request stops the
-    /// boot once recorded. Otherwise it stays unanswered and the boot goes on.
+    /// Strict mode ([`Self::set_strict`]): a refused or observed request
+    /// stops the boot. Otherwise a refusal gets its failure answer, an
+    /// observed request none, and the boot goes on.
     strict: bool,
 }
 
@@ -101,11 +106,13 @@ impl SepOs {
         }
     }
 
-    /// Strict mode (the default) refuses each observed request by name once
-    /// it is recorded. Graceful mode leaves it unanswered, so the kernel
-    /// client takes its own timeout path and the run records the requests
-    /// that follow: a diagnostic exception to the error-reply rule
-    /// (docs/design/runtime.md "Unsupported operations"), never a reply.
+    /// Strict mode (the default) stops at each refused service request, and
+    /// at each observed request once it is recorded. Graceful mode answers a
+    /// refusal with its failure answer and leaves an observed request
+    /// unanswered, so the kernel client takes its own timeout path and the
+    /// run records the requests that follow: a diagnostic exception to the
+    /// error-reply rule (docs/design/runtime.md "Unsupported operations"),
+    /// never a reply.
     pub fn set_strict(&mut self, strict: bool) {
         self.strict = strict;
     }
@@ -149,8 +156,9 @@ impl SepOs {
     }
 
     /// Answer the queued application-service requests through `port`. A
-    /// refusal or DMA fault stops before that request's reply; an observed
-    /// request is recorded and gets none.
+    /// refusal or DMA fault returns its reason instead of the reply, after
+    /// queueing its failure answer outside strict mode; an observed request
+    /// is recorded and gets none.
     pub fn dma(
         &mut self,
         port: &mut Port<'_, '_>,
@@ -199,8 +207,20 @@ impl SepOs {
                 port: &mut *port,
                 read: 0,
             };
-            let reply = xart.request(frame, &mut payload, entropy)?;
-            outbox.push(reply.mailbox());
+            match xart.request(frame, &mut payload, entropy) {
+                Ok(reply) => outbox.push(reply.mailbox()),
+                Err(refusal) => {
+                    // Graceful: the failure answer, once its bytes are
+                    // written.
+                    if !self.strict
+                        && let Some(answer) = refusal.answer
+                        && (answer.output.is_empty() || payload.output(&answer.output).is_ok())
+                    {
+                        outbox.push(answer.frame.mailbox());
+                    }
+                    return Err(refusal.reason);
+                }
+            }
         }
         Ok(())
     }
@@ -679,10 +699,12 @@ mod tests {
         }
     }
 
-    fn dma(
+    /// One DMA step: its result and every frame it produced, which a failed
+    /// step may also have.
+    fn dma_step(
         os: &mut SepOs,
         ram: &mut crate::platform::dma::tests::Ram,
-    ) -> Result<Vec<Frame>, &'static str> {
+    ) -> (Result<(), &'static str>, Vec<Frame>) {
         let mut latch = crate::platform::apple::interrupt::InterruptLatch::new();
         let mut access = crate::platform::apple::bus::Access::new(0, 0, &mut latch);
         let mut port = Port {
@@ -692,18 +714,27 @@ mod tests {
             access: &mut access,
         };
         let mut outbox = Vec::new();
-        os.dma(
+        let result = os.dma(
             &mut port,
             &mut |bytes: &mut [u8]| {
                 bytes.fill(0x5a);
                 Ok(())
             },
             &mut outbox,
-        )?;
-        Ok(outbox
+        );
+        let frames = outbox
             .into_iter()
             .map(|m| Frame::from_mailbox(m).unwrap())
-            .collect())
+            .collect();
+        (result, frames)
+    }
+
+    fn dma(
+        os: &mut SepOs,
+        ram: &mut crate::platform::dma::tests::Ram,
+    ) -> Result<Vec<Frame>, &'static str> {
+        let (result, frames) = dma_step(os, ram);
+        result.map(|()| frames)
     }
 
     #[test]
@@ -835,6 +866,32 @@ mod tests {
         assert_eq!(third[0].tag, 3);
         assert!(!os.dma_pending());
         assert_eq!(os.xart().unwrap().os_uuid(), Some(&[0x5a; 16][..]));
+    }
+
+    #[test]
+    fn a_graceful_xart_refusal_is_answered_enotsup_from_the_dma_step() {
+        let mut os = SepOs::new(None).with_services(store(), false).unwrap();
+        os.set_strict(false);
+        map_shared(&mut os, shm(0x1234_4000, 0x20)).unwrap();
+        let commit_hash = xart::XartMessage {
+            service: xart::SLAVE_ID,
+            tag: 9,
+            op: 18,
+            length: 0,
+            flags: 0,
+            slot: 0,
+            reserved: 0,
+        }
+        .frame();
+        reply(&mut os, commit_hash).unwrap();
+        let mut ram = crate::platform::dma::tests::Ram::new(0x10_0000, 0x1000);
+        assert_eq!(
+            dma_step(&mut os, &mut ram),
+            (
+                Err("xART commit-hash types are not recovered"),
+                alloc::vec![xart::unsupported(commit_hash)]
+            )
+        );
     }
 
     #[test]

@@ -62,12 +62,15 @@
 //! The nonce lives in the SEP's anti-replay store ([`super::store`]). The
 //! store is durable on every commit, so a flush has nothing left to write.
 //! Each other operation is implemented here or refuses, naming what it
-//! needs; none is answered with an invented success.
+//! needs; none is answered with an invented success. A refusal's failure
+//! answer is Darwin `ENOTSUP`, which `_xmsgSendLocked` returns to the
+//! caller as its error.
 use super::{
     Entropy,
     endpoint::Service,
     message::Frame,
     store::{Backend, NONCE_BYTES, Nonces},
+    transaction::{Answer, Payload, Refusal},
 };
 use alloc::{boxed::Box, vec::Vec};
 
@@ -80,6 +83,8 @@ const UUID_BYTES: usize = 16;
 /// `SEPEpoch::EPOCH_COUNT` four-byte slots answer a full epoch read.
 const EPOCH_COUNT: usize = 8;
 const EPOCH_SLOT_BYTES: usize = 4;
+/// A refused request's reply status: Darwin `ENOTSUP`.
+const UNSUPPORTED: u8 = 45;
 
 /// The master instance's fourcc (`AppleSEPXARTService::start` 0x2d7f690).
 pub const MASTER: u32 = u32::from_be_bytes(*b"xarm");
@@ -208,11 +213,18 @@ impl Operation {
     }
 }
 
-/// What a request needs from the SEP's DMA path: its input bytes, and where
-/// to put its result.
-pub trait Payload {
-    fn input(&mut self, bytes: &mut [u8]) -> Result<(), &'static str>;
-    fn output(&mut self, bytes: &[u8]) -> Result<(), &'static str>;
+/// The failure reply to an AP request on `xars`: its service and tag with
+/// the `ENOTSUP` status and no result.
+pub fn unsupported(frame: Frame) -> Frame {
+    XartMessage {
+        op: UNSUPPORTED,
+        length: 0,
+        flags: 0,
+        slot: 0,
+        reserved: 0,
+        ..XartMessage::from_frame(frame)
+    }
+    .frame()
 }
 
 /// The SEP's xART state.
@@ -252,12 +264,34 @@ impl Xart {
     /// Answer one AP request on the slave instance. Master traffic from
     /// the AP is a reply to a SEP-initiated operation, none of which this
     /// implementation sends. The reply carries the
-    /// request's service and tag, status 0 and the result length.
+    /// request's service and tag, status 0 and the result length. A refused
+    /// slave request is answered `ENOTSUP` unless its store commit may have
+    /// happened.
     pub fn request(
         &mut self,
         frame: Frame,
         payload: &mut dyn Payload,
         entropy: &mut dyn Entropy,
+    ) -> Result<Frame, Refusal> {
+        let mut committed = false;
+        self.serve(frame, payload, entropy, &mut committed)
+            .map_err(|reason| {
+                if committed || frame.service != SLAVE_ID || frame.tag == 0 {
+                    Refusal::unanswerable(reason)
+                } else {
+                    Refusal::answered(reason, Answer::frame(unsupported(frame)))
+                }
+            })
+    }
+
+    /// `committed` is set before any store mutation, whose failure may
+    /// still have reached durable storage.
+    fn serve(
+        &mut self,
+        frame: Frame,
+        payload: &mut dyn Payload,
+        entropy: &mut dyn Entropy,
+        committed: &mut bool,
     ) -> Result<Frame, &'static str> {
         let message = XartMessage::from_frame(frame);
         if message.service == MASTER_ID {
@@ -328,6 +362,7 @@ impl Xart {
                 }
                 self.live()?;
                 let nonce = if message.op == 15 {
+                    *committed = true;
                     self.store.generate(NONCE_SLOT, entropy)?
                 } else {
                     self.store.read(NONCE_SLOT)?
@@ -343,6 +378,7 @@ impl Xart {
                 // Killing a nonce that was never generated leaves none,
                 // which is what the AP asks for.
                 if self.store.contains(NONCE_SLOT)? {
+                    *committed = true;
                     self.store.invalidate(NONCE_SLOT)?;
                 }
                 0
@@ -467,6 +503,7 @@ mod tests {
 
     fn ask(xart: &mut Xart, frame: Frame, buffers: &mut Buffers) -> Result<Frame, &'static str> {
         xart.request(frame, buffers, &mut entropy)
+            .map_err(|refusal| refusal.reason)
     }
 
     #[test]
@@ -563,9 +600,12 @@ mod tests {
         assert_eq!(reply, request(SLAVE_ID, 6, 0, 32));
         assert_eq!(buffers.output, [0; 32]);
         // The AP commits only a SEP proposal, and none was made.
+        let commit = xart
+            .request(request(SLAVE_ID, 7, 22, 0), &mut buffers, &mut entropy)
+            .unwrap_err();
         assert_eq!(
-            ask(&mut xart, request(SLAVE_ID, 7, 22, 0), &mut buffers),
-            Err("xART epoch commit without a SEP epoch proposal")
+            commit.answer,
+            Some(Answer::frame(request(SLAVE_ID, 7, UNSUPPORTED, 0)))
         );
         // A slotted or flagged read is outside the AP's sender.
         let slotted = XartMessage {
@@ -573,6 +613,35 @@ mod tests {
             ..XartMessage::from_frame(request(SLAVE_ID, 8, 23, 0))
         };
         assert!(ask(&mut xart, slotted.frame(), &mut buffers).is_err());
+    }
+
+    #[test]
+    fn refusals_are_answered_enotsup_only_on_the_slave_before_any_commit() {
+        let mut xart = xart();
+        let mut buffers = Buffers {
+            input: Vec::new(),
+            output: Vec::new(),
+        };
+        let refused = |xart: &mut Xart, frame, buffers: &mut Buffers| {
+            xart.request(frame, buffers, &mut entropy).unwrap_err()
+        };
+        // An unrecovered operation and a short read are answered ENOTSUP.
+        for frame in [request(SLAVE_ID, 2, 18, 0), request(SLAVE_ID, 3, 8, 16)] {
+            assert_eq!(
+                refused(&mut xart, frame, &mut buffers).answer,
+                Some(Answer::frame(unsupported(frame)))
+            );
+        }
+        // Master and untagged frames have no request to answer.
+        for frame in [request(MASTER_ID, 2, 8, 16), request(SLAVE_ID, 0, 8, 16)] {
+            assert_eq!(refused(&mut xart, frame, &mut buffers).answer, None);
+        }
+        // Reading a never-generated nonce has no effect and is answered.
+        assert!(
+            refused(&mut xart, request(SLAVE_ID, 4, 16, 0), &mut buffers)
+                .answer
+                .is_some()
+        );
     }
 
     #[test]
@@ -612,9 +681,10 @@ mod tests {
             output: Vec::new(),
         };
         fail.set(true);
+        // The nonce may be durable: neither success nor failure is answered.
         assert_eq!(
-            ask(&mut xart, request(SLAVE_ID, 1, 15, 0), &mut buffers),
-            Err("commit acknowledgement lost")
+            xart.request(request(SLAVE_ID, 1, 15, 0), &mut buffers, &mut entropy),
+            Err(Refusal::unanswerable("commit acknowledgement lost"))
         );
         assert!(buffers.output.is_empty());
         for (op, length) in [(17, 0), (12, 1), (16, 0), (15, 0)] {
