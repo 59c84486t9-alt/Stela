@@ -125,12 +125,13 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
     /// NoSnoop/PRI/PASID off and its canonical PageSource/DmaDomain. Do not
     /// qualify physical hardware from the QEMU or WB cache-type observation.
     /// Serialize all raw reset/IRQ/power/firmware paths for this retained owner.
-    /// On a combo MT7925, this same genuine owner must serialize both PCIe
-    /// Wi-Fi and USB Bluetooth for their complete lifetimes: initial Wi-Fi
-    /// restart/bootstrap precedes Bluetooth initialization. Never construct or
-    /// rebootstrap while the sibling has live/uncertain users. Neither a local
-    /// phase value nor a copied combo identifier proves this physical ordering;
-    /// actual attachment supplies it. Automatic shared reset is unsupported.
+    /// This claims the WLAN function and its initial firmware epoch. The
+    /// source WLAN NIC_POWER_CTRL restart is not a Bluetooth setup command;
+    /// the pinned source establishes no mandatory PCIe-before-USB probe order.
+    /// Any external shared power/reset path must retain and quiesce every
+    /// affected function's actual users before changing their resources.
+    /// Neither a local phase nor a copied combo ID grants shared reset or
+    /// recovery authority. Automatic shared reset remains unsupported.
     pub unsafe fn new(
         identity: Identity,
         base: NonNull<u8>,
@@ -194,8 +195,8 @@ impl<C: 'static> Controller<MmioBar, MmioQueue, C> {
     }
 }
 impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
-    // Vendor model/native constructors preserve the exclusive initial combo
-    // ordering contract above; this is not an alternative physical admission.
+    // Vendor model/native constructors preserve the exclusive initial WLAN
+    // ownership contract above; this is not an alternative physical admission.
     pub(in crate::net::wifi::mediatek) fn claim(
         identity: Identity,
         control: Control<I>,
@@ -361,10 +362,10 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
     /// Actual NIC restart is one-way DMA completion, followed by real power
     /// observation and full bound download. The same private mailbox continues
     /// source sequence numbers; no public diagnostic can forge that permission.
-    /// Consume the genuine initial sequencing epoch exactly once. The actual
-    /// constructor/attachment combo owner must keep Bluetooth uninitialized
-    /// until this Wi-Fi restart/download completes, and retain/serialize both
-    /// siblings on uncertainty. A failed boot cannot be retried in this owner.
+    /// Consume the genuine initial WLAN sequencing epoch exactly once. This
+    /// path issues no Bluetooth WMT or CONNV3 subsystem reset. Failure retains
+    /// this function's uncertain resources and cannot be retried in this owner;
+    /// it does not grant a caller shared power/reset or sibling recovery.
     pub fn boot(&mut self, prepared: &Prepared<'_>) -> Result<(), Error> {
         self.require(Phase::Queues)?;
         if *prepared.requests() != super::firmware::Requests::new(&self.state().identity) {
