@@ -29,9 +29,13 @@
 //! fatal controller status prevents all later DMA/ring mutation until an
 //! independently proven controller reset (not implemented as recovery here).
 //!
+//! Root-direct FS/HS isochronous service intervals use the dedicated queued
+//! submit_iso/completed_iso API on audited AMD/QEMU PCI profiles. Payloads fit
+//! one TRB/service and completion ownership survives uncertain cancellation.
+//!
 //! Refused rather than handled: SuperSpeed hubs (they need Set Hub Depth
 //! and SuperSpeed port control, and no class driver here needs one),
-//! isochronous endpoints, secondary stream arrays, hubs more than five tiers
+//! SuperSpeed/hub-routed isochronous endpoints, secondary stream arrays, hubs more than five tiers
 //! deep, and controllers without 4 KiB pages. Hot plug after attach is not seen.
 use super::{bluetooth, cdc, ethernet, hid, storage};
 use crate::{
@@ -58,8 +62,11 @@ mod reset;
 pub(crate) use reset::tests::{
     Fault as ResetFault, Hardware as ResetHardware, fixture as reset_fixture,
 };
+mod iso;
 mod streams;
+mod teardown;
 
+pub use iso::{IsoCompletion, IsoStatus, IsoTransfer};
 pub use streams::StreamTransfer;
 
 pub const CLASS: [u8; 3] = [0x0c, 0x03, 0x30];
@@ -506,6 +513,7 @@ impl Device {
 struct Transfer {
     ring: Ring,
     streams: Option<streams::Streams>,
+    iso: Option<iso::Queue>,
     is_in: bool,
     /// A failed cancellation leaves hardware ownership unresolved.
     poisoned: bool,
@@ -549,6 +557,7 @@ pub struct Controller {
     dma_profile: dma::Profile,
     max_primary_streams: u32,
     stream_policy: streams::Policy,
+    iso_caps: iso::Capabilities,
     max_slots: usize,
     max_ports: u8,
     /// Each root port's USB major revision from the Supported Protocol
@@ -705,6 +714,7 @@ impl Controller {
             dma_profile: profile,
             max_primary_streams: 1 << ((capabilities1 >> 12 & 0xf) + 1),
             stream_policy: streams::Policy::Unknown,
+            iso_caps: iso::Capabilities::new((capability >> 16) as u16, parameters2, capabilities1),
             max_slots,
             max_ports,
             port_major,
@@ -900,6 +910,7 @@ impl Controller {
         endpoints[1] = Some(Transfer {
             ring,
             streams: None,
+            iso: None,
             is_in: false,
             poisoned: false,
             enabled: true,
@@ -1226,7 +1237,7 @@ impl Controller {
             if endpoint.address & 0x70 != 0
                 || dci < 2
                 || endpoint.max_packet & 0x7ff == 0
-                || !matches!(endpoint.kind(), 2 | 3)
+                || !matches!(endpoint.kind(), 1..=3)
                 || selected & (1 << dci) != 0
             {
                 return Err(BlockError::Unsupported(
@@ -1242,6 +1253,15 @@ impl Controller {
             }
             contexts.push(endpoint::Context::new(endpoint, speed)?);
             selected |= 1 << dci;
+        }
+        if endpoints.iter().any(|ep| ep.kind() == 1) {
+            self.iso_caps.admit()?;
+            let attachment = self.slot(slot)?.attachment;
+            if attachment.tier != 0 || attachment.route != 0 || attachment.translator.is_some() {
+                return Err(BlockError::Unsupported(
+                    "isochronous transport currently requires root-direct USB2",
+                ));
+            }
         }
         let layout = if stream_endpoints.is_empty() {
             None
@@ -1288,6 +1308,11 @@ impl Controller {
             state.endpoints[usize::from(dci)] = Some(Transfer {
                 ring,
                 streams: stream,
+                iso: if endpoint.kind() == 1 {
+                    Some(iso::Queue::new(iso::Recipe::new(endpoint, speed)?))
+                } else {
+                    None
+                },
                 is_in: endpoint.is_in(),
                 poisoned: false,
                 enabled: false,
@@ -1352,6 +1377,11 @@ impl Controller {
             if transfer.poisoned {
                 return Err(BlockError::Unsupported("xHCI endpoint cancellation failed"));
             }
+            if transfer.iso.is_some() {
+                return Err(BlockError::Unsupported(
+                    "isochronous endpoint requires submit_iso",
+                ));
+            }
             if transfer.streams.is_some() {
                 return Err(BlockError::Unsupported(
                     "stream ID required for this endpoint",
@@ -1377,6 +1407,16 @@ impl Controller {
     ) -> Option<Result<usize, BlockError>> {
         if let Err(error) = self.endpoint_ready(slot, dci) {
             return Some(Err(error));
+        }
+        if self
+            .slot(slot)
+            .ok()
+            .and_then(|slot| slot.endpoints[usize::from(dci)].as_ref())
+            .is_some_and(|endpoint| endpoint.iso.is_some())
+        {
+            return Some(Err(BlockError::Unsupported(
+                "isochronous endpoint requires completed_iso",
+            )));
         }
         let event = self.take(|e| {
             e.kind() == TRANSFER_EVENT
@@ -1517,12 +1557,20 @@ impl Controller {
         if let Some(streams) = &mut endpoint.streams {
             streams.cancelled();
         }
+        if let Some(iso) = &mut endpoint.iso {
+            iso.cancelled();
+        }
         endpoint.poisoned = false;
         Ok(())
     }
 
     /// Clears a halted bulk or interrupt endpoint on both sides.
     pub fn clear(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
+        if endpoint.kind() == 1 {
+            return Err(BlockError::Unsupported(
+                "isochronous endpoints have no USB halt feature",
+            ));
+        }
         self.recover(slot, endpoint.dci())?;
         let request = setup(0x02, CLEAR_FEATURE, 0, u16::from(endpoint.address), 0);
         self.control(slot, request, &[])?;
@@ -2024,13 +2072,16 @@ pub fn attach_with_provider(
         "xhci {:04x}:{:02x}:{:02x}.{}",
         address.segment, address.bus, address.device, address.function
     );
-    start_with_stream_policy(
+    start_with_policies(
         Box::new(registers),
         handoff.clock,
         dma,
         location,
         firmware,
-        stream_policy,
+        (
+            stream_policy,
+            iso::Policy::pci(function.vendor, function.device),
+        ),
         dma_profile,
     )
 }
@@ -2061,32 +2112,33 @@ pub fn start_with_provider(
     location: String,
     firmware: &dyn crate::firmware::Provider,
 ) -> Result<Found, BlockError> {
-    start_with_stream_policy(
+    start_with_policies(
         registers,
         clock,
         dma,
         location,
         firmware,
-        streams::Policy::Unknown,
+        (streams::Policy::Unknown, iso::Policy::Unknown),
         dma::Profile::SPEC,
     )
 }
 
-fn start_with_stream_policy(
+fn start_with_policies(
     registers: Box<dyn Registers>,
     clock: Clock,
     dma: &mut dyn DmaAllocator,
     location: String,
     firmware: &dyn crate::firmware::Provider,
-    policy: streams::Policy,
+    policy: (streams::Policy, iso::Policy),
     dma_profile: dma::Profile,
 ) -> Result<Found, BlockError> {
     let mut controller =
         Controller::with_dma_profile(registers, clock, dma, location, dma_profile)?;
     // The policy came from this same actual PCI function before BAR access,
     // and applies only to the controller reset just completed above. No public
-    // raw-register caller can supply a guessed PCI identity or enable streams.
-    controller.stream_policy = policy;
+    // raw-register caller can supply a guessed PCI identity or enable streams/iso.
+    controller.stream_policy = policy.0;
+    controller.iso_caps.qualify(policy.1);
     let mut found = Found::default();
     let devices = controller.enumerate(dma, &mut found.failures);
     let shared: Shared = Rc::new(RefCell::new(controller));
@@ -2398,6 +2450,7 @@ pub(crate) mod tests {
             dma_profile: dma::Profile::SPEC,
             max_primary_streams: 4,
             stream_policy: streams::Policy::Unknown,
+            iso_caps: iso::Capabilities::new(0x100, 0, 0),
             max_slots: 1,
             max_ports: 1,
             port_major: vec![2],

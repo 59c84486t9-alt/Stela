@@ -752,6 +752,7 @@ mod tests {
                 dma_profile: dma::Profile::SPEC,
                 max_primary_streams: 16,
                 stream_policy: Policy::Standard,
+                iso_caps: iso::Capabilities::new(0x100, 0, 0),
                 max_slots: 1,
                 max_ports: 1,
                 port_major: vec![3],

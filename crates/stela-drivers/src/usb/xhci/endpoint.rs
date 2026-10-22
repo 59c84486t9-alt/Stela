@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Interval/burst mapping follows Linux xhci-mem.c, pinned in THIRD_PARTY.md.
 // Copyright (C) 2008 Intel Corp. Author: Sarah Sharp.
-//! Validated bulk/interrupt context fields. Validate before allocating or
+//! Validated bulk/interrupt and root-direct USB2 isochronous context fields. Validate before allocating or
 //! publishing DMA: invalid descriptors cannot partially configure a device.
 use super::{
     BlockError, Endpoint, FULL_SPEED, HIGH_SPEED, LOW_SPEED, SUPER_SPEED, SUPER_SPEED_PLUS,
@@ -16,6 +16,9 @@ pub(super) struct Context {
 
 impl Context {
     pub fn new(ep: &Endpoint, speed: u8) -> Result<Self, BlockError> {
+        if ep.kind() == 1 {
+            return super::iso::Recipe::new(ep, speed).map(|recipe| recipe.context());
+        }
         let invalid = || BlockError::Unsupported("invalid speed-specific USB endpoint descriptor");
         let packet = u32::from(ep.max_packet & 0x7ff);
         let interrupt = ep.kind() == 3;

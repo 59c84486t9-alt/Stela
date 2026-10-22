@@ -694,6 +694,7 @@ pub(crate) fn fixture(
         dma_profile: super::super::dma::Profile::SPEC,
         max_primary_streams: 4,
         stream_policy: streams::Policy::Standard,
+        iso_caps: iso::Capabilities::new(0x100, 0, 0),
         max_slots,
         max_ports: 1,
         port_major: vec![if speed >= SUPER_SPEED { 3 } else { 2 }],
