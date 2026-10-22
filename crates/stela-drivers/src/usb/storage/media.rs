@@ -4,11 +4,14 @@
 // scsi_lib.c::scsi_io_completion_action. See THIRD_PARTY.md.
 use super::*;
 
-pub(super) fn no_media(status: u32) -> bool {
-    matches!(status >> 16, 2 | 6) && (status >> 8) & 255 == 0x3a
+pub(super) fn no_media(sense: &Sense) -> bool {
+    matches!(sense.key, Sense::NOT_READY | Sense::UNIT_ATTENTION)
+        && sense.asc == Sense::MEDIUM_NOT_PRESENT
 }
-pub(super) fn changed(status: u32) -> bool {
-    status >> 16 == 6 || no_media(status) || status >> 16 == 5 && (status >> 8) & 255 == 0x25
+pub(super) fn changed(sense: &Sense) -> bool {
+    sense.key == Sense::UNIT_ATTENTION
+        || no_media(sense)
+        || sense.key == Sense::ILLEGAL_REQUEST && sense.asc == Sense::UNSUPPORTED_UNIT
 }
 
 pub(super) struct Owner<T: Scsi> {
@@ -86,15 +89,24 @@ impl<T: Scsi> Scsi for Owner<T> {
         let result = self.transport.command(lun, cdb, data);
         // No retry of data commands. UA identifies an invalidated media view,
         // even when subsequent TUR consumes it and the capacity is unchanged.
-        if matches!(result, Err(BlockError::Device { status }) if changed(status))
+        if matches!(&result, Err(BlockError::Sense(sense)) if changed(sense))
             || result.is_ok()
-                && cdb.first() == Some(&0x1b)
-                && cdb.get(4).is_some_and(|flags| flags & 2 != 0)
+                && cdb.first() == Some(&scsi::START_STOP_UNIT)
+                && cdb
+                    .get(4)
+                    .is_some_and(|flags| flags & scsi::LOAD_EJECT != 0)
         {
             self.changed(lun);
         }
         if self.transport.poisoned()
-            || matches!(result, Err(BlockError::Device { status: 0x063f0e }))
+            || matches!(
+                result,
+                Err(BlockError::Sense(Sense {
+                    key: Sense::UNIT_ATTENTION,
+                    asc: Sense::CONDITIONS_CHANGED,
+                    ascq: Sense::LUNS_CHANGED,
+                }))
+            )
         {
             self.invalidate();
         }
@@ -106,8 +118,11 @@ impl<T: Scsi> Scsi for Owner<T> {
     fn poisoned(&self) -> bool {
         self.transport.poisoned()
     }
-    fn mode_page(&self) -> u8 {
-        self.transport.mode_page()
+    fn write_protect_page(&self) -> Option<u8> {
+        self.transport.write_protect_page()
+    }
+    fn caching(&self) -> Caching {
+        self.transport.caching()
     }
     fn report_luns_permitted(&self) -> bool {
         self.transport.report_luns_permitted()
@@ -321,14 +336,14 @@ mod tests {
                 tur_changed,
                 zero,
             ] = *row;
-            let status = u32::from(key) << 16 | u32::from(asc) << 8 | u32::from(ascq);
-            assert_eq!(absent != 0, valid != 0 && no_media(status));
+            let sense = Sense { key, asc, ascq };
+            assert_eq!(absent != 0, valid != 0 && no_media(&sense));
             assert_eq!(removed_changed != 0, absent != 0 && present != 0);
             assert_eq!(zero != 0, absent != 0 && removable != 0);
             assert_eq!(tur_changed != 0, valid != 0 && removable != 0 && key == 6);
             if valid != 0 && removable != 0 {
                 assert_eq!(
-                    changed(status),
+                    changed(&sense),
                     absent != 0 || tur_changed != 0 || key == 5 && asc == 0x25
                 );
             }

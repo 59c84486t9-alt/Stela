@@ -3,9 +3,10 @@
 // Hardware protocol reference: Linux drivers/usb/storage/transport.c,
 // Copyright 1999-2002 Matthew Dharm; 2000 David L. Brown, Jr.;
 // 2000 Stephen J. Gowdy; 2002 Alan Stern; 1999 Michael Gee.
-use super::{Data, Endpoint, MAX_TD, Shared, setup};
+use super::super::xhci::{DEVICE_TO_HOST, RECIPIENT_INTERFACE, TYPE_CLASS};
+use super::{Data, Endpoint, MAX_TD, Shared, scsi, setup};
 use crate::{
-    block::BlockError,
+    block::{BlockError, Sense},
     bus::dma::{DmaAllocator, DmaBuffer},
 };
 use alloc::vec::Vec;
@@ -14,11 +15,13 @@ const RESET: u8 = 0xff;
 const GET_MAX_LUN: u8 = 0xfe;
 const CBW_SIGNATURE: u32 = 0x4342_5355;
 const CSW_SIGNATURE: u32 = 0x5342_5355;
+/// bCSWStatus: Command Failed (BOT 5.2).
+const CSW_FAILED: u8 = 1;
 const COMMAND_US: u64 = 30_000_000;
 const RESET_RECOVERY_US: u64 = 6_000_000;
 const MAX_LUN: u8 = 15;
-const PROTOCOL_ERROR: u32 = 0x0200_0000;
-const SHORT_TRANSFER: u32 = 0x0300_0000;
+const PROTOCOL_ERROR: BlockError = BlockError::Protocol("malformed Bulk-Only wrapper or transfer");
+const SHORT_WRITE: BlockError = BlockError::Protocol("short Bulk-Only write");
 
 /// Private seam: every native transfer returns only after completion or actual
 /// xHCI cancellation. An error may leave poison; ready must expose it before
@@ -87,18 +90,22 @@ impl<I: Io> Bot<I> {
         dma: &mut dyn DmaAllocator,
     ) -> Result<Self, BlockError> {
         io.ready()?;
-        let max_lun = match io.control(setup(0xa1, GET_MAX_LUN, 0, u16::from(interface), 1)) {
+        let request = setup(
+            DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_INTERFACE,
+            GET_MAX_LUN,
+            0,
+            u16::from(interface),
+            1,
+        );
+        let max_lun = match io.control(request) {
             Ok(bytes) if bytes.len() == 1 && bytes[0] <= MAX_LUN => bytes[0],
-            // BOT 3.2: a single-LUN function may STALL this optional request.
-            // Native xHCI has already recovered EP0 before returning STALL.
-            Err(BlockError::Device {
-                status: super::STALL,
-            }) => {
+            // Linux `usb_stor_Bulk_max_lun`: devices stall this request, send
+            // nothing, time out or answer nonsense; all mean one LUN. EP0
+            // must still be usable afterwards.
+            _ => {
                 io.ready()?;
                 0
             }
-            Ok(_) => return Err(BlockError::Unsupported("invalid USB storage maximum LUN")),
-            Err(error) => return Err(error),
         };
         Ok(Self {
             io,
@@ -140,8 +147,13 @@ impl<I: Io> Bot<I> {
         self.poisoned = true;
         let result = (|| {
             self.io.ready()?;
-            self.io
-                .control(setup(0x21, RESET, 0, u16::from(self.interface), 0))?;
+            self.io.control(setup(
+                TYPE_CLASS | RECIPIENT_INTERFACE,
+                RESET,
+                0,
+                u16::from(self.interface),
+                0,
+            ))?;
             // Acknowledged class reset is not device-side recovery completion.
             // Match usb_stor_reset_common's HZ*6 settling interval before either
             // CLEAR_FEATURE; controller readiness alone cannot replace it.
@@ -164,19 +176,17 @@ impl<I: Io> Bot<I> {
 
     pub fn command(&mut self, lun: u8, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         let result = self.raw(lun, cdb, data);
-        if result == Err(BlockError::Device { status: 1 }) {
+        if result == Err(BlockError::CheckCondition) {
             // SCSI auto-sense must use the failing command's LUN, and cannot
             // race a different unit's command while the interface is borrowed.
-            let status = if cdb[0] == 0x03 {
+            let sense = if cdb[0] == scsi::REQUEST_SENSE {
                 None
             } else {
-                self.raw(lun, &[0x03, 0, 0, 0, 18, 0], Data::In(18))
+                self.raw(lun, &scsi::request_sense(), Data::In(scsi::SENSE_BYTES))
                     .ok()
-                    .and_then(|bytes| sense(&bytes))
+                    .and_then(|bytes| Sense::parse(&bytes))
             };
-            return Err(BlockError::Device {
-                status: status.unwrap_or(0x0100_0000),
-            });
+            return Err(sense.map_or(BlockError::CheckCondition, BlockError::Sense));
         }
         result
     }
@@ -202,9 +212,7 @@ impl<I: Io> Bot<I> {
         match self.io.bulk(self.endpoints[1], self.wrapper.physical(), 31) {
             Ok(31) => {}
             Ok(_) => {
-                return self.failed(BlockError::Device {
-                    status: PROTOCOL_ERROR,
-                });
+                return self.failed(PROTOCOL_ERROR);
             }
             Err(error) => return self.failed(error),
         }
@@ -218,9 +226,7 @@ impl<I: Io> Bot<I> {
             match self.io.bulk(endpoint, self.buffer.physical(), length) {
                 Ok(n) if n <= length => moved = n,
                 Ok(_) => {
-                    return self.failed(BlockError::Device {
-                        status: PROTOCOL_ERROR,
-                    });
+                    return self.failed(PROTOCOL_ERROR);
                 }
                 Err(BlockError::Device {
                     status: super::STALL,
@@ -250,9 +256,7 @@ impl<I: Io> Bot<I> {
         match csw {
             Ok(13) => {}
             Ok(_) => {
-                return self.failed(BlockError::Device {
-                    status: PROTOCOL_ERROR,
-                });
+                return self.failed(PROTOCOL_ERROR);
             }
             Err(error) => return self.failed(error),
         }
@@ -264,18 +268,14 @@ impl<I: Io> Bot<I> {
             || residue > length
             || status > 1
         {
-            return self.failed(BlockError::Device {
-                status: PROTOCOL_ERROR,
-            });
+            return self.failed(PROTOCOL_ERROR);
         }
-        if status == 1 {
-            return Err(BlockError::Device { status: 1 });
+        if status == CSW_FAILED {
+            return Err(BlockError::CheckCondition);
         }
         // A successful CSW does not turn a partial block write into success.
         if !is_in && (moved != length || residue != 0) {
-            return Err(BlockError::Device {
-                status: SHORT_TRANSFER,
-            });
+            return Err(SHORT_WRITE);
         }
         Ok(if is_in {
             self.buffer.bytes()[..moved.min(length - residue)].to_vec()
@@ -295,17 +295,6 @@ fn cbw(tag: u32, lun: u8, cdb: &[u8], length: usize, is_in: bool) -> [u8; 31] {
     bytes[14] = cdb.len() as u8;
     bytes[15..15 + cdb.len()].copy_from_slice(cdb);
     bytes
-}
-pub(super) fn sense(bytes: &[u8]) -> Option<u32> {
-    match bytes.first()? & 0x7f {
-        0x70 | 0x71 if bytes.len() >= 14 && bytes[7] >= 6 => {
-            Some(u32::from(bytes[2] & 15) << 16 | u32::from(bytes[12]) << 8 | u32::from(bytes[13]))
-        }
-        0x72 | 0x73 if bytes.len() >= 8 => {
-            Some(u32::from(bytes[1] & 15) << 16 | u32::from(bytes[2]) << 8 | u32::from(bytes[3]))
-        }
-        _ => None,
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -339,6 +328,8 @@ mod tests {
         attention: bool,
         huge: bool,
         descriptor_sense: bool,
+        /// Spun down until START STOP UNIT starts it.
+        stopped: bool,
     }
     struct Command {
         lun: u8,
@@ -484,7 +475,13 @@ mod tests {
                             u.sense = 0x062900;
                             status = 1;
                         }
+                        0x00 if u.stopped => {
+                            // NOT READY: initializing command required.
+                            u.sense = 0x020402;
+                            status = 1;
+                        }
                         0x00 => {}
+                        0x1b => u.stopped = cdb[4] & 1 == 0,
                         0x03 => {
                             payload = vec![0; 18];
                             if u.descriptor_sense {
@@ -667,6 +664,7 @@ mod tests {
             attention: false,
             huge: false,
             descriptor_sense: false,
+            stopped: false,
         })
     }
     fn model(start: u64, end: u64, units: Vec<Option<Unit>>) -> Model {
@@ -784,29 +782,44 @@ mod tests {
         }
     }
     #[test]
-    fn get_max_lun_requires_one_bounded_byte_or_acknowledged_stall() {
-        for response in [
-            Ok(vec![0]),
-            Ok(vec![15]),
-            Ok(vec![]),
-            Ok(vec![16]),
-            Ok(vec![0, 1]),
-            Err(BlockError::Device {
-                status: super::super::STALL,
-            }),
-            Err(BlockError::Timeout),
+    fn a_stopped_unit_is_started_once_and_then_identified() {
+        let mut memory = vec![0u64; 32 * 1024];
+        let start = memory.as_mut_ptr() as u64;
+        let mut dma = dma(&mut memory);
+        let mut stopped = unit(0x11).unwrap();
+        stopped.stopped = true;
+        let io = model(start, start + memory.len() as u64 * 8, vec![Some(stopped)]);
+        let state = io.0.clone();
+        let mut bot = Bot::new(io, 3, endpoints(), &mut dma).unwrap();
+        super::super::probe(&mut bot, 0, "slot", "serial").unwrap();
+        assert!(!state.borrow().units[0].as_ref().unwrap().stopped);
+    }
+
+    #[test]
+    fn get_max_lun_takes_one_bounded_byte_and_otherwise_one_unit() {
+        for (response, max_lun) in [
+            (Ok(vec![0]), 0),
+            (Ok(vec![15]), 15),
+            (Ok(vec![]), 0),
+            (Ok(vec![16]), 0),
+            (Ok(vec![0, 1]), 0),
+            (
+                Err(BlockError::Device {
+                    status: super::super::STALL,
+                }),
+                0,
+            ),
+            (Err(BlockError::Timeout), 0),
         ] {
-            let expected = matches!(&response,Ok(b) if b.len()==1 && b[0]<=15)
-                || response
-                    == Err(BlockError::Device {
-                        status: super::super::STALL,
-                    });
             let mut memory = vec![0u64; 32 * 1024];
             let start = memory.as_mut_ptr() as u64;
             let mut dma = dma(&mut memory);
             let io = model(start, start + memory.len() as u64 * 8, vec![unit(0)]);
             io.0.borrow_mut().max = response;
-            assert_eq!(Bot::new(io, 3, endpoints(), &mut dma).is_ok(), expected);
+            assert_eq!(
+                Bot::new(io, 3, endpoints(), &mut dma).unwrap().max_lun(),
+                max_lun
+            );
         }
     }
     #[test]
@@ -864,9 +877,7 @@ mod tests {
                 &[0x2a, 0, 0, 0, 0, 0, 0, 0, 1, 0],
                 Data::Out(&vec![2; 512])
             ),
-            Err(BlockError::Device {
-                status: SHORT_TRANSFER
-            })
+            Err(SHORT_WRITE)
         );
     }
     #[test]
@@ -1009,7 +1020,11 @@ mod tests {
         let before = state.borrow().history.len();
         assert_eq!(
             disks[0].write(0, &[0xa4; 512]),
-            Err(BlockError::Device { status: 0x062900 })
+            Err(BlockError::Sense(Sense {
+                key: 0x06,
+                asc: 0x29,
+                ascq: 0x00
+            }))
         );
         assert_eq!(
             state.borrow().history[before..]
@@ -1033,7 +1048,11 @@ mod tests {
         data.fill(0x5a);
         assert_eq!(
             current[0].read(0, &mut data),
-            Err(BlockError::Device { status: 0x023a00 })
+            Err(BlockError::Sense(Sense {
+                key: 0x02,
+                asc: 0x3a,
+                ascq: 0x00
+            }))
         );
         assert_eq!(data, [0x5a; 512]);
         assert!(scan_bot(owner.clone(), &mut failures).unwrap().is_empty());
@@ -1131,6 +1150,7 @@ mod tests {
                 lun,
                 identity,
                 media: Rc::new(core::cell::Cell::new(true)),
+                write_cache: true,
             });
         }
         let mut bytes = vec![0; MAX_TD * 2 + 512];
@@ -1197,11 +1217,19 @@ mod tests {
             vec![
                 (
                     "reader interface 3 LUN 0".into(),
-                    BlockError::Device { status: 0x023a00 }
+                    BlockError::Sense(Sense {
+                        key: 0x02,
+                        asc: 0x3a,
+                        ascq: 0x00
+                    })
                 ),
                 (
                     "reader interface 3 LUN 2".into(),
-                    BlockError::Device { status: 0x023a00 }
+                    BlockError::Sense(Sense {
+                        key: 0x02,
+                        asc: 0x3a,
+                        ascq: 0x00
+                    })
                 )
             ]
         );
@@ -1243,16 +1271,23 @@ mod tests {
             vec![0x71; 8],
             vec![0x75; 18],
         ] {
-            assert_eq!(sense(&bytes), None);
+            assert_eq!(Sense::parse(&bytes), None);
         }
         let mut fixed = vec![0; 18];
         fixed[0] = 0x71;
         fixed[2] = 6;
         fixed[7] = 5;
-        assert_eq!(sense(&fixed), None);
+        assert_eq!(Sense::parse(&fixed), None);
         fixed[7] = 6;
         fixed[12] = 0x29;
-        assert_eq!(sense(&fixed), Some(0x062900));
+        assert_eq!(
+            Sense::parse(&fixed),
+            Some(Sense {
+                key: Sense::UNIT_ATTENTION,
+                asc: Sense::RESET_OCCURRED,
+                ascq: 0
+            })
+        );
     }
     #[test]
     fn late_discovery_transport_poison_discards_already_probed_units() {

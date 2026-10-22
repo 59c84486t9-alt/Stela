@@ -7,7 +7,7 @@
 // see THIRD_PARTY.md for the pinned sources, notices and implementation scope.
 use super::xhci::{Device, Endpoint, Interface, MAX_TD, Plan, STALL, Shared, setup};
 use crate::{
-    block::{BlockDevice, BlockError, Identity, Transport},
+    block::{BlockDevice, BlockError, Identity, Sense, Transport},
     bus::dma::DmaAllocator,
 };
 use alloc::{format, rc::Rc, string::String, vec, vec::Vec};
@@ -15,6 +15,7 @@ use core::cell::{Cell, RefCell};
 mod media;
 pub use media::UsbStorage;
 mod bot;
+mod scsi;
 pub mod uas;
 use bot::{Bot, Io, Native};
 pub const CLASS: u8 = 8;
@@ -43,6 +44,16 @@ pub enum Data<'a> {
     Out(&'a [u8]),
 }
 
+/// How a unit's write cache is found, as Linux `sd_read_cache_type` finds
+/// it: from the Caching mode page, or assumed when a transport's devices
+/// mishandle that page (`skip_ms_page_8`, with or without `wce_default_on`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caching {
+    Query,
+    WriteThrough,
+    WriteBack,
+}
+
 /// SCSI semantics are shared across BOT and UAS; each transport retains its
 /// own framing, LUN address type, command ownership and uncertainty boundary.
 trait Scsi {
@@ -59,8 +70,13 @@ trait Scsi {
     fn max_lun(&self) -> u8 {
         0
     }
-    fn mode_page(&self) -> u8 {
-        0x3f
+    /// The mode page that reports write protection, or none when the unit
+    /// is assumed writable (Linux `skip_ms_page_3f`).
+    fn write_protect_page(&self) -> Option<u8> {
+        Some(scsi::ALL_PAGES)
+    }
+    fn caching(&self) -> Caching {
+        Caching::Query
     }
     fn report_luns_permitted(&self) -> bool {
         true
@@ -80,6 +96,11 @@ impl<I: Io> Scsi for Bot<I> {
     fn max_lun(&self) -> u8 {
         Bot::max_lun(self)
     }
+    /// Linux usb-storage skips the Caching page for every disk and assumes
+    /// write-through without its `WRITE_CACHE` quirk.
+    fn caching(&self) -> Caching {
+        Caching::WriteThrough
+    }
 }
 impl Scsi for uas::Host {
     type Lun = uas::Lun;
@@ -97,8 +118,11 @@ impl Scsi for uas::Host {
     fn poisoned(&self) -> bool {
         self.requires_rebind()
     }
-    fn mode_page(&self) -> u8 {
-        uas::Host::mode_page(self)
+    fn write_protect_page(&self) -> Option<u8> {
+        uas::Host::write_protect_page(self)
+    }
+    fn caching(&self) -> Caching {
+        uas::Host::caching(self)
     }
     fn report_luns_permitted(&self) -> bool {
         uas::Host::report_luns_permitted(self)
@@ -119,6 +143,8 @@ struct Disk<T: Scsi> {
     lun: T::Lun,
     identity: Identity,
     media: Rc<Cell<bool>>,
+    /// The unit caches writes, so a flush sends SYNCHRONIZE CACHE.
+    write_cache: bool,
 }
 
 pub(super) fn discover_retained(
@@ -261,7 +287,8 @@ fn discover_uas_units<T: Scsi<Lun = uas::Lun>>(
             if found
                 .as_ref()
                 .is_ok_and(|bytes| bytes[0] >> 5 == 3 || bytes[0] & 31 == 31)
-                || matches!(found, Err(BlockError::Device { status }) if status >> 16 == 5 && (status >> 8) & 255 == 0x25)
+                || matches!(&found, Err(BlockError::Sense(sense))
+                    if sense.key == Sense::ILLEGAL_REQUEST && sense.asc == Sense::UNSUPPORTED_UNIT)
             {
                 break;
             }
@@ -281,12 +308,32 @@ fn quarantined() -> BlockError {
 
 fn publication<T: Scsi>(owner: &Rc<RefCell<T>>, lun: T::Lun, identity: Identity) -> Disk<T> {
     let media = Rc::new(Cell::new(true));
+    let write_cache = write_cache(&mut *owner.borrow_mut(), lun);
     owner.borrow_mut().media_publication(lun, media.clone());
     Disk {
         bot: owner.clone(),
         lun,
         identity,
         media,
+        write_cache,
+    }
+}
+
+/// Linux `sd_read_cache_type`: the Caching page's WCE bit, or the
+/// transport's assumption; an unreadable page means write-through.
+fn write_cache<T: Scsi>(bot: &mut T, lun: T::Lun) -> bool {
+    match bot.caching() {
+        Caching::WriteThrough => false,
+        Caching::WriteBack => true,
+        Caching::Query => bot
+            .command(
+                lun,
+                &scsi::mode_sense(scsi::CACHING_PAGE),
+                Data::In(scsi::MODE_SENSE_BYTES),
+            )
+            .ok()
+            .and_then(|mode| scsi::write_cache_enabled(&mode))
+            .unwrap_or(false),
     }
 }
 
@@ -322,7 +369,7 @@ fn report_luns<T: Scsi<Lun = uas::Lun>>(
     let mut allocation = 4096usize;
     for _ in 0..3 {
         let mut cdb = [0u8; 12];
-        cdb[0] = 0xa0;
+        cdb[0] = scsi::REPORT_LUNS;
         cdb[6..10].copy_from_slice(&(allocation as u32).to_be_bytes());
         let mut received = None;
         for attempt in 0..3 {
@@ -332,7 +379,11 @@ fn report_luns<T: Scsi<Lun = uas::Lun>>(
                     break;
                 }
                 Err(_) if owner.poisoned() => return Err(quarantined()),
-                Err(BlockError::Device { status }) if status >> 16 == 6 && attempt < 2 => continue,
+                Err(BlockError::Sense(sense))
+                    if sense.key == Sense::UNIT_ATTENTION && attempt < 2 =>
+                {
+                    continue;
+                }
                 // Source command failures fall back to actual sequential
                 // INQUIRY. A poisoned host can never enter this fallback.
                 Err(_) => return Ok(None),
@@ -413,15 +464,15 @@ fn probe<T: Scsi>(
 fn inquiry<T: Scsi>(bot: &mut T, lun: T::Lun) -> Result<Vec<u8>, BlockError> {
     let mut result = Err(BlockError::Unsupported("INQUIRY did not complete"));
     for _ in 0..3 {
-        result = bot.command(lun, &[0x12, 0, 0, 0, 36, 0], Data::In(36));
-        if !matches!(result, Err(BlockError::Device { status }) if status >> 16 == 6
-            && matches!((status >> 8) & 255, 0x28 | 0x29))
+        result = bot.command(lun, &scsi::inquiry(), Data::In(scsi::INQUIRY_BYTES));
+        if !matches!(&result, Err(BlockError::Sense(sense)) if sense.key == Sense::UNIT_ATTENTION
+            && matches!(sense.asc, Sense::MEDIUM_CHANGED | Sense::RESET_OCCURRED))
         {
             break;
         }
     }
     let bytes = result?;
-    if bytes.len() < 36 {
+    if bytes.len() < scsi::INQUIRY_BYTES {
         return Err(BlockError::Unsupported("short INQUIRY data"));
     }
     Ok(bytes)
@@ -440,23 +491,35 @@ fn probe_identified<T: Scsi>(
     }
     let text = |bytes: &[u8]| String::from(String::from_utf8_lossy(bytes).trim());
     let mut ready = false;
+    let mut started = false;
     for attempt in 0..READY_TRIES {
-        match bot.command(lun, &[0; 6], Data::None) {
+        match bot.command(lun, &[scsi::TEST_UNIT_READY, 0, 0, 0, 0, 0], Data::None) {
             Ok(_) => {
                 ready = true;
                 break;
             }
             // No-media must precede the general UA retry: key6/ASC3a also
             // reports absence, and must never lead to capacity/mode queries.
-            Err(BlockError::Device { status }) if media::no_media(status) => {
-                return Err(BlockError::Device { status });
+            Err(BlockError::Sense(sense)) if media::no_media(&sense) => {
+                return Err(BlockError::Sense(sense));
+            }
+            // Linux `sd_spinup_disk`: a unit that needs an initializing
+            // command gets START STOP UNIT once, then is polled again.
+            Err(BlockError::Sense(sense))
+                if !started
+                    && sense.key == Sense::NOT_READY
+                    && sense.asc == Sense::NOT_READY_CAUSE
+                    && sense.ascq == Sense::INITIALIZING_COMMAND_REQUIRED =>
+            {
+                started = true;
+                bot.command(lun, &scsi::start_unit(), Data::None)?;
             }
             // The command has already completed same-LUN REQUEST SENSE.
-            Err(BlockError::Device { status })
-                if status >> 16 == 6
-                    || status >> 16 == 2
-                        && (status >> 8) & 255 == 4
-                        && !matches!(status & 255, 3 | 0xb | 0xc | 0x1b | 0x24 | 0x25) =>
+            Err(BlockError::Sense(sense))
+                if sense.key == Sense::UNIT_ATTENTION
+                    || sense.key == Sense::NOT_READY
+                        && sense.asc == Sense::NOT_READY_CAUSE
+                        && !matches!(sense.ascq, 3 | 0xb | 0xc | 0x1b | 0x24 | 0x25) =>
             {
                 if attempt + 1 < READY_TRIES {
                     bot.delay(READY_DELAY_US);
@@ -468,7 +531,9 @@ fn probe_identified<T: Scsi>(
     if !ready {
         return Err(BlockError::Unsupported("USB storage never became ready"));
     }
-    let capacity = bot.command(lun, &[0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::In(8))?;
+    let mut read_capacity = [0; 10];
+    read_capacity[0] = scsi::READ_CAPACITY_10;
+    let capacity = bot.command(lun, &read_capacity, Data::In(8))?;
     if capacity.len() < 8 {
         return Err(BlockError::Unsupported("short READ CAPACITY data"));
     }
@@ -476,8 +541,8 @@ fn probe_identified<T: Scsi>(
     let mut block_size = u32::from_be_bytes(capacity[4..8].try_into().unwrap());
     let blocks = if last == u32::MAX {
         let mut cdb = [0u8; 16];
-        cdb[0] = 0x9e;
-        cdb[1] = 0x10;
+        cdb[0] = scsi::SERVICE_ACTION_IN_16;
+        cdb[1] = scsi::READ_CAPACITY_16;
         cdb[13] = 32;
         let long = bot.command(lun, &cdb, Data::In(32))?;
         if long.len() < 12 {
@@ -499,14 +564,22 @@ fn probe_identified<T: Scsi>(
             "USB storage block size or capacity",
         ));
     }
-    let page = bot.mode_page();
-    let read_only = match bot.command(lun, &[0x1a, 0, page, 0, 4, 0], Data::In(4)) {
-        Ok(mode) if mode.len() >= 4 && mode[0] >= 3 => mode[2] & 0x80 != 0,
-        // MODE SENSE is optional only when the unit actually reports an
-        // unsupported CDB. USB/transport errors cannot default to writable.
-        Err(BlockError::Device { status }) if status >> 16 == 5 => false,
-        Ok(_) => return Err(BlockError::Unsupported("short MODE SENSE data")),
-        Err(error) => return Err(error),
+    let read_only = match bot.write_protect_page() {
+        None => false,
+        Some(page) => {
+            match bot.command(
+                lun,
+                &scsi::mode_sense(page),
+                Data::In(scsi::MODE_SENSE_BYTES),
+            ) {
+                Ok(mode) => scsi::write_protected(&mode)
+                    .ok_or(BlockError::Unsupported("short MODE SENSE data"))?,
+                // MODE SENSE is optional only when the unit actually reports an
+                // unsupported CDB. USB/transport errors cannot default to writable.
+                Err(BlockError::Sense(sense)) if sense.key == Sense::ILLEGAL_REQUEST => false,
+                Err(error) => return Err(error),
+            }
+        }
     };
     Ok(Identity {
         transport: Transport::Usb,
@@ -530,7 +603,7 @@ impl<T: Scsi> Disk<T> {
     pub fn command(&mut self, cdb: &[u8], data: Data<'_>) -> Result<Vec<u8>, BlockError> {
         self.check_media()?;
         let result = self.bot.borrow_mut().command(self.lun, cdb, data);
-        if matches!(result, Err(BlockError::Device { status }) if media::changed(status)) {
+        if matches!(&result, Err(BlockError::Sense(sense)) if media::changed(sense)) {
             self.media.set(false);
         }
         result
@@ -551,14 +624,14 @@ impl<T: Scsi> Disk<T> {
             .is_some_and(|end| end <= u64::from(u32::MAX) + 1)
             && blocks <= u32::from(u16::MAX)
         {
-            let mut cdb = vec![if write { 0x2a } else { 0x28 }, 0];
+            let mut cdb = vec![if write { scsi::WRITE_10 } else { scsi::READ_10 }, 0];
             cdb.extend_from_slice(&(lba as u32).to_be_bytes());
             cdb.push(0);
             cdb.extend_from_slice(&(blocks as u16).to_be_bytes());
             cdb.push(0);
             cdb
         } else {
-            let mut cdb = vec![if write { 0x8a } else { 0x88 }, 0];
+            let mut cdb = vec![if write { scsi::WRITE_16 } else { scsi::READ_16 }, 0];
             cdb.extend_from_slice(&lba.to_be_bytes());
             cdb.extend_from_slice(&blocks.to_be_bytes());
             cdb.extend_from_slice(&[0, 0]);
@@ -581,9 +654,7 @@ impl<T: Scsi> BlockDevice for Disk<T> {
             let cdb = self.cdb(false, lba, blocks);
             let data = self.command(&cdb, Data::In(chunk.len()))?;
             if data.len() != chunk.len() {
-                return Err(BlockError::Device {
-                    status: 0x0300_0000,
-                });
+                return Err(BlockError::Protocol("short USB storage read"));
             }
             chunk.copy_from_slice(&data);
             lba += u64::from(blocks);
@@ -605,8 +676,12 @@ impl<T: Scsi> BlockDevice for Disk<T> {
         Ok(())
     }
 
+    /// Linux sd flushes only a unit whose write cache is on.
     fn flush(&mut self) -> Result<(), BlockError> {
-        self.command(&[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::None)
+        if !self.write_cache {
+            return self.check_media();
+        }
+        self.command(&scsi::synchronize_cache(), Data::None)
             .map(|_| ())
     }
 }

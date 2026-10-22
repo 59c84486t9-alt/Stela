@@ -7,7 +7,10 @@
 // Linux uas.c reference: Hans de Goede/Red Hat 2013-2016;
 // Matthew Wilcox/Intel Corp 2010; Sarah Sharp/Intel Corp 2010.
 use super::{Data, Device, DmaAllocator, Endpoint, MAX_TD, Shared};
-use crate::{block::BlockError, bus::dma::DmaBuffer};
+use crate::{
+    block::{BlockError, Sense},
+    bus::dma::DmaBuffer,
+};
 use alloc::vec::Vec;
 
 mod binding;
@@ -25,7 +28,7 @@ const WRITE_READY_IU: u8 = 7;
 const TIMEOUT_US: u64 = 30_000_000;
 const IU_BUFFER_BYTES: usize = 512;
 const MAX_CDB: usize = 260;
-const PROTOCOL_ERROR: u32 = 0x0500_0000;
+const PROTOCOL_ERROR: BlockError = BlockError::Protocol("malformed UAS information unit");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pipe {
@@ -257,8 +260,16 @@ impl Host {
         let clock = self.engine.io.controller.borrow().clock;
         clock.delay(micros);
     }
-    pub(super) fn mode_page(&self) -> u8 {
-        if self.flags.always_sync() { 0 } else { 0x3f }
+    /// Linux `uas_sdev_configure`: an ALWAYS_SYNC enclosure skips both mode
+    /// pages and is assumed writable with its write cache on.
+    pub(super) fn write_protect_page(&self) -> Option<u8> {
+        (!self.flags.always_sync()).then_some(super::scsi::ALL_PAGES)
+    }
+    pub(super) fn caching(&self) -> super::Caching {
+        match self.flags.always_sync() {
+            true => super::Caching::WriteBack,
+            false => super::Caching::Query,
+        }
     }
     pub(super) fn report_luns_permitted(&self) -> bool {
         self.flags.report_luns_permitted()
@@ -280,13 +291,7 @@ fn execute<I: Io>(
             "CDB requires an unsupported enclosure operation",
         ));
     }
-    let data_out = matches!(data, Data::Out(_));
-    let result = engine.command(lun, cdb, data)?;
-    if flags.needs_sync(cdb, data_out) {
-        engine.command(lun, &[0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0], Data::None)?;
-    }
-
-    Ok(result)
+    engine.command(lun, cdb, data)
 }
 
 trait Io {
@@ -484,16 +489,12 @@ impl<I: Io> Engine<I> {
                 };
                 match pipe {
                     Pipe::Command if count != command.len() => {
-                        return self.failure(BlockError::Device {
-                            status: PROTOCOL_ERROR,
-                        });
+                        return self.failure(PROTOCOL_ERROR);
                     }
                     Pipe::Command => {}
                     Pipe::Input | Pipe::Output if count <= length => moved = Some(count),
                     Pipe::Input | Pipe::Output => {
-                        return self.failure(BlockError::Device {
-                            status: PROTOCOL_ERROR,
-                        });
+                        return self.failure(PROTOCOL_ERROR);
                     }
                     Pipe::Status => {
                         let frame = match self
@@ -504,9 +505,7 @@ impl<I: Io> Engine<I> {
                         {
                             Some(frame) => frame,
                             None => {
-                                return self.failure(BlockError::Device {
-                                    status: PROTOCOL_ERROR,
-                                });
+                                return self.failure(PROTOCOL_ERROR);
                             }
                         };
                         match frame {
@@ -533,9 +532,7 @@ impl<I: Io> Engine<I> {
                                 }
                             }
                             Frame::Ready(_) => {
-                                return self.failure(BlockError::Device {
-                                    status: PROTOCOL_ERROR,
-                                });
+                                return self.failure(PROTOCOL_ERROR);
                             }
                             Frame::Done(status) => terminal = Some(status),
                         }
@@ -555,26 +552,18 @@ impl<I: Io> Engine<I> {
                             self.pending[pipe.index()] = None;
                         }
                     }
-                    return Err(BlockError::Device {
-                        status: status
-                            .response
-                            .map(|code| 0x0600_0000 | u32::from(code))
-                            .unwrap_or_else(|| {
-                                super::bot::sense(&status.sense)
-                                    .unwrap_or(0x0400_0000 | u32::from(status.code))
-                            }),
+                    return Err(match status.response {
+                        Some(_) => BlockError::Protocol("UAS Response IU refused the command"),
+                        None => Sense::parse(&status.sense)
+                            .map_or(BlockError::CheckCondition, BlockError::Sense),
                     });
                 }
                 if self.pending.iter().all(Option::is_none) {
                     let Some(moved) = moved else {
-                        return self.failure(BlockError::Device {
-                            status: PROTOCOL_ERROR,
-                        });
+                        return self.failure(PROTOCOL_ERROR);
                     };
                     if !input && moved != length {
-                        return Err(BlockError::Device {
-                            status: 0x0300_0000,
-                        });
+                        return Err(BlockError::Protocol("short UAS write"));
                     }
                     return Ok(if input {
                         self.data.bytes()[..moved].to_vec()
@@ -1158,10 +1147,12 @@ mod tests {
                             reply.data[8..12].copy_from_slice(&media.block_size.to_be_bytes());
                         }
                         0x1a => {
-                            assert!(matches!(cdb[2], 0 | 0x3f));
-                            assert_eq!(cdb[4], 4);
-                            reply.requested = 4;
-                            reply.data = vec![3, 0, if media.read_only { 0x80 } else { 0 }, 0];
+                            assert!(matches!(cdb[2], 0x08 | 0x3f));
+                            assert_eq!(usize::from(cdb[4]), super::super::scsi::MODE_SENSE_BYTES);
+                            let protect = if media.read_only { 0x80 } else { 0 };
+                            // A write-back Caching page follows the header.
+                            reply.data = vec![7, 0, protect, 0, 0x08, 0x12, 0x04, 0];
+                            reply.requested = usize::from(cdb[4]);
                         }
                         0x28 | 0x2a | 0x88 | 0x8a => {
                             let (lba, count) = Self::range(cdb);
@@ -1236,8 +1227,14 @@ mod tests {
         fn poisoned(&self) -> bool {
             self.engine.poisoned
         }
-        fn mode_page(&self) -> u8 {
-            if self.flags.always_sync() { 0 } else { 0x3f }
+        fn write_protect_page(&self) -> Option<u8> {
+            (!self.flags.always_sync()).then_some(super::super::scsi::ALL_PAGES)
+        }
+        fn caching(&self) -> super::super::Caching {
+            match self.flags.always_sync() {
+                true => super::super::Caching::WriteBack,
+                false => super::super::Caching::Query,
+            }
         }
         fn report_luns_permitted(&self) -> bool {
             self.flags.report_luns_permitted()
@@ -1279,7 +1276,14 @@ mod tests {
             super::super::discover_uas_units(owner, "native", "serial", &mut failures).unwrap();
         assert_eq!(disks.len(), 2);
         assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].1, BlockError::Device { status: 0x023a00 });
+        assert_eq!(
+            failures[0].1,
+            BlockError::Sense(Sense {
+                key: 0x02,
+                asc: 0x3a,
+                ascq: 0x00
+            })
+        );
         assert!(disks[0].identity().read_only);
         assert!(disks[0].write(0, &[0; 512]).is_err());
         assert_eq!(disks[1].identity().blocks, u64::from(u32::MAX) + 4096);
@@ -1470,14 +1474,11 @@ mod tests {
         assert_eq!(disks.len(), 1);
         assert!(failures.is_empty());
         disks[0].write(1, &[0x88; 512]).unwrap();
+        assert!(state.borrow().target.as_ref().unwrap().flushes.is_empty());
+        // ALWAYS_SYNC reads no mode page and flushes its assumed write cache.
+        disks[0].flush().unwrap();
         let state = state.borrow();
-        assert!(
-            state
-                .history
-                .iter()
-                .filter(|iu| iu[16] == 0x1a)
-                .all(|iu| iu[18] == 0)
-        );
+        assert!(!state.history.iter().any(|iu| iu[16] == 0x1a));
         assert_eq!(state.target.as_ref().unwrap().flushes, vec![Lun::default()]);
         assert!(state.active.is_empty());
     }
@@ -1573,7 +1574,14 @@ mod tests {
                 );
                 assert!(result.is_err(), "{fault:?}");
                 if fault == Fault::ErrorAfterReady {
-                    assert_eq!(result, Err(BlockError::Device { status: 0x023a00 }));
+                    assert_eq!(
+                        result,
+                        Err(BlockError::Sense(Sense {
+                            key: 0x02,
+                            asc: 0x3a,
+                            ascq: 0x00
+                        }))
+                    );
                     assert!(!engine.poisoned);
                     assert!(state.borrow().active.is_empty());
                 } else {
@@ -1633,6 +1641,7 @@ mod tests {
         let mut bytes = [0; 512];
         disks[1].read(1, &mut bytes).unwrap();
         assert_eq!(bytes, [0x55; 512]);
+        disks[1].flush().unwrap();
         let state = state.borrow();
         assert!(state.active.is_empty());
         assert_eq!(state.target.as_ref().unwrap().flushes, vec![sparse]);
@@ -1712,7 +1721,11 @@ mod tests {
             let before_commands = hardware.borrow().scsi.len();
             assert_eq!(
                 changed[0].write(1, &[0x55; 512]),
-                Err(BlockError::Device { status: 0x062800 })
+                Err(BlockError::Sense(Sense {
+                    key: 0x06,
+                    asc: 0x28,
+                    ascq: 0x00
+                }))
             );
             assert_eq!(
                 hardware.borrow().scsi[before_commands..]
@@ -1848,7 +1861,11 @@ mod tests {
         state.borrow_mut().target.as_mut().unwrap().unit_attention = Some(0x063f0e);
         assert_eq!(
             inserted[0].command(&[0; 6], Data::None),
-            Err(BlockError::Device { status: 0x063f0e })
+            Err(BlockError::Sense(Sense {
+                key: 0x06,
+                asc: 0x3f,
+                ascq: 0x0e
+            }))
         );
         let before = state.borrow().events.len();
         assert!(inserted[1].read(0, &mut [0; 512]).is_err());
@@ -1902,6 +1919,7 @@ mod tests {
                     lun: unit.lun,
                     identity: unit.identity.clone(),
                     media: unit.media.clone(),
+                    write_cache: unit.write_cache,
                 }),
             };
             hardware.borrow_mut().hang_next = true;
@@ -2161,7 +2179,11 @@ mod tests {
                         Data::Out(&outgoing)
                     }
                 ),
-                Err(BlockError::Device { status: 0x023a00 })
+                Err(BlockError::Sense(Sense {
+                    key: 0x02,
+                    asc: 0x3a,
+                    ascq: 0x00
+                }))
             );
             assert!(state.borrow().active.is_empty());
             assert!(state.borrow().events.contains(&Event::Cancel(if input {
@@ -2273,27 +2295,23 @@ mod tests {
         assert!(state.active.is_empty());
     }
     #[test]
-    fn enclosure_always_sync_requires_actual_following_cache_completion() {
-        for fault in [Fault::None, Fault::FlushError] {
+    fn always_sync_writes_are_not_followed_by_a_cache_flush_like_linux() {
+        for (op, action) in [(0x2a, None), (0x8a, None), (0x7f, Some(0x0b))] {
             let mut memory = vec![0u64; 32 * 1024];
-            let (io, mut dma) = model(&mut memory, 512, false, fault);
+            let (io, mut dma) = model(&mut memory, 512, false, Fault::None);
             let state = io.state.clone();
             let mut engine = Engine::new(io, &mut dma).unwrap();
-            let result = execute(
+            execute(
                 &mut engine,
                 quirks::Flags::from_id(0x4971, 0x8024, 0),
                 [0; 8],
-                &rw(false, 512),
-                Data::Out(&vec![0xa5; 512]),
-            );
-            assert_eq!(result.is_ok(), fault == Fault::None);
+                &write_form(op, action, false),
+                Data::Out(&[0xa5; 512]),
+            )
+            .unwrap();
             let state = state.borrow();
-            assert_eq!(
-                state.history.iter().map(|c| c[16]).collect::<Vec<_>>(),
-                vec![0x2a, 0x35]
-            );
+            assert_eq!(state.history.len(), 1);
             assert_eq!(state.written, vec![0xa5; 512]);
-            assert!(state.active.is_empty());
         }
     }
     #[test]
@@ -2450,40 +2468,5 @@ mod tests {
         assert!(state.borrow().events.is_empty());
         assert_eq!(engine.tag, 0);
         assert!(always.permits(&[0x1a, 0, 0, 0, 4, 0]));
-    }
-    #[test]
-    fn every_standard_write_alias_requires_actual_cache_completion_for_always_sync() {
-        for (op, action) in [
-            (0x2a, None),
-            (0x2e, None),
-            (0xaa, None),
-            (0xae, None),
-            (0x8a, None),
-            (0x8e, None),
-            (0x9c, None),
-            (0x7f, Some(0x0b)),
-            (0x7f, Some(0x0c)),
-            (0x7f, Some(0x0d)),
-        ] {
-            for fault in [Fault::None, Fault::FlushError] {
-                let mut memory = vec![0u64; 32 * 1024];
-                let (io, mut dma) = model(&mut memory, 512, false, fault);
-                let state = io.state.clone();
-                let mut engine = Engine::new(io, &mut dma).unwrap();
-                let result = execute(
-                    &mut engine,
-                    quirks::Flags::from_id(0x4971, 0x8024, 0),
-                    [0; 8],
-                    &write_form(op, action, false),
-                    Data::Out(&[0xa5; 512]),
-                );
-                assert_eq!(result.is_ok(), fault == Fault::None);
-                let state = state.borrow();
-                assert_eq!(state.history.len(), 2);
-                assert_eq!(state.history[1][16], 0x35);
-                assert_eq!(state.written, vec![0xa5; 512]);
-                assert!(state.active.is_empty());
-            }
-        }
     }
 }

@@ -17,12 +17,60 @@ pub enum BlockError {
     ReadOnly,
     /// The device reported a failure with this controller status.
     Device { status: u32 },
+    /// A SCSI command failed with this sense data.
+    Sense(Sense),
+    /// A SCSI command failed and no sense data said why.
+    CheckCondition,
+    /// The storage transport broke its own protocol.
+    Protocol(&'static str),
     /// The device did not complete in time.
     Timeout,
     /// The DMA pages are exhausted.
     NoDmaMemory,
     /// The device needs something these drivers do not implement.
     Unsupported(&'static str),
+}
+
+/// SCSI sense data (SPC-5 4.4): sense key, additional sense code and its
+/// qualifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sense {
+    pub key: u8,
+    pub asc: u8,
+    pub ascq: u8,
+}
+
+impl Sense {
+    pub const NOT_READY: u8 = 0x02;
+    pub const ILLEGAL_REQUEST: u8 = 0x05;
+    pub const UNIT_ATTENTION: u8 = 0x06;
+    /// ASC 04h: logical unit not ready; 25h: logical unit not supported;
+    /// 28h/29h: medium changed, power on or reset; 3Ah: medium not present;
+    /// 3Fh: target operating conditions changed.
+    pub const NOT_READY_CAUSE: u8 = 0x04;
+    pub const UNSUPPORTED_UNIT: u8 = 0x25;
+    pub const MEDIUM_CHANGED: u8 = 0x28;
+    pub const RESET_OCCURRED: u8 = 0x29;
+    pub const MEDIUM_NOT_PRESENT: u8 = 0x3a;
+    pub const CONDITIONS_CHANGED: u8 = 0x3f;
+    /// ASC 04h/02h: an initializing command (START STOP UNIT) is required.
+    pub const INITIALIZING_COMMAND_REQUIRED: u8 = 0x02;
+    /// ASC 3Fh/0Eh: the reported LUN inventory changed.
+    pub const LUNS_CHANGED: u8 = 0x0e;
+
+    /// Fixed (70h/71h) or descriptor (72h/73h) format sense data.
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let (key, asc, ascq) = match bytes.first()? & 0x7f {
+            0x70 | 0x71 if bytes.len() >= 14 && bytes[7] >= 6 => (bytes[2], bytes[12], bytes[13]),
+            0x72 | 0x73 if bytes.len() >= 8 => (bytes[1], bytes[2], bytes[3]),
+            _ => return None,
+        };
+        Some(Self {
+            key: key & 0x0f,
+            asc,
+            ascq,
+        })
+    }
 }
 
 impl fmt::Display for BlockError {
@@ -41,6 +89,13 @@ impl fmt::Display for BlockError {
             } => write!(f, "blocks {lba}+{blocks} exceed capacity {capacity}"),
             Self::ReadOnly => f.write_str("device is read-only"),
             Self::Device { status } => write!(f, "device status {status:#x}"),
+            Self::Sense(sense) => write!(
+                f,
+                "sense key {:#x}, ASC/ASCQ {:02x}/{:02x}",
+                sense.key, sense.asc, sense.ascq
+            ),
+            Self::CheckCondition => f.write_str("command failed without sense data"),
+            Self::Protocol(what) => write!(f, "transport protocol violation: {what}"),
             Self::Timeout => f.write_str("device timeout"),
             Self::NoDmaMemory => f.write_str("DMA pages exhausted"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),

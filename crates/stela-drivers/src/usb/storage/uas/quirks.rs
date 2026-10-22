@@ -36,30 +36,6 @@ impl Flags {
     pub fn always_sync(self) -> bool {
         self.0 & ALWAYS_SYNC != 0
     }
-    pub fn needs_sync(self, cdb: &[u8], data_out: bool) -> bool {
-        self.always_sync()
-            && (data_out
-                || cdb.first().is_some_and(|op| {
-                    matches!(
-                        op,
-                        0x04 | 0x07
-                            | 0x19
-                            | 0x0a
-                            | 0x2a
-                            | 0x2e
-                            | 0xaa
-                            | 0xae
-                            | 0x89
-                            | 0x8a
-                            | 0x8e
-                            | 0x9c
-                            | 0x41
-                            | 0x93
-                            | 0x42
-                    )
-                })
-                || variable_action(cdb).is_some_and(|action| matches!(action, 0x0b..=0x0d)))
-    }
     pub fn permits(self, cdb: &[u8]) -> bool {
         let Some(&op) = cdb.first() else {
             return false;
