@@ -14,7 +14,7 @@ pub mod status;
 const NAME: &str = "ptd";
 const ENTRY_BYTES: u64 = 16;
 const UPDATE_BYTES: u64 = 8;
-const IRQ_STATUS: u64 = 0x18000;
+pub const IRQ_STATUS: u64 = 0x18000;
 const IRQ_ENABLE: u64 = 0x18200;
 const IRQ_DISABLE: u64 = 0x18300;
 const IRQ_ROUTE: u64 = 0x18400;

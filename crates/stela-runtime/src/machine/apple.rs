@@ -2845,13 +2845,13 @@ impl Devices for AppleDevices {
         if self.bus.route(next, width).ok() != Some((device, next_offset)) {
             return Ok(None);
         }
-        let Some(entry) = self
+        if !self
             .bus
             .device::<memory_resources::Prepared>(device)
-            .and_then(|owner| owner.paired_entry(offset, bytes))
-        else {
+            .is_some_and(|owner| owner.supports_pair(offset, bytes))
+        {
             return Ok(None);
-        };
+        }
         self.publish_rtc_time(now)?;
         self.settle_lifecycle(cpu, now);
         let mut access = Access::new(cpu, now, &mut self.latch);
@@ -2859,7 +2859,7 @@ impl Devices for AppleDevices {
             .bus
             .device::<memory_resources::Prepared>(device)
             .expect("paired read retains the prepared resource")
-            .consume_entry(entry, &mut access)
+            .read_pair_values(offset, bytes, &mut access)
             .map_err(|reason| DeviceError::Refused(reason.into()))?;
         let reset = reset_reason(&access);
         let settlement = self.settle(cpu, now, reset);

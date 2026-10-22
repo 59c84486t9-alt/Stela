@@ -7,7 +7,7 @@ use crate::{
         bus::{Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse},
         interrupt::Wire,
         mcc::{self, Configuration, Controller},
-        ptd::Ptd,
+        ptd::{Ptd, transport::notifications::LocalNotifications},
     },
 };
 use alloc::vec::Vec;
@@ -58,13 +58,7 @@ impl Prepared {
         programmed: Option<(u64, u64)>,
         configuration: Configuration,
         lifecycle: LifecycleState,
-    ) -> Result<
-        (
-            Self,
-            crate::platform::apple::ptd::transport::notifications::LocalNotifications,
-        ),
-        &'static str,
-    > {
+    ) -> Result<(Self, LocalNotifications), &'static str> {
         let router =
             Self::prepare_router(&descriptor, locks, programmed, configuration, lifecycle)?;
         let (ptd, local) = Ptd::initialized_local(
@@ -189,6 +183,47 @@ impl Prepared {
     ) -> Result<[u64; 2], &'static str> {
         let entry = self.ptd.consume_entry(entry, access)?;
         Ok([entry.value, entry.metadata])
+    }
+    fn status_pair(
+        &self,
+        offset: u64,
+        bytes: u8,
+    ) -> Option<(u64, crate::platform::apple::ptd::transport::status::Width)> {
+        use crate::platform::apple::ptd::transport::{IRQ_STATUS, status};
+        let offset = offset.checked_sub(self.ptd_offset())?;
+        let width = match bytes {
+            4 => status::Width::Double,
+            8 => status::Width::Quad,
+            _ => return None,
+        };
+        let words = self.descriptor.ptd_entries.div_ceil(32) as u64;
+        let end = IRQ_STATUS.checked_add(words.checked_mul(4)?)?;
+        (offset >= IRQ_STATUS
+            && offset.checked_add(width.bytes())? <= end
+            && offset.is_multiple_of(width.bytes()))
+        .then_some((offset, width))
+    }
+    pub(super) fn supports_pair(&self, offset: u64, bytes: u8) -> bool {
+        self.paired_entry(offset, bytes).is_some() || self.status_pair(offset, bytes).is_some()
+    }
+    pub(super) fn read_pair_values(
+        &self,
+        offset: u64,
+        bytes: u8,
+        access: &mut Access<'_>,
+    ) -> Result<[u64; 2], &'static str> {
+        if let Some(entry) = self.paired_entry(offset, bytes) {
+            return self.consume_entry(entry, access);
+        }
+        let (offset, width) = self
+            .status_pair(offset, bytes)
+            .ok_or("unqualified PTD pair read shape")?;
+        let value = self.ptd.interrupt_snapshot(offset, width)?;
+        Ok(if bytes == 8 {
+            [value.low, value.high]
+        } else {
+            [value.low & u64::from(u32::MAX), value.low >> 32]
+        })
     }
 }
 impl Lifecycle for Prepared {
@@ -786,6 +821,51 @@ mod tests {
         assert_eq!(
             publication.consume_entry(0, &mut access).unwrap().metadata & 3,
             0
+        );
+    }
+
+    #[test]
+    fn status_pairs_snapshot_one_pending_bank_without_consuming_publications() {
+        use crate::{machine::Devices, platform::apple::ptd::transport::IRQ_STATUS};
+        let owner = prepared();
+        let bindings = owner.bindings();
+        let mut board = super::super::AppleDevices::new();
+        board.bus.install(Box::new(owner), &bindings).unwrap();
+        let mut access = Access::new(0, 17, &mut board.latch);
+        for entry in [0, 33, 65] {
+            board
+                .bus
+                .write(
+                    0x28e3d0000 + entry * 8,
+                    Width::Double,
+                    entry + 0x1000,
+                    &mut access,
+                )
+                .unwrap();
+        }
+        let status = 0x28e3c0000 + IRQ_STATUS;
+        for _ in 0..2 {
+            let narrow = board.read_pair(0, status, 4, 17).unwrap().unwrap();
+            assert_eq!(narrow.values, [1, 2]);
+            assert_eq!(narrow.settlement, Ok(()));
+            let wide = board.read_pair(0, status, 8, 17).unwrap().unwrap();
+            assert_eq!(wide.values, [0x0000000200000001, 2]);
+            assert_eq!(wide.settlement, Ok(()));
+        }
+        // The last status pair cannot extend past the twelve actual words.
+        assert_eq!(board.read_pair(0, status + 40, 8, 17), Ok(None));
+        // Only a publication read consumes its pending flag.
+        assert_eq!(
+            board
+                .read_pair(0, 0x28e3c0000, 8, 17)
+                .unwrap()
+                .unwrap()
+                .values[0],
+            0x1000
+        );
+        assert_eq!(
+            board.read_pair(0, status, 8, 17).unwrap().unwrap().values,
+            [0x0000000200000000, 2]
         );
     }
 }
