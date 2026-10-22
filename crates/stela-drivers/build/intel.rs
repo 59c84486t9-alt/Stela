@@ -2,7 +2,7 @@
 //! compiler, archiver, freestanding flags, and the final library name. Dispatch
 //! headers use Mesa's original XML generator and a selected Python interpreter.
 /// Unchanged Xe sources that Stela's adapters include.
-const UPSTREAM: &[&str] = &["xe_pat.c", "xe_wopcm.c"];
+const UPSTREAM: &[&str] = &["xe_pat.c", "xe_uc_fw.c", "xe_wopcm.c"];
 
 pub fn configure(build: &mut cc::Build) {
     use std::{env, fs, path::PathBuf};
@@ -69,11 +69,7 @@ pub fn configure(build: &mut cc::Build) {
         "xe/xe_gt_type.h",
         "xe/xe_cache_level.h",
         "xe/xe_pat.h",
-        "xe/xe_uc_fw_catalog.h",
-        "xe/xe_uc_fw_css.h",
-        "xe/xe_uc_fw_cpd.h",
         "xe/xe_uc_fw_types.h",
-        "xe/xe_uc_fw_version.h",
         "xe/xe_wopcm.h",
         "xe/xe_uc_fw.h",
         "xe/xe_macros.h",
@@ -105,6 +101,7 @@ pub fn configure(build: &mut cc::Build) {
         "linux/align.h",
         "linux/array_size.h",
         "linux/container_of.h",
+        "linux/err.h",
         "linux/errno.h",
         "linux/sizes.h",
         "linux/stringify.h",

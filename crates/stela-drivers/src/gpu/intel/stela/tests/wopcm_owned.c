@@ -8,7 +8,7 @@
 #include "../activation.c"
 #include "../firmware.h"
 #include "abi/uc_fw_abi.h"
-#include "xe_uc_fw_version.h"
+#include "xe_guc.h"
 struct model {
     pthread_mutex_t lock;
     u32 ack, offset, size;

@@ -249,12 +249,10 @@ test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/tes
 -include $(HOST_DISPATCH_OBJECTS:.o=.d)
 -include $(HOST_COMPUTE_OBJECTS:.o=.d)
 
-# Exact original GuC catalog/CSS algorithms; immutable metadata only, no upload.
-FIRMWARE_HEADERS := $(SOURCE)/firmware.h \
+# Unchanged Linux xe_uc_fw.c selection and CSS/CPD parsing; metadata only, no upload.
+FIRMWARE_HEADERS := $(SOURCE)/firmware.h $(COMPAT_HEADERS) $(UPSTREAM)/xe_uc_fw.c \
     $(SOURCE)/../xe/xe_platform_types.h $(SOURCE)/../xe/xe_gt_type.h $(SOURCE)/../xe/xe_huc_role.h \
-    $(SOURCE)/../xe/xe_uc_fw_types.h $(SOURCE)/../xe/xe_uc_fw_catalog.h \
-    $(SOURCE)/../xe/xe_uc_fw_css.h $(SOURCE)/../xe/xe_uc_fw_cpd.h $(SOURCE)/../xe/xe_uc_fw_version.h \
-    $(SOURCE)/../xe/abi/uc_fw_abi.h
+    $(SOURCE)/../xe/xe_uc_fw.h $(SOURCE)/../xe/xe_uc_fw_types.h $(SOURCE)/../xe/abi/uc_fw_abi.h
 $(BUILD)/firmware.o: $(SOURCE)/firmware.c $(FIRMWARE_HEADERS) | $(BUILD)
 	$(CC) $(CFLAGS) -MD -MP -c "$<" -o "$@"
 .PHONY: firmware test-firmware

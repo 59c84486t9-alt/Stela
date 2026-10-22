@@ -36,16 +36,12 @@ static void cpd(uint8_t bytes[IMAGE_BYTES])
 static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size_t size)
 {
     assert(size <= IMAGE_BYTES);
-    /* Frozen original's is_cpd_header dereferences u32*. Give that donor its
-     * actual alignment; native parser must also work on real offset1 spans. */
-    _Alignas(uint32_t) uint8_t aligned[IMAGE_BYTES];
-    memcpy(aligned, bytes, size);
     struct xe_uc_fw fw = {0};
     stela_intel_fw_donor_select(platform, media_gt ? XE_GT_TYPE_MEDIA : XE_GT_TYPE_MAIN,
                                 XE_UC_FW_TYPE_HUC, &fw);
     assert(fw.path);
     uint32_t expected_diagnostics, diagnostics;
-    int expected = stela_intel_fw_donor_huc(&fw, platform, aligned, size, &expected_diagnostics);
+    int expected = stela_intel_fw_donor_huc(&fw, platform, bytes, size, &expected_diagnostics);
     struct stela_intel_huc_metadata output, before;
     memset(&before, 0xa5, sizeof(before)); output = before;
     int status = stela_intel_huc_parse(platform, 1200, media_gt, bytes, size, &output, &diagnostics);
@@ -72,17 +68,11 @@ static void compare(unsigned platform, bool media_gt, const uint8_t *bytes, size
     assert(!fw.bo && fw.status == XE_UC_FIRMWARE_UNINITIALIZED);
     ++cases;
 }
-struct manifest_result { uint32_t diagnostics, security; };
-static void test_gsc_manifest(void *context, struct xe_uc_fw *fw,
-                              const struct gsc_manifest_header *manifest)
-{
-    struct manifest_result *result = context;
-    fw->versions.found[XE_UC_FW_VER_RELEASE].build = manifest->fw_version.build;
-    result->security = manifest->security_version;
-}
 int main(void)
 {
-    uint8_t storage[IMAGE_BYTES + 1], *bytes = storage + 1;
+    /* Upstream's is_cpd_header reads the marker as a u32, as Linux's page
+     * aligned firmware buffers allow; Stela requires that alignment. */
+    _Alignas(uint32_t) uint8_t bytes[IMAGE_BYTES + 1];
     _Static_assert(sizeof("HUCP.man") <= sizeof(((struct gsc_cpd_entry *)0)->name), "HuC literal");
     _Static_assert(sizeof("huc_fw") <= sizeof(((struct gsc_cpd_entry *)0)->name), "CSS literal");
     _Static_assert(sizeof("RBEP.man") <= sizeof(((struct gsc_cpd_entry *)0)->name), "GSC literal");
@@ -146,19 +136,20 @@ int main(void)
         if (change == 4) { h->num_of_entries = 3; entry[2] = entry[0]; entry[2].offset = IMAGE_BYTES; }
         if (change == 5) entry[0].name[11] = 0xff;
         if (change == 6) entry[0].offset |= GSC_CPD_ENTRY_HUFFMAN_COMP;
-        struct xe_uc_fw a = {.type = XE_UC_FW_TYPE_GSC}, b = a;
-        struct manifest_result result = {0}; uint32_t expected_security = 0, expected_diagnostics;
-        const struct xe_uc_fw_cpd_ops ops = {&result, cpd_diagnostic, invariant, huc_css, test_gsc_manifest};
-        int status = xe_uc_fw_cpd_parse(&a, aligned, sizeof(aligned), "RBEP.man", sizeof("RBEP.man"),
-                                        NULL, 0, XE_METEORLAKE, &ops);
+        struct native_fw native = {0};
+        uint32_t diagnostics = 0, expected_security = 0, expected_diagnostics;
+        struct xe_uc_fw *a = prepare(&native, XE_METEORLAKE, false, XE_UC_FW_TYPE_GSC, &diagnostics);
+        struct xe_uc_fw b = *a;
+        int status = parse_cpd_header(a, aligned, sizeof(aligned), "RBEP.man", NULL);
         int expected = stela_intel_fw_donor_cpd(&b, XE_METEORLAKE, aligned, sizeof(aligned), "RBEP.man", NULL,
                                                &expected_security, &expected_diagnostics);
-        assert(status == expected && result.diagnostics == expected_diagnostics &&
-               a.has_gsc_headers == b.has_gsc_headers &&
-               !memcmp(&a.versions.found[0], &b.versions.found[0], sizeof(a.versions.found[0])) &&
-               result.security == expected_security);
-        if (!status) assert(a.versions.found[0].major == 9 && a.versions.found[0].minor == 8 &&
-                             a.versions.found[0].patch == 7 && a.versions.found[0].build == 6 && result.security == 42);
+        uint32_t security = native.gt.uc.gsc.security_version;
+        assert(status == expected && diagnostics == expected_diagnostics &&
+               a->has_gsc_headers == b.has_gsc_headers &&
+               !memcmp(&a->versions.found[0], &b.versions.found[0], sizeof(a->versions.found[0])) &&
+               security == expected_security);
+        if (!status) assert(a->versions.found[0].major == 9 && a->versions.found[0].minor == 8 &&
+                             a->versions.found[0].patch == 7 && a->versions.found[0].build == 6 && security == 42);
         ++gsc_cases;
     }
     /* Invalid/absent/default role and malformed arithmetic preserve output. */
@@ -176,6 +167,13 @@ int main(void)
         assert(status == (bad == 0 || bad == 3 ? -EINVAL : bad < 4 ? -95 : -75));
         assert(!memcmp(&output, &before, sizeof(output)));
     }
-    printf("Intel HuC: %u frozen CPD/CSS donor comparisons, offset1 native slices,20 directory cases, %u original GSC build/security/name cases,%u strict wide-arithmetic refusals,7 refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n", cases, gsc_cases, checked_arithmetic);
+    /* A misaligned image is refused before any byte is read. */
+    {
+        struct stela_intel_huc_metadata before;
+        memset(&before, 0xa5, sizeof(before)); output = before;
+        assert(stela_intel_huc_parse(XE_TIGERLAKE, 1200, false, bytes + 1, 400, &output, &d) == -EINVAL &&
+               !d && !memcmp(&output, &before, sizeof(output)));
+    }
+    printf("Intel HuC: %u frozen CPD/CSS donor comparisons, 1 misaligned refusal,20 directory cases, %u original GSC build/security/name cases,%u strict wide-arithmetic refusals,7 refusal/overflow cases; host images only, no authentication/BO/WOPCM readiness\n", cases, gsc_cases, checked_arithmetic);
     return 0;
 }

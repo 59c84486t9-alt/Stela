@@ -6,14 +6,18 @@
 #include <linux/minmax.h>
 #include <linux/sizes.h>
 #include <linux/sprintf.h>
+#include <linux/string.h>
 #include "xe_device_types.h"
 #include "xe_gt_types.h"
 #include "xe_macros.h"
+#include "xe_sriov.h"
 #define IS_DGFX(xe) ((xe)->info.is_dgfx)
 static inline struct xe_device *gt_to_xe(struct xe_gt *gt)
 {
 	return gt->xe;
 }
+/* Defined by each translation unit that asks for uC support. */
+static bool xe_device_uc_enabled(struct xe_device *xe);
 static inline struct xe_force_wake *gt_to_fw(struct xe_gt *gt)
 {
 	return &gt->pm.fw;

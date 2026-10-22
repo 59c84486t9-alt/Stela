@@ -8,7 +8,7 @@
 #include "xe_gt_type.h"
 #include "xe_uc_fw_types.h"
 #include "abi/uc_fw_abi.h"
-#include "xe_uc_fw_version.h"
+#include "xe_guc.h"
 #include "../firmware.h"
 #include "firmware_donor.h"
 #include <assert.h>

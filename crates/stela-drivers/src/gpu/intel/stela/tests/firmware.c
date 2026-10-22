@@ -24,6 +24,15 @@ static void same_fw(const struct xe_uc_fw *a, const struct xe_uc_fw *b)
     assert(!a->bo && !b->bo && a->status == XE_UC_FIRMWARE_UNINITIALIZED &&
            b->status == XE_UC_FIRMWARE_UNINITIALIZED);
 }
+/* Upstream selection through the production adapter's GT. */
+static struct xe_uc_fw *selected(struct native_fw *native, unsigned platform, unsigned gt,
+                                 unsigned type, uint32_t *diagnostics)
+{
+    struct xe_uc_fw *fw = prepare(native, platform, gt == XE_GT_TYPE_MEDIA,
+                                  (enum xe_uc_fw_type)type, diagnostics);
+    uc_fw_auto_select(&native->xe, fw);
+    return fw;
+}
 static struct uc_css_header header(uint32_t release)
 {
     return (struct uc_css_header){.header_size_dw = 32 + 64 + 64 + 1,
@@ -42,17 +51,19 @@ int main(void)
     for (unsigned platform = 0; platform <= XE_NOVALAKE_P; ++platform)
         for (unsigned gt = XE_GT_TYPE_MAIN; gt <= XE_GT_TYPE_MEDIA; ++gt)
             for (unsigned type = 0; type < XE_UC_FW_NUM_TYPES; ++type) {
-                struct xe_uc_fw a = {.type = (enum xe_uc_fw_type)type}, b = {0};
-                xe_uc_fw_select_default((enum xe_platform)platform, (enum xe_gt_type)gt, &a);
+                struct native_fw native = {0};
+                uint32_t diagnostics = 0;
+                const struct xe_uc_fw *a = selected(&native, platform, gt, type, &diagnostics);
+                struct xe_uc_fw b = {0};
                 stela_intel_fw_donor_select(platform, gt, type, &b);
-                same_fw(&a, &b); ++selectors;
-                if (type == XE_UC_FW_TYPE_GUC && gt == XE_GT_TYPE_MAIN && a.path) {
+                same_fw(a, &b); ++selectors;
+                if (type == XE_UC_FW_TYPE_GUC && gt == XE_GT_TYPE_MAIN && a->path) {
                     struct stela_intel_guc_selection output;
                     assert(stela_intel_guc_select(platform, &output) == 0);
-                    assert(!strcmp((const char *)output.name, a.path) &&
-                           output.wanted[0] == a.versions.wanted.major &&
-                           output.wanted[1] == a.versions.wanted.minor &&
-                           output.wanted[2] == a.versions.wanted.patch);
+                    assert(!strcmp((const char *)output.name, a->path) &&
+                           output.wanted[0] == a->versions.wanted.major &&
+                           output.wanted[1] == a->versions.wanted.minor &&
+                           output.wanted[2] == a->versions.wanted.patch);
                     ++guc_entries;
                 }
             }
@@ -103,15 +114,15 @@ int main(void)
     struct uc_css_header css = header(MAKE_GUC_VER(70, 44, 1));
     memcpy(bytes, &css, sizeof(css));
     for (size_t size = 0; size <= 400; ++size) {
-        struct xe_uc_fw a = {.type = XE_UC_FW_TYPE_GUC}, b = {0};
-        xe_uc_fw_select_default(XE_TIGERLAKE, XE_GT_TYPE_MAIN, &a);
-        stela_intel_fw_donor_select(XE_TIGERLAKE, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &b);
+        struct native_fw native = {0};
         uint32_t ad = 0, bd = 0, nd = 0;
-        const struct xe_uc_fw_css_ops ops = {&ad, diagnostic, invariant};
-        int ar = xe_uc_fw_css_parse(&a, bytes, size, &ops);
-        if (!ar) ar = xe_uc_fw_css_check_version(&a, &ops);
+        struct xe_uc_fw *a = selected(&native, XE_TIGERLAKE, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &ad);
+        struct xe_uc_fw b = {0};
+        stela_intel_fw_donor_select(XE_TIGERLAKE, XE_GT_TYPE_MAIN, XE_UC_FW_TYPE_GUC, &b);
+        int ar = parse_headers(a, &(const struct firmware){.size = size, .data = bytes});
+        if (!ar) ar = xe_uc_fw_check_version_requirements(a);
         int br = stela_intel_fw_donor_parse(&b, bytes, size, &bd);
-        assert(ar == br && ad == bd); same_fw(&a, &b);
+        assert(ar == br && ad == bd); same_fw(a, &b);
         struct stela_intel_guc_metadata out, before; memset(&before, 0xa5, sizeof(before)); out = before;
         assert(stela_intel_guc_parse(XE_TIGERLAKE, bytes, size, &out, &nd) == ar && nd == ad);
         if (ar) assert(!memcmp(&out, &before, sizeof(out)));
@@ -141,17 +152,20 @@ int main(void)
         for (unsigned overridden = 0; overridden < 2; ++overridden)
             for (unsigned wanted_major = 0; wanted_major < 2; ++wanted_major)
                 for (size_t i = 0; i < ARRAY_SIZE(releases); ++i) {
-                    struct xe_uc_fw a = {.type = XE_UC_FW_TYPE_GUC,
-                        .full_ver_required = full != 0, .user_overridden = overridden != 0,
-                        .versions.wanted = {.major = wanted_major ? 70 : 0, .minor = 44, .patch = 1}};
-                    a.versions.found[0] = (struct xe_uc_fw_version){
+                    struct native_fw native = {0};
+                    uint32_t ad = 0, bd = 0;
+                    struct xe_uc_fw *a = prepare(&native, XE_TIGERLAKE, false, XE_UC_FW_TYPE_GUC, &ad);
+                    a->full_ver_required = full != 0;
+                    a->user_overridden = overridden != 0;
+                    a->versions.wanted = (struct xe_uc_fw_version){
+                        .major = wanted_major ? 70 : 0, .minor = 44, .patch = 1};
+                    a->versions.found[0] = (struct xe_uc_fw_version){
                         .major = (u16)(releases[i] >> 16), .minor = (u16)((releases[i] >> 8) & 255),
                         .patch = (u16)(releases[i] & 255)};
-                    struct xe_uc_fw b = a; uint32_t ad = 0, bd = 0;
-                    const struct xe_uc_fw_css_ops ops = {&ad, diagnostic, invariant};
-                    int ar = xe_uc_fw_css_check_version(&a, &ops);
+                    struct xe_uc_fw b = *a;
+                    int ar = xe_uc_fw_check_version_requirements(a);
                     int br = stela_intel_fw_donor_version(&b, &bd);
-                    assert(ar == br && ad == bd); same_fw(&a, &b); ++versions;
+                    assert(ar == br && ad == bd); same_fw(a, &b); ++versions;
                 }
     for (unsigned bad = 0; bad < 6; ++bad) {
         css = header(MAKE_GUC_VER(70, 44, 1));

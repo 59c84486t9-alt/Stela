@@ -7,6 +7,8 @@
 /* Defined by each translation unit that accesses registers. */
 static u32 xe_mmio_read32(struct xe_mmio *mmio, struct xe_reg reg);
 static void xe_mmio_write32(struct xe_mmio *mmio, struct xe_reg reg, u32 val);
+static int xe_mmio_wait32(struct xe_mmio *mmio, struct xe_reg reg, u32 mask, u32 val,
+			  u32 timeout_us, u32 *out_val, bool atomic);
 /* Copyright © 2021-2023 Intel Corporation; from xe_mmio.c. */
 static inline int xe_mmio_write32_and_verify(struct xe_mmio *mmio, struct xe_reg reg,
 					     u32 val, u32 mask, u32 eval)
