@@ -29,8 +29,9 @@
 //!   takes only the entry's permitted bits (none for most); any other set
 //!   bit stops, as for ACTLR_EL1.
 //! - `Status`: the status of an event this machine never raises (an error,
-//!   an uncore interrupt). It reads 0, and the writes software uses to
-//!   clear it (write-one-to-clear) change nothing.
+//!   an uncore interrupt). It reads the entry's hand-off value (no event
+//!   recorded, with the enables iBoot leaves set), and the writes software
+//!   uses to clear it (write-one-to-clear) change nothing.
 //! - `Record`: information about such an event. It reads 0, and since no
 //!   consumer writes it, a write stops.
 //! - `Counter`: an event counter whose controls (`Control` entries) accept
@@ -90,8 +91,9 @@ macro_rules! encodings {
     };
 }
 
-// Names from m1n1 `cpu_regs.h` where it has one, from XNU where its strings
-// or headers give one, else the encoding.
+// Names from XNU where its sources give one (xnu-6153.141.1 to
+// xnu-12377.121.6 headers and strings), else from m1n1 (`cpu_regs.h`, else
+// `proxyclient/m1n1/apple_regs.json`), else the encoding.
 encodings! {
     HID0 = 0, 0, 0;
     EHID0 = 0, 0, 1;
@@ -102,8 +104,8 @@ encodings! {
     EHID20 = 0, 1, 2;
     HID21 = 0, 1, 3;
     TUNING_C1_6 = 0, 1, 6;
-    TUNING_C2_0 = 0, 2, 0;
-    TUNING_C2_1 = 0, 2, 1;
+    HID2 = 0, 2, 0;
+    EHID2 = 0, 2, 1;
     TUNING_C2_3 = 0, 2, 3;
     TUNING_C2_4 = 0, 2, 4;
     TUNING_C2_5 = 0, 2, 5;
@@ -124,12 +126,12 @@ encodings! {
     HID13 = 0, 14, 0;
     HID14 = 0, 15, 0;
     HID16 = 0, 15, 2;
-    TUNING_C15_5 = 0, 15, 5;
+    HID17 = 0, 15, 5;
     MEM_STALL_SELECT_0 = 1, 0, 3;
     MEM_STALL_SELECT_1 = 1, 1, 3;
     MEM_STALL_SELECT_2 = 1, 2, 3;
     MEM_STALL_SELECT_3 = 1, 3, 3;
-    VM_CONTEXT = 1, 8, 2;
+    PMCR1_GL1 = 1, 8, 2;
     MEM_STALL_COUNTER_0 = 1, 8, 3;
     MEM_STALL_COUNTER_1 = 1, 9, 3;
     MEM_STALL_COUNTER_2 = 1, 10, 3;
@@ -148,24 +150,24 @@ encodings! {
     CORE_TUNING_1 = 4, 0, 1;
     E_FED_ERR_STS = 4, 0, 2;
     CORE_TUNING_3 = 4, 0, 3;
-    GUEST_C2_6 = 4, 2, 6;
+    VMSA_LOCK_EL12 = 4, 2, 6;
     AMX_CTX_EL1 = 4, 5, 0;
-    GUEST_C8_0 = 4, 8, 0;
-    GUEST_C8_1 = 4, 8, 1;
-    GUEST_C8_2 = 4, 8, 2;
-    GUEST_C8_3 = 4, 8, 3;
-    GUEST_C9_0 = 4, 9, 0;
-    GUEST_C9_1 = 4, 9, 1;
-    GUEST_C9_2 = 4, 9, 2;
-    GUEST_C9_3 = 4, 9, 3;
-    GUEST_C9_4 = 4, 9, 4;
-    GUEST_C9_5 = 4, 9, 5;
+    SPRR_UMPRR_EL12 = 4, 8, 0;
+    SPRR_UPERM_SH1_EL12 = 4, 8, 1;
+    SPRR_UPERM_SH2_EL12 = 4, 8, 2;
+    SPRR_UPERM_SH3_EL12 = 4, 8, 3;
+    CTRR_A_LWR_EL12 = 4, 9, 0;
+    CTRR_A_UPR_EL12 = 4, 9, 1;
+    CTRR_B_LWR_EL12 = 4, 9, 2;
+    CTRR_B_UPR_EL12 = 4, 9, 3;
+    CTRR_CTL_EL12 = 4, 9, 4;
+    CTRR_LOCK_EL12 = 4, 9, 5;
     SPTM_KEY_0 = 4, 10, 0;
     SPTM_KEY_1 = 4, 10, 1;
     SPTM_KEY_2 = 4, 10, 2;
     SPTM_KEY_3 = 4, 10, 3;
     SIQ_CFG_EL1 = 4, 10, 4;
-    NESTED_PAGE = 4, 10, 7;
+    AVNCR_EL2 = 4, 10, 7;
     THREAD_CONTROL = 4, 12, 0;
     THREAD_KEY_0 = 4, 13, 6;
     THREAD_KEY_1 = 4, 13, 7;
@@ -177,47 +179,47 @@ encodings! {
     GUEST_C15_2 = 4, 15, 2;
     JIT_BOX_MODE = 4, 15, 4;
     GUEST_C15_5 = 4, 15, 5;
-    THREAD_PERMISSIONS = 4, 15, 6;
+    JCTL_EL0 = 4, 15, 6;
     DPC_ERR_STS = 5, 0, 5;
-    GUEST_VGIC = 5, 1, 2;
+    VM_TMR_LR_EL2 = 5, 1, 2;
     SWITCH_CLEARED = 5, 1, 4;
     WATCHDOG_DIAG0 = 5, 2, 6;
     ACC_CFG = 5, 4, 0;
     ACC_OVRD = 5, 6, 0;
     TRACE_CLEARED = 5, 10, 1;
     MMU_ERR_STS = 6, 0, 0;
-    GUARDED_AFSR1 = 6, 0, 2;
-    GUEST_AFSR1 = 6, 0, 3;
+    AFSR1_GL2 = 6, 0, 2;
+    AFSR1_GL12 = 6, 0, 3;
     BP_OBJC_ADR_EL1 = 6, 0, 4;
     BP_OBJC_CTL_EL1 = 6, 0, 5;
     GUARDED_HPFAR = 6, 1, 1;
     E_MMU_ERR_STS = 6, 2, 0;
-    GUEST_KEY_C2_1 = 6, 2, 1;
-    GUEST_KEY_C2_2 = 6, 2, 2;
-    GUEST_KEY_C2_3 = 6, 2, 3;
-    GUEST_KEY_C2_4 = 6, 2, 4;
-    TSO_THREAD_CONTROL = 6, 2, 5;
-    GUEST_SPRR_C6_0 = 6, 6, 0;
-    GUEST_SPRR_C6_1 = 6, 6, 1;
-    GUEST_SPRR_C6_2 = 6, 6, 2;
-    GUEST_SPRR_C6_3 = 6, 6, 3;
-    GUEST_KEY_C7_0 = 6, 7, 0;
-    GUEST_KEY_C7_1 = 6, 7, 1;
-    GUEST_KEY_C7_2 = 6, 7, 2;
-    GUEST_KEY_C7_3 = 6, 7, 3;
-    GUEST_KEY_C7_4 = 6, 7, 4;
-    GUEST_KEY_C7_5 = 6, 7, 5;
-    GUEST_KEY_C7_6 = 6, 7, 6;
-    GUEST_KEY_C7_7 = 6, 7, 7;
-    TSO_THREAD_FLAGS = 6, 8, 3;
-    GXF_MASK = 6, 8, 5;
+    APGAKEYLO_EL12 = 6, 2, 1;
+    APGAKEYHI_EL12 = 6, 2, 2;
+    KERNKEYLO_EL12 = 6, 2, 3;
+    KERNKEYHI_EL12 = 6, 2, 4;
+    AFPCR_EL0 = 6, 2, 5;
+    SPRR_PMPRR_EL12 = 6, 6, 0;
+    SPRR_PPERM_SH1_EL12 = 6, 6, 1;
+    SPRR_PPERM_SH2_EL12 = 6, 6, 2;
+    SPRR_PPERM_SH3_EL12 = 6, 6, 3;
+    APIAKEYLO_EL12 = 6, 7, 0;
+    APIAKEYHI_EL12 = 6, 7, 1;
+    APIBKEYLO_EL12 = 6, 7, 2;
+    APIBKEYHI_EL12 = 6, 7, 3;
+    APDAKEYLO_EL12 = 6, 7, 4;
+    APDAKEYHI_EL12 = 6, 7, 5;
+    APDBKEYLO_EL12 = 6, 7, 6;
+    APDBKEYHI_EL12 = 6, 7, 7;
+    ASPSR_EL1 = 6, 8, 3;
+    PMCR1_COMPANION = 6, 8, 5;
     GUEST_C12_7 = 6, 12, 7;
     APVMKEYLO_EL2 = 6, 14, 4;
     APVMKEYHI_EL2 = 6, 14, 5;
     ACTLR_EL12 = 6, 14, 6;
     APSTS_EL12 = 6, 14, 7;
-    GUEST_SPRR_C15_4 = 6, 15, 4;
-    GUEST_SPRR_C15_5 = 6, 15, 5;
+    SPRR_CONFIG_EL12 = 6, 15, 4;
+    SPRR_AMRANGE_EL12 = 6, 15, 5;
     CLUSTER_COUNTER_C0 = 7, 0, 2;
     AON_COUNTER_0 = 7, 0, 3;
     UPMCR0 = 7, 0, 4;
@@ -264,6 +266,9 @@ encodings! {
     UPMC7 = 7, 14, 4;
 }
 
+/// The engine's tests still name SPRR_CONFIG_EL12 by its former name.
+pub const GUEST_SPRR_C15_4: Encoding = SPRR_CONFIG_EL12;
+
 /// UPMCR0's interrupt mode 4 (FIQ, bits 16-18) and per-counter PMI enables
 /// (bits 20-35): m1n1 `UPMCR0_IMODE_T8020`, `UPMCR0_IMODE_FIQ` and
 /// `UPMCR0_PMI_SHIFT_T8020`, for 16 counters. Its counter enables (bits
@@ -271,6 +276,10 @@ encodings! {
 const UPMCR0_IMODE_FIQ: u64 = 4 << 16;
 const UPMCR0_PMI_ENABLES: u64 = 0xffff << 20;
 const UPMCR0_PERMITTED: u64 = UPMCR0_IMODE_FIQ | UPMCR0_PMI_ENABLES;
+
+/// What iBoot leaves set in L2C_ERR_STS: undescribed enables in bits 34-38,
+/// 40-43 and 60 (Asahi `hw/cpu/system-registers.md`).
+const L2C_ERR_STS_HANDOFF: u64 = 0x1f << 34 | 0xf << 40 | 1 << 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Class {
@@ -307,6 +316,8 @@ pub struct Entry {
     /// what is missing: a write that sets one completes and is reported
     /// once ([`Entry::unmodeled_effect`]), and stops in strict mode.
     pub unmodeled: Option<(u64, &'static str)>,
+    /// What a `Status` entry reads: the enables iBoot hands off, no event.
+    pub handoff: u64,
 }
 
 const fn entry(
@@ -324,10 +335,28 @@ const fn entry(
         el2: false,
         permitted: 0,
         unmodeled: None,
+        handoff: 0,
     }
 }
 
+/// A `Control` entry that holds every value and reports a nonzero one once
+/// as `missing` (strict mode stops): its effect is not established.
+const fn held(
+    encoding: Encoding,
+    name: &'static str,
+    evidence: &'static str,
+    missing: &'static str,
+) -> Entry {
+    entry(encoding, name, Class::Control, evidence)
+        .permitting(u64::MAX)
+        .unmodeled(u64::MAX, missing)
+}
+
 impl Entry {
+    const fn handing_off(self, handoff: u64) -> Self {
+        Self { handoff, ..self }
+    }
+
     const fn cluster(self) -> Self {
         Self {
             scope: Scope::Cluster,
@@ -381,8 +410,10 @@ const JIT_BOX_UNMODELED: &str = "JIT box enabled; enforcement not modeled: JITs 
 const SPTM_KEY_WRITES: &str = "SPTM 26A434 writes it once per CPU with a PAC-key-derived \
     value after the architectural PAC keys and reads it nowhere; TXM and the kernel never touch it";
 
-const M1N1_TUNING: &str = "m1n1 cpu_regs.h names it a core tuning (HID) register; SPTM 26A434 \
-    sets or clears bits with read-modify-write at boot";
+const M1N1_TUNING: &str = "XNU xnu-6153.141.1 arm64_common.h and m1n1 cpu_regs.h name it a \
+    core tuning (HID) register and its chicken bits (prefetch, fusion, store and fill \
+    disables, power-gating timings); SPTM 26A434 sets or clears bits with read-modify-write at \
+    boot. They tune speculation and power only, so no bit has an effect here";
 
 const XNU_THREAD_CONTROL: &str = "26A434 XNU saves it in every exception frame and \
     restores it on return (0xfffffe000bb9da44, 0xfffffe000bb9db48), SPTM 26A434 keeps it in \
@@ -391,21 +422,28 @@ const XNU_THREAD_CONTROL: &str = "26A434 XNU saves it in every exception frame a
     AIDR_EL1 here advertises no TSO";
 
 const XNU_AMX_CONTEXT: &str = "26A434 XNU CPU initialization writes MPIDR.Aff0 to it \
-    under one boot configuration (0xfffffe000bd80f44) and reads it nowhere; named AMX_CTX_EL1 \
-    beside AMX_CTL_EL1 (docs/research/amx.md)";
+    under one boot configuration (0xfffffe000bd80f44) and reads it nowhere; m1n1 cpu_regs.h names \
+    it AMX_CTX_EL1 beside AMX_CTL_EL1 (docs/research/amx.md), while m1n1's apple_regs.json calls \
+    it CORE_INDEX and Asahi's documentation says it is written with the core's index in its \
+    cluster during initialization, which the value fits. Nothing reads it, so it is stored";
 
 const SPTM_CORE_TUNING: &str = "no public name; SPTM 26A434 clears one bit with \
     read-modify-write at boot, selected by MPIDR core type next to its HID writes \
     (__text+0xb9a8, __text+0xb9d0), and AppleARM64ErrorHandler::_fedErrorHandler reads it \
     only after a front-end error (0xfffffe0009495114), which this machine never raises";
 
-const SPTM_GXF_MASK: &str = "SPTM 26A434 writes it once per CPU at boot with the value it \
-    writes to S3_1_C15_C8_2 (0x30300 or 0x3_0300_00ff_ff00, __text+0x1bebc) and reads it \
-    nowhere; TXM and the kernel never touch it";
+const PMCR1_COMPANION_EVIDENCE: &str = "no public name; SPTM 26A434 writes it once per CPU \
+    at boot with the value it writes to PMCR1_GL1 (0x30300 or 0x3_0300_00ff_ff00, __text+0x1bebc) \
+    and reads it nowhere; TXM and the kernel never touch it. Both values are PMCR1 mode-filter \
+    patterns (m1n1 cpu_regs.h PMCR1 layout), so it is plausibly another guarded-level PMCR1 \
+    (inference); stored";
 
-const VM_CONTEXT_EVIDENCE: &str = "SPTM 26A434 writes it once per CPU at boot (__text+0x1bec8); \
-    the 26A434 kernel only saves and restores it with a VM's GL12 registers \
-    (0xfffffe000bd9eddc, 0xfffffe000bda2bb4)";
+const PMCR1_GL1_EVIDENCE: &str = "m1n1's apple_regs.json names it PMCR1_GL1, the \
+    core PMU's mode filter for the guarded level: SPTM 26A434 writes 0x30300 (PMC0 and PMC1 \
+    counting at EL0 and EL1) or a full enable pattern once per CPU at boot (__text+0x1bec8), and \
+    the 26A434 kernel only saves and restores it with a VM's GL12 registers (0xfffffe000bd9eddc, \
+    0xfffffe000bda2bb4). Stored: machine::pmu does not consult it, so counting at a guarded level \
+    follows PMCR1 (a core PMU gap)";
 
 const ACC_CFG_EVIDENCE: &str = "m1n1 cpu_regs.h names it, with the branch-predictor sleep field \
     ACC_CFG_BP_SLEEP (bits 2-3), which 26A434 XNU sets with read-modify-write \
@@ -416,10 +454,12 @@ const ACC_OVRD_EVIDENCE: &str = "m1n1 cpu_regs.h names it; XNU xnu-12377.121.6 \
     ARM64_REG_ACC_OVRD_*) before a deep-sleep power-down, which acts only when the cluster \
     powers down, and core power-down stops (CYC_OVRD)";
 
-const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1; 26A434 XNU sets bits 0-1 to a \
-    per-thread mode with read-modify-write at context switch (0xfffffe000bd7c388) and before \
-    a power-down, and clears it elsewhere (0xfffffe000bd70b74); no field is described, and \
-    the HID1 and EHID20 chicken bits m1n1 names after the SIQ tune speculation only";
+const SIQ_CFG: &str = "m1n1 cpu_regs.h names it SIQ_CFG_EL1, and Asahi's documentation says \
+    the AICv2 sends a core that writes 3 to it no IRQs (FIQs are unaffected); 26A434 XNU sets bits \
+    0-1 to a per-thread mode with read-modify-write at context switch (0xfffffe000bd7c388) and \
+    before a power-down, and clears it elsewhere (0xfffffe000bd70b74). The value is held, but the \
+    interrupt controller here does not consult it, so that IRQ steering is not modeled (an AIC \
+    gap; docs/design/system.md)";
 
 const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the thread's \
     APIBKey value plus 4 or 5, after APIBKey and APDBKey (0xfffffe000bb9bd38), and reads it \
@@ -427,7 +467,8 @@ const XNU_THREAD_KEYS: &str = "26A434 XNU's context switch writes it with the th
     architectural keys";
 
 const WATCHDOG_DIAG: &str = "XNU xnu-12377.121.6 debug.c names it WATCHDOG_DIAG0, which the \
-    Apple watchdog logging ORs its flags into (awl_set_scratch_reg_hv_bit)";
+    Apple watchdog logging ORs its flags into (awl_set_scratch_reg_hv_bit); m1n1's \
+    apple_regs.json calls it AWL_SCRATCH_EL1";
 
 const XNU_SWITCH_CLEARS: &str = "26A434 XNU writes 0 to it at every context switch \
     (0xfffffe000bd8393c, beside S3_5_C15_C10_1) and reads it nowhere; SPTM and TXM never \
@@ -438,11 +479,18 @@ const XNU_TRACE_CLEARS: &str = "26A434 XNU writes 0 to it at every context switc
     (0xfffffe000bd7b0e0), and reads it nowhere; SPTM and TXM never touch it. Writing 0 can \
     only clear state this machine does not have (inference)";
 
-const XNU_THREAD_PERMISSIONS: &str = "26A434 XNU swaps a per-thread value through it at \
-    context switch (0xfffffe000bd83950) and elsewhere reads it beside SPRR_PERM_EL0, treating \
-    the thread as unrestricted when bits 14-15 are clear and SPRR_PERM_EL0 holds its default \
-    (0xfffffe000bd787cc). Those bits relate to EL0 permissions this machine does not \
-    implement for them, so only 0 is accepted (inference)";
+const JCTL_EVIDENCE: &str = "XNU names it JCTL_EL0 (xnu-12377.121.6 tests/user_msrs.c, a \
+    per-thread user register; sleh.c treats a fault with it in pointer signing mode as an \
+    attack on WebKit), so WebKit's JIT plausibly sets it from EL0 (inference); m1n1 calls it \
+    the JIT box \
+    control. 26A434 XNU swaps a per-thread value through it at context switch \
+    (0xfffffe000bd83950) and elsewhere reads it beside SPRR_PERM_EL0, treating the thread as \
+    unrestricted when bits 14-15 are clear and SPRR_PERM_EL0 holds its default \
+    (0xfffffe000bd787cc). Its layout is not public and what its modes enforce is not modeled: \
+    held, and a nonzero value is reported once as unmodeled";
+
+const JCTL_UNMODELED: &str = "JCTL_EL0 mode set; the pointer signing and JIT box restrictions it \
+    selects are not modeled";
 
 const ERROR_STATUS: &str = "an error status register (m1n1 cpu_regs.h names it; the E_ form \
     is the E-core's): 26A434 XNU's panic for an unhandled implementation-specific error \
@@ -451,20 +499,23 @@ const ERROR_STATUS: &str = "an error status register (m1n1 cpu_regs.h names it; 
     run only after an SError or implementation-defined error exception, which this machine \
     never raises, so it reads 0: no error recorded";
 
-const DPC_ERROR_STATUS: &str = "no m1n1 name; 26A434 XNU's panic for an unhandled \
-    implementation-specific error prints it as dpc_err_sts (0xfffffe000c52dabc), and \
-    AppleARM64ErrorHandler::_platformErrorHandler reads it on both core types and tests its \
-    valid bit 56 (0xfffffe000949497c). Both run only after an SError or \
-    implementation-defined error exception, which this machine never raises, so it reads 0: \
-    no error recorded";
+const DPC_ERROR_STATUS: &str = "XNU xnu-6153.141.1 arm64_common.h names it \
+    ARM64_REG_DPC_ERR_STS (HAS_DPC_ERR on H16 and H17); \
+    26A434 XNU's panic for an unhandled implementation-specific error prints it as dpc_err_sts \
+    (0xfffffe000c52dabc), and AppleARM64ErrorHandler::_platformErrorHandler reads it on both core \
+    types and tests its valid bit 56 (0xfffffe000949497c). Both run only after an SError or \
+    implementation-defined error exception, which this machine never raises, so it reads 0: no \
+    error recorded";
 
 const L2C_ERROR_STATUS: &str = "m1n1 cpu_regs.h names it, with L2C_ERR_STS_ENABLE_W1C; \
     26A434 XNU's error panic and AppleARM64ErrorHandler read it (0xfffffe000c52dad8, \
     0xfffffe00094949bc), _llcErrorHandler writes back the status bit it handled \
     (0xfffffe0009494ecc, 0xfffffe0009494f3c), write-one-to-clear, and _llcErrorClear writes \
     its argument (0xfffffe0009494e98); SPTM 26A434 reads it with L2C_ERR_ADR and L2C_ERR_INF \
-    (__text+0x5ab90). No error exception is ever raised here, so it reads 0 and the clearing \
-    writes change nothing";
+    only for panic_with_register_state (__text+0x5ab90). Asahi's documentation makes it one \
+    register per cluster and says iBoot hands it off with bits 34-38, 40-43 and 60 set, \
+    undescribed enables. No error exception is ever raised here, so it reads those enables with \
+    no error recorded, and the clearing writes change nothing";
 
 const L2C_ERROR_RECORD: &str = "m1n1 cpu_regs.h names it; 26A434 XNU's error panic, \
     AppleARM64ErrorHandler::_platformErrorHandler (0xfffffe00094949c0) and SPTM 26A434 \
@@ -567,11 +618,13 @@ const ENERGY_EVIDENCE: &str = "m1n1 cpu_regs.h names this core energy accumulato
     AppleT8112PMGR reports them (0xfffffe0009fa45d4, 0xfffffe0009fa8ad0). The emulated die \
     accumulates a fixed modeled core power (Registers::energy), all of it on CORE_NRG_ACC_DAT";
 
-const SPTM_HID_TUNING: &str = "no public name; the 26A434 SPTMs set or clear its bits with \
-    read-modify-write in their HID tuning sequences beside the m1n1-named HIDs, each under a \
-    MIDR part-number or revision test: the T8103's and T6000's (sptm.t8103 file 0xaba4c, \
-    0xabad0, 0xaba68 for C2_0, C2_1 and C15_5) and the T8122's (sptm.t8122 file 0xac050, \
-    0xabd88, 0xac1bc and 0xac138 for C2_3, C2_4, C2_5 and C1_6); no other component touches it";
+const SPTM_HID_TUNING: &str = "XNU xnu-6153.141.1 arm64_common.h names S3_0_C15_C2_0 HID2 \
+    (disMMUmtlbPrefetch, bit 13) and m1n1's apple_regs.json names C2_1 and C15_5 EHID2 and \
+    HID17; the others have no public name. The 26A434 SPTMs set or clear its \
+    bits with read-modify-write in their HID tuning sequences beside the m1n1-named HIDs, each \
+    under a MIDR part-number or revision test: the T8103's and T6000's (sptm.t8103 file 0xaba4c, \
+    0xabad0, 0xaba68 for C2_0, C2_1 and C15_5) and the T8122's (sptm.t8122 file 0xac050, 0xabd88, \
+    0xac1bc and 0xac138 for C2_3, C2_4, C2_5 and C1_6); no other component touches it";
 
 const SPTM_TUNING_SELECT_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM reads it in its \
     HID tuning sequence on MIDR part number 0x43 and sets S3_0_C15_C2_5 bit 0, HID7 bit 2 and \
@@ -606,24 +659,33 @@ const VM_COUNTER_OFFSET_EVIDENCE: &str = "no public name; the 26A434 T8122 SPTM 
     adding that offset (0x4d195e8); inference: a VM's counter offset. Stored; entering an EL1&0 \
     guest while it is nonzero stops at the ERET or GEXIT";
 
-const TSO_THREAD_EVIDENCE: &str = "no public name; 26A434 XNU saves S3_6_C15_C8_3 (bits 1-2) \
-    and S3_6_C15_C2_5 in the exception frame of a thread that runs with ACTLR_EL1's EnTSO and \
-    EnAPFLG and restores them on return (0xfffffe000bb9ad7c, 0xfffffe000bb9b96c), swaps a \
-    VM's values at guest exit and entry (0xfffffe000bb9da34, 0xfffffe000bb9b794), and SPTM \
-    26A434 restores S3_6_C15_C2_5 with each context it resumes (__text+0x44a0). Such \
-    threads need the TSO and APFLG features AIDR_EL1 here does not advertise, so only 0 is \
-    accepted (inference)";
+const AFPCR_EVIDENCE: &str = "XNU names it AFPCR_EL0 (xnu-7195.141.2 VMAPPLE.h) with DAZ \
+    (bit 0) and FTZ (bit 1) (proc_reg.h), which Asahi's documentation says replace FPCR.FZ while \
+    ACTLR_EL1.EnAFP is set; 26A434 XNU saves and restores it with ASPSR_EL1 for EnTSO and \
+    EnAPFLG threads (0xfffffe000bb9ad7c, 0xfffffe000bb9b96c) and swaps a VM's value \
+    (0xfffffe000bb9da34), and SPTM 26A434 restores it with each context it resumes \
+    (__text+0x44a0). EnAFP refuses here (AIDR_EL1 does not advertise AFP), so only 0 is \
+    accepted";
 
-const NESTED_PAGE_EVIDENCE: &str = "no public name; SPTM 26A434 reads and writes it through \
-    accessors beside VNCR_EL2's (__text+0x593b0, __text+0x593c8), stores a page's physical \
-    address in it with VNCR_EL2's when HCR_EL2.NV2 is set (__text+0x58f28, __text+0x59e4c) \
-    and clears it before entering EL1 (__text+0x49edc). The M2 has no FEAT_NV2, so only 0 \
-    is accepted (inference: a companion of VNCR_EL2)";
+const ASPSR_EVIDENCE: &str = "XNU names it ASPSR_EL1 (xnu-7195.141.2 VMAPPLE.h), with \
+    APSTATE G, P and A in bits 0-2 (xnu-12377.121.6 proc_reg.h): Apple state the PE records with \
+    an exception, as ASPSR_GL1 does for the guarded level. 26A434 XNU saves its bits 1-2 \
+    (APSTATE_AP_MASK) with AFPCR_EL0 in the exception frame of a thread that runs with ACTLR_EL1's \
+    EnTSO and EnAPFLG and restores them on return (0xfffffe000bb9ad7c, 0xfffffe000bb9b96c), and \
+    swaps a VM's values at guest exit and entry (0xfffffe000bb9da34, 0xfffffe000bb9b794). The PE \
+    here records none (TSO and APFLG, which AIDR_EL1 does not advertise), so it reads 0 and only 0 \
+    is accepted";
+
+const AVNCR_EVIDENCE: &str = "m1n1 cpu_regs.h names it AVNCR_EL2, which m1n1's \
+    hypervisor sets with VNCR_EL2 under NV2; SPTM 26A434 reads and writes it through accessors \
+    beside VNCR_EL2's (__text+0x593b0, __text+0x593c8), stores a page's physical address in it \
+    with VNCR_EL2's when HCR_EL2.NV2 is set (__text+0x58f28, __text+0x59e4c) and clears it before \
+    entering EL1 (__text+0x49edc). The M2 has no FEAT_NV2, so only 0 is accepted";
 
 const JIT_RANGE_EVIDENCE: &str = "no public name; 26A434 XNU's JIT box (jitbox.c) writes a \
     task's JIT range to it, a 32 MiB-aligned user address ORed with a size code, then ISB \
     (0xfffffe000bda5670), after its mode (S3_4_C15_C15_4), and never reads it. The context \
-    switch does so when the incoming task's box or S3_4_C15_C15_6 differs from the CPU's \
+    switch does so when the incoming task's box or JCTL_EL0 differs from the CPU's \
     (0xfffffe000bd839f0), and so does an update of the running task's (0xfffffe000bda5964). \
     The range acts only under an enabled mode, whose enforcement is not modeled, so it is held";
 
@@ -633,14 +695,14 @@ const GUARDED_HPFAR_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to H
     stage-2 fault is taken at a guarded level while HCR_EL2.VM is clear, so it reads 0, and \
     with VM set a read stops (machine::registers); no consumer writes it";
 
-const GUARDED_AFSR1_EVIDENCE: &str = "no public name; SPTM 26A434 copies it to AFSR1_EL2 \
-    when it reflects a guarded-level exception to the kernel (__text+0x27d0); inference: \
-    the guarded level's AFSR1, whose contents are implementation defined. As for \
+const GUARDED_AFSR1_EVIDENCE: &str = "m1n1's apple_regs.json names it AFSR1_GL2; SPTM \
+    26A434 copies it to AFSR1_EL2 when it reflects a guarded-level exception to the kernel \
+    (__text+0x27d0). Its contents are implementation defined: as for \
     AFSRn_ELx, this machine records nothing in it, so it reads 0; no consumer writes it";
 
-const GUEST_AFSR1_EVIDENCE: &str = "no public name; 26A434 XNU's hypervisor saves and \
-    restores it with a vCPU's GL12 registers (0xfffffe000bd9ede4, 0xfffffe000bda2bbc); \
-    inference: GL1's AFSR1 reached from EL2. As for AFSRn_ELx, this machine records no fault \
+const GUEST_AFSR1_EVIDENCE: &str = "m1n1's apple_regs.json names it AFSR1_GL12; 26A434 \
+    XNU's hypervisor saves and restores it with a vCPU's GL12 registers (0xfffffe000bd9ede4, \
+    0xfffffe000bda2bbc). As for AFSRn_ELx, this machine records no fault \
     status in it, so it holds what the hypervisor writes, 0 from reset (inference)";
 
 const VM_KEY_EVIDENCE: &str = "m1n1 cpu_regs.h names it; SPTM 26A434 clears it before \
@@ -654,7 +716,10 @@ const VM_STATUS_EVIDENCE: &str = "m1n1 cpu_regs.h names it APSTS_EL12; SPTM 26A4
     before running a vCPU (0xfffffe000bda2498). A guest's APSTS_EL1 reads MKEYVld as the \
     host's does, so the value is only stored";
 
-const GUEST_EVIDENCE: &str = "no public name; 26A434 XNU's hypervisor saves it with a vCPU's \
+const GUEST_EVIDENCE: &str = "m1n1's apple_regs.json names most of these the EL12 views of \
+    the SPRR, PAC key, VMSA lock and CTRR registers and VM_TMR_LR_EL2 (which Asahi's \
+    documentation describes as recording a guest's pending virtual timer); the rest have no \
+    public name. 26A434 XNU's hypervisor saves it with a vCPU's \
     EL12, GL12, SPRR, PAC or vGIC state after the guest runs (0xfffffe000bd9ea30) and loads \
     it before running one (0xfffffe000bd9fdc8), and SPTM 26A434 loads it from a saved \
     context before entering EL1, saves it on return and clears the PAC-group ones \
@@ -675,12 +740,7 @@ pub const TABLE: &[Entry] = &[
         Class::Control,
         XNU_TRACE_CLEARS,
     ),
-    entry(
-        THREAD_PERMISSIONS,
-        "S3_4_C15_C15_6 (unnamed)",
-        Class::Control,
-        XNU_THREAD_PERMISSIONS,
-    ),
+    held(JCTL_EL0, "JCTL_EL0", JCTL_EVIDENCE, JCTL_UNMODELED),
     entry(
         BP_OBJC_ADR_EL1,
         "BP_OBJC_ADR_EL1",
@@ -746,18 +806,8 @@ pub const TABLE: &[Entry] = &[
         Class::Tuning,
         SPTM_HID_TUNING,
     ),
-    entry(
-        TUNING_C2_0,
-        "S3_0_C15_C2_0 (unnamed)",
-        Class::Tuning,
-        SPTM_HID_TUNING,
-    ),
-    entry(
-        TUNING_C2_1,
-        "S3_0_C15_C2_1 (unnamed)",
-        Class::Tuning,
-        SPTM_HID_TUNING,
-    ),
+    entry(HID2, "HID2", Class::Tuning, SPTM_HID_TUNING),
+    entry(EHID2, "EHID2", Class::Tuning, SPTM_HID_TUNING),
     entry(
         TUNING_C2_3,
         "S3_0_C15_C2_3 (unnamed)",
@@ -776,12 +826,7 @@ pub const TABLE: &[Entry] = &[
         Class::Tuning,
         SPTM_HID_TUNING,
     ),
-    entry(
-        TUNING_C15_5,
-        "S3_0_C15_C15_5 (unnamed)",
-        Class::Tuning,
-        SPTM_HID_TUNING,
-    ),
+    entry(HID17, "HID17", Class::Tuning, SPTM_HID_TUNING),
     entry(
         SPTM_TUNING_SELECT,
         "S3_7_C15_C2_0 (unnamed)",
@@ -847,17 +892,12 @@ pub const TABLE: &[Entry] = &[
     ),
     entry(AMX_CTX_EL1, "AMX_CTX_EL1", Class::Storage, XNU_AMX_CONTEXT),
     entry(
-        GXF_MASK,
+        PMCR1_COMPANION,
         "S3_6_C15_C8_5 (unnamed)",
         Class::Storage,
-        SPTM_GXF_MASK,
+        PMCR1_COMPANION_EVIDENCE,
     ),
-    entry(
-        VM_CONTEXT,
-        "S3_1_C15_C8_2 (unnamed)",
-        Class::Storage,
-        VM_CONTEXT_EVIDENCE,
-    ),
+    entry(PMCR1_GL1, "PMCR1_GL1", Class::Storage, PMCR1_GL1_EVIDENCE),
     // Error records.
     entry(LSU_ERR_STS, "LSU_ERR_STS", Class::Status, ERROR_STATUS),
     entry(E_LSU_ERR_STS, "E_LSU_ERR_STS", Class::Status, ERROR_STATUS),
@@ -865,13 +905,10 @@ pub const TABLE: &[Entry] = &[
     entry(E_FED_ERR_STS, "E_FED_ERR_STS", Class::Status, ERROR_STATUS),
     entry(MMU_ERR_STS, "MMU_ERR_STS", Class::Status, ERROR_STATUS),
     entry(E_MMU_ERR_STS, "E_MMU_ERR_STS", Class::Status, ERROR_STATUS),
-    entry(
-        DPC_ERR_STS,
-        "S3_5_C15_C0_5 (XNU dpc_err_sts)",
-        Class::Status,
-        DPC_ERROR_STATUS,
-    ),
-    entry(L2C_ERR_STS, "L2C_ERR_STS", Class::Status, L2C_ERROR_STATUS),
+    entry(DPC_ERR_STS, "DPC_ERR_STS", Class::Status, DPC_ERROR_STATUS),
+    entry(L2C_ERR_STS, "L2C_ERR_STS", Class::Status, L2C_ERROR_STATUS)
+        .cluster()
+        .handing_off(L2C_ERR_STS_HANDOFF),
     entry(L2C_ERR_ADR, "L2C_ERR_ADR", Class::Record, L2C_ERROR_RECORD),
     entry(L2C_ERR_INF, "L2C_ERR_INF", Class::Record, L2C_ERROR_RECORD),
     // The uncore performance monitor, one per cluster.
@@ -1105,25 +1142,9 @@ pub const TABLE: &[Entry] = &[
     ),
     // Per-thread Rosetta (TSO) state, nested-virtualization and
     // guarded-level syndromes.
-    entry(
-        TSO_THREAD_FLAGS,
-        "S3_6_C15_C8_3 (unnamed)",
-        Class::Control,
-        TSO_THREAD_EVIDENCE,
-    ),
-    entry(
-        TSO_THREAD_CONTROL,
-        "S3_6_C15_C2_5 (unnamed)",
-        Class::Control,
-        TSO_THREAD_EVIDENCE,
-    ),
-    entry(
-        NESTED_PAGE,
-        "S3_4_C15_C10_7 (unnamed)",
-        Class::Control,
-        NESTED_PAGE_EVIDENCE,
-    )
-    .el2(),
+    entry(ASPSR_EL1, "ASPSR_EL1", Class::Control, ASPSR_EVIDENCE),
+    entry(AFPCR_EL0, "AFPCR_EL0", Class::Control, AFPCR_EVIDENCE),
+    entry(AVNCR_EL2, "AVNCR_EL2", Class::Control, AVNCR_EVIDENCE).el2(),
     entry(
         GUARDED_HPFAR,
         "S3_6_C15_C1_1 (unnamed)",
@@ -1132,15 +1153,15 @@ pub const TABLE: &[Entry] = &[
     )
     .el2(),
     entry(
-        GUARDED_AFSR1,
-        "S3_6_C15_C0_2 (unnamed)",
+        AFSR1_GL2,
+        "AFSR1_GL2",
         Class::Record,
         GUARDED_AFSR1_EVIDENCE,
     )
     .el2(),
     entry(
-        GUEST_AFSR1,
-        "S3_6_C15_C0_3 (unnamed)",
+        AFSR1_GL12,
+        "AFSR1_GL12",
         Class::Scratch,
         GUEST_AFSR1_EVIDENCE,
     )
@@ -1169,43 +1190,43 @@ pub const TABLE: &[Entry] = &[
         VM_COUNTER_OFFSET_EVIDENCE,
     )
     .el2(),
-    guest(GUEST_C2_6, "S3_4_C15_C2_6 (unnamed)"),
-    guest(GUEST_C8_0, "S3_4_C15_C8_0 (unnamed)"),
-    guest(GUEST_C8_1, "S3_4_C15_C8_1 (unnamed)"),
-    guest(GUEST_C8_2, "S3_4_C15_C8_2 (unnamed)"),
-    guest(GUEST_C8_3, "S3_4_C15_C8_3 (unnamed)"),
-    guest(GUEST_C9_0, "S3_4_C15_C9_0 (unnamed)"),
-    guest(GUEST_C9_1, "S3_4_C15_C9_1 (unnamed)"),
-    guest(GUEST_C9_2, "S3_4_C15_C9_2 (unnamed)"),
-    guest(GUEST_C9_3, "S3_4_C15_C9_3 (unnamed)"),
-    guest(GUEST_C9_4, "S3_4_C15_C9_4 (unnamed)"),
-    guest(GUEST_C9_5, "S3_4_C15_C9_5 (unnamed)"),
+    guest(VMSA_LOCK_EL12, "VMSA_LOCK_EL12"),
+    guest(SPRR_UMPRR_EL12, "SPRR_UMPRR_EL12"),
+    guest(SPRR_UPERM_SH1_EL12, "SPRR_UPERM_SH1_EL12"),
+    guest(SPRR_UPERM_SH2_EL12, "SPRR_UPERM_SH2_EL12"),
+    guest(SPRR_UPERM_SH3_EL12, "SPRR_UPERM_SH3_EL12"),
+    guest(CTRR_A_LWR_EL12, "CTRR_A_LWR_EL12"),
+    guest(CTRR_A_UPR_EL12, "CTRR_A_UPR_EL12"),
+    guest(CTRR_B_LWR_EL12, "CTRR_B_LWR_EL12"),
+    guest(CTRR_B_UPR_EL12, "CTRR_B_UPR_EL12"),
+    guest(CTRR_CTL_EL12, "CTRR_CTL_EL12"),
+    guest(CTRR_LOCK_EL12, "CTRR_LOCK_EL12"),
     guest(GUEST_C14_0, "S3_4_C15_C14_0 (unnamed)"),
     guest(GUEST_C14_1, "S3_4_C15_C14_1 (unnamed)"),
     guest(GUEST_C14_2, "S3_4_C15_C14_2 (unnamed)"),
     guest(GUEST_C14_3, "S3_4_C15_C14_3 (unnamed)"),
     guest(GUEST_C15_2, "S3_4_C15_C15_2 (unnamed)"),
     guest(GUEST_C15_5, "S3_4_C15_C15_5 (unnamed)"),
-    guest(GUEST_VGIC, "S3_5_C15_C1_2 (unnamed)"),
-    guest(GUEST_KEY_C2_1, "S3_6_C15_C2_1 (unnamed)"),
-    guest(GUEST_KEY_C2_2, "S3_6_C15_C2_2 (unnamed)"),
-    guest(GUEST_KEY_C2_3, "S3_6_C15_C2_3 (unnamed)"),
-    guest(GUEST_KEY_C2_4, "S3_6_C15_C2_4 (unnamed)"),
-    guest(GUEST_SPRR_C6_0, "S3_6_C15_C6_0 (unnamed)"),
-    guest(GUEST_SPRR_C6_1, "S3_6_C15_C6_1 (unnamed)"),
-    guest(GUEST_SPRR_C6_2, "S3_6_C15_C6_2 (unnamed)"),
-    guest(GUEST_SPRR_C6_3, "S3_6_C15_C6_3 (unnamed)"),
-    guest(GUEST_KEY_C7_0, "S3_6_C15_C7_0 (unnamed)"),
-    guest(GUEST_KEY_C7_1, "S3_6_C15_C7_1 (unnamed)"),
-    guest(GUEST_KEY_C7_2, "S3_6_C15_C7_2 (unnamed)"),
-    guest(GUEST_KEY_C7_3, "S3_6_C15_C7_3 (unnamed)"),
-    guest(GUEST_KEY_C7_4, "S3_6_C15_C7_4 (unnamed)"),
-    guest(GUEST_KEY_C7_5, "S3_6_C15_C7_5 (unnamed)"),
-    guest(GUEST_KEY_C7_6, "S3_6_C15_C7_6 (unnamed)"),
-    guest(GUEST_KEY_C7_7, "S3_6_C15_C7_7 (unnamed)"),
+    guest(VM_TMR_LR_EL2, "VM_TMR_LR_EL2"),
+    guest(APGAKEYLO_EL12, "APGAKeyLo_EL12"),
+    guest(APGAKEYHI_EL12, "APGAKeyHi_EL12"),
+    guest(KERNKEYLO_EL12, "KERNKEYLO_EL12"),
+    guest(KERNKEYHI_EL12, "KERNKEYHI_EL12"),
+    guest(SPRR_PMPRR_EL12, "SPRR_PMPRR_EL12"),
+    guest(SPRR_PPERM_SH1_EL12, "SPRR_PPERM_SH1_EL12"),
+    guest(SPRR_PPERM_SH2_EL12, "SPRR_PPERM_SH2_EL12"),
+    guest(SPRR_PPERM_SH3_EL12, "SPRR_PPERM_SH3_EL12"),
+    guest(APIAKEYLO_EL12, "APIAKeyLo_EL12"),
+    guest(APIAKEYHI_EL12, "APIAKeyHi_EL12"),
+    guest(APIBKEYLO_EL12, "APIBKeyLo_EL12"),
+    guest(APIBKEYHI_EL12, "APIBKeyHi_EL12"),
+    guest(APDAKEYLO_EL12, "APDAKeyLo_EL12"),
+    guest(APDAKEYHI_EL12, "APDAKeyHi_EL12"),
+    guest(APDBKEYLO_EL12, "APDBKeyLo_EL12"),
+    guest(APDBKEYHI_EL12, "APDBKeyHi_EL12"),
     guest(GUEST_C12_7, "S3_6_C15_C12_7 (unnamed)"),
-    guest(GUEST_SPRR_C15_4, "S3_6_C15_C15_4 (unnamed)"),
-    guest(GUEST_SPRR_C15_5, "S3_6_C15_C15_5 (unnamed)"),
+    guest(SPRR_CONFIG_EL12, "SPRR_CONFIG_EL12"),
+    guest(SPRR_AMRANGE_EL12, "SPRR_AMRANGE_EL12"),
 ];
 
 const fn guest(encoding: Encoding, name: &'static str) -> Entry {
@@ -1308,7 +1329,8 @@ impl Registers {
         let key = entry.encoding.selector();
         *self.reads.entry(key).or_default() += 1;
         match (self.stored(entry), entry.class) {
-            (_, Class::Status | Class::Record) => Ok(0),
+            (_, Class::Status) => Ok(entry.handoff),
+            (_, Class::Record) => Ok(0),
             (Some(value), _) => Ok(value),
             (None, Class::Storage | Class::Guest) => {
                 Err("read of an implementation-defined storage register before its first write")
@@ -1519,6 +1541,7 @@ mod tests {
             assert!(
                 entry.permitted == 0 || matches!(entry.class, Class::Control | Class::Prediction)
             );
+            assert!(entry.handoff == 0 || entry.class == Class::Status);
         }
     }
 
@@ -1528,9 +1551,10 @@ mod tests {
     fn error_records_read_zero_and_clearing_writes_change_nothing() {
         let mut registers = Registers::default();
         let status = lookup(L2C_ERR_STS).unwrap();
+        assert_eq!(status.scope, Scope::Cluster);
         // _llcErrorHandler's write-one-to-clear of the bit it handled.
         registers.write(status, 1).unwrap();
-        assert_eq!(registers.read(status), Ok(0));
+        assert_eq!(registers.read(status), Ok(L2C_ERR_STS_HANDOFF));
         for encoding in [LSU_ERR_STS, E_FED_ERR_STS, MMU_ERR_STS, DPC_ERR_STS] {
             assert_eq!(registers.read(lookup(encoding).unwrap()), Ok(0));
         }
@@ -1584,6 +1608,12 @@ mod tests {
             assert_eq!(mode.unmodeled_effect(enabled), Some(JIT_BOX_UNMODELED));
         }
         assert_eq!(range.unmodeled_effect(u64::MAX), None);
+        // A thread's JCTL_EL0 mode is held and reported.
+        let control = lookup(JCTL_EL0).unwrap();
+        registers.write(control, 1 << 14).unwrap();
+        assert_eq!(registers.read(control), Ok(1 << 14));
+        assert_eq!(control.unmodeled_effect(1 << 14), Some(JCTL_UNMODELED));
+        assert_eq!(control.unmodeled_effect(0), None);
         // The M1 kernels have no JIT box.
         assert!(super::lookup(JIT_RANGE, Chip::AppleM1).is_none());
         for chip in &Chip::ALL[1..] {
@@ -1681,7 +1711,7 @@ mod tests {
     fn nonzero_guest_state_is_reported() {
         let mut registers = Registers::default();
         assert!(registers.guest_state().is_none());
-        let guest = lookup(GUEST_SPRR_C15_4).unwrap();
+        let guest = lookup(SPRR_CONFIG_EL12).unwrap();
         assert!(guest.el2);
         // SPTM's host-restore clears and the hypervisor's zero loads.
         registers.write(guest, 0).unwrap();
@@ -1689,7 +1719,7 @@ mod tests {
         registers.write(guest, 0x3b).unwrap();
         assert_eq!(
             registers.guest_state().map(|entry| entry.encoding),
-            Some(GUEST_SPRR_C15_4)
+            Some(SPRR_CONFIG_EL12)
         );
         // The VM keys follow the PAC regime: stored, not guest state.
         registers.write(lookup(APVMKEYLO_EL2).unwrap(), 5).unwrap();
