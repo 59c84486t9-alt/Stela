@@ -12,6 +12,8 @@
 #[cfg(target_arch = "x86_64")]
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
+#[cfg(target_arch = "x86_64")]
+use core::sync::atomic::AtomicUsize;
 use core::{
     any::Any,
     cell::UnsafeCell,
@@ -163,6 +165,37 @@ struct State<const N: usize> {
     closed: bool,
     poisoned: bool,
 }
+/// No Runtime/Task pointer crosses into this IRQ-safe read view. A single
+/// actual executor binds these identities to its retained stack ranges.
+#[cfg(target_arch = "x86_64")]
+struct ActiveContext {
+    id: AtomicU64,
+    start: AtomicUsize,
+    end: AtomicUsize,
+}
+#[cfg(target_arch = "x86_64")]
+impl ActiveContext {
+    fn new() -> Self {
+        Self {
+            id: AtomicU64::new(0),
+            start: AtomicUsize::new(0),
+            end: AtomicUsize::new(0),
+        }
+    }
+    // Both methods require the qualified CPU with IF clear. No queue lock or
+    // borrowed Task state survives the subsequent hardware stack transition.
+    fn publish(&self, id: ContextId, bounds: &Range<usize>) {
+        self.start.store(bounds.start, Ordering::Relaxed);
+        self.end.store(bounds.end, Ordering::Relaxed);
+        self.id.store(id.get(), Ordering::Release);
+    }
+    fn clear(&self) {
+        self.id.store(0, Ordering::Release);
+        self.start.store(0, Ordering::Relaxed);
+        self.end.store(0, Ordering::Relaxed);
+    }
+}
+
 /// Shared preallocated admission slots. Every active/queued callback is covered
 /// by the actual provider/root owner retained at construction. Callbacks and
 /// their dynamic contexts must obey unsafe enqueue's lifetime contract.
@@ -171,6 +204,8 @@ pub struct Queue<const N: usize> {
     abandoned: AtomicBool,
     #[cfg(target_arch = "x86_64")]
     executor_claimed: AtomicBool,
+    #[cfg(target_arch = "x86_64")]
+    active: ActiveContext,
     cpu: ManuallyDrop<Arc<dyn Cpu>>,
     owner: ManuallyDrop<RetainedOwner>,
     state: ManuallyDrop<UnsafeCell<State<N>>>,
@@ -220,6 +255,8 @@ impl<const N: usize> Queue<N> {
             abandoned: AtomicBool::new(false),
             #[cfg(target_arch = "x86_64")]
             executor_claimed: AtomicBool::new(false),
+            #[cfg(target_arch = "x86_64")]
+            active: ActiveContext::new(),
             cpu: ManuallyDrop::new(cpu),
             owner: ManuallyDrop::new(owner),
             state: ManuallyDrop::new(UnsafeCell::new(State {
@@ -252,6 +289,29 @@ impl<const N: usize> Queue<N> {
             Ok(())
         }
     }
+    /// Read the actual executing owned work context, never a Runtime/Task
+    /// pointer. Genuine CPU/IRQ metadata is checked before active metadata or
+    /// hardware RSP. Arbitrary dispatcher/ISR stacks never receive an ID.
+    /// The one executor is permanently bound to this unique queue lifetime;
+    /// retired/abandoned views refuse even if a consumer retained the Arc.
+    #[cfg(target_arch = "x86_64")]
+    pub fn current_id(&self) -> Result<ContextId, WorkError> {
+        self.process()?;
+        if self.retired.load(Ordering::Acquire) || self.abandoned.load(Ordering::Acquire) {
+            return Err(WorkError::Closed);
+        }
+        let id = self.active.id.load(Ordering::Acquire);
+        if id == 0 {
+            return Err(WorkError::Unavailable);
+        }
+        let bounds =
+            self.active.start.load(Ordering::Relaxed)..self.active.end.load(Ordering::Relaxed);
+        if !bounds.contains(&context::stack_pointer()) {
+            return Err(WorkError::Unavailable);
+        }
+        Ok(ContextId(id))
+    }
+
     fn enqueue_lane(
         &self,
         lane: Lane,
@@ -366,6 +426,13 @@ impl<const N: usize> Queue<N> {
         let state = g.state();
         if !state.closed || state.poisoned || state.jobs.iter().any(Option::is_some) {
             return Err(WorkError::Pending);
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            if self.active.id.load(Ordering::Acquire) != 0 {
+                return Err(WorkError::Pending);
+            }
+            self.active.clear(); // Guard still holds the real CPU's IF clear.
         }
         self.retired.store(true, Ordering::Release);
         Ok(())
@@ -509,13 +576,14 @@ impl<const N: usize> Runtime<N> {
         &self.queue
     }
     pub fn current_id(&self) -> Result<ContextId, WorkError> {
-        self.queue.process()?;
+        let id = self.queue.current_id()?;
         let i = self.current.get();
         if i == NONE {
             return Err(WorkError::Unavailable);
         }
         let task = unsafe { &(*self.task(i)) };
         if task.state != TaskState::Running
+            || task.id != id
             || !task.stack.bounds.contains(&context::stack_pointer())
         {
             return Err(WorkError::CorruptContext);
@@ -538,6 +606,7 @@ impl<const N: usize> Runtime<N> {
             (*self.task(index)).state = TaskState::Waiting;
         }
         self.current.set(NONE);
+        self.queue.active.clear();
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*self.task(index)).frame),
@@ -601,12 +670,16 @@ impl<const N: usize> Runtime<N> {
         }
         self.current.set(i);
         unsafe {
+            let task = &*self.task(i);
+            self.queue.active.publish(task.id, &task.stack.bounds);
+        }
+        unsafe {
             context::switch(
                 self.dispatch.get(),
                 core::ptr::addr_of!((*self.task(i)).frame),
             )
         };
-        if self.current.get() != NONE {
+        if self.current.get() != NONE || self.queue.active.id.load(Ordering::Acquire) != 0 {
             self.queue.cpu.fatal(WorkError::CorruptContext);
         }
         unsafe { self.queue.cpu.restore(flags) };
@@ -753,6 +826,7 @@ unsafe extern "sysv64" fn entry<const N: usize>(pointer: usize, index: usize) ->
             t.state = TaskState::Idle;
         }
         executor.current.set(NONE);
+        executor.queue.active.clear();
         unsafe {
             context::switch(
                 core::ptr::addr_of_mut!((*executor.task(index)).frame),
@@ -811,12 +885,20 @@ impl<const N: usize> Executor<N> {
 #[cfg(target_arch = "x86_64")]
 impl<const N: usize> Drop for Executor<N> {
     fn drop(&mut self) {
-        if self.runtime.retired.get() {
+        let process = self.runtime.queue.process().is_ok();
+        if process && self.runtime.retired.get() {
             unsafe {
                 ManuallyDrop::drop(&mut self.runtime);
             }
         } else {
             self.runtime.queue.abandoned.store(true, Ordering::Release);
+            if process && let Ok(flags) = self.runtime.queue.cpu.save_disable() {
+                self.runtime.queue.active.clear();
+                unsafe { self.runtime.queue.cpu.restore(flags) };
+            }
+            // If affinity/context is unqualified, closing is atomic and the
+            // complete allocation remains retained; no foreign CPU mutates
+            // active metadata or releases process-affine owners.
             quarantine();
             // Keep the actual Runtime allocation, queue/provider owners, task
             // frames and real stack/root leases even after a timeout/failed drain.
@@ -1013,6 +1095,7 @@ mod tests {
             fn event(&self, value: u64) {
                 let runtime = unsafe { self.runtime() };
                 let id = runtime.current_id().unwrap();
+                assert_eq!(runtime.queue.current_id(), Ok(id));
                 self.events
                     .lock()
                     .unwrap()
@@ -1040,6 +1123,7 @@ mod tests {
             f.cpu.irq.store(true, Ordering::Release);
             let r = unsafe { f.runtime() };
             assert_eq!(r.current_id(), Err(WorkError::InterruptContext));
+            assert_eq!(r.queue.current_id(), Err(WorkError::InterruptContext));
             assert_eq!(r.yield_now(), Err(WorkError::InterruptContext));
             f.cpu.irq.store(false, Ordering::Release);
             let original = unsafe { context::read_controls() };
@@ -1142,11 +1226,40 @@ mod tests {
                 );
             }
             assert_eq!(cpu.flags.load(Ordering::Acquire), 0x202);
+            assert_eq!(r.queue.current_id(), Err(WorkError::Unavailable));
             drop(events);
+            let view = r.queue.clone();
             unsafe { r.retire() }.unwrap();
+            assert_eq!(view.current_id(), Err(WorkError::Closed));
             drop(executor);
             assert_eq!(dropped.load(Ordering::Relaxed), 4);
         }
+        #[test]
+        fn one_actual_executor_per_view_rejects_simultaneous_and_retired_rebinding() {
+            let (executor, _, _, _) = setup();
+            let view = executor.runtime().queue.clone();
+            let dropped = Arc::new(AtomicU64::new(0));
+            for retired in [false, true] {
+                if retired {
+                    unsafe { executor.runtime().retire() }.unwrap();
+                }
+                let result =
+                    Runtime::with_controls(view.clone(), stacks(dropped.clone()), unsafe {
+                        context::read_controls()
+                    });
+                assert!(matches!(result, Err(WorkError::Busy)));
+                assert_eq!(
+                    view.current_id(),
+                    Err(if retired {
+                        WorkError::Closed
+                    } else {
+                        WorkError::Unavailable
+                    })
+                );
+            }
+            assert_eq!(dropped.load(Ordering::Relaxed), 8);
+        }
+
         unsafe extern "C" fn serial_drain(p: *mut c_void) {
             let f = unsafe { fixture(p) };
             let r = unsafe { f.runtime() };
@@ -1187,6 +1300,7 @@ mod tests {
         fn timeout_retains_the_actual_runtime_all_stacks_and_callback_provider() {
             let (executor, f, _, dropped) = setup();
             let raw = executor.runtime().get_ref() as *const Runtime<16>;
+            let view = executor.runtime().queue.clone();
             assert_eq!(
                 unsafe {
                     executor.runtime().call_foreground(
@@ -1206,6 +1320,8 @@ mod tests {
             drop(f);
             assert_eq!(dropped.load(Ordering::Relaxed), 0);
             assert!(weak.upgrade().is_some());
+            assert_eq!(view.current_id(), Err(WorkError::Closed));
+            assert_eq!(view.active.id.load(Ordering::Acquire), 0);
             let retained = unsafe { Pin::new_unchecked(&*raw) };
             assert_eq!(retained.step(), Err(WorkError::Closed));
         }
