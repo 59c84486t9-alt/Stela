@@ -101,6 +101,11 @@ pub const GXF_CONFIG_EN: u64 = 1;
 pub const GXF_CONFIG_LOCKS: u64 = 0b10_1110;
 pub const GXF_CONFIG_EL1_LOCK: u64 = 1 << 6;
 pub const ASPSR_GUARDED: u64 = 1;
+/// The ISS GENTER leaves in ESR_GLx under EC 0x3f, with its immediate in
+/// bits 4:0: m1n1 `hv_sprr.h` `HV_GXF_ESR_GENTER` (0xfe010000, "EC 0x3f")
+/// ORed with the immediate; Asahi Linux "Apple Proprietary Instructions":
+/// "imm5 stored in ESR_GLx".
+const GENTER_ISS: u32 = 0x1_0000;
 
 /// Apple's implementation-defined state (machine::registers dispatches its
 /// encodings).
@@ -202,7 +207,7 @@ fn stack(pstate: Pstate) -> Stack {
 /// Why a GXF instruction cannot run here; each is UNDEFINED.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedRefusal {
-    /// GENTER at EL0, at the guarded level, or with GXF or SPRR disabled.
+    /// GENTER at EL0 or GL0, or with GXF or SPRR disabled.
     Enter,
     /// GEXIT outside the guarded level.
     Exit,
@@ -851,14 +856,18 @@ impl Cpu {
             && self.apple.gxf_config[level] & GXF_CONFIG_EN != 0
     }
 
-    /// GENTER at EL1 or EL2: bank the return state in that GL's registers and
-    /// continue at GXF_ENTER_ELx on the GL stack with every exception masked.
-    /// SPTM 26A434 needs IRQ and FIQ masked: the kernel enters with them
-    /// unmasked and SPTM's GL2 SP_ELx interrupt vectors park
-    /// (`__exc+0x280`). Masking A and D too follows exception entry
-    /// (inference), as does the stack selection (m1n1 sets `sp` after GENTER).
-    pub fn guarded_enter(&mut self) -> Result<(), GuardedRefusal> {
-        if self.pstate.el == 0 || self.pstate.guarded || !self.guarded_enabled() {
+    /// GENTER at EL1 or EL2, or at GL1 or GL2: bank the return state and
+    /// `immediate` in that GL's registers and continue at GXF_ENTER_ELx on
+    /// the GL stack with every exception masked (m1n1 `hv_sprr.c`
+    /// `hv_gxf_genter`: SPSR and ELR from the link state, ESR_GL1
+    /// 0xfe010000 | imm, DAIF set, EL1h). From a GL it stays guarded and
+    /// sets ASPSR bit 0, so GEXIT returns to the GL ("genter from GL is
+    /// weird but allowed"); the outer return state in the bank is replaced.
+    /// m1n1 is an emulator, so this is evidence, not silicon proof. SPTM
+    /// 26A434 needs IRQ and FIQ masked: the kernel enters with them unmasked
+    /// and SPTM's GL2 SP_ELx interrupt vectors park (`__exc+0x280`).
+    pub fn guarded_enter(&mut self, immediate: u8) -> Result<(), GuardedRefusal> {
+        if self.pstate.el == 0 || !self.guarded_enabled() {
             return Err(GuardedRefusal::Enter);
         }
         // GENTER completes, returning to the next instruction, so the saved
@@ -872,7 +881,11 @@ impl Cpu {
         let bank = &mut self.apple.guarded[level];
         bank.spsr = spsr;
         bank.elr = self.pc.wrapping_add(4);
-        bank.aspsr = 0;
+        bank.esr = exception::syndrome(
+            Class::ImplementationDefined,
+            GENTER_ISS | u32::from(immediate & 0x1f),
+        );
+        bank.aspsr = if from.guarded { ASPSR_GUARDED } else { 0 };
         let enter = bank.enter;
         self.set_pstate(Pstate {
             sp: true,

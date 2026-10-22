@@ -67,16 +67,36 @@ pub enum SystemOperation {
     },
 }
 
-/// Apple GXF instructions, exact words from Asahi Linux "SPRR and GXF" and
-/// m1n1 `gxf_asm.S` (`#define genter .long 0x00201420`, `gexit .long
-/// 0x00201400`). They sit in the A64 reserved space, so no other decoder
-/// claims them.
+/// Apple GXF instructions, from Asahi Linux "SPRR and GXF" and "Apple
+/// Proprietary Instructions" and m1n1 `gxf_asm.S` (`#define genter .long
+/// 0x00201420`, `gexit .long 0x00201400`). They sit in the A64 reserved
+/// space, so no other decoder claims them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardedOperation {
-    /// GENTER: enter the guarded level at GXF_ENTER_EL1.
-    Enter,
+    /// GENTER: enter the guarded level at GXF_ENTER_EL1. The immediate,
+    /// bits 4:0 ("imm5 stored in ESR_GLx"), reaches ESR_GLx.
+    Enter { immediate: u8 },
     /// GEXIT: return through ELR/SPSR/ASPSR of the guarded level.
     Exit,
+}
+
+pub const GENTER: u32 = 0x0020_1420;
+pub const GEXIT: u32 = 0x0020_1400;
+/// GENTER's immediate, bits 4:0.
+const GENTER_IMMEDIATE: u32 = 0x1f;
+
+impl GuardedOperation {
+    pub const fn decode(word: u32) -> Option<Self> {
+        if word & !GENTER_IMMEDIATE == GENTER {
+            Some(Self::Enter {
+                immediate: (word & GENTER_IMMEDIATE) as u8,
+            })
+        } else if word == GEXIT {
+            Some(Self::Exit)
+        } else {
+            None
+        }
+    }
 }
 
 /// Debug-state-only instructions outside the exception-generation class.
@@ -101,9 +121,6 @@ impl DebugStateOperation {
         }
     }
 }
-
-pub const GENTER: u32 = 0x0020_1420;
-pub const GEXIT: u32 = 0x0020_1400;
 
 /// Apple SDSB OSH, NSH, ISH and SY: `0x00201460` plus the domain (Asahi Linux
 /// "Apple Proprietary Instructions"; iBoot and SPTM use SDSB ISH). How it
@@ -236,7 +253,8 @@ pub(super) fn decode_el1_system_instruction(
 /// Decode every instruction the system-mode profile hands to the runtime: the
 /// [`decode_el1_system_instruction`] families, SYS/SYSL, and the barriers and
 /// hints that the ordinary decoder does not own (DSB, SSBB/PSSBB, ESB,
-/// TSB and unallocated hints), Apple's SDSB, WKDMC and WKDMD, the Debug-state-only MOVT
+/// TSB and unallocated hints), Apple's GXF instructions, SDSB, WKDMC and
+/// WKDMD, the Debug-state-only MOVT
 /// GPR/ZT0 forms, and
 /// the FEAT_CPA pointer arithmetic.
 /// YIELD, CSDB, SB and DMB stay ordinary and BTI compiles as NOP; PAuth hints belong to the PAuth
@@ -248,10 +266,8 @@ pub fn decode_system_mode_instruction(
     if let Some(instruction) = decode_system_instruction(pc, word)? {
         return Ok(Some(instruction));
     }
-    let operation = if word == GENTER {
-        SystemOperation::Guarded(GuardedOperation::Enter)
-    } else if word == GEXIT {
-        SystemOperation::Guarded(GuardedOperation::Exit)
+    let operation = if let Some(operation) = GuardedOperation::decode(word) {
+        SystemOperation::Guarded(operation)
     } else if let Some(operation) = decode_sdsb(word) {
         SystemOperation::Synchronization(operation)
     } else if let Some(instruction) = crate::wkdm::decode(word) {
@@ -413,6 +429,35 @@ mod tests {
                 ),
                 "{word:#x}"
             );
+        }
+    }
+
+    #[test]
+    fn system_mode_decodes_genter_with_its_immediate_and_gexit() {
+        let pc = GuestAddress(0x1000);
+        let operation = |word| {
+            decode_system_mode_instruction(pc, word)
+                .unwrap()
+                .map(|instruction| instruction.operation)
+        };
+        for immediate in 0..32u8 {
+            assert_eq!(
+                operation(GENTER | u32::from(immediate)),
+                Some(SystemOperation::Guarded(GuardedOperation::Enter {
+                    immediate
+                }))
+            );
+        }
+        assert_eq!(
+            operation(GEXIT),
+            Some(SystemOperation::Guarded(GuardedOperation::Exit))
+        );
+        // GEXIT's other low words and at_as1elx (0x00201440) are not GXF.
+        for word in [0x0020_1402, 0x0020_141f, 0x0020_1440] {
+            assert_eq!(operation(word), None, "{word:#x}");
+        }
+        for word in [GENTER, GEXIT] {
+            assert!(decode_system_instruction(pc, word).unwrap().is_none());
         }
     }
 

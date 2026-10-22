@@ -7,6 +7,7 @@ mod device_access;
 mod device_read;
 mod device_write;
 mod exclusive;
+mod guarded;
 mod hosted;
 mod pointer;
 mod prepare;
@@ -26,8 +27,8 @@ mod watch;
 use super::{
     chip::{AdmitTable, Check},
     cpu::{
-        ASPSR_GUARDED, Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE,
-        HCR_TSC, HCR_VF, HCR_VI, HCR_VSE,
+        Cpu, Exception, HCR_AMO, HCR_API, HCR_FMO, HCR_HCD, HCR_IMO, HCR_TGE, HCR_TSC, HCR_VF,
+        HCR_VI, HCR_VSE,
     },
     ctrr, debug,
     exception::{
@@ -84,7 +85,7 @@ use stela_compiler::{
         self, BlockProfile, ExitKind, PointerAuthentication, PointerAuthenticationKey,
         PointerAuthenticationModifier, PointerAuthenticationOperation,
         el1_platform::{ScalarLoad, ScalarLoadAddress, ScalarStore},
-        system::{GuardedOperation, SystemOperation},
+        system::SystemOperation,
     },
     x86_64::{
         MemoryChecks, NativeSystem, cache_clean,
@@ -5093,12 +5094,9 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Ok(Some(instruction)) => instruction,
             _ => return Err(self.refuse_system(word, "System exit at a word that is not System")),
         };
-        // Apple's GENTER, GEXIT, SDSB (`0x00201460` plus the domain), WKDMC
-        // and WKDMD.
+        // Apple's SDSB (`0x00201460` plus the domain), WKDMC and WKDMD;
+        // `guarded` checks the GXF instructions.
         let apple = match instruction.operation {
-            SystemOperation::Guarded(operation) => Some(hacr::Operation::Guarded {
-                enter: operation == GuardedOperation::Enter,
-            }),
             SystemOperation::Synchronization(_) if word & !3 == 0x0020_1460 => {
                 Some(hacr::Operation::SynchronizationBarrier)
             }
@@ -5165,45 +5163,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
             SystemOperation::Exclusive(Err(_)) => self.undefined(),
             SystemOperation::CheckedPointer(operand) => self.checked_pointer(operand),
             SystemOperation::Compression(instruction) => self.compression(word, instruction),
-            SystemOperation::Guarded(GuardedOperation::Enter) => {
-                if self.cpu.guarded_enter().is_err() {
-                    return self.undefined();
-                }
-                self.host.report(&Event::Guarded {
-                    enter: true,
-                    el: self.cpu.pstate.el,
-                    guarded: true,
-                    pc: self.cpu.pc,
-                });
-                self.sync_regime();
-                Ok(())
-            }
-            SystemOperation::Guarded(GuardedOperation::Exit) => {
-                if self.cpu.pstate.guarded && self.cpu.pstate.el != 0 {
-                    let bank = &self.cpu.apple.guarded[usize::from(self.cpu.pstate.el) - 1];
-                    self.guest_entry(bank.spsr, bank.aspsr & ASPSR_GUARDED != 0)?;
-                }
-                self.guarded_exit()
-            }
-        }
-    }
-
-    /// GEXIT (`Cpu::guarded_exit`).
-    fn guarded_exit(&mut self) -> Step {
-        match self.cpu.guarded_exit() {
-            Err(_) => self.undefined(),
-            Ok(Err(reason)) => Err(self.unsupported(RequirementKind::IllegalReturn(reason))),
-            Ok(Ok(())) => {
-                self.pacm_written = true;
-                self.host.report(&Event::Guarded {
-                    enter: false,
-                    el: self.cpu.pstate.el,
-                    guarded: self.cpu.pstate.guarded,
-                    pc: self.cpu.pc,
-                });
-                self.sync_regime();
-                Ok(())
-            }
+            SystemOperation::Guarded(operation) => self.guarded(word, operation),
         }
     }
 
@@ -5928,7 +5888,7 @@ mod tests {
         pub(super) isolations: usize,
         /// The pages of [`Host::code_invalidated`] calls.
         pub(super) code_invalidations: Vec<Option<u64>>,
-        reaches: Vec<mmu::tlbi::Reach>,
+        pub(super) reaches: Vec<mmu::tlbi::Reach>,
         pub(super) installed: Vec<Vec<u8>>,
         /// Executable copies of the context leaves the engine called.
         executables: Vec<crate::execution::platform::Mapping>,
