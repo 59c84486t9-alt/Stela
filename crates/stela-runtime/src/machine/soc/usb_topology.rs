@@ -1,8 +1,8 @@
 //! DeviceTree placement and validation for usb topology.
 use super::dma_routes::{native_dma_phandle, native_mapper_input};
 use super::{
-    ATC_PHY, Device, GpioBank, HPM, HPM_MANAGER, I2C, Iommu, Node, String, USB_DRD, Vec, apertures,
-    atc_phy, format, i2c,
+    ATC_PHY, Device, GpioBank, HPM, HPM_MANAGER, Iommu, Node, String, Vec, apertures, atc_phy,
+    format, i2c,
 };
 
 /// The ATC PHY register layouts, by the first compatible a node lists that
@@ -11,14 +11,65 @@ use super::{
 /// T8112 (J473AP) views without its last, core+0x4c000, which is beyond the
 /// canonical core window. The views the model places (USB2, event block,
 /// core+0x20000, core) are views 0 to 3 in each.
-pub(super) const ATC_PHY_LAYOUTS: [(&str, usize); 3] = [
+pub(super) const ATC_PHY_LAYOUTS: [(&str, usize); 4] = [
     (ATC_PHY, ATC_PHY_BASE_VIEWS + 1),
     ("atc-phy,t6020", ATC_PHY_BASE_VIEWS),
     ("atc-phy,t8103", ATC_PHY_BASE_VIEWS),
+    ("atc-phy,t6000", ATC_PHY_BASE_VIEWS),
 ];
 
 /// The ADT views every [`ATC_PHY_LAYOUTS`] layout starts with.
 const ATC_PHY_BASE_VIEWS: usize = 28;
+
+/// Qualified Apple I2C register families. The original 26A434 ADTs use
+/// these first compatibles ahead of `i2c,s5l8940x` and `iic,soft`; the latter
+/// fallback strings alone do not establish a modelled Apple register file.
+/// T6000 and T6020 retain the same one-bank byte-FIFO interface (`i2c`).
+const I2C_COMPATIBLES: &[&str] = &["i2c,t8101", "i2c,t6000", "i2c,t6020"];
+
+/// USB DRD families whose nine-view layout is qualified. The original
+/// 26A434 ADTs (source hashes in `isa/apple-soc-facts.json`) give M1/T6000
+/// a 0x1800-byte reg[2], versus 0x5800 on M2/T6020 and M3/T8122. In each,
+/// reg[2] begins at reg[0]+0xc000 and reg[8] at reg[0]+0xd000.
+/// Later families move reg[8] or add a tenth view and are not aliases.
+const USB_DRD_LAYOUTS: &[(&str, u64)] = &[
+    ("usb-drd,t8103", 0x1800),
+    ("usb-drd,t6000", 0x1800),
+    ("usb-drd,t8112", 0x5800),
+    ("usb-drd,t6020", 0x5800),
+    ("usb-drd,t8122", 0x5800),
+];
+
+/// Whether a compatible names a qualified I2C register family.
+pub fn i2c_compatible(compatible: &str) -> bool {
+    I2C_COMPATIBLES.contains(&compatible)
+}
+
+/// Whether a compatible names a qualified nine-view USB DRD family.
+pub fn usb_controller_compatible(compatible: &str) -> bool {
+    USB_DRD_LAYOUTS.iter().any(|&(name, _)| name == compatible)
+}
+
+fn compatible_matches(node: &Node<'_>, accepts: fn(&str) -> bool) -> bool {
+    node.property("compatible")
+        .into_iter()
+        .flat_map(|bytes| bytes.split(|byte| *byte == 0))
+        .any(|entry| core::str::from_utf8(entry).is_ok_and(accepts))
+}
+
+/// Select the actual alias size, rejecting contradictory qualified layouts.
+fn usb_alias_bytes(node: &Node<'_>) -> Option<u64> {
+    let mut selected = None;
+    for &(compatible, bytes) in USB_DRD_LAYOUTS {
+        if node.compatible(compatible) {
+            if selected.is_some_and(|previous| previous != bytes) {
+                return None;
+            }
+            selected = Some(bytes);
+        }
+    }
+    selected
+}
 
 /// Nine ADT windows, five interrupt inputs and the mapper-selected DMA
 /// stream. Apple reg[2]/reg[8] overlap reg[0]; preserve their physical alias.
@@ -118,7 +169,7 @@ pub(super) fn typec_devices(
             return;
         }
         let result = (|| -> Result<(), String> {
-            if node.compatible(I2C) {
+            if compatible_matches(node, i2c_compatible) {
                 let regs = apertures::registers(node).ok_or("I2C controller has no reg pairs")?;
                 let &[range] = regs.as_slice() else {
                     return Err("I2C controller requires one reg range".into());
@@ -286,9 +337,8 @@ pub(super) fn typec_devices(
                         "ATC USB2/core views disagree with the {layout} layout"
                     ));
                 }
-                let phandle = node
-                    .first_u32("AAPL,phandle")
-                    .ok_or("ATC PHY has no phandle")?;
+                let phandle =
+                    native_dma_phandle(node, "AAPL,phandle")?.ok_or("ATC PHY has no phandle")?;
                 let port = node
                     .first_u32("port-number")
                     .filter(|&p| p != 0)
@@ -352,8 +402,8 @@ pub(super) fn typec_devices(
     Ok((i2cs, phys))
 }
 
-/// Every `usb-drd,t8112` (J473AP usb-drd0 and usb-drd1), in DeviceTree
-/// order: ADT reg/interrupts/iommu-parent (research transport section 1).
+/// Every qualified early-family USB DRD, in DeviceTree order, with its
+/// original reg/interrupts/iommu-parent (research transport section 1).
 pub(super) fn usb_controllers(
     io: &Node<'_>,
     translate: &dyn Fn(u64, u64) -> Option<u64>,
@@ -362,7 +412,7 @@ pub(super) fn usb_controllers(
     let mut controllers = Vec::new();
     let mut failure = None;
     apertures::visit(io, translate, &mut |node, translate| {
-        if failure.is_none() && node.compatible(USB_DRD) {
+        if failure.is_none() && compatible_matches(node, usb_controller_compatible) {
             match usb_controller(node, translate, darts) {
                 Ok(controller) => controllers.push(controller),
                 Err(error) => failure = Some(error),
@@ -386,6 +436,8 @@ fn usb_controller(
         .and_then(|name| core::str::from_utf8(name.split(|&b| b == 0).next()?).ok())
         .unwrap_or("usb-drd");
     let err = |why: &str| format!("{name} {why}");
+    let alias_bytes =
+        usb_alias_bytes(node).ok_or_else(|| err("has no consistent qualified USB DRD layout"))?;
     let raw: [(u64, u64); 9] = apertures::registers(node)
         .unwrap_or_default()
         .try_into()
@@ -399,8 +451,8 @@ fn usb_controller(
         *slot = (physical, bytes);
     }
     if ranges[0].1 < 0x11800
-        || ranges[2] != (ranges[0].0 + 0xc000, 0x5800)
-        || ranges[8] != (ranges[0].0 + 0xd000, 0x4000)
+        || ranges[0].0.checked_add(0xc000).map(|at| (at, alias_bytes)) != Some(ranges[2])
+        || ranges[0].0.checked_add(0xd000).map(|at| (at, 0x4000)) != Some(ranges[8])
     {
         return Err(err("has an undescribed DWC3 alias layout"));
     }
@@ -446,8 +498,8 @@ fn usb_controller(
         stream,
         port,
         retention: node.property("retention").is_some(),
-        phy: node
-            .first_u32("atc-phy-parent")
+        phy: native_dma_phandle(node, "atc-phy-parent")
+            .map_err(|why| err(&why))?
             .ok_or_else(|| err("has no atc-phy-parent"))?,
     })
 }
@@ -503,16 +555,19 @@ mod tests {
             lines: vec![199],
             i2c_lines: vec![],
         };
-        let i2c = encode(
-            &[
-                ("name", b"i2c0\0"),
-                ("compatible", b"i2c,t8101\0"),
-                ("reg", &r(&[0x35010000, 0x4000])),
-                ("interrupt-parent", &c(&[0x63])),
-                ("interrupts", &c(&[761])),
-            ],
-            &[manager],
-        );
+        let i2c_with = |compatible: &[u8]| {
+            encode(
+                &[
+                    ("name", b"i2c0\0"),
+                    ("compatible", compatible),
+                    ("reg", &r(&[0x35010000, 0x4000])),
+                    ("interrupt-parent", &c(&[0x63])),
+                    ("interrupts", &c(&[761])),
+                ],
+                core::slice::from_ref(&manager),
+            )
+        };
+        let i2c = i2c_with(b"i2c,t8101\0");
         let mut views = vec![(0x383000000, 0x4000); 29];
         views[0] = (0x382a90000, 0x4000);
         views[1] = (0x382800000, 0x4000);
@@ -675,6 +730,22 @@ mod tests {
             (phys[0].pipe, phys[0].events),
             (None, (0x382800000, 0x4000))
         );
+        for compatible in [
+            b"i2c,t6000\0i2c,s5l8940x\0iic,soft\0".as_slice(),
+            b"i2c,t6020\0i2c,s5l8940x\0iic,soft\0",
+        ] {
+            let bytes = encode(&[("name", b"arm-io\0")], &[i2c_with(compatible)]);
+            let (controllers, _) = place(&bytes, 0x63, Some(&gpio)).unwrap();
+            assert_eq!(controllers, buses);
+        }
+        let t6000 = encode(
+            &[("name", b"arm-io\0")],
+            &[phy_views(b"atc-phy,t6000\0", &views[..ATC_PHY_BASE_VIEWS])],
+        );
+        let (_, phys) = place(&t6000, 0x63, None).unwrap();
+        assert_eq!(phys.len(), 1);
+        assert_eq!(phys[0].phandle, 0xa2);
+        assert_eq!(phys[0].core, (0x383000000, atc_phy::CORE_BYTES));
         // The retimer's register protocol is undetermined: hidden, not refused.
         assert!(!models(RETIMER, |_| None));
         // Hidden PHYs are not parsed or mapped merely because reg survives.
@@ -731,11 +802,11 @@ mod tests {
             ],
             &[mapper],
         );
-        let usb = |ranges: &[(u64, u64)], parent: u32, irqs: &[u32]| {
+        let usb_with = |compatible: &[u8], ranges: &[(u64, u64)], parent: u32, irqs: &[u32]| {
             encode(
                 &[
                     ("name", b"usb-drd0\0"),
-                    ("compatible", b"usb-drd,t8112\0"),
+                    ("compatible", compatible),
                     ("reg", &pairs(ranges)),
                     ("iommu-parent", &words(&[parent])),
                     ("interrupts", &words(irqs)),
@@ -744,6 +815,9 @@ mod tests {
                 ],
                 &[],
             )
+        };
+        let usb = |ranges: &[(u64, u64)], parent, irqs: &[u32]| {
+            usb_with(b"usb-drd,t8112\0", ranges, parent, irqs)
         };
         let irqs = [1031, 1032, 1033, 1034, 990];
         let tree = |usb| {
@@ -771,7 +845,44 @@ mod tests {
                 phy: 0xa2,
             }]
         );
+        for (compatible, bytes) in [
+            (b"usb-drd,t8103\0".as_slice(), 0x1800),
+            (b"usb-drd,t6000\0usb-drd,t8103\0", 0x1800),
+            (b"usb-drd,t6020\0usb-drd,t8112\0", 0x5800),
+            (b"usb-drd,t8122\0", 0x5800),
+        ] {
+            let mut family_ranges = ranges;
+            family_ranges[2].1 = bytes;
+            let family = board(&tree(usb_with(compatible, &family_ranges, 0xa4, &irqs))).unwrap();
+            assert_eq!(family.usbs.len(), 1);
+            assert_eq!(family.usbs[0].ranges, family_ranges);
+            family_ranges[2].1 = if bytes == 0x1800 { 0x5800 } else { 0x1800 };
+            assert!(board(&tree(usb_with(compatible, &family_ranges, 0xa4, &irqs))).is_err());
+        }
+        assert!(
+            board(&tree(usb_with(
+                b"usb-drd,t8103\0usb-drd,t8112\0",
+                &ranges,
+                0xa4,
+                &irqs,
+            )))
+            .is_err()
+        );
         assert_eq!(found.darts[0].instances[0].physical, 0x382f00000);
+        for compatible in [
+            b"usb-drd,t8132\0".as_slice(),
+            b"usb-drd,t8142\0",
+            b"usb-drd,t8152\0",
+            b"usb-drd,t9999\0usb-drd,generic\0",
+        ] {
+            let bytes = usb_with(compatible, &ranges, 0xa4, &irqs);
+            let node = Node::root(&bytes).unwrap();
+            assert!(
+                usb_controller(&node, &flat_fixture_extent(&Some), &found.darts)
+                    .unwrap_err()
+                    .contains("qualified USB DRD layout")
+            );
+        }
         let bytes = usb(&ranges, 0xa4, &irqs);
         let node = Node::root(&bytes).unwrap();
         let mut routes = found.darts.clone();

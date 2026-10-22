@@ -1,4 +1,4 @@
-//! PASemi-derived Apple I2C byte PIO controller (`i2c,t8101`).
+//! PASemi-derived Apple I2C byte PIO controller (`i2c,t8101`, `i2c,t6000`, `i2c,t6020`).
 //!
 //! Linux `drivers/i2c/busses/i2c-pasemi-core.c` at a0ff06b3 documents
 //! START/STOP/read-count FIFO words, RX empty, status, mask and control.

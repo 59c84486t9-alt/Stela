@@ -1,4 +1,6 @@
-//! Digital USB2 portion of `atc-phy,t8112`, including the pipehandler.
+//! Shared digital USB2 portion of the T8103/T6000/T8112/T6020 ATC PHY,
+//! including the pipehandler. The original family view counts are validated
+//! independently in `machine::soc::usb_topology`.
 //!
 //! Linux `drivers/phy/apple/atc.c` at a0ff06b3 supplies the USB2, core-power,
 //! AUSPLL request/ack and pipehandler fields below. Original
