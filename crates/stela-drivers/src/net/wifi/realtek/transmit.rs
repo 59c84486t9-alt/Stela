@@ -29,6 +29,7 @@ pub enum Error {
     Register,
     Removed,
     UnsupportedChip,
+    UnsupportedLayout,
     IdentityChanged,
     FirmwareNotReady,
     InitialIndices,
@@ -168,8 +169,9 @@ unsafe impl Registers for MmioRegisters {
 }
 
 /// All seven indexed TX queues have real native descriptor backing, so engine
-/// prefetch never addresses a placeholder ring. Only typed general-info H2C
-/// publication is admitted here; radio DATA/keys/air reports remain separate.
+/// prefetch never addresses a placeholder ring. Typed general-info/PHYDM and
+/// initial IQK firmware packets use this queue; radio DATA/keys/air reports
+/// remain separate. DMA release never stands in for command completion.
 pub struct Rings<R: Registers> {
     io: Option<R>,
     domain: Arc<dyn DmaDomain>,
@@ -277,8 +279,73 @@ impl<R: Registers> Rings<R> {
         if self.pending() == H2C_COUNT - 1 {
             return Err(Error::Full);
         }
-        self.used = true;
         let payload = general_info(geometry, self.sequence);
+        self.command(source, payload)
+    }
+    /// Publish source PHYDM parameters for the real initialized AB/AB PHY.
+    /// Success is publication only, not firmware application or calibration.
+    ///
+    /// # Safety
+    /// phy, report and these rings are the same actual retained native
+    /// requester/board/reset/firmware epoch, not matching Profile fingerprints
+    /// alone. Source PHY/MAC/HCI start completed; all queues/pins remain live,
+    /// native control is exclusive and operational TX stays gated pending
+    /// genuine channel/RFK/power/OS qualification. Real firmware command/data
+    /// retirement remains independent of descriptor consumer-index release.
+    pub unsafe fn phydm_info(
+        &mut self,
+        source: &dyn PageSource,
+        phy: &super::phy_tables::PhyInitialized,
+        report: &super::features::Report,
+    ) -> Result<(), Error> {
+        if self.poisoned || !self.configured {
+            return Err(Error::Quarantined);
+        }
+        let profile = self.io.as_ref().ok_or(Error::Quarantined)?.profile();
+        if phy.factory_power().profile() != profile || report.profile() != profile {
+            return Err(Error::IdentityChanged);
+        }
+        let cap = report.capabilities();
+        if cap.rf_paths != 2 || cap.rf_phys != 2 || cap.antenna_tx != 3 || cap.antenna_rx != 3 {
+            return Err(Error::UnsupportedLayout);
+        }
+        if self.pending() == H2C_COUNT - 1 {
+            return Err(Error::Full);
+        }
+        let payload = phydm_info(
+            phy.factory_power().rfe(),
+            profile.cut(),
+            cap.antenna_tx,
+            cap.antenna_rx,
+            self.sequence,
+        );
+        self.command(source, payload)
+    }
+    /// # Safety
+    /// Same actual retained native requester/reset/firmware epoch as the
+    /// calibration control owner. Complete source GAPK/PHYDM and real native
+    /// HCI start, held native/OS/coexistence authority, required actual power
+    /// and emission gates, current channel and exclusive calibration work are
+    /// caller-owned. IQK may emit calibration signals. This only publishes the
+    /// source clear=1/segment=0 command; an actual fresh IQK completion and
+    /// independent DMA/firmware retirement are still required.
+    pub(super) unsafe fn initial_iqk_command(
+        &mut self,
+        source: &dyn PageSource,
+    ) -> Result<(), Error> {
+        if self.poisoned || !self.configured {
+            return Err(Error::Quarantined);
+        }
+        if self.pending() == H2C_COUNT - 1 {
+            return Err(Error::Full);
+        }
+        self.command(source, iqk(self.sequence))
+    }
+    pub(super) fn quarantine_firmware(&mut self) {
+        self.poisoned = true;
+    }
+    fn command(&mut self, source: &dyn PageSource, payload: [u8; 32]) -> Result<(), Error> {
+        self.used = true;
         // A reserved sequence is never rolled back after uncertain DMA/MMIO.
         self.sequence = self.sequence.wrapping_add(1);
         self.poisoned = true;
@@ -462,6 +529,23 @@ fn general_info(geometry: Geometry, sequence: u16) -> [u8; 32] {
     p[10] = (geometry.firmware_tx_page() - geometry.boundary()) as u8;
     p
 }
+fn phydm_info(rfe: u8, cut: u8, antenna_tx: u8, antenna_rx: u8, sequence: u16) -> [u8; 32] {
+    let mut p = [0; 32];
+    p[..4].copy_from_slice(&0x0011ff01u32.to_le_bytes());
+    p[4..8].copy_from_slice(&(16u32 | (u32::from(sequence) << 16)).to_le_bytes());
+    p[8] = rfe;
+    p[9] = 2;
+    p[10] = cut;
+    p[11] = (antenna_tx & 15) | ((antenna_rx & 15) << 4);
+    p
+}
+fn iqk(sequence: u16) -> [u8; 32] {
+    let mut p = [0; 32];
+    p[..4].copy_from_slice(&0x000eff01u32.to_le_bytes());
+    p[4..8].copy_from_slice(&(9u32 | (u32::from(sequence) << 16)).to_le_bytes());
+    p[8] = 1;
+    p
+}
 fn h2c_descriptors(address: u32) -> Result<([u8; 48], [u8; 16]), Error> {
     address
         .checked_add((PACKET - 1) as u32)
@@ -511,11 +595,13 @@ mod tests {
         not_ready: bool,
         drops: usize,
         packets: Vec<Vec<u8>>,
+        iqk_trigger: Option<Arc<core::sync::atomic::AtomicBool>>,
         descriptors: Vec<[u8; 16]>,
     }
     struct Io {
         device: Arc<Mutex<Device>>,
         memory: Arc<Mutex<Model>>,
+        profile: Profile,
     }
     fn index(q: Queue) -> usize {
         QUEUES.into_iter().position(|v| v == q).unwrap()
@@ -524,7 +610,7 @@ mod tests {
     // allocation IOVAs; no actual hardware or privileged DMA proof claimed.
     unsafe impl Registers for Io {
         fn profile(&self) -> Profile {
-            profile()
+            self.profile
         }
         fn verify_identity(&mut self) -> Result<(), Error> {
             if self.device.lock().unwrap().identity_changed {
@@ -570,6 +656,11 @@ mod tests {
             let (_, packet) = &m.mappings[&u64::from(address)];
             d.packets
                 .push(unsafe { core::slice::from_raw_parts(*packet as *const u8, 80) }.to_vec());
+            if d.packets.last().unwrap()[50] == 0x0e
+                && let Some(trigger) = &d.iqk_trigger
+            {
+                trigger.store(true, Ordering::SeqCst);
+            }
             d.descriptors.push(descriptor);
             d.indices[6].0 = producer;
             if d.fail_publish {
@@ -588,16 +679,258 @@ mod tests {
         memory: &Arc<Mutex<Model>>,
         device: &Arc<Mutex<Device>>,
     ) -> Result<Rings<Io>, Error> {
+        install_profile(memory, device, profile())
+    }
+    fn install_profile(
+        memory: &Arc<Mutex<Model>>,
+        device: &Arc<Mutex<Device>>,
+        profile: Profile,
+    ) -> Result<Rings<Io>, Error> {
         unsafe {
             Rings::install(
                 Io {
                     device: device.clone(),
                     memory: memory.clone(),
+                    profile,
                 },
                 &Source,
                 Arc::new(Domain(memory.clone())),
             )
         }
+    }
+    #[test]
+    fn phydm_and_initial_iqk_use_real_dma_packets_and_fresh_status_not_consumer_release() {
+        use super::super::firmware_control::{Control, tests::bus};
+        let (phy, report) = super::super::phy_tables::control_fixture();
+        let (io, fw, _, _) = bus(report.profile());
+        let mut control = unsafe { Control::new(io, &report) }.unwrap();
+        let memory = Arc::new(Mutex::new(Model::default()));
+        let device = Arc::new(Mutex::new(Device::default()));
+        device.lock().unwrap().iqk_trigger = Some(fw.lock().unwrap().trigger.clone());
+        let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
+        rings
+            .general_info(&Source, Geometry::for_profile(report.profile()).unwrap())
+            .unwrap();
+        unsafe { rings.phydm_info(&Source, &phy, &report) }.unwrap();
+        fw.lock().unwrap().iqk_after = Some(16);
+        let observed = unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap();
+        assert_eq!(observed.baseline(), 0);
+        assert_eq!(observed.status(), 0xaa);
+        assert_eq!(rings.pending(), 3);
+        assert!(!rings.quarantined());
+        let d = device.lock().unwrap();
+        assert_eq!(d.packets.len(), 3);
+        assert_eq!(
+            &d.packets[1][48..80],
+            &phydm_info(0, report.profile().cut(), 3, 3, 1)
+        );
+        assert_eq!(&d.packets[2][48..80], &iqk(2));
+        drop(d);
+        assert_eq!(fw.lock().unwrap().get(0x1b10, 1), 0);
+        assert_eq!(fw.lock().unwrap().now, 320000);
+        assert_eq!(
+            unsafe { control.initial_iqk(&mut rings, &Source) }.unwrap_err(),
+            super::super::firmware_control::Error::InvalidState
+        );
+        // The actual DMA consumer may release these mappings, independently
+        // of firmware execution or the observed IQK status.
+        let producer = device.lock().unwrap().indices[6].0;
+        device.lock().unwrap().indices[6].1 = producer;
+        assert_eq!(rings.reclaim_h2c().unwrap(), 3);
+        unsafe { rings.release_after_stop() }.unwrap();
+        let io = unsafe { control.release_after_stop() }.unwrap();
+        drop(io);
+    }
+    #[test]
+    fn stale_iqk_zero_publication_timeout_unwind_and_packet_failure_quarantine_both_owners() {
+        use super::super::firmware_control::{Control, Error as FwError, tests::bus};
+        for mode in 0..4 {
+            let (_, report) = super::super::phy_tables::control_fixture();
+            let (io, fw, owner, _) = bus(report.profile());
+            let mut control = unsafe { Control::new(io, &report) }.unwrap();
+            let memory = Arc::new(Mutex::new(Model::default()));
+            let device = Arc::new(Mutex::new(Device::default()));
+            device.lock().unwrap().iqk_trigger = Some(fw.lock().unwrap().trigger.clone());
+            let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
+            fw.lock().unwrap().clear_log();
+            match mode {
+                0 => fw.lock().unwrap().set(0x2d9c, 1, 0xaa),
+                1 => fw.lock().unwrap().iqk_after = None,
+                2 => device.lock().unwrap().fail_publish = true,
+                _ => fw.lock().unwrap().panic_at = Some(6),
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                control.initial_iqk(&mut rings, &Source)
+            }));
+            if mode == 0 {
+                assert_eq!(result.unwrap().unwrap_err(), FwError::StaleIqk);
+                assert_eq!(rings.pending(), 0);
+                assert!(device.lock().unwrap().packets.is_empty());
+            } else if mode == 1 {
+                assert_eq!(
+                    result.unwrap().unwrap_err(),
+                    FwError::Timeout { register: 0x2d9c }
+                );
+                assert_eq!(rings.pending(), 1);
+                assert_eq!(fw.lock().unwrap().get(0x1b10, 1), 0);
+            } else if mode == 2 {
+                assert_eq!(
+                    result.unwrap().unwrap_err(),
+                    FwError::Packet(Error::Register)
+                );
+                assert_eq!(rings.pending(), 1);
+            } else {
+                assert!(result.is_err());
+            }
+            assert!(control.quarantined());
+            assert!(rings.quarantined());
+            drop(control);
+            drop(rings);
+            assert_eq!(Arc::strong_count(&owner), 2);
+        }
+    }
+    #[test]
+    fn every_iqk_control_failure_late_reset_and_regressed_clock_retain_both_owners() {
+        use super::super::firmware_control::{Control, tests::bus};
+        // One successful run determines the actual I/O/clock transaction count;
+        // each later case fails one actual operation, including post-publication
+        // status/clear/identity checks, while keeping the real DMA model live.
+        let mut total = 0;
+        for fault in 0..64 {
+            if fault > total && fault != 0 {
+                break;
+            }
+            let (_, report) = super::super::phy_tables::control_fixture();
+            let (io, fw, owner, _) = bus(report.profile());
+            let mut control = unsafe { Control::new(io, &report) }.unwrap();
+            let memory = Arc::new(Mutex::new(Model::default()));
+            let device = Arc::new(Mutex::new(Device::default()));
+            device.lock().unwrap().iqk_trigger = Some(fw.lock().unwrap().trigger.clone());
+            let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
+            {
+                let mut f = fw.lock().unwrap();
+                f.clear_log();
+                f.iqk_after = Some(1);
+                f.fail = (fault != 0).then_some(fault);
+            }
+            let result = unsafe { control.initial_iqk(&mut rings, &Source) };
+            if fault == 0 {
+                result.unwrap();
+                total = fw.lock().unwrap().calls;
+                assert!(total > 10);
+                unsafe { rings.release_after_stop() }.unwrap();
+                drop(unsafe { control.release_after_stop() }.unwrap());
+            } else {
+                assert!(result.is_err(), "operation {fault}");
+                assert!(control.quarantined());
+                assert!(rings.quarantined());
+                drop(control);
+                drop(rings);
+                assert_eq!(Arc::strong_count(&owner), 2);
+            }
+        }
+        assert!(total < 64);
+        for mode in 0..5 {
+            let (_, report) = super::super::phy_tables::control_fixture();
+            let (io, fw, _, _) = bus(report.profile());
+            if mode == 2 {
+                fw.lock().unwrap().now = 100;
+            }
+            let mut control = unsafe { Control::new(io, &report) }.unwrap();
+            let memory = Arc::new(Mutex::new(Model::default()));
+            let device = Arc::new(Mutex::new(Device::default()));
+            device.lock().unwrap().iqk_trigger = Some(fw.lock().unwrap().trigger.clone());
+            let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
+            {
+                let mut f = fw.lock().unwrap();
+                f.clear_log();
+                match mode {
+                    0 => f.set(0xf0, 4, report.profile().observed().sys_cfg1 ^ 1),
+                    1 => f.set(0x80, 2, 0),
+                    2 => f.regress = true,
+                    3 => f.mutate_at = Some((8, 0xf0, 4, report.profile().observed().sys_cfg1 ^ 1)),
+                    _ => f.mutate_at = Some((9, 0x80, 2, 0)),
+                }
+            }
+            assert!(unsafe { control.initial_iqk(&mut rings, &Source) }.is_err());
+            assert!(control.quarantined());
+            assert!(rings.quarantined());
+            if mode < 2 {
+                assert!(device.lock().unwrap().packets.is_empty());
+            } else {
+                assert_eq!(rings.pending(), 1);
+            }
+        }
+    }
+    #[test]
+    #[ignore = "requires unchanged source PHYDM/IQK packet and IQK polling oracle"]
+    fn full_phydm_iqk_packets_and_iqk_ready_deadlines_match_unchanged_source() {
+        use super::super::firmware_control::{Control, Error as FwError, tests::bus};
+        let dir = std::path::PathBuf::from(
+            std::env::var("STELA_REALTEK_WIFI_FIRMWARE_CONTROL_ORACLE").unwrap(),
+        );
+        let bytes = std::fs::read(dir.join("packets.bin")).unwrap();
+        assert_eq!(bytes.len(), 65536 * 64);
+        for c in 0..65536usize {
+            let offset = c * 64;
+            assert_eq!(
+                phydm_info((c % 7) as u8, ((c / 7) % 7) as u8, 3, 3, c as u16),
+                bytes[offset..offset + 32]
+            );
+            assert_eq!(iqk(c as u16), bytes[offset + 32..offset + 64]);
+        }
+        let bytes = std::fs::read(dir.join("iqk.bin")).unwrap();
+        let mut offset = 0;
+        let mut cases = 0;
+        while offset < bytes.len() {
+            let h: [u32; 3] = core::array::from_fn(|i| {
+                u32::from_le_bytes(
+                    bytes[offset + i * 4..offset + i * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                )
+            });
+            offset += 12;
+            let packet = &bytes[offset..offset + 32];
+            offset += 32;
+            let source = &bytes[offset..offset + h[1] as usize * 16];
+            offset += source.len();
+            let (_, report) = super::super::phy_tables::control_fixture();
+            let (io, fw, _, _) = bus(report.profile());
+            let mut control = unsafe { Control::new(io, &report) }.unwrap();
+            let memory = Arc::new(Mutex::new(Model::default()));
+            let device = Arc::new(Mutex::new(Device::default()));
+            device.lock().unwrap().iqk_trigger = Some(fw.lock().unwrap().trigger.clone());
+            let mut rings = install_profile(&memory, &device, report.profile()).unwrap();
+            rings.sequence = h[0] as u16;
+            {
+                let mut f = fw.lock().unwrap();
+                f.clear_log();
+                f.iqk_after = Some(h[0] as usize);
+            }
+            let result = unsafe { control.initial_iqk(&mut rings, &Source) };
+            assert_eq!(result.is_ok(), h[0] <= 16, "IQK {}", h[0]);
+            if h[0] > 16 {
+                assert_eq!(result.unwrap_err(), FwError::Timeout { register: 0x2d9c });
+            }
+            assert_eq!(&device.lock().unwrap().packets[0][48..80], packet);
+            let mut actual: Vec<_> = fw
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .events
+                .iter()
+                .copied()
+                .filter(|e| !(e[0] == 0 && (e[1] == 0xf0 || e[1] == 0x80)))
+                .collect();
+            assert_eq!(actual.remove(0), [0, 0x2d9c, 1, 0], "fresh baseline");
+            let actual: Vec<u8> = actual
+                .into_iter()
+                .flat_map(|r| r.into_iter().flat_map(u32::to_le_bytes))
+                .collect();
+            assert_eq!(actual, source, "IQK trace {}", h[0]);
+            cases += 1;
+        }
+        assert_eq!(cases, 19);
     }
     #[test]
     fn native_bases_and_real_dma_consumer_control_firmware_packet_lifetime() {

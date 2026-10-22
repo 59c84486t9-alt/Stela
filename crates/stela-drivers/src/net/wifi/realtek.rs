@@ -9,6 +9,7 @@ pub mod efuse;
 pub mod features;
 pub mod fifo;
 pub mod firmware;
+pub mod firmware_control;
 pub mod hci;
 pub mod identity;
 pub mod interrupt;

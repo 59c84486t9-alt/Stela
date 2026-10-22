@@ -107,6 +107,12 @@ pub unsafe trait Io {
     fn write16(&mut self, register: u32, value: u16) -> Result<(), Error>;
     fn write32(&mut self, register: u32, value: u32) -> Result<(), Error>;
     fn delay_us(&mut self, microseconds: u64);
+    /// Actual monotonic native microseconds for firmware wall-time deadlines.
+    /// Implementations must use the same qualified CPU-affine clock as delays;
+    /// unavailable timing explicitly refuses new elapsed-time command polling.
+    fn now_us(&mut self) -> Result<u64, Error> {
+        Err(Error::InvalidClock)
+    }
     fn submit_beacon(&mut self, data: &[u8]) -> Result<(), Error>;
     /// # Safety
     /// Same actual new BCN_VALID completion proof as BeaconQueue::consumed.
@@ -256,6 +262,10 @@ unsafe impl<Q: BeaconQueue> Io for NativeIo<Q> {
     }
     fn delay_us(&mut self, microseconds: u64) {
         self.clock.delay(microseconds);
+    }
+    fn now_us(&mut self) -> Result<u64, Error> {
+        self.owned.as_ref().ok_or(Error::InvalidState)?;
+        Ok(self.clock.now_us())
     }
     fn submit_beacon(&mut self, data: &[u8]) -> Result<(), Error> {
         self.owned
@@ -1061,6 +1071,8 @@ mod tests {
             bytes: 0x170c,
             owned: Some((NoDma, memory)),
         };
+        let first = io.now_us().unwrap();
+        assert!(io.now_us().unwrap() >= first);
         io.write32(0x1708, 0x1234_abcd).unwrap();
         assert_eq!(io.read32(0x1708), Ok(0x1234_abcd));
         assert_eq!(io.read32(0x170c), Err(Error::Register));
@@ -1068,6 +1080,7 @@ mod tests {
         assert_eq!(io.read16(0x170b), Err(Error::Register));
         assert_eq!(io.write32(1, 0), Err(Error::Register));
         io.quarantine();
+        assert_eq!(io.now_us(), Err(Error::InvalidState));
         assert!(matches!(io.beacon_queue(), Err(Error::InvalidState)));
         assert_eq!(io.read32(0), Err(Error::Register));
         assert_eq!(io.submit_beacon(&[0]), Err(Error::InvalidState));

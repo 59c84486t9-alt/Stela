@@ -635,6 +635,10 @@ pub unsafe fn initialize<I: Io>(
 }
 
 #[cfg(test)]
+pub(super) fn control_fixture() -> (PhyInitialized, Report) {
+    tests::control_fixture()
+}
+#[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
@@ -1434,6 +1438,10 @@ mod tests {
             remnant_cck: 0,
             remnant_ofdm: [0; 2],
         }
+    }
+    pub(super) fn control_fixture() -> (PhyInitialized, Report) {
+        let (_, phy, report, _) = power_setup();
+        (phy, report)
     }
     fn power_setup() -> (Bus, PhyInitialized, Report, channel_power::Plan) {
         let (mut bus, factory, report) = tail_setup(0, 5, 6);
