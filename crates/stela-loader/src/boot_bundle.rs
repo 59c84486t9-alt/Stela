@@ -89,11 +89,23 @@ const VIRT_BASE_ALIGNMENT: u64 = 32 << 20;
 const BOOT_ARGS_REGION_BYTES: u64 = 0x4000;
 const MEMORY_MAP: &str = "/chosen/memory-map";
 const RESERVED_ENTRY_PREFIX: &str = "MemoryMapReserved-";
-/// iBoot fill-in recipe sources: `macaddr/NAME`, `syscfg/KEY[/LEN]` and
-/// `zeroes/LEN`, tried in order within a comma-separated recipe.
+/// iBoot fill-in recipe sources: `macaddr/NAME`, `syscfg/KEY[/LEN]`,
+/// `syscfg-mismatch/KEY[/LEN]`, `zeroes/LEN` and `hex/BYTES[/LEN]`, tried in
+/// order within a comma-separated recipe (26A434 `iBoot.j473` resolver
+/// 0xd41cc..0xd42bc, names at 0x1cce79; its `string/` source no template
+/// uses).
 const MACADDR_RECIPE: &str = "macaddr/";
 const SYSCFG_RECIPE: &str = "syscfg/";
+/// The same key read from the syscfg keybag providers instead of the syscfg
+/// store (`iBoot.j473` 0xd68e4 with its mismatch flag set calls 0x10991c,
+/// which asks each provider in turn, instead of 0x1096bc). No keybag provider
+/// is modelled, so the source yields nothing.
+const SYSCFG_MISMATCH_RECIPE: &str = "syscfg-mismatch/";
 const ZERO_FILL_RECIPE: &str = "zeroes/";
+/// Literal bytes as hex digits, zero-extended to LEN when given
+/// (`iBoot.j473` 0xd442c..0xd4570; an odd digit count or a LEN below the
+/// byte count panics, 0xd46ec and 0xd46e0).
+const HEX_RECIPE: &str = "hex/";
 const MAC_ADDRESS_BYTES: usize = 6;
 /// Clock properties XNU `pexpert/arm/pe_identify_machine.c` reads from the
 /// running CPU node; absent ones fall back to its defaults.
@@ -737,8 +749,40 @@ fn alternative_value(
         }
         return Ok(Some(value));
     }
+    if alternative.starts_with(SYSCFG_MISMATCH_RECIPE) {
+        return Ok(None);
+    }
     if let Some(size) = alternative.strip_prefix(ZERO_FILL_RECIPE) {
         return Ok(Some(vec![0; parse_size(size, recipe)?]));
+    }
+    if let Some(spec) = alternative.strip_prefix(HEX_RECIPE) {
+        let (digits, size) = match spec.split_once('/') {
+            Some((digits, size)) => (digits, Some(parse_size(size, recipe)?)),
+            None => (spec, None),
+        };
+        ensure!(
+            digits.len().is_multiple_of(2) && digits.bytes().all(|b| b.is_ascii_hexdigit()),
+            "{recipe} does not hold whole hex bytes"
+        );
+        let mut value: Vec<u8> = digits
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[high, low]| {
+                let digit = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                digit(high) << 4 | digit(low)
+            })
+            .collect();
+        if let Some(size) = size {
+            ensure!(
+                value.len() <= size,
+                "{recipe} holds {} bytes; it allows {size}",
+                value.len()
+            );
+            value.resize(size, 0);
+        }
+        return Ok(Some(value));
     }
     bail!("unknown fill-in source {alternative} in {recipe}")
 }
@@ -768,6 +812,12 @@ fn resolve_placeholders(
                 let bytes = value.len();
                 node.set_property(&placeholder.property, value)?;
                 format!("{alternative}: {bytes} bytes")
+            }
+            None if placeholder.recipe.contains(SYSCFG_MISMATCH_RECIPE) => {
+                node.remove_property(&placeholder.property);
+                "removed: no listed source was supplied, and no syscfg keybag provider is \
+                 modelled for syscfg-mismatch"
+                    .into()
             }
             None => {
                 node.remove_property(&placeholder.property);
@@ -2164,6 +2214,30 @@ mod tests {
             ],
             &[entry("test", &der(&[0x31], &[]))],
         )
+    }
+
+    #[test]
+    fn fill_in_sources_follow_iboots_resolver() -> Result<()> {
+        let options = Options {
+            syscfg: BTreeMap::from([("ARXN".to_owned(), vec![9; 2])]),
+            ..Options::default()
+        };
+        let value = |alternative: &str| alternative_value(alternative, alternative, &options);
+        assert_eq!(value("hex/0200fA")?, Some(vec![2, 0, 0xfa]));
+        assert_eq!(value("hex/0102/0x4")?, Some(vec![1, 2, 0, 0]));
+        for refused in [
+            "hex/012",
+            "hex/0x12",
+            "hex/+1",
+            "hex/010203/0x2",
+            "string/x",
+        ] {
+            assert!(value(refused).is_err(), "{refused}");
+        }
+        // No keybag provider is modelled: the source yields nothing.
+        assert_eq!(value("syscfg-mismatch/ARXN")?, None);
+        assert_eq!(value("syscfg/ARXN")?, Some(vec![9; 2]));
+        Ok(())
     }
 
     fn trust_cache() -> Vec<u8> {
