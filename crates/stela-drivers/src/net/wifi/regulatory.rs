@@ -10,6 +10,9 @@
 use super::{Band, Channel, scan, station};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+mod association;
+pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
+
 static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 fn allocate_owner(counter: &AtomicU64) -> Result<u64, Error> {
@@ -128,6 +131,11 @@ pub trait HardwareLease {
     fn context(&self) -> NativeContext;
     fn lookup_channel(&mut self, band: Band, number: u16) -> Option<Channel>;
     fn allows(&mut self, operation: Operation) -> bool;
+    /// Qualify the complete context-bound autonomous radio profile. The default
+    /// refuses; legacy single-rate permission never implies this permission.
+    fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
+        false
+    }
 }
 
 /// Actual physical radio owner, not an adapter around caller-copied flags.
@@ -142,6 +150,15 @@ pub trait HardwareLease {
 /// The fixed legacy TX profile must cover every hardware retry; refuse if
 /// firmware can choose unqualified fallback rates, widths or power. Receive
 /// here is normal station/scan reception, not a disabled-channel monitor mode.
+/// `allows_association` must additionally qualify the exact current context's
+/// complete source-enabled rate/PHY envelope: local/peer negotiated fields,
+/// basic/automatic ACK and BA responses, firmware rate selection and retries,
+/// all enabled GI/RU/STBC/LDPC/DCM modes, NSS, width/puncture/full channel
+/// footprint, and actually applied per-rate power/calibration/antenna limits.
+/// The context and local source words must be bound to the genuine retained
+/// native capability issuer; parsed/copied facts cannot establish authority.
+/// Do not approve a context using one legacy rate or an unqualified firmware
+/// fallback. Missing any necessary qualification must refuse the operation.
 /// No source default, parsed receipt, country guess or receive observation can
 /// establish these permissions. Missing TX qualification must deny TX while
 /// separately qualified receive may remain possible.
@@ -154,7 +171,9 @@ pub trait HardwareLease {
 /// while synchronously blocking on hardware authority. Use ordered acquisition
 /// or release/coordinate/revalidate without treating released authority as live.
 /// After publication, restrictive revocation must actually stop/cancel/drain
-/// pending radio work (or hardware-enforce the new restriction before emission).
+/// pending radio work and already armed autonomous MAC responses (or
+/// hardware-enforce the new restriction before emission). Stopping/removing a
+/// restricted context must remain possible without a new transmit permission.
 /// Retain old DMA/key/policy resources through actual completions and users.
 /// Closure return is not air completion, cancellation or retirement proof.
 pub unsafe trait HardwarePolicy {
@@ -168,6 +187,11 @@ pub unsafe trait HardwarePolicy {
 pub trait OsLease {
     fn revision(&self) -> u64;
     fn allows(&mut self, operation: Operation) -> bool;
+    /// Qualify the complete context-bound autonomous radio profile. The default
+    /// refuses; legacy single-rate permission never implies this permission.
+    fn allows_association(&mut self, _operation: &AssociationOperation<'_>) -> bool {
+        false
+    }
 }
 
 /// Trusted OS policy boundary. A frontend message or copied country is not it.
@@ -179,6 +203,9 @@ pub trait OsLease {
 /// `allows` must intersect all current location/DFS/indoor and operation-specific
 /// rate/width/power restrictions. The lease must genuinely synchronize policy
 /// revocation through native publication, not merely snapshot flags/revisions.
+/// `allows_association` must qualify that same complete enabled context profile,
+/// not one selected rate or metadata observation, for all current location,
+/// full channel footprint, DFS/no-IR/indoor and per-rate power constraints.
 /// Shared operations acquire hardware then OS authority. OS provider/revocation
 /// callbacks must not hold OS authority while synchronously waiting for hardware
 /// authority in reverse order. Use compatible ordered acquisition or release,

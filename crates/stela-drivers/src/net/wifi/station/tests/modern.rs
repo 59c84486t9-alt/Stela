@@ -821,3 +821,5 @@ fn transmitted_bssid_retains_outer_bounds_and_refuses_profile_selection() {
         Err(Error::Unsupported(_))
     ));
 }
+
+mod regulatory;
