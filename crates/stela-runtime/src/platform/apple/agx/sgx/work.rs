@@ -14,7 +14,9 @@ use crate::platform::apple::agx::{
     work::{Execution, ResultKind},
     work_decode::{
         Frame, Submission,
+        cl::G13X_CONTEXT_PIPE,
         ownership::Identity,
+        render_context::Program,
         resources::{Lease, Policy},
     },
 };
@@ -30,6 +32,9 @@ const PARAMETER_REGISTERS: [u32; 13] = [
     0x10080, 0x1a420, 0x1a4d0, 0x1a4d8, 0x1a4e0, 0x1a4e8, 0x10070, 0x1a458, 0x11840, 0x11848,
     0x11f80, 0x1a440, 0x12090,
 ];
+// Software ownership flags: Control, Context, primary mask and LegacySetup
+// have committed, while legacy-mask and parameter stores have not.
+const BEFORE_LEGACY_MIRROR: u8 = 0x47;
 const CONTROL: u32 = 0x10190;
 const CONTEXT: u32 = 0x10200;
 const CONTEXT_MASK: u32 = 0x17610;
@@ -79,6 +84,7 @@ impl Register {
 }
 
 struct ParameterOwner {
+    program: Option<Program>,
     frame: Frame,
     identity: Identity,
 }
@@ -87,6 +93,7 @@ struct Run {
     submission: Submission,
     lease: Lease,
     parameter_mask: u16,
+    legacy_mirror: Option<u64>,
     programmed: u8,
     backend: Option<Execution>,
 }
@@ -114,7 +121,7 @@ pub(super) struct Registers {
     parameters: [u64; 13],
     run: Option<Run>,
     render: render::Registers,
-    source_program: Option<crate::platform::apple::agx::work_decode::render_context::Program>,
+    source_program: Option<Program>,
     cache: cache::Registers,
 }
 impl fmt::Debug for Registers {
@@ -156,6 +163,7 @@ impl Registers {
             submission: submission.clone(),
             lease,
             parameter_mask: 0,
+            legacy_mirror: None,
             programmed: 0,
             backend: None,
         });
@@ -168,7 +176,15 @@ impl Registers {
         frame: &Frame,
         lease: Lease,
         identity: &Identity,
+        program: Option<Program>,
     ) -> Result<(), &'static str> {
+        if let Some(selected) = program {
+            if self.source_program.is_some_and(|old| old != selected) {
+                return Err("GFX CL parameter program differs from its initialized firmware image");
+            }
+        } else if let Some(initialized) = self.source_program {
+            initialized.require_cl_parameters(None)?;
+        }
         self.begin(submission, lease)?;
         let run = self.run.as_mut().unwrap();
         if let Some(source) = &run.source {
@@ -178,18 +194,25 @@ impl Registers {
             if !source.identity.same(identity) {
                 return Err("GFX CL native parameters belong to another accepted helper");
             }
+            if source.program != program {
+                return Err("GFX CL native parameters belong to another selected program");
+            }
         } else {
             if run.programmed != 0 || run.parameter_mask != 0 || run.backend.is_some() {
                 return Err("GFX CL frame binding follows uncertified native effects");
             }
             run.source = Some(ParameterOwner {
+                program,
                 frame: frame.clone(),
                 identity: identity.clone(),
             });
         }
+        if let Some(program) = program {
+            self.source_program = Some(program);
+        }
         Ok(())
     }
-    fn read(&self, register: Register) -> Result<u64, &'static str> {
+    fn read(&mut self, register: Register) -> Result<u64, &'static str> {
         match register {
             Register::Control => self
                 .control
@@ -197,6 +220,32 @@ impl Registers {
             Register::ContextMask => self
                 .context_mask
                 .ok_or("GFX CL native context-mask initial value is not qualified"),
+            Register::LegacyMask => {
+                let run = self
+                    .run
+                    .as_mut()
+                    .ok_or("GFX CL legacy-mask read has no accepted owner")?;
+                if !run
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.program)
+                    .is_some_and(Program::merge_mirror)
+                    || run.programmed != BEFORE_LEGACY_MIRROR
+                    || run.backend.is_some()
+                {
+                    return Err(
+                        "GFX CL legacy-mask read is outside the selected a000 source phase",
+                    );
+                }
+                if let Some(captured) = run.legacy_mirror {
+                    return Ok(captured);
+                }
+                let value = self
+                    .legacy_mask
+                    .ok_or("GFX CL native legacy-mask initial value is not qualified")?;
+                run.legacy_mirror = Some(value);
+                Ok(value)
+            }
             _ => Err("GFX CL native readback is not an original modeled operation"),
         }
     }
@@ -215,6 +264,18 @@ impl Registers {
         if run.backend.is_some() {
             return Err("GFX CL native configuration changed after submission");
         }
+        let legacy_mask = if run
+            .source
+            .as_ref()
+            .and_then(|source| source.program)
+            .is_some_and(Program::merge_mirror)
+        {
+            self.context_mask
+                .zip(run.legacy_mirror)
+                .map(|(primary, mirror)| primary | mirror | (1u64 << run.submission.context))
+        } else {
+            self.context_mask
+        };
         match register {
             Register::Control if self.control.is_some_and(|old| value == old | 1) => {
                 self.control = Some(value);
@@ -234,7 +295,7 @@ impl Registers {
                 self.context_mask = Some(value);
                 run.programmed |= 4;
             }
-            Register::LegacyMask if policy == Policy::G13X && Some(value) == self.context_mask => {
+            Register::LegacyMask if policy == Policy::G13X && Some(value) == legacy_mask => {
                 self.legacy_mask = Some(value);
                 run.programmed |= 0x20;
             }
@@ -285,6 +346,11 @@ impl Registers {
         let controls = if policy == Policy::G13X { 0x7f } else { 0x1f };
         if run.parameter_mask != parameters || run.programmed != controls {
             return Err("GFX CL submit precedes complete native parameter/context programming");
+        }
+        if policy == Policy::G13X
+            && self.context & 0x3f != (G13X_CONTEXT_PIPE | u32::from(run.lease.slot))
+        {
+            return Err("GFX G13X CL native context does not select its execution slot");
         }
         if self.control != Some(1) {
             return Err("GFX CL captured native control mode is not qualified");
@@ -469,7 +535,7 @@ impl FirmwareWork {
     }
     pub fn read(&self, port: &mut Port<'_, '_>, register: Register) -> Result<u64, &'static str> {
         self.target(port, register, false)?;
-        self.power.native.borrow().work.read(register)
+        self.power.native.borrow_mut().work.read(register)
     }
     pub fn write(
         &self,
@@ -668,7 +734,27 @@ impl crate::platform::apple::agx::work_decode::cl::Access for ParameterAccess<'_
             .native
             .borrow_mut()
             .work
-            .bind_parameters(submission, frame, lease, identity)
+            .bind_parameters(submission, frame, lease, identity, None)
+    }
+    fn begin_selected(
+        &mut self,
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        identity: &Identity,
+        program: Option<Program>,
+    ) -> Result<(), &'static str> {
+        self.owner.available()?;
+        if program.is_some_and(|program| program.policy() != self.owner.policy) {
+            return Err("GFX CL selected program differs from its actual SGX family");
+        }
+        identity.bind(&self.owner.power.native)?;
+        self.owner
+            .power
+            .native
+            .borrow_mut()
+            .work
+            .bind_parameters(submission, frame, lease, identity, program)
     }
     fn check_submitted(&self, submission: &Submission, lease: Lease) -> Result<(), &'static str> {
         self.owner.check_submitted(submission, lease)
@@ -862,11 +948,25 @@ mod tests {
         fail_write: Option<usize>,
         fail_read: Option<usize>,
         fail_after_cache_configuration: Option<super::super::FirmwarePower>,
+        fail_after_cl_mirror: Option<super::super::FirmwarePower>,
         calls: usize,
     }
     impl Memory for TraceRam {
         fn read(&mut self, pa: u64, out: &mut [u8]) -> bool {
             self.calls += 1;
+            if self.fail_after_cl_mirror.as_ref().is_some_and(|power| {
+                power
+                    .native
+                    .borrow()
+                    .work
+                    .run
+                    .as_ref()
+                    .and_then(|run| run.legacy_mirror)
+                    .is_some()
+            }) {
+                self.fail_after_cl_mirror = None;
+                return false;
+            }
             if self
                 .fail_after_cache_configuration
                 .as_ref()
@@ -948,6 +1048,7 @@ mod tests {
             fail_write: None,
             fail_read: None,
             fail_after_cache_configuration: None,
+            fail_after_cl_mirror: None,
             calls: 0,
         }
     }
@@ -2025,7 +2126,18 @@ mod tests {
     }
     fn program(owner: &FirmwareWork, sgx: &mut Sgx, memory: &mut TraceRam) {
         captured_rmw(owner);
-        let mut words = alloc::vec![(Register::Control, 1), (Register::Context, (5 << 8) | 3)];
+        let mut words = alloc::vec![
+            (Register::Control, 1),
+            (
+                Register::Context,
+                (5 << 8)
+                    | if owner.policy == Policy::G13X {
+                        u64::from(G13X_CONTEXT_PIPE) | u64::from(LEASE.slot)
+                    } else {
+                        3
+                    }
+            )
+        ];
         if owner.policy == Policy::G13X {
             words.push((Register::LegacySetup, 0x100));
         }
@@ -2236,6 +2348,34 @@ mod tests {
     }
 
     #[test]
+    fn g13x_native_submit_refuses_a_foreign_pipeline_selector_before_backend_effects() {
+        let mut sgx = gpu(&generation::G13X);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let owner = power
+            .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+            .unwrap();
+        owner.begin(&submission(), LEASE).unwrap();
+        let mut memory = ram();
+        program(&owner, &mut sgx, &mut memory);
+        io(&mut sgx, &mut memory, |port| {
+            owner.write(port, Register::Context, 0x503)
+        })
+        .unwrap();
+        assert_eq!(
+            io(&mut sgx, &mut memory, |port| owner.write(
+                port,
+                Register::Submit,
+                1
+            )),
+            Err("GFX G13X CL native context does not select its execution slot")
+        );
+        assert_eq!(owner.outcome(), Ok(None));
+        assert_eq!(power.native.borrow().work.context, 0x503);
+        assert_eq!((memory.reads, memory.writes), (0, 0));
+        assert!(power.check_reset().is_err());
+    }
+    #[test]
     fn original_parameter_phase_reaches_real_native_trigger_after_a_retained_uat_fault() {
         use crate::platform::apple::agx::work_decode::cl::Parameters;
         for family in [&generation::G13G, &generation::G13X, &generation::G14G] {
@@ -2274,7 +2414,14 @@ mod tests {
                 Err("GFX CL PIO translation disagrees with its actual SGX bank")
             );
             assert_eq!(power.native.borrow().work.control, Some(1));
-            assert_eq!(power.native.borrow().work.context, 0x503);
+            assert_eq!(
+                power.native.borrow().work.context,
+                if owner.policy == Policy::G13X {
+                    0x520
+                } else {
+                    0x503
+                }
+            );
             assert_eq!(
                 power
                     .native
@@ -2422,6 +2569,307 @@ mod tests {
         io(sgx, memory, |port| input.cursor().next(port))
             .unwrap()
             .unwrap()
+    }
+    #[test]
+    fn selected_g13x_cl_retains_a000_mirror_read_store_and_following_ram_boundaries() {
+        use crate::platform::apple::agx::{
+            sgx::{resources::FirmwareResources, work::cache::PreparedResources},
+            work_decode::{
+                cache_pool,
+                cl::{Parameters, attachments::Attachments},
+                render_context::{G13XVariant, Program},
+                resources::Pool,
+            },
+        };
+        for (variant, mode) in [
+            (G13XVariant::A000, 0u32),
+            (G13XVariant::A000, 3),
+            (G13XVariant::B000, 3),
+            (G13XVariant::C000, 3),
+        ] {
+            for enabled in [false, true] {
+                let mut sgx = gpu(&generation::G13X);
+                let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+                let mcc = cache_for(2);
+                let cache = mcc.firmware_cache(&[0x200000000, 0x201000000]).unwrap();
+                let owner = power.firmware_work(region(), cache.clone()).unwrap();
+                let resources = FirmwareResources::new(power.clone(), region())
+                    .unwrap()
+                    .with_cache(cache_region(Policy::G13X), cache)
+                    .unwrap();
+                let mut memory = ram();
+                let root = resource_root(&mut memory);
+                memory.ram.put_u64(DATA + root.rings, 0x1000);
+                assert!(memory.ram.write(DATA + 0x20d4, &mode.to_le_bytes()));
+                let program = io(&mut sgx, &mut memory, |port| {
+                    Program::g13x(variant, &root, port)
+                })
+                .unwrap();
+                let input = submission();
+                let snapshot = cache_input_snapshot(&input, 0);
+                let mut buffer_cache = cache_pool::Pool::after_cold_initialization(program);
+                buffer_cache
+                    .allocate_eligible(&snapshot, LEASE, 0, 0)
+                    .unwrap();
+                let _ = setup_with_attachment(&input, &mut sgx, &mut memory);
+                assert!(memory.ram.write(
+                    DATA + input.stream + 0x28,
+                    &u32::from(enabled).to_le_bytes()
+                ));
+                assert!(
+                    memory
+                        .ram
+                        .write(DATA + input.stream + 0x2c, &0x3fu32.to_le_bytes())
+                );
+                let frame = io(&mut sgx, &mut memory, |port| input.cursor().next(port))
+                    .unwrap()
+                    .unwrap();
+                captured_rmw(&owner); // actual readback supplied only by this fixture
+                let mut parameters =
+                    Parameters::for_program(&input, &frame, LEASE, program).unwrap();
+                let primary = (1u64 << 9) | if enabled { 1 << input.context } else { 0 };
+                let merged = primary | (1 << 11) | (1 << input.context);
+                if variant == G13XVariant::A000 && mode == 3 {
+                    // The source has already stored the primary before this
+                    // unsupported initial mirror read. No zero is supplied.
+                    assert_eq!(
+                        io(&mut sgx, &mut memory, |port| parameters
+                            .advance(&mut owner.parameter_access(port))),
+                        Err("GFX CL native legacy-mask initial value is not qualified")
+                    );
+                    assert_eq!(power.native.borrow().work.context_mask, Some(primary));
+                    assert_eq!(
+                        power.native.borrow().work.run.as_ref().unwrap().programmed,
+                        0x47
+                    );
+                    assert_eq!(
+                        power
+                            .native
+                            .borrow()
+                            .work
+                            .run
+                            .as_ref()
+                            .unwrap()
+                            .parameter_mask,
+                        0
+                    );
+                    assert!(power.check_reset().is_err());
+                    // Changed AP flags and startup mode cannot redirect the
+                    // accepted Frame or its already-copied selected program.
+                    assert!(memory.ram.write(
+                        DATA + input.stream + 0x28,
+                        &u32::from(!enabled).to_le_bytes()
+                    ));
+                    assert!(memory.ram.write(DATA + 0x20d4, &0u32.to_le_bytes()));
+                    let other_program = io(&mut sgx, &mut memory, |port| {
+                        Program::g13x(G13XVariant::A000, &root, port)
+                    })
+                    .unwrap();
+                    let mut other =
+                        Parameters::for_program(&input, &frame, LEASE, other_program).unwrap();
+                    let calls = memory.calls;
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| other
+                            .advance(&mut owner.parameter_access(port)))
+                        .is_err()
+                    );
+                    assert_eq!(memory.calls, calls);
+                    let active = LifecycleState {
+                        powered: true,
+                        clocked: true,
+                        quiesced: false,
+                        reset: false,
+                        retention: false,
+                    };
+                    let mut latch = InterruptLatch::new();
+                    let mut access = Access::new(0, 0, &mut latch);
+                    let gated = LifecycleState {
+                        clocked: false,
+                        ..active
+                    };
+                    sgx.check_lifecycle(gated).unwrap();
+                    sgx.set_lifecycle(gated, &mut access);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| parameters
+                            .advance(&mut owner.parameter_access(port)))
+                        .is_err()
+                    );
+                    assert_eq!(memory.calls, calls);
+                    sgx.check_lifecycle(active).unwrap();
+                    sgx.set_lifecycle(active, &mut access);
+                    power.native.borrow_mut().work.legacy_mask = Some(1 << 11);
+                    memory.fail_after_cl_mirror = Some(power.clone());
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| parameters
+                            .advance(&mut owner.parameter_access(port)))
+                        .is_err()
+                    );
+                    assert_eq!(
+                        power
+                            .native
+                            .borrow()
+                            .work
+                            .run
+                            .as_ref()
+                            .unwrap()
+                            .legacy_mirror,
+                        Some(1 << 11)
+                    );
+                    assert_eq!(power.native.borrow().work.legacy_mask, Some(1 << 11));
+                    // Retain the computed write despite losing its old native
+                    // readback. The following parameter RAM read must remain
+                    // deferred until that native write has committed.
+                    power.native.borrow_mut().work.legacy_mask = None;
+                    power.native.borrow_mut().work.control = Some(0xfeed0001);
+                    memory.fail_read = Some(memory.reads);
+                    assert!(
+                        io(&mut sgx, &mut memory, |port| parameters
+                            .advance(&mut owner.parameter_access(port)))
+                        .is_err()
+                    );
+                    assert_eq!(power.native.borrow().work.legacy_mask, Some(merged));
+                    assert_eq!(power.native.borrow().work.context_mask, Some(primary));
+                    assert_eq!(power.native.borrow().work.control, Some(0xfeed0001));
+                    assert_eq!(
+                        power
+                            .native
+                            .borrow()
+                            .work
+                            .run
+                            .as_ref()
+                            .unwrap()
+                            .parameter_mask,
+                        0
+                    );
+                    memory.ram.put_u64(DATA + 0x3000, 0xabcdef);
+                }
+                io(&mut sgx, &mut memory, |port| {
+                    parameters.advance(&mut owner.parameter_access(port))
+                })
+                .unwrap();
+                assert!(parameters.completed());
+                assert_eq!(power.native.borrow().work.context, 0x520);
+                let merge = variant == G13XVariant::A000 && mode == 3;
+                assert_eq!(
+                    power.native.borrow().work.legacy_mask,
+                    Some(if merge { merged } else { primary })
+                );
+                assert_eq!(power.native.borrow().work.context_mask, Some(primary));
+                assert_eq!(
+                    power
+                        .native
+                        .borrow()
+                        .work
+                        .run
+                        .as_ref()
+                        .unwrap()
+                        .legacy_mirror,
+                    merge.then_some(1 << 11)
+                );
+                if merge {
+                    assert_eq!(power.native.borrow().work.parameters[0], 0xabcdef);
+                }
+                let calls = memory.calls;
+                io(&mut sgx, &mut memory, |port| {
+                    parameters.advance(&mut owner.parameter_access(port))
+                })
+                .unwrap();
+                assert_eq!(memory.calls, calls);
+                // The actual attachment/cache join verifies that a000 used
+                // this exact selected parameter program, not just a family.
+                let pool = io(&mut sgx, &mut memory, |port| {
+                    Pool::bind(port, &root, &generation::G13X, 1)
+                })
+                .unwrap();
+                let mut attachments = Attachments::new(parameters, pool).unwrap();
+                io(&mut sgx, &mut memory, |port| {
+                    attachments.advance(&mut owner.attachment_access(&resources, port).unwrap())
+                })
+                .unwrap();
+                io(&mut sgx, &mut memory, |port| {
+                    buffer_cache.advance_selection(
+                        &mut owner
+                            .buffer_cache_access(
+                                &resources,
+                                PreparedResources::Cl(&attachments),
+                                port,
+                            )
+                            .unwrap(),
+                    )
+                })
+                .unwrap();
+                assert_eq!(buffer_cache.finish(), Ok(cache_pool::Allocation::NoUnits));
+                assert_eq!(power.native.borrow().work.resource, 0);
+                assert_eq!(owner.outcome(), Ok(None));
+                assert!(power.check_reset().is_err());
+            }
+        }
+    }
+    #[test]
+    fn selected_cl_image_remains_bound_after_zero_store_cancel() {
+        use crate::platform::apple::agx::work_decode::{
+            cl::Parameters,
+            render_context::{G13XVariant, Program},
+            resources::Outcome,
+        };
+        let mut sgx = gpu(&generation::G13X);
+        let power = sgx.firmware_power(&[(SGX, 0x4000000, 0)]).unwrap();
+        let mcc = cache();
+        let owner = power
+            .firmware_work(region(), mcc.firmware_cache(&[0x200000000]).unwrap())
+            .unwrap();
+        let mut memory = ram();
+        let root = resource_root(&mut memory);
+        memory.ram.put_u64(DATA + root.rings, 0x1000);
+        assert!(memory.ram.write(DATA + 0x20d4, &3u32.to_le_bytes()));
+        let program = io(&mut sgx, &mut memory, |port| {
+            Program::g13x(G13XVariant::A000, &root, port)
+        })
+        .unwrap();
+        let input = submission();
+        let frame = setup_with_attachment(&input, &mut sgx, &mut memory);
+        let mut parameters = Parameters::for_program(&input, &frame, LEASE, program).unwrap();
+        assert_eq!(
+            io(&mut sgx, &mut memory, |port| parameters
+                .advance(&mut owner.parameter_access(port))),
+            Err("GFX CL native control initial value is not qualified")
+        );
+        assert_eq!(
+            power.native.borrow().work.run.as_ref().unwrap().programmed,
+            0
+        );
+        owner
+            .cancel_setup(&input, LEASE, &Outcome::Aborted)
+            .unwrap();
+        assert!(!power.native.borrow().work.active());
+        let foreign = io(&mut sgx, &mut memory, |port| {
+            Program::g13x(G13XVariant::C000, &root, port)
+        })
+        .unwrap();
+        let mut other = Parameters::for_program(&input, &frame, LEASE, foreign).unwrap();
+        let calls = memory.calls;
+        assert!(
+            io(&mut sgx, &mut memory, |port| other
+                .advance(&mut owner.parameter_access(port)))
+            .is_err()
+        );
+        assert_eq!(memory.calls, calls);
+        assert!(!power.native.borrow().work.active());
+        assert!(
+            io(&mut sgx, &mut memory, |port| parameters
+                .advance(&mut owner.parameter_access(port)))
+            .is_err()
+        );
+        assert_eq!(memory.calls, calls);
+        captured_rmw(&owner);
+        power.native.borrow_mut().work.legacy_mask = Some(0);
+        let mut fresh = Parameters::for_program(&input, &frame, LEASE, program).unwrap();
+        io(&mut sgx, &mut memory, |port| {
+            fresh.advance(&mut owner.parameter_access(port))
+        })
+        .unwrap();
+        assert!(fresh.completed());
+        assert_eq!(power.native.borrow().work.source_program, Some(program));
     }
     fn cache_input_snapshot(
         input: &Submission,

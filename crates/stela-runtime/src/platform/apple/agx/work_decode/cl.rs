@@ -11,6 +11,7 @@ pub mod slot;
 use super::{
     Encoding, Frame, Submission,
     ownership::Identity,
+    render_context::Program,
     resources::{Attachment, Lease, Policy},
 };
 use crate::platform::apple::agx::{
@@ -19,6 +20,9 @@ use crate::platform::apple::agx::{
     sgx::work::Register,
 };
 use alloc::vec::Vec;
+
+/// Literal pipe2 in the G13X source's BFXIL execution-slot producer.
+pub(crate) const G13X_CONTEXT_PIPE: u32 = 0x20;
 
 /// The concrete SGX owner supplies native operations; these never pass
 /// through Shared's RAM-only write interface. Failed native operations
@@ -34,6 +38,19 @@ pub trait Access {
         lease: Lease,
         identity: &Identity,
     ) -> Result<(), &'static str>;
+    fn begin_selected(
+        &mut self,
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        identity: &Identity,
+        program: Option<Program>,
+    ) -> Result<(), &'static str> {
+        if program.is_some() {
+            return Err("GFX CL selected parameter program has no native owner");
+        }
+        self.begin(submission, frame, lease, identity)
+    }
     fn check_submitted(&self, _: &Submission, _: Lease) -> Result<(), &'static str> {
         Err("GFX CL native trigger ownership is not available")
     }
@@ -47,6 +64,7 @@ enum Value {
     Control,
     CaptureMask { bit: u64, enabled: bool },
     Mask,
+    MergeMirror { bit: u64 },
     Parameter(u64),
 }
 #[derive(Debug)]
@@ -61,6 +79,7 @@ struct Action {
 #[derive(Debug)]
 pub struct Parameters {
     policy: Policy,
+    program: Option<Program>,
     attachments: Vec<Attachment>,
     submission: Submission,
     frame: Frame,
@@ -107,6 +126,13 @@ impl Parameters {
         parameters
             .checked_add(0x67)
             .ok_or("GFX CL source parameter block wraps")?;
+        // G13X's common producer BFXILs the execution-slot low5 into
+        // literal0x20; G13G/G14G instead use the setup's low6 selector.
+        let selector = if policy == Policy::G13X {
+            G13X_CONTEXT_PIPE | u32::from(lease.slot)
+        } else {
+            frame.u32(0x2c)? & 0x3f
+        };
         let mut actions = alloc::vec![
             Action {
                 register: Some(Register::Control),
@@ -114,7 +140,7 @@ impl Parameters {
             },
             Action {
                 register: Some(Register::Context),
-                value: Value::Literal(u64::from(context << 8 | (frame.u32(0x2c)? & 0x3f)))
+                value: Value::Literal(u64::from(context << 8 | selector))
             },
         ];
         // G13X reads the old mask before committing LegacySetup at
@@ -159,6 +185,7 @@ impl Parameters {
         }
         Ok(Self {
             policy,
+            program: None,
             attachments: Attachment::read_setup(Encoding::Fixed, frame)?,
             submission: submission.clone(),
             frame: frame.clone(),
@@ -169,6 +196,32 @@ impl Parameters {
             held: None,
             mask: None,
         })
+    }
+    /// Explicit selected original program. a000 mode3 reads the native
+    /// legacy mask after the primary store, then combines old|bit|primary;
+    /// other qualified variants copy the retained primary directly.
+    pub fn for_program(
+        submission: &Submission,
+        frame: &Frame,
+        lease: Lease,
+        program: Program,
+    ) -> Result<Self, &'static str> {
+        let mut parameters = Self::new(submission, frame, lease, program.policy())?;
+        parameters.program = Some(program);
+        if program.merge_mirror() {
+            let action = parameters
+                .actions
+                .iter_mut()
+                .find(|action| action.register == Some(Register::LegacyMask))
+                .ok_or("GFX selected CL program has no legacy-mask phase")?;
+            action.value = Value::MergeMirror {
+                bit: 1 << submission.context,
+            };
+        }
+        Ok(parameters)
+    }
+    pub(crate) fn selected_program(&self) -> Option<Program> {
+        self.program
     }
     pub(crate) fn identity(&self) -> (&Submission, &Frame, Lease, Policy, &Identity) {
         (
@@ -193,7 +246,13 @@ impl Parameters {
             return Err("GFX CL parameter phase was canceled by its native owner");
         }
         access.check_available()?;
-        access.begin(&self.submission, &self.frame, self.lease, &self.identity)?;
+        access.begin_selected(
+            &self.submission,
+            &self.frame,
+            self.lease,
+            &self.identity,
+            self.program,
+        )?;
         while let Some(action) = self.actions.get(self.next) {
             if self.held.is_none() {
                 let value = match action.value {
@@ -206,6 +265,12 @@ impl Parameters {
                     Value::Mask => self
                         .mask
                         .ok_or("GFX CL legacy mirror precedes its retained context-mask write")?,
+                    Value::MergeMirror { bit } => {
+                        let primary = self
+                            .mask
+                            .ok_or("GFX CL mirror read precedes its retained primary mask")?;
+                        access.read_native(Register::LegacyMask)? | bit | primary
+                    }
                     Value::Parameter(va) => access.memory().read_u64(va)?,
                 };
                 self.held = Some(value);
@@ -413,7 +478,13 @@ mod tests {
                 assert_eq!((access.writes, access.reads), done);
             }
             assert_eq!(expected.writes[0], (Register::Control, 0x41));
-            assert_eq!(expected.writes[1], (Register::Context, 0x532));
+            assert_eq!(
+                expected.writes[1],
+                (
+                    Register::Context,
+                    if policy == Policy::G13X { 0x523 } else { 0x532 }
+                )
+            );
         }
     }
     #[test]

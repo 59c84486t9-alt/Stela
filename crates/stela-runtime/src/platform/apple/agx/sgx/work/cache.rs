@@ -175,8 +175,8 @@ impl Access for CacheAccess<'_, '_, '_> {
             );
         }
         match self.prepared {
-            PreparedResources::Cl(_) => {
-                program.require_cl_parameters()?;
+            PreparedResources::Cl(attachments) => {
+                program.require_cl_parameters(attachments.held_parameters()?.selected_program())?;
                 self.owner
                     .check_setup_owner(sub, frame, lease, policy, identity)
             }
