@@ -5,6 +5,7 @@
 use super::registers::{self, BarIo, Registers};
 
 pub mod bootstrap;
+mod cold_start;
 pub mod dma;
 
 const LPCTL: u32 = 0x7c060010;
@@ -20,6 +21,7 @@ const BUSY: u32 = (1 << 1) | (1 << 3);
 pub enum Error {
     ClockUnavailable,
     NotDriverOwned,
+    InitialResetRefused,
     DmaNotStopped,
     UnsupportedDmaMode(u32),
     Readback {
@@ -78,6 +80,7 @@ pub struct Control<I: BarIo> {
     driver_owned: bool,
     dma_stopped: bool,
     poisoned: bool,
+    initial_reset_attempted: bool,
     #[cfg(test)]
     polls: alloc::vec::Vec<(u32, u32, u32, u64)>,
 }
@@ -99,6 +102,7 @@ impl<I: BarIo> Control<I> {
             driver_owned: false,
             dma_stopped: false,
             poisoned: false,
+            initial_reset_attempted: false,
             #[cfg(test)]
             polls: alloc::vec::Vec::new(),
         })

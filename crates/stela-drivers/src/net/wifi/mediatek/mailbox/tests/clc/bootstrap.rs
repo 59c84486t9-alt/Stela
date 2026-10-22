@@ -17,6 +17,8 @@ struct DeviceBar {
     fail_at: Option<usize>,
     busy_wtbl: bool,
     ignore_global: bool,
+    wfsys_cleared: bool,
+    wfsys_no_ack: bool,
     fw: Option<Arc<Mutex<Response>>>,
 }
 #[derive(Clone)]
@@ -57,6 +59,15 @@ unsafe impl BarIo for Bar {
             && b.values.get(&0xfe24c).copied().unwrap_or(0) & 0xffff == 0x1806
         {
             b.values.insert(offset, 0);
+        } else if offset == 0xf0140 {
+            if value & 1 == 0 {
+                b.wfsys_cleared = true;
+                b.values.insert(offset, value & !16);
+            } else {
+                let ack = b.wfsys_cleared && !b.wfsys_no_ack;
+                b.values
+                    .insert(offset, if ack { value | 16 } else { value & !16 });
+            }
         } else {
             b.values.insert(offset, value);
         }
@@ -78,6 +89,7 @@ unsafe impl QueueIo for Q {
     fn configure(&mut self, address: u32, count: u16) -> Result<(), ring::Error> {
         {
             let mut b = self.bar.0.lock().unwrap();
+            b.log.push((2, self.offset, address));
             b.values.insert(self.offset, address);
             b.values.insert(self.offset + 4, u32::from(count));
         }
@@ -312,6 +324,74 @@ impl NativeFixture {
         self.model.lock().unwrap().clc_processing = false;
         self.bar.0.lock().unwrap().values.insert(0xd4208, 0);
         unsafe { self.controller.retire_after_quiesce() }.unwrap();
+    }
+}
+
+#[test]
+fn initial_mt7925_wfsys_ack_precedes_dma_stop_and_every_queue_publication() {
+    let mut f = NativeFixture::new(Chip::Mt7925);
+    f.bar.0.lock().unwrap().values.insert(0xf0140, 0xa5a50011);
+    f.install().unwrap();
+    {
+        let b = f.bar.0.lock().unwrap();
+        let own = b.log.iter().position(|v| *v == (0, 0xe0010, 0)).unwrap();
+        let clear = b
+            .log
+            .iter()
+            .position(|v| *v == (1, 0xf0140, 0xa5a50010))
+            .unwrap();
+        let set = b
+            .log
+            .iter()
+            .position(|v| *v == (1, 0xf0140, 0xa5a50001))
+            .unwrap();
+        let ack = b
+            .log
+            .iter()
+            .enumerate()
+            .skip(set + 1)
+            .find(|(_, v)| **v == (0, 0xf0140, 0xa5a50011))
+            .unwrap()
+            .0;
+        let dma = b
+            .log
+            .iter()
+            .position(|v| v.0 == 1 && v.1 == 0xd4208)
+            .unwrap();
+        let queue = b.log.iter().position(|v| v.0 == 2).unwrap();
+        assert!(own < clear && clear < set && set < ack && ack < dma && dma < queue);
+        assert_eq!(
+            b.log.iter().filter(|v| v.0 == 1 && v.1 == 0xf0140).count(),
+            2
+        );
+    }
+    assert!(matches!(f.install(), Err(BootError::WrongPhase)));
+    f.retire();
+}
+
+#[test]
+fn initial_wfsys_failure_retains_controller_before_any_dma_publication_or_retry() {
+    for fail in [None, Some(3), Some(4), Some(5), Some(6), Some(7)] {
+        let mut f = NativeFixture::new(Chip::Mt7925);
+        {
+            let mut b = f.bar.0.lock().unwrap();
+            b.wfsys_no_ack = true;
+            b.fail_at = fail;
+        }
+        assert!(matches!(f.install(), Err(BootError::Control(_))));
+        assert_eq!(f.controller.phase(), Phase::Quarantined);
+        assert!(f.memory.lock().unwrap().mappings.is_empty());
+        assert!(f.queues.values().all(|q| q.lock().unwrap().count == 0));
+        let count = {
+            let b = f.bar.0.lock().unwrap();
+            assert!(!b.log.iter().any(|v| v.0 == 2 || v.1 == 0xd4208));
+            b.log.len()
+        };
+        assert!(matches!(f.install(), Err(BootError::WrongPhase)));
+        assert_eq!(f.bar.0.lock().unwrap().log.len(), count);
+        let drops = f.drops.clone();
+        drop(f);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
     }
 }
 

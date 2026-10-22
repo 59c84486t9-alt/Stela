@@ -282,6 +282,11 @@ impl<I: BarIo, Q: QueueIo, C: 'static> Controller<I, Q, C> {
         s.phase = Phase::Quarantined;
         s.aspm = Some(aspm);
         s.control.driver_own(aspm).map_err(Error::Control)?;
+        if s.identity.chip == Chip::Mt7925 {
+            // mt7925_pci_probe: actual driver-own, WFSYS reset, then DMA init.
+            // No ring is allocated/published or engine enabled before its ACK.
+            unsafe { s.control.initial_wfsys_reset() }.map_err(Error::Control)?;
+        }
         s.control.stop_dma(true).map_err(Error::Control)?;
         s.control.mask_interrupts().map_err(Error::Control)?;
         s.control.verify_unused_queues().map_err(Error::Control)?;
