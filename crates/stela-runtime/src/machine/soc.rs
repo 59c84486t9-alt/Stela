@@ -2100,7 +2100,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let usbs = usb_controllers(&io, &extent, &darts)?;
     let power_states = power_states(&root, &extent, chip_id)?;
     let PmgrRegisters {
-        refusals: pmgr_refusals,
+        refusals: mut pmgr_refusals,
         cluster_events,
         bridges,
         soc_dpe,
@@ -2111,6 +2111,15 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         clusters,
         aon_fuses,
     } = pmgr_registers(&io, &extent, chip_id)?;
+    // The native T8112 PMP image names three independent DVFS controllers.
+    // Their source-qualified protocol does not establish an actual backend.
+    if chip_id == 0x8112 && pmp.is_some() {
+        pmgr_refusals.extend(
+            crate::platform::apple::pmgr::dvfs::T8112
+                .into_iter()
+                .map(|descriptor| PmgrBankRefusal::from(descriptor.refusal())),
+        );
+    }
     let cpu_start = cpu_start(&io, &extent, chip_id, &cpus.processors)?;
     let memory_cache = memory_cache(&io, &extent, chip_id, memory_controller.as_ref())?;
     let direct_memory_cache =
