@@ -19,6 +19,10 @@
 //!   reason automatically acknowledges and masks the IRQ"). Software pending
 //!   bits are ORed with the hardware line; lower IRQ numbers win.
 //! - AICv2 has no IPI registers; IPIs are fast IPIs.
+//! - The vGIC maintenance interrupt is the core's own: Linux numbers it
+//!   `AIC_VGIC_MI` in its FIQ-source domain but finds it in `aic_handle_irq`,
+//!   after the event register reads 0, by reading ICH_MISR_EL2, so it
+//!   arrives on IRQ without an AIC event (`machine::vgic`), not as an FIQ.
 //!
 //! The 26A434 kernel's `AppleInterruptControllerV2` documents the shared
 //! interrupt timestamps the ADT counts in `#shared-timestamps`: slot N is at
@@ -35,8 +39,19 @@
 //! MAX_IRQ to split IRQ numbers into dies. Its `start` keeps VERSION [7:0] in a
 //! field no code reads.
 //!
+//! The `aic,3` driver (`AppleInterruptControllerV3`, every M3-to-M6 board)
+//! does read VERSION: it masks it to eight bits and from revision 0xb takes
+//! die and SoC topology paths that read the ADT's `aic-numdies`,
+//! `aic-numdies-per-die`, `aic-die-offset-stride`, `aic-soc-offset-stride`
+//! and `max-extint-num` (Snapintosh `docs/DEVICE-REFERENCES.md`, for the
+//! J700 driver; the 26A434 M4 kernelcache carries those names beside "_aicNumDies
+//! is not defined in DT"). No 26A434 Mac DeviceTree has any of them, nor
+//! `aic-rev` (J613, J773g, J813, J873g, J514c/m, J575d), so those boards'
+//! AICs report a revision below 0xb (inference); what each chip reports is
+//! not public.
+//!
 //! Inferred, not documented: VER is the controller's generation (2 for
-//! AICv2, 3 for AICv3), which no public source states and no kernel consumes;
+//! AICv2, 3 for AICv3), below the `aic,3` driver's 0xb topology threshold;
 //! an AICv3's MAX_IRQ is NR_IRQ rounded up to a mask word; an enabled
 //! timestamp slot latches the system counter at each rising edge of its
 //! hardware input, and a slot reads 0 until it first latches; the reset state masks every IRQ with zero
