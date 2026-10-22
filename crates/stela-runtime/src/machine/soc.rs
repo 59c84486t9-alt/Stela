@@ -3551,8 +3551,10 @@ fn spmi_pmu(node: &Node<'_>, io: &Node<'_>) -> Result<SpmiPmu, String> {
     } else {
         0
     };
-    if (primary || interrupt.is_some()) && rtc.is_none() {
-        return Err("PMU global service/output requires a qualified RTC owner".into());
+    // The primary's alarm is the board's RTC wake source. An output alone
+    // needs no RTC: without one it stays deasserted (`pmu::Pmu`).
+    if primary && rtc.is_none() {
+        return Err("PMU primary system service requires a qualified RTC owner".into());
     }
     let rtc_helper = match node.property("function-rtc_read_helper") {
         None => None,
@@ -7026,6 +7028,72 @@ mod tests {
         assert_eq!((rtc.event_mask, rtc.interrupt_mask), (0x1, 0x1));
         // A clock offset that is not six bytes refuses.
         let bytes = tree(&[0xf900, 4]);
+        let io = Node::root(&bytes).unwrap();
+        assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
+    }
+
+    #[test]
+    fn a_pmu_output_needs_no_rtc_but_the_primary_service_does() {
+        use crate::machine::adt::encode;
+        let z = |text: &str| [text.as_bytes(), &[0]].concat();
+        let cells = |values: &[u32]| {
+            values
+                .iter()
+                .flat_map(|n| n.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let pairs = |values: &[(u64, u64)]| {
+            values
+                .iter()
+                .flat_map(|&(a, b)| [a, b])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>()
+        };
+        // A J504AP-shaped pmu-aux (Vale) on its own controller, trimmed.
+        let tree = |primary: u32| {
+            let pmu = encode(
+                &[
+                    ("name", &z("pmu-aux")),
+                    ("compatible", b"pmu,spmi\0pmu,vale\0"),
+                    ("reg", &cells(&[0xe, 3, 0, 4, 0, 0])),
+                    ("info-scrpad", &cells(&[0xa000, 0x800])),
+                    ("info-leg_scrpad", &cells(&[0xbb00])),
+                    ("info-fault_log", &cells(&[0x1800, 3])),
+                    ("info-id", &cells(&[0, 10])),
+                    ("is-primary", &cells(&[primary])),
+                    ("interrupt-parent", &cells(&[0x110])),
+                    ("interrupts", &cells(&[2])),
+                ],
+                &[],
+            );
+            let spmi = encode(
+                &[
+                    ("name", &z("nub-spmi1")),
+                    ("compatible", &z(SPMI)),
+                    ("gen", &cells(&[2])),
+                    ("queue-depth", &cells(&[256, 256])),
+                    ("AAPL,phandle", &cells(&[0x110])),
+                    (
+                        "reg",
+                        &pairs(&[(0x3d81_4000, 0x4000), (0x3d80_4000, 0x4000)]),
+                    ),
+                    ("interrupt-parent", &cells(&[0x110, 0x63, 0x110])),
+                    ("interrupts", &cells(&[0x100, 0x184, 0x119, 0x104])),
+                ],
+                &[pmu],
+            );
+            encode(&[("name", &z("arm-io"))], &[spmi])
+        };
+        let translate = |offset| Some(0x2_0000_0000 + offset);
+        let bytes = tree(0);
+        let io = Node::root(&bytes).unwrap();
+        let controllers = spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).unwrap();
+        let pmu = &controllers[0].pmus[0];
+        assert_eq!(
+            (pmu.primary, pmu.interrupt, pmu.rtc),
+            (false, Some(2), None)
+        );
+        let bytes = tree(1);
         let io = Node::root(&bytes).unwrap();
         assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
     }

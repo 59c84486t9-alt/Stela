@@ -1358,8 +1358,8 @@ impl AppleDevices {
         let mut primary = None;
         let mut primary_clock = None;
         for pmu in &placement.pmus {
-            if (pmu.primary || pmu.interrupt.is_some()) && pmu.rtc.is_none() {
-                return Err("PMU global service/output requires a qualified RTC owner".into());
+            if pmu.primary && pmu.rtc.is_none() {
+                return Err("PMU primary system service requires a qualified RTC owner".into());
             }
             let mut configuration =
                 pmu::Configuration::new(pmu.windows.clone(), pmu.rtc, pmu.alarm_monitor)

@@ -55,6 +55,17 @@
 //! write-one-to-clear. The PMU's interrupt output ([`Interrupt`]) is
 //! asserted while the event is latched and the IRQ mask leaves it
 //! unmasked; where it leads is the board's. Every other address NACKs.
+//!
+//! A PMU without RTC registers can still declare an output (`interrupts`
+//! on the 26A434 Simetra, Vale, Spitfire, Portier, Club and Jerez PMUs,
+//! from T8103 to T6050). The AP consumer of every PMU output is
+//! `AppleDialogSPMIPMU::_interruptAction` (mac15g 26A434 VA 0xfffffe0009d63d80),
+//! registered by `start` (0xfffffe0009d6317c..d6319c) for any provider with
+//! `interrupts`: it only calls the RTC child's `programRTCAlarm(0)`, and with
+//! no RTC child it does nothing beyond a debug log. The RTC alarm is the only
+//! output source this model has; firmware, fault and rail events have no
+//! modeled producer (as for the fault log), so such a PMU's output is an
+//! actual, permanently deasserted wire rather than an unqualified one.
 mod clock;
 mod config;
 mod fault;
@@ -624,8 +635,10 @@ impl SpmiSlave for Pmu {
             .map_or(Ok(()), |loader| loader.check_time(now))
             .map_err(SlaveError::Unsupported)
     }
+    /// The RTC alarm is the only modeled output source; without an RTC the
+    /// output stays deasserted (see the module comment).
     fn interrupt_level(&self) -> Option<bool> {
-        self.rtc.map(|_| self.interrupt.asserted())
+        Some(self.interrupt.asserted())
     }
     fn interrupt_armed(&self) -> bool {
         self.armed || self.interrupt.asserted()
@@ -811,6 +824,38 @@ mod tests {
             assert_eq!(pmu.read(0, &mut [0; 10], 0), Err(SlaveError::Nack));
             assert_eq!(pmu.read(0x3000, &mut [0; 16], 0), Err(SlaveError::Nack));
         }
+    }
+
+    #[test]
+    fn a_pmu_without_rtc_routes_an_actual_permanently_deasserted_output() {
+        use crate::platform::apple::{
+            interrupt::AicInput,
+            spmi::{Configuration as Controller, Profile, Spmi},
+        };
+        // A Vale-shaped secondary: scratch, legacy scratch, no RTC.
+        let windows = alloc::vec![
+            Window {
+                base: 0xa000,
+                bytes: 0x800
+            },
+            Window {
+                base: 0xbb00,
+                bytes: LEGACY_SCRATCH_BYTES
+            },
+        ];
+        let mut pmu = Pmu::configured(Configuration::new(windows, None, 0).unwrap(), None).unwrap();
+        let output = pmu.interrupt();
+        assert_eq!(pmu.interrupt_level(), Some(false));
+        assert!(!pmu.interrupt_armed());
+        pmu.write(0xbb01, &[0x30], FREQUENCY_HZ).unwrap();
+        assert_eq!(pmu.advance(u64::MAX / 2), None);
+        assert!(!output.asserted() && !pmu.interrupt_armed());
+        assert_eq!(pmu.read(0xf800, &mut [0], 0), Err(SlaveError::Nack));
+        let mut spmi = Spmi::with_configuration(
+            AicInput::new(0, 0x180),
+            Controller::new(Profile::Gen2, 192, [256, 256]).unwrap(),
+        );
+        spmi.attach_with_interrupt(0xe, 2, Box::new(pmu)).unwrap();
     }
 
     #[test]
