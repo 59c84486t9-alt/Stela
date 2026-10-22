@@ -8,9 +8,10 @@
 //! the MIDR_EL1 part number of each cluster type (m1n1 `src/midr.h`
 //! `MIDR_PART_<soc>_<core>`; for the Ultras, the parts of the Max dies they
 //! join, and for the second M3 Max and the M3 Ultra an inference stated at
-//! their rows). A SoC, cluster type or affinity without that evidence
-//! refuses: the A18 Pro, which no `machine::Chip` profile describes, the
-//! T6050 (no `product-soc-name`) and its M cores.
+//! their rows). A SoC row names the `machine::Chip` whose CPU profile its
+//! cores take; the A18 Pro takes the M4's (its row gives the evidence). A
+//! SoC, cluster type or affinity without that evidence refuses: the T6050
+//! (no `product-soc-name`) and its M cores.
 use super::{
     Chip,
     adt::Node,
@@ -188,9 +189,9 @@ const fn cache(bytes: u32, ways: u32) -> Cache {
 ///   chockenberry/1d08129bdf41bfb70e98c3a75ce74578): the M4 Max and the M5
 ///   report these `l1icachesize` and `l1dcachesize` values per core type,
 ///   with the `l2cachesize` values their boards' 26A434 DeviceTrees state.
-/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro and the M6, whose
-///   26A434 DeviceTrees give their cores the same `apple,sawtooth` and
-///   `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
+/// - Inferred: the M3 Pro and Max, the M4 and M4 Pro, the A18 Pro and the
+///   M6, whose 26A434 DeviceTrees give their cores the same `apple,sawtooth`
+///   and `apple,everest` compatibles as the M3, M4 Max and M5 cores above.
 ///   This inference applies only to the declared E/P descriptors; the M6
 ///   M type has no inferred cache geometry.
 const L1_CACHES: [CoreCaches; 2] = [
@@ -313,8 +314,8 @@ const LOCKDOWN: [u64; 2] = [0x5000, 0x9000];
 /// `MAX_CPU_CLUSTER_PHY_ID`, defaulting to the cluster count less one):
 /// the T6000 configuration covers the M1 Pro, Max and Ultra, T6020 the M2
 /// Pro, Max and Ultra, T6031 the M3 Max and Ultra, T6041 the M4 Pro and
-/// Max. The T8140 and T8152 have no public configuration, so their boards
-/// are not bounded here. Every 26A434 board DeviceTree fits its chip's
+/// Max. The T8152 has no public configuration, so its boards are not
+/// bounded here. Every 26A434 board DeviceTree fits its chip's
 /// (`topology::KernelLimits`).
 const T8103_LIMITS: KernelLimits = KernelLimits::new(8, 2, 1);
 const T6000_LIMITS: KernelLimits = KernelLimits::new(20, 6, 10);
@@ -326,13 +327,22 @@ const T6031_LIMITS: KernelLimits = KernelLimits::new(32, 6, 10);
 const T8132_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
 const T6041_LIMITS: KernelLimits = KernelLimits::new(16, 3, 2);
 const T8142_LIMITS: KernelLimits = KernelLimits::new(10, 2, 1);
+/// The T8140 has no public configuration; its 26A434 kernel's
+/// (kernelcache.release.mac17p, SHA-256 `12ee4fc6...1d45`) compiles six CPUs,
+/// two clusters and cluster 1: `ml_parse_cpu_topology` defaults its CPU
+/// limit to 6 (`0xfffffe000ba88318`) and fills two `cluster_offsets`
+/// entries (`0xfffffe000ba88408`), and `topology_info` (`0xfffffe0007e2c650`)
+/// points at six 0x88-byte CPU records (`0x...e2c270`) followed by two
+/// 0x58-byte cluster records (`0x...e2c5a0`) that end at it. The same reading
+/// of the T8142's kernel (mac17g) gives XNU's 10/2/1.
+const T8140_LIMITS: KernelLimits = KernelLimits::new(6, 2, 1);
 
 /// The event register offset every 26A434 M3-to-M6 iBoot writes to an
 /// `aic,3` node's `aic-iack-offset` (`mov w8, #0x40000` before the property
 /// name): J613 0x3c0f8, J514s 0x3b800, J514c 0x3e2a4, J773g 0x3a610, J614s
-/// 0x3c6e4, J614c 0x3c604, J813 0x3e79c and J873g 0x3cd14 in the decoded
-/// `iBoot.<board>.RELEASE.im4p` payloads, where J473's writes the 0x8000 of
-/// `t8112.dtsi` (0x39a88).
+/// 0x3c6e4, J614c 0x3c604, J700 0x3ce90, J813 0x3e79c and J873g 0x3cd14
+/// in the decoded `iBoot.<board>.RELEASE.im4p` payloads, where J473's writes
+/// the 0x8000 of `t8112.dtsi` (0x39a88).
 const AIC3_EVENT: u64 = 0x40000;
 
 /// The generic `/arm-io/pmgr` of the M6, whose SoC registers are in
@@ -436,7 +446,7 @@ const M3_MAX: Soc = Soc {
     bridge_fields: None,
 };
 
-const SOCS: [Soc; 18] = [
+const SOCS: [Soc; 19] = [
     Soc {
         chip_id: 0x8103,
         name: "Apple M1",
@@ -671,6 +681,36 @@ const SOCS: [Soc; 18] = [
         dpe_reg: None,
         bridge_fields: None,
     },
+    // The A18 Pro (J700AP) takes the M4's CPU profile. Apple clang's
+    // `-mcpu=apple-a18` exports exactly the M4's FEAT set (clang-2100.1.1.101);
+    // its 26A434 SPTM's IMPLEMENTATION DEFINED census equals the T8132's and
+    // its kernel's is a subset of the T8132 kernel's (`isa/apple-soc-facts.json`);
+    // the SPTM executes the M4's maintenance words and never reads
+    // TAG_OFFSET_EL2; XNU builds memory tagging only for the T8142 and T6050
+    // (`makedefs/MakeInc.def` `MTE_SUPPORTED_SOCS`); and m1n1 gives its Tahiti
+    // cores `features_m4` (`src/chickens.c`). Its parts are XNU's H17P Tahiti
+    // pair (`osfmk/arm/cpuid.h` `CPU_PART_ECORE_TAHITI` 0x60,
+    // `CPU_PART_PCORE_TAHITI` 0x61; m1n1 `MIDR_PART_T8140_TAHITI_*`), and
+    // m1n1 `smp.c` gives it the T8112's CPU start offset.
+    Soc {
+        chip_id: 0x8140,
+        name: "Apple A18 Pro",
+        pmgr: "pmgr1,t8140",
+        chip: Chip::AppleM4,
+        cores: &ep_cores(0x060, 0x061, None),
+        aic: Some(("aic,3", AIC3_EVENT)),
+        dram_base: None,
+        lockdown: None,
+        limits: Some(T8140_LIMITS),
+        memory_cache: None,
+        clusters: None,
+        aon_fuses: None,
+        cpu_start: Some(CPU_START_T8112),
+        wake_masks: None,
+        power_banks: &[],
+        dpe_reg: None,
+        bridge_fields: None,
+    },
     Soc {
         chip_id: 0x8142,
         name: "Apple M5",
@@ -753,6 +793,19 @@ pub fn core_types(chip_id: u32) -> Option<&'static [CoreType]> {
 /// The CPU of the SoC with `chip_id`, for the SoCs with a row.
 pub fn chip(chip_id: u32) -> Option<Chip> {
     Some(SOCS.iter().find(|soc| soc.chip_id == chip_id)?.chip)
+}
+
+/// The label of the SoC's own core variant in a DeviceTree template that
+/// gives a value per variant instead of one: J700AP's P cores carry
+/// `l2-cache-size-h17p` (16 MiB) and `l2-cache-size-h17a` (8 MiB) and no
+/// `l2-cache-size`, which XNU's `ml_parse_cpu_topology` reads. XNU
+/// `osfmk/arm/cpuid.h` names the A18 Pro's Tahiti cores H17P (the A18's
+/// Tupai cores are H17A), so its value is the `-h17p` one.
+pub fn template_variant(chip_id: u32) -> Option<&'static str> {
+    match chip_id {
+        0x8140 => Some("h17p"),
+        _ => None,
+    }
 }
 
 /// The `product-soc-name` of the SoC with `chip_id`, for the SoCs with a row.
@@ -6743,6 +6796,46 @@ mod tests {
                     .all(|other| other.chip_id != soc.chip_id)
             );
         }
+    }
+
+    /// The A18 Pro takes the M4's CPU profile with its own parts, so every
+    /// chip-keyed feature is the M4's: the Apple generic timer, CTRR-C/D and
+    /// CTXR, no memory tagging and the M4's maintenance words (DC INCPA4K,
+    /// operation 25 and `0x00201401`, not operation 26). J700AP's four E and
+    /// two P cores fill its kernel's six CPU slots.
+    #[test]
+    fn the_a18_pro_takes_the_m4_cpu_profile() {
+        use super::super::{ctrr, identification, timer::agt};
+        assert_eq!(chip(0x8140), Some(Chip::AppleM4));
+        assert_eq!(name(0x8140), Some("Apple A18 Pro"));
+        assert_eq!(midr_part(0x8140, b'E'), Some(0x60));
+        assert_eq!(midr_part(0x8140, b'P'), Some(0x61));
+        assert!(agt::present(Chip::AppleM4));
+        assert_eq!(ctrr::generation(Chip::AppleM4), ctrr::Generation::Ctrr3);
+        assert!(!identification::memory_tagging(Chip::AppleM4));
+        assert!(Chip::AppleM4 < Chip::AppleM5);
+        assert_eq!(template_variant(0x8140), Some("h17p"));
+        assert_eq!(template_variant(0x8132), None);
+        let j700 = [
+            (b'E', 0),
+            (b'E', 1),
+            (b'E', 2),
+            (b'E', 3),
+            (b'P', 0x100),
+            (b'P', 0x101),
+        ];
+        let a18 = cpus(0x8140, "Apple A18 Pro", &layout_of(&j700)).unwrap();
+        assert_eq!(a18.chip, Chip::AppleM4);
+        assert_eq!(a18.lockdown, None);
+        assert_eq!(a18.processors[0].midr, 0x611f_0600);
+        assert_eq!(a18.processors[4].midr, 0x611f_0610);
+        assert_eq!(a18.processors[5].mpidr, 0x8001_0101);
+        let seventh = [j700.as_slice(), &[(b'P', 0x102)]].concat();
+        assert!(
+            cpus(0x8140, "Apple A18 Pro", &layout_of(&seventh))
+                .unwrap_err()
+                .contains("MAX_CPUS")
+        );
     }
 
     #[test]

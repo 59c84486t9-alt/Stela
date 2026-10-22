@@ -162,7 +162,7 @@ const N3_UNTRACED: &str = "iBoot's choice between the T8122 temp-sensor and temp
     tables is not traced";
 
 /// The rows, one per `machine::soc` SoC row.
-const HANDOFFS: [Handoff; 18] = [
+const HANDOFFS: [Handoff; 19] = [
     row(
         0x8103,
         LPDDR4,
@@ -258,6 +258,12 @@ const HANDOFFS: [Handoff; 18] = [
         LPDDR5,
         Ok(None),
         ("j614c", 0x2b8d58, 0x15b134, 0x6adc0),
+    ),
+    row(
+        0x8140,
+        LPDDR5,
+        Ok(None),
+        ("j700", 0x2a94f8, 0x1593f4, 0x631a8),
     ),
     row(
         0x8142,

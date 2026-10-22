@@ -141,8 +141,9 @@ struct Board {
 }
 
 /// The hosted board of each SoC `machine::soc` has a row for: the Mac mini
-/// or Mac Studio where one exists, else a MacBook Pro (and the Mac15,3 the
-/// M3 boot bundle uses), with its 26A434 DeviceTree's clusters. The first row
+/// or Mac Studio where one exists, else a MacBook Pro or the A18 Pro's
+/// MacBook (and the Mac15,3 the M3 boot bundle uses), with its 26A434
+/// DeviceTree's clusters. The first row
 /// of each chip is its base SoC, the one [`Hardware::of`] selects.
 const BOARDS: &[Board] = &[
     Board {
@@ -293,6 +294,14 @@ const BOARDS: &[Board] = &[
             layout(PERFORMANCE, 6, 16),
             layout(PERFORMANCE, 6, 16),
         ],
+    },
+    // J700AP's P cores carry the A18 Pro's 16 MiB L2 as `l2-cache-size-h17p`
+    // (`machine::soc::template_variant`).
+    Board {
+        chip_id: 0x8140,
+        model: "Mac17,5",
+        target: "J700AP",
+        clusters: &[layout(EFFICIENCY, 4, 4), layout(PERFORMANCE, 2, 16)],
     },
     Board {
         chip_id: 0x8142,
@@ -650,6 +659,7 @@ mod tests {
             (0x8132, CPUFAMILY_ARM_DONAN, CPUSUBFAMILY_ARM_HG, 10),
             (0x6040, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HS, 16),
             (0x6041, CPUFAMILY_ARM_BRAVA, CPUSUBFAMILY_ARM_HC_HD, 16),
+            (0x8140, CPUFAMILY_ARM_TAHITI, CPUSUBFAMILY_ARM_HP, 6),
             (0x8142, CPUFAMILY_ARM_HIDRA, CPUSUBFAMILY_ARM_HG, 10),
             (0x8152, CPUFAMILY_ARM_KOMODO, CPUSUBFAMILY_ARM_HG, 12),
         ];

@@ -151,11 +151,18 @@ impl AdmitTable {
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum Chip {
+    /// T8103, T6000 to T6002.
     AppleM1,
+    /// T8112, T6020 to T6022.
     AppleM2,
+    /// T8122, T6030 to T6034.
     AppleM3,
+    /// T8132, T6040, T6041, and the A18 Pro's T8140, whose Apple clang
+    /// `-mcpu=apple-a18` export is the M4's (`machine::soc` gives the rest).
     AppleM4,
+    /// T8142.
     AppleM5,
+    /// T8152.
     AppleM6,
 }
 
