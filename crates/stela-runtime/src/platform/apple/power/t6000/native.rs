@@ -671,6 +671,7 @@ impl MmioDevice for View {
 mod tests {
     use super::super::{Bank, Instance, Observation as RequestObservation};
     use super::*;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::{
         apple::{
             bus::{Bus, DeviceId},
@@ -1011,17 +1012,31 @@ mod tests {
         }
         let entry = owner.native_entry(2, 0).unwrap();
         let mut effects = owner
-            .native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord)
+            .native_packet_effects(
+                2,
+                0,
+                bytes.len(),
+                AddressFormat::HighWord,
+                Some(test_initial()),
+            )
             .unwrap();
         assert!(matches!(
-            owner.native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord),
+            owner.native_packet_effects(
+                2,
+                0,
+                bytes.len(),
+                AddressFormat::HighWord,
+                Some(test_initial())
+            ),
             Err(Error::EffectsOwned)
         ));
         let mut memory = owner.native_memory().unwrap();
         assert_eq!(memory.write_checked(entry.pc, &[0; 4]), Err(Error::Pending));
         assert!(owner.native_observations().unwrap().packet_effects_owned);
         let write = effects.begin_write().unwrap();
-        let actual = effects.dispatch_write(&write).unwrap();
+        let actual = effects
+            .dispatch_write(&write, &write.qualify_context(test_fields()).unwrap())
+            .unwrap();
         bus.write(actual.address, actual.width, actual.value, &mut access)
             .unwrap();
         effects
@@ -1038,13 +1053,15 @@ mod tests {
             .unwrap()
             .set_lifecycle(paused, &mut access);
         assert_eq!(
-            effects.dispatch_read(&read),
+            effects.dispatch_read(&read, &read.qualify_context(test_fields()).unwrap()),
             Err(sequencer::Error::Suspended)
         );
         bus.device_mut::<View>(controls)
             .unwrap()
             .set_lifecycle(LIVE, &mut access);
-        let actual = effects.dispatch_read(&read).unwrap();
+        let actual = effects
+            .dispatch_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let value = bus.read(actual.address, actual.width, &mut access).unwrap();
         paused.clocked = false;
         bus.device_mut::<View>(controls)
@@ -1062,7 +1079,9 @@ mod tests {
             .unwrap()
             .set_lifecycle(LIVE, &mut access);
         let write = effects.begin_write().unwrap();
-        let actual = effects.dispatch_write(&write).unwrap();
+        let actual = effects
+            .dispatch_write(&write, &write.qualify_context(test_fields()).unwrap())
+            .unwrap();
         bus.write(actual.address, actual.width, actual.value, &mut access)
             .unwrap();
         effects
@@ -1132,7 +1151,13 @@ mod tests {
                 install.finish(&claim, outcome).unwrap();
             }
             let mut effects = owner
-                .native_packet_effects(2, 0, bytes.len(), AddressFormat::HighWord)
+                .native_packet_effects(
+                    2,
+                    0,
+                    bytes.len(),
+                    AddressFormat::HighWord,
+                    Some(test_initial()),
+                )
                 .unwrap();
             assert_eq!(effects.advance_delay(0), Err(Error::ClockUnbound));
             assert_eq!(effects.packet_kind(), Ok(sequencer::PacketKind::Write));
@@ -1177,7 +1202,9 @@ mod tests {
                 Err(Error::ClockBound)
             );
             let claim = effects.begin_write().unwrap();
-            let write = effects.dispatch_write(&claim).unwrap();
+            let write = effects
+                .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                .unwrap();
             bus.write(write.address, write.width, write.value, &mut access)
                 .unwrap();
             effects

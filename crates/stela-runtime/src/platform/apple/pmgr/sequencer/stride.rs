@@ -66,6 +66,7 @@ pub(super) fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::{
         bus::{Access, Bus, MmioDevice, MmioError},
         interrupt::InterruptLatch,
@@ -95,6 +96,7 @@ mod tests {
             0,
         ];
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         let bytes = words
             .into_iter()
             .flat_map(u32::to_le_bytes)
@@ -141,7 +143,9 @@ mod tests {
         let mut pins = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut pins);
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!((write.address, write.value), (base, 0x20080));
         bus.write(write.address, write.width, write.value, &mut access)
             .unwrap();
@@ -151,7 +155,9 @@ mod tests {
         assert_eq!(cursor.packet_progress(), Some((1, 2)));
         assert_eq!(bus.read(base, Width::Word, &mut access), Ok(0x20080));
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(write.address, base + 0x400000);
         let error = bus
             .write(write.address, write.width, write.value, &mut access)
@@ -167,7 +173,9 @@ mod tests {
         assert_eq!(retry.write().address, base + 0x400000);
         let target = bus.add(Box::new(Register(0)));
         bus.map(target, base + 0x400000, 4, 0).unwrap();
-        let actual = cursor.dispatch_write(&retry).unwrap();
+        let actual = cursor
+            .dispatch_write(&retry, &retry.qualify_context(test_fields()).unwrap())
+            .unwrap();
         bus.write(actual.address, actual.width, actual.value, &mut access)
             .unwrap();
         assert_eq!(
@@ -191,7 +199,9 @@ mod tests {
         let mut cursor = cursor(0x201000000, 0, 16, 7, AddressFormat::Compact);
         for index in 0..16 {
             let claim = cursor.begin_write().unwrap();
-            let actual = cursor.dispatch_write(&claim).unwrap();
+            let actual = cursor
+                .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                .unwrap();
             assert_eq!((actual.address, actual.value), (0x201000000, 7));
             cursor
                 .finish_write::<()>(&claim, RouteOutcome::Committed)
@@ -213,6 +223,7 @@ mod tests {
             ),
         ] {
             let mut cursor = PacketCursor::unknown();
+            cursor.bind_initial_control(test_initial()).unwrap();
             cursor
                 .install_sram(
                     0x292f00000,

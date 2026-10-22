@@ -5,7 +5,8 @@
 //! There is no supplied arbitrary PC, completion setter or end-retirement API.
 use super::{Controller, Error};
 use crate::platform::apple::pmgr::sequencer::{
-    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, copy, delay, poll,
+    self, AddressFormat, PacketCursor, PhysicalWrite, RouteOutcome, WriteClaim, control, copy,
+    delay, poll,
 };
 use alloc::{rc::Rc, vec};
 use core::cell::RefCell;
@@ -70,6 +71,7 @@ impl Controller {
         slot: u8,
         bytes: usize,
         format: AddressFormat,
+        initial_control: Option<control::Initial>,
     ) -> Result<Effects, Error> {
         let mut state = self.0.borrow_mut();
         state.accessible().map_err(|_| Error::Paused)?;
@@ -90,6 +92,11 @@ impl Controller {
         cursor
             .install_sram(entry.pc, &image, format)
             .map_err(Error::Cursor)?;
+        if let Some(initial) = initial_control {
+            cursor
+                .bind_initial_control(initial)
+                .map_err(Error::Cursor)?;
+        }
         cursor.set_suspended(suspended);
         native.packet_effects_owned = true;
         Ok(Effects {
@@ -117,6 +124,13 @@ impl Effects {
     }
     pub fn packet_kind(&self) -> Result<sequencer::PacketKind, sequencer::Error> {
         self.cursor.borrow().packet_kind()
+    }
+    pub fn control_context(&self) -> Option<control::Snapshot> {
+        self.cursor.borrow().control_context()
+    }
+    pub(super) fn advance_control(&mut self) -> Result<control::Snapshot, sequencer::Error> {
+        self.refresh_pause()?;
+        self.cursor.borrow_mut().advance_control()
     }
     pub fn committed_writes(&self) -> u64 {
         self.cursor.borrow().committed_writes()
@@ -195,9 +209,12 @@ impl Effects {
     pub fn dispatch_write(
         &mut self,
         claim: &WriteClaim,
+        qualification: &control::Qualification,
     ) -> Result<PhysicalWrite, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.borrow_mut().dispatch_write(claim)
+        self.cursor
+            .borrow_mut()
+            .dispatch_write(claim, qualification)
     }
     pub fn cancel_write(&mut self, claim: &WriteClaim) -> Result<(), sequencer::Error> {
         self.cursor.borrow_mut().cancel_claim(claim)
@@ -216,9 +233,10 @@ impl Effects {
     pub fn dispatch_read(
         &mut self,
         claim: &poll::ReadClaim,
+        qualification: &control::Qualification,
     ) -> Result<poll::PhysicalRead, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.borrow_mut().dispatch_read(claim)
+        self.cursor.borrow_mut().dispatch_read(claim, qualification)
     }
     pub fn cancel_read(&mut self, claim: &poll::ReadClaim) -> Result<(), sequencer::Error> {
         self.cursor.borrow_mut().cancel_read(claim)
@@ -243,9 +261,12 @@ impl Effects {
     pub fn dispatch_copy_read(
         &mut self,
         claim: &copy::ReadClaim,
+        qualification: &control::Qualification,
     ) -> Result<copy::PhysicalRead, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.borrow_mut().dispatch_copy_read(claim)
+        self.cursor
+            .borrow_mut()
+            .dispatch_copy_read(claim, qualification)
     }
     pub fn cancel_copy_read(&mut self, claim: &copy::ReadClaim) -> Result<(), sequencer::Error> {
         self.cursor.borrow_mut().cancel_copy_read(claim)
@@ -264,9 +285,12 @@ impl Effects {
     pub fn dispatch_copy_write(
         &mut self,
         claim: &copy::WriteClaim,
+        qualification: &control::Qualification,
     ) -> Result<copy::PhysicalWrite, sequencer::Error> {
         self.refresh_pause()?;
-        self.cursor.borrow_mut().dispatch_copy_write(claim)
+        self.cursor
+            .borrow_mut()
+            .dispatch_copy_write(claim, qualification)
     }
     pub fn cancel_copy_write(&mut self, claim: &copy::WriteClaim) -> Result<(), sequencer::Error> {
         self.cursor.borrow_mut().cancel_copy_write(claim)

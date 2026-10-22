@@ -92,10 +92,12 @@ impl PacketCursor {
 mod tests {
     use super::*;
     use crate::platform::apple::bus::Width;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::pmgr::sequencer::{AddressFormat, PhysicalWrite, RouteOutcome};
     use alloc::vec::Vec;
     fn cursor(words: &[u32]) -> PacketCursor {
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         cursor
             .install_sram(
                 0x292f01a00,
@@ -162,7 +164,9 @@ mod tests {
         let claim = cursor.begin_write().unwrap();
         assert_eq!(cursor.advance_delay(0), Err(Error::InFlight));
         assert_eq!(
-            cursor.dispatch_write(&claim).unwrap(),
+            cursor
+                .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                .unwrap(),
             PhysicalWrite {
                 address: 0,
                 width: Width::Word,
@@ -190,7 +194,9 @@ mod tests {
         assert_eq!(cursor.committed_writes(), 1);
         let mut blocked = self::cursor(&[1, 0, 0x55, 4 | (1 << 6), 0]);
         let claim = blocked.begin_write().unwrap();
-        blocked.dispatch_write(&claim).unwrap();
+        blocked
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert!(
             blocked
                 .finish_write(

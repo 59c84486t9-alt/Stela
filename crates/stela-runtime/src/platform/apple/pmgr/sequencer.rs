@@ -14,6 +14,7 @@
 use crate::platform::apple::bus::Width;
 use alloc::{rc::Rc, vec::Vec};
 
+pub mod control;
 pub mod copy;
 pub mod delay;
 pub mod poll;
@@ -46,6 +47,7 @@ pub enum PacketKind {
     Delay,
     Copy,
     CopyJoin,
+    Control,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +90,13 @@ pub enum Error {
     UnqualifiedCopyJoin(u32),
     StrideEncoding,
     UnqualifiedStrideWidth,
+    ControlEncoding,
+    UnknownControlContext,
+    ControlAlreadyOwned,
+    ControlContextRejected,
+    StaleControlQualification,
+    ExpectedControl,
+    ControlGenerationExhausted,
 }
 
 /// One physical store, without a claim that its target accepts that access.
@@ -105,10 +114,26 @@ pub struct WriteClaim {
     owner: Rc<()>,
     ticket: u64,
     write: PhysicalWrite,
+    context: Option<control::Snapshot>,
 }
 impl WriteClaim {
     pub fn write(&self) -> PhysicalWrite {
         self.write
+    }
+    pub fn control_context(&self) -> Option<control::Snapshot> {
+        self.context
+    }
+    pub fn qualify_context(
+        &self,
+        accepted: control::Fields,
+    ) -> Result<control::Qualification, Error> {
+        control::qualify(
+            &self.owner,
+            self.ticket,
+            FlightKind::Write,
+            self.context,
+            accepted,
+        )
     }
 }
 
@@ -182,6 +207,7 @@ pub struct PacketCursor {
     committed_writes: u64,
     committed_reads: u64,
     suspended: bool,
+    control: Option<control::Snapshot>,
 }
 impl PacketCursor {
     pub fn unknown() -> Self {
@@ -240,6 +266,8 @@ impl PacketCursor {
             Ok(PacketKind::Delay)
         } else if header & 0x3f == 8 {
             Ok(PacketKind::Copy)
+        } else if header & 31 == 0x1c {
+            Ok(PacketKind::Control)
         } else if header & 0x3f == 0x38 {
             Ok(PacketKind::CopyJoin)
         } else {
@@ -345,6 +373,7 @@ impl PacketCursor {
             owner: self.owner.clone(),
             ticket,
             write: packet.writes[packet.committed],
+            context: self.control,
         })
     }
 
@@ -373,8 +402,19 @@ impl PacketCursor {
     /// Mark exclusive ownership as dispatched immediately before calling the
     /// physical route. A second dispatch or cancellation is then forbidden.
     /// Inspection via `WriteClaim::write` alone does not dispatch an effect.
-    pub fn dispatch_write(&mut self, claim: &WriteClaim) -> Result<PhysicalWrite, Error> {
+    pub fn dispatch_write(
+        &mut self,
+        claim: &WriteClaim,
+        qualification: &control::Qualification,
+    ) -> Result<PhysicalWrite, Error> {
         self.check_claim(claim)?;
+        control::check(
+            qualification,
+            &claim.owner,
+            claim.ticket,
+            FlightKind::Write,
+            claim.context,
+        )?;
         let state = self.in_flight.as_mut().expect("checked claim");
         if state.dispatched {
             return Err(Error::AlreadyDispatched);
@@ -518,6 +558,7 @@ mod tests {
     use super::*;
     use crate::platform::apple::bus::{Access, Bus, Direction, MmioDevice, MmioError};
     use crate::platform::apple::interrupt::InterruptLatch;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::pmgr::{ACTIVE, Pmgr, PowerState};
     use crate::platform::dma::{Memory, tests::Ram};
     use alloc::boxed::Box;
@@ -527,6 +568,7 @@ mod tests {
 
     fn cursor(words: &[u32], format: AddressFormat) -> PacketCursor {
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         cursor.install_sram(SRAM, &bytes, format).unwrap();
         cursor
@@ -551,7 +593,9 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor
             .finish_write(&claim, {
                 bus.write(write.address, write.width, write.value, &mut access)
@@ -563,7 +607,9 @@ mod tests {
         assert_eq!(cursor.packet_pc(), Some(SRAM));
         assert_eq!(cursor.packet_progress(), Some((1, 2)));
         let failed = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&failed).unwrap();
+        let write = cursor
+            .dispatch_write(&failed, &failed.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let result = bus.write(write.address, write.width, write.value, &mut access);
         // Unmapped is established by Bus before any target device is called.
         assert!(matches!(result, Err(MmioError::Unmapped { .. })));
@@ -595,7 +641,9 @@ mod tests {
                 RouteOutcome::Committed
             ))
         );
-        let write = cursor.dispatch_write(&retry).unwrap();
+        let write = cursor
+            .dispatch_write(&retry, &retry.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor
             .finish_write(&retry, {
                 bus.write(write.address, write.width, write.value, &mut access)
@@ -629,7 +677,9 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let error = bus
             .write(write.address, write.width, write.value, &mut access)
             .unwrap_err();
@@ -678,7 +728,9 @@ mod tests {
             },
         ] {
             let claim = cursor.begin_write().unwrap();
-            let write = cursor.dispatch_write(&claim).unwrap();
+            let write = cursor
+                .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                .unwrap();
             assert_eq!(write, expected);
             let data = write.value.to_le_bytes();
             let result = ram.write(write.address, &data[..write.width.bytes() as usize]);
@@ -709,7 +761,9 @@ mod tests {
             AddressFormat::HighWord,
         );
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             write,
             PhysicalWrite {
@@ -742,7 +796,9 @@ mod tests {
         let retry = cursor.begin_write().unwrap();
         assert_eq!(retry.write(), write);
         let mut ram = Ram::new(0x2000001000, 32);
-        cursor.dispatch_write(&retry).unwrap();
+        cursor
+            .dispatch_write(&retry, &retry.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert!(ram.write(write.address, &write.value.to_le_bytes()));
         cursor
             .finish_write::<()>(&retry, RouteOutcome::Committed)
@@ -775,9 +831,11 @@ mod tests {
                 RouteOutcome::Committed
             ))
         );
-        a.dispatch_write(&new).unwrap();
+        a.dispatch_write(&new, &new.qualify_context(test_fields()).unwrap())
+            .unwrap();
         a.finish_write::<()>(&new, RouteOutcome::Committed).unwrap();
-        b.dispatch_write(&other).unwrap();
+        b.dispatch_write(&other, &other.qualify_context(test_fields()).unwrap())
+            .unwrap();
         b.finish_write::<()>(&other, RouteOutcome::Committed)
             .unwrap();
         assert_eq!(a.committed_writes(), 1);
@@ -789,9 +847,14 @@ mod tests {
         let mut cursor = cursor(&[0x105, 0, 0xf, 4, 0], AddressFormat::Compact);
         let claim = cursor.begin_write().unwrap();
         cursor.set_suspended(true);
-        assert_eq!(cursor.dispatch_write(&claim), Err(Error::Suspended));
+        assert_eq!(
+            cursor.dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap()),
+            Err(Error::Suspended)
+        );
         cursor.set_suspended(false);
-        cursor.dispatch_write(&claim).unwrap();
+        cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor.set_suspended(true);
         assert_eq!(
             cursor.install_sram(SRAM, &[0; 4], AddressFormat::Compact),
@@ -855,15 +918,22 @@ mod tests {
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
         let prefix = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&prefix).unwrap();
+        let write = cursor
+            .dispatch_write(&prefix, &prefix.qualify_context(test_fields()).unwrap())
+            .unwrap();
         bus.write(write.address, write.width, write.value, &mut access)
             .unwrap();
         cursor
             .finish_write::<()>(&prefix, RouteOutcome::Committed)
             .unwrap();
         let claim = cursor.begin_write().unwrap();
-        let write = cursor.dispatch_write(&claim).unwrap();
-        assert_eq!(cursor.dispatch_write(&claim), Err(Error::AlreadyDispatched));
+        let write = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
+        assert_eq!(
+            cursor.dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap()),
+            Err(Error::AlreadyDispatched)
+        );
         assert_eq!(cursor.cancel_claim(&claim), Err(Error::AlreadyDispatched));
         assert!(matches!(cursor.begin_write(), Err(Error::InFlight)));
         let error = bus
@@ -880,7 +950,10 @@ mod tests {
         assert_eq!(cursor.packet_pc(), Some(SRAM));
         for _ in 0..2 {
             assert!(matches!(cursor.begin_write(), Err(Error::UncertainEffects)));
-            assert_eq!(cursor.dispatch_write(&claim), Err(Error::UncertainEffects));
+            assert_eq!(
+                cursor.dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap()),
+                Err(Error::UncertainEffects)
+            );
             assert_eq!(cursor.cancel_claim(&claim), Err(Error::UncertainEffects));
         }
         let diagnostic = alloc::string::String::from("retain original routed diagnostic");
@@ -914,7 +987,12 @@ mod tests {
         );
         cursor.cancel_claim(&claim).unwrap();
         let dispatched = cursor.begin_write().unwrap();
-        cursor.dispatch_write(&dispatched).unwrap();
+        cursor
+            .dispatch_write(
+                &dispatched,
+                &dispatched.qualify_context(test_fields()).unwrap(),
+            )
+            .unwrap();
         assert_eq!(
             cursor.cancel_claim(&dispatched),
             Err(Error::AlreadyDispatched)
@@ -932,7 +1010,10 @@ mod tests {
         let retry = cursor.begin_write().unwrap();
         assert_eq!(retry.write(), dispatched.write());
         cursor.cancel_claim(&retry).unwrap();
-        assert_eq!(cursor.dispatch_write(&retry), Err(Error::StaleClaim));
+        assert_eq!(
+            cursor.dispatch_write(&retry, &retry.qualify_context(test_fields()).unwrap()),
+            Err(Error::StaleClaim)
+        );
     }
 
     #[test]
@@ -986,6 +1067,7 @@ mod tests {
             assert_eq!(cursor.committed_writes(), 0);
         }
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         assert!(matches!(cursor.begin_write(), Err(Error::UnknownSram)));
         assert_eq!(cursor.packet_pc(), None);
         for (base, bytes) in [
@@ -1010,7 +1092,9 @@ mod tests {
         let mut ram = Ram::new(0x1000, 64);
         for index in 0..16 {
             let claim = cursor.begin_write().unwrap();
-            let write = cursor.dispatch_write(&claim).unwrap();
+            let write = cursor
+                .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                .unwrap();
             assert_eq!(write.address, 0x1000 + index * 4);
             assert_eq!(write.value, 0x80 + index);
             assert_eq!(write.width, Width::Word);

@@ -5,7 +5,7 @@
 //! advances the next physical chunk. Nothing here supplies firmware bytes or
 //! makes an unmodeled destination accept DMA. Copy data is retained after a
 //! real read; a later destination refusal must not repeat that read.
-use super::{Error, FlightKind, InFlight, PacketCursor, RouteOutcome, Sram};
+use super::{Error, FlightKind, InFlight, PacketCursor, RouteOutcome, Sram, control};
 use alloc::{rc::Rc, vec::Vec};
 use core::fmt;
 
@@ -78,10 +78,26 @@ pub struct ReadClaim {
     owner: Rc<()>,
     ticket: u64,
     read: PhysicalRead,
+    context: Option<control::Snapshot>,
 }
 impl ReadClaim {
     pub fn read(&self) -> PhysicalRead {
         self.read
+    }
+    pub fn control_context(&self) -> Option<control::Snapshot> {
+        self.context
+    }
+    pub fn qualify_context(
+        &self,
+        accepted: control::Fields,
+    ) -> Result<control::Qualification, Error> {
+        control::qualify(
+            &self.owner,
+            self.ticket,
+            FlightKind::CopyRead,
+            self.context,
+            accepted,
+        )
     }
 }
 #[derive(Debug)]
@@ -89,10 +105,26 @@ pub struct WriteClaim {
     owner: Rc<()>,
     ticket: u64,
     write: PhysicalWrite,
+    context: Option<control::Snapshot>,
 }
 impl WriteClaim {
     pub fn write(&self) -> &PhysicalWrite {
         &self.write
+    }
+    pub fn control_context(&self) -> Option<control::Snapshot> {
+        self.context
+    }
+    pub fn qualify_context(
+        &self,
+        accepted: control::Fields,
+    ) -> Result<control::Qualification, Error> {
+        control::qualify(
+            &self.owner,
+            self.ticket,
+            FlightKind::CopyWrite,
+            self.context,
+            accepted,
+        )
     }
 }
 #[derive(PartialEq, Eq)]
@@ -195,8 +227,11 @@ impl PacketCursor {
         owner: &Rc<()>,
         ticket: u64,
         kind: FlightKind,
+        context: Option<control::Snapshot>,
+        qualification: &control::Qualification,
     ) -> Result<(), Error> {
         self.check_copy(owner, ticket, kind)?;
+        control::check(qualification, owner, ticket, kind, context)?;
         let flight = self.in_flight.as_mut().expect("checked copy claim");
         if flight.dispatched {
             return Err(Error::AlreadyDispatched);
@@ -230,10 +265,21 @@ impl PacketCursor {
                 address: transfer.source,
                 bytes: transfer.bytes,
             },
+            context: self.control,
         })
     }
-    pub fn dispatch_copy_read(&mut self, claim: &ReadClaim) -> Result<PhysicalRead, Error> {
-        self.dispatch_copy(&claim.owner, claim.ticket, FlightKind::CopyRead)?;
+    pub fn dispatch_copy_read(
+        &mut self,
+        claim: &ReadClaim,
+        qualification: &control::Qualification,
+    ) -> Result<PhysicalRead, Error> {
+        self.dispatch_copy(
+            &claim.owner,
+            claim.ticket,
+            FlightKind::CopyRead,
+            claim.context,
+            qualification,
+        )?;
         Ok(claim.read)
     }
     pub fn cancel_copy_read(&mut self, claim: &ReadClaim) -> Result<(), Error> {
@@ -286,10 +332,21 @@ impl PacketCursor {
                 address: packet.transfer.destination,
                 data: packet.data.as_ref().expect("copy read committed").clone(),
             },
+            context: self.control,
         })
     }
-    pub fn dispatch_copy_write(&mut self, claim: &WriteClaim) -> Result<PhysicalWrite, Error> {
-        self.dispatch_copy(&claim.owner, claim.ticket, FlightKind::CopyWrite)?;
+    pub fn dispatch_copy_write(
+        &mut self,
+        claim: &WriteClaim,
+        qualification: &control::Qualification,
+    ) -> Result<PhysicalWrite, Error> {
+        self.dispatch_copy(
+            &claim.owner,
+            claim.ticket,
+            FlightKind::CopyWrite,
+            claim.context,
+            qualification,
+        )?;
         Ok(claim.write.clone())
     }
     pub fn cancel_copy_write(&mut self, claim: &WriteClaim) -> Result<(), Error> {
@@ -423,6 +480,7 @@ fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 mod tests {
     use super::super::{AddressFormat, FinishError, PacketKind};
     use super::*;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use alloc::vec;
     const SOURCE: u64 = 0x292f60000;
     const DESTINATION: u64 = 0x1301000000;
@@ -438,6 +496,7 @@ mod tests {
     }
     fn cursor(words: &[u32], format: AddressFormat) -> PacketCursor {
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         cursor
             .install_sram(
                 0x292f01a00,
@@ -470,7 +529,9 @@ mod tests {
             }
         );
         assert_eq!(cursor.begin_copy_read().unwrap_err(), Error::InFlight);
-        cursor.dispatch_copy_read(&read).unwrap();
+        cursor
+            .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             cursor.cancel_copy_read(&read),
             Err(Error::AlreadyDispatched)
@@ -486,17 +547,24 @@ mod tests {
         );
         assert_eq!(cursor.pending_copy().unwrap().phase, Phase::Write);
         let claim = cursor.begin_copy_write().unwrap();
-        let write = cursor.dispatch_copy_write(&claim).unwrap();
+        let write = cursor
+            .dispatch_copy_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(write.address, DESTINATION);
         assert_eq!(write.bytes(), source_ram);
         assert_eq!(
             cursor.finish_copy_write(&claim, RouteOutcome::NoEffect("target preflight")),
             Err(FinishError::NoEffect("target preflight"))
         );
-        assert_eq!(cursor.dispatch_copy_write(&claim), Err(Error::StaleClaim));
+        assert_eq!(
+            cursor.dispatch_copy_write(&claim, &claim.qualify_context(test_fields()).unwrap()),
+            Err(Error::StaleClaim)
+        );
         assert_eq!(cursor.committed_reads(), 1);
         let retry = cursor.begin_copy_write().unwrap();
-        let write = cursor.dispatch_copy_write(&retry).unwrap();
+        let write = cursor
+            .dispatch_copy_write(&retry, &retry.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let mut destination_ram = vec![0; 256];
         destination_ram.copy_from_slice(write.bytes());
         cursor
@@ -534,7 +602,9 @@ mod tests {
             let mut cursor = cursor(&words(SOURCE, DESTINATION, 128), AddressFormat::HighWord);
             let start = cursor.packet_pc();
             let read = cursor.begin_copy_read().unwrap();
-            cursor.dispatch_copy_read(&read).unwrap();
+            cursor
+                .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+                .unwrap();
             if read_failure {
                 assert_eq!(
                     cursor.finish_copy_read(
@@ -551,7 +621,9 @@ mod tests {
                     .finish_copy_read::<()>(&read, ReadOutcome::Read(payload(128)))
                     .unwrap();
                 let claim = cursor.begin_copy_write().unwrap();
-                let write = cursor.dispatch_copy_write(&claim).unwrap();
+                let write = cursor
+                    .dispatch_copy_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+                    .unwrap();
                 let mut destination_ram = [0; 128];
                 destination_ram[..64].copy_from_slice(&write.bytes()[..64]);
                 assert_eq!(
@@ -582,7 +654,9 @@ mod tests {
         }
         let mut short = cursor(&words(SOURCE, DESTINATION, 128), AddressFormat::HighWord);
         let read = short.begin_copy_read().unwrap();
-        short.dispatch_copy_read(&read).unwrap();
+        short
+            .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             short.finish_copy_read::<()>(&read, ReadOutcome::Read(vec![0xaa; 64])),
             Err(ReadFinishError::InvalidLength {
@@ -603,11 +677,19 @@ mod tests {
         let canceled = cursor.begin_copy_read().unwrap();
         cursor.cancel_copy_read(&canceled).unwrap();
         let read = cursor.begin_copy_read().unwrap();
-        assert_eq!(cursor.dispatch_copy_read(&canceled), Err(Error::StaleClaim));
+        assert_eq!(
+            cursor.dispatch_copy_read(&canceled, &canceled.qualify_context(test_fields()).unwrap()),
+            Err(Error::StaleClaim)
+        );
         cursor.set_suspended(true);
-        assert_eq!(cursor.dispatch_copy_read(&read), Err(Error::Suspended));
+        assert_eq!(
+            cursor.dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap()),
+            Err(Error::Suspended)
+        );
         cursor.set_suspended(false);
-        cursor.dispatch_copy_read(&read).unwrap();
+        cursor
+            .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor.set_suspended(true);
         cursor
             .finish_copy_read::<()>(&read, ReadOutcome::Read(payload(128)))
@@ -615,7 +697,9 @@ mod tests {
         assert_eq!(cursor.begin_copy_write().unwrap_err(), Error::Suspended);
         cursor.set_suspended(false);
         let write = cursor.begin_copy_write().unwrap();
-        cursor.dispatch_copy_write(&write).unwrap();
+        cursor
+            .dispatch_copy_write(&write, &write.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor.set_suspended(true);
         cursor
             .finish_copy_write::<()>(&write, RouteOutcome::Committed)
@@ -627,12 +711,16 @@ mod tests {
         finite[4] = (7 << 6) | JOIN_TAG;
         let mut finite = self::cursor(&finite, AddressFormat::HighWord);
         let read = finite.begin_copy_read().unwrap();
-        finite.dispatch_copy_read(&read).unwrap();
+        finite
+            .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         finite
             .finish_copy_read::<()>(&read, ReadOutcome::Read(payload(128)))
             .unwrap();
         let write = finite.begin_copy_write().unwrap();
-        finite.dispatch_copy_write(&write).unwrap();
+        finite
+            .dispatch_copy_write(&write, &write.qualify_context(test_fields()).unwrap())
+            .unwrap();
         finite
             .finish_copy_write::<()>(&write, RouteOutcome::Committed)
             .unwrap();

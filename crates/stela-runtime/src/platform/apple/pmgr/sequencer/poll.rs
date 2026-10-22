@@ -5,7 +5,7 @@
 //! timeout scale, other condition, hardware trigger or end retirement is
 //! inferred. A nonmatching actual read retains the packet PC. Read effects can
 //! be partial too: an uncertain route result quarantines all future claims.
-use super::{Error, FlightKind, InFlight, PacketCursor, Sram};
+use super::{Error, FlightKind, InFlight, PacketCursor, Sram, control};
 use crate::platform::apple::bus::Width;
 use alloc::rc::Rc;
 
@@ -36,10 +36,26 @@ pub struct ReadClaim {
     owner: Rc<()>,
     ticket: u64,
     read: PhysicalRead,
+    context: Option<control::Snapshot>,
 }
 impl ReadClaim {
     pub fn read(&self) -> PhysicalRead {
         self.read
+    }
+    pub fn control_context(&self) -> Option<control::Snapshot> {
+        self.context
+    }
+    pub fn qualify_context(
+        &self,
+        accepted: control::Fields,
+    ) -> Result<control::Qualification, Error> {
+        control::qualify(
+            &self.owner,
+            self.ticket,
+            FlightKind::Poll,
+            self.context,
+            accepted,
+        )
     }
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -105,6 +121,7 @@ impl PacketCursor {
             owner: self.owner.clone(),
             ticket,
             read: self.poll.as_ref().expect("validated poll").poll.read,
+            context: self.control,
         })
     }
     fn check_read(&self, claim: &ReadClaim) -> Result<(), Error> {
@@ -121,8 +138,19 @@ impl PacketCursor {
             Err(Error::StaleClaim)
         }
     }
-    pub fn dispatch_read(&mut self, claim: &ReadClaim) -> Result<PhysicalRead, Error> {
+    pub fn dispatch_read(
+        &mut self,
+        claim: &ReadClaim,
+        qualification: &control::Qualification,
+    ) -> Result<PhysicalRead, Error> {
         self.check_read(claim)?;
+        control::check(
+            qualification,
+            &claim.owner,
+            claim.ticket,
+            FlightKind::Poll,
+            claim.context,
+        )?;
         let flight = self.in_flight.as_mut().expect("checked read claim");
         if flight.dispatched {
             return Err(Error::AlreadyDispatched);
@@ -272,10 +300,12 @@ fn decode(sram: &Sram, pc: usize) -> Result<Packet, Error> {
 mod tests {
     use super::super::{AddressFormat, RouteOutcome};
     use super::*;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use alloc::{vec, vec::Vec};
 
     fn cursor(words: &[u32], format: AddressFormat) -> PacketCursor {
         let mut cursor = PacketCursor::unknown();
+        cursor.bind_initial_control(test_initial()).unwrap();
         let bytes: Vec<_> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
         cursor.install_sram(0x292f01a00, &bytes, format).unwrap();
         cursor
@@ -292,7 +322,7 @@ mod tests {
             assert_eq!(cursor.begin_write().unwrap_err(), Error::InFlight);
             assert_eq!(cursor.begin_read().unwrap_err(), Error::InFlight);
             assert_eq!(
-                cursor.dispatch_read(&claim),
+                cursor.dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap()),
                 Ok(PhysicalRead {
                     address: 12,
                     width: Width::Word
@@ -303,7 +333,10 @@ mod tests {
                 cursor.finish_read::<()>(&claim, Outcome::Read(value)),
                 Ok(matched)
             );
-            assert_eq!(cursor.dispatch_read(&claim), Err(Error::StaleClaim));
+            assert_eq!(
+                cursor.dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap()),
+                Err(Error::StaleClaim)
+            );
             if !matched {
                 assert_eq!(cursor.packet_pc(), Some(0x292f01a00));
                 assert_eq!(cursor.last_poll_value(), Some(value));
@@ -312,7 +345,13 @@ mod tests {
         assert_eq!(cursor.committed_reads(), 2);
         assert_eq!(cursor.packet_pc(), Some(0x292f01a10));
         let write = cursor.begin_write().unwrap();
-        assert_eq!(cursor.dispatch_write(&write).unwrap().value, 0x1234);
+        assert_eq!(
+            cursor
+                .dispatch_write(&write, &write.qualify_context(test_fields()).unwrap())
+                .unwrap()
+                .value,
+            0x1234
+        );
         cursor
             .finish_write::<()>(&write, RouteOutcome::Committed)
             .unwrap();
@@ -331,15 +370,25 @@ mod tests {
         let mut cursor = cursor(&[2, 0, 0x10, 0], AddressFormat::Compact);
         let cancelled = cursor.begin_read().unwrap();
         cursor.cancel_read(&cancelled).unwrap();
-        assert_eq!(cursor.dispatch_read(&cancelled), Err(Error::StaleClaim));
+        assert_eq!(
+            cursor.dispatch_read(
+                &cancelled,
+                &cancelled.qualify_context(test_fields()).unwrap()
+            ),
+            Err(Error::StaleClaim)
+        );
         let claim = cursor.begin_read().unwrap();
-        cursor.dispatch_read(&claim).unwrap();
+        cursor
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             cursor.finish_read(&claim, Outcome::NoEffect("preflight")),
             Err(FinishError::NoEffect("preflight"))
         );
         let claim = cursor.begin_read().unwrap();
-        cursor.dispatch_read(&claim).unwrap();
+        cursor
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         cursor.set_suspended(true);
         assert_eq!(
             cursor.finish_read(&claim, Outcome::Uncertain(vec![1, 2, 3])),
@@ -358,7 +407,9 @@ mod tests {
         assert_eq!(cursor.committed_reads(), 0);
         let mut invalid = super::tests::cursor(&[2, 0, 0, 0], AddressFormat::Compact);
         let claim = invalid.begin_read().unwrap();
-        invalid.dispatch_read(&claim).unwrap();
+        invalid
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             invalid.finish_read::<()>(&claim, Outcome::Read(1 << 32)),
             Err(FinishError::InvalidValue(1 << 32))
@@ -381,9 +432,14 @@ mod tests {
             }
         );
         cursor.set_suspended(true);
-        assert_eq!(cursor.dispatch_read(&claim), Err(Error::Suspended));
+        assert_eq!(
+            cursor.dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap()),
+            Err(Error::Suspended)
+        );
         cursor.set_suspended(false);
-        cursor.dispatch_read(&claim).unwrap();
+        cursor
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             cursor.finish_read::<()>(&claim, Outcome::Read(0x1234567889abcdef)),
             Ok(true)
@@ -470,7 +526,9 @@ mod tests {
         let mut access = Access::new(0, 0, &mut sink);
         let mut cursor = cursor(&[1, 0, 0x55, 2, 0, 0, 0, 0], AddressFormat::Compact);
         let claim = cursor.begin_write().unwrap();
-        let actual = cursor.dispatch_write(&claim).unwrap();
+        let actual = cursor
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         bus.write(actual.address, actual.width, actual.value, &mut access)
             .unwrap();
         cursor
@@ -478,7 +536,9 @@ mod tests {
             .unwrap();
         assert_eq!(value.get(), 0x55);
         let claim = cursor.begin_read().unwrap();
-        let actual = cursor.dispatch_read(&claim).unwrap();
+        let actual = cursor
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let error = bus
             .read(actual.address, actual.width, &mut access)
             .unwrap_err();
@@ -575,7 +635,9 @@ mod tests {
                 expected
             })
         );
-        cursor.dispatch_read(&claim).unwrap();
+        cursor
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             cursor.finish_read::<()>(&claim, Outcome::Read(0)),
             Ok(false)

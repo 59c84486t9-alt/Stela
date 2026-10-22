@@ -64,6 +64,10 @@ impl Error {
 /// Bytes are read from the same physically installed SRAM, never this input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Program {
+    /// First-entry authority only. Later jobs inherit their actual retained
+    /// Stela port context; a capture/declaration is never replayed as a reset.
+    /// None retains unknown context until a real tag1c executes.
+    pub initial_control: Option<sequencer::control::Initial>,
     pub port: u8,
     pub counted_words: u32,
     pub format: AddressFormat,
@@ -71,6 +75,8 @@ pub struct Program {
 struct Image {
     program: Program,
     entry: Entry,
+    entered: bool,
+    context: Option<sequencer::control::Snapshot>,
 }
 struct Job {
     serial: u64,
@@ -98,6 +104,7 @@ pub struct Completion {
 pub struct Observations {
     pub programs: Vec<Program>,
     pub active: Option<Active>,
+    pub retained_contexts: Vec<(u8, Option<sequencer::control::Snapshot>)>,
     pub completed: Vec<Completion>,
 }
 pub struct Active {
@@ -114,6 +121,7 @@ pub struct Active {
     pub uncertain_read: Option<sequencer::poll::PhysicalRead>,
     pub pending_poll: Option<sequencer::poll::Poll>,
     pub pending_delay: Option<u32>,
+    pub control_context: Option<sequencer::control::Snapshot>,
     pub pending_copy: Option<sequencer::copy::Snapshot>,
     pub last_copy: Option<sequencer::copy::Completed>,
     pub uncertain_copy_read: Option<sequencer::copy::PhysicalRead>,
@@ -180,7 +188,15 @@ impl Controller {
             if bytes.last_chunk::<4>() != Some(&[0; 4]) {
                 return Err(NativeError::Engine(Error::FinalizedImage));
             }
-            images.insert(program.port, Image { program, entry });
+            images.insert(
+                program.port,
+                Image {
+                    program,
+                    entry,
+                    entered: false,
+                    context: None,
+                },
+            );
         }
         if ports == 0 || images.len() != ports.count_ones() as usize {
             return Err(NativeError::Engine(Error::ProgramInventory));
@@ -267,6 +283,17 @@ impl Controller {
         cursor
             .install_sram(image.entry.pc, &bytes, image.program.format)
             .map_err(NativeError::Cursor)?;
+        if image.entered {
+            if let Some(context) = image.context {
+                cursor
+                    .inherit_control(context)
+                    .map_err(NativeError::Cursor)?;
+            }
+        } else if let Some(initial) = image.program.initial_control {
+            cursor
+                .bind_initial_control(initial)
+                .map_err(NativeError::Cursor)?;
+        }
         cursor.set_suspended(paused);
         let job = Job {
             serial: request.serial,
@@ -283,14 +310,17 @@ impl Controller {
                 cursor: job.cursor.clone(),
             },
         };
-        state
+        let engine = state
             .native
             .as_mut()
             .expect("checked native owner")
             .engine
             .as_mut()
-            .expect("checked program family")
-            .job = Some(job);
+            .expect("checked program family");
+        let image = engine.images.get_mut(&port).expect("checked port");
+        image.entered = true;
+        image.context = job.cursor.borrow().control_context();
+        engine.job = Some(job);
         Ok(handle)
     }
 }
@@ -300,6 +330,11 @@ impl State {
         Observations {
             programs: self.images.values().map(|image| image.program).collect(),
             completed: self.completed.clone(),
+            retained_contexts: self
+                .images
+                .iter()
+                .map(|(&port, image)| (port, image.context))
+                .collect(),
             active: self.job.as_ref().map(|job| {
                 let cursor = job.cursor.borrow();
                 Active {
@@ -315,6 +350,7 @@ impl State {
                     uncertain_read: cursor.uncertain_read(),
                     pending_poll: cursor.pending_poll(),
                     pending_delay: cursor.pending_delay(),
+                    control_context: cursor.control_context(),
                     pending_copy: cursor.pending_copy(),
                     last_copy: cursor.last_copy(),
                     uncertain_copy_read: cursor.uncertain_copy_read(),
@@ -411,6 +447,16 @@ impl Engine {
             .map_err(NativeError::Cursor)?;
         let kind = self.effects.packet_kind();
         match kind {
+            Ok(PacketKind::Control) => {
+                self.effects
+                    .advance_control()
+                    .map_err(NativeError::Cursor)?;
+                match self.effects.packet_kind() {
+                    Ok(packet) => Ok(Progress::Packet(packet)),
+                    Err(sequencer::Error::UnqualifiedRetirement) => self.retire(now),
+                    Err(error) => Err(NativeError::Cursor(error)),
+                }
+            }
             Ok(PacketKind::CopyJoin) => {
                 self.effects
                     .advance_copy_join()
@@ -466,7 +512,13 @@ impl Engine {
             committed_writes: cursor.committed_writes(),
             committed_reads: cursor.committed_reads(),
         };
+        let retained = cursor.control_context();
         drop(cursor);
+        engine
+            .images
+            .get_mut(&done.port)
+            .expect("active port")
+            .context = retained;
         engine.completed.push(done);
         engine.job = None;
         // Actual accepted command consumed only after its concrete effects and
@@ -483,6 +535,7 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::apple::pmgr::sequencer::control::{test_fields, test_initial};
     use crate::platform::apple::{
         bus::{Access, Bus, DeviceId, Lifecycle, LifecycleState, MmioDevice, MmioError},
         interrupt::InterruptLatch,
@@ -607,6 +660,7 @@ mod tests {
         }
         let programs = (0..4)
             .map(|port| Program {
+                initial_control: Some(test_initial()),
                 port,
                 counted_words: replace
                     .as_ref()
@@ -657,7 +711,9 @@ mod tests {
     }
     fn route_write(engine: &mut Engine, bus: &mut Bus, access: &mut Access<'_>) {
         let claim = engine.begin_write().unwrap();
-        let write = engine.dispatch_write(&claim).unwrap();
+        let write = engine
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         if !engine.commit_controller_write(&claim).unwrap() {
             bus.write(write.address, write.width, write.value, access)
                 .unwrap();
@@ -668,7 +724,9 @@ mod tests {
     }
     fn read_poll(engine: &mut Engine, bus: &mut Bus, access: &mut Access<'_>) {
         let claim = engine.begin_read().unwrap();
-        let read = engine.dispatch_read(&claim).unwrap();
+        let read = engine
+            .dispatch_read(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         let value = bus.read(read.address, read.width, access).unwrap();
         assert!(
             engine
@@ -772,7 +830,9 @@ mod tests {
         let mut engine = owner.cio_engine().unwrap();
         assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Copy)));
         let read = engine.begin_copy_read().unwrap();
-        let physical = engine.dispatch_copy_read(&read).unwrap();
+        let physical = engine
+            .dispatch_copy_read(&read, &read.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             physical,
             copy::PhysicalRead {
@@ -791,7 +851,13 @@ mod tests {
             .unwrap();
         assert_eq!(engine.committed_reads(), 1);
         let write = engine.begin_copy_write().unwrap();
-        assert_eq!(engine.dispatch_copy_write(&write).unwrap().bytes(), bytes);
+        assert_eq!(
+            engine
+                .dispatch_copy_write(&write, &write.qualify_context(test_fields()).unwrap())
+                .unwrap()
+                .bytes(),
+            bytes
+        );
         // Positive checked destination preflight: no target was touched.
         assert_eq!(
             engine.finish_copy_write(
@@ -822,13 +888,15 @@ mod tests {
         view.check_lifecycle(paused).unwrap();
         view.set_lifecycle(paused, &mut access);
         assert_eq!(
-            engine.dispatch_copy_write(&write),
+            engine.dispatch_copy_write(&write, &write.qualify_context(test_fields()).unwrap()),
             Err(sequencer::Error::Suspended)
         );
         bus.device_mut::<super::super::super::View>(requests)
             .unwrap()
             .set_lifecycle(LIVE, &mut access);
-        let actual = engine.dispatch_copy_write(&write).unwrap();
+        let actual = engine
+            .dispatch_copy_write(&write, &write.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(actual.address, DESTINATION);
         // A real declared destination reservation, distinct from the canonical
         // immutable native code/source SRAM. Commit follows its actual store.
@@ -855,6 +923,130 @@ mod tests {
         };
         assert_eq!((done.committed_reads, done.committed_writes), (1, 2));
         assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0));
+    }
+
+    #[test]
+    fn actual_mounted_control_context_changes_survive_pause_and_require_exact_route_acceptance() {
+        let words = vec![
+            0x30001c, // actual source18000, fields[0,0,0,3,0]
+            0x28e09c01,
+            0,
+            0x30,
+            0,    // actual CPM disable
+            0x1c, // actual source0, independently updates context
+            0x28e09a01,
+            0,
+            0xd,
+            1 << 16,
+            0,
+        ];
+        let (owner, mut bus, requests) = fixture(Some(words), true);
+        let mut pins = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut pins);
+        bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
+        let mut engine = owner.cio_engine().unwrap();
+        assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Write)));
+        let context = engine.control_context().unwrap();
+        assert_eq!(context.fields().values(), [0, 0, 0, 3, 0]);
+        let claim = engine.begin_write().unwrap();
+        assert_eq!(
+            claim.qualify_context(test_fields()).unwrap_err(),
+            sequencer::Error::ControlContextRejected
+        );
+        assert_eq!(engine.committed_writes(), 0);
+        // This test route declares one exact accepted context; it does not
+        // automatically echo/accept whatever fields the program supplied.
+        let accepted = claim
+            .qualify_context(sequencer::control::Fields::new([0, 0, 0, 3, 0]).unwrap())
+            .unwrap();
+        drop(engine);
+        let observed = owner
+            .native_observations()
+            .unwrap()
+            .cio_engine
+            .unwrap()
+            .active
+            .unwrap();
+        assert_eq!(observed.control_context, Some(context));
+        let mut engine = owner.cio_engine().unwrap();
+        let paused = LifecycleState {
+            clocked: false,
+            ..LIVE
+        };
+        let view = bus
+            .device_mut::<super::super::super::View>(requests)
+            .unwrap();
+        view.check_lifecycle(paused).unwrap();
+        view.set_lifecycle(paused, &mut access);
+        assert_eq!(
+            engine.dispatch_write(&claim, &accepted),
+            Err(sequencer::Error::Suspended)
+        );
+        bus.device_mut::<super::super::super::View>(requests)
+            .unwrap()
+            .set_lifecycle(LIVE, &mut access);
+        let write = engine.dispatch_write(&claim, &accepted).unwrap();
+        bus.write(write.address, write.width, write.value, &mut access)
+            .unwrap();
+        engine
+            .finish_write::<()>(&claim, RouteOutcome::Committed)
+            .unwrap();
+        assert_eq!(engine.advance(0), Ok(Progress::Packet(PacketKind::Write)));
+        let zero = engine.control_context().unwrap();
+        assert_eq!(zero.fields().values(), [0; 5]);
+        assert_ne!(zero.generation(), context.generation());
+        let action = engine.begin_write().unwrap();
+        assert_eq!(
+            engine.dispatch_write(&action, &accepted),
+            Err(sequencer::Error::StaleControlQualification)
+        );
+        let accepted = action.qualify_context(test_fields()).unwrap();
+        engine.dispatch_write(&action, &accepted).unwrap();
+        engine.commit_controller_write(&action).unwrap();
+        assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0x10001));
+        assert!(matches!(engine.advance(0), Ok(Progress::Retired(_))));
+        assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0));
+    }
+
+    #[test]
+    fn later_native_job_inherits_actual_retired_context_instead_of_replaying_entry_input() {
+        let words = vec![0x30001c, 0x28e09a01, 0, 0xd, 1 << 16, 0];
+        let (owner, mut bus, _) = fixture(Some(words), true);
+        let mut pins = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut pins);
+        bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
+        let mut engine = owner.cio_engine().unwrap();
+        assert_eq!(engine.control_context().unwrap().fields().values(), [0; 5]);
+        engine.advance(0).unwrap();
+        let context = engine.control_context().unwrap();
+        let claim = engine.begin_write().unwrap();
+        let fields = sequencer::control::Fields::new([0, 0, 0, 3, 0]).unwrap();
+        let accepted = claim.qualify_context(fields).unwrap();
+        engine.dispatch_write(&claim, &accepted).unwrap();
+        engine.commit_controller_write(&claim).unwrap();
+        assert!(matches!(engine.advance(0), Ok(Progress::Retired(_))));
+        assert_eq!(
+            owner
+                .native_observations()
+                .unwrap()
+                .cio_engine
+                .unwrap()
+                .retained_contexts[0],
+            (0, Some(context))
+        );
+        bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
+        let mut next = owner.cio_engine().unwrap();
+        assert_eq!(next.control_context(), Some(context));
+        next.advance(0).unwrap();
+        assert_eq!(
+            next.control_context().unwrap().generation(),
+            context.generation() + 1
+        );
+        let claim = next.begin_write().unwrap();
+        assert_eq!(
+            next.dispatch_write(&claim, &accepted),
+            Err(sequencer::Error::StaleControlQualification)
+        );
     }
 
     #[test]
@@ -915,7 +1107,9 @@ mod tests {
         bus.write(CIO_ADDRESS, Width::Word, 1, &mut access).unwrap();
         let mut engine = owner.cio_engine().unwrap();
         let claim = engine.begin_write().unwrap();
-        let actual = engine.dispatch_write(&claim).unwrap();
+        let actual = engine
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         // Concrete target committed its request, then the physical route lost
         // completion authority. That error must not authorize a second write.
         bus.write(actual.address, actual.width, actual.value, &mut access)
@@ -986,7 +1180,9 @@ mod tests {
             engine.commit_controller_write(&action),
             Err(NativeError::Cursor(sequencer::Error::NotDispatched))
         );
-        engine.dispatch_write(&action).unwrap();
+        engine
+            .dispatch_write(&action, &action.qualify_context(test_fields()).unwrap())
+            .unwrap();
         engine.commit_controller_write(&action).unwrap();
         assert!(owner.cio_completions().unwrap().is_empty());
         let claim = engine.begin_write().unwrap();
@@ -1001,7 +1197,9 @@ mod tests {
             engine.begin_write().unwrap_err(),
             sequencer::Error::InFlight
         );
-        let actual = engine.dispatch_write(&claim).unwrap();
+        let actual = engine
+            .dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap())
+            .unwrap();
         assert_eq!(
             engine.cancel_write(&claim),
             Err(sequencer::Error::AlreadyDispatched)
@@ -1012,7 +1210,7 @@ mod tests {
             Err(FinishError::NoEffect("checked route preflight"))
         );
         assert_eq!(
-            engine.dispatch_write(&claim),
+            engine.dispatch_write(&claim, &claim.qualify_context(test_fields()).unwrap()),
             Err(sequencer::Error::StaleClaim)
         );
         assert_eq!(bus.read(CIO_ADDRESS, Width::Word, &mut access), Ok(0x10001));
@@ -1037,12 +1235,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_control_early_end_missing_action_and_unactivated_request_preserve_real_pending_state()
+    fn unknown_instruction_early_end_missing_action_and_unactivated_request_preserve_real_pending_state()
      {
         for (words, expected) in [
             (
-                vec![0x1c, 0],
-                NativeError::Cursor(sequencer::Error::UnqualifiedInstruction(0x1c)),
+                vec![0x10, 0],
+                NativeError::Cursor(sequencer::Error::UnqualifiedInstruction(0x10)),
             ),
             (vec![0], NativeError::Engine(Error::MissingAction)),
             (
