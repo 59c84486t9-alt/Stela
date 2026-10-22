@@ -22,7 +22,10 @@
 //! control interface) is left unused.
 mod report;
 
-use super::xhci::{Controller, Device, Endpoint, Interface, Plan, STALL, Shared, setup};
+use super::xhci::{
+    Controller, DEVICE_TO_HOST, Device, Endpoint, GET_DESCRIPTOR, Interface, Plan,
+    RECIPIENT_INTERFACE, STALL, Shared, TYPE_CLASS, setup,
+};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -39,7 +42,17 @@ const SET_IDLE: u8 = 0x0a;
 const SET_PROTOCOL: u8 = 0x0b;
 const HID_DESCRIPTOR: u8 = 0x21;
 const REPORT_DESCRIPTOR: u8 = 0x22;
-const REPORT_BYTES: usize = 64;
+/// Boot reports fit eight bytes (HID 1.11 Appendix B); Linux `usbmouse`
+/// caps its transfer there.
+const BOOT_REPORT_BYTES: usize = 8;
+/// An interrupt endpoint's wMaxPacketSize payload bits.
+const MAX_PACKET_SIZE: u16 = 0x7ff;
+/// Linux `hid_io_error`: retry after 13 ms, doubling to at least 100 ms,
+/// and give up after a second of failures.
+const FIRST_RETRY_MS: u64 = 13;
+const LONGEST_RETRY_MS: u64 = 100;
+const RETRY_WINDOW_US: u64 = 1_000_000;
+const MICROSECONDS_PER_MILLISECOND: u64 = 1_000;
 const BOOT_PROTOCOL: u16 = 0;
 const REPORT_PROTOCOL: u16 = 1;
 /// The Keyboard/Keypad usages the native keyboard reports.
@@ -71,7 +84,13 @@ fn read_reports(
             "HID interface without a report descriptor",
         ))?;
     let index = u16::from(interface.number);
-    let request = setup(0x81, 6, u16::from(REPORT_DESCRIPTOR) << 8, index, length);
+    let request = setup(
+        DEVICE_TO_HOST | RECIPIENT_INTERFACE,
+        GET_DESCRIPTOR,
+        u16::from(REPORT_DESCRIPTOR) << 8,
+        index,
+        length,
+    );
     let descriptor = c.control(device.slot, request, &[])?;
     report::parse(&descriptor).map_err(BlockError::Unsupported)
 }
@@ -94,14 +113,54 @@ fn boot_interface(
     }
 }
 
+/// Failed transfers being retried, as Linux `hid_io_error` retries them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Retry {
+    delay_ms: u64,
+    /// When the next transfer may go out, and when retrying stops.
+    at_us: u64,
+    stop_us: u64,
+}
+
+impl Retry {
+    fn first(now_us: u64) -> Self {
+        Self {
+            delay_ms: FIRST_RETRY_MS,
+            at_us: now_us + FIRST_RETRY_MS * MICROSECONDS_PER_MILLISECOND,
+            stop_us: now_us + RETRY_WINDOW_US,
+        }
+    }
+
+    /// The next retry after another failure, or none once retrying has run
+    /// a second without a report.
+    fn next(self, now_us: u64) -> Option<Self> {
+        if now_us > self.stop_us {
+            return None;
+        }
+        let delay_ms = match self.delay_ms < LONGEST_RETRY_MS {
+            true => self.delay_ms * 2,
+            false => self.delay_ms,
+        };
+        Some(Self {
+            delay_ms,
+            at_us: now_us + delay_ms * MICROSECONDS_PER_MILLISECOND,
+            ..self
+        })
+    }
+}
+
 /// One HID interface the host polls.
 pub struct UsbInput {
     controller: Shared,
     slot: u8,
     endpoint: Endpoint,
     buffer: DmaBuffer,
+    /// Bytes one interrupt transfer asks for: the longest input report.
+    length: usize,
     /// The queued TD, if one is out.
     queued: Option<u64>,
+    /// Transfer errors being retried.
+    retry: Option<Retry>,
     reports: Reports,
     /// The keyboard usages the last keyboard report held.
     held: Vec<u32>,
@@ -129,10 +188,20 @@ impl UsbInput {
         let reports = {
             let mut c = controller.borrow_mut();
             let protocol = |c: &mut Controller, protocol: u16| -> Result<(), BlockError> {
-                let request = setup(0x21, SET_PROTOCOL, protocol, index, 0);
+                let request = setup(
+                    TYPE_CLASS | RECIPIENT_INTERFACE,
+                    SET_PROTOCOL,
+                    protocol,
+                    index,
+                    0,
+                );
                 c.control(device.slot, request, &[])?;
                 // Reports on change only; a device may refuse.
-                let _ = c.control(device.slot, setup(0x21, SET_IDLE, 0, index, 0), &[]);
+                let _ = c.control(
+                    device.slot,
+                    setup(TYPE_CLASS | RECIPIENT_INTERFACE, SET_IDLE, 0, index, 0),
+                    &[],
+                );
                 Ok(())
             };
             let boot = match (interface.subclass, interface.protocol) {
@@ -141,6 +210,7 @@ impl UsbInput {
                     Reports {
                         keys: Some(Keys::boot()),
                         pointer: None,
+                        input_bytes: BOOT_REPORT_BYTES,
                     },
                     |reports| reports.keys.is_some(),
                 )),
@@ -149,6 +219,7 @@ impl UsbInput {
                     Reports {
                         keys: None,
                         pointer: Some(Pointer::boot()),
+                        input_bytes: BOOT_REPORT_BYTES,
                     },
                     |reports| reports.pointer.is_some(),
                 )),
@@ -157,11 +228,12 @@ impl UsbInput {
             match boot {
                 Some((chosen, reports)) => {
                     protocol(&mut c, chosen)?;
-                    reports
+                    (chosen, reports)
                 }
-                None => read_reports(&mut c, device, interface)?,
+                None => (REPORT_PROTOCOL, read_reports(&mut c, device, interface)?),
             }
         };
+        let (chosen, reports) = reports;
         if reports.keys.is_none() && reports.pointer.is_none() {
             return Ok(None);
         }
@@ -172,13 +244,22 @@ impl UsbInput {
                 "HID pointer with one absolute and one relative axis",
             ));
         }
-        let buffer = dma.allocate(REPORT_BYTES, REPORT_BYTES)?;
+        let length = match chosen {
+            REPORT_PROTOCOL => reports.input_bytes,
+            _ => usize::from(endpoint.max_packet & MAX_PACKET_SIZE).min(BOOT_REPORT_BYTES),
+        };
+        if length == 0 {
+            return Err(BlockError::Unsupported("HID input report without data"));
+        }
+        let buffer = dma.allocate(length, length.next_power_of_two())?;
         Ok(Some(Self {
             controller,
             slot: device.slot,
             endpoint,
             buffer,
+            length,
             queued: None,
+            retry: None,
             reports,
             held: Vec::new(),
             buttons: 0,
@@ -190,15 +271,15 @@ impl UsbInput {
         }))
     }
 
-    fn length(&self) -> usize {
-        usize::from(self.endpoint.max_packet & 0x7ff).min(REPORT_BYTES)
-    }
-
     /// The inputs of every report that arrived since the last poll.
     pub fn poll(&mut self) -> Vec<Input> {
         let mut inputs = Vec::new();
+        let now = self.controller.borrow().clock.now_us();
+        if self.failed || self.retry.is_some_and(|retry| now < retry.at_us) {
+            return inputs;
+        }
         for _ in 0..16 {
-            let length = self.length();
+            let length = self.length;
             let trb = match self.queued {
                 Some(trb) => trb,
                 None => {
@@ -228,28 +309,32 @@ impl UsbInput {
                 break;
             };
             self.queued = None;
-            match result {
+            let endpoint = self.endpoint;
+            let recovered = match result {
                 Ok(bytes) => {
+                    self.retry = None;
                     let report = self.buffer.bytes()[..bytes].to_vec();
                     self.report(&report, &mut inputs);
+                    continue;
                 }
+                // Linux `hid_irq_in`: a stall clears the halt on both sides.
                 Err(BlockError::Device { status: STALL }) => {
-                    let endpoint = self.endpoint;
-                    if self
-                        .controller
-                        .borrow_mut()
-                        .clear(self.slot, &endpoint)
-                        .is_err()
-                    {
-                        self.failed = true;
-                        break;
-                    }
+                    self.controller.borrow_mut().clear(self.slot, &endpoint)
                 }
-                Err(_) => {
-                    self.failed = true;
-                    break;
-                }
+                // Other errors reset the host endpoint and retry with backoff.
+                Err(_) => self
+                    .controller
+                    .borrow_mut()
+                    .reset_endpoint(self.slot, &endpoint),
+            };
+            self.retry = match self.retry {
+                None => Some(Retry::first(now)),
+                Some(retry) => retry.next(now),
+            };
+            if recovered.is_err() || self.retry.is_none() {
+                self.failed = true;
             }
+            break;
         }
         inputs
     }
@@ -401,10 +486,26 @@ mod tests {
     ];
 
     #[test]
+    fn transfer_errors_retry_with_linux_backoff_for_one_second() {
+        let first = Retry::first(1_000);
+        assert_eq!(
+            (first.delay_ms, first.at_us, first.stop_us),
+            (13, 14_000, 1_001_000)
+        );
+        let delays: Vec<u64> = core::iter::successors(Some(first), |retry| retry.next(retry.at_us))
+            .map(|retry| retry.delay_ms)
+            .take(6)
+            .collect();
+        assert_eq!(delays, [13, 26, 52, 104, 104, 104]);
+        assert_eq!(first.next(1_001_001), None);
+    }
+
+    #[test]
     fn a_boot_keyboard_with_report_ids_is_read_through_its_descriptor() {
         let boot = || Reports {
             keys: Some(Keys::boot()),
             pointer: None,
+            input_bytes: BOOT_REPORT_BYTES,
         };
         let usable = |reports: &Reports| reports.keys.is_some();
         let described = report::parse(&NUMBERED_KEYBOARD).map_err(BlockError::Unsupported);

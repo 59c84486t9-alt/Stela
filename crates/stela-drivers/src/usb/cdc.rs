@@ -29,7 +29,10 @@
 //! taken to be up. Frames above the 1514-byte Ethernet maximum are refused.
 mod ntb;
 
-use super::xhci::{Device, Endpoint, Interface, Plan, SET_INTERFACE, Shared, setup};
+use super::xhci::{
+    DEVICE_TO_HOST, Device, Endpoint, Interface, Plan, RECIPIENT_INTERFACE, SET_INTERFACE, Shared,
+    TYPE_CLASS, setup,
+};
 use crate::{
     block::BlockError,
     bus::dma::{DmaAllocator, DmaBuffer},
@@ -42,6 +45,8 @@ pub const COMMUNICATIONS: u8 = 2;
 pub const ECM: u8 = 6;
 /// The Network Control Model subclass.
 pub const NCM: u8 = 0x0d;
+/// Class requests and notifications address the communications interface.
+const CLASS_INTERFACE: u8 = TYPE_CLASS | RECIPIENT_INTERFACE;
 const DATA_CLASS: u8 = 10;
 const CS_INTERFACE: u8 = 0x24;
 const UNION: u8 = 0x06;
@@ -212,7 +217,7 @@ impl UsbNet {
                 Model::Ecm => Framing::Ecm,
                 Model::Ncm(capabilities) => {
                     let request = setup(
-                        0xa1,
+                        DEVICE_TO_HOST | CLASS_INTERFACE,
                         GET_NTB_PARAMETERS,
                         0,
                         control,
@@ -222,13 +227,15 @@ impl UsbNet {
                     let mut parameters =
                         ntb::Parameters::parse(&reply).map_err(BlockError::Unsupported)?;
                     if capabilities & NCM_CRC_MODE != 0 {
-                        let request = setup(0x21, SET_CRC_MODE, CRC_NOT_APPENDED, control, 0);
+                        let request =
+                            setup(CLASS_INTERFACE, SET_CRC_MODE, CRC_NOT_APPENDED, control, 0);
                         c.control(device.slot, request, &[])?;
                     }
                     // NTB16 is the reset default. Like Linux cdc_ncm_init,
                     // explicitly select it when both formats are offered.
                     if parameters.supports_ntb32 {
-                        let request = setup(0x21, SET_NTB_FORMAT, NTB16_FORMAT, control, 0);
+                        let request =
+                            setup(CLASS_INTERFACE, SET_NTB_FORMAT, NTB16_FORMAT, control, 0);
                         c.control(device.slot, request, &[])?;
                     }
                     if parameters.in_max > NCM_IN_BLOCK {
@@ -238,8 +245,13 @@ impl UsbNet {
                             // wNtbInMaxDatagrams 0: no limit.
                             size.extend_from_slice(&[0; 4]);
                         }
-                        let request =
-                            setup(0x21, SET_NTB_INPUT_SIZE, 0, control, size.len() as u16);
+                        let request = setup(
+                            CLASS_INTERFACE,
+                            SET_NTB_INPUT_SIZE,
+                            0,
+                            control,
+                            size.len() as u16,
+                        );
                         c.control(device.slot, request, &size)?;
                     }
                     Framing::Ncm(parameters, 0)
@@ -289,7 +301,13 @@ impl UsbNet {
                 Model::Ncm(capabilities) => capabilities & NCM_PACKET_FILTER != 0,
             };
             if filter {
-                let request = setup(0x21, SET_ETHERNET_PACKET_FILTER, FILTER, control, 0);
+                let request = setup(
+                    CLASS_INTERFACE,
+                    SET_ETHERNET_PACKET_FILTER,
+                    FILTER,
+                    control,
+                    0,
+                );
                 c.control(device.slot, request, &[])?;
             }
         }
@@ -336,7 +354,8 @@ impl UsbNet {
                 && bytes >= 8
             {
                 let header = &self.status.bytes()[..8];
-                if header[0] == 0xa1 && header[1] == NETWORK_CONNECTION {
+                if header[0] == DEVICE_TO_HOST | CLASS_INTERFACE && header[1] == NETWORK_CONNECTION
+                {
                     self.connected = Some(header[2] != 0);
                 }
             }

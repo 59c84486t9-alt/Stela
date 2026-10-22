@@ -205,6 +205,14 @@ const RESET_RECOVERY_US: u64 = 10_000;
 const ADDRESS_RECOVERY_US: u64 = 2_000;
 const BIOS_HANDOFF_US: u64 = 1_000_000;
 
+// bmRequestType: direction, type and recipient (USB 2.0 Table 9-2).
+pub const DEVICE_TO_HOST: u8 = 0x80;
+pub const TYPE_CLASS: u8 = 0x20;
+pub const TYPE_VENDOR: u8 = 0x40;
+pub const RECIPIENT_INTERFACE: u8 = 0x01;
+pub const RECIPIENT_ENDPOINT: u8 = 0x02;
+pub const RECIPIENT_OTHER: u8 = 0x03;
+
 // Standard requests and descriptors (USB 2.0 9.4, 9.6).
 pub const GET_STATUS: u8 = 0;
 pub const CLEAR_FEATURE: u8 = 1;
@@ -1176,7 +1184,7 @@ impl Controller {
         };
         self.control(
             slot,
-            setup(0x80, GET_DESCRIPTOR, value, language, length),
+            setup(DEVICE_TO_HOST, GET_DESCRIPTOR, value, language, length),
             &[],
         )
     }
@@ -1623,6 +1631,12 @@ impl Controller {
         Ok(())
     }
 
+    /// Resets the host side of an endpoint a transaction error halted; the
+    /// device's endpoint is not halted, so no CLEAR_FEATURE follows.
+    pub fn reset_endpoint(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
+        self.recover(slot, endpoint.dci())
+    }
+
     /// Clears a halted bulk or interrupt endpoint on both sides.
     pub fn clear(&mut self, slot: u8, endpoint: &Endpoint) -> Result<(), BlockError> {
         if endpoint.kind() == 1 {
@@ -1631,7 +1645,13 @@ impl Controller {
             ));
         }
         self.recover(slot, endpoint.dci())?;
-        let request = setup(0x02, CLEAR_FEATURE, 0, u16::from(endpoint.address), 0);
+        let request = setup(
+            RECIPIENT_ENDPOINT,
+            CLEAR_FEATURE,
+            0,
+            u16::from(endpoint.address),
+            0,
+        );
         self.control(slot, request, &[])?;
         Ok(())
     }
@@ -1936,7 +1956,13 @@ impl Controller {
         let slot = device.slot;
         let hub = self.control(
             slot,
-            setup(0xa0, GET_DESCRIPTOR, u16::from(HUB_DESCRIPTOR) << 8, 0, 9),
+            setup(
+                DEVICE_TO_HOST | TYPE_CLASS,
+                GET_DESCRIPTOR,
+                u16::from(HUB_DESCRIPTOR) << 8,
+                0,
+                9,
+            ),
             &[],
         )?;
         if hub.len() < 7 || hub[1] != HUB_DESCRIPTOR {
@@ -1965,7 +1991,13 @@ impl Controller {
         for port in 1..=ports {
             self.control(
                 slot,
-                setup(0x23, SET_FEATURE, PORT_POWER, u16::from(port), 0),
+                setup(
+                    TYPE_CLASS | RECIPIENT_OTHER,
+                    SET_FEATURE,
+                    PORT_POWER,
+                    u16::from(port),
+                    0,
+                ),
                 &[],
             )?;
         }
@@ -1996,7 +2028,17 @@ impl Controller {
     }
 
     fn hub_port_status(&mut self, slot: u8, port: u8) -> Result<(u16, u16), BlockError> {
-        let status = self.control(slot, setup(0xa3, GET_STATUS, 0, u16::from(port), 4), &[])?;
+        let status = self.control(
+            slot,
+            setup(
+                DEVICE_TO_HOST | TYPE_CLASS | RECIPIENT_OTHER,
+                GET_STATUS,
+                0,
+                u16::from(port),
+                4,
+            ),
+            &[],
+        )?;
         if status.len() < 4 {
             return Err(BlockError::Unsupported("short hub port status"));
         }
@@ -2015,10 +2057,26 @@ impl Controller {
         let index = u16::from(port);
         self.control(
             slot,
-            setup(0x23, CLEAR_FEATURE, C_PORT_CONNECTION, index, 0),
+            setup(
+                TYPE_CLASS | RECIPIENT_OTHER,
+                CLEAR_FEATURE,
+                C_PORT_CONNECTION,
+                index,
+                0,
+            ),
             &[],
         )?;
-        self.control(slot, setup(0x23, SET_FEATURE, PORT_RESET, index, 0), &[])?;
+        self.control(
+            slot,
+            setup(
+                TYPE_CLASS | RECIPIENT_OTHER,
+                SET_FEATURE,
+                PORT_RESET,
+                index,
+                0,
+            ),
+            &[],
+        )?;
         let deadline = self.clock.deadline(PORT_RESET_US);
         let status = loop {
             let (status, change) = self.hub_port_status(slot, port)?;
@@ -2032,7 +2090,13 @@ impl Controller {
         };
         self.control(
             slot,
-            setup(0x23, CLEAR_FEATURE, C_PORT_RESET, index, 0),
+            setup(
+                TYPE_CLASS | RECIPIENT_OTHER,
+                CLEAR_FEATURE,
+                C_PORT_RESET,
+                index,
+                0,
+            ),
             &[],
         )?;
         self.clock.delay(RESET_RECOVERY_US);

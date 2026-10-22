@@ -7,7 +7,9 @@
 //! item's fields each hold an index into its usage range (6.2.2.5), where a
 //! value outside the logical range names no usage. Constant items pad.
 //! Output and Feature items have offsets of their own and are not read.
-//! Long items, Push and Pop are refused.
+//! Long items are refused. Push and Pop keep a four-deep global stack, and
+//! sizes, counts and report lengths are bounded as Linux `hid-core.c` bounds
+//! them (`hid_parser_global`, `hid_add_field`).
 //!
 //! A pointer is the first report with Generic Desktop X and Y, its Button
 //! 1-3 and wheel when present. A keyboard is the first report with
@@ -53,6 +55,12 @@ const POP: u8 = 0xb4;
 const USAGE: u8 = 0x08;
 const USAGE_MINIMUM: u8 = 0x18;
 const USAGE_MAXIMUM: u8 = 0x28;
+/// Linux `HID_GLOBAL_STACK_SIZE`, the largest Report Size and Report Count
+/// (`HID_MAX_USAGES`) it takes, and `HID_MAX_BUFFER_SIZE` in bits.
+const GLOBAL_STACK: usize = 4;
+const MAX_REPORT_SIZE: u32 = 256;
+const MAX_REPORT_COUNT: u32 = 12_288;
+const MAX_REPORT_BITS: usize = (16_384 - 1) * 8;
 /// Input item flags (6.2.2.5).
 const CONSTANT: u32 = 1 << 0;
 const VARIABLE: u32 = 1 << 1;
@@ -213,6 +221,9 @@ impl Keys {
 pub struct Reports {
     pub pointer: Option<Pointer>,
     pub keys: Option<Keys>,
+    /// The longest input report, including its report ID byte: what one
+    /// interrupt transfer must hold (Linux `hid_find_max_report`).
+    pub input_bytes: usize,
 }
 
 impl Reports {
@@ -225,7 +236,8 @@ impl Reports {
 }
 
 /// The input fields of a report descriptor.
-fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
+/// The input fields of a report descriptor, and its longest input report.
+fn items(descriptor: &[u8]) -> Result<(Vec<Item>, usize), &'static str> {
     #[derive(Clone, Copy, Default)]
     struct Global {
         page: u32,
@@ -236,6 +248,7 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
         report: Option<u8>,
     }
     let mut global = Global::default();
+    let mut stack: Vec<Global> = Vec::new();
     let mut usages: Vec<u32> = Vec::new();
     let mut range: Option<(u32, u32)> = None;
     let mut offsets: Vec<(Option<u8>, usize)> = Vec::new();
@@ -283,6 +296,9 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                 };
                 let start = *offset;
                 *offset += global.size * global.count;
+                if *offset > MAX_REPORT_BITS {
+                    return Err("input report longer than 16384 bytes");
+                }
                 let constant = flags & CONSTANT != 0;
                 let variable = flags & VARIABLE != 0;
                 for n in 0..global.count {
@@ -336,10 +352,21 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
                     signed
                 };
             }
+            REPORT_SIZE if unsigned > MAX_REPORT_SIZE => {
+                return Err("Report Size over 256 bits");
+            }
             REPORT_SIZE => global.size = unsigned as usize,
-            REPORT_ID => global.report = Some(unsigned as u8),
+            REPORT_ID => match u8::try_from(unsigned) {
+                Ok(id) if id != 0 => global.report = Some(id),
+                _ => return Err("Report ID outside 1-255"),
+            },
+            REPORT_COUNT if unsigned > MAX_REPORT_COUNT => {
+                return Err("Report Count over 12288");
+            }
             REPORT_COUNT => global.count = unsigned as usize,
-            PUSH | POP => return Err("Push and Pop in a report descriptor"),
+            PUSH if stack.len() == GLOBAL_STACK => return Err("global item stack overflow"),
+            PUSH => stack.push(global),
+            POP => global = stack.pop().ok_or("Pop without Push")?,
             // Physical extents and units do not change a field's value.
             PHYSICAL_MINIMUM | PHYSICAL_MAXIMUM | UNIT_EXPONENT | UNIT => {}
             USAGE => usages.push(full_usage(unsigned)),
@@ -350,7 +377,9 @@ fn items(descriptor: &[u8]) -> Result<Vec<Item>, &'static str> {
             _ => {}
         }
     }
-    Ok(items)
+    let numbered = offsets.iter().any(|(id, _)| id.is_some());
+    let longest = offsets.iter().map(|(_, bits)| bits.div_ceil(8)).max();
+    Ok((items, longest.unwrap_or(0) + usize::from(numbered)))
 }
 
 fn pointer(items: &[Item]) -> Option<Pointer> {
@@ -417,10 +446,11 @@ fn keys(items: &[Item]) -> Option<Keys> {
 
 /// The pointer and keyboard reports of `descriptor`.
 pub fn parse(descriptor: &[u8]) -> Result<Reports, &'static str> {
-    let items = items(descriptor)?;
+    let (items, input_bytes) = items(descriptor)?;
     Ok(Reports {
         pointer: pointer(&items),
         keys: keys(&items),
+        input_bytes,
     })
 }
 
@@ -449,9 +479,32 @@ mod tests {
         assert_eq!(layout.wheel.unwrap().offset, 24);
         assert_eq!(layout.buttons[2].unwrap().offset, 2);
         assert_eq!(x.read(&[0, 0xff]), Some(-1));
-        assert!(parse(&[0x05, 0x01, 0xa4]).is_err());
+        // Three bytes of fields after the ID byte.
+        assert_eq!(reports.input_bytes, 5);
         let collection_only = parse(&[0x05, 0x01, 0x09, 0x06, 0xa1, 0x01, 0xc0]).unwrap();
         assert_eq!(collection_only, Reports::default());
+    }
+
+    #[test]
+    fn global_stack_and_field_bounds_follow_linux() {
+        // Push saves the page; Pop restores it, so X keeps Generic Desktop.
+        let pushed = [
+            0x05, 0x01, 0xa4, 0x05, 0x09, 0xb4, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7f,
+            0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
+        ];
+        let pointer = parse(&pushed).unwrap().pointer.unwrap();
+        assert_eq!(pointer.x.unwrap().offset, 0);
+        assert_eq!(parse(&[0xa4; 5]), Err("global item stack overflow"));
+        assert_eq!(parse(&[0xb4]), Err("Pop without Push"));
+        // Report Size 257, Report Count 12289 and Report ID 0 are refused.
+        assert_eq!(parse(&[0x76, 0x01, 0x01]), Err("Report Size over 256 bits"));
+        assert_eq!(parse(&[0x96, 0x01, 0x30]), Err("Report Count over 12288"));
+        assert_eq!(parse(&[0x85, 0x00]), Err("Report ID outside 1-255"));
+        // 256 bits times 12288 fields cannot fit 16 KiB.
+        assert_eq!(
+            parse(&[0x76, 0x00, 0x01, 0x96, 0x00, 0x30, 0x81, 0x01]),
+            Err("input report longer than 16384 bytes")
+        );
     }
 
     /// An NKRO keyboard: report 1 holds a modifier bitmap and a bitmap of
