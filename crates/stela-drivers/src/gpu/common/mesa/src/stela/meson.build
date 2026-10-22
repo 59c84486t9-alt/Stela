@@ -196,6 +196,18 @@ if stela_air_llvm != ''
     test('stela_air_aco', stela_air_aco_probe, suite : 'stela')
   endif
   if with_stela_intel
+    stela_intel_air_render_probe = executable(
+      'stela_intel_air_render_probe',
+      ['../../../../intel/stela/tests/air_render.c',
+       '../../../../intel/stela/tests/air_render_elk.c'],
+      include_directories : [inc_include, inc_src, inc_intel],
+      dependencies : [idep_stela_air, idep_intel_compiler_brw,
+                      idep_intel_compiler_elk, idep_intel_compiler_gen,
+                      idep_intel_dev, idep_mesautil],
+      link_with : [libisl],
+      c_args : ['-Werror', '-UNDEBUG'],
+      build_rpath : fs.parent(stela_air_llvm),
+    )
     stela_air_brw_probe = executable(
       'stela_air_brw_probe',
       '../../../../intel/stela/tests/air_brw_probe.c',

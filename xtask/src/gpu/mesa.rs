@@ -14,6 +14,7 @@ use std::{
 };
 
 mod library;
+mod render;
 mod threadgroup;
 
 const LIBRARIES: &[&str] = &[
@@ -432,6 +433,8 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "intel/stela/hosted/air_compile.h",
             "intel/stela/hosted/air_validate_elk.c",
             "intel/stela/tests/air_compile.c",
+            "intel/stela/tests/air_render.c",
+            "intel/stela/tests/air_render_elk.c",
             "nvidia/stela/hosted/image.c",
             "nvidia/stela/hosted/image.h",
             "nvidia/stela/tests/image.c",
@@ -725,6 +728,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "src/stela/stela_air_ssbo_test",
             "src/stela/stela_air_stage_test",
             "src/stela/stela_nv_air_render_probe",
+            "src/stela/stela_intel_air_render_probe",
             "src/stela/stela_nv_compute_probe",
             "src/stela/stela_intel_fp_controls_probe",
             "src/stela/stela_nv_air_threadgroup_probe",
@@ -752,7 +756,7 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
     run(&mut compile, &evidence, "compile")?;
     let render = llvm_library
         .as_ref()
-        .map(|_| library::verify_render(&build, &evidence, &render_snapshots))
+        .map(|_| render::verify(&build, &evidence, &render_snapshots))
         .transpose()?;
     let amd_air_owned = metal_input
         .as_ref()
