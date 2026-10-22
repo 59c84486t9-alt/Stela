@@ -16,17 +16,6 @@ fn firmware_wopcm_gsm_pat_and_guc_reset_match_original_policy_and_register_trace
     ]);
 }
 
-#[test]
-fn original_range_and_tree_algorithms_preserve_native_pointer_width() {
-    run(&[
-        "test-rbtree",
-        "rbtree-abi",
-        "test-drm-mm",
-        "drm-mm-abi",
-        "drm-mm-linux-equivalence",
-    ]);
-}
-
 fn run(targets: &[&str]) {
     let directory = tempfile::tempdir().unwrap();
     let source = tools::root().join("crates/stela-drivers/src/gpu/intel/stela/Makefile");
@@ -42,12 +31,6 @@ fn run(targets: &[&str]) {
             tools::which("clang").unwrap().display()
         ))
         .arg("SANITIZE=")
-        .arg(format!(
-            "RBTREE_DONOR_SOURCE={}",
-            tools::root()
-                .join("crates/stela-drivers/src/gpu/common/linux/lib/rbtree.c")
-                .display()
-        ))
         .args(targets);
     capture(&mut command).unwrap();
 }

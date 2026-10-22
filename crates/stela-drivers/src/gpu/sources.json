@@ -21,7 +21,7 @@
           ]
         }
       ],
-      "scope": "Resource-manager and display cores plus their dependencies. Linux module adapters, installer entry point and firmware extraction tools are removed; Stela supplies its own platform port."
+      "scope": "Resource-manager and display cores plus their dependencies, built in NVIDIA's FreeBSD configuration. Linux module adapters and the installer entry point are not imported; Stela supplies its own platform port."
     },
     {
       "name": "linux",

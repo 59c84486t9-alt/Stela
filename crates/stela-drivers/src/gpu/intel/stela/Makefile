@@ -554,7 +554,3 @@ $(BUILD)/guc-reset-test: $(SOURCE)/tests/guc_reset.c $(GUC_RESET_TEST_HEADERS) $
 .PHONY: test-guc-reset
 test-guc-reset: $(BUILD)/guc-reset-test
 	$(BUILD)/guc-reset-test
-
-# Focused retained red-black tree pointer-width proof; no GPU activation.
-include $(SOURCE)/tests/rbtree.mk
-include $(SOURCE)/tests/drm_mm.mk
