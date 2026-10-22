@@ -2574,7 +2574,12 @@ pub struct AnsController {
     pub nvme: (u64, u64),
     pub vdma: Option<(u64, u64)>,
     pub sart: (u64, u64),
+    /// The SART's entry and throttle registers, from `sart-version`,
+    /// `sart-throttle-version` and `sart-throttle-offset`.
+    pub sart_layout: sart::Layout,
     pub sart_idle: u64,
+    /// The SART's `power-canary-offset` word in its `reg[1]`.
+    pub sart_canary: Option<u64>,
     /// The SART node's `exclusive-bounds`: entry SIZEs count pages rather
     /// than naming the last one ([`sart::Bounds`]).
     pub sart_exclusive_bounds: bool,
@@ -3323,8 +3328,27 @@ fn ans_controller(
     }
     let sart_node = found
         .and_then(|name| io.child(&name))
-        .filter(|n| n.compatible(SART) && n.first_u32("sart-version") == Some(3))
-        .ok_or("ANS2 iommu-parent is not SART v3")?;
+        .filter(|n| n.compatible(SART))
+        .ok_or("ANS2 iommu-parent is not a SART")?;
+    // SPTM's sart_bootstrap_parse_edt panics on any of these that is not
+    // one word.
+    let word = |name: &str| -> Result<Option<u32>, String> {
+        match sart_node.property(name) {
+            None => Ok(None),
+            Some(bytes) if bytes.len() == 4 => Ok(sart_node.first_u32(name)),
+            Some(_) => Err(format!("SART {name} is not one word")),
+        }
+    };
+    let version = word("sart-version")?.ok_or("SART has no sart-version")?;
+    if sart_node.property("sart-throttle-disable").is_some() {
+        return Err("SART throttle-disable leaves throttle words the model does not carry".into());
+    }
+    let sart_layout = sart::Layout::new(
+        version,
+        word("sart-throttle-version")?.unwrap_or(version),
+        word("sart-throttle-offset")?.unwrap_or(0),
+    )
+    .map_err(String::from)?;
     let sart_regs = apertures::registers(&sart_node).ok_or("SART has no reg pairs")?;
     let place = |pairs: &[(u64, u64)], index: usize, minimum: u64| -> Result<(u64, u64), String> {
         let &(offset, bytes) = pairs
@@ -3340,7 +3364,14 @@ fn ans_controller(
         .property("nvme-vdma-wa")
         .map(|_| place(&regs, 13, ans::VDMA_CACHE_OFFSET + geometry.vdma_bytes()))
         .transpose()?;
-    let sart = place(&sart_regs, 0, sart::REGISTER_BYTES)?;
+    let sart = place(&sart_regs, 0, sart_layout.register_bytes())?;
+    let sart_canary = word("power-canary-offset")?
+        .map(|offset| {
+            let offset = u64::from(offset);
+            let bank = place(&sart_regs, 1, offset + 4)?;
+            Ok::<_, String>(bank.0 + offset)
+        })
+        .transpose()?;
     let power = place(&sart_regs, 2, 4)?;
     let offset = u64::from(
         sart_node
@@ -3382,7 +3413,9 @@ fn ans_controller(
         nvme,
         vdma,
         sart,
+        sart_layout,
         sart_idle,
+        sart_canary,
         sart_exclusive_bounds: sart_node.property("exclusive-bounds").is_some(),
         interrupts,
         completion_irq,
@@ -5828,7 +5861,19 @@ mod tests {
         assert_eq!(placed.nvme, (0x2_7bcc_0000, 0x60000));
         assert_eq!(placed.sart, (0x2_7bc5_0000, 0xc000));
         assert_eq!(placed.sart_idle, 0x2_7bcc_13e8);
+        assert_eq!(placed.sart_layout, sart::Layout::V3);
+        assert_eq!(placed.sart_canary, None);
         assert!(!placed.sart_exclusive_bounds);
+        // A version 4 SART places with SPTM's version 4 layout.
+        let bytes = tree(4, 0x8e, 4);
+        let v4 = ans_controller(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&|a| Some(a)),
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(v4.sart_layout, sart::Layout::new(4, 4, 0).unwrap());
         assert_eq!(placed.completion_irq, 724);
         assert_eq!(placed.interrupts, [718, 717, 720, 719]);
         assert_eq!(

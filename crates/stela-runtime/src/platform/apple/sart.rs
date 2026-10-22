@@ -1,10 +1,10 @@
-//! SART v3 (`sart,coastguard`): sixteen identity-mapped DMA allow-list
+//! SART v3 and v4 (`sart,coastguard`): identity-mapped DMA allow-list
 //! entries. Linux `drivers/soc/apple/sart.c`, `sart3_{get,set}_entry`, gives
-//! CONFIG at 4*i, PADDR at 0x40+4*i and SIZE at 0x80+4*i; addresses and
-//! lengths are in 4 KiB units. SPTM writes SIZE as the page count less one
-//! unless the SART's DT node has `exclusive-bounds` ([`Bounds`]). Only flags
-//! 0 (disabled) and 0xff (allow) have known semantics. Other flags refuse
-//! rather than widening permissions.
+//! v3's sixteen as CONFIG at 4*i, PADDR at 0x40+4*i and SIZE at 0x80+4*i;
+//! addresses and lengths are in 4 KiB units. SPTM writes SIZE as the page
+//! count less one unless the SART's DT node has `exclusive-bounds`
+//! ([`Bounds`]). Only flags 0 (disabled) and 0xff (allow) have known
+//! semantics. Other flags refuse rather than widening permissions.
 //!
 //! On ANS2 the allow-list covers only what the coprocessor reaches at raw
 //! addresses carried in commands, the tunnel buffers: the NVMe engine reads
@@ -16,16 +16,29 @@
 //! `sart-power-reg-offset`. This is an idle request, not a DMA bypass.
 //! Stela hands off with no allowed regions and no idle request, a boot-chain
 //! choice: it has no RTKit firmware buffers to preserve.
+//!
+//! The 26A434 J873GAP (M6) SPTM's `sart_bootstrap_parse_edt` (VA
+//! 0xfffffff0270d9f80..0xfffffff0270da2bc) selects an entry layout by
+//! `sart-version` from a table of four at 0xfffffff027019b30 and a throttle
+//! layout by `sart-throttle-version` (default `sart-version`) from a table
+//! of four at 0xfffffff027019a80, whose throttle and status words it offsets
+//! by `sart-throttle-offset` (default 0) ([`Layout`]); the J813AP (M5)
+//! SPTM has the same tables at 0xfffffff02701a9c8 and 0xfffffff02701a918. With
+//! `power-canary-offset` it maps `reg[1]` and, while it holds the SART
+//! powered, keeps 0xabfedeed in the word at that offset: it writes it when
+//! its reference count leaves 0 (0xfffffff0270d94c0) and panics unless the
+//! word still holds it when the count returns to 0 (0xfffffff0270d8c9c), so
+//! a lost write shows a power loss. Here the word is plain storage at
+//! [`CANARY`]; the SART refuses non-retained power loss.
 use super::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
 use crate::platform::dma::{DmaError, Iommu, Memory};
 
 const NAME: &str = "sart";
-pub const ENTRIES: usize = 16;
+/// The most entries a layout has, v4's.
+const MAX_ENTRIES: usize = 24;
 pub const PAGE: u64 = 4096;
-pub const REGISTER_BYTES: u64 = 0x8028;
-const ENTRY_BYTES: u64 = 0xc0;
 /// SPTM sart_sanity_check_throttles, VA 0xfffffff0270cb7bc..270cb838,
 /// with version-3 layout at 0xfffffff027019ac0: three nonzero boot
 /// configuration words, snapshotted before mappings can be installed.
@@ -46,10 +59,102 @@ const SYNCHRONOUS_CHANNEL: u32 = 1;
 const STATUS: [u64; 3] = [0x8010, 0x8018, 0x8020];
 /// Bus-local offset used to map the separate, DT-placed idle word.
 pub const IDLE: u64 = 0x1000;
+/// Bus-local offset used to map the `power-canary-offset` word.
+pub const CANARY: u64 = 0x2000;
 const BASE: u64 = 0x40;
 const SIZE: u64 = 0x80;
 const SIZE_MASK: u32 = (1 << 30) - 1;
 const ALLOW: u32 = 0xff;
+
+/// Where a SART's entry and throttle registers sit in `reg[0]`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout {
+    entries: usize,
+    base: u64,
+    size: u64,
+    channels: usize,
+    throttles: [u64; 4],
+    status: [u64; 4],
+}
+
+impl Layout {
+    /// `sart-version` 3 with its own throttle layout and no offset.
+    pub const V3: Self = Self {
+        entries: 16,
+        base: BASE,
+        size: SIZE,
+        channels: 3,
+        throttles: [THROTTLES[0], THROTTLES[1], THROTTLES[2], 0],
+        status: [STATUS[0], STATUS[1], STATUS[2], 0],
+    };
+
+    /// The layout SPTM's tables give `sart-version`, `sart-throttle-version`
+    /// and `sart-throttle-offset`. The SPTM's version 3 and 4 entry layouts
+    /// are 16 and 24 CONFIG words from 0, PADDR words from 0x40 and 0x60 and
+    /// SIZE words from 0x80 and 0xc0, each 4 bytes apart with 30-bit fields;
+    /// versions 1 and 2 pack an entry's fields into shared words, which the
+    /// model does not decode.
+    pub fn new(version: u32, throttle_version: u32, offset: u32) -> Result<Self, &'static str> {
+        let (entries, base, size) = match version {
+            3 => (16, BASE, SIZE),
+            4 => (24, 0x60, 0xc0),
+            _ => return Err("SART entry layout other than versions 3 and 4"),
+        };
+        let (channels, throttles, status) = match throttle_version {
+            1 => (3, [0x4014, 0x401c, 0x4024, 0], [0x4010, 0x4018, 0x4020, 0]),
+            2 | 3 => (3, [0x8014, 0x801c, 0x8024, 0], [0x8010, 0x8018, 0x8020, 0]),
+            4 => (
+                4,
+                [0x8008, 0x800c, 0x8014, 0x801c],
+                [0x8000, 0x8004, 0x8010, 0x8018],
+            ),
+            _ => return Err("SART throttle layout other than versions 1 to 4"),
+        };
+        if !offset.is_multiple_of(4) {
+            return Err("SART throttle offset is not word aligned");
+        }
+        let at = |words: [u64; 4]| words.map(|word| word + u64::from(offset));
+        Ok(Self {
+            entries,
+            base,
+            size,
+            channels,
+            throttles: at(throttles),
+            status: at(status),
+        })
+    }
+
+    /// The bytes of `reg[0]` the registers need.
+    pub fn register_bytes(&self) -> u64 {
+        self.throttles[..self.channels]
+            .iter()
+            .chain(&self.status[..self.channels])
+            .map(|&word| word + 4)
+            .chain([self.size + 4 * self.entries as u64])
+            .max()
+            .expect("a layout has registers")
+    }
+
+    fn throttle(&self, offset: u64) -> Option<usize> {
+        self.throttles[..self.channels]
+            .iter()
+            .position(|&word| word == offset)
+    }
+
+    /// The entry and field (0 CONFIG, 1 PADDR, 2 SIZE) at `offset`.
+    fn entry(&self, offset: u64) -> Option<(usize, usize)> {
+        if !offset.is_multiple_of(4) {
+            return None;
+        }
+        [0, self.base, self.size]
+            .iter()
+            .enumerate()
+            .find_map(|(field, &start)| {
+                let index = offset.checked_sub(start)? / 4;
+                (index < self.entries as u64).then_some((index as usize, field))
+            })
+    }
+}
 
 #[derive(Clone, Copy, Default)]
 struct Entry {
@@ -69,14 +174,20 @@ pub enum Bounds {
 
 pub struct Sart {
     lifecycle: LifecycleState,
-    entries: [Entry; ENTRIES],
+    layout: Layout,
+    entries: [Entry; MAX_ENTRIES],
     bounds: Bounds,
     idle: bool,
-    throttles: [u32; 3],
+    throttles: [u32; 4],
+    canary: u32,
 }
 
 impl Sart {
     pub fn new(bounds: Bounds) -> Self {
+        Self::with_layout(bounds, Layout::V3)
+    }
+
+    pub fn with_layout(bounds: Bounds, layout: Layout) -> Self {
         Self {
             lifecycle: LifecycleState {
                 powered: true,
@@ -85,10 +196,12 @@ impl Sart {
                 reset: false,
                 retention: false,
             },
-            entries: [Entry::default(); ENTRIES],
+            layout,
+            entries: [Entry::default(); MAX_ENTRIES],
             bounds,
             idle: false,
-            throttles: [SYNCHRONOUS_CHANNEL; 3],
+            throttles: [SYNCHRONOUS_CHANNEL; 4],
+            canary: 0,
         }
     }
 
@@ -97,7 +210,7 @@ impl Sart {
     pub fn allows(&self, first: u64, last: u64) -> bool {
         self.executing()
             && first <= last
-            && self.entries.iter().any(|entry| {
+            && self.entries[..self.layout.entries].iter().any(|entry| {
                 let pages = u64::from(entry.pages) + u64::from(self.bounds == Bounds::Inclusive);
                 let base = u64::from(entry.base) * PAGE;
                 let end = base + pages * PAGE;
@@ -126,16 +239,9 @@ impl Sart {
     }
 
     fn register(&self, offset: u64) -> Option<u32> {
-        if offset >= ENTRY_BYTES || !offset.is_multiple_of(4) {
-            return None;
-        }
-        let entry = self.entries[(offset % BASE / 4) as usize];
-        Some(match offset / BASE {
-            0 => entry.flags,
-            1 => entry.base,
-            2 => entry.pages,
-            _ => unreachable!(),
-        })
+        let (index, field) = self.layout.entry(offset)?;
+        let entry = self.entries[index];
+        Some([entry.flags, entry.base, entry.pages][field])
     }
 }
 
@@ -161,7 +267,7 @@ impl Iommu for Sart {
         if stream != 0 {
             return Err(DmaError::Unsupported("SART has no stream selector"));
         }
-        if self.throttles.contains(&0) {
+        if self.throttles[..self.layout.channels].contains(&0) {
             return Err(DmaError::Unsupported(
                 "SART DMA while a throttle word is 0 is not modeled",
             ));
@@ -205,14 +311,17 @@ impl MmioDevice for Sart {
         self.accessible()
             .map_err(|reason| refuse(NAME, offset, width, Direction::Read, reason))?;
         if width == Width::Word {
-            if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
+            if let Some(channel) = self.layout.throttle(offset) {
                 return Ok(u64::from(self.throttles[channel]));
             }
-            if STATUS.contains(&offset) {
+            if self.layout.status[..self.layout.channels].contains(&offset) {
                 return Ok(0);
             }
             if offset == IDLE {
                 return Ok(u64::from(self.idle));
+            }
+            if offset == CANARY {
+                return Ok(u64::from(self.canary));
             }
             if let Some(value) = self.register(offset) {
                 return Ok(u64::from(value));
@@ -240,7 +349,7 @@ impl MmioDevice for Sart {
         if width != Width::Word || value > u64::from(u32::MAX) {
             return Err(fail("SART requires a 32-bit word"));
         }
-        if let Some(channel) = THROTTLES.iter().position(|&o| o == offset) {
+        if let Some(channel) = self.layout.throttle(offset) {
             // 0 while SPTM changes entries, or a restore of the snapshot.
             if value > u64::from(SYNCHRONOUS_CHANNEL) {
                 return Err(fail("SART throttle configuration change is not modeled"));
@@ -255,12 +364,16 @@ impl MmioDevice for Sart {
             self.idle = value == 1;
             return Ok(());
         }
-        if self.register(offset).is_none() {
-            return Err(fail("SART register without a model"));
+        if offset == CANARY {
+            self.canary = value as u32;
+            return Ok(());
         }
+        let Some((index, field)) = self.layout.entry(offset) else {
+            return Err(fail("SART register without a model"));
+        };
         let value = value as u32;
-        let entry = &mut self.entries[(offset % BASE / 4) as usize];
-        match offset / BASE {
+        let entry = &mut self.entries[index];
+        match field {
             0 if value == 0 || value == ALLOW => entry.flags = value,
             0 => return Err(fail("SART permission bits without known semantics")),
             1 => entry.base = value,
@@ -435,5 +548,65 @@ mod tests {
         sart.write(IDLE, Width::Word, 1, &mut access).unwrap();
         assert_eq!(sart.read(IDLE, Width::Word, &mut access), Ok(1));
         assert!(!sart.allows(0, 0));
+    }
+
+    #[test]
+    fn layouts_follow_the_sptm_tables_and_throttle_offset() {
+        assert_eq!(Layout::new(3, 3, 0), Ok(Layout::V3));
+        assert_eq!(Layout::V3.register_bytes(), 0x8028);
+        // T6050 and T8152: version 4 throughout.
+        let v4 = Layout::new(4, 4, 0).unwrap();
+        assert_eq!(v4.register_bytes(), 0x8020);
+        assert_eq!(v4.entry(0x5c), Some((23, 0)));
+        assert_eq!(v4.entry(0x60), Some((0, 1)));
+        assert_eq!(v4.entry(0xc0 + 4 * 23), Some((23, 2)));
+        assert_eq!(v4.entry(0x120), None);
+        // T8142: version 3 entries with the version 4 throttles 0x10 up.
+        let m5 = Layout::new(3, 4, 0x10).unwrap();
+        assert_eq!(m5.throttles, [0x8018, 0x801c, 0x8024, 0x802c]);
+        assert_eq!(m5.status, [0x8010, 0x8014, 0x8020, 0x8028]);
+        assert_eq!(m5.register_bytes(), 0x8030);
+        assert_eq!(m5.entry(0x40), Some((0, 1)));
+        for (version, throttle, offset) in [(2, 2, 0), (5, 4, 0), (3, 5, 0), (3, 4, 2)] {
+            assert!(Layout::new(version, throttle, offset).is_err());
+        }
+    }
+
+    #[test]
+    fn a_v4_sart_has_24_entries_four_throttles_and_a_canary_word() {
+        let mut sart = Sart::with_layout(Bounds::Exclusive, Layout::new(4, 4, 0).unwrap());
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let address = 0x8_0000_0000;
+        for (offset, value) in [
+            (0x60 + 4 * 23, address / PAGE),
+            (0xc0 + 4 * 23, 1),
+            (0x5c, 0xff),
+        ] {
+            sart.write(offset, Width::Word, value, &mut access).unwrap();
+        }
+        assert!(sart.allows(address, address + PAGE - 1));
+        for (throttle, status) in [
+            (0x8008, 0x8000),
+            (0x800c, 0x8004),
+            (0x8014, 0x8010),
+            (0x801c, 0x8018),
+        ] {
+            assert_eq!(sart.read(throttle, Width::Word, &mut access), Ok(1));
+            assert_eq!(sart.read(status, Width::Word, &mut access), Ok(0));
+        }
+        sart.write(0x801c, Width::Word, 0, &mut access).unwrap();
+        let mut memory = crate::platform::dma::tests::Ram::new(0, 0x1000);
+        assert!(
+            sart.translate(&mut memory, 0, address, address, false, &mut access)
+                .is_err()
+        );
+        // The v3 entry offsets past 0x60 are other fields or nothing.
+        assert!(sart.read(0x8024, Width::Word, &mut access).is_err());
+        assert!(sart.read(0x120, Width::Word, &mut access).is_err());
+        // SPTM's power canary is plain storage.
+        sart.write(CANARY, Width::Word, 0xabfe_deed, &mut access)
+            .unwrap();
+        assert_eq!(sart.read(CANARY, Width::Word, &mut access), Ok(0xabfe_deed));
     }
 }

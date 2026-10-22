@@ -1033,13 +1033,20 @@ impl AppleDevices {
         } else {
             sart::Bounds::Inclusive
         };
-        let sart = self.bus.add(Box::new(Sart::new(bounds)));
+        let sart = self
+            .bus
+            .add(Box::new(Sart::with_layout(bounds, placement.sart_layout)));
         self.bus
             .map(sart, placement.sart.0, placement.sart.1, 0)
             .map_err(|e| format!("SART placement: {e:?}"))?;
         self.bus
             .map(sart, placement.sart_idle, 4, sart::IDLE)
             .map_err(|e| format!("SART idle placement: {e:?}"))?;
+        if let Some(canary) = placement.sart_canary {
+            self.bus
+                .map(sart, canary, 4, sart::CANARY)
+                .map_err(|e| format!("SART power canary placement: {e:?}"))?;
+        }
         let ans = self.bus.add(Box::new(controller));
         let (base, bytes) = placement.nvme;
         let before = placement
@@ -4675,7 +4682,9 @@ mod tests {
             nvme: (NVME, 0x60000),
             vdma: Some((VDMA, 0x44000)),
             sart: (SART, 0xc000),
+            sart_layout: sart::Layout::V3,
             sart_idle: NVME + 0x13e8,
+            sart_canary: None,
             sart_exclusive_bounds: false,
             interrupts: [718, 717, 720, 719],
             completion_irq: 724,
