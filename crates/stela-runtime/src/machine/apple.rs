@@ -79,6 +79,7 @@ use crate::system::access::{AccessKind, Encoding};
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
 use stela_drivers::{block::BlockDevice, input::Input, net::Mac};
 
+mod display_resources;
 pub mod memory_resources;
 mod sleep;
 pub use sleep::PowerLog;

@@ -1128,7 +1128,19 @@ fn devices<'f>(
             .iter()
             .map(|&(name, reg)| (name, range(reg)))
             .collect();
-        devices.add_display(&regions)?;
+        let mut display_darts = Vec::new();
+        for group in
+            core::iter::once(dcp.iommu).chain(dcp.surface_routes.iter().map(|route| route.iommu))
+        {
+            let instances = darts.get(group).ok_or("display DART group is missing")?;
+            for instance in 0..instances.len() {
+                let owner = native_dart(group, instance)?;
+                if !display_darts.contains(&owner) {
+                    display_darts.push(owner);
+                }
+            }
+        }
+        devices.add_display_with_darts(&regions, dcp.role, &display_darts)?;
     }
     if let Some(sep) = board.and_then(|board| board.sep) {
         use stela_runtime::machine::apple::AscLines;

@@ -13,15 +13,52 @@
 //! registers the restored_external boot actually touches are closed from its
 //! trace, not guessed here.
 use super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
+use alloc::vec::Vec;
 
 /// A present-but-unmodeled register aperture: every access refuses, named.
 pub struct Region {
     name: &'static str,
+    /// Original named physical views; empty for the legacy offset interface.
+    views: Vec<(&'static str, u64, u64)>,
 }
 
 impl Region {
     pub const fn new(name: &'static str) -> Self {
-        Self { name }
+        Self {
+            name,
+            views: Vec::new(),
+        }
+    }
+
+    /// One physical owner for a complete set of possibly contained aliases.
+    /// Child DART/ASC routes are retained by the bus, not implemented here.
+    pub fn physical(views: Vec<(&'static str, u64, u64)>) -> Result<Self, &'static str> {
+        if views.is_empty()
+            || views.iter().any(|(name, base, bytes)| {
+                name.is_empty() || *bytes == 0 || base.checked_add(*bytes).is_none()
+            })
+        {
+            return Err("display physical views are empty or overflow");
+        }
+        Ok(Self {
+            name: "display apertures",
+            views,
+        })
+    }
+
+    fn location(&self, offset: u64, width: Width) -> (&'static str, u64) {
+        self.views
+            .iter()
+            .filter(|(_, base, bytes)| {
+                *base <= offset
+                    && offset
+                        .checked_add(width.bytes())
+                        .is_some_and(|end| end <= base + bytes)
+            })
+            .min_by_key(|(_, _, bytes)| bytes)
+            .map_or((self.name, offset), |(name, base, _)| {
+                (*name, offset - base)
+            })
     }
 }
 
@@ -31,8 +68,9 @@ impl MmioDevice for Region {
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+        let (name, offset) = self.location(offset, width);
         Err(refuse(
-            self.name,
+            name,
             offset,
             width,
             Direction::Read,
@@ -47,8 +85,9 @@ impl MmioDevice for Region {
         _: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
+        let (name, offset) = self.location(offset, width);
         Err(refuse(
-            self.name,
+            name,
             offset,
             width,
             Direction::Write,
@@ -70,5 +109,46 @@ mod tests {
         assert_eq!(region.name(), "dispext0");
         assert!(region.read(0, Width::Word, &mut access).is_err());
         assert!(region.write(0x100, Width::Double, 0, &mut access).is_err());
+    }
+
+    #[test]
+    fn physical_aliases_keep_source_names_and_relative_refusal_offsets() {
+        let mut region = Region::physical(vec![
+            ("pipe", 0x1000, 0x3000),
+            ("bank", 0x2000, 0x400),
+            ("shared", 0x8000, 0x400),
+        ])
+        .unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        for (pa, name, offset) in [
+            (0x1004, "pipe", 4),
+            (0x2010, "bank", 0x10),
+            (0x8018, "shared", 0x18),
+        ] {
+            assert_eq!(
+                region.read(pa, Width::Word, &mut access),
+                Err(refuse(
+                    name,
+                    offset,
+                    Width::Word,
+                    Direction::Read,
+                    "display register has no modeled meaning (DCP-programmed)"
+                ))
+            );
+            assert_eq!(
+                region.write(pa, Width::Word, 0, &mut access),
+                Err(refuse(
+                    name,
+                    offset,
+                    Width::Word,
+                    Direction::Write,
+                    "display register has no modeled meaning (DCP-programmed)"
+                ))
+            );
+        }
+        assert!(Region::physical(vec![]).is_err());
+        assert!(Region::physical(vec![("pipe", u64::MAX, 1)]).is_err());
+        assert!(Region::physical(vec![("", 0x1000, 4)]).is_err());
     }
 }

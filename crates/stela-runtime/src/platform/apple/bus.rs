@@ -10,6 +10,8 @@ use super::interrupt::{CpuIndex, InterruptSink};
 use alloc::{boxed::Box, vec::Vec};
 use core::any::Any;
 
+mod container;
+
 /// Access width in bytes. Apple MMIO is little-endian.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Width {

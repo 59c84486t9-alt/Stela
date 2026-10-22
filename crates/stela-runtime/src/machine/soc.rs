@@ -1494,7 +1494,7 @@ pub struct SepDevice {
 /// The `dcpext` display coprocessor and the register apertures around it,
 /// from the J473AP DeviceTree: the ASC wrapper `reg[0]` and four mailbox IRQs,
 /// whether the nub is `quiesced`, each visible display aperture's primary
-/// `reg[0]` with a stable model name, and the DART streams it masters.
+/// Complete register views with a stable model name, and the DART streams it masters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DcpController {
     pub phandle: Option<u32>,
@@ -4710,13 +4710,27 @@ fn dcp_device(
     let primary_route = surface_routes
         .first()
         .ok_or_else(|| err("pipe has no surface iommu-parent"))?;
-    let primary = pipe
+    let pipe_reg = pipe
+        .property("reg")
+        .ok_or_else(|| err("pipe has no register apertures"))?;
+    if pipe_reg.is_empty() || !pipe_reg.len().is_multiple_of(16) {
+        return Err(err("pipe register apertures are incomplete"));
+    }
+    let mut regions = pipe
         .pairs("reg")
         .unwrap_or_default()
-        .first()
-        .copied()
-        .ok_or_else(|| err("pipe has no primary register aperture"))?;
-    let mut regions = alloc::vec![(profile.pipe, place(primary.0, primary.1)?)];
+        .into_iter()
+        .map(|(base, bytes)| {
+            if bytes == 0 {
+                return Err(err("pipe register aperture is empty"));
+            }
+            let range = place(base, bytes)?;
+            if range.0.checked_add(range.1).is_none() {
+                return Err(err("pipe register aperture overflows"));
+            }
+            Ok((profile.pipe, range))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     // Preserve existing optional J473 aperture placement. These physical-link
     // services remain outside admission; they are not invented T6000 nodes.
     if profile.identity == dcp::ExternalIdentity::Unnumbered {
@@ -8203,8 +8217,18 @@ mod tests {
             dcp.phandle, dcp.mapper, dcp.surface_phandle, dcp.surface_routes
         );
         assert_eq!(dcp.wrapper, (0x2_89c0_0000, 0x6c000));
-        assert_eq!(dcp.regions, [("dispext0", (0x2_8800_0000, 0x3000000))]);
+        assert_eq!(
+            dcp.regions,
+            [
+                ("dispext0", (0x2_8800_0000, 0x3000000)),
+                ("dispext0", (0x2_8932_0000, 0x4000)),
+                ("dispext0", (0x2_8934_4000, 0x4000)),
+                ("dispext0", (0x2_8980_0000, 0x800000)),
+                ("dispext0", (0x2_8e3d_0000, 0x4000)),
+            ]
+        );
         let mut devices = crate::machine::apple::AppleDevices::new();
+        let mut owners = Vec::new();
         for dart in darts {
             let native = dart
                 .instances
@@ -8231,7 +8255,48 @@ mod tests {
                     .add_dart_smmu(ids[0], crate::machine::apple::Range { physical, bytes })
                     .unwrap();
             }
+            owners.extend(ids);
         }
+        use crate::machine::apple::{Range, Scanout, ScanoutFormat, ScanoutMode};
+        struct Screen;
+        impl Scanout for Screen {
+            fn mode(&self) -> ScanoutMode {
+                ScanoutMode {
+                    width: 1,
+                    height: 1,
+                    format: ScanoutFormat::Bgra8888,
+                }
+            }
+            fn present(&mut self, _: &[u8]) -> Result<(), &'static str> {
+                panic!("mount is not a frame")
+            }
+        }
+        devices
+            .add_dcpext(
+                Range {
+                    physical: dcp.wrapper.0,
+                    bytes: dcp.wrapper.1,
+                },
+                dcp.interrupts,
+                dcp.quiesced,
+                dcp.role,
+                dcp.identity,
+                alloc::boxed::Box::new(Screen),
+                (owners[1], dcp.stream as usize),
+                dcp.window,
+                Some((owners[0], dcp.surface.unwrap().1 as usize)),
+            )
+            .unwrap();
+        let regions = dcp
+            .regions
+            .iter()
+            .map(|&(name, (physical, bytes))| (name, Range { physical, bytes }))
+            .collect::<Vec<_>>();
+        devices
+            .add_display_with_darts(&regions, dcp.role, &owners)
+            .unwrap();
+        // Full original views and their actual nested owners mount together;
+        // this is not evidence of original firmware execution or a frame.
     }
 
     #[test]
