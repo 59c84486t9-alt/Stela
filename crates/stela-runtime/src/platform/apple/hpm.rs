@@ -79,10 +79,21 @@ const DATA_UFP: u32 = 1 << 7;
 /// Firmware identity and application configuration are an emulated-die
 /// choice, not a guest-build selector. The ramdisk's USB-C_HPM,47.bin
 /// (SHA-256 6db2150525133690452ce0ff05f498ba158509a35918927d931511dbf7784b41)
-/// starts with a little-endian header pointer 0x4000, format 0xace00002
-/// there, device 0x00cd3218 at header+0x30 and version 0x00216300 at +0x34.
-/// These field meanings are inferred by comparison with the IDs
-/// `publishHPMDevices` accepts at KC 0x277a4ac..0x277a514.
+/// has its header at 0x4000: format 0xace00002, device 0x00cd3218 at
+/// header+0x30 and version 0x00216300 at +0x34. These field meanings are
+/// inferred by comparison with the IDs `publishHPMDevices` accepts at KC
+/// 0x277a4ac..0x277a514, and agree with the names the restore ramdisk's
+/// `libUSBCfwflasher.dylib` logs for them (aceDeviceID, aceFWVersion,
+/// appConfigOffset).
+///
+/// Its `-[iecsUpdater getAceHeaderOffset:...]` (file 0x1188..0x12d4) finds
+/// the header from the image's first word: an ACE format word there puts the
+/// header at 0; otherwise that word is a region offset, or, when it is 0 or
+/// all ones, the word at 0x1000 is; the header is that region plus the word
+/// at 0xffc (0x1ffc for the region at 0x1000). The M2 and later
+/// images keep 0 there, so their header is the region at 0x4000; the
+/// full-flash M1-family images (USB-C_HPM,27..35) keep 0x66000, putting it
+/// at 0x6a000 after the region's other contents.
 ///
 /// Header+0x48 and +0x4c hold the application configuration's offset from
 /// the header and its size (0x800, 0x1fd). The configuration starts with
@@ -112,7 +123,16 @@ impl Firmware {
         };
         let field =
             |offset: Option<usize>| offset.and_then(word).and_then(|v| usize::try_from(v).ok());
-        let header = field(Some(0)).ok_or("HPM firmware has no header pointer")?;
+        let header = match word(0).ok_or("HPM firmware has no header pointer")? {
+            0xace0_0001 | 0xace0_0002 => Some(0),
+            0 | u32::MAX => field(Some(0x1000))
+                .filter(|&region| region != 0 && region != u32::MAX as usize)
+                .zip(field(Some(0x1ffc)))
+                .and_then(|(region, offset)| region.checked_add(offset)),
+            region => field(Some(0xffc))
+                .and_then(|offset| usize::try_from(region).ok()?.checked_add(offset)),
+        }
+        .ok_or("HPM firmware has no header pointer")?;
         if word(header) != Some(0xace0_0002) {
             return Err("unrecognized HPM firmware header format");
         }
@@ -599,32 +619,53 @@ mod tests {
     #[test]
     fn identity_and_records_are_derived_from_the_supplied_image() {
         let firmware = identity();
-        let mut image = alloc::vec![0; 0x200];
         let word = |image: &mut [u8], at: usize, v: u32| {
             image[at..at + 4].copy_from_slice(&v.to_le_bytes())
         };
+        // An image whose header is at `at`.
+        let place = |at: usize| {
+            let mut image = alloc::vec![0; 0x3000];
+            word(&mut image, at, 0xace00002);
+            word(&mut image, at + 0x30, firmware.device);
+            word(&mut image, at + 0x34, firmware.version);
+            word(&mut image, at + 0x48, 0x80);
+            word(&mut image, at + 0x4c, 0x70);
+            image[at + 0x80..at + 0x84].copy_from_slice(&[1, 0, 0x70, 0]);
+            image[at + 0x98] = 0x1a;
+            let mut records = alloc::vec![CONFIG, 62];
+            records.extend_from_slice(&firmware.config[0].1);
+            records.extend_from_slice(&[TX_IDENTITY, 2, 6, 0xac, 5]);
+            // A non-ascending register ends the run.
+            records.extend_from_slice(&[0x01, 0, 0]);
+            image[at + 0x9a..at + 0x9a + records.len()].copy_from_slice(&records);
+            image
+        };
+        // The header is the region the first word names, plus the word at
+        // 0xffc.
+        let mut image = place(0x100);
         word(&mut image, 0, 0x100);
-        word(&mut image, 0x100, 0xace00002);
-        word(&mut image, 0x130, firmware.device);
-        word(&mut image, 0x134, firmware.version);
-        word(&mut image, 0x148, 0x80);
-        word(&mut image, 0x14c, 0x70);
-        image[0x180..0x184].copy_from_slice(&[1, 0, 0x70, 0]);
-        image[0x198] = 0x1a;
-        let mut records = alloc::vec![CONFIG, 62];
-        records.extend_from_slice(&firmware.config[0].1);
-        records.extend_from_slice(&[TX_IDENTITY, 2, 6, 0xac, 5]);
-        // A non-ascending register ends the run.
-        records.extend_from_slice(&[0x01, 0, 0]);
-        image[0x19a..0x19a + records.len()].copy_from_slice(&records);
-        assert_eq!(Firmware::from_image(&image), Ok(firmware));
-        for end in [0, 3, 0x100, 0x103, 0x133, 0x137, 0x14b, 0x14f, 0x1ef] {
+        assert_eq!(Firmware::from_image(&image), Ok(firmware.clone()));
+        for end in [0, 3, 0x100, 0x103, 0x133, 0x137, 0x14b, 0x14f, 0x1ef, 0xfff] {
             assert!(Firmware::from_image(&image[..end]).is_err());
         }
         let mut long = image.clone();
         long[0x19b] = 0x70;
         assert!(Firmware::from_image(&long).is_err());
-        image[..4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut far = place(0x1100);
+        word(&mut far, 0, 0x100);
+        word(&mut far, 0xffc, 0x1000);
+        assert_eq!(Firmware::from_image(&far), Ok(firmware.clone()));
+        // An erased first word defers to the region word at 0x1000 and its
+        // offset at 0x1ffc; a header first is at 0.
+        let mut erased = place(0x2100);
+        word(&mut erased, 0, u32::MAX);
+        word(&mut erased, 0x1000, 0x100);
+        word(&mut erased, 0x1ffc, 0x2000);
+        assert_eq!(Firmware::from_image(&erased), Ok(firmware.clone()));
+        assert_eq!(Firmware::from_image(&place(0)), Ok(firmware));
+        word(&mut erased, 0x1000, 0);
+        assert!(Firmware::from_image(&erased).is_err());
+        word(&mut image, 0xffc, 4);
         assert!(Firmware::from_image(&image).is_err());
     }
     #[test]
