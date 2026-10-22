@@ -16,7 +16,6 @@ use super::{
     },
 };
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod bootstrap;
 pub mod clc;
@@ -25,14 +24,7 @@ pub mod eeprom;
 pub mod firmware;
 pub mod key;
 
-static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
-fn allocate_owner(counter: &AtomicU64) -> Result<u64, Cause> {
-    counter
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
-            id.checked_add(1).filter(|_| id != 0)
-        })
-        .map_err(|_| Cause::OwnerExhausted)
-}
+static NEXT_OWNER: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 
 // Actual PCI send callbacks override the generic fill helper's 20*HZ with
 // 3*HZ before the common MCU owner computes its response expiry.
@@ -290,7 +282,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
         if clock.ticks_per_microsecond == 0 {
             return Err(Cause::ClockUnavailable);
         }
-        let owner = allocate_owner(&NEXT_OWNER)?;
+        let owner = NEXT_OWNER.next().ok_or(Cause::OwnerExhausted)?;
         Ok(Self {
             identity,
             owner,
@@ -343,9 +335,6 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Mailbox<W, F, R> {
     }
     pub(in crate::net::wifi::mediatek) fn receive_idle(&self) -> bool {
         self.assembly.is_idle() && self.runtime_assembly.is_idle() && self.events.is_empty()
-    }
-    pub fn has_runtime_rx(&self) -> bool {
-        self.runtime_rx.is_some()
     }
     pub fn last_failure(&self) -> Option<Failure> {
         self.last_failure
@@ -2273,9 +2262,6 @@ mod tests {
         assert_eq!(awm.lock().unwrap().completed.len(), 4);
         // Deliberately leave second Removed: Drop must retain its actual owner
         // until its own old-user drain proof, never infer drain from the ACK.
-        let end = AtomicU64::new(u64::MAX);
-        assert_eq!(allocate_owner(&end), Err(Cause::OwnerExhausted));
-        assert_eq!(allocate_owner(&end), Err(Cause::OwnerExhausted));
         // SAFETY: both independent modeled requester queues actually stopped.
         unsafe { a.release_after_quiesce() }.unwrap();
         unsafe { b.release_after_quiesce() }.unwrap();

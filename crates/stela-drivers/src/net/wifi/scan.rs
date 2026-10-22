@@ -10,11 +10,10 @@
 
 use super::{Band, Channel};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 pub mod result;
 
-static NEXT_SCAN: AtomicU64 = AtomicU64::new(1);
+static NEXT_SCAN: super::Identities = super::Identities::new();
 // Shared ceilings informed by initial AX200/210, MT7921/22/25, RTL8822CE/8852BE
 // sources. These are not capabilities: vendor encoders must enforce narrower
 // negotiated firmware limits and actual built-probe/reserved-page bounds.
@@ -234,11 +233,7 @@ impl Scanner {
         }
         let deadline = now.checked_add(budget_us).ok_or(Error::Overflow)?;
         request.validate_policy(policy)?;
-        let epoch = NEXT_SCAN
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
-                epoch.checked_add(1)
-            })
-            .map_err(|_| Error::Overflow)?;
+        let epoch = NEXT_SCAN.next().ok_or(Error::Overflow)?;
         self.ticket = Ticket(epoch);
         self.request = Some(request);
         self.deadline = deadline;

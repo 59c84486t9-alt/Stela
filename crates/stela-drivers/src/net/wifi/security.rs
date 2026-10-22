@@ -22,22 +22,13 @@
 
 use super::{Aggregation, frame::Mpdu};
 use crate::net::Mac;
-use core::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
 pub mod aggregate;
 pub mod tx;
 pub use tx::{HostTxNonce, NonceOwner, TransmitSeed};
 
-static NEXT_NATIVE_EPOCH: AtomicU64 = AtomicU64::new(1);
-
-fn allocate_epoch(counter: &AtomicU64) -> Result<u64, Error> {
-    counter
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
-            epoch.checked_add(1).filter(|_| epoch != 0)
-        })
-        .map_err(|_| Error::EpochExhausted)
-}
+static NEXT_NATIVE_EPOCH: super::Identities = super::Identities::new();
 
 fn same_digest(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter()
@@ -297,7 +288,7 @@ impl KeySlot {
     /// let slot = KeySlot::new(7); // Physical ownership requires unsafe proof.
     /// ```
     pub unsafe fn new(slot: u16) -> Result<Self, Error> {
-        let native_epoch = allocate_epoch(&NEXT_NATIVE_EPOCH)?;
+        let native_epoch = NEXT_NATIVE_EPOCH.next().ok_or(Error::EpochExhausted)?;
         Ok(Self {
             slot,
             native_epoch,
@@ -991,14 +982,6 @@ mod tests {
             ));
             assert!(slot.authorize(&packet(key, 101, tid)).is_ok());
         }
-    }
-
-    #[test]
-    fn native_epoch_exhaustion_never_wraps_to_a_previous_identity() {
-        let counter = AtomicU64::new(u64::MAX - 1);
-        assert_eq!(allocate_epoch(&counter), Ok(u64::MAX - 1));
-        assert_eq!(allocate_epoch(&counter), Err(Error::EpochExhausted));
-        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

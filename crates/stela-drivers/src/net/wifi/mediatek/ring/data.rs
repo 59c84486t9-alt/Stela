@@ -10,12 +10,12 @@ use crate::bus::dma::{
 };
 use crate::net::wifi::mediatek::{identity::Chip, tx_free, txp, txwi};
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering, fence};
+use core::sync::atomic::{Ordering, fence};
 
 const TOKENS: usize = 8192;
 const MAX_COUNT: usize = 2048;
 const MAX_SEGMENT: usize = 4095;
-static NEXT_EPOCH: AtomicU64 = AtomicU64::new(1);
+static NEXT_EPOCH: crate::net::wifi::Identities = crate::net::wifi::Identities::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -141,11 +141,7 @@ impl<Q: QueueIo, C: 'static> DataRing<Q, C> {
         if !(4..=MAX_COUNT).contains(&count) || !count.is_power_of_two() {
             return Err(super::Error::InvalidSize.into());
         }
-        let epoch = Epoch(
-            NEXT_EPOCH
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-                .map_err(|_| Error::EpochExhausted)?,
-        );
+        let epoch = Epoch(NEXT_EPOCH.next().ok_or(Error::EpochExhausted)?);
         let descriptors = Allocation::new(
             source,
             domain.clone(),

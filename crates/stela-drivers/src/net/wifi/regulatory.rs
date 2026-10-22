@@ -8,20 +8,11 @@
 //! Only qualified providers holding genuine authority leases may admit work.
 
 use super::{Band, Channel, scan, station};
-use core::sync::atomic::{AtomicU64, Ordering};
 
 mod association;
 pub use association::{AssociationAdmission, AssociationOperation, AssociationUse};
 
-static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
-
-fn allocate_owner(counter: &AtomicU64) -> Result<u64, Error> {
-    counter
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-            value.checked_add(1).filter(|_| value != 0)
-        })
-        .map_err(|_| Error::OwnerExhausted)
-}
+static NEXT_OWNER: super::Identities = super::Identities::new();
 
 /// Actual retained device/reset/firmware owner and fully applied radio policy.
 /// Numbers are provider provenance, not authority or a raw hardware fingerprint.
@@ -266,7 +257,7 @@ fn check(
 
 impl<H: HardwarePolicy, O: OsPolicy> Owner<H, O> {
     pub fn new(hardware: H, os: O) -> Result<Self, Error> {
-        let identity = allocate_owner(&NEXT_OWNER)?;
+        let identity = NEXT_OWNER.next().ok_or(Error::OwnerExhausted)?;
         Ok(Self {
             identity,
             hardware,

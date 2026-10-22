@@ -15,7 +15,7 @@ use crate::bus::{
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     ptr::NonNull,
-    sync::atomic::{AtomicU64, Ordering, fence},
+    sync::atomic::{Ordering, fence},
 };
 
 pub mod data;
@@ -387,17 +387,10 @@ impl<Q: QueueIo> TxRing<Q> {
     }
 }
 
-static QUARANTINED_QUEUES: AtomicU64 = AtomicU64::new(0);
-/// Cumulative owned queue/BAR/requester contexts retained after uncertain
-/// publication or Drop. This does not claim hardware reset or reclamation.
-pub fn quarantined_queues() -> u64 {
-    QUARANTINED_QUEUES.load(Ordering::Relaxed)
-}
+/// Retain the queue/BAR/requester context of an uncertain publication or
+/// Drop; this does not claim hardware reset or reclamation.
 fn retain_queue<Q>(io: Option<Q>) {
     if let Some(io) = io {
-        let _ = QUARANTINED_QUEUES.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
-            Some(n.saturating_add(1))
-        });
         core::mem::forget(io);
     }
 }

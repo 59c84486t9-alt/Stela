@@ -108,7 +108,6 @@ pub struct Connac3 {
 pub struct Observation {
     chip: Chip,
     raw: Vec<u8>,
-    address: u32,
     valid: u32,
     connac3: Option<Connac3>,
     data_offset: usize,
@@ -142,7 +141,6 @@ impl Observation {
         Ok(Self {
             chip,
             raw: body.to_vec(),
-            address,
             valid: word(body, if c3 { 16 } else { 4 }),
             connac3: c3.then(|| Connac3 {
                 reserved: body[..4].try_into().unwrap(),
@@ -165,9 +163,6 @@ impl Observation {
     }
     pub fn offset(&self) -> u32 {
         offset(self.chip)
-    }
-    pub fn block_address(&self) -> u32 {
-        self.address
     }
     pub fn raw_valid(&self) -> u32 {
         self.valid

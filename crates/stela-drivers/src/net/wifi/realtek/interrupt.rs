@@ -50,9 +50,6 @@ impl Causes {
     pub fn h2c_dma(self) -> bool {
         self.owned[2] & (1 << 16) != 0
     }
-    pub fn tx_overflow(self) -> bool {
-        self.owned[1] & (1 << 9) != 0
-    }
     /// Actual queue interrupt cause only; inspect that queue's live hardware
     /// consumer before releasing DMA and its actual report before air status.
     pub fn tx(self, queue: super::transmit::Queue) -> bool {

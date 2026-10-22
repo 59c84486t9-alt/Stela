@@ -19,7 +19,6 @@ use super::{
 };
 use crate::net::Mac;
 use alloc::{sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicU64, Ordering};
 
 mod aggregate;
 mod context;
@@ -31,7 +30,7 @@ pub mod operations;
 pub mod phy;
 pub mod wire;
 
-static NEXT_ASSOCIATION: AtomicU64 = AtomicU64::new(1);
+static NEXT_ASSOCIATION: super::Identities = super::Identities::new();
 // Linux no-ACK-status auth/assoc response timing and retry count.
 const MANAGEMENT_RESPONSE_TIMEOUT_US: u64 = 500_000;
 const MANAGEMENT_ATTEMPTS: u8 = 3;
@@ -338,11 +337,7 @@ impl Station {
             return Err(Error::Unsupported("6GHz HE/SAE/PMF association"));
         }
         join.request.validate_policy(join.policy)?;
-        self.epoch = NEXT_ASSOCIATION
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |epoch| {
-                epoch.checked_add(1)
-            })
-            .map_err(|_| Error::Overflow)?;
+        self.epoch = NEXT_ASSOCIATION.next().ok_or(Error::Overflow)?;
         self.serial = 0;
         self.join = Some(join);
         self.selected_beacon = beacon;

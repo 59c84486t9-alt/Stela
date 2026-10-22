@@ -15,6 +15,8 @@ pub mod scan;
 pub mod security;
 pub mod station;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Channel {
     pub band: Band,
@@ -56,8 +58,8 @@ pub enum Timestamp {
     Full64(u64),
 }
 
-/// Retained aggregation observations. The first security path explicitly
-/// refuses aggregates until reordering and shared-PN subframes are supported.
+/// Retained aggregation observations. Single-MPDU replay checks refuse them;
+/// `security::aggregate` checks aggregates after the backend reorders them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Aggregation {
     pub ampdu: Option<u32>,
@@ -78,25 +80,36 @@ pub struct Amsdu {
     pub last: bool,
 }
 
-/// A transport completion must distinguish reclaiming DMA from an on-air ACK.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TxStatus {
-    pub cookie: u64,
-    pub queue: u16,
-    pub descriptor: u16,
-    pub dma_released: bool,
-    pub air: AirStatus,
-    /// Actual attempts when available; not synthesized for aggregate responses.
-    pub attempts: Option<u16>,
-    pub rate: Option<RawRate>,
-    pub raw_status: u32,
+/// A process-wide source of nonzero identities that never wraps, so a stale
+/// owner, epoch or ticket can never match a later one.
+pub(crate) struct Identities(AtomicU64);
+
+impl Identities {
+    pub(crate) const fn new() -> Self {
+        Self(AtomicU64::new(1))
+    }
+
+    /// The next identity, or `None` once the 64-bit space is used up.
+    pub(crate) fn next(&self) -> Option<u64> {
+        self.0
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| {
+                id.checked_add(1).filter(|_| id != 0)
+            })
+            .ok()
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AirStatus {
-    /// Includes aggregate TX responses awaiting a matching block ACK.
-    Pending,
-    Acknowledged,
-    Failed,
-    Flushed,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identities_never_wrap_or_return_zero() {
+        let ids = Identities(AtomicU64::new(u64::MAX - 1));
+        assert_eq!(ids.next(), Some(u64::MAX - 1));
+        assert_eq!(ids.next(), None);
+        assert_eq!(ids.next(), None);
+        assert_eq!(Identities(AtomicU64::new(0)).next(), None);
+        assert_eq!(Identities::new().next(), Some(1));
+    }
 }

@@ -41,9 +41,6 @@ impl Status {
     pub fn decrypted_bit(self) -> bool {
         self.raw & (1 << 11) != 0
     }
-    pub fn robust_management_bit(self) -> bool {
-        self.raw & (1 << 15) != 0
-    }
     pub fn duplicate_bit(self) -> bool {
         self.raw & (1 << 22) != 0
     }

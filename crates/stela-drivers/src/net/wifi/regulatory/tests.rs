@@ -160,18 +160,6 @@ fn fixture() -> (Owner<Hardware, Os>, Rc<State>, Rc<State>) {
 }
 
 #[test]
-fn owner_identity_never_wraps_or_accepts_zero() {
-    let counter = AtomicU64::new(u64::MAX - 1);
-    assert_eq!(allocate_owner(&counter), Ok(u64::MAX - 1));
-    assert_eq!(allocate_owner(&counter), Err(Error::OwnerExhausted));
-    assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
-    assert_eq!(
-        allocate_owner(&AtomicU64::new(0)),
-        Err(Error::OwnerExhausted)
-    );
-}
-
-#[test]
 fn permissions_are_independent_intersections_for_all_masks() {
     let operations = [
         Operation::Receive(CHANNEL),
