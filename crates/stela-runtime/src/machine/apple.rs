@@ -2230,9 +2230,11 @@ impl AppleDevices {
                 retention,
             });
         }
+        // A domain no inventoried resource names is controller-only: it
+        // completes its own state machine and has no client to deliver to.
         let refusals = coverage
             .iter()
-            .filter(|record| !record.bindable())
+            .filter(|record| !record.bindable() && !record.controller_only())
             .map(|record| {
                 let names = record
                     .consumers
@@ -2255,12 +2257,13 @@ impl AppleDevices {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                let reason = if record.consumers.is_empty() {
-                    "no explicit gate consumers; implicit hardware ownership is unqualified".into()
-                } else {
-                    format!("lifecycle sinks missing for {}", names.join(", "))
-                };
-                (record.address, format!("{identities}: {reason}"))
+                (
+                    record.address,
+                    format!(
+                        "{identities}: lifecycle sinks missing for {}",
+                        names.join(", ")
+                    ),
+                )
             })
             .collect();
         let pmgr = self
@@ -2268,7 +2271,7 @@ impl AppleDevices {
             .device_mut::<Pmgr>(self.pmgr.expect("validated PMGR"))
             .expect("PMGR type");
         for record in coverage {
-            let result = if record.bindable() {
+            let result = if record.bindable() || record.controller_only() {
                 pmgr.bind_lifecycle(record.address)
             } else {
                 pmgr.refuse_lifecycle(record.address)
@@ -4358,6 +4361,45 @@ mod tests {
             assert_eq!(d.read(0, base + 0x1000, 4, 0), Ok(0));
             assert_eq!(d.read(0, 0x2_3501_0000, 4, 0), Err(DeviceError::NoDevice));
         }
+    }
+
+    #[test]
+    fn pmgr_domains_no_resource_names_complete_controller_state_with_no_client() {
+        use super::super::soc::PowerStates;
+        // J473AP ISP_SYS: the board exposes no ISP, and XNU power-gates it.
+        let supply = 0x2_3b70_0438;
+        let states = PowerStates {
+            implicit: Vec::new(),
+            blocks: vec![(supply, 4)],
+            registers: vec![supply],
+            domains: vec![coverage::Domain {
+                name: "ISP_SYS".into(),
+                id: coverage::DomainId {
+                    die: 0,
+                    device: 0x7a,
+                },
+                address: Some(supply),
+                parents: [None; 4],
+            }],
+            resources: Vec::new(),
+        };
+        let mut d = AppleDevices::new();
+        d.add_power_states(
+            &[Range {
+                physical: supply,
+                bytes: 4,
+            }],
+            &states.registers,
+        )
+        .unwrap();
+        d.connect_power_resources(&states, &[], &[]).unwrap();
+        assert!(d.power_refusals().is_empty() && d.power_clients.is_empty());
+        d.write(0, supply, 4, 0x3f0, 0).unwrap();
+        assert_eq!(d.read(0, supply, 4, 0), Ok(0x100));
+        for value in [0x10f, 0x40f, 0x8000_040f, 0x40f, 15] {
+            d.write(0, supply, 4, value, 0).unwrap();
+        }
+        assert_eq!(d.read(0, supply, 4, 0), Ok(0xff));
     }
 
     #[test]

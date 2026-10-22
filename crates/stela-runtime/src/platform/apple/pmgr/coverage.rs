@@ -92,6 +92,15 @@ pub struct DomainCoverage {
 }
 
 impl DomainCoverage {
+    /// True when no inventoried resource names this register or any domain
+    /// beneath it: the machine places no model behind it, so its controller
+    /// state completes with no client to deliver lifecycle edges to. Every
+    /// placed model's resource is inventoried, so hardware behind such a
+    /// domain is unmodeled and its own accesses refuse.
+    pub fn controller_only(&self) -> bool {
+        self.consumers.is_empty()
+    }
+
     /// True for a nonempty set with every required consumer connected. The
     /// caller must establish inventory completeness and positive unavailable
     /// admission evidence; this never grants functional-device support.
@@ -129,7 +138,8 @@ impl Domain {
 }
 
 /// Return one sorted entry per physical register, including registers with
-/// no consumers (which are never bindable). Aliases share an entry and the
+/// no consumers (never [`DomainCoverage::bindable`], but
+/// [`DomainCoverage::controller_only`]). Aliases share an entry and the
 /// union of their parent requirements, so a consumer through one alias also
 /// prevents an unsafe binding of another alias's parent.
 pub fn analyze(
@@ -395,6 +405,7 @@ mod tests {
         }
         assert!(result[2].bindable());
         assert!(result[3].consumers.is_empty() && !result[3].bindable());
+        assert!(result[3].controller_only() && !result[2].controller_only());
     }
     #[test]
     fn aliases_merge_parent_dependencies_and_partial_sinks_never_enable_controls() {
