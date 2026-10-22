@@ -81,6 +81,31 @@ impl AppleDevices {
                 }
             }
         }
+        // A view strictly inside one larger placed window is a sub-block of
+        // that window's owner, which keeps it: J473AP `dispext0` reaches into
+        // the PMP's ASC wrapper at +0x3c000 and into the PMGR. The prepared
+        // memory owner's PTD views qualify only above; an equal window is a
+        // conflicting owner.
+        for &(physical, bytes) in &spans {
+            let Some((start, end, owner, offset)) = self.bus.window_at(physical) else {
+                continue;
+            };
+            let inside = physical + bytes <= end && end - start > bytes;
+            if !inside
+                || children.contains(&owner)
+                || self
+                    .bus
+                    .device::<memory_resources::Prepared>(owner)
+                    .is_some()
+            {
+                continue;
+            }
+            shared.push(
+                self.bus
+                    .shared_view(owner, physical, bytes, offset + (physical - start))
+                    .map_err(|error| format!("display sub-block view: {error:?}"))?,
+            );
+        }
         let plan = if shared.is_empty() {
             self.bus.container_bindings(&spans, &children)
         } else {
@@ -530,6 +555,49 @@ mod tests {
         assert!(devices.bus.route(PRIMARY, Width::Word).is_err());
         assert!(publication.requests().is_empty());
     }
+    #[test]
+    fn display_views_strictly_inside_a_larger_window_stay_with_its_owner() {
+        let (mut devices, owners, mut views) = placement();
+        mount_prepared(&mut devices, prepared());
+        const INSIDE: u64 = 0x2_9000_4000;
+        views.push((
+            "dispext0",
+            Range {
+                physical: INSIDE,
+                bytes: 0x1000,
+            },
+        ));
+        struct Block;
+        impl MmioDevice for Block {
+            fn name(&self) -> &'static str {
+                "block"
+            }
+            fn read(&mut self, _: u64, _: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
+                Ok(0)
+            }
+            fn write(
+                &mut self,
+                _: u64,
+                _: Width,
+                _: u64,
+                _: &mut Access<'_>,
+            ) -> Result<(), MmioError> {
+                Ok(())
+            }
+        }
+        // A larger block owns the window around one display view.
+        devices
+            .bus
+            .install(Box::new(Block), &[(0x2_9000_0000, 0x10000, 0)])
+            .unwrap();
+        let before = devices.bus.route(INSIDE, Width::Word).unwrap();
+        devices
+            .add_display_with_darts(&views, "DCPEXT0", &owners)
+            .unwrap();
+        assert_eq!(devices.bus.route(INSIDE, Width::Word), Ok(before));
+        assert!(devices.bus.route(PRIMARY, Width::Word).is_ok());
+    }
+
     #[test]
     #[ignore = "requires unchanged original 26A434 J314s DeviceTree"]
     fn original_j314s_display_ptd_view_is_the_actual_pmgr_pmp_update_bank() {

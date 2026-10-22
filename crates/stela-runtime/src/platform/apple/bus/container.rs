@@ -168,6 +168,22 @@ impl Bus {
         Ok(bindings)
     }
 
+    /// The placed window holding `address`: its bounds, owner and the
+    /// owner's offset at its start.
+    pub(crate) fn window_at(&self, address: u64) -> Option<(u64, u64, DeviceId, u64)> {
+        self.regions
+            .iter()
+            .find(|region| region.start <= address && address < region.end)
+            .map(|region| {
+                (
+                    region.start,
+                    region.end,
+                    region.device,
+                    region.device_offset,
+                )
+            })
+    }
+
     /// A diagnostic names the actual retained owner without accessing it.
     pub(crate) fn device_name(&self, id: DeviceId) -> Option<&'static str> {
         self.devices.get(id.0).map(|device| device.name())

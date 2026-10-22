@@ -243,6 +243,21 @@ pub fn devices<C: ConsoleSink + 'static>(
             .copied()
             .ok_or("native DMA route names an unmounted DART instance")
     };
+    // The PMGR's power states precede the display, whose views reach into
+    // its windows.
+    if let Some(states) = board.power_states.as_ref() {
+        let blocks: Vec<Range> = states
+            .blocks
+            .iter()
+            .map(|&(physical, bytes)| Range { physical, bytes })
+            .collect();
+        devices.add_power_states(&blocks, &states.registers)?;
+        log(format_args!(
+            "DEVICES pmgr power-states={} blocks={}\n",
+            states.registers.len(),
+            blocks.len()
+        ));
+    }
     // The dcpext display coprocessor and its register apertures, presenting
     // to the host's scanout, mastering through its DART and reading swap
     // surfaces through the display pipe's.
@@ -409,19 +424,6 @@ pub fn devices<C: ConsoleSink + 'static>(
             (native_dart(aes.iommu, aes.instance)?, aes.stream as usize),
             None,
         )?;
-    }
-    if let Some(states) = board.power_states.as_ref() {
-        let blocks: Vec<Range> = states
-            .blocks
-            .iter()
-            .map(|&(physical, bytes)| Range { physical, bytes })
-            .collect();
-        devices.add_power_states(&blocks, &states.registers)?;
-        log(format_args!(
-            "DEVICES pmgr power-states={} blocks={}\n",
-            states.registers.len(),
-            blocks.len()
-        ));
     }
     for bank in &board.bridges {
         devices.add_bridge(
