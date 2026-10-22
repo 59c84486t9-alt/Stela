@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "commands.h"
-#include "../xe/xe_ring_emit.h"
+#include "xe_ring_emit.h"
 
 #define INVALID_ARGUMENT (-22)
 #define NO_SPACE (-28)

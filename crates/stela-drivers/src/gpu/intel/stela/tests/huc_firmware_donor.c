@@ -1,17 +1,16 @@
 /* SPDX-License-Identifier: MIT */
 /* Frozen original CPD policy object, scalar diagnostics/platform adapters only.
  * No fake Linux GSC/GT/BO object or status/transport implementation. */
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/xe_platform_types.h"
-#include "../../xe/xe_uc_fw_types.h"
-#include "../../xe/abi/uc_fw_abi.h"
+#include <linux/bits.h>
+#include <linux/types.h>
+#include "xe_platform_types.h"
+#include "xe_uc_fw_types.h"
+#include "abi/uc_fw_abi.h"
 #include "../firmware.h"
 #include "firmware_donor.h"
 #include <assert.h>
 #include <string.h>
-#define EINVAL 22
-#define ENOENT 2
-#define ENODATA 61
+#include <linux/errno.h>
 static _Thread_local unsigned active_platform;
 static _Thread_local uint32_t *active_diagnostics;
 static _Thread_local uint32_t *active_security;

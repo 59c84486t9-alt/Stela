@@ -1,37 +1,31 @@
 /* SPDX-License-Identifier: MIT */
 /* Original Xe notices and policies remain in the shared headers. */
 #include "firmware.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_platform_types.h"
-#include "../xe/xe_gt_type.h"
-#include "../xe/xe_huc_role.h"
-#include "../xe/xe_uc_fw_types.h"
-#include "../xe/abi/uc_fw_abi.h"
+#include <linux/types.h>
+#include "xe_platform_types.h"
+#include "xe_gt_type.h"
+#include "xe_huc_role.h"
+#include "xe_uc_fw_types.h"
+#include "abi/uc_fw_abi.h"
 _Static_assert(sizeof(struct gsc_cpd_header_v2) == 20, "original CPD header ABI");
 _Static_assert(sizeof(struct gsc_cpd_entry) == 24, "original CPD entry ABI");
 _Static_assert(sizeof(struct gsc_manifest_header) == 128, "original manifest ABI");
 _Static_assert(_Alignof(struct gsc_cpd_header_v2) == 1, "packed CPD marker access");
 _Static_assert(_Alignof(struct gsc_cpd_entry) == 1, "packed CPD entry access");
 _Static_assert(_Alignof(struct gsc_manifest_header) == 1, "packed manifest access");
-#include "../xe/xe_uc_fw_version.h"
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-#define __stringify_1(x) #x
-#define __stringify(x) __stringify_1(x)
-#define FIELD_GET(mask, value) REG_FIELD_GET(mask, value)
-#define unlikely(value) __builtin_expect(!!(value), 0)
-#define EINVAL 22
-#define ENOENT 2
-#define ENOEXEC 8
-#define ENODATA 61
-#define EPROTO 71
+#include "xe_uc_fw_version.h"
+#include <linux/array_size.h>
+#include <linux/stringify.h>
+#include <linux/bitfield.h>
+#include <linux/errno.h>
 /* Preserve original signed iteration / u32 metadata arithmetic unchanged.
  * Native entry points validate indices and byte-size representability first. */
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsign-compare"
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #pragma clang diagnostic ignored "-Wshorten-64-to-32"
-#include "../xe/xe_uc_fw_catalog.h"
-#include "../xe/xe_uc_fw_css.h"
+#include "xe_uc_fw_catalog.h"
+#include "xe_uc_fw_css.h"
 #pragma clang diagnostic pop
 
 static int select_default(uint32_t platform, struct xe_uc_fw *fw)
@@ -160,7 +154,7 @@ static bool cpd_entry_equal(const void *entry, const char *name, size_t bytes)
 #define XE_UC_FW_CPD_ENTRY_EQUAL(entry, name, bytes) cpd_entry_equal(entry, name, bytes)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsign-compare"
-#include "../xe/xe_uc_fw_cpd.h"
+#include "xe_uc_fw_cpd.h"
 #pragma clang diagnostic pop
 
 static void cpd_diagnostic(void *context, enum xe_uc_fw_cpd_diagnostic reason,

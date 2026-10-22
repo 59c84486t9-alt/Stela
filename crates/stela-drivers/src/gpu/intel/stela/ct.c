@@ -5,8 +5,8 @@
  * policy stays with the real owner rather than emulated Linux objects.
  */
 #include "ct.h"
-#include "../xe/xe_guc_ct_message.h"
-#include "../xe/regs/xe_guc_ct_regs.h"
+#include "xe_guc_ct_message.h"
+#include "regs/xe_guc_ct_regs.h"
 
 enum { DESC_HEAD = 0, DESC_TAIL = 1, DESC_STATUS = 2 };
 enum { INVALID_ARGUMENT = -22, NO_DEVICE = -19, PROTOCOL_ERROR = -71,

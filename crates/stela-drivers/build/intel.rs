@@ -5,10 +5,25 @@ pub fn configure(build: &mut cc::Build) {
     use std::{env, path::PathBuf};
 
     let source = "src/gpu/intel";
+    let linux = "src/gpu/common/linux/include";
+    // Unchanged Linux sources build against Stela's compat environment first,
+    // with Kbuild's forced includes, from system directories so upstream code
+    // keeps Linux's warning profile rather than Stela's.
     build
-        .define("STELA_NATIVE", None)
-        .include(format!("{source}/xe"))
-        .include("src/gpu/common/linux/include")
+        .flag("-include")
+        .flag(format!("{linux}/linux/kconfig.h"))
+        .flag("-include")
+        .flag(format!("{source}/stela/compat/linux/compiler_types.h"));
+    for directory in [
+        format!("{source}/stela/compat"),
+        format!("{source}/xe"),
+        format!("{source}/i915"),
+        linux.into(),
+        format!("{linux}/uapi"),
+    ] {
+        build.flag("-isystem").flag(directory);
+    }
+    build
         .file(format!("{source}/xe/xe_pt_walk.c"))
         .file(format!("{source}/stela/pt_walk.c"))
         .file(format!("{source}/stela/commands.c"))
@@ -33,7 +48,6 @@ pub fn configure(build: &mut cc::Build) {
         "xe/xe_pci_types.h",
         "xe/xe_platform_types.h",
         "xe/xe_engine_ids.h",
-        "xe/xe_scalar_types.h",
         "xe/xe_gt_type.h",
         "xe/xe_cache_level.h",
         "xe/xe_pat.h",
@@ -69,6 +83,7 @@ pub fn configure(build: &mut cc::Build) {
     ] {
         println!("cargo:rerun-if-changed={source}/{path}");
     }
+    println!("cargo:rerun-if-changed={linux}/linux/kconfig.h");
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/drm/intel/pciids.h");
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/align.h");
     println!("cargo:rerun-if-changed=src/gpu/common/linux/include/vdso/const.h");
@@ -76,7 +91,6 @@ pub fn configure(build: &mut cc::Build) {
     let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     let python = PathBuf::from(env::var_os("STELA_GPU_PYTHON").unwrap_or_else(|| "python3".into()));
     configure_ggtt(build, &output);
-    configure_pat(build, &output);
     configure_guc_reset(build, &output);
     configure_dispatch(build, &output, &python);
 }
@@ -140,52 +154,7 @@ fn configure_guc_reset(build: &mut cc::Build, output: &std::path::Path) {
         format!("{start}{entry}) }},\n"),
     )
     .expect("write original reset WA entry");
-    build.include(output);
-}
-
-/// Retain the original compile-time checks without importing Linux services.
-/// Address selection still uses the actual drm/intel/pick.h implementation.
-fn configure_pat(build: &mut cc::Build, output: &std::path::Path) {
-    use std::fs;
-    let compiler = "src/gpu/common/linux/include/linux/compiler.h";
-    let bug = "src/gpu/common/linux/include/linux/build_bug.h";
-    let source = fs::read_to_string(compiler).expect("read original compile-time definitions");
-    let mut header = format!(
-        "{}\n",
-        source.lines().next().expect("original compiler license")
-    );
-    for (path, name, required) in [
-        (compiler, "__BUILD_BUG_ON_ZERO_MSG", "_Static_assert"),
-        (compiler, "__is_constexpr", ""),
-        (bug, "BUILD_BUG_ON_ZERO", ""),
-    ] {
-        println!("cargo:rerun-if-changed={path}");
-        let source = fs::read_to_string(path).expect("read original compile-time macro");
-        let lines: Vec<_> = source.lines().collect();
-        let prefix = format!("#define {name}(");
-        let matches: Vec<_> = lines
-            .iter()
-            .enumerate()
-            .filter(|(_, line)| line.starts_with(&prefix) && line.contains(required))
-            .collect();
-        assert_eq!(matches.len(), 1, "changed original PAT macro {name}");
-        let mut index = matches[0].0;
-        loop {
-            let line = lines.get(index).expect("unterminated original PAT macro");
-            header.push_str(line);
-            header.push('\n');
-            if !line.trim_end().ends_with('\\') {
-                break;
-            }
-            index += 1;
-        }
-    }
-    println!("cargo:rerun-if-changed=src/gpu/common/linux/include/drm/intel/pick.h");
-    let output = output.join("intel-pat");
-    fs::create_dir_all(&output).expect("create PAT compile-time output directory");
-    fs::write(output.join("pat_compile_defs.h"), header)
-        .expect("write original PAT compile-time macros");
-    build.include(output);
+    build.flag("-isystem").flag(output);
 }
 
 fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &std::path::Path) {
@@ -282,5 +251,5 @@ fn configure_ggtt(build: &mut cc::Build, output: &std::path::Path) {
     let output = output.join("intel-ggtt");
     fs::create_dir_all(&output).expect("create GGTT scalar output directory");
     fs::write(output.join("ggtt_probe_defs.h"), header).expect("write original GGTT scalar header");
-    build.include(output);
+    build.flag("-isystem").flag(output);
 }

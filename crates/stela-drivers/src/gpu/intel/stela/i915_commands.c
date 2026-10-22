@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "i915_commands.h"
-#include "../i915/gt/intel_batch_emit.h"
+#include "gt/intel_batch_emit.h"
 
 int stela_intel_i915_batch_start(struct stela_intel_commands *commands, uint32_t encoding,
                                 uint64_t address, bool secure, bool no_preempt)

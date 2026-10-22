@@ -1,18 +1,18 @@
 /* SPDX-License-Identifier: MIT */
 #include "pat.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_gt_type.h"
-#include "../xe/xe_force_wake_domain_types.h"
-#include "../xe/regs/xe_reg_defs.h"
-#include "pat_compile_defs.h"
+#include <linux/types.h>
+#include "xe_gt_type.h"
+#include "xe_force_wake_domain_types.h"
+#include "regs/xe_reg_defs.h"
+#include <linux/build_bug.h>
 #include <drm/intel/pick.h>
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#include <linux/array_size.h>
 struct diagnostics { bool warning, missing; };
 #define XE_PAT_SELECT_WARN(context, condition) (((struct diagnostics *)(context))->warning |= !!(condition))
 #define XE_PAT_SELECT_MISSING(context, version) ((void)(version), ((struct diagnostics *)(context))->missing = true)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#include "../xe/xe_pat_select.h"
+#include "xe_pat_select.h"
 #pragma clang diagnostic pop
 struct program {
  const struct stela_intel_activation_io *io;
@@ -28,7 +28,7 @@ static void write32(void *context, struct xe_reg reg, uint32_t value)
 #define XE_PAT_PROGRAM_WRITE(context, reg, value) write32(context, reg, value)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsign-conversion"
-#include "../xe/xe_pat_program.h"
+#include "xe_pat_program.h"
 #pragma clang diagnostic pop
 int stela_intel_pat_program(const struct stela_intel_activation_io *io, void *context,
  const struct stela_intel_activation_facts *facts, struct stela_intel_pat_result *out)

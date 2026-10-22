@@ -2,12 +2,12 @@
 /* Original source in separate object, no LTO. Test-only scalar metadata and
  * write trace context; no Linux/device/IRQ provider or fake hardware ACK. */
 #include "pat_donor.h"
-#include "../../xe/regs/xe_reg_defs.h"
-#include "pat_compile_defs.h"
+#include "regs/xe_reg_defs.h"
+#include <linux/build_bug.h>
 #include <drm/intel/pick.h>
 #include <assert.h>
 #include <string.h>
-#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#include <linux/array_size.h>
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
 #include "donor-pat-tables.inc"

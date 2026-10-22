@@ -5,10 +5,9 @@ Subject: [PATCH] drm/i915: split batch emission into a header for Stela's
  native port
 
 ---
- drivers/gpu/drm/i915/gt/gen8_engine_cs.c     | 20 +++--------
- drivers/gpu/drm/i915/gt/intel_batch_emit.h   | 36 ++++++++++++++++++++
- drivers/gpu/drm/i915/gt/intel_gpu_commands.h |  4 +++
- 3 files changed, 45 insertions(+), 15 deletions(-)
+ drivers/gpu/drm/i915/gt/gen8_engine_cs.c   | 20 +++---------
+ drivers/gpu/drm/i915/gt/intel_batch_emit.h | 36 ++++++++++++++++++++++
+ 2 files changed, 41 insertions(+), 15 deletions(-)
  create mode 100644 drivers/gpu/drm/i915/gt/intel_batch_emit.h
 
 diff --git a/drivers/gpu/drm/i915/gt/gen8_engine_cs.c b/drivers/gpu/drm/i915/gt/gen8_engine_cs.c
@@ -99,19 +98,3 @@ index 0000000000000000000000000000000000000000..a4ff032ecbe238d80743bc920c3ba1c7
 +}
 +
 +#endif
-diff --git a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
-index 5394bc7d4daf81977265d80fe6f6db62810472fa..e83f7a1cb9a6bd62ae2b886b817e6016c37326e3 100644
---- a/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
-+++ b/drivers/gpu/drm/i915/gt/intel_gpu_commands.h
-@@ -6,7 +6,11 @@
- #ifndef _INTEL_GPU_COMMANDS_H_
- #define _INTEL_GPU_COMMANDS_H_
- 
-+#ifdef STELA_NATIVE
-+#include "../../stela/i915_bits.h"
-+#else
- #include <linux/bitops.h>
-+#endif
- 
- /*
-  * Target address alignments required for GPU access e.g.

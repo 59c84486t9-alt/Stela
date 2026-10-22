@@ -2,23 +2,14 @@
 /* Frozen original algorithms, separate object without LTO. Test scalar/MMIO
  * context and real pthread serialization only, no fabricated Linux objects. */
 #include "wopcm_donor.h"
-#include "../../xe/xe_uc_fw_types.h"
+#include "xe_uc_fw_types.h"
 #include <assert.h>
 #include <stdarg.h>
 #include <string.h>
 #include <vdso/align.h>
-#define SZ_1K 0x00000400
-#define SZ_4K 0x00001000
-#define SZ_8K 0x00002000
-#define SZ_16K 0x00004000
-#define SZ_32K 0x00008000
-#define SZ_2M 0x00200000
-#define SZ_8M 0x00800000
-#define SZ_16M 0x01000000
-#define min(x, y) __builtin_elementwise_min((x), (y))
-#define unlikely(value) __builtin_expect(!!(value), 0)
-#define EINVAL 22
-#define E2BIG 7
+#include <linux/errno.h>
+#include <linux/minmax.h>
+#include <linux/sizes.h>
 static _Thread_local struct stela_wopcm_model *active_model;
 static void donor_log(struct stela_wopcm_model *model, const char *format, ...)
 {

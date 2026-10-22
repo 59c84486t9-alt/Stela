@@ -1,26 +1,20 @@
 /* SPDX-License-Identifier: MIT */
 /* Separately compiled frozen source policies; no Linux device/GT/BO objects or
  * services are fabricated. Only scalar spellings and diagnostics are bound. */
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/xe_platform_types.h"
-#include "../../xe/xe_gt_type.h"
-#include "../../xe/xe_uc_fw_types.h"
-#include "../../xe/abi/uc_fw_abi.h"
-#include "../../xe/xe_uc_fw_version.h"
+#include <linux/bitfield.h>
+#include <linux/errno.h>
+#include <linux/types.h>
+#include "xe_platform_types.h"
+#include "xe_gt_type.h"
+#include "xe_uc_fw_types.h"
+#include "abi/uc_fw_abi.h"
+#include "xe_uc_fw_version.h"
 #include "../firmware.h"
 #include "firmware_donor.h"
 #include <assert.h>
 #include <string.h>
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
-#define __stringify_1(x) #x
-#define __stringify(x) __stringify_1(x)
-#define FIELD_GET(mask, value) REG_FIELD_GET(mask, value)
-#define unlikely(value) __builtin_expect(!!(value), 0)
-#define EINVAL 22
-#define ENOENT 2
-#define ENOEXEC 8
-#define ENODATA 61
-#define EPROTO 71
+#include <linux/array_size.h>
+#include <linux/stringify.h>
 #define xe_gt_assert(gt, condition) assert(condition)
 #define xe_uc_fw_is_overridden(fw) ((fw)->user_overridden)
 static _Thread_local uint32_t *active_diagnostics;

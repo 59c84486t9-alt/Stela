@@ -78,7 +78,7 @@ static void model_delay(struct reset_test_mmio *mmio, int64_t wait, bool atomic)
 #define XE_MMIO_POLL_AFTER(a, b) ((a) > (b))
 #define XE_MMIO_POLL_DELTA_US(a, b) (((a) - (b)) / 1000)
 #define XE_MMIO_POLL_DELAY model_delay
-#include "../../xe/xe_mmio_poll.h"
+#include "xe_mmio_poll.h"
 int reset_test_wait(struct reset_test_mmio *mmio, struct xe_reg reg, u32 mask, u32 value,
                     u32 timeout, u32 *out, bool atomic)
 {

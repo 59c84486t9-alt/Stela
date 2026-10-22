@@ -3,7 +3,6 @@
  * shipping Linux device objects, OS stubs or hardware capability providers. */
 #include "guc_reset_model.h"
 #define EIO 5
-#define FIELD_PREP(mask, value) REG_FIELD_PREP(mask, value)
 #define xe_guc reset_test_model
 #define xe_gt reset_test_model
 #define xe_mmio reset_test_mmio

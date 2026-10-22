@@ -6,10 +6,18 @@ CC := clang
 HOST_CC := clang
 AR ?= llvm-ar
 
-CFLAGS := --target=$(TARGET) -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 \
+# Unchanged Linux sources build against Stela's compat environment first, with
+# Kbuild's forced includes, from system directories so upstream code keeps
+# Linux's warning profile rather than Stela's.
+LINUX_INCLUDES := -include $(SOURCE)/../../common/linux/include/linux/kconfig.h \
+                  -include $(SOURCE)/compat/linux/compiler_types.h -isystem $(SOURCE)/compat \
+                  -isystem $(SOURCE)/../xe -isystem $(SOURCE)/../i915 \
+                  -isystem $(SOURCE)/../../common/linux/include \
+                  -isystem $(SOURCE)/../../common/linux/include/uapi
+CFLAGS := --target=$(TARGET) $(LINUX_INCLUDES) -std=gnu11 -O2 \
           -ffreestanding -fno-stack-protector -mno-red-zone -mgeneral-regs-only \
           -Wall -Wextra -Werror -Wconversion -Wsign-conversion
-HOST_CFLAGS := -DSTELA_NATIVE -I$(SOURCE)/../xe -std=gnu11 -O2 -g -Wall -Wextra -Werror \
+HOST_CFLAGS := $(LINUX_INCLUDES) -std=gnu11 -O2 -g -Wall -Wextra -Werror \
                -Wconversion -Wsign-conversion
 SANITIZE ?= -fsanitize=address,undefined
 OBJECTS := $(BUILD)/xe_pt_walk.o $(BUILD)/pt_walk.o $(BUILD)/commands.o $(BUILD)/ct.o \
@@ -94,12 +102,12 @@ $(BUILD)/activation-donor/donor-put.inc: | $(BUILD)
 	mv "$@.tmp" "$@"
 $(BUILD)/activation-donor-reference.o: $(SOURCE)/tests/activation_donor.c $(SOURCE)/tests/activation_donor.h $(ACTIVATION_HEADERS) \
     $(BUILD)/activation-donor/donor-get.inc $(BUILD)/activation-donor/donor-put.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/activation-donor -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/activation-donor -c "$<" -o "$@"
 $(BUILD)/activation-donor-test: $(SOURCE)/tests/activation.c $(SOURCE)/activation.c $(ACTIVATION_HEADERS) \
     $(BUILD)/activation-donor-reference.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o \
     $(BUILD)/activation-donor/donor-get.inc $(BUILD)/activation-donor/donor-put.inc
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -DSTELA_DONOR_CHECK \
-	    -I$(BUILD)/activation-donor -I$(SOURCE)/../../common/linux/include "$<" \
+	    -isystem $(BUILD)/activation-donor -I$(SOURCE)/../../common/linux/include "$<" \
 	    $(BUILD)/activation-donor-reference.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o $(BUILD)/guc_reset-host.o -lpthread -o "$@"
 test-activation-donor: $(BUILD)/activation-donor-test
 	$(BUILD)/activation-donor-test
@@ -155,7 +163,7 @@ test-compute-dispatch: $(BUILD)/test-compute-dispatch
 $(BUILD)/test-compute-packers-%: $(SOURCE)/tests/compute_dispatch_mesa.c $(SOURCE)/compute_dispatch.c \
     $(HOST_COMPUTE_OBJECTS) $(HEADERS) $(SOURCE)/compute_dispatch_internal.h | $(BUILD)
 	test -n "$(MESA_BUILD)"
-	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	$(HOST_CC) $(LINUX_INCLUDES) -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
 	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
 	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
 	    $(filter %.c %.o,$^) -lm -o "$@"
@@ -174,7 +182,7 @@ $(BUILD)/test-dispatch: $(SOURCE)/tests/dispatch.c $(SOURCE)/dispatch.c \
 $(BUILD)/test-dispatch-packers-%: $(SOURCE)/tests/dispatch_mesa.c $(SOURCE)/dispatch.c \
     $(HOST_DISPATCH_OBJECTS) $(HEADERS) $(SOURCE)/dispatch_internal.h | $(BUILD)
 	test -n "$(MESA_BUILD)"
-	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	$(HOST_CC) $(LINUX_INCLUDES) -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
 	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
 	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
 	    $(filter %.c %.o,$^) -lm -o "$@"
@@ -198,7 +206,7 @@ $(BUILD)/test-commands: $(SOURCE)/tests/commands.c $(SOURCE)/commands.c $(HEADER
 
 $(BUILD)/test-packers-%: $(SOURCE)/tests/commands_mesa.c $(SOURCE)/commands.c $(HEADERS) | $(BUILD)
 	test -n "$(MESA_BUILD)"
-	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	$(HOST_CC) $(LINUX_INCLUDES) -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
 	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
 	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
 	    -I$(SOURCE)/../xe $(filter %.c,$^) -lm -o "$@"
@@ -208,7 +216,7 @@ test-packers: $(addprefix $(BUILD)/test-packers-,$(PACKER_GENERATIONS))
 
 $(BUILD)/test-i915-packers-%: $(SOURCE)/tests/i915_commands_mesa.c $(SOURCE)/i915_commands.c $(HEADERS) | $(BUILD)
 	test -n "$(MESA_BUILD)"
-	$(HOST_CC) -DSTELA_NATIVE -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
+	$(HOST_CC) $(LINUX_INCLUDES) -DGFX_VERx10=$* -std=gnu11 -O2 -g $(SANITIZE) \
 	    -I$(MESA_SOURCE)/src -I$(MESA_SOURCE)/include -I$(MESA_SOURCE)/src/intel \
 	    -I$(MESA_SOURCE)/src/intel/genxml -I$(MESA_BUILD)/src/intel \
 	    $(filter %.c,$^) -lm -o "$@"
@@ -235,7 +243,7 @@ test: $(BUILD)/test-pt-walk $(BUILD)/test-commands $(BUILD)/test-ct $(BUILD)/tes
 -include $(HOST_COMPUTE_OBJECTS:.o=.d)
 
 # Exact original GuC catalog/CSS algorithms; immutable metadata only, no upload.
-FIRMWARE_HEADERS := $(SOURCE)/firmware.h $(SOURCE)/../xe/xe_scalar_types.h \
+FIRMWARE_HEADERS := $(SOURCE)/firmware.h \
     $(SOURCE)/../xe/xe_platform_types.h $(SOURCE)/../xe/xe_gt_type.h $(SOURCE)/../xe/xe_huc_role.h \
     $(SOURCE)/../xe/xe_uc_fw_types.h $(SOURCE)/../xe/xe_uc_fw_catalog.h \
     $(SOURCE)/../xe/xe_uc_fw_css.h $(SOURCE)/../xe/xe_uc_fw_cpd.h $(SOURCE)/../xe/xe_uc_fw_version.h \
@@ -271,7 +279,7 @@ $(BUILD)/firmware-donor-reference.o: $(SOURCE)/tests/firmware_donor.c \
     $(BUILD)/firmware-donor/donor-fw-defs.inc $(BUILD)/firmware-donor/donor-fw-select.inc \
     $(BUILD)/firmware-donor/donor-fw-css.inc $(BUILD)/firmware-donor/donor-fw-supported.inc \
     $(BUILD)/firmware-donor/donor-fw-default-status.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/firmware-donor -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/firmware-donor -c "$<" -o "$@"
 $(BUILD)/firmware-test: $(SOURCE)/tests/firmware.c $(SOURCE)/firmware.c \
     $(FIRMWARE_HEADERS) $(BUILD)/firmware-donor-reference.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(BUILD)/firmware-donor-reference.o -o "$@"
@@ -327,7 +335,7 @@ $(BUILD)/wopcm-donor-reference.o: $(SOURCE)/tests/wopcm_donor.c $(SOURCE)/tests/
     $(BUILD)/wopcm-donor/donor-wopcm-body.inc $(BUILD)/wopcm-donor/donor-verify.inc \
     $(BUILD)/wopcm-donor/donor-huc-role.inc
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
-	    -I$(BUILD)/wopcm-donor -c "$<" -o "$@"
+	    -isystem $(BUILD)/wopcm-donor -c "$<" -o "$@"
 $(BUILD)/wopcm-test: $(SOURCE)/tests/wopcm.c $(SOURCE)/tests/wopcm_donor.h \
     $(WOPCM_HEADERS) $(BUILD)/wopcm-donor-reference.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(SOURCE)/../../common/linux/include \
@@ -376,7 +384,7 @@ $(BUILD)/firmware-donor/donor-fw-cpd.inc: | $(BUILD)
 	mv "$@.tmp" "$@"
 $(BUILD)/huc-firmware-donor-reference.o: $(SOURCE)/tests/huc_firmware_donor.c \
     $(SOURCE)/tests/firmware_donor.h $(FIRMWARE_HEADERS) $(BUILD)/firmware-donor/donor-fw-cpd.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/firmware-donor -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/firmware-donor -c "$<" -o "$@"
 $(BUILD)/huc-firmware-test: $(SOURCE)/tests/huc_firmware.c $(SOURCE)/firmware.c \
     $(FIRMWARE_HEADERS) $(BUILD)/firmware-donor-reference.o $(BUILD)/huc-firmware-donor-reference.o
 	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) "$<" $(BUILD)/firmware-donor-reference.o $(BUILD)/huc-firmware-donor-reference.o -o "$@"
@@ -390,7 +398,7 @@ GGTT_PAGE_SOURCE := $(SOURCE)/../xe/xe_bo.h
 GGTT_SIZE_SOURCE := $(SOURCE)/../../common/linux/include/linux/sizes.h
 GGTT_PROBE_HEADERS := $(SOURCE)/ggtt_probe.h $(SOURCE)/../xe/xe_ggtt_probe_core.h \
     $(SOURCE)/../xe/xe_wopcm_size.h $(SOURCE)/../xe/regs/xe_gtt_defs.h \
-    $(SOURCE)/../xe/xe_scalar_types.h $(SOURCE)/../xe/xe_platform_types.h $(GGTT_DEFS)
+    $(SOURCE)/../xe/xe_platform_types.h $(GGTT_DEFS)
 $(GGTT_DEFS): $(GGTT_GMCH_SOURCE) $(GGTT_PAGE_SOURCE) $(GGTT_SIZE_SOURCE) | $(BUILD)
 	mkdir -p "$(BUILD)/ggtt"
 	sed -n '1,/^#ifndef _I915_DRM_H_/p' "$(GGTT_GMCH_SOURCE)" | sed '$$d' > "$@.tmp"
@@ -400,9 +408,9 @@ $(GGTT_DEFS): $(GGTT_GMCH_SOURCE) $(GGTT_PAGE_SOURCE) $(GGTT_SIZE_SOURCE) | $(BU
 	test "$$(sed -n '/^#define /p' "$@.tmp" | wc -l | tr -d ' ')" = 9
 	mv "$@.tmp" "$@"
 $(BUILD)/ggtt_probe.o: $(SOURCE)/ggtt_probe.c $(GGTT_PROBE_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(BUILD)/ggtt -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -isystem $(BUILD)/ggtt -MD -MP -c "$<" -o "$@"
 $(BUILD)/ggtt_probe-host.o: $(SOURCE)/ggtt_probe.c $(GGTT_PROBE_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/ggtt -MD -MP -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/ggtt -MD -MP -c "$<" -o "$@"
 .PHONY: ggtt-probe ggtt-probe-headers host-ggtt-probe
 ggtt-probe-headers: $(GGTT_DEFS)
 ggtt-probe: $(BUILD)/ggtt_probe.o
@@ -442,42 +450,27 @@ $(BUILD)/ggtt/donor-pte-index.inc: | $(BUILD)
 $(BUILD)/ggtt-donor.o: $(SOURCE)/tests/ggtt_probe_donor.c $(SOURCE)/tests/ggtt_probe_donor.h \
     $(GGTT_PROBE_HEADERS) $(BUILD)/ggtt/donor-gsm-decode.inc $(BUILD)/ggtt/donor-pf-range.inc \
     $(BUILD)/ggtt/donor-range-clamp.inc $(BUILD)/ggtt/donor-pte-index.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/ggtt -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/ggtt -c "$<" -o "$@"
 $(BUILD)/ggtt-probe-test: $(SOURCE)/tests/ggtt_probe.c $(SOURCE)/tests/ggtt_probe_donor.h \
     $(GGTT_PROBE_HEADERS) $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/ggtt "$<" \
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/ggtt "$<" \
 	    $(BUILD)/ggtt-donor.o $(BUILD)/ggtt_probe-host.o -o "$@"
 .PHONY: test-ggtt-probe
 test-ggtt-probe: $(BUILD)/ggtt-probe-test
 	$(BUILD)/ggtt-probe-test
 
-# Exact Linux compile-time definitions only. Active _Static_assert is retained;
-# actual pick.h supplies address math, without compiler/percpu/runtime imports.
-PAT_COMPILE_DEFS := $(BUILD)/pat/pat_compile_defs.h
-PAT_COMPILER := $(SOURCE)/../../common/linux/include/linux/compiler.h
-PAT_BUILD_BUG := $(SOURCE)/../../common/linux/include/linux/build_bug.h
-$(PAT_COMPILE_DEFS): $(PAT_COMPILER) $(PAT_BUILD_BUG) | $(BUILD)
-	mkdir -p "$(BUILD)/pat"
-	sed -n '1p' "$(PAT_COMPILER)" > "$@.tmp"
-	sed -n '/^#define __BUILD_BUG_ON_ZERO_MSG.*_Static_assert/p' "$(PAT_COMPILER)" >> "$@.tmp"
-	awk '/^#define __is_constexpr\(/ { active = 1 } active { print; if ($$0 !~ /\\$$/) exit }' "$(PAT_COMPILER)" >> "$@.tmp"
-	awk '/^#define BUILD_BUG_ON_ZERO\(/ { active = 1 } active { print; if ($$0 !~ /\\$$/) exit }' "$(PAT_BUILD_BUG)" >> "$@.tmp"
-	test "$$(sed -n '/^#define /p' "$@.tmp" | wc -l | tr -d ' ')" = 3
-	grep -Eq '_Static_assert' "$@.tmp"
-	mv "$@.tmp" "$@"
 PAT_HEADERS := $(SOURCE)/pat.h $(SOURCE)/activation.h $(SOURCE)/../xe/xe_pat.h \
     $(SOURCE)/../xe/xe_pat_tables.h $(SOURCE)/../xe/xe_pat_select.h \
     $(SOURCE)/../xe/xe_pat_program.h $(SOURCE)/../xe/xe_cache_level.h \
-    $(SOURCE)/../xe/xe_gt_type.h $(PAT_COMPILE_DEFS) \
+    $(SOURCE)/../xe/xe_gt_type.h \
     $(SOURCE)/../../common/linux/include/drm/intel/pick.h
 $(BUILD)/pat.o: $(SOURCE)/pat.c $(PAT_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
 $(BUILD)/pat-host.o: $(SOURCE)/pat.c $(PAT_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
-.PHONY: pat host-pat pat-headers
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -MD -MP -c "$<" -o "$@"
+.PHONY: pat host-pat
 pat: $(BUILD)/pat.o
 host-pat: $(BUILD)/pat-host.o
-pat-headers: $(PAT_COMPILE_DEFS)
 -include $(BUILD)/pat.d $(BUILD)/pat-host.d
 PAT_DONOR_BLOB ?= fad5b5a5ed4a0ca256a98168e4beda1dab3f5bd5
 $(BUILD)/pat/donor-pat-tables.inc: | $(BUILD)
@@ -493,9 +486,9 @@ $(BUILD)/pat/donor-pat-program.inc: | $(BUILD)
 PAT_DONOR_HEADERS := $(SOURCE)/tests/pat_donor.h $(PAT_HEADERS) \
     $(BUILD)/pat/donor-pat-tables.inc $(BUILD)/pat/donor-pat-select.inc $(BUILD)/pat/donor-pat-program.inc $(BUILD)/pat/current-pat-wrapper.inc
 $(BUILD)/pat-donor.o: $(SOURCE)/tests/pat_donor.c $(PAT_DONOR_HEADERS)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/pat -I$(SOURCE)/../../common/linux/include -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include -c "$<" -o "$@"
 $(BUILD)/pat-test: $(SOURCE)/tests/pat.c $(PAT_DONOR_HEADERS) $(BUILD)/pat-donor.o $(BUILD)/pat-host.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/pat -I$(SOURCE)/../../common/linux/include "$<" $(BUILD)/pat-donor.o $(BUILD)/pat-host.o -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/pat -I$(SOURCE)/../../common/linux/include "$<" $(BUILD)/pat-donor.o $(BUILD)/pat-host.o -o "$@"
 .PHONY: test-pat
 test-pat: $(BUILD)/pat-test
 	$(BUILD)/pat-test
@@ -516,14 +509,14 @@ $(BUILD)/guc-reset/guc_reset_wa.inc: $(BUILD)/guc-reset/xe_wa_oob.c
 	test -s "$@.tmp"
 	mv "$@.tmp" "$@"
 GUC_RESET_HEADERS := $(SOURCE)/guc_reset.h $(SOURCE)/activation.h $(SOURCE)/../xe/xe_guc_reset_core.h \
-    $(SOURCE)/../xe/xe_mmio_poll.h $(SOURCE)/../xe/xe_scalar_types.h $(SOURCE)/../xe/xe_gt_type.h \
+    $(SOURCE)/../xe/xe_mmio_poll.h $(SOURCE)/../xe/xe_gt_type.h \
     $(SOURCE)/../xe/xe_force_wake_domain_types.h $(SOURCE)/../xe/regs/xe_gt_regs.h \
     $(SOURCE)/../xe/regs/xe_guc_regs.h $(SOURCE)/../xe/abi/guc_errors_abi.h \
     $(BUILD)/guc-reset/guc_reset_wa.inc
 $(BUILD)/guc_reset.o: $(SOURCE)/guc_reset.c $(GUC_RESET_HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) -I$(BUILD)/guc-reset -MD -MP -c "$<" -o "$@"
+	$(CC) $(CFLAGS) -isystem $(BUILD)/guc-reset -MD -MP -c "$<" -o "$@"
 $(BUILD)/guc_reset-host.o: $(SOURCE)/guc_reset.c $(GUC_RESET_HEADERS) | $(BUILD)
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/guc-reset -MD -MP -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/guc-reset -MD -MP -c "$<" -o "$@"
 .PHONY: guc-reset host-guc-reset
 guc-reset: $(BUILD)/guc_reset.o
 host-guc-reset: $(BUILD)/guc_reset-host.o
@@ -542,13 +535,13 @@ $(BUILD)/guc-reset/guc-reset-linux.inc: $(SOURCE)/../xe/xe_guc.c | $(BUILD)
 	mv "$@.tmp" "$@"
 GUC_RESET_TEST_HEADERS := $(SOURCE)/tests/guc_reset_model.h $(SOURCE)/tests/guc_reset_bind.h $(GUC_RESET_HEADERS)
 $(BUILD)/guc-reset-donor.o: $(SOURCE)/tests/guc_reset_donor.c $(GUC_RESET_TEST_HEADERS) $(BUILD)/guc-reset/guc-reset-donor.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/guc-reset -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/guc-reset -c "$<" -o "$@"
 $(BUILD)/guc-reset-linux.o: $(SOURCE)/tests/guc_reset_linux.c $(GUC_RESET_TEST_HEADERS) $(BUILD)/guc-reset/guc-reset-linux.inc
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/guc-reset -c "$<" -o "$@"
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/guc-reset -c "$<" -o "$@"
 $(BUILD)/guc-reset-test: $(SOURCE)/tests/guc_reset.c $(GUC_RESET_TEST_HEADERS) $(BUILD)/guc-reset-donor.o \
     $(BUILD)/guc-reset-linux.o $(BUILD)/guc_reset-host.o $(BUILD)/activation-host.o \
     $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o
-	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -I$(BUILD)/guc-reset "$<" \
+	$(HOST_CC) $(HOST_CFLAGS) $(SANITIZE) -isystem $(BUILD)/guc-reset "$<" \
 	    $(BUILD)/guc-reset-donor.o $(BUILD)/guc-reset-linux.o $(BUILD)/guc_reset-host.o \
 	    $(BUILD)/activation-host.o $(BUILD)/wopcm-host.o $(BUILD)/firmware-host.o $(BUILD)/pat-host.o -o "$@"
 .PHONY: test-guc-reset

@@ -1,25 +1,17 @@
 /* SPDX-License-Identifier: MIT */
 /* Original-object trace qualification, never physical register/firmware proof. */
 #include "wopcm_donor.h"
-#include "../../xe/xe_huc_role.h"
+#include "xe_huc_role.h"
 #include <assert.h>
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <vdso/align.h>
-#define SZ_1K 0x00000400
-#define SZ_4K 0x00001000
-#define SZ_8K 0x00002000
-#define SZ_16K 0x00004000
-#define SZ_32K 0x00008000
-#define SZ_2M 0x00200000
-#define SZ_8M 0x00800000
-#define SZ_16M 0x01000000
-#define min(x, y) __builtin_elementwise_min((x), (y))
-#define unlikely(value) __builtin_expect(!!(value), 0)
+#include <linux/minmax.h>
+#include <linux/sizes.h>
 static void warn_core(void *, unsigned, bool);
 #define XE_WOPCM_WARN(core, id, condition) warn_core((core)->context, (id), !!(condition))
-#include "../../xe/xe_wopcm_core.h"
+#include "xe_wopcm_core.h"
 void stela_wopcm_record(struct stela_wopcm_model *m, uint32_t kind, uint32_t a, uint32_t b, uint32_t c)
 {
     assert(m->used < 64); m->records[m->used++] = (struct stela_wopcm_record){kind, a, b, c};
@@ -52,7 +44,7 @@ bool stela_wopcm_huc(struct stela_wopcm_model *m)
 #define XE_MMIO_VERIFY_CONTEXT struct stela_wopcm_model
 #define XE_MMIO_VERIFY_WRITE stela_wopcm_write
 #define XE_MMIO_VERIFY_READ stela_wopcm_read
-#include "../../xe/xe_mmio_verify.h"
+#include "xe_mmio_verify.h"
 static u32 read_core(void *m, struct xe_reg reg) { return stela_wopcm_read(m, reg); }
 static int verify_core(void *m, struct xe_reg reg, u32 val, u32 mask, u32 eval)
 {

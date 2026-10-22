@@ -2,7 +2,7 @@
 #ifndef STELA_INTEL_PT_WALK_H
 #define STELA_INTEL_PT_WALK_H
 
-#include "../xe/xe_pt_walk.h"
+#include "xe_pt_walk.h"
 
 /* Native, kernel-owned page trees only. The caller owns every node/children
  * array and serializes edits. Callbacks preserve the validated geometry and

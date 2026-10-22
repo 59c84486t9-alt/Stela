@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #include "ggtt_probe_donor.h"
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/xe_platform_types.h"
+#include <linux/types.h>
+#include "xe_platform_types.h"
 #include "ggtt_probe_defs.h"
-#include "../../xe/regs/xe_gtt_defs.h"
-#include "../../xe/xe_wopcm_size.h"
+#include "regs/xe_gtt_defs.h"
+#include "xe_wopcm_size.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

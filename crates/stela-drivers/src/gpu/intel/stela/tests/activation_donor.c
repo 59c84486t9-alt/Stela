@@ -2,14 +2,14 @@
 /* Original source fragments compile in their own object, without LTO. Hosted
  * mutex serialization is real; this supplies no Linux IRQ/power/timer runtime. */
 #include "activation_donor.h"
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/regs/xe_reg_defs.h"
-#include "../../xe/xe_force_wake_domain_types.h"
+#include <linux/types.h>
+#include "regs/xe_reg_defs.h"
+#include "xe_force_wake_domain_types.h"
 #include <assert.h>
 #include <pthread.h>
 #define for_each_if(condition) if (!(condition)) {} else
 #define ffs(value) __builtin_ffs((int)(value))
-#include "../../xe/xe_force_wake_core.h"
+#include "xe_force_wake_core.h"
 struct donor_fw {
     struct stela_intel_policy_result *gt;
     unsigned initialized_domains, awake_domains, failures;

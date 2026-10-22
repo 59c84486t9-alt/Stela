@@ -1,31 +1,22 @@
 /* SPDX-License-Identifier: MIT */
 #include "wopcm.h"
 #include "firmware.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_platform_types.h"
-#include "../xe/xe_wopcm_types.h"
-#include "../xe/regs/xe_guc_regs.h"
+#include <linux/types.h>
+#include "xe_platform_types.h"
+#include "xe_wopcm_types.h"
+#include "regs/xe_guc_regs.h"
 _Static_assert(sizeof(struct xe_wopcm) == 12, "original WOPCM metadata ABI");
 _Static_assert(sizeof(struct guc_doorbell_info) == 64, "original packed doorbell ABI");
 _Static_assert(_Alignof(struct guc_doorbell_info) == 1, "original packed alignment");
 #include <vdso/align.h>
 /* Fixed scalar spellings from retained linux/sizes.h; no Linux services.
  * Original Linux core caller uses its existing size/ALIGN/min definitions. */
-#define SZ_1K 0x00000400
-#define SZ_4K 0x00001000
-#define SZ_8K 0x00002000
-#define SZ_16K 0x00004000
-#define SZ_32K 0x00008000
-#define SZ_2M 0x00200000
-#define SZ_8M 0x00800000
-#define SZ_16M 0x01000000
-#define min(x, y) __builtin_elementwise_min((x), (y))
-#define unlikely(value) __builtin_expect(!!(value), 0)
-#define EINVAL 22
-#define E2BIG 7
+#include <linux/errno.h>
+#include <linux/minmax.h>
+#include <linux/sizes.h>
 static void core_warn(void *, unsigned, bool);
 #define XE_WOPCM_WARN(core, id, condition) core_warn((core)->context, (id), !!(condition))
-#include "../xe/xe_wopcm_core.h"
+#include "xe_wopcm_core.h"
 
 struct native_wopcm {
     const struct stela_intel_activation_io *io;
@@ -52,7 +43,7 @@ static void native_write(struct native_wopcm *native, struct xe_reg reg, u32 val
 #define XE_MMIO_VERIFY_CONTEXT struct native_wopcm
 #define XE_MMIO_VERIFY_WRITE native_write
 #define XE_MMIO_VERIFY_READ native_read
-#include "../xe/xe_mmio_verify.h"
+#include "xe_mmio_verify.h"
 static u32 core_read(void *context, struct xe_reg reg) { return native_read(context, reg); }
 static int core_verify(void *context, struct xe_reg reg, u32 val, u32 mask, u32 eval)
 {

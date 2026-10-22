@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_INTEL_WOPCM_DONOR_H
 #define STELA_INTEL_WOPCM_DONOR_H
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/xe_platform_types.h"
-#include "../../xe/xe_wopcm_types.h"
-#include "../../xe/regs/xe_guc_regs.h"
+#include <linux/types.h>
+#include "xe_platform_types.h"
+#include "xe_wopcm_types.h"
+#include "regs/xe_guc_regs.h"
 #include <pthread.h>
 struct stela_wopcm_record { uint32_t kind, a, b, c; };
 struct stela_wopcm_model {

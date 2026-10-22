@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_INTEL_PAT_DONOR_H
 #define STELA_INTEL_PAT_DONOR_H
-#include "../../xe/xe_pat.h"
-#include "../../xe/xe_cache_level.h"
-#include "../../xe/xe_platform_types.h"
+#include "xe_pat.h"
+#include "xe_cache_level.h"
+#include "xe_platform_types.h"
 struct stela_pat_test_policy {
  uint32_t profile, count, warning, missing, special;
  uint16_t indices[__XE_CACHE_LEVEL_COUNT];

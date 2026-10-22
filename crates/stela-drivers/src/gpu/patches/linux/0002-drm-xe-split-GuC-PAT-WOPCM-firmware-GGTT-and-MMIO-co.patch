@@ -5,64 +5,56 @@ Subject: [PATCH] drm/xe: split GuC, PAT, WOPCM, firmware, GGTT and MMIO cores
  into headers for Stela's native port
 
 ---
- .../drm/xe/abi/guc_communication_ctb_abi.h    |   4 +
- drivers/gpu/drm/xe/abi/uc_fw_abi.h            |   5 +
- .../gpu/drm/xe/instructions/xe_instr_defs.h   |   4 +
  drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h      |  11 +
- drivers/gpu/drm/xe/regs/xe_guc_regs.h         |  12 +-
- drivers/gpu/drm/xe/regs/xe_reg_defs.h         |  51 +-
- drivers/gpu/drm/xe/regs/xe_reg_type.h         |  55 ++
+ drivers/gpu/drm/xe/regs/xe_guc_regs.h         |   5 +-
+ drivers/gpu/drm/xe/regs/xe_reg_defs.h         |  48 +-
+ drivers/gpu/drm/xe/regs/xe_reg_type.h         |  60 ++
  drivers/gpu/drm/xe/regs/xe_regs.h             |   3 +-
  drivers/gpu/drm/xe/xe_cache_level.h           |  13 +
  drivers/gpu/drm/xe/xe_device_types.h          |   2 +-
  drivers/gpu/drm/xe/xe_engine_ids.h            |  54 ++
  drivers/gpu/drm/xe/xe_force_wake.c            |  91 +--
  drivers/gpu/drm/xe/xe_force_wake.h            |   6 +-
- drivers/gpu/drm/xe/xe_force_wake_core.h       |  78 +++
- .../gpu/drm/xe/xe_force_wake_domain_types.h   |  81 +++
- drivers/gpu/drm/xe/xe_force_wake_gt.h         |  30 +
+ drivers/gpu/drm/xe/xe_force_wake_core.h       |  81 +++
+ .../gpu/drm/xe/xe_force_wake_domain_types.h   |  83 +++
+ drivers/gpu/drm/xe/xe_force_wake_gt.h         |  33 ++
  drivers/gpu/drm/xe/xe_force_wake_types.h      |  73 +--
  drivers/gpu/drm/xe/xe_ggtt.c                  |  24 +-
- drivers/gpu/drm/xe/xe_ggtt_probe_core.h       |  44 ++
+ drivers/gpu/drm/xe/xe_ggtt_probe_core.h       |  47 ++
  drivers/gpu/drm/xe/xe_gt_type.h               |  12 +
  drivers/gpu/drm/xe/xe_gt_types.h              |   6 +-
  drivers/gpu/drm/xe/xe_guc.c                   |  88 +--
  drivers/gpu/drm/xe/xe_guc.h                   |   8 +-
  drivers/gpu/drm/xe/xe_guc_ct.c                |  20 +-
- drivers/gpu/drm/xe/xe_guc_ct_message.h        |  22 +
- drivers/gpu/drm/xe/xe_guc_reset_core.h        | 129 +++++
+ drivers/gpu/drm/xe/xe_guc_ct_message.h        |  24 +
+ drivers/gpu/drm/xe/xe_guc_reset_core.h        | 133 +++++
  drivers/gpu/drm/xe/xe_huc.c                   |   3 +-
- drivers/gpu/drm/xe/xe_huc_role.h              |  10 +
+ drivers/gpu/drm/xe/xe_huc_role.h              |  12 +
  drivers/gpu/drm/xe/xe_hw_engine_types.h       |  47 +-
  drivers/gpu/drm/xe/xe_mmio.c                  |  86 +--
- drivers/gpu/drm/xe/xe_mmio_poll.h             |  57 ++
+ drivers/gpu/drm/xe/xe_mmio_poll.h             |  60 ++
  drivers/gpu/drm/xe/xe_mmio_verify.h           |  21 +
  drivers/gpu/drm/xe/xe_pat.c                   | 371 ++----------
- drivers/gpu/drm/xe/xe_pat.h                   |   8 +
  drivers/gpu/drm/xe/xe_pat_program.h           |  25 +
- drivers/gpu/drm/xe/xe_pat_select.h            | 132 +++++
- drivers/gpu/drm/xe/xe_pat_tables.h            | 238 ++++++++
+ drivers/gpu/drm/xe/xe_pat_select.h            | 135 +++++
+ drivers/gpu/drm/xe/xe_pat_tables.h            | 240 ++++++++
  drivers/gpu/drm/xe/xe_pci.c                   | 527 +-----------------
- drivers/gpu/drm/xe/xe_pci_device_info.h       | 492 ++++++++++++++++
- drivers/gpu/drm/xe/xe_pci_runtime.h           |  65 +++
- drivers/gpu/drm/xe/xe_pci_types.h             |   6 +
+ drivers/gpu/drm/xe/xe_pci_device_info.h       | 495 ++++++++++++++++
+ drivers/gpu/drm/xe/xe_pci_runtime.h           |  66 +++
+ drivers/gpu/drm/xe/xe_pci_types.h             |   2 +
  drivers/gpu/drm/xe/xe_pt_types.h              |   9 +-
  drivers/gpu/drm/xe/xe_pt_walk.c               |   2 +-
- drivers/gpu/drm/xe/xe_pt_walk.h               |   4 +
  drivers/gpu/drm/xe/xe_ring_emit.h             |  52 ++
  drivers/gpu/drm/xe/xe_ring_ops.c              |  41 +-
- drivers/gpu/drm/xe/xe_scalar_types.h          |  26 +
  drivers/gpu/drm/xe/xe_uc_fw.c                 | 420 +++-----------
- drivers/gpu/drm/xe/xe_uc_fw_catalog.h         | 145 +++++
+ drivers/gpu/drm/xe/xe_uc_fw_catalog.h         | 152 +++++
  drivers/gpu/drm/xe/xe_uc_fw_cpd.h             | 144 +++++
- drivers/gpu/drm/xe/xe_uc_fw_css.h             | 132 +++++
- drivers/gpu/drm/xe/xe_uc_fw_types.h           |   4 +
+ drivers/gpu/drm/xe/xe_uc_fw_css.h             | 136 +++++
  drivers/gpu/drm/xe/xe_uc_fw_version.h         |  12 +
  drivers/gpu/drm/xe/xe_wopcm.c                 | 261 ++-------
  drivers/gpu/drm/xe/xe_wopcm_core.h            | 230 ++++++++
- drivers/gpu/drm/xe/xe_wopcm_size.h            |  24 +
- drivers/gpu/drm/xe/xe_wopcm_types.h           |   4 +
- 57 files changed, 2678 insertions(+), 1846 deletions(-)
+ drivers/gpu/drm/xe/xe_wopcm_size.h            |  27 +
+ 49 files changed, 2654 insertions(+), 1847 deletions(-)
  create mode 100644 drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h
  create mode 100644 drivers/gpu/drm/xe/regs/xe_reg_type.h
  create mode 100644 drivers/gpu/drm/xe/xe_cache_level.h
@@ -83,7 +75,6 @@ Subject: [PATCH] drm/xe: split GuC, PAT, WOPCM, firmware, GGTT and MMIO cores
  create mode 100644 drivers/gpu/drm/xe/xe_pci_device_info.h
  create mode 100644 drivers/gpu/drm/xe/xe_pci_runtime.h
  create mode 100644 drivers/gpu/drm/xe/xe_ring_emit.h
- create mode 100644 drivers/gpu/drm/xe/xe_scalar_types.h
  create mode 100644 drivers/gpu/drm/xe/xe_uc_fw_catalog.h
  create mode 100644 drivers/gpu/drm/xe/xe_uc_fw_cpd.h
  create mode 100644 drivers/gpu/drm/xe/xe_uc_fw_css.h
@@ -91,57 +82,6 @@ Subject: [PATCH] drm/xe: split GuC, PAT, WOPCM, firmware, GGTT and MMIO cores
  create mode 100644 drivers/gpu/drm/xe/xe_wopcm_core.h
  create mode 100644 drivers/gpu/drm/xe/xe_wopcm_size.h
 
-diff --git a/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h b/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
-index f58198cf2cf639571cd796a48a4d6756378e33a7..090ffa9d01edb61dc75a07af20e65ddfa3ef2796 100644
---- a/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
-+++ b/drivers/gpu/drm/xe/abi/guc_communication_ctb_abi.h
-@@ -6,8 +6,12 @@
- #ifndef _ABI_GUC_COMMUNICATION_CTB_ABI_H
- #define _ABI_GUC_COMMUNICATION_CTB_ABI_H
- 
-+#ifdef STELA_NATIVE
-+#include "../../stela/ct_abi_platform.h"
-+#else
- #include <linux/types.h>
- #include <linux/build_bug.h>
-+#endif
- 
- #include "guc_messages_abi.h"
- 
-diff --git a/drivers/gpu/drm/xe/abi/uc_fw_abi.h b/drivers/gpu/drm/xe/abi/uc_fw_abi.h
-index 198e949660e09dca764608e8df03a3b270e93946..c29f124d8767fb9574a15ec470d466d5b2f1ef09 100644
---- a/drivers/gpu/drm/xe/abi/uc_fw_abi.h
-+++ b/drivers/gpu/drm/xe/abi/uc_fw_abi.h
-@@ -6,8 +6,13 @@
- #ifndef _ABI_UC_FW_ABI_H
- #define _ABI_UC_FW_ABI_H
- 
-+#ifdef STELA_NATIVE
-+#include "../xe_scalar_types.h"
-+#define __packed __attribute__((packed))
-+#else
- #include <linux/build_bug.h>
- #include <linux/types.h>
-+#endif
- 
- /**
-  * DOC: CSS-based Firmware Layout
-diff --git a/drivers/gpu/drm/xe/instructions/xe_instr_defs.h b/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
-index e559969468c443832371351ca49a86a123fd9eeb..b9dfe8e5ebfa558a62820ebde12a57d85bf81ef3 100644
---- a/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
-+++ b/drivers/gpu/drm/xe/instructions/xe_instr_defs.h
-@@ -6,7 +6,11 @@
- #ifndef _XE_INSTR_DEFS_H_
- #define _XE_INSTR_DEFS_H_
- 
-+#ifdef STELA_NATIVE
-+#include "../../stela/command_bits.h"
-+#else
- #include "regs/xe_reg_defs.h"
-+#endif
- 
- /*
-  * The first dword of any GPU instruction is the "instruction header."  Bits
 diff --git a/drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h b/drivers/gpu/drm/xe/regs/xe_guc_ct_regs.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..6aeb49f8a09cad325968218ee301ff31025110a6
@@ -160,29 +100,18 @@ index 0000000000000000000000000000000000000000..6aeb49f8a09cad325968218ee301ff31
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/regs/xe_guc_regs.h b/drivers/gpu/drm/xe/regs/xe_guc_regs.h
-index 5faac8316b66c4e7fedd70994c39e29a856d0dfb..7d9c9e03165634608533af56223f09e88d0f6515 100644
+index 5faac8316b66c4e7fedd70994c39e29a856d0dfb..fe37a4d9e567ef1c816f28fd6ad2f1b2e785b5c1 100644
 --- a/drivers/gpu/drm/xe/regs/xe_guc_regs.h
 +++ b/drivers/gpu/drm/xe/regs/xe_guc_regs.h
-@@ -6,10 +6,18 @@
- #ifndef _XE_GUC_REGS_H_
- #define _XE_GUC_REGS_H_
- 
-+#ifdef STELA_NATIVE
-+#include "../xe_scalar_types.h"
-+#ifndef __packed
-+#define __packed __attribute__((packed))
-+#endif
-+#else
- #include <linux/compiler.h>
+@@ -10,6 +10,7 @@
  #include <linux/types.h>
-+#endif
  
  #include "regs/xe_reg_defs.h"
 +#include "regs/xe_guc_ct_regs.h"
  
  /* Definitions of GuC H/W registers, bits, etc */
  
-@@ -115,12 +123,12 @@
+@@ -115,12 +116,12 @@
  #define GT_PM_CONFIG				XE_REG(0x13816c)
  #define   GT_DOORBELL_ENABLE			REG_BIT(0)
  
@@ -198,20 +127,10 @@ index 5faac8316b66c4e7fedd70994c39e29a856d0dfb..7d9c9e03165634608533af56223f09e8
  #define MED_VF_SW_FLAG(n)			XE_REG(0x190310 + (n) * 4, XE_REG_OPTION_VF)
  #define MED_VF_SW_FLAG_COUNT			4
 diff --git a/drivers/gpu/drm/xe/regs/xe_reg_defs.h b/drivers/gpu/drm/xe/regs/xe_reg_defs.h
-index 27ac0bf1f6cda7df0331fd12da5634f7f457a156..25e5d0077c17165e69fe1e7b256ae068d164a353 100644
+index 27ac0bf1f6cda7df0331fd12da5634f7f457a156..5047f97fcf945de6250b66e64b33806d31ac07e6 100644
 --- a/drivers/gpu/drm/xe/regs/xe_reg_defs.h
 +++ b/drivers/gpu/drm/xe/regs/xe_reg_defs.h
-@@ -6,6 +6,9 @@
- #ifndef _XE_REG_DEFS_H_
- #define _XE_REG_DEFS_H_
- 
-+#ifdef STELA_NATIVE
-+#include "../xe_scalar_types.h"
-+#else
- #include <drm/intel/pick.h>
- #include <drm/intel/reg_bits.h>
- 
-@@ -13,53 +16,9 @@
+@@ -13,53 +13,7 @@
  #include <linux/log2.h>
  #include <linux/sizes.h>
  
@@ -224,8 +143,7 @@ index 27ac0bf1f6cda7df0331fd12da5634f7f457a156..25e5d0077c17165e69fe1e7b256ae068
 - * Currently this is defined as 4 MiB.
 - */
 -#define XE_REG_ADDR_MAX	SZ_4M
-+#endif
- 
+-
 -/**
 - * struct xe_reg - Register definition
 - *
@@ -269,16 +187,21 @@ index 27ac0bf1f6cda7df0331fd12da5634f7f457a156..25e5d0077c17165e69fe1e7b256ae068
   * struct xe_reg_mcr - MCR register definition
 diff --git a/drivers/gpu/drm/xe/regs/xe_reg_type.h b/drivers/gpu/drm/xe/regs/xe_reg_type.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..861a9bd06da60e4bfc4656add6ccb577a0f4cf8f
+index 0000000000000000000000000000000000000000..ff2f8fec60e3eb1bb51c6d055f0d0e766581c804
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/regs/xe_reg_type.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,60 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Copyright © 2023 Intel Corporation
 + */
 +#ifndef XE_REG_TYPE_H
 +#define XE_REG_TYPE_H
++#include <linux/build_bug.h>
++#include <linux/log2.h>
++#include <linux/sizes.h>
++#include <linux/types.h>
++
 +/**
 + * XE_REG_ADDR_MAX - The upper limit on MMIO register address
 + *
@@ -636,16 +559,19 @@ index e2721f205d6c5d0642d198b6194ebbbacb2130aa..e8a1b31ae8bb2a014529dba9adb16e6e
  	for_each_fw_domain_masked((domain__), (fw__)->initialized_domains, (fw__), (tmp__))
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_core.h b/drivers/gpu/drm/xe/xe_force_wake_core.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c74ebce9c990f1d7ebe40e3e853a88c7a09243ec
+index 0000000000000000000000000000000000000000..f5d7d20ba5f5c8df0d294b5332b72631d2864640
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_core.h
-@@ -0,0 +1,78 @@
+@@ -0,0 +1,81 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * Copyright © 2022 Intel Corporation
 + */
 +#ifndef XE_FORCE_WAKE_CORE_H
 +#define XE_FORCE_WAKE_CORE_H
++#include <linux/bits.h>
++#include <linux/types.h>
++
 +#define XE_FORCE_WAKE_ACK_TIMEOUT_MS 50
 +#define for_each_fw_domain_masked(domain__, mask__, fw__, tmp__) \
 +	for (tmp__ = (mask__); tmp__; tmp__ &= ~BIT(ffs(tmp__) - 1)) \
@@ -720,16 +646,18 @@ index 0000000000000000000000000000000000000000..c74ebce9c990f1d7ebe40e3e853a88c7
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_domain_types.h b/drivers/gpu/drm/xe/xe_force_wake_domain_types.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d3bc8fb0f1362453f55c97a91df93394aaafd440
+index 0000000000000000000000000000000000000000..2eec900069df2d6d6a32f99a2fffa7387f3c5463
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_domain_types.h
-@@ -0,0 +1,81 @@
+@@ -0,0 +1,83 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Copyright © 2022 Intel Corporation
 + */
 +#ifndef XE_FORCE_WAKE_DOMAIN_TYPES_H
 +#define XE_FORCE_WAKE_DOMAIN_TYPES_H
++#include <linux/bits.h>
++
 +#include "regs/xe_reg_type.h"
 +enum xe_force_wake_domain_id {
 +	XE_FW_DOMAIN_ID_GT = 0,
@@ -807,16 +735,19 @@ index 0000000000000000000000000000000000000000..d3bc8fb0f1362453f55c97a91df93394
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_force_wake_gt.h b/drivers/gpu/drm/xe/xe_force_wake_gt.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb76250fbff245239ee72c145a7ca9246c261fe5
+index 0000000000000000000000000000000000000000..b433db476b8a50c9cb7b4bb0769c426399b74c24
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_force_wake_gt.h
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,33 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * Copyright © 2022 Intel Corporation
 + */
 +#ifndef XE_FORCE_WAKE_GT_H
 +#define XE_FORCE_WAKE_GT_H
++#include <linux/errno.h>
++#include <linux/types.h>
++
 +static inline struct xe_reg xe_force_wake_gt_ack(u32 graphics_verx100)
 +{
 +	if (graphics_verx100 >= 1270)
@@ -997,14 +928,17 @@ index a351c578b17055b31d03f5cbf8ba06a71590c624..fee6f588e4c816e9d0d81316dd378036
  		ggtt->pt_ops =
 diff --git a/drivers/gpu/drm/xe/xe_ggtt_probe_core.h b/drivers/gpu/drm/xe/xe_ggtt_probe_core.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..56ee1f3119560197db8f7e047d0787db2c43a0ec
+index 0000000000000000000000000000000000000000..5c4d965803c7a947fdcf54f8439d2cee40141d4a
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_ggtt_probe_core.h
-@@ -0,0 +1,44 @@
+@@ -0,0 +1,47 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2021 Intel Corporation */
 +#ifndef XE_GGTT_PROBE_CORE_H
 +#define XE_GGTT_PROBE_CORE_H
++#include <linux/sizes.h>
++#include <linux/types.h>
++
 +#ifndef XE_GGTT_PROBE_ASSERT
 +#error "GGTT probe requires the real caller's invariant binding"
 +#endif
@@ -1254,14 +1188,16 @@ index 21e0dad9a4815428d87cebbcb1a8b596a77f0251..bccb3b9f36f448ffbad5006f6a02ac20
  	/* H2G header in cmd[1] replaces action[0] so: */
 diff --git a/drivers/gpu/drm/xe/xe_guc_ct_message.h b/drivers/gpu/drm/xe/xe_guc_ct_message.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..24d42aaea292a612ea3af80416faa383a9c4b4a7
+index 0000000000000000000000000000000000000000..b00ecfbc5ba993333855b2dad050d8a43f0270eb
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_guc_ct_message.h
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,24 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2022 Intel Corporation */
 +#ifndef XE_GUC_CT_MESSAGE_H
 +#define XE_GUC_CT_MESSAGE_H
++
++#include <linux/bitfield.h>
 +
 +#include "abi/guc_communication_ctb_abi.h"
 +
@@ -1282,16 +1218,20 @@ index 0000000000000000000000000000000000000000..24d42aaea292a612ea3af80416faa383
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_guc_reset_core.h b/drivers/gpu/drm/xe/xe_guc_reset_core.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..e01f24224f80360d3fe10d5028fff22fb25fe2aa
+index 0000000000000000000000000000000000000000..92de6c849e853dd17a0894861acae3b1e0cee382
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_guc_reset_core.h
-@@ -0,0 +1,129 @@
+@@ -0,0 +1,133 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Copyright © 2022 Intel Corporation
 + */
 +#ifndef XE_GUC_RESET_CORE_H
 +#define XE_GUC_RESET_CORE_H
++#include <linux/bitfield.h>
++#include <linux/errno.h>
++#include <linux/types.h>
++
 +/* Whole original GuC reset/SRAM policy. Every binding is mandatory; includers
 + * retain the actual forcewake, VF/WA selection, ordered I/O, poll and diagnostics.
 + * This does not sanitize software state or establish whole-device quiescence. */
@@ -1438,14 +1378,16 @@ index 57afe21444b183f298a106e29f0e802d2ce343b3..f7a2eeb05402bb61fbfea3500bf058ab
  	}
 diff --git a/drivers/gpu/drm/xe/xe_huc_role.h b/drivers/gpu/drm/xe/xe_huc_role.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..4c2bc05e091d0ec756877a1ef11df1010c6e20c1
+index 0000000000000000000000000000000000000000..ca67f5bdd5a421f16a01f686abd8121337893152
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_huc_role.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,12 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2022 Intel Corporation */
 +#ifndef XE_HUC_ROLE_H
 +#define XE_HUC_ROLE_H
++#include <linux/types.h>
++
 +/* Original xe_huc_init no-main-GT-HuC rule, not missing-firmware policy. */
 +static inline bool xe_huc_role_unsupported(bool media_gt, unsigned graphics_verx100)
 +{
@@ -1619,15 +1561,18 @@ index 78adb303b66303e7373b0af4b0b2f43abe80c5bd..d64970bcac4ce1ccfb6a208a445e1699
   * xe_mmio_wait32() - Wait for a register to match the desired masked value
 diff --git a/drivers/gpu/drm/xe/xe_mmio_poll.h b/drivers/gpu/drm/xe/xe_mmio_poll.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..3cf1c9c588eaba02a97bd48f931f3ec15f681ce5
+index 0000000000000000000000000000000000000000..62d27324674c12f287360da556ee79dcc64a338d
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_mmio_poll.h
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,60 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * Copyright © 2021-2023 Intel Corporation
 + */
 +/* Original masked/deadline/final-reread algorithm; includer binds actual I/O/time. */
++#include <linux/errno.h>
++#include <linux/types.h>
++
 +static int XE_MMIO_POLL_NAME(XE_MMIO_POLL_CONTEXT *mmio, struct xe_reg reg, u32 mask, u32 val,
 +			    u32 timeout_us, u32 *out_val, bool atomic, bool expect_match)
 +{
@@ -2118,32 +2063,6 @@ index fad5b5a5ed4a0ca256a98168e4beda1dab3f5bd5..21265643b78935767293ca1759905c5d
  
  	xe_assert(xe, xe->pat.ops->dump);
  	xe_assert(xe, xe->pat.ops->program_graphics);
-diff --git a/drivers/gpu/drm/xe/xe_pat.h b/drivers/gpu/drm/xe/xe_pat.h
-index 7060f66e1d638af52d9b77e3d212a5044895ad62..9b800b9abb337a37311c14fdd357f9b57a587636 100644
---- a/drivers/gpu/drm/xe/xe_pat.h
-+++ b/drivers/gpu/drm/xe/xe_pat.h
-@@ -6,13 +6,21 @@
- #ifndef _XE_PAT_H_
- #define _XE_PAT_H_
- 
-+#ifdef STELA_NATIVE
-+#include "xe_scalar_types.h"
-+#else
- #include <linux/types.h>
-+#endif
- 
- struct drm_printer;
- struct xe_device;
- struct xe_gt;
- 
-+#ifdef STELA_NATIVE
-+#define XE_PAT_INVALID_IDX UINT16_MAX
-+#else
- #define XE_PAT_INVALID_IDX	U16_MAX
-+#endif
- 
- /**
-  * struct xe_pat_table_entry - The pat_index encoding and other meta information.
 diff --git a/drivers/gpu/drm/xe/xe_pat_program.h b/drivers/gpu/drm/xe/xe_pat_program.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..677560e5772c00a294f6ef67c3658afe43ca42df
@@ -2177,14 +2096,17 @@ index 0000000000000000000000000000000000000000..677560e5772c00a294f6ef67c3658afe
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pat_select.h b/drivers/gpu/drm/xe/xe_pat_select.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..833fe20b83bbee4ddc4480c2d72dd0e4931d9ac9
+index 0000000000000000000000000000000000000000..64a92b586ffe7f982e6d2ef167fb9cf2f52708d7
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pat_select.h
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,135 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2023 Intel Corporation */
 +#ifndef XE_PAT_SELECT_H
 +#define XE_PAT_SELECT_H
++#include <linux/array_size.h>
++#include <linux/types.h>
++
 +#include "xe_cache_level.h"
 +#include "xe_platform_types.h"
 +#include "xe_pat_tables.h"
@@ -2315,14 +2237,16 @@ index 0000000000000000000000000000000000000000..833fe20b83bbee4ddc4480c2d72dd0e4
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pat_tables.h b/drivers/gpu/drm/xe/xe_pat_tables.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..a3f9a44f61b49387af4fc021719b5dc4efe00b38
+index 0000000000000000000000000000000000000000..367f9250f0601dc4b197b09cf0f2c8bd508b1e40
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pat_tables.h
-@@ -0,0 +1,238 @@
+@@ -0,0 +1,240 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2023 Intel Corporation */
 +#ifndef XE_PAT_TABLES_H
 +#define XE_PAT_TABLES_H
++#include <drm/intel/reg_bits.h>
++
 +#include "xe_pat.h"
 +#define _PAT_ATS				0x47fc
 +#define _PAT_INDEX(index)			_PICK_EVEN_2RANGES(index, 8, \
@@ -3132,16 +3056,19 @@ index 9cd873708136c5ac6cedc1360e89af67c446a1b2..a6a5da0b8b58af0196e16eb3331625a7
  		drm_info(&xe->drm, "tile_count: %d, reduced_tile_count %d\n",
 diff --git a/drivers/gpu/drm/xe/xe_pci_device_info.h b/drivers/gpu/drm/xe/xe_pci_device_info.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..0483678e7ee01cea263b8eb537e260605f1ef285
+index 0000000000000000000000000000000000000000..86153be4d09130b405c16e67f2c2b144910f4e16
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pci_device_info.h
-@@ -0,0 +1,492 @@
+@@ -0,0 +1,495 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * Copyright © 2021 Intel Corporation
 + */
 +#ifndef XE_PCI_DEVICE_INFO_H
 +#define XE_PCI_DEVICE_INFO_H
++#include <linux/bits.h>
++#include <linux/types.h>
++
 +#ifndef XE_PCI_ID_TYPE
 +#define XE_PCI_ID_TYPE struct pci_device_id
 +#endif
@@ -3630,16 +3557,21 @@ index 0000000000000000000000000000000000000000..0483678e7ee01cea263b8eb537e26060
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pci_runtime.h b/drivers/gpu/drm/xe/xe_pci_runtime.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..d44ff5f065492fa5409f0d22f5734a28b500b033
+index 0000000000000000000000000000000000000000..c088e2b424c31ba3d3935f23849cb8478f09693d
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_pci_runtime.h
-@@ -0,0 +1,65 @@
+@@ -0,0 +1,66 @@
 +// SPDX-License-Identifier: MIT
 +/*
 + * Copyright © 2021 Intel Corporation
 + */
 +#ifndef XE_PCI_RUNTIME_H
 +#define XE_PCI_RUNTIME_H
++#include <drm/intel/reg_bits.h>
++#include <kunit/static_stub.h>
++#include <linux/array_size.h>
++#include <linux/types.h>
++
 +static const struct xe_subplatform_desc *
 +find_subplatform(const struct xe_device_desc *desc, u16 devid)
 +{
@@ -3676,9 +3608,7 @@ index 0000000000000000000000000000000000000000..d44ff5f065492fa5409f0d22f5734a28
 +
 +static const struct xe_ip *find_graphics_ip(unsigned int verx100)
 +{
-+#ifndef STELA_NATIVE
 +	KUNIT_STATIC_STUB_REDIRECT(find_graphics_ip, verx100);
-+#endif
 +
 +	for (int i = 0; i < ARRAY_SIZE(graphics_ips); i++)
 +		if (graphics_ips[i].verx100 == verx100)
@@ -3688,9 +3618,7 @@ index 0000000000000000000000000000000000000000..d44ff5f065492fa5409f0d22f5734a28
 +
 +static const struct xe_ip *find_media_ip(unsigned int verx100)
 +{
-+#ifndef STELA_NATIVE
 +	KUNIT_STATIC_STUB_REDIRECT(find_media_ip, verx100);
-+#endif
 +
 +	for (int i = 0; i < ARRAY_SIZE(media_ips); i++)
 +		if (media_ips[i].verx100 == verx100)
@@ -3700,18 +3628,10 @@ index 0000000000000000000000000000000000000000..d44ff5f065492fa5409f0d22f5734a28
 +
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_pci_types.h b/drivers/gpu/drm/xe/xe_pci_types.h
-index 5b85e2c24b7b2874192b9de89cbead8346688e99..16d61c8fdbdc32300ba39f3e9c895436fa4277b6 100644
+index 5b85e2c24b7b2874192b9de89cbead8346688e99..60a14591ce9db0dda3e286f0981602816d647a8a 100644
 --- a/drivers/gpu/drm/xe/xe_pci_types.h
 +++ b/drivers/gpu/drm/xe/xe_pci_types.h
-@@ -6,10 +6,16 @@
- #ifndef _XE_PCI_TYPES_H_
- #define _XE_PCI_TYPES_H_
- 
-+#ifdef STELA_NATIVE
-+#include "xe_scalar_types.h"
-+#else
- #include <linux/types.h>
-+#endif
+@@ -10,6 +10,8 @@
  
  #include "xe_platform_types.h"
  
@@ -3753,23 +3673,6 @@ index be602a763ff32b75c96891c82230af3a3a560354..366e69dea3cb7833bac2d8e853de0c80
  		u64 skip_to = round_down(end, 1ull << shift);
  
  		if (skip_to > next) {
-diff --git a/drivers/gpu/drm/xe/xe_pt_walk.h b/drivers/gpu/drm/xe/xe_pt_walk.h
-index e91995fa703b0347710c9aaa17406ba72afb6322..02b52b767c63f048772b4f33293e28ce51f8335b 100644
---- a/drivers/gpu/drm/xe/xe_pt_walk.h
-+++ b/drivers/gpu/drm/xe/xe_pt_walk.h
-@@ -5,8 +5,12 @@
- #ifndef _XE_PT_WALK_H_
- #define _XE_PT_WALK_H_
- 
-+#ifdef STELA_NATIVE
-+#include "../stela/pt_walk_platform.h"
-+#else
- #include <linux/pagewalk.h>
- #include <linux/types.h>
-+#endif
- 
- /**
-  * struct xe_ptw - base class for driver pagetable subclassing.
 diff --git a/drivers/gpu/drm/xe/xe_ring_emit.h b/drivers/gpu/drm/xe/xe_ring_emit.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..7c309b81f54ad21f61ff9d3e78329cd2c0c7d729
@@ -3908,38 +3811,6 @@ index 39a670e91ba7221755e836ba6a835db076f4a7ee..bc0fac3c47da841b3e27daeb93288cff
  static int emit_render_cache_flush(struct xe_sched_job *job, u32 *dw, int i)
  {
  	struct xe_exec_queue *q = job->q;
-diff --git a/drivers/gpu/drm/xe/xe_scalar_types.h b/drivers/gpu/drm/xe/xe_scalar_types.h
-new file mode 100644
-index 0000000000000000000000000000000000000000..ef40859bbd58fa6a8f37adb3e36811c0949eb642
---- /dev/null
-+++ b/drivers/gpu/drm/xe/xe_scalar_types.h
-@@ -0,0 +1,26 @@
-+/* SPDX-License-Identifier: MIT */
-+#ifndef XE_SCALAR_TYPES_H
-+#define XE_SCALAR_TYPES_H
-+/* Fixed-width native definitions for retained pure types. No Linux services. */
-+#include <stdbool.h>
-+#include <stddef.h>
-+#include <stdint.h>
-+typedef uint8_t u8;
-+typedef uint16_t u16;
-+typedef uint32_t u32;
-+typedef uint64_t u64;
-+typedef int64_t s64;
-+#define BIT(n) (UINT64_C(1) << (n))
-+#define GENMASK(h, l) ((UINT64_MAX << (l)) & (UINT64_MAX >> (63 - (h))))
-+#define GENMASK_ULL(h, l) GENMASK(h, l)
-+#define SZ_4M (UINT32_C(4) * 1024 * 1024)
-+#define const_ilog2(n) (31 - __builtin_clz((unsigned)(n)))
-+#ifdef static_assert
-+#undef static_assert
-+#endif
-+#define static_assert(c) _Static_assert((c), #c)
-+#define REG_BIT(n) (UINT32_C(1) << (n))
-+#define REG_GENMASK(h, l) ((UINT32_MAX << (l)) & (UINT32_MAX >> (31 - (h))))
-+#define REG_FIELD_GET(mask, value) (((u32)(value) & (u32)(mask)) >> __builtin_ctz((u32)(mask)))
-+#define REG_FIELD_PREP(mask, value) (((u32)(value) << __builtin_ctz((u32)(mask))) & (u32)(mask))
-+#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw.c b/drivers/gpu/drm/xe/xe_uc_fw.c
 index 3f08a3b54062842f268da77f913aab57c3c09fb4..0c59ecd46ea08fd121e878067e60fa9e1241aa40 100644
 --- a/drivers/gpu/drm/xe/xe_uc_fw.c
@@ -4445,14 +4316,21 @@ index 3f08a3b54062842f268da77f913aab57c3c09fb4..0c59ecd46ea08fd121e878067e60fa9e
  	default:
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_catalog.h b/drivers/gpu/drm/xe/xe_uc_fw_catalog.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..60323b01c97953f53a47f5119966c142325e2ad8
+index 0000000000000000000000000000000000000000..09ad4f84ce04530050f4a93bde24c82550c7d391
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_catalog.h
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,152 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2022 Intel Corporation */
 +#ifndef XE_UC_FW_CATALOG_H
 +#define XE_UC_FW_CATALOG_H
++#include <linux/array_size.h>
++#include <linux/stringify.h>
++#include <linux/types.h>
++
++#include "xe_gt_type.h"
++#include "xe_platform_types.h"
++
 +struct uc_fw_entry {
 +	enum xe_platform platform;
 +	enum xe_gt_type gt_type;
@@ -4746,16 +4624,20 @@ index 0000000000000000000000000000000000000000..812703cd272fcd7dbf7dd6461c62bd30
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_css.h b/drivers/gpu/drm/xe/xe_uc_fw_css.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..76a76b0b3ab6f7582add890b365a87833a56731a
+index 0000000000000000000000000000000000000000..384b28e94e5309222ab443760f550ebdb9e961a3
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_uc_fw_css.h
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,136 @@
 +/* SPDX-License-Identifier: MIT */
 +/*
 + * Copyright © 2022 Intel Corporation
 + */
 +#ifndef XE_UC_FW_CSS_H
 +#define XE_UC_FW_CSS_H
++#include <linux/bitfield.h>
++#include <linux/errno.h>
++#include <linux/types.h>
++
 +/* Required diagnostic/invariant adapters; the original caller retains real
 + * logging and GT assertions. No device, BO, status or OS service is emulated. */
 +enum xe_uc_fw_css_diagnostic {
@@ -4882,22 +4764,6 @@ index 0000000000000000000000000000000000000000..76a76b0b3ab6f7582add890b365a8783
 +	return 0;
 +}
 +#endif
-diff --git a/drivers/gpu/drm/xe/xe_uc_fw_types.h b/drivers/gpu/drm/xe/xe_uc_fw_types.h
-index 2ebe8c9db6ce1ea64f2f39f7458650d8f014774e..7f0f1691c7532976e225eb0aa86841603519423e 100644
---- a/drivers/gpu/drm/xe/xe_uc_fw_types.h
-+++ b/drivers/gpu/drm/xe/xe_uc_fw_types.h
-@@ -6,7 +6,11 @@
- #ifndef _XE_UC_FW_TYPES_H_
- #define _XE_UC_FW_TYPES_H_
- 
-+#ifdef STELA_NATIVE
-+#include "xe_scalar_types.h"
-+#else
- #include <linux/types.h>
-+#endif
- 
- struct xe_bo;
- 
 diff --git a/drivers/gpu/drm/xe/xe_uc_fw_version.h b/drivers/gpu/drm/xe/xe_uc_fw_version.h
 new file mode 100644
 index 0000000000000000000000000000000000000000..bc8e37e534a2047419ec48892ebd9e7ba8275bfe
@@ -5456,14 +5322,17 @@ index 0000000000000000000000000000000000000000..e42b7b1d7fee9d971e598e171d0c7a81
 +#endif
 diff --git a/drivers/gpu/drm/xe/xe_wopcm_size.h b/drivers/gpu/drm/xe/xe_wopcm_size.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..ddff1a56d0dce91897c4ad96d98f63cef78cd82f
+index 0000000000000000000000000000000000000000..d1f4339b9c96e0fc0ecd45d81050bfc57f211829
 --- /dev/null
 +++ b/drivers/gpu/drm/xe/xe_wopcm_size.h
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,27 @@
 +/* SPDX-License-Identifier: MIT */
 +/* Copyright © 2022 Intel Corporation */
 +#ifndef XE_WOPCM_SIZE_H
 +#define XE_WOPCM_SIZE_H
++#include <linux/sizes.h>
++#include <linux/types.h>
++
 +/* Default WOPCM size is 2MB from Gen11, 1MB on previous platforms */
 +/* FIXME: Larger size require for some platforms, do a proper probe sooner or later */
 +#define DGFX_WOPCM_SIZE			SZ_4M
@@ -5484,19 +5353,3 @@ index 0000000000000000000000000000000000000000..ddff1a56d0dce91897c4ad96d98f63ce
 +}
 +
 +#endif
-diff --git a/drivers/gpu/drm/xe/xe_wopcm_types.h b/drivers/gpu/drm/xe/xe_wopcm_types.h
-index 99d34837c408a7a5035ae9b0fdfec53a612b2b0a..38de3af3214aa9028ed007534af48ca85a6b6d4e 100644
---- a/drivers/gpu/drm/xe/xe_wopcm_types.h
-+++ b/drivers/gpu/drm/xe/xe_wopcm_types.h
-@@ -6,7 +6,11 @@
- #ifndef _XE_WOPCM_TYPES_H_
- #define _XE_WOPCM_TYPES_H_
- 
-+#ifdef STELA_NATIVE
-+#include "xe_scalar_types.h"
-+#else
- #include <linux/types.h>
-+#endif
- 
- /**
-  * struct xe_wopcm - Overall WOPCM info and WOPCM regions.

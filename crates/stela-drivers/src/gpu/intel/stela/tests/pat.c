@@ -1,19 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 #include "pat_donor.h"
 #include "../pat.h"
-#include "../../xe/regs/xe_reg_defs.h"
-#include "pat_compile_defs.h"
+#include "regs/xe_reg_defs.h"
+#include <linux/build_bug.h>
 #include <drm/intel/pick.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
-#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#include <linux/array_size.h>
 struct diagnostics {bool warning,missing;};
 #define XE_PAT_SELECT_WARN(context, condition) (((struct diagnostics *)(context))->warning |= !!(condition))
 #define XE_PAT_SELECT_MISSING(context, version) ((void)(version), ((struct diagnostics *)(context))->missing=true)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmissing-field-initializers"
-#include "../../xe/xe_pat_select.h"
+#include "xe_pat_select.h"
 #pragma clang diagnostic pop
 static void record(void *context,struct xe_reg reg,u32 value)
 {
@@ -23,7 +23,7 @@ static void record(void *context,struct xe_reg reg,u32 value)
 #define XE_PAT_PROGRAM_WRITE(context,reg,value) record(context,reg,value)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsign-conversion"
-#include "../../xe/xe_pat_program.h"
+#include "xe_pat_program.h"
 #pragma clang diagnostic pop
 static void selected(enum xe_platform platform,uint32_t graphics,bool discrete,bool llc,
                      struct stela_pat_test_policy *out,struct xe_pat_selection *selection)

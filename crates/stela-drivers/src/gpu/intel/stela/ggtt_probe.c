@@ -1,12 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include "ggtt_probe.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_platform_types.h"
+#include <linux/sizes.h>
+#include <linux/types.h>
+#include "xe_platform_types.h"
 /* Normal Make extracts only original scalar defines from retained headers;
  * no duplicated hardware constants, Linux service shim or custom allocator. */
 #include "ggtt_probe_defs.h"
-#include "../xe/regs/xe_gtt_defs.h"
-#include "../xe/xe_wopcm_size.h"
+#include "regs/xe_gtt_defs.h"
+#include "xe_wopcm_size.h"
 static void invariant(void *context, bool condition)
 {
     (void)context;
@@ -15,7 +16,7 @@ static void invariant(void *context, bool condition)
 #define XE_GGTT_PROBE_ASSERT(context, condition) invariant(context, condition)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wsign-conversion"
-#include "../xe/xe_ggtt_probe_core.h"
+#include "xe_ggtt_probe_core.h"
 #pragma clang diagnostic pop
 int stela_intel_gsm_config(uint32_t graphics_verx100, uint16_t *offset)
 {

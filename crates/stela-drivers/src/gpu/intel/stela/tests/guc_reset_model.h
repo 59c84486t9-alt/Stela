@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: MIT */
 #ifndef STELA_GUC_RESET_MODEL_H
 #define STELA_GUC_RESET_MODEL_H
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/regs/xe_gt_regs.h"
-#include "../../xe/regs/xe_guc_regs.h"
-#include "../../xe/abi/guc_errors_abi.h"
+#include <linux/types.h>
+#include "regs/xe_gt_regs.h"
+#include "regs/xe_guc_regs.h"
+#include "abi/guc_errors_abi.h"
 struct reset_test_model;
 struct reset_test_mmio { struct reset_test_model *owner; };
 struct reset_test_event { uint32_t kind, reg, a, b, c; int64_t ns; };

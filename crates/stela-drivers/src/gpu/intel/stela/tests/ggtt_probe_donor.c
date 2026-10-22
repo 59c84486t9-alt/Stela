@@ -2,8 +2,8 @@
 /* Frozen original arithmetic/assertions, separate original-source object.
  * Scalar test context only, not a fake Linux GGTT/device/MMIO implementation. */
 #include "ggtt_probe_donor.h"
-#include "../../xe/xe_scalar_types.h"
-#include "../../xe/regs/xe_gtt_defs.h"
+#include <linux/types.h>
+#include "regs/xe_gtt_defs.h"
 #include "ggtt_probe_defs.h"
 #include <assert.h>
 #pragma clang diagnostic push

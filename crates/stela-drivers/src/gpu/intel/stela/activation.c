@@ -4,16 +4,16 @@
 #include "wopcm.h"
 #include "pat.h"
 #include "guc_reset.h"
-#include "../xe/xe_gt_type.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_pci_types.h"
-#include "../xe/xe_engine_ids.h"
-#include "../xe/regs/xe_gt_regs.h"
-#include "../xe/regs/xe_regs.h"
-#include "../xe/xe_force_wake_domain_types.h"
+#include "xe_gt_type.h"
+#include <linux/types.h>
+#include "xe_pci_types.h"
+#include "xe_engine_ids.h"
+#include "regs/xe_gt_regs.h"
+#include "regs/xe_regs.h"
+#include "xe_force_wake_domain_types.h"
 
 /* Port only scalar/diagnostic spelling. There is no kernel service shim. */
-#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#include <linux/array_size.h>
 #define __maybe_unused __attribute__((unused))
 #define __diag_push()
 #define __diag_pop()
@@ -25,8 +25,8 @@
 #undef ETIMEDOUT
 #endif
 #define ETIMEDOUT 110
-#include "../xe/xe_force_wake_core.h"
-#include "../xe/xe_force_wake_gt.h"
+#include "xe_force_wake_core.h"
+#include "xe_force_wake_gt.h"
 
 /* Same entire original ID/descriptor block, including class filters/order.
  * This is a native table row, not a fabricated Linux pci_dev/device object. */
@@ -41,9 +41,9 @@ struct stela_intel_pci_match {
 #include <drm/intel/pciids.h>
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Winitializer-overrides"
-#include "../xe/xe_pci_device_info.h"
+#include "xe_pci_device_info.h"
 #pragma clang diagnostic ignored "-Wsign-compare"
-#include "../xe/xe_pci_runtime.h"
+#include "xe_pci_runtime.h"
 #pragma clang diagnostic pop
 
 struct stela_intel_activation {
@@ -111,7 +111,7 @@ static int64_t add_us(int64_t time, int64_t us) { return time + us * 1000; }
 #define XE_MMIO_POLL_DELAY(mmio, wait, atomic) \
     (mmio)->io->delay_us((mmio)->context, (uint32_t)(wait), \
                          (uint32_t)((atomic) ? (wait) : ((wait) << 1)), (atomic))
-#include "../xe/xe_mmio_poll.h"
+#include "xe_mmio_poll.h"
 
 int stela_intel_activation_init(void *storage, size_t bytes,
     const struct stela_intel_activation_io *io, void *context, uint32_t vendor,

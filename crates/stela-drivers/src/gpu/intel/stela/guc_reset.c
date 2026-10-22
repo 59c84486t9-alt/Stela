@@ -1,14 +1,13 @@
 /* SPDX-License-Identifier: MIT */
 #include "guc_reset.h"
-#include "../xe/xe_scalar_types.h"
-#include "../xe/xe_gt_type.h"
-#include "../xe/xe_force_wake_domain_types.h"
-#include "../xe/regs/xe_gt_regs.h"
-#include "../xe/regs/xe_guc_regs.h"
-#include "../xe/abi/guc_errors_abi.h"
-#define EIO 5
-#define ETIMEDOUT 110
-#define FIELD_PREP(mask, value) REG_FIELD_PREP(mask, value)
+#include <linux/types.h>
+#include "xe_gt_type.h"
+#include "xe_force_wake_domain_types.h"
+#include "regs/xe_gt_regs.h"
+#include "regs/xe_guc_regs.h"
+#include "abi/guc_errors_abi.h"
+#include <linux/bitfield.h>
+#include <linux/errno.h>
 
 /* Qualification proof, not a copied WA selector. This is the unchanged entry
  * emitted by the original OOB generator. Both original version-range branches
@@ -73,7 +72,7 @@ static int64_t add_us(int64_t time, int64_t us) { return time + us * 1000; }
 #define XE_MMIO_POLL_DELAY(mmio, wait, atomic) \
     (mmio)->io->delay_us((mmio)->context, (uint32_t)(wait), \
                          (uint32_t)((atomic) ? (wait) : ((wait) << 1)), (atomic))
-#include "../xe/xe_mmio_poll.h"
+#include "xe_mmio_poll.h"
 #define XE_GUC_RESET_CONTEXT struct native_reset
 #define XE_GUC_RESET_READ native_read
 #define XE_GUC_RESET_WRITE native_write
@@ -92,7 +91,7 @@ static int64_t add_us(int64_t time, int64_t us) { return time + us * 1000; }
     ((n)->result->warnings |= 2u, (n)->result->sram_status = (value))
 #define XE_GUC_RESET_ERROR_TIMEOUT(n, value) ((n)->result->gdrst = (value))
 #define XE_GUC_RESET_ERROR_STATUS(n, value) ((n)->result->guc_status = (value))
-#include "../xe/xe_guc_reset_core.h"
+#include "xe_guc_reset_core.h"
 
 int stela_intel_guc_reset(const struct stela_intel_activation_io *io, void *context,
     struct stela_intel_activation *activation, const struct stela_intel_activation_facts *facts,
