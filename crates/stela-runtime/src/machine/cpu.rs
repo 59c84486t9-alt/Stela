@@ -134,10 +134,10 @@ pub struct AppleState {
     /// VM_TMR_FIQ_ENA_EL2: bit 0 lets the EL1 virtual timer, bit 1 the EL1
     /// physical timer, signal FIQ.
     pub vm_timer_fiq: u64,
-    /// SPR_LOCKDOWN_EL2, unknown until written, and whether
-    /// `S3_4_C15_C12_5` has committed it.
-    pub spr_lockdown: Option<u64>,
-    pub spr_locked: bool,
+    /// SPR_LOCKDOWN_EL2 and SPR_LOCKDOWN_EL1, and the bits of
+    /// `S3_4_C15_C12_5` that commit them (`registers::SprLockdown`).
+    pub spr_lockdown: [u64; 2],
+    pub spr_commit: u64,
     /// CYC_OVRD (`registers::CYC_OVRD`), 0 from reset (inference).
     pub cyc_ovrd: u64,
     /// The Apple generic timer's own registers (`timer::agt`).
@@ -170,8 +170,8 @@ impl Default for AppleState {
             // Both EL1 timers signal FIQ until EL2 software says otherwise
             // (inference: m1n1 and SPTM program it explicitly).
             vm_timer_fiq: VM_TIMER_FIQ_VIRTUAL | VM_TIMER_FIQ_PHYSICAL,
-            spr_lockdown: None,
-            spr_locked: false,
+            spr_lockdown: [0; 2],
+            spr_commit: 0,
             cyc_ovrd: 0,
             generic_timer: super::timer::agt::State::new(super::Chip::DEFAULT),
             impdef: super::impdef::Registers::default(),

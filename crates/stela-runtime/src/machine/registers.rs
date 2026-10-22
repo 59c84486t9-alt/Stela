@@ -174,6 +174,7 @@ pub mod encodings {
         // m1n1 `cpu_regs.h` "Lockdown registers"; the commit register has no
         // public name (see `Apple::SprLockdown`).
         SPR_LOCKDOWN_EL2 = 3, 4, 15, 0, 5;
+        SPR_LOCKDOWN_EL1 = 3, 4, 15, 0, 6;
         SPR_LOCKDOWN_COMMIT = 3, 4, 15, 12, 5;
         CYC_OVRD = 3, 5, 15, 5, 0;
     }
@@ -378,16 +379,65 @@ enum Apple {
     PhysicalCountAlias,
     /// AGTCNTRDIR of the EL1&0 (0) or EL2&0 (1) regime.
     TimerRedirect(usize),
-    /// SPR_LOCKDOWN_EL2 (`false`) and `S3_4_C15_C12_5` (`true`). SPTM 26A434
-    /// writes SPR_LOCKDOWN_EL2 once per PE, with every bit except 4, 27 and
-    /// 63, after its MMIO lockdown (`__text+0x181a4`), then writes 1 to
-    /// `S3_4_C15_C12_5` (`__text+0x181bc`); neither is read. Inferred from
-    /// that order: the first selects what is locked and bit 0 of the second
-    /// commits it. Once committed, a write that changes either stops. What
-    /// each bit protects is not documented, so the commit makes no other
-    /// register read-only here (docs/design/system.md records the gap).
-    SprLockdown(bool),
+    /// SPR_LOCKDOWN_EL2 (0) or SPR_LOCKDOWN_EL1 (1), XNU's `MSR_RO_CTL`
+    /// ([`SPR_LOCK_GROUPS`]), each committed by its bit of
+    /// [`Apple::SprCommit`].
+    SprLockdown(usize),
+    /// `S3_4_C15_C12_5`, XNU's `MSR_LOCK` (`MSR_LOCK_VAL` bit 0 commits).
+    SprCommit,
     CycleOverride,
+}
+
+/// The SPR lockdown (XNU `xnu-7195.141.2` `pexpert/pexpert/arm64/spr_locks.h`,
+/// `HAS_TWO_STAGE_SPR_LOCK`: "SPR locks are split into RO_CTL and LOCK
+/// registers"). Bit n of `MSR_RO_CTL` makes register group n read-only once
+/// bit 0 of `MSR_LOCK` commits it. XNU's value leaves bits 4 (HID4), 27
+/// (CYC_OVRD) and 47 (ACC_OVRD) writable, and every 26A434 SPTM of the M1 to
+/// M3 families writes it to SPR_LOCKDOWN_EL2 (`S3_4_C15_C0_5`, m1n1) as
+/// 0xffff_7fff_f7ff_ffef, or on some M3 parts with bit 47 also set
+/// (sptm.t8122 file 0xbbf44..0xbbf70). The M3 SPTMs then write all ones to
+/// SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`) and commit with 3 instead of 1
+/// (file 0xbbf74..0xbbf80): bit 1 commits that second bank (inferred from
+/// the pairing; which registers it guards is not established, so none is
+/// read-only through it). No SPTM reads either bank. XNU's lock test writes
+/// a locked HID8 and expects a synchronous abort that `sleh.c` takes as
+/// `ESR_EC_UNCATEGORIZED` with ISS 0, and HID8 unchanged
+/// (`osfmk/arm64/platform_tests.c` `arm64_spr_lock_test`): so a committed
+/// group's write is UNDEFINED, at every EL. Both banks read what was
+/// written, 0 from reset (Asahi `hw/cpu/system-register-dumps.md`: 0 under
+/// m1n1, and the written value under Darwin 20.3, less bits the M1 does not
+/// implement, which this model keeps). The M4 and later SPTMs write
+/// neither, and the M4-and-later AppleProcessorTrace `defeatureCore`
+/// clears bits 1, 53 and 54 of SPR_LOCKDOWN_EL2 before writing HID1 or
+/// EHID1 (kernelcache.release.mac16g 0xfffffe0009cb46a8..0xfffffe0009cb4708).
+/// A change of a committed bank or commit bit has no documented outcome and
+/// stops.
+const SPR_LOCK_COMMIT_BITS: u64 = 0b11;
+
+/// The registers whose SPR lockdown group is established: HID1 and HID4 by
+/// XNU's `MSR_RO_CTL_HID1` and `MSR_RO_CTL_HID4`, EHID1 by `defeatureCore`
+/// clearing bit 1 to write it, CYC_OVRD and ACC_OVRD by XNU's names, and
+/// EHID4 with HID4 (inference: 26A434 XNU writes it on E cores after the
+/// lockdown). HID8, which XNU's test shows locked, is UNDEFINED here
+/// already: no 26A434 component accesses it. Other registers' groups are not
+/// public, so the lockdown leaves them writable (docs/design/system.md).
+const SPR_LOCK_GROUPS: [(Encoding, u32); 6] = [
+    (impdef::HID1, 1),
+    (impdef::EHID1, 1),
+    (impdef::HID4, 4),
+    (impdef::EHID4, 4),
+    (CYC_OVRD, 27),
+    (impdef::ACC_OVRD, 47),
+];
+
+impl Cpu {
+    /// Whether SPR_LOCKDOWN_EL2's committed groups make `encoding` read-only.
+    fn spr_read_only(&self, encoding: Encoding) -> bool {
+        self.apple.spr_commit & 1 != 0
+            && SPR_LOCK_GROUPS.iter().any(|&(locked, group)| {
+                locked == encoding && self.apple.spr_lockdown[0] >> group & 1 != 0
+            })
+    }
 }
 
 fn bank_read(bank: &GuardedBank, encoding: Encoding) -> u64 {
@@ -497,8 +547,9 @@ impl Cpu {
                 ))));
             }
             ACNTPCT_EL0 => Apple::PhysicalCountAlias,
-            SPR_LOCKDOWN_EL2 => return el2(Apple::SprLockdown(false)),
-            SPR_LOCKDOWN_COMMIT => return el2(Apple::SprLockdown(true)),
+            SPR_LOCKDOWN_EL2 => return el2(Apple::SprLockdown(0)),
+            SPR_LOCKDOWN_EL1 => return el2(Apple::SprLockdown(1)),
+            SPR_LOCKDOWN_COMMIT => return el2(Apple::SprCommit),
             CYC_OVRD => Apple::CycleOverride,
             _ => return None,
         }))
@@ -642,6 +693,9 @@ impl Cpu {
         }
         if self.pstate.el == 1 && !self.in_host() && self.hcr(HCR_TIDCP) {
             return Outcome::Trapped(Some(2));
+        }
+        if !read && self.spr_read_only(encoding) {
+            return Outcome::Undefined;
         }
         if let Some(register) = super::ctrr::decode(self.registers.chip(), encoding) {
             return self.ctrr_access(register, read, value);
@@ -931,11 +985,8 @@ impl Apple {
             Self::CountAlias | Self::PhysicalCountAlias => {
                 unreachable!("the caller completes the count alias")
             }
-            Self::SprLockdown(_) => {
-                return Outcome::Refused(Refusal::UnsupportedSetting(
-                    "read of a lockdown register no software reads",
-                ));
-            }
+            Self::SprLockdown(bank) => apple.spr_lockdown[bank],
+            Self::SprCommit => apple.spr_commit,
             Self::CycleOverride => apple.cyc_ovrd,
         })
     }
@@ -1045,20 +1096,20 @@ impl Apple {
             Self::TimerRedirect(regime) => {
                 changes.unmodeled = apple.generic_timer.set_redirect(regime, value);
             }
-            Self::SprLockdown(false) => {
-                if apple.spr_locked && apple.spr_lockdown != Some(value) {
-                    return refuse("SPR_LOCKDOWN_EL2 change after its commit");
+            Self::SprLockdown(bank) => {
+                if apple.spr_commit >> bank & 1 != 0 && apple.spr_lockdown[bank] != value {
+                    return refuse("SPR lockdown bank change after its commit");
                 }
-                apple.spr_lockdown = Some(value);
+                apple.spr_lockdown[bank] = value;
             }
-            Self::SprLockdown(true) => {
-                if value & !1 != 0 {
-                    return refuse("S3_4_C15_C12_5 bit without documented meaning");
+            Self::SprCommit => {
+                if value & !SPR_LOCK_COMMIT_BITS != 0 {
+                    return refuse("S3_4_C15_C12_5 bit without documented or observed meaning");
                 }
-                if apple.spr_locked && value == 0 {
-                    return refuse("S3_4_C15_C12_5 write releasing the SPR lockdown");
+                if apple.spr_commit & !value != 0 {
+                    return refuse("S3_4_C15_C12_5 write releasing an SPR lockdown commit");
                 }
-                apple.spr_locked = value == 1;
+                apple.spr_commit = value;
             }
             Self::CycleOverride => {
                 let mode = |shift| cyc_ovrd_field(value, shift);
@@ -1243,21 +1294,48 @@ mod tests {
 
     #[test]
     fn sptms_spr_lockdown_commits_at_el2_and_then_holds() {
-        let mut cpu = Cpu::new(0, Pstate::reset(2));
+        use super::super::Chip;
         let write = |cpu: &mut Cpu, encoding, value| {
             cpu.state.x[5] = value;
             cpu.apple_access(msr(5, encoding), 0)
         };
         let written = |outcome| matches!(outcome, Outcome::Written(_));
-        const MASK: u64 = 0x7fff_f7ff_ffff_ffef;
-        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, MASK)));
+        // XNU's MSR_RO_CTL_VAL, which the M1 and M2 SPTMs write: every
+        // bit but 4, 27 and 47.
+        const RO_CTL: u64 = 0xffff_7fff_f7ff_ffef;
+        let mut cpu = Cpu::of(Chip::AppleM2, 0, Pstate::reset(2));
+        assert_eq!(
+            cpu.apple_access(mrs(0, SPR_LOCKDOWN_EL2), 0),
+            Outcome::Read(0)
+        );
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, RO_CTL)));
+        // Before the commit every group is writable.
+        assert!(written(write(&mut cpu, impdef::HID1, 0)));
         assert!(written(write(&mut cpu, SPR_LOCKDOWN_COMMIT, 1)));
         assert_eq!(
-            (cpu.apple.spr_lockdown, cpu.apple.spr_locked),
-            (Some(MASK), true)
+            cpu.apple_access(mrs(0, SPR_LOCKDOWN_EL2), 0),
+            Outcome::Read(RO_CTL)
         );
+        assert_eq!(
+            cpu.apple_access(mrs(0, SPR_LOCKDOWN_COMMIT), 0),
+            Outcome::Read(1)
+        );
+        // A committed group's write is UNDEFINED and changes nothing; reads
+        // and the groups XNU leaves writable complete.
+        cpu.state.x[5] = 0x55;
+        assert_eq!(
+            cpu.apple_access(msr(5, impdef::HID1), 0),
+            Outcome::Undefined
+        );
+        assert_eq!(cpu.apple_access(mrs(0, impdef::HID1), 0), Outcome::Read(0));
+        for encoding in [impdef::HID4, CYC_OVRD, impdef::ACC_OVRD] {
+            assert!(written(write(&mut cpu, encoding, 0)), "{encoding:?}");
+        }
+        cpu.pstate.el = 1;
+        assert_eq!(write(&mut cpu, impdef::HID1, 1), Outcome::Undefined);
+        cpu.pstate.el = 2;
         // The same values again complete; a change or a release stops.
-        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, MASK)));
+        assert!(written(write(&mut cpu, SPR_LOCKDOWN_EL2, RO_CTL)));
         assert!(written(write(&mut cpu, SPR_LOCKDOWN_COMMIT, 1)));
         for (encoding, value) in [(SPR_LOCKDOWN_EL2, u64::MAX), (SPR_LOCKDOWN_COMMIT, 0)] {
             assert!(matches!(
@@ -1265,18 +1343,33 @@ mod tests {
                 Outcome::Refused(_)
             ));
         }
-        // Undocumented bits and reads refuse; both are UNDEFINED below EL2.
-        let mut fresh = Cpu::new(0, Pstate::reset(2));
+        // The M3 SPTMs add SPR_LOCKDOWN_EL1, all ones, and commit both banks
+        // with 3 (sptm.t8122 file 0xbbf70..0xbbf80); bit 2 has no meaning.
+        let mut m3 = Cpu::of(Chip::AppleM3, 0, Pstate::reset(2));
+        assert!(written(write(&mut m3, SPR_LOCKDOWN_EL2, RO_CTL)));
+        assert!(written(write(&mut m3, SPR_LOCKDOWN_EL1, u64::MAX)));
+        assert!(written(write(&mut m3, SPR_LOCKDOWN_COMMIT, 3)));
+        assert_eq!(m3.apple.spr_lockdown, [RO_CTL, u64::MAX]);
         assert!(matches!(
-            write(&mut fresh, SPR_LOCKDOWN_COMMIT, 2),
+            write(&mut m3, SPR_LOCKDOWN_EL1, 0),
             Outcome::Refused(_)
         ));
         assert!(matches!(
-            fresh.apple_access(mrs(0, SPR_LOCKDOWN_EL2), 0),
+            write(&mut m3, SPR_LOCKDOWN_COMMIT, 7),
             Outcome::Refused(_)
         ));
+        // The M4-and-later `defeatureCore` loosens an uncommitted bank.
+        let mut m4 = Cpu::of(Chip::AppleM4, 0, Pstate::reset(2));
+        assert!(written(write(&mut m4, SPR_LOCKDOWN_EL2, 0)));
+        assert_eq!(
+            m4.apple_access(mrs(0, SPR_LOCKDOWN_EL2), 0),
+            Outcome::Read(0)
+        );
+        // Every lockdown register is UNDEFINED below EL2.
         let mut el1 = Cpu::new(0, Pstate::reset(1));
-        assert_eq!(write(&mut el1, SPR_LOCKDOWN_EL2, MASK), Outcome::Undefined);
+        for encoding in [SPR_LOCKDOWN_EL2, SPR_LOCKDOWN_EL1, SPR_LOCKDOWN_COMMIT] {
+            assert_eq!(write(&mut el1, encoding, 0), Outcome::Undefined);
+        }
     }
 
     /// CRn 11 reaches `machine::impdef` where an entry owns it, and stays
@@ -1662,16 +1755,14 @@ mod tests {
     }
 
     /// The M3-and-later encodings whose owners are being written outside
-    /// `machine::impdef`: the M5 kpc state S3_1_C15_C5_1, which `machine::pmu` owns on the M6 only
-    /// (mac17g save 0xfffffe000be64104, restore 0xfffffe000beb56b0), and
-    /// the M3 SPTMs' SPR_LOCKDOWN_EL1 (`S3_4_C15_C0_6`), which joins
-    /// SPR_LOCKDOWN_EL2 in its own batch. Each family leaves this list when
-    /// its owner lands.
+    /// `machine::impdef`: the M5 kpc state S3_1_C15_C5_1, which
+    /// `machine::pmu` owns on the M6 only (mac17g save 0xfffffe000be64104,
+    /// restore 0xfffffe000beb56b0). Each family leaves this list when its
+    /// owner lands.
     fn pending_owner(encoding: Encoding) -> bool {
         const KPC: (u8, u8, u8) = (1, 5, 1);
-        const SPR_LOCKDOWN_EL1: (u8, u8, u8) = (4, 0, 6);
         let key = (encoding.op1(), encoding.crm(), encoding.op2());
-        encoding.crn() == 15 && [KPC, SPR_LOCKDOWN_EL1].contains(&key)
+        encoding.crn() == 15 && key == KPC
     }
 
     /// Every IMPLEMENTATION DEFINED encoding a chip's censused components

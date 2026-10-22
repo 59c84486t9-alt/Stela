@@ -1,26 +1,34 @@
 //! The lockdown registers of a CPU implementation block: the per-PE
 //! `cpu-impl-reg` and the per-cluster `cpm-impl-reg` of an ADT `/cpus` node.
 //!
-//! No public source names these registers; their layout comes from what
-//! SPTM 26A434 (T8112) does at the end of its CPU initialization
+//! XNU names them (`xnu-7195.141.2` `pexpert/pexpert/arm64/spr_locks.h`):
+//! `CPU_PIO_RO_CTL` (per PE) and `ACC_PIO_RO_CTL` (per cluster) select the
+//! MMIO register groups to make read-only, and bit 0 of each block's
+//! `*_PIO_LOCK_VAL` applies the lock. XNU's values leave the per-PE groups
+//! [`CPU_PIO_DBG_WRAP`] and [`CPU_PIO_TRACE_CORE_CFG`] writable, and the
+//! per-cluster [`ACC_PIO_WRITABLE`] groups (PBLK_OVRD, DBG_CTL, DBG_PMGR,
+//! DBG_WRAP_GLB, TRACE_CTL, TRC_UT_CTL and OCLA_CTL). Their offsets come
+//! from what SPTM 26A434 (T8112) does at the end of its CPU initialization
 //! (`__text+0x1b0d8` to `__text+0x1b188`), the only access it or the kernel
-//! makes to either block on that SoC:
+//! makes to these words on that SoC:
 //!
 //! - the 64-bit MASK at CONTROL + 8 is read and ORed with every bit except
-//!   54 (`cpu-impl-reg` + 0x5008) or 53 and 55 (`cpm-impl-reg` + 0x9008);
+//!   54 (`cpu-impl-reg` + 0x5008, TRACE_CORE_CFG) or 53 and 55
+//!   (`cpm-impl-reg` + 0x9008, TRACE_CTL and TRC_UT_CTL);
 //! - then, under one boot configuration, bit 0 of the 64-bit CONTROL is ORed
 //!   in (`+ 0x5000`, `+ 0x9000`);
 //! - each PE of a cluster repeats the `cpm-impl-reg` sequence with the same
 //!   values, and SPTM may read MASK back to record it.
 //!
-//! Inferred from that sequence: MASK selects what is locked, CONTROL bit 0
-//! applies the lock, and both reset to 0. Once locked, a write that keeps
-//! both values (as the cluster's other PEs make) completes; one that changes
-//! them stops, because what hardware does is not documented. What each
-//! MASK bit protects is not documented either. This model owns only the
-//! lockdown pair and optional RVBAR; other described words in the shared
-//! implementation window belong to their own device models. Their placement
-//! does not establish a MASK-bit-to-register protection assignment.
+//! The other M1 to M3 SPTMs make the same accesses with their own masks
+//! (`isa/apple-soc-facts.json` `socs[].lockdown`): the M3 ones set every
+//! per-PE bit. MASK and CONTROL reset to 0 (inference). Once locked, a
+//! write that keeps both values (as the cluster's other PEs make) completes;
+//! one that changes them stops, because what hardware does is not
+//! documented. Which block offsets a group covers is not public, so the lock
+//! makes no other word read-only. This model owns only the lockdown pair
+//! and, in a PE's block, RVBAR; other described words in the shared
+//! implementation window belong to their own device models.
 //!
 //! A PE's `cpu-impl-reg` also holds its RVBAR at +0 (m1n1 `src/smp.c`): the
 //! reset vector in bits 47:12, where the core leaves reset, and RVBAR_LOCK
@@ -37,6 +45,16 @@ pub const BYTES: u64 = 16;
 /// The RVBAR of a PE's block.
 pub const RVBAR_BYTES: u64 = 8;
 const LOCK: u64 = 1;
+/// The per-PE groups XNU's `CPU_PIO_RO_CTL_VAL` leaves writable.
+pub const CPU_PIO_DBG_WRAP: u64 = 1 << 49;
+pub const CPU_PIO_TRACE_CORE_CFG: u64 = 1 << 54;
+/// The per-cluster groups XNU's `ACC_PIO_RO_CTL_VAL` leaves writable:
+/// PBLK_OVRD (47), DBG_CTL (48), DBG_PMGR (50), DBG_WRAP_GLB (51),
+/// TRACE_CTL (53), TRC_UT_CTL (55) and OCLA_CTL (56).
+pub const ACC_PIO_WRITABLE: u64 =
+    1 << 47 | 1 << 48 | 1 << 50 | 1 << 51 | ACC_PIO_TRACE_CTL | ACC_PIO_TRC_UT_CTL | 1 << 56;
+pub const ACC_PIO_TRACE_CTL: u64 = 1 << 53;
+pub const ACC_PIO_TRC_UT_CTL: u64 = 1 << 55;
 const RVBAR: u64 = 0;
 const RVBAR_ADDRESS: u64 = 0x0000_ffff_ffff_f000;
 
@@ -159,17 +177,17 @@ mod tests {
             let value = block.read(offset, Width::Double, access).unwrap() | bits;
             block.write(offset, Width::Double, value, access)
         };
-        // MASK, every bit but 54, then CONTROL bit 0.
-        rmw(&mut block, &mut access, 0x5008, !(1 << 54)).unwrap();
+        // MASK, every bit but TRACE_CORE_CFG, then CONTROL bit 0.
+        rmw(&mut block, &mut access, 0x5008, !CPU_PIO_TRACE_CORE_CFG).unwrap();
         assert!(!block.locked());
         rmw(&mut block, &mut access, 0x5000, 1).unwrap();
         assert!(block.locked());
         assert_eq!(
             block.read(0x5008, Width::Double, &mut access),
-            Ok(!(1 << 54))
+            Ok(!CPU_PIO_TRACE_CORE_CFG)
         );
         // Another PE of the cluster repeats it unchanged; a change stops.
-        rmw(&mut block, &mut access, 0x5008, !(1 << 54)).unwrap();
+        rmw(&mut block, &mut access, 0x5008, !CPU_PIO_TRACE_CORE_CFG).unwrap();
         rmw(&mut block, &mut access, 0x5000, 1).unwrap();
         assert!(
             block
