@@ -6,6 +6,7 @@
 //! These inspect already CPU-owned bytes. They establish no DMA completion,
 //! current reset epoch, key state, regulatory permission or radio readiness.
 use super::firmware::{Family, Firmware};
+use crate::bytes::{le16, le32, le64};
 use core::ops::Range;
 pub mod mpdu;
 
@@ -21,15 +22,6 @@ pub enum Error {
     AliveVersion(Option<u8>),
     AliveLength { minimum: usize, actual: usize },
     AliveRejected { status: u16, flags: u16 },
-}
-fn word(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes[..4].try_into().expect("checked word"))
-}
-fn half(bytes: &[u8]) -> u16 {
-    u16::from_le_bytes(bytes[..2].try_into().expect("checked half"))
-}
-fn long(bytes: &[u8]) -> u64 {
-    u64::from_le_bytes(bytes[..8].try_into().expect("checked long"))
 }
 
 #[derive(Clone, Debug)]
@@ -91,7 +83,7 @@ impl<'a> Iterator for Packets<'a> {
             return None;
         }
         let start = self.offset;
-        let flags = word(&self.bytes[start..]);
+        let flags = le32(self.bytes, start);
         if flags == 0x55550000 {
             self.ended = true;
             return None;
@@ -119,7 +111,7 @@ impl<'a> Iterator for Packets<'a> {
             raw_flags: flags,
             command: raw[4],
             group: raw[5],
-            sequence: half(&raw[6..]),
+            sequence: le16(raw, 6),
             range: start..start + length,
             raw,
         }))
@@ -164,8 +156,8 @@ pub fn used_descriptor(family: Family, raw: &[u8]) -> Result<UsedDescriptor<'_>,
         return Err(Error::DescriptorSize);
     }
     let (id, fragmented) = match family {
-        Family::Ax200 => ((word(raw) & 0xfff) as u16, false),
-        Family::Ax210 => (half(&raw[4..]), raw[6] & 1 != 0),
+        Family::Ax200 => ((le32(raw, 0) & 0xfff) as u16, false),
+        Family::Ax210 => (le16(raw, 4), raw[6] & 1 != 0),
     };
     if id == 0 || (family == Family::Ax200 && id > 0xfff) {
         return Err(Error::DescriptorId);
@@ -190,14 +182,14 @@ pub struct Lmac {
 impl Lmac {
     fn decode(bytes: &[u8]) -> Self {
         Self {
-            major: word(bytes),
-            minor: word(&bytes[4..]),
+            major: le32(bytes, 0),
+            minor: le32(bytes, 4),
             subtype: bytes[8],
             kind: bytes[9],
             mac: bytes[10],
             options: bytes[11],
-            timestamp: word(&bytes[12..]),
-            debug_addresses: core::array::from_fn(|i| word(&bytes[16 + i * 4..])),
+            timestamp: le32(bytes, 12),
+            debug_addresses: core::array::from_fn(|i| le32(bytes, 16 + i * 4)),
         }
     }
 }
@@ -247,8 +239,8 @@ impl<'a> Alive<'a> {
                 actual: raw.len(),
             });
         }
-        let status = half(raw);
-        let flags = half(&raw[2..]);
+        let status = le16(raw, 0);
+        let flags = le16(raw, 2);
         if status != 0xcafe {
             return Err(Error::AliveRejected { status, flags });
         }
@@ -257,17 +249,17 @@ impl<'a> Alive<'a> {
             flags,
             lmac: [Lmac::decode(&raw[4..52]), Lmac::decode(&raw[52..100])],
             umac: Umac {
-                major: word(&raw[100..]),
-                minor: word(&raw[104..]),
-                debug_addresses: [word(&raw[108..]), word(&raw[112..])],
+                major: le32(raw, 100),
+                minor: le32(raw, 104),
+                debug_addresses: [le32(raw, 108), le32(raw, 112)],
             },
-            sku: core::array::from_fn(|i| word(&raw[116 + i * 4..])),
+            sku: core::array::from_fn(|i| le32(raw, 116 + i * 4)),
             imr: Imr {
-                base: long(&raw[128..]),
-                bytes: word(&raw[136..]),
-                enabled: word(&raw[140..]),
+                base: le64(raw, 128),
+                bytes: le32(raw, 136),
+                enabled: le32(raw, 140),
             },
-            platform_id: (minimum == 152).then(|| long(&raw[144..])),
+            platform_id: (minimum == 152).then(|| le64(raw, 144)),
             raw,
         })
     }
@@ -372,8 +364,8 @@ mod tests {
             else {
                 panic!()
             };
-            assert_eq!(half(&encoded), id);
-            assert_eq!(long(&encoded[8..]), 0x123456789800);
+            assert_eq!(le16(&encoded, 0), id);
+            assert_eq!(le64(&encoded, 8), 0x123456789800);
             let mut raw = [0; 32];
             raw[4..6].copy_from_slice(&id.to_le_bytes());
             assert_eq!(used_descriptor(Family::Ax210, &raw).unwrap().id, id);

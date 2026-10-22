@@ -2,6 +2,7 @@
 //! UAC2 descriptor layouts from Linux include/linux/usb/audio-v2.h and
 //! sound/usb/format.c. All IDs and relationships come from runtime descriptors.
 use super::{CLASS, CONTROL_SUBCLASS, Error, STREAMING_SUBCLASS, UAC2};
+use crate::bytes::{le16, le32};
 use crate::{
     audio::Direction,
     usb::xhci::{
@@ -209,12 +210,6 @@ pub struct Binding {
     pub unsupported: Vec<(u8, u8, &'static str)>,
 }
 
-fn le16(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
-}
-fn le32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 fn controls(mut bits: u32, count: usize) -> Result<(), Error> {
     for _ in 0..count {
         if bits & 3 == 2 {

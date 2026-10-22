@@ -8,6 +8,7 @@
 //! a804c5742bff224d4cb4d25dd383554d598be32b. Every TLV remains observable,
 //! including metadata the loader does not consume. A parse is not an upload,
 //! signature verification, ALIVE completion or permission to operate a radio.
+use crate::bytes::le32;
 use alloc::{collections::BTreeMap, vec::Vec};
 use core::ops::Range;
 
@@ -139,10 +140,6 @@ pub struct Firmware<'a> {
     capability_words: BTreeMap<u32, u32>,
 }
 
-fn dword(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes[..4].try_into().expect("checked dword"))
-}
-
 fn singleton<T>(slot: &mut Option<T>, value: T, kind: u32) -> Result<(), Error> {
     if slot.is_some() {
         return Err(Error::Duplicate { kind });
@@ -214,13 +211,13 @@ impl<'a> Firmware<'a> {
         if !(HEADER_BYTES..=MAX_IMAGE_BYTES).contains(&bytes.len()) {
             return Err(Error::ImageSize);
         }
-        if dword(bytes) != 0 || dword(&bytes[4..]) != MAGIC {
+        if le32(bytes, 0) != 0 || le32(bytes, 4) != MAGIC {
             return Err(Error::Header);
         }
         let mut image = Self {
             human_readable: bytes[8..72].try_into().expect("header checked"),
-            version: dword(&bytes[72..]),
-            build: dword(&bytes[76..]),
+            version: le32(bytes, 72),
+            build: le32(bytes, 76),
             ignored_header: u64::from_le_bytes(bytes[80..88].try_into().expect("header checked")),
             tlvs: Vec::new(),
             sections: Vec::new(),
@@ -242,8 +239,8 @@ impl<'a> Firmware<'a> {
             let header = bytes
                 .get(at..at + TLV_HEADER_BYTES)
                 .ok_or(Error::Truncated { offset: at })?;
-            let kind = dword(header);
-            let count = dword(&header[4..]) as usize;
+            let kind = le32(header, 0);
+            let count = le32(header, 4) as usize;
             let aligned = count
                 .checked_next_multiple_of(4)
                 .ok_or(Error::Truncated { offset: at })?;
@@ -265,7 +262,7 @@ impl<'a> Firmware<'a> {
                     if image.sections.len() == MAX_SECTIONS {
                         return Err(Error::ResourceLimit);
                     }
-                    let offset = dword(data);
+                    let offset = le32(data, 0);
                     let payload = &data[4..];
                     if !matches!(offset, CPU_SEPARATOR | PAGING_SEPARATOR)
                         && offset.checked_add(payload.len() as u32).is_none()
@@ -291,7 +288,7 @@ impl<'a> Firmware<'a> {
                             bytes: data.len(),
                         });
                     }
-                    let value = dword(data);
+                    let value = le32(data, 0);
                     match kind {
                         FLAGS => singleton(&mut image.flags, value, kind)?,
                         PHY_SKU => singleton(&mut image.phy_sku, value, kind)?,
@@ -324,7 +321,7 @@ impl<'a> Firmware<'a> {
                     } else {
                         &mut image.capability_words
                     };
-                    *words.entry(dword(data)).or_default() |= dword(&data[4..]);
+                    *words.entry(le32(data, 0)).or_default() |= le32(data, 4);
                 }
                 FW_VERSION => {
                     if data.len() != 12 {
@@ -335,7 +332,7 @@ impl<'a> Firmware<'a> {
                     }
                     singleton(
                         &mut image.version_components,
-                        [dword(data), dword(&data[4..]), dword(&data[8..])],
+                        [le32(data, 0), le32(data, 4), le32(data, 8)],
                         kind,
                     )?;
                 }

@@ -4,6 +4,7 @@
 //! every descriptor and payload is checked before any download command.
 //! Manifest integrity and these headers do not establish vendor authentication.
 use super::identity::{Chip, Identity};
+use crate::bytes::le32;
 use crate::firmware::{self as resources, Image, Provider, Requirement, Target};
 use alloc::{string::String, vec::Vec};
 use core::fmt;
@@ -51,9 +52,6 @@ impl core::error::Error for FormatError {}
 
 fn be32(bytes: &[u8], at: usize) -> u32 {
     u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap())
-}
-fn le32(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 fn checked_address(address: u32, bytes: u32) -> Result<(), FormatError> {
     if bytes == 0 || u64::from(address) + u64::from(bytes) > (1u64 << 32) {

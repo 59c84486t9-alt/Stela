@@ -5,6 +5,7 @@
 //! `rtl_download_firmware`. The selected patch's last four bytes are replaced
 //! by the container version; configuration follows the patch byte for byte.
 use super::FormatError;
+use crate::bytes::{le16, le32};
 use alloc::vec::Vec;
 
 const HEADER: usize = 14;
@@ -61,7 +62,7 @@ impl<'a> Patch<'a> {
         if trailer[1] != project.id() {
             return Err(FormatError::Project);
         }
-        let count = usize::from(word(bytes, 12));
+        let count = usize::from(le16(bytes, 12));
         let table_end = HEADER + count * 8;
         let payload_end = bytes.len() - 8;
         if count == 0 || table_end > payload_end {
@@ -71,9 +72,9 @@ impl<'a> Patch<'a> {
         let wanted = u16::from(rom_version) + 1;
         let mut selected = None;
         for i in 0..count {
-            let chip = word(bytes, HEADER + i * 2);
-            let len = usize::from(word(bytes, HEADER + count * 2 + i * 2));
-            let start = usize::try_from(dword(bytes, HEADER + count * 4 + i * 4))
+            let chip = le16(bytes, HEADER + i * 2);
+            let len = usize::from(le16(bytes, HEADER + count * 2 + i * 2));
+            let start = usize::try_from(le32(bytes, HEADER + count * 4 + i * 4))
                 .map_err(|_| FormatError::PatchBounds)?;
             let end = start.checked_add(len).ok_or(FormatError::PatchBounds)?;
             if chip == 0 || len < 4 || start < table_end || end > payload_end {
@@ -95,7 +96,7 @@ impl<'a> Patch<'a> {
         Ok(Self {
             project,
             rom_version,
-            firmware_version: dword(bytes, 8),
+            firmware_version: le32(bytes, 8),
             payload: selected.ok_or(FormatError::MissingRom)?,
         })
     }
@@ -126,7 +127,7 @@ impl<'a> Configuration<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self, FormatError> {
         if !(6..=MAX_CONFIG).contains(&bytes.len())
             || bytes[..4] != [0x55, 0xab, 0x23, 0x87]
-            || usize::from(word(bytes, 4)) != bytes.len() - 6
+            || usize::from(le16(bytes, 4)) != bytes.len() - 6
         {
             return Err(FormatError::ConfigHeader);
         }
@@ -185,12 +186,6 @@ impl Staged {
 pub struct Fragment<'a> {
     pub index: u8,
     pub data: &'a [u8],
-}
-fn word(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
-}
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
 #[cfg(test)]

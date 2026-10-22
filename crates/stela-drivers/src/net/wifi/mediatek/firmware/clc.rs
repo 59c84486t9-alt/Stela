@@ -8,6 +8,7 @@ use super::{
     Chip,
     auxiliary::{Record, Selection},
 };
+use crate::bytes::le32;
 use alloc::vec::Vec;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,9 +103,6 @@ impl core::fmt::Display for Error {
     }
 }
 impl core::error::Error for Error {}
-fn word(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 impl Plan {
     /// Match source slot order and its explicit "00"/Indoor retry when the
     /// requested country is absent. Fallback is retained as a visible fact;
@@ -230,7 +228,7 @@ impl Plan {
         if count == 0 || table > data.len() || data.len() < 8 {
             return Err(Error::SegmentTable { slot });
         }
-        let rule_end = word(data, 4) as usize;
+        let rule_end = le32(data, 4) as usize;
         if rule_end < table || rule_end > data.len() || !(rule_end - table).is_multiple_of(8) {
             return Err(Error::SegmentTable { slot });
         }
@@ -243,8 +241,8 @@ impl Plan {
                 return Err(Error::SegmentIndex { slot, index });
             }
             let segment = &data[(index as usize - 1) * 16..index as usize * 16];
-            let offset = word(segment, 4) as usize;
-            let length = word(segment, 8) as usize;
+            let offset = le32(segment, 4) as usize;
+            let length = le32(segment, 8) as usize;
             let end = offset
                 .checked_add(length)
                 .filter(|&end| end <= data.len())
@@ -468,7 +466,7 @@ mod tests {
             for _ in 0..108 {
                 let meta = &trace[at..at + 23];
                 at += 23;
-                let n = word(&trace, at) as usize;
+                let n = le32(&trace, at) as usize;
                 at += 4;
                 let owner = auxiliary_owner(chip, &trace[at..at + n]);
                 at += n;
@@ -485,15 +483,15 @@ mod tests {
                     power_type: meta[5],
                     power_limits_node: meta[6] != 0,
                     chip_capabilities: u64::from_le_bytes(meta[7..15].try_into().unwrap()),
-                    mtcl_configuration: word(meta, 15),
-                    world_mtcl_configuration: word(meta, 19),
+                    mtcl_configuration: le32(meta, 15),
+                    world_mtcl_configuration: le32(meta, 19),
                 };
                 let plan = Plan::build(&selection, input).unwrap();
                 let count = usize::from(u16::from_le_bytes(trace[at..at + 2].try_into().unwrap()));
                 at += 2;
                 assert_eq!(plan.requests().len(), count);
                 for request in plan.requests() {
-                    let command = word(&trace, at);
+                    let command = le32(&trace, at);
                     let wait = trace[at + 4] != 0;
                     let flags = trace[at + 5];
                     let n = usize::from(u16::from_le_bytes(
@@ -550,7 +548,7 @@ mod tests {
             for _ in 0..108 {
                 let meta = &country[at..at + 23];
                 at += 23;
-                let n = word(&country, at) as usize;
+                let n = le32(&country, at) as usize;
                 at += 4;
                 let owner = auxiliary_owner(chip, &country[at..at + n]);
                 at += n;
@@ -567,8 +565,8 @@ mod tests {
                     power_type: meta[5],
                     power_limits_node: meta[6] != 0,
                     chip_capabilities: u64::from_le_bytes(meta[7..15].try_into().unwrap()),
-                    mtcl_configuration: word(meta, 15),
-                    world_mtcl_configuration: word(meta, 19),
+                    mtcl_configuration: le32(meta, 15),
+                    world_mtcl_configuration: le32(meta, 19),
                 };
                 let plan = Plan::build(&selection, input).unwrap();
                 let count =

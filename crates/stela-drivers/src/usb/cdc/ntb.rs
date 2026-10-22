@@ -9,6 +9,7 @@
 //! An IN block may hold several datagrams and several chained tables; an
 //! OUT block here holds one datagram, placed as the function's NTB
 //! parameters (GetNtbParameters) require.
+use crate::bytes::{get_le16, get_le32};
 use alloc::vec::Vec;
 
 /// `GET_NTB_PARAMETERS` returns these 28 bytes.
@@ -53,22 +54,14 @@ pub struct Parameters {
     out_alignment: usize,
 }
 
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
-}
-
 impl Parameters {
     /// The `GET_NTB_PARAMETERS` structure, refused when it
     /// names no NTB16 support, a block below the 2048-byte minimum, or a
     /// divisor or alignment that is not a power of two.
     pub fn parse(b: &[u8]) -> Result<Self, &'static str> {
-        let field = |at| u16_at(b, at).map(usize::from);
+        let field = |at| get_le16(b, at).map(usize::from);
         let (Some(formats), Some(in_max), Some(out_max)) =
-            (u16_at(b, 2), u32_at(b, 4), u32_at(b, 16))
+            (get_le16(b, 2), get_le32(b, 4), get_le32(b, 16))
         else {
             return Err("short NTB parameters");
         };
@@ -161,10 +154,10 @@ impl Parameters {
 /// that is not a well-formed NTB16 refuses whole; a datagram past the
 /// block's end refuses with it.
 pub fn decode(received: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
-    if u32_at(received, 0) != Some(NTH16) || u16_at(received, 4) != Some(NTH16_BYTES as u16) {
+    if get_le32(received, 0) != Some(NTH16) || get_le16(received, 4) != Some(NTH16_BYTES as u16) {
         return Err("not an NTH16");
     }
-    let (Some(length), Some(mut table)) = (u16_at(received, 8), u16_at(received, 10)) else {
+    let (Some(length), Some(mut table)) = (get_le16(received, 8), get_le16(received, 10)) else {
         return Err("short NTH16");
     };
     // A block shorter than the transfer is its own length; zero means the
@@ -182,12 +175,12 @@ pub fn decode(received: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
         if at % 4 != 0 {
             return Err("misaligned NDP16");
         }
-        let crc = match u32_at(block, at) {
+        let crc = match get_le32(block, at) {
             Some(NDP16) => 0,
             Some(NDP16_CRC) => CRC_BYTES,
             _ => return Err("not an NDP16"),
         };
-        let (Some(bytes), Some(next)) = (u16_at(block, at + 4), u16_at(block, at + 6)) else {
+        let (Some(bytes), Some(next)) = (get_le16(block, at + 4), get_le16(block, at + 6)) else {
             return Err("short NDP16");
         };
         let end = at + usize::from(bytes);
@@ -195,7 +188,8 @@ pub fn decode(received: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
             return Err("NDP16 length");
         }
         for pointer in (at + NDP16_HEADER..end).step_by(POINTER) {
-            let (Some(index), Some(size)) = (u16_at(block, pointer), u16_at(block, pointer + 2))
+            let (Some(index), Some(size)) =
+                (get_le16(block, pointer), get_le16(block, pointer + 2))
             else {
                 return Err("short datagram pointer");
             };
@@ -276,7 +270,7 @@ mod tests {
         assert_eq!(p.encoded_len(1514), Some(65535));
         let block = p.encode(0, &[0xab; 1514]).unwrap();
         assert_eq!(block.len(), 65535);
-        assert_eq!(u16_at(&block, 8), Some(u16::MAX));
+        assert_eq!(get_le16(&block, 8), Some(u16::MAX));
         assert_eq!(p.encoded_len(1515), None);
         assert_eq!(p.encoded_len(usize::MAX), None);
         bytes[16..20].copy_from_slice(&65534u32.to_le_bytes());
@@ -291,11 +285,11 @@ mod tests {
         // NTH16 at 0, NDP16 aligned to 8 at 16, its 16 bytes, then the
         // datagram at 32, so its Ethernet payload at 46 is 2 modulo 4.
         assert_eq!(&block[..4], b"NCMH");
-        assert_eq!(u16_at(&block, 6), Some(7));
-        assert_eq!(u16_at(&block, 8), Some(block.len() as u16));
-        assert_eq!(u16_at(&block, 10), Some(16));
+        assert_eq!(get_le16(&block, 6), Some(7));
+        assert_eq!(get_le16(&block, 8), Some(block.len() as u16));
+        assert_eq!(get_le16(&block, 10), Some(16));
         assert_eq!(&block[16..20], b"NCM0");
-        assert_eq!(u16_at(&block, 24), Some(32));
+        assert_eq!(get_le16(&block, 24), Some(32));
         assert_eq!(&block[32..], frame);
         assert_eq!(decode(&block).unwrap(), [&frame[..]]);
         assert!(p.encode(0, &[0; 8192]).is_none());
@@ -308,8 +302,8 @@ mod tests {
                 let p = Parameters::parse(&parameters(divisor, remainder, 8)).unwrap();
                 let frame = [0x5a; 60];
                 let block = p.encode(0, &frame).unwrap();
-                let table = usize::from(u16_at(&block, 10).unwrap());
-                let start = usize::from(u16_at(&block, table + 8).unwrap());
+                let table = usize::from(get_le16(&block, 10).unwrap());
+                let start = usize::from(get_le16(&block, table + 8).unwrap());
                 assert_eq!((start + 14) % usize::from(divisor), usize::from(remainder));
                 assert_eq!(decode(&block).unwrap(), [&frame[..]]);
             }

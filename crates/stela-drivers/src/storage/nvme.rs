@@ -2,6 +2,7 @@
 //! active NVM namespace with plain logical blocks becomes one device.
 //! Namespace discovery and shutdown follow Linux `drivers/nvme/host/core.c`
 //! and `pci.c` at a804c5742bff224d4cb4d25dd383554d598be32b.
+use crate::bytes::le32;
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
@@ -371,8 +372,8 @@ pub fn attach(
     let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
     let maximum = identify[CONTROLLER_MAXIMUM_TRANSFER];
-    let rtd3_entry_us = u64::from(le32(&identify[CONTROLLER_RTD3_ENTRY]));
-    let namespaces = le32(&identify[CONTROLLER_NAMESPACES]);
+    let rtd3_entry_us = u64::from(le32(&identify[CONTROLLER_RTD3_ENTRY], 0));
+    let namespaces = le32(&identify[CONTROLLER_NAMESPACES], 0);
     if maximum != 0 {
         let limit = 1usize.checked_shl(u32::from(maximum)).unwrap_or(usize::MAX);
         controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
@@ -478,7 +479,7 @@ fn plain_format(data: &[u8], max_transfer: usize) -> Result<Option<Format>, Bloc
     }
     let flbas = data[NAMESPACE_FORMAT];
     let index = usize::from(flbas & FORMAT_LOW | (flbas & FORMAT_HIGH) >> 1);
-    let descriptor = le32(&data[NAMESPACE_FORMATS + 4 * index..][..4]);
+    let descriptor = le32(data, NAMESPACE_FORMATS + 4 * index);
     let metadata = descriptor & 0xffff;
     let shift = descriptor >> 16 & 0xff;
     if metadata != 0 {
@@ -501,10 +502,6 @@ fn shutdown_timeout_us(rtd3_entry_us: u64) -> u64 {
         .div_ceil(MICROSECONDS_PER_SECOND)
         .saturating_mul(MICROSECONDS_PER_SECOND)
         .clamp(SHUTDOWN_MINIMUM_US, SHUTDOWN_MAXIMUM_US)
-}
-
-fn le32(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes.try_into().unwrap())
 }
 
 impl Namespace {

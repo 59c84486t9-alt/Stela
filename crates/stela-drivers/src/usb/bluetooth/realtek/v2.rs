@@ -4,6 +4,7 @@
 //! Unknown section bodies are skipped by that format policy, with metadata and
 //! whole-body hashes retained. Nonzero key/security selection is not implemented.
 use super::{Configuration, FormatError, Project, Staged};
+use crate::bytes::le32;
 use alloc::vec::Vec;
 use core::cmp::Reverse;
 use sha2::{Digest, Sha256};
@@ -79,7 +80,7 @@ impl<'a> V2Patch<'a> {
             return Err(FormatError::Extension);
         }
         let version = bytes[8..16].try_into().unwrap();
-        let count = dword(bytes, 16) as usize;
+        let count = le32(bytes, 16) as usize;
         if count == 0 || count > (tail - HEADER) / 8 {
             return Err(FormatError::Section);
         }
@@ -91,8 +92,8 @@ impl<'a> V2Patch<'a> {
                 .get(at..at + 8)
                 .filter(|_| at + 8 <= tail)
                 .ok_or(FormatError::Section)?;
-            let opcode = dword(header, 0);
-            let length = dword(header, 4);
+            let opcode = le32(header, 0);
+            let length = le32(header, 4);
             at += 8;
             let end = at
                 .checked_add(length as usize)
@@ -114,7 +115,7 @@ impl<'a> V2Patch<'a> {
                 let mut pos = 4;
                 for _ in 0..num {
                     let header = data.get(pos..pos + 8).ok_or(FormatError::Subsection)?;
-                    let length = dword(header, 4);
+                    let length = le32(header, 4);
                     pos += 8;
                     let end = pos
                         .checked_add(length as usize)
@@ -202,9 +203,6 @@ impl<'a> V2Patch<'a> {
         bytes.extend_from_slice(config);
         Staged::new(bytes)
     }
-}
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
 #[cfg(test)]

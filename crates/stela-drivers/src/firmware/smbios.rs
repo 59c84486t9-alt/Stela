@@ -3,6 +3,7 @@
 //! Layouts: DMTF DSP0134 3.8.0 §§5.2,6.1,7.2. No source mapping authority is
 //! granted by this pure parser; boot must copy genuinely readable pre-EBS data.
 use super::{Image, Provenance, Provider, Requirement, Resource, Target};
+use crate::bytes::{le16, le32};
 use alloc::{format, string::String};
 use sha2::{Digest, Sha256};
 
@@ -108,12 +109,6 @@ pub struct Entry {
     pub structures: Option<u16>,
     pub maximum_structure_bytes: Option<u16>,
 }
-fn word(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
-}
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 fn checksum(bytes: &[u8]) -> bool {
     bytes.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) == 0
 }
@@ -155,7 +150,7 @@ pub fn entry(bytes: &[u8], format: Format) -> Result<Entry, Error> {
                 format,
                 entry_bytes: length,
                 table_address: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
-                table_bytes: dword(bytes, 12) as usize,
+                table_bytes: le32(bytes, 12) as usize,
                 major: bytes[7],
                 minor: bytes[8],
                 docrev: bytes[9],
@@ -176,13 +171,13 @@ pub fn entry(bytes: &[u8], format: Format) -> Result<Entry, Error> {
             Entry {
                 format,
                 entry_bytes: length,
-                table_address: u64::from(dword(bytes, 24)),
-                table_bytes: usize::from(word(bytes, 22)),
+                table_address: u64::from(le32(bytes, 24)),
+                table_bytes: usize::from(le16(bytes, 22)),
                 major: bytes[6],
                 minor: bytes[7],
                 docrev: 0,
-                structures: Some(word(bytes, 28)),
-                maximum_structure_bytes: Some(word(bytes, 8)),
+                structures: Some(le16(bytes, 28)),
+                maximum_structure_bytes: Some(le16(bytes, 8)),
             }
         }
     };
@@ -235,7 +230,7 @@ pub fn identity(entry: Entry, table: &[u8]) -> Result<SystemIdentity<'_>, Error>
     let mut handles = [0u8; 8192];
     while at < table.len() {
         let head = table.get(at..at + 4).ok_or(Error::StructureLength)?;
-        let handle = usize::from(word(head, 2));
+        let handle = usize::from(le16(head, 2));
         let mask = 1u8 << (handle % 8);
         if handles[handle / 8] & mask != 0 {
             return Err(Error::DuplicateHandle);

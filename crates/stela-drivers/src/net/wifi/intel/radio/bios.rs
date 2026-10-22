@@ -3,6 +3,7 @@
 //! Pure packed UEFI radio configuration observations from fw/uefi.{c,h}.
 //! These parsers prove no evaluated GLAI, locked-variable source preference,
 //! actual ACPI fallback, vendor authenticity, programmed power or RF authority.
+use crate::bytes::le32;
 const MAX_RAW_BYTES: usize = 4096;
 pub mod power_tables;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,13 +46,6 @@ fn prefix(raw: &[u8], minimum: usize, revision: u8) -> Result<(), Error> {
     }
     Ok(())
 }
-fn word(raw: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(
-        raw[offset..offset + 4]
-            .try_into()
-            .expect("checked packed word"),
-    )
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarKind {
     Country,
@@ -71,7 +65,7 @@ impl<'a> Scalar<'a> {
     /// retained within the explicit native 4 KiB bound, not silently discarded.
     pub fn parse(kind: ScalarKind, raw: &'a [u8]) -> Result<Self, Error> {
         prefix(raw, 5, 0)?;
-        let raw_value = word(raw, 1);
+        let raw_value = le32(raw, 1);
         let value = match kind {
             ScalarKind::Country => {
                 // Both source UEFI and ACPI BIOS country paths admit CN only.
@@ -130,10 +124,10 @@ impl<'a> GeneralConfiguration<'a> {
     /// The whole 32-entry source package is retained, including entries the
     /// current driver does not interpret. This is not a valid-function grant.
     pub fn raw_function(self, index: usize) -> Option<u32> {
-        (index < 32).then(|| word(self.raw, 1 + index * 4))
+        (index < 32).then(|| le32(self.raw, 1 + index * 4))
     }
     pub fn raw_function_bitmap(self) -> u32 {
-        word(self.raw, 1)
+        le32(self.raw, 1)
     }
     pub fn source_function_bitmap(self) -> u32 {
         self.raw_function_bitmap() | 1
@@ -145,7 +139,7 @@ impl<'a> GeneralConfiguration<'a> {
         if self.source_function_bitmap() & (1u32 << index) == 0 {
             return Err(Error::FunctionUnavailable(index));
         }
-        Ok(word(self.raw, 1 + usize::from(index) * 4))
+        Ok(le32(self.raw, 1 + usize::from(index) * 4))
     }
 }
 #[derive(Clone, Copy, Debug)]
@@ -161,7 +155,7 @@ impl<'a> PhyFilters<'a> {
         self.raw
     }
     pub fn chains(self) -> [u32; 4] {
-        core::array::from_fn(|i| word(self.raw, 1 + i * 4))
+        core::array::from_fn(|i| le32(self.raw, 1 + i * 4))
     }
 }
 

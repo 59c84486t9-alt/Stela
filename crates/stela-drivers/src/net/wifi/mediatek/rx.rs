@@ -3,6 +3,7 @@
 //! Bounded ordinary raw-802.11 receive descriptors. These are observations,
 //! not association/key-generation, authenticated integrity or replay receipts.
 use super::identity::Chip;
+use crate::bytes::get_le32;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -108,13 +109,7 @@ pub struct Decoded<'a> {
     pub payload: &'a [u8],
 }
 fn word(bytes: &[u8], at: usize) -> Result<u32, Error> {
-    Ok(u32::from_le_bytes(
-        bytes
-            .get(at..at + 4)
-            .ok_or(Error::Truncated)?
-            .try_into()
-            .expect("four bytes"),
-    ))
+    get_le32(bytes, at).ok_or(Error::Truncated)
 }
 fn group(at: &mut usize, bytes: usize, total: usize) -> Result<Range<usize>, Error> {
     let end = at

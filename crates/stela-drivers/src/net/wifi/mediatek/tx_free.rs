@@ -4,6 +4,7 @@
 //! evidence only: it neither releases DMA leases nor reports air ACKs. Token
 //! ownership, exact-once processing and firmware-epoch checks precede release.
 use super::identity::Chip;
+use crate::bytes::get_le32;
 use alloc::{collections::BTreeSet, vec::Vec};
 
 const MAX_BYTES: usize = 16 * 1024;
@@ -62,8 +63,7 @@ pub struct Notification<'a> {
     pub raw: &'a [u8],
 }
 fn word(bytes: &[u8], offset: usize) -> Result<u32, Error> {
-    let b = bytes.get(offset..offset + 4).ok_or(Error::Truncated)?;
-    Ok(u32::from_le_bytes(b.try_into().expect("four bytes")))
+    get_le32(bytes, offset).ok_or(Error::Truncated)
 }
 
 /// Parse the complete bounded notification before any token-table mutation.

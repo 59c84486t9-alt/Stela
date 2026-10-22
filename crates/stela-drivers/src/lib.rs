@@ -37,6 +37,7 @@ use core::{
 pub mod audio;
 pub mod block;
 pub mod bus;
+mod bytes;
 pub mod firmware;
 pub mod gpu;
 pub mod input;

@@ -3,6 +3,7 @@
 //! Complete bounded MT79xx maps and exact WMT framing, adapted from Linux
 //! a804c5742bff224d4cb4d25dd383554d598be32b btmtk_setup_firmware_79xx.
 use super::FormatError;
+use crate::bytes::le32;
 use alloc::vec::Vec;
 use sha2::{Digest, Sha256};
 const HEADER: usize = 32;
@@ -25,25 +26,25 @@ pub struct SectionMetadata {
 }
 impl SectionMetadata {
     pub fn section_type(&self) -> u32 {
-        dword(&self.map, 0)
+        le32(&self.map, 0)
     }
     pub fn offset(&self) -> u32 {
-        dword(&self.map, 4)
+        le32(&self.map, 4)
     }
     pub fn size(&self) -> u32 {
-        dword(&self.map, 8)
+        le32(&self.map, 8)
     }
     pub fn download_address(&self) -> u32 {
-        dword(&self.map, 12)
+        le32(&self.map, 12)
     }
     pub fn download_size(&self) -> u32 {
-        dword(&self.map, 16)
+        le32(&self.map, 16)
     }
     pub fn security_key(&self) -> u32 {
-        dword(&self.map, 20)
+        le32(&self.map, 20)
     }
     pub fn mode_crc_type(&self) -> u32 {
-        dword(&self.map, 32)
+        le32(&self.map, 32)
     }
     pub fn specification(&self) -> &[u8] {
         &self.map[MAP - SPECIFICATION..]
@@ -96,7 +97,7 @@ impl<'a> Patch<'a> {
         if &bytes[16..20] != b"ALPS" || bytes[24..28] != [0xff; 4] {
             return Err(FormatError::Header);
         }
-        let count = dword(bytes, HEADER + 12) as usize;
+        let count = le32(bytes, HEADER + 12) as usize;
         if count == 0 || count > MAX_SECTIONS || count > (bytes.len() - HEADER - GLOBAL) / MAP {
             return Err(FormatError::SectionTable);
         }
@@ -106,8 +107,8 @@ impl<'a> Patch<'a> {
         for i in 0..count {
             let at = HEADER + GLOBAL + i * MAP;
             let map: [u8; MAP] = bytes[at..at + MAP].try_into().unwrap();
-            let start = dword(&map, 4) as usize;
-            let size = dword(&map, 8) as usize;
+            let start = le32(&map, 4) as usize;
+            let size = le32(&map, 8) as usize;
             let end = start
                 .checked_add(size)
                 .filter(|end| *end <= bytes.len())
@@ -115,8 +116,8 @@ impl<'a> Patch<'a> {
             if start < table_end {
                 return Err(FormatError::SectionBounds);
             }
-            let size_download = dword(&map, 16) as usize;
-            if size_download > size || dword(&map, 12).checked_add(size_download as u32).is_none() {
+            let size_download = le32(&map, 16) as usize;
+            if size_download > size || le32(&map, 12).checked_add(size_download as u32).is_none() {
                 return Err(FormatError::DownloadBounds);
             }
             if size != 0
@@ -178,9 +179,6 @@ impl Section<'_> {
                 data,
             })
     }
-}
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
 #[cfg(test)]

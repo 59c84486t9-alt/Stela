@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Source ordinary ADDBA/DELBA and single-TID BAR fields. No session authority.
 use super::Error;
+use crate::bytes::get_le16;
 use crate::net::{
     Mac,
     wifi::frame::{ACTION, BLOCK_ACK_REQUEST, FROM_DS, Mpdu, PROTECTED, TO_DS, TYPE_SUBTYPE},
@@ -34,13 +35,7 @@ pub(super) enum Management {
     },
 }
 fn word(bytes: &[u8], offset: usize) -> Result<u16, Error> {
-    Ok(u16::from_le_bytes(
-        bytes
-            .get(offset..offset + 2)
-            .ok_or(Error::Truncated)?
-            .try_into()
-            .unwrap(),
-    ))
+    get_le16(bytes, offset).ok_or(Error::Truncated)
 }
 
 use super::super::wire::action::addba_extension;

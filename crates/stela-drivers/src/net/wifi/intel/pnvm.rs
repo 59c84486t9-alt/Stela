@@ -3,6 +3,7 @@
 //! Bare-TLV PNVM and reduced-power SKU selection from pinned fw/{pnvm,uefi}.c.
 //! Selection is not calibration, regulatory permission or PNVM upload/ACK.
 use super::{firmware::Tlv, identity::Profile};
+use crate::bytes::le32;
 use alloc::vec::Vec;
 use core::ops::Range;
 const SKU: u32 = 64;
@@ -55,9 +56,6 @@ pub struct Selection<'a> {
     hardware: [u16; 2],
     chunks: Vec<Chunk<'a>>,
 }
-fn word(bytes: &[u8]) -> u32 {
-    u32::from_le_bytes(bytes[..4].try_into().expect("checked word"))
-}
 /// Reduced-power packages have SKU-scoped MEM_DESC payloads, with no PNVM
 /// hardware/version requirement. Actual ALIVE selection remains mandatory.
 #[derive(Debug)]
@@ -71,7 +69,7 @@ impl<'a> ReducedPower<'a> {
     }
 }
 fn memory_chunk<'a>(tlv: &Tlv<'a>, index: usize) -> Result<Chunk<'a>, Error> {
-    if word(&tlv.data[4..]) as usize != tlv.data.len() - 8 {
+    if le32(tlv.data, 4) as usize != tlv.data.len() - 8 {
         return Err(Error::MemoryDescriptorSize);
     }
     if tlv.data.len() == 8 {
@@ -79,7 +77,7 @@ fn memory_chunk<'a>(tlv: &Tlv<'a>, index: usize) -> Result<Chunk<'a>, Error> {
     }
     Ok(Chunk {
         kind: ChunkKind::MemoryDescriptor {
-            address: word(tlv.data),
+            address: le32(tlv.data, 0),
         },
         data: &tlv.data[8..],
         tlv_index: index,
@@ -102,8 +100,8 @@ impl<'a> Pnvm<'a> {
             let header = bytes
                 .get(at..at + 8)
                 .ok_or(Error::Truncated { offset: at })?;
-            let kind = word(header);
-            let len = word(&header[4..]) as usize;
+            let kind = le32(header, 0);
+            let len = le32(header, 4) as usize;
             let aligned = len
                 .checked_next_multiple_of(4)
                 .ok_or(Error::Truncated { offset: at })?;
@@ -130,7 +128,7 @@ impl<'a> Pnvm<'a> {
                     last.tlvs.end = pnvm.tlvs.len();
                 }
                 pnvm.groups.push(Group {
-                    sku: [word(data), word(&data[4..]), word(&data[8..])],
+                    sku: [le32(data, 0), le32(data, 4), le32(data, 8)],
                     tlvs: pnvm.tlvs.len() + 1..pnvm.tlvs.len() + 1,
                 });
             }
@@ -220,12 +218,12 @@ impl<'a> Pnvm<'a> {
                         matched |= actual == hardware;
                     }
                     VERSION => {
-                        if version.replace(word(tlv.data)).is_some() {
+                        if version.replace(le32(tlv.data, 0)).is_some() {
                             return Err(Error::DuplicateVersion);
                         }
                     }
                     SECTION => {
-                        let marker = word(tlv.data);
+                        let marker = le32(tlv.data, 0);
                         if marker == 0xddddeeee {
                             continue;
                         }

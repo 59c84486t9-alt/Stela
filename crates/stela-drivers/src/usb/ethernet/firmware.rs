@@ -8,6 +8,7 @@
 //! Setup's independently pinned manifest and exact resource target are still
 //! required. Unknown block effects are refused instead of silently skipped.
 use super::rtl815x::Revision;
+use crate::bytes::{le16, le32};
 use crate::{block::BlockError, firmware as resources};
 use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::fmt;
@@ -161,13 +162,6 @@ pub fn load<'a>(
     Ok(Some((image, parsed)))
 }
 
-fn word(bytes: &[u8], at: usize) -> u16 {
-    u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap())
-}
-fn dword(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Bank {
     Pla,
@@ -190,22 +184,22 @@ impl<'a> Mac<'a> {
         self.payload
     }
     pub fn register(&self) -> u16 {
-        word(self.bytes, 10)
+        le16(self.bytes, 10)
     }
     pub fn breakpoint_base(&self) -> (u16, u16) {
-        (word(self.bytes, 12), word(self.bytes, 14))
+        (le16(self.bytes, 12), le16(self.bytes, 14))
     }
     pub fn breakpoint_enable(&self) -> (u16, u16) {
-        (word(self.bytes, 16), word(self.bytes, 18))
+        (le16(self.bytes, 16), le16(self.bytes, 18))
     }
     pub fn breakpoint_start(&self) -> u16 {
-        word(self.bytes, 20)
+        le16(self.bytes, 20)
     }
     pub fn breakpoints(&self) -> impl Iterator<Item = u16> + '_ {
-        (0..usize::from(word(self.bytes, 22))).map(|i| word(self.bytes, 24 + 2 * i))
+        (0..usize::from(le16(self.bytes, 22))).map(|i| le16(self.bytes, 24 + 2 * i))
     }
     pub fn version_register(&self) -> (u16, u8) {
-        (word(self.bytes, 60), self.bytes[62])
+        (le16(self.bytes, 60), self.bytes[62])
     }
 }
 
@@ -219,26 +213,26 @@ impl<'a> PhyNc<'a> {
         self.payload
     }
     pub fn register(&self) -> u16 {
-        word(self.bytes, 10)
+        le16(self.bytes, 10)
     }
     pub fn base(&self) -> (u16, u16) {
-        (word(self.bytes, 12), word(self.bytes, 14))
+        (le16(self.bytes, 12), le16(self.bytes, 14))
     }
     pub fn patch_enable(&self) -> (u16, u16) {
-        (word(self.bytes, 16), word(self.bytes, 18))
+        (le16(self.bytes, 16), le16(self.bytes, 18))
     }
     pub fn mode(&self) -> (u16, u16, u16) {
         (
-            word(self.bytes, 20),
-            word(self.bytes, 22),
-            word(self.bytes, 24),
+            le16(self.bytes, 20),
+            le16(self.bytes, 22),
+            le16(self.bytes, 24),
         )
     }
     pub fn breakpoint_start(&self) -> u16 {
-        word(self.bytes, 28)
+        le16(self.bytes, 28)
     }
     pub fn breakpoints(&self) -> impl Iterator<Item = u16> + '_ {
-        (0..usize::from(word(self.bytes, 30))).map(|i| word(self.bytes, 32 + 2 * i))
+        (0..usize::from(le16(self.bytes, 30))).map(|i| le16(self.bytes, 32 + 2 * i))
     }
 }
 
@@ -252,19 +246,19 @@ impl<'a> PhyUnion<'a> {
         self.payload
     }
     pub fn register(&self) -> u16 {
-        word(self.bytes, 10)
+        le16(self.bytes, 10)
     }
     pub fn presets(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         (0..usize::from(self.bytes[56]))
-            .map(|i| (word(self.bytes, 12 + 4 * i), word(self.bytes, 14 + 4 * i)))
+            .map(|i| (le16(self.bytes, 12 + 4 * i), le16(self.bytes, 14 + 4 * i)))
     }
     pub fn breakpoints(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
         (0..usize::from(self.bytes[57]))
-            .map(|i| (word(self.bytes, 20 + 4 * i), word(self.bytes, 22 + 4 * i)))
+            .map(|i| (le16(self.bytes, 20 + 4 * i), le16(self.bytes, 22 + 4 * i)))
     }
     pub fn breakpoint_enable(&self) -> Option<(u16, u16)> {
-        (self.bytes[57] != 0 && word(self.bytes, 52) != 0)
-            .then(|| (word(self.bytes, 52), word(self.bytes, 54)))
+        (self.bytes[57] != 0 && le16(self.bytes, 52) != 0)
+            .then(|| (le16(self.bytes, 52), le16(self.bytes, 54)))
     }
 }
 
@@ -315,7 +309,7 @@ fn payload(bytes: &[u8], header: usize, alignment: usize) -> Result<&[u8], &'sta
     if bytes.len() < header {
         return Err("RTL815x short firmware block header");
     }
-    let offset = usize::from(word(bytes, 8));
+    let offset = usize::from(le16(bytes, 8));
     if offset < header || offset >= bytes.len() || !(bytes.len() - offset).is_multiple_of(alignment)
     {
         return Err("RTL815x invalid firmware payload offset/length");
@@ -349,8 +343,8 @@ impl<'a> Firmware<'a> {
             let header = bytes
                 .get(at..at + 8)
                 .ok_or("RTL815x missing firmware END block")?;
-            let kind = dword(header, 0);
-            let length = dword(header, 4) as usize;
+            let kind = le32(header, 0);
+            let length = le32(header, 4) as usize;
             if length < 8 {
                 return Err("RTL815x invalid firmware block length");
             }
@@ -417,20 +411,20 @@ impl<'a> Firmware<'a> {
             }
             let decoded = match kind {
                 PLA | USB => Block::Mac(parse_mac(block, revision, kind == PLA)?),
-                START if length == 16 && word(block, 8) != 0 => Block::PhyStart {
-                    key_register: word(block, 8),
-                    key: word(block, 10),
+                START if length == 16 && le16(block, 8) != 0 => Block::PhyStart {
+                    key_register: le16(block, 8),
+                    key: le16(block, 10),
                 },
                 STOP if length == 8 => Block::PhyStop,
                 NC => {
                     let data = payload(block, PHY_NC_HEADER, 2)?;
                     if !matches!(revision.0, 0x5c10 | 0x5c20 | 0x5c30)
-                        || word(block, 10) != 0xa014
-                        || word(block, 12) != 0xa012
-                        || word(block, 16) != 0xa01a
-                        || word(block, 20) != 0xb820
-                        || word(block, 28) != 0xa000
-                        || word(block, 30) > 4
+                        || le16(block, 10) != 0xa014
+                        || le16(block, 12) != 0xa012
+                        || le16(block, 16) != 0xa01a
+                        || le16(block, 20) != 0xb820
+                        || le16(block, 28) != 0xa000
+                        || le16(block, 30) > 4
                     {
                         return Err("RTL815x wrong PHY NC registers/revision/breakpoints");
                     }
@@ -455,10 +449,10 @@ impl<'a> Firmware<'a> {
                 FIXUP
                     if length == 16
                         && matches!(revision.0, 0x7030 | 0x7410 | 0x7420)
-                        && word(block, 8) == 0xb820
-                        && word(block, 10) == 0x80 =>
+                        && le16(block, 8) == 0xb820
+                        && le16(block, 10) == 0x80 =>
                 {
-                    let operation = match word(block, 12) {
+                    let operation = match le16(block, 12) {
                         0 => Fixup::And,
                         1 => Fixup::Or,
                         2 => Fixup::Clear,
@@ -466,30 +460,30 @@ impl<'a> Firmware<'a> {
                         _ => return Err("RTL815x unknown PHY fixup operation"),
                     };
                     Block::PhyFixup {
-                        register: word(block, 8),
-                        value: word(block, 10),
+                        register: le16(block, 8),
+                        value: le16(block, 10),
                         operation,
                     }
                 }
                 SPEED_UP => {
                     let data = payload(block, 16, 4)?;
-                    if !matches!(revision.0, 0x7410 | 0x7420) || word(block, 12) != 0x9a00 {
+                    if !matches!(revision.0, 0x7410 | 0x7420) || le16(block, 12) != 0x9a00 {
                         return Err("RTL815x invalid PHY speed-up revision/register");
                     }
                     Block::PhySpeedUp {
-                        register: word(block, 12),
-                        version: word(block, 10),
+                        register: le16(block, 12),
+                        version: le16(block, 10),
                         payload: data,
                     }
                 }
                 VERSION
                     if length == 16
                         && matches!(revision.0, 0x7030 | 0x7410 | 0x7420)
-                        && word(block, 8) == 0x801e =>
+                        && le16(block, 8) == 0x801e =>
                 {
                     Block::PhyVersion {
-                        register: word(block, 8),
-                        version: word(block, 10),
+                        register: le16(block, 8),
+                        version: le16(block, 10),
                     }
                 }
                 _ => return Err("RTL815x invalid firmware block structure"),
@@ -516,17 +510,17 @@ fn parse_mac(bytes: &[u8], revision: Revision, pla: bool) -> Result<Mac<'_>, &'s
     } else {
         (0xe600, 0xfc48, 16)
     };
-    let count = usize::from(word(bytes, 22));
-    if word(bytes, 10) != register
-        || word(bytes, 12) != 0xfc26
-        || word(bytes, 16) != enable
-        || word(bytes, 20) != 0xfc28
+    let count = usize::from(le16(bytes, 22));
+    if le16(bytes, 10) != register
+        || le16(bytes, 12) != 0xfc26
+        || le16(bytes, 16) != enable
+        || le16(bytes, 20) != 0xfc28
         || count > maximum
         || usize::from(register) + data.len() >= 0x10000
     {
         return Err("RTL815x invalid MAC firmware registers/breakpoints/range");
     }
-    if (count..maximum).any(|i| word(bytes, 24 + i * 2) != 0) {
+    if (count..maximum).any(|i| le16(bytes, 24 + i * 2) != 0) {
         return Err("RTL815x nonzero unused MAC breakpoint");
     }
     Ok(Mac {

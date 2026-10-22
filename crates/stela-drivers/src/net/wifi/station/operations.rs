@@ -8,6 +8,7 @@
 //! this parser never parses local/outgoing association intent.
 
 use super::phy::{Error, Mode, Negotiated, Width};
+use crate::bytes::le16;
 use crate::net::wifi::{Band, Channel};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,9 +168,6 @@ pub struct Operations {
     pub he: Option<HeOperation>,
     pub eht: Option<EhtOperation>,
 }
-fn word(bytes: &[u8]) -> u16 {
-    u16::from_le_bytes(bytes.try_into().unwrap())
-}
 fn once<T>(slot: &mut Option<T>, value: T) -> Result<(), Error> {
     if slot.replace(value).is_some() {
         return Err(Error::Invalid("duplicate operation IE"));
@@ -206,8 +204,8 @@ impl Operations {
                         HtOperation {
                             primary: b[0],
                             parameter: b[1],
-                            protection: word(&b[2..4]),
-                            stbc: word(&b[4..6]),
+                            protection: le16(b, 2),
+                            stbc: le16(b, 4),
                             basic_mcs: b[6..].try_into().unwrap(),
                         },
                     )?;
@@ -220,7 +218,7 @@ impl Operations {
                             width: b[0],
                             center0: b[1],
                             center1: b[2],
-                            basic_mcs: word(&b[3..5]),
+                            basic_mcs: le16(b, 3),
                         },
                     )?;
                 }
@@ -410,7 +408,7 @@ impl HeOperation {
         exact(bytes, offset)?;
         Ok(Self {
             parameters,
-            basic_mcs: word(&b[4..6]),
+            basic_mcs: le16(b, 4),
             vht,
             cohosted_bssid,
             six_ghz,
@@ -436,7 +434,7 @@ impl EhtOperation {
                 return Err(Error::Invalid("puncture without EHT operation info"));
             }
             n += 2;
-            word(bytes.get(8..10).ok_or(Error::Truncated)?)
+            le16(bytes.get(8..10).ok_or(Error::Truncated)?, 0)
         } else {
             0
         };

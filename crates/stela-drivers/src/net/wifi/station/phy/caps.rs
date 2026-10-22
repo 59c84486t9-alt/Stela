@@ -1,4 +1,5 @@
 use super::{Error, Role};
+use crate::bytes::le16;
 
 /// Bounded HE/EHT PPE observation; no allocation on an untrusted IE path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,9 +35,6 @@ fn exact<const N: usize>(bytes: &[u8]) -> Result<[u8; N], Error> {
         .try_into()
         .map_err(|_| Error::Invalid("fixed capability length"))
 }
-fn le16(bytes: &[u8]) -> u16 {
-    u16::from_le_bytes([bytes[0], bytes[1]])
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ht {
@@ -52,11 +50,11 @@ impl Ht {
     pub(super) fn parse(bytes: &[u8]) -> Result<Self, Error> {
         let raw = exact(bytes)?;
         Ok(Self {
-            capability: le16(bytes),
+            capability: le16(bytes, 0),
             ampdu_exponent: bytes[2] & 3,
             mpdu_spacing: (bytes[2] >> 2) & 7,
             rx_mcs: bytes[3..13].try_into().unwrap(),
-            rx_highest: le16(&bytes[13..]),
+            rx_highest: le16(bytes, 13),
             tx_params: bytes[15],
             raw,
         })
@@ -73,8 +71,8 @@ pub struct McsMaps {
 impl McsMaps {
     fn parse(bytes: &[u8]) -> Self {
         Self {
-            rx: le16(bytes),
-            tx: le16(&bytes[2..]),
+            rx: le16(bytes, 0),
+            tx: le16(bytes, 2),
         }
     }
     pub const fn rx_nss(self) -> u8 {
@@ -131,11 +129,11 @@ impl Vht {
         Ok(Self {
             capability,
             mcs: McsMaps {
-                rx: le16(&bytes[4..]),
-                tx: le16(&bytes[8..]),
+                rx: le16(bytes, 4),
+                tx: le16(bytes, 8),
             },
-            rx_highest: le16(&bytes[6..]),
-            tx_highest: le16(&bytes[10..]),
+            rx_highest: le16(bytes, 6),
+            tx_highest: le16(bytes, 10),
             raw,
         })
     }
@@ -366,7 +364,7 @@ impl Eht {
         source_mcs_union.bytes[..offset - 11].copy_from_slice(&bytes[11..offset]);
         let ppe_len = if phy[5] & 8 != 0 {
             let data = bytes.get(offset..offset + 2).ok_or(Error::Truncated)?;
-            let header = le16(data);
+            let header = le16(data, 0);
             if header & 15 > 7 {
                 return Err(Error::Unsupported("EHT PPE above eight NSS"));
             }

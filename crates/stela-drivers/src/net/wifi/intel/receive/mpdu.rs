@@ -5,7 +5,8 @@
 //! Source RX-MPDU descriptor observations from CPU-owned notification bytes.
 //! This preserves raw status; it does not authenticate a frame, resolve a key
 //! generation/association epoch, validate replay, normalize a MAC or release DMA.
-use super::{Packet, half, long, word};
+use super::Packet;
+use crate::bytes::{le16, le32, le64};
 pub mod normalize;
 use crate::net::wifi::intel::firmware::{Family, Firmware};
 
@@ -182,7 +183,7 @@ impl<'a> Observation<'a> {
         family: Family,
         raw: &'a [u8],
     ) -> Result<Self, Error> {
-        if raw.len() < 8 || (word(raw) & 0x3fff) as usize + 4 != raw.len() {
+        if raw.len() < 8 || (le32(raw, 0) & 0x3fff) as usize + 4 != raw.len() {
             return Err(Error::PacketLength);
         }
         // Public Packet diagnostics are mutable; bind command identity to its
@@ -194,7 +195,7 @@ impl<'a> Observation<'a> {
         if version != Some(if family == Family::Ax200 { 4 } else { 5 }) {
             return Err(Error::Version(version));
         }
-        let packet_flags = word(raw);
+        let packet_flags = le32(raw, 0);
         let d = &raw[8..];
         let size = if family == Family::Ax200 { 48 } else { 64 };
         if d.len() < size {
@@ -203,7 +204,7 @@ impl<'a> Observation<'a> {
                 actual: d.len(),
             });
         }
-        let len = usize::from(half(d));
+        let len = usize::from(le16(d, 0));
         let available = d.len() - size;
         if len > available {
             return Err(Error::MpduLength {
@@ -215,13 +216,13 @@ impl<'a> Observation<'a> {
             flags1: d[2],
             flags2: d[3],
             amsdu_info: d[4],
-            phy_info: half(&d[5..]),
+            phy_info: le16(d, 5),
         };
         let status = Status {
-            raw: word(&d[12..]),
+            raw: le32(d, 12),
             deprecate_ttak: fw.supports_api(41),
         };
-        let raw = word(&d[16..]);
+        let raw = le32(d, 16);
         let ba = ((raw >> 24) & 127) as u8;
         let reorder = Reorder {
             raw,
@@ -233,20 +234,20 @@ impl<'a> Observation<'a> {
         let (rate, energy, gp2, tsf, p2, p3, p5) = if family == Family::Ax200 {
             (28, 32, 36, 40, 20, 24, None)
         } else {
-            (36, 40, 44, 48, 24, 20, Some(word(&d[56..])))
+            (36, 40, 44, 48, 24, 20, Some(le32(d, 56)))
         };
-        let raw_timestamp = long(&d[tsf..]);
+        let raw_timestamp = le64(d, tsf);
         let timestamp = if mac.phy_info & 0x100 != 0 {
             Timestamp::Overloaded {
-                low: word(&d[tsf..]),
-                high: word(&d[tsf + 4..]),
+                low: le32(d, tsf),
+                high: le32(d, tsf + 4),
             }
         } else {
             Timestamp::Counter(raw_timestamp)
         };
         let channel = d[energy + 2];
         let radio = Radio {
-            raw_rate: word(&d[rate..]),
+            raw_rate: le32(d, rate),
             energy: [d[energy], d[energy + 1]],
             channel,
             mac_context: d[energy + 3],
@@ -258,14 +259,14 @@ impl<'a> Observation<'a> {
                     five_ghz: channel > 14,
                 }
             },
-            gp2_on_air_rise: word(&d[gp2..]),
+            gp2_on_air_rise: le32(d, gp2),
             timestamp,
             raw_timestamp,
-            phy_data0: word(&d[tsf..]),
-            phy_data1: word(&d[tsf + 4..]),
-            phy_data2: word(&d[p2..]),
-            phy_data3: word(&d[p3..]),
-            phy_word4: word(&d[8..]),
+            phy_data0: le32(d, tsf),
+            phy_data1: le32(d, tsf + 4),
+            phy_data2: le32(d, p2),
+            phy_data3: le32(d, p3),
+            phy_word4: le32(d, 8),
             phy_data5: p5,
         };
         Ok(Self {

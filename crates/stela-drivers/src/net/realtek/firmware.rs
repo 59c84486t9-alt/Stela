@@ -8,6 +8,7 @@
 //! and exact device binding are checked before this parser is called.
 use super::{Error, Timer, block_error};
 use crate::block::BlockError;
+use crate::bytes::le32;
 
 const HEADER: usize = 45;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
@@ -39,8 +40,8 @@ impl<'a> Script<'a> {
             if bytes.iter().fold(0u8, |sum, b| sum.wrapping_add(*b)) != 0 {
                 return Err(bad("firmware checksum mismatch"));
             }
-            let start = word(bytes, 36) as usize;
-            let length = word(bytes, 40) as usize;
+            let start = le32(bytes, 36) as usize;
+            let length = le32(bytes, 40) as usize;
             // Start need not be aligned. Decode individual LE words, not a cast.
             if start < HEADER || start > bytes.len() || length > (bytes.len() - start) / 4 {
                 return Err(bad("firmware command range outside image"));
@@ -77,7 +78,7 @@ impl<'a> Script<'a> {
         self.code.len() / 4
     }
     fn action(&self, pc: usize) -> u32 {
-        word(self.code, pc * 4)
+        le32(self.code, pc * 4)
     }
 
     pub(super) fn execute(&self, io: &mut impl ScriptIo, timer: &impl Timer) -> Result<(), Error> {
@@ -132,13 +133,6 @@ impl<'a> Script<'a> {
         }
         Err(Error::Script("firmware instruction budget exceeded"))
     }
-}
-fn word(bytes: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(
-        bytes[offset..offset + 4]
-            .try_into()
-            .expect("validated firmware word"),
-    )
 }
 
 #[cfg(test)]

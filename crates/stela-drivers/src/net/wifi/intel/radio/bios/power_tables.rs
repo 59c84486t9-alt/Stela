@@ -2,7 +2,8 @@
 // Copyright (C) 2021-2026 Intel Corporation
 //! Raw UEFI power/coexistence observations, not selected BIOS authority,
 //! approved platform policy, submitted firmware tables or transmit permission.
-use super::{Error, bounded, prefix, word};
+use super::{Error, bounded, prefix};
+use crate::bytes::le32;
 fn exact(raw: &[u8], expected: usize) -> Result<(), Error> {
     if raw.len() != expected {
         return Err(Error::ExactSize {
@@ -36,7 +37,7 @@ impl<'a> Sar<'a> {
         let offset = if extended { 9 } else { 5 };
         let capacity = if extended { 3 } else { 1 };
         exact(raw, offset + capacity * 4 * subbands)?;
-        let profiles = if extended { word(raw, 5) } else { 1 };
+        let profiles = if extended { le32(raw, 5) } else { 1 };
         if profiles > 3 {
             return Err(Error::ProfileCount {
                 minimum: 0,
@@ -64,7 +65,7 @@ impl<'a> Sar<'a> {
         self.profiles
     }
     pub fn raw_mode(self) -> u32 {
-        word(self.raw, 1)
+        le32(self.raw, 1)
     }
     /// Exact source C call converts mode to the bool parameter of
     /// iwl_uefi_set_sar_profile before applying its enable mask. Preserve mode
@@ -166,7 +167,7 @@ impl<'a> Ppag<'a> {
         self.subbands
     }
     pub fn raw_modes(self) -> u32 {
-        word(self.raw, 1)
+        le32(self.raw, 1)
     }
     pub fn source_flags(self) -> u32 {
         match self.raw[0] {
@@ -214,7 +215,7 @@ impl<'a> Tas<'a> {
         self.raw
     }
     pub fn raw_selection(self) -> u32 {
-        word(self.raw, 1)
+        le32(self.raw, 1)
     }
     pub fn source_enabled(self) -> bool {
         self.raw_selection() & 1 != 0

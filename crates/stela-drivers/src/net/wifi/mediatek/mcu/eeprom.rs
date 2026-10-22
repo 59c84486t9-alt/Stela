@@ -4,6 +4,7 @@
 //! donor ignores validity/version/size/magic fields; retain them without
 //! inventing their meaning or treating this observation as radio authority.
 use super::{Encoder, Error as EventError, Event};
+use crate::bytes::le32;
 use crate::net::wifi::mediatek::identity::Chip;
 use alloc::vec::Vec;
 
@@ -112,9 +113,6 @@ pub struct Observation {
     connac3: Option<Connac3>,
     data_offset: usize,
 }
-fn word(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
-}
 impl Observation {
     pub fn parse(chip: Chip, body: &[u8]) -> Result<Self, Error> {
         if body.len() > 64 * 1024 {
@@ -128,7 +126,7 @@ impl Observation {
                 actual: body.len(),
             });
         }
-        let address = word(body, if c3 { 12 } else { 0 });
+        let address = le32(body, if c3 { 12 } else { 0 });
         let expected = offset(chip) & !15;
         // Conservative addition: Linux ignores this echo. Do not select a
         // different physical block's byte as this hardware's encapsulation.
@@ -141,16 +139,16 @@ impl Observation {
         Ok(Self {
             chip,
             raw: body.to_vec(),
-            valid: word(body, if c3 { 16 } else { 4 }),
+            valid: le32(body, if c3 { 16 } else { 4 }),
             connac3: c3.then(|| Connac3 {
                 reserved: body[..4].try_into().unwrap(),
                 tag: u16::from_le_bytes(body[4..6].try_into().unwrap()),
                 length: u16::from_le_bytes(body[6..8].try_into().unwrap()),
-                version: word(body, 8),
-                size: word(body, 20),
-                magic: word(body, 24),
-                kind: word(body, 28),
-                reserved_words: core::array::from_fn(|i| word(body, 32 + i * 4)),
+                version: le32(body, 8),
+                size: le32(body, 20),
+                magic: le32(body, 24),
+                kind: le32(body, 28),
+                reserved_words: core::array::from_fn(|i| le32(body, 32 + i * 4)),
             }),
             data_offset: if c3 { 48 } else { 8 },
         })
@@ -295,10 +293,10 @@ mod tests {
                 assert_eq!(observed.byte(), trace[at]);
                 at += 1;
                 if let Some(c3) = observed.connac3() {
-                    assert_eq!(c3.version, word(observed.raw(), 8));
+                    assert_eq!(c3.version, le32(observed.raw(), 8));
                     assert_eq!(
                         c3.reserved_words,
-                        core::array::from_fn(|i| word(observed.raw(), 32 + i * 4))
+                        core::array::from_fn(|i| le32(observed.raw(), 32 + i * 4))
                     );
                 }
             }
