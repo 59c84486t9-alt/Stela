@@ -88,7 +88,6 @@ pub enum Error {
     UlpState,
     DescriptorFlushRequired,
     Dma(crate::block::BlockError),
-    DmaRange,
     QueueStalled,
     Stopped,
     Poisoned,

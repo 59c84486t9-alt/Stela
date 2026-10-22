@@ -11,6 +11,7 @@ pub mod e1000e;
 pub mod igb;
 pub mod igc;
 pub mod realtek;
+mod ring;
 pub mod virtio;
 pub mod wifi;
 
@@ -58,6 +59,9 @@ pub enum LinkError {
     Adapter(String),
     /// A frame no Ethernet link carries.
     Invalid(&'static str),
+    /// The link is down: no frame can leave until it comes back. Frames the
+    /// adapter held when it went down are discarded, as Linux does.
+    NoCarrier,
 }
 
 /// A raw Ethernet II link: whole frames without the FCS.

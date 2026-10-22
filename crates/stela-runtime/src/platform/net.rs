@@ -115,6 +115,7 @@ impl From<LinkError> for NetError {
         match error {
             LinkError::Adapter(why) => Self::Link(why),
             LinkError::Invalid(why) => Self::Invalid(why),
+            LinkError::NoCarrier => Self::Link(String::from("no carrier")),
         }
     }
 }

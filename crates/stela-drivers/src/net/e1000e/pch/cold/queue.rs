@@ -16,7 +16,7 @@ use core::sync::atomic::{Ordering, fence};
 
 // Common descriptor storage only; the 82574-specific programming/reset/start
 // routines are never called. Addresses are boot-lifetime coherent DMA RAM.
-use super::super::super::{BUFFER, DESCRIPTOR, DESCRIPTORS, Ring};
+use crate::net::ring::{DESCRIPTOR, DESCRIPTORS, Ring};
 
 const CTRL_EXT: u32 = 0x18;
 const FEXTNVM4: u32 = 0x24;
@@ -128,24 +128,6 @@ impl<R: Registers + nvm::Registers, D: Delay + Clone> Ethernet<R, D> {
         }
         let receive = Ring::new(dma).map_err(Error::Dma)?;
         let transmit = Ring::new(dma).map_err(Error::Dma)?;
-        for ring in [&receive, &transmit] {
-            if ring.descriptors.physical() & 127 != 0
-                || ring.descriptors.len() != DESCRIPTORS * DESCRIPTOR
-                || ring.buffers.len() != DESCRIPTORS * BUFFER
-                || ring
-                    .descriptors
-                    .physical()
-                    .checked_add(ring.descriptors.len() as u64)
-                    .is_none()
-                || ring
-                    .buffers
-                    .physical()
-                    .checked_add(ring.buffers.len() as u64)
-                    .is_none()
-            {
-                return Err(Error::DmaRange);
-            }
-        }
         let mut this = Self {
             controller,
             receive,
@@ -800,6 +782,7 @@ pub(super) mod tests {
     use super::super::tests::{Io, Model, Timer, fixture, fixture_lpt, start, start_lpt};
     use super::*;
     use crate::bus::dma::{DmaBuffer, RegionAllocator};
+    use crate::net::ring::BUFFER;
     use alloc::{rc::Rc, sync::Arc, vec};
     use core::{cell::RefCell, sync::atomic::AtomicUsize};
 

@@ -46,7 +46,10 @@
 //! a descriptor is never reused until the device writes its done bit.
 pub mod pch;
 
-use super::{Link, LinkError, MAX_FRAME, MIN_FRAME, Mac};
+use super::{
+    HEADER, Link, LinkError, MAX_FRAME, MIN_FRAME, Mac, check_frame,
+    ring::{DESCRIPTOR, DESCRIPTORS, Ring},
+};
 use crate::{
     Clock, Handoff,
     block::BlockError,
@@ -146,6 +149,21 @@ const PHY_SPECIFIC: u16 = 16;
 const PHY_PAGE: u16 = 22;
 const PHY_BIAS1: u16 = 29;
 const PHY_BIAS2: u16 = 30;
+/// 1000BASE-T Status (IEEE 802.3 clause 40.5.1.1) and the BM PHY's receive
+/// error counter (Linux `E1000_RECEIVE_ERROR_COUNTER`).
+const PHY_GIGABIT_STATUS: u16 = 10;
+const PHY_RECEIVE_ERRORS: u16 = 21;
+const PHY_IDLE_ERRORS: u16 = 0xff;
+/// Advertise 10/100 half and full duplex, IEEE 802.3 selector, no pause.
+const PHY_ADVERTISE_10_100: u16 = 0x01e1;
+/// 1000BASE-T Control: the half/full advertisement and master/slave bits,
+/// of which only 1000 full duplex is advertised.
+const PHY_GIGABIT_FIELDS: u16 = 0x1f00;
+const PHY_GIGABIT_FULL: u16 = 1 << 9;
+/// BM PHY bias settings Linux `e1000_copper_link_setup_m88` applies to
+/// revision 2 parts.
+const PHY_BIAS1_VALUE: u16 = 3;
+const PHY_BIAS2_VALUE: u16 = 0;
 const PHY_RESET: u16 = 1 << 15;
 const PHY_LOOPBACK: u16 = 1 << 14;
 const PHY_AUTONEG: u16 = 1 << 12;
@@ -157,9 +175,6 @@ const PHY_AUTO_MDIX: u16 = 3 << 5;
 const PHY_POLARITY_DISABLE: u16 = 1 << 1;
 const PHY_BM_REV2: u32 = 0x0141_0cb1;
 
-const DESCRIPTORS: usize = 32;
-const DESCRIPTOR: usize = 16;
-const BUFFER: usize = 2048;
 const RX_DONE: u8 = 1;
 const RX_EOP: u8 = 1 << 1;
 // Checksum errors are irrelevant because checksum offload is disabled.
@@ -173,7 +188,18 @@ const RESET_WAIT_US: u64 = 20_000;
 const OWNERSHIP_WAIT_US: u64 = 200_000;
 const MDIC_WAIT_US: u64 = 20_000;
 const PHY_WAIT_US: u64 = 500_000;
-const TRANSMIT_WAIT_US: u64 = 100_000;
+/// Linux runs the e1000e watchdog every two seconds.
+const WATCHDOG_US: u64 = 2_000_000;
+/// Copper inter-packet gaps: IPGT 8, IPGR1 8, IPGR2 6.
+const TIPG_COPPER: u32 = 8 | 8 << 10 | 6 << 20;
+/// RXDCTL prefetch, host and write-back thresholds with byte granularity.
+const RXDCTL_POLICY: u32 = 1 << 16 | 4 << 8 | 8;
+const RECEIVE_ADDRESSES: usize = 16;
+const MULTICAST_HASH_WORDS: usize = 128;
+/// After the MAC drains its bus master requests (Linux `e1000_reset_hw_82571`).
+const MASTER_SETTLE_US: u64 = 10_000;
+/// NVM auto-read starts the PHY's configuration; MDIO stays idle meanwhile.
+const PHY_CONFIGURATION_US: u64 = 25_000;
 
 pub fn matches<C: ConfigSpace>(function: &Function<C>) -> bool {
     function.vendor == VENDOR && function.device == DEVICE && function.class == [2, 0, 0]
@@ -236,7 +262,7 @@ fn reset(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> 
         return Err(BlockError::Timeout);
     }
     device.read(STATUS); // flush posted PCIe writes before the settle time
-    clock.delay(10_000);
+    clock.delay(MASTER_SETTLE_US);
     ownership(device, clock)?;
     device.write(CTRL, device.read(CTRL) | CTRL_RST);
     let reset_done = clock.wait(RESET_WAIT_US, || device.read(CTRL) & CTRL_RST == 0);
@@ -244,8 +270,7 @@ fn reset(device: &impl Registers, clock: &impl Timer) -> Result<(), BlockError> 
     if !reset_done || !clock.wait(RESET_WAIT_US, || device.read(EECD) & EECD_AUTO_RD != 0) {
         return Err(BlockError::Timeout);
     }
-    // NVM auto-read starts the PHY configuration; do not access MDIO yet.
-    clock.delay(25_000);
+    clock.delay(PHY_CONFIGURATION_US);
     device.write(IMC, u32::MAX);
     device.read(ICR);
     Ok(())
@@ -298,24 +323,19 @@ fn configure_phy(device: &impl Registers, clock: &impl Timer) -> Result<(), Bloc
         }
         let mut specific = mdic(device, clock, PHY_SPECIFIC, None)?;
         specific = (specific | PHY_AUTO_MDIX) & !PHY_POLARITY_DISABLE;
-        if id == PHY_BM_REV2 {
-            mdic(device, clock, PHY_SPECIFIC, Some(specific & !PHY_DOWNSHIFT))?;
-            reset_phy(device, clock)?;
-        }
-        mdic(device, clock, PHY_SPECIFIC, Some(specific | PHY_DOWNSHIFT))?;
-        if id == PHY_BM_REV2 {
-            mdic(device, clock, PHY_BIAS1, Some(3))?;
-            mdic(device, clock, PHY_BIAS2, Some(0))?;
-        }
+        mdic(device, clock, PHY_SPECIFIC, Some(specific & !PHY_DOWNSHIFT))?;
         reset_phy(device, clock)?;
-        // Advertise 10/100 half/full and 1000 full, with no pause frames.
-        mdic(device, clock, PHY_ADVERTISE, Some(0x01e1))?;
+        mdic(device, clock, PHY_SPECIFIC, Some(specific | PHY_DOWNSHIFT))?;
+        mdic(device, clock, PHY_BIAS1, Some(PHY_BIAS1_VALUE))?;
+        mdic(device, clock, PHY_BIAS2, Some(PHY_BIAS2_VALUE))?;
+        reset_phy(device, clock)?;
+        mdic(device, clock, PHY_ADVERTISE, Some(PHY_ADVERTISE_10_100))?;
         let gigabit = mdic(device, clock, PHY_GIGABIT, None)?;
         mdic(
             device,
             clock,
             PHY_GIGABIT,
-            Some((gigabit & !0x1f00) | 0x0200),
+            Some((gigabit & !PHY_GIGABIT_FIELDS) | PHY_GIGABIT_FULL),
         )?;
         let control = mdic(device, clock, PHY_CONTROL, None)?;
         mdic(
@@ -341,32 +361,25 @@ fn station(low: u32, high: u32) -> Option<Mac> {
     (high & RAH_VALID != 0 && mac.0 != [0; 6] && !mac.is_multicast()).then_some(mac)
 }
 
-struct Ring {
-    descriptors: DmaBuffer,
-    buffers: DmaBuffer,
+/// Whether the BM PHY has hung: its receive error counter and 1000BASE-T
+/// idle error count both saturated (Linux `e1000_check_phy_82574`). A
+/// failed MDIO read is not a hang.
+fn phy_hung(device: &impl Registers, clock: &impl Timer) -> bool {
+    if ownership(device, clock).is_err() {
+        return false;
+    }
+    let hung = mdic(device, clock, PHY_RECEIVE_ERRORS, None) == Ok(u16::MAX)
+        && mdic(device, clock, PHY_GIGABIT_STATUS, None)
+            .is_ok_and(|status| status & PHY_IDLE_ERRORS == PHY_IDLE_ERRORS);
+    release(device);
+    hung
 }
 
-impl Ring {
-    fn new(dma: &mut dyn DmaAllocator) -> Result<Self, BlockError> {
-        Ok(Self {
-            descriptors: dma.allocate(DESCRIPTORS * DESCRIPTOR, 4096)?,
-            buffers: dma.allocate(DESCRIPTORS * BUFFER, 4096)?,
-        })
-    }
-
-    fn address(&self, index: usize) -> u64 {
-        self.buffers.physical() + (index * BUFFER) as u64
-    }
-
-    fn buffer(&mut self, index: usize) -> &mut [u8] {
-        &mut self.buffers.bytes_mut()[index * BUFFER..(index + 1) * BUFFER]
-    }
-
-    fn program(&self, device: &Mmio, low: usize, high: usize, length: usize) {
-        device.write32(low, self.descriptors.physical() as u32);
-        device.write32(high, (self.descriptors.physical() >> 32) as u32);
-        device.write32(length, (DESCRIPTORS * DESCRIPTOR) as u32);
-    }
+/// Point the controller's base and length registers at `ring`.
+fn program(device: &Mmio, ring: &Ring, low: usize, high: usize, length: usize) {
+    device.write32(low, ring.base() as u32);
+    device.write32(high, (ring.base() >> 32) as u32);
+    device.write32(length, Ring::bytes());
 }
 
 /// The 82574L owns these buffers until reboot. Polling never waits for a
@@ -375,12 +388,15 @@ pub struct E1000e {
     device: Mmio,
     receive: Ring,
     transmit: Ring,
-    next_receive: usize,
-    next_transmit: usize,
-    clean_transmit: usize,
     dropping_receive: bool,
     mac: Mac,
     clock: Clock,
+    /// When the next watchdog check is due, and how many checks in a row
+    /// found the PHY hung.
+    watchdog_at: u64,
+    phy_hangs: u8,
+    /// Register reads return all ones: the function is gone.
+    faulted: bool,
     pub location: String,
 }
 
@@ -417,16 +433,76 @@ impl E1000e {
             device,
             receive: Ring::new(dma)?,
             transmit: Ring::new(dma)?,
-            next_receive: 0,
-            next_transmit: 0,
-            clean_transmit: 0,
             dropping_receive: false,
             mac,
             clock: handoff.clock,
+            watchdog_at: 0,
+            phy_hangs: 0,
+            faulted: false,
             location: format!("{} Intel 82574L", function.address),
         };
         net.start();
         Ok(net)
+    }
+
+    /// Linux's watchdog, driven by link polls: discard transmit work the
+    /// link took down with it, and reinitialize after two PHY hang reports
+    /// in a row. Returns the carrier.
+    fn watchdog(&mut self) -> Result<bool, LinkError> {
+        let status = self.device.read32(STATUS);
+        self.faulted |= status == u32::MAX;
+        if self.faulted {
+            return Err(LinkError::Adapter(format!(
+                "{} lost register access; reinitialization required",
+                self.location
+            )));
+        }
+        let carrier = status & STATUS_LU != 0;
+        if !carrier && self.transmit.pending() {
+            self.flush_transmit();
+        }
+        let now = self.clock.now_us();
+        if now >= self.watchdog_at {
+            self.watchdog_at = now.saturating_add(WATCHDOG_US);
+            self.phy_hangs = match phy_hung(&self.device, &self.clock) {
+                true => self.phy_hangs + 1,
+                false => 0,
+            };
+            if self.phy_hangs > 1 {
+                self.phy_hangs = 0;
+                self.reinitialize()?;
+                return Ok(false);
+            }
+        }
+        Ok(carrier)
+    }
+
+    /// Stop transmit, discard every queued descriptor and start again
+    /// empty, as Linux's reset does for work the link can no longer carry.
+    fn flush_transmit(&mut self) {
+        let control = self.device.read32(TCTL);
+        self.device.write32(TCTL, control & !TCTL_EN);
+        self.device.write32(TDH, 0);
+        self.device.write32(TDT, 0);
+        self.transmit.reset();
+        self.device.write32(TCTL, control);
+    }
+
+    /// Linux's reset task: reset the MAC and PHY and bring the rings back.
+    fn reinitialize(&mut self) -> Result<(), LinkError> {
+        let failed = |error: BlockError| {
+            LinkError::Adapter(format!(
+                "{} reinitialization failed: {error}",
+                self.location
+            ))
+        };
+        reset(&self.device, &self.clock).map_err(failed)?;
+        configure_phy(&self.device, &self.clock).map_err(failed)?;
+        self.receive.reset();
+        self.transmit.reset();
+        self.dropping_receive = false;
+        self.start();
+        Ok(())
     }
 
     fn start(&mut self) {
@@ -452,22 +528,22 @@ impl E1000e {
         device.write32(GCR, device.read32(GCR) | GCR_REQUIRED | GCR_L1_WITHOUT_L0S);
         device.write32(GCR2, device.read32(GCR2) | GCR2_ERRATA);
         // Other receive addresses and multicast hashes must not retain UNDI state.
-        for entry in 1..16 {
+        for entry in 1..RECEIVE_ADDRESSES {
             device.write32(RAL + entry * 8, 0);
             device.write32(RAH + entry * 8, 0);
         }
-        for entry in 0..128 {
+        for entry in 0..MULTICAST_HASH_WORDS {
             device.write32(MTA + entry * 4, 0);
         }
         device.write32(RFCTL, device.read32(RFCTL) & !RFCTL_EXTEN);
         device.write32(RXCSUM, 0);
-        self.receive.program(device, RDBAL, RDBAH, RDLEN);
-        self.transmit.program(device, TDBAL, TDBAH, TDLEN);
+        program(device, &self.receive, RDBAL, RDBAH, RDLEN);
+        program(device, &self.transmit, TDBAL, TDBAH, TDLEN);
         device.write32(RDH, 0);
         device.write32(RDT, 0);
         device.write32(TDH, 0);
         device.write32(TDT, 0);
-        device.write32(RXDCTL, 1 << 16 | 4 << 8 | 8);
+        device.write32(RXDCTL, RXDCTL_POLICY);
         device.write32(TXDCTL, TXDCTL_POLICY);
         // 82574 erratum: both queues must use the same write-back policy.
         device.write32(TXDCTL + 0x100, TXDCTL_POLICY);
@@ -475,8 +551,7 @@ impl E1000e {
             TARC,
             (device.read32(TARC) & !TARC_RESERVED) | TARC_REQUIRED | TARC_ENABLE,
         );
-        // Copper inter-packet gaps: IPGT=8, IPGR1=8, IPGR2=6.
-        device.write32(TIPG, 8 | 8 << 10 | 6 << 20);
+        device.write32(TIPG, TIPG_COPPER);
         for index in 0..DESCRIPTORS {
             self.offer_receive(index);
         }
@@ -495,22 +570,11 @@ impl E1000e {
         self.receive.descriptors.write(base, address);
         self.receive.descriptors.write(base + 8, 0u64);
     }
+}
 
-    fn reclaim(&mut self) -> bool {
-        while self.clean_transmit != self.next_transmit {
-            let status: u8 = self
-                .transmit
-                .descriptors
-                .read(self.clean_transmit * DESCRIPTOR + 12);
-            if status & TX_DONE == 0 {
-                break;
-            }
-            fence(Ordering::Acquire);
-            self.clean_transmit = (self.clean_transmit + 1) % DESCRIPTORS;
-        }
-        // The hardware uses head==tail for empty: retain one unused descriptor.
-        (self.next_transmit + 1) % DESCRIPTORS != self.clean_transmit
-    }
+/// Whether the controller wrote back the transmit descriptor at `base`.
+fn transmitted(descriptors: &DmaBuffer, base: usize) -> bool {
+    descriptors.read::<u8>(base + 12) & TX_DONE != 0
 }
 
 impl Link for E1000e {
@@ -519,23 +583,21 @@ impl Link for E1000e {
     }
 
     fn carrier(&mut self) -> bool {
-        self.device.read32(STATUS) & STATUS_LU != 0
+        self.watchdog().unwrap_or(false)
     }
 
     fn transmit(&mut self, frame: &[u8]) -> Result<(), LinkError> {
-        if !(14..=MAX_FRAME).contains(&frame.len()) {
-            return Err(LinkError::Invalid("frame length is outside 14..=1514"));
+        check_frame(frame)?;
+        if !self.watchdog()? {
+            return Err(LinkError::NoCarrier);
         }
-        if !self.reclaim() {
-            let clock = self.clock;
-            if !clock.wait(TRANSMIT_WAIT_US, || self.reclaim()) {
-                return Err(LinkError::Adapter(format!(
-                    "{} transmit ring stalled",
-                    self.location
-                )));
-            }
+        if !self.transmit.free(self.clock, transmitted) {
+            return Err(LinkError::Adapter(format!(
+                "{} transmit ring stalled",
+                self.location
+            )));
         }
-        let index = self.next_transmit;
+        let index = self.transmit.advance();
         let length = frame.len().max(MIN_FRAME);
         let buffer = self.transmit.buffer(index);
         buffer[..length].fill(0);
@@ -547,16 +609,15 @@ impl Link for E1000e {
             .descriptors
             .write(base + 8, length as u32 | TX_EOP | TX_IFCS | TX_REPORT);
         self.transmit.descriptors.write(base + 12, 0u32);
-        self.next_transmit = (index + 1) % DESCRIPTORS;
         fence(Ordering::SeqCst);
-        self.device.write32(TDT, self.next_transmit as u32);
+        self.device.write32(TDT, self.transmit.next as u32);
         Ok(())
     }
 
     fn receive(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
         // Bound processing even if a device continually supplies bad frames.
         for _ in 0..DESCRIPTORS {
-            let index = self.next_receive;
+            let index = self.receive.next;
             let base = index * DESCRIPTOR;
             let status: u8 = self.receive.descriptors.read(base + 12);
             if status & RX_DONE == 0 {
@@ -569,11 +630,11 @@ impl Link for E1000e {
             let good = !self.dropping_receive
                 && eop
                 && errors & RX_FRAME_ERRORS == 0
-                && (14..=MAX_FRAME).contains(&length);
+                && (HEADER..=MAX_FRAME).contains(&length);
             let frame = good.then(|| self.receive.buffer(index)[..length].to_vec());
             self.dropping_receive = !eop;
             self.offer_receive(index);
-            self.next_receive = (index + 1) % DESCRIPTORS;
+            self.receive.advance();
             fence(Ordering::SeqCst);
             self.device.write32(RDT, index as u32);
             if frame.is_some() {
@@ -809,17 +870,18 @@ mod tests {
                 device,
                 receive: Ring::new(&mut allocator).unwrap(),
                 transmit: Ring::new(&mut allocator).unwrap(),
-                next_receive: 0,
-                next_transmit: 0,
-                clean_transmit: 0,
                 dropping_receive: false,
                 mac: Mac([2, 0, 0, 0, 0, 1]),
                 clock: Clock {
                     ticks_per_microsecond: 1,
                 },
+                watchdog_at: u64::MAX,
+                phy_hangs: 0,
+                faulted: false,
                 location: String::from("model"),
             };
             net.start();
+            registers[STATUS / 4] = STATUS_LU;
             Self {
                 net,
                 registers,
@@ -858,13 +920,13 @@ mod tests {
         let before = fixture.net.transmit.descriptors.bytes().to_vec();
         assert!(fixture.net.transmit(&[8; 60]).is_err());
         assert_eq!(fixture.net.transmit.descriptors.bytes(), before);
-        assert_eq!(fixture.net.next_transmit, 31);
+        assert_eq!(fixture.net.transmit.next, 31);
         // Completion of the oldest descriptor permits only that buffer to be reused.
         fixture.net.transmit.descriptors.write(12, TX_DONE);
         fixture.net.transmit(&[9; 60]).unwrap();
-        assert_eq!(fixture.net.next_transmit, 0);
-        assert_eq!(fixture.net.clean_transmit, 1);
-        assert!(!fixture.net.reclaim());
+        assert_eq!(fixture.net.transmit.next, 0);
+        assert_eq!(fixture.net.transmit.clean, 1);
+        assert!(!fixture.net.transmit.reclaim(transmitted));
     }
 
     #[test]
@@ -889,15 +951,15 @@ mod tests {
                 .descriptors
                 .write(descriptor * DESCRIPTOR + 12, TX_DONE);
         }
-        assert_eq!(fixture.net.next_transmit, 0);
+        assert_eq!(fixture.net.transmit.next, 0);
         assert_eq!(fixture.registers[TDT / 4], 0);
-        let before = fixture.net.next_transmit;
+        let before = fixture.net.transmit.next;
         for bad in [vec![], vec![0; 13], vec![0; MAX_FRAME + 1]] {
             assert!(matches!(
                 fixture.net.transmit(&bad),
                 Err(LinkError::Invalid(_))
             ));
-            assert_eq!(fixture.net.next_transmit, before);
+            assert_eq!(fixture.net.transmit.next, before);
         }
     }
 
@@ -910,7 +972,7 @@ mod tests {
         fixture.inject(3, 4096, RX_DONE | RX_EOP, 0, 4); // don't slice out of bounds
         fixture.inject(4, 60, RX_DONE | RX_EOP, 0, 5);
         assert_eq!(fixture.net.receive().unwrap(), Some(vec![5; 60]));
-        assert_eq!(fixture.net.next_receive, 5);
+        assert_eq!(fixture.net.receive.next, 5);
         assert_eq!(fixture.registers[RDT / 4], 4);
         assert_eq!(
             fixture
@@ -948,7 +1010,53 @@ mod tests {
             );
             assert_eq!(fixture.registers[RDT / 4], index as u32);
         }
-        assert_eq!(fixture.net.next_receive, 0);
+        assert_eq!(fixture.net.receive.next, 0);
+    }
+
+    #[test]
+    fn link_loss_discards_queued_transmit_work_and_refuses_new_frames() {
+        let mut fixture = Fixture::new();
+        for _ in 0..3 {
+            fixture.net.transmit(&[1; 60]).unwrap();
+        }
+        assert_eq!(fixture.registers[TDT / 4], 3);
+        fixture.registers[STATUS / 4] = 0;
+        assert!(!fixture.net.carrier());
+        assert!(!fixture.net.transmit.pending());
+        assert_eq!(fixture.registers[TDT / 4], 0);
+        assert!(fixture.registers[TCTL / 4] & TCTL_EN != 0);
+        assert_eq!(fixture.net.transmit(&[1; 60]), Err(LinkError::NoCarrier));
+        fixture.registers[STATUS / 4] = STATUS_LU;
+        fixture.net.transmit(&[2; 60]).unwrap();
+        assert_eq!(fixture.registers[TDT / 4], 1);
+    }
+
+    #[test]
+    fn an_absent_function_is_never_reported_as_linked() {
+        let mut fixture = Fixture::new();
+        fixture.registers[STATUS / 4] = u32::MAX;
+        assert!(!fixture.net.carrier());
+        assert!(matches!(
+            fixture.net.transmit(&[1; 60]),
+            Err(LinkError::Adapter(_))
+        ));
+        fixture.registers[STATUS / 4] = STATUS_LU;
+        assert!(!fixture.net.carrier());
+    }
+
+    #[test]
+    fn a_phy_hangs_only_when_both_error_counters_saturate() {
+        for (errors, idle, hung) in [
+            (u16::MAX, PHY_IDLE_ERRORS, true),
+            (u16::MAX, 0x7f, false),
+            (0xfffe, PHY_IDLE_ERRORS, false),
+        ] {
+            let model = Model::ready();
+            model.phy.borrow_mut()[usize::from(PHY_RECEIVE_ERRORS)] = errors;
+            model.phy.borrow_mut()[usize::from(PHY_GIGABIT_STATUS)] = idle;
+            assert_eq!(phy_hung(&model, &ModelTimer::default()), hung);
+            assert_eq!(model.read(EXTCNF_CTRL) & MDIO_OWN, 0);
+        }
     }
 
     #[test]
