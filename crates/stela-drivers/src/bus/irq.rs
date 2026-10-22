@@ -105,6 +105,33 @@ impl Handler for SharedHandlers {
     }
 }
 
+/// A request that did not register. Once the CPU check passes, a refusal
+/// before anything is published gives the source and handler back
+/// unchanged, so the driver can keep polling its device; after a wrong-CPU
+/// check or an uncertain arming failure they stay retained.
+pub struct RequestError {
+    pub error: IrqError,
+    pub returned: Option<(Box<dyn Source>, Arc<dyn Handler>)>,
+}
+
+impl core::fmt::Debug for RequestError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RequestError")
+            .field("error", &self.error)
+            .field("returned", &self.returned.is_some())
+            .finish()
+    }
+}
+
+impl From<IrqError> for RequestError {
+    fn from(error: IrqError) -> Self {
+        Self {
+            error,
+            returned: None,
+        }
+    }
+}
+
 /// Object-safe mount service for driver consumers, independent of CPU type.
 /// The actual platform initializes and permanently retains the controller.
 pub trait IrqController: Sync {
@@ -217,6 +244,18 @@ struct Pending<'a, P: Platform> {
     published: bool,
 }
 impl<P: Platform> Pending<'_, P> {
+    /// The unpublished owners, back to the caller on this checked CPU.
+    fn give_back(mut self) -> (Box<dyn Source>, Arc<dyn Handler>) {
+        self.published = true;
+        // SAFETY: this consumes the unique unpublished owners exactly once.
+        unsafe {
+            (
+                ManuallyDrop::take(&mut self.source),
+                ManuallyDrop::take(&mut self.handler),
+            )
+        }
+    }
+
     fn into_slot(mut self) -> Slot {
         self.published = true;
         // SAFETY: this consumes the unique unpublished owners exactly once.
@@ -245,7 +284,10 @@ impl<P: Platform + 'static> IrqController for Registry<P> {
         source: Box<dyn Source>,
         handler: Arc<dyn Handler>,
     ) -> Result<Box<dyn IrqRegistration>, IrqError> {
-        Ok(Box::new(Registry::request(self, source, handler)?))
+        // A refusal's returned owners are released here, on the checked CPU.
+        Registry::request(self, source, handler)
+            .map(|registration| Box::new(registration) as Box<dyn IrqRegistration>)
+            .map_err(|refusal| refusal.error)
     }
     fn quarantine_count(&self) -> u64 {
         Registry::quarantine_count(self)
@@ -292,16 +334,16 @@ impl<P: Platform> Registry<P> {
     }
 
     /// Publish the retained handler before enabling the actual source. Any
-    /// uncertain arming failure retains source/handler and quarantines vector.
-    /// Every pre-publication error also retains both owners observably; this
-    /// includes WrongCpu, target/route failure and exhausted vector inventory.
+    /// uncertain arming failure retains source/handler and quarantines vector,
+    /// as does a wrong-CPU check. Vector exhaustion and target or route
+    /// refusals give both owners back.
     pub fn request(
         &'static self,
         source: Box<dyn Source>,
         handler: Arc<dyn Handler>,
-    ) -> Result<Registration<'static, P>, IrqError> {
-        // Retain both actual owners even if CPU qualification fails before
-        // publication. This consuming API cannot return a failed source to
+    ) -> Result<Registration<'static, P>, RequestError> {
+        // Retain both actual owners if CPU qualification fails before
+        // publication: this consuming API cannot return a failed source to
         // its original CPU, and must never run a !Send source's Drop here.
         let pending = Pending {
             registry: self,
@@ -311,16 +353,29 @@ impl<P: Platform> Registry<P> {
         };
         self.platform.check_cpu()?;
         let guard = self.lock();
-        let index = self
+        let admitted = self
             .slots
             .iter()
             .position(|slot| slot.load(Ordering::Relaxed).is_null())
-            .ok_or(IrqError::Exhausted)?;
-        let vector = FIRST_VECTOR + index as u8;
-        let target = self.platform.target(vector)?;
-        if target.vector != vector || target.destination == 255 {
-            return Err(IrqError::Route);
-        }
+            .ok_or(IrqError::Exhausted)
+            .and_then(|index| {
+                let vector = FIRST_VECTOR + index as u8;
+                let target = self.platform.target(vector)?;
+                match target.vector == vector && target.destination != 255 {
+                    true => Ok((index, vector, target)),
+                    false => Err(IrqError::Route),
+                }
+            });
+        let (index, vector, target) = match admitted {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                drop(guard);
+                return Err(RequestError {
+                    error,
+                    returned: Some(pending.give_back()),
+                });
+            }
+        };
         let route = match pending.source.route() {
             RouteRequest::Msi => Route::Msi(MsiMessage {
                 address: 0xfee00000 | u64::from(target.destination) << 12,
@@ -342,7 +397,7 @@ impl<P: Platform> Registry<P> {
             });
         if let Err(error) = armed {
             self.quarantine(slot);
-            return Err(error);
+            return Err(error.into());
         }
         // The slot is already fully retained; a delivery during unmask sees
         // the real handler. No new submission precedes source configuration.
@@ -353,7 +408,7 @@ impl<P: Platform> Registry<P> {
         if let Err(error) = unsafe { source.unmask() } {
             self.quarantine(slot);
             let _ = source.mask();
-            return Err(error);
+            return Err(error.into());
         }
         Ok(Registration {
             registry: self,
@@ -807,15 +862,27 @@ mod tests {
                 local_source(&model, token.clone()),
                 Arc::new(ModelHandler(model.clone())),
             );
-            assert!(matches!(
-                result,
-                Err(IrqError::WrongCpu | IrqError::Route | IrqError::Exhausted)
-            ));
+            let Err(refusal) = result else {
+                panic!("an inadmissible request registered");
+            };
+            assert_eq!(
+                refusal.error,
+                [
+                    IrqError::WrongCpu,
+                    IrqError::Route,
+                    IrqError::Route,
+                    IrqError::Exhausted
+                ][case]
+            );
             assert_eq!(token.get(), 0);
             assert_eq!(std::rc::Rc::strong_count(&token), 2);
             assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
             assert_eq!(model.handler_drops.load(Ordering::Relaxed), 0);
-            assert_eq!(registry.quarantine_count(), 1);
+            // Only a wrong-CPU refusal keeps the owners; the others return
+            // them untouched for the driver to keep polling with.
+            assert_eq!(refusal.returned.is_some(), case != 0);
+            assert_eq!(registry.quarantine_count(), u64::from(case == 0));
+            drop(refusal);
             model.wrong_cpu.store(false, Ordering::Relaxed);
             for mut registered in occupied {
                 registered.retire().unwrap();
@@ -837,7 +904,13 @@ mod tests {
                 local_source(&other, token.clone()),
                 Arc::new(ModelHandler(other.clone())),
             );
-            assert!(matches!(result, Err(IrqError::WrongCpu)));
+            assert!(matches!(
+                result,
+                Err(RequestError {
+                    error: IrqError::WrongCpu,
+                    returned: None
+                })
+            ));
             assert_eq!(token.get(), 0);
             assert_eq!(std::rc::Rc::strong_count(&token), 2);
         })
@@ -961,7 +1034,10 @@ mod tests {
                 Box::new(ModelSource(model.clone())),
                 Arc::new(ModelHandler(model.clone()))
             ),
-            Err(IrqError::Mask)
+            Err(RequestError {
+                error: IrqError::Mask,
+                returned: None
+            })
         ));
         assert_eq!(registry.quarantine_count(), 2);
         assert_eq!(model.source_drops.load(Ordering::Relaxed), 0);
