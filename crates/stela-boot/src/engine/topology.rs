@@ -11,7 +11,7 @@
 use alloc::{format, string::String, vec::Vec};
 use stela_loader::apple_device_tree::{
     DeviceTree,
-    assigned::{Count, CountField, NodeBinding, Projection, Receipt, SourceBindings},
+    assigned::{Count, CountField, CpuIdRecipe, NodeBinding, Projection, Receipt, SourceBindings},
 };
 use stela_runtime::machine::{
     CpuProfile,
@@ -21,10 +21,14 @@ use stela_runtime::machine::{
     },
 };
 
-#[cfg(test)]
-use crate::{boot_native_capture::Capture, boot_native_topology as native};
+#[cfg(not(test))]
+use super::bundle::live_tree::LiveTree;
 #[cfg(not(test))]
 use crate::native_smp::{firmware::Capture, topology as native};
+#[cfg(test)]
+use crate::{
+    boot_live_tree::LiveTree, boot_native_capture::Capture, boot_native_topology as native,
+};
 
 /// These count consumers are independently source-qualified for the retained
 /// Apple ARM CPU/AIC schema (original J314s audit). They all use the same Plan.
@@ -194,6 +198,7 @@ pub(crate) struct Join {
 pub(crate) struct Source<'a> {
     pub resources: BspSource<'a>,
     tree: DeviceTree,
+    dense_ids: Option<(DeviceTree, [u8; 32])>,
 }
 impl<'a> Source<'a> {
     pub(crate) fn t6000(
@@ -204,7 +209,32 @@ impl<'a> Source<'a> {
     ) -> Result<Self, String> {
         let tree = DeviceTree::parse(prepared).map_err(|e| format!("assigned source ADT: {e}"))?;
         let resources = BspSource::t6000(original, prepared, identity, boot_reg)?;
-        Ok(Self { resources, tree })
+        Ok(Self {
+            resources,
+            tree,
+            dense_ids: None,
+        })
+    }
+    /// Explicit source-family adapter. Checks the actual boot_args snapshot
+    /// before selecting normal harvesting; no kernel override is interpreted
+    /// as a qualified source mode. Physical PMGR/error recipes stay original.
+    pub(crate) fn t8112(
+        original: &'a [u8],
+        live: &LiveTree,
+        identity: SourceIdentity,
+        boot_reg: u32,
+    ) -> Result<Self, String> {
+        live.require_no_harvesting_override()?;
+        let tree = DeviceTree::parse(live.bytes())
+            .map_err(|e| format!("assigned live source ADT: {e}"))?;
+        let immutable = DeviceTree::parse(original)
+            .map_err(|e| format!("assigned immutable source ADT: {e}"))?;
+        let resources = BspSource::t8112(original, live.bytes(), identity, boot_reg, 0)?;
+        Ok(Self {
+            resources,
+            tree,
+            dense_ids: Some((immutable, identity.original_tree_sha256)),
+        })
     }
     pub(crate) fn prepare<'s>(
         &'s self,
@@ -253,6 +283,14 @@ impl<'a> Source<'a> {
             nodes: &nodes,
             counts: &COUNT_FIELDS,
             references: &[],
+            cpu_ids: match &self.dense_ids {
+                Some((original, original_sha256)) => CpuIdRecipe::DenseWithWatchdog {
+                    original,
+                    original_sha256: *original_sha256,
+                    watchdog_path: "/arm-io/wdt",
+                },
+                None => CpuIdRecipe::Preserve,
+            },
         };
         prepare(
             roster,
@@ -745,7 +783,166 @@ mod tests {
             nodes,
             counts: &COUNT_FIELDS,
             references: &[],
+            cpu_ids: CpuIdRecipe::Preserve,
         }
+    }
+    fn captured_live_tree(mut tree: DeviceTree, command: &str) -> LiveTree {
+        use crate::boot_live_tree::Ram;
+        use stela_loader::boot_args::{self, BootArgs, Video};
+        use stela_runtime::boot_bundle::LoadedRegion;
+        const ARGS: u64 = 0x1000;
+        const TREE: u64 = 0x10000;
+        const BYTES: usize = 1 << 20;
+        struct Input(Vec<u8>);
+        impl Ram for Input {
+            fn read(&mut self, pa: u64, bytes: &mut [u8]) -> bool {
+                let Some(range) = usize::try_from(pa)
+                    .ok()
+                    .and_then(|start| start.checked_add(bytes.len()).map(|end| start..end))
+                    .and_then(|range| self.0.get(range))
+                else {
+                    return false;
+                };
+                bytes.copy_from_slice(range);
+                true
+            }
+            fn write(&mut self, _: u64, _: &[u8]) -> bool {
+                panic!("capture must not write")
+            }
+            fn fence(&mut self) {
+                panic!("capture must not publish")
+            }
+        }
+        tree.set_property(
+            "/chosen/memory-map",
+            "DeviceTree",
+            [TREE.to_le_bytes(), (BYTES as u64 - TREE).to_le_bytes()].concat(),
+        )
+        .unwrap();
+        let bytes = tree.serialize();
+        let args = BootArgs {
+            revision: boot_args::REVISION,
+            version: boot_args::VERSION,
+            virt_base: 0xfffffe0000000000,
+            phys_base: 0,
+            mem_size: BYTES as u64,
+            top_of_kernel_data: BYTES as u64,
+            video: Video::default(),
+            machine_type: 0,
+            device_tree: 0xfffffe0000000000 + TREE,
+            device_tree_length: bytes.len() as u32,
+            command_line: command.into(),
+            boot_flags: 0,
+            mem_size_actual: BYTES as u64,
+        }
+        .encode()
+        .unwrap();
+        let mut input = Input(vec![0; BYTES]);
+        input.0[ARGS as usize..ARGS as usize + args.len()].copy_from_slice(&args);
+        input.0[TREE as usize..TREE as usize + bytes.len()].copy_from_slice(&bytes);
+        let regions = [
+            LoadedRegion {
+                name: "DeviceTree".into(),
+                guest_pa: TREE,
+                bytes: bytes.len() as u64,
+                memory_bytes: BYTES as u64 - TREE,
+            },
+            LoadedRegion {
+                name: "BootArgs".into(),
+                guest_pa: ARGS,
+                bytes: args.len() as u64,
+                memory_bytes: 4096,
+            },
+        ];
+        LiveTree::capture(&mut input, &regions, ARGS).unwrap()
+    }
+    #[test]
+    #[ignore = "requires pinned original J473 ADT in STELA_TEST_CPU_DT_DIR"]
+    fn original_t8112_adapter_joins_dense_driver_ids_to_physical_first_p_resources() {
+        use stela_runtime::machine::soc;
+        let file = std::path::PathBuf::from(std::env::var("STELA_TEST_CPU_DT_DIR").unwrap())
+            .join("DeviceTree.j473ap.adt");
+        let original = std::fs::read(file).unwrap();
+        assert_eq!(
+            stela_runtime::sha256(&original),
+            "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
+        );
+        let mut tree = DeviceTree::parse(&original).unwrap();
+        for (key, value) in [("chip-id", 0x8112u32), ("board-id", 0x24)] {
+            tree.set_property("/chosen", key, value.to_le_bytes().to_vec())
+                .unwrap();
+        }
+        for cpu in &mut tree.node_mut("/cpus").unwrap().children {
+            let running = cpu.name() == Some("cpu4");
+            cpu.set_property(
+                "state",
+                if running {
+                    b"running\0".to_vec()
+                } else {
+                    b"waiting\0".to_vec()
+                },
+            )
+            .unwrap();
+        }
+        let identity = SourceIdentity {
+            original_tree_sha256: Sha256::digest(&original).into(),
+            profile: ResourceProfile {
+                chip: Chip::AppleM2,
+                soc: 0x8112,
+                board: 0x24,
+                input_set_sha256: [7; 32],
+                adapted_set_sha256: None,
+            },
+        };
+        let cpus = tree
+            .node("/cpus")
+            .unwrap()
+            .children
+            .iter()
+            .map(|cpu| soc::Processor {
+                reg: cpu.property("reg").unwrap().as_u32().unwrap(),
+                cluster_type: cpu.property("cluster-type").unwrap().value[0],
+                l2_bytes: cpu.property("l2-cache-size").unwrap().as_u32(),
+            })
+            .collect::<Vec<_>>();
+        let actual = soc::cpus(0x8112, "Apple M2", &cpus).unwrap();
+        let profile = CpuProfile {
+            name: "original component fixture",
+            chip: actual.chip,
+            processors: actual.processors,
+            counter_frequency: 24_000_000,
+            fixed: vec![],
+        };
+        let live = captured_live_tree(tree.clone(), "-v");
+        let source = Source::t8112(&original, &live, identity, 0x100).unwrap();
+        let capture = capture();
+        let roster = BspRoster::observed(&capture, 0, 42).unwrap();
+        let prepared = source.prepare(&roster, profile).unwrap();
+        assert_eq!(prepared.plan.pes().len(), 1);
+        assert_eq!(prepared.profile.processors.len(), 1);
+        let join = prepared.join(0x100).unwrap();
+        assert_eq!((join.logical, join.worker, join.apic), (0, 0, 42));
+        assert_eq!(
+            (join.enable_core.argument, join.error_interrupt),
+            (0x10, 0x66)
+        );
+        assert_eq!((join.core_power.device, join.cluster_power.device), (5, 10));
+        assert_eq!(word(&prepared.tree, "/cpus/cpu4", "cpu-id"), Ok(0));
+        assert_eq!(word(&prepared.tree, "/cpus/cpu4", "reg"), Ok(0x100));
+        assert_eq!(word(&prepared.tree, "/cpus", "max_cpus"), Ok(1));
+        assert_eq!(prepared.receipt.cpu_ids[0].original_id, 4);
+        assert_eq!(
+            prepared.tree.node("/arm-io/pmgr"),
+            tree.node("/arm-io/pmgr")
+        );
+        assert_eq!(source.resources.source(), original);
+        let override_live = captured_live_tree(tree, "-v acc-harvesting=0");
+        assert!(
+            Source::t8112(&original, &override_live, identity, 0x100)
+                .err()
+                .unwrap()
+                .contains("boot-argument override")
+        );
     }
     #[test]
     #[ignore = "requires retained original26A434J314s and prepared bundle DT"]

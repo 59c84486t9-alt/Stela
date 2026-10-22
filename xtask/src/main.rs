@@ -29,16 +29,12 @@ mod boot_native_bindings;
 #[path = "../../crates/stela-boot/src/native_smp/firmware/record.rs"]
 mod boot_native_capture;
 #[cfg(test)]
+#[path = "../../crates/stela-boot/src/native_memory.rs"]
+mod boot_native_memory;
+#[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_smp/topology.rs"]
 #[allow(dead_code)] // Includes UEFI capability checks unused by hosted topology tests.
 mod boot_native_topology;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/engine/topology.rs"]
-#[allow(dead_code)] // Actual GS-owner constructor is UEFI-only.
-mod boot_topology;
-#[cfg(test)]
-#[path = "../../crates/stela-boot/src/native_memory.rs"]
-mod boot_native_memory;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/engine/host/ram.rs"]
 mod boot_ram;
@@ -46,6 +42,10 @@ mod boot_ram;
 #[path = "../../crates/stela-boot/src/native_dma/requester.rs"]
 #[allow(dead_code)]
 mod boot_requester;
+#[cfg(test)]
+#[path = "../../crates/stela-boot/src/engine/topology.rs"]
+#[allow(dead_code)] // Actual GS-owner constructor is UEFI-only.
+mod boot_topology;
 #[cfg(test)]
 #[path = "../../crates/stela-boot/src/native_dma/vtd.rs"]
 #[allow(dead_code)]

@@ -3,6 +3,10 @@
 //! Region byte offsets remain valid until Verified::load finishes. Projection
 //! happens afterwards. Its shorter encoding changes boot_args' data length,
 //! while /chosen/memory-map continues to reserve the original whole allocation.
+#[cfg_attr(test, allow(dead_code))] // Positive native RAM proof runs under UEFI.
+#[path = "live_tree/registered.rs"]
+pub(crate) mod registered;
+
 use alloc::{format, string::String, vec::Vec};
 use stela_loader::{
     apple_device_tree::DeviceTree,
@@ -126,6 +130,19 @@ impl LiveTree {
     }
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+
+    /// Check the actual post-patch boot_args snapshot, not the manifest's
+    /// command line. The source factory separately checks all DT providers.
+    /// Even an explicit zero requires a separately qualified override path.
+    pub(crate) fn require_no_harvesting_override(&self) -> Result<(), String> {
+        let args = BootArgs::decode(&self.args).map_err(|e| format!("live boot_args: {e}"))?;
+        if args.command_line.split_ascii_whitespace().any(|word| {
+            word.split('=').next().unwrap_or("").trim_start_matches('-') == "acc-harvesting"
+        }) {
+            return Err("assigned source requires no acc-harvesting boot-argument override".into());
+        }
+        Ok(())
     }
 
     /// Consumes the old snapshot. Any reached write failure is terminal before
@@ -302,6 +319,38 @@ mod tests {
         let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
         assert_eq!(live.bytes(), bytes);
         assert_eq!(ram.writes, 0);
+    }
+    #[test]
+    fn harvesting_guard_uses_actual_boot_args_and_refuses_even_zero_overrides() {
+        for command in [
+            "acc-harvesting=0",
+            "-v acc-harvesting=2 debug=1",
+            "-acc-harvesting",
+            "--acc-harvesting=0",
+            "acc-harvesting = 2",
+            "-v\tacc-harvesting=1",
+        ] {
+            let (mut ram, regions, _) = fixture();
+            let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+            args.command_line = command.into();
+            let encoded = args.encode().unwrap();
+            ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
+            let live = LiveTree::capture(&mut ram, &regions, ARGS).unwrap();
+            assert!(live.require_no_harvesting_override().is_err(), "{command}");
+            assert_eq!(ram.writes, 0);
+        }
+        for command in ["-v", "", "other-acc-harvesting=2", "acc-harvesting-other=2"] {
+            let (mut ram, regions, _) = fixture();
+            let mut args = BootArgs::decode(&ram.bytes[0x1000..]).unwrap();
+            args.command_line = command.into();
+            let encoded = args.encode().unwrap();
+            ram.bytes[0x1000..0x1000 + encoded.len()].copy_from_slice(&encoded);
+            LiveTree::capture(&mut ram, &regions, ARGS)
+                .unwrap()
+                .require_no_harvesting_override()
+                .unwrap();
+            assert_eq!(ram.writes, 0);
+        }
     }
     #[test]
     fn shrink_updates_only_data_length_and_keeps_full_allocation_and_clears_old_tail() {

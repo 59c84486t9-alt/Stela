@@ -3,6 +3,7 @@
 use super::*;
 use machine::engine::{CanonicalDeviceMemory, ConsumedPair, ConsumedScalar, DeviceReadShape};
 mod mcc;
+mod tree;
 const STR_X0_X1: u32 = 0xf9000020;
 const LDR_X6_X1: u32 = 0xf9400026;
 const LDR_W10_X9: u32 = 0xb940012a;
@@ -144,6 +145,9 @@ pub(super) unsafe fn check(
         )
     };
     let ram = unsafe { super::super::canonical::reserve(handoff, &[range]) }?;
+    // SAFETY: before any frame, guest entry or other publisher; this exact
+    // registered allocation is retained by the following Machine.
+    unsafe { tree::check(&ram) }?;
     let mut words = Vec::new();
     source::constant(&mut words, 0, VALUE);
     source::constant(&mut words, 1, source::DATA);
@@ -238,7 +242,7 @@ pub(super) unsafe fn check(
         return Err("cold consumed read replayed or resumed after failed settlement");
     }
     crate::output::arguments(format_args!(
-        "CHECK native-cold PASS actual_BSP=1 warmup=none checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
+        "CHECK native-cold PASS actual_BSP=1 warmup=none live_ADT_publish=canonical checked_Device_RAM=store+load CPU_DSB=1 actual_MCC_drain=1 consumed_reads=4 scalar_signextend=1 pair_writeback=2 postfailure_retired=1 full_frame=preserved replay=refused; no macOS/SMP/DRAM completion claim\n"
     ));
     Ok(())
 }
