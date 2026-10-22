@@ -802,8 +802,7 @@ impl<W: QueueIo, F: QueueIo, R: QueueIo> Transport for Mailbox<W, F, R> {
 }
 
 #[cfg(test)]
-mod tests {
-    mod clc;
+pub(crate) mod tests {
     use super::super::{
         firmware::tests::{catalog, patch_bytes, ram_bytes},
         identity::{Chip, PciIdentity},
@@ -816,55 +815,55 @@ mod tests {
     extern crate std;
     use alloc::sync::Arc;
     use std::sync::Mutex;
-    struct Response {
-        initial_execution: bool,
-        client_execution: bool,
-        roc_channel: Option<u8>,
-        home_channel: Option<u8>,
-        wrong_roc_token: bool,
-        client_commands: Vec<Vec<u8>>,
-        peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
-        receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
-        initial_commands: Vec<Vec<u8>>,
-        initial_fail_at: Option<usize>,
-        raw_disabled: alloc::collections::BTreeSet<u16>,
-        qualified_peer_slots: alloc::collections::BTreeSet<u16>,
-        capability_payload: Option<Vec<u8>>,
-        encapsulation_payload: Option<Vec<u8>>,
-        capability_wrong_event: bool,
-        require_firmware_start: bool,
-        firmware_started: bool,
-        device_execution: bool,
-        device_active: bool,
-        bss_active: bool,
-        device_status: u32,
-        bss_status: u32,
-        key_execution: bool,
-        keys: alloc::collections::BTreeMap<u8, Vec<u8>>,
-        status: u32,
-        command_delta: u8,
-        event: u8,
-        unsolicited: bool,
-        drop: bool,
-        pause_next_index_us: u64,
-        patch_already_applied: bool,
-        fail_firmware_start_publication: bool,
-        clc_payload: Option<Vec<u8>>,
-        clc_commands: Vec<Vec<u8>>,
-        clc_guard: bool,
-        clc_processing: bool,
-        clc_no_reply_after: Option<usize>,
-        clc_fail_publication_after: Option<usize>,
-        clc_hide_tx_index: bool,
-        regulatory_commands: Vec<Vec<u8>>,
-        regulatory_domain: bool,
-        regulatory_power: alloc::collections::BTreeMap<(u8, u8), Vec<u8>>,
-        regulatory_no_reply_at: Option<usize>,
-        regulatory_fail_publication_at: Option<usize>,
-        regulatory_hide_tx_index_at: Option<usize>,
-        regulatory_malformed_pse: bool,
-        regulatory_expected_domain: Option<Vec<u8>>,
-        regulatory_expected_power: alloc::collections::BTreeMap<(u8, u8), Vec<u8>>,
+    pub(crate) struct Response {
+        pub(crate) initial_execution: bool,
+        pub(crate) client_execution: bool,
+        pub(crate) roc_channel: Option<u8>,
+        pub(crate) home_channel: Option<u8>,
+        pub(crate) wrong_roc_token: bool,
+        pub(crate) client_commands: Vec<Vec<u8>>,
+        pub(crate) peers: alloc::collections::BTreeMap<u16, Vec<u8>>,
+        pub(crate) receive_ba: alloc::collections::BTreeMap<(u16, u8), Vec<u8>>,
+        pub(crate) initial_commands: Vec<Vec<u8>>,
+        pub(crate) initial_fail_at: Option<usize>,
+        pub(crate) raw_disabled: alloc::collections::BTreeSet<u16>,
+        pub(crate) qualified_peer_slots: alloc::collections::BTreeSet<u16>,
+        pub(crate) capability_payload: Option<Vec<u8>>,
+        pub(crate) encapsulation_payload: Option<Vec<u8>>,
+        pub(crate) capability_wrong_event: bool,
+        pub(crate) require_firmware_start: bool,
+        pub(crate) firmware_started: bool,
+        pub(crate) device_execution: bool,
+        pub(crate) device_active: bool,
+        pub(crate) bss_active: bool,
+        pub(crate) device_status: u32,
+        pub(crate) bss_status: u32,
+        pub(crate) key_execution: bool,
+        pub(crate) keys: alloc::collections::BTreeMap<u8, Vec<u8>>,
+        pub(crate) status: u32,
+        pub(crate) command_delta: u8,
+        pub(crate) event: u8,
+        pub(crate) unsolicited: bool,
+        pub(crate) drop: bool,
+        pub(crate) pause_next_index_us: u64,
+        pub(crate) patch_already_applied: bool,
+        pub(crate) fail_firmware_start_publication: bool,
+        pub(crate) clc_payload: Option<Vec<u8>>,
+        pub(crate) clc_commands: Vec<Vec<u8>>,
+        pub(crate) clc_guard: bool,
+        pub(crate) clc_processing: bool,
+        pub(crate) clc_no_reply_after: Option<usize>,
+        pub(crate) clc_fail_publication_after: Option<usize>,
+        pub(crate) clc_hide_tx_index: bool,
+        pub(crate) regulatory_commands: Vec<Vec<u8>>,
+        pub(crate) regulatory_domain: bool,
+        pub(crate) regulatory_power: alloc::collections::BTreeMap<(u8, u8), Vec<u8>>,
+        pub(crate) regulatory_no_reply_at: Option<usize>,
+        pub(crate) regulatory_fail_publication_at: Option<usize>,
+        pub(crate) regulatory_hide_tx_index_at: Option<usize>,
+        pub(crate) regulatory_malformed_pse: bool,
+        pub(crate) regulatory_expected_domain: Option<Vec<u8>>,
+        pub(crate) regulatory_expected_power: alloc::collections::BTreeMap<(u8, u8), Vec<u8>>,
     }
     impl Default for Response {
         fn default() -> Self {
@@ -920,17 +919,17 @@ mod tests {
             }
         }
     }
-    struct DeviceIo {
-        io: Io,
-        rx: Arc<Mutex<State>>,
-        chip: Chip,
-        reply: bool,
-        wrong_seq: bool,
-        delay: usize,
-        polls: usize,
-        pending_index: Option<u16>,
-        fwdl: bool,
-        response: Arc<Mutex<Response>>,
+    pub(crate) struct DeviceIo {
+        pub(crate) io: Io,
+        pub(crate) rx: Arc<Mutex<State>>,
+        pub(crate) chip: Chip,
+        pub(crate) reply: bool,
+        pub(crate) wrong_seq: bool,
+        pub(crate) delay: usize,
+        pub(crate) polls: usize,
+        pub(crate) pending_index: Option<u16>,
+        pub(crate) fwdl: bool,
+        pub(crate) response: Arc<Mutex<Response>>,
     }
     // SAFETY: one serialized model requester; actual model IOVA memory is read
     // before TX-index completion and actual RX IOVA bytes written before DDONE.
@@ -1380,7 +1379,7 @@ mod tests {
             Ok(())
         }
     }
-    fn identity(chip: Chip) -> Identity {
+    pub(crate) fn identity(chip: Chip) -> Identity {
         let id = match chip {
             Chip::Mt7921 => 0x7961,
             Chip::Mt7922 => 0x7922,
@@ -1400,9 +1399,9 @@ mod tests {
         )
         .unwrap()
     }
-    type TestMailbox = Mailbox<DeviceIo, DeviceIo, Io>;
-    type ModelState = Arc<Mutex<State>>;
-    fn setup(
+    pub(crate) type TestMailbox = Mailbox<DeviceIo, DeviceIo, Io>;
+    pub(crate) type ModelState = Arc<Mutex<State>>;
+    pub(crate) fn setup(
         chip: Chip,
         reply: bool,
         wrong_seq: bool,
@@ -1416,7 +1415,7 @@ mod tests {
             Arc::new(Mutex::new(Response::default())),
         )
     }
-    fn model_clock() -> crate::Clock {
+    pub(crate) fn model_clock() -> crate::Clock {
         static CLOCK: std::sync::OnceLock<crate::Clock> = std::sync::OnceLock::new();
         *CLOCK.get_or_init(|| {
             // The model uses live RDTSC, so its Clock must convert the actual
@@ -1437,7 +1436,7 @@ mod tests {
             }
         })
     }
-    fn setup_controlled(
+    pub(crate) fn setup_controlled(
         chip: Chip,
         reply: bool,
         wrong_seq: bool,
@@ -1998,20 +1997,20 @@ mod tests {
             assert_eq!(rx_state.lock().unwrap().queue_drops, 0);
         }
     }
-    struct KeyResource(Arc<core::sync::atomic::AtomicUsize>);
+    pub(crate) struct KeyResource(pub(crate) Arc<core::sync::atomic::AtomicUsize>);
     impl Drop for KeyResource {
         fn drop(&mut self) {
             self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
-    fn key_context() -> super::super::mcu::key::Context {
+    pub(crate) fn key_context() -> super::super::mcu::key::Context {
         super::super::mcu::key::Context {
             bss_index: 2,
             omac_index: 3,
             station_disabled: false,
         }
     }
-    fn key_scope(group: bool) -> crate::net::wifi::security::KeyScope {
+    pub(crate) fn key_scope(group: bool) -> crate::net::wifi::security::KeyScope {
         use crate::net::{Mac, wifi::security::KeyScope};
         if group {
             KeyScope::Group(Mac([2, 6, 7, 8, 9, 10]))
@@ -2019,7 +2018,7 @@ mod tests {
             KeyScope::Pairwise(Mac([2, 1, 2, 3, 4, 5]))
         }
     }
-    fn key_packet(
+    pub(crate) fn key_packet(
         key: crate::net::wifi::security::KeyIdentity,
         pn: u64,
     ) -> crate::net::wifi::frame::Mpdu {
@@ -2319,7 +2318,7 @@ mod tests {
             }
         }
     }
-    fn initial_context(chip: Chip, bss: u8) -> super::super::mcu::device::Context {
+    pub(crate) fn initial_context(chip: Chip, bss: u8) -> super::super::mcu::device::Context {
         super::super::mcu::device::Context {
             bss_index: bss,
             omac_index: bss,
@@ -2596,7 +2595,7 @@ mod tests {
         unsafe { b.release_after_quiesce() }.unwrap();
         assert_eq!(bdrops.load(core::sync::atomic::Ordering::Relaxed), 0);
     }
-    fn capability_bytes(chip: Chip, n: u8) -> Vec<u8> {
+    pub(crate) fn capability_bytes(chip: Chip, n: u8) -> Vec<u8> {
         let phy = [1, 1, 1, 0, 1 + n % 2, 0, 1, 1, 0, 0, 3, 1, 1];
         let mut bytes = vec![5, 0, 0xa5, 0x5a];
         for (tag, body) in [
@@ -2865,7 +2864,7 @@ mod tests {
         }
     }
 
-    fn eeprom_body(chip: Chip, value: u8) -> Vec<u8> {
+    pub(crate) fn eeprom_body(chip: Chip, value: u8) -> Vec<u8> {
         let c3 = chip == Chip::Mt7925;
         let mut body = vec![0; if c3 { 80 } else { 24 }];
         let at = if c3 { 12 } else { 0 };

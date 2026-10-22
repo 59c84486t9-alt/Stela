@@ -275,7 +275,7 @@ impl Assembly {
 }
 
 #[cfg(test)]
-pub(in crate::net::wifi::mediatek) mod tests {
+pub(crate) mod tests {
     extern crate std;
     use super::super::tests::{Domain, Io, Source, State};
     use super::*;
@@ -287,12 +287,7 @@ pub(in crate::net::wifi::mediatek) mod tests {
         let ring = unsafe { RxRing::install(Io(state.clone()), &Source, domain, count) }.unwrap();
         (ring, state)
     }
-    pub(in crate::net::wifi::mediatek) fn device_receive(
-        state: &Arc<Mutex<State>>,
-        bytes: &[u8],
-        last: bool,
-        flags: u32,
-    ) {
+    pub(crate) fn device_receive(state: &Arc<Mutex<State>>, bytes: &[u8], last: bool, flags: u32) {
         let mut s = state.lock().unwrap();
         assert_ne!(s.index, s.head);
         let descriptor =
