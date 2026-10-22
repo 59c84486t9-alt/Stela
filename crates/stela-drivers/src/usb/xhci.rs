@@ -227,6 +227,14 @@ pub const INTERFACE_DESCRIPTOR: u8 = 4;
 pub const ENDPOINT_DESCRIPTOR: u8 = 5;
 const HUB_DESCRIPTOR: u8 = 0x29;
 const HUB_CLASS: u8 = 9;
+/// The multi-TT hub bDeviceProtocol (USB 2.0 11.23.1), and the interface
+/// alternate setting that selects one TT per port.
+const HUB_MULTI_TT: u8 = 2;
+const MULTI_TT_ALTERNATE: u8 = 1;
+/// Linux `USB_MAXCHILDREN`; an xHCI route string holds port 15 at most per
+/// tier, so higher ports are routed as 15 (Linux `usb_alloc_dev`).
+const MAX_HUB_PORTS: u8 = 31;
+const MAX_ROUTE_PORT: u8 = 15;
 const PORT_RESET: u16 = 4;
 const PORT_POWER: u16 = 8;
 const C_PORT_CONNECTION: u16 = 16;
@@ -251,6 +259,20 @@ impl Registers for Mmio {
     fn write32(&mut self, offset: usize, value: u32) {
         Mmio::write32(self, offset, value);
     }
+}
+
+/// The status change endpoint of a hub's interface in `alternate`.
+fn hub_status_endpoint(configuration: &[u8], alternate: u8) -> Option<Endpoint> {
+    interfaces(configuration)
+        .into_iter()
+        .find(|interface| interface.class == HUB_CLASS && interface.alternate == alternate)
+        .and_then(|interface| interface.endpoints.first().copied())
+}
+
+/// A hub child's route string: the parent's, with this tier's port, which
+/// xHCI holds as 15 at most (Linux `usb_alloc_dev`).
+fn child_route(parent: u32, tier: u8, port: u8) -> u32 {
+    parent | u32::from(port.min(MAX_ROUTE_PORT)) << (4 * tier)
 }
 
 /// An eight-byte SETUP packet.
@@ -1968,25 +1990,40 @@ impl Controller {
         if hub.len() < 7 || hub[1] != HUB_DESCRIPTOR {
             return Err(BlockError::Unsupported("hub descriptor"));
         }
-        let ports = hub[2].min(15);
+        let ports = hub[2];
+        if ports > MAX_HUB_PORTS {
+            return Err(BlockError::Unsupported("hub with more than 31 ports"));
+        }
         let characteristics = u16::from_le_bytes([hub[3], hub[4]]);
         let power_good_us = u64::from(hub[5]) * 2000;
-        // A multi-TT hub reports protocol 2 on its interface (11.23.1).
-        let multi = interfaces(&device.configuration).iter().any(|interface| {
-            interface.class == HUB_CLASS && interface.alternate == 0 && interface.protocol == 2
-        });
         let think_time = (characteristics >> 5 & 3) as u8;
-        let status = interfaces(&device.configuration)
-            .into_iter()
-            .find(|interface| interface.class == HUB_CLASS && interface.alternate == 0)
-            .and_then(|interface| interface.endpoints.first().copied());
-        let endpoints: Vec<Endpoint> = status.into_iter().collect();
         let tt_think = if attachment.speed == HIGH_SPEED {
             think_time
         } else {
             0
         };
         self.set_configuration(slot, device.configuration_value())?;
+        // Linux `hub_configure`: a multi-TT hub (device protocol 2) gets one
+        // TT per port through interface 0's alternate setting 1; a refusal
+        // leaves it a single-TT hub.
+        let multi = device.descriptor[6] == HUB_MULTI_TT
+            && self
+                .control(
+                    slot,
+                    setup(
+                        RECIPIENT_INTERFACE,
+                        SET_INTERFACE,
+                        u16::from(MULTI_TT_ALTERNATE),
+                        0,
+                        0,
+                    ),
+                    &[],
+                )
+                .is_ok();
+        let alternate = if multi { MULTI_TT_ALTERNATE } else { 0 };
+        let endpoints: Vec<Endpoint> = hub_status_endpoint(&device.configuration, alternate)
+            .into_iter()
+            .collect();
         self.configure(slot, &endpoints, Some((ports, tt_think, multi)), dma)?;
         for port in 1..=ports {
             self.control(
@@ -2013,7 +2050,7 @@ impl Controller {
                     };
                     let child = Attachment {
                         root_port: attachment.root_port,
-                        route: attachment.route | u32::from(port) << (4 * attachment.tier),
+                        route: child_route(attachment.route, attachment.tier, port),
                         tier: attachment.tier + 1,
                         speed,
                         translator,
@@ -2448,6 +2485,38 @@ pub(crate) mod tests {
     use super::*;
     use crate::bus::dma::RegionAllocator;
     use alloc::vec::Vec;
+
+    #[test]
+    fn multi_tt_hubs_use_the_status_endpoint_of_alternate_setting_one() {
+        // Interface 0 alternate 0 (single TT) and 1 (multi TT), each with
+        // an interrupt IN status endpoint of its own.
+        let configuration = [
+            9, 2, 41, 0, 1, 1, 0, 0xe0, 0, //
+            9, 4, 0, 0, 1, HUB_CLASS, 0, 1, 0, //
+            7, 5, 0x81, 3, 1, 0, 12, //
+            9, 4, 0, 1, 1, HUB_CLASS, 0, 2, 0, //
+            7, 5, 0x82, 3, 1, 0, 12,
+        ];
+        assert_eq!(
+            hub_status_endpoint(&configuration, 0).unwrap().address,
+            0x81
+        );
+        assert_eq!(
+            hub_status_endpoint(&configuration, MULTI_TT_ALTERNATE)
+                .unwrap()
+                .address,
+            0x82
+        );
+        assert!(hub_status_endpoint(&configuration, 2).is_none());
+    }
+
+    #[test]
+    fn hub_ports_past_fifteen_route_as_fifteen() {
+        assert_eq!(child_route(0, 0, 3), 3);
+        assert_eq!(child_route(0x3, 1, 9), 0x93);
+        assert_eq!(child_route(0x3, 1, 20), 0xf3);
+        assert_eq!(child_route(0, 4, MAX_HUB_PORTS), 0xf_0000);
+    }
 
     /// A command/event DMA model with a device that needs the full
     /// SET_ADDRESS recovery interval before accepting its first Setup.
