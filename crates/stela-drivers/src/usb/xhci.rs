@@ -692,6 +692,7 @@ impl Controller {
             }
         }
         registers.write32(operational + USBCMD, HCRST);
+        clock.delay(profile.reset_settle_us());
         let reset = wait(&mut *registers, clock, RESET_US, |r| {
             r.read32(operational + USBCMD) & HCRST == 0 && r.read32(operational + USBSTS) & CNR == 0
         });

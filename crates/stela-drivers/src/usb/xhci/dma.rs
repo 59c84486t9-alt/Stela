@@ -1,36 +1,57 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // DMA aperture and segment padding follow pinned Linux xhci-pci.c,
 // xhci.c and xhci-mem.c. Copyright (C) 2008 Intel Corp., Sarah Sharp.
-//! Immutable controller DMA constraints, checked before publishing pointers.
+//! Immutable controller constraints, checked before publishing pointers:
+//! DMA aperture and ring overfetch, and Intel's reset settle time.
 use super::*;
+
+const INTEL: u16 = 0x8086;
+/// Linux `xhci_reset`: Intel controllers need 1 ms after HCRST before any
+/// register access (`XHCI_INTEL_HOST`).
+const INTEL_RESET_SETTLE_US: u64 = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Profile {
     bits: u8,
     overfetch: bool,
+    intel: bool,
 }
 
 impl Profile {
     pub const SPEC: Self = Self {
         bits: 64,
         overfetch: false,
+        intel: false,
     };
 
     pub fn pci(vendor: u16, device: u16) -> Self {
-        match (vendor, device) {
+        let profile = match (vendor, device) {
             (0x1b21, 0x1142 | 0x1242 | 0x2142 | 0x3242) => Self {
                 bits: 32,
-                overfetch: false,
+                ..Self::SPEC
             },
             (0x1106, 0x3483) => Self {
                 bits: 36,
                 overfetch: true,
+                ..Self::SPEC
             },
             (0x1d17, 0x9202 | 0x9203) => Self {
-                bits: 64,
                 overfetch: true,
+                ..Self::SPEC
             },
             _ => Self::SPEC,
+        };
+        Self {
+            intel: vendor == INTEL,
+            ..profile
+        }
+    }
+
+    /// How long to wait after setting HCRST before touching a register.
+    pub fn reset_settle_us(self) -> u64 {
+        match self.intel {
+            true => INTEL_RESET_SETTLE_US,
+            false => 0,
         }
     }
 
@@ -81,6 +102,18 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::bus::dma::RegionAllocator;
+
+    #[test]
+    fn only_intel_controllers_settle_after_reset() {
+        assert_eq!(
+            Profile::pci(INTEL, 0xa36d).reset_settle_us(),
+            INTEL_RESET_SETTLE_US
+        );
+        assert_eq!(Profile::pci(0x1022, 0x15b6).reset_settle_us(), 0);
+        // Vendor quirks combine: an aperture limit keeps its own settle rule.
+        let asmedia = Profile::pci(0x1b21, 0x1242);
+        assert_eq!((asmedia.bits, asmedia.reset_settle_us()), (32, 0));
+    }
 
     #[derive(Default)]
     struct State {
@@ -241,8 +274,8 @@ mod tests {
                         &mut dma,
                         String::new(),
                         Profile {
-                            bits: 64,
-                            overfetch
+                            overfetch,
+                            ..Profile::SPEC
                         }
                     ),
                     Err(BlockError::NoDmaMemory)
@@ -328,7 +361,7 @@ mod tests {
             (0x1d17, 0x9201, 64, false),
         ] {
             let profile = Profile::pci(vendor, device);
-            assert_eq!(profile, Profile { bits, overfetch });
+            assert_eq!((profile.bits, profile.overfetch), (bits, overfetch));
             assert_eq!(profile.segment_bytes(), if overfetch { 8192 } else { 4096 });
             assert_eq!(profile.capabilities(false).bits, 32);
             assert_eq!(profile.capabilities(true), profile);
@@ -340,7 +373,7 @@ mod tests {
         for bits in [32, 36, 64] {
             let profile = Profile {
                 bits,
-                overfetch: false,
+                ..Profile::SPEC
             };
             let maximum = if bits == 64 {
                 u64::MAX
