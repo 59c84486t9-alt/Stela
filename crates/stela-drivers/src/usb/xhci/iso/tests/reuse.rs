@@ -178,3 +178,68 @@ fn rejected_or_unacknowledged_replacement_never_returns_its_ring_to_the_cache() 
         );
     }
 }
+
+#[test]
+fn endpoint_preflight_refuses_foreign_owners_without_commands_or_ring_mutation() {
+    let mut backing = vec![0u64; 32 * 1024];
+    let start = backing.as_mut_ptr() as u64;
+    let mut dma = unsafe { RegionAllocator::new(start..start + backing.len() as u64 * 8) };
+    let (mut controller, model) = controller(&mut dma, HIGH_SPEED, 64, true);
+    let foreign = endpoint(0x82, HIGH_SPEED);
+    let available = endpoint(1, HIGH_SPEED);
+    controller.configure(1, &[foreign], None, &mut dma).unwrap();
+    let buffer = dma.allocate(4096, 4096).unwrap();
+    let active = controller.submit_iso(1, 5, buffer.physical(), 32).unwrap();
+    let commands = model.borrow().seen.len();
+    let bytes = controller.slot(1).unwrap().endpoints[5]
+        .as_ref()
+        .unwrap()
+        .ring
+        .buffer
+        .bytes()
+        .to_vec();
+    assert!(
+        controller
+            .preflight_endpoints(1, &[available, foreign])
+            .is_err()
+    );
+    assert!(
+        controller
+            .preflight_endpoints(1, &[available, available])
+            .is_err()
+    );
+    assert_eq!(model.borrow().seen.len(), commands);
+    assert_eq!(
+        controller.slot(1).unwrap().endpoints[5]
+            .as_ref()
+            .unwrap()
+            .ring
+            .buffer
+            .bytes(),
+        bytes
+    );
+    assert!(
+        !controller.slot(1).unwrap().endpoints[5]
+            .as_ref()
+            .unwrap()
+            .poisoned
+    );
+    model.borrow_mut().complete(5, 0, SUCCESS, 0);
+    assert_eq!(
+        controller.completed_iso(&active).unwrap().unwrap().bytes,
+        32
+    );
+    controller.preflight_endpoints(1, &[available]).unwrap();
+    // Preflight is not a reservation. If another serialized owner claims that
+    // DCI before publication, configure must refuse without tearing it down.
+    controller
+        .configure(1, &[available], None, &mut dma)
+        .unwrap();
+    let commands = model.borrow().seen.len();
+    assert!(
+        controller
+            .configure(1, &[available], None, &mut dma)
+            .is_err()
+    );
+    assert_eq!(model.borrow().seen.len(), commands);
+}

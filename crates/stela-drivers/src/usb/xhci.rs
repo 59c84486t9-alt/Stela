@@ -1212,15 +1212,24 @@ impl Controller {
             .map(|_| ())
     }
 
-    fn configure_inner(
+    /// Check that every requested endpoint is valid and currently unclaimed
+    /// before a class changes its device's alternate setting. This observes the
+    /// current controller epoch; it does not reserve DCIs. The class must
+    /// serialize the complete change and configure rechecks these same rules
+    /// before recording or publishing any endpoint ownership.
+    pub fn preflight_endpoints(
         &mut self,
         slot: u8,
         endpoints: &[Endpoint],
-        hub: Option<(u8, u8, bool)>,
-        stream_endpoints: &[u8],
-        requested_streams: u16,
-        dma: &mut dyn DmaAllocator,
-    ) -> Result<u16, BlockError> {
+    ) -> Result<(), BlockError> {
+        self.endpoint_contexts(slot, endpoints).map(|_| ())
+    }
+
+    fn endpoint_contexts(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+    ) -> Result<Vec<endpoint::Context>, BlockError> {
         self.live_slot(slot)?;
         self.ready()?;
         if !self
@@ -1268,6 +1277,20 @@ impl Controller {
                 ));
             }
         }
+        Ok(contexts)
+    }
+
+    fn configure_inner(
+        &mut self,
+        slot: u8,
+        endpoints: &[Endpoint],
+        hub: Option<(u8, u8, bool)>,
+        stream_endpoints: &[u8],
+        requested_streams: u16,
+        dma: &mut dyn DmaAllocator,
+    ) -> Result<u16, BlockError> {
+        let contexts = self.endpoint_contexts(slot, endpoints)?;
+        let speed = self.slot(slot)?.speed;
         let layout = if stream_endpoints.is_empty() {
             None
         } else {
