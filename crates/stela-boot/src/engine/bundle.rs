@@ -15,6 +15,7 @@
 //! [`recovery_from_disk`] build a staged update's and a recoveryOS's the
 //! same way (`stela_loader::upgrade`, `stela_loader::recovery`).
 pub(crate) mod live_tree;
+pub(crate) mod source;
 use crate::{
     firmware,
     handoff::{File, Region},
@@ -61,6 +62,9 @@ pub struct Entry {
     pub hidden_devices: Vec<String>,
     /// Actual guest RAM after all fixed-offset runtime patches, not its input file.
     pub live_tree: live_tree::LiveTree,
+    /// Verified immutable original input and exact selected manifest metadata.
+    #[allow(dead_code)] // Parent topology/owner adoption consumes this retained input.
+    pub source: source::Intake,
     /// The AMCC CTRR-A region iBoot programs, `(base, bytes)`.
     pub read_only_region: Option<(u64, u64)>,
 }
@@ -530,6 +534,8 @@ fn load_named<'a>(
     let verified = manifest
         .verify(&|name| named(name))
         .map_err(|e| format!("{e}"))?;
+    // The new reader contract is checked before any guest RAM load/patch.
+    let source = source::Intake::from_verified(json, &verified, named)?;
     trace_record(host, &mut trace, *b"EVFY")?;
     // Use the verified tree region, including its file offset. The trace
     // must stay in the original reserved range below managed memory.
@@ -597,6 +603,7 @@ fn load_named<'a>(
         ));
     }
     let live_tree = live_tree::LiveTree::capture(host, &image.regions, image.x0)?;
+    source.validate_live(live_tree.bytes())?;
     Ok(Entry {
         pc: image.entry_pa,
         x0: image.x0,
@@ -606,6 +613,7 @@ fn load_named<'a>(
         kept: image.kept,
         hidden_devices: manifest.hidden_devices,
         live_tree,
+        source,
         read_only_region: manifest
             .read_only_region
             .map(|region| (region.base, region.bytes)),

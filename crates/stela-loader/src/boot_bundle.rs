@@ -33,7 +33,9 @@ use serde::Serialize;
 use stela_runtime::sha256;
 
 /// The format `stela.efi` reads (`stela_runtime::boot_bundle`).
-pub const SCHEMA_VERSION: u32 = 2;
+/// Schema3 requires the boot reader's selected target/source/original ADT
+/// provenance intake. Schema2 never qualified those previously ignored fields.
+pub const SCHEMA_VERSION: u32 = 3;
 /// The revision of what [`prepare`] writes within its schema: bump it in the
 /// commit that changes the content of a prepared bundle (a DeviceTree
 /// property, a region, a patch, a boot argument) without changing its
@@ -65,6 +67,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// actual GOP framebuffer at load. Schema 2 adds these required named fields.
 /// Revision 14: retain the unchanged input ADT beside its prepared output so
 /// runtime resource qualification can compare both complete source graphs.
+/// Schema3 consumes this provenance at the reader; revision14 is unchanged.
 pub const REVISION: u32 = 14;
 /// m1n1 `_write_boot_args`: the physical aperture base XNU expects, offset
 /// by `phys_base` modulo 32 MiB.

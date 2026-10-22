@@ -17,7 +17,9 @@ use alloc::{
 use core::fmt;
 use serde::Deserialize;
 
-pub const SCHEMA_VERSION: u32 = 2;
+/// Schema3 binds the original ADT and selected target/source provenance at the
+/// boot mount; schema2 did not require or interpret those metadata fields.
+pub const SCHEMA_VERSION: u32 = 3;
 pub const MANIFEST_FILE: &str = "bundle.json";
 const MAX_MANIFEST_BYTES: usize = 16 * 1024 * 1024;
 /// Guest DRAM is backed by 2 MiB host frames.
@@ -123,10 +125,42 @@ pub struct BootArgs {
     pub command_line: String,
 }
 
+/// Selected restore identity as written by the loader, never inferred from
+/// template DeviceTree IDs or from a source filename.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Target {
+    pub product_type: String,
+    pub device_class: String,
+    pub product_version: String,
+    pub product_build: String,
+    pub variant: String,
+    pub chip_id: Option<u32>,
+    pub board_id: Option<u32>,
+}
+
+/// Exact input provenance serialized by preparation. File verification alone
+/// does not authenticate its container or an Apple signature.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Source {
+    pub component: String,
+    pub member: String,
+    pub container_sha256: String,
+    pub payload_type: String,
+    pub description: String,
+    pub decoded_bytes: u64,
+    pub decoded_sha256: String,
+}
+
 /// The fields of `bundle.json` the mount uses; others are ignored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Manifest {
     pub schema_version: u32,
+    /// Generic authored images may omit Apple provenance. The Apple boot mount
+    /// requires complete selected target/source/original ADT before loading.
+    #[serde(default)]
+    pub target: Option<Target>,
+    #[serde(default)]
+    pub sources: Vec<Source>,
     pub options: Options,
     pub files: Vec<File>,
     pub regions: Vec<Region>,
@@ -603,7 +637,7 @@ mod tests {
         let sha = crate::sha256;
         format!(
             r#"{{
-  "schema_version": 2, "unknown_field": true,
+  "schema_version": 3, "unknown_field": true,
   "options": {{"dram_base": {BASE}, "dram_size": 1073741824, "phys_base": {BASE}}},
   "files": [
     {{"name": "kernel.img", "bytes": {kb}, "sha256": "{ks}"}},
@@ -662,17 +696,60 @@ mod tests {
                 .hidden_devices
                 .is_empty()
         );
-        let supplied = json.replacen("\"schema_version\": 2", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 2", 1);
+        let supplied = json.replacen("\"schema_version\": 3", "\"hidden_devices\": [\"/arm-io/ave\", \"/ secure-root-prefix\"], \"schema_version\": 3", 1);
         assert_eq!(
             Manifest::parse(supplied.as_bytes()).unwrap().hidden_devices,
             ["/arm-io/ave", "/ secure-root-prefix"]
         );
         let malformed = json.replacen(
-            "\"schema_version\": 2",
-            "\"hidden_devices\": [17], \"schema_version\": 2",
+            "\"schema_version\": 3",
+            "\"hidden_devices\": [17], \"schema_version\": 3",
             1,
         );
         assert!(Manifest::parse(malformed.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn selected_source_metadata_is_typed_and_duplicate_fields_refuse() {
+        let json = manifest_json(&[1; 32], &[2; 32]);
+        let authored = Manifest::parse(json.as_bytes()).unwrap();
+        assert!(authored.target.is_none());
+        assert!(authored.sources.is_empty());
+        let target = r#"{"product_type":"test","device_class":"test","product_version":"test","product_build":"test","variant":"test","chip_id":24576,"board_id":8}"#;
+        let source = r#"{"component":"RestoreDeviceTree","member":"Firmware/test.im4p","container_sha256":"container retained verbatim","payload_type":"dtre","description":"","decoded_bytes":32,"decoded_sha256":"decoded retained verbatim"}"#;
+        let metadata = format!(r#""target":{target},"sources":[{source}],"#);
+        let typed = json.replacen(
+            "\"schema_version\"",
+            &format!("{metadata}\"schema_version\""),
+            1,
+        );
+        let parsed = Manifest::parse(typed.as_bytes()).unwrap();
+        assert_eq!(parsed.target.as_ref().unwrap().board_id, Some(8));
+        assert_eq!(parsed.sources[0].member, "Firmware/test.im4p");
+        assert_eq!(
+            parsed.sources[0].decoded_sha256,
+            "decoded retained verbatim"
+        );
+        // Typed parsing preserves metadata; the Apple Entry intake separately
+        // validates digests, selected IDs and actual original file contents.
+        for repeated in [
+            format!(r#""target":{target},"#),
+            format!(r#""sources":[{source}],"#),
+        ] {
+            let wrong = typed.replacen(
+                "\"schema_version\"",
+                &format!("{repeated}\"schema_version\""),
+                1,
+            );
+            assert!(Manifest::parse(wrong.as_bytes()).is_err());
+        }
+        for wrong in [
+            typed.replace("\"chip_id\":24576", "\"chip_id\":24576,\"chip_id\":24576"),
+            typed.replace("\"board_id\":8", "\"board_id\":4294967296"),
+            typed.replace("\"decoded_bytes\":32", "\"decoded_bytes\":-1"),
+        ] {
+            assert!(Manifest::parse(wrong.as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -893,7 +970,7 @@ mod tests {
         assert!(Manifest::parse(unsafe_name.as_bytes()).is_err());
         assert!(
             Manifest::parse(
-                json.replace("\"schema_version\": 2", "\"schema_version\": 3")
+                json.replace("\"schema_version\": 3", "\"schema_version\": 2")
                     .as_bytes()
             )
             .is_err()
