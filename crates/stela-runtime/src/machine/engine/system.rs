@@ -2,14 +2,17 @@
 //! (`machine::system`): this module is the [`Context`] they run against.
 //!
 //! - Identification registers hold the CPU profile's values; one without a
-//!   value stops the read (`RequirementKind::SystemRegister`).
+//!   value refuses the read (`RequirementKind::SystemRegister`).
 //! - SP_ELx are the banked stack pointers, CNTx_CTL compute ISTATUS, ISR_EL1
 //!   reports the pending lines, and FPCR/FPSR live in the guest state.
-//! - Writes the engine cannot honor stop: debug exceptions and breakpoints,
+//! - Writes the engine cannot honor refuse: debug exceptions and breakpoints,
 //!   and Apple VMSA_LOCK. SCTLR_ELx.EE and E0E are RES0 because the profile
 //!   has no FEAT_MixedEnd.
+//!
+//! A refusal stops in strict mode; graceful, the register behaves as storage
+//! (`Machine::register_refused`).
 use super::{
-    Devices, Host, Machine, RequirementKind, Step, Stop,
+    Devices, Host, Machine, Step,
     mmu::{
         self, Access as MemoryAccess, Outcome as Translated,
         tlbi::{self, Reach, Scope},
@@ -1266,17 +1269,6 @@ impl<H: Host, D: Devices> Machine<H, D> {
             Effect::Refused(reason) => Some(reason),
             _ => None,
         });
-        if let Some(reason) = refusal {
-            let mut requirement = self.requirement(RequirementKind::SystemRegister {
-                word,
-                refusal: Refusal::UnsupportedSetting(reason),
-            });
-            requirement.syndrome = Some(super::super::exception::syndrome(
-                Class::SystemRegister,
-                trap_iss(access),
-            ));
-            return Some(Err(Stop::Unsupported(requirement)));
-        }
         match translation {
             Translation::All => self.translations_changed(),
             Translation::TableBase => self.table_base_changed(),
@@ -1295,12 +1287,25 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 self.host.code_invalidated(None);
             }
         }
+        // The state the accessor changed before refusing is resynchronized
+        // above, whichever mode then answers the refusal.
+        if let Some(reason) = refusal {
+            return Some(self.register_refused(
+                word,
+                Some(access),
+                Refusal::UnsupportedSetting(reason),
+            ));
+        }
         Some(match effect {
             Effect::Done => {
-                if let Some(value) = result
-                    && access.rt() != 31
-                {
-                    self.cpu.state.x[usize::from(access.rt())] = value;
+                match result {
+                    Some(value) => {
+                        let value = self.degraded_read(access, value);
+                        if access.rt() != 31 {
+                            self.cpu.state.x[usize::from(access.rt())] = value;
+                        }
+                    }
+                    None => self.degraded_written(access),
                 }
                 if reset {
                     return Some(self.warm_reset());
@@ -2583,7 +2588,7 @@ mod tests {
         machine.cpu.state.x[0] = 0b10;
         assert!(matches!(
             machine.system_instruction(access(false, RMR_EL2, 0)),
-            Err(super::Stop::Unsupported(_))
+            Err(super::super::Stop::Unsupported(_))
         ));
         assert_eq!(machine.cpu.registers.get(Register::RMR_EL2, 0), 1);
     }
@@ -3285,7 +3290,7 @@ mod tests {
         // EL1, refuses rather than reading zero.
         assert!(matches!(
             machine.system_instruction(access(true, MIDR_EL1, 0)),
-            Err(super::Stop::Unsupported(_))
+            Err(super::super::Stop::Unsupported(_))
         ));
         // A value written to VPIDR_EL2 at EL2 is what EL1 then reads.
         machine.cpu.pstate = Pstate::reset(2);

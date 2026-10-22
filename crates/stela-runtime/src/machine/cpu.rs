@@ -256,6 +256,11 @@ pub struct Cpu {
     /// The region the memory controller has locked against writes, first
     /// and last byte, as the engine last read it from the devices.
     pub memory_lock: Option<(u64, u64)>,
+    /// System registers answered as storage after their model refused an
+    /// access outside strict mode, by encoding selector: each reads the
+    /// value last written to it until its model accepts a write
+    /// (`engine::Machine::set_strict`).
+    pub degraded: alloc::collections::BTreeMap<u16, u64>,
 }
 
 /// What an exception entry needs beyond the vector kind.
@@ -388,6 +393,7 @@ impl Cpu {
             retired: 0,
             ctrr: Rc::default(),
             memory_lock: None,
+            degraded: alloc::collections::BTreeMap::new(),
         }
     }
 
