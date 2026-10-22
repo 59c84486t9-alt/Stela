@@ -15,7 +15,7 @@ NvU32 NV_API_CALL os_string_length(
     const char* str
 )
 {
-    return strlen(str);
+    return (NvU32)strlen(str);
 }
 
 void *NV_API_CALL os_mem_copy(

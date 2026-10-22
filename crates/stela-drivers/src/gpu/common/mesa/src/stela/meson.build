@@ -710,25 +710,6 @@ if with_stela_intel
       build_rpath : fs.parent(stela_air_llvm),
     )
   endif
-  stela_intel_compute_packet_probe = executable(
-    'stela_intel_compute_packet_probe',
-    '../../../../intel/stela/tests/compute_dispatch.c',
-    link_with : [stela_intel_compute_native],
-    c_args : ['-Werror'],
-  )
-  test('stela_intel_compute_packet', stela_intel_compute_packet_probe, suite : 'stela')
-  foreach generation : ['125', '200', '300', '350']
-    stela_intel_compute_packer_probe = executable(
-      'stela_intel_compute_packer_@0@_probe'.format(generation),
-      '../../../../intel/stela/tests/compute_dispatch_mesa.c',
-      include_directories : [inc_include, inc_src, inc_intel],
-      dependencies : [dep_m, idep_genxml, idep_mesautil],
-      link_with : [stela_intel_compute_native],
-      c_args : ['-Werror', '-DGFX_VERx10=@0@'.format(generation)],
-    )
-    test('stela_intel_compute_packer_@0@'.format(generation),
-         stela_intel_compute_packer_probe, suite : 'stela')
-  endforeach
   stela_elk_probe = executable(
     'stela_elk_probe',
     'tests/elk_probe.c',

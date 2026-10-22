@@ -1,126 +1,195 @@
-//! Source list for the native Intel support library; the caller owns target,
-//! compiler, archiver, freestanding flags, and the final library name. Dispatch
-//! headers use Mesa's original XML generator and a selected Python interpreter.
-pub fn configure(build: &mut cc::Build) {
-    use std::{env, path::PathBuf};
+//! Stela's Xe and i915 port, its dispatch packers and their hosted tests.
+//! Linux's and Mesa's original generators supply the workaround table and the
+//! packet headers, run by a selected Python interpreter.
+use super::native::{self, Tests};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-    let source = "src/gpu/intel";
-    let output = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo supplies OUT_DIR"));
-    super::native::linux_environment(
-        build,
-        Some(&output.join("intel-generated")),
-        &["intel/xe", "intel/i915"],
-    );
-    build
-        .file(format!("{source}/stela/pt_walk.c"))
-        .file(format!("{source}/stela/commands.c"))
-        .file(format!("{source}/stela/ct.c"))
-        .file(format!("{source}/stela/activation.c"))
-        .file(format!("{source}/stela/guc_reset.c"))
-        .file(format!("{source}/stela/firmware.c"))
-        .file(format!("{source}/stela/wopcm.c"))
-        .file(format!("{source}/stela/ggtt_probe.c"))
-        .file(format!("{source}/stela/pat.c"))
-        .file(format!("{source}/stela/i915_commands.c"));
-    for path in ["stela", "xe", "i915/gt"] {
-        println!("cargo:rerun-if-changed={source}/{path}");
+const SOURCE: &str = "src/gpu/intel";
+const GENXML: &str = "src/gpu/common/mesa/src/intel/genxml";
+const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
+const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
+
+/// Packet generations: GFX_VERx10, Mesa's XML name, and the dispatch unit
+/// built over each one's selected packets.
+const DISPATCH: [(u32, &str, &str, &str); 10] = [
+    (70, "gen70", "gen", LEGACY),
+    (75, "gen75", "gen", LEGACY),
+    (80, "gen80", "gen", LEGACY),
+    (90, "gen90", "gen", LEGACY),
+    (110, "gen110", "gen", LEGACY),
+    (120, "gen120", "gen", LEGACY),
+    (125, "gen125", "compute", COMPUTE),
+    (200, "xe2", "compute", COMPUTE),
+    (300, "xe3", "compute", COMPUTE),
+    (350, "xe3p", "compute", COMPUTE),
+];
+
+/// Each encoder's comparison against Mesa's complete packers, by generation.
+const PACKERS: [(&str, &[u32]); 4] = [
+    ("commands", &[120, 125, 200, 300, 350]),
+    ("i915_commands", &[60, 70, 75, 80, 90, 110]),
+    ("dispatch", &[70, 75, 80, 90, 110, 120]),
+    ("compute_dispatch", &[125, 200, 300, 350]),
+];
+
+pub fn port(tests: &mut Tests) {
+    let output = native::out_dir();
+    let python = python();
+    let generated = output.join("intel-generated");
+    workarounds(&generated);
+    let dispatch = output.join("intel-dispatch");
+    let mut sources = native::sources(&format!("{SOURCE}/stela"));
+    sources.extend(packets(&python, &dispatch));
+    let configure = |mut build: cc::Build| {
+        native::linux_environment(&mut build, Some(&generated), &["intel/xe", "intel/i915"]);
+        build
+            .include(&dispatch)
+            .include(format!("{SOURCE}/stela"))
+            .include("src/gpu/common/mesa/src")
+            .include(GENXML);
+        build
+    };
+    let port = configure(native::configure());
+    port.clone().files(&sources).compile("stela-intel-port");
+    let Some(base) = native::hosted() else {
+        return;
+    };
+    let hosted = configure(base.clone());
+    let adapters = native::archive(&hosted, "intel-adapters-hosted", &sources);
+    for name in [
+        "activation",
+        "commands",
+        "compute_dispatch",
+        "ct",
+        "dispatch",
+        "firmware",
+        "ggtt_probe",
+        "guc_reset",
+        "huc_firmware",
+        "i915_commands",
+        "pat",
+        "pt_walk",
+        "wopcm",
+        "wopcm_owned",
+    ] {
+        let source = format!("{SOURCE}/stela/tests/{name}.c");
+        tests.add(&hosted, &format!("intel_{name}"), &source, &[&adapters]);
     }
+    let genxml = output.join("intel-genxml");
+    let mut generations = PACKERS
+        .iter()
+        .flat_map(|(_, generations)| generations.iter().copied())
+        .collect::<Vec<_>>();
+    generations.sort_unstable();
+    generations.dedup();
+    for generation in generations {
+        complete_packets(&python, generation, &genxml.join("genxml"));
+    }
+    // Mesa's headers keep their own warning profile, as Linux's do.
+    let mut mesa = base;
+    for directory in [
+        Path::new("src/gpu/common/mesa/include"),
+        Path::new("src/gpu/common/mesa/src"),
+        Path::new(GENXML),
+        &genxml,
+    ] {
+        mesa.flag("-isystem").flag(directory);
+    }
+    for (name, generations) in PACKERS {
+        for generation in generations {
+            let source = format!("{SOURCE}/stela/tests/{name}_mesa.c");
+            let test = format!("intel_{name}_mesa_{generation}");
+            let mut build = mesa.clone();
+            build.define("GFX_VERx10", generation.to_string().as_str());
+            tests.add(&build, &test, &source, &[&adapters]);
+        }
+    }
+}
+
+fn python() -> PathBuf {
     println!("cargo:rerun-if-env-changed=STELA_GPU_PYTHON");
-    let python = PathBuf::from(env::var_os("STELA_GPU_PYTHON").unwrap_or_else(|| "python3".into()));
-    generate_workarounds(&output);
-    configure_dispatch(build, &output, &python);
+    env::var_os("STELA_GPU_PYTHON").map_or_else(|| "python3".into(), PathBuf::from)
 }
 
 /// Xe's workaround table, generated as Kbuild does by Linux's unchanged
 /// generator from its rules, as <generated/xe_wa_oob.h>.
-fn generate_workarounds(output: &std::path::Path) {
-    use std::{env, fs, process::Command};
-    let source = "src/gpu/intel/xe";
-    let generated = output.join("intel-generated/generated");
-    fs::create_dir_all(&generated).expect("create the generated Xe header directory");
-    let host = env::var("HOST").expect("Cargo supplies host triple");
-    let generator = output.join(if host.contains("windows") {
-        "xe_gen_wa_oob.exe"
-    } else {
-        "xe_gen_wa_oob"
-    });
-    let compiler = cc::Build::new()
-        .host(&host)
-        .target(&host)
-        .cargo_metadata(false)
-        .get_compiler();
-    let result = compiler
-        .to_command()
-        .args(["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror"])
-        .arg(format!("{source}/xe_gen_wa_oob.c"))
-        .arg("-o")
-        .arg(&generator)
-        .output()
-        .expect("compile Xe's workaround generator");
-    assert!(
-        result.status.success(),
-        "Xe workaround generator compilation failed: {}",
-        String::from_utf8_lossy(&result.stderr)
+fn workarounds(generated: &Path) {
+    let source = format!("{SOURCE}/xe");
+    let output = generated.join("generated");
+    fs::create_dir_all(&output).expect("create the generated Xe header directory");
+    let host = env::var("HOST").expect("Cargo supplies HOST");
+    let generator = native::out_dir().join(format!("xe_gen_wa_oob{}", env::consts::EXE_SUFFIX));
+    native::run(
+        cc::Build::new()
+            .host(&host)
+            .target(&host)
+            .cargo_metadata(false)
+            .get_compiler()
+            .to_command()
+            .args(["-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror"])
+            .arg(format!("{source}/xe_gen_wa_oob.c"))
+            .arg("-o")
+            .arg(&generator),
     );
-    let result = Command::new(&generator)
-        .arg(format!("{source}/xe_wa_oob.rules"))
-        .arg(output.join("xe_wa_oob.c"))
-        .arg(generated.join("xe_wa_oob.h"))
-        .output()
-        .expect("run Xe's workaround generator");
-    assert!(
-        result.status.success(),
-        "Xe workaround generation failed: {}",
-        String::from_utf8_lossy(&result.stderr)
+    native::run(
+        Command::new(&generator)
+            .arg(format!("{source}/xe_wa_oob.rules"))
+            .arg(native::out_dir().join("xe_wa_oob.c"))
+            .arg(output.join("xe_wa_oob.h")),
     );
 }
 
-fn configure_dispatch(build: &mut cc::Build, output: &std::path::Path, python: &std::path::Path) {
-    use std::{fs, process::Command};
+/// The selected packets of each dispatch generation, and its unit's source.
+fn packets(python: &Path, output: &Path) -> Vec<PathBuf> {
+    fs::create_dir_all(output).expect("create the Intel packet header directory");
+    println!("cargo:rerun-if-changed={GENXML}");
+    DISPATCH
+        .iter()
+        .map(|&(generation, xml, unit, symbols)| {
+            let family = if unit == "gen" { "dispatch" } else { unit };
+            generate(
+                Command::new(python)
+                    .arg(format!("{GENXML}/gen_pack_header.py"))
+                    .arg(format!("{GENXML}/{xml}.xml"))
+                    .args(["--include-symbols", symbols])
+                    .args(["--helpers-include", "genxml_native.h"]),
+                &output.join(format!("gen{generation}_{family}_pack.h")),
+            );
+            PathBuf::from(format!("{SOURCE}/stela/dispatch/{unit}{generation}.c"))
+        })
+        .collect()
+}
 
-    let genxml = "src/gpu/common/mesa/src/intel/genxml";
-    let output = output.join("intel-dispatch");
-    fs::create_dir_all(&output).expect("cannot create Intel packet generation directory");
-    const LEGACY: &str = "GPGPU_WALKER,MEDIA_STATE_FLUSH";
-    const COMPUTE: &str = "COMPUTE_WALKER,COMPUTE_WALKER_BODY,INTERFACE_DESCRIPTOR_DATA,POSTSYNC_DATA,PREF_SLM_ALLOCATION_SIZE";
-    for (generation, xml, family, unit, symbols) in [
-        (70, "gen70", "dispatch", "gen", LEGACY),
-        (75, "gen75", "dispatch", "gen", LEGACY),
-        (80, "gen80", "dispatch", "gen", LEGACY),
-        (90, "gen90", "dispatch", "gen", LEGACY),
-        (110, "gen110", "dispatch", "gen", LEGACY),
-        (120, "gen120", "dispatch", "gen", LEGACY),
-        (125, "gen125", "compute", "compute", COMPUTE),
-        (200, "xe2", "compute", "compute", COMPUTE),
-        (300, "xe3", "compute", "compute", COMPUTE),
-        (350, "xe3p", "compute", "compute", COMPUTE),
-    ] {
-        let generated = output.join(format!("gen{generation}_{family}_pack.h"));
-        let result = Command::new(python)
-            .arg(format!("{genxml}/gen_pack_header.py"))
-            .arg(format!("{genxml}/{xml}.xml"))
-            .args([
-                "--include-symbols",
-                symbols,
-                "--helpers-include",
-                "genxml_native.h",
-            ])
-            .output()
-            .expect("Mesa Intel XML generation requires Python 3; select STELA_GPU_PYTHON");
-        assert!(
-            result.status.success(),
-            "Intel Gen{generation} packet generation failed: {}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        fs::write(generated, result.stdout).expect("cannot write generated Intel packet header");
-        build.file(format!("src/gpu/intel/stela/dispatch/{unit}{generation}.c"));
-    }
-    build
-        .file("src/gpu/intel/stela/dispatch.c")
-        .file("src/gpu/intel/stela/compute_dispatch.c")
-        .include(output)
-        .include("src/gpu/intel/stela")
-        .include("src/gpu/common/mesa/src")
-        .include(genxml);
-    println!("cargo:rerun-if-changed={genxml}");
+/// One generation's complete packers, as Mesa's build generates them.
+fn complete_packets(python: &Path, generation: u32, output: &Path) {
+    fs::create_dir_all(output).expect("create the Mesa packet header directory");
+    let xml = match generation {
+        200 => "xe2".into(),
+        300 => "xe3".into(),
+        350 => "xe3p".into(),
+        _ => format!("gen{generation}"),
+    };
+    generate(
+        Command::new(python)
+            .arg(format!("{GENXML}/gen_pack_header.py"))
+            .arg(format!("{GENXML}/{xml}.xml"))
+            .arg("--engines=render,blitter,compute"),
+        &output.join(format!("{xml}_pack.h")),
+    );
+}
+
+fn generate(command: &mut Command, header: &Path) {
+    let output = command
+        .output()
+        .expect("Mesa's Intel XML generator requires Python 3; select STELA_GPU_PYTHON");
+    assert!(
+        output.status.success(),
+        "{command:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::write(header, output.stdout).expect("write a generated Intel packet header");
 }

@@ -17,6 +17,27 @@ pub mod metal;
 #[cfg(any(feature = "amd-commands", feature = "amd-port"))]
 pub mod amd;
 
+/// The native ports' hosted C test programs, which `build.rs` compiles.
+#[cfg(all(test, any(feature = "amd-port", feature = "intel-port")))]
+mod c_tests {
+    extern crate std;
+
+    fn run(program: &str) {
+        let output = std::process::Command::new(program)
+            .output()
+            .unwrap_or_else(|error| panic!("cannot run {program}: {error}"));
+        assert!(
+            output.status.success(),
+            "{program} failed ({}):\n{}{}",
+            output.status,
+            std::string::String::from_utf8_lossy(&output.stdout),
+            std::string::String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    include!(concat!(env!("OUT_DIR"), "/c_tests.rs"));
+}
+
 /// PCI base class for VGA, 3D and other display controllers.
 const DISPLAY_CLASS: u8 = 0x03;
 const NVIDIA_VENDOR: u16 = 0x10de;

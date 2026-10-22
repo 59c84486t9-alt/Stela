@@ -507,8 +507,6 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
             "intel/stela/hosted/compute.c",
             "intel/stela/hosted/compute.h",
             "intel/stela/hosted/fp_controls.h",
-            "intel/stela/tests/compute_dispatch.c",
-            "intel/stela/tests/compute_dispatch_mesa.c",
             "intel/stela/tests/compute_program.c",
             "intel/stela/dispatch.c",
             "intel/stela/dispatch.h",
@@ -710,11 +708,6 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "src/stela/stela_intel_sampler_probe",
         "src/stela/stela_intel_compute_program_probe",
         "src/stela/stela_intel_legacy_compute_program_probe",
-        "src/stela/stela_intel_compute_packet_probe",
-        "src/stela/stela_intel_compute_packer_125_probe",
-        "src/stela/stela_intel_compute_packer_200_probe",
-        "src/stela/stela_intel_compute_packer_300_probe",
-        "src/stela/stela_intel_compute_packer_350_probe",
     ]);
     if llvm_library.is_some() {
         compile.args([
@@ -831,11 +824,6 @@ pub fn build(options: BuildOptions<'_>) -> Result<()> {
         "intel_sampler",
         "intel_compute_program",
         "intel_legacy_compute_program",
-        "intel_compute_packet",
-        "intel_compute_packer_125",
-        "intel_compute_packer_200",
-        "intel_compute_packer_300",
-        "intel_compute_packer_350",
     ];
     if llvm_sdk.is_some() {
         resource_stages.push("amd_llvm_float");

@@ -4,11 +4,7 @@ use anyhow::Result;
 use clap::{Subcommand, ValueEnum};
 use std::path::PathBuf;
 
-#[cfg(test)]
-mod amd;
 pub mod fetch;
-#[cfg(test)]
-mod intel;
 mod macos;
 mod mesa;
 mod nvidia;
