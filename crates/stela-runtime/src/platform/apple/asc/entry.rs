@@ -31,44 +31,75 @@ pub enum Origin {
     NativeBootResource,
 }
 
-/// An explicit boot-resource authorization, separate from native RTKit state.
-/// The register word is supplied by its owner, never inferred from `running`.
+/// One contiguous source/mapping interval, in three separate address domains.
+/// Geometry describes a requirement; the actual firmware backend must still
+/// prove current allocation/mapping ownership and perform the instruction fetch.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryMapping {
+    pub linked_base: u64,
+    pub physical_base: u64,
+    pub iop_base: u64,
+    pub bytes: u64,
+}
+
+/// Actual result from a firmware backend's current owned instruction mapping.
+/// Protocol-only peers must retain Firmware::fetch_entry's default refusal.
+#[derive(Debug, Clone, Copy)]
+pub struct EntryFetch {
+    pub physical: u64,
+    pub instruction: u32,
+}
+
+/// Required mapping, expected source instruction, and independently established
+/// register word. Constructing this value does not authorize execution.
 #[derive(Debug, Clone, Copy)]
 pub struct EntryHandoff {
+    mapping: EntryMapping,
+    offset: u64,
+    instruction: u32,
     entry: u64,
     word: u64,
     origin: Origin,
 }
 
 impl EntryHandoff {
-    /// Authorize an entry in an actually owned firmware backing region.
-    /// `word` is an independently established/captured register value. Its
-    /// opaque bits are retained on reads. Supplying addresses alone does not
-    /// establish the image's bytes, identity, mapping, or initial lock state.
-    pub fn from_backing(
-        entry: u64,
-        base: u64,
-        bytes: u64,
+    /// Describe a complete entry instruction in a linked image interval, its
+    /// physical backing and its IOP mapping. Original iBoot154cf4 programs the
+    /// TEXT remap/DVA. Zero is a valid IOP address when the actual backend owns
+    /// and fetches that mapping; neither PC0 nor PA alone establishes it.
+    ///
+    /// `word` is separately established/captured. Geometry and source bytes do
+    /// not establish initial lock state, vendor trust or an execution backend.
+    pub fn from_mapping(
+        mapping: EntryMapping,
+        offset: u64,
+        instruction: u32,
         word: u64,
         origin: Origin,
     ) -> Result<Self, &'static str> {
-        let end = base
-            .checked_add(bytes)
-            .ok_or("ASC firmware backing range overflows")?;
-        let instruction_end = entry.checked_add(4).ok_or("ASC firmware entry overflows")?;
-        if entry == 0 || entry & !ADDRESS != 0 {
-            return Err("ASC firmware entry is outside the qualified aligned address field");
+        for base in [mapping.linked_base, mapping.physical_base, mapping.iop_base] {
+            base.checked_add(mapping.bytes)
+                .ok_or("ASC firmware mapping range overflows")?;
         }
-        if entry < base || instruction_end > end {
-            return Err("ASC firmware entry is outside its backing region");
+        if offset.checked_add(4).is_none_or(|end| end > mapping.bytes) {
+            return Err("ASC complete entry instruction is outside its mapping");
+        }
+        let linked = mapping.linked_base + offset;
+        let physical = mapping.physical_base + offset;
+        let entry = mapping.iop_base + offset;
+        if linked & 3 != 0 || physical & 3 != 0 || entry & !ADDRESS != 0 {
+            return Err("ASC firmware entry is outside the qualified aligned address fields");
         }
         if word & LOCK != 0 && word & ADDRESS != entry {
-            return Err("ASC locked entry disagrees with the firmware backing");
+            return Err("ASC locked entry disagrees with the IOP mapping");
         }
         if origin == Origin::NativeBootResource && word & !(ADDRESS | LOCK) != 0 {
             return Err("ASC native boot resource cannot establish opaque entry-register bits");
         }
         Ok(Self {
+            mapping,
+            offset,
+            instruction,
             entry,
             word,
             origin,
@@ -77,6 +108,21 @@ impl EntryHandoff {
 
     pub const fn origin(self) -> Origin {
         self.origin
+    }
+    pub const fn mapping(self) -> EntryMapping {
+        self.mapping
+    }
+    pub const fn linked_entry(self) -> u64 {
+        self.mapping.linked_base + self.offset
+    }
+    pub const fn physical_entry(self) -> u64 {
+        self.mapping.physical_base + self.offset
+    }
+    pub const fn iop_entry(self) -> u64 {
+        self.entry
+    }
+    pub const fn instruction(self) -> u32 {
+        self.instruction
     }
 }
 
@@ -123,14 +169,14 @@ impl Auxiliary {
         Ok(())
     }
 
-    pub(super) fn check_start(&self) -> Result<(), &'static str> {
+    pub(super) fn check_start(&self) -> Result<Option<EntryHandoff>, &'static str> {
         let state = self.0.borrow();
         // Existing native protocol constructors do not claim an ARM image.
         // Once an explicit image handoff exists, its entry must be locked.
         if state.entry_required && state.handoff.is_none_or(|h| h.word & LOCK == 0) {
             return Err("ASC firmware entry has not been programmed and locked");
         }
-        Ok(())
+        Ok(state.handoff)
     }
 
     pub(super) fn set_running(&self, running: bool) {
@@ -221,10 +267,39 @@ mod tests {
     use crate::platform::apple::asc::{Asc, Firmware, Lines, Message};
     use crate::platform::apple::bus::Lifecycle;
     use crate::platform::apple::interrupt::{AicInput, InterruptLatch};
+    use crate::platform::dma::{Memory, tests::Ram};
     use alloc::{boxed::Box, vec::Vec};
 
-    struct Peer;
+    struct FetchOwner {
+        ram: Ram,
+        mapping: Option<(u64, u64, u64)>,
+        allocated: bool,
+    }
+    struct Peer(Rc<RefCell<FetchOwner>>);
     impl Firmware for Peer {
+        fn fetch_entry(&mut self, iop: u64) -> Result<EntryFetch, &'static str> {
+            let mut owner = self.0.borrow_mut();
+            if !owner.allocated {
+                return Err("test allocation owner released");
+            }
+            let (base, physical, bytes) = owner.mapping.ok_or("test IOP mapping is absent")?;
+            let offset = iop.checked_sub(base).ok_or("test fetch precedes mapping")?;
+            if offset.checked_add(4).is_none_or(|end| end > bytes) {
+                return Err("test complete fetch exceeds mapping");
+            }
+            let physical = physical
+                .checked_add(offset)
+                .ok_or("test fetch physical overflow")?;
+            let mut raw = [0; 4];
+            if !owner.ram.read(physical, &mut raw) {
+                return Err("test fetch is not owned RAM");
+            }
+            Ok(EntryFetch {
+                physical,
+                instruction: u32::from_le_bytes(raw),
+            })
+        }
+
         fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
             Ok(())
         }
@@ -244,22 +319,50 @@ mod tests {
             Ok(())
         }
     }
-    const ENTRY: u64 = 0x8000_0000;
+    const ENTRY: u64 = 0x20_0000;
+    const PHYSICAL: u64 = 0x8000_0000;
+    const INSTRUCTION: u32 = 0x1400_0081;
 
-    fn handoff(word: u64) -> EntryHandoff {
-        EntryHandoff::from_backing(ENTRY, ENTRY, 0x4000, word, Origin::NativeBootResource).unwrap()
+    fn mapping(iop_base: u64) -> EntryMapping {
+        EntryMapping {
+            linked_base: 0,
+            physical_base: PHYSICAL,
+            iop_base,
+            bytes: 0x4000,
+        }
     }
-    fn owner(running: bool) -> Asc {
-        Asc::new(
-            Box::new(Peer),
-            running,
-            Lines::from_interrupts([1, 2, 3, 4].map(|irq| AicInput::new(0, irq))),
+    fn handoff(word: u64) -> EntryHandoff {
+        EntryHandoff::from_mapping(
+            mapping(ENTRY),
+            0,
+            INSTRUCTION,
+            word,
+            Origin::NativeBootResource,
         )
         .unwrap()
     }
+    fn owner_with_mapping(running: bool, iop: u64) -> (Asc, Rc<RefCell<FetchOwner>>) {
+        let mut ram = Ram::new(PHYSICAL, 0x4000);
+        assert!(ram.write(PHYSICAL, &INSTRUCTION.to_le_bytes()));
+        let owned = Rc::new(RefCell::new(FetchOwner {
+            ram,
+            mapping: Some((iop, PHYSICAL, 0x4000)),
+            allocated: true,
+        }));
+        let asc = Asc::new(
+            Box::new(Peer(owned.clone())),
+            running,
+            Lines::from_interrupts([1, 2, 3, 4].map(|irq| AicInput::new(0, irq))),
+        )
+        .unwrap();
+        (asc, owned)
+    }
+    fn owner(running: bool) -> Asc {
+        owner_with_mapping(running, ENTRY).0
+    }
 
     #[test]
-    fn native_running_protocol_has_no_invented_arm_entry() {
+    fn running_requires_locked_and_fetched_entry() {
         let mut asc = owner(true);
         let mut aux = asc.auxiliary();
         let mut latch = InterruptLatch::new();
@@ -321,10 +424,10 @@ mod tests {
         let mut asc = owner(true);
         // Capture may include opaque bits the consumers never decode.
         let opaque = 1 << 63;
-        let captured = EntryHandoff::from_backing(
-            ENTRY,
-            ENTRY,
-            0x4000,
+        let captured = EntryHandoff::from_mapping(
+            mapping(ENTRY),
+            0,
+            INSTRUCTION,
             ENTRY | LOCK | opaque,
             Origin::PhysicalCapture,
         )
@@ -381,18 +484,144 @@ mod tests {
     #[test]
     fn resource_geometry_and_locked_identity_are_checked() {
         let origin = Origin::NativeBootResource;
-        for (entry, base, bytes, word) in [
-            (0, 0, 0x4000, 0),
-            (ENTRY + 4, ENTRY, 0x4000, 0),
-            (1 << 42, 1 << 42, 0x4000, 0),
-            (ENTRY, ENTRY + 0x800, 0x4000, 0),
-            (ENTRY, ENTRY, 3, 0),
-            (ENTRY, ENTRY, u64::MAX, 0),
-            (ENTRY, ENTRY, 0x4000, (ENTRY + 0x800) | LOCK),
-            (ENTRY, ENTRY, 0x4000, ENTRY | LOCK | (1 << 63)),
+        for (mapping, offset, word) in [
+            (mapping(ENTRY + 4), 0, 0),
+            (mapping(1 << 42), 0, 0),
+            (mapping(ENTRY), 0x4000 - 3, 0),
+            (
+                EntryMapping {
+                    bytes: 3,
+                    ..mapping(ENTRY)
+                },
+                0,
+                0,
+            ),
+            (
+                EntryMapping {
+                    physical_base: u64::MAX,
+                    ..mapping(ENTRY)
+                },
+                0,
+                0,
+            ),
+            (
+                EntryMapping {
+                    linked_base: u64::MAX,
+                    ..mapping(ENTRY)
+                },
+                0,
+                0,
+            ),
+            (mapping(ENTRY), 0, (ENTRY + 0x800) | LOCK),
+            (mapping(ENTRY), 0, ENTRY | LOCK | (1 << 63)),
         ] {
-            assert!(EntryHandoff::from_backing(entry, base, bytes, word, origin).is_err());
+            assert!(
+                EntryHandoff::from_mapping(mapping, offset, INSTRUCTION, word, origin).is_err()
+            );
         }
-        assert_eq!(handoff(0).origin(), Origin::NativeBootResource);
+        let h = handoff(0);
+        assert_eq!(h.origin(), origin);
+        assert_eq!(
+            (h.linked_entry(), h.physical_entry(), h.iop_entry()),
+            (0, PHYSICAL, ENTRY)
+        );
+    }
+
+    #[test]
+    fn mapped_iop_zero_requires_current_allocation_mapping_and_actual_instruction() {
+        let (mut asc, owned) = owner_with_mapping(false, 0);
+        let h = EntryHandoff::from_mapping(
+            mapping(0),
+            0,
+            INSTRUCTION,
+            LOCK,
+            Origin::NativeBootResource,
+        )
+        .unwrap();
+        assert_eq!(
+            (h.linked_entry(), h.physical_entry(), h.iop_entry()),
+            (0, PHYSICAL, 0)
+        );
+        asc.establish_entry(h).unwrap();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        let mut aux = asc.auxiliary();
+        assert_eq!(aux.read(0, Width::Double, &mut access).unwrap(), LOCK);
+        owned.borrow_mut().mapping = None;
+        assert!(asc.write(0x44, Width::Word, 0x10, &mut access).is_err());
+        assert!(!asc.running);
+        owned.borrow_mut().mapping = Some((0, PHYSICAL, 0x4000));
+        owned.borrow_mut().allocated = false;
+        assert!(asc.write(0x44, Width::Word, 0x10, &mut access).is_err());
+        owned.borrow_mut().allocated = true;
+        assert!(
+            owned
+                .borrow_mut()
+                .ram
+                .write(PHYSICAL, &0xd503201fu32.to_le_bytes())
+        );
+        assert!(asc.write(0x44, Width::Word, 0x10, &mut access).is_err());
+        assert!(!asc.running);
+        assert!(
+            owned
+                .borrow_mut()
+                .ram
+                .write(PHYSICAL, &INSTRUCTION.to_le_bytes())
+        );
+        asc.write(0x44, Width::Word, 0x10, &mut access).unwrap();
+        assert!(asc.running);
+        asc.write(0x44, Width::Word, 0, &mut access).unwrap();
+        owned.borrow_mut().mapping = None;
+        assert!(asc.write(0x44, Width::Word, 0x10, &mut access).is_err());
+        assert!(!asc.running);
+    }
+
+    #[test]
+    fn source_instruction_or_resolved_physical_mismatch_refuses_handoff() {
+        let (mut asc, owned) = owner_with_mapping(false, ENTRY);
+        let wrong = EntryHandoff::from_mapping(
+            mapping(ENTRY),
+            0,
+            INSTRUCTION ^ 1,
+            0,
+            Origin::NativeBootResource,
+        )
+        .unwrap();
+        assert!(asc.establish_entry(wrong).is_err());
+        owned.borrow_mut().mapping = Some((ENTRY, PHYSICAL + 0x800, 0x3800));
+        assert!(
+            owned
+                .borrow_mut()
+                .ram
+                .write(PHYSICAL + 0x800, &INSTRUCTION.to_le_bytes())
+        );
+        assert!(asc.establish_entry(handoff(0)).is_err());
+        let mut aux = asc.auxiliary();
+        let mut latch = InterruptLatch::new();
+        let mut access = Access::new(0, 0, &mut latch);
+        assert!(aux.read(0, Width::Double, &mut access).is_err());
+    }
+
+    #[test]
+    fn protocol_only_peer_cannot_claim_original_entry_ownership() {
+        struct Protocol;
+        impl Firmware for Protocol {
+            fn start(&mut self, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+            fn receive(&mut self, _: Message, _: &mut Vec<Message>) -> Result<(), &'static str> {
+                Ok(())
+            }
+        }
+        let mut asc = Asc::new(
+            Box::new(Protocol),
+            false,
+            Lines::from_interrupts([1, 2, 3, 4].map(|irq| AicInput::new(0, irq))),
+        )
+        .unwrap();
+        assert_eq!(
+            asc.establish_entry(handoff(ENTRY | LOCK)),
+            Err("original coprocessor instruction fetch ownership is not modeled")
+        );
     }
 }

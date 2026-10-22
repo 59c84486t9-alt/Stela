@@ -56,7 +56,7 @@ use alloc::vec::Vec;
 use core::any::Any;
 
 pub mod entry;
-pub use entry::{Auxiliary, EntryHandoff};
+pub use entry::{Auxiliary, EntryFetch, EntryHandoff};
 
 const NAME: &str = "asc";
 
@@ -102,6 +102,16 @@ pub struct TransitionRequest {
 
 /// The coprocessor's software, emulated natively.
 pub trait Firmware: Any {
+    /// Fetch through this backend's live allocation and selected IOP mapping
+    /// owners. Success requires known instruction bytes, actual resolved PA,
+    /// current mapping/ownership and applicable fetch access. A source hash,
+    /// numerical address relation or native protocol peer is not that proof.
+    /// ASC checks the result at handoff and before every start/resume; the
+    /// same backend must retain the owners through its execution/use boundary.
+    fn fetch_entry(&mut self, _iop: u64) -> Result<EntryFetch, &'static str> {
+        Err("original coprocessor instruction fetch ownership is not modeled")
+    }
+
     /// Validate loss of native volatile firmware state. Physical reset is
     /// distinct from an RTKit sleep request: no mailbox ACK is generated.
     fn check_reset(&self) -> Result<(), &'static str> {
@@ -278,12 +288,25 @@ impl Asc {
         self.auxiliary.clone()
     }
 
-    /// Install a boot owner's explicit firmware-resource and register handoff.
-    /// The caller owns the backing bytes and their original image identity.
+    /// Check the actual backend's current owned entry fetch, then establish
+    /// the independent register handoff. The supplied mapping describes all
+    /// three address domains and the expected original instruction.
     /// This never loads or executes ARM firmware, or derives an entry from a
     /// native Rust implementation address.
     pub fn establish_entry(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
+        self.check_entry_fetch(handoff)?;
         self.auxiliary.establish(handoff)
+    }
+
+    fn check_entry_fetch(&mut self, handoff: EntryHandoff) -> Result<(), &'static str> {
+        let fetched = self.firmware.fetch_entry(handoff.iop_entry())?;
+        if fetched.physical != handoff.physical_entry() {
+            return Err("ASC actual entry translation disagrees with owned physical backing");
+        }
+        if fetched.instruction != handoff.instruction() {
+            return Err("ASC fetched entry instruction disagrees with original source");
+        }
+        Ok(())
     }
 
     /// Read-only mailbox state for boot diagnostics.
@@ -436,7 +459,9 @@ impl Asc {
             self.halted = true;
         }
         if run && !self.running {
-            self.auxiliary.check_start()?;
+            if let Some(handoff) = self.auxiliary.check_start()? {
+                self.check_entry_fetch(handoff)?;
+            }
             let mut started = Vec::new();
             let result = if self.halted {
                 self.firmware.resume(&mut started)
