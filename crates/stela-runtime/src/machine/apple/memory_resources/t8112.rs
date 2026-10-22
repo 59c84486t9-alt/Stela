@@ -31,6 +31,8 @@ const PTD_OFFSET: u64 = DCS_BYTES;
 const PROFILE: NativeProfile = NativeProfile::T8112;
 const ALIAS_ENTRIES: usize = 2048;
 
+pub mod amcc;
+
 /// One DCS frontend and one publication bank with immutable source placement.
 /// AMCC locks/cache policy remain separately owned; this is no mount-admission
 /// token and provides no successful configuration/refresh/counter/PMP backend.
@@ -105,6 +107,16 @@ impl Prepared {
     }
     pub fn registered_ram(&self) -> &Arc<RegisteredSystemRam> {
         &self.ram
+    }
+    /// Initialize a distinct software AMCC lock resource over this exact RAM.
+    /// Cache status/capacity/quota/flush effects remain explicitly unavailable.
+    pub fn initialize_amcc_locks(
+        &self,
+        controller: crate::machine::soc::MemoryController,
+        programmed: crate::platform::apple::amcc::Programmed,
+        lifecycle: LifecycleState,
+    ) -> Result<amcc::LockResource, &'static str> {
+        amcc::LockResource::initialized(self, controller, programmed, lifecycle)
     }
     pub fn publication_bank(&self) -> &Ptd {
         &self.ptd
@@ -339,7 +351,7 @@ mod tests {
     struct Storage(UnsafeCell<[u8; 128]>);
     // SAFETY: fixture reservation has no Rust references after registration.
     unsafe impl Sync for Storage {}
-    fn ram_at(source_pa: u64) -> Arc<RegisteredSystemRam> {
+    pub(super) fn ram_at(source_pa: u64) -> Arc<RegisteredSystemRam> {
         let storage = Arc::new(Storage(UnsafeCell::new([0; 128])));
         let range = ReservedSystemRamRange {
             source_pa,
@@ -350,10 +362,10 @@ mod tests {
         // SAFETY: fixture exclusively owns these stable bytes and closed writers.
         Arc::new(unsafe { fixture(&[range], storage) })
     }
-    fn ram() -> Arc<RegisteredSystemRam> {
+    pub(super) fn ram() -> Arc<RegisteredSystemRam> {
         ram_at(0x800000000)
     }
-    fn configuration() -> Vec<ChannelConfiguration> {
+    pub(super) fn configuration() -> Vec<ChannelConfiguration> {
         (0..CHANNELS)
             .map(|i| ChannelConfiguration {
                 ec8: 0x12340000 + i as u32,
@@ -363,7 +375,7 @@ mod tests {
             })
             .collect()
     }
-    fn descriptor() -> MemoryCache {
+    pub(super) fn descriptor() -> MemoryCache {
         MemoryCache {
             // Cache/AMCC are deliberately not part of this composition.
             cache: amcc::Cache {
