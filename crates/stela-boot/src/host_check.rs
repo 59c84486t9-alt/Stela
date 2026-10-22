@@ -488,7 +488,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for (address, error) in &disks.failures {
         output::arguments(format_args!("STORAGE FAILED pci={address} error={error}\n"));
     }
-    for (location, error) in &disks.port_failures {
+    for (location, error) in &disks.device_failures {
         output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
     }
     for (location, error) in &disks.usb_failures {
@@ -503,7 +503,7 @@ fn disks(machine: &mut Machine, handoff: &Handoff) -> Vec<UsbInput> {
     for device in &disks.usb_inputs {
         output::arguments(format_args!("USB INPUT {}\n", device.name));
     }
-    let failures = disks.failures.len() + disks.port_failures.len() + disks.usb_failures.len();
+    let failures = disks.failures.len() + disks.device_failures.len() + disks.usb_failures.len();
     machine.record(
         "storage",
         if disks.devices.is_empty() || failures > 0 {
@@ -847,7 +847,11 @@ fn finish(machine: &mut Machine, keyboards: &mut [UsbInput]) -> ! {
         count(Verdict::Skip)
     ));
     output::flush_log();
-    let mut power = HostPowerControl::new(machine.power, machine.timing.tsc_hz);
+    let mut power = HostPowerControl::new(
+        machine.power,
+        machine.timing.tsc_hz,
+        crate::engine::storage::HostDisks::none(),
+    );
     output::arguments(format_args!(
         "\n>>> The log is saved; powering off is safe now. Press a key to restart, or press the \
          power button (or hold it 4 s) to power off.\n"

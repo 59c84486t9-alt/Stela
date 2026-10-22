@@ -10,7 +10,7 @@ use alloc::{boxed::Box, format, string::String, vec::Vec};
 use core::arch::asm;
 use stela_drivers::{
     Handoff,
-    block::{BlockDevice, BlockError, Identity, Window},
+    block::{BlockDevice, BlockError, Identity, Shared, Window},
     bus::dma::RegionAllocator,
     input::virtio::VirtioInput,
     probe::probe,
@@ -77,6 +77,43 @@ impl BlockDevice for Service {
         // SAFETY: as in read().
         let _root = unsafe { RestoreRoot::enter(self.root) };
         self.inner.flush()
+    }
+}
+
+/// The host disks [`open`] took, each once, to shut down before the PC
+/// restarts or turns off.
+pub struct HostDisks {
+    disks: Vec<Shared>,
+    root: u64,
+}
+
+impl HostDisks {
+    pub fn none() -> Self {
+        Self {
+            disks: Vec::new(),
+            root: 0,
+        }
+    }
+
+    fn add(&mut self, disk: &Shared) {
+        if !self.disks.iter().any(|taken| taken.same(disk)) {
+            self.disks.push(disk.clone());
+        }
+    }
+
+    /// Give every disk its shutdown notice; a failure is reported and the
+    /// transition still goes ahead, as it would for a disk that is gone.
+    pub fn shutdown(&self, power_off: bool) {
+        if self.disks.is_empty() {
+            return;
+        }
+        // SAFETY: open() captured the loader root, as for every service call.
+        let _root = unsafe { RestoreRoot::enter(self.root) };
+        for disk in &self.disks {
+            if let Err(error) = disk.shutdown(power_off) {
+                output::arguments(format_args!("HOST DISK shutdown failed: {error}\n"));
+            }
+        }
     }
 }
 
@@ -150,7 +187,7 @@ pub unsafe fn open(
     for (location, error) in &disks.usb_vendor_failures {
         output::arguments(format_args!("USB VENDOR FAILED {location}: {error}\n"));
     }
-    for (location, error) in &disks.port_failures {
+    for (location, error) in &disks.device_failures {
         output::arguments(format_args!("STORAGE FAILED {location}: {error}\n"));
     }
     for (location, error) in &disks.usb_failures {
@@ -208,6 +245,13 @@ pub unsafe fn open(
             Err((at, error)) => return Err(describe(&named[at], error)),
         }
     };
+    let mut host_disks = HostDisks {
+        disks: Vec::new(),
+        root,
+    };
+    for partition in &opened {
+        host_disks.add(partition.device().shared());
+    }
     let service = |partition: PartitionDevice<Window>, role: &str| -> Box<dyn BlockDevice> {
         output::arguments(format_args!(
             "HOST PARTITION serial={} partition={} blocks={} block_size={}{role}\n",
@@ -266,6 +310,9 @@ pub unsafe fn open(
     let usb_disks = taken
         .into_iter()
         .map(|disk| {
+            let disk = Shared::new(disk);
+            host_disks.add(&disk);
+            let disk = disk.whole();
             output::arguments(format_args!(
                 "HOST USB DISK serial={} model={:?} blocks={} block_size={} read_only={}\n",
                 disk.identity().serial,
@@ -274,7 +321,10 @@ pub unsafe fn open(
                 disk.identity().block_size,
                 disk.identity().read_only
             ));
-            Box::new(Service { inner: disk, root }) as Box<dyn BlockDevice>
+            Box::new(Service {
+                inner: Box::new(disk),
+                root,
+            }) as Box<dyn BlockDevice>
         })
         .collect();
     Ok(Opened {
@@ -286,6 +336,7 @@ pub unsafe fn open(
         inputs,
         links,
         usb_disks,
+        disks: host_disks,
     })
 }
 
@@ -321,6 +372,8 @@ pub struct Opened {
     pub links: super::network::Links,
     /// Whole disks for the guest's USB mass storage, in option order.
     pub usb_disks: alloc::vec::Vec<Box<dyn BlockDevice>>,
+    /// Every disk taken above, for its shutdown notice.
+    pub disks: HostDisks,
 }
 
 /// The host's input devices and the loader root their registers and DMA

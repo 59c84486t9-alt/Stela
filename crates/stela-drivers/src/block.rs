@@ -117,6 +117,13 @@ pub trait BlockDevice {
     fn write(&mut self, lba: u64, data: &[u8]) -> Result<(), BlockError>;
     /// Make every completed write durable.
     fn flush(&mut self) -> Result<(), BlockError>;
+
+    /// Prepare the device for the PC restarting, or turning off when
+    /// `power_off`: make writes durable and give the device the notice its
+    /// class expects before power goes away.
+    fn shutdown(&mut self, _power_off: bool) -> Result<(), BlockError> {
+        self.flush()
+    }
 }
 
 impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
@@ -134,6 +141,10 @@ impl<D: BlockDevice + ?Sized> BlockDevice for Box<D> {
 
     fn flush(&mut self) -> Result<(), BlockError> {
         (**self).flush()
+    }
+
+    fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
+        (**self).shutdown(power_off)
     }
 }
 
@@ -157,6 +168,17 @@ pub struct Shared(Rc<RefCell<Box<dyn BlockDevice>>>);
 impl Shared {
     pub fn new(device: Box<dyn BlockDevice>) -> Self {
         Self(Rc::new(RefCell::new(device)))
+    }
+
+    /// Whether `other` shares this same disk.
+    pub fn same(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Shut the disk down, as [`BlockDevice::shutdown`]; once for all its
+    /// windows.
+    pub fn shutdown(&self, power_off: bool) -> Result<(), BlockError> {
+        self.0.borrow_mut().shutdown(power_off)
     }
 
     /// Every block, as a device of its own.
@@ -221,6 +243,13 @@ pub struct Window {
     disk: Shared,
     first: u64,
     identity: Identity,
+}
+
+impl Window {
+    /// The disk this window is part of.
+    pub fn shared(&self) -> &Shared {
+        &self.disk
+    }
 }
 
 impl BlockDevice for Window {

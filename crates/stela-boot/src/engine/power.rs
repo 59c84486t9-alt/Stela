@@ -88,6 +88,8 @@ fn wait(tsc_hz: u64, milliseconds: u64, mut done: impl FnMut() -> bool) -> bool 
 pub struct HostPowerControl {
     power: Option<HostPower>,
     tsc_hz: u64,
+    /// The host disks, told before either transition.
+    disks: super::storage::HostDisks,
     /// The power button is read.
     button: bool,
     /// The guest refused the button once; reported once.
@@ -97,10 +99,11 @@ pub struct HostPowerControl {
 impl HostPowerControl {
     /// The host's power hardware the loader found, with the fixed power
     /// button armed when there is one.
-    pub fn new(power: Option<HostPower>, tsc_hz: u64) -> Self {
+    pub fn new(power: Option<HostPower>, tsc_hz: u64, disks: super::storage::HostDisks) -> Self {
         let mut control = Self {
             power,
             tsc_hz,
+            disks,
             button: false,
             refused: false,
         };
@@ -188,6 +191,7 @@ impl HostPowerControl {
 
     /// Restart the host machine.
     pub fn restart(&self) -> ! {
+        self.disks.shutdown(false);
         output::arguments(format_args!("STELA RESTART code={RESTART_CODE:#x}\n"));
         output::flush_log();
         output::debug_exit(RESTART_CODE);
@@ -224,6 +228,7 @@ impl HostPowerControl {
 
     /// Power the host machine off.
     pub fn power_off(&self) -> ! {
+        self.disks.shutdown(true);
         output::arguments(format_args!("STELA POWER-OFF code={POWER_OFF_CODE:#x}\n"));
         output::flush_log();
         output::debug_exit(POWER_OFF_CODE);

@@ -1,5 +1,7 @@
 //! NVMe controllers with one admin and one I/O queue pair, polled. Each
 //! active NVM namespace with plain logical blocks becomes one device.
+//! Namespace discovery and shutdown follow Linux `drivers/nvme/host/core.c`
+//! and `pci.c` at a804c5742bff224d4cb4d25dd383554d598be32b.
 use crate::{
     Clock, Handoff,
     block::{BlockDevice, BlockError, Identity, Transport, ascii},
@@ -19,6 +21,7 @@ use core::{
 pub const CLASS: [u8; 3] = [0x01, 0x08, 0x02];
 
 const CAPABILITIES: usize = 0x00;
+const VERSION: usize = 0x08;
 const INTERRUPT_MASK_SET: usize = 0x0c;
 const CONFIGURATION: usize = 0x14;
 const STATUS: usize = 0x1c;
@@ -30,6 +33,18 @@ const DOORBELLS: usize = 0x1000;
 const ENABLE: u32 = 1;
 const READY: u32 = 1;
 const FATAL: u32 = 1 << 1;
+/// CC.SHN normal shutdown and CSTS.SHST (NVMe Base 2.1 §3.1.4.5–6).
+const SHUTDOWN_NOTIFICATION: u32 = 3 << 14;
+const SHUTDOWN_NORMAL: u32 = 1 << 14;
+const SHUTDOWN_STATUS: u32 = 3 << 2;
+const SHUTDOWN_COMPLETE: u32 = 2 << 2;
+/// Linux bounds a shutdown by the controller's RTD3 entry latency, at least
+/// five seconds (`shutdown_timeout`) and at most a minute.
+const SHUTDOWN_MINIMUM_US: u64 = 5_000_000;
+const SHUTDOWN_MAXIMUM_US: u64 = 60_000_000;
+const MICROSECONDS_PER_SECOND: u64 = 1_000_000;
+/// The first version with the active namespace list (Linux `NVME_VS(1, 1, 0)`).
+const VERSION_1_1: u32 = 0x0001_0100;
 /// 64-byte submission and 16-byte completion entries, 4 KiB pages, NVM set.
 const CONFIGURATION_VALUE: u32 = ENABLE | 6 << 16 | 4 << 20;
 
@@ -43,6 +58,24 @@ const IO_READ: u8 = 0x02;
 const IDENTIFY_NAMESPACE: u32 = 0;
 const IDENTIFY_CONTROLLER: u32 = 1;
 const IDENTIFY_ACTIVE_NAMESPACES: u32 = 2;
+
+/// Identify Controller fields (NVMe Base 2.1 Figure 312).
+const CONTROLLER_SERIAL: core::ops::Range<usize> = 4..24;
+const CONTROLLER_MODEL: core::ops::Range<usize> = 24..64;
+const CONTROLLER_MAXIMUM_TRANSFER: usize = 77;
+const CONTROLLER_RTD3_ENTRY: core::ops::Range<usize> = 88..92;
+const CONTROLLER_NAMESPACES: core::ops::Range<usize> = 516..520;
+/// Identify Namespace fields (NVM Command Set 1.1 Figure 114).
+const NAMESPACE_SIZE: core::ops::Range<usize> = 0..8;
+const NAMESPACE_FORMAT: usize = 26;
+const NAMESPACE_ATTRIBUTES: usize = 99;
+const NAMESPACE_WRITE_PROTECTED: u8 = 1 << 0;
+const NAMESPACE_FORMATS: usize = 128;
+/// FLBAS: format index bits 3:0, and bits 6:5 for formats past sixteen.
+const FORMAT_LOW: u8 = 0xf;
+const FORMAT_HIGH: u8 = 3 << 5;
+/// The most namespaces a sequential scan visits, one Identify each.
+const SEQUENTIAL_SCAN_LIMIT: u32 = 1024;
 
 const PAGE: usize = 4096;
 const ENTRIES: u16 = 16;
@@ -80,6 +113,10 @@ struct Controller {
     bounce: DmaBuffer,
     prp_list: DmaBuffer,
     max_transfer: usize,
+    /// How long a normal shutdown may take.
+    shutdown_timeout_us: u64,
+    /// The controller acknowledged a shutdown; it takes no more commands.
+    shut_down: bool,
     command_id: u16,
     clock: Clock,
     /// An unresolved command may still own the queues, PRPs and bounce RAM.
@@ -91,6 +128,9 @@ impl Controller {
     fn ready(&mut self) -> Result<(), BlockError> {
         if let Some(error) = &self.fault {
             return Err(error.clone());
+        }
+        if self.shut_down {
+            return Err(BlockError::Unsupported("NVMe controller is shut down"));
         }
         let status = self.registers.read32(STATUS);
         if status & FATAL != 0 {
@@ -171,6 +211,28 @@ impl Controller {
         }
     }
 
+    /// Notify the controller of a normal shutdown and wait for it to finish
+    /// (Linux `nvme_disable_ctrl` with `shutdown`).
+    fn shutdown(&mut self) -> Result<(), BlockError> {
+        if self.shut_down {
+            return Ok(());
+        }
+        self.ready()?;
+        let configuration = self.registers.read32(CONFIGURATION);
+        self.registers.write32(
+            CONFIGURATION,
+            configuration & !SHUTDOWN_NOTIFICATION | SHUTDOWN_NORMAL,
+        );
+        let registers = self.registers;
+        if !self.clock.wait(self.shutdown_timeout_us, || {
+            registers.read32(STATUS) & SHUTDOWN_STATUS == SHUTDOWN_COMPLETE
+        }) {
+            return Err(self.poison(BlockError::Timeout));
+        }
+        self.shut_down = true;
+        Ok(())
+    }
+
     /// An admin Identify into the first bounce page.
     fn identify(&mut self, cns: u32, namespace: u32) -> Result<&[u8], BlockError> {
         let mut command = [0u32; 16];
@@ -237,7 +299,7 @@ pub fn attach(
     function: &mut Function,
     handoff: &Handoff,
     dma: &mut dyn DmaAllocator,
-) -> Result<Vec<Namespace>, BlockError> {
+) -> Result<Attached, BlockError> {
     function.power_up(&handoff.clock)?;
     let bars = function.bars();
     let registers = registers(handoff, bars[0], 0, 0x2000)?;
@@ -297,20 +359,25 @@ pub fn attach(
         bounce: dma.allocate(BOUNCE_BYTES, PAGE)?,
         prp_list: dma.allocate(PAGE, PAGE)?,
         max_transfer: BOUNCE_BYTES,
+        shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
+        shut_down: false,
         command_id: 0,
         clock,
         fault: None,
     };
 
     let identify = controller.identify(IDENTIFY_CONTROLLER, 0)?;
-    let serial = ascii(&identify[4..24]);
-    let model = ascii(&identify[24..64]);
+    let serial = ascii(&identify[CONTROLLER_SERIAL]);
+    let model = ascii(&identify[CONTROLLER_MODEL]);
     // The maximum transfer, in minimum pages as a power of two; 0 is none.
-    let maximum = identify[77];
+    let maximum = identify[CONTROLLER_MAXIMUM_TRANSFER];
+    let rtd3_entry_us = u64::from(le32(&identify[CONTROLLER_RTD3_ENTRY]));
+    let namespaces = le32(&identify[CONTROLLER_NAMESPACES]);
     if maximum != 0 {
         let limit = 1usize.checked_shl(u32::from(maximum)).unwrap_or(usize::MAX);
         controller.max_transfer = controller.max_transfer.min(limit.saturating_mul(PAGE));
     }
+    controller.shutdown_timeout_us = shutdown_timeout_us(rtd3_entry_us);
 
     let completion = controller.io.completions.physical();
     let submission = controller.io.submissions.physical();
@@ -327,34 +394,52 @@ pub fn attach(
     command[11] = 1 << 16 | 1; // completion queue 1, contiguous
     controller.execute(false, command)?;
 
-    let active: Vec<u32> = controller
-        .identify(IDENTIFY_ACTIVE_NAMESPACES, 0)?
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|word| u32::from_le_bytes(*word))
-        .take_while(|namespace| *namespace != 0)
-        .collect();
-    let mut found = Vec::new();
-    for namespace in active {
-        let data = controller.identify(IDENTIFY_NAMESPACE, namespace)?;
-        let blocks = u64::from_le_bytes(data[0..8].try_into().unwrap());
-        let format = usize::from(data[26] & 0xf);
-        let descriptor =
-            u32::from_le_bytes(data[128 + 4 * format..132 + 4 * format].try_into().unwrap());
-        let metadata = descriptor & 0xffff;
-        let shift = descriptor >> 16 & 0xff;
-        if metadata != 0 || !(9..=16).contains(&shift) || blocks == 0 {
-            // Formats with metadata or odd block sizes are not served.
-            continue;
-        }
-        found.push((namespace, blocks, 1u32 << shift));
-    }
+    // Linux `nvme_scan_work`: the active list from NVMe 1.1, otherwise (or
+    // when the controller refuses it) every namespace ID in turn.
+    let version = registers.read32(VERSION);
+    let listed = if version >= VERSION_1_1 {
+        controller
+            .identify(IDENTIFY_ACTIVE_NAMESPACES, 0)
+            .map(|list| {
+                list.as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| u32::from_le_bytes(*word))
+                    .take_while(|namespace| *namespace != 0)
+                    .collect::<Vec<u32>>()
+            })
+            .ok()
+    } else {
+        None
+    };
+    controller.ready()?;
+    let (candidates, sequential) = match listed {
+        Some(active) => (active, false),
+        None => ((1..=namespaces.min(SEQUENTIAL_SCAN_LIMIT)).collect(), true),
+    };
     let location = format!("{}", function.address);
+    let mut attached = Attached {
+        namespaces: Vec::new(),
+        failures: Vec::new(),
+    };
+    let mut found = Vec::new();
+    let max_transfer = controller.max_transfer;
+    for namespace in candidates {
+        let data = controller.identify(IDENTIFY_NAMESPACE, namespace)?;
+        match plain_format(data, max_transfer) {
+            // An inactive namespace reads as all zeros in a sequential scan.
+            Ok(None) if sequential => {}
+            Ok(None) => attached
+                .failures
+                .push((namespace, BlockError::Unsupported("empty NVMe namespace"))),
+            Ok(Some(format)) => found.push((namespace, format)),
+            Err(error) => attached.failures.push((namespace, error)),
+        }
+    }
     let controller = Rc::new(RefCell::new(controller));
-    Ok(found
+    attached.namespaces = found
         .into_iter()
-        .map(|(namespace, blocks, block_size)| Namespace {
+        .map(|(namespace, format)| Namespace {
             controller: controller.clone(),
             namespace,
             identity: Identity {
@@ -362,12 +447,64 @@ pub fn attach(
                 location: format!("{location} namespace {namespace}"),
                 model: model.clone(),
                 serial: serial.clone(),
-                blocks,
-                block_size,
-                read_only: false,
+                blocks: format.blocks,
+                block_size: format.block_size,
+                read_only: format.read_only,
             },
         })
-        .collect())
+        .collect();
+    Ok(attached)
+}
+
+/// The namespaces of one controller, and those it cannot serve.
+pub struct Attached {
+    pub namespaces: Vec<Namespace>,
+    pub failures: Vec<(u32, BlockError)>,
+}
+
+/// A namespace's size and its in-use LBA format.
+struct Format {
+    blocks: u64,
+    block_size: u32,
+    read_only: bool,
+}
+
+/// The format of an Identify Namespace page: none for an empty namespace,
+/// and a refusal for formats this driver cannot transfer.
+fn plain_format(data: &[u8], max_transfer: usize) -> Result<Option<Format>, BlockError> {
+    let blocks = u64::from_le_bytes(data[NAMESPACE_SIZE].try_into().unwrap());
+    if blocks == 0 {
+        return Ok(None);
+    }
+    let flbas = data[NAMESPACE_FORMAT];
+    let index = usize::from(flbas & FORMAT_LOW | (flbas & FORMAT_HIGH) >> 1);
+    let descriptor = le32(&data[NAMESPACE_FORMATS + 4 * index..][..4]);
+    let metadata = descriptor & 0xffff;
+    let shift = descriptor >> 16 & 0xff;
+    if metadata != 0 {
+        return Err(BlockError::Unsupported("NVMe format with metadata"));
+    }
+    if !(9..=16).contains(&shift) || 1usize << shift > max_transfer {
+        return Err(BlockError::Unsupported("NVMe logical block size"));
+    }
+    Ok(Some(Format {
+        blocks,
+        block_size: 1 << shift,
+        read_only: data[NAMESPACE_ATTRIBUTES] & NAMESPACE_WRITE_PROTECTED != 0,
+    }))
+}
+
+/// Linux's shutdown bound: the RTD3 entry latency in whole seconds, between
+/// five seconds and a minute.
+fn shutdown_timeout_us(rtd3_entry_us: u64) -> u64 {
+    rtd3_entry_us
+        .div_ceil(MICROSECONDS_PER_SECOND)
+        .saturating_mul(MICROSECONDS_PER_SECOND)
+        .clamp(SHUTDOWN_MINIMUM_US, SHUTDOWN_MAXIMUM_US)
+}
+
+fn le32(bytes: &[u8]) -> u32 {
+    u32::from_le_bytes(bytes.try_into().unwrap())
 }
 
 impl Namespace {
@@ -421,6 +558,14 @@ impl BlockDevice for Namespace {
             .execute(true, command)
             .map(|_| ())
     }
+
+    /// Flush, then shut the controller down once for all its namespaces.
+    fn shutdown(&mut self, _power_off: bool) -> Result<(), BlockError> {
+        if !self.controller.borrow().shut_down {
+            self.flush()?;
+        }
+        self.controller.borrow_mut().shutdown()
+    }
 }
 
 #[cfg(test)]
@@ -459,6 +604,8 @@ mod tests {
                 bounce: dma.allocate(BOUNCE_BYTES, PAGE).unwrap(),
                 prp_list: dma.allocate(PAGE, PAGE).unwrap(),
                 max_transfer: BOUNCE_BYTES,
+                shutdown_timeout_us: SHUTDOWN_MINIMUM_US,
+                shut_down: false,
                 command_id: 0,
                 // Force the actual polling path to expire immediately.
                 clock: Clock {
@@ -641,5 +788,70 @@ mod tests {
         assert!(c.io.submissions.bytes().iter().all(|byte| *byte == 0));
         assert!(c.bounce.bytes().iter().all(|byte| *byte == 0));
         assert_eq!(c.registers.read32(DOORBELLS + 8), 0);
+    }
+
+    fn namespace(blocks: u64, flbas: u8, formats: &[(usize, u32)], attributes: u8) -> Vec<u8> {
+        let mut page = vec![0u8; PAGE];
+        page[NAMESPACE_SIZE].copy_from_slice(&blocks.to_le_bytes());
+        page[NAMESPACE_FORMAT] = flbas;
+        page[NAMESPACE_ATTRIBUTES] = attributes;
+        for &(index, descriptor) in formats {
+            page[NAMESPACE_FORMATS + 4 * index..][..4].copy_from_slice(&descriptor.to_le_bytes());
+        }
+        page
+    }
+
+    #[test]
+    fn namespace_formats_use_both_flbas_index_fields_and_write_protection() {
+        // Format 17 (index bits 0001 and 01) holds 4 KiB blocks.
+        let page = namespace(64, 1 | 1 << 5, &[(17, 12 << 16)], NAMESPACE_WRITE_PROTECTED);
+        let format = plain_format(&page, BOUNCE_BYTES).unwrap().unwrap();
+        assert_eq!((format.blocks, format.block_size), (64, 4096));
+        assert!(format.read_only);
+        assert!(
+            plain_format(&namespace(0, 0, &[], 0), BOUNCE_BYTES)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            plain_format(&namespace(8, 0, &[(0, 8 | 9 << 16)], 0), BOUNCE_BYTES).err(),
+            Some(BlockError::Unsupported("NVMe format with metadata"))
+        );
+        // A 64 KiB block cannot fit an 8 KiB maximum transfer.
+        assert_eq!(
+            plain_format(&namespace(8, 0, &[(0, 16 << 16)], 0), 2 * PAGE).err(),
+            Some(BlockError::Unsupported("NVMe logical block size"))
+        );
+    }
+
+    #[test]
+    fn shutdown_waits_follow_the_rtd3_entry_latency_within_linux_bounds() {
+        assert_eq!(shutdown_timeout_us(0), SHUTDOWN_MINIMUM_US);
+        assert_eq!(shutdown_timeout_us(8_000_001), 9 * MICROSECONDS_PER_SECOND);
+        assert_eq!(shutdown_timeout_us(u64::MAX), SHUTDOWN_MAXIMUM_US);
+    }
+
+    #[test]
+    fn a_controller_shuts_down_once_and_then_refuses_commands() {
+        let fixture = Fixture::new();
+        let mut controller = fixture.disk.controller.borrow_mut();
+        controller
+            .registers
+            .write32(CONFIGURATION, CONFIGURATION_VALUE);
+        controller
+            .registers
+            .write32(STATUS, READY | SHUTDOWN_COMPLETE);
+        controller.shutdown().unwrap();
+        assert_eq!(
+            controller.registers.read32(CONFIGURATION),
+            CONFIGURATION_VALUE | SHUTDOWN_NORMAL
+        );
+        controller.registers.write32(CONFIGURATION, 0);
+        controller.shutdown().unwrap();
+        assert_eq!(controller.registers.read32(CONFIGURATION), 0);
+        assert_eq!(
+            controller.ready(),
+            Err(BlockError::Unsupported("NVMe controller is shut down"))
+        );
     }
 }

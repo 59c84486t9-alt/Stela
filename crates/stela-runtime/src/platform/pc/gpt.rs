@@ -327,6 +327,11 @@ impl<D: BlockDevice> PartitionDevice<D> {
         }
     }
 
+    /// The device holding the partition.
+    pub fn device(&self) -> &D {
+        &self.disk
+    }
+
     pub fn partition(&self) -> &Partition {
         &self.partition
     }

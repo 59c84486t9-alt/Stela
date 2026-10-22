@@ -143,6 +143,7 @@ const COMMAND_PRDT_SHIFT: u32 = 16;
 const ATA_READ_DMA_EXT: u8 = 0x25;
 const ATA_WRITE_DMA_EXT: u8 = 0x35;
 const ATA_FLUSH_CACHE_EXT: u8 = 0xea;
+const ATA_STANDBY_IMMEDIATE: u8 = 0xe0;
 const ATA_IDENTIFY: u8 = 0xec;
 
 const BOUNCE_BYTES: usize = 128 * 1024;
@@ -546,6 +547,16 @@ impl BlockDevice for AhciDisk {
 
     fn flush(&mut self) -> Result<(), BlockError> {
         self.issue(ATA_FLUSH_CACHE_EXT, 0, 0, 0, false)
+    }
+
+    /// Flush, and before power-off spin the disk down, as Linux libata's
+    /// `ata_dev_power_set_standby` does on `SYSTEM_POWER_OFF`.
+    fn shutdown(&mut self, power_off: bool) -> Result<(), BlockError> {
+        self.flush()?;
+        if power_off {
+            self.issue(ATA_STANDBY_IMMEDIATE, 0, 0, 0, false)?;
+        }
+        Ok(())
     }
 }
 

@@ -182,9 +182,9 @@ pub struct Disks {
     /// Network adapters, as raw Ethernet links.
     pub links: Vec<Adapter>,
     pub failures: Vec<(Address, Error)>,
-    /// Controller ports that failed while the rest of their controller
-    /// attached, by location.
-    pub port_failures: Vec<(String, BlockError)>,
+    /// Devices behind an attached controller that failed on their own, such
+    /// as AHCI ports and NVMe namespaces, by location.
+    pub device_failures: Vec<(String, BlockError)>,
     /// Nonfatal initialization diagnostics, including adapters not selected.
     pub warnings: Vec<(Address, Warning)>,
     /// USB devices that failed to enumerate or bind, by location.
@@ -272,8 +272,14 @@ pub unsafe fn probe_with_provider(
                 virtio::VirtioBlk::new(&mut function, handoff, dma)
                     .map(|device| vec![Box::new(device) as Box<dyn BlockDevice>])
             } else if function.class == nvme::CLASS {
-                nvme::attach(&mut function, handoff, dma).map(|namespaces| {
-                    namespaces
+                nvme::attach(&mut function, handoff, dma).map(|attached| {
+                    disks
+                        .device_failures
+                        .extend(attached.failures.into_iter().map(|(namespace, error)| {
+                            (alloc::format!("{address} namespace {namespace}"), error)
+                        }));
+                    attached
+                        .namespaces
                         .into_iter()
                         .map(|device| Box::new(device) as Box<dyn BlockDevice>)
                         .collect()
@@ -380,7 +386,7 @@ pub unsafe fn probe_with_provider(
                 continue;
             } else if function.class == ahci::CLASS {
                 ahci::attach(&mut function, handoff, dma).map(|attached| {
-                    disks.port_failures.extend(
+                    disks.device_failures.extend(
                         attached
                             .failures
                             .into_iter()

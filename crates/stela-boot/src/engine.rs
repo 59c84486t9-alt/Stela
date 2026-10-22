@@ -20,7 +20,7 @@ pub(crate) mod nor;
 pub(crate) mod power;
 mod restore;
 mod speculation;
-mod storage;
+pub(crate) mod storage;
 // Compile the source adapter while actual RAM/PMGR adoption remains explicit.
 #[allow(dead_code)]
 mod topology;
@@ -1671,110 +1671,121 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
         });
     }
     let wants_network = options.tss || options.network_check.is_some();
-    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network) = if targets
-        .is_empty()
-        && options.install_source.is_none()
-        && options.preboot.is_none()
-        && !options.input
-        && !wants_network
-        && options.usb_storage.is_empty()
-        && !options.external_disks
-        && !options.guest_network
-        && translation_store.is_none()
-    {
-        (Vec::new(), None, None, None, None, Vec::new(), None)
-    } else {
-        let mut storage_handoff = handoff
-            .storage
-            .handoff()
-            .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
-        storage_handoff.firmware = host_firmware.clone();
-        if options.audio_check.is_some() {
-            // The audio check retains the final slice even after shutdown.
-            storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
-        }
-        crate::status::begin("Starting the PC's disks and USB devices");
-        // SAFETY: before host::install, with sole ownership of DMA/controllers.
-        let storage::Opened {
-            services,
-            medium,
-            preboot,
-            store,
-            log,
-            inputs,
-            mut links,
-            usb_disks,
-        } = unsafe {
-            storage::open(
-                &storage_handoff,
-                &storage::Partitions {
-                    targets: &targets,
-                    medium: options.install_source,
-                    preboot: options.preboot.as_ref(),
-                    store: translation_store,
-                    log: handoff.log_partition.map(Guid),
-                },
-                &options.usb_storage,
-                options.external_disks.then(|| {
-                    stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
-                        .saturating_sub(options.usb_storage.len())
-                }),
+    let (services, medium, preboot, host_input, host_network, usb_disks, guest_network, host_disks) =
+        if targets.is_empty()
+            && options.install_source.is_none()
+            && options.preboot.is_none()
+            && !options.input
+            && !wants_network
+            && options.usb_storage.is_empty()
+            && !options.external_disks
+            && !options.guest_network
+            && translation_store.is_none()
+        {
+            (
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                storage::HostDisks::none(),
             )
-        }
-        .unwrap_or_else(|error| {
-            output::arguments(format_args!("host storage refusal: {error}\n"));
-            output::fatal(&format!("host storage could not be opened: {error}"))
-        });
-        let count = |count: usize, one: &str, many: &str| {
-            format!("{count} {}", if count == 1 { one } else { many })
-        };
-        let partitions = count(
-            services.len() + usize::from(medium.is_some()),
-            "partition",
-            "partitions",
-        );
-        crate::status::done(&match usb_disks.len() {
-            0 => partitions,
-            disks => format!(
-                "{partitions}, and {} macOS sees as USB drives",
-                count(disks, "disk", "disks")
-            ),
-        });
-        if let Some(log) = log {
-            crate::log_file::resume(log);
-        }
-        if let Some(store) = store {
-            translations::set_partition(store);
-        }
-        // The guest's adapter is its own: the mount's client keeps the
-        // first one.
-        let guest_network = options.guest_network.then(|| {
-            network::GuestNetwork::open(&mut links, wants_network).unwrap_or_else(|error| {
-                output::arguments(format_args!("guest network refusal: {error}\n"));
-                output::fatal("the guest network could not be opened")
-            })
-        });
-        // A missing network is reported here and refused only by what
-        // needs it, so the mount still boots and logs how far it gets.
-        let network = wants_network.then(|| {
-            crate::status::begin("Getting a network address");
-            network::HostNetwork::open(links, storage_handoff.clock)
-                .inspect(|network| crate::status::done(network.describe()))
-                .inspect_err(|error| {
-                    output::arguments(format_args!("host network refusal: {error}\n"));
-                    crate::status::warn(error);
+        } else {
+            let mut storage_handoff = handoff
+                .storage
+                .handoff()
+                .unwrap_or_else(|| output::fatal("the loader found no storage controllers"));
+            storage_handoff.firmware = host_firmware.clone();
+            if options.audio_check.is_some() {
+                // The audio check retains the final slice even after shutdown.
+                storage_handoff.dma.end -= crate::audio_check::DMA_BYTES;
+            }
+            crate::status::begin("Starting the PC's disks and USB devices");
+            // SAFETY: before host::install, with sole ownership of DMA/controllers.
+            let storage::Opened {
+                services,
+                medium,
+                preboot,
+                store,
+                log,
+                inputs,
+                mut links,
+                usb_disks,
+                disks,
+            } = unsafe {
+                storage::open(
+                    &storage_handoff,
+                    &storage::Partitions {
+                        targets: &targets,
+                        medium: options.install_source,
+                        preboot: options.preboot.as_ref(),
+                        store: translation_store,
+                        log: handoff.log_partition.map(Guid),
+                    },
+                    &options.usb_storage,
+                    options.external_disks.then(|| {
+                        stela_runtime::machine::apple::UsbCables::disk_ports(options.guest_network)
+                            .saturating_sub(options.usb_storage.len())
+                    }),
+                )
+            }
+            .unwrap_or_else(|error| {
+                output::arguments(format_args!("host storage refusal: {error}\n"));
+                output::fatal(&format!("host storage could not be opened: {error}"))
+            });
+            let count = |count: usize, one: &str, many: &str| {
+                format!("{count} {}", if count == 1 { one } else { many })
+            };
+            let partitions = count(
+                services.len() + usize::from(medium.is_some()),
+                "partition",
+                "partitions",
+            );
+            crate::status::done(&match usb_disks.len() {
+                0 => partitions,
+                disks => format!(
+                    "{partitions}, and {} macOS sees as USB drives",
+                    count(disks, "disk", "disks")
+                ),
+            });
+            if let Some(log) = log {
+                crate::log_file::resume(log);
+            }
+            if let Some(store) = store {
+                translations::set_partition(store);
+            }
+            // The guest's adapter is its own: the mount's client keeps the
+            // first one.
+            let guest_network = options.guest_network.then(|| {
+                network::GuestNetwork::open(&mut links, wants_network).unwrap_or_else(|error| {
+                    output::arguments(format_args!("guest network refusal: {error}\n"));
+                    output::fatal("the guest network could not be opened")
                 })
-        });
-        (
-            services,
-            medium,
-            preboot,
-            options.input.then(|| input::HostInput::new(inputs)),
-            network,
-            usb_disks,
-            guest_network,
-        )
-    };
+            });
+            // A missing network is reported here and refused only by what
+            // needs it, so the mount still boots and logs how far it gets.
+            let network = wants_network.then(|| {
+                crate::status::begin("Getting a network address");
+                network::HostNetwork::open(links, storage_handoff.clock)
+                    .inspect(|network| crate::status::done(network.describe()))
+                    .inspect_err(|error| {
+                        output::arguments(format_args!("host network refusal: {error}\n"));
+                        crate::status::warn(error);
+                    })
+            });
+            (
+                services,
+                medium,
+                preboot,
+                options.input.then(|| input::HostInput::new(inputs)),
+                network,
+                usb_disks,
+                guest_network,
+                disks,
+            )
+        };
     let built = preboot.map(|partition| from_disk(partition, &options));
     // A bundle runs at the DRAM base it was prepared for, its SoC's.
     if options.bundle && !options.dram_explicit {
@@ -2248,6 +2259,7 @@ pub extern "sysv64" fn entry(handoff: u64) -> ! {
             host_input,
             guest_network,
             host_nor,
+            host_disks,
         },
         Machine::run,
     )
@@ -2260,6 +2272,7 @@ struct RunIo {
     host_input: Option<input::HostInput>,
     guest_network: Option<network::GuestNetwork>,
     host_nor: Option<nor::HostNor>,
+    host_disks: storage::HostDisks,
 }
 
 fn run_machine<H: Host>(
@@ -2312,8 +2325,9 @@ fn run_machine<H: Host>(
         mut host_input,
         mut guest_network,
         mut host_nor,
+        host_disks,
     } = io;
-    let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz);
+    let mut host_power = power::HostPowerControl::new(handoff.power, handoff.tsc_hz, host_disks);
     crate::status::begin(match restore {
         Some(_) => "Starting the macOS installer",
         None => "Starting macOS",
