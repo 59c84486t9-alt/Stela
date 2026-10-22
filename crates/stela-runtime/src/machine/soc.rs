@@ -28,6 +28,7 @@ use alloc::{format, string::String, vec::Vec};
 
 pub mod t6000_pmgr;
 
+mod apertures;
 mod dart_topology;
 #[cfg(test)]
 use dart_topology::iommu;
@@ -1757,29 +1758,27 @@ pub struct TypecPhy {
 
 fn typec_devices(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
     gpio: Option<&GpioBank>,
 ) -> Result<(Vec<I2cController>, Vec<TypecPhy>), String> {
     let mut i2cs = Vec::new();
     let mut phys = Vec::new();
     let mut failure = None;
-    let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
-        let first = translate(offset).ok_or("Type-C range starts outside arm-io ranges")?;
-        if bytes == 0
-            || offset.checked_add(bytes - 1).and_then(translate) != first.checked_add(bytes - 1)
-        {
-            return Err("Type-C range exceeds one arm-io translation".into());
-        }
-        Ok((first, bytes))
-    };
-    io.visit(&mut |node| {
+    let root_translate = translate;
+    apertures::visit(io, root_translate, &mut |node, translate| {
+        let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
+            let first =
+                translate(offset, bytes).ok_or("Type-C range starts outside arm-io ranges")?;
+            Ok((first, bytes))
+        };
+
         if failure.is_some() {
             return;
         }
         let result = (|| -> Result<(), String> {
             if node.compatible(I2C) {
-                let regs = node.pairs("reg").ok_or("I2C controller has no reg pairs")?;
+                let regs = apertures::registers(node).ok_or("I2C controller has no reg pairs")?;
                 let &[range] = regs.as_slice() else {
                     return Err("I2C controller requires one reg range".into());
                 };
@@ -1918,7 +1917,7 @@ fn typec_devices(
                         .find(|(layout, _)| layout.as_bytes() == entry)
                 })
             {
-                let reg = node.pairs("reg").ok_or("ATC PHY has no reg pairs")?;
+                let reg = apertures::registers(node).ok_or("ATC PHY has no reg pairs")?;
                 if reg.len() != count {
                     return Err(format!(
                         "{layout} ATC PHY requires its {count} register views"
@@ -1947,22 +1946,28 @@ fn typec_devices(
                     .ok_or("ATC PHY has no port number")?;
                 let mut controller_views = None;
                 let mut duplicate = false;
-                io.visit(&mut |controller| {
+                let mut invalid_controller = false;
+                apertures::visit(io, root_translate, &mut |controller, controller_path| {
                     if controller.property("device_type") == Some(b"usb-drd\0".as_slice())
                         && controller.first_u32("atc-phy-parent") == Some(phandle)
                     {
                         duplicate |= controller_views.is_some();
-                        controller_views = controller
-                            .pairs("reg")
-                            .and_then(|r| Some((*r.get(3)?, *r.get(4)?)));
+                        controller_views = apertures::registers(controller).and_then(|r| {
+                            let &(pipe, pipe_bytes) = r.get(3)?;
+                            let &(events, event_bytes) = r.get(4)?;
+                            Some((
+                                (controller_path(pipe, pipe_bytes)?, pipe_bytes),
+                                (controller_path(events, event_bytes)?, event_bytes),
+                            ))
+                        });
+                        invalid_controller |= controller_views.is_none();
                     }
                 })
                 .ok_or("ATC controller walk failed")?;
                 let events = views[1];
                 let pipe = match controller_views {
                     Some((pipe, controller_events)) => {
-                        let pipe = place(pipe)?;
-                        if pipe.1 != atc_phy::WINDOW_BYTES || place(controller_events)? != events {
+                        if pipe.1 != atc_phy::WINDOW_BYTES || controller_events != events {
                             return Err(
                                 "ATC controller's pipehandler or event view disagrees".into()
                             );
@@ -1971,7 +1976,7 @@ fn typec_devices(
                     }
                     None => None,
                 };
-                if duplicate || events.1 != atc_phy::WINDOW_BYTES {
+                if invalid_controller || duplicate || events.1 != atc_phy::WINDOW_BYTES {
                     return Err("ambiguous ATC controller or incomplete event view".into());
                 }
                 phys.push(TypecPhy {
@@ -2031,26 +2036,19 @@ pub struct GpioBank {
 /// A node's one `reg` range, translated through contiguous `arm-io` ranges.
 fn single_range(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<(u64, u64), &'static str> {
-    let pairs = node.pairs("reg").ok_or("device reg missing")?;
+    let pairs = apertures::registers(node).ok_or("device reg missing")?;
     let [(offset, bytes)] = pairs[..] else {
         return Err("device requires one reg range");
     };
-    let physical = translate(offset).ok_or("device outside arm-io ranges")?;
-    let last = offset
-        .checked_add(bytes.wrapping_sub(1))
-        .filter(|_| bytes != 0)
-        .ok_or("device span is empty or overflows")?;
-    if translate(last) != physical.checked_add(bytes - 1) {
-        return Err("device range exceeds arm-io ranges");
-    }
+    let physical = translate(offset, bytes).ok_or("device range is not wholly translated")?;
     Ok((physical, bytes))
 }
 
 fn gpio_bank(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
 ) -> Result<Option<GpioBank>, String> {
     let Some(node) = AP_GPIO_NAMES
@@ -2082,7 +2080,7 @@ pub struct AuxGpioBank {
 fn aux_gpio_banks(
     root: &Node<'_>,
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
 ) -> Result<Vec<AuxGpioBank>, String> {
     let mut banks = Vec::new();
@@ -2143,7 +2141,7 @@ const GPIO_IRQ_STRIDE: u64 = 0x40;
 /// `interrupts` as their lines.
 fn gpio_geometry(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
 ) -> Result<GpioBank, String> {
     let (physical, bytes) = single_range(node, translate)?;
@@ -2254,7 +2252,7 @@ pub const GPIO_FUNCTION: u32 = u32::from_be_bytes(*b"GPIO");
 fn spi_nor(
     root: &Node<'_>,
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
     gpio: Option<&GpioBank>,
 ) -> Result<Option<SpiNor>, String> {
@@ -2549,7 +2547,7 @@ pub struct PmpController {
 
 fn pmp_controller(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Option<PmpController>, String> {
     let Some(node) = io
         .child("pmp")
@@ -2561,13 +2559,12 @@ fn pmp_controller(
     if nub.first_u32("user-power-managed") != Some(1) {
         return Err("PMP nub is not user-power-managed".into());
     }
-    let &(offset, bytes) = node
-        .pairs("reg")
+    let &(offset, bytes) = apertures::registers(&node)
         .ok_or("PMP has no reg pairs")?
         .first()
         .filter(|(_, bytes)| *bytes >= asc::WRAPPER_BYTES)
         .ok_or("PMP wrapper bank is absent or too short")?;
-    let physical = translate(offset).ok_or("PMP wrapper outside arm-io ranges")?;
+    let physical = translate(offset, bytes).ok_or("PMP wrapper outside arm-io ranges")?;
     let irqs = node.cells32("interrupts").ok_or("PMP has no interrupts")?;
     let irq = |index: usize| -> Result<u16, String> {
         irqs.get(index)
@@ -2621,12 +2618,17 @@ pub struct GfxController {
 /// The `sgx` banks of [`GfxController::sgx`] from `reg[0]` and `reg[1]`
 /// (physical base, bytes).
 fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>, &'static str> {
+    if block.1 == 0 || info.1 == 0 {
+        return Err("sgx register view is empty");
+    }
+    let block_end = block.0.checked_add(block.1).ok_or("sgx block overflows")?;
+    let info_end = info.0.checked_add(info.1).ok_or("sgx info overflows")?;
     if info.0 < block.0 {
         return Err("sgx reg[1] lies below reg[0]");
     }
     let mut banks = vec![(block.0, block.1, 0)];
-    if info.0 + info.1 > block.0 + block.1 {
-        if info.0 < block.0 + block.1 {
+    if info_end > block_end {
+        if info.0 < block_end {
             return Err("sgx reg[1] straddles the end of reg[0]");
         }
         banks.push((info.0, info.1, info.0 - block.0));
@@ -2636,7 +2638,7 @@ fn sgx_banks(block: (u64, u64), info: (u64, u64)) -> Result<Vec<(u64, u64, u64)>
 
 fn gfx_controller(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
 ) -> Result<Option<GfxController>, String> {
     let asc = io
@@ -2660,12 +2662,12 @@ fn gfx_controller(
         .map_err(|reason| format!("{} is not modeled: {reason}", gpu.compatible))?;
     rtbuddy_nub(&asc, "GFX")?;
     let place = |node: &Node<'_>, index: usize, minimum: u64, what: &str| {
-        let (offset, bytes) = node
-            .pairs("reg")
+        let (offset, bytes) = apertures::registers(node)
             .and_then(|regs| regs.get(index).copied())
             .filter(|&(_, bytes)| bytes >= minimum)
             .ok_or_else(|| format!("{what} bank is absent or too short"))?;
-        let physical = translate(offset).ok_or_else(|| format!("{what} outside arm-io ranges"))?;
+        let physical =
+            translate(offset, bytes).ok_or_else(|| format!("{what} outside arm-io ranges"))?;
         Ok::<_, String>((physical, bytes))
     };
     let wrapper = place(&asc, 0, asc::WRAPPER_BYTES, "gfx-asc wrapper")?;
@@ -2720,7 +2722,7 @@ const SMC_GPIO_WRITE: u32 = smc::code(b"pKW4");
 fn smc_controller(
     root: &Node<'_>,
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Option<SmcController>, String> {
     let Some(node) = io
         .child("smc")
@@ -2729,14 +2731,14 @@ fn smc_controller(
         return Ok(None);
     };
     let nub = rtbuddy_nub(&node, "SMC")?;
-    let regs = node.pairs("reg").ok_or("SMC has no reg pairs")?;
+    let regs = apertures::registers(&node).ok_or("SMC has no reg pairs")?;
     let place = |index: usize, minimum: u64, what: &str| -> Result<(u64, u64), String> {
         let &(offset, bytes) = regs
             .get(index)
             .filter(|(_, bytes)| *bytes >= minimum)
             .ok_or_else(|| format!("SMC {what} bank is absent or too short"))?;
         let physical =
-            translate(offset).ok_or_else(|| format!("SMC {what} outside arm-io ranges"))?;
+            translate(offset, bytes).ok_or_else(|| format!("SMC {what} outside arm-io ranges"))?;
         Ok((physical, bytes))
     };
     let wrapper = place(0, asc::WRAPPER_BYTES, "wrapper")?;
@@ -2819,7 +2821,7 @@ fn smc_controller(
 /// controller's line, the others its own vectors.
 fn spmi_controllers(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     aic: u32,
 ) -> Result<Vec<SpmiController>, String> {
     let mut controllers = Vec::new();
@@ -2835,7 +2837,7 @@ fn spmi_controllers(
             Some(2) => spmi::Profile::Gen2,
             _ => return Err("SPMI controller generation is unqualified".into()),
         };
-        let regs = node.pairs("reg").ok_or("SPMI controller has no reg")?;
+        let regs = apertures::registers(&node).ok_or("SPMI controller has no reg")?;
         if node
             .property("reg")
             .is_none_or(|bytes| bytes.len() != regs.len() * 16)
@@ -2847,11 +2849,8 @@ fn spmi_controllers(
                 .get(index)
                 .filter(|(_, bytes)| *bytes == profile.bank_bytes())
                 .ok_or("SPMI controller banks do not match the qualified handler geometry")?;
-            let physical = translate(offset).ok_or("SPMI bank outside arm-io ranges")?;
-            if !physical.is_multiple_of(4)
-                || offset.checked_add(bytes - 1).and_then(translate)
-                    != physical.checked_add(bytes - 1)
-            {
+            let physical = translate(offset, bytes).ok_or("SPMI bank outside arm-io ranges")?;
+            if !physical.is_multiple_of(4) {
                 return Err("SPMI bank is unaligned or crosses arm-io ranges".into());
             }
             Ok((physical, bytes))
@@ -2912,11 +2911,9 @@ fn spmi_controllers(
                 .get(2)
                 .filter(|(_, bytes)| Some(*bytes) == profile.counter_bytes())
                 .ok_or("SPMI Gen1 needs its separate fault-counter bank")?;
-            let physical = translate(offset).ok_or("SPMI fault counters outside arm-io ranges")?;
-            if !physical.is_multiple_of(4)
-                || offset.checked_add(bytes - 1).and_then(translate)
-                    != physical.checked_add(bytes - 1)
-            {
+            let physical =
+                translate(offset, bytes).ok_or("SPMI fault counters outside arm-io ranges")?;
+            if !physical.is_multiple_of(4) {
                 return Err("SPMI fault counters are unaligned or cross arm-io ranges".into());
             }
             Some((physical, bytes))
@@ -3202,7 +3199,7 @@ fn cells_of(value: &[u8]) -> Option<[u32; 4]> {
 /// the kernel read-modify-writes 0x24004 and 0x24008, which have no model.
 fn ans_controller(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     iboot_security: bool,
 ) -> Result<Option<AnsController>, String> {
     let Some(node) = io.child("ans").filter(|n| n.compatible(ASC)) else {
@@ -3234,7 +3231,7 @@ fn ans_controller(
         ));
     }
     rtbuddy_nub(&node, "ANS2")?;
-    let regs = node.pairs("reg").ok_or("ANS2 has no reg pairs")?;
+    let regs = apertures::registers(&node).ok_or("ANS2 has no reg pairs")?;
     let parent = node
         .first_u32("iommu-parent")
         .ok_or("ANS2 has no iommu-parent")?;
@@ -3254,20 +3251,13 @@ fn ans_controller(
         .and_then(|name| io.child(&name))
         .filter(|n| n.compatible(SART) && n.first_u32("sart-version") == Some(3))
         .ok_or("ANS2 iommu-parent is not SART v3")?;
-    let sart_regs = sart_node.pairs("reg").ok_or("SART has no reg pairs")?;
+    let sart_regs = apertures::registers(&sart_node).ok_or("SART has no reg pairs")?;
     let place = |pairs: &[(u64, u64)], index: usize, minimum: u64| -> Result<(u64, u64), String> {
         let &(offset, bytes) = pairs
             .get(index)
             .filter(|(_, bytes)| *bytes >= minimum)
             .ok_or("ANS2/SART register bank is absent or too short")?;
-        let first = translate(offset).ok_or("ANS2/SART bank outside arm-io ranges")?;
-        let last = offset
-            .checked_add(bytes - 1)
-            .and_then(translate)
-            .ok_or("ANS2/SART bank end outside arm-io ranges")?;
-        if first.checked_add(bytes - 1) != Some(last) {
-            return Err("ANS2/SART bank crosses arm-io translations".into());
-        }
+        let first = translate(offset, bytes).ok_or("ANS2/SART bank outside arm-io ranges")?;
         Ok((first, bytes))
     };
     let wrapper = place(&regs, 0, asc::WRAPPER_BYTES)?;
@@ -3503,9 +3493,9 @@ pub struct WatchdogSide {
 
 fn watchdog_side(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Option<WatchdogSide>, String> {
-    let reg = node.pairs("reg").ok_or("watchdog has no reg")?;
+    let reg = apertures::registers(node).ok_or("watchdog has no reg")?;
     if reg.len() == 1 {
         return Ok(None);
     }
@@ -3524,10 +3514,7 @@ fn watchdog_side(
             return Err("watchdog side register is not one aligned full32 word".into());
         }
         let physical =
-            translate(address).ok_or("watchdog side register is outside arm-io ranges")?;
-        if address.checked_add(3).and_then(translate) != physical.checked_add(3) {
-            return Err("watchdog side range translation is not contiguous".into());
-        }
+            translate(address, bytes).ok_or("watchdog side register is outside arm-io ranges")?;
         words.push(physical);
     }
     let mut triggers = Vec::new();
@@ -3593,7 +3580,7 @@ fn place_coresight(cpu: usize, pairs: &[(u64, u64)]) -> Result<CoreSight, String
 /// performance-state table and the eFuse block.
 fn pmgr_registers(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
     processors: &[Identity],
 ) -> Result<PmgrRegisters, String> {
@@ -3619,16 +3606,26 @@ fn pmgr_registers(
         return Ok(none);
     };
     // Each `reg` entry in guest PA, by index; None outside `/arm-io` ranges.
-    let reg: Vec<Option<(u64, u64)>> = node
-        .pairs("reg")
-        .unwrap_or_default()
+    let reg: Vec<Option<(u64, u64)>> = apertures::registers(&node)
+        .ok_or("PMGR reg has incomplete physical pairs")?
         .into_iter()
-        .map(|(offset, bytes)| Some((translate(offset)?, bytes)))
-        .collect();
+        .map(|(offset, bytes)| {
+            if bytes == 0 {
+                Ok(None)
+            } else {
+                translate(offset, bytes)
+                    .map(|physical| Some((physical, bytes)))
+                    .ok_or("PMGR complete reg view is outside its bus domain")
+            }
+        })
+        .collect::<Result<_, _>>()?;
     let covered = |start: u64, bytes: u64| {
-        reg.iter()
-            .flatten()
-            .any(|&(base, size)| base <= start && start + bytes <= base + size)
+        reg.iter().flatten().any(|&(base, size)| {
+            start
+                .checked_sub(base)
+                .and_then(|offset| offset.checked_add(bytes))
+                .is_some_and(|end| end <= size)
+        })
     };
     let clusters = soc
         .clusters
@@ -4131,7 +4128,7 @@ struct PmgrRegisters {
 /// lies in the PMP's PTD update registers.
 fn memory_cache(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
     controller: Option<&MemoryController>,
 ) -> Result<Option<MemoryCache>, String> {
@@ -4153,11 +4150,10 @@ fn memory_cache(
         .and_then(|soc| soc.memory_cache)
         .ok_or_else(|| format!("ApChipID {chip_id:#x} has no memory cache geometry"))?;
     let range = |owner: &Node<'_>, path: &str, index: usize| -> Result<(u64, u64), String> {
-        owner
-            .pairs("reg")
+        apertures::registers(owner)
             .unwrap_or_default()
             .get(index)
-            .and_then(|&(offset, bytes)| Some((translate(offset)?, bytes)))
+            .and_then(|&(offset, bytes)| Some((translate(offset, bytes)?, bytes)))
             .ok_or_else(|| format!("{path} reg[{index}] is missing or outside /arm-io ranges"))
     };
     let in_aperture = |index: usize| -> Result<(u64, u64), String> {
@@ -4227,19 +4223,19 @@ fn memory_cache(
 /// `iommu-parent` must be a mapper of a modeled DART.
 fn aes_engine(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
 ) -> Result<Option<AesEngine>, String> {
     let Some(node) = io.child("aes").filter(|node| node.compatible(AES)) else {
         return Ok(None);
     };
     const PATH: &str = "/arm-io/aes";
-    let reg = node.pairs("reg").unwrap_or_default();
+    let reg = apertures::registers(&node).unwrap_or_default();
     let &[block, key_disable] = reg.as_slice() else {
         return Err(format!("{PATH} has {} register ranges, not two", reg.len()));
     };
     let place = |(offset, bytes): (u64, u64)| {
-        translate(offset)
+        translate(offset, bytes)
             .map(|physical| (physical, bytes))
             .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))
     };
@@ -4288,12 +4284,12 @@ fn aes_engine(
 /// order: ADT reg/interrupts/iommu-parent (research transport section 1).
 fn usb_controllers(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
 ) -> Result<Vec<UsbController>, String> {
     let mut controllers = Vec::new();
     let mut failure = None;
-    io.visit(&mut |node| {
+    apertures::visit(io, translate, &mut |node, translate| {
         if failure.is_none() && node.compatible(USB_DRD) {
             match usb_controller(node, translate, darts) {
                 Ok(controller) => controllers.push(controller),
@@ -4310,7 +4306,7 @@ fn usb_controllers(
 /// parsing; this consumer uses the mapper stream that it publishes.
 fn usb_controller(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
 ) -> Result<UsbController, String> {
     let name = node
@@ -4318,8 +4314,7 @@ fn usb_controller(
         .and_then(|name| core::str::from_utf8(name.split(|&b| b == 0).next()?).ok())
         .unwrap_or("usb-drd");
     let err = |why: &str| format!("{name} {why}");
-    let raw: [(u64, u64); 9] = node
-        .pairs("reg")
+    let raw: [(u64, u64); 9] = apertures::registers(node)
         .unwrap_or_default()
         .try_into()
         .map_err(|_| err("requires nine register windows"))?;
@@ -4328,11 +4323,7 @@ fn usb_controller(
         if bytes == 0 {
             return Err(err("has an empty register extent"));
         }
-        let physical = translate(offset).ok_or_else(|| err("lies outside arm-io ranges"))?;
-        let last = offset.checked_add(bytes - 1).and_then(translate);
-        if last.is_none() || last != physical.checked_add(bytes - 1) {
-            return Err(err("extent crosses arm-io ranges"));
-        }
+        let physical = translate(offset, bytes).ok_or_else(|| err("lies outside arm-io ranges"))?;
         *slot = (physical, bytes);
     }
     if ranges[0].1 < 0x11800
@@ -4395,7 +4386,7 @@ fn usb_controller(
 fn sep_device(
     root: &Node<'_>,
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     darts: &[Iommu],
 ) -> Result<Option<SepDevice>, String> {
     let Some(node) = io.child("sep").filter(|node| node.compatible(SEP)) else {
@@ -4413,7 +4404,7 @@ fn sep_device(
             "{PATH} requires an iop-nub,sep; RTBuddy is not the SEP protocol"
         ));
     }
-    let reg = node.pairs("reg").unwrap_or_default();
+    let reg = apertures::registers(&node).unwrap_or_default();
     let &[first, second] = reg.as_slice() else {
         return Err(format!("{PATH} requires two register ranges"));
     };
@@ -4421,14 +4412,8 @@ fn sep_device(
         return Err(format!("{PATH} has an incomplete register aperture"));
     }
     let place = |(offset, bytes): (u64, u64)| -> Result<_, String> {
-        let physical =
-            translate(offset).ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))?;
-        let last = offset.checked_add(bytes - 1).and_then(translate);
-        if last.is_none() || last != physical.checked_add(bytes - 1) {
-            return Err(format!(
-                "{PATH} register extent lies outside /arm-io ranges"
-            ));
-        }
+        let physical = translate(offset, bytes)
+            .ok_or_else(|| format!("{PATH} lies outside /arm-io ranges"))?;
         Ok((physical, bytes))
     };
     let irqs: [u32; 4] = node
@@ -4880,13 +4865,8 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         }
     }
     let io = root.child("arm-io").ok_or("DeviceTree has no /arm-io")?;
-    let ranges = io.ranges().ok_or("/arm-io has no ranges")?;
-    let translate = |offset: u64| {
-        ranges
-            .iter()
-            .find(|(child, _, size)| (*child..child + size).contains(&offset))
-            .map(|(child, parent, _)| parent + (offset - child))
-    };
+    let translate = |offset: u64| io.translate_range(offset, 1);
+    let extent = |offset: u64, bytes: u64| io.translate_range(offset, bytes);
     let place = |name: &str, model: Option<&str>| -> Result<(Node<'_>, u64, u64), String> {
         let node = io
             .child(name)
@@ -4896,12 +4876,11 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         {
             return Err(format!("/arm-io/{name} is not {model}, the modeled device"));
         }
-        let (offset, bytes) = node
-            .pairs("reg")
+        let (offset, bytes) = apertures::registers(&node)
             .and_then(|reg| reg.first().copied())
             .ok_or_else(|| format!("/arm-io/{name} has no reg"))?;
-        let physical = translate(offset)
-            .ok_or_else(|| format!("/arm-io/{name} lies outside /arm-io ranges"))?;
+        let physical = extent(offset, bytes)
+            .ok_or_else(|| format!("/arm-io/{name} extent is outside /arm-io ranges"))?;
         Ok((node, physical, bytes))
     };
     let device = |name: &str, model: &str| -> Result<Device, String> {
@@ -4917,7 +4896,7 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     };
     let uart = device("uart0", UART)?;
     let watchdog = device("wdt", WATCHDOG)?;
-    let watchdog_side = watchdog_side(&io.child("wdt").expect("device was placed"), &translate)?;
+    let watchdog_side = watchdog_side(&io.child("wdt").expect("device was placed"), &extent)?;
     let (version, event) = cpus
         .aic
         .ok_or("the SoC's AIC event register offset is unknown")?;
@@ -4940,21 +4919,21 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
     let chosen = root.child("chosen").ok_or("DeviceTree has no /chosen")?;
     let memory_controller = memory_controller(&chosen)?;
     let io_access_controller = memory_controller_named(&chosen, "ioa")?;
-    let gpio = gpio_bank(&io, &translate, phandle)?;
-    let aux_gpios = aux_gpio_banks(&root, &io, &translate, phandle)?;
-    let (i2cs, typec_phys) = typec_devices(&io, &translate, phandle, gpio.as_ref())?;
-    let darts = iommus(&io, &translate)?;
-    let aes = aes_engine(&io, &translate, &darts)?;
+    let gpio = gpio_bank(&io, &extent, phandle)?;
+    let aux_gpios = aux_gpio_banks(&root, &io, &extent, phandle)?;
+    let (i2cs, typec_phys) = typec_devices(&io, &extent, phandle, gpio.as_ref())?;
+    let darts = iommus(&io, &extent)?;
+    let aes = aes_engine(&io, &extent, &darts)?;
     let iboot_security = root
         .child("defaults")
         .is_some_and(|defaults| defaults.property("nvme-iboot-sptm-security").is_some());
-    let ans = ans_controller(&io, &translate, iboot_security)?;
-    let smc = smc_controller(&root, &io, &translate)?;
-    let pmp = pmp_controller(&io, &translate)?;
-    let gfx = gfx_controller(&io, &translate, chip_id)?;
-    let sep = sep_device(&root, &io, &translate, &darts)?;
-    let usbs = usb_controllers(&io, &translate, &darts)?;
-    let power_states = power_states(&root, &translate, chip_id)?;
+    let ans = ans_controller(&io, &extent, iboot_security)?;
+    let smc = smc_controller(&root, &io, &extent)?;
+    let pmp = pmp_controller(&io, &extent)?;
+    let gfx = gfx_controller(&io, &extent, chip_id)?;
+    let sep = sep_device(&root, &io, &extent, &darts)?;
+    let usbs = usb_controllers(&io, &extent, &darts)?;
+    let power_states = power_states(&root, &extent, chip_id)?;
     let PmgrRegisters {
         cluster_events,
         bridges,
@@ -4966,12 +4945,12 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
         clusters,
         aon_fuses,
         cpu_start,
-    } = pmgr_registers(&io, &translate, chip_id, &cpus.processors)?;
-    let memory_cache = memory_cache(&io, &translate, chip_id, memory_controller.as_ref())?;
+    } = pmgr_registers(&io, &extent, chip_id, &cpus.processors)?;
+    let memory_cache = memory_cache(&io, &extent, chip_id, memory_controller.as_ref())?;
     let direct_memory_cache =
-        memory_resources::direct_memory_cache(&io, &translate, memory_controller.as_ref())?;
-    let spi_nor = spi_nor(&root, &io, &translate, phandle, gpio.as_ref())?;
-    let spmis = spmi_controllers(&io, &translate, phandle)?;
+        memory_resources::direct_memory_cache(&io, &extent, memory_controller.as_ref())?;
+    let spi_nor = spi_nor(&root, &io, &extent, phandle, gpio.as_ref())?;
+    let spmis = spmi_controllers(&io, &extent, phandle)?;
     let dcp = dcp_device(&io, &translate, &darts)?;
     Ok(Board {
         spmis,
@@ -5021,6 +5000,22 @@ pub fn board(tree: &[u8]) -> Result<Board, String> {
 
 #[cfg(test)]
 mod tests {
+    /// Existing unit fixtures explicitly declare an affine synthetic map.
+    /// Production callers supply Node::translate_range, never this adapter.
+    pub(super) fn flat_fixture_extent(
+        point: &dyn Fn(u64) -> Option<u64>,
+    ) -> impl Fn(u64, u64) -> Option<u64> + '_ {
+        move |address, bytes| {
+            if bytes == 0 {
+                return None;
+            }
+            address.checked_add(bytes)?;
+            let physical = point(address)?;
+            physical.checked_add(bytes)?;
+            Some(physical)
+        }
+    }
+
     use super::*;
 
     /// The T8112 row's PMGR compatible.
@@ -5162,7 +5157,7 @@ mod tests {
             .collect::<Vec<_>>();
         let encoded = tree(&gates, true, false);
         let node = Node::root(&encoded).unwrap();
-        let dart = iommu(&node, &|a| Some(a + 0x2_0000_0000)).unwrap();
+        let dart = iommu(&node, &flat_fixture_extent(&|a| Some(a + 0x2_0000_0000))).unwrap();
         assert_eq!(dart.power_gates, vec![0x212, 0x216]);
         assert!(dart.retention);
         for encoded in [
@@ -5170,7 +5165,7 @@ mod tests {
             tree(&u32::MAX.to_le_bytes(), false, false),
             tree(&gates, true, true),
         ] {
-            assert!(iommu(&Node::root(&encoded).unwrap(), &Some).is_err());
+            assert!(iommu(&Node::root(&encoded).unwrap(), &flat_fixture_extent(&Some)).is_err());
         }
     }
 
@@ -5200,17 +5195,17 @@ mod tests {
         );
         let n = Node::root(&tree).unwrap();
         assert_eq!(
-            watchdog_side(&n, &|a| Some(a + 0x2_0000_0000)).unwrap(),
+            watchdog_side(&n, &flat_fixture_extent(&|a| Some(a + 0x2_0000_0000))).unwrap(),
             Some(WatchdogSide {
                 words: vec![0x2_0000_c218, 0x2_0000_8008, 0x2_0000_800c, 0x2_0000_8020],
                 // Trigger words are absolute physical addresses.
                 triggers: vec![(0x2_1002_0304, 0xf, 1), (0x2_1012_0304, 0xf, 1)],
             })
         );
-        assert!(watchdog_side(&n, &|_| None).is_err());
+        assert!(watchdog_side(&n, &flat_fixture_extent(&|_| None)).is_err());
         let tree = encode(&[("reg", &reg), ("panic-save-flag-bit", &zero)], &[]);
         // reg[4] needs its force-power-off flag bit.
-        assert!(watchdog_side(&Node::root(&tree).unwrap(), &Some).is_err());
+        assert!(watchdog_side(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some)).is_err());
         let tree = encode(
             &[
                 ("reg", &reg[..48]),
@@ -5218,10 +5213,10 @@ mod tests {
             ],
             &[],
         );
-        assert!(watchdog_side(&Node::root(&tree).unwrap(), &Some).is_err());
+        assert!(watchdog_side(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some)).is_err());
         let tree = encode(&[("reg", &reg[..48]), ("panic-save-flag-bit", &zero)], &[]);
         assert_eq!(
-            watchdog_side(&Node::root(&tree).unwrap(), &Some)
+            watchdog_side(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
                 .unwrap()
                 .unwrap()
                 .words,
@@ -5229,7 +5224,7 @@ mod tests {
         );
         let tree = encode(&[("reg", &reg[..16])], &[]);
         assert_eq!(
-            watchdog_side(&Node::root(&tree).unwrap(), &Some).unwrap(),
+            watchdog_side(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some)).unwrap(),
             None
         );
     }
@@ -5258,7 +5253,9 @@ mod tests {
             })
         };
         let node = io.child("wdt").unwrap();
-        let side = watchdog_side(&node, &translate).unwrap().unwrap();
+        let side = watchdog_side(&node, &|address, bytes| io.translate_range(address, bytes))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             side.words,
             [0x2922b8020, 0x2922b802c, 0x2922b8008, 0x2922b8020]
@@ -5353,7 +5350,7 @@ mod tests {
         let data = make(&excluded, None);
         let bank = gpio_geometry(
             &Node::root(&data).unwrap(),
-            &|value| value.checked_add(0x200000000),
+            &flat_fixture_extent(&|value| value.checked_add(0x200000000)),
             130,
         )
         .unwrap();
@@ -5366,10 +5363,24 @@ mod tests {
                 .flat_map(u32::to_le_bytes)
                 .collect::<Vec<_>>();
             let data = make(&raw, None);
-            assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+            assert!(
+                gpio_geometry(
+                    &Node::root(&data).unwrap(),
+                    &flat_fixture_extent(&Some),
+                    130
+                )
+                .is_err()
+            );
         }
         let data = make(&excluded[..3], None);
-        assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+        assert!(
+            gpio_geometry(
+                &Node::root(&data).unwrap(),
+                &flat_fixture_extent(&Some),
+                130
+            )
+            .is_err()
+        );
         for key in [
             "no-resume-restore",
             "supported-int-groups",
@@ -5377,7 +5388,14 @@ mod tests {
             "wake-no-interrupt-group",
         ] {
             let data = make(&excluded, Some(key));
-            assert!(gpio_geometry(&Node::root(&data).unwrap(), &Some, 130).is_err());
+            assert!(
+                gpio_geometry(
+                    &Node::root(&data).unwrap(),
+                    &flat_fixture_extent(&Some),
+                    130
+                )
+                .is_err()
+            );
         }
     }
 
@@ -5391,14 +5409,13 @@ mod tests {
         );
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
-        let ranges = io.ranges().unwrap();
-        let translate = |offset| {
-            ranges
-                .iter()
-                .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
-                .map(|(child, parent, _)| parent + (offset - child))
-        };
-        let bank = gpio_bank(&io, &translate, 130).unwrap().unwrap();
+        let bank = gpio_bank(
+            &io,
+            &|address, bytes| io.translate_range(address, bytes),
+            130,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(bank.profile, gpio::Profile::S5l8960x);
         assert_eq!(
             (
@@ -5477,13 +5494,13 @@ mod tests {
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
         let translate = |v: u64| v.checked_add(0x2_0000_0000);
-        let banks = aux_gpio_banks(&root, &io, &translate, 99).unwrap();
+        let banks = aux_gpio_banks(&root, &io, &flat_fixture_extent(&translate), 99).unwrap();
         assert_eq!(banks.len(), 1);
         assert_eq!(banks[0].name, "aop-gpio");
         assert_eq!(banks[0].bank.physical, 0x2_4a82_0000);
         assert_eq!(banks[0].bank.pins, 0x36);
         assert_eq!(banks[0].client_pins, [0x28, 0x31]);
-        assert!(aux_gpio_banks(&root, &io, &translate, 100).is_err());
+        assert!(aux_gpio_banks(&root, &io, &flat_fixture_extent(&translate), 100).is_err());
     }
 
     #[test]
@@ -5565,22 +5582,30 @@ mod tests {
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
         let translate = |v: u64| v.checked_add(0x2_0000_0000);
-        let bank = gpio_bank(&io, &translate, 99).unwrap().unwrap();
+        let bank = gpio_bank(&io, &flat_fixture_extent(&translate), 99)
+            .unwrap()
+            .unwrap();
         assert_eq!(bank.physical, 0x2_3c10_0000);
         assert_eq!(bank.lines, [199, 200, 201, 202, 203, 204, 205]);
         // Only the AP bank's I2C line; the AOP-bank pin belongs elsewhere.
         assert_eq!(bank.i2c_lines, [0x56]);
-        assert!(gpio_bank(&io, &translate, 100).is_err());
-        let placed = spi_nor(&root, &io, &translate, 99, Some(&bank))
-            .unwrap()
-            .unwrap();
+        assert!(gpio_bank(&io, &flat_fixture_extent(&translate), 100).is_err());
+        let placed = spi_nor(
+            &root,
+            &io,
+            &flat_fixture_extent(&translate),
+            99,
+            Some(&bank),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(placed.device.physical, 0x2_3510_4000);
         assert_eq!(placed.device.irq, 749);
         assert_eq!(placed.select, Some(49));
         assert_eq!(placed.image.bank(0).unwrap(), nor::nvram::empty_bank());
-        assert!(spi_nor(&root, &io, &|_| None, 99, Some(&bank)).is_err());
-        assert!(spi_nor(&root, &io, &Some, 100, Some(&bank)).is_err());
-        assert!(spi_nor(&root, &io, &translate, 99, None).is_err());
+        assert!(spi_nor(&root, &io, &flat_fixture_extent(&|_| None), 99, Some(&bank)).is_err());
+        assert!(spi_nor(&root, &io, &flat_fixture_extent(&Some), 100, Some(&bank)).is_err());
+        assert!(spi_nor(&root, &io, &flat_fixture_extent(&translate), 99, None).is_err());
     }
 
     #[test]
@@ -5656,9 +5681,13 @@ mod tests {
             |version, parent, interrupt_index| flagged(&[], version, parent, interrupt_index);
         let bytes = tree(3, 0x8e, 4);
         let io = Node::root(&bytes).unwrap();
-        let placed = ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset), true)
-            .unwrap()
-            .unwrap();
+        let placed = ans_controller(
+            &io,
+            &flat_fixture_extent(&|offset| Some(0x2_0000_0000 + offset)),
+            true,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(placed.wrapper, (0x2_7740_0000, 0x6c000));
         assert_eq!(placed.nvme, (0x2_7bcc_0000, 0x60000));
         assert_eq!(placed.sart, (0x2_7bc5_0000, 0xc000));
@@ -5678,14 +5707,22 @@ mod tests {
         // reg[13] is SPTM's VDMA cache only under nvme-vdma-wa.
         assert_eq!(placed.vdma, None);
         let vdma = flagged(&["nvme-vdma-wa"], 3, 0x8e, 4);
-        let placed = ans_controller(&Node::root(&vdma).unwrap(), &|a| Some(a), true)
-            .unwrap()
-            .unwrap();
+        let placed = ans_controller(
+            &Node::root(&vdma).unwrap(),
+            &flat_fixture_extent(&|a| Some(a)),
+            true,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(placed.vdma, Some((0x7b10_0000, 0x44000)));
         for flag in UNMODELED_ANS_SPTM {
             let bytes = flagged(&[flag], 3, 0x8e, 4);
-            let error =
-                ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a), true).unwrap_err();
+            let error = ans_controller(
+                &Node::root(&bytes).unwrap(),
+                &flat_fixture_extent(&|a| Some(a)),
+                true,
+            )
+            .unwrap_err();
             assert!(error.contains(flag), "{error}");
         }
         for bytes in [
@@ -5694,12 +5731,26 @@ mod tests {
             tree(3, 0x8e, 3),
             tree(3, 0x8e, 5),
         ] {
-            assert!(ans_controller(&Node::root(&bytes).unwrap(), &|a| Some(a), true).is_err());
+            assert!(
+                ans_controller(
+                    &Node::root(&bytes).unwrap(),
+                    &flat_fixture_extent(&|a| Some(a)),
+                    true
+                )
+                .is_err()
+            );
         }
-        assert!(ans_controller(&io, &|_| None, true).is_err());
+        assert!(ans_controller(&io, &flat_fixture_extent(&|_| None), true).is_err());
         // Without the boot stage's security hand-off the kernel programs
         // registers the model does not carry.
-        assert!(ans_controller(&io, &|offset| Some(0x2_0000_0000 + offset), false).is_err());
+        assert!(
+            ans_controller(
+                &io,
+                &flat_fixture_extent(&|offset| Some(0x2_0000_0000 + offset)),
+                false
+            )
+            .is_err()
+        );
         // These compatibles are shared by other hardware. The partial ANS
         // controller cannot authorize advertising every ASC/RTBuddy/SART.
         assert!(!models(ASC, |_| None));
@@ -5759,7 +5810,7 @@ mod tests {
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
         assert_eq!(
-            pmp_controller(&io, &translate).unwrap(),
+            pmp_controller(&io, &flat_fixture_extent(&translate)).unwrap(),
             Some(PmpController {
                 wrapper: (0x2_3bc0_0000, 0x6c000),
                 interrupts: [0x275, 0x274, 0x277, 0x276],
@@ -5768,7 +5819,13 @@ mod tests {
         );
         let data = tree(0);
         let root = Node::root(&data).unwrap();
-        assert!(pmp_controller(&root.child("arm-io").unwrap(), &translate).is_err());
+        assert!(
+            pmp_controller(
+                &root.child("arm-io").unwrap(),
+                &flat_fixture_extent(&translate)
+            )
+            .is_err()
+        );
         assert!(models(ASC, |key| (key == "role").then_some(b"PMP\0".as_slice())));
     }
 
@@ -5931,7 +5988,7 @@ mod tests {
             let bytes = tree(asc, sgx);
             let root = Node::root(&bytes).unwrap();
             let io = root.child("arm-io").unwrap();
-            gfx_controller(&io, &translate, chip_id)
+            gfx_controller(&io, &flat_fixture_extent(&translate), chip_id)
         };
         let placed = |asc: bool, sgx: bool| placed_on(asc, sgx, 0x8112);
         assert_eq!(
@@ -6072,7 +6129,9 @@ mod tests {
         let root = Node::root(&bytes).unwrap();
         let io = root.child("arm-io").unwrap();
         let translate = |offset| Some(0x2_0000_0000 + offset);
-        let placed = smc_controller(&root, &io, &translate).unwrap().unwrap();
+        let placed = smc_controller(&root, &io, &flat_fixture_extent(&translate))
+            .unwrap()
+            .unwrap();
         assert_eq!(placed.wrapper, (0x2_3e40_0000, 0x6c000));
         assert_eq!(placed.watchdog, Some((0x2_3e81_0000, 0x14)));
         assert_eq!(placed.interrupts, [0x1f4, 0x1f3, 0x1f6, 0x1f5]);
@@ -6093,7 +6152,7 @@ mod tests {
         let small = tree(0x1000);
         let root = Node::root(&small).unwrap();
         let io = root.child("arm-io").unwrap();
-        assert!(smc_controller(&root, &io, &translate).is_err());
+        assert!(smc_controller(&root, &io, &flat_fixture_extent(&translate)).is_err());
         // The SMC claim owns its nub and the nub's PMU child; the buttons
         // the PMU provides are a modeled compatible.
         let smc_role = |key: &str| (key == "role").then_some(b"SMC\0".as_slice());
@@ -6123,14 +6182,12 @@ mod tests {
         );
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
-        let ranges = io.ranges().unwrap();
-        let translate = |offset| {
-            ranges
-                .iter()
-                .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
-                .map(|(child, parent, _)| parent + (offset - child))
-        };
-        let controllers = spmi_controllers(&io, &translate, 130).unwrap();
+        let controllers = spmi_controllers(
+            &io,
+            &|address, bytes| io.translate_range(address, bytes),
+            130,
+        )
+        .unwrap();
         assert_eq!(controllers.len(), 7);
         assert_eq!(
             controllers
@@ -6149,7 +6206,11 @@ mod tests {
             2
         );
         let mut devices = crate::machine::apple::AppleDevices::new();
-        let smc = smc_controller(&root, &io, &translate).unwrap().unwrap();
+        let smc = smc_controller(&root, &io, &|address, bytes| {
+            io.translate_range(address, bytes)
+        })
+        .unwrap()
+        .unwrap();
         devices.add_smc(&smc).unwrap();
         let epoch = pmu::RtcEpoch {
             counter: 100,
@@ -6283,7 +6344,9 @@ mod tests {
         let translate = |offset| Some(0x2_0000_0000 + offset);
         let bytes = tree(&[0xf900, 6]);
         let io = Node::root(&bytes).unwrap();
-        let [controller] = &spmi_controllers(&io, &translate, 0x63).unwrap()[..] else {
+        let [controller] =
+            &spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).unwrap()[..]
+        else {
             panic!("one controller");
         };
         assert_eq!(
@@ -6319,7 +6382,7 @@ mod tests {
         // A clock offset that is not six bytes refuses.
         let bytes = tree(&[0xf900, 4]);
         let io = Node::root(&bytes).unwrap();
-        assert!(spmi_controllers(&io, &translate, 0x63).is_err());
+        assert!(spmi_controllers(&io, &flat_fixture_extent(&translate), 0x63).is_err());
     }
 
     #[test]
@@ -6838,7 +6901,9 @@ mod tests {
         routes[0].profile = dart::Profile::T6000;
         routes[0].remap = vec![(3, 1)];
         routes[0].sids = vec![0, 1, 15];
-        let routed = aes_engine(&io, &Some, &routes).unwrap().unwrap();
+        let routed = aes_engine(&io, &flat_fixture_extent(&Some), &routes)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             (
                 routed.instance,
@@ -6851,14 +6916,14 @@ mod tests {
         let good = routes[0].clone();
         routes[0].mappers.push((0x8a, 2));
         assert!(
-            aes_engine(&io, &Some, &routes)
+            aes_engine(&io, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("ambiguous")
         );
         routes[0] = good.clone();
         routes.push(good.clone());
         assert!(
-            aes_engine(&io, &Some, &routes)
+            aes_engine(&io, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("ambiguous")
         );
@@ -6866,26 +6931,26 @@ mod tests {
         routes[0] = good.clone();
         routes[0].sids = vec![0, 15];
         assert!(
-            aes_engine(&io, &Some, &routes)
+            aes_engine(&io, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("SID set")
         );
         routes[0] = good.clone();
         routes[0].streams = 1;
         assert!(
-            aes_engine(&io, &Some, &routes)
+            aes_engine(&io, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("outside the native profile")
         );
         routes[0] = good.clone();
         routes[0].instances.push(good.instances[0].clone());
         assert!(
-            aes_engine(&io, &Some, &routes)
+            aes_engine(&io, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("multi-instance")
         );
         routes[0].instances.clear();
-        assert!(aes_engine(&io, &Some, &routes).is_err());
+        assert!(aes_engine(&io, &flat_fixture_extent(&Some), &routes).is_err());
         // An APF beside the DART needs its slice count.
         let dapf = [instance.as_slice(), b"FPAD", &[0; 4], b"DART", &[0; 4]].concat();
         let pmp = dart(&dapf, &[0x3b30_0000, 0x4000, 0x3b30_4000, 0x4000]);
@@ -7023,8 +7088,14 @@ mod tests {
             &[i2c.clone(), phy(b"atc-phy,t8112\0"), usb.clone(), acio],
         );
         let translate = |a| Some(if a < 0x100000000 { a + 0x200000000 } else { a });
-        let place =
-            |io: &[u8], aic, gpio| typec_devices(&Node::root(io).unwrap(), &translate, aic, gpio);
+        let place = |io: &[u8], aic, gpio| {
+            typec_devices(
+                &Node::root(io).unwrap(),
+                &flat_fixture_extent(&translate),
+                aic,
+                gpio,
+            )
+        };
         let (buses, phys) = place(&io, 0x63, Some(&gpio)).unwrap();
         assert_eq!(buses[0].device.physical, 0x235010000);
         assert_eq!(buses[0].device.irq, 761);
@@ -7069,7 +7140,15 @@ mod tests {
         assert_eq!(phys[0].events, (0x382800000, 0x4000));
         assert_eq!(phys[0].views, views);
         assert!(place(&io, 0x99, Some(&gpio)).is_err());
-        assert!(typec_devices(&Node::root(&io).unwrap(), &|_| None, 0x63, Some(&gpio)).is_err());
+        assert!(
+            typec_devices(
+                &Node::root(&io).unwrap(),
+                &flat_fixture_extent(&|_| None),
+                0x63,
+                Some(&gpio)
+            )
+            .is_err()
+        );
         for compatible in [
             I2C,
             HPM_MANAGER,
@@ -7163,7 +7242,11 @@ mod tests {
             )
         };
         let bytes = build(&descriptors, &reg, &[1, 14], &[0, 1, 0, 0]);
-        let found = iommu(&Node::root(&bytes).unwrap(), &|a| Some(a)).unwrap();
+        let found = iommu(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&|a| Some(a)),
+        )
+        .unwrap();
         assert_eq!(
             found.instances,
             vec![
@@ -7201,16 +7284,28 @@ mod tests {
                 &[0, 1, 0, 0],
             ),
         ] {
-            assert!(iommu(&Node::root(&bad).unwrap(), &|a| Some(a)).is_err());
+            assert!(
+                iommu(
+                    &Node::root(&bad).unwrap(),
+                    &flat_fixture_extent(&|a| Some(a))
+                )
+                .is_err()
+            );
         }
         let mut bad = descriptors.clone();
         bad[20..24].copy_from_slice(&0u32.to_le_bytes());
         let bytes = build(&bad, &reg, &[1, 14], &[0, 1, 0, 0]);
-        assert!(iommu(&Node::root(&bytes).unwrap(), &|a| Some(a)).is_err());
+        assert!(
+            iommu(
+                &Node::root(&bytes).unwrap(),
+                &flat_fixture_extent(&|a| Some(a))
+            )
+            .is_err()
+        );
         assert!(
             iommu(
                 &Node::root(&build(&descriptors, &reg, &[1, 14], &[0, 1, 0, 0])).unwrap(),
-                &|_| None
+                &flat_fixture_extent(&|_| None)
             )
             .is_err()
         );
@@ -7257,7 +7352,7 @@ mod tests {
         let bytes = encode(&[("name", b"arm-io")], &[pmgr]);
         let found = power_states(
             &Node::root(&bytes).unwrap(),
-            &|a| Some(a + 0x2_0000_0000),
+            &flat_fixture_extent(&|a| Some(a + 0x2_0000_0000)),
             0x8112,
         )
         .unwrap()
@@ -7865,7 +7960,7 @@ mod tests {
             let io = Node::root(&tree).unwrap().child("arm-io").unwrap();
             memory_cache(
                 &io,
-                &|offset| Some(0x2_0000_0000 + offset),
+                &flat_fixture_extent(&|offset| Some(0x2_0000_0000 + offset)),
                 0x8112,
                 controller,
             )
@@ -8007,7 +8102,13 @@ mod tests {
         let root = Node::root(&bytes).unwrap();
         let io = root.child("arm-io").unwrap();
         let place = |darts: &[Iommu]| {
-            sep_device(&root, &io, &|v| Some(v + 0x200000000), darts).map(|sep| sep.unwrap())
+            sep_device(
+                &root,
+                &io,
+                &flat_fixture_extent(&|v| Some(v + 0x200000000)),
+                darts,
+            )
+            .map(|sep| sep.unwrap())
         };
         let mut routed = found.darts.clone();
         routed[0].profile = dart::Profile::T6000;
@@ -8108,7 +8209,7 @@ mod tests {
         let placed = sep_device(
             &Node::root(&region).unwrap(),
             &io,
-            &|v| Some(v + 0x200000000),
+            &flat_fixture_extent(&|v| Some(v + 0x200000000)),
             &found.darts,
         )
         .unwrap()
@@ -8120,7 +8221,7 @@ mod tests {
                 sep_device(
                     &Node::root(&region).unwrap(),
                     &io,
-                    &|v| Some(v + 0x200000000),
+                    &flat_fixture_extent(&|v| Some(v + 0x200000000)),
                     &found.darts
                 )
                 .is_err()
@@ -8137,25 +8238,23 @@ mod tests {
         );
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
-        let ranges = io.ranges().unwrap();
-        let translate = |offset: u64| {
-            ranges.iter().find_map(|&(child, parent, bytes)| {
-                offset
-                    .checked_sub(child)
-                    .filter(|&delta| delta < bytes)
-                    .and_then(|delta| parent.checked_add(delta))
-            })
-        };
         let node = io.child("dart-sep").unwrap();
         assert_eq!(node.first_u32("sids"), Some(0x8001));
-        let darts = [iommu(&node, &translate).unwrap()];
+        let darts = [iommu(&node, &|address, bytes| io.translate_range(address, bytes)).unwrap()];
         let dart = &darts[0];
         assert_eq!(dart.profile, dart::Profile::T6000);
         assert_eq!(dart.streams, 16);
         assert_eq!(dart.sids, [0, 15]);
         assert_eq!(dart.instances.len(), 1);
         assert!(dart.remap.is_empty());
-        let sep = sep_device(&root, &io, &translate, &darts).unwrap().unwrap();
+        let sep = sep_device(
+            &root,
+            &io,
+            &|address, bytes| io.translate_range(address, bytes),
+            &darts,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             (sep.iommu, sep.instance, sep.mapper_context, sep.stream),
             (0, 0, 0, 0)
@@ -8181,8 +8280,12 @@ mod tests {
                 .find(|(child, _, bytes)| (*child..child + bytes).contains(&offset))
                 .map(|(child, parent, _)| parent + (offset - child))
         };
-        let darts = ["dart-dispext0", "dart-dcpext0"]
-            .map(|name| iommu(&io.child(name).unwrap(), &translate).unwrap());
+        let darts = ["dart-dispext0", "dart-dcpext0"].map(|name| {
+            iommu(&io.child(name).unwrap(), &|address, bytes| {
+                io.translate_range(address, bytes)
+            })
+            .unwrap()
+        });
         assert_eq!(darts[0].instances.len(), 1);
         assert_eq!(darts[0].smmu, Some((0x2_8930_0000, 0x4000)));
         assert_eq!(darts[0].instances[0].physical, 0x2_8930_4000);
@@ -8590,21 +8693,21 @@ mod tests {
         routes[0].profile = dart::Profile::T6000;
         routes[0].remap = vec![(0, 1)];
         routes[0].sids = vec![1, 3];
-        let routed = usb_controller(&node, &Some, &routes).unwrap();
+        let routed = usb_controller(&node, &flat_fixture_extent(&Some), &routes).unwrap();
         assert_eq!(
             (routed.mapper, routed.mapper_context, routed.stream),
             (0xa4, 1, 0)
         );
         routes[0].sids = vec![0, 3];
         assert!(
-            usb_controller(&node, &Some, &routes)
+            usb_controller(&node, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("SID set")
         );
         routes[0].sids = vec![1, 3];
         routes[0].mappers.push((0xa4, 3));
         assert!(
-            usb_controller(&node, &Some, &routes)
+            usb_controller(&node, &flat_fixture_extent(&Some), &routes)
                 .unwrap_err()
                 .contains("ambiguous")
         );
@@ -8810,19 +8913,18 @@ mod tests {
         );
         let root = Node::root(&data).unwrap();
         let io = root.child("arm-io").unwrap();
-        let ranges = io.ranges().unwrap();
-        let translate = |offset| {
-            ranges
-                .iter()
-                .find(|(child, _, size)| (*child..child + size).contains(&offset))
-                .map(|(child, parent, _)| parent + (offset - child))
-        };
         let security = root
             .child("defaults")
             .unwrap()
             .property("nvme-iboot-sptm-security")
             .is_some();
-        let placement = ans_controller(&io, &translate, security).unwrap().unwrap();
+        let placement = ans_controller(
+            &io,
+            &|address, bytes| io.translate_range(address, bytes),
+            security,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(placement.geometry.handoff_entries(), 253);
         assert_eq!(placement.geometry.ring_entries(), 254);
         assert_eq!(placement.geometry.tag_slots(), 253);
@@ -8836,5 +8938,59 @@ mod tests {
         assert_eq!(placement.namespaces.len(), 3);
         assert_eq!(placement.namespaces[2].blocks, 32768);
         assert!(!models(ASC, |_| None)); // No whole-board/other ASC admission.
+    }
+    #[test]
+    fn gpio_aperture_requires_complete_source_ranges_before_any_bank_is_returned() {
+        use crate::machine::adt::encode;
+        let raw = [0u64, 0x1000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        for (rows, expected) in [
+            (
+                vec![
+                    (0u64, 0x200000000u64, 0x800u64),
+                    (0x800, 0x200000800, 0x800),
+                ],
+                true,
+            ),
+            (
+                vec![(0, 0x200000000, 0x800), (0x900, 0x200000900, 0x700)],
+                false,
+            ),
+            (
+                vec![(0, 0x200000000, 0x800), (0x800, 0x300000800, 0x800)],
+                false,
+            ),
+        ] {
+            let ranges = rows
+                .into_iter()
+                .flat_map(|(a, b, c)| [a, b, c])
+                .flat_map(u64::to_le_bytes)
+                .collect::<Vec<_>>();
+            for trailing in [false, true] {
+                let mut reg = raw.clone();
+                if trailing {
+                    reg.push(0);
+                }
+                let gpio = encode(
+                    &[
+                        ("name", b"gpio"),
+                        ("compatible", b"gpio,t8101\0"),
+                        ("reg", &reg),
+                        ("#gpio-pins", &2u32.to_le_bytes()),
+                        ("#gpio-int-groups", &1u32.to_le_bytes()),
+                        ("interrupts", &7u32.to_le_bytes()),
+                        ("interrupt-parent", &9u32.to_le_bytes()),
+                        ("AAPL,phandle", &4u32.to_le_bytes()),
+                    ],
+                    &[],
+                );
+                let tree = encode(&[("name", b"arm-io"), ("ranges", &ranges)], &[gpio]);
+                let io = Node::root(&tree).unwrap();
+                let actual = gpio_bank(&io, &|a, b| io.translate_range(a, b), 9);
+                assert_eq!(actual.is_ok(), expected && !trailing);
+            }
+        }
     }
 }

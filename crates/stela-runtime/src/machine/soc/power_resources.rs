@@ -76,7 +76,9 @@ impl PowerStates {
         // Reconstruct every original domain through the existing reader. The
         // association resolver may trust normalized non-CPU locations only
         // after this equality check, including aliases and parent identities.
-        let table = decode_domain_table(&node, &|address| cpu::physical(&io, address, 4).ok())?;
+        let table = decode_domain_table(&node, &|address, bytes| {
+            cpu::physical(&io, address, bytes).ok()
+        })?;
         if self.domains != table.domains
             || self.blocks != table.blocks
             || self.registers != table.registers
@@ -141,16 +143,8 @@ impl PowerStates {
         let expected = inventory_with_nodes(&root)?;
         let io = root.child("arm-io");
         let pmgr = io.as_ref().unwrap_or(&root).child("pmgr");
-        let translate = |address| {
-            if expected.ranges.is_empty() {
-                return Some(address);
-            }
-            expected.ranges.iter().find_map(|&(child, parent, bytes)| {
-                (address >= child && address - child < bytes)
-                    .then(|| parent.checked_add(address - child))
-                    .flatten()
-            })
-        };
+        let translate =
+            |address, bytes| io.as_ref().unwrap_or(&root).translate_range(address, bytes);
         let implicit = pmgr
             .as_ref()
             .map(|pmgr| implicit::resolve(pmgr, &self.domains, &expected, &translate))
@@ -316,15 +310,28 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
         .and_then(|io| io.ranges())
         .or_else(|| root.ranges())
         .unwrap_or_default();
+    let mut physical_views = Vec::new();
+    let io = root.child("arm-io");
+    let bus = io.as_ref().unwrap_or(root);
+    super::apertures::visit(
+        bus,
+        &|address, bytes| bus.translate_range(address, bytes),
+        &mut |node, translate| {
+            if let Some(regs) = super::apertures::registers(node)
+                && let Some(&(address, bytes)) = regs.first()
+                && let Some(physical) = translate(address, bytes)
+            {
+                physical_views.push((node.property("reg").unwrap().as_ptr(), physical));
+            }
+        },
+    )
+    .ok_or("invalid physical resource tree")?;
     let physical = |node: &Node<'_>| {
-        let (address, _) = node.pairs("reg")?.first().copied()?;
-        if ranges.is_empty() {
-            return Some(address);
-        }
-        ranges
+        let key = node.property("reg")?.as_ptr();
+        physical_views
             .iter()
-            .find(|(child, _, size)| address >= *child && address - child < *size)
-            .and_then(|(child, parent, _)| parent.checked_add(address - child))
+            .find(|(source, _)| *source == key)
+            .map(|(_, physical)| *physical)
     };
     let path = if name_of(root) == "arm-io" {
         "/arm-io"
@@ -524,7 +531,7 @@ fn inventory_with_nodes<'a>(root: &Node<'a>) -> Result<ResourceInventory<'a>, St
 
 pub(super) fn power_states(
     root: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     chip_id: u32,
 ) -> Result<Option<PowerStates>, String> {
     let io = root.child("arm-io");
@@ -543,7 +550,7 @@ pub(super) fn power_states(
 fn decode_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<PowerStates, String> {
     let states = source_power_states(root, node, translate)?;
     validate_power_graph(&states)?;
@@ -555,7 +562,7 @@ fn decode_power_states(
 pub(super) fn source_power_states(
     root: &Node<'_>,
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<PowerStates, String> {
     let table = decode_domain_table(node, translate)?;
     let inventory = inventory_with_nodes(root)?;
@@ -601,10 +608,10 @@ struct DomainTable {
 /// coverage checks. This table alone never establishes lifecycle admission.
 fn decode_domain_table(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<DomainTable, String> {
     const PATH: &str = "/arm-io/pmgr";
-    let reg = node.pairs("reg").unwrap_or_default();
+    let reg = super::apertures::registers(node).ok_or("PMGR reg has incomplete pairs")?;
     let (layout, raw_blocks) = Layout::select(node.property("ps-regs"), node.property("ps-groups"))
         .map_err(String::from)?;
     let blocks = raw_blocks
@@ -640,17 +647,14 @@ fn decode_domain_table(
                 .checked_add(index * 8)
                 .filter(|offset| offset.checked_add(4).is_some_and(|end| end <= bytes))
                 .ok_or_else(|| format!("{PATH} power state exceeds reg bank"))?;
-            let physical = range
+            let view = translate(range, bytes)
+                .ok_or_else(|| format!("{PATH} power-state view crosses its actual bus domain"))?;
+            let physical = view
                 .checked_add(offset)
-                .and_then(translate)
-                .filter(|address| {
-                    range.checked_add(offset + 3).and_then(translate) == address.checked_add(3)
-                })
-                .ok_or_else(|| format!("{PATH} power state crosses arm-io ranges"))?;
-            let base = range
+                .ok_or_else(|| format!("{PATH} power-state physical word overflows"))?;
+            let base = view
                 .checked_add(u64::from(cells[1]))
-                .and_then(translate)
-                .ok_or_else(|| format!("{PATH} ps-regs block is outside arm-io ranges"))?;
+                .ok_or_else(|| format!("{PATH} power-state base overflows"))?;
             let end = physical
                 .checked_add(4)
                 .filter(|_| base.checked_add(index * 8) == Some(physical))
@@ -681,7 +685,17 @@ fn decode_domain_table(
 
 #[cfg(test)]
 mod tests {
+    /// Explicit physical bus for synthetic full-PA fixture records.
+    fn flat_bus(children: &[alloc::vec::Vec<u8>]) -> alloc::vec::Vec<u8> {
+        let ranges = [0u64, 0, 1u64 << 40]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<alloc::vec::Vec<_>>();
+        crate::machine::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
+    }
+
     use super::*;
+    use crate::machine::soc::tests::flat_fixture_extent;
     use crate::machine::{adt::encode, soc::DART};
 
     #[test]
@@ -715,15 +729,9 @@ mod tests {
             let root = Node::root(&bytes).unwrap();
             let io = root.child("arm-io").unwrap();
             let node = io.child("pmgr").unwrap();
-            let ranges = io.ranges().unwrap();
-            let translate = |address| {
-                ranges.iter().find_map(|&(child, parent, bytes)| {
-                    (address >= child && address - child < bytes)
-                        .then(|| parent.checked_add(address - child))
-                        .flatten()
-                })
-            };
-            let states = decode_domain_table(&node, &translate).unwrap();
+            let states =
+                decode_domain_table(&node, &|address, bytes| io.translate_range(address, bytes))
+                    .unwrap();
             assert_eq!(states.domains.len(), domains);
             assert_eq!(states.registers.len(), registers);
             let coverage = coverage::analyze(&states.domains, &[]).unwrap();
@@ -731,7 +739,10 @@ mod tests {
             // Account for every original resource, including repeated sibling
             // display names. This remains source accounting, not chip/device
             // admission or a lifecycle sink qualification.
-            let complete = decode_power_states(&root, &node, &translate).unwrap();
+            let complete = decode_power_states(&root, &node, &|address, bytes| {
+                io.translate_range(address, bytes)
+            })
+            .unwrap();
             let consumers = complete
                 .resources
                 .iter()
@@ -809,7 +820,7 @@ mod tests {
         );
         let mut children = children.to_vec();
         children.insert(0, pmgr);
-        encode(&[("name", b"arm-io")], &children)
+        flat_bus(&children)
     }
 
     #[test]
@@ -864,9 +875,13 @@ mod tests {
                 .all(|resource| resource.admission == Admission::Required)
         );
         // A candidate owner is metadata, not evidence of complete sinks.
-        let parsed = power_states(&Node::root(&encoded).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let parsed = power_states(
+            &Node::root(&encoded).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         let consumers = parsed
             .resources
             .iter()
@@ -924,9 +939,13 @@ mod tests {
             ],
             &[dart, client],
         );
-        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         let find = |name| {
             states
                 .resources
@@ -960,9 +979,13 @@ mod tests {
             &[first, second],
         );
         let bytes = tree(&[(1, Some(0), [0, 0])], &[hidden]);
-        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let mut states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             states.apply_admission(&bytes, &["/arm-io/hidden".into()]),
             Ok(2)
@@ -1030,9 +1053,13 @@ mod tests {
             &[(1, Some(0), [0, 0]), (2, Some(1), [0, 0])],
             &[hidden, leaf],
         );
-        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let mut states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         let original = states.clone();
         assert_eq!(states.apply_admission(&bytes, &[]), Ok(0));
         assert_eq!(
@@ -1099,9 +1126,13 @@ mod tests {
             &[],
         );
         let bytes = tree(&[(1, Some(0), [0, 0])], &[watched]);
-        let mut states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let mut states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             states.apply_admission(&bytes, &["/arm-io/watchdog +no-pmu".into()]),
             Ok(0)
@@ -1136,14 +1167,17 @@ mod tests {
         )
         .unwrap();
         let root = Node::root(&bytes).unwrap();
-        let ranges = root.child("arm-io").unwrap().ranges().unwrap();
-        let translate = |address| {
-            ranges
-                .iter()
-                .find(|(child, _, size)| (*child..child + size).contains(&address))
-                .map(|(child, parent, _)| parent + address - child)
-        };
-        let mut states = power_states(&root, &translate, 0x8112).unwrap().unwrap();
+        let mut states = power_states(
+            &root,
+            &|address, bytes| {
+                root.child("arm-io")
+                    .unwrap()
+                    .translate_range(address, bytes)
+            },
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         let original = states.clone();
         let retired = states
             .apply_admission(&bytes, &manifest.hidden_devices)
@@ -1255,9 +1289,13 @@ mod tests {
                 phy,
             ],
         );
-        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         let owner = |name| {
             states
                 .resources
@@ -1303,9 +1341,13 @@ mod tests {
                 &[port(number, register)],
             );
             let bytes = tree(&[(1, Some(0), [0, 0])], &[controller]);
-            let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-                .unwrap()
-                .unwrap();
+            let states = power_states(
+                &Node::root(&bytes).unwrap(),
+                &flat_fixture_extent(&Some),
+                0x8112,
+            )
+            .unwrap()
+            .unwrap();
             let controller = states
                 .resources
                 .iter()
@@ -1331,9 +1373,13 @@ mod tests {
             (4, Some(2), [2, 0]),
         ];
         let bytes = tree(&records, &[]);
-        let states = power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112)
-            .unwrap()
-            .unwrap();
+        let states = power_states(
+            &Node::root(&bytes).unwrap(),
+            &flat_fixture_extent(&Some),
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(states.domains.len(), 4);
         assert_eq!(states.registers, [0x1000, 0x1008, 0x1010]);
         assert_eq!(states.domains[2].address, states.domains[3].address);
@@ -1351,12 +1397,26 @@ mod tests {
             ],
         ] {
             let bytes = tree(&records, &[]);
-            assert!(power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112).is_err());
+            assert!(
+                power_states(
+                    &Node::root(&bytes).unwrap(),
+                    &flat_fixture_extent(&Some),
+                    0x8112
+                )
+                .is_err()
+            );
         }
         for property in ["clock-gates", "power-gates"] {
             let malformed = encode(&[("name", b"controller"), (property, &[1, 0, 0])], &[]);
             let bytes = tree(&records, &[malformed]);
-            assert!(power_states(&Node::root(&bytes).unwrap(), &Some, 0x8112).is_err());
+            assert!(
+                power_states(
+                    &Node::root(&bytes).unwrap(),
+                    &flat_fixture_extent(&Some),
+                    0x8112
+                )
+                .is_err()
+            );
         }
     }
 
@@ -1373,14 +1433,17 @@ mod tests {
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let root = Node::root(&bytes).unwrap();
-        let ranges = root.child("arm-io").unwrap().ranges().unwrap();
-        let translate = |address| {
-            ranges
-                .iter()
-                .find(|(child, _, size)| (*child..child + size).contains(&address))
-                .map(|(child, parent, _)| parent + address - child)
-        };
-        let states = power_states(&root, &translate, 0x8112).unwrap().unwrap();
+        let states = power_states(
+            &root,
+            &|address, bytes| {
+                root.child("arm-io")
+                    .unwrap()
+                    .translate_range(address, bytes)
+            },
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(states.domains.len(), 303);
         assert_eq!(states.resources.len(), 330);
         assert!(states.domains.iter().all(|domain| !domain.name.is_empty()));
@@ -1492,5 +1555,56 @@ mod tests {
             coverage.iter().filter(|record| record.bindable()).count(),
             shared.consumers.len()
         );
+    }
+    #[test]
+    fn physical_candidates_follow_nested_bus_domains_and_never_alias_protocol_slaves() {
+        let reg = [0x100u64, 0x1000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let uart = encode(
+            &[
+                ("name", b"uart"),
+                ("compatible", super::super::UART.as_bytes()),
+                ("reg", &reg),
+            ],
+            &[],
+        );
+        let ranges = [0u64, 0x2000, 0x2000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let nested = encode(
+            &[("name", b"nested"), ("ranges", &ranges)],
+            core::slice::from_ref(&uart),
+        );
+        let protocol = encode(
+            &[
+                ("name", b"serial"),
+                ("compatible", super::super::SPI.as_bytes()),
+            ],
+            &[uart],
+        );
+        let root_ranges = [0u64, 0x100000000, 0x10000]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>();
+        let bytes = encode(
+            &[("name", b"arm-io"), ("ranges", &root_ranges)],
+            &[nested, protocol],
+        );
+        let resources = inventory(&Node::root(&bytes).unwrap()).unwrap();
+        let owner = |path| {
+            resources
+                .iter()
+                .find(|entry| entry.name == path)
+                .unwrap()
+                .owner
+        };
+        assert_eq!(
+            owner("/arm-io/nested/uart"),
+            Some(PowerOwner::Mmio(0x100002100))
+        );
+        assert_eq!(owner("/arm-io/serial/uart"), None);
     }
 }

@@ -124,7 +124,7 @@ fn reg_pairs<'a>(node: &Node<'a>) -> Result<&'a [u8], String> {
 }
 fn range_at(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     index: usize,
 ) -> Result<(u64, u64), String> {
     let pair = reg_pairs(node)?
@@ -134,12 +134,9 @@ fn range_at(
         .ok_or("selected memory resource reg is absent")?;
     let address = u64::from_le_bytes(pair[..8].try_into().expect("u64"));
     let bytes = u64::from_le_bytes(pair[8..].try_into().expect("u64"));
-    let physical = translate(address).ok_or("selected memory resource outside arm-io ranges")?;
-    if bytes == 0
-        || address.checked_add(bytes).is_none()
-        || physical.checked_add(bytes).is_none()
-        || translate(address + bytes - 1) != Some(physical + bytes - 1)
-    {
+    let physical =
+        translate(address, bytes).ok_or("selected memory resource outside arm-io ranges")?;
+    if bytes == 0 || address.checked_add(bytes).is_none() || physical.checked_add(bytes).is_none() {
         return Err(
             "selected memory resource range is empty, overflowing or has inconsistent translation"
                 .into(),
@@ -149,7 +146,7 @@ fn range_at(
 }
 fn ranges(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Vec<(u64, u64)>, String> {
     (0..reg_pairs(node)?.len() / 16)
         .map(|index| range_at(node, translate, index))
@@ -200,7 +197,7 @@ pub(super) fn publication_ranges(
 
 pub(super) fn direct_memory_cache(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
     controller: Option<&MemoryController>,
 ) -> Result<Option<DirectMemoryCache>, String> {
     let Some(node) = io.child("mcc").filter(|node| node.compatible(COMPATIBLE)) else {
@@ -298,6 +295,7 @@ pub(super) fn direct_memory_cache(
 mod tests {
     use super::*;
     use crate::machine::adt::encode;
+    use crate::machine::soc::tests::flat_fixture_extent;
     use alloc::vec;
 
     fn tree(reg_suffix: &[u8], update_bytes: u64, interrupt: u32) -> Vec<u8> {
@@ -394,9 +392,13 @@ mod tests {
     fn direct_descriptor_preserves_real_bank_capacity_and_interrupt_identity() {
         let bytes = tree(&[], 0xc00, 14);
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
-        let owner = direct_memory_cache(&io, &|pa| pa.checked_add(0x200000000), Some(&locks()))
-            .unwrap()
-            .unwrap();
+        let owner = direct_memory_cache(
+            &io,
+            &flat_fixture_extent(&|pa| pa.checked_add(0x200000000)),
+            Some(&locks()),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(owner.ptd_entries, 384);
         assert_eq!(owner.ptd.ranges[0].start, 376);
         assert_eq!(owner.ptd.interrupts, vec![14]);
@@ -414,20 +416,35 @@ mod tests {
             let bytes = tree(suffix, size, 14);
             let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
             assert!(
-                direct_memory_cache(&io, &|pa| pa.checked_add(0x200000000), Some(&locks()))
-                    .is_err()
+                direct_memory_cache(
+                    &io,
+                    &flat_fixture_extent(&|pa| pa.checked_add(0x200000000)),
+                    Some(&locks())
+                )
+                .is_err()
             );
         }
-        assert!(direct_memory_cache(&io, &|pa| pa.checked_add(0x200000000), None).is_err());
+        assert!(
+            direct_memory_cache(
+                &io,
+                &flat_fixture_extent(&|pa| pa.checked_add(0x200000000)),
+                None
+            )
+            .is_err()
+        );
     }
     #[test]
     fn public_descriptor_revalidation_rejects_forged_capacity_and_ownership() {
         let bytes = tree(&[], 0xc00, 14);
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
         let locks = locks();
-        let descriptor = direct_memory_cache(&io, &|pa| pa.checked_add(0x200000000), Some(&locks))
-            .unwrap()
-            .unwrap();
+        let descriptor = direct_memory_cache(
+            &io,
+            &flat_fixture_extent(&|pa| pa.checked_add(0x200000000)),
+            Some(&locks),
+        )
+        .unwrap()
+        .unwrap();
         let mut invalid = descriptor.clone();
         invalid.ptd_entries = 377;
         assert!(invalid.validate(&locks).is_err());
@@ -460,28 +477,13 @@ mod tests {
             "44fa41bfd0fe0027fd862b8615ae956885614636625d44a59cab226d682558ad"
         );
         let io = Node::root(&bytes).unwrap().child("arm-io").unwrap();
-        let raw = io.property("ranges").unwrap();
-        assert!(raw.len().is_multiple_of(24));
-        let windows: Vec<_> = raw
-            .as_chunks::<24>()
-            .0
-            .iter()
-            .map(|record| {
-                let word = |at| u64::from_le_bytes(record[at..at + 8].try_into().unwrap());
-                (word(0), word(8), word(16))
-            })
-            .collect();
-        let translate = |pa: u64| {
-            windows.iter().find_map(|&(start, physical, len)| {
-                let offset = pa.checked_sub(start)?;
-                (offset < len)
-                    .then(|| physical.checked_add(offset))
-                    .flatten()
-            })
-        };
-        let descriptor = direct_memory_cache(&io, &translate, Some(&locks()))
-            .unwrap()
-            .unwrap();
+        let descriptor = direct_memory_cache(
+            &io,
+            &|address, bytes| io.translate_range(address, bytes),
+            Some(&locks()),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(descriptor.ptd_entries, 384);
         assert_eq!(descriptor.ptd.ranges.len(), 19);
         assert_eq!(descriptor.ptd.interrupts.len(), 19);

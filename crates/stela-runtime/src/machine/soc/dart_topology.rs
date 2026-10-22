@@ -8,11 +8,11 @@ use alloc::{format, string::String, vec::Vec};
 /// owners; FPAD and unqualified DMA routing remain explicit requirements.
 pub(super) fn iommus(
     io: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Vec<Iommu>, String> {
     let mut found = Vec::new();
     let mut failure = None;
-    io.visit(&mut |node| {
+    super::apertures::visit(io, translate, &mut |node, translate| {
         if failure.is_some() || !is_dart(node) {
             return;
         }
@@ -43,7 +43,7 @@ pub(super) fn iommus(
 
 pub(super) fn iommu(
     node: &Node<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Iommu, String> {
     let path = format!("/arm-io/{}", name_of(node));
     let profile = node
@@ -91,13 +91,8 @@ pub(super) fn iommu(
         };
         match &descriptor[..4] {
             b"TRAD" if apf.is_none() && smmu.is_none() && number as usize == instances.len() => {
-                let physical = translate(offset)
-                    .filter(|at| {
-                        at.is_multiple_of(dart::DAPF_BYTES)
-                            && bytes == dart::DAPF_BYTES
-                            && offset.checked_add(bytes - 1).and_then(translate)
-                                == at.checked_add(bytes - 1)
-                    })
+                let physical = translate(offset, bytes)
+                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES) && bytes == dart::DAPF_BYTES)
                     .ok_or_else(|| {
                         format!("{path} DART instance is not one translated aligned 16 KiB block")
                     })?;
@@ -126,13 +121,8 @@ pub(super) fn iommu(
                     && apf.is_none()
                     && smmu.is_none() =>
             {
-                let physical = translate(offset)
-                    .filter(|at| {
-                        at.is_multiple_of(dart::DAPF_BYTES)
-                            && bytes == dart::DAPF_BYTES
-                            && offset.checked_add(bytes - 1).and_then(translate)
-                                == at.checked_add(bytes - 1)
-                    })
+                let physical = translate(offset, bytes)
+                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES) && bytes == dart::DAPF_BYTES)
                     .ok_or_else(|| {
                         format!("{path} SMMU instance is not one translated aligned 16 KiB block")
                     })?;
@@ -151,7 +141,7 @@ pub(super) fn iommu(
     let apf = match apf {
         None => None,
         Some((filter, filter_bytes)) => {
-            let at = translate(filter)
+            let at = translate(filter, dart::DAPF_BYTES)
                 .filter(|at| {
                     at.is_multiple_of(dart::DAPF_BYTES) && filter_bytes == dart::DAPF_BYTES
                 })
@@ -448,6 +438,7 @@ pub(super) fn legacy_requirements<'a>(
 mod tests {
     use super::*;
     use crate::machine::adt::encode;
+    use crate::machine::soc::tests::flat_fixture_extent;
     use alloc::vec;
 
     fn bytes64(values: &[u64]) -> Vec<u8> {
@@ -507,7 +498,11 @@ mod tests {
                 &[],
             );
             let node = Node::root(&tree).unwrap();
-            let bank = iommu(&node, &|offset| offset.checked_add(0x200000000)).unwrap();
+            let bank = iommu(
+                &node,
+                &flat_fixture_extent(&|offset| offset.checked_add(0x200000000)),
+            )
+            .unwrap();
             assert_eq!(bank.profile, profile);
             assert_eq!(bank.streams, 16);
             assert_eq!(bank.vm_base, 0x80000000);
@@ -589,7 +584,9 @@ mod tests {
             );
             let node = Node::root(&tree).unwrap();
             assert!(
-                iommu(&node, &Some).unwrap_err().contains(requirement),
+                iommu(&node, &flat_fixture_extent(&Some))
+                    .unwrap_err()
+                    .contains(requirement),
                 "{requirement}"
             );
             assert!(!super::super::models("dart,t8020", |key| node.property(key)));
@@ -609,14 +606,14 @@ mod tests {
             ],
         ] {
             let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
-            assert!(iommu(&Node::root(&bytes).unwrap(), &Some).is_err());
+            assert!(iommu(&Node::root(&bytes).unwrap(), &flat_fixture_extent(&Some)).is_err());
         }
         let flags = [
             ("never-lock", &[][..]),
             ("ignore-inconsistent-hw-locks", &[][..]),
         ];
         let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
-        let bank = iommu(&Node::root(&bytes).unwrap(), &Some).unwrap();
+        let bank = iommu(&Node::root(&bytes).unwrap(), &flat_fixture_extent(&Some)).unwrap();
         assert_eq!(bank.instances.len(), 1);
         assert_eq!(bank.instances[0].reg_index, 0);
         assert_eq!(bank.smmu, Some((0x89300000, 0x4000)));
@@ -626,10 +623,10 @@ mod tests {
         ] {
             let bytes = legacy(b"dart,t6000\0", descriptors, &registers, &flags, &[]);
             if &descriptors[..4] == b"UMMS" {
-                assert!(iommu(&Node::root(&bytes).unwrap(), &Some).is_err());
+                assert!(iommu(&Node::root(&bytes).unwrap(), &flat_fixture_extent(&Some)).is_err());
             } else {
                 assert_eq!(
-                    iommu(&Node::root(&bytes).unwrap(), &Some)
+                    iommu(&Node::root(&bytes).unwrap(), &flat_fixture_extent(&Some))
                         .unwrap()
                         .instances
                         .len(),
@@ -652,7 +649,7 @@ mod tests {
         );
         let node = Node::root(&bytes).unwrap();
         assert!(
-            iommu(&node, &Some)
+            iommu(&node, &flat_fixture_extent(&Some))
                 .unwrap_err()
                 .contains("multi-instance DMA remap")
         );
@@ -666,7 +663,10 @@ mod tests {
                 &[],
             );
             let node = Node::root(&bytes).unwrap();
-            assert_eq!(iommu(&node, &Some).is_ok(), remap == [5, 0, 0, 0]);
+            assert_eq!(
+                iommu(&node, &flat_fixture_extent(&Some)).is_ok(),
+                remap == [5, 0, 0, 0]
+            );
         }
     }
 
@@ -692,7 +692,9 @@ mod tests {
             &[mapper(15)],
         );
         assert_eq!(
-            iommu(&Node::root(&tree).unwrap(), &Some).unwrap().mappers,
+            iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
+                .unwrap()
+                .mappers,
             [(7, 15)]
         );
         let tree = legacy(
@@ -703,7 +705,7 @@ mod tests {
             &[mapper(16)],
         );
         assert!(
-            iommu(&Node::root(&tree).unwrap(), &Some)
+            iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
                 .unwrap_err()
                 .contains("mapper SID")
         );
@@ -723,7 +725,7 @@ mod tests {
         );
         let tree = encode(&[("name", b"arm-io\0")], &[first, second]);
         assert!(
-            iommus(&Node::root(&tree).unwrap(), &Some)
+            iommus(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
                 .unwrap_err()
                 .contains("ambiguous native DMA routing")
         );
@@ -736,7 +738,7 @@ mod tests {
             &[mapper(1)],
         );
         assert!(
-            iommu(&Node::root(&tree).unwrap(), &Some)
+            iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some))
                 .unwrap_err()
                 .contains("multi-instance DMA routing")
         );
@@ -763,7 +765,7 @@ mod tests {
             &[],
         );
         let tree = encode(&[("name", b"arm-io\0")], &[legacy, modern]);
-        let banks = iommus(&Node::root(&tree).unwrap(), &Some).unwrap();
+        let banks = iommus(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some)).unwrap();
         assert_eq!(
             banks.iter().map(|bank| bank.profile).collect::<Vec<_>>(),
             [Profile::T6000, Profile::T8110]
@@ -772,7 +774,7 @@ mod tests {
         assert_eq!(banks[1].vm_base, 0x100000000);
         let unknown = encode(&[("compatible", b"dart,gen3\0dart,t8110\0")], &[]);
         assert!(
-            iommus(&Node::root(&unknown).unwrap(), &Some)
+            iommus(&Node::root(&unknown).unwrap(), &flat_fixture_extent(&Some))
                 .unwrap_err()
                 .contains("unsupported or conflicting")
         );

@@ -127,29 +127,10 @@ pub(super) fn physical(io: &Node<'_>, address: u64, bytes: u64) -> Result<u64, E
     if !ranges.len().is_multiple_of(24) || ranges.is_empty() {
         return Err(Error::Malformed("arm-io ranges"));
     }
-    let end = address
-        .checked_add(bytes)
-        .ok_or(Error::UnqualifiedGeometry("overflowing PS range"))?;
-    let mut answer = None;
-    for range in ranges.as_chunks::<24>().0 {
-        let [start, parent, size]: [u64; 3] = core::array::from_fn(|i| {
-            u64::from_le_bytes(range[i * 8..(i + 1) * 8].try_into().unwrap())
-        });
-        let limit = start
-            .checked_add(size)
-            .ok_or(Error::UnqualifiedGeometry("overflowing arm-io range"))?;
-        if address < limit && start < end {
-            if answer.is_some() || address < start || end > limit {
-                return Err(Error::UnqualifiedGeometry("ambiguous or split PS range"));
-            }
-            let translated = parent
-                .checked_add(address - start)
-                .filter(|value| value.checked_add(bytes).is_some())
-                .ok_or(Error::UnqualifiedGeometry("overflowing physical PS range"))?;
-            answer = Some(translated);
-        }
-    }
-    answer.ok_or(Error::UnqualifiedGeometry("unplaced PS range"))
+    io.translate_range(address, bytes)
+        .ok_or(Error::UnqualifiedGeometry(
+            "unplaced, split or ambiguous complete PS range",
+        ))
 }
 
 fn geometry(root: &Node<'_>, io: &Node<'_>, pmgr: &Node<'_>) -> Result<(), Error> {
@@ -623,9 +604,10 @@ mod tests {
     fn canonical_states(root: &Node<'_>) -> super::super::PowerStates {
         let io = root.child("arm-io").unwrap();
         let pmgr = io.child("pmgr").unwrap();
-        let table =
-            super::super::decode_domain_table(&pmgr, &|address| physical(&io, address, 4).ok())
-                .unwrap();
+        let table = super::super::decode_domain_table(&pmgr, &|address, bytes| {
+            physical(&io, address, bytes).ok()
+        })
+        .unwrap();
         super::super::PowerStates {
             blocks: table.blocks,
             registers: table.registers,

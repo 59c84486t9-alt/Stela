@@ -47,32 +47,7 @@ impl Descriptor {
             .child("pmgr")
             .filter(|n| n.compatible("pmgr1,t6000"))
             .ok_or("T6000 requires its retained original PMGR descriptor")?;
-        let ranges = io.ranges().ok_or("T6000 arm-io ranges are malformed")?;
-        if ranges.is_empty() {
-            return Err("T6000 arm-io ranges are empty".into());
-        }
-        for (i, &(child, parent, bytes)) in ranges.iter().enumerate() {
-            if bytes == 0
-                || child.checked_add(bytes).is_none()
-                || parent.checked_add(bytes).is_none()
-            {
-                return Err("T6000 arm-io range is empty or overflows".into());
-            }
-            if ranges[..i]
-                .iter()
-                .any(|&(base, _, size)| child < base + size && base < child + bytes)
-            {
-                return Err("T6000 arm-io child ranges are ambiguous".into());
-            }
-        }
-        let translate = |address: u64| {
-            ranges.iter().find_map(|&(child, parent, bytes)| {
-                address
-                    .checked_sub(child)
-                    .filter(|&delta| delta < bytes)
-                    .and_then(|delta| parent.checked_add(delta))
-            })
-        };
+        let translate = |offset, bytes| io.translate_range(offset, bytes);
         let word = |key| -> Result<u32, String> {
             let value: [u8; 4] = node
                 .property(key)
@@ -97,20 +72,8 @@ impl Descriptor {
                 registers.push(None);
                 continue;
             }
-            let end = offset
-                .checked_add(bytes)
-                .ok_or("T6000 PMGR register extent overflows")?;
-            let physical = ranges
-                .iter()
-                .find_map(|&(child, parent, size)| {
-                    (offset >= child && end <= child + size)
-                        .then(|| parent.checked_add(offset - child))
-                        .flatten()
-                })
-                .ok_or("T6000 PMGR register extent crosses its actual bus range")?;
-            physical
-                .checked_add(bytes)
-                .ok_or("T6000 PMGR physical extent overflows")?;
+            let physical = translate(offset, bytes)
+                .ok_or("T6000 PMGR register extent crosses its actual bus domain")?;
             registers.push(Some((physical, bytes)));
         }
         let layout = t6000::Layout::new(

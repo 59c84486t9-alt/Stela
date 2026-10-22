@@ -61,7 +61,7 @@ pub(super) fn resolve(
     pmgr: &Node<'_>,
     domains: &[Domain],
     inventory: &ResourceInventory<'_>,
-    translate: &dyn Fn(u64) -> Option<u64>,
+    translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Vec<Requirement>, String> {
     // A fallback list containing another PMGR profile does not establish
     // this exact physical association.
@@ -114,9 +114,7 @@ pub(super) fn resolve(
             };
             if *bytes != binding.bytes
                 || !complete_view
-                || translate(*address) != Some(binding.physical)
-                || address.checked_add(bytes - 1).and_then(translate)
-                    != binding.physical.checked_add(binding.bytes - 1)
+                || translate(*address, *bytes) != Some(binding.physical)
             {
                 continue;
             }
@@ -164,7 +162,17 @@ pub(super) fn power_requirements(states: &PowerStates) -> Result<Vec<Vec<DomainI
 
 #[cfg(test)]
 mod tests {
+    /// Explicit physical bus for synthetic full-PA fixture records.
+    fn flat_bus(children: &[alloc::vec::Vec<u8>]) -> alloc::vec::Vec<u8> {
+        let ranges = [0u64, 0, 1u64 << 40]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<alloc::vec::Vec<_>>();
+        crate::machine::adt::encode(&[("name", b"arm-io"), ("ranges", &ranges)], children)
+    }
+
     use super::*;
+    use crate::machine::soc::tests::flat_fixture_extent;
     use crate::machine::{adt::encode, soc::power_resources::inventory_with_nodes};
     use crate::platform::apple::pmgr::coverage::{self, Admission, Consumer, LifecycleSinks};
     use alloc::vec;
@@ -208,7 +216,7 @@ mod tests {
             &Node::root(&pmgr_bytes).unwrap(),
             &domains,
             &inventory,
-            &Some,
+            &flat_fixture_extent(&Some),
         )?;
         Ok(PowerStates {
             blocks: domains
@@ -228,7 +236,7 @@ mod tests {
             &[("name", b"pmgr"), ("compatible", b"pmgr1,t8112")],
             &[],
         ));
-        encode(&[("name", b"arm-io")], &children)
+        flat_bus(&children)
     }
 
     #[test]
@@ -310,7 +318,7 @@ mod tests {
                     ..binding
                 },
             ] {
-                let bytes = encode(&[("name", b"arm-io")], &[bank(changed)]);
+                let bytes = flat_bus(&[bank(changed)]);
                 assert!(
                     states(&bytes, "pmgr1,t8112", domains())
                         .unwrap()
@@ -328,7 +336,7 @@ mod tests {
                     binding.register,
                 ),
             ] {
-                let bytes = encode(&[("name", b"arm-io")], &[bank(binding)]);
+                let bytes = flat_bus(&[bank(binding)]);
                 let domain = Domain {
                     id,
                     address: Some(address),
@@ -342,7 +350,7 @@ mod tests {
                         .is_empty()
                 );
             }
-            let bytes = encode(&[("name", b"arm-io")], &[bank(binding), bank(binding)]);
+            let bytes = flat_bus(&[bank(binding), bank(binding)]);
             assert!(
                 states(&bytes, "pmgr1,t8112", domains())
                     .unwrap_err()
@@ -366,8 +374,13 @@ mod tests {
             ),
         ];
         let pmgr = encode(&[("compatible", b"pmgr1,t8112")], &[]);
-        let requirements =
-            resolve(&Node::root(&pmgr).unwrap(), &domains(), &inventory, &Some).unwrap();
+        let requirements = resolve(
+            &Node::root(&pmgr).unwrap(),
+            &domains(),
+            &inventory,
+            &flat_fixture_extent(&Some),
+        )
+        .unwrap();
         assert!(requirements.is_empty());
         // A complete affine mapping cannot qualify an overlapping fragment
         // whose priority could change an interior byte's translation.
@@ -376,9 +389,14 @@ mod tests {
             (binding.physical + 0x4000, 0x1000, 0x4000),
         ];
         assert!(
-            resolve(&Node::root(&pmgr).unwrap(), &domains(), &inventory, &Some)
-                .unwrap()
-                .is_empty()
+            resolve(
+                &Node::root(&pmgr).unwrap(),
+                &domains(),
+                &inventory,
+                &flat_fixture_extent(&Some)
+            )
+            .unwrap()
+            .is_empty()
         );
     }
 
@@ -399,7 +417,7 @@ mod tests {
                     ],
                     &[],
                 );
-                let bytes = encode(&[("name", b"arm-io")], &[node]);
+                let bytes = flat_bus(&[node]);
                 assert!(
                     states(&bytes, "pmgr1,t8112", domains())
                         .unwrap()
@@ -550,15 +568,17 @@ mod tests {
             "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
         );
         let root = Node::root(&bytes).unwrap();
-        let ranges = root.child("arm-io").unwrap().ranges().unwrap();
-        let translate = |address| {
-            ranges.iter().find_map(|&(child, parent, bytes)| {
-                (address >= child && address - child < bytes).then(|| parent + address - child)
-            })
-        };
-        let states = super::super::power_states(&root, &translate, 0x8112)
-            .unwrap()
-            .unwrap();
+        let states = super::super::power_states(
+            &root,
+            &|address, bytes| {
+                root.child("arm-io")
+                    .unwrap()
+                    .translate_range(address, bytes)
+            },
+            0x8112,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(states.registers.len(), 153);
         assert_eq!(states.implicit.len(), 3);
         let power = states.power_requirements().unwrap();
