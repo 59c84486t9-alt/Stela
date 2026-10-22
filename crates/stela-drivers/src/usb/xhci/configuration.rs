@@ -3,89 +3,195 @@
 //! separate namespaces. Unknown class descriptors remain in the raw inventory.
 use super::*;
 
-pub(super) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
-    if bytes.len() < 9
-        || bytes[0] != 9
-        || bytes[1] != CONFIGURATION_DESCRIPTOR
-        || usize::from(u16::from_le_bytes([bytes[2], bytes[3]])) != bytes.len()
-        || bytes[5] == 0
-    {
-        return Err("invalid USB configuration header/length/value");
+/// Endpoint types (USB 2.0 Table 9-13) and the largest wMaxPacketSize Linux
+/// `usb_parse_endpoint` accepts for each at each speed, indexed by type:
+/// control, isochronous, bulk, interrupt.
+const ISOCHRONOUS: usize = 1;
+const BULK: usize = 2;
+const INTERRUPT: usize = 3;
+const LOW_SPEED_MAXIMUMS: [u16; 4] = [8, 0, 0, 8];
+const FULL_SPEED_MAXIMUMS: [u16; 4] = [64, 1023, 64, 64];
+const HIGH_SPEED_MAXIMUMS: [u16; 4] = [64, 1024, 512, 1024];
+const SUPER_SPEED_MAXIMUMS: [u16; 4] = [512, 1024, 1024, 1024];
+/// wMaxPacketSize's additional-transactions field (high-speed periodic).
+const MULTIPLE_TRANSACTIONS: u16 = 3 << 11;
+const ENDPOINT_NUMBER: u8 = 0x0f;
+const ENDPOINT_TYPE: u8 = 0x03;
+/// bInterval replacements: 8 ms in microframe or frame exponents, and the
+/// low-speed minimum period.
+const HIGH_SPEED_DEFAULT_INTERVAL: u8 = 7;
+const FULL_SPEED_ISOCHRONOUS_INTERVAL: u8 = 4;
+const SLOW_INTERRUPT_INTERVAL: u8 = 10;
+/// SuperSpeed companion limits (Linux `usb_parse_ss_endpoint_companion`).
+const MAX_BURST: u8 = 15;
+const MAX_STREAMS_EXPONENT: u8 = 16;
+const COMPANION_LENGTH: u8 = 6;
+const ISOCHRONOUS_MULT: u8 = 0x03;
+
+/// A configuration descriptor as Linux `usb_parse_configuration` reads it:
+/// the header must be valid, but a bad descriptor ends the stream, nested
+/// configurations, duplicate interface settings and invalid or duplicate
+/// endpoints are skipped, endpoint fields are corrected as Linux corrects
+/// them, a SuperSpeed endpoint without a companion gets the default one,
+/// and the counts and total length describe what remains.
+pub(super) fn sanitize(bytes: &[u8], speed: u8) -> Result<Vec<u8>, &'static str> {
+    if bytes.len() < 9 || bytes[0] != 9 || bytes[1] != CONFIGURATION_DESCRIPTOR || bytes[5] == 0 {
+        return Err("invalid USB configuration header/value");
     }
-    let mut settings = Vec::new();
-    let mut numbers = Vec::new();
-    let mut zero = Vec::new();
-    let mut active_endpoints = Vec::new();
-    let mut setting_endpoints = Vec::new();
-    let mut interface = None;
+    let total = usize::from(u16::from_le_bytes([bytes[2], bytes[3]])).min(bytes.len());
+    let mut out = bytes[..9].to_vec();
+    let mut settings: Vec<(u8, u8)> = Vec::new();
+    let mut owners: Vec<(u8, u8)> = Vec::new();
+    // The current interface's number and where its bNumEndpoints is.
+    let mut interface: Option<(u8, usize)> = None;
+    let mut setting_endpoints: Vec<u8> = Vec::new();
+    let mut skipping = false;
+    // A SuperSpeed endpoint still waiting for its companion: its type and
+    // packet size, and the default companion's bytes per interval.
+    let mut companion_due: Option<(usize, u16, u16)> = None;
     let mut at = 9;
-    let mut preceding_endpoint = false;
-    while at < bytes.len() {
-        if at + 2 > bytes.len() {
-            return Err("truncated USB descriptor");
-        }
+    while at + 2 <= total {
         let length = usize::from(bytes[at]);
-        if length < 2 || at + length > bytes.len() {
-            return Err("invalid USB descriptor length");
+        if length < 2 || at + length > total {
+            break;
         }
         let d = &bytes[at..at + length];
-        match d[1] {
-            CONFIGURATION_DESCRIPTOR => return Err("nested USB configuration descriptor"),
+        at += length;
+        let kind = d[1];
+        if (kind != SS_ENDPOINT_COMPANION || length != usize::from(COMPANION_LENGTH))
+            && let Some((_, _, bytes_per_interval)) = companion_due.take()
+        {
+            out.extend_from_slice(&default_companion(bytes_per_interval));
+        }
+        match kind {
+            CONFIGURATION_DESCRIPTOR => {}
             INTERFACE_DESCRIPTOR => {
-                if length < 9 {
-                    return Err("short USB interface descriptor");
-                }
-                if interface.is_some_and(|(_, expected)| expected != setting_endpoints.len()) {
-                    return Err("USB endpoint descriptor count mismatch");
-                }
-                if settings.contains(&(d[2], d[3])) {
-                    return Err("duplicate USB interface alternate setting");
+                skipping = length < 9 || settings.contains(&(d[2], d[3]));
+                if skipping {
+                    continue;
                 }
                 settings.push((d[2], d[3]));
-                if !numbers.contains(&d[2]) {
-                    numbers.push(d[2]);
-                }
-                if d[3] == 0 {
-                    zero.push(d[2]);
-                }
-                interface = Some((d[3], usize::from(d[4])));
+                finish_interface(&mut out, interface, setting_endpoints.len());
+                interface = Some((d[2], out.len() + 4));
                 setting_endpoints.clear();
+                out.extend_from_slice(d);
             }
             ENDPOINT_DESCRIPTOR => {
-                if length < 7 {
-                    return Err("short USB endpoint descriptor");
-                }
-                let Some((alternate, _)) = interface else {
-                    return Err("orphan USB endpoint descriptor");
+                let Some((number, _)) = interface.filter(|_| !skipping && length >= 7) else {
+                    continue;
                 };
-                if d[2] & 0x70 != 0 || d[2] & 0x0f == 0 || (d[4] | d[5]) == 0 {
-                    return Err("invalid USB endpoint address/packet size");
-                }
-                if setting_endpoints.contains(&d[2])
-                    || (alternate == 0 && active_endpoints.contains(&d[2]))
+                let address = d[2];
+                let owned_elsewhere = owners
+                    .iter()
+                    .any(|(other, owned)| *owned == address && *other != number);
+                let maximum = u16::from_le_bytes([d[4], d[5]]);
+                if address & ENDPOINT_NUMBER == 0
+                    || maximum == 0
+                    || setting_endpoints.contains(&address)
+                    || owned_elsewhere
                 {
-                    return Err("duplicate active USB endpoint address");
+                    continue;
                 }
-                setting_endpoints.push(d[2]);
-                if alternate == 0 {
-                    active_endpoints.push(d[2]);
+                let mut endpoint = d.to_vec();
+                fix_endpoint(&mut endpoint, speed);
+                setting_endpoints.push(address);
+                owners.push((number, address));
+                out.extend_from_slice(&endpoint);
+                if matches!(speed, SUPER_SPEED | SUPER_SPEED_PLUS) {
+                    let kind = usize::from(d[3] & ENDPOINT_TYPE);
+                    let packet = u16::from_le_bytes([endpoint[4], endpoint[5]]);
+                    let periodic = matches!(kind, ISOCHRONOUS | INTERRUPT);
+                    companion_due = Some((kind, packet, if periodic { packet } else { 0 }));
                 }
             }
-            SS_ENDPOINT_COMPANION if length != 6 || !preceding_endpoint => {
-                return Err("short, orphan or duplicate USB SuperSpeed endpoint companion");
+            SS_ENDPOINT_COMPANION => {
+                // Only a whole companion right after its endpoint is read.
+                let Some((kind, packet, _)) = companion_due.take() else {
+                    continue;
+                };
+                let mut companion = d.to_vec();
+                companion[2] = companion[2].min(MAX_BURST);
+                if kind == BULK {
+                    companion[3] = companion[3].min(MAX_STREAMS_EXPONENT);
+                }
+                if matches!(kind, ISOCHRONOUS | INTERRUPT) {
+                    // A periodic endpoint moves at most its packets per burst
+                    // and per isochronous Mult each interval.
+                    let mult = match kind {
+                        ISOCHRONOUS => u32::from(companion[3] & ISOCHRONOUS_MULT) + 1,
+                        _ => 1,
+                    };
+                    let most = u32::from(packet) * (u32::from(companion[2]) + 1) * mult;
+                    let claimed = u16::from_le_bytes([companion[4], companion[5]]);
+                    let fixed = u32::from(claimed).min(most) as u16;
+                    companion[4..6].copy_from_slice(&fixed.to_le_bytes());
+                }
+                out.extend_from_slice(&companion);
             }
-            _ => {}
+            _ if skipping => {}
+            _ => out.extend_from_slice(d),
         }
-        preceding_endpoint = d[1] == ENDPOINT_DESCRIPTOR;
-        at += length;
     }
-    if interface.is_some_and(|(_, expected)| expected != setting_endpoints.len())
-        || numbers.len() != usize::from(bytes[4])
-        || zero.len() != numbers.len()
-    {
-        return Err("USB interface/endpoint count or alternate-zero mismatch");
+    if let Some((_, _, bytes_per_interval)) = companion_due {
+        out.extend_from_slice(&default_companion(bytes_per_interval));
     }
-    Ok(())
+    finish_interface(&mut out, interface, setting_endpoints.len());
+    let mut numbers: Vec<u8> = settings.iter().map(|(number, _)| *number).collect();
+    numbers.sort_unstable();
+    numbers.dedup();
+    out[4] = numbers.len() as u8;
+    let length = u16::try_from(out.len()).map_err(|_| "USB configuration too long")?;
+    out[2..4].copy_from_slice(&length.to_le_bytes());
+    Ok(out)
+}
+
+/// Record the endpoints an interface descriptor really has.
+fn finish_interface(out: &mut [u8], interface: Option<(u8, usize)>, endpoints: usize) {
+    if let Some((_, count)) = interface {
+        out[count] = endpoints as u8;
+    }
+}
+
+/// Linux's companion for a SuperSpeed endpoint without one: no bursts, no
+/// streams, and a periodic endpoint's packet per service interval.
+fn default_companion(bytes_per_interval: u16) -> [u8; 6] {
+    let [low, high] = bytes_per_interval.to_le_bytes();
+    [COMPANION_LENGTH, SS_ENDPOINT_COMPANION, 0, 0, low, high]
+}
+
+/// Linux `usb_parse_endpoint`'s corrections of bInterval and wMaxPacketSize.
+fn fix_endpoint(endpoint: &mut [u8], speed: u8) {
+    let kind = usize::from(endpoint[3] & ENDPOINT_TYPE);
+    let interval = endpoint[6];
+    let high_speed = matches!(speed, HIGH_SPEED | SUPER_SPEED | SUPER_SPEED_PLUS);
+    endpoint[6] = match kind {
+        INTERRUPT if high_speed && !(1..=16).contains(&interval) => {
+            // Many devices give full-speed periods: convert to microframes.
+            match (u32::from(interval) * 8).checked_ilog2() {
+                Some(bit) => bit as u8 + 1,
+                None => HIGH_SPEED_DEFAULT_INTERVAL,
+            }
+        }
+        INTERRUPT if !high_speed && interval == 0 => SLOW_INTERRUPT_INTERVAL,
+        ISOCHRONOUS if !(1..=16).contains(&interval) => match speed {
+            HIGH_SPEED => HIGH_SPEED_DEFAULT_INTERVAL,
+            _ => FULL_SPEED_ISOCHRONOUS_INTERVAL,
+        },
+        _ => interval,
+    };
+    let field = u16::from_le_bytes([endpoint[4], endpoint[5]]);
+    let multiple = match speed {
+        HIGH_SPEED if matches!(kind, ISOCHRONOUS | INTERRUPT) => field & MULTIPLE_TRANSACTIONS,
+        _ => 0,
+    };
+    let maximums = match speed {
+        LOW_SPEED => LOW_SPEED_MAXIMUMS,
+        FULL_SPEED => FULL_SPEED_MAXIMUMS,
+        SUPER_SPEED | SUPER_SPEED_PLUS => SUPER_SPEED_MAXIMUMS,
+        _ => HIGH_SPEED_MAXIMUMS,
+    };
+    let packet = (field & !multiple).min(maximums[kind]);
+    endpoint[4..6].copy_from_slice(&(multiple | packet).to_le_bytes());
 }
 
 #[cfg(test)]
@@ -189,7 +295,10 @@ pub(super) fn select_with_controller(
 ) -> Result<(), &'static str> {
     let mut candidates = Vec::new();
     for index in 0..device.configurations.len() {
-        device.configuration = device.configurations[index].clone();
+        let Ok(configuration) = sanitize(&device.configurations[index], device.speed) else {
+            continue;
+        };
+        device.configuration = configuration;
         let all = interfaces(&device.configuration);
         let mut count = 0;
         let mut vendor_ethernet = false;
@@ -249,19 +358,16 @@ pub(super) fn select_with_controller(
     if !maximum.1 && finalists.iter().any(|candidate| candidate.3) {
         finalists.retain(|candidate| !candidate.2 || candidate.3);
     }
-    if maximum.0 != 0 && finalists.len() > 1 {
-        device.configuration.clear();
-        return Err("ambiguous equally supported USB configurations");
-    }
+    // Linux `usb_choose_configuration` takes the first of equal candidates.
     let best = finalists.first().map(|candidate| candidate.0);
     if maximum.0 == 0 && device.descriptor[4] == HUB_CLASS {
         return Err("USB hub has no supported configuration");
     }
-    device.configuration = device
+    let chosen = device
         .configurations
         .get(best.unwrap_or(0))
-        .ok_or("USB device has no configuration descriptors")?
-        .clone();
+        .ok_or("USB device has no configuration descriptors")?;
+    device.configuration = sanitize(chosen, device.speed)?;
     Ok(())
 }
 
@@ -277,7 +383,7 @@ pub(super) mod tests {
         ];
         let total = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        validate(&bytes).unwrap();
+        assert_eq!(sanitize(&bytes, SUPER_SPEED).unwrap(), bytes);
         let all = interfaces(&bytes);
         assert_eq!(
             all[0].endpoints[0].companion,
@@ -299,7 +405,9 @@ pub(super) mod tests {
             all[0].extra,
             [vec![6, 0x30, 7, 0, 0, 0], vec![6, 0x30, 3, 0, 37, 0]]
         );
-        // Every short companion length is rejected, including a 2-byte header.
+        // A short companion, or one a class descriptor separates from its
+        // endpoint, gives way to Linux's default companion.
+        let default = Some(SuperSpeedCompanion::default());
         for length in 2..6 {
             let mut bad = bytes.clone();
             bad.splice(
@@ -310,18 +418,33 @@ pub(super) mod tests {
             );
             let total = bad.len() as u16;
             bad[2..4].copy_from_slice(&total.to_le_bytes());
-            assert!(validate(&bad).is_err());
+            let fixed = sanitize(&bad, SUPER_SPEED).unwrap();
+            assert_eq!(interfaces(&fixed)[0].endpoints[0].companion, default);
         }
-        for (at, addition) in [
-            (18, vec![6, 0x30, 0, 0, 0, 0]), // orphan
-            (31, vec![6, 0x30, 0, 0, 0, 0]), // duplicate
-            (25, vec![2, 0x25]),             // intervening class descriptor
-        ] {
-            let mut bad = bytes.clone();
-            bad.splice(at..at, addition);
-            let total = bad.len() as u16;
-            bad[2..4].copy_from_slice(&total.to_le_bytes());
-            assert!(validate(&bad).is_err());
+        let mut separated = bytes.clone();
+        separated.splice(25..25, [2, 0x25]);
+        let total = separated.len() as u16;
+        separated[2..4].copy_from_slice(&total.to_le_bytes());
+        let fixed = sanitize(&separated, SUPER_SPEED).unwrap();
+        assert_eq!(interfaces(&fixed)[0].endpoints[0].companion, default);
+        // A periodic companion cannot claim more than its bursts carry.
+        let mut greedy = bytes.clone();
+        greedy[42..44].copy_from_slice(&1000u16.to_le_bytes());
+        let fixed = sanitize(&greedy, SUPER_SPEED).unwrap();
+        assert_eq!(
+            interfaces(&fixed)[0].endpoints[1]
+                .companion
+                .unwrap()
+                .bytes_per_interval,
+            256
+        );
+        // Orphan and duplicate companions are dropped.
+        for at in [18, 31] {
+            let mut stray = bytes.clone();
+            stray.splice(at..at, [6, 0x30, 9, 0, 0, 0]);
+            let total = stray.len() as u16;
+            stray[2..4].copy_from_slice(&total.to_le_bytes());
+            assert_eq!(sanitize(&stray, SUPER_SPEED).unwrap(), bytes);
         }
     }
 
@@ -377,7 +500,7 @@ pub(super) mod tests {
         rndis[14..17].copy_from_slice(&[2, 2, 0xff]);
         let originals = vec![rndis, ecm(42), vendor(5)];
         for bytes in &originals {
-            validate(bytes).unwrap();
+            sanitize(bytes, SUPER_SPEED).unwrap();
         }
         let mut device = device(originals.clone());
         select(&mut device).unwrap();
@@ -420,21 +543,33 @@ pub(super) mod tests {
         }
         let total = ss.len() as u16;
         ss[2..4].copy_from_slice(&total.to_le_bytes());
-        validate(&ss).unwrap();
+        sanitize(&ss, SUPER_SPEED).unwrap();
         ss
     }
 
     #[test]
     fn refused_superspeed_functions_never_tie_or_beat_usable_configuration() {
         let valid = superspeed(&storage(42));
+        // Linux fixes a missing companion, a reserved stream count and an
+        // oversized burst; each such function then counts.
         let mut missing = storage(7);
         missing[22..24].copy_from_slice(&1024u16.to_le_bytes());
         missing[29..31].copy_from_slice(&1024u16.to_le_bytes());
         let mut streams = superspeed(&storage(7));
         streams[28] = 17;
-        let mut invalid = superspeed(&storage(7));
-        invalid[27] = 16;
-        for refused in [missing, streams, invalid] {
+        let mut burst = superspeed(&storage(7));
+        burst[27] = 16;
+        for fixed in [missing, streams, burst] {
+            let mut dev = device(vec![fixed]);
+            dev.speed = SUPER_SPEED;
+            select(&mut dev).unwrap();
+            let all = interfaces(&dev.configuration);
+            assert!(plan(&dev, &all[0], &all).is_ok());
+        }
+        // A 512-byte SuperSpeed bulk endpoint stays refused.
+        let mut small = superspeed(&storage(7));
+        small[22..24].copy_from_slice(&512u16.to_le_bytes());
+        for refused in [small] {
             for order in [false, true] {
                 let mut configurations = vec![refused.clone(), valid.clone()];
                 if order {
@@ -445,7 +580,8 @@ pub(super) mod tests {
                 select(&mut dev).unwrap();
                 assert_eq!(dev.configuration_value(), 42);
                 assert_eq!(dev.configurations.len(), 2);
-                let all = interfaces(&refused);
+                let fixed = sanitize(&refused, SUPER_SPEED).unwrap();
+                let all = interfaces(&fixed);
                 assert!(plan(&dev, &all[0], &all).is_err());
             }
         }
@@ -453,7 +589,7 @@ pub(super) mod tests {
         // vendor function whose transport is explicitly refused by this host.
         let mut vendor = superspeed(&storage(7));
         vendor[14..17].copy_from_slice(&[0xff, 0, 0]);
-        vendor[28] = 17;
+        vendor[22..24].copy_from_slice(&512u16.to_le_bytes());
         let valid = superspeed(&ecm(42));
         for order in [false, true] {
             let mut configurations = vec![vendor.clone(), valid.clone()];
@@ -489,9 +625,10 @@ pub(super) mod tests {
             9, 2, 25, 0, 1, 42, 0, 0x80, 50, 9, 4, 0, 0, 1, HUB_CLASS, 0, 0, 0, 7, 5, 0x81, 3, 8,
             0, 1,
         ];
+        // An OUT status endpoint cannot report port changes.
         let mut invalid = valid.clone();
         invalid[5] = 7;
-        invalid[24] = 0;
+        invalid[20] = 0x01;
         for order in [false, true] {
             let mut configurations = vec![invalid.clone(), valid.clone()];
             if order {
@@ -505,14 +642,10 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn equal_supported_configurations_are_explicitly_ambiguous() {
+    fn equal_supported_configurations_choose_the_first_like_linux() {
         let mut device = device(vec![storage(7), ecm(42)]);
-        assert_eq!(
-            select(&mut device),
-            Err("ambiguous equally supported USB configurations")
-        );
-        assert!(device.configuration.is_empty());
-        assert_eq!(device.configuration_value(), 0);
+        select(&mut device).unwrap();
+        assert_eq!(device.configuration_value(), 7);
         assert_eq!(device.configurations.len(), 2);
     }
 
@@ -526,7 +659,7 @@ pub(super) mod tests {
         composite[4] = 2;
         let total = composite.len() as u16;
         composite[2..4].copy_from_slice(&total.to_le_bytes());
-        validate(&composite).unwrap();
+        sanitize(&composite, HIGH_SPEED).unwrap();
         for configurations in [
             vec![single.clone(), composite.clone()],
             vec![composite, single],
@@ -587,10 +720,9 @@ pub(super) mod tests {
         let mut device = device(vec![vendor, other, ecm(42)]);
         device.descriptor[8..12].copy_from_slice(&[0xda, 0x0b, 0x52, 0x81]);
         device.vendor_ethernet_revision = Some(0x4c10);
-        assert_eq!(
-            select(&mut device),
-            Err("ambiguous equally supported USB configurations")
-        );
+        // Linux takes the first of equally good configurations.
+        select(&mut device).unwrap();
+        assert_eq!(device.configuration_value(), 7);
     }
 
     #[test]
@@ -724,7 +856,8 @@ pub(super) mod tests {
         vendor[14..17].copy_from_slice(&[0xff, 0xff, 0]);
         let mut alternate = vendor.clone();
         alternate[12] = 2;
-        vendor[28] = 17; // Reserved MaxStreams encoding invalidates the default setting.
+        // A 512-byte SuperSpeed bulk endpoint invalidates the default setting.
+        vendor[22..24].copy_from_slice(&512u16.to_le_bytes());
         vendor.extend_from_slice(&alternate[9..]);
         let length = vendor.len() as u16;
         vendor[2..4].copy_from_slice(&length.to_le_bytes());
@@ -748,25 +881,24 @@ pub(super) mod tests {
         let mut other = vendor.clone();
         other[5] = 9;
         dev.configurations = vec![vendor, other];
-        assert_eq!(
-            select(&mut dev),
-            Err("ambiguous equally supported USB configurations")
-        );
+        // Linux takes the first of equally good configurations.
+        select(&mut dev).unwrap();
+        assert_eq!(dev.configuration_value(), 7);
     }
 
     #[test]
-    fn selected_alternate_cannot_overlap_another_default_active_interface() {
+    fn an_endpoint_another_interface_owns_is_skipped_like_linux() {
         let mut bytes = ecm(42);
         bytes.extend_from_slice(&[9, 4, 2, 0, 1, 0xff, 0, 0, 0, 7, 5, 0x81, 2, 64, 0, 0]);
         bytes[4] = 3;
         let total = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        validate(&bytes).unwrap(); // Default data setting has no endpoints.
         let mut device = device(vec![bytes]);
-        assert_eq!(
-            select(&mut device),
-            Err("USB alternate settings activate overlapping endpoints")
-        );
+        select(&mut device).unwrap();
+        let all = interfaces(&device.configuration);
+        let vendor = all.iter().find(|interface| interface.number == 2).unwrap();
+        assert!(vendor.endpoints.is_empty());
+        assert!(active_settings(&all, &[(1, 1)]).is_ok());
     }
 
     #[test]
@@ -780,7 +912,7 @@ pub(super) mod tests {
         bytes[4] = 3;
         let total = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        validate(&bytes).unwrap();
+        sanitize(&bytes, HIGH_SPEED).unwrap();
         let mut device = device(vec![bytes]);
         assert_eq!(
             select(&mut device),
@@ -789,45 +921,61 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn configuration_stream_must_be_complete_and_internally_consistent() {
+    fn malformed_configurations_are_read_as_linux_reads_them() {
         let valid = ecm(42);
-        for length in 0..valid.len() {
-            assert!(validate(&valid[..length]).is_err(), "truncation {length}");
-        }
-        // Length/type/value/interface count/endpoint count/address/alternate zero.
-        for (offset, value) in [
-            (0, 8),
-            (1, 1),
-            (2, 9),
-            (5, 0),
-            (4, 3),
-            (13, 2),
-            (9, 1),
-            (10, 2),
-            (45, 0),
-            (46, 0x80),
-            (53, 2),
-        ] {
+        assert_eq!(sanitize(&valid, HIGH_SPEED).unwrap(), valid);
+        // Only the header is fatal.
+        for (offset, value) in [(0, 8), (1, 1), (5, 0)] {
             let mut malformed = valid.clone();
             malformed[offset] = value;
-            assert!(
-                validate(&malformed).is_err(),
-                "offset {offset}, value {value}"
-            );
+            assert!(sanitize(&malformed, HIGH_SPEED).is_err(), "offset {offset}");
         }
+        assert!(sanitize(&valid[..8], HIGH_SPEED).is_err());
+        // A truncated stream keeps every whole descriptor and fixes counts.
+        let truncated = sanitize(&valid[..valid.len() - 3], HIGH_SPEED).unwrap();
+        assert_eq!(usize::from(truncated[2]), truncated.len());
+        // Wrong interface and endpoint counts are corrected.
+        let mut miscounted = valid.clone();
+        miscounted[4] = 7;
+        assert_eq!(sanitize(&miscounted, HIGH_SPEED).unwrap(), valid);
+        // Duplicate endpoints in one setting, endpoint zero and empty packets
+        // are skipped; the device keeps the rest.
         let mut duplicate = storage(1);
         duplicate[27] = 0x81;
-        assert!(validate(&duplicate).is_err());
+        let fixed = sanitize(&duplicate, HIGH_SPEED).unwrap();
+        assert_eq!(interfaces(&fixed)[0].endpoints.len(), 1);
         let mut orphan = vendor(1);
         orphan.extend_from_slice(&[7, 5, 0x81, 2, 64, 0, 0]);
         orphan.drain(9..18);
         orphan[2] = orphan.len() as u8;
-        assert!(validate(&orphan).is_err());
+        assert!(interfaces(&sanitize(&orphan, HIGH_SPEED).unwrap()).is_empty());
     }
+
+    #[test]
+    fn endpoint_intervals_and_packet_sizes_are_corrected_like_linux() {
+        let fix = |bytes: [u8; 7], speed| {
+            let mut endpoint = bytes.to_vec();
+            fix_endpoint(&mut endpoint, speed);
+            (u16::from_le_bytes([endpoint[4], endpoint[5]]), endpoint[6])
+        };
+        // A full-speed period in a high-speed interrupt endpoint: 32 frames.
+        assert_eq!(fix([7, 5, 0x81, 3, 8, 0, 32], HIGH_SPEED), (8, 9));
+        assert_eq!(fix([7, 5, 0x81, 3, 8, 0, 0], HIGH_SPEED), (8, 7));
+        assert_eq!(fix([7, 5, 0x81, 3, 8, 0, 0], FULL_SPEED), (8, 10));
+        assert_eq!(fix([7, 5, 0x81, 1, 0, 2, 0], FULL_SPEED), (512, 4));
+        // Oversized packets are clamped; high-speed periodic keeps its
+        // additional transactions.
+        assert_eq!(fix([7, 5, 0x81, 2, 0, 4, 0], HIGH_SPEED), (512, 0));
+        assert_eq!(fix([7, 5, 0x81, 3, 0, 0x14, 1], HIGH_SPEED), (0x1400, 1));
+        assert_eq!(fix([7, 5, 0x81, 3, 64, 0, 1], LOW_SPEED), (8, 1));
+        // Linux only warns about a high-speed bulk endpoint below 512.
+        assert_eq!(fix([7, 5, 0x81, 2, 64, 0, 0], HIGH_SPEED), (64, 0));
+    }
+
     #[test]
     fn pc_uac2_selection_keeps_zero_bandwidth_until_explicit_pcm_start() {
         let configuration = audio::test_configuration();
-        validate(&configuration).unwrap();
+        sanitize(&configuration, HIGH_SPEED).unwrap();
         let mut device = device(vec![configuration]);
         device.speed = 3;
         device.descriptor[2..7].copy_from_slice(&[0, 2, 0xef, 2, 1]);

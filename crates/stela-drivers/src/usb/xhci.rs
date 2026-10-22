@@ -450,7 +450,7 @@ impl Ring {
 }
 
 /// USB 3.x endpoint companion, retained with the endpoint it immediately follows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SuperSpeedCompanion {
     pub max_burst: u8,
     pub attributes: u8,
@@ -2078,15 +2078,13 @@ impl Controller {
                 "slot {slot} configuration {index} value={} validate",
                 head[5]
             ),
-            configuration::validate(&bytes)
-                .and_then(|()| {
-                    if bytes[..9] != head[..9] {
-                        Err("USB configuration header changed during enumeration")
-                    } else {
-                        Ok(())
-                    }
-                })
-                .map_err(BlockError::Unsupported),
+            if bytes[..9] != head[..9] {
+                Err(BlockError::Unsupported(
+                    "USB configuration header changed during enumeration",
+                ))
+            } else {
+                Ok(())
+            },
         )?;
         Ok(bytes)
     }
@@ -3581,7 +3579,7 @@ pub(crate) mod tests {
         }
         let total = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&total.to_le_bytes());
-        configuration::validate(&bytes).unwrap();
+        configuration::sanitize(&bytes, SUPER_SPEED).unwrap();
         let mut device = configuration::tests::device(vec![bytes]);
         configuration::select(&mut device).unwrap();
         device
@@ -4252,24 +4250,26 @@ pub(crate) mod tests {
 
     #[test]
     fn refused_superspeed_plan_preserves_inventory_without_configuration_or_dma() {
+        // SuperSpeed bulk endpoints of 512 bytes, which no fixup changes.
         for streams in [false, true] {
             let mut configuration = vec![
-                9, 2, 0, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 8, 6, 0x50, 0, 7, 5, 0x81, 2, 0, 4, 0,
+                9, 2, 0, 0, 1, 7, 0, 0x80, 50, 9, 4, 0, 0, 2, 8, 6, 0x50, 0, 7, 5, 0x81, 2, 0, 2, 0,
             ];
             if streams {
                 configuration.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 0, 17, 0, 0]);
             }
-            configuration.extend_from_slice(&[7, 5, 2, 2, 0, 4, 0]);
+            configuration.extend_from_slice(&[7, 5, 2, 2, 0, 2, 0]);
             if streams {
                 configuration.extend_from_slice(&[6, SS_ENDPOINT_COMPANION, 0, 0, 0, 0]);
             }
             let total = configuration.len() as u16;
             configuration[2..4].copy_from_slice(&total.to_le_bytes());
-            configuration::validate(&configuration).unwrap();
+            let sanitized = configuration::sanitize(&configuration, SUPER_SPEED).unwrap();
             let mut device = configuration::tests::device(vec![configuration.clone()]);
             device.speed = SUPER_SPEED;
             configuration::select(&mut device).unwrap();
-            assert_eq!(device.configuration, configuration);
+            assert_eq!(device.configuration, sanitized);
+            assert_eq!(device.configurations, [configuration]);
             let mut backing = vec![0u64; 128 * 1024];
             let start = backing.as_mut_ptr() as u64;
             // SAFETY: backing stays exclusive/live throughout model and controller access.
@@ -4717,7 +4717,7 @@ pub(crate) mod tests {
         }
         let length = bytes.len() as u16;
         bytes[2..4].copy_from_slice(&length.to_le_bytes());
-        configuration::validate(&bytes).unwrap();
+        configuration::sanitize(&bytes, SUPER_SPEED).unwrap();
         bytes
     }
 
