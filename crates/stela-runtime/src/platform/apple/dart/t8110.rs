@@ -114,13 +114,56 @@
 //! SID a remapped stream's fault records is not recovered, so such a fault
 //! refuses instead of inventing ERROR's STREAM field.
 //!
+//! Revision 2.2 (`Profile::T8110Rev22`), the register file of the M4- and
+//! M5-generation nodes whose translation windows are 0xc000 or 0x20000
+//! bytes, keeps the layout above and reports PARAMS3 version 0x0202 with a
+//! 42-bit VA space: SPTM requires a VA space above 40 bits from version 2
+//! (`t8110dart_init_instance`) and those nodes' `vm-base` is 1 << 40. Its
+//! differences, from the 26A434 T8132 SPTM and Mac16 kernelcache:
+//! - Faults are per stream, in the bank `gen3::fault::Capture` implements:
+//!   a pending bit per stream at 0x4000 + 4 × word, which software clears
+//!   by writing ones (SPTM CLEAR_EXCEPTION, VA 0xfffffff0270ce06c, helper
+//!   0xfffffff0270cdf80), and a 0x40-byte record per stream at 0x8000 +
+//!   0x40 × SID whose fault address is at +8/+0xc (`_DART_EXCEPTION`
+//!   0xfffffe0009f32640). The kernel's `_fatalException`
+//!   (0xfffffe0009f300d0..0xfffffe0009f303ec, table 0xfffffe0009f30594)
+//!   decodes the status at +0 with the gen3 taxonomy: a code in [3:0] and,
+//!   for an invalid entry, its level in [13:12]. As for gen3, the complete
+//!   status header, the auxiliary AXI fields (`_DART_ERR_SID_AXI_ID`
+//!   0xfffffe0009f319a4), a second fault on a pending stream and a record
+//!   read after acknowledgement are unqualified and refuse. ERROR,
+//!   ERROR_ADDRESS and ERROR_STREAMS are unused: SPTM's CLEAR_ERR raises a
+//!   violation from 2.2 (0xfffffff0270cfdf8), so they refuse. ERROR_MASK
+//!   moves to 0x4060 (SPTM table file 0x159d0); SPTM only writes it zero,
+//!   and a nonzero mask, whose encoding is unrecovered, refuses. Inferred:
+//!   the interrupt follows any pending bit. The bitmaps at 0x4020 and
+//!   0x4040, which only the kernel's register capture reads, refuse.
+//! - FOUR_LEVEL (TCR bit 3) walks three tables from the TTBR: DVA [46:36],
+//!   [35:25] and [24:14] (the kernel's `t8110dart_vo_tte`, VA
+//!   0xfffffe000be2b714, level masks 0xfffffe0007013cc0 and shifts ..ce0,
+//!   whose root is the TTBR at level 0 with FOUR_LEVEL and level 1 without).
+//!   A missing first-level entry is NO_PGD (code 0, level 1). Without
+//!   FOUR_LEVEL the TTBR's table maps [35:25] as in revision 1; the kernel
+//!   expects DVA [46:36] to be 0x10 (or 0 for a node it flags), so both
+//!   reach those tables and any other value refuses as unrecovered.
+//! - SPTM reads the capture count from TRAD +0x18 from version 2.1
+//!   (0xfffffff0270d11a0), which reads zero here; the paired UMMS view's
+//!   revision 2 interface is unrecovered and refuses.
+//! - PROTECT domains 5 to 8 exist: SPTM requires them with TTBR_TCR locked
+//!   below version 2.4 (0xfffffff0270d1e7c). What they guard is unrecovered;
+//!   every register they could guard is unmodelled and refuses anyway.
+//! - The window between the 0xc000-byte register file and a 0x20000-byte
+//!   window's end has no recovered register (iBoot's DART driver maps only
+//!   0x4000 or 0xc000 bytes, J604 iBoot VA 0x100c1b90ef0), so it refuses.
+//!
 //! Full family evidence, capability gates and qualification gaps are in
 //! `docs/research/dart-iommu.md`. The paired SMMU view exposes the capture
 //! count of this cacheless implementation, not a physical chip's dump.
 use super::super::bus::{Access, Direction, MmioDevice, MmioError, Width, refuse};
 use super::super::interrupt::{AicInput, Wire};
 use super::descriptor::Format;
-use super::{DAPF_BYTES, DAPF_OFFSET, Fault, SMMU_BYTES, SMMU_OFFSET, SmmuBlock};
+use super::gen3::fault::{Capture, Code, Level, Record};
+use super::{DAPF_BYTES, DAPF_OFFSET, Fault, Profile, SMMU_BYTES, SMMU_OFFSET, SmmuBlock};
 use crate::platform::dma::{DmaError, Iommu, Memory};
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -139,8 +182,34 @@ const REGION_PROTECTION: u32 = 1 << 31;
 const BYPASS_SUPPORT: u32 = 1;
 const PARAMS3: u64 = 0x08;
 const PARAMS4: u64 = 0x0c;
-/// PARAMS3: the PA and VA widths and version 1.0.
-const PARAMS3_VALUE: u32 = PA_BITS << 24 | IOVA_BITS << 16 | 0x0100;
+/// PARAMS3 versions of the two register files.
+const VERSION_1_0: u16 = 0x0100;
+const VERSION_2_2: u16 = 0x0202;
+/// Revision 2.2: the TRAD capture count (low 16 bits), the per-stream
+/// pending words and records, and the moved ERROR_MASK.
+const CAPTURE_COUNT: u64 = 0x18;
+const PENDING: u64 = 0x4000;
+const ERROR_MASK_2_2: u64 = 0x4060;
+const RECORDS: u64 = 0x8000;
+const RECORD: u64 = 0x40;
+/// The revision 2.2 register file, ending with the last stream's record.
+pub(super) const REGISTER_BYTES_2_2: u64 = RECORDS + 256 * RECORD;
+/// Each walk fault's record class: an invalid entry at its table level, or a
+/// permission code, whose level field the decoder ignores.
+const CLASSES: [(Fault, Code, Level); 7] = [
+    (Fault::NoTtbr, Code::Invalid, Level::Ttbr),
+    (Fault::NoPgd, Code::Invalid, Level::Cte),
+    (Fault::NoPmd, Code::Invalid, Level::Ste),
+    (Fault::NoPte, Code::Invalid, Level::Pte),
+    (Fault::Write, Code::Write, Level::Pte),
+    (Fault::Read, Code::Read, Level::Pte),
+    (Fault::Region, Code::Region, Level::Pte),
+];
+const REVISION_2_2_UMMS: &str =
+    "DART revision 2.2 UMMS capture interface is unrecovered; its count is TRAD +0x18";
+const REVISION_2_2_ERRORS: &str =
+    "DART revision 2.2 reports faults in per-stream exception records, not ERROR";
+const REVISION_2_2_TAIL: &str = "DART window beyond the revision 2.2 register file is unrecovered";
 const TLB_CMD: u64 = 0x80;
 const TLB_OP: u32 = 0x7 << 8;
 const TLB_OP_FLUSH_ALL: u32 = 0;
@@ -210,6 +279,8 @@ const PROTECT_TTBR_TCR: u32 = 1;
 const PROTECT_APF: u32 = 1 << 2;
 /// Secure translation-zone configuration is outside the switched DART state.
 const PROTECT_TZ: u32 = (1 << 3) | (1 << 4);
+/// Revision 2 protection domains whose guarded registers are unrecovered.
+const PROTECT_UNRECOVERED: u32 = 0x1e0;
 const TZ_CONFIG: u64 = 0x500;
 const TZ_SELECT: u64 = 0x504;
 const TZ_FIRST: u64 = 0x508;
@@ -244,6 +315,9 @@ const PAGE_SHIFT: u32 = 14;
 const PAGE: u64 = 1 << PAGE_SHIFT;
 const LEVEL_BITS: u32 = 11;
 const IOVA_BITS: u32 = PAGE_SHIFT + 2 * LEVEL_BITS;
+const IOVA_BITS_2_2: u32 = 42;
+/// Revision 2.2 two-level walks: the DVA [46:36] values the kernel uses.
+const TWO_LEVEL_WINDOWS: [u64; 2] = [0, 0x10];
 /// The PAs an entry's address field reaches.
 const PA_BITS: u32 = (ENTRY_ADDRESS << ENTRY_ADDRESS_SHIFT).ilog2() + 1;
 const ENTRY_VALID: u64 = 1;
@@ -254,6 +328,8 @@ const ENTRY_ADDRESS_SHIFT: u32 = 4;
 const SUBPAGE_UNIT: u64 = 4;
 
 pub struct Dart {
+    /// PARAMS3's version, which selects the register file.
+    version: u16,
     streams: usize,
     powered: bool,
     clock_enabled: bool,
@@ -270,6 +346,8 @@ pub struct Dart {
     error_mask: u32,
     error_address: u64,
     error_streams: [u32; STREAM_WORDS as usize],
+    /// Revision 2.2's per-stream fault bank.
+    faults: Option<Capture>,
     protect: u32,
     locked: u32,
     /// The address permission filter's slices, when the DART has one.
@@ -325,14 +403,24 @@ impl Dart {
         self.streams
     }
 
-    /// A DART of `streams` streams (`sid-count`, at most 256), every stream
-    /// disabled and untranslated, signalling faults on `irq`.
+    /// A revision-1.0 DART of `streams` streams (`sid-count`, at most 256),
+    /// every stream disabled and untranslated, signalling faults on `irq`.
     pub fn new(streams: usize, irq: Option<AicInput>) -> Self {
+        Self::for_version(VERSION_1_0, streams, irq)
+    }
+
+    /// A DART of the register file PARAMS3 `version` names.
+    pub(super) fn for_version(version: u16, streams: usize, irq: Option<AicInput>) -> Self {
         assert!(
             (1..=256).contains(&streams),
             "the T8110 layout addresses 1..256 streams"
         );
+        assert!(
+            [VERSION_1_0, VERSION_2_2].contains(&version),
+            "a modelled T8110 register file"
+        );
         Self {
+            version,
             streams,
             powered: true,
             clock_enabled: true,
@@ -349,6 +437,8 @@ impl Dart {
             error_mask: 0,
             error_address: 0,
             error_streams: [0; STREAM_WORDS as usize],
+            faults: (version >= VERSION_2_2)
+                .then(|| Capture::new(streams).expect("validated stream count")),
             protect: 0,
             locked: 0,
             apf: None,
@@ -363,10 +453,19 @@ impl Dart {
     /// The J473AP `dart-usb0` DT has two ranges and one `interrupts` cell.
     /// Clearing one instance cannot deassert another instance's pending fault.
     pub fn group(streams: usize, irq: Option<AicInput>, count: usize) -> Vec<Self> {
+        Self::group_for_version(VERSION_1_0, streams, irq, count)
+    }
+
+    pub(super) fn group_for_version(
+        version: u16,
+        streams: usize,
+        irq: Option<AicInput>,
+        count: usize,
+    ) -> Vec<Self> {
         let levels = Rc::new(RefCell::new(vec![false; count]));
         (0..count)
             .map(|index| {
-                let mut dart = Self::new(streams, irq);
+                let mut dart = Self::for_version(version, streams, irq);
                 dart.shared_fault = Some((levels.clone(), index));
                 dart
             })
@@ -444,6 +543,9 @@ impl Dart {
         self.error_mask = 0;
         self.error_address = 0;
         self.error_streams.fill(0);
+        if let Some(faults) = &mut self.faults {
+            faults.clear();
+        }
         self.protect &= PROTECT_TZ;
         self.locked &= PROTECT_TZ;
         if let Some(apf) = &mut self.apf {
@@ -454,7 +556,87 @@ impl Dart {
 
     /// The protection domains this DART has.
     fn domains(&self) -> u32 {
-        PROTECT_TTBR_TCR | PROTECT_TZ | if self.apf.is_some() { PROTECT_APF } else { 0 }
+        let unrecovered = if self.revision_2_2() {
+            PROTECT_UNRECOVERED
+        } else {
+            0
+        };
+        PROTECT_TTBR_TCR
+            | PROTECT_TZ
+            | unrecovered
+            | if self.apf.is_some() { PROTECT_APF } else { 0 }
+    }
+
+    const fn revision_2_2(&self) -> bool {
+        self.version >= VERSION_2_2
+    }
+
+    const fn iova_bits(&self) -> u32 {
+        if self.revision_2_2() {
+            IOVA_BITS_2_2
+        } else {
+            IOVA_BITS
+        }
+    }
+
+    /// Whether `offset` is one of revision 2.2's per-stream fault registers.
+    fn fault_register(&self, offset: u64) -> bool {
+        let pending = PENDING..PENDING + 4 * self.streams.div_ceil(32) as u64;
+        let records = RECORDS..RECORDS + RECORD * self.streams as u64;
+        pending.contains(&offset) || records.contains(&offset)
+    }
+
+    /// A revision 2.2 register read, or None for the shared layout.
+    fn revision_2_2_read(
+        &mut self,
+        offset: u64,
+        width: Width,
+        access: &mut Access<'_>,
+    ) -> Option<Result<u64, MmioError>> {
+        let fail = |reason| refuse(NAME, offset, width, Direction::Read, reason);
+        let registers = self.fault_register(offset);
+        let faults = self.faults.as_mut()?;
+        Some(match offset {
+            ERROR | ERROR_MASK | ERROR_ADDRESS_LOW | ERROR_ADDRESS_HIGH => {
+                Err(fail(REVISION_2_2_ERRORS))
+            }
+            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => Err(fail(REVISION_2_2_ERRORS)),
+            // The cacheless model captures no state; only a zero mask is
+            // accepted.
+            CAPTURE_COUNT | ERROR_MASK_2_2 => Ok(0),
+            _ if registers => faults.read(offset, width, access),
+            _ if (REGISTER_BYTES_2_2..DAPF_OFFSET).contains(&offset) => {
+                Err(fail(REVISION_2_2_TAIL))
+            }
+            _ => return None,
+        })
+    }
+
+    /// A revision 2.2 register write, or None for the shared layout.
+    fn revision_2_2_write(
+        &mut self,
+        offset: u64,
+        width: Width,
+        value: u64,
+        access: &mut Access<'_>,
+    ) -> Option<Result<(), MmioError>> {
+        let fail = |reason| refuse(NAME, offset, width, Direction::Write, reason);
+        let registers = self.fault_register(offset);
+        let faults = self.faults.as_mut()?;
+        Some(match offset {
+            ERROR | ERROR_MASK | ERROR_ADDRESS_LOW | ERROR_ADDRESS_HIGH => {
+                Err(fail(REVISION_2_2_ERRORS))
+            }
+            _ if bitmap_word(offset, ERROR_STREAMS).is_some() => Err(fail(REVISION_2_2_ERRORS)),
+            CAPTURE_COUNT => Err(fail("DART capture count is read-only")),
+            ERROR_MASK_2_2 if value == 0 => Ok(()),
+            ERROR_MASK_2_2 => Err(fail("DART revision 2.2 error-mask encoding is unrecovered")),
+            _ if registers => faults.write(offset, width, value, access),
+            _ if (REGISTER_BYTES_2_2..DAPF_OFFSET).contains(&offset) => {
+                Err(fail(REVISION_2_2_TAIL))
+            }
+            _ => return None,
+        })
     }
 
     /// The filter register at `offset` from the filter's start and the bits
@@ -533,18 +715,31 @@ impl Dart {
         if tcr & TCR_BYPASS_DART != 0 {
             return Ok(iova);
         }
-        if tcr & TCR_TRANSLATE == 0 || iova >> IOVA_BITS != 0 {
+        if tcr & TCR_TRANSLATE == 0 || iova >> self.iova_bits() != 0 {
             return Err(fault(Fault::NoTtbr));
         }
-        if tcr & TCR_FOUR_LEVEL != 0 {
+        let four_level = tcr & TCR_FOUR_LEVEL != 0;
+        if four_level && !self.revision_2_2() {
             return Err(DmaError::Unsupported("four-level DART tables"));
+        }
+        if !four_level && !TWO_LEVEL_WINDOWS.contains(&(iova >> IOVA_BITS)) {
+            return Err(DmaError::Unsupported(
+                "DART two-level DVA bits [46:36] outside the recovered 0 and 0x10 windows",
+            ));
         }
         let ttbr = self.ttbr[sid];
         if ttbr & TTBR_VALID == 0 {
             return Err(fault(Fault::NoTtbr));
         }
-        let root = u64::from((ttbr & TTBR_ADDRESS) >> TTBR_ADDRESS_SHIFT) << PAGE_SHIFT;
-        let first = entry(memory, root, iova >> (PAGE_SHIFT + LEVEL_BITS))?;
+        let mut table = u64::from((ttbr & TTBR_ADDRESS) >> TTBR_ADDRESS_SHIFT) << PAGE_SHIFT;
+        if four_level {
+            let upper = entry(memory, table, iova >> IOVA_BITS)?;
+            if upper & ENTRY_VALID == 0 {
+                return Err(fault(Fault::NoPgd));
+            }
+            table = target(upper, false)?;
+        }
+        let first = entry(memory, table, iova >> (PAGE_SHIFT + LEVEL_BITS))?;
         if first & ENTRY_VALID == 0 {
             return Err(fault(Fault::NoPmd));
         }
@@ -565,7 +760,31 @@ impl Dart {
         }
     }
 
-    fn report(&mut self, sid: usize, iova: u64, code: u32, write: bool, access: &mut Access<'_>) {
+    /// Latch a fault: revision 1.0's first ERROR, or revision 2.2's
+    /// stream record, whose second capture is unqualified and refuses.
+    fn report(
+        &mut self,
+        sid: usize,
+        iova: u64,
+        code: u32,
+        write: bool,
+        access: &mut Access<'_>,
+    ) -> Result<(), DmaError> {
+        if let Some(faults) = &mut self.faults {
+            let &(_, code, level) = CLASSES
+                .iter()
+                .find(|(fault, ..)| *fault as u32 == code)
+                .expect("every walk fault has a record class");
+            let record = Record {
+                code,
+                level,
+                write,
+                address: iova,
+            };
+            faults.capture(sid, record).map_err(DmaError::Unsupported)?;
+            self.signal(access);
+            return Ok(());
+        }
         if self.error & ERROR_FLAG == 0 {
             self.error = ERROR_FLAG
                 | (sid as u32 & 0xff) << ERROR_STREAM_SHIFT
@@ -577,10 +796,15 @@ impl Dart {
             self.error_streams[sid / 32] |= 1 << (sid % 32);
         }
         self.signal(access);
+        Ok(())
     }
 
     fn signal(&mut self, access: &mut Access<'_>) {
-        let level = self.error & ERROR_FLAG != 0 && self.error & ERROR_CODE & !self.error_mask != 0;
+        let level = if let Some(faults) = &self.faults {
+            (0..self.streams.div_ceil(32)).any(|word| faults.pending(word) != Ok(0))
+        } else {
+            self.error & ERROR_FLAG != 0 && self.error & ERROR_CODE & !self.error_mask != 0
+        };
         if level != self.irq_level {
             self.irq_level = level;
             let level = if let Some((levels, index)) = &self.shared_fault {
@@ -603,6 +827,14 @@ impl Dart {
         }
         let index = usize::try_from(offset.checked_sub(base)? / 4).ok()?;
         (index < self.streams).then_some(index)
+    }
+}
+
+/// The PARAMS3 version of a `dart,t8110` profile.
+pub(super) const fn version(profile: Profile) -> u16 {
+    match profile {
+        Profile::T8110Rev22 => VERSION_2_2,
+        _ => VERSION_1_0,
     }
 }
 
@@ -633,7 +865,7 @@ impl Iommu for Dart {
                     "DART remapped fault source-versus-context SID provenance",
                 ));
             }
-            self.report(sid, iova, code, write, access);
+            self.report(sid, iova, code, write, access)?;
         }
         result
     }
@@ -684,6 +916,9 @@ impl MmioDevice for Dart {
             return Err(fail("DART reset is asserted"));
         }
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            if self.revision_2_2() && self.smmu.is_some() {
+                return Err(fail(REVISION_2_2_UMMS));
+            }
             return self
                 .smmu
                 .as_mut()
@@ -696,10 +931,13 @@ impl MmioDevice for Dart {
                 .map(|(value, _)| u64::from(*value))
                 .ok_or_else(|| fail("unknown DART APF register"));
         }
+        if let Some(result) = self.revision_2_2_read(offset, width, access) {
+            return result;
+        }
         let value = match offset {
             PARAMS1 => PARAMS1_VALUE,
             PARAMS2 => BYPASS_SUPPORT,
-            PARAMS3 => PARAMS3_VALUE,
+            PARAMS3 => PA_BITS << 24 | self.iova_bits() << 16 | u32::from(self.version),
             PARAMS4 => self.streams as u32,
             TLB_CMD | TLB_SYNC | TLB_SYNC_STATUS => 0,
             TLB_PARAMETER => self.tlb_words[0],
@@ -766,6 +1004,9 @@ impl MmioDevice for Dart {
             return Err(fail("DART reset is asserted"));
         }
         if (SMMU_OFFSET..SMMU_OFFSET + SMMU_BYTES).contains(&offset) {
+            if self.revision_2_2() && self.smmu.is_some() {
+                return Err(fail(REVISION_2_2_UMMS));
+            }
             return self
                 .smmu
                 .as_mut()
@@ -784,6 +1025,11 @@ impl MmioDevice for Dart {
             if !locked {
                 *register = value;
             }
+            return Ok(());
+        }
+        if let Some(result) = self.revision_2_2_write(offset, width, u64::from(value), access) {
+            result?;
+            self.signal(access);
             return Ok(());
         }
         let protected = self.protect & PROTECT_TTBR_TCR != 0;
@@ -876,7 +1122,11 @@ mod tests {
     }
 
     fn setup() -> (Dart, Ram, InterruptLatch) {
-        let mut dart = Dart::new(16, Some(AicInput::new(0, 0x301)));
+        setup_version(VERSION_1_0)
+    }
+
+    fn setup_version(version: u16) -> (Dart, Ram, InterruptLatch) {
+        let mut dart = Dart::for_version(version, 16, Some(AicInput::new(0, 0x301)));
         let mut ram = Ram::new(ROOT, 8 * PAGE as usize);
         let mut latch = InterruptLatch::new();
         let mut access = Access::new(0, 0, &mut latch);
@@ -1518,5 +1768,262 @@ mod tests {
             dart.write(TCR + 4 * 16, Width::Word, 0, &mut access)
                 .is_err()
         );
+    }
+
+    /// Revision 2.2 DVAs: the base of the two-level window DVA [46:36] 0x10.
+    const HIGH: u64 = 1 << 40;
+    const UPPER: u64 = ROOT + 2 * PAGE;
+
+    #[test]
+    fn revision_2_2_identifies_its_register_file_and_refuses_unrecovered_registers() {
+        let mut d = Dart::for_version(VERSION_2_2, 64, None);
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        assert_eq!(
+            d.read(PARAMS3, Width::Word, &mut a),
+            Ok(42 << 24 | 42 << 16 | 0x0202)
+        );
+        assert_eq!(d.read(PARAMS4, Width::Word, &mut a), Ok(64));
+        assert_eq!(d.read(CAPTURE_COUNT, Width::Word, &mut a), Ok(0));
+        assert!(d.write(CAPTURE_COUNT, Width::Word, 0, &mut a).is_err());
+        // SPTM's power-up clears the moved mask and reads it back.
+        d.write(ERROR_MASK_2_2, Width::Word, 0, &mut a).unwrap();
+        assert_eq!(d.read(ERROR_MASK_2_2, Width::Word, &mut a), Ok(0));
+        assert!(d.write(ERROR_MASK_2_2, Width::Word, 1, &mut a).is_err());
+        for offset in [
+            ERROR,
+            ERROR_MASK,
+            ERROR_ADDRESS_LOW,
+            ERROR_ADDRESS_HIGH,
+            ERROR_STREAMS,
+        ] {
+            assert!(d.read(offset, Width::Word, &mut a).is_err());
+            assert!(d.write(offset, Width::Word, 0, &mut a).is_err());
+        }
+        // Two pending words for 64 streams. The unknown bitmaps, absent
+        // streams' records and the window beyond the register file refuse.
+        assert_eq!(d.read(PENDING + 4, Width::Word, &mut a), Ok(0));
+        for offset in [
+            PENDING + 8,
+            0x4020,
+            0x4040,
+            RECORDS + 64 * RECORD,
+            REGISTER_BYTES_2_2,
+            DAPF_OFFSET - 4,
+        ] {
+            assert!(d.read(offset, Width::Word, &mut a).is_err(), "{offset:#x}");
+            assert!(
+                d.write(offset, Width::Word, 0, &mut a).is_err(),
+                "{offset:#x}"
+            );
+        }
+        // The layout both revisions share is unchanged.
+        let tcr = u64::from(TCR_TRANSLATE | TCR_FOUR_LEVEL);
+        d.write(TCR + 4 * 63, Width::Word, tcr, &mut a).unwrap();
+        assert_eq!(d.read(TCR + 4 * 63, Width::Word, &mut a), Ok(tcr));
+        // The paired UMMS view's revision 2 interface is unrecovered.
+        assert!(d.enable_smmu());
+        assert!(d.read(SMMU_OFFSET, Width::Word, &mut a).is_err());
+        assert!(d.write(SMMU_OFFSET + 0x80, Width::Word, 0, &mut a).is_err());
+        // Revision 1.0 has none of these registers.
+        let mut old = Dart::new(64, None);
+        assert_eq!(
+            old.read(PARAMS3, Width::Word, &mut a),
+            Ok(42 << 24 | 36 << 16 | 0x0100)
+        );
+        for offset in [CAPTURE_COUNT, PENDING, ERROR_MASK_2_2, RECORDS + 8] {
+            assert!(old.read(offset, Width::Word, &mut a).is_err());
+        }
+    }
+
+    #[test]
+    fn revision_2_2_walks_both_two_level_windows_and_three_four_level_tables() {
+        let (mut d, mut ram, mut sink) = setup_version(VERSION_2_2);
+        let mut a = Access::new(0, 0, &mut sink);
+        for base in [0, HIGH] {
+            assert_eq!(
+                d.translate(
+                    &mut ram,
+                    1,
+                    base + 0x200_4010,
+                    base + 0x200_4013,
+                    false,
+                    &mut a
+                ),
+                Ok(FRAME + 0x10)
+            );
+        }
+        let other = (1 << 36) + 0x200_4010;
+        assert_eq!(
+            d.translate(&mut ram, 1, other, other, false, &mut a),
+            Err(DmaError::Unsupported(
+                "DART two-level DVA bits [46:36] outside the recovered 0 and 0x10 windows"
+            ))
+        );
+        // FOUR_LEVEL: the TTBR's table maps DVA [46:36] to the same tables.
+        ram.put_u64(UPPER + 0x10 * 8, table_entry(ROOT));
+        for (offset, value) in [
+            (TCR + 12, TCR_TRANSLATE | TCR_FOUR_LEVEL),
+            (
+                TTBR + 12,
+                ((UPPER >> PAGE_SHIFT) << TTBR_ADDRESS_SHIFT) as u32 | TTBR_VALID,
+            ),
+        ] {
+            d.write(offset, Width::Word, u64::from(value), &mut a)
+                .unwrap();
+        }
+        assert_eq!(
+            d.translate(
+                &mut ram,
+                3,
+                HIGH + 0x200_4010,
+                HIGH + 0x200_4013,
+                false,
+                &mut a
+            ),
+            Ok(FRAME + 0x10)
+        );
+        // DVA [46:36] 0 has no first-level entry: NO_PGD at level 1.
+        assert_eq!(
+            d.translate(&mut ram, 3, 0x200_4010, 0x200_4010, false, &mut a),
+            Err(DmaError::Fault(Fault::NoPgd as u32))
+        );
+        let record = d.faults.as_ref().unwrap().record(3).unwrap().unwrap();
+        assert_eq!(
+            (record.code, record.level, record.write, record.address),
+            (Code::Invalid, Level::Cte, false, 0x200_4010)
+        );
+        // Beyond the 42-bit VA space the TTBR is invalid.
+        assert_eq!(
+            d.translate(&mut ram, 1, 1 << 42, 1 << 42, false, &mut a),
+            Err(DmaError::Fault(Fault::NoTtbr as u32))
+        );
+    }
+
+    #[test]
+    fn revision_2_2_captures_per_stream_faults_until_their_pending_bits_clear() {
+        let (mut d, mut ram, mut latch) = setup_version(VERSION_2_2);
+        let irq = Wire::Aic(AicInput::new(0, 0x301));
+        let dva = HIGH + 0x200_4010;
+        let record = RECORDS + RECORD;
+        {
+            let mut a = Access::new(0, 0, &mut latch);
+            // A write to the read-only page and an untranslated stream.
+            assert_eq!(
+                d.translate(&mut ram, 1, dva, dva + 3, true, &mut a),
+                Err(DmaError::Fault(Fault::Write as u32))
+            );
+            assert_eq!(
+                d.translate(&mut ram, 4, 0, 0, false, &mut a),
+                Err(DmaError::Fault(Fault::NoTtbr as u32))
+            );
+            // A second fault of a pending stream is unqualified.
+            assert_eq!(
+                d.translate(&mut ram, 1, dva, dva + 3, true, &mut a),
+                Err(DmaError::Unsupported(
+                    "per-SID DART secondary fault capture is unsupported"
+                ))
+            );
+            assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(1 << 4 | 1 << 1));
+            assert_eq!(d.read(record + 8, Width::Word, &mut a), Ok(0x200_4010));
+            assert_eq!(d.read(record + 12, Width::Word, &mut a), Ok(HIGH >> 32));
+            // The complete status header and auxiliary data are unqualified.
+            for offset in [record, record + 4, record + 0x18] {
+                assert!(d.read(offset, Width::Word, &mut a).is_err());
+            }
+            assert!(d.write(record + 8, Width::Word, 0, &mut a).is_err());
+            let faults = d.faults.as_ref().unwrap();
+            assert_eq!(faults.record(1).unwrap().unwrap().class(), 1);
+            assert_eq!(faults.record(4).unwrap().unwrap().class(), 0);
+        }
+        assert!(latch.is_asserted(irq));
+        {
+            let mut a = Access::new(0, 0, &mut latch);
+            // Bits of absent streams cannot acknowledge anything.
+            assert!(
+                d.write(PENDING, Width::Word, 1 << 16 | 1 << 1, &mut a)
+                    .is_err()
+            );
+            d.write(PENDING, Width::Word, 1 << 1, &mut a).unwrap();
+            assert!(d.read(record + 8, Width::Word, &mut a).is_err());
+        }
+        assert!(latch.is_asserted(irq));
+        {
+            let mut a = Access::new(0, 0, &mut latch);
+            d.write(PENDING, Width::Word, 1 << 4, &mut a).unwrap();
+        }
+        assert!(!latch.is_asserted(irq));
+        {
+            // An acknowledged stream captures its next fault.
+            let mut a = Access::new(0, 0, &mut latch);
+            assert_eq!(
+                d.translate(&mut ram, 1, dva, dva, true, &mut a),
+                Err(DmaError::Fault(Fault::Write as u32))
+            );
+        }
+        assert!(latch.is_asserted(irq));
+        {
+            // A power gate without retention clears the bank and the wire.
+            let mut a = Access::new(0, 0, &mut latch);
+            d.set_power(false, false, &mut a);
+            d.set_power(true, false, &mut a);
+            assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(0));
+        }
+        assert!(!latch.is_asserted(irq));
+    }
+
+    #[test]
+    fn revision_2_2_keeps_cacheless_invalidation_remap_and_its_protection_domains() {
+        let (mut d, mut ram, mut sink) = setup_version(VERSION_2_2);
+        let mut a = Access::new(0, 0, &mut sink);
+        let dva = HIGH + 0x200_4010;
+        assert_eq!(
+            d.translate(&mut ram, 1, dva, dva, false, &mut a),
+            Ok(FRAME + 0x10)
+        );
+        // A changed entry is visible at once; every invalidation iBoot and
+        // SPTM issue completes (stream, ranged stream, powerdown flush).
+        ram.put_u64(LEAVES + 8, table_entry(FRAME + PAGE) | 0xfff << 40);
+        for command in [0x8101, 0xf101, 0x7101, 0xa000] {
+            d.write(TLB_CMD, Width::Word, command, &mut a).unwrap();
+        }
+        d.write(TLB_SYNC, Width::Word, 0, &mut a).unwrap();
+        assert_eq!(
+            d.translate(&mut ram, 1, dva, dva, true, &mut a),
+            Ok(FRAME + PAGE + 0x10)
+        );
+        // A remapped source takes its target's context; the SID a fault of
+        // it records is unrecovered.
+        let remap = TCR_REMAP_ENABLE | 1 << TCR_REMAP_SHIFT;
+        d.write(TCR, Width::Word, u64::from(remap), &mut a).unwrap();
+        assert_eq!(
+            d.translate(&mut ram, 0, dva, dva, true, &mut a),
+            Ok(FRAME + PAGE + 0x10)
+        );
+        ram.put_u64(
+            LEAVES + 8,
+            table_entry(FRAME) | 0xfff << 40 | ENTRY_NO_WRITE,
+        );
+        assert_eq!(
+            d.translate(&mut ram, 0, dva, dva, true, &mut a),
+            Err(DmaError::Unsupported(
+                "DART remapped fault source-versus-context SID provenance"
+            ))
+        );
+        assert_eq!(d.read(PENDING, Width::Word, &mut a), Ok(0));
+        // SPTM protects and locks domains 5 to 8 with TTBR_TCR.
+        d.write(PROTECT, Width::Word, 0x1e1, &mut a).unwrap();
+        d.write(PROTECT_LOCK, Width::Word, 0x1e1, &mut a).unwrap();
+        assert_eq!(d.read(PROTECT_LOCK, Width::Word, &mut a), Ok(0x1e1));
+        d.write(UNPROTECT, Width::Word, 0x1e1, &mut a).unwrap();
+        assert_eq!(d.read(PROTECT, Width::Word, &mut a), Ok(0x1e1));
+        d.write(TCR + 4, Width::Word, 0, &mut a).unwrap();
+        assert_eq!(
+            d.read(TCR + 4, Width::Word, &mut a),
+            Ok(u64::from(TCR_TRANSLATE))
+        );
+        assert!(d.write(PROTECT, Width::Word, 1 << 9, &mut a).is_err());
+        let mut old = Dart::new(16, None);
+        assert!(old.write(PROTECT, Width::Word, 1 << 5, &mut a).is_err());
     }
 }

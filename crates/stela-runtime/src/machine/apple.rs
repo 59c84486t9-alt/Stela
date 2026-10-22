@@ -1545,10 +1545,10 @@ impl AppleDevices {
         irq: Option<AicInput>,
         apf: Option<(u64, usize)>,
     ) -> Result<Vec<DartId>, String> {
-        if profile != dart::Profile::T8110 && apf.is_some() {
+        if !profile.is_t8110() && apf.is_some() {
             return Err("legacy DART APF topology and filtering are unsupported".into());
         }
-        if profile != dart::Profile::T8110 && ranges.len() > 5 {
+        if !profile.is_t8110() && ranges.len() > 5 {
             return Err(
                 "legacy DART topology exceeds the recovered five-instance placement".into(),
             );
@@ -1561,11 +1561,14 @@ impl AppleDevices {
             return Err("DART APF requires one aligned window with a native slice count".into());
         }
         if ranges.iter().any(|range| {
-            range.bytes != dart::DAPF_BYTES
+            !profile.admits_window(range.bytes)
                 || !range.physical.is_multiple_of(dart::DAPF_BYTES)
                 || range.physical.checked_add(range.bytes).is_none()
         }) {
-            return Err("DART translation ranges must be aligned native 16 KiB windows".into());
+            return Err(
+                "DART translation ranges must be aligned windows of the profile's register file"
+                    .into(),
+            );
         }
         let models = Dart::group_for_profile(profile, streams, irq, ranges.len())?;
         self.place_dart_group(models, ranges, apf, irq)
@@ -3461,6 +3464,65 @@ mod tests {
             assert!(ram.read(ROOT + 2 * PAGE + 7, &mut actual));
             assert_eq!(actual, [2, 4, 6, 8]);
         }
+    }
+
+    #[test]
+    fn revision_2_2_mounts_whole_windows_beside_the_filter_and_capture_views() {
+        let mut d = AppleDevices::new();
+        let ranges = [
+            Range {
+                physical: 0x2_7000_0000,
+                bytes: 0x20000,
+            },
+            Range {
+                physical: 0x2_7004_0000,
+                bytes: 0xc000,
+            },
+        ];
+        // A window selects its register file; neither revision mounts the
+        // other's, nor a window without a recovered register file.
+        for (profile, bytes) in [
+            (dart::Profile::T8110, 0xc000),
+            (dart::Profile::T8110Rev22, 0x4000),
+            (dart::Profile::T8110Rev22, 0x8000),
+            (dart::Profile::T8110Rev22, 0x24000),
+        ] {
+            let range = Range {
+                physical: ranges[0].physical,
+                bytes,
+            };
+            assert!(
+                d.add_dart_group_for_profile(profile, &[range], 16, None, None)
+                    .is_err()
+            );
+            assert!(d.read(0, range.physical, 4, 0).is_err());
+        }
+        let apf = 0x2_7002_0000;
+        let ids = d
+            .add_dart_group_for_profile(
+                dart::Profile::T8110Rev22,
+                &ranges,
+                16,
+                None,
+                Some((apf, 16)),
+            )
+            .unwrap();
+        let smmu = Range {
+            physical: 0x2_7005_4000,
+            bytes: 0x4000,
+        };
+        d.add_dart_smmu(ids[1], smmu).unwrap();
+        for range in ranges {
+            assert_eq!(d.read(0, range.physical + 8, 4, 0), Ok(0x2a2a_0202));
+            assert_eq!(d.read(0, range.physical + 0x4000, 4, 0), Ok(0));
+            assert!(d.read(0, range.physical + 0x100, 4, 0).is_err());
+        }
+        assert!(d.read(0, ranges[0].physical + 0xc000, 4, 0).is_err());
+        assert!(d.read(0, ranges[0].physical + 0x1fffc, 4, 0).is_err());
+        // The filter's slices stay reachable at their own window.
+        d.write(0, apf + 8, 4, 0x1234_0000, 0).unwrap();
+        assert_eq!(d.read(0, apf + 8, 4, 0), Ok(0x1234_0000));
+        assert!(d.read(0, smmu.physical, 4, 0).is_err());
     }
 
     #[test]

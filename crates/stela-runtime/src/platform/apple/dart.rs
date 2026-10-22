@@ -17,17 +17,23 @@ use crate::platform::dma::{DmaError, Iommu, Memory};
 use alloc::vec::Vec;
 pub use irq::SharedIrq;
 pub use smmu::SmmuBlock;
-/// Internal bus offsets of the independently placed APF and UMMS views.
-pub const DAPF_OFFSET: u64 = 0x4000;
+/// Internal bus offsets of the independently placed APF and UMMS views,
+/// above the largest translation window any profile admits.
+pub const DAPF_OFFSET: u64 = TRANSLATION_WINDOW_LIMIT;
 pub const DAPF_BYTES: u64 = 0x4000;
 pub const SMMU_OFFSET: u64 = DAPF_OFFSET + DAPF_BYTES;
 pub const SMMU_BYTES: u64 = 0x4000;
+/// The largest DT translation window: M4/M5-generation `dart,t8110` nodes
+/// declare 0xc000 or 0x20000 bytes (J604AP, J700AP, J714cAP).
+const TRANSLATION_WINDOW_LIMIT: u64 = 0x20000;
 
 /// A t8110 translation fault's ERROR code; legacy generations use their
 /// separately encoded error bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fault {
     NoTtbr = 1,
+    /// A missing first-level entry of a revision 2 FOUR_LEVEL walk.
+    NoPgd = 1 << 1,
     NoPmd = 1 << 2,
     NoPte = 1 << 3,
     Write = 1 << 4,
@@ -41,7 +47,12 @@ pub enum Fault {
 pub enum Profile {
     T8020,
     T6000,
+    /// `dart,t8110` revision 1.0: one 16 KiB register file.
     T8110,
+    /// `dart,t8110` revision 2.2: per-stream exception records above 0x4000
+    /// make the register file 0xc000 bytes. A compatible string never names
+    /// it; the node's translation window selects it.
+    T8110Rev22,
 }
 
 impl Profile {
@@ -72,7 +83,45 @@ impl Profile {
     pub const fn stream_limit(self) -> usize {
         match self {
             Self::T8020 | Self::T6000 => 16,
-            Self::T8110 => 256,
+            Self::T8110 | Self::T8110Rev22 => 256,
+        }
+    }
+
+    /// Whether the profile is a revision of the `dart,t8110` family, which
+    /// shares its 16-byte DT instance descriptors and modern properties.
+    pub const fn is_t8110(self) -> bool {
+        matches!(self, Self::T8110 | Self::T8110Rev22)
+    }
+
+    /// Refine a compatible family by the bytes of its first translation
+    /// window. Registers above 0x4000 exist only from revision 2.2: SPTM's
+    /// error-mask table moves ERROR_MASK to 0x4060 at 0x202 (T8112 file
+    /// 0x15a38/0x159d0) and the per-stream exception records reach 0xc000.
+    /// A 16 KiB window is therefore revision 1.0 and a larger one revision
+    /// 2.2, the minimal revision with that register file. The silicon's own
+    /// revision is read from PARAMS3 by iBoot, SPTM and the kernel and is not
+    /// recoverable statically, so this is an inference documented in
+    /// `docs/research/dart-iommu.md`.
+    pub fn for_translation_window(self, bytes: u64) -> Option<Self> {
+        let profile = match self {
+            Self::T8110 | Self::T8110Rev22 if bytes > DAPF_BYTES => Self::T8110Rev22,
+            Self::T8110 | Self::T8110Rev22 => Self::T8110,
+            profile => profile,
+        };
+        profile.admits_window(bytes).then_some(profile)
+    }
+
+    /// Whether a translation window of `bytes` fits this register file: one
+    /// 16 KiB block before revision 2.2, else 16 KiB blocks covering the
+    /// 0xc000-byte register file, at most 0x20000. Registers between the
+    /// register file and the window's end are unrecovered and refuse.
+    pub fn admits_window(self, bytes: u64) -> bool {
+        match self {
+            Self::T8110Rev22 => {
+                bytes.is_multiple_of(DAPF_BYTES)
+                    && (t8110::REGISTER_BYTES_2_2..=TRANSLATION_WINDOW_LIMIT).contains(&bytes)
+            }
+            _ => bytes == DAPF_BYTES,
         }
     }
 
@@ -167,7 +216,11 @@ impl Dart {
         }
         Ok(Self {
             model: match profile {
-                Profile::T8110 => Model::T8110(t8110::Dart::new(streams, irq)),
+                Profile::T8110 | Profile::T8110Rev22 => Model::T8110(t8110::Dart::for_version(
+                    t8110::version(profile),
+                    streams,
+                    irq,
+                )),
                 Profile::T8020 | Profile::T6000 => {
                     Model::Legacy(legacy::Dart::new(profile, streams, irq))
                 }
@@ -206,7 +259,14 @@ impl Dart {
         }
         Self::for_profile(profile, streams, irq)?;
         Ok(match profile {
-            Profile::T8110 => Self::group(streams, irq, count),
+            Profile::T8110 | Profile::T8110Rev22 => {
+                t8110::Dart::group_for_version(t8110::version(profile), streams, irq, count)
+                    .into_iter()
+                    .map(|model| Self {
+                        model: Model::T8110(model),
+                    })
+                    .collect()
+            }
             Profile::T8020 | Profile::T6000 => legacy::Dart::group(profile, streams, irq, count)
                 .into_iter()
                 .map(|model| Self {
@@ -508,10 +568,15 @@ mod tests {
 
     #[test]
     fn paired_capture_view_is_available_only_for_its_implemented_generation() {
-        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+        for profile in [
+            Profile::T8020,
+            Profile::T6000,
+            Profile::T8110,
+            Profile::T8110Rev22,
+        ] {
             let mut model = Dart::for_profile(profile, 16, None).unwrap();
             assert!(!model.has_smmu());
-            let supported = matches!(profile, Profile::T6000 | Profile::T8110);
+            let supported = profile == Profile::T6000 || profile.is_t8110();
             assert_eq!(model.supports_smmu(), supported);
             assert_eq!(model.can_attach_smmu(), supported);
             // Capability queries have no attachment side effect.
@@ -628,7 +693,12 @@ mod tests {
 
     #[test]
     fn native_owner_capacity_is_available_without_mmio_or_power() {
-        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+        for profile in [
+            Profile::T8020,
+            Profile::T6000,
+            Profile::T8110,
+            Profile::T8110Rev22,
+        ] {
             for count in [1, profile.stream_limit()] {
                 let mut model = Dart::for_profile(profile, count, None).unwrap();
                 let mut latch = InterruptLatch::new();
@@ -668,21 +738,22 @@ mod tests {
 
     #[test]
     fn functional_clock_gating_retains_configuration_and_blocks_both_access_paths() {
-        for profile in [Profile::T8020, Profile::T6000, Profile::T8110] {
+        for profile in [
+            Profile::T8020,
+            Profile::T6000,
+            Profile::T8110,
+            Profile::T8110Rev22,
+        ] {
             let mut model = Dart::for_profile(profile, 16, None).unwrap();
             let mut sink = InterruptLatch::new();
             let mut a = Access::new(0, 0, &mut sink);
             let mut ram = Ram::new(0, 0x4000);
-            let (tcr, bypass) = if profile == Profile::T8110 {
+            let (tcr, bypass) = if profile.is_t8110() {
                 (0x1000, 6)
             } else {
                 (0x100, 1 << 8 | 1 << 12)
             };
-            let enable = if profile == Profile::T8110 {
-                0xc00
-            } else {
-                0xfc
-            };
+            let enable = if profile.is_t8110() { 0xc00 } else { 0xfc };
             model.write(enable, Width::Word, 1, &mut a).unwrap();
             model.write(tcr, Width::Word, bypass, &mut a).unwrap();
             assert_eq!(model.translate(&mut ram, 0, 0, 0, false, &mut a), Ok(0));
@@ -722,5 +793,42 @@ mod tests {
         assert_eq!(Profile::T8020.stream_limit(), 16);
         assert_eq!(Profile::T6000.stream_limit(), 16);
         assert_eq!(Profile::T8110.stream_limit(), 256);
+        assert_eq!(Profile::T8110Rev22.stream_limit(), 256);
+    }
+
+    #[test]
+    fn a_t8110_translation_window_selects_its_register_file_revision() {
+        for (profile, bytes, expected) in [
+            (Profile::T8110, 0x4000, Some(Profile::T8110)),
+            (Profile::T8110, 0xc000, Some(Profile::T8110Rev22)),
+            (Profile::T8110, 0x20000, Some(Profile::T8110Rev22)),
+            (Profile::T8110Rev22, 0x4000, Some(Profile::T8110)),
+            (Profile::T8110, 0x8000, None),
+            (Profile::T8110, 0xd000, None),
+            (Profile::T8110, 0x24000, None),
+            (Profile::T8110, 0, None),
+            (Profile::T6000, 0x4000, Some(Profile::T6000)),
+            (Profile::T6000, 0xc000, None),
+            (Profile::T8020, 0x20000, None),
+        ] {
+            assert_eq!(
+                profile.for_translation_window(bytes),
+                expected,
+                "{profile:?} {bytes:#x}"
+            );
+        }
+        assert!(Profile::T8110Rev22.is_t8110() && !Profile::T6000.is_t8110());
+        // The internal filter and capture views lie above every window.
+        assert!(!Profile::T8110Rev22.admits_window(DAPF_OFFSET + DAPF_BYTES));
+        assert!(Profile::T8110Rev22.admits_window(DAPF_OFFSET));
+        // Revision 2.2 constructs its own register file, alone or grouped.
+        let mut sink = InterruptLatch::new();
+        let mut a = Access::new(0, 0, &mut sink);
+        let mut models = Dart::group_for_profile(Profile::T8110Rev22, 16, None, 2).unwrap();
+        models.push(Dart::for_profile(Profile::T8110Rev22, 16, None).unwrap());
+        for model in &mut models {
+            assert_eq!(model.read(8, Width::Word, &mut a), Ok(0x2a2a_0202));
+            assert!(model.read(0x100, Width::Word, &mut a).is_err());
+        }
     }
 }

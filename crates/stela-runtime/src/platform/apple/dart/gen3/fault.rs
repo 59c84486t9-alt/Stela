@@ -1,4 +1,8 @@
-//! Gen3 per-SID fault capture and bitmap acknowledgement.
+//! Per-SID fault capture and bitmap acknowledgement of gen3 and of t8110
+//! revision 2.2, whose bank is the same: the Mac16 kernel's
+//! `_DART_EXCEPTION` (VA 0xfffffe0009f32640) reads the 0x40-byte records and
+//! the T8132 SPTM's CLEAR_EXCEPTION (VA 0xfffffff0270ce06c) writes the
+//! pending words, at the offsets below.
 //!
 //! Original mac18g collection at VA fffffe0009289804 uses one 0x40-byte
 //! record per SID, with a separate pending bitmap at TRAD4000. Its numbered
@@ -55,7 +59,7 @@ impl TryFrom<u8> for Code {
             12 => Self::SttFlush,
             13 => Self::External,
             14 => Self::IllegalSid,
-            _ => return Err("gen3 DART observed fault code is outside the native decoder"),
+            _ => return Err("per-SID DART observed fault code is outside the native decoder"),
         })
     }
 }
@@ -81,7 +85,7 @@ pub struct ObservedSummary {
 impl ObservedSummary {
     pub fn trad(raw: u32) -> Result<Self, &'static str> {
         if raw & 0x600 != 0 {
-            return Err("gen3 DART non-TRAD summary access type is unqualified");
+            return Err("per-SID DART non-TRAD summary access type is unqualified");
         }
         let code = Code::try_from((raw & 0xf) as u8)?;
         Ok(Self { raw, code })
@@ -139,7 +143,7 @@ pub struct Capture {
 impl Capture {
     pub fn new(streams: usize) -> Result<Self, &'static str> {
         if !(1..=256).contains(&streams) {
-            return Err("gen3 DART fault stream count is outside its native bounds");
+            return Err("per-SID DART fault stream count is outside its native bounds");
         }
         Ok(Self {
             records: vec![None; streams],
@@ -154,9 +158,9 @@ impl Capture {
         let entry = self
             .records
             .get_mut(sid)
-            .ok_or("gen3 DART fault SID is outside its native bounds")?;
+            .ok_or("per-SID DART fault SID is outside its native bounds")?;
         if entry.is_some() {
-            return Err("gen3 DART secondary fault capture is unsupported");
+            return Err("per-SID DART secondary fault capture is unsupported");
         }
         *entry = Some(record);
         self.pending[sid / 32] |= 1 << (sid % 32);
@@ -167,14 +171,14 @@ impl Capture {
         self.pending
             .get(word)
             .copied()
-            .ok_or("gen3 DART fault bitmap word is outside its native bounds")
+            .ok_or("per-SID DART fault bitmap word is outside its native bounds")
     }
 
     pub fn record(&self, sid: usize) -> Result<Option<Record>, &'static str> {
         self.records
             .get(sid)
             .copied()
-            .ok_or("gen3 DART fault SID is outside its native bounds")
+            .ok_or("per-SID DART fault SID is outside its native bounds")
     }
 
     /// The pending bitmap's recovered write-one acknowledgement. Removing a
@@ -183,11 +187,11 @@ impl Capture {
         let pending = self
             .pending
             .get_mut(word)
-            .ok_or("gen3 DART fault bitmap word is outside its native bounds")?;
+            .ok_or("per-SID DART fault bitmap word is outside its native bounds")?;
         let streams = (self.records.len() - word * 32).min(32);
         let valid = u32::MAX >> (32 - streams);
         if bits & !valid != 0 {
-            return Err("gen3 DART fault acknowledgement names an out-of-profile SID");
+            return Err("per-SID DART fault acknowledgement names an out-of-profile SID");
         }
         *pending &= !bits;
         for sid in word * 32..self.records.len().min((word + 1) * 32) {
@@ -206,13 +210,15 @@ impl Capture {
 
 impl MmioDevice for Capture {
     fn name(&self) -> &'static str {
-        "dart-gen3-fault"
+        "dart-sid-fault"
     }
 
     fn read(&mut self, offset: u64, width: Width, _: &mut Access<'_>) -> Result<u64, MmioError> {
-        let fail = |reason| refuse("dart-gen3-fault", offset, width, Direction::Read, reason);
+        let fail = |reason| refuse("dart-sid-fault", offset, width, Direction::Read, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(fail("gen3 DART fault registers are aligned 32-bit words"));
+            return Err(fail(
+                "per-SID DART fault registers are aligned 32-bit words",
+            ));
         }
         if let Some(word) = offset.checked_sub(PENDING).filter(|offset| *offset < 32) {
             return self
@@ -222,17 +228,17 @@ impl MmioDevice for Capture {
         }
         if let Some(relative) = offset.checked_sub(RECORDS) {
             let sid = usize::try_from(relative / RECORD_BYTES)
-                .map_err(|_| fail("gen3 DART fault SID is outside its native bounds"))?;
+                .map_err(|_| fail("per-SID DART fault SID is outside its native bounds"))?;
             let record = self.record(sid).map_err(fail)?;
-            let record =
-                record.ok_or_else(|| fail("gen3 DART historical fault readback is unqualified"))?;
+            let record = record
+                .ok_or_else(|| fail("per-SID DART historical fault readback is unqualified"))?;
             return match relative % RECORD_BYTES {
                 ADDRESS_LOW => Ok(u64::from(record.address as u32)),
                 ADDRESS_HIGH => Ok(record.address >> 32),
                 0 => Err(fail(
-                    "gen3 DART complete fault access-type header is unsupported",
+                    "per-SID DART complete fault access-type header is unsupported",
                 )),
-                _ => Err(fail("gen3 DART auxiliary fault data is unsupported")),
+                _ => Err(fail("per-SID DART auxiliary fault data is unsupported")),
             };
         }
         Err(fail("unknown gen3 DART fault register"))
@@ -245,9 +251,11 @@ impl MmioDevice for Capture {
         value: u64,
         _: &mut Access<'_>,
     ) -> Result<(), MmioError> {
-        let fail = |reason| refuse("dart-gen3-fault", offset, width, Direction::Write, reason);
+        let fail = |reason| refuse("dart-sid-fault", offset, width, Direction::Write, reason);
         if width != Width::Word || !offset.is_multiple_of(4) {
-            return Err(fail("gen3 DART fault registers are aligned 32-bit words"));
+            return Err(fail(
+                "per-SID DART fault registers are aligned 32-bit words",
+            ));
         }
         if let Some(word) = offset.checked_sub(PENDING).filter(|offset| *offset < 32) {
             return self
@@ -335,7 +343,7 @@ mod tests {
         let saved = capture.record(31).unwrap().unwrap();
         assert_eq!(
             capture.capture(31, saved),
-            Err("gen3 DART secondary fault capture is unsupported")
+            Err("per-SID DART secondary fault capture is unsupported")
         );
         capture.acknowledge(0, 1).unwrap();
         assert_eq!(capture.record(0), Ok(None));

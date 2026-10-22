@@ -46,13 +46,13 @@ pub(super) fn iommu(
     translate: &dyn Fn(u64, u64) -> Option<u64>,
 ) -> Result<Iommu, String> {
     let path = format!("/arm-io/{}", name_of(node));
-    let profile = node
+    let mut profile = node
         .property("compatible")
         .and_then(Profile::from_compatible)
         .ok_or_else(|| {
             format!("{path} requires an unsupported or conflicting native DART generation")
         })?;
-    if profile != Profile::T8110 {
+    if !profile.is_t8110() {
         legacy_requirements(profile, |key| node.property(key))
             .map_err(|reason| format!("{path} {reason}"))?;
     }
@@ -64,7 +64,7 @@ pub(super) fn iommu(
         return Err(format!("{path} has incomplete reg pairs"));
     }
     let descriptors = node.property("instance").unwrap_or_default();
-    let descriptor_bytes = if profile == Profile::T8110 { 16 } else { 12 };
+    let descriptor_bytes = if profile.is_t8110() { 16 } else { 12 };
     if descriptors.is_empty()
         || !descriptors.len().is_multiple_of(descriptor_bytes)
         || descriptors.len() / descriptor_bytes != reg.len()
@@ -81,7 +81,7 @@ pub(super) fn iommu(
         .zip(&reg)
         .enumerate()
     {
-        let (number, owner_start) = if profile == Profile::T8110 {
+        let (number, owner_start) = if profile.is_t8110() {
             (
                 u32::from_le_bytes(descriptor[4..8].try_into().expect("instance number")),
                 8,
@@ -91,11 +91,21 @@ pub(super) fn iommu(
         };
         match &descriptor[..4] {
             b"TRAD" if apf.is_none() && smmu.is_none() && number as usize == instances.len() => {
-                let physical = translate(offset, bytes)
-                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES) && bytes == dart::DAPF_BYTES)
+                // The window selects the register file's revision; every
+                // instance of one node shares it (J700AP `dart-ane` mixes
+                // 0xc000- and 0x20000-byte windows of revision 2.2).
+                let (physical, revision) = translate(offset, bytes)
+                    .filter(|at| at.is_multiple_of(dart::DAPF_BYTES))
+                    .zip(profile.for_translation_window(bytes))
                     .ok_or_else(|| {
-                        format!("{path} DART instance is not one translated aligned 16 KiB block")
+                        format!(
+                            "{path} DART instance is not one translated aligned register window of a modelled revision"
+                        )
                     })?;
+                if !instances.is_empty() && revision != profile {
+                    return Err(format!("{path} mixes DART register-file revisions"));
+                }
+                profile = revision;
                 if instances
                     .iter()
                     .any(|i: &DartInstance| i.physical == physical)
@@ -117,7 +127,7 @@ pub(super) fn iommu(
             }
             b"UMMS"
                 if instances.len() == 1
-                    && (profile != Profile::T8110 || number == 0)
+                    && (!profile.is_t8110() || number == 0)
                     && apf.is_none()
                     && smmu.is_none() =>
             {
@@ -199,7 +209,7 @@ pub(super) fn iommu(
     if let Some(error) = mapper_failure {
         return Err(error);
     }
-    let sids = if profile == Profile::T8110 {
+    let sids = if profile.is_t8110() {
         match node.property("sid") {
             None => Vec::new(),
             Some(bytes) if bytes.len().is_multiple_of(4) => node
@@ -243,7 +253,7 @@ pub(super) fn iommu(
         .map_err(|reason| format!("{path} {reason}"))?;
     let vm_base = match node.property("vm-base") {
         None => 0,
-        Some(bytes) if profile != Profile::T8110 => u64::from(u32::from_le_bytes(
+        Some(bytes) if !profile.is_t8110() => u64::from(u32::from_le_bytes(
             bytes.try_into().expect("validated legacy vm-base"),
         )),
         Some(bytes) => u64::from_le_bytes(
@@ -262,7 +272,7 @@ pub(super) fn iommu(
                 .map_err(|reason| format!("{path} {reason}"))?;
         }
     }
-    if profile != Profile::T8110 && instances.len() > 1 && !mappers.is_empty() {
+    if !profile.is_t8110() && instances.len() > 1 && !mappers.is_empty() {
         return Err(format!(
             "{path} requires explicit legacy multi-instance DMA routing"
         ));
@@ -301,7 +311,7 @@ pub(super) fn legacy_requirements<'a>(
     profile: Profile,
     property: impl Fn(&str) -> Option<&'a [u8]>,
 ) -> Result<(), &'static str> {
-    if profile == Profile::T8110 {
+    if profile.is_t8110() {
         return Ok(());
     }
     let streams = match property("sid-count") {
@@ -772,5 +782,62 @@ mod tests {
         assert!(!super::super::models("dart,gen3", |_| None));
         let node = Node::root(&unknown).unwrap();
         assert!(!super::super::models("dart,t8110", |key| node.property(key)));
+    }
+
+    #[test]
+    fn t8110_windows_select_one_register_file_revision_per_node() {
+        let node = |windows: &[u64]| {
+            let descriptors = (0..windows.len() as u32)
+                .flat_map(|number| {
+                    [b"TRAD".as_slice(), &number.to_le_bytes(), b"DART\0\0\0\0"].concat()
+                })
+                .collect::<Vec<_>>();
+            let registers = windows
+                .iter()
+                .enumerate()
+                .flat_map(|(index, &bytes)| [0x7_0300_0000 + 0x40000 * index as u64, bytes])
+                .collect::<Vec<_>>();
+            encode(
+                &[
+                    ("name", b"dart-m4\0"),
+                    ("compatible", b"dart,t8110\0"),
+                    ("instance", &descriptors),
+                    ("reg", &bytes64(&registers)),
+                    ("interrupts", &1u32.to_le_bytes()),
+                    ("vm-base", &(1u64 << 40).to_le_bytes()),
+                ],
+                &[],
+            )
+        };
+        // J604AP/J714cAP windows are 0xc000 or 0x20000 bytes; J700AP
+        // `dart-ane` mixes both within revision 2.2.
+        for (windows, expected) in [
+            (&[0x4000][..], Ok(Profile::T8110)),
+            (&[0xc000], Ok(Profile::T8110Rev22)),
+            (&[0x20000], Ok(Profile::T8110Rev22)),
+            (&[0xc000, 0x20000, 0x20000], Ok(Profile::T8110Rev22)),
+            (&[0x4000, 0xc000], Err("mixes DART register-file revisions")),
+            (
+                &[0x20000, 0x4000],
+                Err("mixes DART register-file revisions"),
+            ),
+            (&[0x8000], Err("register window of a modelled revision")),
+            (&[0x24000], Err("register window of a modelled revision")),
+        ] {
+            let tree = node(windows);
+            let bank = iommu(&Node::root(&tree).unwrap(), &flat_fixture_extent(&Some));
+            match expected {
+                Ok(profile) => {
+                    let bank = bank.unwrap();
+                    assert_eq!(bank.profile, profile, "{windows:x?}");
+                    assert_eq!(
+                        bank.instances.iter().map(|i| i.bytes).collect::<Vec<_>>(),
+                        windows
+                    );
+                    assert_eq!((bank.streams, bank.vm_base), (16, 1 << 40));
+                }
+                Err(reason) => assert!(bank.unwrap_err().contains(reason), "{windows:x?}"),
+            }
+        }
     }
 }
