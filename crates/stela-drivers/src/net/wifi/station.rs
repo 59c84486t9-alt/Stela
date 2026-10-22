@@ -18,10 +18,13 @@ use super::{
     security::{KeyIdentity, KeyScope, KeySlot},
 };
 use crate::net::Mac;
-use alloc::vec::Vec;
+use alloc::{sync::Arc, vec::Vec};
 use core::sync::atomic::{AtomicU64, Ordering};
 
+mod context;
+pub use context::AssociationContext;
 pub mod data;
+pub mod operations;
 pub mod phy;
 pub mod wire;
 
@@ -96,6 +99,7 @@ pub enum Error {
     NotQueued,
     WrongChannel,
     Wire(wire::Error),
+    Phy(phy::Error),
     Timeout,
     NotAssociated,
     WrongKey,
@@ -133,6 +137,8 @@ pub enum Action {
         channel: Channel,
         request: wire::AssociationRequest,
         response: wire::AssociationResponse,
+        /// Exact retained modern configuration. Legacy actions carry None.
+        context: Option<Arc<AssociationContext>>,
     },
     /// Remove association/keys, mask/drain associated work, then acknowledge.
     Remove {
@@ -154,6 +160,8 @@ pub struct Station {
     local: Mac,
     phase: Phase,
     join: Option<Join>,
+    selected_beacon: Option<super::scan::result::Bss>,
+    context: Option<Arc<AssociationContext>>,
     epoch: u64,
     serial: u32,
     sequence: u16,
@@ -171,6 +179,8 @@ impl Station {
             local,
             phase: Phase::Idle,
             join: None,
+            selected_beacon: None,
+            context: None,
             epoch: 0,
             serial: 0,
             sequence: 0,
@@ -249,6 +259,65 @@ impl Station {
         now_us: u64,
         policy: &mut impl RegulatoryPolicy,
     ) -> Result<Action, Error> {
+        if join.request.modern().is_some() {
+            return Err(Error::Unsupported(
+                "modern join requires selected actual beacon",
+            ));
+        }
+        self.begin_inner(join, None, now_us, policy)
+    }
+
+    /// Start an explicit modern association using the actual selected beacon.
+    /// This supplies no SAE/PMF, OS authentication or native radio authority;
+    /// 6GHz remains refused until those actual boundaries are operational.
+    pub fn begin_modern(
+        &mut self,
+        join: Join,
+        beacon: super::scan::result::Bss,
+        now_us: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
+        let selection = join
+            .request
+            .modern()
+            .ok_or(Error::Unsupported("modern request required"))?;
+        if selection.capabilities().band() != join.channel.band
+            || beacon.channel != join.channel
+            || beacon.bssid != join.bssid
+            || beacon.transmitter != join.bssid
+        {
+            return Err(Error::Unsupported("selected beacon/local PHY mismatch"));
+        }
+        self.begin_inner(join, Some(beacon), now_us, policy)
+    }
+
+    /// Identity preflight, not a publication lease. Native submission must also
+    /// hold genuine current association/radio/regulatory guards through submit.
+    pub fn validate_association_context(&self, context: &AssociationContext) -> Result<(), Error> {
+        if !matches!(self.phase, Phase::Configuring | Phase::Associated)
+            || self
+                .context
+                .as_ref()
+                .is_none_or(|current| !core::ptr::eq(current.as_ref(), context))
+        {
+            return Err(Error::Stale);
+        }
+        Ok(())
+    }
+
+    pub fn association_context(&self) -> Option<&AssociationContext> {
+        self.context
+            .as_deref()
+            .filter(|context| self.validate_association_context(context).is_ok())
+    }
+
+    fn begin_inner(
+        &mut self,
+        join: Join,
+        beacon: Option<super::scan::result::Bss>,
+        now_us: u64,
+        policy: &mut impl RegulatoryPolicy,
+    ) -> Result<Action, Error> {
         if self.phase != Phase::Idle {
             return Err(Error::Busy);
         }
@@ -267,12 +336,16 @@ impl Station {
             .map_err(|_| Error::Overflow)?;
         self.serial = 0;
         self.join = Some(join);
+        self.selected_beacon = beacon;
+        self.context = None;
         self.phase = Phase::Authenticating;
         match self.transmit(Phase::Authenticating, 1, policy) {
             Ok(action) => Ok(action),
             Err(error) => {
                 self.phase = Phase::Idle;
                 self.join = None;
+                self.selected_beacon = None;
+                self.context = None;
                 Err(error)
             }
         }
@@ -368,6 +441,19 @@ impl Station {
                     .checked_add(CONFIGURATION_TIMEOUT_US)
                     .ok_or(Error::Overflow)?;
                 let ticket = self.ticket()?;
+                let context = if request.modern().is_some() {
+                    let join = self.join.as_ref().ok_or(Error::NotAssociated)?;
+                    let beacon = self
+                        .selected_beacon
+                        .as_ref()
+                        .ok_or(Error::Unsupported("selected beacon required"))?;
+                    Some(Arc::new(AssociationContext::build(
+                        ticket, join, beacon, &response,
+                    )?))
+                } else {
+                    None
+                };
+                self.context = context.clone();
                 self.phase = Phase::Configuring;
                 self.pending = Some(Pending {
                     ticket,
@@ -381,6 +467,7 @@ impl Station {
                     channel,
                     request,
                     response,
+                    context,
                 })
             }
             _ => Err(Error::Stale),
@@ -438,6 +525,8 @@ impl Station {
             Completion::Accepted => Phase::Associated,
             Completion::RejectedAndIdle => {
                 self.join = None;
+                self.selected_beacon = None;
+                self.context = None;
                 Phase::Idle
             }
             Completion::Uncertain => Phase::Quarantined,
@@ -539,6 +628,8 @@ impl Station {
         self.authorization = None;
         self.phase = if result == Completion::Accepted {
             self.join = None;
+            self.selected_beacon = None;
+            self.context = None;
             Phase::Idle
         } else {
             Phase::Quarantined
@@ -549,6 +640,7 @@ impl Station {
 
 #[cfg(test)]
 mod tests {
+    mod modern;
     use super::*;
     use crate::net::wifi::{
         Band, RadioStatus, RawRate,

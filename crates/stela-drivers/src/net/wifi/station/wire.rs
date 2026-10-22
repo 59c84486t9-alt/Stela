@@ -4,12 +4,12 @@
 //! Single-link open-system/RSN association wire forms. SAE, FT, PMF and
 //! multi-link negotiation are refused by this first native MLME path.
 
-use super::PortPolicy;
+use super::{PortPolicy, phy};
 use crate::net::{
     Mac,
-    wifi::{frame::Mpdu, security::Cipher},
+    wifi::{Band, frame::Mpdu, security::Cipher},
 };
-use alloc::{vec, vec::Vec};
+use alloc::{sync::Arc, vec, vec::Vec};
 
 const MAX_ELEMENTS: usize = 2300;
 
@@ -29,6 +29,27 @@ pub struct AssociationRequest {
     elements: Vec<u8>,
     rsn: Option<(Cipher, Cipher)>,
     legacy_wpa: bool,
+    modern: Option<Arc<ModernSelection>>,
+}
+
+/// Exact local association advertisement and explicit OS-selected PHY profile.
+/// Vendor admission must bind it to the actual retained hardware capabilities.
+#[derive(Clone, Debug)]
+pub struct ModernSelection {
+    pub(crate) capabilities: phy::Capabilities,
+    pub(crate) mode: phy::Mode,
+    pub(crate) width: phy::Width,
+}
+impl ModernSelection {
+    pub fn capabilities(&self) -> &phy::Capabilities {
+        &self.capabilities
+    }
+    pub fn mode(&self) -> phy::Mode {
+        self.mode
+    }
+    pub fn width(&self) -> phy::Width {
+        self.width
+    }
 }
 
 fn cipher(bytes: &[u8]) -> Result<Cipher, Error> {
@@ -105,6 +126,44 @@ impl AssociationRequest {
     /// The first native profile is pre-HT single-link 2.4/5GHz with open-system
     /// authentication; advanced capabilities must be negotiated by later code.
     pub fn new(capabilities: u16, listen_interval: u16, bytes: Vec<u8>) -> Result<Self, Error> {
+        Self::parse(capabilities, listen_interval, bytes, false)
+    }
+
+    /// Explicit modern advertisement, not authorization to use these modes.
+    /// The current station modern entry still refuses 6GHz until SAE/PMF and
+    /// the genuine OS authentication boundary are implemented.
+    pub fn new_modern(
+        capabilities: u16,
+        listen_interval: u16,
+        bytes: Vec<u8>,
+        band: Band,
+        mode: phy::Mode,
+        width: phy::Width,
+    ) -> Result<Self, Error> {
+        if mode == phy::Mode::Legacy {
+            return Err(Error::Invalid("modern mode selection"));
+        }
+        let local = phy::Capabilities::parse(band, phy::Role::Station, &bytes)
+            .map_err(|_| Error::Invalid("local modern capabilities"))?;
+        let mut request = Self::parse(capabilities, listen_interval, bytes, true)?;
+        request.modern = Some(Arc::new(ModernSelection {
+            capabilities: local,
+            mode,
+            width,
+        }));
+        Ok(request)
+    }
+
+    pub fn modern(&self) -> Option<&ModernSelection> {
+        self.modern.as_deref()
+    }
+
+    fn parse(
+        capabilities: u16,
+        listen_interval: u16,
+        bytes: Vec<u8>,
+        modern: bool,
+    ) -> Result<Self, Error> {
         if bytes.len() > MAX_ELEMENTS {
             return Err(Error::Invalid("association elements too long"));
         }
@@ -145,19 +204,22 @@ impl AssociationRequest {
                 221 if data.starts_with(&[0, 0x50, 0xf2, 1]) => legacy_wpa = true,
                 // Do not advertise modes the current native state machine and
                 // actual driver association context cannot configure yet.
-                45 | 61 | 191 | 192 => {
+                61 | 192 => {
+                    return Err(Error::Unsupported("AP operation in station request"));
+                }
+                45 | 191 if !modern => {
                     return Err(Error::Unsupported("HT/VHT association context"));
                 }
-                255 if data
-                    .first()
-                    .is_some_and(|id| matches!(id, 35 | 36 | 106 | 107 | 108)) =>
+                255 if data.first().is_some_and(|id| {
+                    matches!(id, 36 | 106 | 107) || (!modern && matches!(id, 35 | 108))
+                }) =>
                 {
                     return Err(Error::Unsupported("HE/EHT/MLO association context"));
                 }
                 _ => (),
             }
         }
-        if !ssid || !rates {
+        if !ssid || (!rates && !modern) {
             return Err(Error::Invalid("missing SSID/rates"));
         }
         Ok(Self {
@@ -166,6 +228,7 @@ impl AssociationRequest {
             elements: bytes,
             rsn: selected_rsn,
             legacy_wpa,
+            modern: None,
         })
     }
 
