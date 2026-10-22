@@ -396,6 +396,57 @@ impl<H: Host, D: Devices> Machine<H, D> {
         self.native_publication = Some(inventory);
         Ok(owners)
     }
+    /// Bind exactly all instantiated canonical Cpu owners; Off slots carry no
+    /// worker authority. The roster cannot grow through an unjoined CPU start.
+    pub fn bind_active_native_workers(
+        &mut self,
+        bindings: &[publication::WorkerBinding],
+    ) -> Result<Vec<publication::WorkerOwner>, publication::PublicationError> {
+        if !matches!(
+            self.peers.get(self.current),
+            Some(super::super::processors::Peer::Running)
+        ) {
+            return Err(publication::PublicationError::UnknownPe(self.current));
+        }
+        if self.native_publication.is_some() {
+            return Err(publication::PublicationError::AlreadyInitialized);
+        }
+        let active: Vec<_> = self
+            .peers
+            .iter()
+            .enumerate()
+            .filter_map(|(pe, peer)| {
+                (!matches!(peer, super::super::processors::Peer::Off)).then_some(pe)
+            })
+            .collect();
+        if bindings.len() != active.len()
+            || active
+                .iter()
+                .any(|pe| !bindings.iter().any(|binding| binding.pe == *pe))
+            || bindings.iter().any(|binding| !active.contains(&binding.pe))
+        {
+            return Err(publication::PublicationError::ProcessorCount {
+                expected: active.len(),
+                actual: bindings.len(),
+            });
+        }
+        for &pe in &active {
+            let cpu = match &self.peers[pe] {
+                super::super::processors::Peer::Running if pe == self.current => &self.cpu,
+                super::super::processors::Peer::Parked(parked) => parked.cpu(),
+                _ => return Err(publication::PublicationError::UnknownPe(pe)),
+            };
+            if !cpu.canonical_memory.as_ref().is_some_and(|memory| {
+                memory.pe == pe && Arc::ptr_eq(&memory.machine, &self.native_memory_identity)
+            }) {
+                return Err(publication::PublicationError::UnknownPe(pe));
+            }
+        }
+        let (inventory, owners) = publication::WorkerPublications::new(bindings)?;
+        self.native_publication = Some(inventory);
+        Ok(owners)
+    }
+
     pub fn native_worker_publications(&mut self) -> Option<&mut publication::WorkerPublications> {
         self.native_publication.as_mut()
     }

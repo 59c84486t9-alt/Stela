@@ -17,10 +17,12 @@ mod profile;
 mod tag_transfer;
 pub use profile::{CheckedMemoryEntry, MemoryProfile};
 mod lifecycle;
+mod service;
 pub(in crate::memory) use lifecycle::MemoryServiceLoan;
 pub(in crate::memory) use lifecycle::ServiceLoanAttempt;
 use lifecycle::{DomainSnapshot, DomainState};
 pub use lifecycle::{ExecutionLoanAttempt, MemoryExecutionLoan, MemoryObservationLoan};
+pub(in crate::memory) use service::AllWriterService;
 
 mod exclusive;
 pub(crate) mod m0_read;

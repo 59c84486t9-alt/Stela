@@ -56,9 +56,9 @@ pub use processors::{
     ProcessorTarget, ProcessorWrite, Processors, SettledProcessorWrite,
 };
 pub use shared_memory::{
-    NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation, NativeTransport, ReturnedRun,
-    ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure, SharedMemoryRefusal,
-    dispatch_native_run, recover_native_run,
+    HeldRamService, NativeCohort, NativeRun, NativeRunIdentity, NativeRunObservation,
+    NativeTransport, ReturnedRun, ServiceHost, ServiceTransport, SharedMemory, SharedMemoryFailure,
+    SharedMemoryRefusal, dispatch_native_run, recover_native_run,
 };
 use stela_compiler::{
     GuestAddress, GuestState, Lifter, TargetCpu,

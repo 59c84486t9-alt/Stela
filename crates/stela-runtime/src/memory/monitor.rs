@@ -281,6 +281,25 @@ impl<B, M, A> Drop for GlobalRetirement<'_, B, M, A> {
     }
 }
 
+/// Retains every physical writer gate without changing bytes or reservations.
+/// Only the canonical memory owner uses this while native frames are recovered.
+/// No monitor operation may reenter while the guard is held.
+pub(in crate::memory) struct FrozenWriters<'a, B, M, A> {
+    domain: &'a MonitorDomain<B, M, A>,
+    _gates: Vec<MutexGuard<'a, Entries<B>>>,
+}
+
+impl<B, M, A> FrozenWriters<'_, B, M, A> {
+    /// Fail before releasing gates, including writers which already passed an
+    /// outer memory-system check and are now waiting for their physical gate.
+    pub(in crate::memory) fn fail(&self) {
+        self.domain.failed.store(true, Ordering::Release);
+    }
+    pub(in crate::memory) fn validate_current(&self) -> Result<(), MonitorError> {
+        self.domain.check_execution()
+    }
+}
+
 impl<B, M, A> MonitorDomain<B, M, A> {
     pub fn new(erg_bytes: u64, stripe_count: usize) -> Result<Arc<Self>, MonitorError> {
         if !(MIN_ERG_BYTES..=MAX_ERG_BYTES).contains(&erg_bytes) || !erg_bytes.is_power_of_two() {
@@ -802,6 +821,38 @@ impl<B, M, A> MonitorDomain<B, M, A> {
         result.map_err(AccessError::Memory)
     }
 
+    /// Nonblocking acquisition in the same ascending order as cross-granule
+    /// writers. Busy acquisition releases its prefix, performs no callback and
+    /// does not invalidate a reservation. Poisoning remains terminal.
+    pub(in crate::memory) fn try_freeze_writers(
+        &self,
+    ) -> Result<Option<FrozenWriters<'_, B, M, A>>, MonitorError> {
+        self.check_execution()?;
+        let mut gates = Vec::with_capacity(self.stripes.len());
+        for stripe in &self.stripes {
+            #[cfg(feature = "std")]
+            let gate = match stripe.try_lock() {
+                Ok(gate) => gate,
+                Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    self.failed.store(true, Ordering::Release);
+                    return Err(MonitorError::Poisoned);
+                }
+            };
+            #[cfg(not(feature = "std"))]
+            let gate = match stripe.try_lock() {
+                Ok(gate) => gate,
+                Err(_) => return Ok(None),
+            };
+            gates.push(gate);
+        }
+        self.check_execution()?;
+        Ok(Some(FrozenWriters {
+            domain: self,
+            _gates: gates,
+        }))
+    }
+
     pub fn revoke_mapping(&self, mapping: &Mapping<M, A>) -> Result<(), MonitorError> {
         let _failure = FailureBoundary(&self.failed);
         // Declare before gates so generic backing payload destruction is outside all gates.
@@ -883,6 +934,78 @@ mod tests {
             domain.store(thread, access, || Ok::<_, ()>(())).unwrap(),
             ConditionalWrite::Stored(())
         )
+    }
+
+    #[test]
+    fn all_writer_hold_is_nonblocking_releases_busy_prefix_and_preserves_marks() {
+        let (domain, backing, mapping) = fixture(TEST_ERG_BYTES, TEST_STRIPES);
+        let original = access(&backing, &mapping, 0);
+        let mut thread = domain.thread();
+        load(&domain, &mut thread, &original);
+        let last = domain.stripes.last().unwrap().lock().unwrap();
+        assert!(domain.try_freeze_writers().unwrap().is_none());
+        for stripe in &domain.stripes[..TEST_STRIPES - 1] {
+            assert!(stripe.try_lock().is_ok());
+        }
+        drop(last);
+        let hold = domain.try_freeze_writers().unwrap().unwrap();
+        hold.validate_current().unwrap();
+        assert!(
+            domain
+                .stripes
+                .iter()
+                .all(|stripe| stripe.try_lock().is_err())
+        );
+        assert!(domain.try_freeze_writers().unwrap().is_none());
+        drop(hold);
+        assert!(store(&domain, &mut thread, &original));
+    }
+
+    #[test]
+    fn failed_all_writer_hold_denies_waiting_callback_before_any_byte_effect() {
+        use std::{sync::mpsc, time::Duration};
+        let (domain, backing, _) = fixture(TEST_ERG_BYTES, TEST_STRIPES);
+        let hold = domain.try_freeze_writers().unwrap().unwrap();
+        let calls = AtomicUsize::new(0);
+        let (started, ready) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(|| {
+                let range = WriteRange::new(backing, 0, 8).unwrap();
+                started.send(()).unwrap();
+                domain.with_writer(&range, Invalidation::BeforeAttempt, || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, ()>(())
+                })
+            });
+            ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            hold.fail();
+            drop(hold);
+            assert_eq!(
+                writer.join().unwrap(),
+                Err(AccessError::Monitor(MonitorError::Poisoned))
+            );
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn all_writer_hold_refuses_poison_without_a_completion() {
+        let (domain, _, _) = fixture(TEST_ERG_BYTES, TEST_STRIPES);
+        let poisoned = Arc::clone(&domain);
+        assert!(
+            std::thread::spawn(move || {
+                let _gate = poisoned.stripes[TEST_STRIPES - 1].lock().unwrap();
+                panic!("deliberately poison the actual writer gate");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(matches!(
+            domain.try_freeze_writers(),
+            Err(MonitorError::Poisoned)
+        ));
+        assert_eq!(domain.check_execution(), Err(MonitorError::Poisoned));
+        assert!(domain.stripes[0].try_lock().is_ok());
     }
 
     #[test]

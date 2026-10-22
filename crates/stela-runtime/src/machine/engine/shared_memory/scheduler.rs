@@ -47,7 +47,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .initialize(&mut self.host.local, inventory, owners);
     }
 
-    fn hold_native_services(&mut self) -> Result<publication::StoppedWorkers, Stop> {
+    pub(super) fn hold_native_services(&mut self) -> Result<publication::StoppedWorkers, Stop> {
         let Some(inventory) = &mut self.native_publication else {
             return Err(self.unsupported(RequirementKind::Native(
                 "native publication inventory is absent",
@@ -58,10 +58,7 @@ impl<H: Host, T: NativeTransport, D: Devices> Machine<ServiceHost<H, T>, D> {
             .transport
             .hold_all(&mut self.host.local, inventory);
         let members: Vec<_> = inventory.bindings().map(|binding| binding.pe).collect();
-        if inventory
-            .require_stopped(self.peers.len(), &members)
-            .is_err()
-        {
+        if inventory.require_all_held(&held).is_err() {
             self.host
                 .transport
                 .fail_stopped("native source services lack actual held workers");

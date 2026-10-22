@@ -57,6 +57,56 @@ pub struct HostEffectReceipt {
 }
 
 impl WorkerPublications {
+    /// Exact explicit roster for leaf services which borrow only instantiated
+    /// Cpu owners. Whole-ProcessorWrite still requires its full modeled roster.
+    pub(in crate::machine::engine) fn require_held_members(
+        &self,
+        members: &[usize],
+    ) -> Result<(), PublicationError> {
+        if members.is_empty()
+            || self.slots.len() != members.len()
+            || self
+                .slots
+                .iter()
+                .any(|slot| !members.contains(&slot.binding.pe))
+            || members
+                .iter()
+                .enumerate()
+                .any(|(i, pe)| members[..i].contains(pe))
+        {
+            return Err(PublicationError::ProcessorCount {
+                expected: members.len(),
+                actual: self.slots.len(),
+            });
+        }
+        let mut generation = None;
+        for slot in &self.slots {
+            if !matches!(slot.frame, Frame::Recovered(_)) {
+                return Err(PublicationError::InFlight);
+            }
+            let Some((stop, StopPhase::Held)) = slot.stop else {
+                return Err(PublicationError::MissingInvalidation);
+            };
+            if generation.is_some_and(|before| before != stop) {
+                return Err(PublicationError::StaleStop);
+            }
+            generation = Some(stop);
+        }
+        Ok(())
+    }
+    pub(in crate::machine::engine) fn require_all_held(
+        &self,
+        held: &StoppedWorkers,
+    ) -> Result<(), PublicationError> {
+        self.check_stop(&held.request, StopPhase::Held)?;
+        let members: Vec<_> = held
+            .request
+            .members
+            .iter()
+            .map(|binding| binding.pe)
+            .collect();
+        self.require_held_members(&members)
+    }
     pub(in crate::machine::engine) fn require_recovered(
         &self,
         binding: WorkerBinding,
@@ -361,6 +411,50 @@ mod tests {
         let held = inventory.hold_stop(request).unwrap();
         (inventory, owners, hosts, held)
     }
+    #[test]
+    fn sparse_leaf_roster_hold_does_not_authorize_whole_processor_write() {
+        let binding = WorkerBinding {
+            pe: 7,
+            worker: WorkerId(41),
+        };
+        let (mut inventory, mut owners) = WorkerPublications::new(&[binding]).unwrap();
+        let mut host = LocalHost {
+            worker: binding.worker,
+            effects: Vec::new(),
+            regime: None,
+        };
+        inventory
+            .accept_initial(owners[0].publish_initial(&mut host).unwrap())
+            .unwrap();
+        assert!(inventory.require_held_members(&[7]).is_err());
+        let request = inventory.request_stop(&[7]).unwrap();
+        let command = inventory
+            .native_stop_commands(&request)
+            .unwrap()
+            .pop()
+            .unwrap();
+        inventory
+            .accept_invalidation(owners[0].invalidate(command, &mut host).unwrap())
+            .unwrap();
+        let held = inventory.hold_stop(request).unwrap();
+        inventory.require_all_held(&held).unwrap();
+        inventory.require_held_members(&[7]).unwrap();
+        assert!(inventory.require_held_members(&[0]).is_err());
+        assert!(inventory.require_held_members(&[7, 7]).is_err());
+        assert!(inventory.require_stopped(1, &[7]).is_err());
+        assert!(inventory.require_stopped(10, &[7]).is_err());
+        let (foreign, _, _, _) = self::held();
+        assert_eq!(
+            foreign.require_all_held(&held),
+            Err(PublicationError::WrongInventory)
+        );
+        let release = inventory.release(held).unwrap().pop().unwrap();
+        inventory
+            .accept_release(owners[0].release(release).unwrap())
+            .unwrap();
+        assert!(inventory.require_held_members(&[7]).is_err());
+    }
+
     #[test]
     fn effects_require_actual_assigned_host_and_receipt_before_close_or_release() {
         let (mut inventory, mut owners, mut hosts, held) = held();

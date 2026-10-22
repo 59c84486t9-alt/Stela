@@ -13,7 +13,9 @@ use alloc::{sync::Arc, vec::Vec};
 use core::ptr::NonNull;
 use stela_compiler::{TargetCpu, context::memory::MemoryStatus};
 
+mod completion;
 mod transfer;
+pub use completion::CanonicalRamService;
 
 const GRANULE: usize = 16;
 const MAX_RANGES: usize = 4096;
@@ -344,6 +346,88 @@ mod tests {
             target: TargetCpu::Baseline,
             erg_bytes: 64,
         }
+    }
+
+    #[test]
+    fn canonical_service_excludes_native_and_mapping_publication_until_drop() {
+        let storage = Storage::new();
+        let ranges = [range(&storage, 0x4000, 0, 128)];
+        let ram = unsafe { model(&ranges, storage) };
+        let other_storage = Storage::new();
+        let other = unsafe { model(&[range(&other_storage, 0x4000, 0, 128)], other_storage) };
+        let native = ram.domain.execution_loan().unwrap();
+        assert!(ram.try_service().unwrap().is_none());
+        drop(native);
+        let service = ram.try_service().unwrap().unwrap();
+        assert!(service.belongs_to(&ram));
+        assert!(!service.belongs_to(&other));
+        assert_eq!(service.generation(), ram.domain.generation().unwrap());
+        service.validate_current().unwrap();
+        assert!(matches!(
+            ram.domain.try_execution_loan().unwrap(),
+            crate::memory::domain::ExecutionLoanAttempt::ServiceBusy
+        ));
+        assert!(ram.try_service().unwrap().is_none());
+        // An independent physical domain still works; geometry is not authority.
+        drop(other.try_service().unwrap().unwrap());
+        drop(service);
+        drop(ram.domain.execution_loan().unwrap());
+        drop(ram.try_service().unwrap().unwrap());
+        let mut bytes = [0; 128];
+        unsafe { ram.read_physical(0x4000, &mut bytes) }.unwrap();
+        assert_eq!(bytes, [0x53; 128]);
+    }
+
+    #[test]
+    fn canonical_service_blocks_real_alias_copyout_and_descriptor_writers() {
+        use std::{sync::mpsc, time::Duration};
+        let storage = Storage::new();
+        let ram = Arc::new(unsafe { model(&[range(&storage, 0x4000, 0, 128)], storage) });
+        let service = ram.try_service().unwrap().unwrap();
+        let (started, ready) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        std::thread::scope(|scope| {
+            for descriptor in [false, true] {
+                let ram = Arc::clone(&ram);
+                let started = started.clone();
+                let finished = finished.clone();
+                scope.spawn(move || {
+                    started.send(()).unwrap();
+                    if descriptor {
+                        assert!(
+                            ram.update_descriptor(0x4040, u64::from_le_bytes([0x53; 8]), 7)
+                                .unwrap()
+                        );
+                    } else {
+                        // Same retained physical backing through the host writer.
+                        unsafe { ram.system.publish(&ram.regions[0].backing, 0, &[9; 8]) }.unwrap();
+                    }
+                    finished.send(()).unwrap();
+                });
+            }
+            for _ in 0..2 {
+                ready.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+            service.validate_current().unwrap();
+            assert!(done.try_recv().is_err());
+            let mut before = [0; 128];
+            unsafe { ram.read_physical(0x4000, &mut before) }.unwrap();
+            assert_eq!(before, [0x53; 128]);
+            drop(service);
+            for _ in 0..2 {
+                done.recv_timeout(Duration::from_secs(2)).unwrap();
+            }
+        });
+        let mut after = [0; 128];
+        unsafe { ram.read_physical(0x4000, &mut after) }.unwrap();
+        assert_eq!(&after[..8], &[9; 8]);
+        assert_eq!(&after[64..72], &7u64.to_le_bytes());
+        assert!(
+            after[8..64]
+                .iter()
+                .chain(after[72..].iter())
+                .all(|byte| *byte == 0x53)
+        );
     }
 
     #[test]

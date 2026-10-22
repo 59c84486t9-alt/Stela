@@ -6,7 +6,7 @@ mod host;
 mod native_run;
 mod policy;
 mod scheduler;
-pub use host::{NativeTransport, ServiceHost, ServiceTransport};
+pub use host::{HeldRamService, NativeTransport, ServiceHost, ServiceTransport};
 
 use super::{Devices, Host, Machine, mmu};
 use crate::memory::{RegisteredSystemRam, domain::MemoryThread};
@@ -88,14 +88,50 @@ impl<H: Host, D: Devices> Machine<H, D> {
         ram: Arc<RegisteredSystemRam>,
         events: &crate::system::events::EventDomain,
     ) -> Result<(), MemoryStatus> {
+        self.install_shared_memory(ram, events, false)
+    }
+
+    /// Convert exactly the instantiated Running/Parked Cpu owners. Peer::Off
+    /// has no Cpu/frame authority and remains unbound; starts/reset/rebind must
+    /// refuse until a real canonical owner and physical worker can be joined.
+    pub fn install_shared_memory_for_active_processors(
+        &mut self,
+        ram: Arc<RegisteredSystemRam>,
+        events: &crate::system::events::EventDomain,
+    ) -> Result<(), MemoryStatus> {
+        self.install_shared_memory(ram, events, true)
+    }
+
+    fn install_shared_memory(
+        &mut self,
+        ram: Arc<RegisteredSystemRam>,
+        events: &crate::system::events::EventDomain,
+        active_only: bool,
+    ) -> Result<(), MemoryStatus> {
+        if !matches!(
+            self.peers.get(self.current),
+            Some(super::processors::Peer::Running)
+        ) {
+            return Err(MemoryStatus::Unsupported);
+        }
         if ram.reservation_granule() != crate::machine::cpu::RESERVATION_GRANULE {
             return Err(MemoryStatus::Unsupported);
         }
         if let Some(publication) = &self.native_publication {
-            let members: Vec<_> = (0..self.peers.len()).collect();
-            publication
-                .require_stopped(self.peers.len(), &members)
-                .map_err(|_| MemoryStatus::Unsupported)?;
+            let members: Vec<_> = self
+                .peers
+                .iter()
+                .enumerate()
+                .filter_map(|(pe, peer)| {
+                    (!active_only || !matches!(peer, super::processors::Peer::Off)).then_some(pe)
+                })
+                .collect();
+            if active_only {
+                publication.require_held_members(&members)
+            } else {
+                publication.require_stopped(self.peers.len(), &members)
+            }
+            .map_err(|_| MemoryStatus::Unsupported)?;
         }
         let mut prepared = Vec::with_capacity(self.peers.len());
         for (pe, peer) in self.peers.iter().enumerate() {
@@ -106,6 +142,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
                     &self.cpu
                 }
                 super::processors::Peer::Parked(parked) if parked.native_ready() => parked.cpu(),
+                super::processors::Peer::Off if active_only => continue,
                 _ => return Err(MemoryStatus::Unsupported),
             };
             if cpu.canonical_memory.is_some() || cpu.monitor.is_some() {
@@ -117,18 +154,21 @@ impl<H: Host, D: Devices> Machine<H, D> {
                 .register(cpu.event, None)
                 .map_err(|_| MemoryStatus::Domain)?;
             memory.bind_events(&event.producer())?;
-            prepared.push(SharedMemory {
-                memory,
-                ram: Arc::clone(&ram),
+            prepared.push((
                 pe,
-                event,
-                machine: Arc::clone(&self.native_memory_identity),
-            });
+                SharedMemory {
+                    memory,
+                    ram: Arc::clone(&ram),
+                    pe,
+                    event,
+                    machine: Arc::clone(&self.native_memory_identity),
+                },
+            ));
         }
         // No fallible step after the first move. The old scalar event storage
         // ceases to be authoritative; all services use the moved endpoint.
-        for (peer, memory) in self.peers.iter_mut().zip(prepared) {
-            let cpu = match peer {
+        for (pe, memory) in prepared {
+            let cpu = match &mut self.peers[pe] {
                 super::processors::Peer::Running => &mut self.cpu,
                 super::processors::Peer::Parked(parked) => parked.cpu_mut(),
                 super::processors::Peer::Off => unreachable!("preflight admitted active PE"),

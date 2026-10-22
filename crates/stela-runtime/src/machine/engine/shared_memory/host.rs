@@ -1,5 +1,8 @@
 //! BSP control-plane Host routing during a true all-worker stop. Only the
 //! closed native effects cross cores; the Machine and Cpu never do.
+mod completion;
+pub use completion::HeldRamService;
+
 use super::super::publication;
 use super::*;
 use crate::machine::{InstallError, NativeCode, NativeExit, Regime, mmu};
@@ -384,6 +387,258 @@ mod tests {
                 .unwrap();
         }
     }
+    struct Copyout {
+        calls: usize,
+        fail: bool,
+    }
+    impl Devices for Copyout {
+        fn read(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+        ) -> Result<u64, crate::machine::DeviceError> {
+            Err(crate::machine::DeviceError::NoDevice)
+        }
+        fn write(
+            &mut self,
+            _: usize,
+            _: u64,
+            _: u8,
+            _: u64,
+            _: u64,
+        ) -> Result<(), crate::machine::DeviceError> {
+            Err(crate::machine::DeviceError::NoDevice)
+        }
+        fn lines(&mut self, _: usize, _: u64) -> crate::machine::engine::Lines {
+            crate::machine::engine::Lines::default()
+        }
+        fn transfer(
+            &mut self,
+            _: usize,
+            memory: &mut dyn crate::machine::engine::Memory,
+            _: u64,
+        ) -> Result<(), crate::machine::DeviceError> {
+            self.calls += 1;
+            assert!(memory.write(0x14080, &0x12345678u64.to_le_bytes()));
+            if self.fail {
+                Err(crate::machine::DeviceError::TransferRefused(
+                    "retained modeled prefix".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+    fn memory_service_machine(
+        fail: bool,
+    ) -> (
+        Machine<ServiceHost<Local, OneWorker>, Copyout>,
+        Arc<RegisteredSystemRam>,
+    ) {
+        memory_service_machine_slots(fail, 1)
+    }
+
+    fn memory_service_machine_slots(
+        fail: bool,
+        count: usize,
+    ) -> (
+        Machine<ServiceHost<Local, OneWorker>, Copyout>,
+        Arc<RegisteredSystemRam>,
+    ) {
+        let (cpu, mut profile, missing, ram) = super::super::policy::tests::fixture();
+        if count > 1 {
+            // Synthetic modeled slots, not a claim about a physical Apple SKU.
+            profile.processors = (0..count)
+                .map(|pe| crate::machine::registers::Identity {
+                    midr: 0x611f0220,
+                    mpidr: 0x80000000 | pe as u64,
+                    clock: None,
+                    caches: None,
+                })
+                .collect();
+        }
+        let host = ServiceHost::new(Local, OneWorker(None), Arc::clone(&ram));
+        let mut machine =
+            Machine::new(cpu, host, Copyout { calls: 0, fail }, profile, ram.target());
+        machine.profile_missing = missing;
+        machine
+            .install_shared_memory_for_active_processors(
+                Arc::clone(&ram),
+                &crate::system::events::EventDomain::new(),
+            )
+            .unwrap();
+        let owners = machine
+            .bind_active_native_workers(&[WorkerBinding {
+                pe: 0,
+                worker: WorkerId(17),
+            }])
+            .unwrap();
+        machine.initialize_native_transport(owners);
+        (machine, ram)
+    }
+    #[test]
+    fn active_bootstrap_keeps_off_slots_unbound_and_refuses_start_or_reset() {
+        let (mut machine, ram) = memory_service_machine_slots(false, 10);
+        assert_eq!(machine.peers.len(), 10);
+        assert!(
+            machine.peers[1..]
+                .iter()
+                .all(|peer| matches!(peer, crate::machine::engine::processors::Peer::Off))
+        );
+        assert_eq!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .bindings()
+                .count(),
+            1
+        );
+        let before = (
+            machine.cpu.state.clone(),
+            machine.cpu.pc,
+            machine.cpu.retired,
+        );
+        let (devices, mut service) = unsafe { machine.prepare_native_ram_service_parts() }.unwrap();
+        assert_eq!(devices.calls, 1); // actual disjoint receiver, not a clone
+        assert!(service.memory().belongs_to(&ram));
+        service.validate_current().unwrap();
+        service.fence_cpu_memory();
+        service.validate_current().unwrap();
+        service.finish();
+        assert!(
+            machine
+                .start(crate::machine::engine::Start {
+                    cpu: 1,
+                    address: 0x1000
+                })
+                .is_err()
+        );
+        assert!(machine.warm_reset().is_err());
+        let waiting = crate::machine::engine::Wait {
+            kind: stela_compiler::aarch64::system::synchronization::WaitKind::Interrupt,
+            timeout: None,
+            down: true,
+        };
+        machine.waiting = Some(waiting);
+        assert!(machine.wake().is_err());
+        assert_eq!(machine.waiting, Some(waiting));
+        machine.waiting = None;
+        assert!(matches!(
+            machine.peers[1],
+            crate::machine::engine::processors::Peer::Off
+        ));
+        assert_eq!(
+            (
+                machine.cpu.state.clone(),
+                machine.cpu.pc,
+                machine.cpu.retired
+            ),
+            before
+        );
+        assert!(matches!(
+            machine.run(1),
+            crate::machine::Stop::Unsupported(_)
+        ));
+    }
+
+    #[test]
+    fn held_ram_service_uses_actual_copyout_owner_and_explicit_settlement() {
+        let (mut machine, ram) = memory_service_machine(false);
+        let before = (
+            machine.cpu.state.clone(),
+            machine.cpu.pc,
+            machine.cpu.retired,
+        );
+        // SAFETY: one real model owner, no native entry or external writer. The
+        // same guard/protocol is exercised; this is not CPL0/native SMP proof.
+        let service = unsafe { machine.prepare_native_ram_service() }.unwrap();
+        service.validate_current().unwrap();
+        assert!(service.memory().belongs_to(&ram));
+        assert!(matches!(
+            ram.domain().try_execution_loan().unwrap(),
+            crate::memory::domain::ExecutionLoanAttempt::ServiceBusy
+        ));
+        let mut bytes = [0; 8];
+        unsafe { ram.read_physical(0x14080, &mut bytes) }.unwrap();
+        assert_eq!(bytes, 0x12345678u64.to_le_bytes());
+        service.finish(); // model has no pending controller effect or ACK
+        assert_eq!(machine.devices.calls, 1);
+        assert_eq!(
+            (
+                machine.cpu.state.clone(),
+                machine.cpu.pc,
+                machine.cpu.retired
+            ),
+            before
+        );
+        assert!(machine.host.services.is_empty());
+        assert!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .require_stopped(1, &[0])
+                .is_err()
+        );
+        drop(ram.domain().execution_loan().unwrap());
+    }
+    #[test]
+    fn abandoned_ram_service_fails_owner_and_never_releases_actual_workers() {
+        let (mut machine, ram) = memory_service_machine(false);
+        let service = unsafe { machine.prepare_native_ram_service() }.unwrap();
+        drop(service);
+        assert_eq!(
+            ram.domain().check_execution(),
+            Err(stela_compiler::context::memory::MemoryStatus::Domain)
+        );
+        assert!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .require_stopped(1, &[0])
+                .is_ok()
+        );
+        assert_eq!(machine.host.services.len(), 1);
+        let mut bytes = [0xa5; 8];
+        assert!(unsafe { ram.read_physical(0x14080, &mut bytes) }.is_err());
+        assert_eq!(bytes, [0xa5; 8]);
+    }
+    #[test]
+    fn refused_copyout_retains_committed_prefix_and_actual_stopped_owners() {
+        let (mut machine, ram) = memory_service_machine(true);
+        let before = (
+            machine.cpu.state.clone(),
+            machine.cpu.pc,
+            machine.cpu.retired,
+        );
+        assert!(unsafe { machine.prepare_native_ram_service() }.is_err());
+        assert_eq!(machine.devices.calls, 1);
+        assert_eq!(
+            (
+                machine.cpu.state.clone(),
+                machine.cpu.pc,
+                machine.cpu.retired
+            ),
+            before
+        );
+        assert!(
+            machine
+                .native_publication
+                .as_ref()
+                .unwrap()
+                .require_stopped(1, &[0])
+                .is_ok()
+        );
+        assert_eq!(machine.host.services.len(), 1);
+        let mut bytes = [0; 8];
+        unsafe { ram.read_physical(0x14080, &mut bytes) }.unwrap();
+        assert_eq!(bytes, 0x12345678u64.to_le_bytes());
+    }
+
     #[test]
     fn unprivileged_round_recovers_refusal_without_source_execution_or_raw_ram_fallback() {
         let (mut cpu, profile, missing, ram) = super::super::policy::tests::fixture();

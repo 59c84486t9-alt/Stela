@@ -402,6 +402,13 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// interrupt woke consumes the event register (`Machine::wait`). A PE
     /// that woke from power-down leaves reset instead.
     pub(super) fn wake(&mut self) -> Step {
+        if self.waiting.is_some_and(|waiting| waiting.down)
+            && (self.native_publication.is_some() || self.cpu.has_canonical_memory())
+        {
+            return Err(self.unsupported(RequirementKind::Native(
+                "native CPU wake from reset requires its canonical RAM/event and physical worker rebind owner",
+            )));
+        }
         let Some(Wait { kind, down, .. }) = self.waiting.take() else {
             return Ok(());
         };
@@ -550,7 +557,17 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// highest implemented EL, with the System registers' reset values and
     /// its own identification (Arm `TakeReset`). A powered-down PE can be
     /// started like one held in reset.
-    fn start(&mut self, start: Start) -> Step {
+    pub(super) fn start(&mut self, start: Start) -> Step {
+        if self.native_publication.is_some()
+            || self.cpu.has_canonical_memory()
+            || self.peers.iter().any(
+                |peer| matches!(peer, Peer::Parked(parked) if parked.cpu.has_canonical_memory()),
+            )
+        {
+            return Err(self.unsupported(RequirementKind::Native(
+                "native CPU start requires its canonical RAM/event and assigned physical worker rebind owner",
+            )));
+        }
         let held = match self.peers.get(start.cpu) {
             Some(Peer::Off) => true,
             Some(Peer::Running) => down(self.waiting),
@@ -585,7 +602,7 @@ impl<H: Host, D: Devices> Machine<H, D> {
     /// AMX unit) restarts as on its other resets (inference: no 26A434
     /// component requests a Warm reset). The cluster's shared registers stay.
     pub(super) fn warm_reset(&mut self) -> Step {
-        if self.cpu.has_canonical_memory() {
+        if self.native_publication.is_some() || self.cpu.has_canonical_memory() {
             return Err(self.unsupported(RequirementKind::Native(
                 "canonical native PE reset requires its RAM/event retirement and reset-rebind owner",
             )));
