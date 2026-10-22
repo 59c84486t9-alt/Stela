@@ -293,9 +293,9 @@ pub(crate) struct Prepare {
     #[arg(long, value_parser = parse_ecid)]
     ecid: Option<u64>,
     /// A firmware image the board's own devices run, kept under its guest
-    /// file name (such as `USB-C_HPM,47.bin`); repeat for each image. These
-    /// replace the images the DeviceTree's board names, which are otherwise
-    /// taken from the IPSW's restore ramdisk.
+    /// file name (such as `USB-C_HPM,47.bin`); repeat for each image. Each
+    /// takes the place of the same-named image the DeviceTree's board names;
+    /// the others are taken from the IPSW's restore ramdisk.
     #[arg(long, conflicts_with = "disk")]
     board_firmware: Vec<PathBuf>,
 }
@@ -790,12 +790,16 @@ impl Prepare {
         let options = self.options(inputs.dram_base()?, recovery_uuid.as_deref())?;
         let mut bundle = boot_bundle::prepare(&inputs, &options)?;
         let mut unresolved = vec![];
-        if self.board_firmware.is_empty() {
-            // The board the bundle's DeviceTree describes names its images;
-            // the same IPSW's restore ramdisk holds them.
-            match board_firmware::needed(&bundle) {
-                Ok(names) if names.is_empty() => {}
-                Ok(names) => {
+        // The board the bundle's DeviceTree describes names its images, each
+        // die the one its own node or its flash's names; the same IPSW's
+        // restore ramdisk holds those not given by hand.
+        match board_firmware::needed(&bundle) {
+            Ok(names) => {
+                let names: Vec<String> = names
+                    .into_iter()
+                    .filter(|name| !board_firmware.iter().any(|(given, _)| given == name))
+                    .collect();
+                if !names.is_empty() {
                     let ramdisk = match &ramdisk {
                         Some(ramdisk)
                             if ramdisk.source.component == components::RESTORE_RAMDISK =>
@@ -813,16 +817,18 @@ impl Prepare {
                     };
                     sourced =
                         board_firmware::from_ramdisk(ramdisk, board_firmware::DIRECTORY, &names)?;
-                    inputs.board_firmware = sourced
-                        .iter()
-                        .map(|(name, decoded)| (name.clone(), input(decoded)))
-                        .collect();
+                    inputs.board_firmware.extend(
+                        sourced
+                            .iter()
+                            .map(|(name, decoded)| (name.clone(), input(decoded))),
+                    );
                     bundle = boot_bundle::prepare(&inputs, &options)?;
                 }
-                Err(error) => unresolved.push(format!(
-                    "board firmware: the DeviceTree is not a board the engine models ({error})"
-                )),
             }
+            Err(error) if board_firmware.is_empty() => unresolved.push(format!(
+                "board firmware: the DeviceTree is not a board the engine models ({error})"
+            )),
+            Err(_) => {}
         }
         bundle.manifest.unresolved.extend(unresolved);
         bundle
