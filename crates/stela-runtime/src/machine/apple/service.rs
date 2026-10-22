@@ -124,6 +124,25 @@ impl AppleDevices {
     ) -> Result<(), DeviceError> {
         self.service.retain_reset(&mut self.reset, reset);
         self.settle_lifecycle(cpu, now);
+        self.capture_reached(cpu, now, None);
+        let result = self.apply_service();
+        match &result {
+            Ok(()) => self.service = ServiceBatch::default(),
+            Err(error) => self.service.failure = Some(error.clone()),
+        }
+        result
+    }
+
+    /// Retain reached outputs even when the producing register operation
+    /// subsequently refuses. Capturing never delivers an input or retries a
+    /// peripheral effect, and keeps its original CPU/counter context.
+    pub(super) fn capture_reached(
+        &mut self,
+        cpu: CpuIndex,
+        now: u64,
+        reset: Option<Reset>,
+    ) {
+        self.service.retain_reset(&mut self.reset, reset);
         // Capture both queues before either family can refuse. A release error
         // must not leave the reached wire batch unrepresented or discard it.
         if let Some(starter) = &self.cpu_start {
@@ -137,12 +156,6 @@ impl AppleDevices {
             );
         }
         self.capture_inputs(cpu, now);
-        let result = self.apply_service();
-        match &result {
-            Ok(()) => self.service = ServiceBatch::default(),
-            Err(error) => self.service.failure = Some(error.clone()),
-        }
-        result
     }
 
     fn apply_service(&mut self) -> Result<(), DeviceError> {

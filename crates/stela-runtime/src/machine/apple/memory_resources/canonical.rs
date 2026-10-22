@@ -115,7 +115,7 @@ impl Prepared {
     ) -> Result<(), &'static str> {
         // SAFETY: caller retains exactly the same closed producer set/guard.
         let expected = unsafe { self.read_ram_drain(offset, width, memory) }?;
-        if value != expected {
+        if u64::from(value as u32) != expected {
             return Err("DCS flush must preserve high16 and clear both low bytes");
         }
         let (aperture, within) = self.router.target(offset)?;

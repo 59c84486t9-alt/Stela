@@ -55,8 +55,8 @@ impl AppleDevices {
             } else {
                 self.bus.write(physical, width, value, &mut access).map_err(describe)
             };
-            written
-                .map_err(|error| {
+            let reset = reset_reason(&access);
+            let result = written.map_err(|error| {
                     if let Some((_, reason)) = self
                         .power_refusals
                         .iter()
@@ -69,19 +69,32 @@ impl AppleDevices {
                     } else {
                         error
                     }
-                })?;
+                });
+            if let Err(error) = result {
+                self.capture_reached(cpu, now, reset);
+                return Err(error);
+            }
             for wire in self.selects.iter().filter(|w| w.physical == physical) {
-                self.bus
+                let result = self.bus
                     .device_mut::<Spi>(wire.spi)
                     .expect("SPI wire")
-                    .set_cs(value & 1 != 0)
-                    .map_err(|e| DeviceError::Refused(e.into()))?;
+                    .set_cs(value & 1 != 0);
+                if let Err(error) = result {
+                    self.capture_reached(cpu, now, reset);
+                    return Err(DeviceError::Refused(error.into()));
+                }
             }
-            Ok(reset_reason(&access))
+            Ok(reset)
         })();
         Ok(match reached {
             Ok(reset) => ConsumedWrite::Complete { settlement: self.settle(cpu, now, reset) },
-            Err(error) => ConsumedWrite::Unknown { error },
+            Err(error) => {
+                // Early RTC/lifecycle refusals can also have reached wires.
+                // A second capture after the register error is empty, never a
+                // replay, and preserves the first reset already retained.
+                self.capture_reached(cpu, now, None);
+                ConsumedWrite::Unknown { error }
+            },
         })
     }
 }
@@ -106,6 +119,8 @@ mod tests {
         fn write(&mut self, offset: u64, width: Width, _: u64, access: &mut Access<'_>) -> Result<(), MmioError> {
             self.count.set(self.count.get() + 1);
             if self.refuse_after_effect {
+                access.request_reset(self.name(), "reached before refusal");
+                access.interrupts.set_level(Wire::Aic(AicInput::new(0, 1)), true);
                 return Err(crate::platform::apple::bus::refuse(self.name(), offset, width,
                     crate::platform::apple::bus::Direction::Write, "retained peripheral prefix"));
             }
@@ -137,9 +152,18 @@ mod tests {
     #[test]
     fn a_bus_error_after_effects_is_unknown_not_effect_free() {
         let (mut board, count) = board(true);
-        let consumed = board.consume_scalar_write(0, 0x1000, 4, 7, 9, None).unwrap();
+        let consumed = board.consume_scalar_write(3, 0x1000, 4, 7, 9, None).unwrap();
         assert!(matches!(consumed, ConsumedWrite::Unknown { .. }));
         assert_eq!(count.get(), 1);
+        let pending = board.pending_service().unwrap();
+        assert_eq!(pending.committed(), 0);
+        assert_eq!(pending.resets().len(), 1);
+        assert_eq!(pending.inputs(), &[ServiceInput::Aic(AicDelivery {
+            input: AicInput::new(0, 1), level: true, cpu: 3, now: 9,
+        })]);
+        let reset = board.take_reset().unwrap();
+        assert_eq!(reset.transition, Transition::Restart);
+        assert!(reset.reason.contains("reached before refusal"));
         assert!(board.consume_scalar_write(0, 0x1000, 3, 7, 9, None).is_err());
         assert_eq!(count.get(), 1);
     }

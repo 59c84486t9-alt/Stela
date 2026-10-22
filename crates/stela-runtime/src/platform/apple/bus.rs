@@ -49,7 +49,9 @@ pub enum Direction {
     Write,
 }
 
-/// Why a device access was not performed. No register effect happened.
+/// A refused device access. Earlier device, wire or transition effects may
+/// already be retained by their owners; this error alone proves no byte prefix
+/// and grants no replay or source-retirement authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MmioError {
     /// No device is mapped at this guest PA.
