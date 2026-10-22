@@ -164,13 +164,13 @@ pub struct Run {
     /// entry (`stela setup --verify-on-read`).
     #[arg(long, requires = "bundle")]
     verify_on_read: bool,
-    /// Answer unsupported operations as the SoC and its firmware do and
-    /// report each once as `UNMODELED`, as a user's boot does. Without it a
-    /// system-mode run is a boot study: it adds the mount's `--strict`, so
-    /// the first unsupported operation stops the run
-    /// (docs/design/runtime.md "Unsupported operations").
+    /// Stop a system-mode run at its first unsupported operation: adds the
+    /// mount's `--strict`, as `STELA_STRICT=1` in the environment also does.
+    /// Without it the run answers each degraded and reports it once as
+    /// `UNMODELED`, as a user's boot does (docs/design/runtime.md
+    /// "Unsupported operations").
     #[arg(long, conflicts_with_all = ["module", "usb_image", "payload"])]
-    graceful: bool,
+    strict: bool,
     /// Use QEMU's directory-backed FAT16 for a bundle that fits its
     /// volume, avoiding host disk-image utilities (QEMU rejects overflow).
     #[arg(long, requires = "bundle")]
@@ -593,7 +593,12 @@ fn launch(arguments: Run) -> Result<ExitCode> {
     if arguments.verify_on_read {
         options.push_str(" --verify-on-read");
     }
-    let strict = (arguments.bundle.is_some() || preboot.is_some()) && !arguments.graceful;
+    let system = options.split_whitespace().next() == Some("--system");
+    ensure!(
+        system || !arguments.strict,
+        "--strict applies to system-mode runs"
+    );
+    let strict = system && (arguments.strict || strict_environment());
     if strict {
         options.push_str(" --strict");
     }
@@ -602,7 +607,7 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         || arguments.network_check.is_some()
     {
         ensure!(
-            options.split_whitespace().next() == Some("--system"),
+            system,
             "host audio/network checks require system mode: use --scenario system-kernel, --bundle or --append starting with --system"
         );
     }
@@ -668,7 +673,6 @@ fn launch(arguments: Run) -> Result<ExitCode> {
             install
         }
     };
-    let system = options.starts_with("--system");
     ensure!(
         arguments.host_firmware.is_none() || system,
         "host firmware qualification requires --scenario system-kernel or another --system boot"
@@ -1261,6 +1265,11 @@ fn launch(arguments: Run) -> Result<ExitCode> {
         (true, false) => FAILED_EXIT,
         (false, _) => code,
     }))
+}
+
+/// Whether `STELA_STRICT=1` asks for strict mode, as it does for `stela run`.
+fn strict_environment() -> bool {
+    std::env::var_os("STELA_STRICT").is_some_and(|value| value == "1")
 }
 
 /// The first printed requirement, including graceful-mode diagnostics which
@@ -1882,7 +1891,7 @@ mod tests {
             "--storage-serial",
             "ANS-1",
             "--directory-volume",
-            "--graceful",
+            "--strict",
             "--append",
             "--system --storage ANS-1:GUID",
         ])
@@ -1893,7 +1902,7 @@ mod tests {
         assert_eq!(run.storage_serial, ["ANS-1"]);
         assert_eq!(run.storage_disk, [Path::new("/tmp/disk.raw")]);
         assert!(run.directory_volume);
-        assert!(run.graceful);
+        assert!(run.strict);
         assert_eq!(run.append.as_deref(), Some("--system --storage ANS-1:GUID"));
         for extra in [
             vec!["--storage-disk", "/tmp/disk", "--storage-check"],

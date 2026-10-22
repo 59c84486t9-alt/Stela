@@ -69,8 +69,8 @@ const INSTALL_SOURCE_OPTION: &str = "--install-source";
 /// The restore host refuses a payload without recorded block hashes, which
 /// it would read whole before StartRestore (`restore::store::Verify`).
 pub const VERIFY_ON_READ_OPTION: &str = "--verify-on-read";
-/// Stop at the first unsupported device access instead of answering it as
-/// the SoC does (docs/design/runtime.md "Unsupported operations").
+/// Stop at the first unsupported operation instead of answering it degraded
+/// and reporting it (docs/design/runtime.md "Unsupported operations").
 pub const STRICT_OPTION: &str = "--strict";
 /// The install restores with the inventory's Update identity, over the
 /// installed system and keeping its data, instead of erasing the target.
@@ -201,10 +201,10 @@ struct Options {
     /// never completed. A diagnostic mode.
     agx_observe: bool,
     /// Stop every PE at the first unsupported operation (`--strict`)
-    /// instead of answering it as the SoC or its firmware does and
-    /// reporting it (docs/design/runtime.md "Unsupported operations").
-    /// Restore studies (`--restore-study`) are strict whatever this says;
-    /// `cargo xtask boot run` passes it unless `--graceful`.
+    /// instead of answering it degraded and reporting it once
+    /// (docs/design/runtime.md "Unsupported operations"). Off by default
+    /// for every run, restore studies included; `cargo xtask boot run`
+    /// passes it with `--strict` or `STELA_STRICT=1`.
     strict: bool,
     /// Stop when a PE reaches one of these guest PCs (`--break`), with the
     /// stop's report.
@@ -2290,16 +2290,11 @@ fn run_machine<H: Host>(
         machine.begin_survey();
     }
     machine.set_idle_skip(options.idle_skip);
-    let strict = options.strict || options.restore;
-    machine.set_strict(strict);
-    machine.devices.set_strict(strict);
+    machine.set_strict(options.strict);
+    machine.devices.set_strict(options.strict);
     output::arguments(format_args!(
         "UNSUPPORTED OPERATIONS {}\n",
-        if strict {
-            "mode=strict response=stop"
-        } else {
-            "mode=graceful response=soc-error diagnostics=once"
-        }
+        unsupported_mode(options.strict)
     ));
     if options.tss {
         output::arguments(format_args!(
@@ -2955,13 +2950,30 @@ fn sep_observation_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     }
 }
 
+/// The boot log's account of the unsupported-operation policy.
+fn unsupported_mode(strict: bool) -> &'static str {
+    if strict {
+        "mode=strict response=stop"
+    } else {
+        "mode=graceful response=degraded diagnostics=once"
+    }
+}
+
+/// The distinct unsupported operations `UNMODELED` lines have reported.
+static UNMODELED_REPORTED: AtomicU64 = AtomicU64::new(0);
+
 /// Each unsupported operation answered outside strict mode for the first
-/// time since the last report: machine effects and device accesses, then
-/// coprocessor requests answered with their firmware's error reply.
+/// time since the last report: machine operations and device accesses, then
+/// coprocessor requests answered with their firmware's error reply or left
+/// unanswered.
 fn unmodeled_report<H: Host>(machine: &mut Machine<H, AppleDevices>) {
     static ORDER_NOTED: AtomicBool = AtomicBool::new(false);
     let requirements = machine.take_unmodeled();
     let requests = machine.devices.take_unmodeled();
+    UNMODELED_REPORTED.fetch_add(
+        (requirements.len() + requests.len()) as u64,
+        Ordering::Relaxed,
+    );
     if (!requirements.is_empty() || !requests.is_empty())
         && !ORDER_NOTED.swap(true, Ordering::Relaxed)
     {
@@ -3161,6 +3173,13 @@ fn finish<H: Host>(
 ) -> ! {
     survey_report(machine);
     unmodeled_report(machine);
+    // Machine answers are counted per access; coprocessor requests are
+    // counted among the distinct reports only.
+    output::arguments(format_args!(
+        "UNSUPPORTED SUMMARY answered={} distinct={}\n",
+        machine.statistics.degraded,
+        UNMODELED_REPORTED.load(Ordering::Relaxed)
+    ));
     stack_report(machine);
     dump_report(machine, dumps);
     let host = host::statistics();
