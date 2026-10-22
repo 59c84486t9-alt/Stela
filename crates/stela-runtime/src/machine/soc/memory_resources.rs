@@ -11,8 +11,6 @@ const COMPATIBLE: &str = "mcc,t6000";
 // Original AppleT6000PMGR::initRegMaps, KC 26A434 mac13j 0x2ef5300:
 // selector8 is DT reg41. PMP's update alias independently cross-checks it.
 const PTD_PMGR_REG: usize = 41;
-const ENTRY_BYTES: u64 = 16;
-const UPDATE_BYTES: u64 = 8;
 
 /// Original descriptor inputs, not reset measurements or fabricated DRAM/cache
 /// configuration. One owner must join these overlapping MCC/AMCC apertures.
@@ -41,35 +39,15 @@ impl DirectMemoryCache {
         {
             return Err("direct MCC descriptor does not match actual memory resources");
         }
+        let geometry = ptd::Geometry::new((self.ptd.physical, ptd::PTD_BYTES), self.ptd_updates)?;
+        if self.ptd_entries != geometry.entries() {
+            return Err("PTD descriptor capacity differs from its actual bank/update geometry");
+        }
         let ptd_end = self
             .ptd
             .physical
             .checked_add(ptd::PTD_BYTES)
             .ok_or("PTD bank end overflows")?;
-        let update_start = self
-            .ptd
-            .physical
-            .checked_add(ptd::UPDATE_OFFSET)
-            .ok_or("PTD update start overflows")?;
-        let update_end = self
-            .ptd_updates
-            .0
-            .checked_add(self.ptd_updates.1)
-            .ok_or("PTD update end overflows")?;
-        if self.ptd_entries == 0
-            || self.ptd_updates.0 != update_start
-            || update_end > ptd_end
-            || u64::try_from(self.ptd_entries)
-                .ok()
-                .and_then(|n| n.checked_mul(UPDATE_BYTES))
-                != Some(self.ptd_updates.1)
-            || u64::try_from(self.ptd_entries)
-                .ok()
-                .and_then(|n| n.checked_mul(ENTRY_BYTES))
-                .is_none_or(|bytes| bytes > ptd::UPDATE_OFFSET)
-        {
-            return Err("PTD publication/update capacity is inconsistent");
-        }
         let mut mapped = Vec::new();
         for &pa in &self.apertures {
             let end = pa
@@ -159,6 +137,9 @@ pub(super) fn publication_ranges(
     records: &[u8],
     entries: usize,
 ) -> Result<(Vec<ptd::Range>, Vec<u32>), String> {
+    if entries == 0 || entries > ptd::MAX_ENTRIES {
+        return Err("PMP PTD descriptor capacity exceeds actual interrupt-routing storage".into());
+    }
     if records.is_empty() || !records.len().is_multiple_of(PTD_RANGE) {
         return Err("PMP PTD descriptors are not whole nonempty records".into());
     }
@@ -254,22 +235,8 @@ pub(super) fn direct_memory_cache(
     let index = usize::try_from(scalar(&pmp, "ptd-update-reg-index")?)
         .map_err(|_| "PMP update reg index overflows")?;
     let updates = range_at(&pmp, translate, index)?;
-    if updates.0 != bank.0 + ptd::UPDATE_OFFSET
-        || updates.1 == 0
-        || !updates.1.is_multiple_of(UPDATE_BYTES)
-        || updates.0 + updates.1 > bank.0 + ptd::PTD_BYTES
-    {
-        return Err("PMP update alias does not fit the actual selector8 bank".into());
-    }
-    let entries =
-        usize::try_from(updates.1 / UPDATE_BYTES).map_err(|_| "PTD entry count overflows")?;
-    if u64::try_from(entries)
-        .ok()
-        .and_then(|entries| entries.checked_mul(ENTRY_BYTES))
-        .is_none_or(|bytes| bytes > ptd::UPDATE_OFFSET)
-    {
-        return Err("PMP publication entries overlap the update alias".into());
-    }
+    let geometry = ptd::Geometry::new(bank, updates).map_err(String::from)?;
+    let entries = geometry.entries();
     let records = pmp
         .child("iop-pmp-nub")
         .and_then(|nub| nub.property("ptd-range"))

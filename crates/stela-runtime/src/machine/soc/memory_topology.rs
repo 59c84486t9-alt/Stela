@@ -12,6 +12,10 @@ pub struct MemoryCache {
     pub channels: (u64, u64, usize),
     /// The PMP's PTD bank, `reg[pmp_ptd_reg_idx]`.
     pub ptd: PtdBank,
+    /// The PMP's actual 8-byte update alias, not the whole half-bank.
+    pub ptd_updates: (u64, u64),
+    /// Capacity shared by publication, updates and interrupt routing.
+    pub ptd_entries: usize,
 }
 
 /// The PMP's PTD bank (`platform::apple::ptd`): its guest PA and the
@@ -251,19 +255,13 @@ pub(super) fn memory_cache(
         .first_u32("ptd-update-reg-index")
         .ok_or("/arm-io/pmp has no ptd-update-reg-index")?;
     let updates = range(&pmp, "/arm-io/pmp", index as usize)?;
-    let slots = bank.0 + ptd::UPDATE_OFFSET..bank.0 + ptd::PTD_BYTES;
-    if !slots.contains(&updates.0) || updates.0 + updates.1 > slots.end {
-        return Err("/arm-io/pmp PTD updates lie outside the PTD bank".into());
-    }
+    let geometry = ptd::Geometry::new(bank, updates).map_err(String::from)?;
     let records = pmp
         .child("iop-pmp-nub")
         .and_then(|nub| nub.property("ptd-range"))
         .filter(|records| !records.is_empty() && records.len() % PTD_RANGE == 0)
         .ok_or("/arm-io/pmp/iop-pmp-nub has no whole ptd-range records")?;
-    let (ranges, interrupts) = memory_resources::publication_ranges(
-        records,
-        ((ptd::PTD_BYTES - ptd::UPDATE_OFFSET) / 8) as usize,
-    )?;
+    let (ranges, interrupts) = memory_resources::publication_ranges(records, geometry.entries())?;
     let ptd = PtdBank {
         physical: bank.0,
         ranges,
@@ -278,6 +276,8 @@ pub(super) fn memory_cache(
         },
         channels: (channels.0, channels.1, count as usize),
         ptd,
+        ptd_updates: geometry.updates(),
+        ptd_entries: geometry.entries(),
     }))
 }
 
@@ -564,6 +564,8 @@ mod tests {
                     ways: 16,
                 },
                 channels: (0x2_0100_0000, 0x200_0000, 8),
+                ptd_updates: (0x2_3b3d_0000, 0x4000),
+                ptd_entries: 2048,
                 ptd: PtdBank {
                     physical: 0x2_3b3c_0000,
                     interrupts: vec![0, 0],
@@ -588,5 +590,62 @@ mod tests {
         // lock-regs aperture.
         assert!(found(0x2_0000, Some(&controller)).is_err());
         assert!(found(0x1_0000, None).is_err());
+    }
+
+    #[test]
+    fn pmp_range_capacity_is_bounded_by_its_own_update_alias() {
+        let bank = (0x23b3c0000, ptd::PTD_BYTES);
+        let geometry = ptd::Geometry::new(bank, (bank.0 + ptd::UPDATE_OFFSET, 0x4000)).unwrap();
+        let mut record = [0u8; PTD_RANGE];
+        record[..4].copy_from_slice(&1u32.to_le_bytes());
+        record[4..8].copy_from_slice(&2047u32.to_le_bytes());
+        record[8..12].copy_from_slice(&1u32.to_le_bytes());
+        record[12..16].copy_from_slice(&0x504d_5003u32.to_le_bytes());
+        record[16..20].copy_from_slice(b"LAST");
+        let (ranges, resources) =
+            memory_resources::publication_ranges(&record, geometry.entries()).unwrap();
+        assert_eq!(ranges[0].start, 2047);
+        assert_eq!(resources, [0x504d_5003]);
+        record[8..12].copy_from_slice(&2u32.to_le_bytes());
+        assert!(memory_resources::publication_ranges(&record, geometry.entries()).is_err());
+        record[4..8].copy_from_slice(&2048u32.to_le_bytes());
+        record[8..12].copy_from_slice(&1u32.to_le_bytes());
+        assert!(memory_resources::publication_ranges(&record, geometry.entries()).is_err());
+        // A nominal half-bank limit cannot bypass the implemented route bitmap.
+        assert!(memory_resources::publication_ranges(&record, 8192).is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "std")]
+    #[ignore = "requires pinned original 26A434 J473 DeviceTree via STELA_TEST_MCC_J473_DT"]
+    fn original_j473_uses_its_actual_2048_slot_update_alias() {
+        use sha2::{Digest, Sha256};
+        let path = std::env::var("STELA_TEST_MCC_J473_DT").unwrap();
+        let data = std::fs::read(path).unwrap();
+        assert_eq!(
+            hex::encode(Sha256::digest(&data)),
+            "a99fa2260f292236fbad210fcee380fc69f101e591125bce347819e84e68034c"
+        );
+        let root = Node::root(&data).unwrap();
+        let io = root.child("arm-io").unwrap();
+        let mcc = io.child("mcc").unwrap();
+        let pmp = io.child("pmp").unwrap();
+        assert!(mcc.compatible(MCC));
+        let bank = mcc.pairs("reg").unwrap()[mcc.first_u32("pmp_ptd_reg_idx").unwrap() as usize];
+        let updates =
+            pmp.pairs("reg").unwrap()[pmp.first_u32("ptd-update-reg-index").unwrap() as usize];
+        assert_eq!(bank, (0x3b3c0000, 0x20000));
+        assert_eq!(updates, (0x3b3d0000, 0x4000));
+        let geometry = ptd::Geometry::new(bank, updates).unwrap();
+        assert_eq!(geometry.entries(), 2048);
+        let records = pmp
+            .child("iop-pmp-nub")
+            .unwrap()
+            .property("ptd-range")
+            .unwrap();
+        let (ranges, interrupt_resources) =
+            memory_resources::publication_ranges(records, geometry.entries()).unwrap();
+        assert_eq!(ranges.len(), interrupt_resources.len());
+        assert!(ranges.iter().all(|range| range.start + range.count <= 2048));
     }
 }

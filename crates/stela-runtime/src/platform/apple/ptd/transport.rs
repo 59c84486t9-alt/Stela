@@ -1,6 +1,6 @@
 #[cfg(test)]
 use super::PTD_BYTES;
-use super::{Range, UPDATE_OFFSET};
+use super::{MAX_ENTRIES, Range, UPDATE_OFFSET};
 use crate::platform::apple::bus::{
     Access, Direction, Lifecycle, LifecycleState, MmioDevice, MmioError, Width, refuse,
 };
@@ -19,8 +19,6 @@ const IRQ_ENABLE: u64 = 0x18200;
 const IRQ_DISABLE: u64 = 0x18300;
 const IRQ_ROUTE: u64 = 0x18400;
 const ROUTES: usize = 16;
-// The described 256-byte enable/disable windows contain 2048 bits.
-const MAX_ENTRIES: usize = ((IRQ_DISABLE - IRQ_ENABLE) * 8) as usize;
 const NEW_DATA: u64 = 1 << 1;
 const DROPPED: u64 = 1;
 const FLAGS: u64 = NEW_DATA | DROPPED;
